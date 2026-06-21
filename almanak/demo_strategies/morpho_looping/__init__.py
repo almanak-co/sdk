@@ -5,7 +5,7 @@ through leverage. It supplies collateral, borrows against it, swaps back to
 collateral, and repeats to build a leveraged position.
 
 Example:
-    from strategies.demo.morpho_looping import MorphoLoopingStrategy
+    from almanak.demo_strategies.morpho_looping import MorphoLoopingStrategy
 
     strategy = MorphoLoopingStrategy(
         chain="ethereum",

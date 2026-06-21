@@ -12,7 +12,7 @@ Prerequisites:
        uv run almanak gateway --network anvil
 
     3. Run this script:
-       python strategies/demo/morpho_looping/run_anvil.py [action]
+       python almanak/demo_strategies/morpho_looping/run_anvil.py [action]
 
 Actions:
     supply  - Test supply collateral (default)

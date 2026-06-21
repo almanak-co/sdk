@@ -27,11 +27,11 @@ PREREQUISITES:
 
 USAGE:
 ------
-    python strategies/demo/traderjoe_lp/run_anvil.py
+    python almanak/demo_strategies/traderjoe_lp/run_anvil.py
 
     # With custom options:
-    python strategies/demo/traderjoe_lp/run_anvil.py --action open
-    python strategies/demo/traderjoe_lp/run_anvil.py --action close
+    python almanak/demo_strategies/traderjoe_lp/run_anvil.py --action open
+    python almanak/demo_strategies/traderjoe_lp/run_anvil.py --action close
 
 ===============================================================================
 """

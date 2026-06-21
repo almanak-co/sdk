@@ -36,11 +36,11 @@ Uniswap V3's concentrated liquidity allows LPs to provide liquidity within a spe
 # Prerequisites: Foundry installed, RPC URL in .env
 
 # Run with default settings (opens LP position)
-python strategies/demo/uniswap_lp/run_anvil.py
+python almanak/demo_strategies/uniswap_lp/run_anvil.py
 
 # Force specific action
-python strategies/demo/uniswap_lp/run_anvil.py --action open
-python strategies/demo/uniswap_lp/run_anvil.py --action close --position-id 123456
+python almanak/demo_strategies/uniswap_lp/run_anvil.py --action open
+python almanak/demo_strategies/uniswap_lp/run_anvil.py --action close --position-id 123456
 ```
 
 > **Tip: Funding the Anvil Wallet**
@@ -174,7 +174,7 @@ In ticks:
 ## File Structure
 
 ```
-strategies/demo/uniswap_lp/
+almanak/demo_strategies/uniswap_lp/
 ├── __init__.py      # Package exports
 ├── strategy.py      # Main strategy logic (with tutorial comments)
 ├── config.json      # Default configuration

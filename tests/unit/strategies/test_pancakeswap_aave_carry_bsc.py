@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.framework.market import HealthUnavailableError
 from almanak.demo_strategies.pancakeswap_aave_carry_bsc.strategy import (
     BORROWED,
     BORROWING,
@@ -40,6 +41,7 @@ def _make_strategy(**config_overrides) -> PancakeswapAaveCarryBscStrategy:
         "borrow_token": "USDC",
         "swap_to_token": "USDT",
         "ltv_target": "0.3",
+        "max_borrow_fraction": "0.5",
     }
     default_config.update(config_overrides)
 
@@ -57,6 +59,7 @@ def _make_strategy(**config_overrides) -> PancakeswapAaveCarryBscStrategy:
     strategy.borrow_token = str(default_config["borrow_token"])
     strategy.swap_to_token = str(default_config["swap_to_token"])
     strategy.ltv_target = Decimal(str(default_config["ltv_target"]))
+    strategy.max_borrow_fraction = Decimal(str(default_config["max_borrow_fraction"]))
 
     strategy._state = IDLE
     strategy._previous_stable = IDLE
@@ -67,8 +70,19 @@ def _make_strategy(**config_overrides) -> PancakeswapAaveCarryBscStrategy:
     return strategy
 
 
-def _make_market(wbnb_price=Decimal("600"), usdc_price=Decimal("1"), usdt_price=Decimal("1")):
-    """Create a mock MarketSnapshot with BSC token prices."""
+def _make_market(
+    wbnb_price=Decimal("600"),
+    usdc_price=Decimal("1"),
+    usdt_price=Decimal("1"),
+    max_borrow_usd=Decimal("100000"),
+    health_factor=Decimal("2.5"),
+):
+    """Create a mock MarketSnapshot with BSC token prices.
+
+    ``max_borrow_usd`` defaults high enough that the live borrow-capacity guard
+    in ``_do_borrow`` does not clamp the config-sized borrow (preserving the
+    base-case borrow-amount assertions). Override it to exercise the clamp path.
+    """
     market = MagicMock()
 
     def price_side_effect(token):
@@ -78,6 +92,11 @@ def _make_market(wbnb_price=Decimal("600"), usdc_price=Decimal("1"), usdt_price=
         raise ValueError(f"Unknown token: {token}")
 
     market.price.side_effect = price_side_effect
+
+    health = MagicMock()
+    health.max_borrow_usd = max_borrow_usd
+    health.health_factor = health_factor
+    market.position_health.return_value = health
     return market
 
 
@@ -189,6 +208,35 @@ class TestEntryPhase:
         intent = strategy.decide(_make_market(wbnb_price=Decimal("600")))
 
         assert intent.borrow_amount == Decimal("90.00")
+
+    def test_borrow_clamped_by_live_capacity(self):
+        """The live borrow-capacity guard clamps the config-sized borrow when it
+        exceeds ``max_borrow_fraction`` of Aave's available capacity.
+
+        Config borrow is $90 (0.5 WBNB * $600 * 30% LTV). With live
+        max_borrow_usd=$100 and the default 0.5 fraction, the safe ceiling is
+        $50, so the borrow is clamped to 50.00 USDC.
+        """
+        strategy = _make_strategy()
+        _advance_to_supplied(strategy)
+
+        intent = strategy.decide(_make_market(max_borrow_usd=Decimal("100")))
+
+        assert intent.intent_type.value == "BORROW"
+        assert intent.borrow_amount == Decimal("50.00")
+
+    def test_borrow_holds_when_health_unavailable(self):
+        """The borrow-capacity guard FAILS CLOSED: when live health data is
+        unavailable, it HOLDs (retries next iteration) rather than borrowing
+        without the safety signal."""
+        strategy = _make_strategy()
+        _advance_to_supplied(strategy)
+        market = _make_market()
+        market.position_health.side_effect = HealthUnavailableError("no health data")
+
+        intent = strategy.decide(market)
+
+        assert intent.intent_type.value == "HOLD"
 
     def test_borrow_with_zero_collateral_price_holds(self):
         strategy = _make_strategy()

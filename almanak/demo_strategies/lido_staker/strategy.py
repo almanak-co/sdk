@@ -43,7 +43,7 @@ USAGE:
     python -m src.cli.run --strategy demo_lido_staker
 
     # Test on Anvil
-    python strategies/demo/lido_staker/run_anvil.py
+    python almanak/demo_strategies/lido_staker/run_anvil.py
 
 ===============================================================================
 """

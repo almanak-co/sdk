@@ -31,7 +31,7 @@ Every Almanak strategy follows this pattern:
 
 FILE STRUCTURE:
 ---------------
-strategies/demo/uniswap_rsi/
+almanak/demo_strategies/uniswap_rsi/
     __init__.py      - Package exports
     strategy.py      - This file (main strategy logic)
     config.json      - Default configuration
@@ -865,7 +865,7 @@ class UniswapRSIStrategy(IntentStrategy):
 # TESTING
 # =============================================================================
 # This block runs when you execute this file directly:
-#   python strategies/demo/uniswap_rsi/strategy.py
+#   python almanak/demo_strategies/uniswap_rsi/strategy.py
 
 if __name__ == "__main__":
     print("=" * 60)
@@ -880,4 +880,4 @@ if __name__ == "__main__":
     print("\nTo run this strategy:")
     print("  python -m src.cli.run --strategy demo_uniswap_rsi --once --dry-run")
     print("\nTo test on Anvil:")
-    print("  python strategies/demo/uniswap_rsi/run_anvil.py")
+    print("  python almanak/demo_strategies/uniswap_rsi/run_anvil.py")

@@ -8,8 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# Add examples to path so we can import shared code
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "examples" / "agentic"))
+# Add the internal agentic examples to path so we can import shared code.
+# The examples moved to strategies/internal/examples/ (git-sync-private, #2954).
+_AGENTIC_EXAMPLES = Path(__file__).resolve().parent.parent.parent.parent / "strategies" / "internal" / "examples" / "agentic"
+sys.path.insert(0, str(_AGENTIC_EXAMPLES))
 
 from shared.llm_client import LLMClient, LLMClientProtocol, LLMConfig, MockLLMClient  # noqa: E402
 

@@ -284,7 +284,7 @@ Al desplegar una estrategia a través de una cartera Safe con restricciones Zodi
 almanak strat permissions
 
 # Directorio explícito
-almanak strat permissions -d strategies/demo/uniswap_rsi
+almanak strat permissions -d almanak/demo_strategies/uniswap_rsi
 
 # Especificar cadena
 almanak strat permissions --chain base

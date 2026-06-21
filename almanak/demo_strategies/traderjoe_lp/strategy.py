@@ -42,7 +42,7 @@ Price at bin ID: price = (1 + binStep/10000)^(binId - 8388608)
 USAGE:
 ------
     # Test on Anvil (local Avalanche fork)
-    python strategies/demo/traderjoe_lp/run_anvil.py
+    python almanak/demo_strategies/traderjoe_lp/run_anvil.py
 
     # Run once to open a position
     python -m src.cli.run --strategy demo_traderjoe_lp --once
@@ -430,10 +430,11 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         range_lower = current_price * (Decimal("1") - half_width)
         range_upper = current_price * (Decimal("1") + half_width)
 
-        # Record the band so decide() can detect drift even before
-        # on_intent_executed fires.
-        self._range_lower = range_lower
-        self._range_upper = range_upper
+        # The drift band (_range_lower/_range_upper) is committed ONLY in
+        # on_intent_executed, once the LP_OPEN fill is confirmed — never here,
+        # pre-fill. decide()'s drift check is gated on _position_bin_ids (also
+        # set post-fill), so a failed or never-filled open cannot leave a stale
+        # band behind (promotion gate: no pre-fill state mutation in decide()).
 
         logger.info(
             f"💧 LP_OPEN: {format_token_amount_human(amount_x, self.token_x_symbol)} + "
@@ -807,4 +808,4 @@ if __name__ == "__main__":
     print(f"Intent Types: {TraderJoeLPStrategy.STRATEGY_METADATA.intent_types}")
     print(f"\nDescription: {TraderJoeLPStrategy.STRATEGY_METADATA.description}")
     print("\nTo test on Anvil:")
-    print("  python strategies/demo/traderjoe_lp/run_anvil.py")
+    print("  python almanak/demo_strategies/traderjoe_lp/run_anvil.py")

@@ -44,6 +44,7 @@ from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.data import MarketSnapshotError, PriceUnavailableError
 from almanak.framework.intents import Intent
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
@@ -100,67 +101,69 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
         )
 
     def decide(self, market: MarketSnapshot) -> Intent | None:
-        """Make a lending decision based on lifecycle state."""
-        try:
-            # State: IDLE -> SUPPLY (deposit USDC collateral; no price needed)
-            if self._loop_state == "idle":
-                logger.info("State: IDLE -> Supplying collateral")
-                self._previous_stable_state = self._loop_state
-                self._loop_state = "supplying"
-                return self._create_supply_intent()
+        """Make a lending decision based on lifecycle state.
 
-            # State: SUPPLIED -> BORROW (needs prices to calculate borrow amount)
-            if self._loop_state == "supplied":
-                try:
-                    collateral_price = market.price(self.collateral_token)
-                    borrow_price = market.price(self.borrow_token)
-                    logger.info(
-                        f"Prices: {self.collateral_token}=${collateral_price:.2f}, "
-                        f"{self.borrow_token}=${borrow_price:.2f}"
-                    )
-                except (ValueError, KeyError) as e:
-                    logger.warning(f"Could not get prices: {e}, skipping this iteration")
-                    return Intent.hold(reason="Price data unavailable, skipping this iteration")
+        Data-unavailable price reads degrade to HOLD where they occur; any
+        other exception propagates (no blanket ``except -> hold`` masking bugs).
+        """
+        # State: IDLE -> SUPPLY (deposit USDC collateral; no price needed)
+        if self._loop_state == "idle":
+            logger.info("State: IDLE -> Supplying collateral")
+            self._previous_stable_state = self._loop_state
+            self._loop_state = "supplying"
+            return self._create_supply_intent()
 
-                if collateral_price == Decimal("0") or borrow_price == Decimal("0"):
-                    return Intent.hold(reason="Price data unavailable, skipping this iteration")
-
-                logger.info("State: SUPPLIED -> Borrowing against collateral")
-                self._previous_stable_state = self._loop_state
-                self._loop_state = "borrowing"
-                return self._create_borrow_intent(collateral_price, borrow_price)
-
-            # State: BORROWED -> REPAY (repay the debt; no price needed)
-            if self._loop_state == "borrowed":
-                logger.info("State: BORROWED -> Repaying debt")
-                self._previous_stable_state = self._loop_state
-                self._loop_state = "repaying"
-                return self._create_repay_intent()
-
-            # State: REPAID -> WITHDRAW (reclaim collateral)
-            if self._loop_state == "repaid":
-                logger.info("State: REPAID -> Withdrawing collateral")
-                self._previous_stable_state = self._loop_state
-                self._loop_state = "withdrawing"
-                return self._create_withdraw_intent()
-
-            # State: COMPLETE -> HOLD
-            if self._loop_state == "complete":
-                return Intent.hold(reason="Full lifecycle complete: borrow -> repay -> withdraw")
-
-            # Stuck in transitional state -- revert to last stable state
-            if self._loop_state in ("supplying", "borrowing", "repaying", "withdrawing"):
-                revert_to = self._previous_stable_state
-                logger.warning(
-                    f"Stuck in transitional state '{self._loop_state}' -- reverting to '{revert_to}'"
+        # State: SUPPLIED -> BORROW (needs prices to calculate borrow amount)
+        if self._loop_state == "supplied":
+            try:
+                collateral_price = market.price(self.collateral_token)
+                borrow_price = market.price(self.borrow_token)
+                logger.info(
+                    f"Prices: {self.collateral_token}=${collateral_price:.2f}, "
+                    f"{self.borrow_token}=${borrow_price:.2f}"
                 )
-                self._loop_state = revert_to
+            except (PriceUnavailableError, MarketSnapshotError, ValueError, KeyError) as e:
+                # market.price raises PriceUnavailableError (-> MarketSnapshotError),
+                # which is NOT a ValueError/KeyError subclass; catch it explicitly so
+                # a missing price degrades to HOLD instead of crashing the strategy.
+                logger.warning(f"Could not get prices: {e}, skipping this iteration")
+                return Intent.hold(reason="Price data unavailable, skipping this iteration")
 
-            return Intent.hold(reason=f"Waiting for state transition (current: {self._loop_state})")
+            if collateral_price == Decimal("0") or borrow_price == Decimal("0"):
+                return Intent.hold(reason="Price data unavailable, skipping this iteration")
 
-        except Exception as e:
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {e!s}")
+            logger.info("State: SUPPLIED -> Borrowing against collateral")
+            self._previous_stable_state = self._loop_state
+            self._loop_state = "borrowing"
+            return self._create_borrow_intent(collateral_price, borrow_price)
+
+        # State: BORROWED -> REPAY (repay the debt; no price needed)
+        if self._loop_state == "borrowed":
+            logger.info("State: BORROWED -> Repaying debt")
+            self._previous_stable_state = self._loop_state
+            self._loop_state = "repaying"
+            return self._create_repay_intent()
+
+        # State: REPAID -> WITHDRAW (reclaim collateral)
+        if self._loop_state == "repaid":
+            logger.info("State: REPAID -> Withdrawing collateral")
+            self._previous_stable_state = self._loop_state
+            self._loop_state = "withdrawing"
+            return self._create_withdraw_intent()
+
+        # State: COMPLETE -> HOLD
+        if self._loop_state == "complete":
+            return Intent.hold(reason="Full lifecycle complete: borrow -> repay -> withdraw")
+
+        # Stuck in transitional state -- revert to last stable state
+        if self._loop_state in ("supplying", "borrowing", "repaying", "withdrawing"):
+            revert_to = self._previous_stable_state
+            logger.warning(
+                f"Stuck in transitional state '{self._loop_state}' -- reverting to '{revert_to}'"
+            )
+            self._loop_state = revert_to
+
+        return Intent.hold(reason=f"Waiting for state transition (current: {self._loop_state})")
 
     def _create_supply_intent(self) -> Intent:
         """Create a SUPPLY intent: deposit USDC collateral into BENQI.

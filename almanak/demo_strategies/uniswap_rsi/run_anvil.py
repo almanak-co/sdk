@@ -35,11 +35,11 @@ PREREQUISITES:
 
 USAGE:
 ------
-    python strategies/demo/uniswap_rsi/run_anvil.py
+    python almanak/demo_strategies/uniswap_rsi/run_anvil.py
 
     # With custom options:
-    python strategies/demo/uniswap_rsi/run_anvil.py --action buy
-    python strategies/demo/uniswap_rsi/run_anvil.py --action sell
+    python almanak/demo_strategies/uniswap_rsi/run_anvil.py --action buy
+    python almanak/demo_strategies/uniswap_rsi/run_anvil.py --action sell
 
 ===============================================================================
 """
@@ -464,7 +464,7 @@ def run_strategy_on_anvil(force_action: str = "buy") -> SwapResult | None:
     from almanak.framework.market import RSIData, TokenBalance
 
     # Import our strategy
-    from strategies.demo.uniswap_rsi import UniswapRSIStrategy
+    from almanak.demo_strategies.uniswap_rsi.strategy import UniswapRSIStrategy
 
     # Connect to Anvil
     w3 = Web3(Web3.HTTPProvider(ANVIL_RPC))

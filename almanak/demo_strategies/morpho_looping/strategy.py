@@ -59,7 +59,7 @@ USAGE:
     uv run almanak strat run -d almanak/demo_strategies/morpho_looping --network anvil --interval 15
 
     # Test on Anvil
-    python strategies/demo/morpho_looping/run_anvil.py
+    python almanak/demo_strategies/morpho_looping/run_anvil.py
 
 ===============================================================================
 """
@@ -168,10 +168,10 @@ class MorphoLoopingStrategy(IntentStrategy):
     Example::
 
         # Full lifecycle on Anvil (clears stale state, runs continuously)
-        almanak strat run -d strategies/demo/morpho_looping --fresh --interval 15 --network anvil
+        almanak strat run -d almanak/demo_strategies/morpho_looping --fresh --interval 15 --network anvil
 
         # Single step for debugging
-        almanak strat run -d strategies/demo/morpho_looping --fresh --once --network anvil
+        almanak strat run -d almanak/demo_strategies/morpho_looping --fresh --once --network anvil
     """
 
     # =========================================================================
@@ -1224,4 +1224,4 @@ if __name__ == "__main__":
     print("\nTo run this strategy:")
     print("  uv run almanak strat run --strategy demo_morpho_looping --once")
     print("\nTo test on Anvil:")
-    print("  python strategies/demo/morpho_looping/run_anvil.py")
+    print("  python almanak/demo_strategies/morpho_looping/run_anvil.py")

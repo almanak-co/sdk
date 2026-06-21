@@ -328,7 +328,7 @@ When deploying a strategy through a Safe wallet with Zodiac Roles restrictions, 
 almanak strat permissions
 
 # Explicit directory
-almanak strat permissions -d strategies/demo/uniswap_rsi
+almanak strat permissions -d almanak/demo_strategies/uniswap_rsi
 
 # Override chain
 almanak strat permissions --chain base

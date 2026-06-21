@@ -48,7 +48,7 @@ USAGE:
     python -m src.cli.run --strategy demo_uniswap_lp --interval 60
 
     # Test on Anvil (local fork)
-    python strategies/demo/uniswap_lp/run_anvil.py
+    python almanak/demo_strategies/uniswap_lp/run_anvil.py
 
 ===============================================================================
 """
@@ -781,4 +781,4 @@ if __name__ == "__main__":
     print("\nTo run this strategy:")
     print("  python -m src.cli.run --strategy demo_uniswap_lp --once")
     print("\nTo test on Anvil:")
-    print("  python strategies/demo/uniswap_lp/run_anvil.py")
+    print("  python almanak/demo_strategies/uniswap_lp/run_anvil.py")

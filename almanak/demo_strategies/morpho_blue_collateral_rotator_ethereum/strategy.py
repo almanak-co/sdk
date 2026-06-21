@@ -32,7 +32,7 @@ USAGE:
         --foreground
 
     # Run directly on Anvil (single iteration)
-    almanak strat run -d strategies/demo/morpho_blue_collateral_rotator_ethereum \\
+    almanak strat run -d almanak/demo_strategies/morpho_blue_collateral_rotator_ethereum \\
         --network anvil --once
 """
 

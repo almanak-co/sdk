@@ -10,7 +10,7 @@ Strategy Logic:
    respecting max_vault_allocation_pct of total portfolio value.
 2. DEPOSITED: Monitor position. Track yield via share price appreciation.
    Auto-compound by re-depositing any idle USDC above threshold every
-   compound_interval_hours. Redeem on teardown or if yield drops below floor.
+   compound_interval_hours. Redeem on teardown.
 3. COMPOUNDING: Re-deposit idle USDC that has accumulated (e.g., from other
    strategy activity or manual transfers) into the vault.
 
@@ -65,8 +65,6 @@ class MetaMorphoBaseYield(IntentStrategy):
         self.deposit_amount = Decimal(str(self.get_config("deposit_amount", "1000")))
         self.min_deposit_usd = Decimal(str(self.get_config("min_deposit_usd", "100")))
         self.max_vault_allocation_pct = int(self.get_config("max_vault_allocation_pct", 80))
-        self.rebalance_threshold_bps = int(self.get_config("rebalance_threshold_bps", 200))
-        self.yield_floor_apy_bps = int(self.get_config("yield_floor_apy_bps", 50))
         self.compound_interval_hours = int(self.get_config("compound_interval_hours", 24))
 
         # State
@@ -92,25 +90,25 @@ class MetaMorphoBaseYield(IntentStrategy):
         )
 
     def decide(self, market: MarketSnapshot) -> Intent | None:
-        """Advance the vault yield state machine."""
-        try:
-            if self._state == "idle":
-                return self._handle_idle(market)
-            elif self._state == "deposited":
-                return self._handle_deposited(market)
-            elif self._state in ("depositing", "redeeming", "compounding"):
-                revert_to = self._previous_stable_state
-                logger.warning(
-                    "Stuck in transitional state '%s' -- reverting to '%s'",
-                    self._state, revert_to,
-                )
-                self._state = revert_to
-                return Intent.hold(reason=f"Reverted from stuck state to '{revert_to}'")
-            else:
-                return Intent.hold(reason=f"Unknown state: {self._state}")
-        except Exception as e:
-            logger.exception("Error in decide(): %s", e)
-            return Intent.hold(reason=f"Error: {e}")
+        """Advance the vault yield state machine.
+
+        Data-unavailable reads degrade to HOLD inside the per-state handlers;
+        any other exception propagates (no blanket ``except -> hold`` masking a
+        real bug).
+        """
+        if self._state == "idle":
+            return self._handle_idle(market)
+        if self._state == "deposited":
+            return self._handle_deposited(market)
+        if self._state in ("depositing", "redeeming", "compounding"):
+            revert_to = self._previous_stable_state
+            logger.warning(
+                "Stuck in transitional state '%s' -- reverting to '%s'",
+                self._state, revert_to,
+            )
+            self._state = revert_to
+            return Intent.hold(reason=f"Reverted from stuck state to '{revert_to}'")
+        return Intent.hold(reason=f"Unknown state: {self._state}")
 
     def _handle_idle(self, market: MarketSnapshot) -> Intent:
         """Evaluate whether to deposit into the vault."""

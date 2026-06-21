@@ -18,7 +18,7 @@ State machine:
     accumulating -> (dip_buy | heavy_dip | profit_take | regular_buy) -> accumulating
 
 Usage:
-    almanak strat run -d strategies/demo/mantle_mnt_accumulator --network anvil --once
+    almanak strat run -d almanak/demo_strategies/mantle_mnt_accumulator --network anvil --once
 """
 
 import logging
@@ -29,11 +29,22 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from almanak.framework.teardown.models import TeardownMode, TeardownPositionSummary
 
+from almanak.framework.data import BalanceUnavailableError, MarketSnapshotError, PriceUnavailableError
 from almanak.framework.intents import Intent
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
 logger = logging.getLogger(__name__)
+
+# Data-unavailable reads degrade to HOLD; any other exception propagates so a
+# real bug is never masked behind a blanket ``except -> hold``.
+_DATA_UNAVAILABLE_ERRORS = (
+    PriceUnavailableError,
+    BalanceUnavailableError,
+    MarketSnapshotError,
+    KeyError,
+    ValueError,
+)
 
 
 def _cfg(config, key: str, default: Any = None) -> Any:
@@ -90,6 +101,9 @@ class MantleMntAccumulator(IntentStrategy):
         # Internal state
         self._last_trade_time: datetime | None = None
         self._last_rsi_signal: str = "NEUTRAL"
+        # Signal to commit to ``_last_rsi_signal`` once a swap fill is confirmed
+        # (in on_intent_executed) — never latched pre-fill.
+        self._pending_signal: str | None = None
         self._total_buys: int = 0
         self._total_sells: int = 0
 
@@ -107,22 +121,24 @@ class MantleMntAccumulator(IntentStrategy):
     # decide()
     # --------------------------------------------------------------------- #
 
-    def decide(self, market: MarketSnapshot) -> Intent | None:
-        try:
-            return self._decide_internal(market)
-        except Exception as e:
-            logger.exception("Error in decide()")
-            return Intent.hold(reason=f"Error: {e}")
+    def decide(self, market: MarketSnapshot) -> Intent:
+        # Fresh tick: clear any uncommitted signal latch from a prior emit so a
+        # failed swap can never leak its signal into the next fill's commit.
+        self._pending_signal = None
 
-    def _decide_internal(self, market: MarketSnapshot) -> Intent:
-        # Read market data
+        # Data-unavailable reads degrade to HOLD; any other exception
+        # propagates (no blanket ``except -> hold`` masking a real bug).
         try:
             rsi = market.rsi(self.target_token, period=self.rsi_period)
-        except Exception:
+        except _DATA_UNAVAILABLE_ERRORS:
             return Intent.hold(reason="RSI data unavailable for MNT")
 
-        stable_bal = market.balance(self.stable_token)
-        target_bal = market.balance(self.target_token)
+        try:
+            stable_bal = market.balance(self.stable_token)
+            target_bal = market.balance(self.target_token)
+        except _DATA_UNAVAILABLE_ERRORS:
+            return Intent.hold(reason="Balance data unavailable")
+
         total_usd = stable_bal.balance_usd + target_bal.balance_usd
 
         # Current position ratio
@@ -200,7 +216,7 @@ class MantleMntAccumulator(IntentStrategy):
                         f"Signal change {self._last_rsi_signal}->OVERSOLD | "
                         f"Buying with {buy_amount:.2f} {self.stable_token}"
                     )
-                    self._last_rsi_signal = current_signal
+                    self._pending_signal = current_signal
                     return Intent.swap(
                         from_token=self.stable_token,
                         to_token=self.target_token,
@@ -219,7 +235,7 @@ class MantleMntAccumulator(IntentStrategy):
                     f"REGULAR BUY: RSI={rsi_val:.1f} neutral | "
                     f"Accumulating {buy_amount:.2f} {self.stable_token} worth of {self.target_token}"
                 )
-                self._last_rsi_signal = current_signal
+                self._pending_signal = current_signal
                 return Intent.swap(
                     from_token=self.stable_token,
                     to_token=self.target_token,
@@ -265,6 +281,13 @@ class MantleMntAccumulator(IntentStrategy):
             return
 
         self._last_trade_time = datetime.now(UTC)
+
+        # Commit the signal latch only on a CONFIRMED fill. Setting it in
+        # decide() would lock out a retry after a failed swap and desync the
+        # re-arm latch across restarts (state transitions belong here).
+        if self._pending_signal is not None:
+            self._last_rsi_signal = self._pending_signal
+            self._pending_signal = None
 
         # Detect buy vs sell from the intent
         if hasattr(_intent, "from_token"):

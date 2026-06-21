@@ -42,7 +42,7 @@ USAGE:
     python -m src.cli.run --strategy demo_spark_lender
 
     # Test on Anvil
-    python strategies/demo/spark_lender/run_anvil.py
+    python almanak/demo_strategies/spark_lender/run_anvil.py
 
 ===============================================================================
 """

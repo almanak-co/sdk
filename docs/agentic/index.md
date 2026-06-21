@@ -125,19 +125,19 @@ almanak gateway --network anvil
 
 ```bash
 # Terminal 2: smoke test
-python examples/agentic/agent_swap/run.py --once --mock
+python <your_agent>/run.py --once --mock
 ```
 
 ### 4. Run with a real LLM
 
 ```bash
-AGENT_LLM_API_KEY=sk-... python examples/agentic/agent_swap/run.py --once
+AGENT_LLM_API_KEY=sk-... python <your_agent>/run.py --once
 ```
 
 ### What happens if the key is missing?
 
 ```
-$ python examples/agentic/agent_swap/run.py --once
+$ python <your_agent>/run.py --once
 
 ERROR: No LLM API key configured.
 
@@ -152,7 +152,7 @@ See: https://sdk.docs.almanak.co/agentic/
 
 ## Building Your Own Agent
 
-1. **Copy a template** -- Start from `examples/agentic/agent_swap/` (simplest) or `agent_lp/` (LP management) or `defai_vault_lp/` (vault + LP)
+1. **Copy a template** -- Start from an agentic strategy template — a simple swap agent, an LP-management agent, or a vault + LP agent. (These example strategies are not currently bundled in the public SDK; a curated set is planned as Tutorials — VIB-5332.)
 2. **Edit `config.json`** -- Set tokens, amounts, strategy parameters (chain is set via the `@almanak_strategy` decorator)
 3. **Write prompts** -- `prompts.py` defines the system prompt with available tools and decision rules
 4. **Configure policy** -- `create_policy()` in `run.py` sets spend limits, allowed tools/tokens/chains
@@ -177,4 +177,4 @@ See [almanak ax CLI reference](../cli/almanak-ax.md) for full documentation.
 
 - [Agent Tools API Reference](agent-tools.md) -- All 38 tools, ToolExecutor, PolicyEngine, error types
 - [Framework Adapters](adapters.md) -- OpenAI, MCP, and LangChain integrations
-- [Examples source](https://github.com/almanak-co/sdk/tree/main/examples/agentic) -- Working agent implementations
+- Agentic example strategies -- not currently bundled in the public SDK; a curated set is planned as Tutorials (VIB-5332)

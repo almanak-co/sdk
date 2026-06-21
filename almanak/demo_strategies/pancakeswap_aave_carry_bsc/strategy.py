@@ -7,7 +7,8 @@ PancakeSwap V3 swaps. Full lifecycle with teardown:
 
 Entry:
   1. SUPPLY: Supply WBNB collateral to Aave V3 (use_as_collateral=True)
-  2. BORROW: Borrow USDC against the supplied collateral at 30% LTV
+  2. BORROW: Borrow USDC against the supplied collateral at `ltv_target` (30%),
+     clamped to a safe fraction of Aave's LIVE available-borrow capacity
   3. SWAP: Swap borrowed USDC -> USDT via PancakeSwap V3
 
 Teardown:
@@ -41,7 +42,7 @@ from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.intents import Intent
-from almanak.framework.market import MarketSnapshot
+from almanak.framework.market import HealthUnavailableError, MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_token_amount_human, format_usd
 
@@ -97,6 +98,8 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
         borrow_token: Token to borrow (default: USDC)
         swap_to_token: Token to swap borrowed funds into (default: USDT)
         ltv_target: Target loan-to-value ratio (default: 0.3 = 30%)
+        max_borrow_fraction: Cap the borrow at this fraction of Aave's live
+            available-borrow capacity (default: 0.5) -- an enforced liquidation buffer.
     """
 
     def supports_teardown(self) -> bool:
@@ -110,6 +113,11 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
         self.borrow_token = str(self.get_config("borrow_token", "USDC"))
         self.swap_to_token = str(self.get_config("swap_to_token", "USDT"))
         self.ltv_target = Decimal(str(self.get_config("ltv_target", "0.3")))
+        # Enforced safety ceiling: never borrow more than this fraction of
+        # Aave's LIVE available-borrow capacity (see _do_borrow). Keeps the
+        # position clear of the liquidation boundary even if the collateral
+        # price drifts between the SUPPLY and BORROW steps.
+        self.max_borrow_fraction = Decimal(str(self.get_config("max_borrow_fraction", "0.5")))
 
         self._state = IDLE
         self._previous_stable = IDLE
@@ -130,47 +138,46 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
     # =========================================================================
 
     def decide(self, market: MarketSnapshot) -> Intent | None:
-        """Execute the next lifecycle step based on current state."""
-        try:
-            # Handle stuck transitional states by reverting
-            if self._state in TRANSITIONAL_STATES:
-                revert_to = self._previous_stable
-                logger.warning(f"Stuck in '{self._state}' -- reverting to '{revert_to}'")
-                self._state = revert_to
+        """Execute the next lifecycle step based on current state.
 
-            # === ENTRY PHASE ===
-            if self._state == IDLE:
-                return self._do_supply()
+        Data-unavailable reads degrade to HOLD inside the phase helpers; any
+        other exception propagates (no blanket ``except -> hold`` masking bugs).
+        """
+        # Handle stuck transitional states by reverting
+        if self._state in TRANSITIONAL_STATES:
+            revert_to = self._previous_stable
+            logger.warning(f"Stuck in '{self._state}' -- reverting to '{revert_to}'")
+            self._state = revert_to
 
-            if self._state == SUPPLIED:
-                return self._do_borrow(market)
+        # === ENTRY PHASE ===
+        if self._state == IDLE:
+            return self._do_supply()
 
-            if self._state == BORROWED:
-                return self._do_swap()
+        if self._state == SUPPLIED:
+            return self._do_borrow(market)
 
-            # === TEARDOWN PHASE ===
-            if self._state == SWAPPED:
-                return self._do_swap_back()
+        if self._state == BORROWED:
+            return self._do_swap()
 
-            if self._state == SWAP_BACK:
-                return self._do_repay()
+        # === TEARDOWN PHASE ===
+        if self._state == SWAPPED:
+            return self._do_swap_back()
 
-            if self._state == REPAID:
-                return self._do_withdraw()
+        if self._state == SWAP_BACK:
+            return self._do_repay()
 
-            if self._state == COMPLETE:
-                return Intent.hold(
-                    reason=(
-                        "Full lifecycle complete: SUPPLY -> BORROW -> SWAP -> SWAP_BACK -> REPAY -> WITHDRAW. "
-                        "All positions closed."
-                    )
+        if self._state == REPAID:
+            return self._do_withdraw()
+
+        if self._state == COMPLETE:
+            return Intent.hold(
+                reason=(
+                    "Full lifecycle complete: SUPPLY -> BORROW -> SWAP -> SWAP_BACK -> REPAY -> WITHDRAW. "
+                    "All positions closed."
                 )
+            )
 
-            return Intent.hold(reason=f"Unknown state: {self._state}")
-
-        except Exception as e:
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {e!s}")
+        return Intent.hold(reason=f"Unknown state: {self._state}")
 
     # =========================================================================
     # PHASE HELPERS
@@ -219,6 +226,31 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
 
         if borrow_amount <= 0:
             return Intent.hold(reason="Computed borrow amount is zero")
+
+        # Enforced risk control: clamp the borrow to a safe fraction of Aave's
+        # LIVE available-borrow capacity. Sizing off config alone ignores the
+        # actual on-chain position, so a collateral-price drop between SUPPLY and
+        # BORROW could push the real LTV past target. FAILS CLOSED (HOLD, retry
+        # next iteration) when health data is unavailable -- an "enforced" guard
+        # must not be silently bypassed exactly when its safety signal is missing.
+        try:
+            health = market.position_health(protocol="aave_v3", market_id=self.chain)
+            safe_ceiling_usd = health.max_borrow_usd * self.max_borrow_fraction
+            borrow_amount_usd = borrow_amount * borrow_price
+            if borrow_amount_usd > safe_ceiling_usd:
+                borrow_amount = (safe_ceiling_usd / borrow_price).quantize(
+                    Decimal("0.01"), rounding=ROUND_DOWN
+                )
+                logger.warning(
+                    f"Clamping borrow to {format_token_amount_human(borrow_amount, self.borrow_token)}: "
+                    f"requested {format_usd(borrow_amount_usd)} exceeds {self.max_borrow_fraction:.0%} of "
+                    f"live capacity {format_usd(health.max_borrow_usd)} (HF={health.health_factor})"
+                )
+            if borrow_amount <= 0:
+                return Intent.hold(reason="No safe borrow capacity available (live HF guard)")
+        except HealthUnavailableError as e:
+            logger.warning(f"Live borrow-capacity guard unavailable; holding (fail-closed): {e}")
+            return Intent.hold(reason="Live borrow-capacity unavailable (fail-closed risk guard)")
 
         logger.info(
             f"Phase 2 BORROW: collateral {format_token_amount_human(self.collateral_amount, self.collateral_token)} "

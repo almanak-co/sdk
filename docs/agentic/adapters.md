@@ -38,7 +38,7 @@ from almanak.framework.agent_tools.adapters.openai_adapter import get_openai_too
 tools = get_openai_tools(catalog)
 ```
 
-This is the simplest integration path. See `examples/agentic/shared/agent_loop.py` for a complete agent loop implementation.
+This is the simplest integration path. See the agentic strategy templates (being reorganized into `Tutorials/`, VIB-5332) for a complete agent loop implementation.
 
 ## MCP (Model Context Protocol)
 

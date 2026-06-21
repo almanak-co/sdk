@@ -284,7 +284,7 @@ Lors du déploiement d'une stratégie via un portefeuille Safe avec des restrict
 almanak strat permissions
 
 # Répertoire explicite
-almanak strat permissions -d strategies/demo/uniswap_rsi
+almanak strat permissions -d almanak/demo_strategies/uniswap_rsi
 
 # Spécifier la chaîne
 almanak strat permissions --chain base

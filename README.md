@@ -86,12 +86,12 @@ This auto-detects your platform (Claude Code, Codex, Cursor, Copilot, and [6 mor
    Use `--dashboard` to launch a live monitoring dashboard alongside execution:
 
    ```bash
-   uv run almanak strat run -d strategies/demo/uniswap_lp --network anvil --dashboard --once
+   uv run almanak strat run -d almanak/demo_strategies/uniswap_lp --network anvil --dashboard --once
    ```
 
    This single command auto-starts Anvil + gateway, opens the dashboard in your browser, and runs one iteration of the strategy.
 
-> **New here?** Start with the [`uniswap_rsi` demo strategy](strategies/demo/uniswap_rsi/) -
+> **New here?** Start with the [`uniswap_rsi` demo strategy](almanak/demo_strategies/uniswap_rsi/) -
 > a fully commented tutorial that walks through RSI-based trading on Uniswap V3.
 
 ## Writing a Strategy
@@ -233,15 +233,19 @@ almanak strat backtest scenario -s my_strategy --scenario terra_collapse
 
 ### Working Examples
 
-Complete runnable examples are available in `examples/`:
+The demo strategies under [`almanak/demo_strategies/`](almanak/demo_strategies/) are
+runnable end to end (see the Demo Strategies table above) and double as backtest
+subjects:
 
 ```bash
-python examples/backtest_ta_strategy.py      # RSI mean reversion
-python examples/backtest_lp_strategy.py      # Concentrated LP
-python examples/backtest_looping_strategy.py # Leveraged yield
+almanak strat backtest run -d almanak/demo_strategies/uniswap_rsi   # RSI mean reversion
+almanak strat backtest run -d almanak/demo_strategies/uniswap_lp    # Concentrated LP
+almanak strat backtest run -d almanak/demo_strategies/morpho_looping # Leveraged yield
 ```
 
-For complete documentation, see [`almanak/framework/backtesting/README.md`](almanak/framework/backtesting/README.md).
+> Standalone backtest example scripts are being reorganized into a dedicated
+> `Tutorials/` folder (VIB-5332). For complete documentation, see
+> [`almanak/framework/backtesting/README.md`](almanak/framework/backtesting/README.md).
 
 ## Supported Networks
 
@@ -294,29 +298,27 @@ The SDK includes educational demo strategies to help you learn:
 
 | Strategy | Description | Chain | Protocol |
 |----------|-------------|-------|----------|
-| `uniswap_rsi` | RSI-based trading on Uniswap V3 | Ethereum | Uniswap V3 |
-| `uniswap_lp` | Dynamic LP position management | Ethereum | Uniswap V3 |
-| `aave_borrow` | Supply collateral and borrow | Ethereum | Aave V3 |
-| `gmx_perps` | Perpetuals trading | Arbitrum | GMX V2 |
-| `enso_rsi` | RSI trading via DEX aggregator | Ethereum | Enso |
-| `enso_uniswap_arbitrage` | Cross-protocol arbitrage | Ethereum | Enso, Uniswap |
+| `uniswap_rsi` | Config-driven RSI swap — buy oversold, sell overbought | Ethereum | Uniswap V3 |
+| `uniswap_lp` | Concentrated liquidity position management | Arbitrum | Uniswap V3 |
+| `uniswap_v4_hooks` | Hook-aware V4 LP — dynamic-fee hooks + typed hookData | Base | Uniswap V4 |
 | `traderjoe_lp` | Liquidity Book position management | Avalanche | TraderJoe V2 |
-| `aerodrome_lp` | Solidly-based LP management | Base | Aerodrome |
-| `lido_staker` | Stake ETH for liquid staking yield | Ethereum | Lido |
-| `ethena_yield` | Stake USDe for yield-bearing sUSDe | Ethereum | Ethena |
-| `spark_lender` | Supply DAI for lending yield | Ethereum | Spark |
 | `morpho_looping` | Leveraged yield farming via recursive borrowing | Ethereum | Morpho Blue |
-| `kraken_rebalancer` | CEX deposit, swap, and withdraw | Arbitrum | Kraken |
-| `polymarket_signal_trader` | Signal-based prediction trading | Polygon | Polymarket |
-| `polymarket_arbitrage` | Cross-market arbitrage | Polygon | Polymarket |
-| `pancakeswap_simple` | Simple swap on PancakeSwap V3 | Arbitrum | PancakeSwap V3 |
-| `sushiswap_lp` | LP position management on SushiSwap | Arbitrum | SushiSwap V3 |
-| `pendle_basics` | Yield tokenization basics | Plasma | Pendle |
-| `almanak_rsi` | RSI trading variant | Base | Uniswap V3 |
+| `morpho_blue_collateral_rotator_ethereum` | Rotate collateral across Morpho Blue markets | Ethereum | Morpho Blue |
+| `metamorpho_base_yield` | MetaMorpho USDC yield via Moonwell Flagship vault | Base | Morpho |
+| `spark_lender` | Supply DAI for lending yield | Ethereum | Spark |
+| `euler_v2_supply_ethereum` | Supply/withdraw USDC lifecycle | Ethereum | Euler V2 |
+| `benqi_lending_lifecycle` | Borrow → repay → withdraw lending lifecycle | Avalanche | BENQI |
+| `pancakeswap_aave_carry_bsc` | Borrow → swap → repay carry trade | BSC | PancakeSwap V3, Aave V3 |
+| `lido_staker` | Stake ETH for liquid staking yield | Ethereum | Lido |
+| `gmx_perp_lifecycle` | Perpetual futures lifecycle (open + close) | Arbitrum | GMX V2 |
+| `gmx_v2_directional_perp` | Directional perp — EMA crossover, close-before-reverse, funding gate, stop-loss | Arbitrum | GMX V2 |
+| `balancer_flash_arb` | Flash-loan arbitrage with Enso swap callbacks | Arbitrum | Balancer V2, Enso |
+| `mantle_mnt_accumulator` | Multi-signal MNT accumulation | Mantle | Agni Finance |
+| `0g_swap` | Wrap native A0GI into W0G | 0G Chain | 0G |
 
 Run any demo with:
 ```bash
-cd strategies/demo/<strategy_name>
+cd almanak/demo_strategies/<strategy_name>
 uv run almanak strat run --once --dry-run
 ```
 
@@ -392,24 +394,16 @@ you write a system prompt and let the LLM reason over market data and call tools
 
 **Requirements:** Your own LLM API key (OpenAI, Anthropic, or any OpenAI-compatible provider).
 
-```bash
-# Smoke test with mock LLM (no API key needed)
-python examples/agentic/agent_swap/run.py --once --mock
-
-# Run with real LLM
-AGENT_LLM_API_KEY=sk-... python examples/agentic/agent_swap/run.py --once
-```
-
-The `almanak ax` CLI also supports a **natural language mode** that uses the same LLM infrastructure
-for one-shot DeFi actions without writing strategy files:
+The `almanak ax` CLI exposes a **natural language mode** that drives the agentic LLM
+infrastructure for one-shot DeFi actions without writing any strategy files:
 
 ```bash
 AGENT_LLM_API_KEY=sk-... almanak ax -n "swap 5 USDC to WETH on base"
 AGENT_LLM_API_KEY=sk-... almanak ax -n "what's the price of ETH?"
 ```
 
-See [Agentic Trading docs](https://sdk.docs.almanak.co/agentic/) for the full guide, or browse
-the [4 working examples](examples/agentic/).
+> Full agentic-agent example strategies are being reorganized into a dedicated
+> `Tutorials/` folder (VIB-5332) and will be linked here once they land.
 
 ## Contributing
 

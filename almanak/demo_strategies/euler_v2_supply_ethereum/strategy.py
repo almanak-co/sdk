@@ -90,57 +90,57 @@ class EulerV2SupplyEthereumStrategy(IntentStrategy):
         )
 
     def decide(self, market: MarketSnapshot) -> Intent | None:
-        try:
-            # Handle stuck transitional states
-            if self._loop_state in TRANSITIONAL_STATES:
-                stuck_state = self._loop_state
-                revert_to = self._previous_stable_state
-                logger.warning(f"Stuck in '{stuck_state}' -- reverting to '{revert_to}', holding this iteration")
-                self._loop_state = revert_to
-                return Intent.hold(reason=f"Recovered from stuck state '{stuck_state}', holding before retry")
+        """Advance the supply lifecycle.
 
-            # Step 1: SUPPLY (deposit into ERC-4626 vault)
-            if self._loop_state == IDLE:
-                logger.info(
-                    f"Step 1: SUPPLY {format_token_amount_human(self.supply_amount, self.supply_token)} "
-                    f"to Euler V2 on Ethereum"
-                )
-                self._transition(SUPPLYING)
+        Pure state machine — no market reads here, so any exception propagates
+        rather than being masked behind a blanket ``except -> hold``.
+        """
+        # Handle stuck transitional states
+        if self._loop_state in TRANSITIONAL_STATES:
+            stuck_state = self._loop_state
+            revert_to = self._previous_stable_state
+            logger.warning(f"Stuck in '{stuck_state}' -- reverting to '{revert_to}', holding this iteration")
+            self._loop_state = revert_to
+            return Intent.hold(reason=f"Recovered from stuck state '{stuck_state}', holding before retry")
 
-                return Intent.supply(
-                    protocol="euler_v2",
-                    token=self.supply_token,
-                    amount=self.supply_amount,
-                    chain=self.chain,
-                )
+        # Step 1: SUPPLY (deposit into ERC-4626 vault)
+        if self._loop_state == IDLE:
+            logger.info(
+                f"Step 1: SUPPLY {format_token_amount_human(self.supply_amount, self.supply_token)} "
+                f"to Euler V2 on Ethereum"
+            )
+            self._transition(SUPPLYING)
 
-            # Step 2: WITHDRAW (use withdraw_all to fully clear the ERC-4626 position)
-            if self._loop_state == SUPPLIED:
-                logger.info(
-                    f"Step 2: WITHDRAW {format_token_amount_human(self._supplied_amount, self.supply_token)} "
-                    f"from Euler V2"
-                )
-                self._transition(WITHDRAWING)
+            return Intent.supply(
+                protocol="euler_v2",
+                token=self.supply_token,
+                amount=self.supply_amount,
+                chain=self.chain,
+            )
 
-                return Intent.withdraw(
-                    token=self.supply_token,
-                    amount=self._supplied_amount,
-                    protocol="euler_v2",
-                    withdraw_all=True,
-                    chain=self.chain,
-                )
+        # Step 2: WITHDRAW (use withdraw_all to fully clear the ERC-4626 position)
+        if self._loop_state == SUPPLIED:
+            logger.info(
+                f"Step 2: WITHDRAW {format_token_amount_human(self._supplied_amount, self.supply_token)} "
+                f"from Euler V2"
+            )
+            self._transition(WITHDRAWING)
 
-            # Done
-            if self._loop_state == COMPLETE:
-                return Intent.hold(
-                    reason="Full supply lifecycle complete: deposit -> withdraw"
-                )
+            return Intent.withdraw(
+                token=self.supply_token,
+                amount=self._supplied_amount,
+                protocol="euler_v2",
+                withdraw_all=True,
+                chain=self.chain,
+            )
 
-            return Intent.hold(reason=f"Unknown state: {self._loop_state}")
+        # Done
+        if self._loop_state == COMPLETE:
+            return Intent.hold(
+                reason="Full supply lifecycle complete: deposit -> withdraw"
+            )
 
-        except Exception as e:
-            logger.exception(f"Error in decide(): {e}")
-            return Intent.hold(reason=f"Error: {e!s}")
+        return Intent.hold(reason=f"Unknown state: {self._loop_state}")
 
     def _transition(self, new_state: str) -> None:
         old = self._loop_state

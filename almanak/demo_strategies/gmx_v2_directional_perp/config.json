@@ -1,0 +1,25 @@
+{
+    "chain": "arbitrum",
+    "market": "ETH/USD",
+    "funding_market": "ETH-USD",
+    "base_token": "ETH",
+    "collateral_token": "USDC",
+    "position_size_usd": "100",
+    "leverage": "2.0",
+    "ema_fast_period": 9,
+    "ema_slow_period": 21,
+    "funding_entry_threshold_hourly": "0.0005",
+    "funding_exit_threshold_hourly": "0.0015",
+    "stop_loss_pct": "0.10",
+    "max_slippage": "0.01",
+    "min_collateral_usd": "20",
+    "force_action": "",
+    "anvil_funding": {
+        "ETH": 100,
+        "USDC": 1000
+    },
+    "token_funding": [
+        {"token": "ETH", "amount": 100, "chain": "arbitrum"},
+        {"token": "USDC", "amount": 1000, "chain": "arbitrum"}
+    ]
+}

@@ -46,8 +46,7 @@ docker-compose.backtest.yml
 # --- Core SDK package ---
 almanak/
 
-# --- Examples, skills ---
-examples/
+# --- Skills (examples/ moved to strategies/internal/examples/; replaced by root Tutorials/ — VIB-5332) ---
 skills/
 
 # --- Tests (tests/reports/ intentionally NOT listed) ---
@@ -99,14 +98,10 @@ docs/gateway/
 docs/overrides/
 docs/stylesheets/
 
-# --- Strategies (strategies/incubating/ intentionally NOT listed) ---
+# --- Strategies (all strategy folders are now internal: private by default) ---
+# strategies/incubating/ and strategies/accounting/ remain at strategies/ root
+# (already private — never listed here). The former public folders (demo,
+# reference, experiments, probes, archived, test, tests, vaults, xlayer) moved
+# under strategies/internal/ and are NOT published. Promote an audited strategy
+# to the public mirror by adding its specific path here once reviewed.
 strategies/__init__.py
-strategies/archived/
-strategies/demo/
-strategies/experiments/
-strategies/probes/
-strategies/reference/
-strategies/test/
-strategies/tests/
-strategies/vaults/
-strategies/xlayer/

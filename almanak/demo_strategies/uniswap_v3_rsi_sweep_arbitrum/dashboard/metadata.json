@@ -1,5 +1,0 @@
-{
-    "display_name": "Uniswap V3 RSI Sweep (Arbitrum)",
-    "description": "Higher-size RSI sweep swap strategy on Uniswap V3 (Arbitrum). Shows the price and RSI series fetched through the same OHLCVRouter the strategy used live.",
-    "icon": ""
-}

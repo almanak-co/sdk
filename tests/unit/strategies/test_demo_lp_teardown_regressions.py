@@ -77,56 +77,8 @@ def test_uniswap_lp_close_clears_cached_position() -> None:
     assert strategy._current_position_id is None
 
 
-# ---------------------------------------------------------------------------
-# traderjoe_lp_lifecycle regression tests (VIB-3296)
-# ---------------------------------------------------------------------------
-
-
-def test_traderjoe_lp_lifecycle_tracks_bin_ids_from_extracted_data() -> None:
-    """on_intent_executed must read bin_ids from extracted_data, not result.bin_ids."""
-    from almanak.demo_strategies.traderjoe_lp_lifecycle.strategy import TraderJoeLPLifecycleStrategy
-
-    strategy = TraderJoeLPLifecycleStrategy.__new__(TraderJoeLPLifecycleStrategy)
-    strategy._position_bin_ids = []
-
-    result = SimpleNamespace(bin_ids=None, extracted_data={"bin_ids": [10, 20, 30]})
-    strategy.on_intent_executed(_mock_intent("LP_OPEN"), True, result)
-
-    assert strategy._position_bin_ids == [10, 20, 30]
-
-
-def test_traderjoe_lp_lifecycle_teardown_intent_carries_known_bin_ids() -> None:
-    """generate_teardown_intents must propagate bin_ids via protocol_params."""
-    from almanak.demo_strategies.traderjoe_lp_lifecycle.strategy import TraderJoeLPLifecycleStrategy
-
-    strategy = TraderJoeLPLifecycleStrategy.__new__(TraderJoeLPLifecycleStrategy)
-    strategy._position_bin_ids = [101, 102, 103]
-    strategy.pool = "WAVAX/USDC/20"
-
-    intents = strategy.generate_teardown_intents(mode=SimpleNamespace(value="soft"))
-
-    assert len(intents) == 1
-    assert intents[0].protocol_params == {"bin_ids": [101, 102, 103]}
-
-
-def test_traderjoe_lp_lifecycle_persists_and_restores_bin_ids(monkeypatch) -> None:
-    """get_persistent_state / load_persistent_state must round-trip bin_ids."""
-    from almanak.demo_strategies.traderjoe_lp_lifecycle.strategy import TraderJoeLPLifecycleStrategy
-    from almanak.framework.strategies import IntentStrategy
-
-    # raising=True (default) so the test fails immediately if IntentStrategy ever
-    # renames these hooks, catching interface regressions early.
-    monkeypatch.setattr(IntentStrategy, "get_persistent_state", lambda self: {})
-    monkeypatch.setattr(IntentStrategy, "load_persistent_state", lambda self, state: None)
-
-    strategy = TraderJoeLPLifecycleStrategy.__new__(TraderJoeLPLifecycleStrategy)
-    strategy._position_bin_ids = [11, 22, 33]
-
-    state = strategy.get_persistent_state()
-    assert state["position_bin_ids"] == [11, 22, 33]
-
-    restored = TraderJoeLPLifecycleStrategy.__new__(TraderJoeLPLifecycleStrategy)
-    restored._position_bin_ids = []
-    restored.load_persistent_state(state)
-
-    assert restored._position_bin_ids == [11, 22, 33]
+# NOTE: The ``traderjoe_lp_lifecycle`` regression tests (VIB-3296) that used to
+# live here were relocated to
+# ``strategies/internal/tests/unit/strategies/test_traderjoe_lp_lifecycle_teardown_regressions.py``
+# when that demo was parked under ``strategies/internal/demo_catalog/`` (#2954).
+# The tests above exercise the still-packaged golden demos and stay here.
