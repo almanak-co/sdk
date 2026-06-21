@@ -59,12 +59,13 @@ class PendleCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             return self.compile_lp_close(ctx, intent)
         if intent_type == IntentType.WITHDRAW:
             return self.compile_withdraw(ctx, intent)
-        if intent_type == IntentType.LP_COLLECT_FEES:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                intent_id=getattr(intent, "intent_id", ""),
-                error="Pendle does not support LP_COLLECT_FEES compilation.",
-            )
+        # Pendle does not support standalone LP_COLLECT_FEES (its market LP
+        # positions accrue value into the LP token rather than exposing a
+        # separate fee-claim primitive). It is intentionally absent from the
+        # ``intents`` ClassVar and from the connector manifest's
+        # ``strategy_intents``, so the framework's LP_COLLECT_FEES dispatch
+        # never routes such an intent here. Any other unsupported intent type
+        # falls through to the canonical fail-close below (VIB-5308).
         return self._unsupported(intent)
 
     def compile_swap(self, ctx: BaseCompilerContext, intent: SwapIntent) -> CompilationResult:

@@ -1965,7 +1965,17 @@ class IntentCompiler:
 
         protocol = self._resolve_protocol(intent.protocol)
         connector_compiler = get_connector_compiler(protocol)
-        if connector_compiler is not None:
+        # Dispatch only when the connector compiler actually declares
+        # LP_COLLECT_FEES. A compiler may be registered for the protocol (to
+        # handle swaps / LP open / close) without supporting standalone fee
+        # collection — e.g. Pendle and Curve. Dispatching anyway would let the
+        # connector return a bespoke FAILED result that masquerades as
+        # protocol-handled, the silent-FAILED path VIB-5308 closes. Gating on
+        # the compiler's declared ``intents`` ClassVar makes that declaration
+        # authoritative for dispatch and routes unsupported
+        # (protocol, LP_COLLECT_FEES) pairs to the canonical
+        # "not supported, here is what is" error below.
+        if connector_compiler is not None and intent.intent_type in connector_compiler.intents:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
         from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
 
