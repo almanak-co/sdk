@@ -1338,9 +1338,7 @@ class TestPendleRedeemMoneyLegs:
             "out_token": {"symbol": "WSTETH", "address": self.WSTETH, "decimals": 18},
             "py_amount": str(10**18),
         }
-        kwargs = self._parser().build_extract_kwargs(
-            field="primitive_money_legs", bundle_metadata=bundle_metadata
-        )
+        kwargs = self._parser().build_extract_kwargs(field="primitive_money_legs", bundle_metadata=bundle_metadata)
         assert kwargs["pt_address"] == self.PT_WSTETH
         assert kwargs["out_token_symbol"] == "WSTETH"
         assert kwargs["out_token_address"] == self.WSTETH
@@ -1442,6 +1440,232 @@ class TestPTSymbolResolverHelpers:
         assert _resolve_base_symbol("arbitrum", "0x" + "cd" * 20) is None
         assert _resolve_base_symbol("arbitrum", None) is None
         assert _resolve_base_symbol("nosuchchain", self._ADDR) is None
+
+
+class TestPendleLPCloseMoneyLegs:
+    """VIB-5302: a Pendle LP_CLOSE declares its received-underlying OUTPUT leg as a
+    typed ``PrimitiveMoneyLegs`` (the realized proceeds the wallet gets back).
+
+    A single-sided LP removal burns the LP (Market ``Burn`` → intermediate SY/PT)
+    and redeems the SY to the underlying out-token, which lands in the wallet via
+    the SY ``Redeem`` event's ``amount_token_out``. The legacy LP_CLOSE ledger path
+    drops this for Pendle (no PoolKey currencies, no intent token0/token1); these
+    tests pin the OUTPUT-leg extraction and its Empty≠Zero degrade. The Market
+    ``Burn`` event is the discriminator that routes an LP_CLOSE (vs a PT redeem)
+    through the shared ``extract_primitive_money_legs`` extractor.
+    """
+
+    MARKET = "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B"
+    WSTETH = "0x5979D7b546E38E414F7E9822514be443A4800529"
+    SY_ADDR = "0x" + "5a" * 20
+    USDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+    WALLET = "0x1234567890123456789012345678901234567890"
+
+    # Real-fork-shaped values (18-dec underlying): the Burn reports intermediate
+    # SY/PT; the SY Redeem reports the underlying actually paid to the wallet.
+    NET_LP_BURNED = 5_000_000_000_000_000  # 0.005 LP
+    NET_SY_OUT = 4_900_000_000_000_000  # intermediate SY (NOT the proceeds)
+    NET_PT_OUT = 0
+    UNDERLYING_OUT_RAW = 4_950_000_000_000_000  # 0.00495 wstETH received
+
+    def _parser(self):
+        return PendleReceiptParser(chain="arbitrum", token_in_decimals=18, token_out_decimals=18)
+
+    @staticmethod
+    def _topic_addr(addr: str) -> str:
+        return "0x" + addr.lower().replace("0x", "").zfill(64)
+
+    def _redeem_sy_log(self, amount_sy: int, amount_token_out: int, token_out: str | None = None) -> dict:
+        # Redeem(caller, receiver, tokenOut indexed; amountSyToRedeem, amountTokenOut)
+        data = "0x" + hex(amount_sy)[2:].zfill(64) + hex(amount_token_out)[2:].zfill(64)
+        return {
+            "topics": [
+                EVENT_TOPICS["RedeemSY"],
+                self._topic_addr(self.WALLET),
+                self._topic_addr(self.WALLET),
+                self._topic_addr(token_out or self.WSTETH),
+            ],
+            "data": data,
+            "logIndex": 2,
+            "address": self.SY_ADDR,
+        }
+
+    def _close_receipt(self, *, with_redeem: bool = True, underlying_raw: int | None = None) -> dict:
+        logs = [
+            create_burn_log(self.WALLET, self.NET_LP_BURNED, self.NET_SY_OUT, self.NET_PT_OUT, self.MARKET),
+        ]
+        if with_redeem:
+            out_raw = self.UNDERLYING_OUT_RAW if underlying_raw is None else underlying_raw
+            logs.append(self._redeem_sy_log(self.NET_SY_OUT, out_raw))
+        return create_mock_receipt(logs=logs)
+
+    def test_lp_close_declares_received_underlying_output_leg(self):
+        """Burn + SY Redeem ⇒ a single OUTPUT leg carrying the measured underlying
+        the wallet received (NOT the intermediate SY/PT from the Burn)."""
+        legs = self._parser().extract_primitive_money_legs(
+            self._close_receipt(),
+            out_token_symbol="WSTETH",
+            out_token_address=self.WSTETH,
+            out_token_decimals=18,
+        )
+        assert legs is not None, "an LP_CLOSE with a measured SY Redeem must declare its OUTPUT leg"
+        assert len(legs.input_legs) == 0, "single-sided Pendle LP_CLOSE declares no INPUT leg"
+        outputs = legs.output_legs
+        assert len(outputs) == 1
+        assert outputs[0].token == "WSTETH"
+        assert outputs[0].amount.is_measured
+        # The received underlying (amount_token_out), NOT the intermediate net_sy_out.
+        assert outputs[0].amount.value == Decimal("0.00495")
+        assert outputs[0].amount.value != Decimal("0.0049")  # net_sy_out scaled
+
+    def test_lp_close_applies_out_token_decimals(self):
+        """A 6-decimal underlying (USDC) must scale by 1e6, not the 18-dec default."""
+        receipt = self._close_receipt(underlying_raw=4_950_000)  # 4.95 USDC (6 dec)
+        legs = self._parser().extract_primitive_money_legs(
+            receipt,
+            out_token_symbol="USDC",
+            out_token_address=self.USDC,
+            out_token_decimals=6,
+        )
+        assert legs is not None
+        assert legs.output_legs[0].token == "USDC"
+        assert legs.output_legs[0].amount.value == Decimal("4.95")
+
+    def test_lp_close_unknown_decimals_returns_none_not_misscaled(self):
+        """Decimals NOT threaded (metadata seam broke) ⇒ a measured raw amount must
+        NOT be scaled by a guessed 18-dec default (a 6-dec underlying would be off
+        by 1e12). Empty≠Zero: return None (UNMEASURED → legacy fallback) instead of
+        booking a measured-WRONG proceeds amount. A measured raw IS present here, so
+        this isolates the decimals-guard from the no-Redeem path above."""
+        legs = self._parser().extract_primitive_money_legs(
+            self._close_receipt(underlying_raw=4_950_000),  # 4.95 if 6-dec, 4.95e-12 if 18-dec
+            out_token_symbol="USDC",
+            out_token_address=self.USDC,
+            out_token_decimals=None,
+        )
+        assert legs is None, "unknown out-token decimals must degrade to UNMEASURED, never guess a scale"
+
+    def test_lp_close_no_sy_redeem_returns_none_empty_not_zero(self):
+        """No SY ``Redeem`` (close-to-PT / non-underlying path) ⇒ proceeds UNMEASURED:
+        return None so the dispatcher falls back to the legacy LP_CLOSE path. The
+        intermediate Burn SY/PT is NEVER proxied in as the underlying proceeds."""
+        legs = self._parser().extract_primitive_money_legs(
+            self._close_receipt(with_redeem=False),
+            out_token_symbol="WSTETH",
+            out_token_decimals=18,
+        )
+        assert legs is None
+
+    def test_lp_close_zero_amount_token_out_is_unmeasured(self):
+        """A degenerate SY Redeem with amount_token_out == 0 yields no measured
+        proceeds (Empty≠Zero: do not declare a fabricated leg) → None."""
+        legs = self._parser().extract_primitive_money_legs(
+            self._close_receipt(underlying_raw=0),
+            out_token_symbol="WSTETH",
+            out_token_decimals=18,
+        )
+        assert legs is None
+
+    def test_lp_close_missing_out_symbol_keeps_measured_amount(self):
+        """If the out-token symbol wasn't threaded, the measured amount is still
+        captured on the OUTPUT leg (token=='' — Empty symbol, not a fabricated one)."""
+        legs = self._parser().extract_primitive_money_legs(
+            self._close_receipt(),
+            out_token_symbol=None,
+            out_token_decimals=18,
+        )
+        assert legs is not None
+        assert legs.output_legs[0].token == ""
+        assert legs.output_legs[0].amount.value == Decimal("0.00495")
+
+    def test_burn_event_routes_to_lp_close_not_redeem(self):
+        """The Market ``Burn`` event must route to the LP_CLOSE path even when a
+        ``pt_address`` is (incorrectly) supplied — an LP close is not a PT redeem,
+        so the result is the underlying OUTPUT leg, never a PT INPUT leg."""
+        legs = self._parser().extract_primitive_money_legs(
+            self._close_receipt(),
+            pt_address="0x71fBF40651E9D4278a74586AfC99F307f369Ce9A",  # PT-wstETH-25JUN2026
+            out_token_symbol="WSTETH",
+            out_token_decimals=18,
+        )
+        assert legs is not None
+        assert len(legs.input_legs) == 0, "an LP_CLOSE must not declare a PT INPUT leg"
+        assert legs.output_legs[0].token == "WSTETH"
+
+    def test_lp_close_seam_threads_out_token_via_enricher(self):
+        """Full enricher seam: LP_CLOSE ActionBundle.metadata['out_token'] →
+        build_extract_kwargs → extract_primitive_money_legs OUTPUT leg."""
+        from almanak.framework.execution.result_enricher import ResultEnricher
+
+        # Mirrors compiler.py ``compile_pendle_lp_close`` ActionBundle.metadata.
+        bundle_metadata = {
+            "protocol": "pendle",
+            "market": self.MARKET,
+            "out_token": {"symbol": "WSTETH", "address": self.WSTETH, "decimals": 18, "is_native": False},
+            "lp_amount": str(self.NET_LP_BURNED),
+        }
+        parser = self._parser()
+        enricher = ResultEnricher()
+        kwargs = enricher._build_extract_kwargs_for_parser(parser, "primitive_money_legs", bundle_metadata)
+        assert kwargs.get("out_token_symbol") == "WSTETH"
+        assert kwargs.get("out_token_decimals") == 18
+
+        legs = parser.extract_primitive_money_legs(self._close_receipt(), **kwargs)
+        assert legs is not None, "full enricher seam must declare the LP_CLOSE underlying OUTPUT leg"
+        assert legs.output_legs[0].token == "WSTETH"
+        assert legs.output_legs[0].amount.value == Decimal("0.00495")
+
+    def test_redeem_path_unaffected_no_burn(self):
+        """Regression guard: a PT redeem (RedeemSY only, NO Burn) still produces the
+        PT INPUT + underlying OUTPUT legs — the LP_CLOSE branch did not capture it."""
+        pt = "0x71fBF40651E9D4278a74586AfC99F307f369Ce9A"  # PT-wstETH-25JUN2026
+        pt_count = 12_378_419_794_380_337
+        receipt = create_mock_receipt(
+            logs=[
+                {
+                    "topics": [
+                        EVENT_TOPICS["Transfer"],
+                        self._topic_addr(self.WALLET),
+                        self._topic_addr("0x0000000000000000000000000000000000000000"),
+                    ],
+                    "data": "0x" + hex(pt_count)[2:].zfill(64),
+                    "logIndex": 0,
+                    "address": pt,
+                },
+                self._redeem_sy_log(10_002_774_988_900_641, 10_002_774_988_900_641),
+            ]
+        )
+        legs = self._parser().extract_primitive_money_legs(
+            receipt,
+            pt_address=pt,
+            out_token_symbol="WSTETH",
+            out_token_decimals=18,
+        )
+        assert legs is not None
+        assert len(legs.input_legs) == 1, "PT redeem must still declare its PT INPUT leg"
+        assert legs.input_legs[0].token == "PT-wstETH-25JUN2026"
+
+
+class TestPendleLPOpenMintedLP:
+    """VIB-5302: LP_OPEN must emit the minted LP-token amount (unchanged on main,
+    pinned here as part of the LP open/close output-extraction contract)."""
+
+    MARKET = "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B"
+    WALLET = "0x1234567890123456789012345678901234567890"
+
+    def test_lp_open_emits_minted_lp_amount(self):
+        parser = PendleReceiptParser(chain="arbitrum")
+        net_lp = 5_000_000_000_000_000
+        net_sy = 4_900_000_000_000_000
+        net_pt = 100_000_000_000_000
+        receipt = create_mock_receipt(logs=[create_mint_log(self.WALLET, net_lp, net_sy, net_pt, self.MARKET)])
+        lp_open = parser.extract_lp_open_data(receipt)
+        assert lp_open is not None
+        # Minted LP (the amount an amount="all" LP_CLOSE re-entry would size off,
+        # deferred to VIB-5346) is carried on liquidity; SY/PT used on amount0/1.
+        assert lp_open.liquidity == net_lp
+        assert lp_open.amount0 == net_sy
+        assert lp_open.amount1 == net_pt
 
 
 if __name__ == "__main__":

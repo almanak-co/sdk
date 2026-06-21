@@ -199,9 +199,9 @@ class TestPendleLPOpenIntent:
         """Open a wstETH LP position in the PT-wstETH-25JUN2026 Pendle market."""
         wsteth_decimals = get_token_decimals(web3, WSTETH_ADDRESS)
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Test: LP_OPEN wstETH -> PT-wstETH-25JUN2026 (Pendle)")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
         print(f"Deposit: {LP_DEPOSIT_AMOUNT} {WSTETH_SYMBOL}")
 
         # Layer 4 setup: record balances BEFORE
@@ -227,9 +227,7 @@ class TestPendleLPOpenIntent:
             rpc_url=anvil_rpc_url,
         )
         compilation_result = compiler.compile(intent)
-        assert compilation_result.status.value == "SUCCESS", (
-            f"Compilation failed: {compilation_result.error}"
-        )
+        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
 
         tx_count = len(compilation_result.action_bundle.transactions)
@@ -264,7 +262,7 @@ class TestPendleLPOpenIntent:
                 net_sy_used_raw = mint.net_sy_used
                 net_pt_used_raw = mint.net_pt_used
                 print(
-                    f"\nTx {i+1} Mint event:"
+                    f"\nTx {i + 1} Mint event:"
                     f"\n  market:        {mint.market_address}"
                     f"\n  net_lp_minted: {mint.net_lp_minted}"
                     f"\n  net_sy_used:   {mint.net_sy_used}"
@@ -297,8 +295,7 @@ class TestPendleLPOpenIntent:
 
         expected_wsteth_wei = int(LP_DEPOSIT_AMOUNT * Decimal(10**wsteth_decimals))
         assert wsteth_spent == expected_wsteth_wei, (
-            f"wstETH spent must EXACTLY equal deposit amount. "
-            f"Expected: {expected_wsteth_wei}, Got: {wsteth_spent}"
+            f"wstETH spent must EXACTLY equal deposit amount. Expected: {expected_wsteth_wei}, Got: {wsteth_spent}"
         )
         assert lp_received > 0, "LP token balance must increase after LP_OPEN"
         assert lp_received == lp_minted_raw, (
@@ -367,9 +364,9 @@ class TestPendleLPOpenIntent:
         balance_decimal = Decimal(wsteth_balance) / Decimal(10**wsteth_decimals)
         excessive_amount = balance_decimal * Decimal("100")
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Test: LP_OPEN Insufficient Balance (Pendle)")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
         print(f"wstETH balance: {balance_decimal}")
         print(f"Trying:         {excessive_amount}")
 
@@ -488,13 +485,11 @@ class TestPendleLPCloseIntent:
         wsteth_decimals = get_token_decimals(web3, WSTETH_ADDRESS)
 
         # Setup: open an LP position to close
-        lp_amount = await self._open_lp_position(
-            web3, funded_wallet, orchestrator, price_oracle, anvil_rpc_url
-        )
+        lp_amount = await self._open_lp_position(web3, funded_wallet, orchestrator, price_oracle, anvil_rpc_url)
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Test: LP_CLOSE PT-wstETH-25JUN2026 -> wstETH (Pendle)")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
         print(f"LP to burn: {format_token_amount(lp_amount, 18)}")
 
         # Layer 4 setup: record balances BEFORE close
@@ -519,9 +514,7 @@ class TestPendleLPCloseIntent:
             rpc_url=anvil_rpc_url,
         )
         compilation_result = compiler.compile(intent)
-        assert compilation_result.status.value == "SUCCESS", (
-            f"Compilation failed: {compilation_result.error}"
-        )
+        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
 
         tx_count = len(compilation_result.action_bundle.transactions)
@@ -556,7 +549,7 @@ class TestPendleLPCloseIntent:
                 sy_out_raw = burn.net_sy_out
                 pt_out_raw = burn.net_pt_out
                 print(
-                    f"\nTx {i+1} Burn event:"
+                    f"\nTx {i + 1} Burn event:"
                     f"\n  market:        {burn.market_address}"
                     f"\n  net_lp_burned: {burn.net_lp_burned}"
                     f"\n  net_sy_out:    {burn.net_sy_out}"
@@ -565,9 +558,7 @@ class TestPendleLPCloseIntent:
 
         assert lp_burned_raw is not None, "No Burn event found in any transaction receipt"
         assert lp_burned_raw > 0, f"net_lp_burned must be positive, got {lp_burned_raw}"
-        assert sy_out_raw is not None and sy_out_raw > 0, (
-            f"net_sy_out must be positive, got {sy_out_raw}"
-        )
+        assert sy_out_raw is not None and sy_out_raw > 0, f"net_sy_out must be positive, got {sy_out_raw}"
 
         # Layer 4: Balance deltas
         wsteth_after = get_token_balance(web3, WSTETH_ADDRESS, funded_wallet)
@@ -581,8 +572,7 @@ class TestPendleLPCloseIntent:
         print(f"LP burned:       {format_token_amount(lp_spent, 18)}")
 
         assert lp_spent == lp_amount, (
-            f"LP tokens burned must equal position_id amount. "
-            f"Expected: {lp_amount}, Got: {lp_spent}"
+            f"LP tokens burned must equal position_id amount. Expected: {lp_amount}, Got: {lp_spent}"
         )
         assert lp_after == 0, f"LP token balance must be zero after full close, got {lp_after}"
         assert wsteth_received > 0, "Must receive positive wstETH after LP_CLOSE"
@@ -605,6 +595,52 @@ class TestPendleLPCloseIntent:
                 f"lp_close_data.liquidity_removed must match net_lp_burned. "
                 f"Expected: {lp_burned_raw}, Got: {lp_close_data.liquidity_removed}"
             )
+
+        # VIB-5302: LP_CLOSE must emit the RECEIVED-UNDERLYING amount (the realized
+        # proceeds the wallet gets back), not just the intermediate SY/PT from the
+        # Burn event. The single-sided removal redeems SY -> wstETH; the SY Redeem
+        # event's amount_token_out is the wstETH the wallet received. Cross-check
+        # Layer 3 (parser) against Layer 4 (on-chain balance delta): byte-identical
+        # (no MEV on Anvil), and the declared OUTPUT money-leg must carry that same
+        # measured amount in human units. amount="all" LP_CLOSE chaining off this
+        # output is deferred to VIB-5346 (LPCloseIntent has no chained-amount
+        # concept today); this test uses an explicit wei position_id.
+        underlying_out_raw: int | None = None
+        for tx_result in execution_result.transaction_results:
+            if not tx_result.receipt:
+                continue
+            receipt_dict = tx_result.receipt.to_dict()
+            pr = parser.parse_receipt(receipt_dict)
+            if not pr.burn_events:
+                continue
+            assert pr.redeem_sy_events, (
+                "Pendle single-sided LP_CLOSE must emit an SY Redeem event carrying "
+                "the underlying paid to the wallet (received-underlying source)"
+            )
+            underlying_out_raw = pr.redeem_sy_events[0].amount_token_out
+            assert underlying_out_raw == wsteth_received, (
+                f"SY Redeem amount_token_out must equal the on-chain wstETH balance delta. "
+                f"Receipt: {underlying_out_raw}, balance delta: {wsteth_received}"
+            )
+            # Declared money-leg surface (US-009): the received underlying is the
+            # OUTPUT leg the ledger dispatcher records — measured, in human units.
+            legs = parser.extract_primitive_money_legs(
+                receipt_dict,
+                out_token_symbol=WSTETH_SYMBOL,
+                out_token_address=WSTETH_ADDRESS,
+                out_token_decimals=wsteth_decimals,
+            )
+            assert legs is not None, "LP_CLOSE must declare its received-underlying OUTPUT leg"
+            assert len(legs.output_legs) == 1
+            out_leg = legs.output_legs[0]
+            assert out_leg.token == WSTETH_SYMBOL
+            assert out_leg.amount.is_measured
+            expected_human = Decimal(wsteth_received) / Decimal(10**wsteth_decimals)
+            assert out_leg.amount.value == expected_human, (
+                f"OUTPUT leg must carry the received underlying in human units. "
+                f"Expected: {expected_human}, Got: {out_leg.amount.value}"
+            )
+        assert underlying_out_raw is not None, "No Burn receipt found to verify received-underlying extraction"
 
         # Layer 5: accounting persistence — PendleAccountingEvent(PENDLE_LP_CLOSE)
         accounting_row = await assert_accounting_persisted(

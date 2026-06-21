@@ -495,8 +495,16 @@ class PendleReceiptParser:
     # A PT redeem is a WITHDRAW; ``extract_primitive_money_legs`` surfaces the
     # maturity-bearing PT symbol the lending-path guesser would otherwise drop. A
     # non-PT Pendle withdraw yields None from the extractor → legacy path, unchanged.
+    #
+    # VIB-5302 — an LP_CLOSE routes through the SAME ``primitive_money_legs``
+    # extractor to declare the received-underlying OUTPUT leg (the realized
+    # proceeds the legacy LP_CLOSE ledger path drops for Pendle). The extractor
+    # discriminates redeem vs LP-close by the Market ``Burn`` event (present only
+    # on an LP removal) and returns None for an unmeasured close → legacy path,
+    # unchanged.
     EXTRA_EXTRACTIONS_BY_INTENT: dict[str, tuple[str, ...]] = {
         "WITHDRAW": ("primitive_money_legs",),
+        "LP_CLOSE": ("primitive_money_legs",),
     }
 
     def __init__(
@@ -1657,7 +1665,13 @@ class PendleReceiptParser:
         out_token_address: str | None = None,
         out_token_decimals: int | None = None,
     ) -> "PrimitiveMoneyLegs | None":
-        """Declare the PT-redeem money legs for the transaction ledger (G-PT / VIB-4988).
+        """Declare the money legs for a Pendle redeem or LP_CLOSE (G-PT / VIB-4988, VIB-5302).
+
+        Two intents route through this single ``primitive_money_legs`` extractor;
+        the Market ``Burn`` event (emitted only by an LP removal, never by a PT
+        redeem) discriminates them. An LP_CLOSE delegates to
+        :meth:`_lp_close_money_legs` (the received-underlying OUTPUT leg); the
+        remainder of this method handles the PT-redeem WITHDRAW path described below.
 
         A Pendle PT redeem is a WITHDRAW intent whose compiler names
         ``intent.token`` = the *underlying* out token and ``intent.market_id`` =
@@ -1712,6 +1726,26 @@ class PendleReceiptParser:
         from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg, PrimitiveMoneyLegs
         from almanak.framework.accounting.measured import MeasuredMoney
 
+        try:
+            result = self.parse_receipt(receipt)
+        except Exception as e:
+            logger.warning(f"Failed to extract primitive money legs: {e}")
+            return None
+
+        # VIB-5302 — LP_CLOSE branch. A Pendle LP removal emits a Market ``Burn``
+        # event; a PT redeem never does, so the Burn is the reliable discriminator
+        # between the two intents that both route through this
+        # ``primitive_money_legs`` extractor. Declare the received-underlying
+        # OUTPUT leg (the realized proceeds the wallet gets back), which the legacy
+        # LP_CLOSE ledger path drops for Pendle. Must be checked BEFORE the
+        # PT-symbol gate below (an LP close threads no ``pt_address``).
+        if result.burn_events:
+            return self._lp_close_money_legs(
+                result,
+                out_token_symbol=out_token_symbol,
+                out_token_decimals=out_token_decimals,
+            )
+
         pt_symbol = _resolve_pt_symbol(self.chain, pt_address)
         if pt_symbol is None:
             # Unknown catalogue address (or no pt_address threaded): never
@@ -1723,12 +1757,6 @@ class PendleReceiptParser:
                 pt_address,
                 self.chain,
             )
-            return None
-
-        try:
-            result = self.parse_receipt(receipt)
-        except Exception as e:
-            logger.warning(f"Failed to extract primitive money legs (redeem): {e}")
             return None
 
         # PT redeemed (INPUT leg) — MUST be the PT TOKEN COUNT, basis-identical to
@@ -1776,6 +1804,87 @@ class PendleReceiptParser:
             PrimitiveMoneyLeg.input(pt_symbol, pt_amount),
             PrimitiveMoneyLeg.output(out_token, out_amount),
         )
+
+    def _lp_close_money_legs(
+        self,
+        result: ParseResult,
+        *,
+        out_token_symbol: str | None,
+        out_token_decimals: int | None,
+    ) -> "PrimitiveMoneyLegs | None":
+        """Declare the received-underlying OUTPUT leg for a Pendle LP_CLOSE (VIB-5302).
+
+        A single-sided Pendle LP removal burns the LP (Market ``Burn`` →
+        intermediate ``net_sy_out`` / ``net_pt_out``) and then redeems the SY to
+        the underlying out-token, which lands in the wallet.
+        :meth:`extract_lp_close_data` already carries the intermediate SY/PT (the
+        Pendle LP accounting leg, unchanged), but the actual underlying the wallet
+        RECEIVES — the realized proceeds, and the amount an ``amount="all"`` LP
+        re-entry would size off (deferred to VIB-5346) — was dropped from the
+        ledger: the legacy LP_CLOSE path leaves it empty for Pendle (no PoolKey
+        currencies, no intent ``token0`` / ``token1``).
+
+        The underlying received is the SY ``Redeem`` event's ``amount_token_out``
+        (the measured token the SY contract paid out to the wallet). It is declared
+        as a typed OUTPUT leg so the US-009 ledger dispatcher records it on the row
+        instead of guessing (blueprint 27 §6.6), mirroring the PT-redeem OUTPUT leg
+        in :meth:`extract_primitive_money_legs`.
+
+        Empty != Zero (blueprint 27 §10.10): when no SY ``Redeem`` carries a
+        measured ``amount_token_out`` (e.g. a close that returns PT rather than the
+        underlying — no SY redemption fires), this returns ``None`` so the
+        dispatcher falls back to the legacy LP_CLOSE path. The proceeds are left
+        UNMEASURED rather than fabricated as a zero or proxied from the
+        SY-denominated ``Burn`` amounts.
+
+        Args:
+            result: The already-parsed receipt (carries ``burn_events`` /
+                ``redeem_sy_events``).
+            out_token_symbol: Underlying out-token symbol (from the LP_CLOSE
+                ``ActionBundle.metadata["out_token"]``).
+            out_token_decimals: Underlying out-token decimals. When ``None`` (the
+                metadata seam did not carry it) the leg is left UNMEASURED rather
+                than scaled by a guessed default (Empty != Zero — a wrong scale is
+                worse than unmeasured).
+
+        Returns:
+            A :class:`PrimitiveMoneyLegs` with the single received-underlying
+            OUTPUT leg, or ``None`` when the underlying proceeds were not measured
+            OR the out-token decimals were not threaded.
+        """
+        from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg, PrimitiveMoneyLegs
+        from almanak.framework.accounting.measured import MeasuredMoney
+
+        out_raw: int | None = None
+        if result.redeem_sy_events and result.redeem_sy_events[0].amount_token_out:
+            out_raw = result.redeem_sy_events[0].amount_token_out
+        if out_raw is None:
+            logger.debug(
+                "Pendle LP_CLOSE: no SY Redeem amount_token_out on the receipt "
+                "(close-to-PT or non-underlying path); leaving proceeds UNMEASURED and "
+                "falling back to legacy LP_CLOSE ledger extraction (Empty != Zero).",
+            )
+            return None
+
+        if out_token_decimals is None:
+            # Empty != Zero (blueprint 27 §10.10): a MEASURED raw amount scaled by
+            # GUESSED decimals is measured-WRONG — a 6-dec underlying (USDC Pendle
+            # markets exist) booked at the 18-dec default is off by 1e12, far worse
+            # than leaving it unmeasured. self.token_out_decimals is NOT a safe
+            # fallback here: the enricher builds PendleReceiptParser with chain only
+            # (``_build_parser_kwargs``), so it stays at the 18-dec constructor
+            # default for an LP_CLOSE — the same wrong guess. The compiler always
+            # threads the out-token decimals via ``ActionBundle.metadata["out_token"]``
+            # in prod, so a missing value means the metadata seam broke: degrade to
+            # the legacy LP_CLOSE path rather than book a wrong scale.
+            logger.debug(
+                "Pendle LP_CLOSE: out_token_decimals not threaded; leaving proceeds "
+                "UNMEASURED rather than guessing a scale (Empty != Zero)."
+            )
+            return None
+        out_amount = MeasuredMoney.measured(Decimal(str(out_raw)) / Decimal(10**out_token_decimals))
+        out_token = out_token_symbol or ""
+        return PrimitiveMoneyLegs.of(PrimitiveMoneyLeg.output(out_token, out_amount))
 
     def extract_redemption_amounts(self, receipt: dict[str, Any]) -> dict[str, int] | None:
         """
