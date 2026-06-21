@@ -740,6 +740,36 @@ class PendleReceiptParser:
                     token_out_decimals=token_out_decimals,
                     wallet_address=wallet_address,
                 )
+            elif intent_swap_type in ("token_to_yt", "yt_to_token") and transfer_events:
+                # VIB-5301: a YT swap's user-facing amounts live ONLY in Transfer
+                # events (input token leaving the wallet, YT arriving — or the
+                # reverse on a sell). The PendleMarket ``Swap`` event reflects an
+                # internal flash-mint of PT and is NOT required to value the
+                # user's YT trade; on real receipts it is frequently absent
+                # entirely (limit-order fills, or markets whose AMM curve is
+                # never touched — the report market emitted zero AMM Swap events
+                # on mainnet yet still delivered YT to the wallet). Gating
+                # reconstruction behind ``swap_events`` therefore silently
+                # dropped the YT output amount, breaking ``amount="all"``
+                # chaining (the runner reads ``swap_amounts.amount_out_decimal``)
+                # and accounting. ``_build_yt_swap_result`` consumes only the
+                # Transfer events and returns None when the amounts cannot be
+                # reconstructed (Empty != Zero), so a missing leg stays
+                # unmeasured rather than becoming a fabricated zero.
+                swap_result = self._build_yt_swap_result(
+                    intent_swap_type=intent_swap_type,
+                    transfer_events=transfer_events,
+                    token_in_address=token_in_address,
+                    token_out_address=token_out_address,
+                    token_in_decimals=token_in_decimals,
+                    token_out_decimals=token_out_decimals,
+                    wallet_address=wallet_address,
+                    # No AMM Swap event ⇒ no market address available. The market
+                    # address is only a label on ParsedSwapResult (not part of
+                    # SwapAmounts), so an empty string is honest here.
+                    market_address="",
+                    quoted_amount_out=quoted_amount_out,
+                )
 
             # Log parsed receipt
             logger.info(

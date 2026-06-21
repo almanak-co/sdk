@@ -850,6 +850,173 @@ class TestYTSwapReconstruction:
         assert amounts.amount_in_decimal == Decimal("1.5")
         assert amounts.amount_out_decimal == Decimal("12")
 
+    # -------------------------------------------------------------------------
+    # VIB-5301: YT swap reconstruction must NOT require a PendleMarket ``Swap``
+    # event to be present.
+    #
+    # A YT trade's user-facing amounts live ONLY in Transfer events (input token
+    # leaving the wallet, YT arriving — or the reverse on a sell). The internal
+    # ``Swap`` event is the router's flash-mint of PT and is *not* a faithful
+    # representation of the user trade. On real receipts that ``Swap`` event is
+    # often absent entirely: limit-order fills and markets whose AMM curve is
+    # never touched produce a successful YT buy with NO ``Swap`` log (the report
+    # market 0x8dAe…883 emitted zero AMM Swap events across millions of blocks on
+    # mainnet, yet YT was delivered to the wallet). The prior code gated the
+    # entire swap_result behind ``if swap_events:`` so those receipts silently
+    # lost the YT output amount, breaking ``amount="all"`` chaining (the runner
+    # reads ``swap_amounts.amount_out_decimal``) and accounting.
+    #
+    # Empty != Zero: when the amounts genuinely cannot be reconstructed the
+    # parser must still return None (unmeasured), never Decimal("0").
+    # -------------------------------------------------------------------------
+
+    def test_yt_entry_no_swap_event_reconstructs_from_transfers(self):
+        """YT BUY receipt with input + YT Transfers but NO Swap event must
+        still report the user-facing sUSDe-in / YT-out (VIB-5301).
+
+        Before the fix this returned None ("no output amount extracted"),
+        breaking amount='all' chaining into the exit swap.
+        """
+        parser = PendleReceiptParser(
+            chain="ethereum",
+            token_in_decimals=18,
+            token_out_decimals=18,
+        )
+        # Real YT-entry shape WITHOUT an AMM Swap event: user sends sUSDe,
+        # receives YT. No create_swap_log at all.
+        logs = [
+            create_transfer_log(self.WALLET, self.ROUTER, 50 * 10**18, self.SUSDE, 0),
+            create_transfer_log(self.ROUTER, self.WALLET, 60_971 * 10**18, self.YT_SUSDE, 1),
+        ]
+        receipt = create_mock_receipt(logs=logs)
+
+        amounts = parser.extract_swap_amounts(
+            receipt,
+            intent_swap_type="token_to_yt",
+            token_in_address=self.SUSDE,
+            token_out_address=self.YT_SUSDE,
+            wallet_address=self.WALLET,
+        )
+        assert amounts is not None, "YT entry without a Swap event must still reconstruct from Transfers"
+        assert amounts.amount_in_decimal == Decimal("50")
+        assert amounts.amount_out_decimal == Decimal("60971")
+        assert amounts.token_out == "YT"
+
+    def test_yt_exit_no_swap_event_reconstructs_from_transfers(self):
+        """YT SELL receipt with YT-in + token-out Transfers but NO Swap event
+        must report the user-facing YT-in / sUSDe-out (VIB-5301 mirror)."""
+        parser = PendleReceiptParser(
+            chain="ethereum",
+            token_in_decimals=18,
+            token_out_decimals=18,
+        )
+        logs = [
+            create_transfer_log(self.WALLET, self.ROUTER, 60_971 * 10**18, self.YT_SUSDE, 0),
+            create_transfer_log(self.ROUTER, self.WALLET, 49 * 10**18, self.SUSDE, 1),
+        ]
+        receipt = create_mock_receipt(logs=logs)
+
+        amounts = parser.extract_swap_amounts(
+            receipt,
+            intent_swap_type="yt_to_token",
+            token_in_address=self.YT_SUSDE,
+            token_out_address=self.SUSDE,
+            wallet_address=self.WALLET,
+        )
+        assert amounts is not None
+        assert amounts.amount_in_decimal == Decimal("60971")
+        assert amounts.amount_out_decimal == Decimal("49")
+        assert amounts.token_in == "YT"
+
+    def test_yt_entry_no_swap_event_unmeasured_when_yt_transfer_missing(self):
+        """Empty != Zero: a YT entry with NO Swap event AND no matching YT
+        Transfer to the wallet must return None (unmeasured), never a coerced
+        Decimal('0'). Guards against the fix silently fabricating a zero
+        output amount that would corrupt amount='all' chaining."""
+        parser = PendleReceiptParser(
+            chain="ethereum",
+            token_in_decimals=18,
+            token_out_decimals=18,
+        )
+        # Input leaves the wallet but the YT never arrives (truncated receipt).
+        logs = [
+            create_transfer_log(self.WALLET, self.ROUTER, 50 * 10**18, self.SUSDE, 0),
+        ]
+        receipt = create_mock_receipt(logs=logs)
+
+        amounts = parser.extract_swap_amounts(
+            receipt,
+            intent_swap_type="token_to_yt",
+            token_in_address=self.SUSDE,
+            token_out_address=self.YT_SUSDE,
+            wallet_address=self.WALLET,
+        )
+        assert amounts is None
+
+
+class TestYTEntryEnricherSeam:
+    """VIB-5301: prove the FULL seam end-to-end — the compiler's ActionBundle
+    metadata for a ``token_to_yt`` swap, threaded through the framework
+    ResultEnricher's ``build_extract_kwargs`` contract, reaches the parser and
+    reconstructs the YT output amount from Transfer events on a receipt that has
+    NO PendleMarket ``Swap`` event.
+
+    This guards against an *inert* fix: the parser change is only meaningful if
+    the enricher actually forwards ``intent_swap_type`` + token/wallet addresses
+    to ``extract_swap_amounts``. The runner reads the resulting
+    ``swap_amounts.amount_out_decimal`` for ``amount="all"`` chaining.
+    """
+
+    SUSDE = "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497"
+    YT_SUSDE = "0x30775B422b9c7415349855346352FAA61fD97E41"
+    MARKET = "0x8dAe8ECe668cf80d348873F23D456448E8694883"
+    ROUTER = "0x888888888889758F76e7103c6CbF23ABbF58F946"
+    WALLET = "0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF"
+
+    def test_yt_entry_seam_no_swap_event(self):
+        from almanak.framework.execution.result_enricher import ResultEnricher
+
+        # Mirrors compiler.py ``compile_pendle_swap`` ActionBundle.metadata for
+        # a token_to_yt swap (from_token.to_dict(), to_token_address,
+        # to_token_decimals, swap_type, wallet_address).
+        bundle_metadata = {
+            "from_token": {
+                "symbol": "sUSDe",
+                "address": self.SUSDE,
+                "decimals": 18,
+                "is_native": False,
+            },
+            "to_token": "YT-sUSDe-7MAY2026",
+            "to_token_address": self.YT_SUSDE,
+            "to_token_decimals": 18,
+            "amount_in": str(50 * 10**18),
+            "swap_type": "token_to_yt",
+            "wallet_address": self.WALLET,
+            "market": self.MARKET,
+        }
+
+        # Real YT-entry receipt shape with NO AMM Swap event.
+        logs = [
+            create_transfer_log(self.WALLET, self.ROUTER, 50 * 10**18, self.SUSDE, 0),
+            create_transfer_log(self.ROUTER, self.WALLET, 60_971 * 10**18, self.YT_SUSDE, 1),
+        ]
+        receipt = create_mock_receipt(logs=logs)
+
+        parser = PendleReceiptParser(chain="ethereum")
+        enricher = ResultEnricher()
+        kwargs = enricher._build_extract_kwargs_for_parser(parser, "swap_amounts", bundle_metadata)
+
+        # The enricher must have derived the YT reconstruction context.
+        assert kwargs.get("intent_swap_type") == "token_to_yt"
+        assert kwargs.get("token_in_address") == self.SUSDE
+        assert kwargs.get("token_out_address") == self.YT_SUSDE
+        assert kwargs.get("wallet_address") == self.WALLET
+
+        amounts = parser.extract_swap_amounts(receipt, **kwargs)
+        assert amounts is not None, "full enricher seam must reconstruct YT entry without a Swap event"
+        assert amounts.amount_out_decimal == Decimal("60971")
+        assert amounts.amount_in_decimal == Decimal("50")
+
 
 class TestPTSwapSymbolResolution:
     """G-PT0: PT swaps must stamp the FULL maturity-bearing PT symbol.
