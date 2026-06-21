@@ -651,10 +651,16 @@ def _build_pt_redeem(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pen
     computed against the right lot size (VIB-4988).
 
     The PT being redeemed is read from the ledger row's ``token_in`` (the PT
-    symbol). R6: if ``token_in`` is empty / non-PT we fall back to the outbox
-    position-key's market and degrade confidence rather than mismatch the FIFO
-    key. The base/SY USD price comes from ``price_inputs_json`` keyed by the
+    symbol). The base/SY USD price comes from ``price_inputs_json`` keyed by the
     redeem's ``token_out`` symbol (the underlying the PT redeemed into).
+
+    R6 (defensive fallback): if ``token_in`` is empty / non-PT this builder degrades
+    confidence and notes an unreliable FIFO key rather than mismatching it. Since
+    VIB-5330 the PRIMARY gate is at categorization/dispatch — both ``_categorize``
+    and ``handle_pendle_pt`` only route a WITHDRAW here when ``token_in`` starts
+    with ``PT-`` — so this R6 branch is UNREACHABLE from the sole production caller
+    (``handle_pendle_pt``). It is retained as defense-in-depth for any direct or
+    future caller of this private helper; do not delete it.
     """
     pt_token_sym = ctx.ledger_row.get("token_in") or ""
     base_token_sym = ctx.ledger_row.get("token_out") or ""
@@ -748,7 +754,10 @@ def handle_pendle_pt(
     builders, each independently under the CRAP threshold (so the prior cc=50
     allowlist is dropped):
 
-    * ``WITHDRAW`` → :func:`_build_pt_redeem` (PT → underlying at/after maturity).
+    * ``WITHDRAW`` with a ``PT-`` ``token_in`` → :func:`_build_pt_redeem` (PT →
+      underlying at/after maturity). A non-PT ``token_in`` (the pt_address-degrade
+      path) → ``None`` → framework stage-2 ``taxonomy.classify("WITHDRAW")`` →
+      generic ``AccountingCategory.LENDING`` (NOT SWAP); see VIB-5330.
     * ``SWAP`` with a ``PT-`` ``token_out`` → :func:`_build_pt_buy` (token → PT).
     * ``SWAP`` with a ``PT-`` ``token_in`` → :func:`_build_pt_sell` (PT → token).
     * anything else → ``None`` (a YT/SY pendle swap falls through to the generic
@@ -772,7 +781,23 @@ def handle_pendle_pt(
     token_in = ledger_row.get("token_in") or ""
 
     if intent_type_str == "WITHDRAW":
-        return _build_pt_redeem(_pt_context(outbox_row, ledger_row), basis_store)
+        # VIB-5330: a Pendle WITHDRAW is a PT redeem ONLY when the redeemed leg is
+        # a PT- token. The receipt parser stamps the canonical PT symbol onto
+        # ``token_in`` from the redeem's DECLARED INPUT money leg; when the PT
+        # address could not be resolved (YT absent from the catalogue + on-chain
+        # YT.PT() fallback failed) the parser degrades and ``token_in`` is the
+        # underlying / empty — a non-PT WITHDRAW. Booking that as a PT_REDEEM
+        # pollutes the PT FIFO/realized-yield lane with a phantom redemption.
+        # Gate on the SAME predicate the position-event lane uses
+        # (``observability/position_events.py:_pendle_pt_event`` →
+        # ``_redeem_pt_symbol_from_legs`` startswith ``PT-``, sourced from the same
+        # INPUT leg that stamps ``token_in``), so the two lanes cannot diverge.
+        # Otherwise decline → the framework falls through to stage-2
+        # ``taxonomy.classify("WITHDRAW")`` → ``AccountingCategory.LENDING`` (the
+        # generic lending category handler), NOT the SWAP path.
+        if token_in.upper().startswith("PT-"):
+            return _build_pt_redeem(_pt_context(outbox_row, ledger_row), basis_store)
+        return None
     if intent_type_str == "SWAP" and token_out.upper().startswith("PT-"):
         return _build_pt_buy(_pt_context(outbox_row, ledger_row), basis_store)
     if intent_type_str == "SWAP" and token_in.upper().startswith("PT-"):
@@ -822,12 +847,21 @@ def _categorize(
       is a PT *sell* on the secondary market (VIB-4988). ``token_in`` is the
       decisive signal that distinguishes a sell from a YT/SY swap and is why the
       categorize signature carries it.
-    * Pendle PT redeem (``WITHDRAW``) → generic ``AccountingCategory.SWAP`` with
-      treatment ``"pendle_pt"`` (PT → underlying at/after maturity; VIB-4988).
+    * Pendle PT redeem (``WITHDRAW`` with a ``PT-`` ``token_in``) → generic
+      ``AccountingCategory.SWAP`` with treatment ``"pendle_pt"`` (PT → underlying
+      at/after maturity; VIB-4988). A WITHDRAW whose ``token_in`` is NOT a ``PT-``
+      token (the pt_address-degrade path: underlying / empty leg) is DECLINED
+      (VIB-5330) — booking it as a PT_REDEEM would pollute the PT FIFO lane.
 
-    A Pendle ``SWAP`` whose *neither* leg is a ``PT-`` token (a YT/SY swap) is
-    DECLINED (returns ``None``) so it books as a generic SWAP via the framework's
-    stage-2 path — no special PT yield attribution applies.
+    Both decline cases return ``None`` so the framework falls through to its
+    stage-2 ``taxonomy.classify(intent_type)`` — and they land on DIFFERENT generic
+    categories by intent type: a declined Pendle ``SWAP`` (YT/SY swap) → generic
+    ``AccountingCategory.SWAP``; a declined non-PT ``WITHDRAW`` →
+    ``AccountingCategory.LENDING`` (``taxonomy.py``: WITHDRAW maps to the LENDING
+    category). Either way no special PT yield attribution applies. This matches the
+    position-event lane's PT/non-PT predicate
+    (``observability/position_events.py:_pendle_pt_event``) so the accounting and
+    lifecycle lanes cannot diverge for the same on-chain action.
 
     Returns ``None`` for every non-Pendle event (the registry then falls through
     to the generic category path).
@@ -838,8 +872,22 @@ def _categorize(
     if it in _PENDLE_LP_INTENTS:
         return AccountingCategoryDecision(category=AccountingCategory.LP, treatment_key="pendle_lp")
     if it == "WITHDRAW":
-        return AccountingCategoryDecision(category=AccountingCategory.SWAP, treatment_key="pendle_pt")
-    if it == "SWAP" and (token_out.upper().startswith("PT-") or token_in.upper().startswith("PT-")):
+        # VIB-5330: route a WITHDRAW to the PT treatment ONLY when the redeemed leg
+        # is a PT- token (``token_in``, stamped by the receipt parser from the
+        # redeem's DECLARED INPUT money leg). A non-PT Pendle WITHDRAW (the
+        # pt_address-degrade path: underlying / empty ``token_in``) must NOT be
+        # misbooked as a PT_REDEEM — it would pollute the PT FIFO/realized-yield
+        # lane. Declining (``None``) lets the framework fall through to stage-2
+        # ``taxonomy.classify("WITHDRAW")`` → ``AccountingCategory.LENDING`` (the
+        # generic lending category, NOT SWAP), matching the position-event lane's
+        # PT/non-PT predicate (``observability/position_events.py:_pendle_pt_event``
+        # declines a non-PT redeem) so accounting and lifecycle cannot diverge.
+        if token_in and token_in.upper().startswith("PT-"):
+            return AccountingCategoryDecision(category=AccountingCategory.SWAP, treatment_key="pendle_pt")
+        return None
+    if it == "SWAP" and (
+        (token_out and token_out.upper().startswith("PT-")) or (token_in and token_in.upper().startswith("PT-"))
+    ):
         return AccountingCategoryDecision(category=AccountingCategory.SWAP, treatment_key="pendle_pt")
     return None
 

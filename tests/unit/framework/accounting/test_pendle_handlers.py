@@ -615,18 +615,31 @@ def test_pt_redeem_sources_pt_count_from_declared_legs_pen6() -> None:
     assert event.basis_lot_id is not None
 
 
-def test_pt_redeem_token_in_not_pt_degrades_confidence() -> None:
-    """R6: WITHDRAW whose token_in is not a PT- symbol → ESTIMATED + degrade reason."""
+def test_pt_redeem_non_pt_token_in_declines_vib5330() -> None:
+    """VIB-5330: a Pendle WITHDRAW whose token_in is NOT a PT- symbol (the
+    pt_address-degrade path) must NOT be booked as a PT_REDEEM.
+
+    Pre-fix, the dispatcher routed EVERY Pendle WITHDRAW to _build_pt_redeem and
+    emitted a PT_REDEEM carrying a non-PT pt_token + ran a FIFO match on a bogus
+    key — polluting the PT realized-yield lane with a phantom redemption. The
+    dispatcher now declines (returns None) so the event books via the generic
+    SWAP/category path, matching the position-event lane's PT/non-PT predicate
+    (``observability/position_events.py:_pendle_pt_event`` declines the same shape).
+
+    Empty != Zero: the FIFO store must be untouched (no match consumed against a
+    real PT lot), so a later genuine PT redeem still matches the full buy lot.
+    """
     pt_symbol = _future_pt()
     basis = FIFOBasisStore()
     _buy_lot(basis, pt_symbol)
+    lots_before = json.dumps({k: len(v) for k, v in basis._lots.items()}, sort_keys=True)
 
     red_ext = json.dumps({"redemption_amounts": {"py_redeemed": int(1e18), "sy_received": int(1e18)}})
     ob = _outbox("WITHDRAW", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
     led = _ledger(
         "WITHDRAW",
         protocol="pendle",
-        token_in="USDC",  # NOT a PT- symbol
+        token_in="USDC",  # NOT a PT- symbol (degrade path)
         token_out="USDC",
         extracted_data_json=red_ext,
         price_inputs_json=json.dumps({"USDC": "1.0"}),
@@ -634,7 +647,27 @@ def test_pt_redeem_token_in_not_pt_degrades_confidence() -> None:
 
     event = handle_pendle_pt(ob, led, basis_store=basis)
 
-    assert event is not None
-    assert event.event_type == PendleEventType.PT_REDEEM
-    assert event.confidence == AccountingConfidence.ESTIMATED
-    assert "not a PT- symbol" in event.unavailable_reason
+    assert event is None  # declined → generic SWAP path, no phantom PT_REDEEM
+    # FIFO lane untouched: the seeded PT buy lot is still intact (no spurious match).
+    assert json.dumps({k: len(v) for k, v in basis._lots.items()}, sort_keys=True) == lots_before
+
+
+def test_pt_redeem_yt_token_in_declines_vib5330() -> None:
+    """VIB-5330: a Pendle WITHDRAW whose token_in is a YT- symbol declines too —
+    a YT leg is not a PT redeem and must not seed/consume the PT FIFO lane."""
+    basis = FIFOBasisStore()
+    red_ext = json.dumps({"redemption_amounts": {"py_redeemed": int(1e18), "sy_received": int(1e18)}})
+    ob = _outbox("WITHDRAW", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger(
+        "WITHDRAW",
+        protocol="pendle",
+        token_in="YT-wstETH-25JUN2026",  # YT, not PT
+        token_out="WSTETH",
+        extracted_data_json=red_ext,
+        price_inputs_json=json.dumps({"WSTETH": "4000.0"}),
+    )
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+
+    assert event is None
+    assert not basis._lots  # no lot recorded for the YT symbol

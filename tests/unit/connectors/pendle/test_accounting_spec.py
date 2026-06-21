@@ -61,8 +61,10 @@ def _ledger(
     intent_type: str = "LP_OPEN",
     protocol: str = "pendle",
     token_out: str = "",
+    token_in: str = "",
     extracted: str = "",
     tx_hash: str = "0xdeadbeef",
+    price_inputs_json: str = "",
 ) -> dict:
     return {
         "id": "led-1",
@@ -74,8 +76,10 @@ def _ledger(
         "protocol": protocol,
         "chain": "arbitrum",
         "token_out": token_out,
+        "token_in": token_in,
         "tx_hash": tx_hash,
         "extracted_data_json": extracted,
+        "price_inputs_json": price_inputs_json,
     }
 
 
@@ -107,11 +111,69 @@ def test_categorize_pendle_pt_sell_via_token_in():
 
 
 def test_categorize_pendle_pt_redeem_withdraw():
-    """WITHDRAW (PT redeem) → generic SWAP + pendle_pt (VIB-4988)."""
+    """WITHDRAW (PT redeem) with a PT- token_in → generic SWAP + pendle_pt (VIB-4988)."""
     decision = ACCOUNTING_TREATMENT_SPEC.categorize("WITHDRAW", "pendle", "USDC", token_in="PT-x")
     assert decision is not None
     assert decision.category is AccountingCategory.SWAP
     assert decision.treatment_key == "pendle_pt"
+
+
+@pytest.mark.parametrize(
+    "token_in",
+    [
+        "YT-wstETH-25JUN2026",  # YT leg
+        "SY-wstETH",  # SY leg
+        "WSTETH",  # underlying (pt_address-degrade path)
+        "",  # parser emitted no leg
+        None,  # None/missing token_in (must not AttributeError — Gemini)
+    ],
+)
+def test_categorize_non_pt_withdraw_declined_vib5330(token_in: str | None):
+    """VIB-5330: a Pendle WITHDRAW whose token_in is NOT a PT- symbol must NOT be
+    routed to the PT treatment — it would misbook a phantom PT_REDEEM. Declining
+    (None) routes it to the generic SWAP path, matching the position-event lane's
+    PT/non-PT predicate (``_pendle_pt_event`` declines the same shape)."""
+    assert ACCOUNTING_TREATMENT_SPEC.categorize("WITHDRAW", "pendle", "WSTETH", token_in=token_in) is None
+
+
+def test_dispatch_non_pt_withdraw_returns_none_and_no_fifo_pollution_vib5330():
+    """VIB-5330: handle_pendle_pt declines a non-PT WITHDRAW (returns None) and
+    records NO FIFO lot, so a real PT redeem's lot match is never polluted."""
+    basis = FIFOBasisStore()
+    extracted = json.dumps({"redemption_amounts": {"py_redeemed": int(1e18), "sy_received": int(1e18)}})
+    ob = _outbox("WITHDRAW", market_id="0xmarket")
+    led = _ledger(
+        "WITHDRAW",
+        token_in="YT-wstETH-25JUN2026",  # non-PT leg
+        token_out="WSTETH",
+        extracted=extracted,
+        price_inputs_json=json.dumps({"WSTETH": "4000.0"}),
+    )
+
+    assert handle_pendle_pt(ob, led, basis_store=basis) is None
+    assert not basis._lots  # FIFO lane untouched — no phantom redemption
+
+
+def test_dispatch_pt_withdraw_still_redeems_vib5330():
+    """VIB-5330 no-regression: a genuine PT WITHDRAW (PT- token_in) STILL produces
+    a PT_REDEEM event via the dispatcher."""
+    from almanak.framework.accounting.models import PendleEventType
+
+    basis = FIFOBasisStore()
+    extracted = json.dumps({"redemption_amounts": {"py_redeemed": int(1e18), "sy_received": int(1e18)}})
+    ob = _outbox("WITHDRAW", market_id="0xmarket")
+    led = _ledger(
+        "WITHDRAW",
+        token_in="PT-wstETH-25JUN2030",
+        token_out="WSTETH",
+        extracted=extracted,
+        price_inputs_json=json.dumps({"WSTETH": "4000.0"}),
+    )
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+    assert event is not None
+    assert event.event_type == PendleEventType.PT_REDEEM
+    assert event.pt_token == "PT-wstETH-25JUN2030"
 
 
 def test_categorize_pendle_yt_sy_swap_declined():
