@@ -83,8 +83,10 @@ from almanak.framework.dashboard.sections import (
     render_trade_tape_section,
 )
 from almanak.framework.dashboard.templates._ohlcv_window import (
+    DEFAULT_DISPLAY_WINDOW_SECONDS,
     ChartWindow,
     build_chart_window,
+    display_window_bounds,
     extend_window_to_cover_signal,
 )
 
@@ -150,6 +152,19 @@ class TADashboardConfig:
             :func:`multi_ta_config`. Each extra contributes one more panel
             beneath the price chart; the extras' pair/chain/timeframe are ignored
             (the primary config drives the shared OHLCV fetch).
+        display_window_seconds: Default *visible* span of the price/indicator
+            x-axis, in seconds (VIB-5345). **Decoupled from the FETCH span**: the
+            dashboard still fetches the wide candle window (``timeframe`` cap +
+            signal backfill) and computes the indicator over that full series —
+            this only bounds how much is *plotted* by default so a freshly
+            deployed strategy's recent action is not crowded into a multi-day
+            axis. Anchored to the strategy's own timeline (see
+            :func:`~almanak.framework.dashboard.templates._ohlcv_window.display_window_bounds`):
+            the window never extends before the strategy start, and a hard floor
+            of ``now - display_window_seconds`` guards against an unreliable
+            reported start (VIB-5343). Defaults to one day
+            (:data:`~almanak.framework.dashboard.templates._ohlcv_window.DEFAULT_DISPLAY_WINDOW_SECONDS`);
+            set ``<= 0`` to disable the cap and plot the full fetched span.
     """
 
     indicator_name: str
@@ -167,6 +182,7 @@ class TADashboardConfig:
     quote_token: str = "USDC"
     timeframe: str = "1h"
     extra_indicators: list["TADashboardConfig"] = field(default_factory=list)
+    display_window_seconds: int = DEFAULT_DISPLAY_WINDOW_SECONDS
 
 
 def multi_ta_config(primary: TADashboardConfig, *extras: TADashboardConfig) -> TADashboardConfig:
@@ -1342,6 +1358,76 @@ def _clip_signals_to_price_window(signals: pd.DataFrame | None, price_df: pd.Dat
     return clipped
 
 
+# A resolved visible x-axis range ``(start, end)``; ``None`` ⇒ leave the axis
+# auto-ranged (legacy full-fetched-span display).
+DisplayBounds = tuple[Any, Any]
+
+
+def _resolve_display_window(
+    price_df: pd.DataFrame,
+    strategy_start_time: Any,
+    config: TADashboardConfig,
+) -> DisplayBounds | None:
+    """Resolve the default visible x-axis range for the chart paths (VIB-5345).
+
+    Bridges the pandas price frame to the pure
+    :func:`~almanak.framework.dashboard.templates._ohlcv_window.display_window_bounds`
+    policy: anchors the right edge to the latest plotted candle (the strategy's
+    own "now") and threads the (possibly unreliable, VIB-5343) reported strategy
+    start as the *tightening* lower bound, with the policy's ``now - window``
+    floor as the safety net. Returns ``None`` (axis stays auto-ranged) when the
+    price frame has no parseable timestamps or the cap is disabled.
+    """
+    if price_df.empty or "time" not in price_df.columns:
+        return None
+    times = _series_as_utc(price_df["time"]).dropna()
+    if times.empty:
+        return None
+    data_end = times.max().to_pydatetime()
+    strategy_start: Any = None
+    if strategy_start_time is not None:
+        parsed = pd.to_datetime(strategy_start_time, utc=True, errors="coerce")
+        if not pd.isna(parsed):
+            strategy_start = parsed.to_pydatetime()
+    return display_window_bounds(data_end, strategy_start, config.display_window_seconds)
+
+
+def _naive_utc(ts: Any) -> Any:
+    """Express ``ts`` as a tz-NAIVE UTC wall-clock ``pd.Timestamp``.
+
+    Plotly serialises datetime *trace* data to tz-naive UTC ``datetime64`` (an
+    offset-free ISO string) regardless of the source Series' tz — but it keeps a
+    tz-*aware* axis ``range`` aware (an ISO string WITH ``+00:00``). A tz-aware
+    range against tz-naive data shifts by the viewer's browser offset on the JS
+    side, pushing the data outside the window → a blank chart (VIB-5345; Gemini
+    review, confirmed by JSON round-trip: aware data + aware range still emit
+    ``data.x`` offset-free while ``range`` carries ``+00:00``). So normalising
+    the *source* Series to UTC does NOT fix it — only matching the range to the
+    data's tz-naive UTC basis does. This converts an aware ``ts`` to UTC then
+    drops the tz (a naive ``ts`` is already UTC wall-clock — our bounds are
+    computed in UTC — so it passes through)."""
+    t = pd.Timestamp(ts)
+    if t.tzinfo is not None:
+        t = t.tz_convert("UTC").tz_localize(None)
+    return t
+
+
+def _apply_display_window(fig: Any, bounds: DisplayBounds | None) -> None:
+    """Clamp every x-axis of ``fig`` to ``bounds`` (no-op when ``bounds`` is None).
+
+    ``fig.update_xaxes(range=...)`` with no ``row``/``col`` updates *all* x-axes,
+    so a shared-axis subplot (price + indicator) shows the same window on both
+    panels. Only the *visible* range is bounded — the underlying full-fetched
+    series stays in the figure, so an operator zoom/pan reveals the rest. Bounds
+    are applied in the tz-naive UTC basis plotly uses for the trace data
+    (:func:`_naive_utc`) so the range matches the axis and the chart is never
+    blanked by a tz mismatch."""
+    if bounds is None:
+        return
+    start, end = bounds
+    fig.update_xaxes(range=[_naive_utc(start), _naive_utc(end)])
+
+
 def _render_charts_section(  # noqa: C901
     session_state: dict[str, Any],
     strategy_config: dict[str, Any],
@@ -1404,11 +1490,17 @@ def _render_charts_section(  # noqa: C901
     sell_df = _clip_signals_to_price_window(_coerce_signals(sell_signals), price_df)
     strategy_start_time = session_state.get("strategy_start_time")
 
+    # Default visible window (VIB-5345): bound the plotted x-axis to ~1 day of
+    # recent history (config-overridable) without touching the wide FETCH that
+    # warms up the indicator. Resolved once and applied to every figure below so
+    # all price/indicator panels share the same window.
+    display_bounds = _resolve_display_window(price_df, strategy_start_time, config)
+
     # Multi-signal layout (VIB-4897): render price once, then one dedicated
     # panel per configured indicator. The single-indicator path below is
     # unchanged.
     if config.extra_indicators:
-        _render_multi_indicator_charts(session_state, config, price_df, buy_df, sell_df)
+        _render_multi_indicator_charts(session_state, config, price_df, buy_df, sell_df, display_bounds)
         return
 
     # Get indicator data
@@ -1608,12 +1700,17 @@ def _render_charts_section(  # noqa: C901
             showlegend=True,
         )
 
+        # Cap BOTH subplots (price + RSI) to the default visible window (VIB-5345)
+        # — applied after layout so the explicit range wins.
+        _apply_display_window(fig, display_bounds)
         st.plotly_chart(fig, use_container_width=True)
 
     elif _has_indicator_data(indicator_data) and config.indicator_name.upper() in _DEDICATED_RENDERERS:
         # MACD/Bollinger/CCI/Stochastic/ATR/ADX each need a purpose-built chart
         # (multi-line bands, oscillator zones, …), not the generic single line.
-        _DEDICATED_RENDERERS[config.indicator_name.upper()](price_df, buy_df, sell_df, indicator_data, config)
+        _DEDICATED_RENDERERS[config.indicator_name.upper()](
+            price_df, buy_df, sell_df, indicator_data, config, display_bounds
+        )
 
     else:
         # For other indicators, use separate charts
@@ -1624,6 +1721,7 @@ def _render_charts_section(  # noqa: C901
             sell_signals=sell_df,
             title="Price with Buy/Sell Signals",
         )
+        _apply_display_window(fig_price, display_bounds)
         st.plotly_chart(fig_price, use_container_width=True)
 
         # Indicator chart if available (for non-RSI indicators)
@@ -1654,6 +1752,7 @@ def _render_charts_section(  # noqa: C901
                 yaxis_title=config.indicator_name,
                 height=300,
             )
+            _apply_display_window(fig_indicator, display_bounds)
             st.plotly_chart(fig_indicator, use_container_width=True)
 
 
@@ -1661,6 +1760,7 @@ def _render_price_signals(
     price_df: pd.DataFrame,
     buy_df: pd.DataFrame | None,
     sell_df: pd.DataFrame | None,
+    display_bounds: DisplayBounds | None = None,
 ) -> None:
     """Render the shared price-with-buy/sell-signals chart."""
     fig_price = plot_price_with_signals(
@@ -1669,6 +1769,7 @@ def _render_price_signals(
         sell_signals=sell_df,
         title="Price with Buy/Sell Signals",
     )
+    _apply_display_window(fig_price, display_bounds)
     st.plotly_chart(fig_price, use_container_width=True)
 
 
@@ -1704,8 +1805,22 @@ def _indicator_present(data: Any) -> bool:
 #     shared figure itself). See ``_render_multi_indicator_charts`` (VIB-4982).
 
 
+def _finalize_panel(fig: Any, target: "SubplotTarget | None", display_bounds: DisplayBounds | None) -> None:
+    """Render a standalone indicator panel, capping its x-axis to the display window.
+
+    No-op when ``target`` is supplied — the panel's traces were added to a shared
+    composite figure that its owner renders (and windows) once (VIB-5345)."""
+    if target is None:
+        _apply_display_window(fig, display_bounds)
+        st.plotly_chart(fig, use_container_width=True)
+
+
 def _panel_rsi(
-    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+    price_df: pd.DataFrame,
+    data: Any,
+    config: TADashboardConfig,
+    target: SubplotTarget | None = None,
+    display_bounds: DisplayBounds | None = None,
 ) -> None:
     series = _as_indicator_series(data)
     if series is None:
@@ -1717,24 +1832,30 @@ def _panel_rsi(
         oversold=config.lower_threshold if config.lower_threshold is not None else 30,
         target=target,
     )
-    if target is None:
-        st.plotly_chart(fig, use_container_width=True)
+    _finalize_panel(fig, target, display_bounds)
 
 
 def _panel_macd(
-    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+    price_df: pd.DataFrame,
+    data: Any,
+    config: TADashboardConfig,
+    target: SubplotTarget | None = None,
+    display_bounds: DisplayBounds | None = None,
 ) -> None:
     if not (isinstance(data, pd.DataFrame) and not data.empty):
         return
     fig = plot_macd_indicator(
         macd=data["macd"], macd_signal=data["signal"], macd_hist=data["histogram"], time_index=data.index, target=target
     )
-    if target is None:
-        st.plotly_chart(fig, use_container_width=True)
+    _finalize_panel(fig, target, display_bounds)
 
 
 def _panel_bollinger(
-    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+    price_df: pd.DataFrame,
+    data: Any,
+    config: TADashboardConfig,
+    target: SubplotTarget | None = None,
+    display_bounds: DisplayBounds | None = None,
 ) -> None:
     if not (isinstance(data, pd.DataFrame) and not data.empty):
         return
@@ -1747,12 +1868,15 @@ def _panel_bollinger(
         time_index=data.index,
         target=target,
     )
-    if target is None:
-        st.plotly_chart(fig, use_container_width=True)
+    _finalize_panel(fig, target, display_bounds)
 
 
 def _panel_cci(
-    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+    price_df: pd.DataFrame,
+    data: Any,
+    config: TADashboardConfig,
+    target: SubplotTarget | None = None,
+    display_bounds: DisplayBounds | None = None,
 ) -> None:
     series = _as_indicator_series(data)
     if series is None:
@@ -1764,12 +1888,15 @@ def _panel_cci(
         oversold=config.lower_threshold if config.lower_threshold is not None else -100,
         target=target,
     )
-    if target is None:
-        st.plotly_chart(fig, use_container_width=True)
+    _finalize_panel(fig, target, display_bounds)
 
 
 def _panel_stochastic(
-    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+    price_df: pd.DataFrame,
+    data: Any,
+    config: TADashboardConfig,
+    target: SubplotTarget | None = None,
+    display_bounds: DisplayBounds | None = None,
 ) -> None:
     if not (isinstance(data, pd.DataFrame) and not data.empty):
         return
@@ -1781,23 +1908,29 @@ def _panel_stochastic(
         oversold=config.lower_threshold if config.lower_threshold is not None else 20,
         target=target,
     )
-    if target is None:
-        st.plotly_chart(fig, use_container_width=True)
+    _finalize_panel(fig, target, display_bounds)
 
 
 def _panel_atr(
-    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+    price_df: pd.DataFrame,
+    data: Any,
+    config: TADashboardConfig,
+    target: SubplotTarget | None = None,
+    display_bounds: DisplayBounds | None = None,
 ) -> None:
     series = _as_indicator_series(data)
     if series is None:
         return
     fig = plot_atr_indicator(atr_data=series, time_index=series.index, target=target)
-    if target is None:
-        st.plotly_chart(fig, use_container_width=True)
+    _finalize_panel(fig, target, display_bounds)
 
 
 def _panel_adx(
-    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+    price_df: pd.DataFrame,
+    data: Any,
+    config: TADashboardConfig,
+    target: SubplotTarget | None = None,
+    display_bounds: DisplayBounds | None = None,
 ) -> None:
     if not (isinstance(data, pd.DataFrame) and not data.empty):
         return
@@ -1809,12 +1942,15 @@ def _panel_adx(
         trend_threshold=config.lower_threshold if config.lower_threshold is not None else 25,
         target=target,
     )
-    if target is None:
-        st.plotly_chart(fig, use_container_width=True)
+    _finalize_panel(fig, target, display_bounds)
 
 
 def _panel_generic(
-    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+    price_df: pd.DataFrame,
+    data: Any,
+    config: TADashboardConfig,
+    target: SubplotTarget | None = None,
+    display_bounds: DisplayBounds | None = None,
 ) -> None:
     """Fallback single-line panel for an indicator with no dedicated chart."""
     series = _as_indicator_series(data)
@@ -1840,7 +1976,7 @@ def _panel_generic(
         yaxis_title=config.indicator_name,
         height=300,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    _finalize_panel(fig, target, display_bounds)
 
 
 # Uppercased ``config.indicator_name`` → panel builder.
@@ -1915,6 +2051,7 @@ def _render_multi_indicator_charts(
     price_df: pd.DataFrame,
     buy_df: pd.DataFrame | None,
     sell_df: pd.DataFrame | None,
+    display_bounds: DisplayBounds | None = None,
 ) -> None:
     """Stacked multi-signal layout: ONE shared-axis ``make_subplots`` figure.
 
@@ -1985,6 +2122,8 @@ def _render_multi_indicator_charts(
         hovermode="x unified",
         showlegend=True,
     )
+    # Cap every row's shared time axis to the default visible window (VIB-5345).
+    _apply_display_window(fig, display_bounds)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -1994,22 +2133,28 @@ def _render_indicator_with_price(
     sell_df: pd.DataFrame | None,
     data: Any,
     config: TADashboardConfig,
+    display_bounds: DisplayBounds | None = None,
 ) -> None:
     """Single-indicator dedicated render: price+signals chart, then the indicator panel.
 
     Shares the per-indicator panel builders with the multi-signal layout so the
-    two paths can never drift in how a given indicator is drawn.
+    two paths can never drift in how a given indicator is drawn. Both the price
+    chart and the indicator panel are capped to the default visible window
+    (VIB-5345).
     """
-    _render_price_signals(price_df, buy_df, sell_df)
+    _render_price_signals(price_df, buy_df, sell_df, display_bounds)
     panel = _INDICATOR_PANELS.get(config.indicator_name.upper(), _panel_generic)
-    panel(price_df, data, config)
+    panel(price_df, data, config, display_bounds=display_bounds)
 
 
 # Uppercased ``config.indicator_name`` → dedicated chart renderer. RSI is handled
 # inline in ``_render_charts_section`` (combined price+RSI subplot); every entry
 # here renders a price+signals chart plus its dedicated indicator panel.
 _DEDICATED_RENDERERS: dict[
-    str, Callable[[pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None, Any, TADashboardConfig], None]
+    str,
+    Callable[
+        [pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None, Any, TADashboardConfig, DisplayBounds | None], None
+    ],
 ] = dict.fromkeys(("MACD", "BOLLINGER", "CCI", "STOCHASTIC", "ATR", "ADX"), _render_indicator_with_price)
 
 

@@ -72,6 +72,69 @@ grown just enough to cover it — but never unbounded. 2000 candles is ~7 days a
 earliest marker while keeping a single bounded request, mirroring the
 "never silently unbounded" policy of the recent-window table above."""
 
+DEFAULT_DISPLAY_WINDOW_SECONDS = 24 * 60 * 60
+"""Default visible-window span for a dashboard price/indicator chart (VIB-5345).
+
+**FETCH span vs DISPLAY span are decoupled.** The candle-count caps above (and
+:func:`extend_window_to_cover_signal`) decide how much history is *fetched* — wide
+enough to warm up the indicator (RSI/MACD/Bollinger need tens-to-hundreds of
+candles) and to cover the earliest still-displayed signal marker. The indicator
+series is always computed over that full fetched span.
+
+This constant instead bounds how much of that fetched history is *plotted* by
+default: a strategy that deployed today should not have its recent action crowded
+into the right edge of a 7-day axis (the operator complaint behind VIB-5345). One
+day is short enough to foreground the recent action while still giving visual
+context; the operator can always zoom/pan out to the full fetched span.
+
+Configurable per dashboard (``TADashboardConfig.display_window_seconds``); a value
+``<= 0`` disables the cap (plot the full fetched span — explicit opt-out)."""
+
+
+def display_window_bounds(
+    data_end: datetime | None,
+    strategy_start: datetime | None,
+    display_window_seconds: int = DEFAULT_DISPLAY_WINDOW_SECONDS,
+) -> tuple[datetime, datetime] | None:
+    """Compute the visible ``[start, end]`` x-axis range for a chart (VIB-5345).
+
+    Pure (no Streamlit, no pandas, no I/O) so templates and unit tests share one
+    decision — the DISPLAY-window twin of :func:`build_chart_window` (which owns
+    the FETCH window). Bounds the *plotted* x-axis to at most
+    ``display_window_seconds`` of recent history, anchored to the strategy's own
+    timeline rather than a generic wall-clock ``now``:
+
+    * ``end`` = ``data_end`` (the latest plotted candle — the strategy's own
+      "now", so a stalled feed bounds the right edge to real data, not the wall
+      clock).
+    * ``floor`` = ``data_end - display_window_seconds`` — a **hard lower bound**.
+      This is the safety net: even if ``strategy_start`` is wrong (VIB-5343 —
+      ``_strategy_start_time`` can report a *prior* run's start a day early
+      because the wallet-derived ``deployment_id`` is reused across runs), the
+      window never extends earlier than this floor, so the chart never shows
+      pre-strategy data beyond one display span.
+    * ``start`` = ``strategy_start`` **only when** it falls strictly inside
+      ``(floor, end)`` — i.e. the strategy has been running for *less* than the
+      display span (a 3h-old deployment shows ~its 3h of life, not a blank
+      day). A ``strategy_start`` at/just before the floor, missing, or at/after
+      ``end`` (degenerate / future) all fall back to ``floor``.
+
+    Returns ``None`` (caller leaves the axis auto-ranged — legacy behaviour) when
+    there is no ``data_end`` or the cap is disabled (``display_window_seconds <= 0``).
+    """
+    if data_end is None or display_window_seconds <= 0:
+        return None
+    if data_end.tzinfo is None:
+        data_end = data_end.replace(tzinfo=UTC)
+    floor = data_end - timedelta(seconds=display_window_seconds)
+    start = floor
+    if strategy_start is not None:
+        if strategy_start.tzinfo is None:
+            strategy_start = strategy_start.replace(tzinfo=UTC)
+        if floor < strategy_start < data_end:
+            start = strategy_start
+    return (start, data_end)
+
 
 def normalize_timeframe(timeframe: str | None) -> str:
     """Coerce a falsy / empty timeframe to :data:`DEFAULT_TIMEFRAME`.
