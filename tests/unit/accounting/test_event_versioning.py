@@ -298,7 +298,10 @@ def test_primitive_versions_explicit_per_primitive_pinning() -> None:
         # (realized fixed-yield attribution) under the SWAP primitive.
         # VIB-4988: bumped 3→4 — PT_BUY/PT_SELL payloads moved raw-18 → human
         # units (uniform with PT_REDEEM) so PEN6 conservation holds on a redeem.
-        Primitive.SWAP: 4,
+        # VIB-5316: bumped 4→5 — PT_BUY now populates the buy-time ``sy_price`` the
+        # held-PT USD cost basis is anchored to (was re-marked at the current
+        # underlying, sign-flipping PnL for volatile underlyings).
+        Primitive.SWAP: 5,
         Primitive.VAULT: 1,
         Primitive.STAKING: 1,
         Primitive.BRIDGE: 1,

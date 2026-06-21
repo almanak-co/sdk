@@ -463,6 +463,311 @@ def _classify_swap_inventory(
     return _SwapInventoryClassification(rows, total_value, metadata)
 
 
+# ---------------------------------------------------------------------------
+# Held-PT inventory classification (VIB-5316)
+# ---------------------------------------------------------------------------
+#
+# A held Pendle PT is NOT a position_event: the ``PENDLE_PT`` PositionType was
+# removed in VIB-4931 and ``SWAP`` is absent from ``INTENT_TO_EVENT_TYPE``, so a
+# strategy that swapped into a PT reports NO discovered position for it — the
+# VIB-5313 reprice path (``_reprice_principal_token_enriched``) is INERT for
+# such a strategy. This classifier is the LIVE consumer that makes the gateway
+# PT/USD valuation reach NAV: it synthesizes the open-PT inventory from FIFO
+# basis lots (``FIFOBasisStore.iter_open_pt_lots`` — ``PT_BUY`` minus matched
+# ``PT_SELL`` / ``PT_REDEEM``) and values each open symbol via the gateway price
+# authority (``MarketSnapshot.pt_price`` → ``value_principal_token_position``,
+# design spine §2 VIB-5316). NO ``position_events`` / ``PositionType`` change
+# (default-(b)) — the FIFO lot IS the inventory record.
+#
+# Unlike swap inventory (VIB-5057), a PT is KNOWN_UNPRICEABLE in the spot oracle
+# and is dropped from the wallet token valuation — so its USD value is NOT
+# already counted in ``wallet_value``. The synthetic PT rows are therefore
+# ordinary NON-wallet positions: they count into ``total_value_usd``
+# (open-position NAV) AND ``wallet_total_value_usd`` (counted once — they do not
+# overlap the wallet index since the PT symbol is unpriceable / absent from
+# wallet balances), and their cost basis flows into ``deployed_capital_usd``.
+# They are NOT subtracted from ``available_cash_usd`` (a held PT is not cash).
+#
+# ``details["source"]`` is the data-shape marker (VIB-4636 discipline — consumers
+# detect these rows by the marker, never by a protocol-name string; this file
+# stays free of connector-name coupling so the framework→connector ratchet,
+# ``scripts/ci/scan_chain_protocol_coupling.py``, stays green).
+_PT_INVENTORY_SOURCE = "pt_inventory_lots"
+
+
+@dataclass(frozen=True)
+class _PtInventoryClassification:
+    """Result of classifying open held-PT inventory for one snapshot (VIB-5316).
+
+    ``metadata`` is stamped onto ``snapshot_metadata["pt_inventory"]`` when not
+    ``None``; it is ``None`` exactly when there is nothing to report (no
+    accounting context, or zero open PT lots) so non-Pendle strategies stay
+    byte-identical to the pre-VIB-5316 writer.
+    """
+
+    rows: list[PositionValue]
+    metadata: dict[str, Any] | None
+
+
+_NO_PT_INVENTORY = _PtInventoryClassification([], None)
+
+
+def _reported_pt_symbols(positions: list[PositionValue]) -> set[str]:
+    """Canonical PT symbols already represented by a discovered position.
+
+    The VIB-5313 reprice path values a PT a strategy reports as a discovered
+    position (``details.pt_token`` / ``pt_symbol``). FIFO inventory must only
+    FILL THE GAP for held PTs nothing else surfaces — never double-count a
+    symbol the reprice path already valued. Keyed by ``canonical_symbol`` so the
+    skip matches the aggregation key (spine §3.1).
+    """
+    from almanak.framework.accounting.basis import canonical_symbol
+
+    symbols: set[str] = set()
+    for p in positions:
+        details = getattr(p, "details", None) or {}
+        raw = details.get("pt_token") or details.get("pt_token_symbol") or details.get("pt_symbol")
+        if isinstance(raw, str) and raw:
+            symbols.add(canonical_symbol(raw))
+    return symbols
+
+
+def _aggregate_open_pt_lots(
+    events: list[dict[str, Any]],
+    deployment_id: str,
+) -> dict[str, tuple[Decimal, Decimal | None, Decimal | None, str]]:
+    """Aggregate open held-PT lots per symbol from accounting events (VIB-5316).
+
+    Replays the deployment-scoped event history through ``FIFOBasisStore`` (the
+    same reconstruction the swap-inventory path uses — reconstruction from
+    durable events sidesteps the runner's in-memory lot store so a restart cannot
+    silently zero the inventory) and sums ``iter_open_pt_lots`` per
+    ``canonical_symbol`` (the case-insensitive identity + join + FIFO-match key,
+    spine §3.1).
+
+    Returns ``{canonical_symbol: (remaining_pt_total, sy_cost_total,
+    usd_cost_total, display)}`` where:
+
+    * ``sy_cost_total`` — the SY/underlying-denominated cost of the open inventory.
+    * ``usd_cost_total`` — the BUY-TIME-anchored USD cost basis of the open
+      inventory (``cost_per_pt × remaining × underlying_price_at_buy`` summed
+      across lots). This is the COST the valuer uses; it is NOT re-marked at the
+      current underlying price (the VIB-5316 bug).
+
+    Both totals are ``None`` when ANY of the symbol's open lots has an unmeasured
+    contribution (Empty ≠ Zero — one unmeasured lot poisons the symbol's whole
+    basis; a pre-fix lot with no buy-time price poisons ``usd_cost_total`` only).
+    ``display`` is the first-seen ORIGINAL-case symbol (canonical keys join /
+    dedup; the original case is kept for the dashboard, mirroring swap inventory).
+
+    Events are scoped to ``deployment_id`` before replay so a shared wallet cannot
+    leak a co-located strategy's PT inventory into this snapshot.
+    """
+    from almanak.framework.accounting.basis import FIFOBasisStore, canonical_symbol
+
+    scoped = [ev for ev in events if isinstance(ev, dict) and ev.get("deployment_id") == deployment_id]
+    store = FIFOBasisStore()
+    store.reconstruct_from_events(scoped)
+
+    totals: dict[str, tuple[Decimal, Decimal | None, Decimal | None, str]] = {}
+    for _position_key, pt_token, remaining, sy_cost, usd_cost in store.iter_open_pt_lots():
+        key = canonical_symbol(pt_token)
+        prev_remaining, prev_sy, prev_usd, display = totals.get(
+            key, (Decimal("0"), Decimal("0"), Decimal("0"), pt_token)
+        )
+        sy_total = None if (prev_sy is None or sy_cost is None) else prev_sy + sy_cost
+        usd_total = None if (prev_usd is None or usd_cost is None) else prev_usd + usd_cost
+        totals[key] = (prev_remaining + remaining, sy_total, usd_total, display)
+    return totals
+
+
+def _pt_unmeasured_row(
+    symbol: str,
+    chain: str,
+    remaining: Decimal,
+    sy_cost: Decimal | None,
+    *,
+    reason: str,
+) -> PositionValue:
+    """A held PT whose gateway USD price is unmeasured (Empty ≠ Zero, VIB-5316).
+
+    The row STILL surfaces the MEASURED qty + SY cost basis (from the ledger),
+    but the USD mark + cost + unrealized PnL are UNMEASURED. ``PositionValue``
+    requires ``Decimal`` numeric fields, so they carry a placeholder
+    ``Decimal("0")`` PAIRED WITH ``valuation_status="no_path"`` + explicit
+    ``*_unmeasured`` detail flags — which drops the WHOLE snapshot confidence to
+    ``UNAVAILABLE`` (``_determine_value_confidence``). No reader trusts the 0:
+    it is never a fabricated measured-zero (spine §3.3). The value_usd 0 also
+    keeps it out of ``total_value_usd`` (the ``value_usd > 0`` sum) so an
+    unmeasured PT never books phantom NAV.
+    """
+    return PositionValue(
+        position_type=PositionType.TOKEN,
+        protocol="pt",
+        chain=chain,
+        value_usd=Decimal("0"),
+        label=f"PT inventory {symbol}",
+        tokens=[symbol],
+        details={
+            "asset": symbol,
+            "source": _PT_INVENTORY_SOURCE,
+            "classification": "deployed_inventory",
+            "pt_symbol": symbol,
+            "quantity": str(remaining),
+            "sy_cost": str(sy_cost) if sy_cost is not None else "",
+            "valuation_status": "no_path",
+            "mark_unmeasured": True,
+            "cost_basis_unmeasured": True,
+            "unrealized_pnl_unmeasured": True,
+            "unavailable_reason": reason,
+        },
+        cost_basis_usd=Decimal("0"),
+        unrealized_pnl_usd=Decimal("0"),
+    )
+
+
+def _classify_pt_inventory(
+    lot_totals: dict[str, tuple[Decimal, Decimal | None, Decimal | None, str]],
+    market: "MarketDataSource",
+    chain: str,
+    skip_symbols: set[str],
+) -> _PtInventoryClassification:
+    """Value per-symbol open held-PT inventory via the gateway price (VIB-5316).
+
+    Per symbol the result is whole-or-nothing with explicit, never-silent states:
+
+    * ``reported_position_present`` — a discovered PT position already represents
+      this symbol (VIB-5313 reprice path); FIFO defers to it (no double-count).
+    * measured price (``AVAILABLE`` / ``ESTIMATED`` / ``STALE``) → a valued row;
+      ESTIMATED/STALE stamps ``valuation_status="estimated"`` so the snapshot
+      degrades (never folded into a HIGH NAV — spine §3.4).
+    * unmeasured price (``UNAVAILABLE``) → :func:`_pt_unmeasured_row`: qty + SY
+      cost shown, USD mark/cost/PnL unmeasured, snapshot → ``UNAVAILABLE``.
+
+    USD cost-basis convention (documented, VIB-5316): the USD cost basis is the
+    BUY-TIME-anchored cost aggregated from the FIFO lots
+    (``cost_per_pt × remaining × underlying_price_at_buy``, summed). The mark is
+    the CURRENT gateway PT/USD value; the cost is what was paid. Unrealized PnL is
+    therefore the honest total return (PT-vs-par yield drift AND underlying spot
+    drift), not just the PT-vs-par drift a current-price re-mark would show. When
+    any contributing lot lacks a measured buy-time price (pre-fix persisted lots,
+    or ``price_inputs_json`` missing the base token at buy) the USD cost is
+    unmeasured (``None``) and the mark still stands — the cost is NEVER re-marked
+    at the current underlying price (that re-mark sign-flipped unrealized PnL for
+    volatile underlyings: the bug this fix removes).
+    """
+    if not lot_totals:
+        return _NO_PT_INVENTORY
+
+    pt_price_fn = getattr(market, "pt_price", None)
+    if not callable(pt_price_fn):
+        # Market surface predates pt_price (bare test double / data-layer
+        # snapshot) → cannot value PT inventory. Stamp an explicit unmeasured
+        # status, never a silent no-op.
+        return _PtInventoryClassification([], {"status": "unavailable", "reason": "no_pt_price_surface"})
+
+    from almanak.connectors._strategy_base.principal_token_valuation import value_principal_token_position
+
+    rows: list[PositionValue] = []
+    token_detail: dict[str, dict[str, Any]] = {}
+    skipped: dict[str, str] = {}
+    measured_count = 0
+
+    for canonical in sorted(lot_totals):
+        if canonical in skip_symbols:
+            skipped[canonical] = "reported_position_present"
+            continue
+        remaining, sy_cost, buy_time_usd_cost, symbol = lot_totals[canonical]
+
+        # VIB-5316 unpriceable-shape guard: the no-double-count safety relies on PT
+        # symbols being KNOWN_UNPRICEABLE in the spot oracle (the ``PT-`` prefix), so
+        # the wallet/position valuation never ALSO prices them. ``canonical`` is the
+        # upper-cased symbol; if it ever loses the ``PT-`` shape (a future symbol-format
+        # change), a PT inventory row would silently double-count against a wallet
+        # TOKEN row. Skip + stamp rather than book a phantom — never a silent no-op.
+        if not canonical.startswith("PT-"):
+            logger.warning(
+                "PT inventory: symbol %s entered the PT path without a PT- shape; skipping to "
+                "avoid double-counting against a wallet TOKEN row",
+                symbol,
+            )
+            skipped[canonical] = "not_pt_shape"
+            continue
+
+        try:
+            pt_price = pt_price_fn(symbol, chain)
+        except Exception as e:  # noqa: BLE001 — fail closed to unmeasured, never crash the snapshot
+            logger.warning("PT inventory: pt_price(%s) failed (%s); marking unmeasured", symbol, e)
+            rows.append(_pt_unmeasured_row(symbol, chain, remaining, sy_cost, reason="pt_price_error"))
+            continue
+
+        valued = value_principal_token_position(pt_price=pt_price, pt_amount=remaining)
+        underlying = pt_price.underlying_price
+        # VIB-5316: cost is the BUY-TIME-anchored USD cost from the FIFO lots — NOT
+        # ``sy_cost × current_underlying`` (the re-mark that sign-flipped PnL). When
+        # any contributing lot lacked a measured buy price ``buy_time_usd_cost`` is
+        # None → cost/PnL honestly unmeasured while the mark still stands.
+        cost_usd = buy_time_usd_cost
+
+        if valued.current_value_usd is None or valued.confidence == ValueConfidence.UNAVAILABLE:
+            rows.append(_pt_unmeasured_row(symbol, chain, remaining, sy_cost, reason="price_unmeasured"))
+            continue
+
+        measured_count += 1
+        mark = valued.current_value_usd
+        cost_basis = cost_usd if cost_usd is not None else Decimal("0")
+        unrealized = (mark - cost_usd) if cost_usd is not None else Decimal("0")
+
+        details: dict[str, Any] = {
+            "asset": symbol,
+            "source": _PT_INVENTORY_SOURCE,
+            "classification": "deployed_inventory",
+            "pt_symbol": symbol,
+            "quantity": str(remaining),
+            "sy_cost": str(sy_cost) if sy_cost is not None else "",
+            "underlying_price_usd": str(underlying) if underlying is not None else "",
+            "pt_to_asset_rate": str(pt_price.pt_to_asset_rate) if pt_price.pt_to_asset_rate is not None else "",
+            "days_to_maturity": valued.days_to_maturity,
+            "price_confidence": str(valued.confidence),
+            "price_source": pt_price.source,
+        }
+        if cost_usd is None:
+            # SY cost is measured (shown) but the underlying/USD conversion leg is
+            # missing → the USD cost basis + unrealized PnL are UNMEASURED, not
+            # zero. The placeholder 0 is paired with explicit flags (Empty ≠ Zero).
+            details["cost_basis_unmeasured"] = True
+            details["unrealized_pnl_unmeasured"] = True
+        if valued.confidence != ValueConfidence.HIGH:
+            details["valuation_status"] = "estimated"
+
+        token_detail[symbol] = {
+            "quantity": str(remaining),
+            "value_usd": str(mark),
+            "cost_usd": str(cost_usd) if cost_usd is not None else "",
+            "confidence": str(valued.confidence),
+        }
+        rows.append(
+            PositionValue(
+                position_type=PositionType.TOKEN,
+                protocol="pt",
+                chain=chain,
+                value_usd=mark,
+                label=f"PT inventory {symbol}",
+                tokens=[symbol],
+                details=details,
+                cost_basis_usd=cost_basis,
+                unrealized_pnl_usd=unrealized,
+            )
+        )
+
+    metadata: dict[str, Any] = {"status": "applied" if measured_count else "unmeasured"}
+    if token_detail:
+        metadata["tokens"] = token_detail
+    if skipped:
+        metadata["skipped"] = skipped
+    return _PtInventoryClassification(rows, metadata)
+
+
 @runtime_checkable
 class MarketDataSource(Protocol):
     """Minimal interface for fetching prices and balances.
@@ -702,6 +1007,21 @@ class PortfolioValuer:
             swap_inventory = self._swap_inventory_for_snapshot(chain, balances, prices)
             positions = [*positions, *swap_inventory.rows]
 
+            # Step 4a-bis (VIB-5316): synthesize the held-PT inventory from FIFO
+            # basis lots and value it via the gateway PT/USD authority — the LIVE
+            # consumer that makes the VIB-5313 valuation reach NAV (a held PT is
+            # not a position_event, so nothing else feeds it). PT is dropped from
+            # the wallet token valuation (KNOWN_UNPRICEABLE), so these are ordinary
+            # NON-wallet positions: they flow into total_value_usd /
+            # wallet_total_value_usd / deployed_capital_usd through the existing
+            # sums (they don't overlap the wallet index) and are NOT subtracted
+            # from available_cash. Symbols already covered by a discovered PT
+            # position (the VIB-5313 reprice path) are skipped — no double-count.
+            # Zero open PT lots ⇒ empty rows + None metadata ⇒ byte-identical
+            # snapshot to the pre-VIB-5316 writer.
+            pt_inventory = self._pt_inventory_for_snapshot(chain, market, _reported_pt_symbols(positions))
+            positions = [*positions, *pt_inventory.rows]
+
             # Step 4b: Compute deployed capital = sum of per-position cost bases.
             # cost_basis_usd is populated by _enrich_position_pnl() inside
             # _get_positions() when accounting events exist.  Only positive cost bases
@@ -792,7 +1112,9 @@ class PortfolioValuer:
                 token_prices=token_price_records,
                 chain=chain,
                 iteration_number=iteration_number,
-                snapshot_metadata=self._build_snapshot_metadata(gas_native_status, swap_inventory.metadata),
+                snapshot_metadata=self._build_snapshot_metadata(
+                    gas_native_status, swap_inventory.metadata, pt_inventory.metadata
+                ),
             )
             # Reconciliation is advisory — never let it downgrade the framework snapshot.
             try:
@@ -968,6 +1290,41 @@ class PortfolioValuer:
                 [], Decimal("0"), {"status": "unavailable", "reason": "classification_error"}
             )
 
+    def _pt_inventory_for_snapshot(
+        self,
+        chain: str,
+        market: "MarketDataSource",
+        skip_symbols: set[str],
+    ) -> _PtInventoryClassification:
+        """Classify this snapshot's open held-PT inventory (VIB-5316).
+
+        Reads the order-preserving event prefetch (``_snapshot_events_flat``) and
+        never raises — any failure degrades to "no PT inventory this snapshot"
+        with an explicit ``unavailable`` metadata stamp and a WARNING, never a
+        silent no-op. Returns the no-op sentinel (no rows, no stamp) when no
+        accounting context is wired — non-Pendle strategies and legacy callers
+        stay byte-identical to the pre-VIB-5316 writer.
+        """
+        if self._snapshot_events_flat is None:
+            if self._snapshot_prefetch_failed:
+                logger.warning(
+                    "PT inventory classification skipped for %s: accounting events unavailable; "
+                    "held PT not surfaced this snapshot",
+                    self._deployment_id,
+                )
+                return _PtInventoryClassification([], {"status": "unavailable", "reason": "events_fetch_failed"})
+            return _NO_PT_INVENTORY
+        try:
+            lot_totals = _aggregate_open_pt_lots(self._snapshot_events_flat, self._deployment_id)
+            return _classify_pt_inventory(lot_totals, market, chain, skip_symbols)
+        except Exception:
+            logger.warning(
+                "PT inventory classification failed for %s; held PT not surfaced this snapshot",
+                self._deployment_id,
+                exc_info=True,
+            )
+            return _PtInventoryClassification([], {"status": "unavailable", "reason": "classification_error"})
+
     @staticmethod
     def _idle_cash_after_inventory(wallet_value: Decimal, inventory_value_usd: Decimal) -> Decimal:
         """``available_cash_usd`` = wallet value − deployed swap inventory.
@@ -991,17 +1348,21 @@ class PortfolioValuer:
     def _build_snapshot_metadata(
         gas_native_status: str,
         swap_inventory_metadata: dict[str, Any] | None,
+        pt_inventory_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Assemble the writer-side ``snapshot_metadata`` dict.
 
-        The ``swap_inventory`` stamp is only present when there is something
-        to report (applied / unmeasured / unavailable) — its ABSENCE is the
-        documented "no open swap lots, nothing reclassified" state, keeping
-        non-swap strategies byte-identical (VIB-5057).
+        The ``swap_inventory`` / ``pt_inventory`` stamps are only present when
+        there is something to report (applied / unmeasured / unavailable) — their
+        ABSENCE is the documented "no open lots, nothing reclassified" state,
+        keeping non-swap / non-Pendle strategies byte-identical (VIB-5057 /
+        VIB-5316).
         """
         metadata: dict[str, Any] = {"gas_native_status": gas_native_status}
         if swap_inventory_metadata is not None:
             metadata["swap_inventory"] = swap_inventory_metadata
+        if pt_inventory_metadata is not None:
+            metadata["pt_inventory"] = pt_inventory_metadata
         return metadata
 
     def _reconcile_with_external(
@@ -1941,6 +2302,22 @@ class PortfolioValuer:
         """
         from almanak.framework.teardown.models import PositionType
 
+        # VIB-5313: principal-token (Pendle PT) positions are valued from the
+        # gateway PT/USD price authority (MarketSnapshot.pt_price →
+        # value_principal_token_position). Detected by DATA SHAPE — a ``pt_token``
+        # in details — not by a protocol-name string (the VIB-4636 capability-gate
+        # discipline that keeps this file free of connector-name coupling and the
+        # framework→connector coupling ratchet green). Intercepted BEFORE the type
+        # dispatch so a PT a strategy mis-reports under SUPPLY (e.g. exp8) does not
+        # fall into the lending repricer and book its placeholder value. Returns
+        # None for a position this path cannot value (no pt_token / no pt_price
+        # surface) → fall through to the normal dispatch.
+        details = getattr(position, "details", None) or {}
+        if details.get("pt_token") or details.get("pt_token_symbol"):
+            pt = self._reprice_principal_token_enriched(position, chain, market)
+            if pt is not None:
+                return pt
+
         if position.position_type == PositionType.LP:
             return self._reprice_lp_enriched_dispatch(position, chain, market)
 
@@ -1997,6 +2374,91 @@ class PortfolioValuer:
             return position.value_usd, {}, True
 
         return position.value_usd, {}, True
+
+    def _reprice_principal_token_enriched(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any], bool] | None:
+        """Re-price a principal-token (PT) position via the gateway price authority (VIB-5313).
+
+        The gateway is the single PT/USD price authority (design spine §0/§1): it
+        composes ``PT/USD = pt_to_asset_rate × underlying/USD``, sources both
+        legs, and stamps confidence + staleness. This path reads that one number
+        via ``MarketSnapshot.pt_price`` (the strategy-safe surface — NO on-chain
+        read, NO composition here) and multiplies by the wallet's PT holding
+        through ``value_principal_token_position`` (the connector-skeleton math
+        that owns only the position math, spine §1 boundary).
+
+        Returns ``(value_usd, enriched_details, repriced)`` or ``None`` when the
+        position is not a PT-shaped position this path can value (caller falls
+        through to the type dispatch).
+
+        Empty ≠ Zero (spine §3.3): an unmeasured gateway price (``UNAVAILABLE`` /
+        ``price=None`` — the corrected VIB-5310 model returns no number when
+        ``pt_to_asset_rate`` or the underlying is missing, never an at-par
+        fabrication) returns ``repriced=False`` so the snapshot confidence drops
+        to ``UNAVAILABLE`` — NEVER a booked ``Decimal("0")``. A degraded-but-
+        measured price (``ESTIMATED`` / ``STALE``) is valued and flagged
+        ``valuation_status="estimated"`` so the snapshot degrades to ESTIMATED
+        (spine §3.4 — confidence never upgraded into a HIGH NAV).
+        """
+        from almanak.framework.portfolio.models import ValueConfidence
+
+        details = getattr(position, "details", None) or {}
+        # Symbol is the PT identity + price-contract key (spine §3.1).
+        symbol = details.get("pt_token") or details.get("pt_token_symbol") or details.get("symbol")
+        pt_price_fn = getattr(market, "pt_price", None)
+        if not symbol or not callable(pt_price_fn):
+            # No PT symbol, or the market surface predates pt_price (e.g. a bare
+            # test double / data-layer snapshot) → not valuable here.
+            return None
+
+        # PT quantity = the wallet's PT holding (human units). PT is
+        # KNOWN_UNPRICEABLE in the spot oracle, so it is dropped from the wallet
+        # balance valuation — its USD value enters NAV ONLY here, no double-count.
+        try:
+            bal = market.balance(symbol)
+            pt_amount = bal.balance if hasattr(bal, "balance") else Decimal(str(bal))
+        except Exception as e:  # noqa: BLE001 — fail to unmeasured, never crash the snapshot
+            logger.warning("principal-token reprice: balance(%s) failed (%s); cannot size PT position", symbol, e)
+            return Decimal("0"), {"pt_symbol": symbol, "valuation_status": "no_path"}, False
+
+        try:
+            pt_price = pt_price_fn(symbol, chain)
+        except Exception as e:  # noqa: BLE001 — PriceUnavailableError (no gateway client) / transport
+            logger.warning("principal-token reprice: pt_price(%s) failed (%s)", symbol, e)
+            return Decimal("0"), {"pt_symbol": symbol, "valuation_status": "no_path"}, False
+
+        from almanak.connectors._strategy_base.principal_token_valuation import (
+            value_principal_token_position,
+        )
+
+        valued = value_principal_token_position(pt_price=pt_price, pt_amount=pt_amount)
+
+        enriched: dict[str, Any] = {
+            "pt_symbol": symbol,
+            "pt_amount": str(pt_amount),
+            "price_confidence": str(valued.confidence),
+            "underlying_price_usd": (str(pt_price.underlying_price) if pt_price.underlying_price is not None else ""),
+            "pt_to_asset_rate": (str(pt_price.pt_to_asset_rate) if pt_price.pt_to_asset_rate is not None else ""),
+            "days_to_maturity": pt_price.days_to_maturity,
+            "price_source": pt_price.source,
+        }
+
+        if valued.current_value_usd is None or valued.confidence == ValueConfidence.UNAVAILABLE:
+            # Empty ≠ Zero: unmeasured price → no_path so the snapshot confidence
+            # drops to UNAVAILABLE rather than masquerade as a measured $0.
+            enriched["valuation_status"] = "no_path"
+            return Decimal("0"), enriched, False
+
+        if valued.confidence != ValueConfidence.HIGH:
+            # ESTIMATED / STALE gateway price → snapshot ESTIMATED (never folded
+            # into a HIGH-confidence NAV). The value is real and traceable.
+            enriched["valuation_status"] = "estimated"
+
+        return valued.current_value_usd, enriched, True
 
     def _reprice_lp_on_chain_enriched(
         self,

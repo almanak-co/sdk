@@ -132,9 +132,11 @@ def test_swap_primitive_version_bumped_to_v2() -> None:
     VIB-4905 (F1) took it to v2 (partial-match field bundle); VIB-4988 took it
     to v3 (Pendle PT now emits PT_SELL / PT_REDEEM realized-yield events under
     the SWAP primitive), then to v4 (PT_BUY/PT_SELL payloads moved raw-18 →
-    human units, uniform with PT_REDEEM). The assertion tracks the current value.
+    human units, uniform with PT_REDEEM); VIB-5316 took it to v5 (PT_BUY now
+    populates the buy-time ``sy_price`` the held-PT USD cost basis is anchored
+    to). The assertion tracks the current value.
     """
-    assert PRIMITIVE_VERSIONS[Primitive.SWAP] == 4
+    assert PRIMITIVE_VERSIONS[Primitive.SWAP] == 5
 
 
 # ---------------------------------------------------------------------------

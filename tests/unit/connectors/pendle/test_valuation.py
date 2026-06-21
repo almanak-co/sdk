@@ -1,43 +1,63 @@
-"""Tests for Pendle position valuation (VIB-3487).
+"""Tests for Pendle position valuation (VIB-3487, rewired VIB-5313).
 
-Tests:
-  1. test_pendle_valuer_pt_pull_to_par
-     PT position near maturity: value approaches face value as pt_to_asset_rate → 1.
-  2. test_pendle_valuer_lp_component_decomposition
-     LP position with pool reserves: correct weighted SY + PT sum.
-  3. test_pt_valuation_no_discount_at_par
-     pt_to_asset_rate=1.0 → value exactly = pt_amount × underlying_price.
-  4. test_sy_valuation
-     SY position: value = sy_amount × underlying_price.
-  5. test_lp_fallback_without_pool_reserves
-     lp_amount provided but no pool reserves → ESTIMATED confidence, fallback value.
-  6. test_compute_pt_implied_apy_bps_standard
-     pt_to_asset_rate=0.95, days=180 → ~1067 bps.
-  7. test_compute_pt_implied_apy_bps_at_maturity
-     days=0 → None.
-  8. test_compute_pt_implied_apy_bps_capped
-     Very near maturity → capped at _APR_BPS_CAP.
-  9. test_no_position_data_returns_unavailable
-     No lp/pt/sy amount → UNAVAILABLE.
-  10. test_underlying_price_none_returns_unavailable
-      underlying_price_usd=None → UNAVAILABLE.
-  11. test_pt_pull_to_par_near_maturity
-      pt_to_asset_rate=0.9999 → value ≈ face value within 0.02%.
+VIB-5313 routes Pendle PT / LP valuation through the **gateway price authority**
+(``MarketSnapshot.pt_price`` → ``PtPriceData``) instead of ad-hoc
+``underlying_price_usd`` + ``on_chain_reader`` inputs. The gateway composes
+``PT/USD = pt_to_asset_rate × underlying/USD`` and stamps confidence + staleness;
+the valuer only does position math (``pt_amount × pt_price.price``).
+
+Characterization matrix:
+  - PT valued from a HIGH gateway price → value = pt_amount × price, HIGH.
+  - PT with UNAVAILABLE gateway price → value None (Empty ≠ Zero, NOT 0).
+  - PT with ESTIMATED / STALE gateway price → value present, confidence propagated.
+  - SY valued from the underlying/USD leg.
+  - LP decomposition uses underlying/USD (SY) + PT/USD (PT) gateway legs.
+  - LP with an unmeasured gateway price → value None.
+  - Pure-math helpers + implied-APY computation.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import MagicMock
 
 from almanak.connectors.pendle.valuation import (
     _APR_BPS_CAP,
+    PendlePositionValue,
     compute_pt_implied_apy_bps,
     value_pendle_lp_from_components,
     value_pendle_position,
     value_pt_position,
     value_sy_position,
 )
+from almanak.framework.market.models import PtPriceData
+from almanak.framework.portfolio.models import ValueConfidence
+
+
+def _pt_price(
+    *,
+    price: Decimal | None,
+    confidence: ValueConfidence,
+    underlying_price: Decimal | None = None,
+    pt_to_asset_rate: Decimal | None = None,
+    days_to_maturity: int | None = None,
+    symbol: str = "PT-sUSDe-26DEC2024",
+    chain: str = "ethereum",
+) -> PtPriceData:
+    """Build a gateway PtPriceData stand-in for the valuer under test.
+
+    Mirrors the MarketSnapshot.pt_price contract: an UNAVAILABLE price drops the
+    composition legs (price=None), an AVAILABLE/STALE price carries them.
+    """
+    return PtPriceData(
+        symbol=symbol,
+        chain=chain,
+        price=price,
+        confidence=confidence,
+        underlying_price=underlying_price,
+        pt_to_asset_rate=pt_to_asset_rate,
+        days_to_maturity=days_to_maturity,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Pure math unit tests
@@ -51,97 +71,71 @@ class TestComputePtImpliedApyBps:
         """pt_to_asset_rate=0.95, days=180 → ~1067 bps."""
         result = compute_pt_implied_apy_bps(Decimal("0.95"), 180)
         assert result is not None
-        # (1 - 0.95) / 0.95 * (365 / 180) * 10_000 ≈ 1067
         assert 1050 <= result <= 1090, f"Expected ~1067, got {result}"
 
     def test_zero_days_returns_none(self):
-        """days_to_maturity=0 (expired) → None."""
         assert compute_pt_implied_apy_bps(Decimal("0.95"), 0) is None
 
     def test_negative_days_returns_none(self):
-        """Negative days (past maturity) → None."""
         assert compute_pt_implied_apy_bps(Decimal("0.95"), -5) is None
 
     def test_at_par_returns_zero(self):
-        """pt_to_asset_rate=1.0 (at par) → 0 bps."""
         result = compute_pt_implied_apy_bps(Decimal("1.0"), 180)
-        assert result is not None
         assert result == 0
 
     def test_near_maturity_capped(self):
-        """Large discount near maturity → capped at _APR_BPS_CAP."""
         result = compute_pt_implied_apy_bps(Decimal("0.5"), 1)
-        assert result is not None
         assert result == _APR_BPS_CAP
 
     def test_full_year_small_discount(self):
-        """0.1% discount over 365 days → ~10 bps."""
         result = compute_pt_implied_apy_bps(Decimal("0.999"), 365)
         assert result is not None
         assert 8 <= result <= 12, f"Expected ~10, got {result}"
 
 
 class TestValuePtPosition:
-    """Tests for PT position valuation math."""
+    """PT position math: value = pt_amount × gateway PT/USD mark."""
 
-    def test_pt_at_par(self):
-        """pt_to_asset_rate=1.0 → value = pt_amount × price."""
-        val = value_pt_position(Decimal("2.0"), Decimal("3500"), Decimal("1.0"))
-        assert val == Decimal("7000")
+    def test_pt_basic(self):
+        # gateway PT/USD mark = $3325 (= 3500 × 0.95, composed gateway-side)
+        assert value_pt_position(Decimal("2.0"), Decimal("3325")) == Decimal("6650")
 
-    def test_pt_with_discount(self):
-        """pt_to_asset_rate=0.95 → value = pt_amount × price × 0.95."""
-        val = value_pt_position(Decimal("1.0"), Decimal("1000"), Decimal("0.95"))
-        assert val == Decimal("950")
-
-    def test_pendle_valuer_pt_pull_to_par(self):
-        """Near maturity: value approaches face value (within 0.01% of par)."""
-        face_value = Decimal("3500")  # 1 PT × $3500 underlying at par
-        # pt_to_asset_rate ≈ 1 (0.01% discount → near maturity)
-        near_par_rate = Decimal("0.9999")
-        val = value_pt_position(Decimal("1.0"), Decimal("3500"), near_par_rate)
-        # val = 3500 × 0.9999 = 3499.65; within 0.01% of par
-        diff_pct = abs(val - face_value) / face_value
-        assert diff_pct < Decimal("0.0002")
+    def test_pt_at_par_mark(self):
+        # At maturity the gateway mark pulls to par ($3500).
+        assert value_pt_position(Decimal("1.0"), Decimal("3500")) == Decimal("3500")
 
 
 class TestValueSyPosition:
-    """Tests for SY position valuation math."""
+    """SY position math: value = sy_amount × underlying/USD."""
 
     def test_sy_position(self):
-        """SY value = sy_amount × underlying_price."""
-        val = value_sy_position(Decimal("5.0"), Decimal("100"))
-        assert val == Decimal("500")
+        assert value_sy_position(Decimal("5.0"), Decimal("100")) == Decimal("500")
 
     def test_zero_sy(self):
-        """Zero SY → zero value."""
-        val = value_sy_position(Decimal("0"), Decimal("3500"))
-        assert val == Decimal("0")
+        assert value_sy_position(Decimal("0"), Decimal("3500")) == Decimal("0")
 
 
 class TestValuePendleLpFromComponents:
-    """Tests for LP component decomposition math."""
+    """LP component decomposition math: SY from underlying, PT from PT/USD mark."""
 
-    def test_pendle_valuer_lp_component_decomposition(self):
-        """Correct weighted SY + PT sum with pool decomposition."""
-        # Pool: 100 SY + 50 PT, price $1000, rate 0.95
+    def test_decomposition(self):
+        # 100 SY @ $1000 underlying + 50 PT @ $950 PT/USD mark
         total, sy_val, pt_val = value_pendle_lp_from_components(
             sy_amount=Decimal("100"),
             pt_amount=Decimal("50"),
             underlying_price_usd=Decimal("1000"),
-            pt_to_asset_rate=Decimal("0.95"),
+            pt_price_usd=Decimal("950"),
         )
-        assert sy_val == Decimal("100000")   # 100 × $1000
-        assert pt_val == Decimal("47500")    # 50 × $1000 × 0.95
+        assert sy_val == Decimal("100000")  # 100 × $1000
+        assert pt_val == Decimal("47500")   # 50 × $950
         assert total == Decimal("147500")
 
-    def test_lp_at_par(self):
-        """pt_to_asset_rate=1.0 → PT valued at full price."""
+    def test_at_par(self):
         total, sy_val, pt_val = value_pendle_lp_from_components(
             sy_amount=Decimal("10"),
             pt_amount=Decimal("10"),
             underlying_price_usd=Decimal("100"),
-            pt_to_asset_rate=Decimal("1.0"),
+            pt_price_usd=Decimal("100"),
         )
         assert sy_val == Decimal("1000")
         assert pt_val == Decimal("1000")
@@ -149,181 +143,244 @@ class TestValuePendleLpFromComponents:
 
 
 # ---------------------------------------------------------------------------
-# Integration tests for value_pendle_position
+# value_pendle_position — gateway-price-authority contract (VIB-5313)
 # ---------------------------------------------------------------------------
 
 
-class TestValuePendlePosition:
-    """Tests for the high-level value_pendle_position function."""
+class TestValuePendlePositionPT:
+    """PT-only valuation from the gateway PT/USD mark."""
 
-    def test_pt_pull_to_par_near_maturity(self):
-        """PT with rate=1.0 (no reader) → value exactly at par."""
+    def test_pt_high_confidence(self):
+        """HIGH gateway price → value = pt_amount × price, confidence propagated."""
         result = value_pendle_position(
-            chain="arbitrum",
-            market_address="0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
-            pt_amount=Decimal("1.0"),
-            underlying_price_usd=Decimal("3500"),
-            on_chain_reader=None,  # No reader → rate defaults to 1.0
-        )
-        # With no reader, rate defaults to 1.0 (at-par)
-        assert result.current_value_usd == Decimal("3500")
-
-    def test_pt_valuation_with_on_chain_reader(self):
-        """PT valuation uses pt_to_asset_rate from on-chain reader when available."""
-        mock_reader = MagicMock()
-        mock_reader.get_pt_to_asset_rate.return_value = Decimal("0.95")
-        mock_reader.get_days_to_maturity.return_value = None  # expiry not needed for this test
-
-        result = value_pendle_position(
-            chain="arbitrum",
-            market_address="0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
+            pt_price=_pt_price(
+                price=Decimal("950"),
+                confidence=ValueConfidence.HIGH,
+                underlying_price=Decimal("1000"),
+                pt_to_asset_rate=Decimal("0.95"),
+                days_to_maturity=180,
+            ),
             pt_amount=Decimal("2.0"),
-            underlying_price_usd=Decimal("1000"),
-            on_chain_reader=mock_reader,
         )
-        # 2.0 PT × $1000 × 0.95 = $1900
-        assert result.current_value_usd == Decimal("1900")
+        assert result.current_value_usd == Decimal("1900")  # 2 × $950
+        assert result.pt_component_usd == Decimal("1900")
+        assert result.sy_component_usd is None
+        assert result.confidence == ValueConfidence.HIGH
+        assert result.unavailable_reason == ""
         assert result.pt_to_asset_rate == Decimal("0.95")
+        assert result.underlying_price_usd == Decimal("1000")
+        assert result.days_to_maturity == 180
+        assert result.implied_apy_bps is not None  # rate + days both present
 
-    def test_sy_valuation(self):
-        """SY position: value = sy_amount × underlying_price."""
+    def test_pt_unavailable_is_unmeasured_not_zero(self):
+        """UNAVAILABLE gateway price → value None (Empty ≠ Zero), never 0."""
         result = value_pendle_position(
-            chain="arbitrum",
-            market_address="0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
-            sy_amount=Decimal("3.0"),
-            underlying_price_usd=Decimal("1000"),
+            pt_price=_pt_price(price=None, confidence=ValueConfidence.UNAVAILABLE),
+            pt_amount=Decimal("2.0"),
         )
-        assert result.current_value_usd == Decimal("3000")
+        assert result.current_value_usd is None  # NOT Decimal("0")
+        assert result.current_value_usd != Decimal("0")
+        assert result.confidence == ValueConfidence.UNAVAILABLE
+        assert result.pt_component_usd is None
+        assert result.unavailable_reason
+
+    def test_pt_estimated_confidence_propagated(self):
+        """ESTIMATED gateway price → valued, confidence propagated (not upgraded)."""
+        result = value_pendle_position(
+            pt_price=_pt_price(
+                price=Decimal("980"),
+                confidence=ValueConfidence.ESTIMATED,
+                underlying_price=Decimal("1000"),
+                pt_to_asset_rate=Decimal("0.98"),
+            ),
+            pt_amount=Decimal("1.0"),
+        )
+        assert result.current_value_usd == Decimal("980")
+        assert result.confidence == ValueConfidence.ESTIMATED
+        assert result.unavailable_reason  # non-empty degradation note
+
+    def test_pt_stale_confidence_propagated(self):
+        """STALE gateway price → valued, STALE confidence stamped (not folded into HIGH)."""
+        result = value_pendle_position(
+            pt_price=_pt_price(
+                price=Decimal("970"),
+                confidence=ValueConfidence.STALE,
+                underlying_price=Decimal("1000"),
+                pt_to_asset_rate=Decimal("0.97"),
+            ),
+            pt_amount=Decimal("3.0"),
+        )
+        assert result.current_value_usd == Decimal("2910")  # 3 × $970
+        assert result.confidence == ValueConfidence.STALE
+        assert result.unavailable_reason
+
+    def test_pt_value_does_not_re_derive_composition(self):
+        """Valuer uses pt_price.price directly, not underlying × rate.
+
+        Guards spine §0: no consumer re-derives price. Here price (960) is
+        deliberately != underlying × rate (1000 × 0.95 = 950) — the valuer must
+        trust the gateway's composed mark.
+        """
+        result = value_pendle_position(
+            pt_price=_pt_price(
+                price=Decimal("960"),
+                confidence=ValueConfidence.HIGH,
+                underlying_price=Decimal("1000"),
+                pt_to_asset_rate=Decimal("0.95"),
+            ),
+            pt_amount=Decimal("1.0"),
+        )
+        assert result.current_value_usd == Decimal("960")  # price, not 950
+
+    def test_pt_non_positive_price_is_unavailable(self):
+        """Fail closed (Gemini, VIB-5313): a 0/negative PT/USD is not a measured
+        mark (PT trades at > 0 before redemption) → value None, never 0."""
+        for bad in (Decimal("0"), Decimal("-5")):
+            result = value_pendle_position(
+                pt_price=_pt_price(
+                    price=bad,
+                    confidence=ValueConfidence.HIGH,  # band says HIGH, but price is junk
+                    underlying_price=Decimal("1000"),
+                    pt_to_asset_rate=Decimal("0.95"),
+                ),
+                pt_amount=Decimal("2.0"),
+            )
+            assert result.current_value_usd is None, bad
+            assert result.current_value_usd != Decimal("0"), bad
+            assert result.confidence == ValueConfidence.UNAVAILABLE, bad
+
+
+class TestValuePendlePositionSY:
+    """SY-only valuation from the underlying/USD leg."""
+
+    def test_sy_from_underlying_leg(self):
+        result = value_pendle_position(
+            pt_price=_pt_price(
+                price=Decimal("950"),
+                confidence=ValueConfidence.HIGH,
+                underlying_price=Decimal("1000"),
+            ),
+            sy_amount=Decimal("3.0"),
+        )
+        assert result.current_value_usd == Decimal("3000")  # 3 × $1000
         assert result.sy_component_usd == Decimal("3000")
         assert result.pt_component_usd is None
+        assert result.confidence == ValueConfidence.HIGH
 
-    def test_pendle_valuer_lp_component_decomposition_via_position(self):
-        """LP with pool reserves: correct SY + PT weighted sum."""
+    def test_sy_underlying_unmeasured_is_unavailable(self):
         result = value_pendle_position(
-            chain="arbitrum",
-            market_address="0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
-            lp_amount=Decimal("10"),        # 10 LP tokens
-            lp_pool_sy_amount=Decimal("1000"),   # 1000 SY in pool
-            lp_pool_pt_amount=Decimal("500"),    # 500 PT in pool
-            lp_total_supply=Decimal("100"),      # 100 total LP
-            underlying_price_usd=Decimal("1000"),
-            # No reader → rate defaults to 1.0
+            pt_price=_pt_price(price=None, confidence=ValueConfidence.UNAVAILABLE),
+            sy_amount=Decimal("3.0"),
         )
-        # 10/100 = 10% of pool → 100 SY + 50 PT
-        # value = 100 × $1000 + 50 × $1000 × 1.0 = $150_000
-        assert result.current_value_usd == Decimal("150000")
-        assert result.sy_component_usd == Decimal("100000")
-        assert result.pt_component_usd == Decimal("50000")
-
-    def test_lp_fallback_without_pool_reserves(self):
-        """LP without pool reserves uses fallback (lp_amount × sy_price)."""
-        from almanak.framework.portfolio.models import ValueConfidence
-
-        result = value_pendle_position(
-            chain="arbitrum",
-            market_address="0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
-            lp_amount=Decimal("5.0"),
-            underlying_price_usd=Decimal("2000"),
-        )
-        assert result.current_value_usd == Decimal("10000")  # 5.0 × $2000
-        assert result.confidence == ValueConfidence.ESTIMATED
-        assert "lp_pool_reserves not provided" in result.unavailable_reason
-
-    def test_no_position_data_returns_unavailable(self):
-        """No lp/pt/sy amount → UNAVAILABLE."""
-        from almanak.framework.portfolio.models import ValueConfidence
-
-        result = value_pendle_position(
-            chain="arbitrum",
-            market_address="0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
-            underlying_price_usd=Decimal("1000"),
-        )
-        assert result.confidence == ValueConfidence.UNAVAILABLE
-        assert result.current_value_usd == Decimal("0")
-
-    def test_underlying_price_none_returns_unavailable(self):
-        """underlying_price_usd=None → UNAVAILABLE."""
-        from almanak.framework.portfolio.models import ValueConfidence
-
-        result = value_pendle_position(
-            chain="arbitrum",
-            market_address="0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
-            lp_amount=Decimal("1.0"),
-            underlying_price_usd=None,
-        )
+        assert result.current_value_usd is None
         assert result.confidence == ValueConfidence.UNAVAILABLE
 
-    def test_underlying_price_zero_returns_unavailable(self):
-        """underlying_price_usd=0 → UNAVAILABLE."""
-        from almanak.framework.portfolio.models import ValueConfidence
-
+    def test_sy_unavailable_confidence_with_leaked_price_is_unavailable(self):
+        """Fail closed (Gemini, VIB-5313): even if an underlying_price leaks through
+        on an UNAVAILABLE band, the SY value must be None (Empty ≠ Zero) — the band
+        is authoritative, never overridden by a stray measured-looking leg."""
         result = value_pendle_position(
-            chain="arbitrum",
-            market_address="0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
-            lp_amount=Decimal("1.0"),
-            underlying_price_usd=Decimal("0"),
+            pt_price=_pt_price(
+                price=None,
+                confidence=ValueConfidence.UNAVAILABLE,
+                underlying_price=Decimal("1000"),  # leaked despite UNAVAILABLE band
+            ),
+            sy_amount=Decimal("3.0"),
         )
+        assert result.current_value_usd is None
+        assert result.current_value_usd != Decimal("0")
         assert result.confidence == ValueConfidence.UNAVAILABLE
 
-    def test_on_chain_reader_failure_graceful(self):
-        """on_chain_reader failure → falls back to rate=1.0, ESTIMATED confidence."""
-        from almanak.framework.portfolio.models import ValueConfidence
 
-        mock_reader = MagicMock()
-        mock_reader.get_pt_to_asset_rate.side_effect = Exception("network error")
-        mock_reader.get_days_to_maturity.return_value = None
+class TestValuePendlePositionLP:
+    """LP valuation: SY from underlying/USD, PT from the PT/USD mark."""
 
+    def test_lp_decomposition(self):
         result = value_pendle_position(
-            chain="arbitrum",
-            market_address="0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
-            pt_amount=Decimal("1.0"),
-            underlying_price_usd=Decimal("1000"),
-            on_chain_reader=mock_reader,
-        )
-        # Should still return a value (using at-par default)
-        assert result.current_value_usd == Decimal("1000")
-        assert result.confidence == ValueConfidence.ESTIMATED
-        assert "pt_to_asset_rate" in result.unavailable_reason
-
-    def test_lp_decomposition_with_on_chain_rate(self):
-        """LP decomposition correctly applies pt_to_asset_rate from reader."""
-        mock_reader = MagicMock()
-        mock_reader.get_pt_to_asset_rate.return_value = Decimal("0.95")
-        mock_reader.get_days_to_maturity.return_value = None  # not needed for this test
-
-        result = value_pendle_position(
-            chain="arbitrum",
-            market_address="0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
+            pt_price=_pt_price(
+                price=Decimal("950"),
+                confidence=ValueConfidence.HIGH,
+                underlying_price=Decimal("1000"),
+                pt_to_asset_rate=Decimal("0.95"),
+            ),
             lp_amount=Decimal("10"),
             lp_pool_sy_amount=Decimal("1000"),
             lp_pool_pt_amount=Decimal("500"),
             lp_total_supply=Decimal("100"),
-            underlying_price_usd=Decimal("1000"),
-            on_chain_reader=mock_reader,
         )
         # 10% of pool = 100 SY + 50 PT
-        # SY value = 100 × $1000 = $100_000
-        # PT value = 50 × $1000 × 0.95 = $47_500
-        # Total = $147_500
+        # SY = 100 × $1000 = $100_000 ; PT = 50 × $950 = $47_500
         assert result.current_value_usd == Decimal("147500")
         assert result.sy_component_usd == Decimal("100000")
         assert result.pt_component_usd == Decimal("47500")
+        assert result.confidence == ValueConfidence.HIGH
 
-    def test_implied_apy_computed_when_reader_available(self):
-        """implied_apy_bps is populated when pt_to_asset_rate and days_to_maturity available."""
-        mock_reader = MagicMock()
-        mock_reader.get_pt_to_asset_rate.return_value = Decimal("0.95")
-        # Simulate 180 days to maturity via the public reader API
-        mock_reader.get_days_to_maturity.return_value = 180
-
+    def test_lp_unmeasured_price_is_unavailable(self):
+        """UNAVAILABLE gateway price → LP value None (Empty ≠ Zero), never 0."""
         result = value_pendle_position(
-            chain="arbitrum",
-            market_address="0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
-            pt_amount=Decimal("1.0"),
-            underlying_price_usd=Decimal("3500"),
-            on_chain_reader=mock_reader,
+            pt_price=_pt_price(price=None, confidence=ValueConfidence.UNAVAILABLE),
+            lp_amount=Decimal("10"),
+            lp_pool_sy_amount=Decimal("1000"),
+            lp_pool_pt_amount=Decimal("500"),
+            lp_total_supply=Decimal("100"),
         )
-        assert result.implied_apy_bps is not None
-        # With 5% discount and ~180 days: ~1067 bps
-        assert 1000 <= result.implied_apy_bps <= 1200, f"Got {result.implied_apy_bps}"
-        assert result.days_to_maturity == 180
+        assert result.current_value_usd is None
+        assert result.current_value_usd != Decimal("0")
+        assert result.confidence == ValueConfidence.UNAVAILABLE
+
+    def test_lp_fallback_without_reserves_is_estimated(self):
+        """No pool reserves → lp_amount × underlying approximation, ESTIMATED."""
+        result = value_pendle_position(
+            pt_price=_pt_price(
+                price=Decimal("1900"),
+                confidence=ValueConfidence.HIGH,
+                underlying_price=Decimal("2000"),
+            ),
+            lp_amount=Decimal("5.0"),
+        )
+        assert result.current_value_usd == Decimal("10000")  # 5 × $2000
+        assert result.confidence == ValueConfidence.ESTIMATED
+        assert "lp_pool_reserves not provided" in result.unavailable_reason
+
+    def test_lp_fallback_keeps_stale_confidence(self):
+        """Fallback never upgrades a worse gateway confidence (STALE stays STALE)."""
+        result = value_pendle_position(
+            pt_price=_pt_price(
+                price=Decimal("1900"),
+                confidence=ValueConfidence.STALE,
+                underlying_price=Decimal("2000"),
+            ),
+            lp_amount=Decimal("5.0"),
+        )
+        assert result.current_value_usd == Decimal("10000")
+        assert result.confidence == ValueConfidence.STALE
+
+
+class TestValuePendlePositionGuards:
+    """Input-validation + no-data guards."""
+
+    def test_no_position_data_returns_unavailable(self):
+        result = value_pendle_position(
+            pt_price=_pt_price(price=Decimal("950"), confidence=ValueConfidence.HIGH),
+        )
+        assert result.confidence == ValueConfidence.UNAVAILABLE
+        assert result.current_value_usd is None
+
+    def test_ambiguous_multi_type_raises(self):
+        try:
+            value_pendle_position(
+                pt_price=_pt_price(price=Decimal("950"), confidence=ValueConfidence.HIGH),
+                pt_amount=Decimal("1"),
+                sy_amount=Decimal("1"),
+            )
+        except ValueError as e:
+            assert "at most one of" in str(e)
+        else:
+            raise AssertionError("expected ValueError for multi-type input")
+
+    def test_result_type(self):
+        result = value_pendle_position(
+            pt_price=_pt_price(price=Decimal("950"), confidence=ValueConfidence.HIGH),
+            pt_amount=Decimal("1"),
+        )
+        assert isinstance(result, PendlePositionValue)

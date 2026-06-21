@@ -202,6 +202,26 @@ class TestGetPtPriceUnmeasured:
         assert "yt-valuation-deferred" in resp.source
         priced.assert_not_called()  # never even prices the underlying for YT
 
+    @pytest.mark.asyncio
+    async def test_unknown_family_is_unmeasured_never_priced_as_pt(self, market_service, mock_context):
+        """A non-PT/YT family (e.g. a future "LP") must NOT silently price as PT.
+
+        ``PrincipalTokenMarketRef.family`` is a free str documented as PT/YT/LP;
+        an unrecognized family must fail closed to UNMEASURED with a clear reason,
+        never fall through to PT composition (which would misprice it).
+        """
+        with (
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref(family="LP")),
+            patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying())) as priced,
+        ):
+            resp = await market_service.GetPtPrice(_request("LP-sUSDe-13AUG2026"), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_UNMEASURED
+        assert resp.price == ""
+        assert "unrecognized-family" in resp.source
+        assert "LP" in resp.source
+        priced.assert_not_called()  # never even prices the underlying for an unknown family
+
 
 class TestGetPtPriceErrored:
     @pytest.mark.asyncio

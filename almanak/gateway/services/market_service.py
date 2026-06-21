@@ -886,6 +886,28 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 maturity_ts=ref.maturity_ts,
             )
 
+        # 2b. Only PT proceeds to composition. ``PrincipalTokenMarketRef.family``
+        #     is a free str documented as PT/YT/LP; YT is handled above, and any
+        #     OTHER family (a future "LP", or an unknown value) must NOT silently
+        #     fall through to PT pricing — an LP token mispriced as a single PT
+        #     would be wrong money. Fail closed to UNMEASURED with a clear reason.
+        if ref.family != "PT":
+            logger.warning(
+                "GetPtPrice: unrecognized PT family %r for %s on %s; refusing to price as PT",
+                ref.family,
+                symbol,
+                chain,
+            )
+            return _build_pt_price_response(
+                symbol=symbol,
+                chain=chain,
+                quote=quote,
+                availability=gateway_pb2.PT_PRICE_AVAILABILITY_UNMEASURED,
+                confidence_band=unmeasured_band,
+                source=f"unmeasured:unrecognized-family:{ref.family}",
+                maturity_ts=ref.maturity_ts,
+            )
+
         # 3. Price the underlying (existing aggregator). Unpriceable → UNMEASURED
         #    (expected); unexpected error → ERRORED. Both carry NO price.
         try:

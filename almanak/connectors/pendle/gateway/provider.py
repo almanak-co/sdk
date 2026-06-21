@@ -131,11 +131,15 @@ class PendleGatewayConnector(
     def build_principal_token_market_reader(self, *, chain: str, rpc_url: str):
         """Build a Pendle on-chain market reader in direct (rpc_url) mode.
 
-        Returns ``None`` for a chain without a RouterStatic mapping (the gateway
-        then composes with the at-par ESTIMATED rate). Direct mode reuses the
-        on-chain reader's EXISTING ``# vib-2986-exempt`` web3 path — no new
-        egress, no new exempt marker. A bounded request timeout is passed so a
-        hung RPC can't wedge the gateway's worker thread indefinitely.
+        Returns ``None`` for a chain without a RouterStatic mapping. With no reader
+        the gateway cannot read ``pt_to_asset_rate``, so the price is UNMEASURED
+        (no price) — it is NEVER fabricated to an at-par (1.0) ESTIMATED rate, which
+        would overvalue the PT to its maximum redemption value (PT trades at ≤ par
+        before maturity). See ``market_service.py`` §5 (``rate is None`` →
+        UNMEASURED) and ``_read_pt_market`` for the reject-at-par contract.
+        Direct mode reuses the on-chain reader's EXISTING ``# vib-2986-exempt`` web3
+        path — no new egress, no new exempt marker. A bounded request timeout is
+        passed so a hung RPC can't wedge the gateway's worker thread indefinitely.
         """
         from ..on_chain_reader import ROUTER_STATIC_ADDRESSES, PendleOnChainReader
 

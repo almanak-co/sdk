@@ -206,7 +206,18 @@ PRIMITIVE_VERSIONS: dict[Primitive, int] = {
     # algo is unchanged, so matching_policy_version is NOT bumped). Pre-v4 rows
     # carry raw-18 payloads; the stamp lets a reader disambiguate. (Branch is
     # unmerged/pre-production, so no backfill obligation — Blueprint 27 §10.6.)
-    Primitive.SWAP: 4,
+    # VIB-5316 (v4→v5): PT_BUY now POPULATES the pre-existing ``sy_price`` field
+    # (the buy-time underlying/USD price) on its payload. The held-PT USD cost
+    # basis is now anchored to this buy-time price instead of being re-marked at
+    # the CURRENT underlying (the re-mark sign-flipped unrealized PnL for volatile
+    # underlyings). The contract change is "PT_BUY emits a measured buy-time price
+    # that the valuer consumes for cost"; the stamp lets a reader disambiguate a
+    # buy-time-anchored lot (v5) from a pre-fix lot whose ``sy_price`` is absent
+    # (cost unmeasured, never re-marked). The field pre-existed in the model/schema
+    # and readers already handle None, so the wire format is additive; the FIFO
+    # algo is unchanged → matching_policy_version is NOT bumped. (Branch is
+    # unmerged/pre-production, so no backfill obligation — Blueprint 27 §10.6.)
+    Primitive.SWAP: 5,
     Primitive.VAULT: PRIMITIVE_VERSION_DEFAULT,
     Primitive.STAKING: PRIMITIVE_VERSION_DEFAULT,
     Primitive.BRIDGE: PRIMITIVE_VERSION_DEFAULT,

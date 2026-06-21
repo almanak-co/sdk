@@ -414,12 +414,19 @@ class FIFOBasisStore:
             return 0
         if pt_human <= 0:
             return 0
+        # VIB-5316: the buy-time underlying/USD price (``sy_price`` on the PendleAccountingEvent
+        # payload) anchors the USD cost basis of the held PT. ``None`` for pre-fix
+        # persisted lots (the field was always-None before this fix) → the lot carries
+        # no buy-time price and its USD cost stays unmeasured (Empty ≠ Zero). NEVER
+        # re-marked at the current underlying price.
+        sy_price = _parse_decimal(ctx.payload.get("sy_price"))
         self.record_pt_buy(
             deployment_id=ctx.deployment_id,
             position_key=ctx.position_key,
             pt_token=pt_token,
             pt_amount=pt_human,
             sy_cost=sy_human,
+            sy_price=sy_price,
             timestamp=ctx.timestamp,
             source_ledger_entry_id=ctx.ledger_entry_id,
         )
@@ -676,6 +683,7 @@ class FIFOBasisStore:
         pt_token: str,
         pt_amount: Decimal,
         sy_cost: Decimal,
+        sy_price: Decimal | None = None,
         timestamp: datetime | None = None,
         lot_id: str | None = None,
         source_ledger_entry_id: str | None = None,
@@ -687,8 +695,24 @@ class FIFOBasisStore:
         self._lots[key].append(
             {
                 "lot_id": lot_id,
+                # ``pt_token`` (the PT symbol) is stamped on the lot so the
+                # read-only inventory accessor (:meth:`iter_open_pt_lots`,
+                # VIB-5316) can yield the symbol — the identity + join +
+                # FIFO-match key (spine §3.1) — WITHOUT colon-splitting the
+                # composite store key (whose ``deployment_id`` segment itself
+                # contains a colon, making the split ambiguous). Preserves the
+                # original case for display.
+                "pt_token": pt_token,
                 "pt_amount": pt_amount,
                 "sy_cost": sy_cost,
+                # VIB-5316: the underlying/USD price captured AT BUY TIME (the
+                # PendleAccountingEvent ``sy_price``). The held-PT USD cost basis is
+                # ``cost_per_pt × remaining_pt × underlying_price_at_buy`` — anchored to
+                # this price, NOT re-marked at the current underlying (which sign-flips
+                # unrealized PnL for volatile underlyings). ``None`` = unmeasured buy
+                # price (pre-fix lot or missing ``price_inputs_json``) → USD cost stays
+                # unmeasured downstream (Empty ≠ Zero); never substitute the current price.
+                "underlying_price_at_buy": sy_price,
                 "remaining_pt": pt_amount,
                 "cost_per_pt": sy_cost / pt_amount if pt_amount else Decimal("0"),
                 "timestamp": (timestamp or datetime.now(UTC)).isoformat(),
@@ -955,6 +979,84 @@ class FIFOBasisStore:
                 else:
                     cost_for_remaining = cost_usd * (remaining / amount)
                 yield position_key, token, remaining, cost_for_remaining
+
+    def iter_open_pt_lots(self) -> Iterable[tuple[str, str, Decimal, Decimal | None, Decimal | None]]:
+        """Yield every open principal-token (PT) lot for read-only valuation (VIB-5316).
+
+        Yields ``(position_key, pt_token, remaining_pt, sy_cost_for_remaining,
+        usd_cost_for_remaining)`` for each PT acquisition lot with ``remaining_pt > 0``
+        — the unmatched
+        residual of ``PT_BUY`` after ``PT_SELL`` / ``PT_REDEEM`` FIFO consumption
+        (:meth:`record_pt_buy` / :meth:`match_pt_redeem`). This residual IS the
+        held-PT inventory: a held PT is not a ``position_event`` (the
+        ``PENDLE_PT`` PositionType was removed in VIB-4931 and ``SWAP`` is absent
+        from ``INTENT_TO_EVENT_TYPE``), so the FIFO lot is the only durable record
+        of a currently-held PT (design spine §2 VIB-5316).
+
+        PT lots are discriminated by SHAPE (the ``remaining_pt`` key) — never by
+        protocol name — keeping this accessor free of connector-name coupling;
+        the ``_lots`` dict is shared across BORROW / SWAP / prediction lots, which
+        carry different keys. ``pt_token`` (the PT symbol) is read from the lot
+        directly (stamped by :meth:`record_pt_buy`), so the symbol survives even
+        though the composite store key's ``deployment_id`` segment contains a
+        colon.
+
+        ``sy_cost_for_remaining`` is the SY/underlying-denominated cost of the
+        open portion (``cost_per_pt × remaining_pt``) — the MEASURED accounting
+        primitive. It is ``None`` when ``cost_per_pt`` is unmeasured (Empty ≠ Zero
+        — missing basis is unmeasured, NOT zero cost).
+
+        ``usd_cost_for_remaining`` is the open portion's USD cost basis anchored at
+        the **BUY-TIME** underlying/USD price stamped on the lot
+        (``cost_per_pt × remaining_pt × underlying_price_at_buy``, VIB-5316). It is
+        ``None`` when EITHER ``cost_per_pt`` OR ``underlying_price_at_buy`` is
+        unmeasured (pre-fix lot, or ``price_inputs_json`` lacked the base token at
+        buy time) — Empty ≠ Zero. Critically this is NEVER computed from the
+        CURRENT underlying price: re-marking the buy-time SY cost at today's price
+        sign-flips unrealized PnL for volatile underlyings (the VIB-5316 bug). The
+        mark (current value) is the gateway price's job at the valuation boundary;
+        the COST stays pinned to what was paid.
+
+        Read-only accessor: does NOT mutate lot state. Callers must not reach into
+        the private ``_lots`` dict (mirrors :meth:`iter_open_swap_lots`).
+        """
+        for composite_key, lots in self._lots.items():
+            for lot in lots:
+                # Shape gate: only PT lots carry ``remaining_pt``. Borrow lots
+                # use ``remaining`` / ``principal``; swap lots ``remaining`` /
+                # ``amount``; prediction rows ``kind == "prediction"``.
+                if "remaining_pt" not in lot:
+                    continue
+                remaining = lot.get("remaining_pt")
+                if not isinstance(remaining, Decimal):
+                    remaining = _parse_decimal(remaining)
+                if remaining is None or remaining <= 0:
+                    continue
+                pt_token = lot.get("pt_token") or ""
+                if not pt_token:
+                    # Defensive: a lot recorded before the ``pt_token`` stamp —
+                    # recover the symbol from the composite key's final
+                    # colon-segment (``{deployment_id}:{position_key}:{token}``).
+                    last_colon = composite_key.rfind(":")
+                    pt_token = composite_key[last_colon + 1 :] if last_colon >= 0 else composite_key
+                if not pt_token:
+                    continue
+                suffix = ":" + pt_token.lower()
+                position_key = composite_key[: -len(suffix)] if composite_key.endswith(suffix) else composite_key
+                cost_per_pt: Decimal | None = lot.get("cost_per_pt")
+                if cost_per_pt is not None and not isinstance(cost_per_pt, Decimal):
+                    cost_per_pt = _parse_decimal(cost_per_pt)
+                sy_cost_for_remaining = cost_per_pt * remaining if cost_per_pt is not None else None
+                # VIB-5316: buy-time-anchored USD cost. None if EITHER leg unmeasured
+                # (Empty ≠ Zero); never the current underlying price.
+                underlying_at_buy: Decimal | None = lot.get("underlying_price_at_buy")
+                if underlying_at_buy is not None and not isinstance(underlying_at_buy, Decimal):
+                    underlying_at_buy = _parse_decimal(underlying_at_buy)
+                if cost_per_pt is None or underlying_at_buy is None:
+                    usd_cost_for_remaining: Decimal | None = None
+                else:
+                    usd_cost_for_remaining = cost_per_pt * remaining * underlying_at_buy
+                yield position_key, pt_token, remaining, sy_cost_for_remaining, usd_cost_for_remaining
 
     def record_prediction_buy(
         self,

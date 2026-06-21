@@ -457,6 +457,14 @@ def _build_pt_buy(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pendle
     so a same-run match and a post-restart match agree (VIB-4988 R1).
     """
     pt_token_sym = ctx.ledger_row.get("token_out") or ""
+    # VIB-5316: the non-PT (base/SY) leg of a PT buy is ``token_in`` (``token_out``
+    # is the PT). Its USD price at buy time, read from the gateway-sourced
+    # ``price_inputs_json`` (already-captured measured data — no gateway-boundary
+    # issue), anchors the held-PT USD cost basis so a later valuation does NOT
+    # re-mark the cost at the current underlying price. None when the column lacks
+    # the base symbol (Empty ≠ Zero — never fabricated).
+    base_token_sym = ctx.ledger_row.get("token_in") or ""
+    sy_price = _sy_price_from_ledger(ctx, base_token_sym)
     sy_raw, pt_raw = _parse_swap_amounts(ctx)
     # Convert raw-18 → human once, up front. ``pt_price`` is a unit-invariant
     # ratio (human/human == raw/raw), so the implied-APR math is unchanged.
@@ -505,6 +513,7 @@ def _build_pt_buy(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pendle
         pt_amount=pt_amount,
         sy_amount=sy_amount,
         pt_price=pt_price,
+        sy_price=sy_price,
         implied_apr_bps=implied_apr_bps,
         days_to_maturity=days_to_maturity,
         realized_yield_usd=None,
@@ -524,6 +533,10 @@ def _build_pt_buy(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pendle
             pt_token=pt_token_key,
             pt_amount=pt_amount,
             sy_cost=sy_amount,
+            # VIB-5316: stamp the buy-time underlying/USD on the in-memory lot too so
+            # a SAME-RUN valuation (before any restart/replay) anchors the USD cost
+            # basis identically to the post-restart ``_replay_pt_buy`` path.
+            sy_price=sy_price,
             timestamp=ctx.now,
             lot_id=identity.id,
             source_ledger_entry_id=ctx.ledger_entry_id,
