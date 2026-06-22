@@ -518,17 +518,26 @@ def _reported_pt_symbols(positions: list[PositionValue]) -> set[str]:
     The VIB-5313 reprice path values a PT a strategy reports as a discovered
     position (``details.pt_token`` / ``pt_symbol``). FIFO inventory must only
     FILL THE GAP for held PTs nothing else surfaces — never double-count a
-    symbol the reprice path already valued. Keyed by ``canonical_symbol`` so the
-    skip matches the aggregation key (spine §3.1).
+    symbol the reprice path already valued.
+
+    VIB-5355: keyed by ``canonical_pt_symbol`` (maturity-INSENSITIVE for PTs) so
+    a discovered position's maturity-LESS config symbol (``PT-wstETH``, from
+    ``details.pt_token``) matches the FIFO inventory's maturity-BEARING ledger
+    symbol (``PT-wstETH-25JUN2026``). Bare ``canonical_symbol`` left the skip-set
+    as ``{PT-WSTETH}`` while FIFO aggregated under ``PT-WSTETH-25JUN2026``, so the
+    skip MISSED and the same held PT was counted by BOTH the reprice path and the
+    FIFO inventory path → ~2× NAV. The skip-comparison side in
+    :func:`_classify_pt_inventory` folds the FIFO display symbol through the same
+    helper so both ends of the dedup agree.
     """
-    from almanak.framework.accounting.basis import canonical_symbol
+    from almanak.framework.accounting.basis import canonical_pt_symbol
 
     symbols: set[str] = set()
     for p in positions:
         details = getattr(p, "details", None) or {}
         raw = details.get("pt_token") or details.get("pt_token_symbol") or details.get("pt_symbol")
         if isinstance(raw, str) and raw:
-            symbols.add(canonical_symbol(raw))
+            symbols.add(canonical_pt_symbol(raw))
     return symbols
 
 
@@ -667,6 +676,7 @@ def _classify_pt_inventory(
         return _PtInventoryClassification([], {"status": "unavailable", "reason": "no_pt_price_surface"})
 
     from almanak.connectors._strategy_base.principal_token_valuation import value_principal_token_position
+    from almanak.framework.accounting.basis import canonical_pt_symbol
 
     rows: list[PositionValue] = []
     token_detail: dict[str, dict[str, Any]] = {}
@@ -674,7 +684,11 @@ def _classify_pt_inventory(
     measured_count = 0
 
     for canonical in sorted(lot_totals):
-        if canonical in skip_symbols:
+        # VIB-5355: ``canonical`` is the maturity-BEARING aggregation/pricing key;
+        # ``skip_symbols`` are maturity-LESS (``canonical_pt_symbol``). Fold this
+        # key through the same helper so a maturity-bearing FIFO lot is correctly
+        # deduped against a maturity-less discovered position (no double-count).
+        if canonical_pt_symbol(canonical) in skip_symbols:
             skipped[canonical] = "reported_position_present"
             continue
         remaining, sy_cost, buy_time_usd_cost, symbol = lot_totals[canonical]

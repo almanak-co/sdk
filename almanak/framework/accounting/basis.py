@@ -12,6 +12,7 @@ MATCHING_POLICY_VERSION must be bumped any time the matching algorithm changes.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -1301,6 +1302,54 @@ def canonical_symbol(symbol: Any) -> str:
     return str(symbol or "").strip().upper()
 
 
+# Maturity grammar for principal-token (PT) symbols, e.g. the ``-25JUN2026`` in
+# ``PT-wstETH-25JUN2026``. Duplicated (deliberately, to keep this framework layer
+# free of any connector-name coupling — the framework→connector ratchet
+# ``scripts/ci/scan_chain_protocol_coupling.py`` forbids naming a protocol here)
+# from the connector-side parser; keep the two in sync if the PT symbol grammar
+# ever changes:
+#   almanak/connectors/pendle/accounting_spec.py:_parse_pt_maturity
+_PT_MATURITY_RE = re.compile(r"[-_](\d{1,2})([A-Z]{3})(\d{4})(?:$|[-_])")
+
+
+def canonical_pt_symbol(symbol: Any) -> str:
+    """Cross-surface canonical identity for a token, maturity-INSENSITIVE for PTs.
+
+    Identical to :func:`canonical_symbol` for every non-PT token (so non-Pendle
+    inventory is byte-identical), AND for a ``PT-`` symbol that carries no
+    parseable maturity suffix. For a ``PT-`` symbol WITH a maturity suffix it
+    strips the suffix to the maturity-less identity:
+
+        canonical_pt_symbol("PT-wstETH-25JUN2026") == "PT-WSTETH"
+        canonical_pt_symbol("PT-wstETH")           == "PT-WSTETH"
+
+    WHY (VIB-5353 / VIB-5355): the SAME held PT is named in two forms across
+    surfaces — the framework/ledger/accounting layer resolves the maturity-
+    BEARING symbol (receipt parser → SWAP ledger row → ``PT_BUY.pt_token`` →
+    FIFO lot), while the strategy/config layer can only emit the maturity-LESS
+    form (``get_config("pt_token", "PT-wstETH")`` → teardown ``from_token`` and
+    ``details["pt_token"]``). ``canonical_symbol`` (bare upper/strip) never joins
+    them, so the teardown clamp strands a swap-acquired PT (``untracked_token``)
+    and the PortfolioValuer dedup misses (counting the PT in BOTH the reprice and
+    FIFO-inventory paths → ~2× NAV). The maturity-less form is the ONLY form both
+    layers can produce, so it is the cross-surface join key.
+
+    This is a JOIN/DEDUP/tracked-inventory identity ONLY. The FIFO *match* key
+    (:meth:`FIFOBasisStore._key`, raw token + position_key) and the valuer
+    *pricing* aggregation key (``portfolio_valuer._aggregate_open_pt_lots`` keys
+    on :func:`canonical_symbol`, maturity-bearing) are deliberately left on the
+    maturity-bearing form, so two distinct maturities of the same underlying stay
+    distinct for matching and pricing.
+    """
+    base = canonical_symbol(symbol)
+    if not base.startswith("PT-"):
+        return base
+    m = _PT_MATURITY_RE.search(base)
+    if not m:
+        return base
+    return base[: m.start()]
+
+
 def sum_open_wallet_basis_by_token(
     events: list[dict[str, Any]],
     deployment_id: str,
@@ -1310,9 +1359,25 @@ def sum_open_wallet_basis_by_token(
     Reconstructs FIFO lots from ``events`` via
     :meth:`FIFOBasisStore.reconstruct_from_events` and sums ``remaining`` across
     ALL wallet-basis lots (:meth:`FIFOBasisStore.iter_open_wallet_basis_lots` —
-    SWAP / BORROW / WITHDRAW sources all count), keyed by
-    :func:`canonical_symbol`. This is the quantity a default teardown is allowed
-    to swap back: ``min(this, live_balance)`` never touches commingled funds.
+    SWAP / BORROW / WITHDRAW sources all count) AND held principal-token (PT)
+    lots (:meth:`FIFOBasisStore.iter_open_pt_lots` — the open ``PT_BUY`` residual
+    after ``PT_SELL`` / ``PT_REDEEM`` matching), keyed by
+    :func:`canonical_pt_symbol`. This is the quantity a default teardown is
+    allowed to swap back: ``min(this, live_balance)`` never touches commingled
+    funds.
+
+    VIB-5353: a PT acquired via a ``SwapIntent`` is booked as a ``PT_BUY`` and
+    lives in the PT lot lane (``pendle_pt:`` key, ``remaining_pt`` field), so it
+    is invisible to :meth:`iter_open_wallet_basis_lots` (``:swap:`` key +
+    ``remaining`` field). Folding the PT lane in here makes a held PT TRACKED
+    wallet inventory — it IS ours to swap back on teardown — so the clamp
+    classifies the swap-back as ``clamped`` instead of stranding it as
+    ``untracked_token``. The PT and swap lanes live in disjoint key namespaces
+    and PT symbols (``PT-…``) never collide with ordinary token symbols, so the
+    two folds sum into one map without overlap. ``canonical_pt_symbol`` is
+    maturity-insensitive for PTs so the maturity-less teardown ``from_token``
+    (config) matches the maturity-bearing FIFO lot (ledger); it is identical to
+    ``canonical_symbol`` for every non-PT token (no behaviour change there).
 
     Deployment-scoped: only events whose ``deployment_id`` matches are replayed
     (a shared wallet's sibling-strategy lots are not ours). An empty / missing
@@ -1328,10 +1393,18 @@ def sum_open_wallet_basis_by_token(
     store.reconstruct_from_events(scoped)
     by_token: dict[str, Decimal] = {}
     for _position_key, token, remaining, _cost in store.iter_open_wallet_basis_lots():
-        sym = canonical_symbol(token)
+        sym = canonical_pt_symbol(token)
         if not sym:
             continue
         by_token[sym] = by_token.get(sym, Decimal("0")) + remaining
+    # VIB-5353: fold held-PT inventory into the same tracked map (maturity-less
+    # canonical key) so a swap-acquired PT's teardown swap-back is clamped, not
+    # stranded as untracked. iter_open_pt_lots yields the open PT_BUY residual.
+    for _position_key, pt_token, remaining_pt, _sy_cost, _usd_cost in store.iter_open_pt_lots():
+        sym = canonical_pt_symbol(pt_token)
+        if not sym:
+            continue
+        by_token[sym] = by_token.get(sym, Decimal("0")) + remaining_pt
     return by_token
 
 

@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from almanak.framework.accounting.basis import canonical_symbol, sum_open_wallet_basis_by_token
+from almanak.framework.accounting.basis import canonical_pt_symbol, sum_open_wallet_basis_by_token
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,12 @@ def decide_swap_clamp(
       degraded (``zero_tracked``).
     * otherwise → proceed with ``amount = min(tracked, live)`` (``clamped``).
     """
-    key = canonical_symbol(from_token)
+    # VIB-5353: ``canonical_pt_symbol`` is maturity-insensitive for PT symbols so
+    # the strategy's maturity-less swap-back ``from_token`` (e.g. ``PT-wstETH``)
+    # matches the maturity-bearing FIFO/tracked-inventory key (``PT-wstETH-…``);
+    # it is identical to ``canonical_symbol`` for every non-PT token. The tracked
+    # map is keyed the same way in ``sum_open_wallet_basis_by_token``.
+    key = canonical_pt_symbol(from_token)
     if tracked_map is None:
         return SwapClampDecision(None, True, True, "tracked_inventory_unmeasured")
     # A non-finite (NaN / ±Inf) or non-Decimal live balance is UNMEASURED —
