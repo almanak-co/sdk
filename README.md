@@ -34,7 +34,7 @@
 
 ---
 
-Almanak is an intent-based Python framework for developing, testing, and deploying autonomous DeFi strategies. Express trading logic as high-level intents - the framework handles compilation, execution, and state management across 17 chains and 40 protocol connectors.
+Almanak is an intent-based Python framework for developing, testing, and deploying autonomous DeFi strategies. Express trading logic as high-level intents - the framework handles compilation, execution, and state management across 17 chains and 41 protocol connectors.
 
 ## Features
 
@@ -278,7 +278,7 @@ For the authoritative per-protocol chain matrix, see the [connector reference](h
 
 ## Supported Protocols
 
-40 connectors are registered today (`ConnectorRegistry.all()`). See the [connector reference](https://sdk.docs.almanak.co/api/connectors/) for the full matrix of chains × intent types per connector.
+41 connectors are registered today (`ConnectorRegistry.all()`). See the [connector reference](https://sdk.docs.almanak.co/api/connectors/) for the full matrix of chains × intent types per connector.
 
 - **DEXs / AMMs**: Uniswap V3, Uniswap V4, SushiSwap V3, PancakeSwap V3, TraderJoe V2, Aerodrome, Camelot, Curve, Fluid, Pendle, Orca, Meteora, Raydium CLMM
 - **Swap aggregators**: Jupiter, Enso, LiFi

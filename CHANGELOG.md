@@ -6,53 +6,124 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.19.0] - 2026-06-22
+
 ### Added
 
+- **Pendle PT/YT vertical.** Gateway PT/USD price provider that composes the
+  on-chain PT rate with the underlying price (honest availability semantics),
+  `MarketSnapshot.pt_price` surfaced over a new `GetPtPrice` gateway contract,
+  and PT/LP USD valuation with buy-time cost basis (#2945, #2949, #2950, #2951,
+  #2940).
+- **Fluid connectors.** `fluid_dex_lp` (Fluid SmartLending fungible DEX LP) and
+  `fluid_vault` (NFT-CDP BORROW/REPAY), wired into the synthetic discovery
+  matrix (#2802, #2765, #2806).
+- **Accounting valuation hardening (VIB-52xx).** Typed `MeasuredMoney`
+  (Empty≠Zero enforced by construction) and a typed `PrimitiveMoneyLeg`
+  extraction contract, applied at the ledger-extraction, accounting-payload,
+  and USD-valuation boundaries; the dispatcher now prefers connector-declared
+  money legs over intent fallbacks. Adds a canonical `PortfolioValuer`
+  projection contract, a shared lending Track-C seam (Compound V3 + Morpho
+  Blue), declared money legs for Lido STAKE and TraderJoe V2 LP_CLOSE, and an
+  ambient G6 inventory-revaluation lane (#2904, #2906, #2907, #2908, #2910,
+  #2911, #2913, #2914, #2857, #2830).
+- **Uniswap V4 native-ETH pools.** Native-ETH V4 pool support (guards +
+  gateway-read native-amount stamping) and V4 wired into the synthetic-intents
+  permission matrix (#2795, #2790).
+- **Curve multi-coin LP.** `LP_OPEN` now supports non-leading coins in
+  multi-coin Curve pools (#2840).
+- **Dashboard quant surfaces.** Windowed/time-travel chart APIs with
+  server-side decimation, an incremental lifetime-drawdown fold, a default
+  ~1-day plot display window decoupled from indicator fetch, targeted SQL
+  aggregation for quant tiles, and a baseline `dashboard/ui.py` backfilled
+  across strategies (#2791, #2818, #2739, #2824).
+- **Lending accounting surfaces.** Aave Track-C `health_factor` / APY /
+  `borrow_balance` populated, and the Compound V3 lifecycle now emits a
+  standalone SUPPLY accounting event (#2794, #2803).
 - **Backtesting v1** (epic VIB-5079). The backtesting surface reaches v1: a
   PnL backtest engine plus parameter sweep/optimize and Anvil-fork paper
-  trading, with value conservation now enforced end-to-end. **In scope**:
-  PnL backtest + sweep/optimize + paper trade; strategy types swap/TA, LP, and
-  lending; perp is **beta** (the adapter exists and round-trips but carries
-  wider funding-rate variance); chains the demos already cover. **Out of scope
-  (v1.1+)**: overfitting-detection heuristics (VIB-396), statistical
-  significance testing (VIB-408), order-book market-making backtester
-  (VIB-407), prediction markets (VIB-415), tick-level IL, Dune integration,
-  numeric confidence bands, async-native adapters, gas block indexing, and
-  persistent forks. The surface **remains gated behind
-  `ALMANAK_ENABLE_BACKTESTING` (off by default)**; the flag is intentionally
-  left in place and its removal is a separate human-gated step.
-  - **Certification**: the network-free Trust Matrix
-    (`tests/validation/backtesting/`) is green -- **21 PASS / 0 xfail** across
-    swap/LP/lending/perp conservation cells plus the closed-form math checks.
-    The PnL engine was re-certified L3-equivalent (production-ready on the
-    correctness axis, CI enforcement pending), and the stale Feb 2026 "L3"
-    report was formally retracted (VIB-5087). See
-    `docs/internal/notes/backtesting/TrustTest/TRUST_TEST_REPORT.md` and
-    blueprint `docs/internal/blueprints/31-backtesting.md`.
-  - **Known variance bounds** (treat PnL-engine output as carrying at least
-    this much error -- blueprint 31 section 7): LP fee estimation +/- 10-15%,
-    perp funding rates +/- 15%, lending APY +/- 10%, slippage on large trades
-    +/- 30%, gas costs +/- 20%. Optimize on the PnL engine; certify on the
-    paper trader before going live.
+  trading, with value conservation enforced end-to-end. **In scope**: PnL
+  backtest + sweep/optimize + paper trade; strategy types swap/TA, LP, and
+  lending; perp is **beta**. The surface **remains gated behind
+  `ALMANAK_ENABLE_BACKTESTING` (off by default)**. Certified by the
+  network-free Trust Matrix (21 PASS / 0 xfail). Adds configurable
+  numeraire/quote-asset (#2814), dynamic CoinGecko id resolution + price-
+  availability guard (#2817), gas routed through gateway rate history (#2829),
+  PositionReconciler divergence detection in paper trading (#2782), and a
+  platform backtest runner image + versioned Cloud Run jobs via the new
+  `almanak[platform-runner]` extra (#2917, #2919). Known variance bounds
+  (blueprint 31 §7): LP fees ±10-15%, perp funding ±15%, lending APY ±10%,
+  large-trade slippage ±30%, gas ±20%.
 
 ### Fixed
 
 - **Backtesting conservation and fidelity** (epic VIB-5079). Eliminated a
-  family of value-(de)minting defects in the PnL engine that made historical
-  backtest results untrustworthy: SWAP buys that minted value by never
-  debiting stablecoin outflows (VIB-5082), LP opens marked 27x-90x their cost
-  (VIB-5096), lending WITHDRAW double-counting principal (VIB-5097), BORROW /
-  REPAY mis-accounting (VIB-5098), and a perp adapter reading a nonexistent
-  portfolio field (VIB-5093). Insufficient-balance fills are now recorded as
-  failed trades that change equity by exactly zero -- not silently clamped.
-  Per-trade realized PnL is now attributed for swaps (previously hardcoded to
-  zero, degenerating win_rate to 0 and profit_factor to `0E+17`); `win_rate`
-  is computed over realized-PnL trades, `failed_trades` is surfaced separately,
-  and `profit_factor` is normalized (VIB-5083). Gas defaults are now
-  chain-aware via the chain registry (e.g. ~0.1 gwei on Arbitrum) instead of a
-  flat 30 gwei that overstated L2 gas ~100x (VIB-5088). Subgraph-backed
-  providers paginate, so multi-year backtests no longer truncate at ~1000 data
-  points (VIB-5089), and Balancer pools resolve from bare addresses (VIB-5090).
+  family of value-(de)minting defects in the PnL engine: SWAP buys that minted
+  value (VIB-5082), LP opens marked 27x-90x cost (VIB-5096), lending WITHDRAW
+  double-counting principal (VIB-5097), BORROW/REPAY mis-accounting (VIB-5098),
+  and a perp adapter reading a nonexistent field (VIB-5093). Insufficient-
+  balance fills now record as failed trades that change equity by exactly zero.
+  Per-trade realized PnL is attributed for swaps (VIB-5083); gas defaults are
+  chain-aware (VIB-5088, ~0.1 gwei on Arbitrum vs a flat 30 gwei); subgraph
+  providers paginate past ~1000 points (VIB-5089); Balancer pools resolve from
+  bare addresses (VIB-5090). Additionally: first tick is priceable via a seeded
+  prior candle (#2941), numeraires priced by contract address (#2932), a 10% LP
+  fee-share floor that minted value removed (#2816), and the engine no longer
+  reports `total_fees_earned_usd=0` on every LP backtest (#2852).
+- **Teardown.** Fail-closed consolidation on failed balance eviction (#2900);
+  manual consolidation consent persists across resume (#2886); absent
+  accounting backend distinguished from empty (#2885); swap-back clamped to
+  tracked quantity (#2873); universal fresh-state guard for lending unwind
+  (#2826); auto-fallback to on-chain LP discovery when strategy state is lost
+  (#2822); reports positions closed rather than intents landed (#2787);
+  fully-drained TraderJoe V2 LP teardown verified by deriving the LBPair
+  (#2887).
+- **Accounting.** Pendle PT accounting vertical with PT-rate/redeem gating
+  (#2940, #2952, #2953, #2957, #2947, #2948, #2946); perp NAV net-equity + GMX
+  decode (#2943); fallback snapshot falls back to positions-only to avoid wallet
+  double-count (#2939); debt-netted dashboard cost basis / PnL / drawdown for
+  leveraged loops (#2862); `strat pnl` prefers live Track-C health factor
+  (#2797); `transaction_ledger` amount_in/out populated for V4 native LP_CLOSE
+  (#2848); native-ETH-leg LP accounting and Empty≠Zero close-principal (#2809,
+  #2810, #2808); open swap-inventory lots classified as deployed capital
+  (#2740).
+- **Uniswap V4 / concentrated liquidity.** ABI struct-offset added to V4 swap
+  params, fixing all-ERC20 V4 swaps on every chain (#2785); `sqrt_price_x96_to_tick`
+  off-by-one corrected (#2786, #2796); unspent native `msg.value` swept on V4 LP
+  mint (#2831); V4 custom-error args decoded and `InsufficientToken` relabeled
+  (#2849); fail-closed swap quote + price-impact guard (#2738).
+- **TraderJoe V2.** LP gas estimates scaled by bin count for open and close
+  (#2869, #2820); token0/token1 threaded into LP_CLOSE valuation (#2894); LP
+  state reset on any successful LP_CLOSE (#2867).
+- **Dashboard.** Lending HF/LTV gauges never fabricate placeholders (#2866);
+  trade tape reflects on-chain landed status (#2870); lifetime
+  drawdown/high-watermark over full history (#2801); TA/LP price charts follow
+  the selected NAV range (#2799); OHLCV backfill covers the earliest signal
+  after redeploy (#2842); chart x-axis normalized to tz-naive UTC; hosted G6
+  inventory revaluation aligned (#2891).
+- **CLI.** Single validated config parse with typo-warnings on unknown keys
+  (#2858); `strat pnl` scopes its default DB to the cwd strategy folder (#2800);
+  `strat run --dashboard` no longer silently swallows the strategy (#2788);
+  status commands honor canonical `ALMANAK_GATEWAY_*` env vars (#2860).
+- **Market data & gateway.** `MarketSnapshot.price()` resolves
+  case-insensitively (#2839); transient `MarketSnapshotError` is catchable
+  (#2841); V3 TWAP observe path and Solana CLMM price underflow hardened (#2874,
+  #2871); Balancer pool IDs auto-resolve from bare addresses (#2768); post-tx
+  state reads pinned to the receipt block (#2828); Aerodrome Slipstream (cl_nft)
+  LP valuation path added (#2821); CBBTC mapped to BTC CEX pairs for OHLCV
+  (#2819).
+- **Intents.** Fail-closed capability errors for Balancer LP intents (#2865) and
+  against bundled collateralized-lending borrow (#2827).
+- **Other.** BENQI fails closed on Compound soft-fail receipts (#2893); runner
+  reconciles cached side-state vs live balance on resume (#2843); hardcoded
+  address metadata derived dynamically (#2872); `ALMANAK_FORK_HEALTH_TIMEOUT`
+  wired to the Anvil readiness probe (#2846); demo trade-counting and
+  private-test/GMX-gate fixes (#2864, #2960).
+
+### Security
+
+- Bump cryptography 46.0.7 → 48.0.1, starlette 1.0.1 → 1.3.1, aiohttp 3.14.0 →
+  3.14.1, and tornado to 6.5.7 (#2836, #2837, #2838, #2835, #2784).
 
 ## [2.18.0] - 2026-06-12
 
