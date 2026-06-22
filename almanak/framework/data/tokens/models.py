@@ -4,6 +4,7 @@ This module defines the core data structures for representing tokens
 across different chains with their metadata and addresses.
 
 Key Components:
+    - TokenRef: Chain-scoped token identity, keyed by (chain, address)
     - Token: Core token metadata with addresses across chains
     - ChainToken: Token-on-chain representation with chain-specific details
     - ResolvedToken: Fully resolved token with all metadata (frozen for caching)
@@ -15,9 +16,100 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
-from almanak.core.enums import Chain
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import Chain, ChainFamily
+
+
+def _coerce_chain_enum(chain: Chain | str) -> Chain:
+    """Coerce a public chain value into the canonical :class:`Chain` enum."""
+    if isinstance(chain, Chain):
+        return chain
+    try:
+        return ChainRegistry.resolve(str(chain)).enum
+    except ValueError as exc:
+        raise ValueError(f"Unknown chain for token identity: {chain!r}") from exc
+
+
+def normalize_token_address_for_chain(address: str, chain: Chain | str) -> str:
+    """Normalize a token address for identity comparisons on ``chain``.
+
+    EVM addresses are case-insensitive and normalize to lowercase. Solana
+    base58 mints are case-sensitive and must remain byte-preserved. Unknown
+    string chains intentionally fall through to the EVM/lowercase behavior to
+    preserve the historical resolver helper contract.
+    """
+    if not isinstance(address, str):
+        raise TypeError("Token address must be a string")
+
+    address = address.strip()
+    descriptor = ChainRegistry.try_resolve(chain.value if isinstance(chain, Chain) else str(chain))
+    if descriptor is not None and descriptor.family is ChainFamily.SOLANA:
+        return address
+    return address.lower()
+
+
+@dataclass(frozen=True, eq=False)
+class TokenRef:
+    """Chain-scoped token identity.
+
+    Token identity is ``(chain, normalized address)``. ``symbol`` is display
+    metadata only and ``decimals`` is carried amount metadata; neither
+    participates in equality or hashing.
+    """
+
+    chain: Chain | str
+    address: str
+    decimals: int
+    symbol: str | None = None
+    provenance: str | None = None
+
+    def __post_init__(self) -> None:
+        chain = _coerce_chain_enum(self.chain)
+        normalized_address = normalize_token_address_for_chain(self.address, chain)
+        if not normalized_address:
+            raise ValueError("TokenRef address cannot be empty")
+        if self.decimals < 0 or self.decimals > 77:
+            raise ValueError(f"Invalid decimals: {self.decimals}. Must be 0-77.")
+
+        object.__setattr__(self, "chain", chain)
+        object.__setattr__(self, "address", normalized_address)
+
+    @property
+    def identity_key(self) -> tuple[Chain, str]:
+        """Return the stable identity key used by equality and hashing."""
+        return (cast(Chain, self.chain), self.address)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, TokenRef):
+            return NotImplemented
+        return self.identity_key == other.identity_key
+
+    def __hash__(self) -> int:
+        return hash(self.identity_key)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to the stable TokenRef wire shape."""
+        chain = cast(Chain, self.chain)
+        return {
+            "chain": chain.value,
+            "address": self.address,
+            "decimals": self.decimals,
+            "symbol": self.symbol,
+            "provenance": self.provenance,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TokenRef":
+        """Create a TokenRef from its stable wire shape."""
+        return cls(
+            chain=data["chain"],
+            address=data["address"],
+            decimals=data["decimals"],
+            symbol=data.get("symbol"),
+            provenance=data.get("provenance"),
+        )
 
 
 class BridgeType(Enum):
@@ -87,7 +179,7 @@ class ResolvedToken:
 
     Attributes:
         symbol: Token symbol (e.g., "ETH", "USDC", "WBTC")
-        address: Contract address on the resolved chain
+        address: Contract address on the resolved chain in resolver output/display form
         decimals: Token decimal places
         chain: Chain enum value where this token is resolved
         chain_id: Numeric chain ID for the resolved chain
@@ -152,6 +244,17 @@ class ResolvedToken:
         expected_chain_id = CHAIN_ID_MAP.get(self.chain)
         if expected_chain_id is not None and self.chain_id != expected_chain_id:
             raise ValueError(f"Chain {self.chain.value} has chain_id {expected_chain_id}, but got {self.chain_id}")
+
+    @property
+    def token_ref(self) -> TokenRef:
+        """Return this resolver output as a strict TokenRef identity."""
+        return TokenRef(
+            chain=self.chain,
+            address=self.address,
+            decimals=self.decimals,
+            symbol=self.symbol,
+            provenance=self.source,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""

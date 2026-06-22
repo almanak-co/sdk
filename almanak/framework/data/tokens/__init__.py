@@ -77,7 +77,15 @@ from .exceptions import (
     TokenResolutionTimeoutError,
 )
 from .identity import canonicalize_token_identity
-from .models import BridgeType, ChainToken, ChainTokenConfig, ResolvedToken, Token
+from .models import (
+    BridgeType,
+    ChainToken,
+    ChainTokenConfig,
+    ResolvedToken,
+    Token,
+    TokenRef,
+    normalize_token_address_for_chain,
+)
 from .resolver import TokenResolver, create_token_resolver, get_token_resolver
 from .utils import denormalize, normalize
 
@@ -93,6 +101,7 @@ __all__ = [
     "canonicalize_token_identity",
     # Resolved token model
     "ResolvedToken",
+    "TokenRef",
     "BridgeType",
     "ChainTokenConfig",
     # Token resolution exceptions
@@ -114,6 +123,7 @@ __all__ = [
     # =========================================================================
     "Token",
     "ChainToken",
+    "normalize_token_address_for_chain",
     "get_coingecko_id",
     "get_coingecko_ids",
     # Utility functions

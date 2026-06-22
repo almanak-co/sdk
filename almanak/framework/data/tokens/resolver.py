@@ -70,7 +70,7 @@ from .exceptions import (
     TokenNotFoundError,
     TokenResolutionError,
 )
-from .models import CHAIN_ID_MAP, BridgeType, ResolvedToken, Token
+from .models import CHAIN_ID_MAP, BridgeType, ResolvedToken, Token, normalize_token_address_for_chain
 
 if TYPE_CHECKING:
     import grpc
@@ -188,9 +188,7 @@ def _normalize_address_for_chain(address: str, chain: str) -> str:
     EVM addresses are case-insensitive -> lowercase.
     Solana base58 addresses are case-sensitive -> preserve case.
     """
-    if _is_solana_chain(chain):
-        return address
-    return address.lower()
+    return normalize_token_address_for_chain(address, chain)
 
 
 _STATIC_ADDRESS_CANONICAL_SYMBOLS: dict[tuple[str, str], str] = {
