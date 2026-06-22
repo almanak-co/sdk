@@ -378,6 +378,152 @@ class TestCoinGeckoIteration:
         assert data_points[1][1].ohlcv == {"ETH": first_candle}
 
 
+class TestPrefetchSeedPriorCandle:
+    """Tests for the leading-edge prior-candle seed in ``_prefetch_ohlcv_data``.
+
+    CoinGecko's first in-window sample lands a sub-interval after the requested
+    start (e.g. ``00:00:48`` for a ``00:00:00`` start), so the first backtest
+    tick has no candle at-or-before it. The prefetch seeds a genuine *prior*
+    candle so the first tick forward-fills a past close -- without it a
+    token-quoted strategy's numeraire projection fails loud at t0 (VIB-5127).
+    """
+
+    @staticmethod
+    def _candle(ts: datetime, close: str) -> OHLCV:
+        price = Decimal(close)
+        return OHLCV(timestamp=ts, open=price, high=price, low=price, close=price, volume=None)
+
+    @pytest.mark.asyncio
+    async def test_prefetch_seeds_prior_candle_for_misaligned_first_candle(self):
+        """A misaligned first candle is preceded by a real prior candle, so the
+        first tick forward-fills a PAST price (not the future first candle)."""
+        start = datetime(2026, 2, 1, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 2, 1, 3, 0, tzinfo=UTC)
+        main_first = self._candle(
+            datetime(2026, 2, 1, 0, 0, 48, tzinfo=UTC),
+            "100",
+        )
+        main_second = self._candle(datetime(2026, 2, 1, 1, 0, tzinfo=UTC), "101")
+        prior = self._candle(datetime(2026, 1, 31, 23, 1, tzinfo=UTC), "99")
+
+        def fake_get_ohlcv(token, s, e, interval_seconds):
+            # The pre-window seed request ends exactly at the window start.
+            return [prior] if e == start else [main_first, main_second]
+
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider.get_ohlcv = AsyncMock(side_effect=fake_get_ohlcv)  # type: ignore[method-assign]
+
+        config = HistoricalDataConfig(
+            start_time=start, end_time=end, interval_seconds=3600, tokens=["ETH"], include_ohlcv=True
+        )
+        cache = await provider._prefetch_ohlcv_data(config)
+
+        assert cache.data["ETH"][0] is prior  # prior candle prepended
+        # First tick forward-fills the prior PAST close, never the future candle.
+        assert cache.get_price_at("ETH", start) == Decimal("99")
+
+    @pytest.mark.asyncio
+    async def test_prefetch_normalizes_naive_window_before_seeding(self):
+        """A naive config window is treated as UTC before aware candle comparisons."""
+        start = datetime(2026, 2, 1, 0, 0)
+        end = datetime(2026, 2, 1, 3, 0)
+        start_utc = start.replace(tzinfo=UTC)
+        end_utc = end.replace(tzinfo=UTC)
+        main_first = self._candle(datetime(2026, 2, 1, 0, 0, 48, tzinfo=UTC), "100")
+        prior = self._candle(datetime(2026, 1, 31, 23, 1, tzinfo=UTC), "99")
+        calls: list[tuple[datetime, datetime]] = []
+
+        def fake_get_ohlcv(token, s, e, interval_seconds):
+            calls.append((s, e))
+            return [prior] if e == start_utc else [main_first]
+
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider.get_ohlcv = AsyncMock(side_effect=fake_get_ohlcv)  # type: ignore[method-assign]
+
+        config = HistoricalDataConfig(
+            start_time=start,
+            end_time=end,
+            interval_seconds=3600,
+            tokens=["ETH"],
+            include_ohlcv=True,
+        )
+        cache = await provider._prefetch_ohlcv_data(config)
+
+        assert cache.data["ETH"][0] is prior
+        assert cache.get_price_at("ETH", start_utc) == Decimal("99")
+        assert calls == [
+            (start_utc, end_utc),
+            (start_utc - timedelta(days=1), start_utc),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_fetch_prior_candle_normalizes_naive_start(self):
+        """The seed helper treats a naive start as UTC before querying/comparing."""
+        start = datetime(2026, 2, 1, 0, 0)
+        start_utc = start.replace(tzinfo=UTC)
+        prior = self._candle(datetime(2026, 1, 31, 23, 1, tzinfo=UTC), "99")
+
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider.get_ohlcv = AsyncMock(return_value=[prior])  # type: ignore[method-assign]
+
+        seed = await provider._fetch_prior_candle("ETH", start, 3600)
+
+        assert seed is prior
+        provider.get_ohlcv.assert_awaited_once_with(
+            "ETH",
+            start_utc - timedelta(days=1),
+            start_utc,
+            3600,
+        )
+
+    @pytest.mark.asyncio
+    async def test_prefetch_no_prior_candle_leaves_first_tick_unpriced(self):
+        """With no candle at-or-before the start, nothing is fabricated and the
+        first tick legitimately stays unpriceable (no look-ahead)."""
+        start = datetime(2026, 2, 1, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 2, 1, 3, 0, tzinfo=UTC)
+        main_first = self._candle(datetime(2026, 2, 1, 0, 0, 48, tzinfo=UTC), "100")
+
+        def fake_get_ohlcv(token, s, e, interval_seconds):
+            return [] if e == start else [main_first]  # no prior history
+
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider.get_ohlcv = AsyncMock(side_effect=fake_get_ohlcv)  # type: ignore[method-assign]
+
+        config = HistoricalDataConfig(
+            start_time=start, end_time=end, interval_seconds=3600, tokens=["ETH"], include_ohlcv=True
+        )
+        cache = await provider._prefetch_ohlcv_data(config)
+
+        assert cache.data["ETH"][0] is main_first  # nothing prepended
+        assert cache.get_price_at("ETH", start) is None
+
+    @pytest.mark.asyncio
+    async def test_prefetch_skips_seed_when_first_candle_aligned(self):
+        """A first candle exactly at the start (e.g. daily, midnight-aligned)
+        needs no seed, so no pre-window request is made."""
+        start = datetime(2026, 2, 1, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+        aligned_first = self._candle(start, "100")
+        second = self._candle(datetime(2026, 2, 2, 0, 0, tzinfo=UTC), "101")
+
+        def fake_get_ohlcv(token, s, e, interval_seconds):
+            assert e != start, "no pre-window seed request expected for an aligned first candle"
+            return [aligned_first, second]
+
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider.get_ohlcv = AsyncMock(side_effect=fake_get_ohlcv)  # type: ignore[method-assign]
+
+        config = HistoricalDataConfig(
+            start_time=start, end_time=end, interval_seconds=86400, tokens=["ETH"], include_ohlcv=True
+        )
+        cache = await provider._prefetch_ohlcv_data(config)
+
+        assert cache.data["ETH"][0] is aligned_first
+        assert cache.get_price_at("ETH", start) == Decimal("100")
+        assert provider.get_ohlcv.await_count == 1  # main fetch only, no seed
+
+
 class TestCoinGeckoProviderCaching:
     """Tests for CoinGeckoDataProvider historical caching."""
 

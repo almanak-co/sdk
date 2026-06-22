@@ -135,6 +135,13 @@ def _is_auth_error(exc: BaseException) -> bool:
     return int(status_match.group(1)) in (401, 403)
 
 
+def _as_utc(timestamp: datetime) -> datetime:
+    """Return an aware UTC timestamp, treating naive inputs as already UTC."""
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        return timestamp.replace(tzinfo=UTC)
+    return timestamp.astimezone(UTC)
+
+
 @dataclass
 class RetryConfig:
     """Configuration for retry behavior with exponential backoff.
@@ -1280,6 +1287,18 @@ class CoinGeckoDataProvider:
         This method fetches all historical data upfront to minimize API calls
         during iteration and avoid rate limiting issues.
 
+        For each token whose first in-window candle lands *after* the requested
+        ``start_time`` -- CoinGecko samples are not grid-aligned, so the first
+        hourly candle for a midnight start typically arrives a sub-interval later
+        (e.g. ``00:00:48``) -- a single candle from just *before* the window is
+        fetched and prepended. The first backtest tick then forward-fills a
+        genuine **prior** close, exactly like every later tick, instead of being
+        unpriceable. It is a past price, not a future candle, so the cache's
+        no-look-ahead invariant is preserved (see ``OHLCVCache.get_price_at`` and
+        the ``test_*_before_first_candle`` guards). Without it, a token-quoted
+        strategy's numeraire projection fails loud at the very first equity point
+        (VIB-5127; ``docs/internal/blueprints/31-backtesting.md`` §Numeraire).
+
         Args:
             config: Historical data configuration
 
@@ -1287,22 +1306,65 @@ class CoinGeckoDataProvider:
             OHLCVCache with all prefetched data
         """
         data: dict[str, list[OHLCV]] = {}
+        start_time = _as_utc(config.start_time)
+        end_time = _as_utc(config.end_time)
 
         for token in config.tokens:
             try:
                 ohlcv = await self.get_ohlcv(
                     token,
-                    config.start_time,
-                    config.end_time,
+                    start_time,
+                    end_time,
                     config.interval_seconds,
                 )
-                data[token.upper()] = ohlcv
-                logger.info(f"Prefetched {len(ohlcv)} data points for {token}")
             except ValueError as e:
                 logger.warning(f"Failed to prefetch data for {token}: {e}")
                 data[token.upper()] = []
+                continue
+
+            # Seed a prior candle when the first in-window candle is misaligned
+            # past the requested start, so the first tick has an at-or-before
+            # candle to forward-fill from (a real past close, never a future one).
+            if ohlcv and ohlcv[0].timestamp > start_time:
+                seed = await self._fetch_prior_candle(
+                    token,
+                    start_time,
+                    config.interval_seconds,
+                )
+                if seed is not None and seed.timestamp < ohlcv[0].timestamp:
+                    ohlcv = [seed, *ohlcv]
+
+            data[token.upper()] = ohlcv
+            logger.info(f"Prefetched {len(ohlcv)} data points for {token}")
 
         return OHLCVCache(data=data, fetched_at=datetime.now(UTC))
+
+    async def _fetch_prior_candle(
+        self,
+        token: str,
+        start: datetime,
+        interval_seconds: int,
+    ) -> OHLCV | None:
+        """Return the latest candle at or before ``start``, or ``None``.
+
+        Fetches a short pre-window range (one day before ``start``) purely to
+        obtain a prior price point for forward-filling the first tick. Returns
+        ``None`` when no candle at-or-before ``start`` exists (the token's
+        history begins at/after the window start), in which case the first tick
+        legitimately stays unpriceable -- no fabricated pre-history price.
+        """
+        start = _as_utc(start)
+        try:
+            prior = await self.get_ohlcv(
+                token,
+                start - timedelta(days=1),
+                start,
+                interval_seconds,
+            )
+        except ValueError:
+            return None
+        candidates = [candle for candle in prior if candle.timestamp <= start]
+        return candidates[-1] if candidates else None
 
     async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         """Iterate through historical market states.
