@@ -105,39 +105,6 @@ DEFAULT_BACKTEST_LOG_LEVEL: str = "info"
 
 
 # =============================================================================
-# Feature flag — backtesting is disabled until VIB-5079 (v1 completion) lands
-# =============================================================================
-
-
-BACKTESTING_FLAG_ENV_VAR: str = "ALMANAK_ENABLE_BACKTESTING"
-
-# Same truthy vocabulary as almanak/framework/deployment/mode.py.
-_FLAG_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
-
-
-def backtesting_enabled() -> bool:
-    """Return True iff the backtesting feature flag is set to a truthy value.
-
-    Backtesting is gated off by default while VIB-5079 (backtesting v1
-    completion) is in flight: the PnL engine has a known value-conservation
-    bug (VIB-5082) that makes results untrustworthy. The CLI entry points
-    (``almanak strat backtest`` and ``almanak backtest-service``) refuse to
-    run unless ``ALMANAK_ENABLE_BACKTESTING`` is truthy. Unset / empty /
-    unrecognised values mean disabled.
-    """
-    return os.environ.get(BACKTESTING_FLAG_ENV_VAR, "").strip().lower() in _FLAG_TRUTHY
-
-
-def backtesting_disabled_message() -> str:
-    """One-line operator-facing explanation used by every gated entry point."""
-    return (
-        "Backtesting is temporarily disabled: the PnL engine has known "
-        "correctness issues that make results untrustworthy (Linear: VIB-5079, "
-        f"VIB-5082). Set {BACKTESTING_FLAG_ENV_VAR}=1 to run it anyway, at your own risk."
-    )
-
-
-# =============================================================================
 # GasApiConfig — per-chain Etherscan-family credentials
 # =============================================================================
 

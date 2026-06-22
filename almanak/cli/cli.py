@@ -950,13 +950,6 @@ def backtest_service(host, port, workers, log_level):
         # Start on custom port
         almanak backtest-service --port 9000
     """
-    # Feature flag: backtesting is disabled until VIB-5079 lands. Same gate
-    # as the `almanak strat backtest` group in framework/cli/backtest/group.py.
-    from almanak.config.backtest import backtesting_disabled_message, backtesting_enabled
-
-    if not backtesting_enabled():
-        raise click.ClickException(backtesting_disabled_message())
-
     from almanak.services.backtest.server import run_server
 
     click.echo(f"Starting BacktestService on {host or '0.0.0.0'}:{port or 8000}")

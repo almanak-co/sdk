@@ -365,14 +365,6 @@ For strategies that execute through a Gnosis Safe multisig.
 
 ## Backtesting
 
-### Feature Flag
-
-Backtesting is disabled by default while known correctness issues are fixed (Linear: VIB-5079). Both `almanak strat backtest` and `almanak backtest-service` refuse to run without the opt-in flag.
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `ALMANAK_ENABLE_BACKTESTING` | Opt in to the experimental backtesting CLI (`1`/`true`/`yes`/`on`). Results are not yet trustworthy; enable at your own risk. | unset (disabled) |
-
 ### Archive RPC URLs
 
 Required for historical on-chain data (Chainlink prices, TWAP calculations). Standard RPC nodes don't support historical state queries. Use archive-enabled providers like Alchemy (paid), QuickNode, or Infura.

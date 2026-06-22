@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.19.1] - 2026-06-22
+
+### Changed
+
+- **Backtesting is enabled by default** (VIB-5130). The
+  `ALMANAK_ENABLE_BACKTESTING` opt-in flag is removed now that the v1
+  conservation work (VIB-5079) has landed: `almanak strat backtest` and
+  `almanak backtest-service` run without it. Treat PnL-engine output as
+  carrying the documented variance bounds (blueprint 31 §7) and certify on the
+  paper trader before going live; perp support remains beta. Any existing
+  `ALMANAK_ENABLE_BACKTESTING=1` setting becomes a harmless no-op.
+
 ## [2.19.0] - 2026-06-22
 
 ### Added

@@ -180,9 +180,11 @@ almanak strat backtest dashboard    # Interactive results dashboard
 
 ## Backtesting
 
-> **Experimental - disabled by default.** Backtesting is gated behind
-> `ALMANAK_ENABLE_BACKTESTING=1` while known correctness issues are fixed;
-> results should not be trusted for strategy decisions yet.
+> **v1 (beta) — enabled by default since v2.19.1.** The PnL engine is
+> conservation-certified on the network-free Trust Matrix. Treat results as
+> carrying documented variance bounds (LP fees ±10-15%, perp funding ±15%,
+> lending APY ±10%, large-trade slippage ±30%, gas ±20%) and certify on the
+> paper trader before going live. Perp support is beta.
 
 The SDK provides a dual-engine backtesting system for institutional-grade strategy validation:
 

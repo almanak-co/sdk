@@ -76,10 +76,6 @@ def backtest() -> None:
     Run backtests for Almanak strategies.
 
     \b
-    EXPERIMENTAL — disabled by default while known correctness issues are
-    fixed (Linear: VIB-5079). Set ALMANAK_ENABLE_BACKTESTING=1 to opt in.
-
-    \b
     Commands (ordered by typical workflow):
       pnl           Single backtest with historical price data
       sweep         Grid search over parameter combinations
@@ -127,16 +123,8 @@ def backtest() -> None:
     # Load .env from current directory through the config-service boundary
     # so backtest commands pick up API keys (COINGECKO_API_KEY,
     # THEGRAPH_API_KEY, ALCHEMY_API_KEY, etc.) the same way
-    # 'almanak strat run' does from its working directory. Loaded before
-    # the feature-flag check so the flag can live in .env too.
+    # 'almanak strat run' does from its working directory.
     env_file = Path.cwd() / ".env"
     if env_file.exists():
         _load_dotenv_once(str(env_file))
         click.echo(f"Loaded environment from: {env_file}")
-
-    # Feature flag: backtesting is disabled until VIB-5079 lands. Deferred
-    # import keeps this module lean (tests/framework/cli/test_imports_lean.py).
-    from almanak.config.backtest import backtesting_disabled_message, backtesting_enabled
-
-    if not backtesting_enabled():
-        raise click.ClickException(backtesting_disabled_message())
