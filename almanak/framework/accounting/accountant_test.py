@@ -74,7 +74,7 @@ CLOSE_EVENT_TYPES: tuple[str, ...] = tuple(
 # ``Primitive`` via ``SCORECARD_PROFILES`` (assembled below). ``Primitive`` is
 # kept as a back-compat alias: it is exported in ``__all__`` and referenced by
 # annotations throughout this module.
-ProfileName = Literal["lp", "looping", "perp", "pendle_pt"]
+ProfileName = Literal["lp", "looping", "perp", "pendle_pt", "pendle_lp"]
 Primitive = ProfileName
 CellStatus = Literal["PASS", "FAIL", "XFAIL", "SKIP"]
 
@@ -2974,6 +2974,190 @@ def _cells_pendle_pt(
     return out
 
 
+def _cells_pendle_lp(
+    acct_events: list[dict[str, Any]],
+    pos_events: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    payload_errors: dict[Any, str],
+) -> list[CellResult]:
+    """PLP1–PLP6 — the Pendle LP scorecard (VIB-5320 PR A).
+
+    Pendle LP is a *fungible* LP surface: a single-sided deposit (wstETH ->
+    SY) mints an LP token whose contract is the market address (no NFT, no
+    tick range). It rides the LP primitive in the taxonomy
+    (``taxonomy.py`` ``PENDLE_LP_OPEN/CLOSE -> Primitive.LP``) but its typed
+    events are ``PendleAccountingEvent`` (``handle_pendle_lp``), NOT the generic
+    ``LPOpenEventPayload`` / ``LPCloseEventPayload`` — so the generic LP cell
+    pack (``_cells_lp``, which asserts ticks / fees_token0-1 / IL / Track-C)
+    would FAIL on data Pendle LP never emits. This pack scores only what Pendle
+    LP actually books off the ``PENDLE_LP_OPEN`` / ``PENDLE_LP_CLOSE`` payload
+    (``sy_amount`` / ``pt_amount``, both human-units, ``confidence=ESTIMATED``).
+
+    This pins the CURRENT HONEST FLOOR, not a clean-green target. Pendle LP
+    events are USD-less by design today (limitation B1), unpriced by the
+    portfolio valuer (limitation B2 — same root cause as ``pendle_pt`` G6=FAIL),
+    and out of the v1 payload-validation surface (limitation B3 —
+    ``PENDLE_LP_OPEN/CLOSE`` absent from ``_PAYLOAD_MODELS``, so they decode but
+    are not Pydantic-validated; ``payload_errors`` is empty for them). PLP3/PLP4
+    are XFAIL because the capability is absent, not wrong; the USD-pricing fix
+    (VIB-5276 gateway PT price + valuer wiring) is a separate follow-up PR.
+    """
+    out: list[CellResult] = []
+    lp_opens = [r for r in acct_events if r.get("event_type") == "PENDLE_LP_OPEN"]
+    lp_closes = [r for r in acct_events if r.get("event_type") == "PENDLE_LP_CLOSE"]
+
+    # PLP1 — open books both legs: a Pendle LP_OPEN books sy_amount (SY supplied)
+    # AND pt_amount (PT supplied), the two quantity inputs every downstream PnL
+    # number needs. (B3: these rows are out of the v1 surface, so _payload_block
+    # returns None and we read the decoded payload directly — but we still call
+    # it so a future v1 wiring of PENDLE_LP would surface validation errors here.)
+    blocked = _payload_block_cell("PLP1", "LP_OPEN books both legs (sy_amount + pt_amount)", lp_opens, payload_errors)
+    if blocked is not None:
+        out.append(blocked)
+    else:
+        ok = False
+        for r in lp_opens:
+            p = acct_payloads.get(r.get("id"), {})
+            if p.get("sy_amount") is not None and p.get("pt_amount") is not None:
+                ok = True
+                break
+        out.append(
+            CellResult(
+                "PLP1",
+                "LP_OPEN books both legs (sy_amount + pt_amount)",
+                "PASS" if ok else "XFAIL",
+                "PENDLE_LP_OPEN books sy_amount + pt_amount"
+                if ok
+                else "no PENDLE_LP_OPEN carrying sy_amount + pt_amount",
+            )
+        )
+
+    # PLP2 — close books the collected legs: a Pendle LP_CLOSE books sy_amount
+    # AND pt_amount drained on burn (amount0_collected / amount1_collected scaled
+    # into human units by handle_pendle_lp). These are the realized proceeds the
+    # conservation invariant (PLP6) rests on.
+    blocked = _payload_block_cell(
+        "PLP2", "LP_CLOSE books collected legs (sy_amount + pt_amount)", lp_closes, payload_errors
+    )
+    if blocked is not None:
+        out.append(blocked)
+    else:
+        ok = False
+        for r in lp_closes:
+            p = acct_payloads.get(r.get("id"), {})
+            if p.get("sy_amount") is not None and p.get("pt_amount") is not None:
+                ok = True
+                break
+        out.append(
+            CellResult(
+                "PLP2",
+                "LP_CLOSE books collected legs (sy_amount + pt_amount)",
+                "PASS" if ok else "XFAIL",
+                "PENDLE_LP_CLOSE books sy_amount + pt_amount"
+                if ok
+                else "no PENDLE_LP_CLOSE carrying sy_amount + pt_amount",
+            )
+        )
+
+    # PLP3 — open-LP mark-to-market. Requires the portfolio valuer to price an
+    # open Pendle LP (value_pendle_lp / value_principal_token_lp_from_components),
+    # which is NOT wired into portfolio_valuer.py (limitation B2) — so an open
+    # Pendle LP marks to ~0 and carries no cost_basis_usd / unrealized_pnl_usd.
+    # XFAIL, not FAIL: the capability is absent, not wrong. Unblocked by the
+    # VIB-5276 gateway PT-price path + valuer wiring (separate follow-up PR).
+    out.append(
+        CellResult(
+            "PLP3",
+            "Open-LP mark-to-market (cost basis + unrealised PnL)",
+            "XFAIL",
+            "Pendle-LP valuer unwired (B2: value_pendle_lp not in portfolio_valuer; VIB-5276 gateway PT price)",
+        )
+    )
+
+    # PLP4 — realised PnL / fees in USD on close. Pendle LP events are USD-less
+    # by design today (limitation B1: pt_price=None, realized_yield_usd=None, no
+    # *_usd fields on the LP payload model), so a close cannot attribute realised
+    # PnL or fees in USD. XFAIL until the USD-pricing follow-up lands.
+    out.append(
+        CellResult(
+            "PLP4",
+            "Realised PnL / fees in USD on close",
+            "XFAIL",
+            "Pendle LP events USD-less by design (B1: realized_yield_usd / *_usd absent on LP payload)",
+        )
+    )
+
+    # PLP5 — lifecycle continuity: an LP_OPEN seeds an LP position_events OPEN and
+    # an LP_CLOSE a CLOSE on the SAME position_id, so the dashboard renders one
+    # position. NOTE Pendle LP's conftest position-key special-case yields an
+    # EMPTY position_key / market_id on the accounting event (a real contract
+    # divergence vs Uniswap V3 LP — see tests/intents/arbitrum/test_pendle_lp.py),
+    # so the join key lives on position_events, not the accounting payload. We
+    # assert what is actually true: if position_events carry a shared OPEN/CLOSE
+    # position_id, PASS; if Pendle LP does not seed position_events with a usable
+    # shared id (the present floor), XFAIL with the observed shape.
+    lp_pos = [r for r in pos_events if r.get("position_type") in ("LP", "PENDLE_LP")]
+    opens = [r for r in lp_pos if r.get("event_type") == "OPEN"]
+    closes = [r for r in lp_pos if r.get("event_type") == "CLOSE"]
+    has_open = bool(opens)
+    has_close = bool(closes)
+    # Filter falsy/empty position_ids so {None}&{None} (or {""}&{""}) cannot
+    # spuriously read as a shared id (CodeRabbit/Gemini).
+    same_id = bool(
+        has_open
+        and has_close
+        and {r.get("position_id") for r in opens if r.get("position_id")}
+        & {r.get("position_id") for r in closes if r.get("position_id")}
+    )
+    out.append(
+        CellResult(
+            "PLP5",
+            "Position lifecycle continuity (LP OPEN->CLOSE, one position)",
+            "PASS" if same_id else "XFAIL",
+            f"OPEN={has_open} CLOSE={has_close} shared_position_id={same_id}",
+        )
+    )
+
+    # PLP6 — quantity conservation: the SY+PT supplied on open must equal the
+    # SY+PT drained on close within tolerance (single round-trip, no MEV on a
+    # fork). This is the unit-level conservation the lane-symmetry contract rests
+    # on; the USD lane symmetry is deferred to the B1/B2 USD-pricing follow-up.
+    def _sum_legs(rows: list[dict[str, Any]]) -> tuple[Decimal, bool]:
+        total = Decimal(0)
+        seen = False
+        for r in rows:
+            p = acct_payloads.get(r.get("id"), {})
+            for field_name in ("sy_amount", "pt_amount"):
+                v = p.get(field_name)
+                if v is None:
+                    continue
+                try:
+                    total += Decimal(str(v))
+                    seen = True
+                except (ArithmeticError, ValueError):
+                    continue
+        return total, seen
+
+    supplied, have_open = _sum_legs(lp_opens)
+    drained, have_close = _sum_legs(lp_closes)
+    if have_open and have_close and supplied > 0:
+        rel = abs(supplied - drained) / supplied
+        plp6_pass = rel <= Decimal("0.01")
+        plp6_detail = f"SY+PT supplied={supplied} drained={drained} rel_diff={rel:.6f}"
+    else:
+        plp6_pass = False
+        plp6_detail = f"incomplete round-trip (have_open={have_open} have_close={have_close})"
+    out.append(
+        CellResult(
+            "PLP6",
+            "Quantity conservation (SY+PT supplied == drained)",
+            "PASS" if plp6_pass else "XFAIL",
+            plp6_detail,
+        )
+    )
+    return out
+
+
 # ─── Scorecard profile registry (G-A foundation) ─────────────────────────
 #
 # One declarative table replaces the former per-primitive if/elif ladders (the
@@ -3045,6 +3229,28 @@ SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
         eps_pct=Decimal("0.0025"),
         eps_scaling=lambda b: (b.notional_traded, "notional_traded"),
         cells=lambda ctx: _cells_pendle_pt(
+            ctx.acct_events,
+            ctx.pos_events,
+            ctx.acct_payloads,
+            ctx.payload_errors,
+        ),
+    ),
+    # Pendle LP rides the LP primitive in the taxonomy (taxonomy.py
+    # ``PENDLE_LP_OPEN/CLOSE -> Primitive.LP`` with ``_LP_LIFECYCLE``): the
+    # ledger intent_type IS ``LP_OPEN`` / ``LP_CLOSE``, so the canonical
+    # lifecycle is LP's and the FixtureLifecycleError guard verifies the
+    # round-trip from the ledger. The cell pack scores the *Pendle* economics
+    # off the PendleAccountingEvent payload (sy_amount/pt_amount), NOT the
+    # generic LP shape (ticks/IL/Track-C) which Pendle LP never emits — using
+    # ``_cells_lp`` here would FAIL, not XFAIL. LP's ε (0.0025 on
+    # notional_traded) is reused. VIB-5320 PR A.
+    "pendle_lp": ScorecardProfile(
+        name="pendle_lp",
+        canonical_primitive=_TaxonomyPrimitive.LP,
+        required_lifecycle=("LP_OPEN", "LP_CLOSE"),
+        eps_pct=Decimal("0.0025"),
+        eps_scaling=lambda b: (b.notional_traded, "notional_traded"),
+        cells=lambda ctx: _cells_pendle_lp(
             ctx.acct_events,
             ctx.pos_events,
             ctx.acct_payloads,

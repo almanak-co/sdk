@@ -1,0 +1,42 @@
+{
+  "_provenance": {
+    "row_id": "pendle_lp-pendle-arbitrum",
+    "fixture": "pendle_lp",
+    "chain": "arbitrum",
+    "primitive": "pendle_lp",
+    "captured_from": "tests/fixtures/accounting/pendle_lp/expected_baseline.sqlite (VIB-5320 real-fork LP_OPEN->teardown LP_CLOSE round-trip on Arbitrum)",
+    "captured_at": "2026-06-22T15:48:16.045557+00:00",
+    "captured_at_commit": "4643beb7bb983a937631a2427157a276d2476045",
+    "note": "Real-Anvil baseline (same DB as the ratchet fixture). Honest floor: PLP3/PLP4 XFAIL = USD valuation gaps B1/B2 (VIB-5276). G2/G12 FAIL = Pendle teardown LP_CLOSE not stamping gas_usd/price_inputs_json (newly found; follow-up). G3/G6 FAIL = USD-less LP yield + open-LP unpriced. PLP5 XFAIL = OPEN/CLOSE share position_key but not position_id (Pendle fungible-LP identity)."
+  },
+  "cells": {
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "FAIL",
+    "G13": "PASS",
+    "G14": "PASS",
+    "G15": "PASS",
+    "G2": "FAIL",
+    "G3": "FAIL",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L5_22": "XFAIL",
+    "PLP1": "PASS",
+    "PLP2": "PASS",
+    "PLP3": "XFAIL",
+    "PLP4": "XFAIL",
+    "PLP5": "XFAIL",
+    "PLP6": "PASS"
+  },
+  "scores": {
+    "passed": 13,
+    "failed": 4,
+    "xfailed": 4,
+    "total": 22
+  }
+}
