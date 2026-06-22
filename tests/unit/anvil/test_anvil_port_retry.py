@@ -46,7 +46,7 @@ class TestAnvilForkRetry:
 
         spec = importlib.util.spec_from_file_location(
             "test_defai_vault_lp",
-            "tests/e2e/test_defai_vault_lp.py",
+            "strategies/internal/tests/e2e/test_defai_vault_lp.py",
         )
         mod = importlib.util.module_from_spec(spec)
 
@@ -94,7 +94,7 @@ class TestAnvilForkRetry:
 
         spec = importlib.util.spec_from_file_location(
             "test_defai_vault_lp",
-            "tests/e2e/test_defai_vault_lp.py",
+            "strategies/internal/tests/e2e/test_defai_vault_lp.py",
         )
         mod = importlib.util.module_from_spec(spec)
 

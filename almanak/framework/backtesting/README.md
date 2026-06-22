@@ -13,7 +13,7 @@ The Almanak backtesting system provides two complementary engines:
 
 ## Quick Start
 
-> **🚀 New to backtesting?** Start with our [complete working examples](../../examples/README.md) - they're copy-paste ready and include everything you need, including data providers, strategies, and visualization.
+> **🚀 New to backtesting?** The demo strategies under [`almanak/demo_strategies/`](../../demo_strategies/) are runnable backtest subjects (e.g. `almanak strat backtest run -d almanak/demo_strategies/uniswap_rsi`). Standalone, copy-paste backtest example scripts are being reorganized into a dedicated `Tutorials/` folder (VIB-5332).
 
 ### PnL Backtesting (Recommended for Historical Analysis)
 
@@ -26,11 +26,10 @@ from decimal import Decimal
 from almanak.framework.backtesting import PnLBacktester, PnLBacktestConfig
 from almanak.framework.backtesting.pnl.engine import DefaultFeeModel, DefaultSlippageModel
 
-# For a complete example with data provider and strategy, see:
-# examples/backtest_ta_strategy.py
+# For complete, runnable strategies, see almanak/demo_strategies/ (e.g. uniswap_rsi).
 
 async def main():
-    # 1. Create data provider (see examples/common/data_providers.py)
+    # 1. Create data provider (a backtest data provider supplies historical ticks)
     # data_provider = RSITriggerDataProvider(start_time=..., end_time=...)
     
     # 2. Create fee and slippage models
@@ -52,7 +51,7 @@ async def main():
         interval_seconds=3600,  # Hourly ticks
     )
     
-    # 5. Create strategy (see examples/ for implementations)
+    # 5. Create strategy (see almanak/demo_strategies/ for implementations)
     # strategy = MyStrategy()
     
     # 6. Run backtest
@@ -67,7 +66,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-**For a complete runnable example**, see [`examples/backtest_ta_strategy.py`](../../examples/backtest_ta_strategy.py) which includes:
+**For a complete runnable strategy**, see the demos under [`almanak/demo_strategies/`](../../demo_strategies/) (e.g. `uniswap_rsi`), which include:
 - Data provider setup
 - Strategy implementation
 - Full backtest execution
@@ -299,29 +298,27 @@ or from a prior historical-volume run) — and returns a
 
 ## Examples
 
-> **📚 Complete Working Examples**: See [`examples/README.md`](../../examples/README.md) for detailed documentation on all example scripts.
+> **📚 Runnable subjects**: The demo strategies under [`almanak/demo_strategies/`](../../demo_strategies/) double as backtest subjects. Standalone backtest example scripts are being reorganized into a dedicated `Tutorials/` folder (VIB-5332).
 
-Complete working examples are available in [`examples/`](../../examples/):
+Backtest a demo strategy directly:
 
 ```bash
-# RSI mean reversion strategy
-python examples/backtest_ta_strategy.py
+# RSI mean reversion
+almanak strat backtest run -d almanak/demo_strategies/uniswap_rsi
 
-# Concentrated LP strategy
-python examples/backtest_lp_strategy.py
+# Concentrated LP
+almanak strat backtest run -d almanak/demo_strategies/uniswap_lp
 
-# Leveraged looping strategy
-python examples/backtest_looping_strategy.py
+# Leveraged looping
+almanak strat backtest run -d almanak/demo_strategies/morpho_looping
 ```
 
-Each example includes:
-- ✅ Complete, copy-paste ready code
-- ✅ Synthetic data providers for reproducibility (no API keys needed)
-- ✅ 3-panel visualization charts saved to `examples/output/`
+The demo strategies include:
+- ✅ Complete, copy-paste ready `decide()` logic
+- ✅ A `config.json` with sensible defaults
 - ✅ Verification formulas for manual auditing
-- ✅ Comprehensive documentation in [`examples/README.md`](../../examples/README.md)
 
-**Quick Start with Examples:**
+**Quick Start:**
 
 1. **Install dependencies** (if not already installed):
    ```bash
@@ -329,14 +326,10 @@ Each example includes:
    uv add matplotlib  # For chart generation
    ```
 
-2. **Run an example**:
+2. **Run a backtest**:
    ```bash
-   python examples/backtest_ta_strategy.py
+   almanak strat backtest run -d almanak/demo_strategies/uniswap_rsi
    ```
-
-3. **View results**: Charts are saved to `examples/output/`
-
-See [`examples/README.md`](../../examples/README.md) for detailed explanations of each strategy, configuration options, and how to interpret results.
 
 ## Crisis Scenario Testing
 
@@ -514,6 +507,6 @@ almanak/framework/backtesting/
 ## Related Documentation
 
 - [CLI documentation](https://sdk.docs.almanak.co/cli/) - CLI command reference
-- `examples/README.md` - Working examples documentation
+- `almanak/demo_strategies/` - Runnable demo strategies (backtest subjects)
 - `docs/ACCURACY_LIMITATIONS.md` - Accuracy documentation
 - `MIGRATION.md` - Legacy engine migration guide

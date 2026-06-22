@@ -190,12 +190,25 @@ class GmxV2DirectionalPerp(IntentStrategy):
                 reason=f"Funding {funding:.6f}/h < -{self.funding_entry_threshold} — short would pay too much"
             )
 
+        # Required margin (USD) = notional / leverage. Compute up front (it needs
+        # no price) so the balance gate checks the ACTUAL margin the open needs,
+        # not just the static minimum. min_collateral_usd stays a position-size
+        # floor: too-small a margin isn't worth opening.
+        collateral_usd = self.position_size_usd / self.leverage
+        if collateral_usd < self.min_collateral_usd:
+            return Intent.hold(
+                reason=f"Required margin ${collateral_usd:.2f} below min ${self.min_collateral_usd}"
+            )
+
         try:
             collateral = market.balance(self.collateral_token)
         except _DATA_UNAVAILABLE_ERRORS as exc:
             return Intent.hold(reason=f"Balance unavailable: {exc}")
-        if collateral.balance_usd < self.min_collateral_usd:
-            return Intent.hold(reason=f"Insufficient {self.collateral_token}: ${collateral.balance_usd:.2f}")
+        if collateral.balance_usd < collateral_usd:
+            return Intent.hold(
+                reason=f"Insufficient {self.collateral_token}: ${collateral.balance_usd:.2f} "
+                f"< required margin ${collateral_usd:.2f}"
+            )
 
         try:
             entry_price = market.price(self.base_token)
@@ -207,7 +220,6 @@ class GmxV2DirectionalPerp(IntentStrategy):
         # margin in USD and passing it straight to perp_open would deposit that
         # many tokens (e.g. 50 ETH instead of $50 of ETH) for any non-stablecoin
         # collateral. Convert: USD margin / collateral price.
-        collateral_usd = self.position_size_usd / self.leverage
         collateral_amount = collateral_usd / collateral_price
         is_long = signal == LONG
         # Captured for the entry-price fallback; committed to _entry_price only
