@@ -212,6 +212,25 @@ class FluidDexLpCompiler(BaseProtocolCompiler[BaseCompilerContext]):
     # -- LP_CLOSE -----------------------------------------------------------
 
     def compile_lp_close(self, ctx: BaseCompilerContext, intent: LPCloseIntent) -> CompilationResult:
+        # VIB-5346 defense-in-depth: Fluid DEX-LP uses position_id as a wrapper /
+        # pool address (see ``wrapper`` below), not a fungible LP-token wei.
+        # Reject amount="all" chaining via the shared fail-closed allowlist (the
+        # runner gate is the primary control; this guards the direct-compile path).
+        from almanak.framework.strategies.lp_position_tracker import (
+            lp_close_amount_chaining_supported,
+        )
+
+        protocol = getattr(intent, "protocol", None) or "fluid_dex_lp"
+        if getattr(intent, "is_chained_amount", False) and not lp_close_amount_chaining_supported(protocol):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"LP_CLOSE amount='all' chaining is not supported for {protocol}: "
+                    "position_id is a wrapper/pool identity, not a fungible LP-token amount"
+                ),
+                intent_id=intent.intent_id,
+            )
+
         from almanak.connectors._fluid_core.smart_lending_sdk import FluidDexLpError
 
         wrapper = intent.position_id or (intent.pool or "")

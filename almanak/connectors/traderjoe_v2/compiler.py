@@ -60,6 +60,24 @@ class TraderJoeV2Compiler(BaseProtocolCompiler[BaseCompilerContext]):
         return _TraderJoeV2CompileImpl(ctx)._compile_lp_open_traderjoe_v2(intent)
 
     def compile_lp_close(self, ctx: BaseCompilerContext, intent: LPCloseIntent) -> CompilationResult:
+        # VIB-5346 defense-in-depth: position_id is a bin-id / identity for
+        # TraderJoe V2 (Liquidity Book), not a fungible LP-token wei amount.
+        # Reject amount="all" chaining via the shared fail-closed allowlist (the
+        # runner gate is the primary control; this guards the direct-compile path).
+        from almanak.framework.strategies.lp_position_tracker import (
+            lp_close_amount_chaining_supported,
+        )
+
+        protocol = getattr(intent, "protocol", None) or "traderjoe_v2"
+        if getattr(intent, "is_chained_amount", False) and not lp_close_amount_chaining_supported(protocol):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    "LP_CLOSE amount='all' chaining is not supported for traderjoe_v2: "
+                    "position_id is a position identity (bin-id), not a fungible amount"
+                ),
+                intent_id=intent.intent_id,
+            )
         return _TraderJoeV2CompileImpl(ctx)._compile_lp_close_traderjoe_v2(intent)
 
     def compile_collect_fees(self, ctx: BaseCompilerContext, intent: CollectFeesIntent) -> CompilationResult:

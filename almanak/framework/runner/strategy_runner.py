@@ -1895,6 +1895,12 @@ class StrategyRunner:
         result_from_early_shortcut = False
         is_multi_intent = len(intents) > 1
         previous_amount_received: Decimal | None = None
+        # VIB-5346: WEI lane for fungible-LP close chaining. Strictly separate
+        # from ``previous_amount_received`` (the swap-output human-unit lane):
+        # carries the prior LP_OPEN's minted-LP wei so a downstream LP_CLOSE
+        # amount="all" can resolve its position_id. Never read/written by the
+        # swap path; the two lanes never cross.
+        previous_lp_minted_wei: int | None = None
         for idx, intent in enumerate(intents):
             # Resolve amount="all" from previous step's output or wallet balance.
             # Returns (intent_to_execute, early_result, should_continue) where
@@ -1910,6 +1916,7 @@ class StrategyRunner:
                 intents=intents,
                 is_multi_intent=is_multi_intent,
                 previous_amount_received=previous_amount_received,
+                previous_lp_minted_wei=previous_lp_minted_wei,
                 market=market,
                 strategy=strategy,
                 start_time=start_time,
@@ -1957,6 +1964,24 @@ class StrategyRunner:
                             "subsequent amount='all' steps will fail",
                             idx + 1,
                         )
+
+                # VIB-5346: WEI lane. Capture the minted-LP wei from an LP_OPEN
+                # so a downstream LP_CLOSE amount="all" can resolve its
+                # position_id. Strictly separate from the swap-output lane above:
+                # never touches ``previous_amount_received`` and never reads
+                # ``swap_amounts``.
+                lp_open = StrategyRunner._result_lp_open_data(er)
+                if lp_open is not None and getattr(lp_open, "liquidity", None) is not None:
+                    previous_lp_minted_wei = int(lp_open.liquidity)
+                else:
+                    previous_lp_minted_wei = None
+            elif intent_result.status == IterationStatus.SUCCESS:
+                # VIB-5346 robustness: a SUCCESS step with a falsy
+                # ``execution_result`` produced no measurable output. Reset BOTH
+                # chaining lanes so a downstream ``amount="all"`` step fails
+                # explicitly rather than re-using a stale prior value.
+                previous_amount_received = None
+                previous_lp_minted_wei = None
 
             # Stop on failure - don't execute subsequent intents
             if not intent_result.success:
@@ -2038,6 +2063,7 @@ class StrategyRunner:
         intents: list["AnyIntent"],
         is_multi_intent: bool,
         previous_amount_received: Decimal | None,
+        previous_lp_minted_wei: int | None = None,
         market: Any,
         strategy: "StrategyProtocol",
         start_time: datetime,
@@ -2063,6 +2089,73 @@ class StrategyRunner:
         """
         if not Intent.has_chained_amount(intent):
             return intent, None, False
+
+        # VIB-5346: LP_CLOSE WEI lane. A fungible-LP close (e.g. Pendle) chains
+        # off the prior LP_OPEN's minted-LP wei, resolved into ``position_id``
+        # via ``set_resolved_amount``. This branch is evaluated BEFORE any
+        # ``previous_amount_received`` (swap-output) logic so the two lanes never
+        # cross.
+        if getattr(intent, "intent_type", None) == IntentType.LP_CLOSE:
+            # VIB-5346 PRIMARY fail-closed capability gate. ``position_id`` is a
+            # fungible LP-token wei amount ONLY for allowlisted connectors;
+            # for everything else it is a position identity (NFT token-id,
+            # bin-id, pool address). Reject non-allowlisted protocols BEFORE
+            # resolving the minted wei — otherwise we would write minted-
+            # liquidity wei into an NFT ``position_id`` slot (e.g.
+            # aerodrome_slipstream validates position_id is a numeric token-id
+            # and would ACCEPT the garbage). The per-connector compiler guards
+            # are defense-in-depth for the direct-compile path; this gate is
+            # the complete, primary control. Framework→framework import (the
+            # predicate lives under ``almanak/framework/``), so the
+            # connector-boundary guard is not engaged.
+            from ..strategies.lp_position_tracker import (
+                lp_close_amount_chaining_supported,
+            )
+
+            protocol = getattr(intent, "protocol", None)
+            if not lp_close_amount_chaining_supported(protocol):
+                error = (
+                    f"LP_CLOSE amount='all' chaining is not supported for protocol "
+                    f"'{protocol}': position_id is a position identity (NFT token-id / "
+                    "bin-id), not a fungible LP-token amount. Only fungible-LP "
+                    "connectors may chain a close."
+                )
+                logger.error("  %s", error)
+                result = IterationResult(
+                    status=IterationStatus.COMPILATION_FAILED,
+                    intent=intent,
+                    error=error,
+                    deployment_id=strategy.deployment_id,
+                    duration_ms=self._calculate_duration_ms(start_time),
+                )
+                return intent, result, False  # break — NEVER resolve
+            if previous_lp_minted_wei is not None:
+                logger.info(
+                    "  Resolving LP_CLOSE amount='all' to minted-LP wei %d into position_id",
+                    previous_lp_minted_wei,
+                )
+                return Intent.set_resolved_amount(intent, Decimal(previous_lp_minted_wei)), None, False
+            if self.config.dry_run:
+                logger.warning(
+                    "  LP_CLOSE amount='all' but no prior LP_OPEN minted-LP amount "
+                    "available (dry-run mode). Skipping compilation of this step."
+                )
+                result = IterationResult(
+                    status=IterationStatus.DRY_RUN,
+                    intent=intent,
+                    deployment_id=strategy.deployment_id,
+                    duration_ms=self._calculate_duration_ms(start_time),
+                )
+                return intent, result, True  # continue
+            logger.error("  LP_CLOSE amount='all' but no prior LP_OPEN minted-LP amount available")
+            result = IterationResult(
+                status=IterationStatus.COMPILATION_FAILED,
+                intent=intent,
+                error="LP_CLOSE amount='all' but no prior LP_OPEN minted-LP amount available",
+                deployment_id=strategy.deployment_id,
+                duration_ms=self._calculate_duration_ms(start_time),
+            )
+            return intent, result, False  # break
 
         if is_multi_intent and previous_amount_received is not None:
             # Multi-intent chain: resolve from previous step output
@@ -7453,8 +7546,28 @@ class StrategyRunner:
         # Resolve amount="all" if needed
         intent_to_execute = intent
         if Intent.has_chained_amount(intent) and state.previous_amount_received is not None:
-            logger.info(f"Resolving amount='all' to {state.previous_amount_received}")
-            intent_to_execute = Intent.set_resolved_amount(intent, state.previous_amount_received)
+            # VIB-5346 fail-closed: an LP_CLOSE amount="all" on a non-allowlisted
+            # connector must NEVER have the swap-output amount resolved into its
+            # ``position_id`` (a position identity, not a fungible amount). Leave
+            # the marker unresolved so the per-connector compiler guard rejects it
+            # rather than silently re-pointing the close at a garbage identity.
+            from ..strategies.lp_position_tracker import (
+                lp_close_amount_chaining_supported,
+            )
+
+            is_nonfungible_lp_close = getattr(
+                intent, "intent_type", None
+            ) == IntentType.LP_CLOSE and not lp_close_amount_chaining_supported(getattr(intent, "protocol", None))
+            if is_nonfungible_lp_close:
+                logger.error(
+                    "  LP_CLOSE amount='all' chaining is not supported for protocol "
+                    "'%s' on the bridge-wait resume path; leaving marker unresolved "
+                    "so the compiler guard rejects it.",
+                    getattr(intent, "protocol", None),
+                )
+            else:
+                logger.info(f"Resolving amount='all' to {state.previous_amount_received}")
+                intent_to_execute = Intent.set_resolved_amount(intent, state.previous_amount_received)
 
         # Get expected output for cross-chain tracking (before execution)
         dest_chain: str | None = None

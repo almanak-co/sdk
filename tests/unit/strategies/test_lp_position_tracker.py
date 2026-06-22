@@ -332,5 +332,50 @@ class TestDefensive:
         )
 
 
+# ---------------------------------------------------------------------------
+# VIB-5346 fail-closed fungible-LP-chaining allowlist
+# ---------------------------------------------------------------------------
+
+
+def test_fungible_chaining_allowlist_disjoint_from_nft_and_bin() -> None:
+    """A connector cannot be both fungible-LP-chaining AND NFT/bin-identity.
+    Guards future drift: adding a protocol to the chaining allowlist that also
+    appears in the NFT/bin sets would be a contradiction (its position_id is an
+    identity, not a fungible amount)."""
+    from almanak.framework.strategies.lp_position_tracker import (
+        _BIN_BASED_PROTOCOLS,
+        _FUNGIBLE_LP_CHAINING_PROTOCOLS,
+        _NFT_BASED_PROTOCOLS,
+    )
+
+    assert _FUNGIBLE_LP_CHAINING_PROTOCOLS.isdisjoint(_NFT_BASED_PROTOCOLS)
+    assert _FUNGIBLE_LP_CHAINING_PROTOCOLS.isdisjoint(_BIN_BASED_PROTOCOLS)
+
+
+@pytest.mark.parametrize(
+    ("protocol", "expected"),
+    [
+        ("pendle", True),
+        ("uniswap_v3", False),
+        ("uniswap_v4", False),
+        ("traderjoe_v2", False),
+        ("aerodrome_slipstream", False),
+        ("velodrome_slipstream", False),
+        ("sushiswap_v3", False),
+        ("pancakeswap_v3", False),
+        ("curve", False),
+        ("fluid_dex_lp", False),
+        (None, False),
+        ("", False),
+    ],
+)
+def test_lp_close_amount_chaining_supported(protocol, expected) -> None:
+    from almanak.framework.strategies.lp_position_tracker import (
+        lp_close_amount_chaining_supported,
+    )
+
+    assert lp_close_amount_chaining_supported(protocol) is expected
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

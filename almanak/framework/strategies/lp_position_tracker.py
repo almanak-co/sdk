@@ -83,6 +83,23 @@ _NFT_BASED_PROTOCOLS: frozenset[str] = frozenset(
     }
 )
 
+# VIB-5346 — Fail-closed allowlist: connectors whose LP_CLOSE ``position_id`` IS
+# a fungible LP-token wei amount, so ``amount="all"`` chaining can resolve the
+# prior LP_OPEN's minted-LP wei into it. A connector must OPT IN here; anything
+# not listed is rejected (NFT token-ids, bin-ids, pool addresses, uncategorised
+# — all unsafe). This is the single source of truth for the runner-level
+# capability gate that fails closed BEFORE the minted wei is resolved into
+# ``position_id`` (see ``StrategyRunner._resolve_chained_amount_for_intent``).
+_FUNGIBLE_LP_CHAINING_PROTOCOLS: frozenset[str] = frozenset({"pendle"})
+
+
+def lp_close_amount_chaining_supported(protocol: str | None) -> bool:
+    """True iff the protocol's LP_CLOSE ``position_id`` is a fungible LP-token
+    wei amount (so ``amount="all"`` chaining is safe). Fail-closed allowlist:
+    any protocol not explicitly listed in ``_FUNGIBLE_LP_CHAINING_PROTOCOLS``
+    (including ``None``) returns ``False``."""
+    return protocol in _FUNGIBLE_LP_CHAINING_PROTOCOLS
+
 
 @dataclass(frozen=True)
 class _PositionKey:

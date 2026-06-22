@@ -61,6 +61,25 @@ class AerodromeCompiler(BaseConcentratedLiquidityCompiler):
         return compile_lp_open_aerodrome(impl, intent)
 
     def compile_lp_close(self, ctx: CLCompilerContext, intent: LPCloseIntent) -> CompilationResult:
+        # VIB-5346 defense-in-depth: Aerodrome/Velodrome Slipstream position_id is
+        # an NFT token-id (and the Slipstream close path VALIDATES it is numeric,
+        # so it would otherwise ACCEPT minted-LP wei as a token-id); classic
+        # routes key on pool/identity. Reject amount="all" chaining via the shared
+        # fail-closed allowlist (the runner gate is the primary control).
+        from almanak.framework.strategies.lp_position_tracker import (
+            lp_close_amount_chaining_supported,
+        )
+
+        protocol = getattr(intent, "protocol", None) or ctx.protocol
+        if getattr(intent, "is_chained_amount", False) and not lp_close_amount_chaining_supported(protocol):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"LP_CLOSE amount='all' chaining is not supported for {protocol}: "
+                    "position_id is a position identity (NFT token-id), not a fungible amount"
+                ),
+                intent_id=intent.intent_id,
+            )
         impl = _AerodromeCompileImpl(ctx)
         if ctx.protocol == "aerodrome_slipstream":
             return compile_lp_close_aerodrome_slipstream(impl, intent)

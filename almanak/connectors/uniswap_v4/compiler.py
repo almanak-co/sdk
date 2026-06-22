@@ -168,6 +168,24 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
     # crap-allowlist: VIB-4688 — pre-existing logic (cc=15, at threshold); coverage-driven score from phase-2 fold relocation. Unit-coverage backfill tracked in VIB-4688.
     def compile_lp_close(self, ctx: BaseCompilerContext, intent: LPCloseIntent) -> CompilationResult:
         """Compile LP_CLOSE intent for Uniswap V4 via PositionManager."""
+        # VIB-5346 defense-in-depth: position_id is an NFT/identity token-id for
+        # Uniswap V4, not a fungible amount. Reject amount="all" chaining via the
+        # shared fail-closed allowlist (the runner gate is the primary control;
+        # this guards the direct-compile path).
+        from almanak.framework.strategies.lp_position_tracker import (
+            lp_close_amount_chaining_supported,
+        )
+
+        protocol = getattr(intent, "protocol", None) or "uniswap_v4"
+        if getattr(intent, "is_chained_amount", False) and not lp_close_amount_chaining_supported(protocol):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    "LP_CLOSE amount='all' chaining is not supported for uniswap_v4: "
+                    "position_id is a position identity (NFT token-id), not a fungible amount"
+                ),
+                intent_id=intent.intent_id,
+            )
         result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)
 
         try:

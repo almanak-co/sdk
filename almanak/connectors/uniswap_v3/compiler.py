@@ -412,6 +412,24 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
 
     def compile_lp_close(self, ctx: CLCompilerContext, intent: LPCloseIntent) -> CompilationResult:
         protocol = self._protocol(ctx, intent.protocol)
+        # VIB-5346 defense-in-depth: position_id is an NFT/identity token-id for
+        # Uniswap V3 forks (uniswap_v3 / sushiswap_v3 / pancakeswap_v3), not a
+        # fungible amount. Reject amount="all" chaining via the shared fail-closed
+        # allowlist (the runner gate is the primary control; this guards the
+        # direct-compile path).
+        from almanak.framework.strategies.lp_position_tracker import (
+            lp_close_amount_chaining_supported,
+        )
+
+        if getattr(intent, "is_chained_amount", False) and not lp_close_amount_chaining_supported(protocol):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"LP_CLOSE amount='all' chaining is not supported for {protocol}: "
+                    "position_id is a position identity (NFT token-id), not a fungible amount"
+                ),
+                intent_id=intent.intent_id,
+            )
         result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)
         transactions: list[TransactionData] = []
         warnings: list[str] = []

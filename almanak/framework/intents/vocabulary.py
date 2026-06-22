@@ -443,7 +443,12 @@ class LPCloseIntent(BaseIntent):
     """Intent to close a liquidity position.
 
     Attributes:
-        position_id: Identifier of the position to close (e.g., NFT token ID)
+        position_id: Identifier of the position to close (e.g., NFT token ID).
+            When ``amount="all"`` is set, ``position_id`` is resolved at
+            execution time from the prior LP_OPEN's minted-LP wei (the runner
+            writes the chained wei integer into this field as its string form).
+            When ``amount is None`` (the default), the literal ``position_id``
+            is used unchanged — byte-identical to historical behaviour.
         pool: Pool address (optional, for validation)
         collect_fees: Whether to collect accumulated fees
         protocol: LP protocol (e.g., "uniswap_v3", "camelot")
@@ -451,6 +456,23 @@ class LPCloseIntent(BaseIntent):
         protocol_params: Optional protocol-specific parameters (e.g., V4 requires
             ``{"liquidity": <int>, "currency0": "<addr>", "currency1": "<addr>"}``
             from an on-chain position query)
+        amount: Pure opt-in MARKER for WEI-denominated chaining (VIB-5346). The
+            only accepted value is the literal ``"all"``; a numeric Decimal is
+            rejected (close-all is the only meaningful chained semantic for a
+            fungible LP position, and a numeric ``amount`` would be a second
+            silent carrier). When ``"all"``, the runner resolves the prior
+            LP_OPEN minted-LP wei into ``position_id``; the compiler still reads
+            ``int(position_id)`` and never sees ``"all"``. Only fungible-LP
+            connectors on the fail-closed allowlist
+            (``_FUNGIBLE_LP_CHAINING_PROTOCOLS`` in
+            ``almanak.framework.strategies.lp_position_tracker``; currently only
+            Pendle) support this. The runner-level capability gate
+            (``StrategyRunner._resolve_chained_amount_for_intent``) is the
+            PRIMARY control: it REJECTS any non-allowlisted protocol
+            (NFT token-ids, bin-ids, pool/wrapper identities, uncategorised) with
+            a COMPILATION_FAILED result BEFORE the minted wei is resolved into
+            ``position_id``. Per-connector LP_CLOSE compiler guards are
+            defense-in-depth for the direct-compile path only.
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
     """
@@ -461,8 +483,34 @@ class LPCloseIntent(BaseIntent):
     protocol: str = "uniswap_v3"
     chain: str | None = None
     protocol_params: dict[str, Any] | None = None
+    amount: OptionalChainedAmount = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
+
+    @model_validator(mode="after")
+    def validate_lp_close_intent(self) -> "LPCloseIntent":
+        """Validate the LP_CLOSE chaining marker.
+
+        ``amount`` is a pure opt-in marker: the only accepted value is the
+        literal ``"all"``. A numeric Decimal is rejected — close-all is the
+        only meaningful chained semantic for a fungible LP position, and a
+        numeric ``amount`` would be a second silent carrier alongside
+        ``position_id``. When ``amount is None`` (the historical invariant),
+        ``position_id`` must be a non-empty string.
+        """
+        if self.amount is not None:
+            if self.amount != "all":
+                raise ValueError(
+                    "LPCloseIntent.amount must be the literal 'all' (or None); numeric amounts are not supported"
+                )
+        elif not isinstance(self.position_id, str) or not self.position_id:
+            raise ValueError("position_id must be a non-empty string when amount is None")
+        return self
+
+    @property
+    def is_chained_amount(self) -> bool:
+        """Check if this intent uses a chained amount from previous step."""
+        return self.amount == "all"
 
     @property
     def intent_type(self) -> IntentType:
@@ -473,6 +521,10 @@ class LPCloseIntent(BaseIntent):
         """Serialize the intent to a dictionary."""
         data = self.model_dump(mode="json")
         data["type"] = self.intent_type.value
+        # Preserve the "all" marker as a string so it round-trips through
+        # deserialize (mirrors SwapIntent.serialize).
+        if self.amount == "all":
+            data["amount"] = "all"
         return data
 
     @classmethod
@@ -939,18 +991,29 @@ class Intent:
         protocol: str = "uniswap_v3",
         chain: str | None = None,
         protocol_params: dict[str, Any] | None = None,
+        amount: ChainedAmount | None = None,
         registry_handle: str | None = None,
     ) -> LPCloseIntent:
         """Create an LP close intent.
 
         Args:
-            position_id: Identifier of the position to close
+            position_id: Identifier of the position to close. Ignored as a
+                literal when ``amount="all"`` is set (the runner overwrites it
+                with the prior LP_OPEN minted-LP wei); pass any placeholder.
             pool: Pool address (optional, for validation)
             collect_fees: Whether to collect accumulated fees (default True)
             protocol: LP protocol (default "uniswap_v3")
             chain: Target chain for execution (defaults to strategy's primary chain)
             protocol_params: Optional protocol-specific parameters (e.g., V4 requires
                 liquidity, currency0, currency1 from an on-chain position query)
+            amount: WEI-denominated chaining marker (VIB-5346). The only accepted
+                value is the literal ``"all"``. When set, the runner resolves the
+                prior LP_OPEN minted-LP wei into ``position_id`` at execution time.
+                Only fungible-LP connectors on the fail-closed allowlist (e.g.
+                Pendle) support it. The runner-level capability gate REJECTS any
+                non-allowlisted protocol (NFT token-ids, bin-ids, pool/wrapper
+                identities) with COMPILATION_FAILED BEFORE resolving the wei;
+                per-connector compiler guards are defense-in-depth only.
 
         Returns:
             LPCloseIntent: The created LP close intent
@@ -961,6 +1024,10 @@ class Intent:
 
             # Close without collecting fees
             intent = Intent.lp_close(position_id="12345", collect_fees=False)
+
+            # Chain a fungible-LP close off the prior LP_OPEN's minted liquidity
+            # (Pendle): the runner resolves the minted wei into position_id.
+            intent = Intent.lp_close(position_id="0", protocol="pendle", amount="all")
         """
         return LPCloseIntent(
             position_id=position_id,
@@ -969,6 +1036,7 @@ class Intent:
             protocol=protocol,
             chain=chain,
             protocol_params=protocol_params,
+            amount=amount,
             registry_handle=registry_handle,
         )
 
@@ -2651,7 +2719,13 @@ class Intent:
 
         Args:
             intent: The intent to update
-            resolved_amount: The concrete amount to use
+            resolved_amount: The concrete amount to use. For most intents this is
+                a human-unit token amount that lands on the ``amount`` /
+                ``collateral_amount`` field. For LP_CLOSE ``amount="all"``
+                (VIB-5346) the units contract widens: the caller passes an
+                integer-valued Decimal (the prior LP_OPEN minted-LP **wei**) and
+                it lands on ``position_id`` as a clean integer string (no
+                exponent / decimal point) that ``int(position_id)`` parses.
 
         Returns:
             A new intent instance with the resolved amount
@@ -2662,8 +2736,31 @@ class Intent:
         # Get the serialized form
         data = intent.serialize()
 
+        # VIB-5346: LP_CLOSE WEI lane. When the LP_CLOSE chaining marker is set,
+        # the resolved value is the prior LP_OPEN minted-LP wei (a fungible
+        # amount), and it lands on ``position_id`` — NOT on a generic ``amount``
+        # field. Clear the marker so the deserialized intent is a plain
+        # literal-position_id close (the compiler reads int(position_id) and
+        # never sees "all"). Guarded strictly on amount == "all" so literal
+        # closes are untouched. This branch must come BEFORE the generic
+        # ``amount`` rewrite below, otherwise the marker would be consumed there.
+        if data.get("type") == "LP_CLOSE" and data.get("amount") == "all":
+            # VIB-5346 defensive: a fungible LP-token amount is strictly positive
+            # wei. A zero/negative would produce a bogus ``position_id`` (e.g.
+            # "0" or "-1") that downstream ``int(position_id)`` would silently
+            # accept. The live path passes non-negative minted-LP wei; reject
+            # the degenerate case loudly rather than emit a poisoned identity.
+            if resolved_amount <= 0:
+                raise ValueError(
+                    f"LP_CLOSE amount='all' resolved to a non-positive minted-LP wei "
+                    f"value ({resolved_amount}); cannot form a valid position_id"
+                )
+            # Normalize to an integer string: int() strips any exponent/decimal
+            # point so int(position_id) parses cleanly downstream.
+            data["position_id"] = str(int(resolved_amount))
+            data["amount"] = None
         # Update the appropriate amount field
-        if "amount" in data and data["amount"] == "all":
+        elif "amount" in data and data["amount"] == "all":
             data["amount"] = str(resolved_amount)
         elif "collateral_amount" in data and data["collateral_amount"] == "all":
             data["collateral_amount"] = str(resolved_amount)
