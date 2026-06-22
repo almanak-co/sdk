@@ -196,6 +196,22 @@ class TestGetPtToAssetRate:
         with pytest.raises(PendleOnChainError, match="getPtToAssetRate failed"):
             reader.get_pt_to_asset_rate("0xmarket")
 
+    def test_oracle_state_revert_raises_pendle_error(self, reader):
+        """VIB-5352: a reverting ``getOracleState`` (an old wound-down market
+        reverts the call on real mainnet) must surface as ``PendleOnChainError``,
+        not a raw web3 exception. ``_assert_oracle_ready`` runs in
+        ``get_pt_to_asset_rate`` BEFORE that method's own try/except, so the wrap
+        has to live in ``_read_oracle_state`` for the documented typed-error
+        contract to hold for every caller.
+        """
+        reader.pt_oracle.functions.getOracleState.return_value.call.side_effect = Exception(
+            "execution reverted"
+        )
+        with pytest.raises(PendleOnChainError, match="getOracleState failed"):
+            reader.get_pt_to_asset_rate("0xmarket")
+        # The readiness gate failed first — the rate read must NOT be attempted.
+        assert reader.pt_oracle.functions.getPtToAssetRate.return_value.call.call_count == 0
+
 
 # =========================================================================
 # Implied APY Tests (direct mode)

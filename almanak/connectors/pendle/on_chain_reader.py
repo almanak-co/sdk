@@ -341,19 +341,35 @@ class PendleOnChainReader:
         """Read ``getOracleState(market, duration)`` from the PT oracle.
 
         Returns ``(increaseCardinalityRequired, cardinality, oldestObservationSatisfied)``.
+
+        Raises:
+            PendleOnChainError: If the RPC call fails or reverts. An old wound-down
+                market reverts ``getOracleState`` on real mainnet (VIB-5352); the
+                raw web3 / gateway exception is wrapped here so the typed-error
+                contract holds for EVERY caller. This matters because
+                :meth:`_assert_oracle_ready` runs in :meth:`get_pt_to_asset_rate`
+                BEFORE that method's own try/except, so an unwrapped raw exception
+                would otherwise leak past the documented ``PendleOnChainError``
+                surface that callers rely on to emit UNMEASURED.
         """
-        if self._gateway_client is not None:
-            calldata = GET_ORACLE_STATE_SELECTOR + _encode_address_uint32(
-                market_address, PT_ORACLE_TWAP_DURATION_SECONDS
-            )
-            result = self._gateway_eth_call(self.pt_oracle_address, calldata, "pendle_oracle_state")
-            return _decode_oracle_state(result)
-        assert self.web3 is not None and self.pt_oracle is not None
-        increase_required, cardinality, oldest_ok = self.pt_oracle.functions.getOracleState(
-            self.web3.to_checksum_address(market_address),
-            PT_ORACLE_TWAP_DURATION_SECONDS,
-        ).call()
-        return bool(increase_required), int(cardinality), bool(oldest_ok)
+        try:
+            if self._gateway_client is not None:
+                calldata = GET_ORACLE_STATE_SELECTOR + _encode_address_uint32(
+                    market_address, PT_ORACLE_TWAP_DURATION_SECONDS
+                )
+                result = self._gateway_eth_call(self.pt_oracle_address, calldata, "pendle_oracle_state")
+                return _decode_oracle_state(result)
+            assert self.web3 is not None and self.pt_oracle is not None
+            increase_required, cardinality, oldest_ok = self.pt_oracle.functions.getOracleState(
+                self.web3.to_checksum_address(market_address),
+                PT_ORACLE_TWAP_DURATION_SECONDS,
+            ).call()
+            return bool(increase_required), int(cardinality), bool(oldest_ok)
+        except PendleOnChainError:
+            raise
+        except Exception as e:
+            logger.warning("Failed to read PT oracle state for %s: %s", market_address, e)
+            raise PendleOnChainError(f"getOracleState failed: {e}") from e
 
     def _assert_oracle_ready(self, market_address: str) -> None:
         """Gate the rate read on TWAP readiness — Empty≠Zero.
