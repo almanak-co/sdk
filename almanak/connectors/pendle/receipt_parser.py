@@ -24,6 +24,12 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
+from almanak.framework.execution.extract_result import (
+    ExtractError,
+    ExtractMissing,
+    ExtractOk,
+    ExtractResult,
+)
 from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData, SwapAmounts
 
 if TYPE_CHECKING:
@@ -1628,6 +1634,91 @@ class PendleReceiptParser:
             logger.warning(f"Failed to extract lp_close_data: {e}")
             return None
 
+    # =========================================================================
+    # Tagged-variant (ExtractResult) extractors — VIB-5354
+    #
+    # These are the fail-closed counterparts of the legacy ``extract_*`` methods
+    # above. They distinguish three outcomes the legacy ``X | None`` shape
+    # collapses into a single ``None`` (VIB-3159 / VIB-5354):
+    #   * ExtractOk(value)  — event present and parsed
+    #   * ExtractMissing()  — event genuinely absent from the receipt (benign)
+    #   * ExtractError()    — parse_receipt raised OR reported failure, OR the
+    #                         extractor itself raised (accounting-broken — a
+    #                         silent parse failure on a money path must never be
+    #                         indistinguishable from "no event").
+    #
+    # The ``ResultEnricher`` prefers these ``*_result`` variants over the raw
+    # methods (see ``ResultEnricher._invoke_extract`` /
+    # ``_class_has_method``), so the enricher consumes the tagged signal with no
+    # backward-compat ``DeprecationWarning``. The raw methods are retained
+    # unchanged for direct callers (strategies, intent tests) that expect the
+    # legacy return type — mirroring the canonical aave_v3 migration.
+    # =========================================================================
+
+    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractError | None:
+        """Run ``parse_receipt`` and return ``ExtractError`` if it crashed or
+        reported failure; ``None`` when parsing succeeded.
+
+        ``parse_receipt`` swallows decode exceptions internally and returns a
+        ``ParseResult(success=False, error=...)`` (see its ``except`` branch),
+        so both the raising case and the reported-failure case must be checked
+        to surface a parse error rather than treating it as "no event"
+        (VIB-3159 / VIB-5354). Canonical idiom shared with aave_v3 / uniswap_v3.
+        """
+        try:
+            parsed = self.parse_receipt(receipt)
+        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if not parsed.success:
+            return ExtractError(error=parsed.error or "parse_receipt reported failure")
+        return None
+
+    def _wrap_extract(
+        self,
+        fn: Any,
+        receipt: dict[str, Any],
+        missing_reason: str,
+        **kwargs: Any,
+    ) -> ExtractResult[Any]:
+        """Shared wrapper for the no-extra-kwargs tagged extractors.
+
+        Runs ``_strict_parse`` first so an actual parse crash / reported failure
+        propagates as ``ExtractError`` rather than being silently swallowed by
+        the legacy extractor's ``except Exception: return None``. A ``None``
+        from the legacy method then means a genuinely absent event
+        (``ExtractMissing``); any value is wrapped in ``ExtractOk``.
+
+        NOTE: ``_strict_parse`` probes ``parse_receipt(receipt)`` with NO extra
+        kwargs. This is only sound for extractors whose ``**kwargs`` do not reach
+        ``parse_receipt`` (true for all four migrated methods — their kwargs are
+        post-parse, e.g. ``pt_address`` / ``out_token_*``). Before migrating an
+        extractor whose kwargs DO change parsing (e.g. ``swap_amounts`` with
+        ``intent_swap_type``), make ``_strict_parse`` forward those kwargs, or the
+        probe and the real call could disagree.
+        """
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        try:
+            value = fn(receipt, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — extractor crash is accounting-critical
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason=missing_reason)
+        return ExtractOk(value=value)
+
+    def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[str]:
+        """Fail-closed variant of :meth:`extract_position_id` — see VIB-5354."""
+        return self._wrap_extract(self.extract_position_id, receipt, "no Pendle Mint/Burn event in receipt")
+
+    def extract_lp_open_data_result(self, receipt: dict[str, Any]) -> "ExtractResult[LPOpenData]":
+        """Fail-closed variant of :meth:`extract_lp_open_data` — see VIB-5354."""
+        return self._wrap_extract(self.extract_lp_open_data, receipt, "no Pendle Mint event in receipt")
+
+    def extract_lp_close_data_result(self, receipt: dict[str, Any]) -> "ExtractResult[LPCloseData]":
+        """Fail-closed variant of :meth:`extract_lp_close_data` — see VIB-5354."""
+        return self._wrap_extract(self.extract_lp_close_data, receipt, "no Pendle Burn event in receipt")
+
     @staticmethod
     def _pt_transfer_amount(
         transfer_events: "list[TransferEventData]",
@@ -1803,6 +1894,38 @@ class PendleReceiptParser:
         return PrimitiveMoneyLegs.of(
             PrimitiveMoneyLeg.input(pt_symbol, pt_amount),
             PrimitiveMoneyLeg.output(out_token, out_amount),
+        )
+
+    def extract_primitive_money_legs_result(
+        self,
+        receipt: dict[str, Any],
+        *,
+        pt_address: str | None = None,
+        out_token_symbol: str | None = None,
+        out_token_address: str | None = None,
+        out_token_decimals: int | None = None,
+    ) -> "ExtractResult[PrimitiveMoneyLegs]":
+        """Fail-closed variant of :meth:`extract_primitive_money_legs` — VIB-5354.
+
+        Forwards the compiler-threaded redeem / LP_CLOSE kwargs unchanged so the
+        ``ResultEnricher`` (which builds them via :meth:`build_extract_kwargs`)
+        gets the same INPUT/OUTPUT-leg semantics as the legacy method, now with
+        a parse crash surfaced as ``ExtractError`` instead of a silent ``None``.
+
+        ``ExtractMissing`` here preserves the legacy ``None`` contract: a non-PT
+        / unmeasured Pendle withdraw or LP close where the extractor declines to
+        declare typed legs (so the US-009 ledger dispatcher falls back to its
+        legacy guess — blueprint 27 §6.6 / §10.10, Empty != Zero). It is NOT a
+        parse error; only an actual crash / reported failure is ``ExtractError``.
+        """
+        return self._wrap_extract(
+            self.extract_primitive_money_legs,
+            receipt,
+            "no resolvable Pendle PT-redeem / LP_CLOSE money legs in receipt",
+            pt_address=pt_address,
+            out_token_symbol=out_token_symbol,
+            out_token_address=out_token_address,
+            out_token_decimals=out_token_decimals,
         )
 
     def _lp_close_money_legs(
