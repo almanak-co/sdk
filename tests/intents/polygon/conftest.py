@@ -58,8 +58,11 @@ def _seed_wallet_state(web3: Web3, rpc_url: str) -> str:
     required_tokens = {"USDC", "WETH"}
     failed_tokens: list[str] = []
 
-    # Fund with 100 native tokens (MATIC on Polygon)
-    fund_native_token(TEST_WALLET, 100 * 10**18, rpc_url)
+    # Fund with 1,000 native tokens (MATIC on Polygon). Native-keyed V4 LP
+    # collect-fees coverage deposits 500 MATIC before executing additional
+    # Polygon-priced transactions; 100 MATIC made that test depend on Anvil's
+    # default account balance instead of this fixture's explicit contract.
+    fund_native_token(TEST_WALLET, 1_000 * 10**18, rpc_url)
 
     # Fund with common tokens
     # Note: WETH on Polygon is bridged (not wrapped native), so all tokens

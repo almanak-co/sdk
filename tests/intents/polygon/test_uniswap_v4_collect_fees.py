@@ -60,6 +60,7 @@ To run:
 """
 
 import json
+from collections.abc import Generator
 from decimal import Decimal
 
 import pytest
@@ -77,14 +78,19 @@ from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPOpenIntent
+from almanak.gateway.utils.rpc_provider import get_rpc_url
+from tests.conftest_gateway import AnvilFixture
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     assert_accounting_persisted,
     assert_no_accounting_on_failure,
     format_token_amount,
+    fund_native_token,
     get_token_balance,
     get_token_decimals,
+    seed_wallet_state_with_recovery,
 )
+from tests.intents.polygon.conftest import _seed_wallet_state
 
 # VIB-4483: native-keyed V4 pool (currency0=0x0) — its modifyLiquidities calldata
 # shape isn't in the ERC20-derived Zodiac synthetic-discovery manifest, so every
@@ -102,6 +108,70 @@ pytestmark = pytest.mark.no_zodiac(
 # =============================================================================
 
 CHAIN_NAME = "polygon"
+
+# VIB-4427: this test proves same-pool V4 fee accrual by opening an LP position,
+# moving the pool with a counter-swap, then collecting fees. Pool depth and
+# Polygon gas price drift enough across CI's weekly fork pin that the fixed LP /
+# counter-swap sizing can oscillate between passing, slippage aborts, and
+# insufficient-gas funding failures. Keep this module on the fork block used to
+# calibrate COUNTER_SWAP_USDC / SWAP_MAX_SLIPPAGE / gas headroom instead of the
+# workflow's rolling cache pin.
+POLYGON_V4_COLLECT_FEES_FORK_BLOCK = 88430000
+
+
+@pytest.fixture(scope="module")
+def anvil_polygon() -> Generator[AnvilFixture, None, None]:
+    """Run this module against the calibrated Polygon V4 collect-fees fork."""
+    try:
+        fork_rpc_url = get_rpc_url(CHAIN_NAME, network="mainnet")
+    except ValueError as exc:
+        pytest.skip(f"Cannot start pinned Polygon Anvil fork: {exc}")
+        return
+
+    anvil = AnvilFixture(
+        chain=CHAIN_NAME,
+        fork_rpc_url=fork_rpc_url,
+        fork_block_number=POLYGON_V4_COLLECT_FEES_FORK_BLOCK,
+    )
+    try:
+        anvil.start()
+    except RuntimeError as exc:
+        pytest.skip(f"Failed to start pinned Polygon Anvil fork: {exc}")
+        return
+
+    try:
+        yield anvil
+    finally:
+        anvil.stop()
+
+
+@pytest.fixture(scope="module")
+def _eoa_funded_wallet(web3, anvil_rpc_url: str, anvil_instance: AnvilFixture) -> str:
+    """Seed the wallet on this module's dedicated pinned fork WITHOUT the shared
+    cross-module pristine reset.
+
+    Overrides the Polygon conftest's ``_eoa_funded_wallet``. That fixture calls
+    ``reset_fork_to_pristine(web3)``, whose ``_session_pristine`` cache is keyed by
+    ``chain_id`` only. This module runs its own module-scoped ``anvil_polygon``
+    fork (pinned to ``POLYGON_V4_COLLECT_FEES_FORK_BLOCK``) alongside the
+    session-scoped Polygon fork the other ~18 polygon modules use. With both forks
+    sharing ``_session_pristine[137]`` in the single ``pytest tests/intents/polygon/
+    -n0`` process, the shared reset would try to ``evm_revert`` a snapshot captured
+    on the *session* fork against this *separate* fork — returning ``False``,
+    raising under ``strict=True``, and corrupting the session fork's pristine entry
+    for sibling modules (e.g. ``test_uniswap_v4_lp_close``).
+
+    A dedicated fork is fresh at module start and torn down at module end, so
+    cross-module pristine reversion is unnecessary here — seed directly. (PR #2963)
+    """
+    return seed_wallet_state_with_recovery(
+        seed_wallet_state=_seed_wallet_state,
+        web3=web3,
+        rpc_url=anvil_rpc_url,
+        anvil_instance=anvil_instance,
+        chain_name=CHAIN_NAME,
+    )
+
 
 # MATIC/USDC pool with 0.3% fee tier. V4 pools support native MATIC as
 # currency0 (address(0)); ``UniswapV4Adapter._resolve_token(for_v4_pool=True)``
@@ -158,19 +228,20 @@ LP_RANGE_UPPER = Decimal("0.20")
 # UR/Permit2 path expects wrapped-native; and (3) we already have a
 # verifiable fee-accrual signal via the USDC leg alone.
 #
-# Sizing (VIB-4483, re-probed 2026-06-13 at fork block ~88.43M): the
-# native MATIC/USDC fee=3000 pool now carries liquidity ~1.07e17 at
-# tick ~-302226 (~$0.075 USDC/MATIC). That is ~20x thinner than the
-# ~2.09e18 the original (2026-05-14) probe recorded — these polygon V4
-# tests fork the LATEST block (no pinned fork-block), so pool depth drifts
-# with the live chain. A 2,000 USDC counter-swap exceeds the 0.10 slippage
-# tolerance against the current depth and reverts with the V4 router's
-# bare slippage abort ("Invalid revert data (too short): 0x"). 200 USDC
-# (~2,670 MATIC out) stays comfortably inside slippage at current depth
-# while still charging ~0.6 USDC of pool-wide fees, of which our in-range
-# position captures a wei-positive USDC Transfer at COLLECT_FEES.
+# Sizing (VIB-4483, re-probed 2026-06-13 at fork block 88,430,000): the
+# native MATIC/USDC fee=3000 pool carries liquidity ~1.07e17 at tick
+# ~-302226 (~$0.075 USDC/MATIC). That is ~20x thinner than the ~2.09e18
+# the original (2026-05-14) probe recorded, so this module pins the fork
+# block above. A 2,000 USDC counter-swap exceeds the 0.10 slippage tolerance
+# against this depth and reverts with the V4 router's bare slippage abort
+# ("Invalid revert data (too short): 0x"). 200 USDC (~2,670 MATIC out)
+# stays comfortably inside slippage at the pinned depth while still charging
+# ~0.6 USDC of pool-wide fees, of which our in-range position captures a
+# wei-positive USDC Transfer at COLLECT_FEES.
 COUNTER_SWAP_USDC = Decimal("200")
 SWAP_MAX_SLIPPAGE = Decimal("0.10")
+NATIVE_MATIC_GAS_HEADROOM = Decimal("25")
+POST_LP_OPEN_NATIVE_TOP_UP_MATIC = Decimal("100")
 
 
 # =============================================================================
@@ -321,6 +392,7 @@ async def _open_v4_position(
 
 
 async def _counter_swap_to_generate_fees(
+    web3: Web3,
     funded_wallet: str,
     orchestrator: ExecutionOrchestrator,
     price_oracle: dict[str, Decimal],
@@ -360,8 +432,30 @@ async def _counter_swap_to_generate_fees(
     )
     swap_compilation = compiler.compile(swap_intent)
     if swap_compilation.status.value != "SUCCESS" or swap_compilation.action_bundle is None:
+        print(f"Counter-swap compilation failed: {swap_compilation.error}")
         return False
     swap_result = await orchestrator.execute(swap_compilation.action_bundle)
+    if not swap_result.success:
+        wallet_balance = web3.eth.get_balance(funded_wallet)
+        print(
+            "Counter-swap execution failed: "
+            f"error={swap_result.error!r}, wallet_native_balance={wallet_balance}"
+        )
+        # Compiler-stage transactions only carry to/value/gas_estimate; gas-price
+        # and fee fields are populated later by the orchestrator, so they would
+        # always print None here. Use safe access over the fields that exist.
+        for i, tx in enumerate(swap_compilation.action_bundle.transactions):
+            if isinstance(tx, dict):
+                tx_to = tx.get("to")
+                tx_value = tx.get("value")
+                tx_gas_estimate = tx.get("gas_estimate") or tx.get("gas") or tx.get("gas_limit")
+            else:
+                tx_to = getattr(tx, "to", None)
+                tx_value = getattr(tx, "value", None)
+                tx_gas_estimate = getattr(tx, "gas_estimate", None) or getattr(tx, "gas_limit", None)
+            print(
+                f"  counter-swap tx[{i}]: to={tx_to} value={tx_value} gas_estimate={tx_gas_estimate}"
+            )
     return swap_result.success
 
 
@@ -545,10 +639,11 @@ class TestUniswapV4CollectFeesIntent:
         matic_before_setup = web3.eth.get_balance(funded_wallet)
         usdc_before_setup = get_token_balance(web3, usdc_addr, funded_wallet)
         required_usdc = int((LP_AMOUNT_USDC + COUNTER_SWAP_USDC) * (10 ** usdc_decimals))
-        # Native MATIC budget: LP deposit + gas headroom (counter-swap
-        # is USDC -> MATIC so it does not spend wallet's MATIC).
+        # Native MATIC budget: LP deposit + gas headroom calibrated to the
+        # pinned fork block above (counter-swap is USDC -> MATIC so it does
+        # not spend wallet's MATIC).
         required_matic = int(
-            (LP_AMOUNT_MATIC + Decimal("2")) * (10**18)
+            (LP_AMOUNT_MATIC + NATIVE_MATIC_GAS_HEADROOM) * (10**18)
         )
         assert matic_before_setup >= required_matic, (
             f"Insufficient native MATIC funding for test setup: "
@@ -571,6 +666,17 @@ class TestUniswapV4CollectFeesIntent:
         print(f"Opened position: id={position_id}, liquidity={liquidity_before}")
         print(f"Currencies: {currency0[:10]}.../{currency1[:10]}...")
 
+        # LP_OPEN can consume almost all native MATIC available to the test
+        # wallet on this fork before the counter-swap runs. The fee-generation
+        # swap is USDC -> MATIC and has tx.value=0, but the signer still needs
+        # native MATIC for Polygon-priced gas. Top up as setup before recording
+        # the COLLECT_FEES pre-balances below so collection deltas stay exact.
+        fund_native_token(
+            funded_wallet,
+            int(POST_LP_OPEN_NATIVE_TOP_UP_MATIC * (10**18)),
+            anvil_rpc_url,
+        )
+
         # Verify the LP pool key is the native-MATIC pool (currency0 must
         # be address(0)). If LP_OPEN ever shifted to a non-native pool
         # key, the same-pool fee-accrual invariant below would silently
@@ -592,7 +698,7 @@ class TestUniswapV4CollectFeesIntent:
         # during COLLECT_FEES.
         print("\n--- Counter-swap to accrue fees (USDC -> MATIC) ---")
         counter_swap_executed = await _counter_swap_to_generate_fees(
-            funded_wallet, orchestrator, prices_with_native,
+            web3, funded_wallet, orchestrator, prices_with_native,
         )
         print(f"Counter-swap executed: {counter_swap_executed}")
         assert counter_swap_executed, (

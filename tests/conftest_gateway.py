@@ -102,15 +102,20 @@ class AnvilFixture:
         port: Dynamically allocated port for this Anvil instance
     """
 
-    def __init__(self, chain: str, fork_rpc_url: str):
+    def __init__(self, chain: str, fork_rpc_url: str, fork_block_number: int | None = None):
         """Initialize Anvil fixture.
 
         Args:
             chain: Chain name for the fork
             fork_rpc_url: Mainnet RPC URL to fork from
+            fork_block_number: Optional explicit block to fork from. When set,
+                this overrides ``ANVIL_FORK_BLOCK_<CHAIN>`` / ``ANVIL_FORK_BLOCK``
+                for tests that must remain pinned to a calibrated historical
+                state instead of the weekly CI pin.
         """
         self.chain = chain
         self.fork_rpc_url = fork_rpc_url
+        self.fork_block_number = fork_block_number
         self.port = find_free_port()
 
         self._manager: RollingForkManager | None = None
@@ -365,11 +370,16 @@ class AnvilFixture:
 
             # Allow pinning the fork block via env var to maximise --cache-path hit rate.
             # Use chain-specific var first (e.g. ANVIL_FORK_BLOCK_ARBITRUM), then generic.
-            fork_block_env = (
-                os.environ.get(f"ANVIL_FORK_BLOCK_{chain_for_manager.upper()}")
-                or os.environ.get("ANVIL_FORK_BLOCK")
-            )
-            fork_block_number = int(fork_block_env) if fork_block_env else None
+            # Some fork-state-sensitive tests override the weekly CI pin with an
+            # explicit calibrated block via ``AnvilFixture(..., fork_block_number=...)``.
+            if self.fork_block_number is not None:
+                fork_block_number = self.fork_block_number
+            else:
+                fork_block_env = (
+                    os.environ.get(f"ANVIL_FORK_BLOCK_{chain_for_manager.upper()}")
+                    or os.environ.get("ANVIL_FORK_BLOCK")
+                )
+                fork_block_number = int(fork_block_env) if fork_block_env else None
 
             self._manager = RollingForkManager(
                 rpc_url=self.fork_rpc_url,
