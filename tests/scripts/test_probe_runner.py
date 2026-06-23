@@ -247,8 +247,14 @@ def test_classify_failure(probe_runner, overrides, expected):
 
 
 def test_all_failure_types_are_in_the_enum(probe_runner):
-    for failure_type, _ in probe_runner._FAILURE_MARKERS:
+    # VIB-5373: the marker table + vocabulary moved into the shared
+    # nightly_classify module (both runners use it). The marker->type
+    # consistency contract still holds, just relocated. Reach it through the
+    # already-imported module reference to avoid a duplicate module instance.
+    nc = probe_runner.nightly_classify
+    for failure_type, _ in nc._FAILURE_MARKERS:
         assert failure_type in probe_runner.FAILURE_TYPES
+        assert failure_type in nc.FAILURE_TYPES
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -370,3 +376,76 @@ def test_debug_log_contains_budget_lines(probe_runner, tmp_path):
     assert "## base_swap_relay [chain=base]: PASS (EXECUTED)" in log
     assert "Budget: $10.00 -> $9.95 (loss: $0.05)" in log
     assert "Failure type: execution_revert" in log
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# VIB-5373(b/c) Action Items dedup + root-cause label
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_action_items_dedup_twin_failure_types_to_one_row(probe_runner):
+    """Two FAIL results for the SAME (strategy, chain) that classified as
+    different failure types must produce ONE Action Item row (keyed on the
+    stable fingerprint), not two — the core VIB-5373(b) regression guard."""
+    r1 = probe_runner._empty_result("euler_cycle", "arbitrum")
+    r1.update({"status": "FAIL", "outcome": "ERROR", "failure_type": "execution_revert"})
+    r2 = probe_runner._empty_result("euler_cycle", "arbitrum")
+    r2.update({"status": "FAIL", "outcome": "ERROR", "failure_type": "other"})
+
+    # Build the report to a temp file and read back the Action Items section.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "full_report.md"
+        probe_runner.write_full_report(
+            out, [r1, r2], [], "0xwallet", "abc1234", "https://example.test", 3.0,
+        )
+        text = out.read_text()
+
+    # Exactly one P0 row for the single fingerprint.
+    action_section = text.split("## Action Items", 1)[1].split("##", 1)[0]
+    p0_rows = [ln for ln in action_section.splitlines() if ln.strip().startswith("| P0 ")]
+    assert len(p0_rows) == 1
+    assert "euler_cycle:arbitrum" in p0_rows[0]
+
+
+def test_action_items_label_uses_root_cause(probe_runner):
+    """When a failure carries a recognized root cause, the action label is the
+    cause, not the raw failure_type/symptom (VIB-5373(c))."""
+    r = probe_runner._empty_result("opt_probe", "optimism")
+    r.update({
+        "status": "FAIL",
+        "outcome": "ERROR",
+        "failure_type": "anvil_fork_start_failure",
+        "root_cause": "Managed Anvil fork failed to start",
+    })
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "full_report.md"
+        probe_runner.write_full_report(
+            out, [r], [], "0xwallet", "abc1234", "https://example.test", 3.0,
+        )
+        text = out.read_text()
+
+    action_section = text.split("## Action Items", 1)[1]
+    assert "Fix Managed Anvil fork failed to start in opt_probe" in action_section
+
+
+def test_full_report_still_round_trips_through_slack_parser_with_new_columns(probe_runner, slack_helper):
+    """Adding the Fingerprint/Root Cause columns to Action Items must NOT break
+    the Slack parser, which keys on the Detailed Results table (unchanged)."""
+    import tempfile
+
+    r = probe_runner._empty_result("base_probe", "base")
+    r.update({"status": "FAIL", "outcome": "ERROR", "failure_type": "execution_revert"})
+
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "full_report.md"
+        probe_runner.write_full_report(
+            out, [r], [], "0xwallet", "abc1234", "https://example.test", 3.0,
+        )
+        rows = slack_helper._parse_report_rows(out.read_text())
+
+    # The Detailed Results row is still parseable (Strategy/Status keyed).
+    assert any(row.get("strategy") == "base_probe" and row.get("status") == "FAIL" for row in rows)

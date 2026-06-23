@@ -317,3 +317,121 @@ def test_extract_error_filters_deprecation_warnings_as_noise(direct_runner):
     )
     error = direct_runner.extract_error("", stderr)
     assert error == "No error output"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# VIB-5373(d) manifest preflight + (a) scope-aware JSON artifact
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _make_strategy(tmp_path, name, chain, protocols, intents):
+    """Write a minimal strategy folder (strategy.py + config.json) on disk."""
+    d = tmp_path / name
+    d.mkdir(parents=True)
+    proto_lit = ", ".join(f'"{p}"' for p in protocols)
+    intent_lit = ", ".join(f'"{i}"' for i in intents)
+    (d / "strategy.py").write_text(
+        "from almanak import almanak_strategy\n\n"
+        "@almanak_strategy(\n"
+        f"    supported_protocols=[{proto_lit}],\n"
+        f"    intent_types=[{intent_lit}],\n"
+        ")\n"
+        "class S:\n    pass\n"
+    )
+    (d / "config.json").write_text(f'{{"chain": "{chain}"}}\n')
+    return d
+
+
+def test_preflight_partition_skips_unsupported_runs_supported(direct_runner, tmp_path):
+    """A structurally-impossible combo (PancakeSwap V3 on Optimism) is skipped;
+    a supported one (Uniswap V3 on Arbitrum) is kept. This is the runner-level
+    proof that an unsupported (protocol, chain, intent) is NOT enqueued."""
+    bad = _make_strategy(
+        tmp_path, "pancakeswap_v3_swap_optimism", "optimism", ["pancakeswap_v3"], ["SWAP"]
+    )
+    good = _make_strategy(
+        tmp_path, "uniswap_rsi_arbitrum", "arbitrum", ["uniswap_v3"], ["SWAP"]
+    )
+    runnable, skipped = direct_runner.preflight_partition([bad, good])
+    assert [p.name for p in runnable] == ["uniswap_rsi_arbitrum"]
+    assert len(skipped) == 1
+    assert skipped[0]["name"] == "pancakeswap_v3_swap_optimism"
+    assert "pancakeswap_v3" in skipped[0]["reason"]
+
+
+def test_preflight_partition_fails_open_on_unknown(direct_runner, tmp_path):
+    """Unresolvable protocol -> never skipped (fail-open)."""
+    s = _make_strategy(tmp_path, "mystery", "optimism", ["not_a_connector"], ["SWAP"])
+    runnable, skipped = direct_runner.preflight_partition([s])
+    assert [p.name for p in runnable] == ["mystery"]
+    assert skipped == []
+
+
+def test_results_artifact_carries_scope_and_skip_signals(direct_runner, tmp_path):
+    """The machine-readable results.json must carry the in-scope fingerprint
+    allowlist (a), per-result fingerprints + root cause (b/c), and the
+    skipped-unsupported combos (d) — the merge step drops everything else."""
+    import json
+
+    results = [
+        {
+            "name": "foo_arb",
+            "source": "demo",
+            "status": "PASS",
+            "outcome": "EXECUTED",
+            "tx_hashes": [_TX_HASH_OK],
+            "failure_type": "",
+            "root_cause": "",
+            "fingerprint": "foo_arb:arbitrum",
+        },
+        {
+            "name": "bar_arb",
+            "source": "incubating",
+            "status": "FAIL",
+            "outcome": "ERROR",
+            "tx_hashes": [],
+            "failure_type": "anvil_fork_start_failure",
+            "root_cause": "Managed Anvil fork failed to start",
+            "fingerprint": "bar_arb:arbitrum",
+        },
+        {
+            # A FAIL whose error matched no root-cause rule: root_cause is the
+            # empty string (the run_strategy `or ""` coercion). Locks the JSON
+            # type so a future regression to None/null is caught here.
+            "name": "baz_arb",
+            "source": "demo",
+            "status": "FAIL",
+            "outcome": "ERROR",
+            "tx_hashes": [],
+            "failure_type": "other",
+            "root_cause": "",
+            "fingerprint": "baz_arb:arbitrum",
+        },
+    ]
+    skipped = [{"name": "pancake_opt", "chain": "optimism", "reason": "unsupported (protocol, chain)"}]
+
+    direct_runner.write_results_artifact(
+        tmp_path, "arbitrum", "anvil", results, skipped, "deadbeef",
+    )
+    raw = (tmp_path / "results.json").read_text()
+    data = json.loads(raw)
+
+    assert data["schema_version"] == 1
+    assert data["chain"] == "arbitrum"
+    # (a) in-scope allowlist = every evaluated fingerprint.
+    assert set(data["in_scope_fingerprints"]) == {
+        "foo_arb:arbitrum", "bar_arb:arbitrum", "baz_arb:arbitrum",
+    }
+    # (b/c) per-result fingerprint + root cause survive.
+    bar = next(r for r in data["results"] if r["name"] == "bar_arb")
+    assert bar["fingerprint"] == "bar_arb:arbitrum"
+    assert bar["root_cause"] == "Managed Anvil fork failed to start"
+    assert bar["failure_type"] == "anvil_fork_start_failure"
+    # No-root-cause failure stays an empty string, never JSON null.
+    baz = next(r for r in data["results"] if r["name"] == "baz_arb")
+    assert baz["root_cause"] == ""
+    assert baz["root_cause"] is not None
+    assert '"root_cause": null' not in raw
+    # (d) skipped-unsupported list is present and NOT in results.
+    assert data["skipped_unsupported"] == skipped
+    assert "pancake_opt" not in {r["name"] for r in data["results"]}
