@@ -104,6 +104,55 @@ def test_available_high_fresh_maps_high():
     assert sent.maturity_ts == 0
 
 
+def test_days_to_maturity_passthrough_when_maturity_ts_zero():
+    """Regression (VIB-5311): a valid ``days_to_maturity`` must survive a 0 ``maturity_ts``.
+
+    The gateway resolves days-to-maturity on-chain but echoes ``maturity_ts``
+    from the (zero) request — the real-world path for any caller that does not
+    pass a maturity hint. The old ``days_to_maturity if response.maturity_ts``
+    guard nulled the valid value, leaving the PT implied-APY signal inert for
+    every such caller. ``days_to_maturity`` must pass through on its own.
+    """
+    response = _make_response(
+        availability=gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE,
+        price="32.0",
+        confidence_band=gateway_pb2.PT_PRICE_CONFIDENCE_BAND_HIGH,
+        confidence=0.99,
+        underlying_price="32.005",
+        pt_to_asset_rate="0.999858",
+        source="composition:getPtToAssetRate×aggregator",
+        timestamp=1_750_000_000,
+        maturity_ts=0,  # gateway did NOT populate it (request echo)
+        days_to_maturity=2,  # but it DID read days on-chain
+    )
+    snap, _ = _snapshot_with_response(response)
+
+    result = snap.pt_price("PT-wstETH-25JUN2026", chain="ethereum")
+
+    assert result.days_to_maturity == 2  # not None
+    assert result.maturity_ts is None  # still unpopulated (gateway follow-up)
+    assert result.pt_to_asset_rate == Decimal("0.999858")
+
+
+def test_days_to_maturity_zero_maps_to_none_empty_not_zero():
+    """A 0/unset ``days_to_maturity`` is unmeasured (None), never 0 (Empty≠Zero)."""
+    response = _make_response(
+        availability=gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE,
+        price="1.0",
+        confidence_band=gateway_pb2.PT_PRICE_CONFIDENCE_BAND_HIGH,
+        confidence=0.99,
+        underlying_price="1.0",
+        pt_to_asset_rate="1.0",
+        days_to_maturity=0,
+        maturity_ts=0,
+    )
+    snap, _ = _snapshot_with_response(response)
+
+    result = snap.pt_price("PT-sUSDe-26JUN2025")
+
+    assert result.days_to_maturity is None
+
+
 def test_available_estimated_maps_estimated():
     response = _make_response(
         availability=gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE,
@@ -370,7 +419,10 @@ def test_ambiguous_chain_raises_on_multichain_without_chain():
 
 
 def test_available_with_zero_maturity_omits_days_to_maturity():
-    # maturity_ts unset → days_to_maturity is meaningless → None (not 0-as-unknown).
+    # Both legs unset: days_to_maturity=0 is unmeasured → None (Empty≠Zero), and
+    # maturity_ts=0 → None. NOTE: days is None here because *days itself* is 0,
+    # NOT because maturity_ts is 0 — a positive days survives a 0 maturity_ts
+    # (see test_days_to_maturity_passthrough_when_maturity_ts_zero, VIB-5311).
     response = _make_response(
         availability=gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE,
         price="0.9",

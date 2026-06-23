@@ -1015,7 +1015,17 @@ class MarketSnapshot:
             confidence=confidence,
             underlying_price=_opt_decimal(response.underlying_price),
             pt_to_asset_rate=_opt_decimal(response.pt_to_asset_rate),
-            days_to_maturity=response.days_to_maturity if response.maturity_ts else None,
+            # ``days_to_maturity`` is an independent field — do NOT gate it on
+            # ``maturity_ts``. The gateway resolves days-to-maturity on-chain but
+            # only echoes ``maturity_ts`` from the (often-zero) request, so the
+            # old ``if response.maturity_ts`` guard nulled a valid days value for
+            # every caller that didn't pass a maturity hint (the normal path),
+            # leaving the PT implied-APY signal inert. The gateway root cause —
+            # ``maturity_ts`` echoing the request instead of the on-chain expiry —
+            # is tracked in VIB-5384; until then ``maturity_ts`` stays None. Trust
+            # the field on its own; proto3's 0-default → None (Empty≠Zero: 0/unset
+            # days == unmeasured, a matured PT carries no forward runway anyway).
+            days_to_maturity=response.days_to_maturity or None,
             maturity_ts=response.maturity_ts or None,
             source=response.source,
             stale=response.stale,
