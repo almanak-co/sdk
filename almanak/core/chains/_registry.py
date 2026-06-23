@@ -22,9 +22,14 @@ Usage::
 
 from __future__ import annotations
 
-from almanak.core.enums import Chain
+from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile
+from ._descriptor import CAIP2_NAMESPACE_BY_FAMILY, ChainDescriptor, GasProfile
+
+# Recognised CAIP-2 namespaces (derived from the family→namespace map). Used to
+# detect a CAIP-2-shaped input in ``resolve`` / ``try_resolve`` without
+# mistaking a bare chain name for one. VIB-5175.
+_CAIP2_NAMESPACES: frozenset[str] = frozenset(CAIP2_NAMESPACE_BY_FAMILY.values())
 
 
 class ChainRegistry:
@@ -42,6 +47,10 @@ class ChainRegistry:
     _by_enum: dict[Chain, ChainDescriptor] = {}
     _by_name: dict[str, ChainDescriptor] = {}
     _by_id: dict[int, ChainDescriptor] = {}
+    # CAIP-2 id (e.g. "eip155:42161", "solana:5eykt4UsFv8P8…") → descriptor.
+    # Keys store the reference VERBATIM (Solana's base58 genesis hash is
+    # case-sensitive); the namespace is lowercased. VIB-5175.
+    _by_caip2: dict[str, ChainDescriptor] = {}
 
     @classmethod
     def register(cls, descriptor: ChainDescriptor) -> None:
@@ -95,6 +104,28 @@ class ChainRegistry:
                 f"{cls._by_id[descriptor.chain_id].enum.name})"
             )
 
+        # Non-EVM chains must declare an explicit caip2_reference to be
+        # registered (their chain_id is the 0 sentinel and cannot serve as a
+        # CAIP-2 reference). Enforced here rather than in ChainDescriptor
+        # __post_init__ so synthetic non-EVM descriptors (test fixtures) stay
+        # buildable without one. VIB-5175.
+        if descriptor.family is not ChainFamily.EVM and not descriptor.caip2_reference:
+            raise ValueError(
+                f"Non-EVM ChainDescriptor {descriptor.enum.name} must declare a "
+                f"caip2_reference (chain_id is the non-EVM sentinel and cannot serve "
+                f"as a CAIP-2 reference)"
+            )
+
+        # CAIP-2 id must be unique. For EVM the chain_id check above already
+        # guarantees it, but non-EVM chains are keyed only by their explicit
+        # ``caip2_reference``, so guard that namespace here. VIB-5175.
+        caip2 = descriptor.caip2
+        existing_caip2 = cls._by_caip2.get(caip2)
+        if existing_caip2 is not None and existing_caip2.enum is not descriptor.enum:
+            raise ValueError(
+                f"Duplicate CAIP-2 id {caip2!r} for {descriptor.enum.name} (already used by {existing_caip2.enum.name})"
+            )
+
         # ----- commit (every validation has passed) -----
         cls._by_enum[descriptor.enum] = descriptor
         cls._by_name[descriptor.name] = descriptor
@@ -102,6 +133,7 @@ class ChainRegistry:
             cls._by_name[alias] = descriptor
         if descriptor.chain_id != 0:
             cls._by_id[descriptor.chain_id] = descriptor
+        cls._by_caip2[caip2] = descriptor
 
     @classmethod
     def get(cls, chain: Chain) -> ChainDescriptor:
@@ -121,15 +153,22 @@ class ChainRegistry:
 
     @classmethod
     def resolve(cls, name_or_alias: str) -> ChainDescriptor:
-        """Resolve any canonical name or alias to a descriptor.
+        """Resolve any canonical name, alias, or CAIP-2 id to a descriptor.
 
-        Case-insensitive; leading/trailing whitespace is stripped.
+        Case-insensitive for names/aliases; leading/trailing whitespace is
+        stripped. A CAIP-2-shaped input (``eip155:42161``,
+        ``solana:5eykt4UsFv8P8…``) is routed to :meth:`by_caip2` with the
+        reference case preserved, so ``resolve("eip155:42161")`` and
+        ``resolve("arbitrum")`` return the same descriptor (VIB-5175).
 
-        Raises ``ValueError`` for unknown chain names (matches the legacy
+        Raises ``ValueError`` for unknown chains (matches the legacy
         ``resolve_chain_name`` contract).
         """
-        key = name_or_alias.lower().strip()
-        descriptor = cls._by_name.get(key)
+        raw = name_or_alias.strip()
+        caip = cls.try_resolve_caip2(raw)
+        if caip is not None:
+            return caip
+        descriptor = cls._by_name.get(raw.lower())
         if descriptor is None:
             raise ValueError(f"Unknown chain: {name_or_alias!r}")
         return descriptor
@@ -140,9 +179,42 @@ class ChainRegistry:
 
         Used by legacy ``dict.get(chain, DEFAULT)`` call sites that want
         the previous "missing chain → fall back silently" behaviour.
+        Accepts CAIP-2 ids in addition to names/aliases (VIB-5175).
         """
-        key = name_or_alias.lower().strip()
-        return cls._by_name.get(key)
+        raw = name_or_alias.strip()
+        caip = cls.try_resolve_caip2(raw)
+        if caip is not None:
+            return caip
+        return cls._by_name.get(raw.lower())
+
+    @classmethod
+    def by_caip2(cls, caip2: str) -> ChainDescriptor:
+        """Look up a descriptor by its CAIP-2 blockchain id.
+
+        Raises ``ValueError`` for an unknown or malformed CAIP-2 id.
+        """
+        descriptor = cls.try_resolve_caip2(caip2)
+        if descriptor is None:
+            raise ValueError(f"Unknown or malformed CAIP-2 chain id: {caip2!r}")
+        return descriptor
+
+    @classmethod
+    def try_resolve_caip2(cls, value: str) -> ChainDescriptor | None:
+        """Resolve a CAIP-2 id to a descriptor, or ``None``.
+
+        Returns ``None`` when ``value`` is not CAIP-2-shaped (no ``:`` or an
+        unknown namespace), so callers can use this as a detector. The
+        namespace is lowercased; the reference is matched VERBATIM (Solana's
+        base58 genesis hash is case-sensitive). VIB-5175.
+        """
+        if not isinstance(value, str):
+            # A detector must never raise on a non-string (e.g. a mocked chain
+            # in tests); it simply isn't a CAIP-2 id.
+            return None
+        namespace, sep, reference = value.strip().partition(":")
+        if not sep or not reference or namespace.lower() not in _CAIP2_NAMESPACES:
+            return None
+        return cls._by_caip2.get(f"{namespace.lower()}:{reference}")
 
     @classmethod
     def by_id(cls, chain_id: int) -> ChainDescriptor:
@@ -208,6 +280,7 @@ class ChainRegistry:
         cls._by_enum.clear()
         cls._by_name.clear()
         cls._by_id.clear()
+        cls._by_caip2.clear()
 
 
 def register_chain(descriptor: ChainDescriptor) -> ChainDescriptor:

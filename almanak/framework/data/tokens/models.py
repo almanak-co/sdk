@@ -111,6 +111,22 @@ class TokenRef:
             provenance=data.get("provenance"),
         )
 
+    def to_caip19(self) -> str:
+        """Render this identity as a CAIP-19 asset id string.
+
+        Native tokens emit ``<caip2>/slip44:<coin_type>``; fungible tokens emit
+        ``<caip2>/erc20:<address>`` (EVM) or ``<caip2>/token:<address>``
+        (Solana SPL). Raises ``ValueError`` if the chain's native asset has no
+        registered SLIP-44 coin type. The inverse (CAIP-19 string → resolved
+        token *with decimals*) is ``TokenResolver.resolve_caip19`` — CAIP-19
+        carries identity only, not decimals. VIB-5175.
+        """
+        # Late import: the CAIP-19 codec depends on ``defaults`` (NATIVE_SENTINEL),
+        # which imports this module — a top-level import would cycle.
+        from .caip import token_ref_to_caip19
+
+        return token_ref_to_caip19(self)
+
 
 class BridgeType(Enum):
     """Token bridge status indicating origin of the token on a chain.

@@ -60,6 +60,7 @@ from ._descriptor import (
     Timeouts,
 )
 from ._registry import ChainRegistry, register_chain
+from .caip import parse_caip2, to_caip2
 from .defaults import DEFAULT_CHAIN, DEFAULT_VAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 
 # Runtime cross-check: every Chain enum member must have a descriptor.
@@ -99,5 +100,7 @@ __all__ = [
     "RpcProfile",
     "SimulationProfile",
     "Timeouts",
+    "parse_caip2",
     "register_chain",
+    "to_caip2",
 ]

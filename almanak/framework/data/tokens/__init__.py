@@ -45,6 +45,7 @@ Example:
     token = resolver.resolve_for_swap("ETH", "arbitrum")  # Returns WETH
 """
 
+from .caip import ParsedAsset, parse_caip19, token_ref_to_caip19
 from .defaults import (
     AAVE,
     ARB,
@@ -104,6 +105,10 @@ __all__ = [
     "TokenRef",
     "BridgeType",
     "ChainTokenConfig",
+    # CAIP-19 asset-id codec (VIB-5175)
+    "ParsedAsset",
+    "parse_caip19",
+    "token_ref_to_caip19",
     # Token resolution exceptions
     "TokenResolutionError",
     "TokenNotFoundError",

@@ -28,6 +28,7 @@ DESCRIPTOR = register_chain(
             coingecko_id="ethereum",
             wrapped_symbol="WETH",
             wrapped_coingecko_id="weth",
+            slip44=60,  # SLIP-44 coin type for Ether (CAIP-19 native)
         ),
         gas=GasProfile(
             buffer=1.5,

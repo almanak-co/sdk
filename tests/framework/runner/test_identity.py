@@ -59,6 +59,25 @@ class TestResolveDeploymentIdLocal:
         id2 = resolve_deployment_id(wallet_address="0xAAA", chain="base")
         assert id1 != id2
 
+    def test_caip2_not_silently_wired_into_deployment_id(self, monkeypatch):
+        """CAIP-2 adoption (VIB-5175) must NOT change the deployment_id hash input.
+
+        The hash folds the chain string verbatim, so the canonical name is
+        still hashed as ``"arbitrum"`` (not ``"eip155:42161"``). Feeding a
+        CAIP-2 string here would re-fork every existing local deployment's
+        identity — that is explicitly out of CAIP Phase-1 scope. This guard
+        fails loudly if a future change normalizes the chain to CAIP-2 before
+        hashing.
+        """
+        _local_env(monkeypatch)
+        canonical = resolve_deployment_id(wallet_address="0xAAA", chain="arbitrum")
+        key = "0xaaa:arbitrum"
+        assert canonical == f"deployment:{hashlib.sha256(key.encode()).hexdigest()[:12]}"
+        # A CAIP-2 chain string is hashed verbatim (treated as a different
+        # string), proving the resolver does not canonicalize to CAIP-2.
+        caip = resolve_deployment_id(wallet_address="0xAAA", chain="eip155:42161")
+        assert caip != canonical
+
     def test_no_wallet_raises_fatal(self, monkeypatch):
         """No wallet ⇒ FatalBootError (no bare-name fallback)."""
         _local_env(monkeypatch)

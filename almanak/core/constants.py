@@ -52,13 +52,17 @@ _CHAIN_ALIASES: MappingProxyType[str, Chain] = MappingProxyType(dict(ChainRegist
 
 
 def resolve_chain_name(chain: str) -> str:
-    """Resolve any chain alias to its canonical lowercase name.
+    """Resolve any chain alias or CAIP-2 id to its canonical lowercase name.
 
     The canonical name is derived from the Chain enum value (e.g., Chain.BSC -> "bsc").
     This normalizes aliases like "bnb" -> "bsc", "eth" -> "ethereum", "avax" -> "avalanche".
+    A CAIP-2-shaped input (``eip155:42161``, ``solana:5eykt4UsFv8P8…``) resolves to
+    the same canonical name as its alias form (VIB-5175); the reference case is
+    preserved so Solana's base58 genesis hash matches.
 
     Args:
-        chain: Chain name string (e.g., "bsc", "bnb", "eth", "arbitrum")
+        chain: Chain name, alias, or CAIP-2 id (e.g. "bsc", "bnb", "arbitrum",
+            "eip155:42161")
 
     Returns:
         Canonical lowercase chain name
@@ -66,6 +70,11 @@ def resolve_chain_name(chain: str) -> str:
     Raises:
         ValueError: If chain name is not recognized
     """
+    # CAIP-2 ids carry a case-sensitive reference (Solana), so detect and route
+    # them BEFORE lowercasing. Non-CAIP inputs fall through unchanged.
+    caip = ChainRegistry.try_resolve_caip2(chain.strip())
+    if caip is not None:
+        return caip.name
     chain_lower = chain.lower().strip()
     chain_enum = _CHAIN_ALIASES.get(chain_lower)
     if chain_enum is None:

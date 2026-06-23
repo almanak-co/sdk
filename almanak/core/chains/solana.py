@@ -37,6 +37,7 @@ DESCRIPTOR = register_chain(
             coingecko_id="solana",
             wrapped_symbol="WSOL",
             wrapped_coingecko_id="solana",
+            slip44=501,  # SLIP-44 registered coin type for SOL (CAIP-19 native)
         ),
         gas=GasProfile(
             buffer=None,
@@ -57,6 +58,10 @@ DESCRIPTOR = register_chain(
             rate_limit_rpm=300,
         ),
         explorer=Explorer(browse_url="https://solscan.io"),
+        # CAIP-2 reference for Solana mainnet: the first 32 base58 chars of the
+        # genesis block hash (chain_id=0 is the non-EVM sentinel and cannot
+        # serve as a CAIP-2 reference). VIB-5175.
+        caip2_reference="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
         # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.

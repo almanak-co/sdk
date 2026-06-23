@@ -637,10 +637,75 @@ class TokenResolver:
         with cls._instance_lock:
             cls._instance = None
 
+    def resolve_caip19(self, caip19: str, *, log_errors: bool = True, skip_gateway: bool = False) -> ResolvedToken:
+        """Resolve a CAIP-19 asset id to a fully-resolved token.
+
+        Parses the id, resolves the chain via its CAIP-2 part, then resolves the
+        asset through the normal cascade so ``decimals`` / ``symbol`` come back
+        populated (CAIP-19 carries identity only, not decimals). ``slip44``
+        assets resolve the chain's native token; ``erc20`` / ``token`` (SPL)
+        assets resolve by address. VIB-5175.
+
+        Args:
+            caip19: A CAIP-19 asset id, e.g. ``"eip155:1/erc20:0x6b17…1d0f"``
+                or ``"eip155:1/slip44:60"``.
+            log_errors: Forwarded to :meth:`resolve`.
+            skip_gateway: Forwarded to :meth:`resolve`.
+
+        Returns:
+            ResolvedToken with full metadata.
+
+        Raises:
+            ValueError: ``caip19`` is malformed, names an unknown chain, or is
+                semantically invalid for its chain (a slip44 reference that does
+                not match the chain's native coin type, or an asset namespace
+                that does not match the chain family — e.g. ``token`` on EVM or
+                an unsupported namespace like ``erc721``). Rejecting these stops
+                a distinct/invalid CAIP-19 id from silently aliasing to a real
+                asset.
+            TokenResolutionError: the asset cannot be resolved on its chain.
+
+        Example:
+            resolver.resolve_caip19("eip155:1/erc20:0x6b175474e89094c44da98b954eedeac495271d0f")
+        """
+        # Late import mirrors ``TokenRef.to_caip19`` — the CAIP-19 codec depends
+        # on ``defaults``/``models`` which this module also imports.
+        from .caip import parse_caip19
+
+        parsed = parse_caip19(caip19)
+        descriptor = ChainRegistry.by_caip2(parsed.caip2)
+        namespace = parsed.asset_namespace
+        if namespace == "slip44":
+            # Native asset. The reference MUST match the chain's registered
+            # native SLIP-44 coin type, else a foreign coin type (e.g.
+            # eip155:1/slip44:501 — SOL on Ethereum) would alias to native ETH.
+            expected = descriptor.native.slip44
+            if expected is None:
+                raise ValueError(f"Chain {descriptor.name!r} has no registered native SLIP-44 coin type")
+            if parsed.asset_reference != str(expected):
+                raise ValueError(
+                    f"CAIP-19 slip44 reference {parsed.asset_reference!r} does not match "
+                    f"{descriptor.name!r} native coin type {expected}"
+                )
+            target = descriptor.native.symbol
+        else:
+            # Fungible asset. The namespace must match the chain family (erc20
+            # on EVM, token/SPL on Solana); anything else (unsupported namespace
+            # like erc721, or a family mismatch) is rejected rather than treated
+            # as an address.
+            expected_ns = "erc20" if descriptor.family is ChainFamily.EVM else "token"
+            if namespace != expected_ns:
+                raise ValueError(
+                    f"Unsupported CAIP-19 asset namespace {namespace!r} for {descriptor.name!r} "
+                    f"(expected {expected_ns!r} or 'slip44')"
+                )
+            target = parsed.asset_reference
+        return self.resolve(target, descriptor.name, log_errors=log_errors, skip_gateway=skip_gateway)
+
     def resolve(  # noqa: C901
         self, token: str, chain: str | Chain, *, log_errors: bool = True, skip_gateway: bool = False
     ) -> ResolvedToken:
-        """Resolve a token by symbol or address on a specific chain.
+        """Resolve a token by symbol, address, or CAIP-19 asset id on a chain.
 
         This is the main resolution method. It checks:
         1. Memory cache
@@ -671,7 +736,18 @@ class TokenResolver:
 
             # By address
             token = resolver.resolve("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum")
+
+            # By CAIP-19 asset id (self-describing; ``chain`` arg is ignored)
+            token = resolver.resolve("eip155:42161/erc20:0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum")
         """
+        # CAIP-19 asset ids are self-describing (they carry their own chain via
+        # the CAIP-2 part), so a "/"-containing token is routed to
+        # resolve_caip19 and the ``chain`` argument is ignored. A "/" never
+        # appears in a bare symbol or an EVM/Solana address, so this detection
+        # is unambiguous. VIB-5175.
+        if "/" in token:
+            return self.resolve_caip19(token, log_errors=log_errors, skip_gateway=skip_gateway)
+
         start_time = time.perf_counter()
         chain_lower, chain_enum = _normalize_chain(chain)
 

@@ -22,11 +22,29 @@ VIB-4801 (parent epic VIB-4800).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from almanak.core.enums import Chain, ChainFamily
+
+# CAIP-2 (https://chainagnostic.org/CAIPs/caip-2) blockchain-id namespace per
+# execution family. EVM chains serialize as ``eip155:<chain_id>``; non-EVM
+# families (Solana, ...) carry an explicit reference — see
+# ``ChainDescriptor.caip2_reference`` — because their ``chain_id`` is the ``0``
+# non-EVM sentinel and cannot serve as a CAIP-2 reference. Every ChainFamily
+# member MUST appear here or ``ChainDescriptor.caip2`` raises KeyError at first
+# use. VIB-5175 (CAIP-2/19 adoption, Phase 1).
+CAIP2_NAMESPACE_BY_FAMILY: Mapping[ChainFamily, str] = MappingProxyType(
+    {
+        ChainFamily.EVM: "eip155",
+        ChainFamily.SOLANA: "solana",
+    }
+)
+
+# CAIP-2 reference grammar (from the spec): ``[-_a-zA-Z0-9]{1,32}``.
+_CAIP2_REFERENCE_RE = re.compile(r"^[-_a-zA-Z0-9]{1,32}$")
 
 # Recognised vendor keys for ``ChainDescriptor.external_ids`` (VIB-4851 B1).
 # Each key is a third-party data/integration vendor whose per-chain
@@ -98,6 +116,14 @@ class NativeToken:
             (ethereum-family ``"weth"``, zerog ``"wrapped-0g"``); the rest
             alias the native id (the established WAVAX/WBNB/WSOL/WMNT
             pattern from the legacy maps). ``None`` == unverified/absent.
+        slip44: SLIP-44 (https://github.com/satoshilabs/slips/blob/master/
+            slip-0044.md) registered coin type for this chain's native asset,
+            used as the CAIP-19 native-asset reference (``slip44:<coin_type>``).
+            ``None`` means "no verified SLIP-44 coin type for this chain yet" —
+            ``TokenRef.to_caip19()`` then fails loudly rather than emit a
+            non-standard native id, so values can be populated incrementally.
+            Populate from the SLIP-44 registry, NEVER guessed (ETH-denominated
+            chains are 60; SOL is 501). VIB-5175 (CAIP adoption, Phase 1).
     """
 
     symbol: str
@@ -108,6 +134,14 @@ class NativeToken:
     coingecko_id: str | None = None
     wrapped_symbol: str | None = None
     wrapped_coingecko_id: str | None = None
+    slip44: int | None = None
+
+    def __post_init__(self) -> None:
+        # SLIP-44 coin types are non-negative registry indices. A negative
+        # value is a copy/paste bug; fail loudly at registration like the
+        # sibling descriptor validations.
+        if self.slip44 is not None and self.slip44 < 0:
+            raise ValueError(f"NativeToken slip44 must be non-negative, got {self.slip44}")
 
 
 # Recognised L1 fee-oracle mechanism kinds (Plan 026). Each string names the
@@ -557,6 +591,14 @@ class ChainDescriptor:
             class dict in ``almanak/framework/agent_tools/executor.py``.
             Lookup is EXACT-NAME (canonical chain name only — alias inputs
             deliberately fall through to the fallback). Plan 027.
+        caip2_reference: Explicit CAIP-2 reference for non-EVM chains (e.g.
+            Solana's mainnet genesis-hash prefix
+            ``"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"``). MUST be ``None`` for EVM
+            chains — their CAIP-2 reference derives from ``chain_id`` — and is
+            REQUIRED for non-EVM families, whose ``chain_id`` is the ``0``
+            non-EVM sentinel. Validated against the CAIP-2 reference grammar.
+            Consumed by the :attr:`caip2` property and ``ChainRegistry``'s
+            CAIP-2 lookups. VIB-5175 (CAIP adoption, Phase 1).
     """
 
     enum: Chain
@@ -579,6 +621,30 @@ class ChainDescriptor:
     aliases: tuple[str, ...] = ()
     color: str | None = None
     default_display_tokens: tuple[str, ...] | None = None
+    caip2_reference: str | None = None
+
+    @property
+    def caip2(self) -> str:
+        """CAIP-2 blockchain id for this chain (e.g. ``"eip155:42161"``).
+
+        EVM chains serialize as ``eip155:<chain_id>``; non-EVM chains use
+        ``<namespace>:<caip2_reference>`` (e.g. ``solana:5eykt4UsFv8P8…``).
+
+        Raises ``ValueError`` for a non-EVM chain with no ``caip2_reference``
+        (its ``chain_id`` is the 0 sentinel and cannot serve as a reference).
+        ``ChainRegistry.register`` guarantees registered non-EVM chains always
+        have one, so this only fires on synthetic (unregistered) descriptors.
+        """
+        namespace = CAIP2_NAMESPACE_BY_FAMILY[self.family]
+        if self.caip2_reference is not None:
+            reference = self.caip2_reference
+        elif self.family is ChainFamily.EVM:
+            reference = str(self.chain_id)
+        else:
+            raise ValueError(
+                f"ChainDescriptor {self.name!r} is non-EVM and has no caip2_reference; cannot form a CAIP-2 id"
+            )
+        return f"{namespace}:{reference}"
 
     def __post_init__(self) -> None:
         # Strong invariant: ``name`` always equals the lowercase enum name.
@@ -655,3 +721,21 @@ class ChainDescriptor:
                     f"ChainDescriptor {self.name!r} color {c!r} must be a "
                     f"#-prefixed 3- or 6-digit lowercase hex string (e.g. '#627eea')"
                 )
+        # CAIP-2 reference (VIB-5175). EVM derives the reference from
+        # ``chain_id`` and must NOT set ``caip2_reference``. Non-EVM families
+        # MAY omit it at construction so synthetic test descriptors stay
+        # buildable; its presence on a *registered* non-EVM chain is enforced
+        # in ``ChainRegistry.register``. Here we only reject it on EVM and
+        # validate the grammar when it is provided.
+        if self.family is ChainFamily.EVM:
+            if self.caip2_reference is not None:
+                raise ValueError(
+                    f"ChainDescriptor {self.name!r} is EVM; caip2_reference must be None "
+                    f"(the CAIP-2 reference is derived from chain_id={self.chain_id}), "
+                    f"got {self.caip2_reference!r}"
+                )
+        elif self.caip2_reference is not None and not _CAIP2_REFERENCE_RE.match(self.caip2_reference):
+            raise ValueError(
+                f"ChainDescriptor {self.name!r} caip2_reference {self.caip2_reference!r} "
+                f"must match the CAIP-2 reference grammar [-_a-zA-Z0-9]{{1,32}}"
+            )
