@@ -20,6 +20,7 @@ from ..interfaces import (
     OHLCVCandle,
     validate_timeframe,
 )
+from ..models import CEX_SYMBOL_MAP
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
@@ -160,6 +161,15 @@ class GatewayOHLCVProvider:
     def _resolve_binance_symbol(self, token: str) -> str | None:
         """Resolve token symbol to Binance trading pair.
 
+        Consults the canonical ``CEX_SYMBOL_MAP`` (preferring the USDT pair, then
+        USDC) before the connector-local ``TOKEN_TO_BINANCE_SYMBOL``. The local
+        table had drifted from ``CEX_SYMBOL_MAP`` — CBBTC/DAI/GMX/PENDLE/BTCB are
+        declared there (e.g. CBBTC -> BTCUSDT as a BTC spot proxy) but were
+        absent locally, so this resolver returned ``None`` and Binance was
+        silently skipped in favour of a sparse CoinGecko fallback, breaking
+        realized-vol. Reading the canonical map first keeps the two in sync; the
+        local table remains the fallback for tokens not in ``CEX_SYMBOL_MAP``.
+
         Args:
             token: Token symbol (e.g., "WETH", "ETH")
 
@@ -167,6 +177,10 @@ class GatewayOHLCVProvider:
             Binance trading pair (e.g., "ETHUSDT") or None if not found
         """
         token_upper = token.upper()
+        for quote in ("USDT", "USDC"):
+            mapped = CEX_SYMBOL_MAP.get(("binance", token_upper, quote))
+            if mapped:
+                return mapped
         return TOKEN_TO_BINANCE_SYMBOL.get(token_upper)
 
     def _get_cache_ttl(self, timeframe: str) -> float:

@@ -35,6 +35,7 @@ from almanak.framework.data.interfaces import (
     OHLCVCandle,
     validate_timeframe,
 )
+from almanak.framework.data.models import CEX_SYMBOL_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -305,8 +306,23 @@ class BinanceOHLCVProvider:
         )
 
     def _resolve_symbol(self, token: str) -> str | None:
-        """Resolve token symbol to Binance trading pair (static map only)."""
-        return BINANCE_SYMBOL_MAP.get(token.upper())
+        """Resolve token symbol to Binance trading pair (static maps only).
+
+        Consults the canonical ``CEX_SYMBOL_MAP`` (preferring the USDT pair,
+        then USDC) before the connector-local ``BINANCE_SYMBOL_MAP``. This is
+        the third Binance symbol table in the codebase; reading the canonical
+        map first keeps it from silently drifting away from the OHLCV/price
+        providers (the drift that left CBBTC/PENDLE unresolvable here — Binance
+        was skipped on the backtesting/paper path → sparse CoinGecko fallback →
+        realized-vol failed). The local table stays the fallback for tokens
+        absent from ``CEX_SYMBOL_MAP``.
+        """
+        token_upper = token.upper()
+        for quote in ("USDT", "USDC"):
+            mapped = CEX_SYMBOL_MAP.get(("binance", token_upper, quote))
+            if mapped:
+                return mapped
+        return BINANCE_SYMBOL_MAP.get(token_upper)
 
     async def _resolve_symbol_dynamic(self, token: str) -> str | None:
         """Try to find a valid Binance trading pair for an unknown token (VIB-645).

@@ -5,10 +5,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.framework.data.models import CEX_SYMBOL_MAP
 from almanak.gateway.data.ohlcv.binance_provider import (
     BINANCE_SYMBOL_MAP,
     BinanceOHLCVProvider,
 )
+
+
+def _cex_binance_bases() -> set[str]:
+    return {base for (exch, base, _quote) in CEX_SYMBOL_MAP if exch == "binance"}
+
+
+def _cex_resolve(base: str) -> str | None:
+    for quote in ("USDT", "USDC"):
+        mapped = CEX_SYMBOL_MAP.get(("binance", base, quote))
+        if mapped:
+            return mapped
+    return None
 
 
 class TestBinanceSymbolMap:
@@ -168,3 +181,49 @@ class TestDynamicSymbolResolution:
 
         assert result == "CACHEDUSDT"
         mock_session.get.assert_not_called()
+
+
+class TestThirdTableCanonicalParity:
+    """``BinanceOHLCVProvider`` is the THIRD Binance symbol table (the
+    backtesting / paper path). It now resolves through the canonical
+    ``CEX_SYMBOL_MAP`` first, so it can never silently drift from the OHLCV /
+    price providers again — the drift that left CBBTC/PENDLE unresolvable here
+    (Binance skipped → sparse CoinGecko fallback → realized-vol failed)."""
+
+    @pytest.fixture()
+    def provider(self) -> BinanceOHLCVProvider:
+        return BinanceOHLCVProvider()
+
+    @pytest.mark.parametrize(
+        "token,expected",
+        [
+            ("CBBTC", "BTCUSDT"),  # was MISSING from the local table → unresolvable
+            ("PENDLE", "PENDLEUSDT"),  # was MISSING from the local table
+            ("DAI", "DAIUSDT"),
+            ("GMX", "GMXUSDT"),
+            ("BTCB", "BTCUSDT"),
+            ("WBTC", "BTCUSDT"),  # already local → still resolves (fallback path)
+        ],
+    )
+    def test_resolves_via_canonical_then_local(self, provider, token, expected):
+        assert provider._resolve_symbol(token) == expected
+        assert provider._resolve_symbol(token.lower()) == expected  # case-insensitive
+
+    def test_every_canonical_binance_base_is_resolvable(self, provider):
+        """Drift guard: every Binance base in ``CEX_SYMBOL_MAP`` must resolve via
+        this third table, so it can never silently diverge from the canonical
+        source (the CBBTC/PENDLE gap)."""
+        unresolved = sorted(b for b in _cex_binance_bases() if provider._resolve_symbol(b) is None)
+        assert unresolved == [], f"third-table Binance bases not resolvable: {unresolved}"
+
+    def test_local_table_does_not_disagree_with_canonical(self):
+        """Ordering-safety: no token may map to a DIFFERENT pair in the local
+        ``BINANCE_SYMBOL_MAP`` than in ``CEX_SYMBOL_MAP``. While they agree,
+        canonical-first vs local-first ordering cannot change any result — so the
+        three Binance tables stay coherent."""
+        conflicts = {
+            base: (local, _cex_resolve(base))
+            for base, local in BINANCE_SYMBOL_MAP.items()
+            if _cex_resolve(base) is not None and _cex_resolve(base) != local
+        }
+        assert conflicts == {}, f"local table disagrees with CEX_SYMBOL_MAP: {conflicts}"

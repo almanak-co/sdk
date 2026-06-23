@@ -20,6 +20,7 @@ from almanak.framework.data.interfaces import (
     DataSourceUnavailable,
     PriceResult,
 )
+from almanak.framework.data.models import CEX_SYMBOL_MAP
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,28 @@ _DYNAMIC_QUOTE_CANDIDATES = ("USDT", "USDC", "FDUSD")
 
 # TTL for negative cache entries (tokens confirmed not on Binance).
 _NEGATIVE_CACHE_TTL = 4 * 3600  # 4 hours
+
+
+def _curated_binance_symbol(token_upper: str) -> str | None:
+    """Curated Binance pair for a token: the canonical ``CEX_SYMBOL_MAP``
+    (preferring the USDT pair, then USDC) first, then the connector-local
+    ``_TOKEN_TO_BINANCE_SYMBOL`` as the fallback for tokens the canonical map
+    lacks. Canonical-first matches the OHLCV providers' ordering, so the same
+    token can never resolve to a different Binance pair across the OHLCV and
+    price paths (a local-first price path vs canonical-first OHLCV path would
+    silently diverge for any token present in both tables). ``CEX_SYMBOL_MAP``
+    also carries proxy mappings the local table lacks (e.g. ``CBBTC -> BTCUSDT``,
+    whose spot proxy is BTC and so can't be found by dynamic ``{TOKEN}USDT``
+    probing).
+    """
+    for quote in ("USDT", "USDC"):
+        mapped = CEX_SYMBOL_MAP.get(("binance", token_upper, quote))
+        if mapped:
+            return mapped
+    symbol = _TOKEN_TO_BINANCE_SYMBOL.get(token_upper)
+    if symbol:
+        return symbol
+    return None
 
 
 class BinancePriceSource(BasePriceSource):
@@ -156,8 +179,8 @@ class BinancePriceSource(BasePriceSource):
             if time.time() - cached_at < self._cache_ttl:
                 return result
 
-        # Look up Binance symbol: static map -> dynamic cache -> dynamic resolve
-        binance_symbol = _TOKEN_TO_BINANCE_SYMBOL.get(token_upper)
+        # Look up Binance symbol: curated tables -> dynamic cache -> dynamic resolve
+        binance_symbol = _curated_binance_symbol(token_upper)
         confidence = 1.0
 
         if not binance_symbol:
