@@ -242,6 +242,123 @@ class TestPendleReconstruction:
 
 
 # ---------------------------------------------------------------------------
+# Tests: VIB-5377 — PT partial disposal must pro-rate proceeds to the matched qty
+# ---------------------------------------------------------------------------
+
+
+class TestPtPartialDisposalYield:
+    """A PT disposal whose quantity exceeds the open lots (``unmatched > 0``)
+    must attribute ONLY the proportional proceeds to the matched lots — never the
+    full-disposal proceeds (VIB-5377). Pre-fix, ``realized_yield = sy_received −
+    cost_of_matched`` used the FULL ``sy_received`` against the cost of only the
+    matched portion, overstating realized yield by the proceeds of the unmatched
+    PT.
+    """
+
+    def test_partial_disposal_prorates_proceeds_to_matched_qty(self):
+        """REGRESSION (fails on origin/main): buy 6 PT (cost 6 SY), dispose 10 PT
+        for 10 SY proceeds. Only 6 PT have a tracked lot → unmatched 4 PT.
+
+        Correct yield on the matched 6 = proceeds_for_6 − cost_for_6
+                                       = 10 * (6/10) − 6 = 6 − 6 = 0.
+        Pre-fix overstated this as 10 − 6 = 4 (attributing the 4-PT proceeds to
+        the 6 matched lots).
+        """
+        store = FIFOBasisStore()
+        dep, pk, pt = "dep-pp", "pendle:arb:pendle:0xwp", "0xPT_partial"
+        # Buy 6 PT at 1.0 SY/PT (cost 6 SY).
+        store.record_pt_buy(dep, pk, pt, pt_amount=Decimal("6"), sy_cost=Decimal("6"))
+
+        # Dispose 10 PT for 10 SY proceeds — 4 PT have no prior buy lot.
+        result = store.match_pt_redeem(dep, pk, pt,
+                                       pt_redeemed=Decimal("10"),
+                                       sy_received=Decimal("10"))
+
+        # Matched 6 PT, cost basis 6, proceeds pro-rated to 6 = 6.
+        assert result.repaid_principal == pytest.approx(Decimal("6"), abs=Decimal("0.0001"))
+        assert result.unmatched_amount == pytest.approx(Decimal("4"), abs=Decimal("0.0001"))
+        # Realized yield on the matched portion = 6 − 6 = 0 (NOT the overstated 4).
+        assert result.interest_or_yield == pytest.approx(Decimal("0"), abs=Decimal("0.0001"))
+
+    def test_partial_disposal_with_real_yield_on_matched_portion(self):
+        """Buy 6 PT for cost 6 SY; dispose 10 PT for 20 SY proceeds (unmatched 4).
+
+        proceeds_for_matched = 20 * (6/10) = 12; yield on matched = 12 − 6 = 6.
+        Pre-fix: 20 − 6 = 14 (overstated by the 4-PT proceeds of 8).
+        """
+        store = FIFOBasisStore()
+        dep, pk, pt = "dep-pp2", "pendle:arb:pendle:0xwp2", "0xPT_partial2"
+        store.record_pt_buy(dep, pk, pt, pt_amount=Decimal("6"), sy_cost=Decimal("6"))
+
+        result = store.match_pt_redeem(dep, pk, pt,
+                                       pt_redeemed=Decimal("10"),
+                                       sy_received=Decimal("20"))
+
+        assert result.repaid_principal == pytest.approx(Decimal("6"), abs=Decimal("0.0001"))
+        assert result.unmatched_amount == pytest.approx(Decimal("4"), abs=Decimal("0.0001"))
+        assert result.interest_or_yield == pytest.approx(Decimal("6"), abs=Decimal("0.0001"))
+
+    def test_partial_sell_of_held_lot_leaves_residual_open_with_correct_basis(self):
+        """Buy 10 PT (cost 9.5 SY), sell 6 PT for 6.6 SY. This is a within-lot
+        partial: 6 PT match (no unmatched). Yield = 6.6 − (9.5 * 6/10) = 6.6 − 5.7
+        = 0.9. The residual 4 PT lot stays open with basis 9.5 * 4/10 = 3.8.
+        """
+        store = FIFOBasisStore()
+        dep, pk, pt = "dep-pp3", "pendle:arb:pendle:0xwp3", "0xPT_partial3"
+        store.record_pt_buy(dep, pk, pt, pt_amount=Decimal("10"), sy_cost=Decimal("9.5"))
+
+        result = store.match_pt_redeem(dep, pk, pt,
+                                       pt_redeemed=Decimal("6"),
+                                       sy_received=Decimal("6.6"))
+
+        # Fully matched within the held lot → no unmatched, full proceeds attribute.
+        assert result.unmatched_amount == pytest.approx(Decimal("0"), abs=Decimal("0.0001"))
+        assert result.repaid_principal == pytest.approx(Decimal("5.7"), abs=Decimal("0.0001"))
+        assert result.interest_or_yield == pytest.approx(Decimal("0.9"), abs=Decimal("0.0001"))
+
+        # Residual 4 PT lot is still open with the correct residual SY cost basis.
+        open_lots = list(store.iter_open_pt_lots())
+        residual = [t for t in open_lots if t[1] == pt]
+        assert len(residual) == 1
+        _pos, _tok, remaining_pt, sy_cost_remaining, _usd = residual[0]
+        assert remaining_pt == pytest.approx(Decimal("4"), abs=Decimal("0.0001"))
+        assert sy_cost_remaining == pytest.approx(Decimal("3.8"), abs=Decimal("0.0001"))
+
+    def test_full_disposal_unaffected_no_regression(self):
+        """A FULL disposal (matched_pt == pt_redeemed) must be byte-identical to
+        the pre-fix path: pro-rate factor is 1, so realized_yield = sy_received −
+        original_cost exactly. Buy 1000 PT (cost 950), redeem 1000 for 1000.
+        """
+        store = FIFOBasisStore()
+        dep, pk, pt = "dep-pp4", "pendle:arb:pendle:0xwp4", "0xPT_full"
+        store.record_pt_buy(dep, pk, pt, pt_amount=Decimal("1000"), sy_cost=Decimal("950"))
+
+        result = store.match_pt_redeem(dep, pk, pt,
+                                       pt_redeemed=Decimal("1000"),
+                                       sy_received=Decimal("1000"))
+
+        assert result.unmatched_amount == pytest.approx(Decimal("0"), abs=Decimal("0.0001"))
+        assert result.repaid_principal == pytest.approx(Decimal("950"), abs=Decimal("0.0001"))
+        assert result.interest_or_yield == pytest.approx(Decimal("50"), abs=Decimal("0.0001"))
+
+    def test_no_lot_disposal_yields_unmeasured_not_zero(self):
+        """No prior buy lot → nothing matched. ``lot_matches`` is empty (consumer
+        surfaces realized yield as UNMEASURED/None — Empty ≠ Zero) and
+        ``unmatched_amount`` equals the full disposed quantity.
+        """
+        store = FIFOBasisStore()
+        dep, pk, pt = "dep-pp5", "pendle:arb:pendle:0xwp5", "0xPT_none"
+
+        result = store.match_pt_redeem(dep, pk, pt,
+                                       pt_redeemed=Decimal("5"),
+                                       sy_received=Decimal("5"))
+
+        assert result.lot_matches == []
+        assert result.repaid_principal == Decimal("0")
+        assert result.unmatched_amount == pytest.approx(Decimal("5"), abs=Decimal("0.0001"))
+
+
+# ---------------------------------------------------------------------------
 # Tests: amount_token round-trip through LendingAccountingEvent payload
 # ---------------------------------------------------------------------------
 

@@ -730,7 +730,29 @@ class FIFOBasisStore:
         pt_redeemed: Decimal,
         sy_received: Decimal,
     ) -> MatchResult:
-        """FIFO match PT redemption against open PT buy lots."""
+        """FIFO match a PT disposal (sell / redeem) against open PT buy lots.
+
+        ``realized_yield`` (``interest_or_yield``) is the SY/underlying-denominated
+        yield on the **matched** quantity only:
+
+            realized_yield = proceeds_for_matched_qty − cost_basis_of_matched_qty
+
+        On a PARTIAL disposal — where ``pt_redeemed`` exceeds the open lots'
+        available PT (``unmatched_amount > 0``) — ``sy_received`` is the proceeds
+        for the FULL disposed quantity, but only ``matched_pt`` of it has a tracked
+        cost lot. Attributing the FULL ``sy_received`` against the cost of only the
+        matched lots overstates realized yield by the proceeds of the unmatched PT
+        (VIB-5377). We therefore PRO-RATE ``sy_received`` to the matched fraction,
+        exactly mirroring the SWAP partial-match contract (``_split_proceeds`` in
+        ``swap_handler.py``, VIB-4905): the matched portion gets its proportional
+        proceeds; the residual lots stay open with their correct residual basis.
+
+        When nothing matched (``lot_matches`` empty), ``interest_or_yield`` is
+        ``Decimal("0")`` but is NOT surfaced — the consumer
+        (``connectors.pendle.accounting_spec._realized_yield_from_match``) returns
+        ``(None, None)`` on empty ``lot_matches`` (Empty ≠ Zero: realized yield on
+        an unmatched disposal is UNMEASURED, never a fabricated zero).
+        """
         key = self._key(deployment_id, position_key, pt_token)
         lots = self._lots.get(key, [])
         remaining = pt_redeemed
@@ -759,7 +781,19 @@ class FIFOBasisStore:
                 except (ValueError, TypeError):
                     pass
 
-        realized_yield = sy_received - original_cost
+        # Matched PT quantity = disposed − unmatched. Pro-rate the disposal's
+        # proceeds to the matched fraction so a partial disposal books yield only
+        # on the lots it actually consumed (VIB-5377). For a full match
+        # (``remaining == 0``) ``proceeds_for_matched == sy_received`` exactly, so
+        # this is a no-op on the existing full-disposal path.
+        matched_pt = pt_redeemed - remaining
+        if matched_pt > 0 and pt_redeemed > 0:
+            proceeds_for_matched = sy_received * (matched_pt / pt_redeemed)
+            realized_yield = proceeds_for_matched - original_cost
+        else:
+            # Nothing matched: yield is unmeasured (Empty ≠ Zero). ``lot_matches``
+            # is empty, so the consumer never surfaces this value.
+            realized_yield = Decimal("0")
         return MatchResult(
             repaid_principal=original_cost,
             interest_or_yield=realized_yield,

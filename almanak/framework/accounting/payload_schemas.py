@@ -141,6 +141,17 @@ MATCHING_POLICY_VERSIONS: dict[Primitive, int] = {
     # ``realized_pnl_usd_matched`` + ``unmatched_amount_in`` +
     # ``unmatched_proceeds_usd``, where v3 emitted ``realized_pnl_usd=None``
     # and dropped the matched value on the floor).
+    #
+    # VIB-5377: PT partial-disposal realized yield is now PRO-RATED to the matched
+    # quantity in ``basis.py:match_pt_redeem`` (pre-fix it attributed the FULL
+    # ``sy_received`` against the cost of only the matched lots when
+    # ``unmatched_amount > 0``, overstating yield by the proceeds of the unmatched
+    # PT). The per-primitive ``matching_policy_version`` is DELIBERATELY NOT bumped:
+    # this slot is shared by ALL swaps (PT_* taxonomy-map to Primitive.SWAP), and a
+    # bump would re-stamp every non-PT swap event — whose matching is unchanged —
+    # restamping in-flight perp/looping fixtures. The PT correction touches only the
+    # PT-disposal realized-yield value (no payload-shape change, additive-None
+    # contract already tolerated by the reader), so the shared slot stays at v4.
     Primitive.SWAP: 4,
     Primitive.VAULT: 1,
     Primitive.STAKING: 1,
