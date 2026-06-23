@@ -63,6 +63,28 @@ class LPPosition:
 
 
 @dataclass
+class StrategyPosition:
+    """A strategy-reported position (``StrategyPosition`` proto).
+
+    Carries the FIFO-derived held-PT inventory rows (VIB-5317) and any
+    heartbeat-cached strategy positions. PT-specific drill-down fields
+    (quantity, days-to-maturity, price confidence, SY cost) ride in ``details``.
+
+    Empty ≠ Zero: ``value_usd`` / ``unrealized_pnl_usd`` are ``None`` (not
+    ``Decimal("0")``) when the proto left them blank — an unmeasured PT mark
+    must render as "—", never "$0".
+    """
+
+    position_type: str = ""
+    position_id: str = ""
+    chain: str = ""
+    protocol: str = ""
+    value_usd: Decimal | None = None
+    unrealized_pnl_usd: Decimal | None = None
+    details: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class PositionInfo:
     """Position information for a strategy."""
 
@@ -71,6 +93,7 @@ class PositionInfo:
     total_lp_value_usd: Decimal = Decimal("0")
     health_factor: Decimal | None = None
     leverage: Decimal | None = None
+    strategy_positions: list[StrategyPosition] = field(default_factory=list)
 
 
 @dataclass
@@ -1029,6 +1052,21 @@ class GatewayDashboardClient:
                 position.health_factor = Decimal(proto.position.health_factor)
             if proto.position.leverage:
                 position.leverage = Decimal(proto.position.leverage)
+            # Strategy-reported positions, incl. FIFO-derived held-PT inventory
+            # (VIB-5317). Empty ≠ Zero: a blank proto value_usd / pnl is an
+            # UNMEASURED mark → None (renders "—"), never Decimal("0").
+            position.strategy_positions = [
+                StrategyPosition(
+                    position_type=sp.position_type,
+                    position_id=sp.position_id,
+                    chain=sp.chain,
+                    protocol=sp.protocol,
+                    value_usd=Decimal(sp.value_usd) if sp.value_usd else None,
+                    unrealized_pnl_usd=Decimal(sp.unrealized_pnl_usd) if sp.unrealized_pnl_usd else None,
+                    details=dict(sp.details),
+                )
+                for sp in proto.position.strategy_positions
+            ]
 
         # Convert timeline
         timeline = [self._convert_timeline_event(e) for e in proto.timeline]

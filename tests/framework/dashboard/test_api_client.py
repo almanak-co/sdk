@@ -110,9 +110,7 @@ class TestGetTimeline:
         assert events[0]["event_type"] == "TRADE"
         assert events[0]["description"] == "Swapped USDC for ETH"
         assert events[0]["tx_hash"] == "0xabc123"
-        mock_gateway_client.get_timeline.assert_called_once_with(
-            "test-strategy", limit=10, event_type_filter=None
-        )
+        mock_gateway_client.get_timeline.assert_called_once_with("test-strategy", limit=10, event_type_filter=None)
 
     def test_get_timeline_with_filter(self, api_client, mock_gateway_client):
         """Test filtering timeline by event type."""
@@ -120,9 +118,7 @@ class TestGetTimeline:
 
         api_client.get_timeline(limit=20, event_type="ERROR")
 
-        mock_gateway_client.get_timeline.assert_called_once_with(
-            "test-strategy", limit=20, event_type_filter="ERROR"
-        )
+        mock_gateway_client.get_timeline.assert_called_once_with("test-strategy", limit=20, event_type_filter="ERROR")
 
     def test_get_timeline_default_limit(self, api_client, mock_gateway_client):
         """Test default limit is 50."""
@@ -130,9 +126,7 @@ class TestGetTimeline:
 
         api_client.get_timeline()
 
-        mock_gateway_client.get_timeline.assert_called_once_with(
-            "test-strategy", limit=50, event_type_filter=None
-        )
+        mock_gateway_client.get_timeline.assert_called_once_with("test-strategy", limit=50, event_type_filter=None)
 
     def test_get_timeline_error_returns_empty(self, api_client, mock_gateway_client):
         """Test error handling returns empty list."""
@@ -451,6 +445,154 @@ class TestGetPrice:
                 mock_pb2.PriceRequest.assert_called_with(token="ETH", quote="USD", chain="base")
 
 
+class TestGetPtPrice:
+    """VIB-5317: typed PT/USD accessor over the GetPtPrice RPC.
+
+    Uses REAL proto responses (not mocks) so the enum-name mapping and the
+    Empty != Zero availability gate are exercised end-to-end.
+    """
+
+    def _wire_market(self, api_client, mock_gateway_client, response):
+        from almanak.gateway.proto import gateway_pb2
+
+        mock_market = MagicMock()
+        mock_market.GetPtPrice.return_value = response
+        mock_gateway_client._client = MagicMock()
+        mock_gateway_client._client.market = mock_market
+        return gateway_pb2
+
+    def test_available_pt_price_maps_all_fields(self, api_client, mock_gateway_client):
+        from almanak.gateway.proto import gateway_pb2
+
+        response = gateway_pb2.PtPriceResponse(
+            symbol="PT-wstETH-25JUN2026",
+            chain="arbitrum",
+            quote="USD",
+            price="1500.50",
+            availability=gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE,
+            confidence=0.95,
+            confidence_band=gateway_pb2.PT_PRICE_CONFIDENCE_BAND_HIGH,
+            underlying_price="3000.00",
+            pt_to_asset_rate="0.5",
+            source="composition:getPtToAssetRate×oracle",
+            stale=False,
+            maturity_ts=1781308800,
+            days_to_maturity=2,
+        )
+        self._wire_market(api_client, mock_gateway_client, response)
+
+        result = api_client.get_pt_price("PT-wstETH-25JUN2026", chain="arbitrum")
+
+        assert result["price"] == 1500.50
+        assert result["availability"] == "AVAILABLE"
+        assert result["confidence"] == pytest.approx(0.95)
+        assert result["confidence_band"] == "HIGH"
+        assert result["underlying_price"] == 3000.00
+        assert result["pt_to_asset_rate"] == 0.5
+        assert result["days_to_maturity"] == 2
+        assert result["maturity_ts"] == 1781308800
+        assert result["stale"] is False
+
+    def test_unmeasured_pt_price_is_none_not_zero(self, api_client, mock_gateway_client):
+        """Empty != Zero: UNMEASURED availability yields price=None, never 0.0."""
+        from almanak.gateway.proto import gateway_pb2
+
+        # Gateway sends NO price string for an unmeasured PT.
+        response = gateway_pb2.PtPriceResponse(
+            symbol="PT-x",
+            chain="arbitrum",
+            availability=gateway_pb2.PT_PRICE_AVAILABILITY_UNMEASURED,
+            confidence_band=gateway_pb2.PT_PRICE_CONFIDENCE_BAND_UNAVAILABLE,
+        )
+        self._wire_market(api_client, mock_gateway_client, response)
+
+        result = api_client.get_pt_price("PT-x", chain="arbitrum")
+
+        assert result["price"] is None
+        assert result["availability"] == "UNMEASURED"
+        assert result["confidence_band"] == "UNAVAILABLE"
+
+    def test_available_but_blank_price_string_is_none(self, api_client, mock_gateway_client):
+        """Defensive: AVAILABLE with an empty price string must NOT coerce to 0.0."""
+        from almanak.gateway.proto import gateway_pb2
+
+        response = gateway_pb2.PtPriceResponse(
+            symbol="PT-x",
+            availability=gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE,
+            price="",
+        )
+        self._wire_market(api_client, mock_gateway_client, response)
+
+        result = api_client.get_pt_price("PT-x", chain="arbitrum")
+        assert result["price"] is None
+
+    def test_errored_pt_price_is_none(self, api_client, mock_gateway_client):
+        from almanak.gateway.proto import gateway_pb2
+
+        response = gateway_pb2.PtPriceResponse(
+            symbol="PT-x",
+            availability=gateway_pb2.PT_PRICE_AVAILABILITY_ERRORED,
+        )
+        self._wire_market(api_client, mock_gateway_client, response)
+
+        result = api_client.get_pt_price("PT-x", chain="arbitrum")
+        assert result["price"] is None
+        assert result["availability"] == "ERRORED"
+
+    def test_rpc_failure_returns_unmeasured_shape(self, api_client, mock_gateway_client):
+        """An RPC exception returns the unmeasured shape, never raises."""
+        mock_market = MagicMock()
+        mock_market.GetPtPrice.side_effect = Exception("transport down")
+        mock_gateway_client._client = MagicMock()
+        mock_gateway_client._client.market = mock_market
+
+        with patch.object(api_client, "get_config", return_value={"default_chain": "arbitrum"}):
+            result = api_client.get_pt_price("PT-x")
+
+        assert result["price"] is None
+        assert result["availability"] == "UNSPECIFIED"
+        assert result["chain"] == "arbitrum"
+
+    def test_unknown_availability_enum_does_not_raise(self, api_client, mock_gateway_client):
+        """Gateway-version skew: an availability int this client's proto does not
+        know must NOT make ``EnumTypeWrapper.Name`` escape as an uncaught
+        ValueError. It falls back to UNSPECIFIED and price=None (Empty != Zero),
+        never crashing the dashboard."""
+        from almanak.gateway.proto import gateway_pb2
+
+        response = gateway_pb2.PtPriceResponse(symbol="PT-x", price="123.45")
+        # proto3 open enum: assign an int with no defined name.
+        response.availability = 9999
+        response.confidence_band = 9999
+        self._wire_market(api_client, mock_gateway_client, response)
+
+        result = api_client.get_pt_price("PT-x", chain="arbitrum")
+
+        # Unknown availability is not AVAILABLE -> price must be None despite the
+        # non-empty price string.
+        assert result["price"] is None
+        assert result["availability"] == "UNSPECIFIED"
+        assert result["confidence_band"] == "UNSPECIFIED"
+
+    def test_chain_falls_back_to_config(self, api_client, mock_gateway_client):
+        from almanak.gateway.proto import gateway_pb2
+
+        response = gateway_pb2.PtPriceResponse(
+            symbol="PT-x",
+            availability=gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE,
+            price="100",
+        )
+        self._wire_market(api_client, mock_gateway_client, response)
+
+        with patch.object(api_client, "get_config", return_value={"default_chain": "base"}) as mock_cfg:
+            result = api_client.get_pt_price("PT-x")
+            mock_cfg.assert_called_once()
+
+        sent = mock_gateway_client._client.market.GetPtPrice.call_args[0][0]
+        assert sent.chain == "base"
+        assert result["price"] == 100.0
+
+
 class TestGetBalance:
     """Tests for get_balance method."""
 
@@ -474,9 +616,7 @@ class TestGetBalance:
             balance = api_client.get_balance("USDC")
 
             assert balance == 1500.25
-            mock_pb2.BalanceRequest.assert_called_once_with(
-                token="USDC", chain="arbitrum", wallet_address="0x1234"
-            )
+            mock_pb2.BalanceRequest.assert_called_once_with(token="USDC", chain="arbitrum", wallet_address="0x1234")
 
     def test_get_balance_with_chain_override(self, api_client, mock_gateway_client):
         """Test getting balance with explicit chain."""
@@ -496,9 +636,7 @@ class TestGetBalance:
         with patch("almanak.gateway.proto.gateway_pb2") as mock_pb2:
             api_client.get_balance("ETH", chain="base")
 
-            mock_pb2.BalanceRequest.assert_called_once_with(
-                token="ETH", chain="base", wallet_address="0x1234"
-            )
+            mock_pb2.BalanceRequest.assert_called_once_with(token="ETH", chain="base", wallet_address="0x1234")
 
     def test_get_balance_error_returns_none(self, api_client, mock_gateway_client):
         """Test error handling returns None when market call fails."""
@@ -693,6 +831,7 @@ class TestPositionToDict:
         position.total_lp_value_usd = None
         position.health_factor = None
         position.leverage = None
+        position.strategy_positions = []
 
         result = api_client._position_to_dict(position)
 
@@ -701,6 +840,121 @@ class TestPositionToDict:
         assert result["total_lp_value_usd"] == "0"
         assert result["health_factor"] is None
         assert result["leverage"] is None
+        # No strategy_positions → key omitted (not an empty list masquerading as data).
+        assert "strategy_positions" not in result
+        assert "pt_inventory" not in result
+
+
+def _pt_strategy_position(
+    *,
+    pt_symbol: str = "PT-wstETH-25JUN2026",
+    quantity: str = "1.234",
+    value_usd: str = "1500.00",
+    unrealized_pnl_usd: str = "12.50",
+    days_to_maturity: str = "2",
+    confidence: str = "ValueConfidence.HIGH",
+    source: str = "pt_inventory_lots",
+    protocol: str = "pt",
+    mark_unmeasured: bool = False,
+):
+    """Build a mock ``StrategyPosition`` proto carrying held-PT inventory fields."""
+    sp = MagicMock()
+    sp.position_type = "TOKEN"
+    sp.position_id = pt_symbol
+    sp.chain = "arbitrum"
+    sp.protocol = protocol
+    sp.value_usd = "" if mark_unmeasured else value_usd
+    sp.unrealized_pnl_usd = "" if mark_unmeasured else unrealized_pnl_usd
+    details = {
+        "source": source,
+        "pt_symbol": pt_symbol,
+        "quantity": quantity,
+        "days_to_maturity": days_to_maturity,
+        "price_confidence": confidence,
+    }
+    if mark_unmeasured:
+        details["mark_unmeasured"] = "true"
+        details["cost_basis_unmeasured"] = "true"
+    sp.details = details
+    return sp
+
+
+class TestStrategyPositionsSurfacing:
+    """VIB-5317: ``_position_to_dict`` surfaces strategy_positions + pt_inventory."""
+
+    def _base_position(self):
+        position = MagicMock()
+        position.token_balances = []
+        position.lp_positions = []
+        position.total_lp_value_usd = None
+        position.health_factor = None
+        position.leverage = None
+        return position
+
+    def test_pt_inventory_row_surfaced(self, api_client):
+        """A FIFO-derived held-PT row reaches strategy_positions + pt_inventory."""
+        position = self._base_position()
+        position.strategy_positions = [_pt_strategy_position()]
+
+        result = api_client._position_to_dict(position)
+
+        assert len(result["strategy_positions"]) == 1
+        sp = result["strategy_positions"][0]
+        assert sp["protocol"] == "pt"
+        assert sp["position_type"] == "TOKEN"
+        assert sp["value_usd"] == "1500.00"
+        assert sp["unrealized_pnl_usd"] == "12.50"
+        assert sp["details"]["pt_symbol"] == "PT-wstETH-25JUN2026"
+        assert sp["details"]["quantity"] == "1.234"
+        assert sp["details"]["days_to_maturity"] == "2"
+        # pt_inventory is the filtered convenience view.
+        assert len(result["pt_inventory"]) == 1
+        assert result["pt_inventory"][0] is sp
+
+    def test_pt_inventory_detected_by_source_marker_not_protocol(self, api_client):
+        """A reported PT (protocol='pendle') is still detected via the source marker."""
+        position = self._base_position()
+        position.strategy_positions = [_pt_strategy_position(protocol="pendle")]
+
+        result = api_client._position_to_dict(position)
+
+        # protocol != 'pt' but source marker classifies it as PT inventory (VIB-4636).
+        assert len(result["pt_inventory"]) == 1
+        assert result["pt_inventory"][0]["protocol"] == "pendle"
+
+    def test_non_pt_strategy_position_excluded_from_pt_inventory(self, api_client):
+        """A perp/lending strategy position surfaces but is NOT PT inventory."""
+        position = self._base_position()
+        perp = MagicMock()
+        perp.position_type = "PERP"
+        perp.position_id = "gmx-eth-long"
+        perp.chain = "arbitrum"
+        perp.protocol = "gmx_v2"
+        perp.value_usd = "500.00"
+        perp.unrealized_pnl_usd = "-3.20"
+        perp.details = {"direction": "LONG"}
+        position.strategy_positions = [perp]
+
+        result = api_client._position_to_dict(position)
+
+        assert len(result["strategy_positions"]) == 1
+        assert result["pt_inventory"] == []
+
+    def test_unmeasured_pt_preserves_empty_not_zero(self, api_client):
+        """Empty != Zero: an unmeasured PT mark stays '' (the flag carries it), never '0'."""
+        position = self._base_position()
+        position.strategy_positions = [_pt_strategy_position(mark_unmeasured=True)]
+
+        result = api_client._position_to_dict(position)
+
+        sp = result["pt_inventory"][0]
+        # The valuer/gateway leave USD strings blank for an unmeasured mark; we do
+        # NOT coerce to "0". The renderer keys "—" on the mark_unmeasured flag.
+        assert sp["value_usd"] == ""
+        assert sp["unrealized_pnl_usd"] == ""
+        assert sp["details"]["mark_unmeasured"] == "true"
+        # Quantity + SY-side fields still surface even when the mark is unmeasured.
+        assert sp["details"]["quantity"] == "1.234"
 
 
 class TestSummaryToDict:
@@ -722,3 +976,59 @@ class TestSummaryToDict:
         assert result["deployment_id"] == "test-strategy"
         assert result["name"] == ""
         assert result["status"] == "UNKNOWN"
+
+
+class TestStrategyPositionToDict:
+    """VIB-5317: serializing a strategy-reported position to a dict must preserve
+    the Empty != Zero distinction on the money fields. The gateway-client
+    dataclass carries ``value_usd`` / ``unrealized_pnl_usd`` as ``Decimal | None``,
+    so a measured ``Decimal("0")`` (falsy!) must NOT collapse to the unmeasured
+    sentinel."""
+
+    def test_measured_zero_is_preserved_not_blanked(self):
+        from types import SimpleNamespace
+
+        sp = SimpleNamespace(
+            position_type="pt_inventory",
+            position_id="PT-x",
+            chain="arbitrum",
+            protocol="pt",
+            value_usd=Decimal("0"),  # measured $0 — must survive as "0", not ""
+            unrealized_pnl_usd=Decimal("0"),
+            details={"source": "pt_inventory_lots"},
+        )
+        result = DashboardAPIClient._strategy_position_to_dict(sp)
+        assert result["value_usd"] == "0"
+        assert result["unrealized_pnl_usd"] == "0"
+
+    def test_unmeasured_none_maps_to_empty_string(self):
+        from types import SimpleNamespace
+
+        sp = SimpleNamespace(
+            position_type="pt_inventory",
+            position_id="PT-y",
+            chain="arbitrum",
+            protocol="pendle",
+            value_usd=None,  # UNMEASURED -> "" sentinel, never "0"
+            unrealized_pnl_usd=None,
+            details={"source": "pt_inventory_lots", "mark_unmeasured": "true"},
+        )
+        result = DashboardAPIClient._strategy_position_to_dict(sp)
+        assert result["value_usd"] == ""
+        assert result["unrealized_pnl_usd"] == ""
+
+    def test_measured_nonzero_decimal_stringified(self):
+        from types import SimpleNamespace
+
+        sp = SimpleNamespace(
+            position_type="pt_inventory",
+            position_id="PT-z",
+            chain="arbitrum",
+            protocol="pt",
+            value_usd=Decimal("28.38"),
+            unrealized_pnl_usd=Decimal("1.12"),
+            details={"source": "pt_inventory_lots"},
+        )
+        result = DashboardAPIClient._strategy_position_to_dict(sp)
+        assert result["value_usd"] == "28.38"
+        assert result["unrealized_pnl_usd"] == "1.12"

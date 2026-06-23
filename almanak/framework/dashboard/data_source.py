@@ -30,6 +30,7 @@ from almanak.framework.dashboard.models import (
     LPPosition,
     PaperMetrics,
     PositionSummary,
+    PtInventoryPosition,
     Strategy,
     StrategyStatus,
     TimelineEventType,
@@ -211,6 +212,56 @@ def _convert_gateway_summary_to_model(summary: StrategySummary) -> Strategy:
     )
 
 
+def _extract_pt_inventory(strategy_positions: Any) -> list[PtInventoryPosition]:
+    """Pull held-PT rows from the gateway strategy positions (VIB-5317).
+
+    A row is PT inventory when its ``details["source"] == "pt_inventory_lots"``
+    (the valuer's ``_PT_INVENTORY_SOURCE`` marker) or ``protocol == "pt"``. The
+    marker is stamped by BOTH the FIFO-inventory path
+    (``_classify_pt_inventory``) AND the reported-position reprice path
+    (``_reprice_principal_token_enriched`` — the common ``get_open_positions``
+    case where the strategy reports its PT as ``protocol="pendle"``), so both
+    render identically here. Other strategy positions (heartbeat-cached
+    perps/lending/LP) are not PT inventory and are left for their own surfaces.
+
+    Empty ≠ Zero: ``value_usd`` / ``unrealized_pnl_usd`` come through as ``None``
+    when the gateway left them unset (unmeasured PT) — the renderer shows "—".
+
+    The valuer's FIFO dedup (``_reported_pt_symbols``) already ensures a reported
+    PT and a FIFO PT for the same symbol never both reach ``snapshot.positions``;
+    a defensive first-wins guard here keeps a duplicate from rendering even if an
+    upstream change ever regresses that dedup.
+    """
+    out: list[PtInventoryPosition] = []
+    seen: set[str] = set()
+    for sp in strategy_positions or []:
+        det = sp.details or {}
+        if det.get("source") != "pt_inventory_lots" and sp.protocol != "pt":
+            continue
+        symbol = det.get("pt_symbol") or sp.position_id
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        # Proto map<string,string> stamps "true"/"false", but a non-proto producer
+        # path can stamp a boolean True. Accept both so a valid unmeasured PT row is
+        # never misclassified as measured (Empty != Zero).
+        unmeasured = str(det.get("mark_unmeasured", "")).lower() == "true"
+        out.append(
+            PtInventoryPosition(
+                symbol=symbol,
+                quantity=det.get("quantity", ""),
+                value_usd=sp.value_usd,
+                unrealized_pnl_usd=sp.unrealized_pnl_usd,
+                days_to_maturity=det.get("days_to_maturity", ""),
+                confidence=det.get("price_confidence", ""),
+                sy_cost=det.get("sy_cost", ""),
+                chain=sp.chain,
+                unmeasured=unmeasured,
+            )
+        )
+    return out
+
+
 def _convert_gateway_details_to_model(details: StrategyDetails) -> Strategy:
     """Convert gateway StrategyDetails to dashboard Strategy model.
 
@@ -249,6 +300,7 @@ def _convert_gateway_details_to_model(details: StrategyDetails) -> Strategy:
             total_lp_value_usd=details.position.total_lp_value_usd,
             health_factor=details.position.health_factor,
             leverage=details.position.leverage,
+            pt_inventory=_extract_pt_inventory(details.position.strategy_positions),
         )
 
     # Add timeline events

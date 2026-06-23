@@ -2437,13 +2437,41 @@ class PortfolioValuer:
             pt_amount = bal.balance if hasattr(bal, "balance") else Decimal(str(bal))
         except Exception as e:  # noqa: BLE001 — fail to unmeasured, never crash the snapshot
             logger.warning("principal-token reprice: balance(%s) failed (%s); cannot size PT position", symbol, e)
-            return Decimal("0"), {"pt_symbol": symbol, "valuation_status": "no_path"}, False
+            # VIB-5317: stamp the PT-inventory marker (+ Empty≠Zero flag) so the
+            # reported PT still surfaces on the displayed PT-inventory surface as
+            # UNMEASURED — qty unknown here (balance failed), USD mark/PnL blank.
+            return (
+                Decimal("0"),
+                {
+                    "pt_symbol": symbol,
+                    "source": _PT_INVENTORY_SOURCE,
+                    "classification": "deployed_inventory",
+                    "valuation_status": "no_path",
+                    "mark_unmeasured": True,
+                    "cost_basis_unmeasured": True,
+                    "unrealized_pnl_unmeasured": True,
+                },
+                False,
+            )
 
         try:
             pt_price = pt_price_fn(symbol, chain)
         except Exception as e:  # noqa: BLE001 — PriceUnavailableError (no gateway client) / transport
             logger.warning("principal-token reprice: pt_price(%s) failed (%s)", symbol, e)
-            return Decimal("0"), {"pt_symbol": symbol, "valuation_status": "no_path"}, False
+            return (
+                Decimal("0"),
+                {
+                    "pt_symbol": symbol,
+                    "source": _PT_INVENTORY_SOURCE,
+                    "classification": "deployed_inventory",
+                    "quantity": str(pt_amount),
+                    "valuation_status": "no_path",
+                    "mark_unmeasured": True,
+                    "cost_basis_unmeasured": True,
+                    "unrealized_pnl_unmeasured": True,
+                },
+                False,
+            )
 
         from almanak.connectors._strategy_base.principal_token_valuation import (
             value_principal_token_position,
@@ -2451,8 +2479,20 @@ class PortfolioValuer:
 
         valued = value_principal_token_position(pt_price=pt_price, pt_amount=pt_amount)
 
+        # VIB-5317: stamp the SAME display fields the FIFO inventory path
+        # (``_classify_pt_inventory``) uses so the dashboard / CLI render a
+        # REPORTED PT (``details.pt_token``, the common ``get_open_positions``
+        # case) identically to a FIFO-derived held PT. The ``source`` marker is
+        # the VIB-4636 data-shape key every PT-inventory consumer detects on
+        # (gateway ``_pt_strategy_positions_from_snapshot``, CLI status, dashboard
+        # ``_extract_pt_inventory``) — never a protocol-name string. This is
+        # display-only: ``value_usd`` / NAV / the FIFO dedup are untouched (the
+        # dedup keys on ``pt_token`` / ``pt_symbol``, not ``source``).
         enriched: dict[str, Any] = {
             "pt_symbol": symbol,
+            "source": _PT_INVENTORY_SOURCE,
+            "classification": "deployed_inventory",
+            "quantity": str(pt_amount),
             "pt_amount": str(pt_amount),
             "price_confidence": str(valued.confidence),
             "underlying_price_usd": (str(pt_price.underlying_price) if pt_price.underlying_price is not None else ""),
@@ -2463,8 +2503,12 @@ class PortfolioValuer:
 
         if valued.current_value_usd is None or valued.confidence == ValueConfidence.UNAVAILABLE:
             # Empty ≠ Zero: unmeasured price → no_path so the snapshot confidence
-            # drops to UNAVAILABLE rather than masquerade as a measured $0.
+            # drops to UNAVAILABLE rather than masquerade as a measured $0. The
+            # row still surfaces (qty shown) but with NO USD mark / cost / PnL.
             enriched["valuation_status"] = "no_path"
+            enriched["mark_unmeasured"] = True
+            enriched["cost_basis_unmeasured"] = True
+            enriched["unrealized_pnl_unmeasured"] = True
             return Decimal("0"), enriched, False
 
         if valued.confidence != ValueConfidence.HIGH:

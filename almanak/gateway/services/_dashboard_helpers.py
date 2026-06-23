@@ -346,6 +346,107 @@ def build_chain_health(chains: list[str]) -> dict[str, gateway_pb2.ChainHealthIn
     }
 
 
+# PortfolioValuer tags FIFO-derived held-PT inventory rows with this marker on
+# ``PositionValue.details["source"]`` (``_PT_INVENTORY_SOURCE`` in
+# ``portfolio_valuer.py``). These rows are NOT position-registry positions
+# (VIB-4931 removed the PENDLE_PT PositionType) — they are computed from the
+# FIFO lots and only ever live on ``snapshot.positions``. This is the marker the
+# dashboard uses to surface them; do not match on ``protocol == "pt"`` alone, a
+# future protocol rename should not silently drop the row from the display.
+_PT_INVENTORY_SOURCE = "pt_inventory_lots"
+
+
+def _pt_position_to_strategy_proto(pos: Any) -> gateway_pb2.StrategyPosition:
+    """Map a FIFO-derived held-PT ``PositionValue`` to a ``StrategyPosition``.
+
+    The valuer (``portfolio_valuer.py::_classify_pt_inventory`` /
+    ``_pt_unmeasured_row``) already produced the row; this only re-shapes it for
+    the displayed surface (CLI ``strat status`` + dashboard). PT-specific detail
+    keys (qty, days-to-maturity, price confidence, SY cost) ride in the proto's
+    ``details`` ``map<string,string>`` — no proto field is added.
+
+    Empty ≠ Zero (VIB-5316): an UNMEASURED PT (``details["mark_unmeasured"]`` is
+    truthy — the placeholder ``value_usd=0`` the valuer pairs with that flag,
+    NEVER a measured zero) renders with NO USD mark and NO unrealized-PnL string
+    (the proto-default empty string → the CLI/dashboard show "—", not "$0"), and
+    its confidence badge is ``UNAVAILABLE``. The measured qty + SY cost still
+    surface so the operator sees the holding.
+    """
+    details = pos.details or {}
+    unmeasured = bool(details.get("mark_unmeasured"))
+
+    proto_details: dict[str, str] = {}
+    # VIB-5317: carry the data-shape marker forward so the downstream display
+    # filters (CLI ``_format_pt_inventory_detail_line``, dashboard
+    # ``_extract_pt_inventory``) detect this row by ``source`` — uniformly for a
+    # FIFO-derived held PT AND a REPORTED PT (``protocol`` may be ``pendle``, not
+    # ``pt``). Marker-keyed, never protocol-name keyed (VIB-4636 discipline).
+    source = details.get("source", "")
+    if source:
+        proto_details["source"] = str(source)
+    # PT-specific fields surfaced for the drill-down view. Each is guarded with an
+    # explicit default — a genuinely-absent optional renders blank, never crashes.
+    quantity = details.get("quantity", "")
+    if quantity:
+        proto_details["quantity"] = str(quantity)
+    days_to_maturity = details.get("days_to_maturity")
+    if days_to_maturity is not None:
+        proto_details["days_to_maturity"] = str(days_to_maturity)
+    sy_cost = details.get("sy_cost", "")
+    if sy_cost:
+        proto_details["sy_cost"] = str(sy_cost)
+    pt_symbol = details.get("pt_symbol", "")
+    if pt_symbol:
+        proto_details["pt_symbol"] = str(pt_symbol)
+    # Confidence badge: measured rows carry the gateway price confidence; an
+    # unmeasured row has no ``price_confidence`` key → present UNAVAILABLE so the
+    # blank USD mark reads as "unmeasured", not "zero".
+    confidence = str(details.get("price_confidence") or ("UNAVAILABLE" if unmeasured else ""))
+    if confidence:
+        proto_details["price_confidence"] = confidence
+    if unmeasured:
+        proto_details["mark_unmeasured"] = "true"
+        if details.get("cost_basis_unmeasured"):
+            proto_details["cost_basis_unmeasured"] = "true"
+    valuation_status = details.get("valuation_status", "")
+    if valuation_status:
+        proto_details["valuation_status"] = str(valuation_status)
+
+    sp = gateway_pb2.StrategyPosition(
+        position_type=str(getattr(pos.position_type, "value", pos.position_type)),
+        position_id=pt_symbol or pos.label,
+        chain=pos.chain,
+        protocol=pos.protocol,
+        details=proto_details,
+    )
+    # Empty ≠ Zero: only stamp USD-shaped fields when the row is MEASURED. An
+    # unmeasured row leaves them at the proto-default empty string.
+    if not unmeasured:
+        sp.value_usd = str(pos.value_usd)
+        sp.unrealized_pnl_usd = str(pos.unrealized_pnl_usd)
+    return sp
+
+
+def _pt_strategy_positions_from_snapshot(
+    snapshot: PortfolioSnapshot | None,
+) -> list[gateway_pb2.StrategyPosition]:
+    """Extract FIFO-derived held-PT rows from ``snapshot.positions``.
+
+    Returns the PT rows mapped to ``StrategyPosition`` protos, in snapshot
+    order. Non-PT position rows are ignored here (wallet balances and registry
+    positions own their own surfaces). Returns ``[]`` when the snapshot is
+    absent or carries no PT inventory.
+    """
+    if snapshot is None or not getattr(snapshot, "positions", None):
+        return []
+    out: list[gateway_pb2.StrategyPosition] = []
+    for pos in snapshot.positions:
+        details = getattr(pos, "details", None) or {}
+        if details.get("source") == _PT_INVENTORY_SOURCE or getattr(pos, "protocol", "") == "pt":
+            out.append(_pt_position_to_strategy_proto(pos))
+    return out
+
+
 def build_position_proto(
     state: dict | None,
     cached_positions: Any,
@@ -414,6 +515,13 @@ def build_position_proto(
             position.health_factor = str(state["health_factor"])
         if "leverage" in state:
             position.leverage = str(state["leverage"])
+
+    # FIFO-derived held-PT inventory (VIB-5317). The valuer already built these
+    # rows onto ``snapshot.positions`` (``_classify_pt_inventory`` /
+    # ``_pt_unmeasured_row``); PT has no position-registry row (VIB-4931) so this
+    # is the ONLY hop that gets them onto the displayed surface. Inserted BEFORE
+    # the heartbeat-cached positions so the operator sees inventory first.
+    position.strategy_positions.extend(_pt_strategy_positions_from_snapshot(snapshot))
 
     # Include cached strategy positions from heartbeat
     if cached_positions:

@@ -398,6 +398,41 @@ def _print_legacy_position(pos: Any) -> None:
         click.echo(f"    Health Factor: {pos.health_factor}")
 
 
+def _format_pt_inventory_detail_line(sp: Any) -> str:
+    """Build the PT-inventory drill-down line (VIB-5317).
+
+    FIFO-derived held-PT rows (``details["source"] == "pt_inventory_lots"`` or
+    ``protocol == "pt"``) carry qty, days-to-maturity, price confidence, and SY
+    cost in the proto ``details`` map. Returns an empty string for any non-PT
+    position (those have no such details) so the caller emits no line.
+
+    Empty ≠ Zero: an unmeasured PT (``details["mark_unmeasured"] == "true"``)
+    shows ``Confidence: UNAVAILABLE`` and still surfaces qty + SY cost; its USD
+    mark is rendered by the size/pnl helpers as absent (the proto value_usd was
+    left blank), never as ``$0``.
+    """
+    details = dict(getattr(sp, "details", None) or {})
+    if details.get("source") != "pt_inventory_lots" and getattr(sp, "protocol", "") != "pt":
+        return ""
+
+    parts: list[str] = []
+    quantity = details.get("quantity", "")
+    if quantity:
+        parts.append(f"Qty: {quantity}")
+    days = details.get("days_to_maturity", "")
+    if days:
+        parts.append(f"Days to maturity: {days}")
+    sy_cost = details.get("sy_cost", "")
+    if sy_cost:
+        parts.append(f"SY cost: {sy_cost}")
+    confidence = details.get("price_confidence", "")
+    if confidence:
+        parts.append(f"Confidence: {confidence}")
+    if not parts:
+        return ""
+    return " | ".join(parts)
+
+
 def _format_strategy_position_size_line(sp: Any) -> str:
     """Build the Size/Value/Collateral/Leverage/HF pipe-joined line.
 
@@ -499,6 +534,11 @@ def _print_strategy_positions(positions: Any) -> None:
         pnl_line = _format_strategy_position_pnl_line(sp)
         if pnl_line:
             click.echo(f"      {pnl_line}")
+        # PT inventory detail line (VIB-5317): qty / days-to-maturity / confidence
+        # ride in the proto details map. Only emitted for PT rows.
+        pt_line = _format_pt_inventory_detail_line(sp)
+        if pt_line:
+            click.echo(f"      {pt_line}")
         if sp.liquidation_risk:
             click.echo(click.style("      ! Liquidation risk", fg="red", bold=True))
 

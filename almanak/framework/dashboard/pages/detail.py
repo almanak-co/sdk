@@ -484,6 +484,34 @@ def render_position_summary(strategy: Strategy) -> None:
                 unsafe_allow_html=True,
             )
 
+    # PT inventory (FIFO-derived held Pendle PT, VIB-5317). Not a registry
+    # position (VIB-4931), so it only reaches the UI via this snapshot-derived
+    # row. Empty ≠ Zero: an unmeasured mark renders "—", never "$0".
+    if position.pt_inventory:
+        st.markdown("### PT Inventory")
+
+        def _blank(v: Any) -> str:
+            # Empty != Zero: only None / "" are blanks -> "—". A measured "0"
+            # (e.g. days-to-maturity on maturity day) is truthy-trapped by a bare
+            # ``or "—"``, so check emptiness explicitly.
+            return "—" if v is None or v == "" else str(v)
+
+        pt_rows = []
+        for pt in position.pt_inventory:
+            value_cell = "—" if pt.unmeasured or pt.value_usd is None else format_usd(pt.value_usd)
+            pnl_cell = "—" if pt.unmeasured or pt.unrealized_pnl_usd is None else format_usd(pt.unrealized_pnl_usd)
+            pt_rows.append(
+                {
+                    "Symbol": pt.symbol,
+                    "Quantity": _blank(pt.quantity),
+                    "Value (USD)": value_cell,
+                    "Unrealized PnL": pnl_cell,
+                    "Days to Maturity": _blank(pt.days_to_maturity),
+                    "Confidence": _blank(pt.confidence),
+                }
+            )
+        st.dataframe(pt_rows, use_container_width=True, hide_index=True)
+
     # Health metrics (for lending strategies)
     if position.health_factor is not None or position.leverage is not None:
         st.markdown("### Health Metrics")

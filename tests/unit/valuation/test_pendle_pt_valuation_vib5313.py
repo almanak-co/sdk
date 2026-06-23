@@ -152,3 +152,71 @@ class TestPendlePtNavVib5313:
         ):
             valuer.value(strategy, market)
         market.pt_price.assert_called_once_with(_PT_SYMBOL, _CHAIN)
+
+
+class TestReportedPtRendersInInventoryVib5317:
+    """VIB-5317 — the reported PT carries the SAME display marker + fields as a
+    FIFO-derived held PT, so it reaches the dashboard / CLI PT-inventory surface.
+
+    The first VIB-5317 impl was INERT for this (the common ``get_open_positions``)
+    case: the reported position arrived as ``protocol="pendle"`` with no ``source``
+    marker, and the FIFO row that DID carry the fields was deduped away. These
+    tests assert the enrichment WITHOUT changing value_usd / NAV / the dedup.
+    """
+
+    _SOURCE = "pt_inventory_lots"
+
+    def test_measured_reported_pt_stamps_inventory_marker_and_fields(self):
+        snapshot = _run_value(
+            pt_amount=Decimal("100"),
+            pt_price=_pt_price(price=Decimal("0.95"), confidence=ValueConfidence.HIGH),
+        )
+        legs = _pendle_legs(snapshot)
+        assert len(legs) == 1
+        det = legs[0].details
+        # The data-shape marker every PT-inventory consumer detects on.
+        assert det.get("source") == self._SOURCE
+        assert det.get("pt_symbol") == _PT_SYMBOL
+        assert det.get("quantity") == "100"
+        assert det.get("days_to_maturity") == 120
+        assert det.get("price_confidence") == str(ValueConfidence.HIGH)
+        # Display enrichment must NOT change the money: NAV still 100 × 0.95.
+        assert legs[0].value_usd == Decimal("95")
+        assert snapshot.total_value_usd == Decimal("95")
+        assert snapshot.value_confidence == ValueConfidence.HIGH
+        # NOT unmeasured for a HIGH price.
+        assert det.get("mark_unmeasured") is not True
+
+    def test_unmeasured_reported_pt_marks_unmeasured_not_zero(self):
+        snapshot = _run_value(
+            pt_amount=Decimal("100"),
+            pt_price=_pt_price(price=None, confidence=ValueConfidence.UNAVAILABLE),
+        )
+        legs = _pendle_legs(snapshot)
+        assert len(legs) == 1
+        det = legs[0].details
+        # Still tagged PT inventory so the row surfaces…
+        assert det.get("source") == self._SOURCE
+        assert det.get("pt_symbol") == _PT_SYMBOL
+        assert det.get("quantity") == "100"
+        # …but Empty ≠ Zero: explicitly unmeasured, paired with no_path.
+        assert det.get("mark_unmeasured") is True
+        assert det.get("cost_basis_unmeasured") is True
+        assert det.get("unrealized_pnl_unmeasured") is True
+        assert det.get("valuation_status") == "no_path"
+        # Snapshot confidence drops to UNAVAILABLE — never a booked measured $0.
+        assert snapshot.value_confidence == ValueConfidence.UNAVAILABLE
+
+    def test_stale_reported_pt_still_inventory_marked_and_valued(self):
+        snapshot = _run_value(
+            pt_amount=Decimal("100"),
+            pt_price=_pt_price(price=Decimal("0.94"), confidence=ValueConfidence.STALE),
+        )
+        legs = _pendle_legs(snapshot)
+        assert len(legs) == 1
+        det = legs[0].details
+        assert det.get("source") == self._SOURCE
+        assert legs[0].value_usd == Decimal("94")  # value unchanged
+        assert det.get("valuation_status") == "estimated"
+        assert det.get("mark_unmeasured") is not True
+        assert snapshot.value_confidence == ValueConfidence.ESTIMATED

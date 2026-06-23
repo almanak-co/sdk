@@ -291,6 +291,133 @@ class DashboardAPIClient:
             logger.debug(f"Failed to get price for {token}/{quote}: {e}")
             return None
 
+    def get_pt_price(
+        self,
+        symbol: str,
+        chain: str | None = None,
+        quote: str = "USD",
+        maturity_ts: int = 0,
+    ) -> dict[str, Any]:
+        """Get the composed Pendle PT/USD price via the gateway price authority.
+
+        Typed accessor over the ``MarketService.GetPtPrice`` RPC (VIB-5309/5310)
+        so a custom dashboard never re-derives a PT mark from a raw
+        ``get_price`` ratio. PT/USD is composed gateway-side as
+        ``pt_to_asset_rate × underlying/USD`` and stamped with confidence +
+        staleness + maturity (design spine §1).
+
+        **Empty != Zero**: ``price`` is ``None`` (never ``0.0``) unless
+        ``availability == AVAILABLE``. A PT that is genuinely unpriceable
+        (``UNMEASURED``), an old gateway (``UNSPECIFIED``), or a read that raised
+        (``ERRORED``) all yield ``price=None`` — the dashboard shows an explicit
+        "unmeasured" cell, never a fabricated number. Gate on ``availability``,
+        not on string emptiness.
+
+        Args:
+            symbol: Canonical PT symbol — the identity / join / FIFO-match key
+                (case-insensitive at the gateway).
+            chain: Chain name. When omitted, falls back to the strategy config's
+                ``default_chain`` / ``chain`` (mirrors :meth:`get_price`).
+            quote: Quote currency (default ``USD``).
+            maturity_ts: Optional maturity hint as a Unix timestamp in seconds;
+                ``0`` lets the gateway resolve the active maturity.
+
+        Returns:
+            A dict with: ``symbol``, ``chain``, ``quote``, ``price``
+            (``float | None`` — ``None`` when unmeasured), ``availability``
+            (``"AVAILABLE"`` / ``"UNMEASURED"`` / ``"ERRORED"`` / ``"UNSPECIFIED"``),
+            ``confidence`` (raw ``float`` 0..1), ``confidence_band``
+            (``"HIGH"`` / ``"ESTIMATED"`` / ``"UNAVAILABLE"`` / ``"UNSPECIFIED"``),
+            ``underlying_price`` (``float | None``), ``pt_to_asset_rate``
+            (``float | None``), ``source``, ``stale`` (``bool``), ``maturity_ts``
+            (``int``), ``days_to_maturity`` (``int``). Composition legs are
+            ``None`` when the gateway left them blank (Empty != Zero). Returns the
+            unmeasured shape (``price=None``, ``availability="UNSPECIFIED"``) on
+            any RPC failure — never raises, never fabricates a number.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        resolved_chain = chain
+        if resolved_chain is None:
+            if isinstance(self._chain_cache, _Sentinel):
+                try:
+                    config = self.get_config()
+                    self._chain_cache = config.get("default_chain") or config.get("chain") or None
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f"Could not read chain from config: {e}")
+                    self._chain_cache = None
+            resolved_chain = self._chain_cache
+
+        # Empty != Zero unmeasured shape, returned on any failure path so the
+        # dashboard renders an explicit "unmeasured" cell rather than crashing.
+        unmeasured: dict[str, Any] = {
+            "symbol": symbol,
+            "chain": resolved_chain or "",
+            "quote": quote,
+            "price": None,
+            "availability": "UNSPECIFIED",
+            "confidence": 0.0,
+            "confidence_band": "UNSPECIFIED",
+            "underlying_price": None,
+            "pt_to_asset_rate": None,
+            "source": "",
+            "stale": False,
+            "maturity_ts": 0,
+            "days_to_maturity": 0,
+        }
+        try:
+            request = gateway_pb2.PtPriceRequest(
+                symbol=symbol,
+                chain=resolved_chain or "",
+                quote=quote,
+                maturity_ts=maturity_ts,
+            )
+            response = self._client._client.market.GetPtPrice(request)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Failed to get PT price for {symbol}/{quote}: {e}")
+            return unmeasured
+
+        # A gateway newer than this client can return an enum int we don't know.
+        # ``EnumTypeWrapper.Name`` raises ValueError on an unknown value; fall back
+        # to UNSPECIFIED rather than letting it escape (which would turn a
+        # version-skew response into an uncaught exception instead of the
+        # unmeasured shape). ``is_available`` below is an int-constant comparison
+        # that never raises, so an unknown availability correctly yields price=None.
+        try:
+            availability = gateway_pb2.PtPriceAvailability.Name(response.availability)
+        except ValueError:
+            availability = "PT_PRICE_AVAILABILITY_UNSPECIFIED"
+        try:
+            band = gateway_pb2.PtPriceConfidenceBand.Name(response.confidence_band)
+        except ValueError:
+            band = "PT_PRICE_CONFIDENCE_BAND_UNSPECIFIED"
+        # Strip the verbose proto-enum prefixes to a terse band the renderer can
+        # show directly (AVAILABLE / UNMEASURED / ERRORED / HIGH / ESTIMATED / ...).
+        availability_label = availability.removeprefix("PT_PRICE_AVAILABILITY_")
+        band_label = band.removeprefix("PT_PRICE_CONFIDENCE_BAND_")
+
+        is_available = response.availability == gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE
+        # Empty != Zero: only an AVAILABLE response carries a trustable price.
+        # ``response.price`` is the proto-default empty string when unmeasured —
+        # never coerce it to 0.
+        price = float(response.price) if (is_available and response.price) else None
+
+        return {
+            "symbol": response.symbol or symbol,
+            "chain": response.chain or (resolved_chain or ""),
+            "quote": response.quote or quote,
+            "price": price,
+            "availability": availability_label,
+            "confidence": float(response.confidence),
+            "confidence_band": band_label,
+            "underlying_price": float(response.underlying_price) if response.underlying_price else None,
+            "pt_to_asset_rate": float(response.pt_to_asset_rate) if response.pt_to_asset_rate else None,
+            "source": response.source or "",
+            "stale": bool(response.stale),
+            "maturity_ts": int(response.maturity_ts),
+            "days_to_maturity": int(response.days_to_maturity),
+        }
+
     def get_balance(self, token: str, chain: str | None = None) -> float | None:
         """Get token balance for strategy wallet.
 
@@ -747,7 +874,67 @@ class DashboardAPIClient:
         if hasattr(position, "leverage") and position.leverage is not None:
             result["leverage"] = str(position.leverage)
 
+        # Strategy-reported / valuer-synthesized positions (VIB-5317). Previously
+        # dropped here, which made FIFO-derived held-PT inventory invisible to
+        # custom dashboards even though the valuer stamps the PT display fields
+        # (qty, days-to-maturity, pt_to_asset_rate, price confidence) into the
+        # proto ``details`` map and the gateway surfaces them as
+        # ``strategy_positions``. Surface them so a custom
+        # ``render_custom_dashboard`` can render its own Open-Positions /
+        # PT-inventory table, mirroring the generic operator detail page
+        # (``pages/detail.py``). ``pt_inventory`` is the pre-filtered convenience
+        # view of the held-PT rows.
+        if hasattr(position, "strategy_positions") and position.strategy_positions:
+            result["strategy_positions"] = [self._strategy_position_to_dict(sp) for sp in position.strategy_positions]
+            result["pt_inventory"] = [d for d in result["strategy_positions"] if self._is_pt_inventory_row(d)]
+
         return result
+
+    @staticmethod
+    def _is_pt_inventory_row(sp_dict: dict[str, Any]) -> bool:
+        """Detect a FIFO-derived held-PT inventory row by its data-shape marker.
+
+        Keyed on ``details["source"] == "pt_inventory_lots"`` (the valuer's
+        ``_PT_INVENTORY_SOURCE``) or ``protocol == "pt"`` — never on a
+        connector-name string, so a future protocol rename never silently drops
+        the row (VIB-4636 discipline, mirrors ``data_source._extract_pt_inventory``).
+        """
+        details = sp_dict.get("details") or {}
+        return details.get("source") == "pt_inventory_lots" or sp_dict.get("protocol") == "pt"
+
+    @staticmethod
+    def _strategy_position_to_dict(sp: Any) -> dict[str, Any]:
+        """Convert a ``StrategyPosition`` proto to a dict (VIB-5317).
+
+        Empty != Zero: ``value_usd`` / ``unrealized_pnl_usd`` are passed through
+        verbatim (no ``or "0"`` coercion). An unmeasured PT mark is flagged in
+        ``details`` (``mark_unmeasured == "true"``) and the gateway leaves the USD
+        strings at the proto-default empty string — the renderer keys "—" on the
+        flag, NOT on a zero/empty value, so a measured zero is never confused with
+        unmeasured. We preserve the raw proto strings so that distinction survives
+        to the custom dashboard.
+        """
+        raw_details = getattr(sp, "details", None) or {}
+        details = {str(k): str(v) for k, v in raw_details.items()}
+        # Empty != Zero: the gateway-client dataclass carries ``value_usd`` /
+        # ``unrealized_pnl_usd`` as ``Decimal | None``. A measured ``Decimal("0")``
+        # is falsy, so ``... or ""`` would collapse a real $0 into the unmeasured
+        # sentinel — exactly the conflation this PR exists to prevent. Map only the
+        # genuinely-unmeasured sentinels (``None`` for the dataclass, ``""`` for a
+        # raw proto) to "", and stringify every measured value (including "0").
+        value_usd = getattr(sp, "value_usd", None)
+        unrealized_pnl_usd = getattr(sp, "unrealized_pnl_usd", None)
+        return {
+            "position_type": getattr(sp, "position_type", "") or "",
+            "position_id": getattr(sp, "position_id", "") or "",
+            "chain": getattr(sp, "chain", "") or "",
+            "protocol": getattr(sp, "protocol", "") or "",
+            "value_usd": "" if value_usd is None or value_usd == "" else str(value_usd),
+            "unrealized_pnl_usd": ""
+            if unrealized_pnl_usd is None or unrealized_pnl_usd == ""
+            else str(unrealized_pnl_usd),
+            "details": details,
+        }
 
     def _summary_to_dict(self, summary: Any) -> dict[str, Any]:
         """Convert summary to dictionary."""

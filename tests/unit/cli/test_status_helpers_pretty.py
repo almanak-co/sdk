@@ -1223,3 +1223,79 @@ def test_render_details_pretty_trailing_blank_line() -> None:
     details = _make_details()
     out = _invoke(runner, status_helpers._render_details_pretty, details, True)
     assert out.endswith("\n\n")
+
+
+# ---------------------------------------------------------------------------
+# _format_pt_inventory_detail_line + _print_strategy_positions (PT, VIB-5317)
+# ---------------------------------------------------------------------------
+
+
+def _make_pt_position(**detail_overrides: Any) -> SimpleNamespace:
+    """A FIFO-derived held-PT StrategyPosition-like row (proto map shape)."""
+    details = {
+        "source": "pt_inventory_lots",
+        "pt_symbol": "PT-wstETH-26DEC2024",
+        "quantity": "10.5",
+        "days_to_maturity": "42",
+        "sy_cost": "9.8",
+        "price_confidence": "HIGH",
+    }
+    details.update(detail_overrides)
+    return _make_strategy_position(
+        position_type="TOKEN",
+        position_id="PT-wstETH-26DEC2024",
+        protocol="pt",
+        chain="arbitrum",
+        value_usd="1050.50",
+        unrealized_pnl_usd="50.50",
+        details=details,
+    )
+
+
+def test_format_pt_inventory_detail_line_measured() -> None:
+    """Measured PT row renders qty / days / SY cost / confidence."""
+    line = status_helpers._format_pt_inventory_detail_line(_make_pt_position())
+    assert "Qty: 10.5" in line
+    assert "Days to maturity: 42" in line
+    assert "SY cost: 9.8" in line
+    assert "Confidence: HIGH" in line
+
+
+def test_format_pt_inventory_detail_line_unmeasured_badge() -> None:
+    """Unmeasured PT shows Confidence: UNAVAILABLE and keeps qty + SY cost."""
+    pt = _make_pt_position(price_confidence="UNAVAILABLE", mark_unmeasured="true")
+    line = status_helpers._format_pt_inventory_detail_line(pt)
+    assert "Confidence: UNAVAILABLE" in line
+    assert "Qty: 10.5" in line
+
+
+def test_format_pt_inventory_detail_line_skips_non_pt() -> None:
+    """A non-PT position (no PT marker) yields an empty line."""
+    perp = _make_strategy_position()  # PERP, empty details
+    assert status_helpers._format_pt_inventory_detail_line(perp) == ""
+
+
+def test_print_strategy_positions_pt_row_visible() -> None:
+    """End-to-end: a PT row prints header + value + the PT detail line."""
+    runner = CliRunner()
+    out = _invoke(runner, status_helpers._print_strategy_positions, [_make_pt_position()])
+    assert "TOKEN" in out
+    assert "PT-wstETH-26DEC2024" in out
+    assert "(pt) on arbitrum" in out
+    assert "Value: $1050.50" in out
+    assert "Qty: 10.5" in out
+    assert "Confidence: HIGH" in out
+
+
+def test_print_strategy_positions_unmeasured_pt_no_dollar_zero() -> None:
+    """Unmeasured PT: blank value_usd → no 'Value:' line, never '$0'."""
+    runner = CliRunner()
+    pt = _make_pt_position(price_confidence="UNAVAILABLE", mark_unmeasured="true")
+    # Unmeasured proto leaves value_usd / pnl blank.
+    pt.value_usd = ""
+    pt.unrealized_pnl_usd = ""
+    out = _invoke(runner, status_helpers._print_strategy_positions, [pt])
+    assert "PT-wstETH-26DEC2024" in out
+    assert "$0" not in out
+    assert "Value:" not in out
+    assert "Confidence: UNAVAILABLE" in out

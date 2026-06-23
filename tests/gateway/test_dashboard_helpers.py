@@ -40,9 +40,11 @@ import pytest
 
 from almanak.framework.portfolio.models import (
     PortfolioSnapshot,
+    PositionValue,
     TokenBalance,
     ValueConfidence,
 )
+from almanak.framework.teardown.models import PositionType
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services._dashboard_helpers import (
     build_chain_health,
@@ -978,6 +980,247 @@ class TestBuildPositionProto:
 
         assert [b.symbol for b in position.token_balances] == ["WETH"]
         assert [p.position_id for p in position.strategy_positions] == ["uni-weth-usdc"]
+
+
+# ---------------------------------------------------------------------------
+# build_position_proto — FIFO-derived PT inventory (VIB-5317)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPositionProtoPtInventory:
+    """PT inventory rows from ``snapshot.positions`` reach ``strategy_positions``.
+
+    Mirrors the exact ``PositionValue`` shapes the valuer emits
+    (``portfolio_valuer.py::_classify_pt_inventory`` for measured rows and
+    ``_pt_unmeasured_row`` for unmeasured) so the proto hop is exercised against
+    the real contract, not an invented detail dict.
+    """
+
+    def _snapshot_with_positions(self, positions: list[PositionValue]) -> PortfolioSnapshot:
+        return PortfolioSnapshot(
+            timestamp=datetime.now(UTC),
+            deployment_id="s1",
+            total_value_usd=Decimal("0"),
+            available_cash_usd=Decimal("0"),
+            value_confidence=ValueConfidence.HIGH,
+            positions=positions,
+        )
+
+    def _measured_pt(self) -> PositionValue:
+        # Shape from _classify_pt_inventory's measured branch.
+        return PositionValue(
+            position_type=PositionType.TOKEN,
+            protocol="pt",
+            chain="arbitrum",
+            value_usd=Decimal("1050.50"),
+            label="PT inventory PT-wstETH-26DEC2024",
+            tokens=["PT-wstETH-26DEC2024"],
+            details={
+                "asset": "PT-wstETH-26DEC2024",
+                "source": "pt_inventory_lots",
+                "classification": "deployed_inventory",
+                "pt_symbol": "PT-wstETH-26DEC2024",
+                "quantity": "10.5",
+                "sy_cost": "9.8",
+                "days_to_maturity": 42,
+                "price_confidence": "HIGH",
+                "price_source": "pendle",
+            },
+            cost_basis_usd=Decimal("1000.00"),
+            unrealized_pnl_usd=Decimal("50.50"),
+        )
+
+    def _unmeasured_pt(self) -> PositionValue:
+        # Shape from _pt_unmeasured_row (Empty ≠ Zero: value_usd is a placeholder
+        # 0 PAIRED WITH mark_unmeasured=True — never a measured zero).
+        return PositionValue(
+            position_type=PositionType.TOKEN,
+            protocol="pt",
+            chain="arbitrum",
+            value_usd=Decimal("0"),
+            label="PT inventory PT-eETH-26JUN2025",
+            tokens=["PT-eETH-26JUN2025"],
+            details={
+                "asset": "PT-eETH-26JUN2025",
+                "source": "pt_inventory_lots",
+                "classification": "deployed_inventory",
+                "pt_symbol": "PT-eETH-26JUN2025",
+                "quantity": "3.0",
+                "sy_cost": "2.9",
+                "valuation_status": "no_path",
+                "mark_unmeasured": True,
+                "cost_basis_unmeasured": True,
+                "unrealized_pnl_unmeasured": True,
+                "unavailable_reason": "price_unmeasured",
+            },
+            cost_basis_usd=Decimal("0"),
+            unrealized_pnl_usd=Decimal("0"),
+        )
+
+    def test_measured_pt_row_emits_strategy_position(self):
+        """A measured PT row surfaces qty / USD mark / PnL / days / confidence."""
+        snapshot = self._snapshot_with_positions([self._measured_pt()])
+
+        position = build_position_proto(state=None, cached_positions=None, snapshot=snapshot)
+
+        assert len(position.strategy_positions) == 1
+        sp = position.strategy_positions[0]
+        assert sp.position_type == "TOKEN"
+        assert sp.protocol == "pt"
+        assert sp.chain == "arbitrum"
+        assert sp.position_id == "PT-wstETH-26DEC2024"
+        # Measured → USD mark + PnL are stamped.
+        assert sp.value_usd == "1050.50"
+        assert sp.unrealized_pnl_usd == "50.50"
+        # PT-specific drill-down details ride in the map.
+        assert sp.details["quantity"] == "10.5"
+        assert sp.details["days_to_maturity"] == "42"
+        assert sp.details["price_confidence"] == "HIGH"
+        assert sp.details["sy_cost"] == "9.8"
+        # Measured row carries no unmeasured marker.
+        assert "mark_unmeasured" not in sp.details
+
+    def test_unmeasured_pt_row_has_no_fabricated_usd(self):
+        """Unmeasured PT: NO USD mark / PnL string (Empty ≠ Zero), badge UNAVAILABLE."""
+        snapshot = self._snapshot_with_positions([self._unmeasured_pt()])
+
+        position = build_position_proto(state=None, cached_positions=None, snapshot=snapshot)
+
+        assert len(position.strategy_positions) == 1
+        sp = position.strategy_positions[0]
+        # CRITICAL: the placeholder Decimal("0") must NOT become a displayed "$0".
+        # The proto-default empty string renders as "—" downstream.
+        assert sp.value_usd == ""
+        assert sp.unrealized_pnl_usd == ""
+        # Qty + SY cost still surface so the operator sees the holding.
+        assert sp.details["quantity"] == "3.0"
+        assert sp.details["sy_cost"] == "2.9"
+        # Confidence badge is UNAVAILABLE, keyed on the mark_unmeasured flag.
+        assert sp.details["price_confidence"] == "UNAVAILABLE"
+        assert sp.details["mark_unmeasured"] == "true"
+
+    def test_pt_rows_precede_cached_positions(self):
+        """PT inventory is inserted BEFORE heartbeat-cached positions."""
+        snapshot = self._snapshot_with_positions([self._measured_pt()])
+        cached = [
+            gateway_pb2.StrategyPosition(
+                position_type="LP",
+                position_id="uni-weth-usdc",
+                chain="arbitrum",
+                protocol="Uniswap V3",
+                value_usd="5000",
+            )
+        ]
+
+        position = build_position_proto(state=None, cached_positions=cached, snapshot=snapshot)
+
+        ids = [p.position_id for p in position.strategy_positions]
+        assert ids == ["PT-wstETH-26DEC2024", "uni-weth-usdc"]
+
+    def test_non_pt_snapshot_position_is_not_emitted(self):
+        """A non-PT position row in the snapshot is NOT surfaced here.
+
+        Wallet-balance + heartbeat surfaces own non-PT rows; this hop is
+        PT-only. Also a regression guard: wallet_balances + cached positions
+        keep working alongside a non-PT snapshot position.
+        """
+        non_pt = PositionValue(
+            position_type=PositionType.TOKEN,
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            value_usd=Decimal("123"),
+            label="WETH/USDC LP",
+            tokens=["WETH", "USDC"],
+            details={"source": "lp_position"},
+        )
+        snapshot = PortfolioSnapshot(
+            timestamp=datetime.now(UTC),
+            deployment_id="s1",
+            total_value_usd=Decimal("0"),
+            available_cash_usd=Decimal("0"),
+            value_confidence=ValueConfidence.HIGH,
+            wallet_balances=[TokenBalance(symbol="WETH", balance=Decimal("1"), value_usd=Decimal("3000"))],
+            positions=[non_pt],
+        )
+        cached = [
+            gateway_pb2.StrategyPosition(
+                position_type="SUPPLY", position_id="aave-usdc", chain="arbitrum", protocol="Aave", value_usd="10"
+            )
+        ]
+
+        position = build_position_proto(state=None, cached_positions=cached, snapshot=snapshot)
+
+        # Only the cached position — the non-PT snapshot row is ignored.
+        assert [p.position_id for p in position.strategy_positions] == ["aave-usdc"]
+        # Wallet balances unaffected.
+        assert [b.symbol for b in position.token_balances] == ["WETH"]
+
+    def test_empty_positions_emit_nothing(self):
+        """A snapshot with no PT positions adds no strategy_positions."""
+        snapshot = self._snapshot_with_positions([])
+
+        position = build_position_proto(state=None, cached_positions=None, snapshot=snapshot)
+
+        assert len(position.strategy_positions) == 0
+
+    def test_source_marker_propagates_to_proto(self):
+        """VIB-5317: the ``source`` marker is carried into the proto details map.
+
+        Downstream display filters (CLI ``_format_pt_inventory_detail_line``,
+        dashboard ``_extract_pt_inventory``) detect a PT-inventory row by
+        ``source``, so a ``protocol="pendle"`` reported PT (whose protocol is NOT
+        ``pt``) only reaches the surface when the marker rides the proto.
+        """
+        snapshot = self._snapshot_with_positions([self._measured_pt()])
+
+        position = build_position_proto(state=None, cached_positions=None, snapshot=snapshot)
+
+        sp = position.strategy_positions[0]
+        assert sp.details["source"] == "pt_inventory_lots"
+
+    def _reported_pendle_pt(self) -> PositionValue:
+        """A REPORTED PT enriched by ``_reprice_principal_token_enriched``.
+
+        ``protocol="pendle"`` (NOT ``pt``) — the common ``get_open_positions``
+        case the first VIB-5317 impl was inert for. The valuer now stamps the
+        ``source`` marker + display fields, so it must surface here just like a
+        FIFO row.
+        """
+        return PositionValue(
+            position_type=PositionType.SUPPLY,
+            protocol="pendle",
+            chain="arbitrum",
+            value_usd=Decimal("2000.00"),
+            label="pendle supply",
+            tokens=["PT-wstETH"],
+            details={
+                "source": "pt_inventory_lots",
+                "classification": "deployed_inventory",
+                "pt_symbol": "PT-wstETH",
+                "quantity": "20.0",
+                "days_to_maturity": 180,
+                "price_confidence": "HIGH",
+            },
+            cost_basis_usd=Decimal("1900.00"),
+            unrealized_pnl_usd=Decimal("100.00"),
+        )
+
+    def test_reported_pendle_pt_is_emitted(self):
+        """A reported PT (protocol='pendle' + source marker) reaches the proto."""
+        snapshot = self._snapshot_with_positions([self._reported_pendle_pt()])
+
+        position = build_position_proto(state=None, cached_positions=None, snapshot=snapshot)
+
+        assert len(position.strategy_positions) == 1
+        sp = position.strategy_positions[0]
+        assert sp.protocol == "pendle"
+        assert sp.details["source"] == "pt_inventory_lots"
+        assert sp.position_id == "PT-wstETH"
+        assert sp.value_usd == "2000.00"
+        assert sp.unrealized_pnl_usd == "100.00"
+        assert sp.details["quantity"] == "20.0"
+        assert sp.details["days_to_maturity"] == "180"
+        assert sp.details["price_confidence"] == "HIGH"
 
 
 # ---------------------------------------------------------------------------

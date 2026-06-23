@@ -189,6 +189,32 @@ class LPPosition:
 
 
 @dataclass
+class PtInventoryPosition:
+    """A FIFO-derived held-PT inventory row for the Open Positions table (VIB-5317).
+
+    PT inventory is computed from the FIFO lots, not the position registry
+    (VIB-4931 removed the PENDLE_PT PositionType), so it never appears in the
+    position-event lifecycle table. This row carries what the operator needs to
+    see the holding: symbol, quantity, the USD mark + unrealized PnL when
+    measured, days-to-maturity and a confidence badge.
+
+    Empty ≠ Zero (VIB-5316): ``value_usd`` / ``unrealized_pnl_usd`` are ``None``
+    when UNMEASURED — the renderer shows "—", never "$0". ``unmeasured`` flags
+    that state explicitly; do not infer it from a zero value.
+    """
+
+    symbol: str
+    quantity: str = ""
+    value_usd: Decimal | None = None
+    unrealized_pnl_usd: Decimal | None = None
+    days_to_maturity: str = ""
+    confidence: str = ""
+    sy_cost: str = ""
+    chain: str = ""
+    unmeasured: bool = False
+
+
+@dataclass
 class PositionSummary:
     """Summary of strategy position."""
 
@@ -197,6 +223,7 @@ class PositionSummary:
     total_lp_value_usd: Decimal = Decimal("0")
     health_factor: Decimal | None = None
     leverage: Decimal | None = None
+    pt_inventory: list[PtInventoryPosition] = field(default_factory=list)
 
 
 @dataclass
