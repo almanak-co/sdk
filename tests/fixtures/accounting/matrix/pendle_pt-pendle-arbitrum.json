@@ -8,7 +8,8 @@
     "captured_from_sha256": "a62933a8c1c3da9338d33b0439c4f69ea30744765bcb0d7c35b408290aa04477",
     "captured_at": "2026-06-23T05:56:23.700639+00:00",
     "captured_at_commit": "74b031a3ffabb66c81c939135ed2c459cd1065be",
-    "note": "Real-Anvil baseline (same DB the check-accounting-ratchet gate scores). HONEST FLOOR \u2014 PEN1/2/4/5/6 PASS (acquisition basis, entry economics, FIFO-matched realized yield in true USD via VIB-5314, lifecycle continuity, PT-quantity conservation). VIB-5319 advanced the generic cells off the typed PendleAccountingEvent: G3 PASS = the yield-ledger cell now reads PT realized_yield_usd (the PT strategy's entire realised payoff). G1 XFAIL + G6 XFAIL = the PT disposal's GROSS USD (money-trail leg G1; reconciliation proceeds sy_amount\u00d7sy_price G6) is unmeasured because the sell-side SY price is absent on this fork (sy_price=None on PT_SELL \u2014 the gateway PT/SY implied-price path, VIB-5276, same root cause as PEN3). These are MEASURED XFAILs (measured-but-blocked, not a books error and not a fabricated PASS), narrowly scoped via the pendle_pt profile's disposal_usd_unmeasured_is_xfail flag to the one ticketed null bucket \u2014 any OTHER unmeasured leg still FAILs. They flip to PASS automatically once VIB-5276 lands the sell-side SY price and the fixture is re-captured. PEN3 XFAIL = open-PT mark-to-market, same VIB-5276 gateway PT price. G11 SKIP = no failed intents in the round-trip. G14/G15/L5_22 XFAIL = Track-C / registry-mode not on for this run (same shape as every other primitive's frozen fixture)."
+    "post_fix_for": "VIB-5319, VIB-5276",
+    "note": "Real-Anvil baseline (same DB the check-accounting-ratchet gate scores). PEN1/2/3/4/5/6 PASS. VIB-5319 advanced the generic cells off the typed PendleAccountingEvent: G3 PASS = the yield-ledger cell reads PT realized_yield_usd (the PT strategy's entire realised payoff). G1 XFAIL + G6 XFAIL = the PT disposal's GROSS USD (money-trail leg G1; reconciliation proceeds sy_amount\u00d7sy_price G6) is unmeasured because the sell-side SY price is absent on this fork (sy_price=None on PT_SELL \u2014 the gateway PT/SY implied-price path, same VIB-5276 root cause as the OPEN-side PT price). These are MEASURED XFAILs (measured-but-blocked, not a books error and not a fabricated PASS), narrowly scoped via the pendle_pt profile's disposal_usd_unmeasured_is_xfail flag to the one ticketed null bucket \u2014 any OTHER unmeasured leg still FAILs. VIB-5276 promoted PEN3 (open-PT mark-to-market) XFAIL\u2192PASS: the gateway PT implied-price path (PT/USD = pt_to_asset_rate \u00d7 underlying/USD) is wired through MarketSnapshot.pt_price into the portfolio valuer (VIB-5313 reprice + VIB-5316 FIFO-inventory consumer), and the PEN3 cell predicate now reads the open-PT mark off the snapshot's pt_inventory_lots row instead of being hardcoded XFAIL. This frozen DB's last snapshot already carries a MEASURED open-PT row (value_usd=26.51, cost_basis_usd=21.44, unrealized_pnl_usd=5.07, price_confidence=STALE) \u2014 STALE is a measured mark (Empty \u2260 Zero keys on the mark_unmeasured flag, not on confidence), so PEN3 measures PASS with no DB re-capture. G11 SKIP = no failed intents in the round-trip. G14/G15/L5_22 XFAIL = Track-C / registry-mode not on for this run (same shape as every other primitive's frozen fixture)."
   },
   "cells": {
     "G1": "XFAIL",
@@ -29,15 +30,15 @@
     "L5_22": "XFAIL",
     "PEN1": "PASS",
     "PEN2": "PASS",
-    "PEN3": "XFAIL",
+    "PEN3": "PASS",
     "PEN4": "PASS",
     "PEN5": "PASS",
     "PEN6": "PASS"
   },
   "scores": {
     "failed": 0,
-    "passed": 15,
+    "passed": 16,
     "total": 22,
-    "xfailed": 6
+    "xfailed": 5
   }
 }

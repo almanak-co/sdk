@@ -3043,9 +3043,137 @@ def _cells_perp(
     return out
 
 
+def _open_pt_inventory_rows(snapshots: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    """Open held-PT inventory rows across all snapshots, iteration-ordered.
+
+    The portfolio valuer surfaces an open Pendle PT as a synthetic
+    ``positions_json`` row tagged ``details.source == "pt_inventory_lots"``
+    (``_classify_pt_inventory`` / ``_pt_unmeasured_row``, VIB-5316). PEN3 reads
+    those rows to score open-PT mark-to-market — a real measurement now that the
+    gateway PT implied-price path is wired (VIB-5276), not a hardcoded XFAIL.
+
+    Returns ``(rows, any_unreadable)``. ``rows`` are the matching position dicts
+    ordered oldest→newest (by ``iteration_number`` then ``timestamp``) so the
+    caller can take the LATEST snapshot's mark with ``rows[-1]``. ``any_unreadable``
+    is True when ≥1 snapshot's ``positions_json`` is malformed — surfaced as a
+    diagnostic note (Empty ≠ Zero / VIB-3891: unreadable JSON is NOT "no PT", it is
+    simply unknown here; the hard coverage failure for it lives in G15, not PEN3).
+
+    Parses ``positions_json`` with the same accept-two-shapes discipline as the
+    Track-C cells (legacy plain list OR versioned envelope ``{"positions": [...]}``).
+
+    The ``"pt_inventory_lots"`` marker is the data-shape contract (VIB-4636
+    discipline — detect by marker, never by a protocol-name string); the accounting
+    layer matches it as a literal so it does not import the valuer (mirrors the
+    ``swap_inventory_lots`` literal used by the Track-C cells above). Source of
+    truth: ``portfolio_valuer._PT_INVENTORY_SOURCE``.
+    """
+    out: list[dict[str, Any]] = []
+    any_unreadable = False
+    ordered = sorted(snapshots, key=lambda r: (r.get("iteration_number") or 0, r.get("timestamp") or ""))
+    for s in ordered:
+        positions_json = s.get("positions_json")
+        if not positions_json or positions_json == "[]":
+            continue
+        try:
+            parsed = json.loads(positions_json)
+        except (json.JSONDecodeError, TypeError):
+            any_unreadable = True
+            continue
+        if isinstance(parsed, list):
+            positions = parsed
+        elif isinstance(parsed, dict) and isinstance(parsed.get("positions"), list):
+            positions = parsed["positions"]
+        else:
+            any_unreadable = True
+            continue
+        for p in positions:
+            if not isinstance(p, dict):
+                continue
+            details = p.get("details")
+            if isinstance(details, dict) and details.get("source") == "pt_inventory_lots":
+                out.append(p)
+    return out, any_unreadable
+
+
+def _pen3_open_pt_cell(snapshots: list[dict[str, Any]]) -> CellResult:
+    """PEN3 — open-PT mark-to-market (unrealised discount accretion).
+
+    The gateway PT implied-price path (VIB-5276:
+    ``PT/USD = pt_to_asset_rate × underlying/USD``) is wired through
+    ``MarketSnapshot.pt_price`` into the portfolio valuer (VIB-5313 reprice +
+    VIB-5316 FIFO-inventory consumer), which surfaces an open PT as a
+    ``pt_inventory_lots`` row in ``portfolio_snapshots.positions_json``. This cell
+    reads those rows — a real measurement, no longer a hardcoded XFAIL.
+
+    Empty ≠ Zero (blueprint 27 §L2 mark-to-market, line ~700; CLAUDE.md
+    §Accounting spine §3.3): the measured/unmeasured discriminators are the
+    ``details.*_unmeasured`` flags the valuer sets — NOT ``price_confidence``
+    (STALE / ESTIMATED still carry a real ``value_usd`` mark). The cell's claim is
+    the *unrealised discount accretion*, so it PASSes only when ALL THREE of the
+    mark, the cost basis, and the unrealised PnL are measured. ``_classify_pt_inventory``
+    can mark the row priced (``mark_unmeasured`` absent) yet flag
+    ``cost_basis_unmeasured`` / ``unrealized_pnl_unmeasured`` when the buy-time USD
+    cost leg is missing — in that case the persisted ``cost_basis_usd`` /
+    ``unrealized_pnl_usd`` are placeholder ``0`` (Empty ≠ Zero), so a PASS here
+    would publish a fabricated zero unrealised PnL. PEN3 XFAILs instead.
+
+    * measured open-PT row (USD mark AND cost_basis AND unrealized PnL) → **PASS**;
+    * row priced but cost / unrealised-PnL unmeasured (buy-time USD leg missing) →
+      **XFAIL** (the discount-accretion claim is unmeasured, not a fabricated 0);
+    * honest-unmeasured row (gateway price UNAVAILABLE on this fork) → **XFAIL**
+      citing the row's ``unavailable_reason`` (capability present, not priceable
+      here — absent, not wrong);
+    * no open-PT inventory row in any snapshot → **XFAIL** (nothing to mark).
+
+    There is NO FAIL branch: an unmeasured / absent mark is Empty ≠ Zero, never a
+    failure. The decision is taken on the LATEST snapshot bearing a PT row (rows
+    are iteration-ordered) — PT inventory exists only while a lot is open, so the
+    most recent such row is the freshest unrealised-discount mark.
+    """
+    name = "Open-PT mark-to-market (unrealised discount accretion)"
+    pt_rows, pt_unreadable = _open_pt_inventory_rows(snapshots)
+    if not pt_rows:
+        note = "; NOTE: malformed positions_json on ≥1 snapshot" if pt_unreadable else ""
+        return CellResult(
+            "PEN3",
+            name,
+            "XFAIL",
+            f"no open-PT inventory row in any snapshot (pt_inventory_lots) — nothing to mark-to-market{note}",
+        )
+    latest = pt_rows[-1]
+    d = latest.get("details") or {}
+    sym = d.get("pt_symbol") or d.get("asset") or "PT"
+    # The unrealised-discount-accretion claim needs the mark AND the cost basis AND
+    # the unrealised PnL all measured. Any *_unmeasured flag → XFAIL (Empty ≠ Zero;
+    # the placeholder 0s the valuer pairs with those flags must never read as PASS).
+    unmeasured = d.get("mark_unmeasured") or d.get("cost_basis_unmeasured") or d.get("unrealized_pnl_unmeasured")
+    if not unmeasured:
+        return CellResult(
+            "PEN3",
+            name,
+            "PASS",
+            f"open-PT {sym} marked value_usd={latest.get('value_usd')} "
+            f"cost_basis_usd={latest.get('cost_basis_usd')} "
+            f"unrealized_pnl_usd={latest.get('unrealized_pnl_usd')} "
+            f"(confidence={d.get('price_confidence', '?')}, source={d.get('price_source', '?')})",
+        )
+    reason = d.get("unavailable_reason") or (
+        "price_unmeasured" if d.get("mark_unmeasured") else "cost_basis_unmeasured"
+    )
+    return CellResult(
+        "PEN3",
+        name,
+        "XFAIL",
+        f"open-PT {sym} mark/cost unmeasured ({reason}) — Empty ≠ Zero: capability wired "
+        "(VIB-5276) but the gateway price or buy-time cost basis is not measured on this run",
+    )
+
+
 def _cells_pendle_pt(
     acct_events: list[dict[str, Any]],
     pos_events: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
     acct_payloads: dict[Any, dict[str, Any]],
     payload_errors: dict[Any, str],
 ) -> list[CellResult]:
@@ -3106,18 +3234,12 @@ def _cells_pendle_pt(
             )
         )
 
-    # PEN3 — open-PT mark-to-market (unrealised discount accretion). Requires the
-    # portfolio valuer to price an open PT (G-PT2) which needs a gateway PT price
-    # path (VIB-5276); until then an open PT carries no cost_basis_usd /
-    # unrealized_pnl_usd. XFAIL, not FAIL — the capability is absent, not wrong.
-    out.append(
-        CellResult(
-            "PEN3",
-            "Open-PT mark-to-market (unrealised discount accretion)",
-            "XFAIL",
-            "open-PT valuer unwired (G-PT2 / VIB-5276 gateway PT price)",
-        )
-    )
+    # PEN3 — open-PT mark-to-market (unrealised discount accretion). The gateway
+    # PT implied-price path (VIB-5276) is now wired through the portfolio valuer,
+    # so this cell reads the open-PT mark off the snapshot instead of hardcoding
+    # XFAIL. Predicate extracted to ``_pen3_open_pt_cell`` (keeps this pack small +
+    # unit-testable, mirroring ``_lp5_decomposition_cell``).
+    out.append(_pen3_open_pt_cell(snapshots))
 
     # PEN4 — realised fixed yield: a PT sell/redeem books realized_yield_usd
     # (sy_received − matched-lot cost) against the FIFO buy lot. This is the
@@ -3292,14 +3414,16 @@ def _cells_pendle_lp(
     # open Pendle LP (value_pendle_lp / value_principal_token_lp_from_components),
     # which is NOT wired into portfolio_valuer.py (limitation B2) — so an open
     # Pendle LP marks to ~0 and carries no cost_basis_usd / unrealized_pnl_usd.
-    # XFAIL, not FAIL: the capability is absent, not wrong. Unblocked by the
-    # VIB-5276 gateway PT-price path + valuer wiring (separate follow-up PR).
+    # XFAIL, not FAIL: the capability is absent, not wrong. NOTE: the gateway PT
+    # implied-price path (VIB-5276) is now SHIPPED and consumed for open-PT MTM
+    # (PEN3 PASS); the remaining PLP3 gap is the Pendle-LP valuer wiring
+    # (value_pendle_lp), a separate follow-up — not the gateway price.
     out.append(
         CellResult(
             "PLP3",
             "Open-LP mark-to-market (cost basis + unrealised PnL)",
             "XFAIL",
-            "Pendle-LP valuer unwired (B2: value_pendle_lp not in portfolio_valuer; VIB-5276 gateway PT price)",
+            "Pendle-LP valuer unwired (B2: value_pendle_lp not wired into portfolio_valuer)",
         )
     )
 
@@ -3460,6 +3584,7 @@ SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
         cells=lambda ctx: _cells_pendle_pt(
             ctx.acct_events,
             ctx.pos_events,
+            ctx.snapshots,
             ctx.acct_payloads,
             ctx.payload_errors,
         ),
