@@ -86,6 +86,20 @@ class ScorecardProfile:
     cells
         ``(ScorecardCtx) -> list[CellResult]``: the primitive cell pack, adapted
         to the pack's existing signature.
+    disposal_usd_unmeasured_is_xfail
+        VIB-5319: when True, a generic money-trail / reconciliation cell (G1, G6)
+        that is blocked *only* because a disposal leg's gross USD value is
+        unmeasured — and that unmeasured value is a KNOWN, TICKETED gateway-price
+        gap, not an accounting bug — surfaces ``XFAIL`` (measured-but-blocked)
+        instead of ``FAIL`` (a wrong/contradictory number). Set True only on the
+        ``pendle_pt`` profile: a PT_SELL / PT_REDEEM on a fork without the gateway
+        PT/SY implied-price path (VIB-5276) carries ``sy_price = None``, so the
+        disposal proceeds (``sy_amount × sy_price``) and the per-leg USD money
+        trail are genuinely unmeasured (Empty ≠ Zero — never folded to a silent
+        zero, never a fabricated PASS). Every other primitive keeps the strict
+        FAIL-on-null behaviour (default False). The XFAIL is narrowly scoped to
+        the PT-disposal-USD null bucket: any *other* unmeasured component bucket
+        still FAILs.
     """
 
     name: str
@@ -94,3 +108,4 @@ class ScorecardProfile:
     eps_pct: Decimal
     eps_scaling: Callable[[G6Bases], tuple[Decimal, str]]
     cells: Callable[[ScorecardCtx], list[Any]]
+    disposal_usd_unmeasured_is_xfail: bool = False

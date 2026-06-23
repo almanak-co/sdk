@@ -688,10 +688,100 @@ def _payload_block_cell(
 # ─── Cell predicates ─────────────────────────────────────────────────────
 
 
+# VIB-5319: Pendle PT trade legs ride the SWAP intent_type in the ledger but are
+# booked as typed ``PendleAccountingEvent`` rows (PT_BUY / PT_SELL / PT_REDEEM),
+# NOT generic ``SWAP`` events. Their money-trail USD proof therefore lives in the
+# Pendle payload (``sy_amount`` × ``sy_price``), not a SwapEventPayload. G1 maps
+# such ledger rows to their Pendle event so the money-trail USD pillar reads the
+# correct typed field instead of false-failing on a missing SwapEventPayload.
+_PENDLE_PT_EVENT_TYPES = ("PT_BUY", "PT_SELL", "PT_REDEEM")
+_PENDLE_PT_DISPOSAL_TYPES = ("PT_SELL", "PT_REDEEM")
+
+
+def _g1_classify_swap_usd_legs(
+    successful: list[dict[str, Any]],
+    acct_events: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+) -> tuple[list[tuple[Any, str]], list[tuple[Any, str]]]:
+    """Classify each successful SWAP ledger row's USD money-trail proof.
+
+    Returns ``(missing_swap_usd, pt_unmeasured_disposals)``:
+
+    * ``missing_swap_usd`` — SWAP rows with a genuinely missing USD pillar (no
+      paired SwapEventPayload, a null SwapEventPayload USD, or an acquiring
+      PT_BUY with no USD). These FAIL G1.
+    * ``pt_unmeasured_disposals`` — PT disposal rows (PT_SELL / PT_REDEEM) whose
+      sell-side SY price is unmeasured (sy_price=None — VIB-5276). The caller
+      routes these to XFAIL (ticketed gap) or FAIL per the profile.
+
+    VIB-5319: a SWAP ledger row backed by a typed Pendle PT event proves its
+    money trail through the Pendle payload (``sy_amount × sy_price``), not a
+    SwapEventPayload, so it is checked against the Pendle event here.
+    """
+    swap_acct_by_ledger_id: dict[Any, dict[str, Any]] = {}
+    pt_acct_by_ledger_id: dict[Any, tuple[str, dict[str, Any]]] = {}
+    for ae in acct_events:
+        leg = ae.get("ledger_entry_id")
+        if leg is None:
+            continue
+        et = ae.get("event_type")
+        if et == "SWAP":
+            swap_acct_by_ledger_id[leg] = acct_payloads.get(ae.get("id"), {})
+        elif et in _PENDLE_PT_EVENT_TYPES:
+            pt_acct_by_ledger_id[leg] = (et, acct_payloads.get(ae.get("id"), {}))
+
+    missing_swap_usd: list[tuple[Any, str]] = []
+    pt_unmeasured_disposals: list[tuple[Any, str]] = []
+    for r in successful:
+        if r.get("intent_type") != "SWAP":
+            continue
+        ledger_id = r.get("id")
+        pt_entry = pt_acct_by_ledger_id.get(ledger_id)
+        if pt_entry is not None:
+            et, pt_payload = pt_entry
+            sy_amount = pt_payload.get("sy_amount")
+            sy_price = pt_payload.get("sy_price")
+            if sy_amount not in (None, "") and sy_price not in (None, ""):
+                continue  # PT leg fully valued in USD — money trail intact.
+            detail = f"sy_amount={sy_amount!r} sy_price={sy_price!r}"
+            # The VIB-5276 XFAIL waiver is narrowly the *gateway price* gap: an
+            # on-chain disposal whose SY proceeds AMOUNT is measured but whose
+            # sell-side SY USD price is *absent on the fork* — and "absent" is
+            # specifically ``sy_price is None`` (the gateway returned no PT/SY
+            # implied price). Two adjacent states are NOT the waiver and must FAIL:
+            #   * a missing disposal AMOUNT (sy_amount None/"") — a receipt/writer
+            #     data loss, never a price gap;
+            #   * ``sy_price == ""`` — the parser failed to emit the field at all,
+            #     a real serialization defect, distinct from the gateway returning
+            #     None. (Empty≠Zero, and Empty≠Unmeasured.)
+            amount_measured = sy_amount not in (None, "")
+            price_is_gateway_gap = sy_price is None
+            if et in _PENDLE_PT_DISPOSAL_TYPES and amount_measured and price_is_gateway_gap:
+                pt_unmeasured_disposals.append((ledger_id, detail))
+            elif et in _PENDLE_PT_DISPOSAL_TYPES:
+                # Missing disposal amount, or sy_price=="" (parser omission) — a
+                # real money-trail gap, not the ticketed VIB-5276 price waiver.
+                missing_swap_usd.append((ledger_id, f"{et} {detail}"))
+            else:
+                # An acquiring PT_BUY with no USD is a real money-trail gap.
+                missing_swap_usd.append((ledger_id, f"PT_BUY {detail}"))
+            continue
+        payload = swap_acct_by_ledger_id.get(ledger_id)
+        if payload is None:
+            missing_swap_usd.append((ledger_id, "no SwapEventPayload row"))
+            continue
+        in_usd = payload.get("amount_in_usd")
+        out_usd = payload.get("amount_out_usd")
+        if in_usd in (None, "") or out_usd in (None, ""):
+            missing_swap_usd.append((ledger_id, f"amount_in_usd={in_usd!r} amount_out_usd={out_usd!r}"))
+    return missing_swap_usd, pt_unmeasured_disposals
+
+
 def _cell_g1_money_trail(
     rows: list[dict[str, Any]],
     acct_events: list[dict[str, Any]],
     acct_payloads: dict[Any, dict[str, Any]],
+    primitive: str,
 ) -> CellResult:
     """G1 — Money trail (every credit/debit → tx_hash + USD@block).
 
@@ -707,6 +797,15 @@ def _cell_g1_money_trail(
     foreign key wired by ``AccountingWriter``). When a SWAP ledger row has
     no matching accounting_events row at all, that's also a money-trail
     failure — the typed payload is the *only* place USD valuations live.
+
+    VIB-5319: Pendle PT legs ride the SWAP intent_type but book typed
+    ``PendleAccountingEvent`` rows whose USD lives in ``sy_amount × sy_price``.
+    A PT-backed SWAP ledger row is checked against the Pendle payload, not a
+    SwapEventPayload. A PT disposal whose sell-side SY price is unmeasured
+    (sy_price=None — VIB-5276 gateway PT price) has a genuinely unmeasured
+    money-trail USD leg; for a profile that opts in
+    (``disposal_usd_unmeasured_is_xfail``) that is a ticketed measurement gap
+    (XFAIL), not a books error (FAIL), and never a fabricated PASS.
     """
     if not rows:
         return CellResult(
@@ -730,28 +829,7 @@ def _cell_g1_money_trail(
     # failed Pydantic validation lands as ``{}`` here, which counts as
     # missing USD (and the matching cell-level error is also surfaced via
     # the report's ``payload_validation_errors`` list).
-    swap_acct_by_ledger_id: dict[Any, dict[str, Any]] = {}
-    for ae in acct_events:
-        if ae.get("event_type") != "SWAP":
-            continue
-        leg = ae.get("ledger_entry_id")
-        if leg is None:
-            continue
-        swap_acct_by_ledger_id[leg] = acct_payloads.get(ae.get("id"), {})
-
-    missing_swap_usd: list[tuple[Any, str]] = []
-    for r in successful:
-        if r.get("intent_type") != "SWAP":
-            continue
-        ledger_id = r.get("id")
-        payload = swap_acct_by_ledger_id.get(ledger_id)
-        if payload is None:
-            missing_swap_usd.append((ledger_id, "no SwapEventPayload row"))
-            continue
-        in_usd = payload.get("amount_in_usd")
-        out_usd = payload.get("amount_out_usd")
-        if in_usd in (None, "") or out_usd in (None, ""):
-            missing_swap_usd.append((ledger_id, f"amount_in_usd={in_usd!r} amount_out_usd={out_usd!r}"))
+    missing_swap_usd, pt_unmeasured_disposals = _g1_classify_swap_usd_legs(successful, acct_events, acct_payloads)
 
     if missing_hash:
         return CellResult(
@@ -776,13 +854,34 @@ def _cell_g1_money_trail(
             "FAIL",
             f"{len(missing_swap_usd)} SWAP rows missing USD valuation in SwapEventPayload (e.g. {sample_usd!r})",
         )
+    # VIB-5319: every measured leg is intact; the only remaining gap is a PT
+    # disposal whose sell-side SY price is unmeasured (VIB-5276). For a profile
+    # that opts in, that is a measured-but-blocked XFAIL, not a FAIL.
+    if pt_unmeasured_disposals:
+        profile = _profile_for(primitive)
+        pt_sample = pt_unmeasured_disposals[:3]
+        if profile.disposal_usd_unmeasured_is_xfail:
+            return CellResult(
+                "G1",
+                "Money trail",
+                "XFAIL",
+                f"{len(pt_unmeasured_disposals)} PT disposal row(s) carry no USD valuation: "
+                f"sy_price=None (VIB-5276 gateway PT/SY price) — measured-but-blocked, "
+                f"not a books error (e.g. {pt_sample!r}). Flips to PASS once the SY price lands.",
+            )
+        return CellResult(
+            "G1",
+            "Money trail",
+            "FAIL",
+            f"{len(pt_unmeasured_disposals)} PT disposal row(s) missing USD valuation (e.g. {pt_sample!r})",
+        )
     swap_count = sum(1 for r in successful if r.get("intent_type") == "SWAP")
     return CellResult(
         "G1",
         "Money trail",
         "PASS",
         f"{len(rows)} ledger rows ({len(successful)} successful, {swap_count} SWAP); "
-        "all tx_hashes present; SWAP rows carry token amounts AND USD valuations",
+        "all tx_hashes present; SWAP/PT rows carry token amounts AND USD valuations",
     )
 
 
@@ -831,6 +930,20 @@ def _cell_g3_yield_ledger(pos_events: list[dict[str, Any]], acct_events: list[di
         )
         if rpnl_for_yield:
             yields.append(("realized_pnl", r.get("event_type"), rpnl_for_yield))
+        # Pendle PT realised fixed yield (VIB-5319): a PT_SELL / PT_REDEEM books
+        # its payoff in ``realized_yield_usd`` — the disposal-leg PnL of the PT
+        # primitive (blueprint 27 §11.3, the registry's per-event contribution
+        # row for Pendle disposals). PT events ride the SWAP taxonomy but do NOT
+        # populate ``realized_pnl_usd``, so without reading this typed field the
+        # yield ledger cell never sees the PT strategy's entire realised payoff.
+        # A measured 0 (``Decimal("0")``) is a real no-yield disposal and is
+        # intentionally NOT counted; a null is unmeasured. Raw payload JSON can
+        # carry the value as the STRING ``"0"`` (truthy), so normalise via
+        # ``_dec`` and compare against ``Decimal("0")`` — a bare truthiness test
+        # would miscount a measured-zero yield as yield-emitting (Empty≠Zero).
+        pendle_yield = _dec(p.get("realized_yield_usd"))
+        if pendle_yield is not None and pendle_yield != Decimal("0"):
+            yields.append(("pendle_yield", r.get("event_type"), p.get("realized_yield_usd")))
         # ``augment_accounting_payload`` projects lending events onto the
         # AttemptNo17 spec field names (``interest_paid_usd`` for REPAY,
         # ``interest_accrued_usd`` for WITHDRAW). Counting only the legacy
@@ -1036,6 +1149,19 @@ def _cell_g6_reconciliation(  # noqa: C901
     null_perp_funding = 0
     null_withdraw_interest = 0
     null_repay_interest = 0
+    # VIB-5319: a Pendle PT disposal (PT_SELL / PT_REDEEM) whose realized-yield
+    # USD payoff is unmeasured because the gateway PT/SY sell-side implied price
+    # is absent (sy_price=None on the fork — VIB-5276). The proceeds leg
+    # (sy_amount × sy_price) the component method needs to reconcile against the
+    # wallet inflow cannot be computed, so the reconciliation runs on an
+    # unmeasured input (Empty≠Zero) — never folded to a silent zero.
+    #
+    # The XFAIL waiver applies ONLY to this price gap (amount measured, price
+    # absent). A disposal whose proceeds AMOUNT (sy_amount) is itself unmeasured
+    # is a real receipt/writer data loss — counted in ``null_pt_proceeds_amount``,
+    # which always FAILs G6 and is never eligible for the VIB-5276 waiver.
+    null_pt_proceeds = 0
+    null_pt_proceeds_amount = 0
 
     # VIB-3869 (B): notional accumulators for primitive-aware tolerance.
     notional_traded = Decimal(0)  # LP / Spot scaling base
@@ -1165,6 +1291,52 @@ def _cell_g6_reconciliation(  # noqa: C901
                 notional = abs(size) * abs(entry_price)
                 if notional > max_perp_notional:
                     max_perp_notional = notional
+        # VIB-5319: Pendle PT registry rows (blueprint 27 §11.3 — a contribution
+        # row per event_type; PT rides Primitive.SWAP, so its realized payoff
+        # lands in the SWAP bucket).
+        #   PT_BUY  — the basis (acquiring) leg: records a FIFO lot, contributes
+        #             nothing to PnL (mirrors a SWAP BUY leg). No bucket entry.
+        #   PT_SELL / PT_REDEEM — the disposal leg.
+        # The wallet (equity) method moves by the GROSS proceeds the disposal
+        # returns to the wallet (sy_amount × sy_price), so the component method
+        # must book those gross proceeds — NOT merely the realized_yield delta —
+        # to reconcile (the SY token the proceeds arrive as is an inflow the
+        # ambient lane structurally cannot represent; §11.5). When the sell-side
+        # SY price is present, proceeds are measured and contribute to sum_swap;
+        # when sy_price=None (VIB-5276 gateway PT price absent on the fork) the
+        # proceeds leg is UNMEASURED (Empty≠Zero) — it increments null_pt_proceeds
+        # and never folds to a silent zero. realized_yield_usd alone (a small
+        # delta) cannot stand in for the gross proceeds.
+        if et in ("PT_SELL", "PT_REDEEM"):
+            sy_amount = _dec(p.get("sy_amount"))
+            sy_price = _dec(p.get("sy_price"))
+            # ``sy_price is None`` from the gateway (VIB-5276) is the only ticketed
+            # waiver; a parser omission (``sy_price == ""``) is a real defect that
+            # must FAIL like a missing amount (Empty≠Unmeasured), so distinguish
+            # the gateway-None sentinel from the empty-string omission on the raw.
+            raw_price = p.get("sy_price")
+            price_is_gateway_gap = raw_price is None
+            if sy_amount is not None and sy_price is not None:
+                # Measured gross proceeds returned to the wallet on disposal.
+                sum_swap += sy_amount * sy_price
+                notional_traded += abs(sy_amount * sy_price)
+            elif sy_amount is not None and price_is_gateway_gap:
+                # Proceeds AMOUNT measured, sell-side SY price absent from the
+                # gateway (sy_price=None — VIB-5276). The ONLY waiver-eligible
+                # bucket; the profile decides FAIL vs XFAIL.
+                null_pt_proceeds += 1
+            else:
+                # Proceeds AMOUNT unmeasured, or sy_price=="" (parser omission) —
+                # a receipt/writer data loss, NOT the gateway-price gap. Always
+                # FAIL G6; never waiver-eligible (Empty≠Zero, never a silent zero).
+                null_pt_proceeds_amount += 1
+        if et == "PT_BUY":
+            # Basis leg: the SY cost the wallet paid to acquire the PT. Adds to
+            # the ε notional base (so ε scales to PT trade size); not a PnL term.
+            sy_amount = _dec(p.get("sy_amount"))
+            sy_price = _dec(p.get("sy_price"))
+            if sy_amount is not None and sy_price is not None:
+                notional_traded += abs(sy_amount * sy_price)
 
     # Ambient inventory revaluation term (blueprint 27 §11.5): the component
     # sum above only carries the PnL of tokens the strategy TRADED. The wallet
@@ -1237,6 +1409,16 @@ def _cell_g6_reconciliation(  # noqa: C901
         # an open lot with no basis) is a null input to the reconciliation, not
         # a measured zero — FAIL the cell rather than fold it in as zero.
         "Σ_inventory_reval_usd_null_count": null_inventory_reval,
+        # VIB-5319: a Pendle PT disposal whose USD proceeds are unmeasured
+        # (sy_price=None on the fork — VIB-5276 gateway PT price). Null input to
+        # the reconciliation, surfaced separately so the profile can classify it
+        # as a known ticketed measurement gap (XFAIL) vs a real bug (FAIL).
+        "Σ_pt_proceeds_usd_null_count": null_pt_proceeds,
+        # VIB-5319: a PT disposal whose proceeds AMOUNT (not price) is unmeasured.
+        # A real receipt/writer data loss — always FAILs (never the VIB-5276
+        # waiver, which is price-only). Kept as its own bucket so the XFAIL gate
+        # below (which keys on the price-only bucket) can never absorb it.
+        "Σ_pt_proceeds_amount_null_count": null_pt_proceeds_amount,
     }
     has_nulls = any(v > 0 for v in null_breakdown.values())
 
@@ -1277,6 +1459,32 @@ def _cell_g6_reconciliation(  # noqa: C901
     # otherwise running on unmeasured zero, not a real signal.
     if has_nulls:
         nonzero = {k: v for k, v in null_breakdown.items() if v > 0}
+        # VIB-5319: a Pendle PT disposal blocked ONLY because its USD proceeds are
+        # unmeasured (sy_price=None on the fork — VIB-5276 gateway PT price) is a
+        # known, ticketed measurement gap, not a books error. When the profile
+        # opts in AND the sole non-zero null bucket is the PT-proceeds counter,
+        # surface XFAIL (measured-but-blocked) instead of FAIL. Any OTHER null
+        # bucket — a real swap/lp/perp/ambient gap — still FAILs: the XFAIL is
+        # narrowly scoped to the one ticketed gap and never blanket-passes Pendle.
+        if (
+            _profile.disposal_usd_unmeasured_is_xfail
+            and null_pt_proceeds > 0
+            and set(nonzero) == {"Σ_pt_proceeds_usd_null_count"}
+        ):
+            return (
+                CellResult(
+                    "G6",
+                    "Reconciliation",
+                    "XFAIL",
+                    f"PT disposal proceeds unmeasured: sy_price=None on "
+                    f"{null_pt_proceeds} PT_SELL/PT_REDEEM row(s) (VIB-5276 gateway "
+                    f"PT/SY price); wallet=${wallet_pnl} component=${component_pnl} "
+                    f"gap=${gap} — measured-but-blocked, not a books error. "
+                    "Flips to PASS once the sell-side SY price lands.",
+                    decomposition=decomp,
+                ),
+                decomp,
+            )
         return (
             CellResult(
                 "G6",
@@ -3255,6 +3463,14 @@ SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
             ctx.acct_payloads,
             ctx.payload_errors,
         ),
+        # VIB-5319: a PT disposal on a fork without the gateway PT/SY implied
+        # price (VIB-5276) carries sy_price=None, so the disposal's gross USD
+        # (money-trail leg G1, reconciliation proceeds G6) is unmeasured. That is
+        # a ticketed measurement gap, not an accounting bug → G1/G6 surface XFAIL
+        # (measured-but-blocked) rather than FAIL. The PT economics themselves are
+        # proven by PEN1/PEN4/PEN5/PEN6. Flips to PASS once VIB-5276 lands the
+        # sell-side SY price and the fixture is re-captured.
+        disposal_usd_unmeasured_is_xfail=True,
     ),
     # Pendle LP rides the LP primitive in the taxonomy (taxonomy.py
     # ``PENDLE_LP_OPEN/CLOSE -> Primitive.LP`` with ``_LP_LIFECYCLE``): the
@@ -3349,7 +3565,7 @@ def evaluate_cells(
     acct_payloads, payload_errors, payload_error_records = _typed_acct_payloads(acct_events)
 
     cells: list[CellResult] = []
-    cells.append(_cell_g1_money_trail(ledger, acct_events, acct_payloads))
+    cells.append(_cell_g1_money_trail(ledger, acct_events, acct_payloads, primitive))
     cells.append(_cell_g2_cost_ledger(ledger))
     cells.append(_cell_g3_yield_ledger(pos_events, acct_events))
     cells.append(_cell_g4_capital_deployed(snapshots))

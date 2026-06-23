@@ -1,7 +1,7 @@
 {
   "accounting_events_row_count": 2,
   "cells": {
-    "G1": "FAIL",
+    "G1": "XFAIL",
     "G10": "PASS",
     "G11": "SKIP",
     "G12": "PASS",
@@ -9,10 +9,10 @@
     "G14": "XFAIL",
     "G15": "XFAIL",
     "G2": "PASS",
-    "G3": "FAIL",
+    "G3": "PASS",
     "G4": "PASS",
     "G5": "PASS",
-    "G6": "FAIL",
+    "G6": "XFAIL",
     "G7": "PASS",
     "G8": "PASS",
     "G9": "PASS",
