@@ -20,6 +20,7 @@ DESCRIPTOR = register_chain(
             coingecko_id="berachain-bera",
             wrapped_symbol="WBERA",
             wrapped_coingecko_id="berachain-bera",
+            slip44=8008,  # SLIP-44 "Berachain" — BERA (CAIP-19)
         ),
         gas=GasProfile(
             buffer=1.2,

@@ -50,15 +50,29 @@ def test_to_caip19_native_uses_slip44() -> None:
     assert ref.to_caip19() == "eip155:42161/slip44:60"
 
 
+@pytest.mark.parametrize(
+    ("chain", "expected"),
+    [
+        (Chain.POLYGON, "eip155:137/slip44:966"),  # Matic
+        (Chain.AVALANCHE, "eip155:43114/slip44:9000"),  # Avalanche
+        (Chain.BSC, "eip155:56/slip44:9006"),  # Binance Smart Chain
+        (Chain.BERACHAIN, "eip155:80094/slip44:8008"),  # Berachain
+    ],
+)
+def test_to_caip19_native_for_non_eth_chains(chain: Chain, expected: str) -> None:
+    ref = TokenRef(chain=chain, address=NATIVE_SENTINEL, decimals=18, symbol="X")
+    assert ref.to_caip19() == expected
+
+
 def test_to_caip19_solana_spl_token() -> None:
     ref = TokenRef(chain=Chain.SOLANA, address=USDC_SOLANA, decimals=6, symbol="USDC")
     assert ref.to_caip19() == f"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/token:{USDC_SOLANA}"
 
 
 def test_to_caip19_native_fails_loud_without_slip44() -> None:
-    # Polygon's native asset has no registered slip44 yet -> fail loudly rather
-    # than emit a non-standard native id.
-    ref = TokenRef(chain=Chain.POLYGON, address=NATIVE_SENTINEL, decimals=18, symbol="POL")
+    # Mantle has no registered SLIP-44 coin type -> fail loudly rather than
+    # emit a non-standard native id (the slip44 field stays None).
+    ref = TokenRef(chain=Chain.MANTLE, address=NATIVE_SENTINEL, decimals=18, symbol="MNT")
     with pytest.raises(ValueError, match="no SLIP-44 coin type"):
         ref.to_caip19()
 

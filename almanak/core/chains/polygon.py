@@ -43,6 +43,7 @@ DESCRIPTOR = register_chain(
             coingecko_id="polygon-ecosystem-token",
             wrapped_symbol="WMATIC",
             wrapped_coingecko_id="polygon-ecosystem-token",
+            slip44=966,  # SLIP-44 "Matic" — Polygon native (CAIP-19)
         ),
         gas=GasProfile(
             buffer=1.2,

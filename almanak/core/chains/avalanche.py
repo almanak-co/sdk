@@ -30,6 +30,7 @@ DESCRIPTOR = register_chain(
             coingecko_id="avalanche-2",
             wrapped_symbol="WAVAX",
             wrapped_coingecko_id="avalanche-2",
+            slip44=9000,  # SLIP-44 "Avalanche" — AVAX (CAIP-19)
         ),
         gas=GasProfile(
             buffer=1.1,

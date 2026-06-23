@@ -36,6 +36,9 @@ DESCRIPTOR = register_chain(
             coingecko_id="binancecoin",
             wrapped_symbol="WBNB",
             wrapped_coingecko_id="binancecoin",
+            # SLIP-44 "Binance Smart Chain" (9006) — our Chain.BSC. NOT 714,
+            # which is "Binance Chain" (BEP2), a different network we don't model.
+            slip44=9006,
         ),
         gas=GasProfile(
             buffer=1.2,
