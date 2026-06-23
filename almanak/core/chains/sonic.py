@@ -38,6 +38,7 @@ DESCRIPTOR = register_chain(
             coingecko_id="sonic-3",
             wrapped_symbol="wS",
             wrapped_coingecko_id="sonic-3",
+            slip44=10007,  # SLIP-44 "SONIC" — S (CAIP-19)
         ),
         gas=GasProfile(
             buffer=None,  # legacy: not in CHAIN_GAS_BUFFERS (falls back to DEFAULT_GAS_BUFFER)

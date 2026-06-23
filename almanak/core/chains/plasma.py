@@ -29,6 +29,8 @@ DESCRIPTOR = register_chain(
             coingecko_id="plasma",
             wrapped_symbol="WXPL",
             wrapped_coingecko_id="plasma",
+            # No verified Plasma SLIP-44 entry; native CAIP-19 stays fail-loud.
+            slip44=None,
         ),
         gas=GasProfile(
             buffer=1.1,

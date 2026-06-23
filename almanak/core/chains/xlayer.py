@@ -20,6 +20,9 @@ DESCRIPTOR = register_chain(
             coingecko_id="okb",
             wrapped_symbol="WOKB",
             wrapped_coingecko_id="okb",
+            # No verified X Layer / OKB-native SLIP-44 entry. Registry 996 is
+            # OKExChain, a different OKX chain, so native CAIP-19 stays fail-loud.
+            slip44=None,
         ),
         gas=GasProfile(
             buffer=1.3,

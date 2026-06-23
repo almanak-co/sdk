@@ -20,6 +20,8 @@ DESCRIPTOR = register_chain(
             coingecko_id="zero-gravity",
             wrapped_symbol="W0G",
             wrapped_coingecko_id="wrapped-0g",
+            # No verified 0G / A0GI SLIP-44 entry; native CAIP-19 stays fail-loud.
+            slip44=None,
         ),
         gas=GasProfile(
             buffer=1.1,

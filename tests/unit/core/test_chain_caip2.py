@@ -196,3 +196,39 @@ def test_eth_native_chains_carry_slip44_60() -> None:
     for chain in (Chain.ETHEREUM, Chain.ARBITRUM, Chain.OPTIMISM, Chain.BASE, Chain.BLAST, Chain.LINEA):
         assert ChainRegistry.get(chain).native.slip44 == 60
     assert ChainRegistry.get(Chain.SOLANA).native.slip44 == 501
+
+
+def test_non_eth_native_chains_carry_verified_slip44_values() -> None:
+    assert ChainRegistry.get(Chain.POLYGON).native.slip44 == 966
+    assert ChainRegistry.get(Chain.AVALANCHE).native.slip44 == 9000
+    assert ChainRegistry.get(Chain.BSC).native.slip44 == 9006
+    assert ChainRegistry.get(Chain.BERACHAIN).native.slip44 == 8008
+    assert ChainRegistry.get(Chain.SONIC).native.slip44 == 10007
+    assert ChainRegistry.get(Chain.MONAD).native.slip44 == 268435779
+
+
+def test_chains_without_verified_slip44_leave_slip44_unset() -> None:
+    for chain in (Chain.XLAYER, Chain.MANTLE, Chain.PLASMA, Chain.ZEROG):
+        assert ChainRegistry.get(chain).native.slip44 is None
+
+
+def test_every_registered_chain_has_slip44_coverage() -> None:
+    covered_with_slip44 = {
+        Chain.ETHEREUM,
+        Chain.ARBITRUM,
+        Chain.OPTIMISM,
+        Chain.BASE,
+        Chain.BLAST,
+        Chain.LINEA,
+        Chain.SOLANA,
+        Chain.POLYGON,
+        Chain.AVALANCHE,
+        Chain.BSC,
+        Chain.BERACHAIN,
+        Chain.SONIC,
+        Chain.MONAD,
+    }
+    covered_without_slip44 = {Chain.XLAYER, Chain.MANTLE, Chain.PLASMA, Chain.ZEROG}
+    all_registered = {descriptor.enum for descriptor in ChainRegistry.all()}
+
+    assert all_registered == covered_with_slip44 | covered_without_slip44

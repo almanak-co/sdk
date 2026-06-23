@@ -28,6 +28,7 @@ DESCRIPTOR = register_chain(
             coingecko_id="monad",
             wrapped_symbol="WMON",
             wrapped_coingecko_id="monad",
+            slip44=268435779,  # SLIP-44 "Monad" — MON (CAIP-19)
         ),
         gas=GasProfile(
             buffer=1.1,

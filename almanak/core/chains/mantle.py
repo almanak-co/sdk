@@ -29,6 +29,8 @@ DESCRIPTOR = register_chain(
             coingecko_id="mantle",
             wrapped_symbol="WMNT",
             wrapped_coingecko_id="mantle",
+            # No verified Mantle SLIP-44 entry; native CAIP-19 stays fail-loud.
+            slip44=None,
         ),
         gas=GasProfile(
             buffer=1.5,
