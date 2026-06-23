@@ -989,10 +989,16 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         """
         # Level 1 — PortfolioMetrics are always authoritative when available.
         # They are framework-owned and updated by PortfolioValuer each iteration.
+        #
+        # ``total_value_usd`` may be ``None`` (unmeasured — Empty≠Zero, blueprint
+        # 27 §10.10 / VIB-2475): the metrics row exists but the latest snapshot's
+        # NAV could not be sourced. We must NOT treat that as authoritative — it
+        # is neither a real value (``str(None)`` would render "None") nor a
+        # measured zero. Fall through to the fresh-snapshot grace period instead.
         if self._state_manager is not None:
             try:
                 metrics = await self._state_manager.get_portfolio_metrics(deployment_id)
-                if metrics is not None:
+                if metrics is not None and metrics.total_value_usd is not None:
                     pnl_24h = await self._compute_pnl_24h(deployment_id, metrics.total_value_usd)
                     return str(metrics.total_value_usd), str(pnl_24h)
             except Exception:

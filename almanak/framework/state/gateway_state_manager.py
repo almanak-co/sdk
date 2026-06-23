@@ -563,11 +563,27 @@ class GatewayStateManager:
             if not response.found:
                 return None
 
+            # VIB-2475: the ``PortfolioMetricsData`` proto does NOT carry
+            # ``total_value_usd`` (VIB-2765 — it is derived from the most recent
+            # snapshot, saved moments before this RPC). Source it from the
+            # latest snapshot, exactly as the comment historically promised and
+            # as the gateway WRITE path already does
+            # (``_save_metrics_helpers.resolve_total_value_usd``). Empty≠Zero:
+            # when no snapshot exists the value is genuinely UNMEASURED, so the
+            # field stays ``None`` — never ``Decimal("0")``, which would
+            # fabricate a measured-zero NAV and poison ``pnl_before_gas`` as
+            # ≈ −initial (a confident-wrong −100% loss). The framework READ path
+            # diverges intentionally from the gateway write path's
+            # ``Decimal("0")``-on-miss: a read must surface "unmeasured", not a
+            # fabricated zero.
+            snapshot = await self.get_latest_snapshot(deployment_id)
+            total_value_usd = snapshot.total_value_usd if snapshot is not None else None
+
             return PortfolioMetrics(
                 timestamp=datetime.fromtimestamp(response.updated_at, tz=UTC)
                 if response.updated_at
                 else datetime.now(UTC),
-                total_value_usd=Decimal("0"),  # Not stored in metrics, get from latest snapshot
+                total_value_usd=total_value_usd,
                 initial_value_usd=Decimal(response.initial_value_usd or "0"),
                 deposits_usd=Decimal(response.deposits_usd or "0"),
                 withdrawals_usd=Decimal(response.withdrawals_usd or "0"),

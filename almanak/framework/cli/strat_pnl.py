@@ -677,15 +677,34 @@ def _populate_strategy_nav(breakdown: PnLBreakdown, snapshot: Any) -> None:
 
 
 def _populate_gross_net_pnl(breakdown: PnLBreakdown, metrics: Any) -> None:
-    """Gross / net PnL from PortfolioMetrics."""
-    if metrics is not None:
-        breakdown.gross_pnl_usd = _dec(metrics.pnl_before_gas)
-        breakdown.net_pnl_usd = _dec(metrics.pnl_after_gas)
-    else:
+    """Gross / net PnL from PortfolioMetrics.
+
+    Three states (Empty≠Zero — blueprint 27 §10.10 / VIB-2475):
+
+    1. **No metrics row** — leave gross/net ``None``, emit the "no row" warning.
+    2. **Row present, ``total_value_usd`` unmeasured** (``pnl_before_gas`` is
+       ``None``) — leave gross/net ``None``, emit the "unmeasured" warning. We
+       must NOT let ``_dec`` swallow the ``None`` into ``Decimal("0")``: that
+       would re-fabricate the confident-wrong $0 headline this fix removes.
+    3. **Row present and measured** — populate gross/net verbatim.
+    """
+    if metrics is None:
         breakdown.warnings.append(
             "No PortfolioMetrics row found — gross/net PnL unavailable. "
             "Run the strategy at least once so metrics are persisted."
         )
+        return
+    gross = metrics.pnl_before_gas
+    net = metrics.pnl_after_gas
+    if gross is None or net is None:
+        breakdown.warnings.append(
+            "PortfolioMetrics present but total_value_usd is unmeasured "
+            "(no portfolio snapshot yet) — gross/net PnL unavailable rather "
+            "than fabricated as $0 (VIB-2475, Empty≠Zero)."
+        )
+        return
+    breakdown.gross_pnl_usd = _dec(gross)
+    breakdown.net_pnl_usd = _dec(net)
 
 
 def _apply_open_leveraged_headline(breakdown: PnLBreakdown, metrics: Any, verdict: LeveragedLendingVerdict) -> None:

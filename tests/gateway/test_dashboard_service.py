@@ -514,6 +514,51 @@ class TestPortfolioFallback:
         dashboard_service._portfolio_chain.get_wallet_portfolio.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_unmeasured_metrics_value_falls_through_to_snapshot(self, dashboard_service):
+        """``total_value_usd is None`` (unmeasured — Empty≠Zero, VIB-2475) must
+        NOT be treated as authoritative: ``str(None)`` would render "None" and a
+        fabricated zero would read as a confident-wrong NAV. The Level-1 metrics
+        row is skipped and the fresh-snapshot grace period supplies the value."""
+        dashboard_service._initialized = True
+        dashboard_service._state_manager = AsyncMock()
+        dashboard_service._state_manager.get_portfolio_metrics = AsyncMock(return_value=MagicMock(total_value_usd=None))
+        dashboard_service._state_manager.get_latest_snapshot = AsyncMock(
+            return_value=PortfolioSnapshot(
+                timestamp=datetime.now(UTC),
+                deployment_id="test_strategy",
+                total_value_usd=Decimal("55.5"),
+                available_cash_usd=Decimal("0"),
+                value_confidence=ValueConfidence.HIGH,
+            )
+        )
+        dashboard_service._portfolio_chain = AsyncMock()
+
+        result = await dashboard_service._get_portfolio_value_and_pnl(
+            "test_strategy",
+        )
+
+        # Falls through to the fresh snapshot — never renders "None".
+        assert result == ("55.5", "0")
+        dashboard_service._portfolio_chain.get_wallet_portfolio.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unmeasured_metrics_value_no_snapshot_returns_zeros(self, dashboard_service):
+        """Unmeasured metrics with no fresh snapshot returns the explicit
+        no-data sentinel ("0", "0") rather than rendering "None"."""
+        dashboard_service._initialized = True
+        dashboard_service._state_manager = AsyncMock()
+        dashboard_service._state_manager.get_portfolio_metrics = AsyncMock(return_value=MagicMock(total_value_usd=None))
+        dashboard_service._state_manager.get_latest_snapshot = AsyncMock(return_value=None)
+        dashboard_service._portfolio_chain = AsyncMock()
+
+        result = await dashboard_service._get_portfolio_value_and_pnl(
+            "test_strategy",
+        )
+
+        assert result == ("0", "0")
+        dashboard_service._portfolio_chain.get_wallet_portfolio.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_stale_snapshot_returns_zeros_when_no_metrics(self, dashboard_service):
         """Stale snapshot without metrics should return zeros (no external fallback)."""
         dashboard_service._initialized = True
@@ -2118,21 +2163,27 @@ class TestGetAuditPosture:
             deployment_id="test_strategy",
             total_value_usd=Decimal("0"),
             available_cash_usd=Decimal("0"),
-            wallet_balances=[TokenBalance(symbol="USDC", balance=Decimal("100"), value_usd=Decimal("100"), price_usd=Decimal("1"))],
+            wallet_balances=[
+                TokenBalance(symbol="USDC", balance=Decimal("100"), value_usd=Decimal("100"), price_usd=Decimal("1"))
+            ],
         )
         recent_oldest = PortfolioSnapshot(
             timestamp=datetime(2026, 6, 16, tzinfo=UTC),
             deployment_id="test_strategy",
             total_value_usd=Decimal("0"),
             available_cash_usd=Decimal("0"),
-            wallet_balances=[TokenBalance(symbol="USDC", balance=Decimal("50"), value_usd=Decimal("50"), price_usd=Decimal("1"))],
+            wallet_balances=[
+                TokenBalance(symbol="USDC", balance=Decimal("50"), value_usd=Decimal("50"), price_usd=Decimal("1"))
+            ],
         )
         latest = PortfolioSnapshot(
             timestamp=datetime(2026, 6, 17, tzinfo=UTC),
             deployment_id="test_strategy",
             total_value_usd=Decimal("0"),
             available_cash_usd=Decimal("0"),
-            wallet_balances=[TokenBalance(symbol="USDC", balance=Decimal("75"), value_usd=Decimal("75"), price_usd=Decimal("1"))],
+            wallet_balances=[
+                TokenBalance(symbol="USDC", balance=Decimal("75"), value_usd=Decimal("75"), price_usd=Decimal("1"))
+            ],
         )
         dashboard_service._state_manager = MagicMock()
         dashboard_service._state_manager.get_first_snapshot = AsyncMock(return_value=first)

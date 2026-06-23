@@ -311,7 +311,14 @@ class TestGatewayStateManagerMetrics:
 
     @pytest.mark.asyncio
     async def test_get_metrics_via_gateway_client(self):
-        """GatewayStateManager.get_portfolio_metrics calls gRPC."""
+        """GatewayStateManager.get_portfolio_metrics calls gRPC.
+
+        VIB-2475: ``PortfolioMetricsData`` does NOT carry ``total_value_usd``
+        (it is sourced from the latest snapshot saved moments before). The
+        reconstruction must populate ``total_value_usd`` from
+        ``GetLatestSnapshot`` so ``pnl_before_gas`` is the true figure, not the
+        ≈ −initial poison the old hardcoded ``Decimal("0")`` produced.
+        """
         from almanak.framework.state.gateway_state_manager import GatewayStateManager
 
         mock_client = MagicMock()
@@ -326,6 +333,15 @@ class TestGatewayStateManagerMetrics:
             updated_at=1712000000,
             found=True,
         )
+        # The latest snapshot carries the current NAV the proto cannot transmit.
+        mock_state_stub.GetLatestSnapshot.return_value = gateway_pb2.SnapshotData(
+            found=True,
+            timestamp=1712000000,
+            total_value_usd="12345",
+            available_cash_usd="0",
+            value_confidence="HIGH",
+            deployment_id="test-strategy",
+        )
         mock_client.state = mock_state_stub
 
         gsm = GatewayStateManager(mock_client)
@@ -335,7 +351,49 @@ class TestGatewayStateManagerMetrics:
         assert result.deployment_id == "test-strategy"
         assert result.initial_value_usd == Decimal("10000")
         assert result.deposits_usd == Decimal("500")
+        # VIB-2475: total_value_usd sourced from the snapshot (not hardcoded 0).
+        assert result.total_value_usd == Decimal("12345")
+        # pnl_before_gas = 12345 - 10000 - 500 + 100 = 1945 (was -9900 poisoned).
+        assert result.pnl_before_gas == Decimal("1945")
+        assert result.pnl_after_gas == Decimal("1920")  # 1945 - 25 gas
         mock_state_stub.GetPortfolioMetrics.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_metrics_total_value_unmeasured_when_no_snapshot(self):
+        """VIB-2475 (Empty≠Zero): no snapshot → total_value_usd is None, not 0.
+
+        When the metrics row exists but no portfolio snapshot has landed yet,
+        ``total_value_usd`` is genuinely UNMEASURED. The reconstruction must
+        leave it ``None`` and propagate ``None`` through ``pnl_before_gas`` /
+        ``pnl_after_gas`` rather than fabricating a measured-zero NAV (which
+        would read as ≈ −initial, a confident-wrong −100% loss).
+        """
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        mock_client = MagicMock()
+        mock_state_stub = MagicMock()
+        mock_state_stub.GetPortfolioMetrics.return_value = gateway_pb2.PortfolioMetricsData(
+            deployment_id="test-strategy",
+            initial_value_usd="10000",
+            initial_timestamp=1712000000,
+            deposits_usd="0",
+            withdrawals_usd="0",
+            gas_spent_usd="0",
+            updated_at=1712000000,
+            found=True,
+        )
+        mock_state_stub.GetLatestSnapshot.return_value = gateway_pb2.SnapshotData(found=False)
+        mock_client.state = mock_state_stub
+
+        gsm = GatewayStateManager(mock_client)
+        result = await gsm.get_portfolio_metrics("test-strategy")
+
+        assert result is not None
+        # Empty≠Zero: unmeasured, never Decimal("0").
+        assert result.total_value_usd is None
+        assert result.pnl_before_gas is None
+        assert result.pnl_after_gas is None
+        assert result.roi_percent is None
 
     @pytest.mark.asyncio
     async def test_get_metrics_not_found_via_gateway(self):

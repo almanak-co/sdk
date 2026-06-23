@@ -364,8 +364,12 @@ class PortfolioMetrics:
     deployment_id: str
     timestamp: datetime
 
-    # Current value from latest snapshot
-    total_value_usd: Decimal
+    # Current value from latest snapshot.
+    # ``None`` = unmeasured (Empty≠Zero, blueprint 27 §10.10): a read path that
+    # cannot source the latest snapshot's value must NOT fabricate
+    # ``Decimal("0")`` — a measured-zero NAV claim that flows into
+    # ``pnl_before_gas`` as ≈ −initial (a confident-wrong −100% loss). VIB-2475.
+    total_value_usd: Decimal | None
 
     # Baseline tracking (persisted, survives restarts)
     initial_value_usd: Decimal  # Set once on first run
@@ -383,38 +387,60 @@ class PortfolioMetrics:
     is_complete: bool = True  # Whether all expected records for this cycle were committed
 
     def __post_init__(self) -> None:
-        """Normalize numeric fields to Decimal."""
+        """Normalize numeric fields to Decimal.
+
+        ``total_value_usd`` may legitimately be ``None`` (unmeasured,
+        Empty≠Zero) — the ``isinstance`` guard skips it, so ``None`` is
+        preserved rather than coerced to ``Decimal("0")``.
+        """
         for attr in ["total_value_usd", "initial_value_usd", "deposits_usd", "withdrawals_usd", "gas_spent_usd"]:
             value = getattr(self, attr)
             if isinstance(value, int | float | str):
                 setattr(self, attr, Decimal(str(value)))
 
     @property
-    def pnl_before_gas(self) -> Decimal:
+    def pnl_before_gas(self) -> Decimal | None:
         """PnL excluding gas costs, adjusted for capital flows.
 
-        Formula: current_value - initial_value - deposits + withdrawals
+        Formula: current_value - initial_value - deposits + withdrawals.
+
+        Returns ``None`` (unmeasured — Empty≠Zero, blueprint 27 §10.10) when
+        ``total_value_usd`` was not measured, rather than fabricating a PnL off
+        a zero current value (which reads as ≈ −initial). VIB-2475.
         """
+        if self.total_value_usd is None:
+            return None
         return self.total_value_usd - self.initial_value_usd - self.deposits_usd + self.withdrawals_usd
 
     @property
-    def pnl_after_gas(self) -> Decimal:
-        """Net PnL including gas costs."""
-        return self.pnl_before_gas - self.gas_spent_usd
+    def pnl_after_gas(self) -> Decimal | None:
+        """Net PnL including gas costs. ``None`` when gross PnL is unmeasured."""
+        gross = self.pnl_before_gas
+        if gross is None:
+            return None
+        return gross - self.gas_spent_usd
 
     @property
-    def roi_percent(self) -> Decimal:
-        """Return on investment percentage (before gas)."""
+    def roi_percent(self) -> Decimal | None:
+        """Return on investment percentage (before gas).
+
+        ``None`` when gross PnL is unmeasured (``total_value_usd is None``).
+        """
+        gross = self.pnl_before_gas
+        if gross is None:
+            return None
         if self.initial_value_usd == 0:
             return Decimal("0")
-        return (self.pnl_before_gas / self.initial_value_usd) * 100
+        return (gross / self.initial_value_usd) * 100
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for storage."""
         return {
             "deployment_id": self.deployment_id,
             "timestamp": self.timestamp.isoformat(),
-            "total_value_usd": str(self.total_value_usd),
+            # Empty≠Zero: preserve unmeasured (None) across the round-trip rather
+            # than serialising "None" / coercing to "0" (VIB-2475).
+            "total_value_usd": None if self.total_value_usd is None else str(self.total_value_usd),
             "initial_value_usd": str(self.initial_value_usd),
             "deposits_usd": str(self.deposits_usd),
             "withdrawals_usd": str(self.withdrawals_usd),
@@ -431,7 +457,9 @@ class PortfolioMetrics:
         return cls(
             deployment_id=data["deployment_id"],
             timestamp=datetime.fromisoformat(data["timestamp"]),
-            total_value_usd=Decimal(data["total_value_usd"]),
+            # Empty≠Zero: a missing/None ``total_value_usd`` deserialises to None
+            # (unmeasured), never Decimal("None")/Decimal("0") (VIB-2475).
+            total_value_usd=(None if data.get("total_value_usd") is None else Decimal(data["total_value_usd"])),
             initial_value_usd=Decimal(data["initial_value_usd"]),
             deposits_usd=Decimal(data.get("deposits_usd", "0")),
             withdrawals_usd=Decimal(data.get("withdrawals_usd", "0")),

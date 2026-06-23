@@ -8,6 +8,11 @@ Background — the cascade
     gross = metrics.pnl_before_gas
           = total_value_usd − initial_value_usd − deposits_usd + withdrawals_usd
 
+(VIB-2475: ``pnl_before_gas`` is now ``Decimal | None`` — when
+``total_value_usd`` is *unmeasured* the headline is left ``None`` upstream in
+``strat_pnl._populate_gross_net_pnl`` before this module's verdict is consulted,
+so the cascade below describes the *measured* case only.)
+
 Under VIB-3614 ``total_value_usd`` is **positive-position-scoped**: it counts
 Aave **collateral** (SUPPLY) but EXCLUDES the wallet balance and does NOT
 subtract **debt** (BORROW).  That scope is correct for the dashboard but wrong
