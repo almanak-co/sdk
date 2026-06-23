@@ -122,3 +122,8 @@ platform-plugins/almanak_platform_plugins.egg-info/
 docs/internal/quant-user-runs/*
 !docs/internal/quant-user-runs/README.md
 !docs/internal/quant-user-runs/changelog.html
+# Durable batch-run tooling IS tracked. Internal-only: docs/internal/ is never in
+# .syncinclude, so this ships in the private repo but is NOT published to the public
+# mirror. Run artifacts inside _harness/ (e.g. __pycache__) stay ignored.
+!docs/internal/quant-user-runs/_harness/
+docs/internal/quant-user-runs/_harness/__pycache__/
