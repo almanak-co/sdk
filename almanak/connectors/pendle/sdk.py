@@ -92,10 +92,30 @@ MARKET_BY_PT_TOKEN: dict[str, dict[str, str]] = {
         "PT-sUSDai-15OCT2026": "0xcbf629c8d396b1261f81f55175afa010e94787d8",
     },
     "ethereum": {
+        # NOTE ON ORDER: permission_hints._market_grid() picks the FIRST
+        # fully-supported market in this dict's insertion order as the canonical
+        # Zodiac synthetic / LP_CLOSE market for ethereum. The sUSDe-13AUG2026
+        # market MUST stay first so the on-chain Zodiac LP_CLOSE coverage
+        # (tests/intents/ethereum/test_pendle_lp.py::test_lp_close_returns_susde)
+        # keeps resolving to it. The VIB-5324 stETH demo-roll market is appended
+        # below — it is resolved by symbol for the SWAP demo and does not need to
+        # be the canonical synthetic market.
         # PT-sUSDe-13AUG2026 (active sUSDe market — replaced 7MAY2026 after expiry)
         "PT-SUSDE-13AUG2026": "0x177768caf9d0e036725a51d3f60d7e20f2d4d194",
         "PT-sUSDE-13AUG2026": "0x177768caf9d0e036725a51d3f60d7e20f2d4d194",
         "PT-sUSDe-13AUG2026": "0x177768caf9d0e036725a51d3f60d7e20f2d4d194",
+        # PT-stETH-30DEC2027 (long-dated wstETH/stETH market — VIB-5324 breadth +
+        # durable demo roll target). On-chain-verified via readTokens(): market
+        # expiry() = 1830124800 (2027-12-30 UTC). SY-stETH accepts native ETH,
+        # WETH, stETH and wstETH as mint inputs (getTokensIn), so funding wstETH
+        # mints SY directly without a V3 pre-swap. Both stETH and wstETH aliases
+        # are registered because Pendle's UI labels this the "wstETH" market while
+        # the on-chain PT symbol is PT-stETH-30DEC2027. Kept AFTER sUSDe so it is
+        # NOT the canonical synthetic market (see ORDER note above).
+        "PT-STETH-30DEC2027": "0x34280882267ffa6383B363E278B027Be083bBe3b",
+        "PT-stETH-30DEC2027": "0x34280882267ffa6383B363E278B027Be083bBe3b",
+        "PT-WSTETH-30DEC2027": "0x34280882267ffa6383B363E278B027Be083bBe3b",
+        "PT-wstETH-30DEC2027": "0x34280882267ffa6383B363E278B027Be083bBe3b",
         # PT-sUSDe-7MAY2026 (expired 2026-05-07; kept for historical receipt parsing)
         "PT-SUSDE-7MAY2026": "0x8dAe8ECe668cf80d348873F23D456448E8694883",  # Fully uppercase for compiler lookup
         "PT-sUSDE-7MAY2026": "0x8dAe8ECe668cf80d348873F23D456448E8694883",
@@ -133,6 +153,12 @@ PT_TOKEN_INFO: dict[str, dict[str, tuple[str, int]]] = {
         "PT-sUSDai-15OCT2026": ("0xb459db106f645d698e74027eef6019a26a0675cc", 18),
     },
     "ethereum": {
+        # PT-stETH-30DEC2027: (address, decimals) - long-dated wstETH/stETH PT.
+        # On-chain-verified PT address via market.readTokens() (VIB-5324).
+        "PT-STETH-30DEC2027": ("0xb253Eff1104802b97aC7E3aC9FdD73AecE295a2c", 18),
+        "PT-stETH-30DEC2027": ("0xb253Eff1104802b97aC7E3aC9FdD73AecE295a2c", 18),
+        "PT-WSTETH-30DEC2027": ("0xb253Eff1104802b97aC7E3aC9FdD73AecE295a2c", 18),
+        "PT-wstETH-30DEC2027": ("0xb253Eff1104802b97aC7E3aC9FdD73AecE295a2c", 18),
         # PT-sUSDe-13AUG2026: (address, decimals) - active sUSDe PT (replaced 7MAY2026)
         "PT-SUSDE-13AUG2026": ("0x5a19fa369f2895dcd8d2cee62e4ceae58ef92bbb", 18),
         "PT-sUSDE-13AUG2026": ("0x5a19fa369f2895dcd8d2cee62e4ceae58ef92bbb", 18),
@@ -166,6 +192,12 @@ YT_TOKEN_INFO: dict[str, dict[str, tuple[str, int]]] = {
         "YT-fUSDT0": ("0x7B6aD25E30AB1E7F5393E26C3F6bF1f4e8C0138A", 6),
     },
     "ethereum": {
+        # YT-stETH-30DEC2027 — long-dated wstETH/stETH YT. On-chain-verified YT
+        # address via market.readTokens() (VIB-5324). Shares market 0x342808...
+        "YT-STETH-30DEC2027": ("0x04B7Fa1e727d7290D6E24fA9b426d0c940283a95", 18),
+        "YT-stETH-30DEC2027": ("0x04B7Fa1e727d7290D6E24fA9b426d0c940283a95", 18),
+        "YT-WSTETH-30DEC2027": ("0x04B7Fa1e727d7290D6E24fA9b426d0c940283a95", 18),
+        "YT-wstETH-30DEC2027": ("0x04B7Fa1e727d7290D6E24fA9b426d0c940283a95", 18),
         # YT-sUSDe-13AUG2026 — active sUSDe YT (replaced 7MAY2026 after expiry)
         "YT-SUSDE-13AUG2026": ("0x45a699a11a4a17fe0931ef3cea4bfc3235e659f2", 18),
         "YT-sUSDE-13AUG2026": ("0x45a699a11a4a17fe0931ef3cea4bfc3235e659f2", 18),
@@ -200,6 +232,11 @@ MARKET_BY_YT_TOKEN: dict[str, dict[str, str]] = {
         "YT-wstETH": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
     },
     "ethereum": {
+        # YT-stETH-30DEC2027 shares the market 0x342808... with PT-stETH-30DEC2027
+        "YT-STETH-30DEC2027": "0x34280882267ffa6383B363E278B027Be083bBe3b",
+        "YT-stETH-30DEC2027": "0x34280882267ffa6383B363E278B027Be083bBe3b",
+        "YT-WSTETH-30DEC2027": "0x34280882267ffa6383B363E278B027Be083bBe3b",
+        "YT-wstETH-30DEC2027": "0x34280882267ffa6383B363E278B027Be083bBe3b",
         # YT-sUSDe-13AUG2026 shares the market 0x177768... with PT-sUSDe-13AUG2026
         "YT-SUSDE-13AUG2026": "0x177768caf9d0e036725a51d3f60d7e20f2d4d194",
         "YT-sUSDE-13AUG2026": "0x177768caf9d0e036725a51d3f60d7e20f2d4d194",
@@ -225,6 +262,11 @@ MARKET_TOKEN_MINT_SY: dict[str, dict[str, str]] = {
         "0xcbf629c8d396b1261f81f55175afa010e94787d8": "0x0b2b2b2076d95dda7817e785989fe353fe955ef9",  # sUSDai
     },
     "ethereum": {
+        # stETH-30DEC2027 market — SY-stETH accepts native ETH / WETH / stETH /
+        # wstETH as mint inputs (getTokensIn). We pin wstETH because it is the
+        # Anvil-fundable, non-rebasing demo funding token, so from_token=WSTETH
+        # equals tokenMintSy and no V3 pre-swap leg is inserted (VIB-5324).
+        "0x34280882267ffa6383b363e278b027be083bbe3b": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",  # wstETH
         # sUSDe-13AUG2026 market - SY is minted from sUSDe (active, replaced 7MAY2026)
         "0x177768caf9d0e036725a51d3f60d7e20f2d4d194": "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497",  # sUSDe
         # sUSDe-7MAY2026 market - SY is minted from sUSDe

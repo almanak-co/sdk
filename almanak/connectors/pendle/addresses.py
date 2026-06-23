@@ -53,6 +53,13 @@ PENDLE: dict[str, dict[str, str]] = {
         "market_factory": "0x1A6fCc85557BC4fB7B534ed835a03EF056552D52",
         "yt_factory": "0xeA1CE3Fd2da6C6BD47C227526be5e54e4E12fE00",
         "pt_oracle": "0x66a1096C6366b2529274dF4f5D8247827fe4CEA8",
+        # Long-dated wstETH/stETH market — durable demo + VIB-5324 breadth target.
+        # Expires 2027-12-30 (on-chain expiry()=1830124800). PT/YT/SY tokens
+        # verified via market.readTokens().
+        "market_steth_30dec2027": "0x34280882267ffa6383B363E278B027Be083bBe3b",
+        "pt_steth_30dec2027": "0xb253Eff1104802b97aC7E3aC9FdD73AecE295a2c",
+        "yt_steth_30dec2027": "0x04B7Fa1e727d7290D6E24fA9b426d0c940283a95",
+        "sy_steth": "0xcbC72d92b2dc8187414F6734718563898740C0BC",
     },
     "plasma": {
         "router": "0x888888888889758F76e7103c6CbF23ABbF58F946",
