@@ -94,21 +94,93 @@ def reconstruct_lending_basis_store(
         if not deployment_id:
             return 0
         events = runner.state_manager.get_accounting_events_sync(deployment_id)
-        if not events:
-            return 0
-        replayed = runner._lending_basis_store.reconstruct_from_events(events)
+        replayed = runner._lending_basis_store.reconstruct_from_events(events) if events else 0
         if replayed:
             logger.info(
                 "Reconstructed %d FIFO lot operations for %s from accounting_events",
                 replayed,
                 deployment_id,
             )
+        # VIB-4394: seed pre-existing wallet inventory as OPENING_BALANCE lots
+        # AFTER replay (so the excess-over-open-lots de-dup sees the replayed
+        # lots), so the first disposal of opening inventory realizes against a
+        # basis instead of booking realized_pnl=None. Runs even when there are no
+        # accounting events yet — a wallet can hold pre-existing inventory before
+        # it has traded anything.
+        _seed_opening_balance_lots(runner, strategy, deployment_id)
         return replayed
     except Exception as e:
         if runner._is_live_mode():
             raise RuntimeError(f"Failed to reconstruct FIFO basis store for {deployment_id}: {e}") from e
         logger.warning("Failed to reconstruct FIFO basis store on startup: %s", e)
         return 0
+
+
+def _seed_opening_balance_lots(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    deployment_id: str,
+) -> int:
+    """Seed pre-existing wallet inventory as OPENING_BALANCE FIFO lots (VIB-4394).
+
+    Reads the earliest persisted portfolio snapshot's ``wallet_balances`` and
+    seeds each as a wallet-basis lot via
+    :meth:`FIFOBasisStore.seed_wallet_inventory`, so the first disposal of
+    inventory the wallet held *before* the strategy started realizes against a
+    basis instead of booking ``realized_pnl=None`` (which G6 used to conflate
+    with a measurement gap).
+
+    Offline and gateway-boundary-safe: reads only the persisted snapshot (no
+    chain / price hop). When the warm backend exposes no sync first-snapshot
+    reader (e.g. the hosted ``GatewayStateManager``), ``get_first_snapshot_sync``
+    returns ``None`` and the seed no-ops (Empty ≠ Zero — structurally absent,
+    not empty inventory). The ``swap:<chain>:<wallet>`` key mirrors the swap
+    handler's construction (``swap_handler.py`` token-in/out keying): chain from
+    the snapshot, wallet from the runner's runtime config (the snapshot does not
+    carry the wallet address). Returns the number of lots seeded.
+    """
+    # Guard the method's existence: a state manager without a sync first-snapshot
+    # reader (the hosted GatewayStateManager, an older backend, or a test mock)
+    # makes the seed a no-op rather than crashing boot — Empty ≠ Zero, the read
+    # is structurally absent, not "no inventory".
+    reader = getattr(runner.state_manager, "get_first_snapshot_sync", None)
+    if reader is None:
+        return 0
+    snapshot = reader(deployment_id)
+    if snapshot is None:
+        return 0
+    chain_norm = (getattr(snapshot, "chain", "") or "").lower().strip()
+    wallet = (
+        (
+            getattr(getattr(runner, "_runtime_config", None), "wallet_address", "")
+            or getattr(strategy, "wallet_address", "")
+            or ""
+        )
+        .lower()
+        .strip()
+    )
+    if not chain_norm or not wallet:
+        return 0
+    swap_position_key = f"swap:{chain_norm}:{wallet}"
+    rows = [
+        {"symbol": b.symbol, "balance": b.balance, "price_usd": b.price_usd}
+        for b in getattr(snapshot, "wallet_balances", []) or []
+    ]
+    if not rows:
+        return 0
+    seeded = runner._lending_basis_store.seed_wallet_inventory(
+        deployment_id,
+        swap_position_key,
+        rows,
+        timestamp=getattr(snapshot, "timestamp", None),
+    )
+    if seeded:
+        logger.info(
+            "Seeded %d opening-balance FIFO lot(s) for %s from the earliest snapshot",
+            seeded,
+            deployment_id,
+        )
+    return seeded
 
 
 def _open_event_payload(ev: dict) -> dict:

@@ -1023,6 +1023,13 @@ def _cell_g6_reconciliation(  # noqa: C901
     # zero — a false positive. Counting the nulls separately surfaces this
     # as "the inputs to the reconciliation are NULL, not measured zero".
     null_swap_rpnl = 0
+    # VIB-4394: a SWAP whose realized_pnl is None because there was no prior
+    # FIFO lot to realize against (an opening / acquiring swap, or the first
+    # disposal of pre-existing wallet inventory) is a LEGITIMATE measured state,
+    # NOT a measurement gap. It is counted separately and reported for forensics,
+    # but — unlike null_swap_rpnl — it does NOT trip has_nulls / fail G6. Only an
+    # UNMEASURED-amount SWAP (amount_in_usd is None) increments null_swap_rpnl.
+    no_prior_basis_swap = 0
     null_lp_close_rpnl = 0
     null_lp_fees = 0
     null_perp_rpnl = 0
@@ -1058,11 +1065,20 @@ def _cell_g6_reconciliation(  # noqa: C901
             # legacy key; the ``is not None`` fall-through handles both.
             matched = _dec(p.get("realized_pnl_usd_matched"))
             rpnl_swap = matched if matched is not None else rpnl
-            if rpnl_swap is None:
-                null_swap_rpnl += 1
-            else:
-                sum_swap += rpnl_swap
             amt_in_usd = _dec(p.get("amount_in_usd"))
+            if rpnl_swap is not None:
+                sum_swap += rpnl_swap
+            elif amt_in_usd is not None:
+                # VIB-4394: measured amounts but no prior FIFO basis to realize
+                # against — an opening / acquiring swap, or the first disposal of
+                # pre-existing wallet inventory. A legitimate measured state, NOT
+                # a measurement gap. Surfaced for forensics; does NOT fail G6.
+                no_prior_basis_swap += 1
+            else:
+                # Unmeasured amounts: the receipt parser could not resolve a USD
+                # value the SWAP path should have emitted. A genuine gap — the
+                # reconciliation runs on null, not a real signal. FAIL G6.
+                null_swap_rpnl += 1
             if amt_in_usd is not None:
                 notional_traded += abs(amt_in_usd)
         if et in ("LP_OPEN", "LP_CLOSE"):
@@ -1228,6 +1244,11 @@ def _cell_g6_reconciliation(  # noqa: C901
         "wallet_pnl_usd": str(wallet_pnl),
         "component_pnl_usd": str(component_pnl),
         "Σ_swaps_usd": str(sum_swap),
+        # VIB-4394: SWAPs with measured amounts but no prior FIFO basis to
+        # realize against (opening / acquiring swaps, first disposal of
+        # pre-existing inventory). A legitimate measured state — surfaced for
+        # forensics but deliberately NOT in null_breakdown, so it never fails G6.
+        "Σ_swaps_no_prior_basis_count": str(no_prior_basis_swap),
         "Σ_lp_usd": str(sum_lp),
         "Σ_perp_usd": str(sum_perp),
         "Σ_fees_usd": str(sum_fees),

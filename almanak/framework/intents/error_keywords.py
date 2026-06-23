@@ -13,6 +13,30 @@ state-machine retry tests.
 
 from __future__ import annotations
 
+# VIB-5374: pre-submit feasibility preflight (RC-2) stable error prefixes.
+# A connector ``preflight`` hook (BaseProtocolCompiler.preflight) FAILs a
+# structurally-doomed intent at compile time with one of these prefixes so the
+# state machine routes it to HOLD (fail-fast, no retry storm) rather than paying
+# gas on an inevitable on-chain revert. Retrying with the same inputs reproduces
+# the same doomed state (expired market, native fee > balance, borrow > LTV
+# capacity), so each is terminal.
+#
+# These are matched BEFORE the generic ``revert`` short-circuit below because the
+# human-readable ``reason`` appended to the prefix can legitimately contain the
+# word "revert" (e.g. Euler's "the EVC borrow would revert"). The prefix is the
+# authoritative classification signal — letting an explanatory "revert" in the
+# reason downgrade a permanent INFEASIBLE verdict to a transient REVERT (and back
+# into the retry budget) defeats the seam. Checking the prefix first makes the
+# classification robust to reason wording, so connector authors need not contort
+# their messages to avoid a substring (cf. host-unreachable handling below, which
+# uses the same check-before-generic precedent).
+_PREFLIGHT_INFEASIBLE_PREFIXES = (
+    "pendle_market_expired",
+    "gmx_insufficient_native_fee",
+    "stargate_insufficient_native_fee",
+    "euler_borrow_infeasible",
+)
+
 
 def categorize_error(error_message: str) -> str | None:
     """Categorize an error message into a known error type.
@@ -48,6 +72,13 @@ def categorize_error(error_message: str) -> str | None:
     if "comptroller" in error_lower and any(kw in error_lower for kw in compound_fork_permanent):
         return "COMPILATION_PERMANENT"
     if "collateral_cannot_cover_new_borrow" in error_lower:
+        return "COMPILATION_PERMANENT"
+
+    # VIB-5374: pre-submit feasibility preflight prefixes. Checked BEFORE the
+    # generic ``revert`` short-circuit so an explanatory "revert" in the reason
+    # cannot downgrade a permanent INFEASIBLE verdict to a transient REVERT.
+    # See _PREFLIGHT_INFEASIBLE_PREFIXES for the full rationale.
+    if any(kw in error_lower for kw in _PREFLIGHT_INFEASIBLE_PREFIXES):
         return "COMPILATION_PERMANENT"
 
     # Common error categories
@@ -198,6 +229,13 @@ def categorize_error(error_message: str) -> str | None:
         # initiate explicitly.
         "no drift user account found",
         "no active position found for market index",
+        # VIB-5374 pre-submit feasibility preflight prefixes are matched earlier
+        # (see _PREFLIGHT_INFEASIBLE_PREFIXES, checked before the generic ``revert``
+        # short-circuit) so they are intentionally NOT repeated here. The native-fee
+        # prefixes also avoid ``funds``/``balance`` so they never get absorbed by
+        # INSUFFICIENT_FUNDS above. The transient counterpart
+        # (PreflightOutcome.UNAVAILABLE) carries no prefix, so it never matches and
+        # correctly surfaces as an ``is_transient`` FAILED result.
     )
     if any(kw in error_lower for kw in permanent_keywords):
         return "COMPILATION_PERMANENT"

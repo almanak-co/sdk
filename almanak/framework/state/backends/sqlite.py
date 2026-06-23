@@ -4466,6 +4466,39 @@ class SQLiteStore:
             rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
+    def get_first_snapshot_sync(self, deployment_id: str) -> "PortfolioSnapshot | None":
+        """Synchronous earliest-snapshot query for use from non-async callers (VIB-4394).
+
+        Sync twin of :meth:`get_first_snapshot`: the boot FIFO reconstruction
+        (``_run_loop_helpers.reconstruct_lending_basis_store``) runs synchronously
+        and seeds pre-existing wallet inventory as OPENING_BALANCE lots from the
+        earliest persisted snapshot's ``wallet_balances_json``. It cannot await,
+        so this bypasses the executor wrapper — same pattern as
+        :meth:`get_accounting_events_sync`. Returns ``None`` when the store is not
+        yet initialized or no snapshot exists.
+        """
+        if not self._initialized or not self._conn:
+            return None
+        with self._db_lock:
+            cursor = self._conn.execute(
+                """
+                SELECT timestamp, iteration_number, total_value_usd,
+                       available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                       value_confidence, positions_json,
+                       token_prices_json, wallet_balances_json, chain,
+                       deployment_id, cycle_id, execution_mode
+                FROM portfolio_snapshots
+                WHERE deployment_id = ?
+                ORDER BY timestamp ASC, id ASC
+                LIMIT 1
+                """,
+                (deployment_id,),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return self._row_to_portfolio_snapshot(row)
+
     async def get_accounting_history(
         self,
         deployment_id: str,

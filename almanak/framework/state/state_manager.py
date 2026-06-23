@@ -3944,6 +3944,40 @@ class StateManager:
             logger.debug("get_position_events_sync failed", exc_info=True)
             return []
 
+    def has_first_snapshot_backend(self) -> bool:
+        """True iff a warm backend able to serve the earliest snapshot synchronously is wired (VIB-4394).
+
+        Structural guard for :meth:`get_first_snapshot_sync`, mirroring
+        :meth:`has_accounting_event_backend`. ``False`` means the sync earliest-
+        snapshot read is structurally unavailable (Empty ≠ Zero — UNMEASURED):
+        e.g. the hosted ``GatewayStateManager`` exposes no first-snapshot reader,
+        so the boot OPENING_BALANCE seed (VIB-4394) no-ops there rather than
+        substituting empty inventory. Read-only; never raises.
+        """
+        return self._warm is not None and hasattr(self._warm, "get_first_snapshot_sync")
+
+    def get_first_snapshot_sync(self, deployment_id: str) -> "PortfolioSnapshot | None":
+        """Synchronous earliest-snapshot query — delegates to the warm backend (VIB-4394).
+
+        Used by the boot FIFO reconstruction
+        (``_run_loop_helpers.reconstruct_lending_basis_store``) to seed pre-
+        existing wallet inventory as OPENING_BALANCE lots. Returns ``None`` when no
+        warm backend supports it (probe with :meth:`has_first_snapshot_backend`
+        first to distinguish "structurally absent" from "no snapshot yet"). The
+        ``None`` return makes the seed a no-op rather than fabricating empty
+        inventory — Empty ≠ Zero.
+        """
+        if not self.has_first_snapshot_backend():
+            self._unimplemented_warn("get_first_snapshot_sync", deployment_id)
+            return None
+        warm = self._warm
+        assert warm is not None and hasattr(warm, "get_first_snapshot_sync")
+        try:
+            return warm.get_first_snapshot_sync(deployment_id)
+        except Exception:
+            logger.debug("get_first_snapshot_sync failed", exc_info=True)
+            return None
+
     async def get_accounting_events_for_dashboard(
         self,
         deployment_id: str,

@@ -811,6 +811,130 @@ class FIFOBasisStore:
         )
         return effective_lot_id
 
+    def seed_wallet_inventory(
+        self,
+        deployment_id: str,
+        swap_position_key: str,
+        rows: list[dict[str, Any]],
+        *,
+        timestamp: datetime | None = None,
+        source: str = "OPENING_BALANCE",
+    ) -> int:
+        """Seed pre-existing wallet inventory as wallet-basis FIFO lots (VIB-4394).
+
+        FIFO lot replay (:meth:`reconstruct_from_events`) only mints lots from
+        SWAP / BORROW / WITHDRAW / PT events. Inventory the wallet already held
+        *before* the strategy started never produced such an event, so the first
+        disposal of that inventory via a SWAP had no lot to consume →
+        ``match_swap_disposal`` returned ``(None, amount)`` → ``realized_pnl=None``
+        → the Accountant Test G6 reconciliation conflated a legitimate
+        no-prior-basis state with a measurement gap and FAILed the cell.
+
+        This seeds one ``source="OPENING_BALANCE"`` wallet-basis lot per token in
+        the strategy's earliest portfolio snapshot, AFTER event replay, so the
+        first disposal of opening inventory realizes against a basis.
+
+        ``rows`` are the parsed first-snapshot ``wallet_balances_json`` entries
+        (``{symbol, balance, price_usd}``); the caller builds them from
+        ``PortfolioSnapshot.wallet_balances`` and supplies the
+        ``swap:<chain>:<wallet>`` key (the snapshot carries the chain but not the
+        wallet — see ``_run_loop_helpers.reconstruct_lending_basis_store``).
+
+        Cost-basis convention (blueprint 27 §7.11.1 Consumer-A; §11.5): the lot's
+        ``cost_usd`` is ``balance × price_usd`` — the first-observed snapshot
+        price, the SAME mark the wallet-equity method already used at the initial
+        endpoint. Realizing a later disposal against it yields the genuine
+        boot→disposal price move, symmetric with the §11.5 ambient lane which
+        marks *untraded* idle inventory boot→final.
+
+        Empty ≠ Zero: when ``price_usd`` is absent / unparseable the lot's
+        ``cost_usd`` is ``None`` (unmeasured) — NEVER ``Decimal("0")``, which
+        would fabricate a 100%-gain on first disposal. The lot is still seeded
+        (quantity known, basis ``None``): ``match_swap_disposal`` handles a
+        ``cost_usd=None`` lot by returning ``(None, remaining)``, giving the
+        disposal a quantity to consume while keeping ``realized_pnl`` honestly
+        ``None``. A row whose ``balance`` is absent / unparseable / ``<= 0`` is
+        skipped — there is no inventory to seed.
+
+        Source tag & iterator behaviour: ``source="OPENING_BALANCE"`` mirrors the
+        VIB-3964 BORROW / WITHDRAW source split. The lot lands under the same
+        fungible ``swap:<chain>:<wallet>`` key (so a later SWAP disposal matches —
+        matching is source-agnostic), is EXCLUDED from :meth:`iter_open_swap_lots`
+        (the VIB-4984 swap-trading dashboard tile is SWAP-source only — opening
+        inventory is not swap-trading PnL) and INCLUDED in
+        :meth:`iter_open_wallet_basis_lots` (it IS tracked wallet inventory for the
+        teardown clamp).
+
+        Restart idempotency (de-dup against prior OPENING_BALANCE lots only): the
+        snapshot reflects the boot balance, which is immutable across restarts.
+        OPENING_BALANCE lots are NOT persisted as accounting events, so they are
+        re-seeded from the snapshot on every boot rather than replayed. The de-dup
+        therefore suppresses only the quantity already held by a PRIOR
+        ``OPENING_BALANCE`` seed of this same snapshot (floored at zero) — making
+        a repeated seed a no-op. It deliberately does NOT net against replayed
+        SWAP/BORROW/WITHDRAW lots: those are post-boot deltas orthogonal to the
+        boot balance (a post-boot acquisition is additive; a post-boot disposal
+        of opening inventory already consumed lots during replay). Netting the
+        opening balance against them would under-seed (additive acquisition) or
+        leave a re-seeded balance after disposal. Idempotent: safe to call on
+        every boot.
+
+        Returns the number of lots seeded.
+        """
+        seeded = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sym = canonical_symbol(row.get("symbol"))
+            if not sym:
+                continue
+            balance = _parse_decimal(row.get("balance"))
+            # Empty ≠ Zero: a missing / unparseable / non-positive balance is no
+            # seedable inventory (a measured zero balance is likewise nothing).
+            if balance is None or balance <= 0:
+                continue
+
+            # Same-boot idempotency de-dup: never re-seed quantity already
+            # represented by a PRIOR OPENING_BALANCE seed of this same boot
+            # snapshot. Only ``source == OPENING_BALANCE`` lots are counted —
+            # NOT replayed SWAP/BORROW/WITHDRAW lots. Those are post-boot deltas
+            # orthogonal to the immutable boot balance: a SWAP that ACQUIRED
+            # more of the token is additive (it must not suppress opening basis),
+            # and a SWAP that DISPOSED opening inventory already consumed lots
+            # during replay (its effect lives in the on-chain balance, not in a
+            # duplicate of the snapshot). De-duping against ALL lots conflated
+            # those post-boot deltas with a re-run of the seed and under-/over-
+            # seeded the opening balance. The runner calls
+            # ``reconstruct_lending_basis_store`` on every boot, so this guard
+            # makes a repeated seed of the same snapshot a no-op.
+            key = self._key(deployment_id, swap_position_key, sym)
+            already_open = Decimal("0")
+            for lot in self._lots.get(key, []):
+                if lot.get("source") != source:
+                    continue
+                remaining = lot.get("remaining")
+                if not isinstance(remaining, Decimal):
+                    remaining = _parse_decimal(remaining)
+                if remaining is not None and remaining > 0:
+                    already_open += remaining
+            seed_qty = balance - already_open
+            if seed_qty <= 0:
+                continue
+
+            price = _parse_decimal(row.get("price_usd"))
+            cost_usd = (seed_qty * price) if price is not None else None
+            self.record_swap_acquisition(
+                deployment_id=deployment_id,
+                position_key=swap_position_key,
+                token=sym,
+                amount=seed_qty,
+                cost_usd=cost_usd,
+                timestamp=timestamp,
+                source=source,
+            )
+            seeded += 1
+        return seeded
+
     # ──────────────────────────────────────────────────────────────────────
     # Prediction-market aggregation (VIB-3707)
     #

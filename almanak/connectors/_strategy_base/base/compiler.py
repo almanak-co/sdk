@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,8 @@ class CompilerServices(Protocol):
     def query_erc20_balance_for_chain(self, token_address: str, wallet_address: str, chain: str) -> int | None: ...
 
     def query_native_balance_for_chain(self, wallet_address: str, chain: str) -> int | None: ...
+
+    def eth_call(self, to: str, data: str, *, chain: str | None = None) -> str | None: ...
 
     def default_swap_adapter(self, protocol: str) -> DefaultSwapAdapter: ...
 
@@ -164,6 +167,53 @@ class PerpCompilerContext(BaseCompilerContext):
     protocol: str
 
 
+class PreflightOutcome(Enum):
+    """Result class of a pre-submit feasibility check (VIB-5374 / RC-2).
+
+    A connector's :meth:`BaseProtocolCompiler.preflight` returns one of these to
+    say whether an intent can *structurally* land on-chain BEFORE any calldata is
+    built — surfacing doomed intents as clean compile FAILs instead of paying gas
+    on an inevitable on-chain revert. Generalises the hardcoded VIB-3823
+    LP_OPEN zero-liquidity gate into a declared, connector-owned hook.
+    """
+
+    #: The intent can proceed; the compiler builds calldata as usual.
+    FEASIBLE = "feasible"
+    #: Structurally doomed (expired market, native fee > balance, borrow > LTV
+    #: capacity). Retrying with the same inputs reproduces the same on-chain
+    #: revert, so the seam emits a **permanent** compile FAIL the state machine
+    #: routes to HOLD — never the data-class retry budget, never the breaker.
+    INFEASIBLE = "infeasible"
+    #: A transient data gap (a required on-chain read was unavailable) left
+    #: feasibility *undetermined*. The seam emits a **retryable** compile FAIL so
+    #: the breaker treats it as a tolerant data-class failure, not an action
+    #: failure — fresh data on the next iteration may resolve it.
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class PreflightVerdict:
+    """Verdict returned by :meth:`BaseProtocolCompiler.preflight`.
+
+    ``error_prefix`` is a stable, venue-specific token strategies (and the
+    retry-classification keyword table in
+    ``almanak.framework.intents.error_keywords``) match on — e.g.
+    ``"PENDLE_MARKET_EXPIRED"``. It MUST NOT contain the substring ``"revert"``:
+    the state machine classifies any error containing ``revert`` as a transient
+    REVERT *before* the permanent-keyword table is consulted (cf. the VIB-3828 /
+    VIB-3818 hazard pinned in ``error_keywords.py``).
+    """
+
+    outcome: PreflightOutcome
+    reason: str = ""
+    error_prefix: str = ""
+
+    @classmethod
+    def feasible(cls) -> PreflightVerdict:
+        """Canonical FEASIBLE verdict (the default — intent may proceed)."""
+        return cls(outcome=PreflightOutcome.FEASIBLE)
+
+
 class BaseProtocolCompiler[CompilerContextT: BaseCompilerContext](ABC):
     """Root ABC for connector-owned intent compilers.
 
@@ -174,6 +224,15 @@ class BaseProtocolCompiler[CompilerContextT: BaseCompilerContext](ABC):
     context-type guard, and :meth:`_unsupported` for the canonical "does not
     support" fail-close. Neither is required — connectors can write their own
     custom fail-close messages, which is the typical pattern.
+
+    Feasibility preflight (VIB-5374 / RC-2)
+    ---------------------------------------
+    Every category base :meth:`compile` funnels through :meth:`_check_context`
+    then :meth:`_run_preflight` BEFORE per-primitive dispatch. The default
+    :meth:`preflight` returns FEASIBLE so existing compiles are byte-identical;
+    a connector opts a venue in by overriding :meth:`preflight` on its compiler
+    class — zero edits to ``intents/compiler.py``, ``settings.py``, or any
+    framework file. The override IS the registration.
     """
 
     protocols: ClassVar[frozenset[str]]
@@ -184,6 +243,46 @@ class BaseProtocolCompiler[CompilerContextT: BaseCompilerContext](ABC):
     @abstractmethod
     def compile(self, ctx: CompilerContextT, intent: Any) -> CompilationResult:
         """Compile one intent. Subclass dispatches on intent type internally."""
+
+    def preflight(self, ctx: CompilerContextT, intent: Any) -> PreflightVerdict:
+        """Pre-submit feasibility check, run before per-primitive dispatch.
+
+        The base returns FEASIBLE unconditionally — connectors override this to
+        reject structurally-doomed intents (expired Pendle markets, GMX/Stargate
+        native-fee shortfalls, Euler over-LTV borrows) at compile time. An
+        override MUST be side-effect-free and use only ``ctx``-mediated reads
+        (``ctx.services.*`` / ``ctx.gateway_client`` / ``ctx.price_oracle``) — no
+        raw RPC or HTTP (gateway-boundary rule). Return ``UNAVAILABLE`` (not
+        ``INFEASIBLE``) when a required read could not be performed, so a
+        transient data gap never gets stamped as a permanent failure.
+        """
+        return PreflightVerdict.feasible()
+
+    def _run_preflight(self, ctx: Any, intent: Any) -> CompilationResult | None:
+        """Run :meth:`preflight` and convert a non-FEASIBLE verdict to a FAILED result.
+
+        Returns ``None`` on FEASIBLE (the common case → caller proceeds with
+        per-primitive dispatch). On INFEASIBLE the FAILED result carries the
+        stable ``error_prefix`` so the state machine's keyword table classifies
+        it as ``COMPILATION_PERMANENT`` (fail-fast → HOLD). On UNAVAILABLE the
+        result is marked retryable so the breaker treats it as data-class.
+
+        Defensive by contract: a connector ``preflight`` that itself raises must
+        NOT take down the compile — an exception is swallowed and treated as
+        FEASIBLE (fail-open), because a buggy feasibility check should degrade to
+        the pre-VIB-5374 behaviour (let the intent compile), never harden into a
+        false reject.
+        """
+        try:
+            verdict = self.preflight(ctx, intent)
+        except Exception:  # pragma: no cover - defensive; preflight must be pure
+            logger.exception("%s.preflight raised; treating intent as FEASIBLE (fail-open)", type(self).__name__)
+            return None
+        if verdict.outcome is PreflightOutcome.FEASIBLE:
+            return None
+        retryable = verdict.outcome is PreflightOutcome.UNAVAILABLE
+        error = f"{verdict.error_prefix}: {verdict.reason}" if verdict.error_prefix else verdict.reason
+        return _failed_result(getattr(intent, "intent_id", ""), error, retryable=retryable)
 
     def _check_context(self, ctx: Any, intent: Any) -> CompilationResult | None:
         """Return a FAILED result if ``ctx`` isn't the declared ``context_type``, else ``None``."""
@@ -307,6 +406,8 @@ class BaseConcentratedLiquidityCompiler(BaseProtocolCompiler[CLCompilerContext])
         invalid_ctx = self._check_context(ctx, intent)
         if invalid_ctx is not None:
             return invalid_ctx
+        if (pf := self._run_preflight(ctx, intent)) is not None:
+            return pf
         intent_type = getattr(intent, "intent_type", None)
         if intent_type == IntentType.SWAP:
             return self.compile_swap(ctx, intent)
@@ -342,6 +443,8 @@ class BasePerpCompiler(BaseProtocolCompiler[PerpCompilerContext]):
         invalid_ctx = self._check_context(ctx, intent)
         if invalid_ctx is not None:
             return invalid_ctx
+        if (pf := self._run_preflight(ctx, intent)) is not None:
+            return pf
         intent_type = getattr(intent, "intent_type", None)
         if intent_type == IntentType.PERP_OPEN:
             return self.compile_perp_open(ctx, intent)
@@ -367,6 +470,8 @@ class BaseBridgeCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         invalid_ctx = self._check_context(ctx, intent)
         if invalid_ctx is not None:
             return invalid_ctx
+        if (pf := self._run_preflight(ctx, intent)) is not None:
+            return pf
         if getattr(intent, "intent_type", None) == IntentType.BRIDGE:
             return self.compile_bridge(ctx, intent)
         return self._unsupported(intent)
@@ -386,6 +491,8 @@ class BaseStakingCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         invalid_ctx = self._check_context(ctx, intent)
         if invalid_ctx is not None:
             return invalid_ctx
+        if (pf := self._run_preflight(ctx, intent)) is not None:
+            return pf
         if self.chains is not None and ctx.chain not in self.chains:
             supported = ", ".join(sorted(self.chains))
             return _failed_result(
@@ -448,11 +555,13 @@ __all__ = [
     "CLCompilerContext",
     "CompilerServices",
     "PerpCompilerContext",
+    "PreflightOutcome",
+    "PreflightVerdict",
     "SwapCompilerContext",
 ]
 
 
-def _failed_result(intent_id: str, error: str) -> CompilationResult:
+def _failed_result(intent_id: str, error: str, *, retryable: bool = False) -> CompilationResult:
     from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 
-    return CompilationResult(status=CompilationStatus.FAILED, intent_id=intent_id, error=error)
+    return CompilationResult(status=CompilationStatus.FAILED, intent_id=intent_id, error=error, is_transient=retryable)

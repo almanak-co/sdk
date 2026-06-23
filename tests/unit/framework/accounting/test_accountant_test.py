@@ -924,10 +924,17 @@ def _make_db_with_n_swaps(
 
 
 def test_g6_fails_with_null_count_when_all_swap_rpnl_are_null():
-    """VIB-3869 acceptance: 4 SWAP rows with ``realized_pnl_usd=null`` on
-    every payload → G6 FAILs and the diagnostic surfaces the null count.
-    Pre-fix this would silently sum to zero and mis-reconcile."""
-    payloads = [_swap_payload(amount_in_usd="3", realized_pnl_usd=None) for _ in range(4)]
+    """VIB-3869 acceptance: 4 SWAP rows that are a genuine measurement gap
+    (``amount_in_usd=null``) → G6 FAILs and the diagnostic surfaces the null
+    count. Pre-fix this would silently sum to zero and mis-reconcile.
+
+    VIB-4394 refinement: the gap signal is UNMEASURED amounts
+    (``amount_in_usd=null``), not merely ``realized_pnl_usd=null``. A SWAP with
+    MEASURED amounts but null realized_pnl is a legitimate no-prior-basis state
+    (an opening / acquiring swap) and is exercised separately in
+    ``test_g6_measured_null_rpnl_swap_is_legitimate_no_prior_basis``.
+    """
+    payloads = [_swap_payload(amount_in_usd=None, realized_pnl_usd=None) for _ in range(4)]
     db_path = _make_db_with_n_swaps(payloads)
     try:
         report = run_against_sqlite(db_path, primitive="lp")
@@ -937,6 +944,26 @@ def test_g6_fails_with_null_count_when_all_swap_rpnl_are_null():
         # Decomposition surfaces the count for triage.
         decomp = report.g6_decomposition
         assert decomp["Σ_swaps_usd_null_count"] == "4"
+    finally:
+        db_path.unlink(missing_ok=True)
+
+
+def test_g6_measured_null_rpnl_swap_is_legitimate_no_prior_basis():
+    """VIB-4394: a SWAP with MEASURED amounts but null realized_pnl (no prior
+    FIFO lot to realize against — an opening / acquiring swap) is NOT a
+    measurement gap. It must NOT increment ``Σ_swaps_usd_null_count`` and must
+    NOT fail G6; it lands in the non-failing ``Σ_swaps_no_prior_basis_count``."""
+    payloads = [_swap_payload(amount_in_usd="3", realized_pnl_usd=None) for _ in range(4)]
+    db_path = _make_db_with_n_swaps(payloads)
+    try:
+        report = run_against_sqlite(db_path, primitive="lp")
+        decomp = report.g6_decomposition
+        assert decomp["Σ_swaps_usd_null_count"] == "0"
+        assert decomp["Σ_swaps_no_prior_basis_count"] == "4"
+        # Equity is flat (initial==final==100) and component PnL is 0, so the
+        # reconciliation reconciles once the null-conflation is removed.
+        cells = {c.cell_id: c for c in report.cells}
+        assert cells["G6"].status == "PASS", cells["G6"].diagnostic
     finally:
         db_path.unlink(missing_ok=True)
 

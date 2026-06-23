@@ -2,15 +2,29 @@
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Any, ClassVar
 
-from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
+from almanak.connectors._strategy_base.base.compiler import (
+    BaseCompilerContext,
+    PreflightOutcome,
+    PreflightVerdict,
+)
 from almanak.connectors._strategy_base.base.lending import BaseLendingCompiler
 from almanak.connectors._strategy_base.base.lending import aave_helpers as _aave_helpers
 from almanak.connectors.euler_v2.adapter import EULER_V2_VAULTS_BY_CHAIN
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
-from almanak.framework.intents.vocabulary import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
+from almanak.framework.intents.vocabulary import BorrowIntent, IntentType, RepayIntent, SupplyIntent, WithdrawIntent
+
+logger = logging.getLogger(__name__)
+
+#: ``LTVBorrow(address collateral)`` on an Euler EVK controller (borrow) vault,
+#: returning the borrowing LTV in 1e4 scale (10000 == 100%). A zero LTV means the
+#: collateral vault is NOT enabled as collateral for that borrow vault, so a
+#: borrow against it would revert on the EVC solvency check.
+_LTV_BORROW_SELECTOR = "0xbf58094d"
+_LTV_SCALE = 10000
 
 
 class _LendingCompilerAdapter:
@@ -90,11 +104,135 @@ def _failed(intent: Any, error: str) -> CompilationResult:
     )
 
 
+def _decode_uint(hex_result: str | None) -> int | None:
+    """Decode a single uint256 word from an ``eth_call`` hex result, or ``None``.
+
+    Empty / ``0x`` / un-parseable results return ``None`` (UNMEASURED — Empty≠Zero)
+    so the caller degrades to UNAVAILABLE rather than treating a read gap as a 0 LTV.
+    """
+    if not hex_result or hex_result in ("0x", "0X"):
+        return None
+    try:
+        return int(hex_result, 16)
+    except (ValueError, TypeError):
+        return None
+
+
 class EulerV2Compiler(BaseLendingCompiler):
     """Compile euler v2 lending intents."""
 
     protocols: ClassVar[frozenset[str]] = frozenset({"euler_v2"})
     chains: ClassVar[frozenset[str]] = frozenset(EULER_V2_VAULTS_BY_CHAIN.keys())
+
+    #: Stable prefix strategies + the retry-classification keyword table match on.
+    BORROW_INFEASIBLE_ERROR_PREFIX: ClassVar[str] = "EULER_BORROW_INFEASIBLE"
+
+    def preflight(self, ctx: BaseCompilerContext, intent: Any) -> PreflightVerdict:
+        """Reject a structurally-doomed Euler V2 BORROW at compile time (VIB-5374 / 2795).
+
+        Two structural failures the EVC reverts on (today only a ``logger.warning``
+        existed — the borrow compiled and reverted, burning gas):
+
+        1. The collateral vault is not enabled as collateral for the borrow vault
+           (``LTVBorrow(collateral) == 0``).
+        2. The requested borrow value exceeds the collateral value at the borrow
+           LTV (over-LTV), so the EVC solvency check fails.
+
+        The EVC ``LTVBorrow`` read rides on ``ctx.services.eth_call`` (VIB-5374
+        gateway-backed passthrough — no new ``almanak/gateway/`` surface). Only
+        ``BORROW`` is gated; SUPPLY/WITHDRAW/REPAY are never feasibility-blocked.
+        A read or price gap yields ``UNAVAILABLE`` / FEASIBLE (fail-open), never a
+        false reject.
+        """
+        if getattr(intent, "intent_type", None) != IntentType.BORROW:
+            return PreflightVerdict.feasible()
+        if ctx.chain not in self.chains:
+            return PreflightVerdict.feasible()
+        try:
+            return self._euler_borrow_verdict(ctx, intent)
+        except Exception as exc:  # noqa: BLE001 - feasibility must never harden into a false reject
+            logger.warning("Euler borrow preflight could not evaluate; deferring: %s", exc)
+            return PreflightVerdict.feasible()
+
+    def _euler_borrow_verdict(self, ctx: BaseCompilerContext, intent: Any) -> PreflightVerdict:
+        """Core Euler BORROW feasibility check (see :meth:`preflight`)."""
+        from almanak.connectors.euler_v2.adapter import EulerV2Adapter, EulerV2Config
+
+        adapter = _LendingCompilerAdapter(ctx)
+        collateral_token = adapter._resolve_token(intent.collateral_token)
+        borrow_token = adapter._resolve_token(intent.borrow_token)
+        if collateral_token is None or borrow_token is None:
+            return PreflightVerdict.feasible()  # compile path emits the real "unknown token" error
+        if intent.collateral_amount == "all":
+            return PreflightVerdict.feasible()  # resolved upstream; defer to compile
+
+        euler_adapter = EulerV2Adapter(EulerV2Config(chain=ctx.chain, wallet_address=ctx.wallet_address))
+        collateral_vault = euler_adapter.find_vault_for_asset(collateral_token.symbol.upper())
+        borrow_vault = euler_adapter.find_vault_for_asset(borrow_token.symbol.upper())
+        if collateral_vault is None or borrow_vault is None:
+            return PreflightVerdict.feasible()  # compile path emits the real "no vault" error
+
+        # LTVBorrow(collateral_vault) is read on the BORROW (controller) vault.
+        calldata = _LTV_BORROW_SELECTOR + collateral_vault.vault_address.lower().replace("0x", "").zfill(64)
+        raw = ctx.services.eth_call(borrow_vault.vault_address, calldata, chain=ctx.chain)
+        ltv_borrow = _decode_uint(raw)
+        if ltv_borrow is None:
+            return PreflightVerdict(
+                outcome=PreflightOutcome.UNAVAILABLE,
+                reason=(
+                    f"could not read Euler LTVBorrow({collateral_vault.vault_symbol}) "
+                    f"on {borrow_vault.vault_symbol} ({ctx.chain})"
+                ),
+            )
+        if ltv_borrow == 0:
+            return PreflightVerdict(
+                outcome=PreflightOutcome.INFEASIBLE,
+                error_prefix=self.BORROW_INFEASIBLE_ERROR_PREFIX,
+                reason=(
+                    f"{collateral_token.symbol} is not enabled as collateral for borrowing "
+                    f"{borrow_token.symbol} on Euler V2 ({ctx.chain}); the EVC borrow would revert"
+                ),
+            )
+
+        return self._euler_capacity_verdict(ctx, intent, collateral_token, borrow_token, ltv_borrow)
+
+    def _euler_capacity_verdict(
+        self,
+        ctx: BaseCompilerContext,
+        intent: Any,
+        collateral_token: Any,
+        borrow_token: Any,
+        ltv_borrow: int,
+    ) -> PreflightVerdict:
+        """Check requested borrow value vs collateral value at LTVBorrow."""
+        try:
+            collateral_price = ctx.services.require_token_price(collateral_token.symbol)
+            borrow_price = ctx.services.require_token_price(borrow_token.symbol)
+        except Exception as exc:  # noqa: BLE001 - missing price → can't size capacity, fail-open
+            logger.debug("Euler capacity preflight: price unavailable (%s); deferring", exc)
+            return PreflightVerdict.feasible()
+        if collateral_price <= 0 or borrow_price <= 0:
+            return PreflightVerdict.feasible()
+
+        collateral_amount: Decimal = intent.collateral_amount  # resolved Decimal (guarded by caller)
+        borrow_amount: Decimal = intent.borrow_amount
+        # New collateral supplied by this intent. (Existing on-chain collateral
+        # would only ADD capacity, so using just the new collateral is the
+        # conservative — never a false reject — lower bound.)
+        max_borrow_value = (collateral_amount * collateral_price) * (Decimal(ltv_borrow) / Decimal(_LTV_SCALE))
+        requested_borrow_value = borrow_amount * borrow_price
+        if requested_borrow_value > max_borrow_value:
+            return PreflightVerdict(
+                outcome=PreflightOutcome.INFEASIBLE,
+                error_prefix=self.BORROW_INFEASIBLE_ERROR_PREFIX,
+                reason=(
+                    f"requested borrow ${requested_borrow_value:.2f} exceeds max ${max_borrow_value:.2f} "
+                    f"at LTVBorrow {Decimal(ltv_borrow) / Decimal(_LTV_SCALE):.2%} against "
+                    f"{collateral_amount} {collateral_token.symbol} collateral on {ctx.chain}; "
+                    f"the EVC solvency check would fail"
+                ),
+            )
+        return PreflightVerdict.feasible()
 
     def compile_supply(self, ctx: BaseCompilerContext, intent: SupplyIntent) -> CompilationResult:
         adapter = _LendingCompilerAdapter(ctx)

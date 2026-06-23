@@ -3017,12 +3017,15 @@ class TestLpImpermanentLoss:
     def test_il_usd_none_when_either_entry_amount_is_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Gemini review on PR #2259 (2026-05-13): :class:`LPOpenEventPayload`
-        requires both ``amount0`` and ``amount1`` as ``Decimal`` (see
-        ``payload_schemas.py:287``). A ``None`` on either leg is a parse
-        failure, NOT a single-sided position (single-sided LP OPENs land as
-        ``Decimal("0")``). Computing a partial V_hodl against a full
-        ``cost_basis_usd`` would emit a misleading ``il_usd``. Fail closed.
+        """Gemini review on PR #2259 (2026-05-13): a ``None`` on either entry leg
+        means V_hodl is not computable, so IL fails closed (``il_usd is None``).
+
+        Two cases land here and both correctly skip IL: a parse failure that
+        dropped a two-sided leg, AND a VIB-3587 single-sided LP_OPEN whose
+        unfunded coin is ABSENT (``None`` — Empty ≠ Zero, NOT a measured
+        ``Decimal("0")``). A single-sided position has no two-sided HODL anchor,
+        so computing a partial V_hodl against a full ``cost_basis_usd`` would
+        emit a misleading ``il_usd``.
         """
         self._patch_token_resolver(monkeypatch, {"USDC": 6, "WETH": 18})
         # amount1 unparseable ⇒ data integrity issue. Pre-fix the helper

@@ -1,5 +1,8 @@
 """Tests for Curve Receipt Parser (Refactored)."""
 
+from decimal import Decimal
+from types import SimpleNamespace
+
 from almanak.connectors.curve.receipt_parser import (
     CurveEventType,
     CurveReceiptParser,
@@ -59,6 +62,23 @@ def create_remove_liquidity_2_log(provider, amounts, fees, supply):
         ],
         "data": f"0x{data}",
         "logIndex": 2,
+    }
+
+
+def create_add_liquidity_3_log(provider, amounts, fees, invariant, supply, pool=POOL_ADDRESS):
+    """Create AddLiquidity log for a 3-coin NG pool (e.g. 3pool DAI/USDC/USDT).
+
+    Signature: AddLiquidity(address,uint256[3],uint256[3],uint256,uint256).
+    """
+    data = "".join(f"{a:064x}" for a in amounts) + "".join(f"{f:064x}" for f in fees) + f"{invariant:064x}{supply:064x}"
+    return {
+        "address": pool,
+        "topics": [
+            "0x423f6495a08fc652425cf4ed0d1f9e37e571d9b9529b1c1c23cce780b2e7df0d",
+            f"0x000000000000000000000000{provider[2:].lower()}",
+        ],
+        "data": f"0x{data}",
+        "logIndex": 1,
     }
 
 
@@ -305,3 +325,166 @@ class TestCurveReceiptParser:
 
         assert result.success is True
         assert result.transaction_hash == "0x12345678"
+
+
+class TestCurvePrimitiveMoneyLegs:
+    """VIB-3587 — Curve LP_OPEN declares funded coin legs (no fabricated 0-leg).
+
+    Exercises the REAL declared-leg path end-to-end: the actual
+    ``CurveReceiptParser.extract_primitive_money_legs`` joined to the actual
+    ledger dispatcher ``_extract_from_declared_legs`` (no ``SimpleNamespace``
+    stand-ins). 3pool on Ethereum is DAI (idx 0, 18dp) / USDC (idx 1, 6dp) /
+    USDT (idx 2, 6dp), so the amounts double as a decimals-scaling check.
+    """
+
+    # Ethereum 3pool (matches CURVE_POOLS["ethereum"]["3pool"]["address"]).
+    POOL = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"
+    PROVIDER = "0x742d35cc6634c0532925a3b844bc454e4438f44e"
+
+    def _receipt(self, amounts):
+        log = create_add_liquidity_3_log(
+            self.PROVIDER, amounts, fees=[0, 0, 0], invariant=1, supply=10**18, pool=self.POOL
+        )
+        return {"status": 1, "transactionHash": "0x" + "ab" * 32, "logs": [log]}
+
+    def _tuple_for(self, amounts):
+        from almanak.framework.observability.ledger import _extract_from_declared_legs
+
+        parser = CurveReceiptParser(chain="ethereum")
+        legs = parser.extract_primitive_money_legs(self._receipt(amounts))
+        assert legs is not None
+        token_in, token_out, amount_in, amount_out, _eff, _slip = _extract_from_declared_legs(legs)
+        return legs, token_in, token_out, amount_in, amount_out
+
+    def test_single_sided_usdc_no_fabricated_zero_leg(self):
+        """Single-sided USDC (coin idx 1): only USDC is declared; DAI/USDT absent.
+
+        The legacy ``amount0``/``amount1`` two-slot guess persisted a fabricated
+        ``amount_in='0'`` for the unfunded DAI (coin idx 0) AND lost USDC's
+        symbol (3pool's pool string has no ``/`` to parse). The declared-leg path
+        puts USDC on ``token_in``/``amount_in`` and leaves ``token_out`` empty —
+        no fabricated zero leg.
+        """
+        legs, token_in, token_out, amount_in, amount_out = self._tuple_for([0, 100_000_000, 0])
+
+        # Exactly one declared leg — the funded coin. Unfunded coins are ABSENT
+        # (Empty != Zero), not measured-zero legs.
+        assert len(legs.legs) == 1
+        assert legs.legs[0].token == "USDC"
+        assert legs.legs[0].amount.is_measured
+        assert legs.legs[0].amount.value == Decimal("100")
+
+        # Funded coin lands on the IN slot; OUT stays empty (no fabricated zero).
+        assert token_in == "USDC"
+        assert amount_in == "100"
+        assert token_out == ""
+        assert amount_out == ""
+
+    def test_single_sided_non_leading_coin_usdt_idx2(self):
+        """Single-sided USDT (coin idx 2): the legacy path dropped this entirely.
+
+        ``amount0``/``amount1`` only ever carry coins 0/1, so a deposit of coin
+        index 2+ was invisible to the ledger. The declared-leg path surfaces it.
+        """
+        legs, token_in, token_out, amount_in, amount_out = self._tuple_for([0, 0, 50_000_000])
+
+        assert len(legs.legs) == 1
+        assert legs.legs[0].token == "USDT"
+        assert token_in == "USDT"
+        assert amount_in == "50"
+        assert token_out == ""
+        assert amount_out == ""
+
+    def test_two_sided_dai_usdc_lane_symmetric(self):
+        """Two-sided DAI+USDC stays lane-symmetric with the legacy projection."""
+        legs, token_in, token_out, amount_in, amount_out = self._tuple_for([10 * 10**18, 10 * 10**6, 0])
+
+        assert [leg.token for leg in legs.legs] == ["DAI", "USDC"]
+        assert token_in == "DAI"
+        assert amount_in == "10"
+        assert token_out == "USDC"
+        assert amount_out == "10"
+
+    def test_no_add_liquidity_event_returns_none(self):
+        """A receipt with no AddLiquidity event declares no legs (legacy fallback)."""
+        parser = CurveReceiptParser(chain="ethereum")
+        receipt = {
+            "status": 1,
+            "transactionHash": "0x" + "cd" * 32,
+            "logs": [create_token_exchange_log(USER_ADDRESS, 0, 1000000, 1, 999000)],
+        }
+        assert parser.extract_primitive_money_legs(receipt) is None
+
+    def test_unknown_pool_returns_none(self):
+        """An AddLiquidity from a pool absent from CURVE_POOLS yields no legs.
+
+        Without the pool-coin address map we cannot bind an amount to the coin it
+        funds, so the parser returns None and the legacy two-slot path is used.
+        """
+        parser = CurveReceiptParser(chain="ethereum")
+        unknown_pool = "0x0000000000000000000000000000000000000bad"
+        log = create_add_liquidity_3_log(
+            self.PROVIDER, [0, 1_000_000, 0], fees=[0, 0, 0], invariant=1, supply=10**18, pool=unknown_pool
+        )
+        receipt = {"status": 1, "transactionHash": "0x" + "ef" * 32, "logs": [log]}
+        assert parser.extract_primitive_money_legs(receipt) is None
+
+    def test_funded_amount_beyond_known_coins_falls_back_to_legacy(self, monkeypatch):
+        """A funded ``token_amounts`` slot with no bound pool coin → legacy fallback.
+
+        Guards a stale / truncated ``CURVE_POOLS.coin_addresses`` (fewer coins than
+        the pool actually has): the funded coin at the unbound index must NOT be
+        silently dropped from the declared legs. Since declared legs bypass the
+        legacy path, the parser returns ``None`` so the legacy two-slot extraction
+        runs instead of declaring a lossy subset.
+        """
+        from almanak.connectors.curve import adapter
+
+        # Truncate 3pool to its first TWO coins (DAI, USDC) — drop USDT (idx 2).
+        pools = adapter.CURVE_POOLS
+        truncated = {
+            chain: {
+                name: (
+                    {**data, "coin_addresses": list(data.get("coin_addresses", []))[:2]}
+                    if str(data.get("address", "")).lower() == self.POOL.lower()
+                    else data
+                )
+                for name, data in chain_pools.items()
+            }
+            for chain, chain_pools in pools.items()
+        }
+        monkeypatch.setattr(adapter, "CURVE_POOLS", truncated)
+
+        parser = CurveReceiptParser(chain="ethereum")
+        # USDT (idx 2) is funded but unbound to a known coin → fall back to legacy.
+        assert parser.extract_primitive_money_legs(self._receipt([0, 0, 50_000_000])) is None
+
+        # A deposit confined to the known coins still declares legs normally.
+        legs = parser.extract_primitive_money_legs(self._receipt([0, 100_000_000, 0]))
+        assert legs is not None
+        assert [leg.token for leg in legs.legs] == ["USDC"]
+
+    def test_resolver_miss_keeps_coin_address_identity(self, monkeypatch):
+        """When the static symbol resolver misses, the leg keeps the coin ADDRESS.
+
+        ``coin_address`` is pool-ordered chain-truth — emitting ``""`` would
+        discard a known token identity (Empty != Zero). The leg falls back to the
+        lowercased address (the ledger treats ``token`` opaquely) instead.
+        """
+        from almanak.framework.data import tokens
+
+        class _MissResolver:
+            def resolve(self, *_args, **_kwargs):
+                # Symbol unknown, but decimals still resolvable (USDC = 6dp).
+                return SimpleNamespace(symbol="", decimals=6)
+
+        monkeypatch.setattr(tokens, "get_token_resolver", lambda: _MissResolver())
+
+        parser = CurveReceiptParser(chain="ethereum")
+        legs = parser.extract_primitive_money_legs(self._receipt([0, 100_000_000, 0]))
+        assert legs is not None
+        assert len(legs.legs) == 1
+        # USDC's pool-coin address (3pool idx 1), lowercased — NOT "".
+        assert legs.legs[0].token == "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        assert legs.legs[0].amount.is_measured
+        assert legs.legs[0].amount.value == Decimal("100")

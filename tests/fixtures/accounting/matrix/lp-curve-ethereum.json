@@ -4,22 +4,23 @@
     "fixture": "lp_curve",
     "chain": "ethereum",
     "primitive": "lp",
-    "captured_from": "docs/internal/notes/.tmp/matrix-overnight-new-rows/lp-curve-ethereum/accountant.json",
-    "captured_at": "2026-05-13T19:37:58.424368+00:00",
-    "captured_at_commit": "7df7573c4a55a3950d044aa6c9247d74b41504ee",
+    "captured_from": "docs/internal/notes/.tmp/accounting-matrix/lp-curve-ethereum/accountant.json",
+    "captured_at": "2026-06-22T00:00:00.000000+00:00",
+    "captured_at_commit": "e16489116",
     "post_fix_for": [
-      "VIB-4316 Tier 1+2 matrix expansion (2026-05-14 overnight)"
+      "VIB-4316 Tier 1+2 matrix expansion (2026-05-14 overnight)",
+      "VIB-3587 Curve single-sided LP_OPEN declares funded legs (no zero-leg)"
     ],
-    "note": "Real-Anvil baseline \u2014 first run on this protocol/chain combo. See docs/internal/VIB-4316-Overnight-2026-05-14.md for the per-cell narrative."
+    "note": "Re-baselined for VIB-3587: the lp_curve fixture now deposits SINGLE-SIDED (USDC only, coin idx 1) so the matrix exercises the single-sided leg shape. The Curve connector DECLARES typed PrimitiveMoneyLegs for its funded coin(s) and the ledger dispatcher consumes them, so the LP_OPEN row books token_in=USDC/amount_in=10 with NO fabricated zero leg (the unfunded DAI/USDT coins are ABSENT, not measured-zero). The LPOpenEventPayload was widened to amount0/amount1 = Decimal|None (mirrors VIB-5117 on LP_CLOSE) so the unfunded coin's None no longer FAILs Pydantic, which unblocked G13/LP4. Forward vs the two-sided baseline: G13 FAIL->PASS, G14 XFAIL->PASS, G15 XFAIL->PASS, LP5 XFAIL->PASS (passed 11->15). LP1/LP2/LP6 are concentrated-liquidity cells (ticks / in-range-time / liquidity-over-time) that DO NOT APPLY to a fungible Curve StableSwap pool and are inapplicable-FAIL here, unchanged by this fix. G6 (native-gas-in-equity, VIB-4256) and LP4 (single-sided IL undefined -> XFAIL) are out of scope for VIB-3587."
   },
   "cells": {
     "G1": "PASS",
     "G10": "PASS",
     "G11": "SKIP",
     "G12": "PASS",
-    "G13": "FAIL",
-    "G14": "XFAIL",
-    "G15": "XFAIL",
+    "G13": "PASS",
+    "G14": "PASS",
+    "G15": "PASS",
     "G2": "PASS",
     "G3": "PASS",
     "G4": "PASS",
@@ -30,16 +31,16 @@
     "G9": "PASS",
     "L5_22": "XFAIL",
     "LP1": "FAIL",
-    "LP2": "XFAIL",
+    "LP2": "FAIL",
     "LP3": "PASS",
-    "LP4": "FAIL",
-    "LP5": "XFAIL",
-    "LP6": "XFAIL"
+    "LP4": "XFAIL",
+    "LP5": "PASS",
+    "LP6": "FAIL"
   },
   "scores": {
-    "passed": 11,
+    "passed": 15,
     "failed": 4,
-    "xfailed": 6,
+    "xfailed": 2,
     "total": 22
   }
 }

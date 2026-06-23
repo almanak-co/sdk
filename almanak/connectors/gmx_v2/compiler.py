@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
-from typing import ClassVar
+from typing import Any, ClassVar
 
-from almanak.connectors._strategy_base.base.compiler import BasePerpCompiler, PerpCompilerContext
+from almanak.connectors._strategy_base.base.compiler import (
+    BasePerpCompiler,
+    PerpCompilerContext,
+    PreflightOutcome,
+    PreflightVerdict,
+)
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
 from almanak.framework.intents.intent_errors import InvalidCollateralForMarketError
 from almanak.framework.intents.vocabulary import IntentType, PerpCloseIntent, PerpOpenIntent
@@ -25,6 +30,60 @@ class GMXV2Compiler(BasePerpCompiler):
     protocols: ClassVar[frozenset[str]] = frozenset({"gmx_v2"})
     intents: ClassVar[frozenset[IntentType]] = frozenset({IntentType.PERP_OPEN, IntentType.PERP_CLOSE})
     chains: ClassVar[frozenset[str]] = frozenset({"arbitrum", "avalanche"})
+
+    #: Stable prefix strategies + the retry-classification keyword table match on.
+    NATIVE_FEE_ERROR_PREFIX: ClassVar[str] = "GMX_INSUFFICIENT_NATIVE_FEE"
+    #: Native-token headroom (wei) reserved for the order tx's own gas, on top of
+    #: the keeper execution fee. GMX keeper fees dominate; this is a conservative
+    #: floor so the comparison isn't off-by-gas. Kept small relative to exec fee.
+    _GAS_RESERVE_WEI: ClassVar[int] = 2_000_000_000_000_000  # 0.002 native
+
+    def preflight(self, ctx: PerpCompilerContext, intent: Any) -> PreflightVerdict:
+        """Reject a GMX order the wallet cannot fund the keeper execution fee for (VIB-5374 / 2303).
+
+        GMX V2 orders pay a native keeper execution fee as ``msg.value`` (consumed
+        even if the order later fails). Before VIB-5374 the compiler only emitted a
+        ``logger.warning`` (adapter.py) — the order compiled and reverted on-chain,
+        burning gas. This compares the REAL keeper fee + a gas reserve against the
+        wallet's ACTUAL native balance, so on a VIB-5068 inflated managed-Anvil
+        fork the order correctly passes while a true mainnet shortfall is caught.
+        """
+        if getattr(intent, "intent_type", None) not in (IntentType.PERP_OPEN, IntentType.PERP_CLOSE):
+            return PreflightVerdict.feasible()
+        if ctx.chain not in self.chains:
+            return PreflightVerdict.feasible()
+
+        sdk_or_error = self._build_sdk(ctx, getattr(intent, "intent_id", ""))
+        if isinstance(sdk_or_error, CompilationResult):
+            # No read path to price the fee — let the compile path surface the real
+            # configuration error rather than fabricate a feasibility verdict.
+            return PreflightVerdict.feasible()
+        order_type = "increase" if intent.intent_type == IntentType.PERP_OPEN else "decrease"
+        try:
+            execution_fee_wei = int(sdk_or_error.get_execution_fee(order_type=order_type))
+        except Exception as exc:  # noqa: BLE001 - gas-price read gap → fail-open, never a false reject
+            logger.warning("GMX exec-fee preflight: could not price keeper fee; deferring: %s", exc)
+            return PreflightVerdict.feasible()
+
+        native_balance_wei = ctx.services.query_native_balance_for_chain(ctx.wallet_address, ctx.chain)
+        if native_balance_wei is None:
+            # A balance read gap must never block: the downstream compile and the
+            # orchestrator's own pre-flight balance check still guard execution.
+            logger.debug("GMX exec-fee preflight: native balance unavailable on %s; deferring", ctx.chain)
+            return PreflightVerdict.feasible()
+
+        required_wei = execution_fee_wei + self._GAS_RESERVE_WEI
+        if native_balance_wei < required_wei:
+            return PreflightVerdict(
+                outcome=PreflightOutcome.INFEASIBLE,
+                error_prefix=self.NATIVE_FEE_ERROR_PREFIX,
+                reason=(
+                    f"native {native_balance_wei} wei < required {required_wei} wei "
+                    f"(keeper execution fee {execution_fee_wei} + gas reserve {self._GAS_RESERVE_WEI}) "
+                    f"on {ctx.chain}; the GMX keeper fee would not be covered"
+                ),
+            )
+        return PreflightVerdict.feasible()
 
     def compile_perp_open(self, ctx: PerpCompilerContext, intent: PerpOpenIntent) -> CompilationResult:  # noqa: C901
         result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)

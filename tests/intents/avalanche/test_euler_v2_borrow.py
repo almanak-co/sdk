@@ -48,6 +48,7 @@ from typing import Any
 import pytest
 from web3 import Web3
 
+from almanak.connectors.euler_v2.compiler import EulerV2Compiler
 from almanak.connectors.euler_v2.receipt_parser import EulerV2ReceiptParser
 from almanak.framework.accounting.lending_accounting import (
     capture_lending_post_state,
@@ -57,6 +58,7 @@ from almanak.framework.accounting.lending_accounting import (
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,
+    ExecutionPhase,
     ExecutionResult,
 )
 from almanak.framework.execution.result_enricher import enrich_result
@@ -666,8 +668,52 @@ class TestEulerV2BorrowIntent:
 
         compilation_result = compiler.compile(intent)
 
-        # Compilation must succeed — the compiler builds the EVC batch regardless
-        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
+        # The borrow is structurally doomed (no collateral / WAVAX not enabled as
+        # collateral for the eUSDC borrow vault — LTVBorrow == 0 on-chain), so it
+        # must fail at compilation OR execution. The VIB-5374 Euler BORROW preflight
+        # now catches this at compile time (FAILED + EULER_BORROW_INFEASIBLE) before
+        # any gas is burned; on a fork where the preflight read is unavailable it
+        # fails open and the EVC borrow reverts at execution. Both are valid; the
+        # invariants below (balance conservation + zero accounting rows) hold for
+        # both and are the real contract this test guards.
+        if compilation_result.status.value != "SUCCESS":
+            # Preflight rejected the doomed borrow before building the EVC batch.
+            assert compilation_result.action_bundle is None, "rejected compilation must not produce a bundle"
+            assert EulerV2Compiler.BORROW_INFEASIBLE_ERROR_PREFIX in str(compilation_result.error), (
+                f"compile-time rejection must carry the structured infeasibility prefix; got: {compilation_result.error}"
+            )
+            print(f"Compilation rejected the doomed borrow as expected: {compilation_result.error}")
+
+            # No on-chain action was taken -> balances are trivially conserved.
+            usdc_after = get_token_balance(web3, usdc, funded_wallet)
+            wavax_after = get_token_balance(web3, wavax, funded_wallet)
+            assert usdc_after == usdc_before, "USDC balance must be unchanged after rejected borrow"
+            assert wavax_after == wavax_before, "WAVAX balance must be unchanged after rejected borrow"
+
+            # ── Layer 5: failure-path accounting contract (compile-reject branch) ──
+            # A compile-rejected intent never executed, so it must produce zero typed
+            # accounting_events rows — the SAME contract the execution-failure branch
+            # below asserts. Drive a synthesized failed result (no transactions) through
+            # the harness so the invariant is enforced for BOTH valid failure modes.
+            rejected_result = ExecutionResult(
+                success=False,
+                phase=ExecutionPhase.VALIDATION,  # rejected pre-execution; never reached the chain
+                error=str(compilation_result.error),
+            )
+            await assert_no_accounting_on_failure(
+                layer5_accounting_harness,
+                intent=intent,
+                result=rejected_result,
+                chain=CHAIN_NAME,
+                wallet_address=funded_wallet,
+                price_oracle=price_oracle,
+                eth_call_reader=anvil_eth_call_adapter,
+            )
+            print("\nALL CHECKS PASSED")
+            return
+
+        # Fail-open path: preflight read unavailable -> compile builds the EVC batch
+        # and the borrow reverts on-chain.
         assert compilation_result.action_bundle is not None, "ActionBundle must be created"
         print(f"Compilation succeeded with {len(compilation_result.action_bundle.transactions)} transactions")
 

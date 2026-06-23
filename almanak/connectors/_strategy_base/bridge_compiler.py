@@ -6,7 +6,12 @@ import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from almanak.connectors._strategy_base.base.compiler import BaseBridgeCompiler, BaseCompilerContext
+from almanak.connectors._strategy_base.base.compiler import (
+    BaseBridgeCompiler,
+    BaseCompilerContext,
+    PreflightOutcome,
+    PreflightVerdict,
+)
 from almanak.framework.intents.compiler_constants import get_gas_estimate
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
 from almanak.framework.intents.vocabulary import IntentType
@@ -35,6 +40,118 @@ class BridgeCompiler(BaseBridgeCompiler):
             "polygon",
         }
     )
+
+    #: Stable prefix strategies + the retry-classification keyword table match on.
+    STARGATE_NATIVE_FEE_ERROR_PREFIX: ClassVar[str] = "STARGATE_INSUFFICIENT_NATIVE_FEE"
+
+    def preflight(self, ctx: BaseCompilerContext, intent: Any) -> PreflightVerdict:
+        """Reject a Stargate bridge the wallet cannot fund the LayerZero native fee for (VIB-5374 / 2301).
+
+        Stargate V2 pays a LayerZero messaging fee in the SOURCE chain's native
+        token as ``msg.value`` (plus the transfer amount itself when bridging a
+        native asset). If the wallet can't cover it the ``send()`` reverts and
+        burns gas. This gate only fires when the bridge that WOULD be selected is
+        Stargate (Across is left untouched — it has no native messaging fee), and
+        compares the quote's native fee against the wallet's actual native
+        balance.
+
+        The native fee is read from the selected Stargate quote
+        (``route_data['lz_fee_wei']``), which today is a conservative 3x
+        overestimate (``StargateBridgeAdapter._estimate_layerzero_fee``). The
+        ``ctx.services.eth_call`` seam (VIB-5374) is wired so a follow-up can
+        replace this with an exact on-chain ``quoteSend`` read; the overestimate
+        is strictly fail-safe in the meantime (it over-, never under-, rejects).
+        """
+        if getattr(intent, "intent_type", None) != IntentType.BRIDGE:
+            return PreflightVerdict.feasible()
+        try:
+            return self._stargate_native_fee_verdict(ctx, intent)
+        except Exception as exc:  # noqa: BLE001 - feasibility must never harden into a false reject
+            logger.warning("Stargate native-fee preflight could not evaluate; deferring: %s", exc)
+            return PreflightVerdict.feasible()
+
+    def _stargate_native_fee_verdict(self, ctx: BaseCompilerContext, intent: BridgeIntent) -> PreflightVerdict:
+        """Core Stargate native-fee feasibility check (see :meth:`preflight`)."""
+        from_chain = intent.from_chain.lower()
+        to_chain = intent.to_chain.lower()
+        token_symbol = intent.token
+
+        token_info = ctx.services.resolve_token(token_symbol, chain=from_chain)
+        if token_info is None:
+            return PreflightVerdict.feasible()  # compile path emits the real error
+
+        # Resolve amount the same way compile_bridge does. A fixed Decimal is the
+        # common open path. For ``amount="all"`` the transfer amount only matters
+        # to the gate for NATIVE assets — there ``msg.value = lz_fee + amount``, so
+        # a bridge-all that can't cover fee + balance must NOT slip through.
+        # ERC20 ``all`` (and any other non-Decimal) defers to the compile path,
+        # whose native fee does not include the transfer amount.
+        if isinstance(intent.amount, Decimal):
+            amount_decimal = intent.amount
+        elif intent.amount == "all" and token_info.is_native:
+            amount_result = self._resolve_all_amount(ctx, intent, from_chain, token_symbol, token_info)
+            if isinstance(amount_result, CompilationResult):
+                # Balance read gap / empty balance → defer; compile path emits the real error.
+                return PreflightVerdict.feasible()
+            amount_decimal = amount_result
+        else:
+            return PreflightVerdict.feasible()
+
+        selector = self._build_selector(ctx)
+        selection = self._select_bridge(selector, intent, token_symbol, amount_decimal, from_chain, to_chain)
+        if not selection.is_success or selection.bridge is None or selection.quote is None:
+            return PreflightVerdict.feasible()  # no bridge → compile path handles it
+
+        if selection.bridge.name.lower() != "stargate":
+            return PreflightVerdict.feasible()  # Across et al. carry no native messaging fee
+
+        lz_fee_wei = self._extract_lz_fee_wei(selection.quote)
+        if lz_fee_wei is None:
+            # No native-fee number to compare against → defer (fail-open).
+            return PreflightVerdict.feasible()
+
+        # Native asset bridges also send the transfer amount as msg.value.
+        required_wei = lz_fee_wei
+        if token_info.is_native:
+            required_wei += int(amount_decimal * Decimal(10**token_info.decimals))
+
+        native_balance_wei = ctx.services.query_native_balance_for_chain(ctx.wallet_address, from_chain)
+        if native_balance_wei is None:
+            # Balance read gap must never block — the compile + orchestrator
+            # pre-flight balance check still guard execution.
+            return PreflightVerdict.feasible()
+
+        if native_balance_wei < required_wei:
+            return PreflightVerdict(
+                outcome=PreflightOutcome.INFEASIBLE,
+                error_prefix=self.STARGATE_NATIVE_FEE_ERROR_PREFIX,
+                reason=(
+                    f"native {native_balance_wei} wei < required {required_wei} wei "
+                    f"(LayerZero messaging fee {lz_fee_wei}"
+                    f"{' + native transfer amount' if token_info.is_native else ''}) "
+                    f"on {from_chain}; the Stargate send would not be covered"
+                ),
+            )
+        return PreflightVerdict.feasible()
+
+    @staticmethod
+    def _extract_lz_fee_wei(quote: Any) -> int | None:
+        """Pull the LayerZero native messaging fee (wei) from a Stargate quote."""
+        route_data = getattr(quote, "route_data", None) or {}
+        raw = route_data.get("lz_fee_wei")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (ValueError, TypeError):
+                return None
+        # Fallback: gas_fee_amount is the LZ fee in native-token units.
+        gas_fee = getattr(quote, "gas_fee_amount", None)
+        if gas_fee is not None:
+            try:
+                return int(Decimal(str(gas_fee)) * Decimal(10**18))
+            except (ValueError, TypeError):
+                return None
+        return None
 
     def compile_bridge(self, ctx: BaseCompilerContext, intent: BridgeIntent) -> CompilationResult:  # noqa: C901
         """Compile a BRIDGE intent into an ActionBundle."""

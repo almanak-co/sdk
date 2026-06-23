@@ -654,3 +654,51 @@ class TestQueryPositionTokensOwed:
         result = cq.query_position_tokens_owed("0xPosManager", 7)
 
         assert result == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# Tests for eth_call (VIB-5374 gateway-backed passthrough for preflights)
+# ---------------------------------------------------------------------------
+
+
+class TestEthCall:
+    """Coverage for CompilerQueries.eth_call — read-only passthrough used by
+    connector feasibility preflights (Stargate native fee, Euler LTV)."""
+
+    def test_gateway_happy_path_returns_hex(self) -> None:
+        gw = MagicMock()
+        gw.eth_call.return_value = "0x" + "0" * 63 + "1"
+        host = _make_stub_host(gateway_client=gw)
+        cq = CompilerQueries(host)
+
+        result = cq.eth_call("0xVault", "0xdeadbeef")
+
+        assert result == "0x" + "0" * 63 + "1"
+        gw.eth_call.assert_called_once_with(chain="arbitrum", to="0xVault", data="0xdeadbeef")
+
+    def test_gateway_failure_fails_closed_to_none(self) -> None:
+        gw = MagicMock()
+        gw.eth_call.side_effect = RuntimeError("rpc down")
+        host = _make_stub_host(gateway_client=gw)
+        cq = CompilerQueries(host)
+
+        # Fail-closed: a configured gateway that errors returns None, never a
+        # silent fall-through to direct RPC.
+        assert cq.eth_call("0xVault", "0xdeadbeef") is None
+
+    def test_no_gateway_no_rpc_returns_none(self) -> None:
+        host = _make_stub_host(gateway_client=None, rpc_url=None)
+        host._get_rpc_url_for_chain = MagicMock(return_value=None)
+        cq = CompilerQueries(host)
+
+        assert cq.eth_call("0xVault", "0xdeadbeef") is None
+
+    def test_explicit_chain_is_passed_through(self) -> None:
+        gw = MagicMock()
+        gw.eth_call.return_value = "0x1"
+        host = _make_stub_host(gateway_client=gw)
+        cq = CompilerQueries(host)
+
+        cq.eth_call("0xVault", "0xdeadbeef", chain="ethereum")
+
+        gw.eth_call.assert_called_once_with(chain="ethereum", to="0xVault", data="0xdeadbeef")

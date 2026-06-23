@@ -967,6 +967,59 @@ class CompilerQueries:
             logger.error(f"Failed to query native balance on {chain}: {e}")
             return None
 
+    def eth_call(self, to: str, data: str, *, chain: str | None = None) -> str | None:
+        """Read-only ``eth_call`` passthrough for connector feasibility preflights (VIB-5374).
+
+        Gateway-first / direct-RPC-fallback, mirroring
+        :meth:`query_native_balance_for_chain`. Used by connector ``preflight``
+        hooks that need a typed on-chain read the framework does not already
+        expose (Stargate LayerZero ``quoteSend`` native fee; Euler EVC
+        ``LTVBorrow``). NOT an egress bypass — the gateway path goes through the
+        gateway's RPC proxy (``GatewayClient.eth_call``); the direct-Web3 branch
+        only fires when no gateway is configured (local dev / Anvil), matching the
+        gateway-internal-fallback pattern of the sibling balance queries.
+
+        Args:
+            to: Contract address to call.
+            data: Hex-encoded calldata (with 0x prefix).
+            chain: Chain to read on (defaults to the compiler's chain).
+
+        Returns:
+            Hex-encoded result string, or ``None`` on any failure (caller treats
+            a ``None`` as an UNMEASURED data gap → UNAVAILABLE, never a fabricated
+            feasibility verdict).
+        """
+        target_chain = chain or self._host.chain
+
+        # Fail-closed: if a gateway is configured but the call fails, do NOT fall
+        # through to direct RPC — return None so the caller degrades to UNAVAILABLE.
+        if self._host._gateway_client is not None:
+            try:
+                return self._host._gateway_client.eth_call(chain=target_chain, to=to, data=data)
+            except Exception as e:
+                logger.error("Gateway eth_call failed (%s -> %s): %s", target_chain, to, e)
+                return None
+
+        # No gateway configured: fall back to direct Web3 RPC (local dev / Anvil only).
+        rpc_url = self._host._get_rpc_url_for_chain(target_chain)
+        if rpc_url is None:
+            logger.warning("No RPC URL for chain %s — cannot eth_call %s", target_chain, to)
+            return None
+        try:
+            from web3 import Web3
+        except ImportError:
+            logger.warning("web3 is not installed; cannot use direct RPC fallback for eth_call")
+            return None
+        try:
+            from eth_typing import HexStr
+
+            web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
+            result = web3.eth.call({"to": web3.to_checksum_address(to), "data": HexStr(data)})
+            return "0x" + result.hex()
+        except Exception as e:
+            logger.error("Direct eth_call failed on %s (%s): %s", target_chain, to, e)
+            return None
+
     def query_native_balance(self, wallet_address: str) -> int | None:
         """Query native token balance (ETH, MATIC, AVAX, etc.) from on-chain.
 

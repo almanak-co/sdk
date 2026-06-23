@@ -34,6 +34,8 @@ class BaseLendingCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         invalid_ctx = self._check_context(ctx, intent)
         if invalid_ctx is not None:
             return invalid_ctx
+        if (pf := self._run_preflight(ctx, intent)) is not None:
+            return pf
         intent_type = getattr(intent, "intent_type", None)
         if intent_type == IntentType.SUPPLY:
             return self.compile_supply(ctx, intent)

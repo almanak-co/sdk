@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
 
 if TYPE_CHECKING:
+    from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg, PrimitiveMoneyLegs
     from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData, ProtocolFees, SwapAmounts
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
 
@@ -261,6 +262,39 @@ def _canonical_pool_address(event: CurveEvent) -> str:
     return str(addr).lower()
 
 
+def _pool_coin_addresses(pool_address: str, chain: str) -> list[str]:
+    """Return the pool-coin-ordered ERC-20 addresses for a Curve pool, or ``[]``.
+
+    Looks the pool up by its on-chain address in the static ``CURVE_POOLS``
+    registry (the same metadata the compiler funds from) and returns its
+    ``coin_addresses`` in pool-coin index order — the SAME order the
+    AddLiquidity event emits ``token_amounts``. This lets the money-leg
+    declaration map ``token_amounts[i]`` to the coin that index actually funds,
+    instead of the legacy positional ``amount0``/``amount1`` guess that blindly
+    assumes coin 0 = ``token_in`` and coin 1 = ``token_out`` (VIB-3587: a
+    single-sided deposit of coin index 1+ left coin 0 carrying a fabricated zero
+    leg, and a deposit of coin index 2+ was dropped entirely).
+
+    Returns ``[]`` (→ caller declares no legs, legacy fallback unchanged) when
+    the pool is unknown or carries no ``coin_addresses`` — never fabricates an
+    address (Empty ≠ Zero).
+    """
+    if not pool_address:
+        return []
+    try:
+        from almanak.connectors.curve.adapter import CURVE_POOLS
+
+        chain_pools = CURVE_POOLS.get(chain, {})
+        target = pool_address.lower()
+        for data in chain_pools.values():
+            if str(data.get("address", "")).lower() == target:
+                coin_addresses = data.get("coin_addresses") or []
+                return [str(a) for a in coin_addresses]
+    except Exception as exc:  # noqa: BLE001 — accounting path: degrade to legacy, never raise
+        logger.debug("Curve money-legs: pool-coin lookup failed for %s on %s: %s", pool_address, chain, exc)
+    return []
+
+
 # =============================================================================
 # Receipt Parser
 # =============================================================================
@@ -272,6 +306,28 @@ class CurveReceiptParser:
     Refactored to use base infrastructure utilities for hex decoding
     and event registry management. Maintains full backward compatibility.
     """
+
+    # VIB-3587 — Connector-DECLARED per-intent extra extractions. The framework
+    # enricher merges these onto the generic ``EXTRACTION_SPECS`` base via
+    # ``ResultEnricher._with_parser_extra_extractions`` — keeping the Curve-specific
+    # field choice in the connector, not as a protocol-named overlay in the framework
+    # (``test_connector_descriptor`` / the chain-protocol coupling ratchet forbid that
+    # for migrated connectors). An LP_OPEN routes through
+    # ``extract_primitive_money_legs``, which declares one INPUT leg per FUNDED pool
+    # coin (built from the AddLiquidity event's pool-coin-ordered ``token_amounts``
+    # joined to the pool's ``coin_addresses``). This surfaces the typed
+    # ``PrimitiveMoneyLegs`` under ``extracted_data["primitive_money_legs"]`` — the
+    # seam the US-009 ledger dispatcher (``_extract_tokens_and_amounts``) prefers over
+    # the legacy ``LPOpenData.amount0`` / ``amount1`` two-slot guess. Curve is a
+    # multi-coin venue with single-sided and non-leading deposits, so that legacy
+    # guess persisted a fabricated zero leg for an unfunded coin (and dropped a coin
+    # index 2+ deposit entirely); the declared legs put each funded amount on the coin
+    # it actually funds, with an unfunded coin simply ABSENT (Empty != Zero). A deposit
+    # the extractor cannot measure yields ``None`` → legacy path, unchanged. Mirrors
+    # the Pendle / Lido ``primitive_money_legs`` declaration.
+    EXTRA_EXTRACTIONS_BY_INTENT: dict[str, tuple[str, ...]] = {
+        "LP_OPEN": ("primitive_money_legs",),
+    }
 
     def __init__(self, chain: str = "ethereum", **kwargs: Any) -> None:
         """Initialize the parser.
@@ -1088,6 +1144,167 @@ class CurveReceiptParser:
 
         except Exception as e:
             logger.warning(f"Failed to extract lp_open_data: {e}")
+            return None
+
+    def _build_open_input_leg(self, coin_address: str, raw_amount: Any) -> "PrimitiveMoneyLeg | None":
+        """Build one INPUT money leg for a funded Curve LP_OPEN coin (VIB-3587).
+
+        Token identity is resolved FROM the pool's coin address (chain-truth,
+        pool-coin order) rather than guessed from the intent's two-slot
+        ``token0`` / ``token1`` — so a deposit of coin index 1+ lands on the
+        coin it actually funds. When the static resolver misses the symbol, the
+        leg keeps the lowercased coin ADDRESS (the known chain-truth identity the
+        ledger treats opaquely) rather than dropping to ``""``; ``""`` is reserved
+        for a genuinely unknown coin (no address), never a fabricated symbol.
+
+        Amount is a human-unit ``MeasuredMoney`` (the VIB-5036 ledger contract)
+        carrying Empty ≠ Zero (blueprint 27 §10.10) by construction. Mirrors the
+        TraderJoe V2 ``_build_close_output_leg`` discipline:
+
+        * a non-integer / missing raw → UNMEASURED;
+        * a non-zero raw whose token decimals cannot be strictly resolved →
+          UNMEASURED (never a wrongly-scaled value, NOT the 18-decimal
+          best-effort fallback);
+        * otherwise → measured human amount.
+
+        Returns ``None`` for an UNFUNDED coin (raw ``0``): a single-sided
+        deposit's zero-amount coins are simply ABSENT from the declared legs
+        (Empty ≠ Zero — an unfunded coin is not a measured-zero leg), which is
+        the whole point of VIB-3587. Callers must filter ``None``.
+        """
+        from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg
+        from almanak.framework.accounting.measured import MeasuredMoney
+
+        try:
+            raw_int: int | None = int(raw_amount)
+        except (TypeError, ValueError):
+            raw_int = None
+
+        # An unfunded coin (measured raw 0) is ABSENT from the declaration, not a
+        # measured-zero leg. A None/garbage raw is also not declared (we cannot
+        # assert it was funded). Either way: no leg, so the flat-tuple projection
+        # never carries a fabricated zero for it.
+        if not raw_int:
+            return None
+
+        # ``coin_address`` is the pool-ordered chain-truth token identity. Seed the
+        # leg's token with the lowercased address so a static-resolver MISS still
+        # carries the funded coin's identity — the ledger treats ``token`` opaquely
+        # (symbol OR address; ``""`` only when unknown) per the ``PrimitiveMoneyLeg``
+        # contract, so a known address is a measured fact, not a fabricated one. The
+        # resolved symbol UPGRADES it when available; only a genuinely unknown coin
+        # (``coin_address`` empty) leaves it ``""`` (Empty ≠ Zero).
+        token_identity = str(coin_address).lower() if coin_address else ""
+        decimals: int | None = None
+        if coin_address and self.chain:
+            try:
+                from almanak.framework.data.tokens import get_token_resolver
+
+                resolver = get_token_resolver()
+                # skip_gateway/log_errors: accounting write hot path — resolve the
+                # symbol AND decimals from the static registry without risking a
+                # gateway round-trip stall (mirrors ledger ``_lp_amount_to_human``).
+                info = resolver.resolve(coin_address, self.chain, log_errors=False, skip_gateway=True)
+                token_identity = getattr(info, "symbol", "") or token_identity
+                decimals = getattr(info, "decimals", None)
+            except Exception as exc:  # noqa: BLE001 — fail to unmeasured, never raise on the accounting path
+                logger.debug("Curve open leg: token resolve failed for %s on %s: %s", coin_address, self.chain, exc)
+
+        if isinstance(decimals, int) and decimals >= 0:
+            amount = MeasuredMoney.measured(Decimal(raw_int) / Decimal(10**decimals))
+        else:
+            amount = MeasuredMoney.unmeasured()
+        return PrimitiveMoneyLeg.input(token_identity, amount)
+
+    def extract_primitive_money_legs(self, receipt: dict[str, Any]) -> "PrimitiveMoneyLegs | None":
+        """VIB-3587 — declare the LP_OPEN money legs as a typed ``PrimitiveMoneyLegs``
+        the ledger dispatcher consumes directly (the Lido / TJ V2 US-009 pattern).
+
+        Inverts the legacy control flow (blueprint 27 §6.6, 05 §7): instead of the
+        ledger reverse-engineering an LP_OPEN's legs from ``LPOpenData.amount0`` /
+        ``amount1`` (which it maps positionally onto ``token_in`` /``token_out`` of
+        the pool's FIRST TWO coins), the connector DECLARES the coin(s) it actually
+        funded on-chain. Curve is a multi-coin (2/3/4) venue with single-sided and
+        non-leading-coin deposits, so the two-slot legacy guess is structurally
+        wrong:
+
+        * a single-sided deposit of coin 0 left coin 1 carrying a fabricated zero
+          ``amount_out`` leg (and vice-versa) — a measured-zero where the coin was
+          simply UNFUNDED (Empty ≠ Zero violation);
+        * a deposit of coin index 2+ (e.g. USDT in 3pool, crvUSD in 4pool) was
+          dropped entirely — ``amount0`` / ``amount1`` only ever carry coins 0/1.
+
+        The declared legs are built FROM the AddLiquidity event's pool-coin-ordered
+        ``token_amounts`` (chain truth) joined to the pool's ``coin_addresses``
+        (same index order), emitting one INPUT leg per FUNDED coin and NOTHING for
+        an unfunded coin. The dispatcher (``_extract_from_declared_legs``) projects
+        leg0 → ``token_in`` / ``amount_in`` and leg1 → ``token_out`` / ``amount_out``
+        — lane-symmetric with ``_extract_from_lp_open`` for a 2-coin deposit, and a
+        single funded leg lands on ``token_in`` only (``token_out`` stays empty — no
+        fabricated zero). A 3rd+ funded coin surfaces the dispatcher's documented
+        "dropped leg" WARN rather than silently corrupting the trade tape.
+
+        Returns ``None`` (→ legacy LP_OPEN fallback, byte-identical rows) when the
+        receipt carries no AddLiquidity event, the pool's coin metadata is unknown,
+        or no coin is funded — so non-Curve-resolvable receipts degrade unchanged.
+        Never raises: any failure degrades to ``None`` rather than halting the live
+        accounting writer.
+        """
+        from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
+
+        try:
+            result = self.parse_receipt(receipt)
+
+            for event in result.events:
+                if event.event_type != CurveEventType.ADD_LIQUIDITY:
+                    continue
+
+                pool_address = _canonical_pool_address(event)
+                coin_addresses = _pool_coin_addresses(pool_address, self.chain)
+                if not coin_addresses:
+                    # Without the pool-coin address map we cannot bind an amount to
+                    # the coin it funds; fall back to the legacy two-slot path
+                    # rather than guess.
+                    return None
+
+                token_amounts = event.data.get("token_amounts") or []
+
+                # A stale / truncated ``CURVE_POOLS.coin_addresses`` (fewer coins
+                # than the pool actually has) would let the loop below ignore a
+                # FUNDED ``token_amounts`` slot beyond its length and still declare
+                # a partial ``PrimitiveMoneyLegs``. Because declared legs BYPASS the
+                # legacy path, that silently drops a funded coin from the trade tape.
+                # If any positive amount cannot be bound to a known pool coin, fall
+                # back to the legacy two-slot extraction rather than declare a lossy
+                # subset.
+                unbound_amounts = token_amounts[len(coin_addresses) :]
+                if any(int(raw or 0) > 0 for raw in unbound_amounts):
+                    logger.debug(
+                        "Curve money-legs: %s funded token_amounts exceed %s coin "
+                        "addresses for pool %s; falling back to legacy extraction",
+                        len(token_amounts),
+                        len(coin_addresses),
+                        pool_address,
+                    )
+                    return None
+
+                legs = []
+                for idx, coin_address in enumerate(coin_addresses):
+                    raw = token_amounts[idx] if idx < len(token_amounts) else None
+                    leg = self._build_open_input_leg(coin_address, raw)
+                    if leg is not None:
+                        legs.append(leg)
+
+                # No funded coin → no declaration (legacy fallback). A real
+                # AddLiquidity always funds ≥1 coin, so this guards only a
+                # degenerate / mis-decoded receipt.
+                if not legs:
+                    return None
+                return PrimitiveMoneyLegs.of(*legs)
+
+            return None
+        except Exception as exc:  # noqa: BLE001 — never halt the accounting writer
+            logger.warning(f"Failed to extract primitive_money_legs: {exc}")
             return None
 
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> "LPCloseData | None":

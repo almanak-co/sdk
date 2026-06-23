@@ -401,8 +401,23 @@ class LPOpenEventPayload(_Versioned):
     pool_address: str
     token0: str
     token1: str
-    amount0: Decimal
-    amount1: Decimal
+    # VIB-3587: amount0 / amount1 are Decimal | None per AGENTS.md Empty ≠ Zero —
+    # the same widening VIB-5117 applied to LPCloseEventPayload below. A SINGLE-
+    # SIDED LP_OPEN (e.g. a Curve deposit funding only one pool coin) leaves the
+    # unfunded coin's leg ABSENT — the connector DECLARES no leg for it (US-009),
+    # so the handler emits ``None`` (unmeasured), NOT a fabricated measured zero.
+    # Forcing it to ``Decimal("0")`` would assert the unfunded coin was measured
+    # at zero, violating Empty ≠ Zero; before this widening such a row FAILed
+    # Pydantic validation, blocking G6 / G13 / LP4 (and silently dropping the
+    # whole LP_OPEN accounting event).
+    #
+    # ``Field(...)`` (Pydantic v2 "required key, no default") preserves the
+    # discipline: a parser bug that drops the key entirely (``""`` shape) FAILs
+    # loud, while a measured-unmeasured row with explicit ``None`` validates. The
+    # writer always emits both keys (``LPAccountingEvent.to_payload_json`` →
+    # ``_enc``), so the key is always present on the production path.
+    amount0: Decimal | None = Field(...)
+    amount1: Decimal | None = Field(...)
     amount0_usd: Decimal | None = None
     amount1_usd: Decimal | None = None
     cost_basis_usd: Decimal | None = None

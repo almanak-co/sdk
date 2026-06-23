@@ -157,6 +157,9 @@ class _ConnectorCompilerServices:
     def query_native_balance_for_chain(self, wallet_address: str, chain: str) -> int | None:
         return self.compiler._query_native_balance_for_chain(wallet_address, chain)
 
+    def eth_call(self, to: str, data: str, *, chain: str | None = None) -> str | None:
+        return self.compiler._eth_call(to, data, chain=chain)
+
     def default_swap_adapter(self, protocol: str) -> DefaultSwapAdapter:
         """Construct a ``DefaultSwapAdapter`` for a V3 pre-swap leg.
 
@@ -2553,6 +2556,10 @@ class IntentCompiler:
     def _query_native_balance_for_chain(self, wallet_address: str, chain: str) -> int | None:
         """Delegates to CompilerQueries.query_native_balance_for_chain (see compiler_queries.py)."""
         return self._queries.query_native_balance_for_chain(wallet_address, chain)
+
+    def _eth_call(self, to: str, data: str, *, chain: str | None = None) -> str | None:
+        """Delegates to CompilerQueries.eth_call (see compiler_queries.py)."""
+        return self._queries.eth_call(to, data, chain=chain)
 
     def _get_rpc_url_for_chain(self, chain: str) -> str | None:
         """Get RPC URL for an arbitrary chain.

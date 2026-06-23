@@ -12,7 +12,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext, BaseProtocolCompiler
+from almanak.connectors._strategy_base.base.compiler import (
+    BaseCompilerContext,
+    BaseProtocolCompiler,
+    PreflightOutcome,
+    PreflightVerdict,
+)
 from almanak.framework.intents import compiler_constants
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TokenInfo, TransactionData
 from almanak.framework.intents.vocabulary import IntentType
@@ -50,6 +55,8 @@ class PendleCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         invalid_ctx = self._check_context(ctx, intent)
         if invalid_ctx is not None:
             return invalid_ctx
+        if (pf := self._run_preflight(ctx, intent)) is not None:
+            return pf
         intent_type = getattr(intent, "intent_type", None)
         if intent_type == IntentType.SWAP:
             return self.compile_swap(ctx, intent)
@@ -67,6 +74,29 @@ class PendleCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         # never routes such an intent here. Any other unsupported intent type
         # falls through to the canonical fail-close below (VIB-5308).
         return self._unsupported(intent)
+
+    #: Stable prefix strategies (and the retry-classification keyword table in
+    #: ``almanak.framework.intents.error_keywords``) match on for the maturity gate.
+    MATURITY_ERROR_PREFIX: ClassVar[str] = "PENDLE_MARKET_EXPIRED"
+
+    def preflight(self, ctx: BaseCompilerContext, intent: Any) -> PreflightVerdict:
+        """Reject opening NEW Pendle exposure into an already-expired market (VIB-5374 / 2802).
+
+        Buying PT/YT or opening LP into an expired market burns gas on a router
+        revert (the market no longer accepts new positions). Risk-reducing
+        intents — selling PT/YT, ``LP_CLOSE``, ``WITHDRAW`` (redeem) — are NEVER
+        gated: closing an expired position is exactly what a strategy must do.
+
+        ``is_market_expired`` is gateway-backed (``expiry()`` via
+        ``PendleOnChainReader._gateway_eth_call``) and only runs when a connected
+        gateway is available; without one — or on a transient read failure — this
+        fails open (defers to the compile path) rather than producing a false
+        reject. Only a CONFIRMED-expired market yields ``INFEASIBLE``.
+        """
+        market = _preflight_market_for_new_exposure(self, ctx, intent)
+        if market is None:
+            return PreflightVerdict.feasible()
+        return _pendle_maturity_verdict(self, ctx, market)
 
     def compile_swap(self, ctx: BaseCompilerContext, intent: SwapIntent) -> CompilationResult:
         return compile_pendle_swap(_PendleCompileImpl(ctx), intent)
@@ -142,6 +172,74 @@ def _resolve_pt_from_yt(adapter: Any, yt_address: str) -> str | None:
 def _failed(intent_id: str, error: str) -> CompilationResult:
     """Build a FAILED CompilationResult with the given error message."""
     return CompilationResult(status=CompilationStatus.FAILED, error=error, intent_id=intent_id)
+
+
+def _preflight_market_for_new_exposure(compiler, ctx: BaseCompilerContext, intent: Any) -> str | None:
+    """Resolve the Pendle market for an intent that OPENS new exposure, else ``None``.
+
+    Returns the market address only when the intent buys PT/YT (SWAP into a
+    PT/YT) or opens LP. Selling PT/YT, ``LP_CLOSE``, ``WITHDRAW`` (redeem), and
+    any unrecognised / unresolvable shape return ``None`` — the maturity gate
+    does not apply (risk-reducing or not-an-open). Resolution failures degrade to
+    ``None`` so the existing per-primitive compile path surfaces the real error.
+    """
+    if ctx.chain not in compiler.chains:
+        return None
+    intent_type = getattr(intent, "intent_type", None)
+    impl = _PendleCompileImpl(ctx)
+    if intent_type == IntentType.SWAP:
+        # Only BUYING PT/YT opens exposure; selling is risk-reducing.
+        classified = _classify_pendle_swap_type(intent)
+        if isinstance(classified, CompilationResult):
+            return None
+        _swap_type, side = classified
+        if side not in ("buying_pt", "buying_yt"):
+            return None
+        market = _resolve_pendle_market(intent, impl, side)
+        return None if isinstance(market, CompilationResult) else market
+    if intent_type == IntentType.LP_OPEN:
+        parsed = _parse_pendle_lp_open_pool(getattr(intent, "pool", None) or "", getattr(intent, "intent_id", ""))
+        if isinstance(parsed, CompilationResult):
+            return None
+        _token_symbol, market_part = parsed
+        market = _resolve_pendle_lp_open_market(impl, market_part, getattr(intent, "intent_id", ""))
+        return None if isinstance(market, CompilationResult) else market
+    return None
+
+
+def _pendle_maturity_verdict(compiler, ctx: BaseCompilerContext, market: str) -> PreflightVerdict:
+    """Return INFEASIBLE if ``market`` is expired; otherwise fail-open as FEASIBLE.
+
+    The expiry read is gateway-backed only. Without a connected gateway this new
+    preflight read fails open (defers to the compile path) rather than falling back
+    to direct RPC — per the gateway-boundary rule, new Pendle data work must not grow
+    the framework-owned direct-egress surface (AGENTS.md §Gateway boundary; the
+    ``api_client``/``on_chain_reader`` direct paths are migration debt, not a license
+    to add more). A transient read failure likewise fails open, never a false reject.
+    """
+    from almanak.connectors.pendle.on_chain_reader import PendleOnChainError, PendleOnChainReader
+
+    gateway_client = ctx.gateway_client
+    if gateway_client is None or not getattr(gateway_client, "is_connected", False):
+        # No gateway-backed read path → defer to the compile path, which emits the
+        # real configuration error without growing direct Pendle egress.
+        return PreflightVerdict.feasible()
+    try:
+        reader = PendleOnChainReader(chain=ctx.chain, gateway_client=gateway_client)
+        expired = reader.is_market_expired(market)
+    except (PendleOnChainError, Exception) as exc:  # noqa: BLE001 - read gap → fail-open, never a false reject
+        # An expiry read that fails must NOT block the compile: only a CONFIRMED
+        # expired market is doomed. Defer to the compile path (consistent with the
+        # GMX/Stargate native-fee gates) rather than reject on a transient gap.
+        logger.warning("Pendle maturity preflight read failed for %s; deferring: %s", market, exc)
+        return PreflightVerdict.feasible()
+    if expired:
+        return PreflightVerdict(
+            outcome=PreflightOutcome.INFEASIBLE,
+            error_prefix=compiler.MATURITY_ERROR_PREFIX,
+            reason=f"market {market} on {ctx.chain} has matured; opening new exposure would fail on-chain",
+        )
+    return PreflightVerdict.feasible()
 
 
 def _resolve_pendle_from_token(compiler, intent: SwapIntent) -> TokenInfo | None:

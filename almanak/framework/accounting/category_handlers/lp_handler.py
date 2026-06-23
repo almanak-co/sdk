@@ -126,6 +126,23 @@ def _resolve_lp_amounts(
     fees1: Decimal | None = None
     assumed_decimals = False
 
+    # ── Declared money legs win for LP_OPEN (VIB-3587) ───────────────────────
+    # When a connector DECLARES its LP_OPEN money legs (the US-009 contract,
+    # e.g. Curve single-sided / multi-coin deposits), the ledger row's
+    # ``amount_in`` / ``amount_out`` are already the human amounts ALIGNED to the
+    # declared ``token_in`` / ``token_out`` (= token0 / token1 here). The legacy
+    # ``lp_open_data.amount0`` / ``amount1`` are positional over the pool's FIRST
+    # TWO coins, so for a single-sided / non-leading deposit the token and the
+    # raw amount come from DIFFERENT coins — pairing them mis-attributes the
+    # amount (Curve: token0=USDC but amount0=DAI's raw 0). Preferring the aligned
+    # ledger strings keeps (token0, amount0) a single coin's fact. An unfunded
+    # coin's slot stays ``""`` → ``None`` (Empty ≠ Zero — absent, not a measured
+    # zero). Mirrors the ledger dispatcher's prefer-declared-legs inversion.
+    if intent_type_str == "LP_OPEN" and extracted.get("primitive_money_legs") is not None:
+        amount0 = _safe_decimal(amount_in_str) if amount_in_str else None
+        amount1 = _safe_decimal(amount_out_str) if amount_out_str else None
+        return amount0, amount1, None, None, False
+
     # ── Try typed extracted_data objects first ───────────────────────────────
     lp_open_data = extracted.get("lp_open_data")
     lp_close_data = extracted.get("lp_close_data")
@@ -762,11 +779,15 @@ def _compute_lp_impermanent_loss(
       - Outside ``LP_CLOSE`` (LP_OPEN has no IL; ``LP_COLLECT_FEES``
         leaves principal on-chain — see scope note above).
       - No prior OPEN payload (cannot recover entry amounts).
-      - Either entry amount is ``None`` (data integrity issue —
-        :class:`LPOpenEventPayload` requires both ``amount0`` /
-        ``amount1`` as :class:`Decimal` per ``payload_schemas.py:287``,
-        so ``None`` is a parse failure rather than a single-sided
-        position; single-sided LP OPENs land as ``Decimal("0")``).
+      - Either entry amount is ``None`` ⇒ V_hodl is not computable.
+        Post-VIB-3587 :class:`LPOpenEventPayload` widens ``amount0`` /
+        ``amount1`` to ``Decimal | None`` (Empty ≠ Zero), so ``None``
+        covers BOTH a parse failure that dropped a two-sided leg AND a
+        SINGLE-SIDED LP_OPEN whose unfunded coin is ABSENT (``None``, NOT
+        a fabricated ``Decimal("0")``). Either way IL is undefined — a
+        single-sided position has no two-sided HODL anchor to diff
+        against (see the inline note on the ``amount0_open is None`` guard
+        below).
       - Close-time oracle lacks a price for any non-zero entry leg
         (V_hodl unmeasurable).
 
@@ -798,14 +819,16 @@ def _compute_lp_impermanent_loss(
 
     amount0_open = _safe_decimal(prior_open_payload.get("amount0"))
     amount1_open = _safe_decimal(prior_open_payload.get("amount1"))
-    # Either leg ``None`` ⇒ data integrity issue. :class:`LPOpenEventPayload`
-    # requires both ``amount0`` / ``amount1`` as ``Decimal`` (see
-    # ``payload_schemas.py:287``), so ``None`` here is a parse failure, not a
-    # single-sided position. Single-sided LP OPENs land as ``Decimal("0")``
-    # and proceed normally — the zero leg contributes nothing to V_hodl and
-    # its missing price is irrelevant. Computing a partial V_hodl against a
-    # full ``cost_basis_usd`` would emit a misleading ``il_usd`` (gemini
-    # review on PR #2259, 2026-05-13).
+    # Either leg ``None`` ⇒ V_hodl is not computable, so fail closed (return
+    # both ``None``). Two distinct cases both land here and both are correct to
+    # skip IL on:
+    #   * a parse failure that dropped a two-sided leg, and
+    #   * a SINGLE-SIDED LP_OPEN whose unfunded coin is ABSENT (``None``) — the
+    #     VIB-3587 Empty ≠ Zero contract (the unfunded coin is NOT a measured
+    #     ``Decimal("0")``). A single-sided position has no two-sided HODL anchor
+    #     to diff against, so IL is genuinely undefined; computing a partial
+    #     V_hodl against a full ``cost_basis_usd`` would emit a misleading
+    #     ``il_usd`` (gemini review on PR #2259, 2026-05-13).
     if amount0_open is None or amount1_open is None:
         return None, None
 
