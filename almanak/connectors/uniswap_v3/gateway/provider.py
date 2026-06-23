@@ -112,11 +112,17 @@ _UNISWAP_V3_SUBGRAPHS: dict[str, str] = {
 # W7-followup / VIB-4870 — Uniswap V3 daily-volume subgraph spec
 # =============================================================================
 #
-# Deployment IDs migrated verbatim from
+# Deployment IDs originally migrated from
 # ``framework/backtesting/pnl/providers/dex/uniswap_v3_volume.py``
 # (``UNISWAP_V3_SUBGRAPH_IDS``). The strategy container no longer holds
 # these — the ``RateHistoryService`` servicer queries TheGraph
 # server-side via the shared ``_dex_volume_subgraph`` helper.
+#
+# Base and Optimism were re-pointed to live V3-native deployments after
+# the originally-migrated IDs went dead ("no allocations") on TheGraph's
+# decentralised network. All five chains remain V3-native
+# (``poolDayDatas`` / ``volumeUSD``), so the single shared
+# ``_uniswap_v3_volume_spec`` still applies to every chain.
 #
 # Built lazily (a module-level constant import of the gateway-side
 # ``DexVolumeSubgraphSpec`` would couple this connector module to the
@@ -124,8 +130,8 @@ _UNISWAP_V3_SUBGRAPHS: dict[str, str] = {
 _UNISWAP_V3_VOLUME_SUBGRAPH_IDS: dict[str, str] = {
     "ethereum": "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
     "arbitrum": "FbCGRftH4a3yZugY7TnbYgPJVEv2LvMT6oF1fxPe9aJM",
-    "base": "43Hwfi3dJSoGpyas9VwNoDAv28rqtbnqUk3EYCRr3j6i",
-    "optimism": "Gc2DPCVq5UkBfyHjZDMbKTc7ynrjoSKxc6sHLKY9Pmjc",
+    "base": "96eJ9Go8gFjySRGnndG7EYxThaiwVDV8BYPp1TMDcoYh",
+    "optimism": "Cghf4LfVqPiFw6fp6Y5X5Ubc8UpmUhSfJL82zwiBFLaj",
     "polygon": "3hCPRGf4z88VC5rsBKU5AA9FBBq5nF3jbKJG7VZCbhjm",
 }
 

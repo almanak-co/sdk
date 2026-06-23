@@ -232,6 +232,62 @@ def test_balancer_v2_pool_snapshots_decode() -> None:
 
 
 # =============================================================================
+# Happy path: SushiSwap V3 — Messari (liquidityPoolDailySnapshots / day / dailyVolumeUSD)
+# =============================================================================
+
+
+def test_sushiswap_v3_messari_decode() -> None:
+    # SushiSwap's configured subgraph is a Messari deployment (same shape as
+    # curve), NOT the Uniswap-V3 ``poolDayDatas`` schema (which it lacks).
+    body = {
+        "data": {
+            "liquidityPoolDailySnapshots": [
+                {"day": 19676, "dailyVolumeUSD": "6005.5"},
+            ]
+        }
+    }
+    servicer, captured = _make_servicer_with_subgraph(body)
+    response, _ctx = _run_volume(servicer, dex="sushiswap_v3", chain="ethereum", pool_address="0xSUSHI")
+
+    assert response.success is True
+    assert len(response.points) == 1
+    assert response.points[0].timestamp == 19676 * 86400  # day → unix seconds
+    assert Decimal(response.points[0].volume_usd) == Decimal("6005.5")
+
+    query = captured[0]["json"]["query"]
+    assert "liquidityPoolDailySnapshots" in query
+    assert "day_gte" in query
+
+
+# =============================================================================
+# Happy path: TraderJoe V2 — Liquidity Book (lbpairDayDatas / lbPair / volumeUSD)
+# =============================================================================
+
+
+def test_traderjoe_v2_lbpair_day_datas_decode() -> None:
+    # LB subgraph entity is lowercase-"p" ``lbpairDayDatas`` (the camelCase
+    # ``lbPairDayDatas`` spelling does not exist on it).
+    body = {
+        "data": {
+            "lbpairDayDatas": [
+                {"date": 1_700_000_000, "volumeUSD": "774.1"},
+            ]
+        }
+    }
+    servicer, captured = _make_servicer_with_subgraph(body)
+    response, _ctx = _run_volume(servicer, dex="traderjoe_v2", chain="avalanche", pool_address="0xJOE")
+
+    assert response.success is True
+    assert len(response.points) == 1
+    assert response.points[0].timestamp == 1_700_000_000
+    assert Decimal(response.points[0].volume_usd) == Decimal("774.1")
+
+    query = captured[0]["json"]["query"]
+    assert "lbpairDayDatas" in query
+    assert "lbPair: $poolAddress" in query
+
+
+# =============================================================================
 # VIB-5090: Balancer V2 bare-address → full-pool-ID auto-resolution
 # =============================================================================
 #

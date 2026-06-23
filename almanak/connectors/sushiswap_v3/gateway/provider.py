@@ -145,10 +145,15 @@ class SushiSwapV3GatewayConnector(
         end_ts: int,
         interval_secs: int,
     ) -> Any:
-        """Daily trading-volume history via the V3 ``poolDayDatas`` subgraph.
+        """Daily trading-volume history via the SushiSwap subgraph.
 
         Migrated from
         ``framework/backtesting/pnl/providers/dex/sushiswap_v3_volume.py``.
+        The configured subgraph is a Messari standard deployment exposing
+        ``liquidityPoolDailySnapshots`` (filtered by ``pool``) with the
+        ``dailyVolumeUSD`` field and a ``day`` (days-since-epoch) time key —
+        the same shape as curve, NOT the Uniswap-V3 ``poolDayDatas`` schema
+        (which does not exist on this subgraph).
         """
         from almanak.gateway.services._dex_volume_subgraph import (
             DexVolumeSubgraphSpec,
@@ -160,10 +165,12 @@ class SushiSwapV3GatewayConnector(
             DexVolumeSubgraphSpec(
                 dex_name="sushiswap_v3",
                 subgraph_ids=dict(_SUSHISWAP_V3_VOLUME_SUBGRAPH_IDS),
-                entity="poolDayDatas",
+                entity="liquidityPoolDailySnapshots",
                 id_field="pool",
-                volume_field="volumeUSD",
+                volume_field="dailyVolumeUSD",
                 source="sushiswap_v3_subgraph",
+                time_field="day",
+                time_unit="days",
             ),
             chain=chain,
             pool_address=pool_address,

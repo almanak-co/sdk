@@ -54,6 +54,11 @@ _CURVE_SUBGRAPHS: dict[str, str] = {
 # on a different chain set than the Convex quote subgraphs.
 _CURVE_VOLUME_SUBGRAPH_IDS: dict[str, str] = {
     "ethereum": "3fy93eAT56UJsRCEht8iFhfi6wjHWXtZ9dnnbQmvFopF",
+    # KNOWN DEAD (ALM-2879): this deployment returns "no allocations" on
+    # TheGraph's decentralised network, so Curve Optimism volume queries
+    # fail with DataSourceUnavailable until a live replacement subgraph is
+    # sourced. Ethereum above is unaffected. Left in place (not removed) so
+    # behaviour is unchanged pending the replacement.
     "optimism": "CXDZPduZE6nWuWEkSzWkRoJSSJ6CneSqiDxdnhhURShX",
 }
 

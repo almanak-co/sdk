@@ -60,8 +60,8 @@ logger = logging.getLogger(__name__)
 UNISWAP_V3_SUBGRAPH_IDS: dict[Chain, str] = {
     Chain.ETHEREUM: "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
     Chain.ARBITRUM: "FbCGRftH4a3yZugY7TnbYgPJVEv2LvMT6oF1fxPe9aJM",
-    Chain.BASE: "43Hwfi3dJSoGpyas9VwNoDAv28rqtbnqUk3EYCRr3j6i",
-    Chain.OPTIMISM: "Gc2DPCVq5UkBfyHjZDMbKTc7ynrjoSKxc6sHLKY9Pmjc",
+    Chain.BASE: "96eJ9Go8gFjySRGnndG7EYxThaiwVDV8BYPp1TMDcoYh",
+    Chain.OPTIMISM: "Cghf4LfVqPiFw6fp6Y5X5Ubc8UpmUhSfJL82zwiBFLaj",
     Chain.POLYGON: "3hCPRGf4z88VC5rsBKU5AA9FBBq5nF3jbKJG7VZCbhjm",
 }
 

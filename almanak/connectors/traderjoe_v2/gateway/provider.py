@@ -113,7 +113,10 @@ class TraderJoeV2GatewayConnector(
             DexVolumeSubgraphSpec(
                 dex_name="traderjoe_v2",
                 subgraph_ids=dict(_TRADERJOE_V2_VOLUME_SUBGRAPH_IDS),
-                entity="lbPairDayDatas",
+                # The LB subgraph entity is ``lbpairDayDatas`` (lowercase "p");
+                # the ``lbPairDayDatas`` camelCase spelling does not exist on it
+                # and failed with a GraphQL schema error for every pair.
+                entity="lbpairDayDatas",
                 id_field="lbPair",
                 volume_field="volumeUSD",
                 source="traderjoe_v2_subgraph",
