@@ -380,6 +380,33 @@ async def test_t_3763_10_postgres_missing_table_reports_all_columns() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Regression — boot connection must disable the statement cache (pgbouncer).
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_postgres_validator_disables_statement_cache_for_pgbouncer() -> None:
+    """The boot validator MUST connect with ``statement_cache_size=0``.
+
+    Production deployment f1020c3f-c961-4b4e-9ce7-250b28f33377 crash-looped
+    because this connection used asyncpg's default statement cache. Hosted
+    Postgres sits behind pgbouncer in transaction pooling mode, where asyncpg's
+    auto-named ``__asyncpg_stmt_N__`` prepared statements collide across pooled
+    backends and raise ``DuplicatePreparedStatementError`` from the very first
+    ``conn.fetch`` — the gateway died before serving its strategy. Every other
+    asyncpg connection in the codebase already passes ``statement_cache_size=0``;
+    this pins the boot validator to the same contract.
+    """
+    full_columns = {table: list(cols) for table, cols in HOSTED_SCHEMA_CONTRACT.items()}
+    connect, _ = _make_pg_mock(full_columns)
+    with patch("asyncpg.connect", connect):
+        await validate_postgres_schema_or_raise("postgres://user:pass@host/db")
+
+    connect.assert_awaited_once()
+    assert connect.await_args.kwargs.get("statement_cache_size") == 0, (
+        "boot validator must connect with statement_cache_size=0 so it survives behind pgbouncer transaction pooling"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Sanity — boot wrapper branches on is_hosted() (the canonical mode signal)
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio

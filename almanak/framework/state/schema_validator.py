@@ -104,7 +104,15 @@ async def validate_postgres_schema_or_raise(database_url: str) -> None:
     from almanak.gateway.database import _strip_schema_param
 
     url, schema = _strip_schema_param(database_url)
-    conn = await asyncpg.connect(url)
+    # Hosted Postgres sits behind pgbouncer in transaction pooling mode, which
+    # cannot support server-side prepared statements: asyncpg's auto-named
+    # ``__asyncpg_stmt_N__`` statements collide across multiplexed backends and
+    # raise ``DuplicatePreparedStatementError`` from this boot-time fetch,
+    # crash-looping the gateway before it ever serves the strategy. Disabling the
+    # statement cache makes asyncpg issue unprepared queries, matching every
+    # other asyncpg connection in this codebase (timeline store, lifecycle store,
+    # state manager pool — all ``statement_cache_size=0``).
+    conn = await asyncpg.connect(url, statement_cache_size=0)
     try:
         violations: dict[str, set[str]] = {}
         # Accounting uses one shared contract across SQLite and Postgres; hosted
