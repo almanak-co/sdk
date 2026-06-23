@@ -56,9 +56,11 @@ from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..models.reproduction_bundle import ActionBundle
 from ..strategies.base import RiskGuard, RiskGuardResult
 from ..utils.log_formatters import _emojis_enabled, format_gas_cost, format_tx_hash
-from .extracted_data import BridgeData, LPCloseData, PredictionFill, SwapAmounts
+from .extracted_data import BridgeData, LPCloseData, PredictionFill, ProtocolFees, SwapAmounts
 
 if TYPE_CHECKING:
+    from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
+
     from .outcome import ExecutionOutcome
 
 from ._pipeline_state import ExecutionPipelineState
@@ -212,6 +214,13 @@ class ExecutionResult:
             asynchronously by EnsoStateProvider; ``bridge_data.destination_tx_hash``
             is a forward-looking hook and will usually be ``None`` here.
         bin_ids: TraderJoe V2 bin IDs for LP positions
+        protocol_fees: Typed ProtocolFees enrichment, when a receipt parser
+            emits it (VIB-159). Top-level slot so strategy callbacks can read
+            ``result.protocol_fees`` rather than digging in ``extracted_data``.
+        primitive_money_legs: Connector-declared ``PrimitiveMoneyLegs`` (US-008/
+            US-009), when a migrated connector emits it (VIB-159). Top-level slot
+            mirrors ``swap_amounts`` / ``lp_close_data``; also kept in
+            ``extracted_data`` for the legacy ledger dispatcher fallback.
         extracted_data: Flexible dict for protocol-specific extracted data
         extraction_warnings: Non-fatal warnings from extraction process
     """
@@ -238,6 +247,12 @@ class ExecutionResult:
     prediction_fill: PredictionFill | None = None
     bridge_data: BridgeData | None = None  # VIB-3226: BRIDGE intent enrichment
     bin_ids: list[int] | None = None  # TraderJoe V2 LP bin IDs
+    protocol_fees: ProtocolFees | None = None  # VIB-159: protocol-fee enrichment
+    # VIB-159 — connector-declared money legs (US-008/US-009). Type-only import
+    # to respect the framework -> connector boundary; the annotation is a string
+    # (no ``from __future__ import annotations`` in this module) so the connector
+    # value type is never loaded at framework-module import time.
+    primitive_money_legs: "PrimitiveMoneyLegs | None" = None
     extracted_data: dict[str, Any] = field(default_factory=dict)
     extraction_warnings: list[str] = field(default_factory=list)
 

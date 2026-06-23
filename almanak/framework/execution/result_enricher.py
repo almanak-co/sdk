@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import re
 import warnings
+from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
@@ -42,6 +43,41 @@ if TYPE_CHECKING:
     from .orchestrator import ExecutionContext, ExecutionResult
 
 logger = logging.getLogger(__name__)
+
+
+def _is_primitive_money_legs(value: Any) -> bool:
+    """Type guard for the connector-declared ``PrimitiveMoneyLegs``.
+
+    Deferred import keeps the framework -> connector boundary intact: the
+    connector value type must never load at framework-module import time
+    (mirrors ``ledger._declared_money_legs``).
+    """
+    from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
+
+    return isinstance(value, PrimitiveMoneyLegs)
+
+
+# Strictly-typed enriched fields that get a real top-level slot on
+# ``ExecutionResult`` (read directly by strategy callbacks) AND a mirror in
+# ``extracted_data``. Each entry is ``(result_attr, type_validator, type_label)``.
+# A value failing its validator is rejected with a warning and the enricher
+# keeps scanning the bundle (``return False``) rather than treating the
+# rejection as a terminal attach. ``primitive_money_legs`` / ``bin_ids`` slots
+# were the VIB-159 gap: declared / expected but never assigned to the result.
+_STRICT_TYPED_FIELDS: dict[str, tuple[str, Callable[[Any], bool], str]] = {
+    "lp_close_data": ("lp_close_data", lambda v: isinstance(v, LPCloseData), "LPCloseData"),
+    "bridge_data": ("bridge_data", lambda v: isinstance(v, BridgeData), "BridgeData"),
+    "protocol_fees": ("protocol_fees", lambda v: isinstance(v, ProtocolFees), "ProtocolFees"),
+    "bin_ids": (
+        "bin_ids",
+        # ``bool`` is an ``int`` subclass in Python, so an explicit
+        # ``not isinstance(b, bool)`` guard is required to keep ``[True]`` /
+        # ``[False]`` from masquerading as valid bin identifiers.
+        lambda v: isinstance(v, list) and all(isinstance(b, int) and not isinstance(b, bool) for b in v),
+        "list[int]",
+    ),
+    "primitive_money_legs": ("primitive_money_legs", _is_primitive_money_legs, "PrimitiveMoneyLegs"),
+}
 
 # Mapping from TransactionReceipt.to_dict() snake_case keys to web3-style camelCase keys.
 # All receipt parsers expect camelCase (transactionHash, gasUsed, blockNumber).
@@ -1936,89 +1972,90 @@ class ResultEnricher:
             value: Extracted value
             intent_type: Type of intent
         """
-        # Core typed fields - set directly on result
+        # Core typed fields - set directly on result.
         if field == "position_id" and isinstance(value, int | str):
-            if isinstance(value, str):
-                # Accept hex addresses (40-char, e.g. Curve LP token addresses) and bytes32
-                # hashes (64-char, e.g. Aster Perps tradeHash) as valid position IDs.
-                is_hex_address = bool(re.fullmatch(r"0x[a-fA-F0-9]{40}", value))
-                is_bytes32 = bool(re.fullmatch(r"0x[a-fA-F0-9]{64}", value))
-                if not (is_hex_address or is_bytes32):
-                    try:
-                        parsed = Decimal(value)
-                        if not parsed.is_finite():
-                            logger.warning(f"Ignoring non-finite string position_id {value!r}")
-                            result.extracted_data[field] = value
-                            return True
-                    except InvalidOperation:
-                        logger.warning(f"Ignoring invalid string position_id {value!r}: not a valid decimal or address")
-                        result.extracted_data[field] = value
-                        return True
-            result.position_id = value
+            if not self._attach_position_id(result, value):
+                # Non-finite / non-decimal string id: already mirrored into
+                # extracted_data by the helper; treat as accepted (return True)
+                # so the caller does not keep scanning. Skip the top-level slot.
+                return True
         elif field == "swap_amounts" and isinstance(value, SwapAmounts):
-            result.swap_amounts = value
-            # VIB-3164 / Empty != Zero: a parser that could not resolve token
-            # decimals stamps the *_decimal_resolved flags False. Surface that
-            # on the result so operators see it without grepping parser logs.
-            # Non-fatal by design — ledger/sidecar already gate amounts on
-            # the flags and record the "parser didn't emit" sentinel.
-            unresolved_sides = [
-                side
-                for side, ok in (
-                    ("token_in", value.amount_in_decimal_resolved),
-                    ("token_out", value.amount_out_decimal_resolved),
-                )
-                if not ok
-            ]
-            if unresolved_sides:
-                result.extraction_warnings.append(
-                    f"swap_amounts decimals unresolved for {', '.join(unresolved_sides)}; "
-                    "decimal amounts use the legacy 18-decimal fallback and are "
-                    "excluded from ledger/sidecar amounts (VIB-3164)"
-                )
-        elif field == "lp_close_data":
-            # VIB-4310 — Reject anything that is not LPCloseData. The
-            # aggregate path (``_AGGREGATE_FIELDS``) treats every successful
-            # attach as terminal for that field, so a broken parser that
-            # returns a dict / None / bare int would silently win over a
-            # legitimate sibling candidate from a different receipt. Match
-            # the bridge_data / protocol_fees pattern: log + return False so
-            # the enricher keeps scanning. CodeRabbit pushback on PR #2256.
-            if not isinstance(value, LPCloseData):
+            self._attach_swap_amounts(result, value)
+        elif field in _STRICT_TYPED_FIELDS:
+            # VIB-4310 / VIB-3226 / VIB-3204 / VIB-159 — strictly-typed slots
+            # (lp_close_data / bridge_data / protocol_fees / bin_ids /
+            # primitive_money_legs). Reject anything of the wrong type with a
+            # warning and ``return False`` so the enricher keeps scanning the
+            # remaining receipts in a multi-tx bundle, rather than treating the
+            # rejection as a terminal "attached". On a valid value, set the
+            # top-level attribute so the strategy callback can read it directly
+            # (the #159 fix: these previously fell through to extracted_data
+            # only, leaving ``result.bin_ids`` etc. unreachable / None).
+            attr, validator, type_label = _STRICT_TYPED_FIELDS[field]
+            if not validator(value):
                 logger.warning(
-                    "Enrichment: parser returned non-LPCloseData value for 'lp_close_data' "
+                    f"Enrichment: parser returned non-{type_label} value for {field!r} "
                     f"(type={type(value).__name__}); ignoring and continuing receipt scan"
                 )
                 return False
-            result.lp_close_data = value
-        elif field == "bridge_data":
-            # VIB-3226: reject anything that is not BridgeData so a broken
-            # parser cannot silently populate ``result.bridge_data`` with a
-            # dict / None-fielded struct. Matches the ProtocolFees pattern:
-            # return False so the enricher keeps scanning subsequent receipts
-            # in a multi-tx bundle (approve + deposit is the common shape).
-            if not isinstance(value, BridgeData):
-                logger.warning(
-                    "Enrichment: parser returned non-BridgeData value for 'bridge_data' "
-                    f"(type={type(value).__name__}); ignoring and continuing receipt scan"
-                )
-                return False
-            result.bridge_data = value
-        elif field == "protocol_fees" and not isinstance(value, ProtocolFees):
-            # VIB-3204 audit fix (CodeRabbit multi-receipt): rejecting the
-            # value is correct, but the caller MUST continue scanning the
-            # remaining receipts in a multi-tx bundle rather than treat
-            # this rejection as "attached successfully" and stop. Return
-            # False so _extract_field keeps looking.
-            logger.warning(
-                "Enrichment: parser returned non-ProtocolFees value for 'protocol_fees' "
-                f"(type={type(value).__name__}); ignoring and continuing receipt scan"
-            )
-            return False
+            setattr(result, attr, value)
 
-        # Always add to extracted_data for full access
+        # Always add to extracted_data for full access. The ledger dispatcher's
+        # ``primitive_money_legs`` fallback (VIB-5212/5218) reads this entry, so
+        # it MUST remain even though the value now also has a top-level slot.
         result.extracted_data[field] = value
         return True
+
+    def _attach_position_id(self, result: ExecutionResult, value: int | str) -> bool:
+        """Set ``result.position_id`` from a validated int/str value.
+
+        Returns ``False`` (without setting the slot) for a string id that is
+        neither a hex address / bytes32 hash nor a finite decimal — in that
+        case the raw value is still mirrored into ``extracted_data`` so no
+        information is lost. Returns ``True`` once the top-level slot is set.
+        """
+        if isinstance(value, str):
+            # Accept hex addresses (40-char, e.g. Curve LP token addresses) and bytes32
+            # hashes (64-char, e.g. Aster Perps tradeHash) as valid position IDs.
+            is_hex_address = bool(re.fullmatch(r"0x[a-fA-F0-9]{40}", value))
+            is_bytes32 = bool(re.fullmatch(r"0x[a-fA-F0-9]{64}", value))
+            if not (is_hex_address or is_bytes32):
+                try:
+                    parsed = Decimal(value)
+                    if not parsed.is_finite():
+                        logger.warning(f"Ignoring non-finite string position_id {value!r}")
+                        result.extracted_data["position_id"] = value
+                        return False
+                except InvalidOperation:
+                    logger.warning(f"Ignoring invalid string position_id {value!r}: not a valid decimal or address")
+                    result.extracted_data["position_id"] = value
+                    return False
+        result.position_id = value
+        return True
+
+    @staticmethod
+    def _attach_swap_amounts(result: ExecutionResult, value: SwapAmounts) -> None:
+        """Set ``result.swap_amounts`` and surface unresolved-decimal warnings."""
+        result.swap_amounts = value
+        # VIB-3164 / Empty != Zero: a parser that could not resolve token
+        # decimals stamps the *_decimal_resolved flags False. Surface that
+        # on the result so operators see it without grepping parser logs.
+        # Non-fatal by design — ledger/sidecar already gate amounts on
+        # the flags and record the "parser didn't emit" sentinel.
+        unresolved_sides = [
+            side
+            for side, ok in (
+                ("token_in", value.amount_in_decimal_resolved),
+                ("token_out", value.amount_out_decimal_resolved),
+            )
+            if not ok
+        ]
+        if unresolved_sides:
+            result.extraction_warnings.append(
+                f"swap_amounts decimals unresolved for {', '.join(unresolved_sides)}; "
+                "decimal amounts use the legacy 18-decimal fallback and are "
+                "excluded from ledger/sidecar amounts (VIB-3164)"
+            )
 
     def _has_extracted(self, result: ExecutionResult, field: str) -> bool:
         """Check if a field was successfully extracted.
