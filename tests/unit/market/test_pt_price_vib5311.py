@@ -188,6 +188,42 @@ def test_available_but_stale_maps_stale_regardless_of_band():
     assert result.stale is True
     # STALE still counts as an available number (just degraded).
     assert result.is_available is True
+    # VIB-5312: a strategy can gate on the stale mark via a first-class property.
+    assert result.is_stale is True
+
+
+def test_fresh_high_mark_is_not_stale():
+    # VIB-5312: a fresh HIGH mark is available AND not stale — the
+    # ``is_available and not is_stale`` gate a strategy uses for a trustable mark.
+    response = _make_response(
+        availability=gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE,
+        price="0.97",
+        confidence_band=gateway_pb2.PT_PRICE_CONFIDENCE_BAND_HIGH,
+        confidence=0.99,
+        stale=False,
+    )
+    snap, _ = _snapshot_with_response(response)
+
+    result = snap.pt_price("PT-sUSDe-26JUN2025")
+
+    assert result.is_available is True
+    assert result.is_stale is False
+    assert result.confidence is ValueConfidence.HIGH
+
+
+def test_is_stale_true_when_confidence_stale_even_without_flag():
+    # Defense-in-depth: if the combined confidence is STALE, ``is_stale`` is True
+    # even should the raw flag disagree — the two signals are OR-ed (fail-safe).
+    from almanak.framework.market.models import PtPriceData
+
+    data = PtPriceData(
+        symbol="PT-x",
+        chain="ethereum",
+        price=Decimal("0.9"),
+        confidence=ValueConfidence.STALE,
+        stale=False,
+    )
+    assert data.is_stale is True
 
 
 def test_available_band_unspecified_fails_closed_to_unavailable():

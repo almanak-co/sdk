@@ -174,6 +174,23 @@ class PtPriceData:
 
         return self.price is not None and self.confidence != _VC.UNAVAILABLE
 
+    @property
+    def is_stale(self) -> bool:
+        """True when the mark is stale — for a strategy to gate on before trusting it (VIB-5312).
+
+        Combines BOTH staleness signals so a caller never has to (and never
+        silently drops one): the gateway's raw ``stale`` flag OR a
+        ``confidence == STALE`` that the band+stale combination already produced
+        (``MarketSnapshot.pt_price``). They normally agree; OR-ing them is
+        fail-safe — a mark flagged stale by either signal is treated as stale.
+
+        Note an AVAILABLE price can still be stale (the mark exists but is old);
+        ``is_available and not is_stale`` is the "fresh, trustable mark" gate.
+        """
+        from almanak.framework.portfolio.models import ValueConfidence as _VC
+
+        return self.stale or self.confidence == _VC.STALE
+
 
 # =============================================================================
 # Indicator DTOs

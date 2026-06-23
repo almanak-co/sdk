@@ -431,6 +431,127 @@ class TestAvailableNeverEmptyGuard:
         assert resp.price == ""
 
 
+class TestGetPtPriceTelemetry:
+    """VIB-5312 — the price path emits structured telemetry for exactly the four
+    observable fields (price source, confidence, staleness, unavailable reason)
+    for BOTH a measured and an unmeasured/stale mark. Every GetPtPrice outcome
+    funnels through ``_build_pt_price_response`` so a single record is emitted.
+    """
+
+    def _telemetry_record(self, caplog):
+        """The single ``pt_telemetry`` log record emitted for the call (or None)."""
+        records = [r for r in caplog.records if getattr(r, "pt_telemetry", False)]
+        assert len(records) == 1, f"expected exactly one PT telemetry record, got {len(records)}"
+        return records[0]
+
+    @pytest.mark.asyncio
+    async def test_measured_high_emits_observable_fields(self, market_service, mock_context, caplog):
+        """A fresh AVAILABLE+HIGH mark logs all four observable fields, no
+        unavailable reason (Empty≠Zero: AVAILABLE → reason is None), no secrets."""
+        with (
+            caplog.at_level("DEBUG", logger="almanak.gateway.services.market_service"),
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref()),
+            patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("1.00", 0.9))),
+            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.95"), 30, _ONCHAIN_EXPIRY, "")),
+        ):
+            resp = await market_service.GetPtPrice(_request(), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_AVAILABLE
+        rec = self._telemetry_record(caplog)
+        assert rec.availability == "AVAILABLE"
+        assert rec.confidence_band == "HIGH"
+        assert rec.confidence == pytest.approx(0.9)
+        assert rec.stale is False
+        # Empty≠Zero in observability: an AVAILABLE mark has NO unavailable reason.
+        assert rec.unavailable_reason is None
+        assert "getPtToAssetRate" in rec.price_source
+        # No secrets leaked — only public market identity + the four signals.
+        assert rec.symbol == "PT-sUSDe-13AUG2026"
+        assert rec.chain == "ethereum"
+
+    @pytest.mark.asyncio
+    async def test_stale_mark_emits_stale_signal(self, market_service, mock_context, caplog):
+        """A measured-but-stale mark carries ``stale=True`` in telemetry even though
+        the price is AVAILABLE (the freshness signal rides separately from the band)."""
+        with (
+            caplog.at_level("DEBUG", logger="almanak.gateway.services.market_service"),
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref()),
+            patch.object(
+                market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("1.00", 0.7, stale=True))
+            ),
+            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.9"), 30, _ONCHAIN_EXPIRY, "")),
+        ):
+            await market_service.GetPtPrice(_request(), mock_context)
+
+        rec = self._telemetry_record(caplog)
+        assert rec.availability == "AVAILABLE"
+        assert rec.confidence_band == "ESTIMATED"
+        assert rec.stale is True
+        assert rec.unavailable_reason is None  # still a measured price
+
+    @pytest.mark.asyncio
+    async def test_unmeasured_emits_unavailable_reason(self, market_service, mock_context, caplog):
+        """An UNMEASURED mark (missing rate) carries the stamped reason and a
+        UNAVAILABLE band — Empty≠Zero: confidence 0.0, a real reason string."""
+        with (
+            caplog.at_level("INFO", logger="almanak.gateway.services.market_service"),
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref()),
+            patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("1.05", 0.9))),
+            patch.object(
+                market_service,
+                "_read_pt_market",
+                return_value=(None, 60, _ONCHAIN_EXPIRY, "pt_to_asset_rate-read-failed"),
+            ),
+        ):
+            resp = await market_service.GetPtPrice(_request(), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_UNMEASURED
+        rec = self._telemetry_record(caplog)
+        assert rec.availability == "UNMEASURED"
+        assert rec.confidence_band == "UNAVAILABLE"
+        assert rec.confidence == 0.0
+        assert rec.stale is False
+        # The unavailable reason reuses the provider's stamped source (no parallel
+        # reason vocabulary — VIB-5312 scope guard).
+        assert rec.unavailable_reason is not None
+        assert "pt-rate-unavailable" in rec.unavailable_reason
+
+    @pytest.mark.asyncio
+    async def test_errored_emits_warning_with_reason(self, market_service, mock_context, caplog):
+        """An ERRORED read logs at WARNING with the errored reason."""
+        with (
+            caplog.at_level("WARNING", logger="almanak.gateway.services.market_service"),
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref()),
+            patch.object(market_service, "_price_underlying_usd", AsyncMock(side_effect=RuntimeError("rpc exploded"))),
+        ):
+            resp = await market_service.GetPtPrice(_request(), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_ERRORED
+        rec = self._telemetry_record(caplog)
+        assert rec.availability == "ERRORED"
+        assert rec.levelname == "WARNING"
+        assert rec.unavailable_reason is not None
+
+    def test_unavailable_reason_is_none_for_available(self):
+        """``_pt_unavailable_reason`` — AVAILABLE → None (Empty≠Zero)."""
+        from almanak.gateway.services.market_service import _pt_unavailable_reason
+
+        assert _pt_unavailable_reason(pb.PT_PRICE_AVAILABILITY_AVAILABLE, "composition:x") is None
+
+    def test_unavailable_reason_uses_source_for_unmeasured(self):
+        """Non-AVAILABLE reuses the stamped source string as the reason."""
+        from almanak.gateway.services.market_service import _pt_unavailable_reason
+
+        reason = _pt_unavailable_reason(pb.PT_PRICE_AVAILABILITY_UNMEASURED, "unmeasured:underlying-unpriceable:0xabc")
+        assert reason == "unmeasured:underlying-unpriceable:0xabc"
+
+    def test_unavailable_reason_falls_back_to_label_on_empty_source(self):
+        """A provider-bug empty source still yields a non-blank reason for the operator."""
+        from almanak.gateway.services.market_service import _pt_unavailable_reason
+
+        assert _pt_unavailable_reason(pb.PT_PRICE_AVAILABILITY_ERRORED, "") == "errored"
+
+
 class TestResolveMaturityTs:
     """``_resolve_maturity_ts`` chooses the authoritative PT maturity (VIB-5384)."""
 

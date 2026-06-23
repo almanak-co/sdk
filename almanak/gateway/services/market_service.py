@@ -172,6 +172,109 @@ def _resolve_maturity_ts(onchain_expiry_ts: int | None, static_maturity_ts: int)
     return 0
 
 
+# VIB-5312 — PT/YT price-path telemetry. Maps the wire enums to stable string
+# labels for the structured telemetry event so an operator (and downstream
+# metrics) reads a human-meaningful source/confidence/availability instead of a
+# bare proto int. These names are the OBSERVABILITY contract — keep them stable.
+_PT_AVAILABILITY_LABELS: dict[int, str] = {
+    gateway_pb2.PT_PRICE_AVAILABILITY_UNSPECIFIED: "UNSPECIFIED",
+    gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE: "AVAILABLE",
+    gateway_pb2.PT_PRICE_AVAILABILITY_UNMEASURED: "UNMEASURED",
+    gateway_pb2.PT_PRICE_AVAILABILITY_ERRORED: "ERRORED",
+}
+_PT_CONFIDENCE_BAND_LABELS: dict[int, str] = {
+    gateway_pb2.PT_PRICE_CONFIDENCE_BAND_UNSPECIFIED: "UNSPECIFIED",
+    gateway_pb2.PT_PRICE_CONFIDENCE_BAND_HIGH: "HIGH",
+    gateway_pb2.PT_PRICE_CONFIDENCE_BAND_ESTIMATED: "ESTIMATED",
+    gateway_pb2.PT_PRICE_CONFIDENCE_BAND_UNAVAILABLE: "UNAVAILABLE",
+}
+
+
+def _pt_unavailable_reason(
+    availability: "gateway_pb2.PtPriceAvailability.ValueType",
+    source: str,
+) -> str | None:
+    """Derive the operator-facing "why no price" reason for the telemetry event.
+
+    Empty ≠ Zero applied to observability: an AVAILABLE price has NO unavailable
+    reason (``None``), never an empty string masquerading as a measured reason.
+    For every non-AVAILABLE outcome the reason is carried by the ``source`` string
+    the provider already stamps (e.g. ``"unmeasured:pt-rate-unavailable(...)"`` /
+    ``"errored:underlying-price-read"``), so the telemetry reuses that single
+    authoritative field rather than inventing a parallel reason vocabulary
+    (VIB-5312 scope guard).
+    """
+    if availability == gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE:
+        return None
+    # Non-AVAILABLE always carries a stamped source reason; fall back to the bare
+    # availability label only on the (provider-bug) empty-source case so the
+    # operator never sees a blank reason for a missing price.
+    return source or _PT_AVAILABILITY_LABELS.get(availability, "UNKNOWN").lower()
+
+
+def _emit_pt_price_telemetry(
+    *,
+    symbol: str,
+    chain: str,
+    quote: str,
+    availability: "gateway_pb2.PtPriceAvailability.ValueType",
+    confidence_band: "gateway_pb2.PtPriceConfidenceBand.ValueType",
+    confidence: float,
+    stale: bool,
+    source: str,
+    timestamp: int,
+) -> None:
+    """Emit one structured telemetry event for the PT/YT price path (VIB-5312).
+
+    Exactly four observable fields for a real-money operator to judge a PT mark
+    BEFORE trusting NAV — no more (anti-catch-all scope guard, VIB-5312):
+
+    * ``price_source`` — the composition / unmeasured source string the provider
+      already stamps.
+    * ``confidence`` — the AUTHORITATIVE coarse band (label) plus the raw double,
+      reusing the P10/P11 (VIB-5310) confidence model verbatim. NOT re-thresholded.
+    * ``stale`` — the raw freshness signal that rides separately from the band (a
+      stale price can still be AVAILABLE/ESTIMATED — see ``PtPriceConfidenceBand``).
+    * ``unavailable_reason`` — ``None`` for an AVAILABLE price (Empty≠Zero), else
+      the stamped reason.
+
+    Logged fields carry ONLY public market identity (symbol/chain/quote) and the
+    four observable signals — NO wallet address, NO private key, NO secret. An
+    AVAILABLE+fresh mark logs at DEBUG (high-volume happy path); any
+    non-AVAILABLE / stale / ERRORED outcome logs at INFO/WARNING so a
+    stale-or-missing PT mark is visible in production logs without enabling debug.
+    """
+    availability_label = _PT_AVAILABILITY_LABELS.get(availability, "UNKNOWN")
+    band_label = _PT_CONFIDENCE_BAND_LABELS.get(confidence_band, "UNKNOWN")
+    unavailable_reason = _pt_unavailable_reason(availability, source)
+    extra = {
+        "pt_telemetry": True,
+        "symbol": symbol,
+        "chain": chain,
+        "quote": quote,
+        "availability": availability_label,
+        # The four observable fields (VIB-5312):
+        "price_source": source,
+        "confidence_band": band_label,
+        "confidence": confidence,
+        "stale": stale,
+        "unavailable_reason": unavailable_reason,
+        "composed_at": timestamp or None,
+    }
+    is_available = availability == gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE
+    is_errored = availability == gateway_pb2.PT_PRICE_AVAILABILITY_ERRORED
+    if is_errored:
+        logger.warning("PT price ERRORED for %s on %s: %s", symbol, chain, unavailable_reason, extra=extra)
+    elif not is_available:
+        logger.info("PT price unmeasured for %s on %s: %s", symbol, chain, unavailable_reason, extra=extra)
+    elif stale:
+        logger.warning(
+            "PT price STALE for %s on %s (band=%s, source=%s)", symbol, chain, band_label, source, extra=extra
+        )
+    else:
+        logger.debug("PT price %s for %s on %s (band=%s)", availability_label, symbol, chain, band_label, extra=extra)
+
+
 def _build_pt_price_response(
     *,
     symbol: str,
@@ -203,6 +306,28 @@ def _build_pt_price_response(
             "PT price provider invariant violated: availability=AVAILABLE requires a "
             "non-empty price (Empty≠Zero, VIB-5309). Emit UNMEASURED/ERRORED instead."
         )
+    # VIB-5312 — single price-path telemetry chokepoint. EVERY GetPtPrice outcome
+    # is constructed here, so emitting once here covers measured + unmeasured +
+    # errored + stale with no per-call-site wiring (and no double-emit). Telemetry
+    # must never break a price read: a logging failure is swallowed.
+    try:
+        _emit_pt_price_telemetry(
+            symbol=symbol,
+            chain=chain,
+            quote=quote,
+            availability=availability,
+            confidence_band=confidence_band,
+            confidence=confidence,
+            stale=stale,
+            source=source,
+            timestamp=timestamp,
+        )
+    except Exception:  # noqa: BLE001 — observability must not break the money path
+        # WARNING, not DEBUG: a failure in the staleness/availability telemetry
+        # path is itself an operator-visible incident (the signal an operator
+        # relies on to judge a PT mark is now broken) — surface it, but still
+        # swallow so the price read never fails on a logging bug.
+        logger.warning("PT price telemetry emit failed for %s on %s", symbol, chain, exc_info=True)
     return gateway_pb2.PtPriceResponse(
         symbol=symbol,
         chain=chain,
