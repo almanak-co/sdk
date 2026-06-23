@@ -21,6 +21,11 @@ CONNECTOR = Connector(
         chains=("base",),
         amm_family="solidly_v2",
         chain_default=("base",),
+        # Slipstream (CL) volume rides the same connector; the canonical slug
+        # callers pass is "aerodrome_slipstream", so the DEX-volume caller path
+        # (DexVolumeRegistry → MultiDEXVolumeProvider) resolves it here instead
+        # of falling through to the LOW-confidence unknown-protocol fallback.
+        aliases=("aerodrome_slipstream",),
     ),
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.aerodrome.fee_model", attribute="AerodromeFeeModel"),

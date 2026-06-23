@@ -81,7 +81,7 @@ class TestGetVolume:
 
     @pytest.mark.asyncio
     async def test_get_volume_no_data_raises_unavailable(self):
-        response = make_response([], success=False, source="aerodrome", error="no pairDayDatas")
+        response = make_response([], success=False, source="aerodrome", error="no poolDayDatas")
         patcher, _captured = patch_gateway(response)
         with patcher:
             provider = AerodromeVolumeProvider()

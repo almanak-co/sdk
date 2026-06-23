@@ -183,7 +183,12 @@ class GatewayMarketPriceAggregator(PriceAggregator):
         chain_lower = chain.lower()
         pair = f"{token_a}/{token_b}"
         if fee_tiers is None:
-            fee_tiers = [100, 500, 3000, 10000]
+            # Union of Uniswap-style fee tiers and Aerodrome Slipstream tick
+            # spacings — pools are keyed by tick spacing on Slipstream and by
+            # fee tier on Uniswap/forks. Discriminators with no pool resolve to
+            # the zero address via factory.getPool and are skipped, so the
+            # superset is safe: one sweep covers both pool-key models.
+            fee_tiers = [1, 10, 50, 100, 200, 500, 2000, 3000, 10000]
         if protocols is None:
             protocols = self._registry.protocols_for_chain(chain_lower)
         if not protocols:
@@ -220,7 +225,16 @@ class GatewayMarketPriceAggregator(PriceAggregator):
         if not pool_addresses:
             raise PoolPriceUnavailableError(pair, f"No pools resolved for {pair} on {chain_lower}")
 
-        dex = "uniswap_v3" if "uniswap_v3" in protocols else protocols[0]
+        # The gateway LWAP read is protocol-agnostic — it reads slot0() +
+        # liquidity() on the already-resolved pool addresses, and the uniswap_v3
+        # provider reads Uniswap V3 AND all its V3-style forks (PancakeSwap V3,
+        # SushiSwap V3, Aerodrome Slipstream) identically. `protocols` governs
+        # pool *resolution* only, not the read. We therefore always dispatch
+        # under the uniswap_v3 read profile rather than `protocols[0]`, which
+        # would route to a dex with no registered LWAP provider whenever a
+        # caller pins a non-uniswap protocol (e.g. protocols=["aerodrome_slipstream"])
+        # and hard-fail with "unsupported dex (lwap)".
+        dex = "uniswap_v3"
         start_time = datetime.now(UTC)
         try:
             resp = self._gateway_client.rate_history.GetDexLwap(

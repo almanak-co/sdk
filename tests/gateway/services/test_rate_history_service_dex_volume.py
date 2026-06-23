@@ -7,9 +7,8 @@ subgraph, verifying that:
    ``GatewayDexVolumeCapability``.
 2. Each DEX-family schema decodes correctly via the shared
    ``_dex_volume_subgraph`` helper:
-   * V3-family (``poolDayDatas`` / ``pool`` / ``volumeUSD``) — uniswap_v3.
-   * Solidly (``pairDayDatas`` / ``pairAddress`` / ``dailyVolumeUSD``) —
-     aerodrome.
+   * V3-family (``poolDayDatas`` / ``pool`` / ``volumeUSD``) — uniswap_v3 and
+     aerodrome (its configured subgraph is the Slipstream/CL deployment).
    * Messari (``liquidityPoolDailySnapshots`` / ``day`` days-since-epoch /
      ``dailyVolumeUSD``) — curve.
    * Balancer V2 (``poolSnapshots`` / unix ``timestamp`` / ``swapVolume``).
@@ -147,15 +146,18 @@ def test_uniswap_v3_pool_day_datas_decode() -> None:
 
 
 # =============================================================================
-# Happy path: Solidly (pairDayDatas / pairAddress / dailyVolumeUSD)
+# Happy path: Aerodrome Slipstream — Uniswap-V3-style (poolDayDatas / pool / volumeUSD)
 # =============================================================================
 
 
-def test_aerodrome_pair_day_datas_decode() -> None:
+def test_aerodrome_pool_day_datas_decode() -> None:
+    # Aerodrome's configured subgraph is the Slipstream (CL) deployment, which
+    # uses the Uniswap-V3 poolDayDatas schema — NOT Solidly pairDayDatas (that
+    # entity does not exist on it and failed for every pool).
     body = {
         "data": {
-            "pairDayDatas": [
-                {"date": 1_700_000_000, "dailyVolumeUSD": "9999.5"},
+            "poolDayDatas": [
+                {"date": 1_700_000_000, "volumeUSD": "9999.5"},
             ]
         }
     }
@@ -168,8 +170,8 @@ def test_aerodrome_pair_day_datas_decode() -> None:
     assert Decimal(response.points[0].volume_usd) == Decimal("9999.5")
 
     query = captured[0]["json"]["query"]
-    assert "pairDayDatas" in query
-    assert "pairAddress: $poolAddress" in query
+    assert "poolDayDatas" in query
+    assert "pool: $poolAddress" in query
 
 
 # =============================================================================

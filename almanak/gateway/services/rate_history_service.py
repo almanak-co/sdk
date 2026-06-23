@@ -203,6 +203,23 @@ def _normalize_key(value: str) -> str:
     return value.strip().lower()
 
 
+def _provider_dispatch_keys(conn: Any) -> tuple[str, ...]:
+    """Capability dispatch keys for a DEX provider.
+
+    Returns the provider's ``dex_name()`` plus any ``dex_aliases()`` it declares,
+    normalized and de-duplicated. Aliases let a single connector answer to more
+    than one routing slug — e.g. the aerodrome connector (``dex_name="aerodrome"``)
+    also serving the canonical ``aerodrome_slipstream`` name that strategies and
+    the executor actually pass for the concentrated-liquidity (Slipstream) product.
+    """
+    keys = [_normalize_key(str(conn.dex_name()))]
+    aliases_fn = getattr(conn, "dex_aliases", None)
+    if callable(aliases_fn):
+        aliases: Any = aliases_fn() or ()
+        keys.extend(_normalize_key(str(alias)) for alias in aliases)
+    return tuple(dict.fromkeys(keys))
+
+
 def _invalid_argument(context: grpc.aio.ServicerContext, message: str) -> None:
     context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
     context.set_details(message)
@@ -361,43 +378,43 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
 
         self._twap_providers: dict[str, GatewayDexTwapCapability] = {}
         for twap_conn in GATEWAY_REGISTRY.capability_providers(GatewayDexTwapCapability):  # type: ignore[type-abstract]
-            # ``dex_name()`` is declared on ``GatewayDexTwapCapability`` so
-            # the registry's structural Protocol check enforces it; a DEX
-            # reuses the same identifier as its ``GatewayDexQuoteCapability``
-            # so a strategy doesn't carry two names for the same DEX.
-            key = str(twap_conn.dex_name()).lower()
-            existing_twap = self._twap_providers.get(key)
-            if existing_twap is not None and existing_twap is not twap_conn:
-                raise RuntimeError(
-                    f"Duplicate DEX TWAP provider for dex {key!r}: "
-                    f"{type(existing_twap).__qualname__} vs "
-                    f"{type(twap_conn).__qualname__}"
-                )
-            self._twap_providers[key] = twap_conn
+            # ``dex_name()`` is declared on ``GatewayDexTwapCapability`` so the
+            # registry's structural Protocol check enforces it. A connector may
+            # also declare ``dex_aliases()`` (e.g. aerodrome answering to the
+            # canonical ``aerodrome_slipstream`` slug callers actually pass).
+            for key in _provider_dispatch_keys(twap_conn):
+                existing_twap = self._twap_providers.get(key)
+                if existing_twap is not None and existing_twap is not twap_conn:
+                    raise RuntimeError(
+                        f"Duplicate DEX TWAP provider for dex {key!r}: "
+                        f"{type(existing_twap).__qualname__} vs "
+                        f"{type(twap_conn).__qualname__}"
+                    )
+                self._twap_providers[key] = twap_conn
 
         self._lwap_providers: dict[str, GatewayDexLwapCapability] = {}
         for lwap_conn in GATEWAY_REGISTRY.capability_providers(GatewayDexLwapCapability):  # type: ignore[type-abstract]
-            key = str(lwap_conn.dex_name()).lower()
-            existing_lwap = self._lwap_providers.get(key)
-            if existing_lwap is not None and existing_lwap is not lwap_conn:
-                raise RuntimeError(
-                    f"Duplicate DEX LWAP provider for dex {key!r}: "
-                    f"{type(existing_lwap).__qualname__} vs "
-                    f"{type(lwap_conn).__qualname__}"
-                )
-            self._lwap_providers[key] = lwap_conn
+            for key in _provider_dispatch_keys(lwap_conn):
+                existing_lwap = self._lwap_providers.get(key)
+                if existing_lwap is not None and existing_lwap is not lwap_conn:
+                    raise RuntimeError(
+                        f"Duplicate DEX LWAP provider for dex {key!r}: "
+                        f"{type(existing_lwap).__qualname__} vs "
+                        f"{type(lwap_conn).__qualname__}"
+                    )
+                self._lwap_providers[key] = lwap_conn
 
         self._volume_providers: dict[str, GatewayDexVolumeCapability] = {}
         for volume_conn in GATEWAY_REGISTRY.capability_providers(GatewayDexVolumeCapability):  # type: ignore[type-abstract]
-            key = str(volume_conn.dex_name()).lower()
-            existing_volume = self._volume_providers.get(key)
-            if existing_volume is not None and existing_volume is not volume_conn:
-                raise RuntimeError(
-                    f"Duplicate DEX volume provider for dex {key!r}: "
-                    f"{type(existing_volume).__qualname__} vs "
-                    f"{type(volume_conn).__qualname__}"
-                )
-            self._volume_providers[key] = volume_conn
+            for key in _provider_dispatch_keys(volume_conn):
+                existing_volume = self._volume_providers.get(key)
+                if existing_volume is not None and existing_volume is not volume_conn:
+                    raise RuntimeError(
+                        f"Duplicate DEX volume provider for dex {key!r}: "
+                        f"{type(existing_volume).__qualname__} vs "
+                        f"{type(volume_conn).__qualname__}"
+                    )
+                self._volume_providers[key] = volume_conn
 
         logger.debug(
             "Initialized RateHistoryService (lending=%s, funding=%s, twap=%s, lwap=%s, volume=%s)",

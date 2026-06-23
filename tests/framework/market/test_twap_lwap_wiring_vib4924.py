@@ -364,6 +364,59 @@ def test_lwap_gateway_success_false_raises():
         agg.lwap("WETH", "USDC", "base")
 
 
+def test_lwap_pinned_aerodrome_slipstream_dispatches_uniswap_v3_profile():
+    """#1 regression: pinning protocols=["aerodrome_slipstream"] must still
+    produce an LWAP. The gateway read is protocol-agnostic (slot0/liquidity), so
+    a pinned non-uniswap protocol dispatches under the uniswap_v3 read profile
+    instead of dex="aerodrome_slipstream" — which has no registered LWAP provider
+    and hard-fails with 'unsupported dex (lwap)' (the live Base bug)."""
+    reader = MagicMock()
+    # Slipstream USDC/CBBTC pool keyed by tick spacing 100 (not a uni fee tier).
+    reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xslip100" if fee == 100 else None
+    reader._resolve_to_address.side_effect = _stub_resolve
+    registry = MagicMock()
+    registry.protocols_for_chain.return_value = ["uniswap_v3", "aerodrome_slipstream"]
+    registry.get_reader.return_value = reader
+
+    rh = _FakeRateHistory(lwap_response=_lwap_resp(price="64000.0", pool_count=1))
+    agg = GatewayMarketPriceAggregator(
+        gateway_client=_FakeGatewayClient(rate_history=rh),
+        pool_registry=registry,
+        rpc_call=lambda *a: b"",
+    )
+
+    env = agg.lwap("WETH", "USDC", "base", protocols=["aerodrome_slipstream"])
+
+    assert env.value.price == Decimal("64000.0")
+    req = rh.last_lwap_request
+    assert req.dex == "uniswap_v3"  # the fix — NOT "aerodrome_slipstream"
+    assert "0xslip100" in list(req.pool_addresses)
+
+
+def test_lwap_default_sweep_covers_aerodrome_tick_spacings():
+    """#1: the default fee_tiers sweep includes Aerodrome tick spacings (e.g.
+    200), so spacing-200 Slipstream pools resolve — a pure Uniswap fee-tier
+    sweep ([100, 500, 3000, 10000]) would skip them."""
+    reader = MagicMock()
+    reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xspacing200" if fee == 200 else None
+    reader._resolve_to_address.side_effect = _stub_resolve
+    registry = MagicMock()
+    registry.protocols_for_chain.return_value = ["aerodrome_slipstream"]
+    registry.get_reader.return_value = reader
+
+    rh = _FakeRateHistory(lwap_response=_lwap_resp(price="64000.0", pool_count=1))
+    agg = GatewayMarketPriceAggregator(
+        gateway_client=_FakeGatewayClient(rate_history=rh),
+        pool_registry=registry,
+        rpc_call=lambda *a: b"",
+    )
+
+    agg.lwap("WETH", "USDC", "base")
+    req = rh.last_lwap_request
+    assert "0xspacing200" in list(req.pool_addresses)  # 200 = tick spacing, not uni fee tier
+    assert req.dex == "uniswap_v3"
+
+
 def test_snapshot_lwap_normalizes_protocols_without_registry():
     # CodeRabbit: a snapshot with a price_aggregator but NO registry must still
     # forward lowercase protocol names (the downstream dispatch is exact-match).

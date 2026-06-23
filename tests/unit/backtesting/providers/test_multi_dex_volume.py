@@ -61,6 +61,13 @@ class TestProtocolMappings:
         for protocol in expected_protocols:
             assert DexVolumeRegistry.canonical(protocol.value) == protocol.value.lower()
 
+    def test_aerodrome_slipstream_alias_resolves_to_aerodrome(self):
+        """Slipstream (CL) volume rides the aerodrome connector: the canonical
+        ``aerodrome_slipstream`` slug callers pass must normalize to ``aerodrome``
+        so ``get_volume`` uses the real provider instead of the LOW-confidence
+        unknown-protocol fallback (DexVolumeDecl alias)."""
+        assert DexVolumeRegistry.canonical("aerodrome_slipstream") == "aerodrome"
+
     def test_all_protocol_ids_declared(self):
         """Every legacy dispatch key is connector-declared."""
         expected_ids = [
