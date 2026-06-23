@@ -398,8 +398,9 @@ class TestLiquidityDepthReader:
         assert ticks[1].liquidity_net == -500
 
     def test_tick_spacing_from_fee_tier(self):
-        """Test tick spacing inference from fee tier."""
-        rpc = self._make_rpc_mock()
+        """Fee tier is the FALLBACK when the pool's on-chain tickSpacing() is
+        unreadable (returns 0 here), so fee_tier=500 infers tick_spacing=10."""
+        rpc = self._make_rpc_mock(tick_spacing=0)  # on-chain read invalid -> fall back to fee map
         reader = LiquidityDepthReader(rpc_call=rpc, tick_range_multiplier=5)
 
         envelope = reader.read_liquidity_depth(
@@ -410,10 +411,31 @@ class TestLiquidityDepthReader:
             current_price=Decimal("1"),
             token0_decimals=18,
             token1_decimals=18,
-            fee_tier=500,  # Should infer tick_spacing=10
+            fee_tier=500,  # falls back to fee map -> tick_spacing=10
         )
 
         assert envelope.value.tick_spacing == 10
+
+    def test_tick_spacing_prefers_onchain_over_fee_map(self):
+        """The pool's on-chain tickSpacing() is authoritative and must win over
+        the fee-tier map. A Slipstream-style pool whose fee() collides with a
+        Uniswap fee tier (100) but whose real tick spacing is 200 must scan the
+        200 grid — not FEE_TO_TICK_SPACING[100]=1."""
+        rpc = self._make_rpc_mock(tick_spacing=200)
+        reader = LiquidityDepthReader(rpc_call=rpc, tick_range_multiplier=5)
+
+        envelope = reader.read_liquidity_depth(
+            pool_address="0xabc",
+            chain="base",
+            current_tick=0,
+            current_liquidity=100,
+            current_price=Decimal("1"),
+            token0_decimals=18,
+            token1_decimals=18,
+            fee_tier=100,  # would wrongly map to spacing=1 if fee-map took priority
+        )
+
+        assert envelope.value.tick_spacing == 200
 
     def test_tick_spacing_from_rpc(self):
         """Test tick spacing read from contract when fee tier not available."""
@@ -606,10 +628,15 @@ class TestSlippageEstimatorV3:
             envelope = DataEnvelope(value=pool_price, meta=meta, classification=DataClassification.EXECUTION_GRADE)
             reader.read_pool_price.return_value = envelope
 
+        # estimate_slippage auto-resolves the deepest pool via
+        # resolve_best_pool_address when no explicit fee_tier is passed (the
+        # default path); mirror both resolvers so the mock matches either.
         if pool_address is not None:
             reader.resolve_pool_address.return_value = pool_address
+            reader.resolve_best_pool_address.return_value = pool_address
         else:
             reader.resolve_pool_address.return_value = None
+            reader.resolve_best_pool_address.return_value = None
 
         registry.protocols_for_chain.return_value = ["uniswap_v3"]
         registry.get_reader.return_value = reader

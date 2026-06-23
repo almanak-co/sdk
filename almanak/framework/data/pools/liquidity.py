@@ -325,23 +325,27 @@ class LiquidityDepthReader:
         chain: str,
         fee_tier: int | None = None,
     ) -> int:
-        """Get tick spacing from fee tier or on-chain read.
+        """Get tick spacing from the pool's on-chain ``tickSpacing()``, falling
+        back to the Uniswap fee-tier map.
+
+        The on-chain read is authoritative for every V3-style pool and is
+        REQUIRED for tick-spacing-keyed DEXs (Aerodrome Slipstream), where the
+        pool fee is independent of the tick spacing — inferring spacing from the
+        fee via ``FEE_TO_TICK_SPACING`` there scans the wrong tick grid (and can
+        silently corrupt the slippage estimate). The fee-tier map is kept only as
+        a fallback for when the on-chain read is unavailable; it is exact for
+        Uniswap-style pools where ``tickSpacing == FEE_TO_TICK_SPACING[fee]``.
 
         Args:
             pool_address: Pool contract address.
             chain: Chain name.
-            fee_tier: Optional fee tier for static lookup.
+            fee_tier: Optional fee tier, used only as a fallback.
 
         Returns:
             Tick spacing integer.
         """
-        # Try static lookup by fee tier
-        if fee_tier is not None:
-            spacing = FEE_TO_TICK_SPACING.get(fee_tier)
-            if spacing is not None:
-                return spacing
-
-        # Read from contract
+        # Authoritative: read the pool's own tickSpacing() (fee != spacing on
+        # Slipstream, so this must take priority over the fee-tier map).
         try:
             data = self._rpc_call(chain, pool_address, TICK_SPACING_SELECTOR)
             if len(data) >= 32:
@@ -351,10 +355,16 @@ class LiquidityDepthReader:
         except Exception:
             logger.debug("tick_spacing_read_failed pool=%s chain=%s", pool_address, chain, exc_info=True)
 
+        # Fallback: derive from the Uniswap fee tier (exact for Uniswap-style pools).
+        if fee_tier is not None:
+            mapped = FEE_TO_TICK_SPACING.get(fee_tier)
+            if mapped is not None:
+                return mapped
+
         raise DataUnavailableError(
             data_type="liquidity_depth",
             instrument=pool_address,
-            reason=f"Cannot determine tick spacing for pool {pool_address} (fee_tier missing and on-chain read failed)",
+            reason=f"Cannot determine tick spacing for pool {pool_address} (on-chain read failed and no fee_tier fallback)",
         )
 
     def _scan_initialized_ticks(
@@ -751,7 +761,7 @@ class SlippageEstimator:
         chain: str,
         protocol: str | None = None,
         pool_address: str | None = None,
-        fee_tier: int = 3000,
+        fee_tier: int | None = None,
     ) -> DataEnvelope[SlippageEstimate]:
         """Estimate slippage for a swap.
 
@@ -765,7 +775,11 @@ class SlippageEstimator:
             chain: Chain name.
             protocol: Protocol name (e.g., "uniswap_v3"). Auto-detected if None.
             pool_address: Explicit pool address. Resolved if None.
-            fee_tier: Fee tier for pool resolution (default 3000 = 0.3%).
+            fee_tier: Explicit discriminator for pool resolution (fee tier for
+                Uniswap-style DEXs, tick spacing for Aerodrome Slipstream). When
+                None (default), the deepest pool is auto-resolved by sweeping the
+                protocol's candidate keys — so a blind 3000 no longer wrongly
+                fails tick-spacing-keyed pools (e.g. Slipstream USDC/CBBTC).
 
         Returns:
             DataEnvelope[SlippageEstimate] with EXECUTION_GRADE classification.
@@ -946,9 +960,16 @@ class SlippageEstimator:
         token_out: str,
         chain: str,
         protocol: str | None,
-        fee_tier: int,
+        fee_tier: int | None,
     ) -> str | None:
-        """Resolve a pool address for the given pair."""
+        """Resolve a pool address for the given pair.
+
+        With an explicit ``fee_tier`` the exact pool for that discriminator is
+        returned. With ``fee_tier=None`` (the default path) the deepest pool is
+        resolved by sweeping each protocol's candidate keys — fee tiers for
+        Uniswap-style DEXs, tick spacings for Aerodrome Slipstream — so a blind
+        ``fee_tier=3000`` no longer wrongly fails tick-spacing-keyed pools.
+        """
         if self._pool_reader_registry is None:
             return None
 
@@ -957,7 +978,10 @@ class SlippageEstimator:
         for proto in protocols:
             try:
                 reader = self._pool_reader_registry.get_reader(chain, proto)
-                addr = reader.resolve_pool_address(token_in, token_out, chain, fee_tier)
+                if fee_tier is None:
+                    addr = reader.resolve_best_pool_address(token_in, token_out, chain)
+                else:
+                    addr = reader.resolve_pool_address(token_in, token_out, chain, fee_tier)
                 if addr:
                     return addr
             except Exception:

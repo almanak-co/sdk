@@ -27,6 +27,7 @@ from almanak.framework.data.pools.reader import (
     LIQUIDITY_SELECTOR,
     PANCAKESWAP_V3_FACTORY,
     SLOT0_SELECTOR,
+    SUSHISWAP_V3_FACTORY,
     TOKEN0_SELECTOR,
     TOKEN1_SELECTOR,
     UNISWAP_V3_FACTORY,
@@ -34,6 +35,7 @@ from almanak.framework.data.pools.reader import (
     PancakeSwapV3PoolReader,
     PoolPrice,
     PoolReaderRegistry,
+    SushiSwapV3PoolReader,
     UniswapV3PoolPriceReader,
 )
 
@@ -214,6 +216,45 @@ class TestAerodromePoolReader:
         )
         assert seen["calldata"].startswith("0x28af8d0b")  # getPool(address,address,int24)
         assert not seen["calldata"].startswith("0x1698ee82")  # not v3's uint24 selector
+
+    def test_candidate_pool_keys_are_tick_spacings(self):
+        """#2: Slipstream sweeps tick spacings, not Uniswap fee tiers."""
+        assert AerodromePoolReader._candidate_pool_keys == (1, 10, 50, 100, 200, 2000)
+        # 3000 is a Uniswap fee tier; it must NOT be in the Slipstream sweep.
+        assert 3000 not in AerodromePoolReader._candidate_pool_keys
+
+    def test_resolve_best_sweeps_tick_spacing_pools(self):
+        """#2 regression: resolve_best_pool_address resolves a pool keyed by tick
+        spacing 200 — which the old Uniswap fee-tier sweep ([100,500,3000,10000])
+        could never find. This is the gap that made estimate_slippage('USDC',
+        'CBBTC', protocol='aerodrome_slipstream') fail with 'No pool found' on the
+        live Base deployment."""
+        cbbtc = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+        expected = "0xaaaabbbbccccddddeeeeffff0000111122223333"
+
+        def rpc(chain, to, calldata):
+            selector = calldata[:10]
+            if selector == "0x28af8d0b":  # getPool(address,address,int24 tickSpacing)
+                tick_spacing = int(calldata[-64:], 16)
+                return _address_bytes(expected if tick_spacing == 200 else "0x" + "0" * 40)
+            if selector == SLOT0_SELECTOR:
+                return _build_slot0_response(2**96, 0)
+            if selector == LIQUIDITY_SELECTOR:
+                return _uint256_bytes(10**18)
+            if selector == TOKEN0_SELECTOR:
+                return _address_bytes(USDC_BASE)
+            if selector == TOKEN1_SELECTOR:
+                return _address_bytes(cbbtc)
+            if selector == FEE_SELECTOR:
+                return _uint256_bytes(0)
+            if selector == "0x313ce567":  # decimals()
+                return _uint256_bytes(6)
+            return b"\x00" * 32
+
+        reader = AerodromePoolReader(rpc_call=rpc, cache_ttl_seconds=0)
+        best = reader.resolve_best_pool_address(USDC_BASE, cbbtc, "base")
+        assert best is not None
+        assert best.lower() == expected.lower()
 
     def test_resolve_no_factory_for_chain(self):
         """Chain without factory returns None for unknown pools."""
@@ -640,3 +681,45 @@ class TestManifestPoolReaderSpecs:
         assert spec.factory_addresses is PANCAKESWAP_V3_FACTORY
         assert spec.known_pools is _PANCAKESWAP_KNOWN_POOLS
         assert spec.get_pool_selector == V3_GET_POOL_SELECTOR
+
+    def test_sushiswap_spec_feeds_reader(self):
+        spec = POOL_READER_REGISTRY.require("sushiswap_v3")
+        assert spec.factory_addresses is SUSHISWAP_V3_FACTORY
+        assert spec.get_pool_selector == V3_GET_POOL_SELECTOR
+
+
+class TestSushiSwapV3PoolReader:
+    """SushiSwap V3 pool reader (standard Uniswap-V3 fork) — added so the
+    framework can resolve SushiSwap pools for LWAP/TWAP (previously there was
+    no reader and resolution failed even though the gateway registered it)."""
+
+    def test_inherits_from_uniswap(self):
+        assert issubclass(SushiSwapV3PoolReader, UniswapV3PoolPriceReader)
+
+    def test_registered_in_registry(self):
+        reg = PoolReaderRegistry(rpc_call=_make_rpc_call())
+        assert isinstance(reg.get_reader("ethereum", "sushiswap_v3"), SushiSwapV3PoolReader)
+
+    def test_uses_standard_uniswap_fee_tiers(self):
+        # SushiSwap V3 is fee-tier keyed like Uniswap (NOT tick-spacing).
+        assert SushiSwapV3PoolReader._candidate_pool_keys == (100, 500, 3000, 10000)
+
+    def test_has_factory_for_major_chains(self):
+        for chain in ("ethereum", "arbitrum", "base", "optimism", "polygon"):
+            assert chain in SushiSwapV3PoolReader._factory_addresses
+
+    def test_resolve_unknown_pool_uses_factory(self):
+        expected_pool = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+        def factory_rpc(chain, to, calldata):
+            return _address_bytes(expected_pool)
+
+        reader = SushiSwapV3PoolReader(rpc_call=factory_rpc, cache_ttl_seconds=0)
+        addr = reader.resolve_pool_address(
+            "0x1111111111111111111111111111111111111111",
+            "0x2222222222222222222222222222222222222222",
+            "ethereum",
+            fee_tier=500,
+        )
+        assert addr is not None
+        assert addr.lower() == expected_pool.lower()

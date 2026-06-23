@@ -68,6 +68,7 @@ GET_POOL_SELECTOR = V3_GET_POOL_SELECTOR
 _UNISWAP_POOL_READER_SPEC = POOL_READER_REGISTRY.require("uniswap_v3")
 _AERODROME_POOL_READER_SPEC = POOL_READER_REGISTRY.require("aerodrome")
 _PANCAKESWAP_POOL_READER_SPEC = POOL_READER_REGISTRY.require("pancakeswap_v3")
+_SUSHISWAP_POOL_READER_SPEC = POOL_READER_REGISTRY.require("sushiswap_v3")
 
 # Historical module-level aliases are preserved for tests and callers that
 # imported them directly. The data is connector-owned and manifest-loaded.
@@ -77,6 +78,8 @@ AERODROME_CL_FACTORY = _AERODROME_POOL_READER_SPEC.factory_addresses
 _AERODROME_KNOWN_POOLS = _AERODROME_POOL_READER_SPEC.known_pools
 PANCAKESWAP_V3_FACTORY = _PANCAKESWAP_POOL_READER_SPEC.factory_addresses
 _PANCAKESWAP_KNOWN_POOLS = _PANCAKESWAP_POOL_READER_SPEC.known_pools
+SUSHISWAP_V3_FACTORY = _SUSHISWAP_POOL_READER_SPEC.factory_addresses
+_SUSHISWAP_KNOWN_POOLS = _SUSHISWAP_POOL_READER_SPEC.known_pools
 
 # RpcCallFn type: (chain, to_address, calldata_hex) -> bytes
 # This abstracts over gateway RPC vs direct Web3 calls.
@@ -231,6 +234,10 @@ class UniswapV3PoolPriceReader:
     _known_pools: Mapping[str, Mapping[tuple[str, str, int], str]] = _KNOWN_POOLS
     protocol_name: str = "uniswap_v3"
     _get_pool_selector: str = GET_POOL_SELECTOR
+    # Discriminator values swept during pool resolution. For Uniswap-style DEXs
+    # these are fee tiers (uint24); tick-spacing forks (Aerodrome Slipstream)
+    # override with their tick spacings. Consumed by ``resolve_best_pool_address``.
+    _candidate_pool_keys: tuple[int, ...] = (100, 500, 3000, 10000)
 
     def __init__(
         self,
@@ -470,7 +477,10 @@ class UniswapV3PoolPriceReader:
             The highest-liquidity pool address, or None if none resolve.
         """
         if fee_tiers is None:
-            fee_tiers = [100, 500, 3000, 10000]
+            # Use the protocol's own discriminator set: fee tiers for Uniswap
+            # forks, tick spacings for Aerodrome Slipstream. A blind Uniswap
+            # fee-tier list would never resolve a tick-spacing-keyed pool.
+            fee_tiers = list(self._candidate_pool_keys)
 
         chain_lower = chain.lower()
         best_addr: str | None = None
@@ -604,6 +614,10 @@ class AerodromePoolReader(UniswapV3PoolPriceReader):
     _known_pools: Mapping[str, Mapping[tuple[str, str, int], str]] = _AERODROME_KNOWN_POOLS
     protocol_name: str = "aerodrome"
     _get_pool_selector: str = "0x28af8d0b"  # int24 (tick_spacing), not v3 uint24 (fee_tier)
+    # Slipstream keys pools by TICK SPACING, not Uniswap fee tier — getPool's
+    # third arg is the tick spacing. Snapshot of the Base CL factory's
+    # ``tickSpacings()`` (governance-extensible — keep in sync if it grows).
+    _candidate_pool_keys: tuple[int, ...] = (1, 10, 50, 100, 200, 2000)
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +641,32 @@ class PancakeSwapV3PoolReader(UniswapV3PoolPriceReader):
     _factory_addresses: Mapping[str, str] = PANCAKESWAP_V3_FACTORY
     _known_pools: Mapping[str, Mapping[tuple[str, str, int], str]] = _PANCAKESWAP_KNOWN_POOLS
     protocol_name: str = "pancakeswap_v3"
+    # PancakeSwap V3 uses a 2500 (0.25%) tier where Uniswap uses 3000 (0.3%).
+    _candidate_pool_keys: tuple[int, ...] = (100, 500, 2500, 10000)
+
+
+# ---------------------------------------------------------------------------
+# SushiSwapV3PoolReader
+# ---------------------------------------------------------------------------
+
+
+class SushiSwapV3PoolReader(UniswapV3PoolPriceReader):
+    """Reads live prices from SushiSwap V3 pool contracts.
+
+    SushiSwap V3 is a standard Uniswap-V3 fork: identical slot0()/getPool ABI
+    and the canonical Uniswap fee tiers, just different factory addresses. It
+    inherits the default fee-tier candidate sweep from the base reader.
+
+    Args:
+        rpc_call: Callable(chain, to_address, calldata_hex) -> bytes.
+        token_resolver: Optional TokenResolver for decimal lookups.
+        cache_ttl_seconds: Cache TTL in seconds (default 2).
+        source_name: Source identifier for DataMeta (default "alchemy_rpc").
+    """
+
+    _factory_addresses: Mapping[str, str] = SUSHISWAP_V3_FACTORY
+    _known_pools: Mapping[str, Mapping[tuple[str, str, int], str]] = _SUSHISWAP_KNOWN_POOLS
+    protocol_name: str = "sushiswap_v3"
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +679,7 @@ _PROTOCOL_READER_CLASSES: dict[str, type[UniswapV3PoolPriceReader]] = {
     "aerodrome": AerodromePoolReader,  # legacy name used by existing demo strategies
     "aerodrome_slipstream": AerodromePoolReader,  # canonical name used by executor / CLI
     "pancakeswap_v3": PancakeSwapV3PoolReader,
+    "sushiswap_v3": SushiSwapV3PoolReader,
 }
 
 
