@@ -357,12 +357,15 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             )
 
         # VIB-4841 / FR-5002: pass the stablecoin peg fast-path config from
-        # gateway settings. getattr with defaults keeps older Settings shapes
+        # gateway settings. VIB-5375 (RC-3): pass the bounded per-source + global
+        # aggregator timeouts. getattr with defaults keeps older Settings shapes
         # (and test stubs) working without the new fields.
         self._price_aggregator = PriceAggregator(
             sources=sources,
             stablecoin_verify=getattr(self.settings, "stablecoin_verify", False),
             stablecoin_chainlink_check_interval=getattr(self.settings, "stablecoin_chainlink_check_interval", 50),
+            per_source_timeout_seconds=getattr(self.settings, "price_source_timeout_seconds", 10.0),
+            global_timeout_seconds=getattr(self.settings, "price_aggregator_timeout_seconds", 15.0),
         )
         # Last-resort manual override source — reads ALMANAK_PRICE_OVERRIDE_<TOKEN>
         # env vars. Kept OUT of the aggregator's median vote because

@@ -192,3 +192,83 @@ def test_timeout_zero_via_env_rejected(gateway_env_scrub: pytest.MonkeyPatch) ->
     gateway_env_scrub.setenv("ALMANAK_GATEWAY_TIMEOUT", "0")
     with pytest.raises(ValidationError, match="timeout must be > 0"):
         GatewaySettings()
+
+
+# =============================================================================
+# Price-timeout finite validator (CodeRabbit review on PR 2984, VIB-5375).
+# These bounds are clamped with ``max(0.0, value)`` in the aggregator, where
+# ``<= 0`` is a deliberate "disable the bound" sentinel. A non-finite override
+# escapes that clamp: ``inf`` makes the bound effectively unbounded (re-opening
+# the Mantle timeout-class stall these fields close) and ``NaN`` feeds an
+# undefined ``asyncio.wait(timeout=...)``. Reject non-finite at the boundary;
+# keep the non-positive disable sentinel valid.
+# =============================================================================
+
+import math
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["price_source_timeout_seconds", "price_aggregator_timeout_seconds"],
+)
+def test_price_timeout_nan_rejected(field_name: str, gateway_env_scrub: pytest.MonkeyPatch) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="must be a finite number"):
+        GatewaySettings(**{field_name: math.nan})
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["price_source_timeout_seconds", "price_aggregator_timeout_seconds"],
+)
+@pytest.mark.parametrize("value", [math.inf, -math.inf])
+def test_price_timeout_inf_rejected(
+    field_name: str, value: float, gateway_env_scrub: pytest.MonkeyPatch
+) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="must be a finite number"):
+        GatewaySettings(**{field_name: value})
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["price_source_timeout_seconds", "price_aggregator_timeout_seconds"],
+)
+@pytest.mark.parametrize("value", [0.0, -1.0])
+def test_price_timeout_non_positive_disable_sentinel_accepted(
+    field_name: str, value: float, gateway_env_scrub: pytest.MonkeyPatch
+) -> None:
+    """``<= 0`` disables the respective bound (aggregator clamps via ``max(0.0, …)``);
+    the finite validator must NOT reject it."""
+    settings = GatewaySettings(**{field_name: value})
+    assert getattr(settings, field_name) == value
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["price_source_timeout_seconds", "price_aggregator_timeout_seconds"],
+)
+def test_price_timeout_finite_positive_accepted(
+    field_name: str, gateway_env_scrub: pytest.MonkeyPatch
+) -> None:
+    settings = GatewaySettings(**{field_name: 12.5})
+    assert getattr(settings, field_name) == 12.5
+
+
+def test_price_timeout_defaults_pass_validator(gateway_env_scrub: pytest.MonkeyPatch) -> None:
+    """The hard-coded 10.0 / 15.0 defaults must survive the validator unchanged."""
+    settings = GatewaySettings()
+    assert settings.price_source_timeout_seconds == 10.0
+    assert settings.price_aggregator_timeout_seconds == 15.0
+
+
+def test_price_timeout_nan_via_env_rejected(gateway_env_scrub: pytest.MonkeyPatch) -> None:
+    """Env-derived ``ALMANAK_GATEWAY_PRICE_SOURCE_TIMEOUT_SECONDS=nan`` also hits
+    the validator (Python ``float('nan')`` is non-finite)."""
+    from pydantic import ValidationError
+
+    gateway_env_scrub.setenv("ALMANAK_GATEWAY_PRICE_SOURCE_TIMEOUT_SECONDS", "nan")
+    with pytest.raises(ValidationError, match="must be a finite number"):
+        GatewaySettings()

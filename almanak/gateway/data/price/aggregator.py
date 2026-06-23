@@ -49,6 +49,34 @@ DEFAULT_OUTLIER_DEVIATION_THRESHOLD = 0.02  # 2% deviation from median
 DEFAULT_STALE_CONFIDENCE_PENALTY = 0.3  # Reduce confidence by 30% for stale data
 DEFAULT_PARTIAL_FAILURE_CONFIDENCE_PENALTY = 0.1  # Reduce by 10% per failed source
 
+# VIB-5375 (RC-3) — bounded per-source + global aggregator timeout.
+#
+# Why this exists: ``_fetch_all_sources`` used to ``asyncio.gather`` every price
+# source with NO overall deadline. On a cold/rate-limited fork a slow non-CoinGecko
+# source (e.g. a Mantle RPC behind the on-chain Chainlink source) could stall
+# indefinitely — blowing the 30s ``decide()`` budget → "timeout, 0 tx" (the Mantle
+# timeout class: VIB-2510/2511, shared RC behind 2338/2339/2460/2803). Each source
+# already self-bounds its *individual HTTP request* (Binance/onchain 5s, CoinGecko/
+# DexScreener 10s ``aiohttp.ClientTimeout``), but that does NOT bound the whole
+# ``get_price`` coroutine — retries, symbol→address fallbacks, multi-pair scans, or a
+# hang outside the HTTP call all escape the inner timeout. These two bounds wrap the
+# *coroutine* so the aggregator can never exceed a known wall-time regardless of a
+# source's internal behaviour.
+#
+# Defaults are chosen to sit ABOVE each source's internal single-request timeout (so
+# a healthy-but-slow source is not double-cut) and BELOW the 30s ``decide()`` budget
+# and the 60s pre-warm window (so a stalled source can never consume either):
+#   - Per-source 10s: ≥ the slowest source's internal HTTP timeout (10s), yet 3× under
+#     the decide() budget — a true hang is cut at 10s, not at "never".
+#   - Global 15s: sources run CONCURRENTLY, so the wall-time floor is one per-source
+#     bound (10s); 15s adds slack for event-loop scheduling / many-source fan-out while
+#     still leaving ≥15s of the 30s decide() budget for the rest of decide() and
+#     comfortably fitting inside the 60s pre-warm window.
+# A timed-out source is recorded as an error (Empty≠Zero: "unmeasured", never a zero
+# price) and does NOT sink the aggregation — whatever valid results arrived still win.
+DEFAULT_PER_SOURCE_TIMEOUT_SECONDS = 10.0
+DEFAULT_GLOBAL_TIMEOUT_SECONDS = 15.0
+
 # Magnitude outlier threshold: if max/min price ratio exceeds this, the sources
 # fundamentally disagree (feed misconfiguration, wrong units, decimal mismatch).
 # Example: wstETH/ETH exchange rate feed (~1.228) decoded with 8-decimal assumption
@@ -272,6 +300,8 @@ class PriceAggregator:
         *,
         stablecoin_verify: bool = False,
         stablecoin_chainlink_check_interval: int = DEFAULT_STABLECOIN_CHAINLINK_CHECK_INTERVAL,
+        per_source_timeout_seconds: float = DEFAULT_PER_SOURCE_TIMEOUT_SECONDS,
+        global_timeout_seconds: float = DEFAULT_GLOBAL_TIMEOUT_SECONDS,
     ) -> None:
         """Initialize the PriceAggregator.
 
@@ -303,6 +333,23 @@ class PriceAggregator:
                 masks a de-peg by returning $1.00. When the check times out or
                 cannot run, the peg is returned best-effort. Non-positive values
                 disable the periodic check.
+            per_source_timeout_seconds: VIB-5375 (RC-3). Wall-clock bound applied
+                to EACH source's ``get_price`` coroutine. A source that exceeds
+                this is recorded as an error (Empty≠Zero — "unmeasured", never a
+                zero price) and does not sink the aggregation. Default 10s — above
+                each source's internal single-request HTTP timeout (so a
+                healthy-but-slow source is not double-cut) yet well under the 30s
+                ``decide()`` budget. Non-positive disables the per-source bound.
+            global_timeout_seconds: VIB-5375 (RC-3). Wall-clock bound on the whole
+                concurrent gather across all sources, so many slow sources cannot
+                stack wall-time past a known limit. On the global cutoff, any
+                source that hasn't returned is recorded as a timeout error and the
+                aggregator proceeds with whatever valid results arrived. Default
+                15s — leaves ≥15s of the 30s ``decide()`` budget for the rest of
+                ``decide()`` and fits inside the 60s pre-warm window. Non-positive
+                disables the global bound. Applied independently of
+                ``per_source_timeout_seconds`` — whichever bound fires first caps
+                the wall-time.
 
         Raises:
             ValueError: If sources list is empty
@@ -311,6 +358,14 @@ class PriceAggregator:
             raise ValueError("At least one price source is required")
 
         self._sources = list(sources)
+        # VIB-5375: timeouts are non-negative wall-clock seconds; <=0 disables the
+        # respective bound. The two bounds are applied INDEPENDENTLY — per-source
+        # cuts one slow source, global caps the whole concurrent gather — so the
+        # effective wall-time is whichever bound fires first. We deliberately do
+        # NOT coerce one against the other: an operator who sets a tight global
+        # ceiling means it, and one who sets a tight per-source bound means that.
+        self._per_source_timeout_seconds = max(0.0, per_source_timeout_seconds)
+        self._global_timeout_seconds = max(0.0, global_timeout_seconds)
         self._outlier_threshold = outlier_threshold
         self._stale_confidence_penalty = stale_confidence_penalty
         self._partial_failure_penalty = partial_failure_penalty
@@ -349,6 +404,8 @@ class PriceAggregator:
                 "magnitude_outlier_ratio": magnitude_outlier_ratio,
                 "stablecoin_verify": stablecoin_verify,
                 "stablecoin_chainlink_check_interval": stablecoin_chainlink_check_interval,
+                "per_source_timeout_seconds": self._per_source_timeout_seconds,
+                "global_timeout_seconds": self._global_timeout_seconds,
             },
         )
 
@@ -737,13 +794,15 @@ class PriceAggregator:
         Returns:
             AggregationResult with valid results, outliers, and errors
         """
-        # Create tasks for all sources
-        tasks = [
-            self._fetch_with_metrics(source, token, quote, resolved_token=resolved_token) for source in self._sources
-        ]
-
-        # Gather results (don't raise on individual failures)
-        task_results = await asyncio.gather(*tasks, return_exceptions=True)
+        # VIB-5375 (RC-3): bound the whole fan-out. Each source's coroutine is
+        # wrapped in a PER-SOURCE timeout so one slow/hanging source (e.g. a cold
+        # Mantle RPC) is cut off and recorded as an error rather than stalling the
+        # decide() budget. The concurrent gather is additionally bounded by a
+        # GLOBAL timeout so many slow sources cannot stack wall-time past a known
+        # limit. A timed-out source is "unmeasured" (Empty≠Zero) — recorded as an
+        # error, never a zero price — and never sinks the aggregation: whatever
+        # valid results arrived still win.
+        task_results = await self._gather_bounded(token, quote, resolved_token=resolved_token)
 
         # Separate successes and failures
         valid_results: list[PriceResult] = []
@@ -795,6 +854,109 @@ class PriceAggregator:
 
         # Multiple sources: detect outliers and compute median
         return self._aggregate_multiple(valid_results, errors)
+
+    async def _gather_bounded(
+        self,
+        token: str,
+        quote: str,
+        *,
+        resolved_token: ResolvedToken | None = None,
+    ) -> list[PriceResult | Exception]:
+        """Fetch all sources concurrently under per-source + global timeouts.
+
+        VIB-5375 (RC-3). Returns a list positionally aligned with ``self._sources``
+        (same contract as the previous ``asyncio.gather(..., return_exceptions=True)``):
+        each entry is the source's :class:`PriceResult`, or an :class:`Exception`
+        when the source failed OR was cut off by the per-source / global timeout.
+
+        Two bounds, both fail-soft (a timeout is recorded as an error, never sinks
+        the aggregation, and is "unmeasured" — never a zero price):
+
+        - **Per-source** (``_per_source_timeout_seconds``): each source coroutine is
+          wrapped in :func:`asyncio.wait_for`, so one slow/hanging source is cut off
+          independently while the others keep running.
+        - **Global** (``_global_timeout_seconds``): the concurrent set is awaited
+          with :func:`asyncio.wait(..., timeout=...)`. On the global cutoff, any
+          source that has not finished is cancelled and recorded as a timeout error,
+          and the aggregator proceeds with whatever results arrived. This preserves
+          partial results — unlike wrapping the whole gather in ``wait_for``, which
+          would discard everything on the first slow source.
+        """
+        tasks: list[asyncio.Task[PriceResult]] = [
+            asyncio.ensure_future(self._fetch_with_timeout(source, token, quote, resolved_token=resolved_token))
+            for source in self._sources
+        ]
+
+        global_timeout = self._global_timeout_seconds if self._global_timeout_seconds > 0 else None
+        # ``asyncio.wait`` (not ``wait_for``) so that a global cutoff still leaves
+        # the already-completed tasks' results retrievable.
+        done, pending = await asyncio.wait(tasks, timeout=global_timeout)
+
+        results: list[PriceResult | Exception] = []
+        for source, task in zip(self._sources, tasks, strict=True):
+            if task in pending:
+                # Global cutoff reached before this source returned. Cancel it and
+                # record a timeout error so it counts as "unmeasured", not zero.
+                task.cancel()
+                metrics = self._health_metrics[source.source_name]
+                err_msg = f"Global aggregator timeout after {self._global_timeout_seconds:.1f}s"
+                metrics.record_failure(err_msg)
+                logger.warning(
+                    "Price source %s cut off by global aggregator timeout (%.1fs) for %s/%s; "
+                    "recording as unmeasured (not a zero price).",
+                    source.source_name,
+                    self._global_timeout_seconds,
+                    token,
+                    quote,
+                )
+                results.append(TimeoutError(err_msg))
+                continue
+            try:
+                results.append(task.result())
+            except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - mirror gather(return_exceptions=True)
+                results.append(exc if isinstance(exc, Exception) else TimeoutError(str(exc)))
+
+        # Drain cancellations so the cancelled coroutines don't leak warnings.
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        return results
+
+    async def _fetch_with_timeout(
+        self,
+        source: BasePriceSource,
+        token: str,
+        quote: str,
+        *,
+        resolved_token: ResolvedToken | None = None,
+    ) -> PriceResult:
+        """Wrap :meth:`_fetch_with_metrics` in the per-source wall-clock bound.
+
+        VIB-5375 (RC-3). A source whose ``get_price`` coroutine exceeds
+        ``_per_source_timeout_seconds`` is cut off here and the timeout is recorded
+        as a source failure (so health metrics and the per-call diagnostics reflect
+        it). The :class:`TimeoutError` propagates to ``_gather_bounded`` which treats
+        it like any other source error. Non-positive timeout disables the bound.
+        """
+        if self._per_source_timeout_seconds <= 0:
+            return await self._fetch_with_metrics(source, token, quote, resolved_token=resolved_token)
+        try:
+            return await asyncio.wait_for(
+                self._fetch_with_metrics(source, token, quote, resolved_token=resolved_token),
+                timeout=self._per_source_timeout_seconds,
+            )
+        except TimeoutError:
+            err_msg = f"Per-source timeout after {self._per_source_timeout_seconds:.1f}s"
+            self._health_metrics[source.source_name].record_failure(err_msg)
+            logger.warning(
+                "Price source %s exceeded per-source timeout (%.1fs) for %s/%s; "
+                "recording as unmeasured (not a zero price).",
+                source.source_name,
+                self._per_source_timeout_seconds,
+                token,
+                quote,
+            )
+            raise TimeoutError(err_msg) from None
 
     async def _fetch_with_metrics(
         self,

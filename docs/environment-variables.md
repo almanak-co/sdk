@@ -180,6 +180,8 @@ How the gateway binds itself and how strategy clients reach it. The defaults are
 | `ALMANAK_GATEWAY_LIFECYCLE_WRITER` | Hosted-only — distinguishes the strategy-pod gateway (writer) from the dashboard-pod gateway (reader). Both pods ship the same image; only the strategy-pod gateway sets this to `true`, so the dashboard-pod gateway stays read-only for lifecycle state and avoids racing the strategy's `agent_state` writes. Local mode ignores this field. | `false` |
 | `ALMANAK_GATEWAY_DATABASE_URL` | Postgres DSN for the hosted state backend (`metrics_db`). **Must be set in hosted mode; must NOT be set in local mode.** A mismatch is fatal at boot. | unset |
 | `ALMANAK_GATEWAY_CHAINS` | Comma-separated list of chains to pre-initialize at startup (`bnb,arb,base`). Empty = accept any chain on-demand. Each entry is canonicalized via `resolve_chain_name` so aliases work (`bsc`/`bnb`/`binance` all resolve). | unset |
+| `ALMANAK_GATEWAY_PRICE_SOURCE_TIMEOUT_SECONDS` | Per-source wall-clock bound (seconds) on each price source's `get_price` coroutine in the `PriceAggregator`. A source that exceeds it is recorded as an error ("unmeasured", never a zero price) and does not sink the aggregate. Above each source's internal HTTP timeout, below the 30s `decide()` budget. `<= 0` disables the bound. | `10.0` |
+| `ALMANAK_GATEWAY_PRICE_AGGREGATOR_TIMEOUT_SECONDS` | Global wall-clock bound (seconds) on the whole concurrent price fan-out across all sources. On the cutoff, sources that haven't returned are recorded as timeout errors and the aggregate proceeds with whatever valid results arrived. Sits under the 30s `decide()` budget / 60s pre-warm window. `<= 0` disables the bound. | `15.0` |
 
 ### Client connection flags & env-var precedence
 

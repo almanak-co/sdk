@@ -139,6 +139,21 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     # ``ALMANAK_GATEWAY_STABLECOIN_CHAINLINK_CHECK_INTERVAL``.
     stablecoin_chainlink_check_interval: int = 50
 
+    # VIB-5375 (RC-3) — PriceAggregator bounded timeouts. Without these a slow /
+    # rate-limited non-CoinGecko price source (e.g. a cold Mantle RPC behind the
+    # on-chain Chainlink source) could stall the concurrent price fan-out
+    # indefinitely, blowing the 30s decide() budget → "timeout, 0 tx" (the Mantle
+    # timeout class, VIB-2510/2511). ``price_source_timeout_seconds`` bounds each
+    # source's get_price coroutine; ``price_aggregator_timeout_seconds`` bounds the
+    # whole concurrent gather. A bounded source is recorded as an error
+    # ("unmeasured", never a zero price) and never sinks the aggregate. Defaults
+    # sit above each source's internal HTTP timeout and below the decide() budget /
+    # 60s pre-warm window. Non-positive disables the respective bound. Override via
+    # ``ALMANAK_GATEWAY_PRICE_SOURCE_TIMEOUT_SECONDS`` /
+    # ``ALMANAK_GATEWAY_PRICE_AGGREGATOR_TIMEOUT_SECONDS``.
+    price_source_timeout_seconds: float = 10.0
+    price_aggregator_timeout_seconds: float = 15.0
+
     # PoolHistoryService kill-switch (VIB-4728 / POOL-2).
     # Default false until POOL-5 wires real providers. The servicer is
     # always REGISTERED on the gRPC server; this flag gates the handler.
@@ -375,6 +390,24 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
             raise ValueError(f"dexscreener_min_turnover_ratio must be a finite number (got {value!r})")
         if value < 0 or value > 1:
             raise ValueError(f"dexscreener_min_turnover_ratio must be in [0, 1] (got {value})")
+        return value
+
+    @field_validator(
+        "price_source_timeout_seconds",
+        "price_aggregator_timeout_seconds",
+    )
+    @classmethod
+    def _validate_price_timeout_finite(cls, value: float, info: ValidationInfo) -> float:
+        # CodeRabbit review on PR 2984 (VIB-5375): these bounds are clamped with
+        # ``max(0.0, value)`` in the aggregator, where non-positive means "disable
+        # the bound" (a deliberate sentinel). But a non-finite override escapes that
+        # clamp: ``inf`` would make the bound effectively unbounded (re-opening the
+        # Mantle timeout-class stall these fields exist to close), and ``NaN`` feeds
+        # an undefined ``asyncio.wait(timeout=...)``. Reject non-finite at the model
+        # boundary so the misconfiguration fails at boot. ``<= 0`` stays valid (the
+        # disable sentinel); only NaN / +-inf are rejected.
+        if not math.isfinite(value):
+            raise ValueError(f"{info.field_name} must be a finite number (got {value!r})")
         return value
 
     # ``polymarket_market_cache_ttl_seconds`` validator is contributed by the

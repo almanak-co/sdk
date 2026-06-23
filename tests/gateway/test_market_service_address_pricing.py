@@ -44,6 +44,30 @@ def _mock_coingecko_address_response(source, payload: dict, status: int = 200):
     return patch.object(source, "_get_session", new_callable=AsyncMock, return_value=session)
 
 
+def _market_settings_stub(chains: list[str]) -> MagicMock:
+    """Build a settings stub covering only what ``_do_initialize`` touches.
+
+    A bare ``MagicMock`` auto-vivifies every attribute as a child Mock, so
+    ``getattr(settings, "...", default)`` in ``MarketServiceServicer`` never
+    falls back to its default — it returns a Mock. That is fine for fields the
+    servicer only stores, but VIB-5375 made the PriceAggregator do arithmetic on
+    the timeout fields (``max(0.0, per_source_timeout_seconds)``), which raises
+    ``TypeError`` on a Mock. We therefore pin every field the servicer reads to a
+    real value with the same defaults a real ``GatewaySettings`` carries, so the
+    stub stays a faithful stand-in as the servicer's settings surface grows.
+    """
+    settings = MagicMock()
+    settings.chains = chains
+    settings.network = "mainnet"
+    settings.coingecko_api_key = ""
+    settings.enable_manual_price_overrides = False
+    # VIB-5375: PriceAggregator now bounds wall-time and operates numerically on
+    # these — must be real floats, not auto-vivified Mocks.
+    settings.price_source_timeout_seconds = 10.0
+    settings.price_aggregator_timeout_seconds = 15.0
+    return settings
+
+
 @pytest.mark.asyncio
 async def test_getprice_resolves_renbtc_from_address_without_hardcoded_entry():
     """renBTC (not in any registry) should be priced via on-chain resolution
@@ -57,13 +81,7 @@ async def test_getprice_resolves_renbtc_from_address_without_hardcoded_entry():
     for tok in DEFAULT_TOKENS:
         assert RENBTC_ADDRESS.lower() not in {a.lower() for a in (tok.addresses or {}).values()}
 
-    # Build a settings stub covering only what _do_initialize touches.
-    settings = MagicMock()
-    settings.chains = ["base"]
-    settings.network = "mainnet"
-    settings.coingecko_api_key = ""
-    settings.enable_manual_price_overrides = False
-
+    settings = _market_settings_stub(["base"])
     servicer = MarketServiceServicer(settings)
 
     # Stub OnChainLookup: pretend the ERC20 contract returned symbol="renBTC",
@@ -87,9 +105,7 @@ async def test_getprice_resolves_renbtc_from_address_without_hardcoded_entry():
 
     # Reduce the aggregator to CoinGecko only — the other sources (Chainlink,
     # Binance, DexScreener) would try real HTTP/RPC in unit tests.
-    cg_source = next(
-        s for s in servicer._price_aggregator.sources if s.source_name == "coingecko"
-    )
+    cg_source = next(s for s in servicer._price_aggregator.sources if s.source_name == "coingecko")
     servicer._price_aggregator._sources = [cg_source]
 
     # Mock CoinGecko's contract-address endpoint.
@@ -135,12 +151,7 @@ async def test_getprice_forwards_resolved_token_with_chain_to_aggregator():
     carrying that chain so downstream price sources can use address endpoints
     instead of symbol lookup.
     """
-    settings = MagicMock()
-    settings.chains = ["base"]
-    settings.network = "mainnet"
-    settings.coingecko_api_key = ""
-    settings.enable_manual_price_overrides = False
-
+    settings = _market_settings_stub(["base"])
     servicer = MarketServiceServicer(settings)
 
     fake_metadata = TokenMetadata(
@@ -196,12 +207,7 @@ async def test_getprice_forwards_resolved_token_with_chain_to_aggregator():
 @pytest.mark.asyncio
 async def test_getprice_address_without_chain_uses_primary_chain():
     """Request with empty chain falls back to settings.chains[0]."""
-    settings = MagicMock()
-    settings.chains = ["base"]
-    settings.network = "mainnet"
-    settings.coingecko_api_key = ""
-    settings.enable_manual_price_overrides = False
-
+    settings = _market_settings_stub(["base"])
     servicer = MarketServiceServicer(settings)
 
     fake_metadata = TokenMetadata(
@@ -234,12 +240,7 @@ async def test_getprice_multi_chain_gateway_requires_explicit_chain():
     rather than silently cascading into "Unknown token"."""
     from almanak.gateway.services.market_service import MultiChainAmbiguousPriceRequest
 
-    settings = MagicMock()
-    settings.chains = ["base", "arbitrum"]  # multi-chain
-    settings.network = "mainnet"
-    settings.coingecko_api_key = ""
-    settings.enable_manual_price_overrides = False
-
+    settings = _market_settings_stub(["base", "arbitrum"])  # multi-chain
     servicer = MarketServiceServicer(settings)
 
     # OnChainLookup must not be constructed or called; if it is, the test fails.
@@ -264,12 +265,7 @@ async def test_getprice_multi_chain_empty_chain_returns_invalid_argument():
     gRPC INVALID_ARGUMENT, not a silent pricing miss."""
     import grpc
 
-    settings = MagicMock()
-    settings.chains = ["base", "arbitrum"]  # multi-chain
-    settings.network = "mainnet"
-    settings.coingecko_api_key = ""
-    settings.enable_manual_price_overrides = False
-
+    settings = _market_settings_stub(["base", "arbitrum"])  # multi-chain
     servicer = MarketServiceServicer(settings)
     await servicer._ensure_initialized()
 
@@ -297,12 +293,7 @@ async def test_getprice_multi_chain_symbol_token_keeps_fallthrough():
     """Multi-chain gateway + SYMBOL token (not an EVM address) + empty chain
     must still fall through to the normal symbol-based aggregator path.
     Only address-based lookups are tightened by Phase 2."""
-    settings = MagicMock()
-    settings.chains = ["base", "arbitrum"]  # multi-chain
-    settings.network = "mainnet"
-    settings.coingecko_api_key = ""
-    settings.enable_manual_price_overrides = False
-
+    settings = _market_settings_stub(["base", "arbitrum"])  # multi-chain
     servicer = MarketServiceServicer(settings)
 
     resolved = await servicer._resolve_token_for_pricing("ETH", "")
@@ -313,12 +304,7 @@ async def test_getprice_multi_chain_symbol_token_keeps_fallthrough():
 @pytest.mark.asyncio
 async def test_getprice_symbol_input_skips_address_resolution():
     """Symbol input (e.g. 'ETH') must not trigger OnChainLookup."""
-    settings = MagicMock()
-    settings.chains = ["base"]
-    settings.network = "mainnet"
-    settings.coingecko_api_key = ""
-    settings.enable_manual_price_overrides = False
-
+    settings = _market_settings_stub(["base"])
     servicer = MarketServiceServicer(settings)
     resolved = await servicer._resolve_token_for_pricing("ETH", "base")
     assert resolved is None  # symbols skip the on-chain path entirely
@@ -332,12 +318,7 @@ async def test_getprice_rejects_invalid_chain_with_invalid_argument(bad_chain):
     RpcService behavior and enforces the gateway's input-validation boundary."""
     import grpc
 
-    settings = MagicMock()
-    settings.chains = ["base"]
-    settings.network = "mainnet"
-    settings.coingecko_api_key = ""
-    settings.enable_manual_price_overrides = False
-
+    settings = _market_settings_stub(["base"])
     servicer = MarketServiceServicer(settings)
     await servicer._ensure_initialized()
 
