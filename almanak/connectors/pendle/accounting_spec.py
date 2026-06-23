@@ -21,7 +21,6 @@ registry-wiring tests in ``tests/unit/connectors/pendle/test_accounting_spec.py`
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass
@@ -33,6 +32,7 @@ from almanak.connectors._strategy_base.accounting_treatment_base import (
     AccountingCategoryDecision,
     AccountingTreatmentSpec,
 )
+from almanak.framework.accounting.category_handlers._price_helpers import parse_price_inputs
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.models import (
     AccountingConfidence,
@@ -389,47 +389,55 @@ def _sy_price_from_ledger(ctx: _PTContext, base_token_symbol: str) -> Decimal | 
     ``None`` (unmeasured) when the column is empty, unparseable, or has no entry
     for the symbol — the caller then degrades confidence and stores an
     SY-denominated yield (Empty ≠ Zero).
+
+    VIB-5314: parse via the shared tolerant parser
+    (``category_handlers._price_helpers.parse_price_inputs``) so this reads the
+    **canonical nested** wire shape ``{SYM: {"price_usd": "<num>", ...}}`` written
+    by ``observability/ledger.py`` — NOT only the legacy flat ``{SYM: "<num>"}``
+    shape. The prior hand-rolled ``Decimal(str(prices.get(sym)))`` returned
+    ``None`` on every real ledger row (the nested dict stringifies to a non-numeric
+    value), which silently made the strict-USD realized-yield contract INERT: USD
+    was never measured, so ``realized_yield_usd`` was always ``None`` in production.
+    The parser upper-cases symbol keys; we match case-insensitively to stay robust
+    to a base-token symbol stored in any case on the ledger row.
     """
     if not base_token_symbol:
         return None
     raw = ctx.ledger_row.get("price_inputs_json") or ""
     if not raw:
         return None
-    try:
-        prices = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(prices, dict):
-        return None
-    val = prices.get(base_token_symbol)
-    if val is None:
-        return None
-    try:
-        parsed = Decimal(str(val))
-    except (InvalidOperation, ValueError):
-        return None
-    return parsed if parsed.is_finite() else None
+    prices = parse_price_inputs(raw)
+    return prices.get(base_token_symbol.upper())
 
 
 def _realized_yield_from_match(
     match: MatchResult,
     sy_received_human: Decimal,
     sy_price: Decimal | None,
-) -> tuple[Decimal | None, str, AccountingConfidence]:
-    """Convert a FIFO ``MatchResult`` into ``(realized_yield_usd, reason, confidence)``.
+) -> tuple[Decimal | None, Decimal | None, str, AccountingConfidence]:
+    """Convert a FIFO ``MatchResult`` into ``(realized_yield_usd, realized_yield_sy, reason, confidence)``.
 
-    Implements the Empty≠Zero contract for PT realized yield (VIB-4988 C4):
+    Implements the strict Empty≠Zero accounting-contract for PT realized yield
+    (VIB-5314, tightening VIB-4988 C4). ``realized_yield_usd`` is STRICTLY a USD
+    value or ``None`` — it must NEVER hold a non-USD (SY/underlying-denominated)
+    number, even flagged. The measured SY-denominated primitive is carried
+    separately in ``realized_yield_sy``:
 
-    * No lot matched (``lot_matches`` empty) → ``None`` (unmeasured).
-    * Matched & ``sy_price`` known → ``interest_or_yield * sy_price`` (USD).
-      ``Decimal("0")`` is a genuine break-even, not "missing".
-    * Matched & ``sy_price`` is ``None`` → store the SY-denominated value but
-      flag ESTIMATED + an unavailable_reason (never silently treat SY as USD).
+    * No lot matched (``lot_matches`` empty) → ``(None, None, reason, ESTIMATED)``
+      (both unmeasured).
+    * Matched: ``realized_yield_sy = match.interest_or_yield`` ALWAYS (the measured
+      SY/underlying-denominated primitive).
+    * Matched & ``sy_price`` known → ``realized_yield_usd = interest_or_yield *
+      sy_price`` (USD); confidence HIGH (or ESTIMATED on a partial match).
+      ``Decimal("0")`` USD is a genuine break-even (measured zero), NOT "missing".
+    * Matched & ``sy_price`` is ``None`` → ``realized_yield_usd = None`` (the USD
+      projection is unmeasured — never the SY value); confidence ESTIMATED + a
+      reason noting only the SY-denominated value is available.
     * Partial match (``unmatched_amount > 0`` but a lot WAS consumed) → measured
       yield on the matched portion, with the unmatched qty noted in the reason.
     """
     if not match.lot_matches:
-        return None, "no PT buy lot matched — realized yield unavailable", AccountingConfidence.ESTIMATED
+        return None, None, "no PT buy lot matched — realized yield unavailable", AccountingConfidence.ESTIMATED
 
     partial_note = ""
     confidence = AccountingConfidence.HIGH
@@ -437,12 +445,14 @@ def _realized_yield_from_match(
         partial_note = f"; {match.unmatched_amount} PT unmatched (no prior buy lot) — yield on matched portion only"
         confidence = AccountingConfidence.ESTIMATED
 
+    realized_sy = match.interest_or_yield
+
     if sy_price is None:
-        reason = "realized yield is SY-denominated (no USD price for base token)" + partial_note
-        return match.interest_or_yield, reason, AccountingConfidence.ESTIMATED
+        reason = "USD price for base token unmeasured — only SY-denominated realized yield available" + partial_note
+        return None, realized_sy, reason, AccountingConfidence.ESTIMATED
 
     realized_usd = match.interest_or_yield * sy_price
-    return realized_usd, partial_note.lstrip("; "), confidence
+    return realized_usd, realized_sy, partial_note.lstrip("; "), confidence
 
 
 def _build_pt_buy(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> PendleAccountingEvent:
@@ -564,6 +574,7 @@ def _build_pt_sell(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pendl
     identity = _pt_identity(ctx, "PT_SELL")
 
     realized_yield_usd: Decimal | None = None
+    realized_yield_sy: Decimal | None = None
     basis_lot_id: str | None = None
     confidence = AccountingConfidence.ESTIMATED
     unavailable_reason = "PT sell amounts unavailable from receipt"
@@ -580,7 +591,9 @@ def _build_pt_sell(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pendl
                 pt_redeemed=pt_human,
                 sy_received=sy_human,
             )
-            realized_yield_usd, unavailable_reason, confidence = _realized_yield_from_match(match, sy_human, sy_price)
+            realized_yield_usd, realized_yield_sy, unavailable_reason, confidence = _realized_yield_from_match(
+                match, sy_human, sy_price
+            )
             if match.lot_matches:
                 basis_lot_id = match.lot_matches[0].lot_id
         else:
@@ -599,6 +612,7 @@ def _build_pt_sell(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pendl
         implied_apr_bps=None,
         days_to_maturity=None,
         realized_yield_usd=realized_yield_usd,
+        realized_yield_sy=realized_yield_sy,
         basis_lot_id=basis_lot_id,
         confidence=confidence,
         unavailable_reason=unavailable_reason,
@@ -703,6 +717,7 @@ def _build_pt_redeem(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pen
     identity = _pt_identity(ctx, "PT_REDEEM")
 
     realized_yield_usd: Decimal | None = None
+    realized_yield_sy: Decimal | None = None
     basis_lot_id: str | None = None
     confidence = AccountingConfidence.ESTIMATED
     unavailable_reason = "PT redeem amounts unavailable from receipt"
@@ -722,8 +737,9 @@ def _build_pt_redeem(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pen
                 pt_redeemed=pt_human,
                 sy_received=sy_human,
             )
-            yield_usd, match_reason, match_conf = _realized_yield_from_match(match, sy_human, sy_price)
+            yield_usd, yield_sy, match_reason, match_conf = _realized_yield_from_match(match, sy_human, sy_price)
             realized_yield_usd = yield_usd
+            realized_yield_sy = yield_sy
             if match.lot_matches:
                 basis_lot_id = match.lot_matches[0].lot_id
             # Take the match note when token_in is a real PT- symbol; otherwise the
@@ -750,6 +766,7 @@ def _build_pt_redeem(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pen
         implied_apr_bps=None,
         days_to_maturity=None,
         realized_yield_usd=realized_yield_usd,
+        realized_yield_sy=realized_yield_sy,
         basis_lot_id=basis_lot_id,
         confidence=confidence,
         unavailable_reason=unavailable_reason,

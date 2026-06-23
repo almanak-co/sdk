@@ -301,7 +301,10 @@ def test_primitive_versions_explicit_per_primitive_pinning() -> None:
         # VIB-5316: bumped 4→5 — PT_BUY now populates the buy-time ``sy_price`` the
         # held-PT USD cost basis is anchored to (was re-marked at the current
         # underlying, sign-flipping PnL for volatile underlyings).
-        Primitive.SWAP: 5,
+        # VIB-5314: bumped 5→6 — PT_SELL/PT_REDEEM ``realized_yield_usd`` is now
+        # STRICTLY USD-or-None (never SY-units); new ``realized_yield_sy`` carries
+        # the SY-denominated value separately.
+        Primitive.SWAP: 6,
         Primitive.VAULT: 1,
         Primitive.STAKING: 1,
         Primitive.BRIDGE: 1,

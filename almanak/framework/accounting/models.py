@@ -362,6 +362,12 @@ class PendleAccountingEvent:
     realized_yield_usd: Decimal | None
     basis_lot_id: str | None = None
 
+    # VIB-5314: SY/underlying-denominated realized yield — the measured primitive.
+    # ``realized_yield_usd`` is its USD projection when a base-token USD price was
+    # measured, else None. The two are kept separate so a *_usd field NEVER holds
+    # non-USD units (strict Empty≠Zero). None = unmeasured; Decimal("0") = zero.
+    realized_yield_sy: Decimal | None = None
+
     # VIB-3488: SY price in USD, additive optional field (stays schema_version=1).
     # None = price unavailable (preserve None vs Decimal("0") discipline).
     # sy_value_usd = sy_amount * sy_price; pt_value_usd = pt_amount * pt_price.
@@ -398,6 +404,7 @@ class PendleAccountingEvent:
             "implied_apr_bps": self.implied_apr_bps,
             "days_to_maturity": self.days_to_maturity,
             "realized_yield_usd": _enc(self.realized_yield_usd),
+            "realized_yield_sy": _enc(self.realized_yield_sy),
             "basis_lot_id": self.basis_lot_id,
             "confidence": self.confidence.value,
             # VIB-3938 — see LPAccountingEvent.to_payload_json for rationale.
@@ -430,6 +437,7 @@ class PendleAccountingEvent:
             implied_apr_bps=d.get("implied_apr_bps"),
             days_to_maturity=d.get("days_to_maturity"),
             realized_yield_usd=_dec(d.get("realized_yield_usd")),
+            realized_yield_sy=_dec(d.get("realized_yield_sy")),
             basis_lot_id=d.get("basis_lot_id"),
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH)),
             unavailable_reason=d.get("unavailable_reason") or "",

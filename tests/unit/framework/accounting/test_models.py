@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -88,7 +89,8 @@ def _pendle_event(identity: AccountingIdentity) -> PendleAccountingEvent:
         pt_price=Decimal("0.95"),
         implied_apr_bps=750,
         days_to_maturity=247,
-        realized_yield_usd=None,
+        realized_yield_usd=Decimal("1.25"),
+        realized_yield_sy=Decimal("0.0005"),
         basis_lot_id="lot-1",
         confidence=AccountingConfidence.HIGH,
         unavailable_reason="",
@@ -149,10 +151,36 @@ class TestRoundTrip:
         assert restored.implied_apr_bps == original.implied_apr_bps
         assert restored.days_to_maturity == original.days_to_maturity
         assert restored.realized_yield_usd == original.realized_yield_usd
+        assert restored.realized_yield_sy == original.realized_yield_sy
         assert restored.basis_lot_id == original.basis_lot_id
         assert restored.confidence == original.confidence
         assert restored.unavailable_reason == original.unavailable_reason
         assert restored.schema_version == 1
+
+    def test_pendle_event_realized_yield_sy_empty_not_zero(self):
+        """VIB-5314 Empty≠Zero: realized_yield_sy None stays None, 0 stays 0
+        across the payload round-trip; realized_yield_usd stays strictly USD-or-None."""
+        identity = _identity()
+        base = _pendle_event(identity)
+
+        # Unmeasured USD price case: usd None, sy measured.
+        none_usd = replace(base, realized_yield_usd=None, realized_yield_sy=Decimal("0.0005"))
+        r = PendleAccountingEvent.from_payload_json(identity, none_usd.to_payload_json())
+        assert r.realized_yield_usd is None
+        assert r.realized_yield_sy == Decimal("0.0005")
+
+        # Measured break-even: both Decimal("0"), never coerced to None.
+        zero = replace(base, realized_yield_usd=Decimal("0"), realized_yield_sy=Decimal("0"))
+        r0 = PendleAccountingEvent.from_payload_json(identity, zero.to_payload_json())
+        assert r0.realized_yield_usd == Decimal("0")
+        assert r0.realized_yield_usd is not None
+        assert r0.realized_yield_sy == Decimal("0")
+
+        # Fully unmeasured (no lot match): both None.
+        both_none = replace(base, realized_yield_usd=None, realized_yield_sy=None)
+        rn = PendleAccountingEvent.from_payload_json(identity, both_none.to_payload_json())
+        assert rn.realized_yield_usd is None
+        assert rn.realized_yield_sy is None
 
 
 # ---------------------------------------------------------------------------

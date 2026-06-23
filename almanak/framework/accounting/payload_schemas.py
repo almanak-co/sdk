@@ -217,7 +217,19 @@ PRIMITIVE_VERSIONS: dict[Primitive, int] = {
     # and readers already handle None, so the wire format is additive; the FIFO
     # algo is unchanged → matching_policy_version is NOT bumped. (Branch is
     # unmerged/pre-production, so no backfill obligation — Blueprint 27 §10.6.)
-    Primitive.SWAP: 5,
+    # VIB-5314 (v5→v6): PT_SELL / PT_REDEEM ``realized_yield_usd`` is now STRICTLY
+    # USD-or-None — it never holds the SY/underlying-denominated value, even when
+    # flagged (pre-v6 it substituted the SY number when the base-token USD price
+    # was unmeasured, a units violation in a *_usd field). The measured
+    # SY-denominated value now rides a NEW additive ``realized_yield_sy`` field.
+    # When no base-token USD price was measured, ``realized_yield_usd`` is None and
+    # only ``realized_yield_sy`` is populated. The wire format is additive (readers
+    # already handle None) but the semantics of ``realized_yield_usd`` changed, so
+    # the stamp lets a reader disambiguate a v6 strict-USD payload from a pre-v6
+    # one that may carry SY-units in the *_usd field. The FIFO algo is unchanged →
+    # matching_policy_version is NOT bumped. (Branch is unmerged/pre-production, so
+    # no backfill obligation — Blueprint 27 §10.6.)
+    Primitive.SWAP: 6,
     Primitive.VAULT: PRIMITIVE_VERSION_DEFAULT,
     Primitive.STAKING: PRIMITIVE_VERSION_DEFAULT,
     Primitive.BRIDGE: PRIMITIVE_VERSION_DEFAULT,

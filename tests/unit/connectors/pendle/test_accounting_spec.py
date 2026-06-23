@@ -324,20 +324,21 @@ def test_position_key_withdraw_is_owned_but_deferred():
     assert market == "0xyt"
 
 
-# --- version stamp == 5 for PT events after augment (VIB-5316 SWAP bump) ------
+# --- version stamp == 6 for PT events after augment (VIB-5314 SWAP bump) ------
 
 
 @pytest.mark.parametrize("event_type", ["PT_BUY", "PT_SELL", "PT_REDEEM"])
-def test_pt_events_stamp_primitive_version_5(event_type: str):
-    """PT_BUY / PT_SELL / PT_REDEEM all taxonomy-map to SWAP, now bumped to v5
-    (v4→v5 = PT_BUY now populates the buy-time ``sy_price`` the held-PT USD cost
-    basis is anchored to; v3→v4 was the raw-18 → human payload-unit move)."""
+def test_pt_events_stamp_primitive_version_6(event_type: str):
+    """PT_BUY / PT_SELL / PT_REDEEM all taxonomy-map to SWAP, now bumped to v6
+    (v5→v6 = PT_SELL/PT_REDEEM realized_yield_usd is STRICTLY USD-or-None, with the
+    SY-denominated value carried separately in realized_yield_sy; v4→v5 was PT_BUY
+    populating the buy-time ``sy_price``; v3→v4 was the raw-18 → human unit move)."""
     import json as _json
 
     from almanak.framework.accounting.writer import augment_accounting_payload
 
     decoded = _json.loads(augment_accounting_payload(_json.dumps({"event_type": event_type}), is_live=True))
-    assert decoded["primitive_version"] == 5
+    assert decoded["primitive_version"] == 6
 
 
 # --- golden: _build_pt_buy payload is byte-identical to the buy contract -----
@@ -378,9 +379,201 @@ def test_pt_buy_payload_byte_identity_golden():
         "implied_apr_bps",
         "days_to_maturity",
         "realized_yield_usd",
+        "realized_yield_sy",
         "basis_lot_id",
         "confidence",
         "unavailable_reason",
         "schema_version",
         "primitive_version",
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _realized_yield_from_match — strict USD-or-None contract (VIB-5314)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _match(*, interest: str, matched: bool = True, unmatched: str = "0"):
+    """Build a minimal MatchResult for the realized-yield helper."""
+    from almanak.framework.accounting.basis import LotMatch, MatchResult
+
+    return MatchResult(
+        repaid_principal=Decimal("1"),
+        interest_or_yield=Decimal(interest),
+        lot_matches=[LotMatch(lot_id="lot-1", consumed_quantity=Decimal("1"))] if matched else [],
+        unmatched_amount=Decimal(unmatched),
+    )
+
+
+def test_realized_yield_measured_price_projects_to_usd() -> None:
+    """Measured sy_price → usd = sy * price, sy = the SY primitive, HIGH."""
+    from almanak.connectors.pendle.accounting_spec import _realized_yield_from_match
+    from almanak.framework.accounting.models import AccountingConfidence
+
+    usd, sy, _reason, conf = _realized_yield_from_match(
+        _match(interest="0.05"), Decimal("0.95"), Decimal("2")
+    )
+    assert usd == Decimal("0.10")  # 0.05 SY * $2
+    assert sy == Decimal("0.05")
+    assert conf == AccountingConfidence.HIGH
+
+
+def test_realized_yield_unmeasured_price_usd_none_sy_carried() -> None:
+    """sy_price None → usd None (never SY-units in *_usd), sy = SY value, ESTIMATED."""
+    from almanak.connectors.pendle.accounting_spec import _realized_yield_from_match
+    from almanak.framework.accounting.models import AccountingConfidence
+
+    usd, sy, reason, conf = _realized_yield_from_match(
+        _match(interest="0.05"), Decimal("0.95"), None
+    )
+    assert usd is None
+    assert sy == Decimal("0.05")
+    assert conf == AccountingConfidence.ESTIMATED
+    assert "SY-denominated" in reason
+
+
+def test_realized_yield_no_lot_match_both_none() -> None:
+    """No lot matched → both usd and sy None (Empty≠Zero)."""
+    from almanak.connectors.pendle.accounting_spec import _realized_yield_from_match
+    from almanak.framework.accounting.models import AccountingConfidence
+
+    usd, sy, _reason, conf = _realized_yield_from_match(
+        _match(interest="0", matched=False), Decimal("0.95"), Decimal("2")
+    )
+    assert usd is None
+    assert sy is None
+    assert conf == AccountingConfidence.ESTIMATED
+
+
+def test_realized_yield_break_even_is_measured_zero_not_none() -> None:
+    """Measured break-even (interest 0) → usd Decimal('0') (NOT None), sy 0."""
+    from almanak.connectors.pendle.accounting_spec import _realized_yield_from_match
+
+    usd, sy, _reason, _conf = _realized_yield_from_match(
+        _match(interest="0"), Decimal("0.9"), Decimal("1")
+    )
+    assert usd == Decimal("0")
+    assert usd is not None  # measured zero, distinct from unmeasured None
+    assert sy == Decimal("0")
+
+
+def test_realized_yield_partial_match_downgrades_estimated() -> None:
+    """Partial match (unmatched > 0) keeps measured USD but downgrades to ESTIMATED."""
+    from almanak.connectors.pendle.accounting_spec import _realized_yield_from_match
+    from almanak.framework.accounting.models import AccountingConfidence
+
+    usd, sy, reason, conf = _realized_yield_from_match(
+        _match(interest="0.05", unmatched="0.5"), Decimal("0.95"), Decimal("1")
+    )
+    assert usd == Decimal("0.05")
+    assert sy == Decimal("0.05")
+    assert conf == AccountingConfidence.ESTIMATED
+    assert "unmatched" in reason
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _sy_price_from_ledger — must read the CANONICAL NESTED price_inputs_json shape
+# (VIB-5314 regression guard). The pre-fix hand-rolled ``Decimal(str(prices.get(
+# sym)))`` returned None on the nested wire shape every real ledger row carries,
+# silently making the strict-USD realized-yield contract INERT. The part-1 unit
+# tests only ever used the legacy FLAT shape, which masked the bug.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _ctx_with_prices(price_inputs_json: str):
+    """Build a minimal _PTContext carrying only the price_inputs_json column."""
+    from almanak.connectors.pendle.accounting_spec import _pt_context
+
+    return _pt_context(_outbox("SWAP"), _ledger("SWAP", price_inputs_json=price_inputs_json))
+
+
+def test_sy_price_reads_canonical_nested_shape_vib5314() -> None:
+    """Canonical nested ``{SYM: {"price_usd": "..."}}`` → the measured price.
+
+    This is the exact shape ``observability/ledger.py`` writes and every real
+    ledger row carries; the pre-fix parser returned None here (inert contract).
+    """
+    from almanak.connectors.pendle.accounting_spec import _sy_price_from_ledger
+
+    nested = json.dumps(
+        {
+            "WSTETH": {"price_usd": "2110.4822806872576", "oracle_source": "aggregator", "confidence": "HIGH"},
+            "ETH": {"price_usd": "1706.41"},
+        }
+    )
+    assert _sy_price_from_ledger(_ctx_with_prices(nested), "WSTETH") == Decimal("2110.4822806872576")
+
+
+def test_sy_price_reads_legacy_flat_shape_vib5314() -> None:
+    """Legacy flat ``{SYM: "<num>"}`` shape still resolves (back-compat)."""
+    from almanak.connectors.pendle.accounting_spec import _sy_price_from_ledger
+
+    flat = json.dumps({"WSTETH": "4000.0"})
+    assert _sy_price_from_ledger(_ctx_with_prices(flat), "WSTETH") == Decimal("4000.0")
+
+
+def test_sy_price_symbol_match_is_case_insensitive_vib5314() -> None:
+    """A base-token symbol in any case resolves against the upper-cased parse."""
+    from almanak.connectors.pendle.accounting_spec import _sy_price_from_ledger
+
+    nested = json.dumps({"WSTETH": {"price_usd": "2110.5"}})
+    assert _sy_price_from_ledger(_ctx_with_prices(nested), "wstETH") == Decimal("2110.5")
+
+
+def test_sy_price_absent_symbol_returns_none_vib5314() -> None:
+    """Symbol absent from the row → None (unmeasured, Empty≠Zero)."""
+    from almanak.connectors.pendle.accounting_spec import _sy_price_from_ledger
+
+    nested = json.dumps({"ETH": {"price_usd": "1706.41"}})
+    assert _sy_price_from_ledger(_ctx_with_prices(nested), "WSTETH") is None
+
+
+@pytest.mark.parametrize("raw", ["", "not json", "[]", "{}"])
+def test_sy_price_empty_or_malformed_returns_none_vib5314(raw: str) -> None:
+    """Empty / malformed / non-object price_inputs_json → None (fail-closed)."""
+    from almanak.connectors.pendle.accounting_spec import _sy_price_from_ledger
+
+    assert _sy_price_from_ledger(_ctx_with_prices(raw), "WSTETH") is None
+
+
+def test_pt_buy_sell_roundtrip_books_real_usd_from_nested_prices_vib5314() -> None:
+    """End-to-end guard mirroring the real fixture: a PT buy→sell round-trip whose
+    ledger rows carry the CANONICAL NESTED price_inputs_json books a genuine USD
+    ``realized_yield_usd`` (sy_yield × measured base price), a separate measured
+    ``realized_yield_sy``, and confidence HIGH — NOT the inert None/SY-units state
+    the pre-fix parser produced. This is the unit-level proof that PEN4 moves to
+    real USD once the fixture is regenerated."""
+    from almanak.framework.accounting.models import AccountingConfidence, PendleEventType
+
+    basis = FIFOBasisStore()
+    nested = json.dumps({"WSTETH": {"price_usd": "2000.0", "oracle_source": "aggregator", "confidence": "HIGH"}})
+
+    # BUY: 1.0 WSTETH → 1.25 PT (swap_amounts amount_in=WSTETH, amount_out=PT; raw-18).
+    buy_extracted = json.dumps({"swap_amounts": {"amount_in": int(1.0e18), "amount_out": int(1.25e18)}})
+    buy = handle_pendle_pt(
+        _outbox("SWAP"),
+        _ledger("SWAP", token_in="WSTETH", token_out="PT-wstETH-25JUN2030", extracted=buy_extracted, tx_hash="0xbuy"),
+        basis_store=basis,
+    )
+    assert buy is not None and buy.event_type == PendleEventType.PT_BUY
+
+    # SELL the full PT lot back for 1.10 WSTETH (a 0.10 WSTETH realized gain).
+    sell_extracted = json.dumps({"swap_amounts": {"amount_in": int(1.25e18), "amount_out": int(1.10e18)}})
+    sell = handle_pendle_pt(
+        _outbox("SWAP"),
+        _ledger(
+            "SWAP",
+            token_in="PT-wstETH-25JUN2030",
+            token_out="WSTETH",
+            extracted=sell_extracted,
+            price_inputs_json=nested,
+            tx_hash="0xsell",
+        ),
+        basis_store=basis,
+    )
+    assert sell is not None and sell.event_type == PendleEventType.PT_SELL
+    # realized_sy = sy_received − sy_cost = 1.10 − 1.00 = 0.10 WSTETH.
+    assert sell.realized_yield_sy == Decimal("0.10")
+    # realized_usd = 0.10 WSTETH × $2000 = $200 (genuine USD, not None, not SY-units).
+    assert sell.realized_yield_usd == Decimal("200.00")
+    assert sell.confidence == AccountingConfidence.HIGH

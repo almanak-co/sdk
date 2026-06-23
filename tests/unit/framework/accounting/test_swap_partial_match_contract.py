@@ -134,9 +134,11 @@ def test_swap_primitive_version_bumped_to_v2() -> None:
     the SWAP primitive), then to v4 (PT_BUY/PT_SELL payloads moved raw-18 →
     human units, uniform with PT_REDEEM); VIB-5316 took it to v5 (PT_BUY now
     populates the buy-time ``sy_price`` the held-PT USD cost basis is anchored
-    to). The assertion tracks the current value.
+    to); VIB-5314 took it to v6 (PT_SELL/PT_REDEEM realized_yield_usd is strictly
+    USD-or-None with a separate realized_yield_sy field). The assertion tracks the
+    current value.
     """
-    assert PRIMITIVE_VERSIONS[Primitive.SWAP] == 5
+    assert PRIMITIVE_VERSIONS[Primitive.SWAP] == 6
 
 
 # ---------------------------------------------------------------------------

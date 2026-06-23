@@ -413,6 +413,7 @@ def test_pt_sell_realized_yield_usd_high_confidence() -> None:
     assert event.pt_amount == Decimal("1")
     assert event.sy_amount == Decimal("0.95")
     assert event.realized_yield_usd == Decimal("0.05")
+    assert event.realized_yield_sy == Decimal("0.05")  # measured SY primitive
     assert event.confidence == AccountingConfidence.HIGH
     assert event.basis_lot_id is not None
     assert event.implied_apr_bps is None
@@ -439,6 +440,7 @@ def test_pt_sell_break_even_is_measured_zero() -> None:
 
     assert event is not None
     assert event.realized_yield_usd == Decimal("0")  # measured zero, NOT None
+    assert event.realized_yield_sy == Decimal("0")  # measured SY zero (break-even)
     assert event.confidence == AccountingConfidence.HIGH
 
 
@@ -463,12 +465,15 @@ def test_pt_sell_unmatched_returns_none_estimated() -> None:
     assert event is not None
     assert event.event_type == PendleEventType.PT_SELL
     assert event.realized_yield_usd is None
+    assert event.realized_yield_sy is None  # no lot matched → both unmeasured
     assert event.confidence == AccountingConfidence.ESTIMATED
     assert event.basis_lot_id is None
 
 
-def test_pt_sell_missing_sy_price_is_sy_denominated_estimated() -> None:
-    """sy_price missing → SY-denominated yield stored + ESTIMATED + explicit reason."""
+def test_pt_sell_missing_sy_price_usd_none_sy_carried() -> None:
+    """VIB-5314: sy_price missing → realized_yield_usd is None (STRICTLY USD-or-None,
+    never SY-units in the *_usd field); the SY-denominated value (0.95 - 0.9 = 0.05 SY)
+    rides realized_yield_sy; ESTIMATED + explicit reason."""
     pt_symbol = _future_pt()
     basis = FIFOBasisStore()
     _buy_lot(basis, pt_symbol)
@@ -487,8 +492,10 @@ def test_pt_sell_missing_sy_price_is_sy_denominated_estimated() -> None:
     event = handle_pendle_pt(ob, led, basis_store=basis)
 
     assert event is not None
-    # SY-denominated value (0.95 - 0.9 = 0.05 SY), NOT silently treated as USD.
-    assert event.realized_yield_usd == Decimal("0.05")
+    # No measured USD price → the USD projection is unmeasured (None), NOT the SY value.
+    assert event.realized_yield_usd is None
+    # The measured SY-denominated primitive is preserved separately.
+    assert event.realized_yield_sy == Decimal("0.05")
     assert event.confidence == AccountingConfidence.ESTIMATED
     assert "SY-denominated" in event.unavailable_reason
 
@@ -552,6 +559,7 @@ def test_pt_redeem_at_maturity_human_amounts_and_yield() -> None:
     assert event.sy_amount == Decimal(sy_raw) / _SCALE_18
     # Yield = (1.0 received - 0.9 cost) * $1 = 0.10 USD.
     assert event.realized_yield_usd == Decimal("0.1")
+    assert event.realized_yield_sy == Decimal("0.1")  # measured SY primitive (USDC @ $1)
     assert event.basis_lot_id is not None
 
 
