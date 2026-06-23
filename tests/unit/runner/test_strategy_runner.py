@@ -394,6 +394,38 @@ class TestRunIteration:
         assert result.intent is None
 
     @pytest.mark.asyncio
+    async def test_run_iteration_resets_drain_batch_at_start(
+        self,
+        runner: StrategyRunner,
+    ) -> None:
+        """VIB-5406: ``run_iteration`` opens a FRESH per-iteration drain batch at
+        the top, so a prior iteration's drain tasks never carry over into this
+        iteration's snapshot barrier (cross-iteration contamination would let the
+        barrier await — or skip — the wrong unit's disposals). A no-trade (HOLD)
+        iteration fires no drains, so after the reset the batch is empty.
+
+        Barrier semantics, both capture lanes, the teardown reset, the
+        completed-but-failed result check, and the race closure itself are covered
+        in ``test_drain_barrier_snapshot_race_vib5406.py``; this asserts the
+        iteration-start reset specifically.
+        """
+
+        async def _already_done() -> bool:
+            return True
+
+        stale = asyncio.create_task(_already_done())
+        await stale  # a leftover task from a hypothetical prior iteration
+        runner._drain_batch = [stale]
+
+        strategy = MockStrategy(decide_returns=Intent.hold(reason="neutral"))
+        await runner.run_iteration(strategy)
+
+        # The iteration-start reset (strategy_runner.py: ``self._drain_batch = []``)
+        # replaced the list; the stale task is gone and no new drains were fired.
+        assert runner._drain_batch == []
+        assert stale not in runner._drain_batch
+
+    @pytest.mark.asyncio
     async def test_swap_intent_executes_successfully(
         self,
         runner: StrategyRunner,

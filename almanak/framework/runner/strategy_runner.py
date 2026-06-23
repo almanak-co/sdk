@@ -888,6 +888,15 @@ class StrategyRunner:
         )
         # Strong-ref set for drain tasks so they cannot be GC'd before completion.
         self._pending_drain_tasks: set[asyncio.Task] = set()
+        # VIB-5406: per-unit (iteration / teardown) drain-task batch. A snapshot
+        # awaits exactly THIS unit's disposal drains before reading
+        # accounting_events, so event-replay-derived inventory (PT, swap) reflects
+        # this unit's disposals (closes the held-PT/swap NAV race). Reset at the
+        # top of run_iteration and at the teardown pre-bracket; awaited+cleared by
+        # ``await_drain_barrier`` at each snapshot site. Distinct from
+        # ``_pending_drain_tasks`` (the lifetime strong-ref set awaited only at
+        # shutdown) — the batch is per-unit and never cancels stragglers.
+        self._drain_batch: list[asyncio.Task] = []
 
         mode = "multi-chain" if self._is_multi_chain else "single-chain"
         logger.info(
@@ -1059,6 +1068,12 @@ class StrategyRunner:
         """
         start_time = datetime.now(UTC)
         deployment_id = strategy.deployment_id
+
+        # VIB-5406: open a fresh per-iteration drain batch. Disposal drains fired
+        # during this iteration accumulate here; the post-iteration snapshot
+        # awaits them (``await_drain_barrier``) before reading accounting_events
+        # so replay-derived inventory reflects this iteration's disposals.
+        self._drain_batch = []
 
         # Bind correlation ID for all log messages during this iteration
         iteration_id = f"{deployment_id}_{self._total_iterations + 1}_{int(start_time.timestamp())}"
@@ -4326,6 +4341,11 @@ class StrategyRunner:
                 )
                 self._pending_drain_tasks.add(task)
                 task.add_done_callback(self._pending_drain_tasks.discard)
+                # VIB-5406: also record on the per-unit batch so the next snapshot
+                # (iteration or teardown POST bracket) awaits THIS disposal's drain
+                # before reading accounting_events. Append-only; the barrier clears
+                # the batch after awaiting.
+                self._drain_batch.append(task)
             else:
                 # outbox_id is None: write failed. In live mode this is a
                 # data-loss risk; raise so run_iteration routes to

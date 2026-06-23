@@ -635,6 +635,46 @@ def _pt_unmeasured_row(
     )
 
 
+def _drain_incomplete_marker_row(chain: str, *, source: str) -> PositionValue:
+    """A confidence-downgrading marker for a drain-incomplete snapshot (VIB-5406).
+
+    When the per-unit outbox-drain barrier times out, the replayed event stream
+    may be MISSING this unit's disposals, so the held-PT / open-swap inventory is
+    UNMEASURABLE this snapshot — not measurably empty. Returning empty rows would
+    silently drop that inventory from ``total_value_usd`` while leaving the
+    snapshot stamped HIGH (``_determine_value_confidence`` only downgrades on a
+    per-row ``valuation_status``), making a degraded NAV masquerade as measured.
+
+    This mirrors the :func:`_pt_unmeasured_row` contract: ``value_usd=0`` (no
+    phantom NAV; kept out of the ``value_usd > 0`` sum) PAIRED WITH
+    ``valuation_status="no_path"``, which forces the WHOLE snapshot confidence to
+    ``UNAVAILABLE`` (Empty ≠ Zero — a reader must never read a drain-degraded
+    snapshot as HIGH). No quantity is claimed (the disposal that would size it
+    has not drained). Consumers that fold NAV without honouring confidence are a
+    separate, pre-existing gap tracked by VIB-5408; this marker is the correct
+    signal that fix reads.
+    """
+    return PositionValue(
+        position_type=PositionType.TOKEN,
+        protocol="wallet" if source == _SWAP_INVENTORY_SOURCE else "pt",
+        chain=chain,
+        value_usd=Decimal("0"),
+        label="inventory unmeasured (drain_incomplete)",
+        tokens=[],
+        details={
+            "source": source,
+            "classification": "deployed_inventory",
+            "valuation_status": "no_path",
+            "mark_unmeasured": True,
+            "cost_basis_unmeasured": True,
+            "unrealized_pnl_unmeasured": True,
+            "unavailable_reason": "drain_incomplete",
+        },
+        cost_basis_usd=Decimal("0"),
+        unrealized_pnl_usd=Decimal("0"),
+    )
+
+
 def _classify_pt_inventory(
     lot_totals: dict[str, tuple[Decimal, Decimal | None, Decimal | None, str]],
     market: "MarketDataSource",
@@ -883,6 +923,14 @@ class PortfolioValuer:
         # degraded stamp — never a silent no-op).
         self._snapshot_events_flat: list[dict] | None = None
         self._snapshot_prefetch_failed: bool = False
+        # VIB-5406: set True by the snapshot caller when the per-unit outbox-drain
+        # barrier timed out before this snapshot. When True, replay-derived
+        # inventory (PT, swap) would be built from an INCOMPLETE event stream
+        # (this unit's disposals not yet drained), so the builders stamp
+        # ``{"status":"unmeasured","reason":"drain_incomplete"}`` (Empty≠Zero)
+        # instead of emitting a phantom not-yet-disposed lot. Consumed once:
+        # value()'s finally resets it so the next snapshot starts clean.
+        self._drain_barrier_incomplete: bool = False
 
     def set_gateway_client(self, gateway_client: object | None) -> None:
         """Update the gateway client for on-chain queries.
@@ -911,6 +959,18 @@ class PortfolioValuer:
         """
         self._accounting_store = store
         self._deployment_id = deployment_id
+
+    def set_drain_barrier_incomplete(self, incomplete: bool) -> None:
+        """Flag that this snapshot's outbox-drain barrier did not complete (VIB-5406).
+
+        Called by the snapshot caller (``capture_snapshot_with_accounting`` /
+        ``capture_teardown_snapshot_with_accounting``) BEFORE ``value()`` when the
+        per-unit drain barrier timed out. While set, the replay-derived inventory
+        builders degrade to an ``unmeasured``/``drain_incomplete`` stamp rather than
+        emit a phantom lot from an event stream missing this unit's disposals
+        (Empty≠Zero). Consumed once — ``value()``'s finally resets it.
+        """
+        self._drain_barrier_incomplete = incomplete
 
     def value(
         self,
@@ -1156,6 +1216,9 @@ class PortfolioValuer:
             self._snapshot_event_cache = None
             self._snapshot_events_flat = None
             self._snapshot_prefetch_failed = False
+            # VIB-5406: consume-once — the drain-barrier flag applies to THIS
+            # snapshot only; the next caller re-sets it before value().
+            self._drain_barrier_incomplete = False
 
     @staticmethod
     def _determine_value_confidence(
@@ -1280,6 +1343,24 @@ class PortfolioValuer:
         context is wired — non-swap strategies and legacy callers stay
         byte-identical to the pre-VIB-5057 writer.
         """
+        # VIB-5406: the per-unit drain barrier timed out, so the prefetched event
+        # stream may be MISSING this unit's disposals — replaying it would surface
+        # a phantom not-yet-disposed lot. Degrade to an explicit unmeasured stamp
+        # (Empty≠Zero) rather than emit a stale lot value.
+        if self._drain_barrier_incomplete:
+            logger.warning(
+                "Swap inventory classification degraded for %s: drain barrier incomplete; "
+                "emitting an unmeasured marker (snapshot confidence → UNAVAILABLE)",
+                self._deployment_id,
+            )
+            # Emit a confidence-downgrading marker (NOT empty rows): a degraded
+            # NAV must read UNAVAILABLE, never a silent HIGH that drops the
+            # inventory. See _drain_incomplete_marker_row (VIB-5406 / VIB-5408).
+            return _SwapInventoryClassification(
+                [_drain_incomplete_marker_row(chain, source=_SWAP_INVENTORY_SOURCE)],
+                Decimal("0"),
+                {"status": "unmeasured", "reason": "drain_incomplete"},
+            )
         if self._snapshot_events_flat is None:
             if self._snapshot_prefetch_failed:
                 logger.warning(
@@ -1319,6 +1400,25 @@ class PortfolioValuer:
         accounting context is wired — non-Pendle strategies and legacy callers
         stay byte-identical to the pre-VIB-5316 writer.
         """
+        # VIB-5406: drain barrier incomplete → the prefetched event stream may be
+        # MISSING this unit's PT disposals, so an event replay would surface the
+        # full (already-sold) PT lot as still held — the exact stale-held-PT NAV
+        # overstatement this guard prevents. Degrade to an unmeasured stamp
+        # (Empty≠Zero) rather than emit the phantom lot.
+        if self._drain_barrier_incomplete:
+            logger.warning(
+                "PT inventory classification degraded for %s: drain barrier incomplete; "
+                "emitting an unmeasured marker (snapshot confidence → UNAVAILABLE)",
+                self._deployment_id,
+            )
+            # Emit a confidence-downgrading marker (NOT empty rows): a held PT
+            # that may exist but is unmeasurable until the disposal drains must
+            # read UNAVAILABLE, never a silent HIGH that drops it from NAV.
+            # See _drain_incomplete_marker_row (VIB-5406 / VIB-5408).
+            return _PtInventoryClassification(
+                [_drain_incomplete_marker_row(chain, source=_PT_INVENTORY_SOURCE)],
+                {"status": "unmeasured", "reason": "drain_incomplete"},
+            )
         if self._snapshot_events_flat is None:
             if self._snapshot_prefetch_failed:
                 logger.warning(

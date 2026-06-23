@@ -569,6 +569,102 @@ def invoke_pre_iteration_callback(
         logger.error(f"Pre-iteration callback error: {e}")
 
 
+# VIB-5406: max wall-clock a post-execution/teardown snapshot waits for the
+# current unit's outbox drains to land before reading accounting_events. The
+# drain is local SQLite I/O (sub-ms typically); 5s is a generous ceiling that
+# never stalls the loop. On timeout we degrade (stamp inventory unmeasured),
+# never halt — the outbox row persists and drains later (on-chain risk already
+# removed).
+_DRAIN_BARRIER_TIMEOUT_S = 5.0
+
+
+async def await_drain_barrier(
+    runner: StrategyRunner,
+    tasks: list[asyncio.Task],
+    *,
+    timeout: float = _DRAIN_BARRIER_TIMEOUT_S,
+) -> bool:
+    """Await the current unit's accounting-drain batch before a snapshot (VIB-5406).
+
+    A snapshot reads ``accounting_events`` by replaying them into a fresh FIFO
+    store to derive held-PT / open-swap inventory. The disposal's accounting
+    event is written by a fire-and-forget ``drain_one`` task
+    (``strategy_runner._write_outbox_and_fire_processor``); without this barrier
+    the snapshot can prefetch BEFORE the disposal drains, replaying an event
+    stream that still shows the just-sold lot as held → phantom inventory / NAV
+    overstatement (the race this fix closes).
+
+    Awaits ``tasks`` (this unit's drain batch) up to ``timeout`` seconds.
+    Stragglers are **not** cancelled — unlike the shutdown drain, they must still
+    complete and persist their event (the outbox row is durable; the event lands
+    on a later snapshot or at shutdown). On timeout we ERROR-log with the
+    deployment id + undrained count and return ``False`` (degraded) so the caller
+    can stamp inventory ``unmeasured``; we never raise and never block the loop.
+
+    Returns ``True`` only when every task both COMPLETED within the timeout AND
+    reported success (``drain_one`` returns ``bool`` — ``False`` is a persistent
+    write failure it catches internally). A timed-out OR failed/raised drain
+    returns ``False`` (degraded) so the caller stamps inventory ``unmeasured``;
+    an empty batch (the common no-disposal-this-unit case) returns ``True``. We
+    never raise and never block the loop. Clears the batch after awaiting
+    regardless of outcome (its job for THIS snapshot is done).
+    """
+    pending = [t for t in tasks if not t.done()]
+    all_done = True
+    # Tasks already finished before we awaited still need their RESULT inspected
+    # (see the loop below) — completion alone is not success.
+    completed: list[asyncio.Task] = [t for t in tasks if t.done()]
+    if pending:
+        _done, still_pending = await asyncio.wait(pending, timeout=timeout)
+        completed.extend(_done)
+        if still_pending:
+            all_done = False
+            logger.error(
+                "await_drain_barrier: %d/%d accounting drain task(s) did not complete within %.1fs "
+                "for %s — snapshot inventory will be stamped unmeasured (drain_incomplete); "
+                "tasks continue draining in the background",
+                len(still_pending),
+                len(pending),
+                timeout,
+                getattr(runner, "deployment_id", "") or "",
+            )
+    # A COMPLETED drain whose result is ``False`` (or that raised) means the
+    # disposal's accounting event was NOT persisted — the snapshot would replay a
+    # stale stream and surface the just-sold lot as still held, the exact bug this
+    # barrier closes. ``done()`` alone is not enough; treat a failed/raised drain
+    # exactly like a timeout so the caller degrades inventory to unmeasured rather
+    # than emitting the phantom lot. Reading ``.result()`` also consumes any
+    # exception (defensive: ``drain_one`` catches its own today, but a future raise
+    # must read as failure, not silent success) and clears the
+    # "exception never retrieved" warning. ``still_pending`` tasks are excluded
+    # from ``completed`` so we never call ``.result()`` on an unfinished task.
+    for t in completed:
+        try:
+            if t.result() is False:
+                all_done = False
+                logger.error(
+                    "await_drain_barrier: an accounting drain task reported persistent failure "
+                    "(event not persisted) for %s — snapshot inventory will be stamped unmeasured "
+                    "(drain_incomplete)",
+                    getattr(runner, "deployment_id", "") or "",
+                )
+        except asyncio.CancelledError:
+            all_done = False
+        except Exception:
+            all_done = False
+            logger.error(
+                "await_drain_barrier: an accounting drain task raised (event not persisted) for %s "
+                "— snapshot inventory will be stamped unmeasured (drain_incomplete)",
+                getattr(runner, "deployment_id", "") or "",
+                exc_info=True,
+            )
+    # The batch's purpose for this snapshot is fulfilled; clear it so the next
+    # unit starts clean. Stragglers remain referenced by ``_pending_drain_tasks``
+    # (awaited at shutdown), so clearing here cannot drop them.
+    tasks.clear()
+    return all_done
+
+
 async def capture_snapshot_with_accounting(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
@@ -610,6 +706,16 @@ async def capture_snapshot_with_accounting(
 
     if not runner.config.enable_state_persistence:
         return result
+
+    # VIB-5406: await THIS iteration's disposal drains before the snapshot reads
+    # accounting_events, so event-replay-derived inventory (PT, swap) reflects
+    # this iteration's disposals instead of racing a not-yet-drained event. On
+    # timeout the valuer stamps inventory unmeasured (drain_incomplete) rather
+    # than emit a phantom lot; the loop never halts.
+    drain_ok = await await_drain_barrier(runner, getattr(runner, "_drain_batch", []))
+    valuer = getattr(runner, "_portfolio_valuer", None)
+    if valuer is not None and hasattr(valuer, "set_drain_barrier_incomplete"):
+        valuer.set_drain_barrier_incomplete(not drain_ok)
 
     # VIB-4926: on trade iterations, re-open the per-iteration MarketSnapshot
     # scope with a FRESH token before the post-execution snapshot capture so
@@ -1372,6 +1478,23 @@ async def capture_teardown_snapshot_with_accounting(
             deployment_id,
             exc_info=True,
         )
+
+    # VIB-5406: teardown disposal-drain handling around the snapshot bracket.
+    #   PRE  → open a fresh drain batch so the teardown disposals committed after
+    #          this bracket accumulate for the POST barrier (mirrors the
+    #          per-iteration reset at run_iteration top).
+    #   POST → await this teardown's disposal drains before the snapshot reads
+    #          accounting_events (teardown_commit.py fires the same fire-and-forget
+    #          drain), so held-PT / swap inventory reflects the unwind's disposals.
+    #          On timeout the valuer stamps inventory unmeasured; teardown never
+    #          halts (the unwind already removed on-chain risk).
+    if pre_teardown:
+        runner._drain_batch = []
+    else:
+        drain_ok = await await_drain_barrier(runner, getattr(runner, "_drain_batch", []))
+        valuer = getattr(runner, "_portfolio_valuer", None)
+        if valuer is not None and hasattr(valuer, "set_drain_barrier_incomplete"):
+            valuer.set_drain_barrier_incomplete(not drain_ok)
 
     try:
         try:
