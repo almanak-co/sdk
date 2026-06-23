@@ -481,7 +481,25 @@ def _tx_and_gas_details(ctx: IntentEventContext, result: Any) -> tuple[str, str]
     if not result:
         return tx_hash, gas_usd
     if hasattr(result, "transaction_results") and result.transaction_results:
-        tx_hash = result.transaction_results[0].tx_hash or ""
+        # VIB-5066 — ``position_events.tx_hash`` MUST point at the ACTION
+        # transaction, not an APPROVAL leg. The pre-fix code always took
+        # ``transaction_results[0]``, which for an approve+action bundle
+        # (e.g. SUPPLY = approve + supply) pointed at the approval, making
+        # the recorded tx_hash useless for "what was the action?" audits.
+        # Reuse ``ledger._classify_sub_tx_role`` (the same Approval-event
+        # heuristic the ledger writer uses for ``transaction_ledger.tx_hash``
+        # per VIB-4087) so the position_events row and the ledger row agree
+        # on the ACTION leg. Fall back to ``[0]`` only when no ACTION leg is
+        # found — never silently keep the approval over an available action.
+        from almanak.framework.observability.ledger import _classify_sub_tx_role
+
+        tx_results = result.transaction_results
+        action_tx = next(
+            (tr for tr in tx_results if _classify_sub_tx_role(tr) == "ACTION"),
+            None,
+        )
+        chosen = action_tx if action_tx is not None else tx_results[0]
+        tx_hash = chosen.tx_hash or ""
     gas_cost_legacy = getattr(result, "gas_cost_usd", None)
     if gas_cost_legacy is not None:
         gas_usd = str(gas_cost_legacy)

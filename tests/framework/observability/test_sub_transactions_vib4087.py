@@ -331,3 +331,98 @@ def test_unknown_slippage_source_value_degrades_to_none():
     }
     decoded = deserialize_extracted_data(json.dumps(payload))["swap_amounts"]
     assert decoded.slippage_source == SlippageSource.NONE
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# VIB-5066 — position_events.tx_hash must point at the ACTION sub-tx, not
+# the APPROVAL leg. Pre-fix ``_tx_and_gas_details`` always took
+# ``transaction_results[0]``, which for an approve+action bundle pointed at
+# the approval — so position_events disagreed with transaction_ledger
+# (which already picks the ACTION leg per VIB-4087). The fix reuses the same
+# ``_classify_sub_tx_role`` heuristic the ledger writer uses.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _event_ctx():
+    """Minimal IntentEventContext for ``_tx_and_gas_details``.
+
+    ``_tx_and_gas_details`` only reads ``ctx.chain`` / ``ctx.price_oracle``
+    on the gas-USD path; the tx_hash branch under test needs neither, so a
+    bare context with empty gas inputs is sufficient.
+    """
+    from almanak.framework.observability.position_events import IntentEventContext
+
+    return IntentEventContext(
+        intent=None,
+        result=None,
+        extracted={},
+        deployment_id="deployment:test",
+        chain="ethereum",
+        ledger_entry_id="ledger:test",
+        price_oracle=None,
+    )
+
+
+def test_position_events_tx_hash_picks_action_not_approval():
+    """``position_events.tx_hash`` must point at the ACTION transaction.
+    Pre-fix the writer always picked tx_results[0], which for a
+    SUPPLY = approve+supply bundle pointed at the approval."""
+    from almanak.framework.observability.position_events import _tx_and_gas_details
+
+    approve_tr = _make_tx_result(
+        logs=[{"topics": [ERC20_APPROVAL_TOPIC]}], tx_hash="0xapprove", gas_used=46_000
+    )
+    action_tr = _make_tx_result(
+        logs=[{"topics": ["0x123ddd"]}], tx_hash="0xaction", gas_used=240_000
+    )
+    result = SimpleNamespace(
+        transaction_results=[approve_tr, action_tr],
+        total_gas_used=286_000,
+        total_gas_cost_wei=None,
+        gas_cost_usd=None,
+    )
+
+    tx_hash, _gas_usd = _tx_and_gas_details(_event_ctx(), result)
+
+    assert tx_hash == "0xaction"
+
+
+def test_position_events_tx_hash_falls_back_to_first_when_no_action():
+    """Pathological all-APPROVAL bundle: fall back to the first hash rather
+    than emit empty string. Never silently picks an approval *over* an
+    available action — but with no action present, first is the safe hash."""
+    from almanak.framework.observability.position_events import _tx_and_gas_details
+
+    approve_a = _make_tx_result(
+        logs=[{"topics": [ERC20_APPROVAL_TOPIC]}], tx_hash="0xapprove_a"
+    )
+    approve_b = _make_tx_result(
+        logs=[{"topics": [ERC20_APPROVAL_TOPIC]}], tx_hash="0xapprove_b"
+    )
+    result = SimpleNamespace(
+        transaction_results=[approve_a, approve_b],
+        total_gas_used=92_000,
+        total_gas_cost_wei=None,
+        gas_cost_usd=None,
+    )
+
+    tx_hash, _gas_usd = _tx_and_gas_details(_event_ctx(), result)
+
+    assert tx_hash == "0xapprove_a"
+
+
+def test_position_events_tx_hash_single_tx():
+    """Single-tx intents (already-approved swap) preserve the hash."""
+    from almanak.framework.observability.position_events import _tx_and_gas_details
+
+    only_tr = _make_tx_result(tx_hash="0xonly")
+    result = SimpleNamespace(
+        transaction_results=[only_tr],
+        total_gas_used=200_000,
+        total_gas_cost_wei=None,
+        gas_cost_usd=None,
+    )
+
+    tx_hash, _gas_usd = _tx_and_gas_details(_event_ctx(), result)
+
+    assert tx_hash == "0xonly"
