@@ -36,6 +36,16 @@ class PrincipalTokenMarketReader(Protocol):
 
     def is_market_expired(self, market_address: str) -> bool: ...
 
+    def get_market_expiry_ts(self, market_address: str) -> int | None:
+        """Authoritative on-chain ``expiry()`` unix timestamp, or None on failure.
+
+        Single source of truth for PT maturity (VIB-5384): the gateway stamps this
+        as the response ``maturity_ts`` and derives ``days_to_maturity`` from the
+        same read. None means the expiry could not be read (Empty≠Zero — never a
+        fabricated 0).
+        """
+        ...
+
     def get_days_to_maturity(self, market_address: str) -> int | None: ...
 
     def get_market_tokens(self, market_address: str) -> dict[str, str]: ...

@@ -7,6 +7,7 @@ gateway; strategy containers only see the results.
 
 import asyncio
 import logging
+import math
 import re
 import time
 from decimal import Decimal
@@ -150,6 +151,25 @@ class _UnpriceableUnderlying(Exception):
     underlying is a measured "no price" (Empty≠Zero), not an infrastructure
     failure. Carries no numeric price.
     """
+
+
+def _resolve_maturity_ts(onchain_expiry_ts: int | None, static_maturity_ts: int) -> int:
+    """Choose the authoritative PT maturity timestamp for the response (VIB-5384).
+
+    The on-chain ``expiry()`` is authoritative: the gateway is the price authority
+    and stamps the real maturity it read on-chain, not the request echo. Order:
+
+    1. On-chain ``expiry()`` when it was read (``> 0``).
+    2. The resolver's static ``ref.maturity_ts`` as a fallback ONLY when the
+       on-chain read failed but the connector statically knew the maturity.
+    3. ``0`` (unset) when neither is known — Empty≠Zero: an unmeasured maturity
+       is left unset, never fabricated.
+    """
+    if onchain_expiry_ts is not None and onchain_expiry_ts > 0:
+        return onchain_expiry_ts
+    if static_maturity_ts and static_maturity_ts > 0:
+        return static_maturity_ts
+    return 0
 
 
 def _build_pt_price_response(
@@ -946,7 +966,13 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         #    concurrent gRPC handler on the gateway (perimeter liveness). The
         #    reader itself carries a bounded web3 request timeout so the worker
         #    thread can't hang forever either.
-        rate, days_to_maturity, rate_reason = await asyncio.to_thread(self._read_pt_market, ref, chain)
+        rate, days_to_maturity, expiry_ts, rate_reason = await asyncio.to_thread(self._read_pt_market, ref, chain)
+
+        # The authoritative maturity is the on-chain ``expiry()`` (VIB-5384).
+        # Prefer it; fall back to the resolver's static ``ref.maturity_ts`` only
+        # when the on-chain read failed AND the connector statically knew it.
+        # Both unknown → 0 (unset), never a fabricated maturity (Empty≠Zero).
+        maturity_ts = _resolve_maturity_ts(expiry_ts, ref.maturity_ts)
 
         # 5. Missing PT rate → UNMEASURED. Per the ratified AC, a missing
         #    required read is NEVER fabricated: defaulting pt_to_asset_rate to
@@ -964,7 +990,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 underlying_price=str(underlying_price),
                 source=f"unmeasured:pt-rate-unavailable({rate_reason})",
                 timestamp=int(underlying_result.timestamp.timestamp()),
-                maturity_ts=ref.maturity_ts,
+                maturity_ts=maturity_ts,
                 days_to_maturity=days_to_maturity or 0,
             )
 
@@ -976,9 +1002,9 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             symbol=symbol,
             chain=chain,
             quote=quote,
-            ref=ref,
             underlying_result=underlying_result,
             rate=rate,
+            maturity_ts=maturity_ts,
             days_to_maturity=days_to_maturity,
         )
 
@@ -988,9 +1014,9 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         symbol: str,
         chain: str,
         quote: str,
-        ref: Any,
         underlying_result: Any,
         rate: Decimal,
+        maturity_ts: int,
         days_to_maturity: int | None,
     ) -> "gateway_pb2.PtPriceResponse":
         """Stamp an AVAILABLE PT/USD response from two measured legs.
@@ -999,6 +1025,9 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         ``ESTIMATED`` + ``stale=True`` (the band carries freshness, the separate
         ``stale`` flag carries the raw signal). ``confidence_band`` is
         authoritative; the ``confidence`` double is kept consistent.
+
+        ``maturity_ts`` is the authoritative on-chain expiry resolved by the
+        caller (VIB-5384); ``days_to_maturity`` is derived from the same read.
         """
         underlying_price = underlying_result.price
         pt_usd = underlying_price * rate
@@ -1023,7 +1052,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             confidence=confidence,
             timestamp=int(underlying_result.timestamp.timestamp()),
             stale=underlying_result.stale,
-            maturity_ts=ref.maturity_ts,
+            maturity_ts=maturity_ts,
             days_to_maturity=days_to_maturity or 0,
         )
 
@@ -1077,21 +1106,29 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         except (AllDataSourcesFailed, DataSourceUnavailable) as e:
             raise _UnpriceableUnderlying(str(e)) from e
 
-    def _read_pt_market(self, ref, chain: str) -> tuple[Decimal | None, int | None, str]:
-        """Read ``pt_to_asset_rate`` + days-to-maturity via the connector reader.
+    def _read_pt_market(self, ref, chain: str) -> tuple[Decimal | None, int | None, int | None, str]:
+        """Read ``pt_to_asset_rate`` + on-chain expiry/maturity via the connector.
 
-        Returns ``(rate_or_None, days_or_None, reason)``. ``rate`` is ``None``
-        when the reader cannot be built or the read fails / is non-positive; the
-        CALLER maps a ``None`` rate to ``UNMEASURED`` (no price) — deliberately
-        NOT ``valuation.py``'s at-par (1.0) fallback, which overvalues the PT and
-        is forbidden by the ratified AC. Reads run through the connector's
-        on-chain market reader in direct mode, a gateway-internal eth_call path
-        that reuses the EXISTING ``# vib-2986-exempt`` marker (no new egress, no
-        new marker).
+        Returns ``(rate_or_None, days_or_None, expiry_ts_or_None, reason)``.
+
+        * ``rate`` is ``None`` when the reader cannot be built or the read fails /
+          is non-positive; the CALLER maps a ``None`` rate to ``UNMEASURED`` (no
+          price) — deliberately NOT ``valuation.py``'s at-par (1.0) fallback,
+          which overvalues the PT and is forbidden by the ratified AC.
+        * ``expiry_ts`` is the on-chain ``expiry()`` unix timestamp (VIB-5384),
+          and ``days`` is derived from the SAME read so the two are consistent.
+          Both are ``None`` when the expiry read fails (Empty≠Zero: the caller
+          leaves ``maturity_ts`` unset rather than fabricating 0). The on-chain
+          expiry — not the resolver's static ``ref.maturity_ts`` echo (0 on the
+          normal call path) — is the authoritative maturity for the response.
+
+        Reads run through the connector's on-chain market reader in direct mode, a
+        gateway-internal eth_call path that reuses the EXISTING ``# vib-2986-exempt``
+        marker (no new egress, no new marker).
         """
         reader = self._build_pt_reader(ref.protocol, chain)
         if reader is None:
-            return None, None, "rate-reader-unavailable"
+            return None, None, None, "rate-reader-unavailable"
 
         rate: Decimal | None = None
         reason = ""
@@ -1105,13 +1142,26 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             logger.debug("GetPtPrice: pt_to_asset_rate read failed for %s: %s", ref.market_address, e)
             reason = "pt_to_asset_rate-read-failed"
 
+        # On-chain expiry is the authoritative maturity. Read it once and derive
+        # days-to-maturity from the SAME timestamp so the response's maturity_ts
+        # and days_to_maturity can never disagree (VIB-5384). A failed read leaves
+        # both unmeasured rather than fabricating a 0 maturity (Empty≠Zero).
+        expiry_ts: int | None = None
         days: int | None = None
         try:
-            days = reader.get_days_to_maturity(ref.market_address)
+            raw_expiry_ts = reader.get_market_expiry_ts(ref.market_address)
+            # Normalize non-positive expiry to unread so days_to_maturity and
+            # maturity_ts cannot disagree. _resolve_maturity_ts already treats a
+            # non-positive expiry as invalid; a reader that returns <= 0 must not
+            # stamp days = 0 here while maturity_ts falls back (VIB-5384, Empty≠Zero).
+            if raw_expiry_ts is not None and raw_expiry_ts > 0:
+                expiry_ts = raw_expiry_ts
+                now_ts = int(time.time())
+                days = max(0, math.ceil((expiry_ts - now_ts) / 86400))
         except Exception as e:
-            logger.debug("GetPtPrice: days_to_maturity read failed for %s: %s", ref.market_address, e)
+            logger.debug("GetPtPrice: expiry read failed for %s: %s", ref.market_address, e)
 
-        return rate, days, reason
+        return rate, days, expiry_ts, reason
 
     def _build_pt_reader(self, protocol: str, chain: str):
         """Build the connector's on-chain principal-token market reader, or None.

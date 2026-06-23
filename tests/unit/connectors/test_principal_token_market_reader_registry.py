@@ -27,6 +27,9 @@ class _Reader:
     def is_market_expired(self, market_address: str) -> bool:
         return False
 
+    def get_market_expiry_ts(self, market_address: str) -> int | None:
+        return 1_782_777_600
+
     def get_days_to_maturity(self, market_address: str) -> int | None:
         return 30
 

@@ -499,6 +499,59 @@ class PendleOnChainReader:
             logger.warning("Failed to read implied APY for %s: %s", market_address, e)
             raise PendleOnChainError(f"getImpliedApy failed: {e}") from e
 
+    def get_market_expiry_ts(self, market_address: str) -> int | None:
+        """Return the market's on-chain ``expiry()`` as a unix timestamp, or None.
+
+        Single source of truth for the PT maturity timestamp: ``is_market_expired``
+        and ``get_days_to_maturity`` both derive from this read so a caller that
+        needs the raw timestamp, days-remaining, and the expired flag observes one
+        consistent expiry (VIB-5384).
+
+        ``expiry()`` reads the MARKET contract, not RouterStatic — do not gate on
+        ``router_static`` (absent on Arbitrum).
+
+        Never raises — a failed read returns ``None`` (Empty≠Zero: the caller maps
+        an unread expiry to an unmeasured maturity, never a fabricated 0). The
+        result is cached so the expired / days / timestamp views stay coherent
+        within the cache window.
+
+        Args:
+            market_address: Pendle market contract address.
+
+        Returns:
+            Unix-seconds expiry timestamp, or ``None`` if it could not be read.
+        """
+        cache_key = f"expiry_ts:{market_address.lower()}"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            if self._gateway_client is not None:
+                result = self._gateway_eth_call(market_address, EXPIRY_SELECTOR, "pendle_expiry")
+                expiry = _decode_uint256(result)
+            else:
+                # expiry() reads the MARKET contract, not RouterStatic — do not gate
+                # on router_static (absent on Arbitrum).
+                assert self.web3 is not None
+                market_contract = self.web3.eth.contract(
+                    address=self.web3.to_checksum_address(market_address),
+                    abi=MARKET_EXPIRY_ABI,
+                )
+                expiry = market_contract.functions.expiry().call()
+        except Exception as e:
+            logger.debug("pendle: get_market_expiry_ts failed for %s: %s", market_address, e)
+            return None
+
+        expiry = int(expiry)
+        if expiry <= 0:
+            # A non-positive expiry is not a real on-chain maturity. Treat it as
+            # unread rather than caching/propagating a fabricated 0 (Empty≠Zero).
+            logger.debug("pendle: get_market_expiry_ts read non-positive expiry %s for %s", expiry, market_address)
+            return None
+        self._set_cached(cache_key, expiry)
+        return expiry
+
     def is_market_expired(self, market_address: str) -> bool:
         """Check if a market has expired.
 
@@ -516,35 +569,20 @@ class PendleOnChainReader:
         if cached is not None:
             return cached
 
-        try:
-            if self._gateway_client is not None:
-                result = self._gateway_eth_call(market_address, EXPIRY_SELECTOR, "pendle_expiry")
-                expiry = _decode_uint256(result)
-            else:
-                # expiry() reads the MARKET contract, not RouterStatic — do not gate
-                # on router_static (absent on Arbitrum). Matches get_days_to_maturity.
-                assert self.web3 is not None
-                market_contract = self.web3.eth.contract(
-                    address=self.web3.to_checksum_address(market_address),
-                    abi=MARKET_EXPIRY_ABI,
-                )
-                expiry = market_contract.functions.expiry().call()
-            current_time = int(time.time())
-            is_expired = current_time >= expiry
-            self._set_cached(cache_key, is_expired)
-            return is_expired
-        except PendleOnChainError:
-            raise
-        except Exception as e:
-            logger.warning("Failed to read market expiry for %s: %s", market_address, e)
-            raise PendleOnChainError(f"expiry() failed: {e}") from e
+        expiry = self.get_market_expiry_ts(market_address)
+        if expiry is None:
+            raise PendleOnChainError(f"expiry() failed for {market_address}")
+        is_expired = int(time.time()) >= expiry
+        self._set_cached(cache_key, is_expired)
+        return is_expired
 
     def get_days_to_maturity(self, market_address: str) -> int | None:
         """Return calendar days remaining until PT maturity, or None on failure.
 
-        Returns 0 when the market is already expired.  Never raises — exceptions
-        are swallowed and logged at DEBUG level so callers can treat the absence
-        of this data as non-fatal.
+        Returns 0 when the market is already expired.  Never raises — a failed
+        expiry read returns ``None`` so callers can treat the absence of this data
+        as non-fatal. Derived from the same ``get_market_expiry_ts`` read as the
+        raw timestamp so the two stay consistent (VIB-5384).
 
         Args:
             market_address: Pendle market contract address.
@@ -555,22 +593,11 @@ class PendleOnChainReader:
         """
         import math as _math
 
-        try:
-            if self._gateway_client is not None:
-                result = self._gateway_eth_call(market_address, EXPIRY_SELECTOR, "pendle_expiry_valuer")
-                expiry = _decode_uint256(result)
-            else:
-                assert self.web3 is not None
-                market_contract = self.web3.eth.contract(
-                    address=self.web3.to_checksum_address(market_address),
-                    abi=MARKET_EXPIRY_ABI,
-                )
-                expiry = market_contract.functions.expiry().call()
-            now_ts = int(time.time())
-            return max(0, _math.ceil((expiry - now_ts) / 86400))
-        except Exception as e:
-            logger.debug("pendle_valuer: get_days_to_maturity failed for %s: %s", market_address, e)
+        expiry = self.get_market_expiry_ts(market_address)
+        if expiry is None:
             return None
+        now_ts = int(time.time())
+        return max(0, _math.ceil((expiry - now_ts) / 86400))
 
     def get_market_tokens(self, market_address: str) -> dict[str, str]:
         """Get SY, PT, and YT addresses for a market.

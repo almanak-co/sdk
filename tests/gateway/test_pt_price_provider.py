@@ -34,6 +34,7 @@ from almanak.gateway.proto import gateway_pb2 as pb
 from almanak.gateway.services.market_service import (
     MarketServiceServicer,
     _build_pt_price_response,
+    _resolve_maturity_ts,
     _UnpriceableUnderlying,
 )
 
@@ -51,6 +52,11 @@ def mock_context() -> MagicMock:
     context.set_code = MagicMock()
     context.set_details = MagicMock()
     return context
+
+
+# A representative on-chain ``expiry()`` timestamp (PT-wstETH-25JUN2026, unix s).
+# Used to prove the response stamps the on-chain expiry, not the static echo.
+_ONCHAIN_EXPIRY = 1_782_777_600
 
 
 def _underlying(price: str = "1.0003", confidence: float = 0.97, stale: bool = False) -> PriceResult:
@@ -80,11 +86,21 @@ def _request(symbol: str = "PT-sUSDe-13AUG2026", chain: str = "ethereum") -> pb.
 class TestGetPtPriceAvailableHigh:
     @pytest.mark.asyncio
     async def test_both_legs_measured_is_available_high(self, market_service, mock_context):
-        """Underlying priced + on-chain rate read → AVAILABLE + HIGH, composed."""
+        """Underlying priced + on-chain rate read → AVAILABLE + HIGH, composed.
+
+        The on-chain ``expiry()`` (VIB-5384) is the authoritative maturity — the
+        response stamps the on-chain value (here ``_ONCHAIN_EXPIRY``), NOT the
+        resolver's static ``ref.maturity_ts`` echo (a different value below), so
+        the dashboard/valuer see the real timestamp even when the request carries
+        no maturity hint (the normal call path, where ``ref.maturity_ts == 0``).
+        """
+        # Static ref maturity differs from the on-chain read to prove the on-chain
+        # value wins. days_to_maturity is derived from the SAME on-chain expiry.
+        static_ref = _pt_ref(maturity_ts=1_700_000_000)
         with (
-            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref()),
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=static_ref),
             patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("1.00", 0.9))),
-            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.95"), 120, "")),
+            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.95"), 120, _ONCHAIN_EXPIRY, "")),
         ):
             resp = await market_service.GetPtPrice(_request(), mock_context)
 
@@ -96,9 +112,42 @@ class TestGetPtPriceAvailableHigh:
         assert resp.pt_to_asset_rate == "0.95"
         assert resp.confidence == pytest.approx(0.9)  # HIGH carries the underlying confidence
         assert resp.days_to_maturity == 120
-        assert resp.maturity_ts == 1_754_956_800
+        # Authoritative on-chain expiry stamped (not the static 1_700_000_000 echo).
+        assert resp.maturity_ts == _ONCHAIN_EXPIRY
         assert "getPtToAssetRate" in resp.source
         mock_context.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_available_falls_back_to_static_maturity_when_onchain_unread(self, market_service, mock_context):
+        """If the on-chain expiry read failed (expiry_ts=None) but the connector
+        statically knew the maturity, the response stamps the static value — never
+        fabricates one (Empty≠Zero)."""
+        with (
+            patch.object(
+                market_service, "_resolve_principal_token_ref", return_value=_pt_ref(maturity_ts=1_754_956_800)
+            ),
+            patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("1.00", 0.9))),
+            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.95"), None, None, "")),
+        ):
+            resp = await market_service.GetPtPrice(_request(), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_AVAILABLE
+        assert resp.maturity_ts == 1_754_956_800  # static fallback
+        assert resp.days_to_maturity == 0  # unread days → 0 (not fabricated)
+
+    @pytest.mark.asyncio
+    async def test_available_maturity_unset_when_neither_onchain_nor_static_known(self, market_service, mock_context):
+        """Neither the on-chain expiry nor a static maturity known → maturity_ts
+        stays unset (0). Empty≠Zero: an unmeasured maturity is never fabricated."""
+        with (
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref(maturity_ts=0)),
+            patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("1.00", 0.9))),
+            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.95"), None, None, "")),
+        ):
+            resp = await market_service.GetPtPrice(_request(), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_AVAILABLE
+        assert resp.maturity_ts == 0  # unset — never fabricated
 
     @pytest.mark.asyncio
     async def test_fresh_both_legs_measured_pt_to_asset_rate_emitted(self, market_service, mock_context):
@@ -106,7 +155,7 @@ class TestGetPtPriceAvailableHigh:
         with (
             patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref()),
             patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("1.00", 0.9))),
-            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.95"), 30, "")),
+            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.95"), 30, _ONCHAIN_EXPIRY, "")),
         ):
             resp = await market_service.GetPtPrice(_request(), mock_context)
         assert resp.confidence_band == pb.PT_PRICE_CONFIDENCE_BAND_HIGH
@@ -125,7 +174,7 @@ class TestGetPtPriceStaleIsEstimated:
             patch.object(
                 market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("1.00", 0.7, stale=True))
             ),
-            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.9"), 30, "")),
+            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.9"), 30, _ONCHAIN_EXPIRY, "")),
         ):
             resp = await market_service.GetPtPrice(_request(), mock_context)
 
@@ -146,7 +195,11 @@ class TestGetPtPriceMissingRate:
         with (
             patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref()),
             patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("1.05", 0.9))),
-            patch.object(market_service, "_read_pt_market", return_value=(None, 60, "pt_to_asset_rate-read-failed")),
+            patch.object(
+                market_service,
+                "_read_pt_market",
+                return_value=(None, 60, _ONCHAIN_EXPIRY, "pt_to_asset_rate-read-failed"),
+            ),
         ):
             resp = await market_service.GetPtPrice(_request(), mock_context)
 
@@ -158,6 +211,10 @@ class TestGetPtPriceMissingRate:
         # underlying WAS measured → echoed for transparency
         assert resp.underlying_price == "1.05"
         assert "pt-rate-unavailable" in resp.source
+        # Maturity is still authoritative from the on-chain expiry even when the
+        # rate read failed — the dashboard maturity column does not depend on rate.
+        assert resp.maturity_ts == _ONCHAIN_EXPIRY
+        assert resp.days_to_maturity == 60
 
 
 class TestGetPtPriceUnmeasured:
@@ -275,7 +332,7 @@ class TestGetPtPriceValidation:
         with (
             patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref()),
             patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("1.00", 0.9))),
-            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.95"), 30, "")),
+            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.95"), 30, _ONCHAIN_EXPIRY, "")),
         ):
             resp = await market_service.GetPtPrice(
                 pb.PtPriceRequest(symbol="PT-sUSDe-13AUG2026", chain="ethereum"), mock_context
@@ -295,7 +352,9 @@ class TestPerimeterLiveness:
         with (
             patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref()),
             patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("1.00", 0.9))),
-            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.95"), 30, "")) as read,
+            patch.object(
+                market_service, "_read_pt_market", return_value=(Decimal("0.95"), 30, _ONCHAIN_EXPIRY, "")
+            ) as read,
             patch(
                 "almanak.gateway.services.market_service.asyncio.to_thread", wraps=asyncio.to_thread
             ) as to_thread_spy,
@@ -370,6 +429,25 @@ class TestAvailableNeverEmptyGuard:
             confidence_band=pb.PT_PRICE_CONFIDENCE_BAND_UNAVAILABLE,
         )
         assert resp.price == ""
+
+
+class TestResolveMaturityTs:
+    """``_resolve_maturity_ts`` chooses the authoritative PT maturity (VIB-5384)."""
+
+    def test_onchain_expiry_wins_over_static(self):
+        # On-chain expiry is authoritative; the static echo is the fallback only.
+        assert _resolve_maturity_ts(_ONCHAIN_EXPIRY, 1_700_000_000) == _ONCHAIN_EXPIRY
+
+    def test_static_fallback_when_onchain_unread(self):
+        assert _resolve_maturity_ts(None, 1_754_956_800) == 1_754_956_800
+
+    def test_zero_when_neither_known(self):
+        # Empty≠Zero: an unmeasured maturity is left unset, never fabricated.
+        assert _resolve_maturity_ts(None, 0) == 0
+
+    def test_non_positive_onchain_falls_back(self):
+        # A non-positive on-chain read is not a real maturity → use the static one.
+        assert _resolve_maturity_ts(0, 1_754_956_800) == 1_754_956_800
 
 
 class TestPendlePrincipalTokenResolution:
@@ -488,29 +566,72 @@ class TestServicerResolutionAndReader:
     def test_read_pt_market_no_reader_returns_estimated_signal(self, market_service):
         ref = _pt_ref()
         with patch.object(market_service, "_build_pt_reader", return_value=None):
-            rate, days, reason = market_service._read_pt_market(ref, "ethereum")
+            rate, days, expiry_ts, reason = market_service._read_pt_market(ref, "ethereum")
         assert rate is None
         assert days is None
+        assert expiry_ts is None
         assert reason == "rate-reader-unavailable"
 
-    def test_read_pt_market_reads_rate_and_days(self, market_service):
+    def test_read_pt_market_reads_rate_and_expiry(self, market_service):
+        """Rate + on-chain expiry are read; days_to_maturity is DERIVED from the
+        SAME expiry timestamp so the two can never disagree (VIB-5384)."""
+        import math
+        import time as _time
+
+        ref = _pt_ref()
+        # Expiry ~90 days out → days_to_maturity ceil((expiry-now)/86400).
+        expiry = int(_time.time()) + 90 * 86400
+        fake_reader = MagicMock()
+        fake_reader.get_pt_to_asset_rate.return_value = Decimal("0.97")
+        fake_reader.get_market_expiry_ts.return_value = expiry
+        with patch.object(market_service, "_build_pt_reader", return_value=fake_reader):
+            rate, days, expiry_ts, reason = market_service._read_pt_market(ref, "ethereum")
+        assert rate == Decimal("0.97")
+        assert expiry_ts == expiry
+        # days derived from the on-chain expiry (NOT a separate get_days call)
+        assert days == max(0, math.ceil((expiry - int(_time.time())) / 86400))
+        assert reason == ""
+        # The provider derives days from expiry itself, never the legacy helper.
+        fake_reader.get_days_to_maturity.assert_not_called()
+
+    def test_read_pt_market_expiry_unread_leaves_maturity_unmeasured(self, market_service):
+        """A failed on-chain expiry read → expiry_ts and days both None (Empty≠Zero),
+        never a fabricated 0."""
         ref = _pt_ref()
         fake_reader = MagicMock()
         fake_reader.get_pt_to_asset_rate.return_value = Decimal("0.97")
-        fake_reader.get_days_to_maturity.return_value = 90
+        fake_reader.get_market_expiry_ts.return_value = None
         with patch.object(market_service, "_build_pt_reader", return_value=fake_reader):
-            rate, days, reason = market_service._read_pt_market(ref, "ethereum")
+            rate, days, expiry_ts, reason = market_service._read_pt_market(ref, "ethereum")
         assert rate == Decimal("0.97")
-        assert days == 90
+        assert expiry_ts is None
+        assert days is None
+        assert reason == ""
+
+    def test_read_pt_market_non_positive_expiry_leaves_maturity_unmeasured(self, market_service):
+        """A reader that returns a non-positive expiry must NOT stamp days = 0 while
+        maturity_ts falls back: _read_pt_market normalizes <= 0 to unread so days
+        and maturity_ts stay consistent (VIB-5384, Empty≠Zero). The canonical
+        reader already maps <= 0 → None, but the gateway must not trust every
+        PrincipalTokenMarketReader implementation to do so."""
+        ref = _pt_ref()
+        fake_reader = MagicMock()
+        fake_reader.get_pt_to_asset_rate.return_value = Decimal("0.97")
+        fake_reader.get_market_expiry_ts.return_value = 0
+        with patch.object(market_service, "_build_pt_reader", return_value=fake_reader):
+            rate, days, expiry_ts, reason = market_service._read_pt_market(ref, "ethereum")
+        assert rate == Decimal("0.97")
+        assert expiry_ts is None
+        assert days is None
         assert reason == ""
 
     def test_read_pt_market_non_positive_rate_is_none(self, market_service):
         ref = _pt_ref()
         fake_reader = MagicMock()
         fake_reader.get_pt_to_asset_rate.return_value = Decimal("0")
-        fake_reader.get_days_to_maturity.return_value = 5
+        fake_reader.get_market_expiry_ts.return_value = None
         with patch.object(market_service, "_build_pt_reader", return_value=fake_reader):
-            rate, _, reason = market_service._read_pt_market(ref, "ethereum")
+            rate, _days, _expiry, reason = market_service._read_pt_market(ref, "ethereum")
         assert rate is None
         assert reason == "pt_to_asset_rate-non-positive"
 
@@ -518,12 +639,27 @@ class TestServicerResolutionAndReader:
         ref = _pt_ref()
         fake_reader = MagicMock()
         fake_reader.get_pt_to_asset_rate.side_effect = RuntimeError("rpc down")
-        fake_reader.get_days_to_maturity.return_value = None
+        fake_reader.get_market_expiry_ts.return_value = None
         with patch.object(market_service, "_build_pt_reader", return_value=fake_reader):
-            rate, days, reason = market_service._read_pt_market(ref, "ethereum")
+            rate, days, expiry_ts, reason = market_service._read_pt_market(ref, "ethereum")
         assert rate is None
         assert days is None
+        assert expiry_ts is None
         assert reason == "pt_to_asset_rate-read-failed"
+
+    def test_read_pt_market_expiry_read_raises_is_graceful(self, market_service):
+        """An exception from the expiry read is swallowed → expiry_ts/days None,
+        while the rate read still succeeds independently."""
+        ref = _pt_ref()
+        fake_reader = MagicMock()
+        fake_reader.get_pt_to_asset_rate.return_value = Decimal("0.97")
+        fake_reader.get_market_expiry_ts.side_effect = RuntimeError("rpc down")
+        with patch.object(market_service, "_build_pt_reader", return_value=fake_reader):
+            rate, days, expiry_ts, reason = market_service._read_pt_market(ref, "ethereum")
+        assert rate == Decimal("0.97")
+        assert expiry_ts is None
+        assert days is None
+        assert reason == ""
 
 
 class TestUnpriceableClassification:

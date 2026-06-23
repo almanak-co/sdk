@@ -204,9 +204,7 @@ class TestGetPtToAssetRate:
         has to live in ``_read_oracle_state`` for the documented typed-error
         contract to hold for every caller.
         """
-        reader.pt_oracle.functions.getOracleState.return_value.call.side_effect = Exception(
-            "execution reverted"
-        )
+        reader.pt_oracle.functions.getOracleState.return_value.call.side_effect = Exception("execution reverted")
         with pytest.raises(PendleOnChainError, match="getOracleState failed"):
             reader.get_pt_to_asset_rate("0xmarket")
         # The readiness gate failed first — the rate read must NOT be attempted.
@@ -285,6 +283,54 @@ class TestIsMarketExpired:
         arb_reader.web3.eth.contract.return_value = mock_contract
 
         assert arb_reader.is_market_expired("0xmarket") is False
+
+
+class TestGetMarketExpiryTs:
+    """Test get_market_expiry_ts — the authoritative on-chain maturity (VIB-5384).
+
+    Single source of truth: ``is_market_expired`` and ``get_days_to_maturity``
+    both derive from this read, so the raw timestamp, the days-remaining, and the
+    expired flag stay consistent. A failed read returns None (Empty≠Zero), never
+    a fabricated 0.
+    """
+
+    def test_returns_raw_onchain_expiry(self, reader):
+        future_expiry = int(time.time()) + 86400 * 200
+        mock_contract = MagicMock()
+        mock_contract.functions.expiry.return_value.call.return_value = future_expiry
+        reader.web3.eth.contract.return_value = mock_contract
+
+        assert reader.get_market_expiry_ts("0xmarket") == future_expiry
+
+    def test_rpc_failure_returns_none(self, reader):
+        """A failed expiry read is swallowed → None (Empty≠Zero), never raises."""
+        mock_contract = MagicMock()
+        mock_contract.functions.expiry.return_value.call.side_effect = Exception("rpc error")
+        reader.web3.eth.contract.return_value = mock_contract
+
+        assert reader.get_market_expiry_ts("0xmarket") is None
+
+    def test_non_positive_expiry_is_none_not_fabricated(self, reader):
+        """A 0/garbage expiry (e.g. a placeholder/echo) is treated as unread, not a
+        fabricated maturity (Empty≠Zero)."""
+        mock_contract = MagicMock()
+        mock_contract.functions.expiry.return_value.call.return_value = 0
+        reader.web3.eth.contract.return_value = mock_contract
+
+        assert reader.get_market_expiry_ts("0xmarket") is None
+
+    def test_days_and_expired_derive_from_same_read(self, reader):
+        """is_market_expired and get_days_to_maturity both consume the same expiry."""
+        future_expiry = int(time.time()) + 86400 * 90
+        mock_contract = MagicMock()
+        mock_contract.functions.expiry.return_value.call.return_value = future_expiry
+        reader.web3.eth.contract.return_value = mock_contract
+
+        expiry_ts = reader.get_market_expiry_ts("0xmarket")
+        assert expiry_ts == future_expiry
+        assert reader.is_market_expired("0xmarket") is False
+        days = reader.get_days_to_maturity("0xmarket")
+        assert days is not None and 85 <= days <= 95
 
 
 # =========================================================================
