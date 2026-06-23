@@ -450,6 +450,7 @@ def _prepare_pnl_runtime(
         fee_models={},
         slippage_models={},
         data_config=volume_data_config,
+        token_addresses=token_addresses,
     )
     return _PnlRuntime(
         strategy_config=strategy_config,

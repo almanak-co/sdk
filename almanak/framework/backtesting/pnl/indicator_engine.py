@@ -26,17 +26,18 @@ from decimal import Decimal
 from almanak.framework.data.indicators.atr import ATRCalculator
 from almanak.framework.data.indicators.bollinger_bands import BollingerBandsCalculator
 from almanak.framework.data.indicators.macd import MACDCalculator
+from almanak.framework.data.indicators.moving_averages import MovingAverageCalculator
 from almanak.framework.data.indicators.rsi import RSICalculator
 from almanak.framework.data.interfaces import InsufficientDataError
-from almanak.framework.market import ATRData, BollingerBandsData, MACDData, MarketSnapshot, RSIData
+from almanak.framework.market import ATRData, BollingerBandsData, MACDData, MAData, MarketSnapshot, RSIData
 
 logger = logging.getLogger(__name__)
 
 # Default indicators to compute when strategy doesn't declare required_indicators
-DEFAULT_INDICATORS = frozenset({"rsi", "macd", "bollinger_bands", "atr"})
+DEFAULT_INDICATORS = frozenset({"rsi", "macd", "bollinger_bands", "atr", "ema"})
 
 # Supported indicator names for validation
-SUPPORTED_INDICATORS = frozenset({"rsi", "macd", "bollinger_bands", "atr"})
+SUPPORTED_INDICATORS = frozenset({"rsi", "macd", "bollinger_bands", "atr", "ema"})
 
 # Maximum price history to keep per token (covers all standard indicator periods)
 DEFAULT_MAX_HISTORY = 200
@@ -125,6 +126,9 @@ class BacktestIndicatorEngine:
 
             if "atr" in self._required:
                 self._populate_atr(snapshot, token, price_list, config)
+
+            if "ema" in self._required:
+                self._populate_ema(snapshot, token, price_list, config)
 
     def _populate_rsi(
         self,
@@ -236,6 +240,69 @@ class BacktestIndicatorEngine:
         except InsufficientDataError:
             pass
 
+    @staticmethod
+    def _ema_periods_from_config(config: dict) -> list[int]:
+        """Collect the EMA periods a strategy needs from its config.
+
+        ta_swap-style strategies declare ``ema_fast_period`` / ``ema_slow_period``;
+        a single-EMA strategy may use ``ema_period``; ``ema_periods`` accepts an
+        explicit list. Deduped, positive-only, order-stable. An EMA query for a
+        period not pre-populated here still raises (honest miss), matching the
+        other indicators.
+        """
+        periods: list[int] = []
+        for key in ("ema_period", "ema_fast_period", "ema_slow_period"):
+            value = config.get(key)
+            if value is not None:
+                periods.append(int(value))
+        extra = config.get("ema_periods")
+        if isinstance(extra, list | tuple):
+            periods.extend(int(p) for p in extra)
+        if not periods:
+            # No EMA period declared: populate EMA(12) so a bare
+            # ``market.ema(token)`` (snapshot default period=12) resolves.
+            periods.append(12)
+        seen: set[int] = set()
+        unique: list[int] = []
+        for period in periods:
+            if period >= 1 and period not in seen:
+                seen.add(period)
+                unique.append(period)
+        return unique
+
+    def _populate_ema(
+        self,
+        snapshot: MarketSnapshot,
+        token: str,
+        prices: list[Decimal],
+        config: dict,
+    ) -> None:
+        """Compute EMA(s) and set on snapshot for each configured period.
+
+        The backtest snapshot has no live indicator provider, so a strategy
+        calling ``market.ema(token, period=N)`` only resolves if EMA(N) was
+        pre-populated here. Periods come from the strategy config
+        (:meth:`_ema_periods_from_config`). Silently skips a period with
+        insufficient history (the strategy's read then raises, same as RSI/BB).
+        """
+        current_price = prices[-1] if prices else Decimal("0")
+        for period in self._ema_periods_from_config(config):
+            try:
+                ema_value = MovingAverageCalculator.calculate_ema_from_prices(prices, period)
+            except InsufficientDataError:
+                continue
+            snapshot.set_ma(
+                token,
+                MAData(
+                    value=Decimal(str(round(ema_value, 6))),
+                    ma_type="EMA",
+                    period=period,
+                    current_price=current_price,
+                ),
+                ma_type="EMA",
+                period=period,
+            )
+
     def min_warmup_ticks(self, config: dict | None = None) -> int:
         """Return the minimum number of ticks required before all indicators can compute.
 
@@ -256,6 +323,13 @@ class BacktestIndicatorEngine:
         if "atr" in self._required:
             # ATR needs period + 1 data points
             required = max(required, int(config.get("atr_period", 14)) + 1)
+        if "ema" in self._required:
+            # EMA(n) needs n data points; warm up for the largest configured
+            # period so a slow EMA (e.g. ema_slow_period=55) is not treated as
+            # past warm-up before _populate_ema can compute it.
+            ema_periods = self._ema_periods_from_config(config)
+            if ema_periods:
+                required = max(required, max(ema_periods))
         return required
 
     def is_warming_up(self, token: str, config: dict | None = None) -> bool:

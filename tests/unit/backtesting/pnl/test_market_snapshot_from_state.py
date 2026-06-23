@@ -142,3 +142,160 @@ class TestNoPortfolio:
 
         price = snapshot.price("WETH")
         assert price == Decimal("3000")
+
+
+class TestAddressAliasResolution:
+    """A strategy may reference tokens by contract address; the backtest data
+    (seeded by symbol) must resolve those address reads via the alias map."""
+
+    CB_ADDR = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+    ALIASES = {CB_ADDR: "CBBTC"}
+
+    def _real_state(self):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        return MarketState(
+            timestamp=datetime(2026, 3, 23, tzinfo=UTC),
+            chain="base",
+            prices={"CBBTC": Decimal("60000"), "USDC": Decimal("1")},
+            token_aliases=self.ALIASES,
+        )
+
+    def test_marketstate_get_price_resolves_address_any_case(self):
+        state = self._real_state()
+        assert state.get_price(self.CB_ADDR) == Decimal("60000")
+        assert state.get_price(self.CB_ADDR.upper()) == Decimal("60000")  # fill-pricing keys uppercase
+        assert state.get_price("CBBTC") == Decimal("60000")  # symbol still works
+
+    def test_marketstate_unmapped_address_is_honest_miss(self):
+        state = self._real_state()
+        with pytest.raises(KeyError):
+            state.get_price("0xdeadbeef00000000000000000000000000000000")
+
+    def test_snapshot_price_and_balance_resolve_by_address(self):
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        state = self._real_state()
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+        portfolio.tokens["CBBTC"] = Decimal("0.05")
+        snapshot = create_market_snapshot_from_state(
+            state, chain="base", portfolio=portfolio, token_aliases=self.ALIASES
+        )
+        assert snapshot.price(self.CB_ADDR) == snapshot.price("CBBTC") == Decimal("60000")
+        assert snapshot.balance(self.CB_ADDR).balance == Decimal("0.05")
+
+    def test_snapshot_indicator_resolves_by_address(self):
+        from almanak.framework.market import RSIData
+
+        state = self._real_state()
+        snapshot = create_market_snapshot_from_state(state, chain="base", token_aliases=self.ALIASES)
+        snapshot.set_rsi("CBBTC", RSIData(value=Decimal("31"), period=14))
+        assert snapshot.rsi(self.CB_ADDR, period=14).value == Decimal("31")
+
+    def test_empty_aliases_keeps_address_an_honest_miss(self):
+        # Without an alias map (live snapshots), an address query is unchanged.
+        state = self._real_state()
+        state.token_aliases = {}
+        snapshot = create_market_snapshot_from_state(state, chain="base")
+        with pytest.raises(ValueError):
+            snapshot.price(self.CB_ADDR)
+
+
+class TestAddressAliasResolutionAllReads:
+    """`_canonicalize_token` must be wired through every token-keyed snapshot read,
+    not just price/balance/rsi/bb/ema."""
+
+    CB_ADDR = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+    ALIASES = {CB_ADDR: "CBBTC"}
+
+    def _snapshot(self):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        state = MarketState(
+            timestamp=datetime(2026, 3, 23, tzinfo=UTC),
+            chain="base",
+            prices={"CBBTC": Decimal("60000")},
+            token_aliases=self.ALIASES,
+        )
+        return create_market_snapshot_from_state(state, chain="base", token_aliases=self.ALIASES)
+
+    def test_macd_resolves_by_address(self):
+        from almanak.framework.market import MACDData
+
+        snap = self._snapshot()
+        snap.set_macd("CBBTC", MACDData(macd_line=Decimal("1"), signal_line=Decimal("0.5"), histogram=Decimal("0.5")))
+        assert snap.macd(self.CB_ADDR).macd_line == Decimal("1")
+
+    def test_atr_resolves_by_address(self):
+        from almanak.framework.market import ATRData
+
+        snap = self._snapshot()
+        snap.set_atr("CBBTC", ATRData(value=Decimal("123"), value_percent=Decimal("0.2"), period=14))
+        assert snap.atr(self.CB_ADDR, period=14).value == Decimal("123")
+
+    def test_price_data_resolves_by_address(self):
+        snap = self._snapshot()
+        assert snap.price_data(self.CB_ADDR).price == Decimal("60000")
+
+
+class TestAliasAwareFlows:
+    """Address-keyed intents must produce SYMBOL-keyed portfolio flows / position
+    labels so the cash sweep, cost-basis, and close/reporting stay symbol-keyed."""
+
+    CB_ADDR = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+    USDC_ADDR = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    ALIASES = {CB_ADDR: "CBBTC", USDC_ADDR: "USDC"}
+
+    def _state(self):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        return MarketState(
+            timestamp=datetime(2026, 3, 23, tzinfo=UTC),
+            chain="base",
+            prices={"CBBTC": Decimal("60000"), "USDC": Decimal("1")},
+            token_aliases=self.ALIASES,
+        )
+
+    def test_swap_flows_keyed_by_symbol(self):
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl._engine_helpers import calculate_token_flows
+
+        intent = SimpleNamespace(from_token=self.USDC_ADDR, to_token=self.CB_ADDR)
+        tokens_in, tokens_out = calculate_token_flows(
+            intent, IntentType.SWAP, Decimal("60"), Decimal("0"), Decimal("0"), self._state()
+        )
+        assert set(tokens_out) == {"USDC"}  # not "0X8335..."
+        assert set(tokens_in) == {"CBBTC"}  # not "0XCBB7..."
+
+    def test_supply_flow_keyed_by_symbol(self):
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl._engine_helpers import calculate_token_flows
+
+        intent = SimpleNamespace(token=self.CB_ADDR)
+        _tokens_in, tokens_out = calculate_token_flows(
+            intent, IntentType.SUPPLY, Decimal("60"), Decimal("0"), Decimal("0"), self._state()
+        )
+        assert set(tokens_out) == {"CBBTC"}
+
+    def test_vault_deposit_position_labelled_by_symbol(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from almanak.framework.backtesting.pnl.engine import PnLBacktester
+
+        bt = PnLBacktester(data_provider=MagicMock(), fee_models={}, slippage_models={})
+        intent = SimpleNamespace(deposit_token=self.CB_ADDR, amount_usd=Decimal("60"), apy=Decimal("0.05"))
+        position = bt._vault_deposit_delta(
+            intent,
+            protocol="metamorpho",
+            tokens=["CBBTC"],
+            executed_price=Decimal("60000"),
+            timestamp=datetime(2026, 3, 23, tzinfo=UTC),
+            market_state=self._state(),
+            strict_reproducibility=False,
+        )
+        assert "CBBTC" in position.tokens  # not "0XCBB7..."

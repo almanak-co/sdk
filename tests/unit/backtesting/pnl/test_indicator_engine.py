@@ -27,7 +27,6 @@ from almanak.framework.backtesting.pnl.indicator_engine import (
 )
 from almanak.framework.market import ATRData, BollingerBandsData, MACDData, MarketSnapshot, RSIData
 
-
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -554,3 +553,77 @@ class TestIsWarmingUp:
     def test_not_warming_up_no_indicators(self):
         engine = BacktestIndicatorEngine(required_indicators=set())
         assert engine.is_warming_up("ETH") is False
+
+
+# =============================================================================
+# EMA population (VIB: address/EMA backtest support)
+# =============================================================================
+
+
+class TestEmaPopulation:
+    """EMA must be computed for the periods a ta_swap-style strategy declares."""
+
+    def test_ema_populated_for_fast_and_slow_periods(self) -> None:
+        prices = _generate_prices(3500.0, 60)
+        engine = _create_engine_with_prices("WETH", prices, {"ema"})
+
+        snapshot = _make_snapshot()
+        engine.populate_snapshot(snapshot, config={"ema_fast_period": 21, "ema_slow_period": 55})
+
+        fast = snapshot.ema("WETH", period=21)
+        slow = snapshot.ema("WETH", period=55)
+        assert fast.ma_type == "EMA" and fast.period == 21 and fast.value > 0
+        assert slow.ma_type == "EMA" and slow.period == 55 and slow.value > 0
+
+    def test_ema_in_default_indicator_set(self) -> None:
+        assert "ema" in DEFAULT_INDICATORS
+
+    def test_ema_skipped_for_period_with_insufficient_history(self) -> None:
+        # 30 prices: EMA-21 resolves, EMA-55 does not.
+        prices = _generate_prices(3500.0, 30)
+        engine = _create_engine_with_prices("WETH", prices, {"ema"})
+
+        snapshot = _make_snapshot()
+        engine.populate_snapshot(snapshot, config={"ema_fast_period": 21, "ema_slow_period": 55})
+
+        assert snapshot.ema("WETH", period=21).period == 21
+        with pytest.raises(ValueError):
+            snapshot.ema("WETH", period=55)
+
+    def test_ema_periods_from_config_dedupes_and_filters(self) -> None:
+        periods = BacktestIndicatorEngine._ema_periods_from_config(
+            {"ema_period": 9, "ema_fast_period": 9, "ema_slow_period": 21, "ema_periods": [21, 0, 50]}
+        )
+        assert periods == [9, 21, 50]
+
+
+class TestEmaDefaultAndWarmup:
+    """A bare `market.ema(token)` (snapshot default period=12) must resolve, and
+    `min_warmup_ticks` must account for the largest EMA period."""
+
+    def test_default_ema_12_when_no_period_configured(self) -> None:
+        prices = _generate_prices(3500.0, 30)
+        engine = _create_engine_with_prices("WETH", prices, {"ema"})
+
+        snapshot = _make_snapshot()
+        engine.populate_snapshot(snapshot, config={})  # no ema_* keys
+
+        ema = snapshot.ema("WETH")  # default period=12
+        assert ema.ma_type == "EMA" and ema.period == 12 and ema.value > 0
+
+    def test_ema_periods_default_to_twelve_when_unconfigured(self) -> None:
+        assert BacktestIndicatorEngine._ema_periods_from_config({}) == [12]
+
+    def test_min_warmup_ticks_includes_largest_ema_period(self) -> None:
+        engine = BacktestIndicatorEngine(required_indicators={"ema"})
+        # ema_slow_period dominates RSI/MACD/BB/ATR defaults.
+        assert engine.min_warmup_ticks({"ema_fast_period": 21, "ema_slow_period": 55}) == 55
+
+    def test_ema_only_strategy_warms_up_until_slow_period(self) -> None:
+        engine = BacktestIndicatorEngine(required_indicators={"ema"})
+        cfg = {"ema_fast_period": 21, "ema_slow_period": 55}
+        for i in range(54):
+            engine.append_price("ETH", Decimal(str(3000 + i)))
+        assert engine.is_warming_up("ETH", cfg) is True  # 54 < 55
+        engine.append_price("ETH", Decimal("3055"))
+        assert engine.is_warming_up("ETH", cfg) is False  # 55 >= 55

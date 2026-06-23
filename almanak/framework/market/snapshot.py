@@ -550,6 +550,13 @@ class MarketSnapshot:
         self._balances: dict[str, TokenBalance] = {}
         self._rsi_values: dict[str, tuple[RSIData, str | None]] = {}
 
+        # Optional ``{address_lower: SYMBOL}`` map used only by the PnL backtest
+        # to let a strategy that references tokens by contract address resolve to
+        # the symbol-keyed data the engine seeds. Empty for live snapshots and
+        # symbol-only backtests, so ``_canonicalize_token`` is an identity no-op
+        # there and pre-existing behaviour is byte-identical.
+        self._token_aliases: dict[str, str] = {}
+
         # Pre-populated indicator data (for all TA indicators)
         # Stored as (data, timeframe) tuples; timeframe=None matches any query
         self._macd_values: dict[str, tuple[MACDData, str | None]] = {}
@@ -693,6 +700,9 @@ class MarketSnapshot:
                 configured chains AND the oracle cannot route by chain.
             ValueError: If price cannot be determined.
         """
+        # Backtest address-keyed strategies resolve to the seeded symbol; a
+        # symbol or a live snapshot (no alias map) passes through unchanged.
+        token = self._canonicalize_token(token)
         # Chain resolution: oracle-aware. When the oracle supports chain=,
         # let the caller's explicit chain pass through even if it's not in
         # ``self.chains`` — the oracle will handle (or reject) it.
@@ -813,6 +823,7 @@ class MarketSnapshot:
         Raises:
             ChainNotConfiguredError / AmbiguousChainError: same rules as :meth:`price`.
         """
+        token = self._canonicalize_token(token)
         requested_chain = self._resolve_chain(chain)
         cache_key = f"{token}/{quote}@{requested_chain}"
 
@@ -1027,6 +1038,7 @@ class MarketSnapshot:
         Raises:
             ValueError: If RSI cannot be calculated
         """
+        token = self._canonicalize_token(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
@@ -1199,6 +1211,7 @@ class MarketSnapshot:
             if macd.is_bullish_crossover:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        token = self._canonicalize_token(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, fast_period, slow_period, signal_period)
 
@@ -1268,6 +1281,7 @@ class MarketSnapshot:
             if bb.is_oversold:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        token = self._canonicalize_token(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period, std_dev)
 
@@ -1332,6 +1346,7 @@ class MarketSnapshot:
             if stoch.is_oversold and stoch.k_value > stoch.d_value:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        token = self._canonicalize_token(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, k_period, d_period)
 
@@ -1392,6 +1407,7 @@ class MarketSnapshot:
                 # Safe to trade
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        token = self._canonicalize_token(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
@@ -1451,6 +1467,7 @@ class MarketSnapshot:
             if sma.is_price_above:
                 print("Bullish - price above 50 SMA")
         """
+        token = self._canonicalize_token(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, "SMA", period)
 
@@ -1506,6 +1523,7 @@ class MarketSnapshot:
             if ema_12.value > ema_26.value:
                 print("Golden cross - bullish")
         """
+        token = self._canonicalize_token(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, "EMA", period)
 
@@ -1560,6 +1578,7 @@ class MarketSnapshot:
             if adx.is_uptrend:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        token = self._canonicalize_token(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
@@ -1608,6 +1627,7 @@ class MarketSnapshot:
             if obv.is_bullish:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        token = self._canonicalize_token(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, signal_period)
 
@@ -1656,6 +1676,7 @@ class MarketSnapshot:
             if cci.is_oversold:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        token = self._canonicalize_token(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
@@ -1713,6 +1734,7 @@ class MarketSnapshot:
             if ich.is_bullish_crossover and ich.is_above_cloud:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
+        token = self._canonicalize_token(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, tenkan_period, kijun_period, senkou_b_period)
 
@@ -1817,6 +1839,9 @@ class MarketSnapshot:
             ValueError: If balance cannot be determined.
         """
         requested_chain = self._resolve_chain(chain)
+        # Backtest address-keyed reads resolve to the seeded symbol first; live
+        # snapshots (no alias map) pass through unchanged.
+        token = self._canonicalize_token(token)
         # VIB-3138: translate generic symbol to protocol-preferred variant.
         resolved = self._resolve_protocol_variant(token, protocol)
         cache_key = f"{resolved}@{requested_chain}"
@@ -2153,6 +2178,27 @@ class MarketSnapshot:
         if cache_key is not None:
             self._balance_usd_unmeasured.discard(cache_key)
         return filled
+
+    def set_token_aliases(self, aliases: dict[str, str]) -> None:
+        """Register a ``{address_lower: SYMBOL}`` map for address-keyed reads.
+
+        Used only by the PnL backtest engine: a strategy that calls
+        ``market.price(addr)`` / ``market.rsi(addr)`` etc. with a contract
+        address resolves to the symbol the engine seeded. Live snapshots never
+        call this, so :meth:`_canonicalize_token` stays an identity no-op there.
+        """
+        self._token_aliases = aliases or {}
+
+    def _canonicalize_token(self, token: str) -> str:
+        """Resolve a contract address to its seeded symbol, else return as-is.
+
+        Address keys are lowercased (Blueprint 17 cache-key convention), so a
+        query in any case resolves; a symbol (not present as an address key)
+        passes through unchanged. No-op when no alias map is registered.
+        """
+        if not self._token_aliases or not isinstance(token, str):
+            return token
+        return self._token_aliases.get(token.lower(), token)
 
     def _seeded_price_for_symbol(self, token: str) -> Decimal | None:
         """Case-insensitive lookup in the ``set_price()``-seeded ``_prices`` map.
@@ -4704,6 +4750,9 @@ class MarketSnapshot:
             OHLCVUnavailableError: If OHLCV data cannot be retrieved.
         """
         token_str = token if isinstance(token, str) else token.pair
+        # Resolve an address-keyed token to its seeded symbol (no-op for a
+        # "BASE/QUOTE" pair string, an Instrument, or a live snapshot).
+        token_str = self._canonicalize_token(token_str)
 
         if self._ohlcv_router is not None:
             envelope = self._fetch_ohlcv_via_router(token, timeframe, limit, pool_address, quote, token_str)

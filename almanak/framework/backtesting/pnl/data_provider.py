@@ -147,12 +147,30 @@ class MarketState:
     block_number: int | None = None
     gas_price_gwei: Decimal | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: Optional ``{address_lower: SYMBOL_UPPER}`` map letting a
+    #: strategy that references tokens by contract address resolve to the
+    #: symbol-keyed price/OHLCV space the backtest seeds. Stamped per tick by
+    #: the engine loop; empty for symbol-only runs and every non-backtest
+    #: caller, so resolution is a no-op there.
+    token_aliases: dict[str, str] = field(default_factory=dict)
+
+    def _canonical_token(self, token: str) -> str:
+        """Map a contract address to its canonical symbol, else return as-is.
+
+        Address keys are lowercased (Blueprint 17 cache-key convention), so a
+        query in any case (a lowercase ``decide`` read or an UPPERCASE
+        fill-pricing key) resolves. A symbol passes through unchanged.
+        """
+        if not self.token_aliases:
+            return token
+        return self.token_aliases.get(token.lower(), token)
 
     def get_price(self, token: str) -> Decimal:
         """Get the price of a token at this market state.
 
         Args:
-            token: Token symbol (e.g., "WETH", "USDC")
+            token: Token symbol (e.g., "WETH", "USDC") or, when a
+                ``token_aliases`` map is present, a contract address.
 
         Returns:
             Price in USD
@@ -160,7 +178,7 @@ class MarketState:
         Raises:
             KeyError: If token price is not available
         """
-        token_upper = token.upper()
+        token_upper = self._canonical_token(token).upper()
         if token_upper in self.prices:
             return self.prices[token_upper]
 
@@ -179,7 +197,7 @@ class MarketState:
         Returns:
             OHLCV data if available, None otherwise
         """
-        return self.ohlcv.get(token.upper())
+        return self.ohlcv.get(self._canonical_token(token).upper())
 
     def has_token(self, token: str) -> bool:
         """Check if price data is available for a token.
@@ -190,7 +208,7 @@ class MarketState:
         Returns:
             True if price data exists
         """
-        token_upper = token.upper()
+        token_upper = self._canonical_token(token).upper()
         return token_upper in self.prices or token_upper in self.ohlcv
 
     @property

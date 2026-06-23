@@ -431,6 +431,7 @@ def create_market_snapshot_from_state(
     chain: str = DEFAULT_CHAIN,
     wallet_address: str = "",
     portfolio: SimulatedPortfolio | None = None,
+    token_aliases: dict[str, str] | None = None,
 ) -> MarketSnapshot:
     """Create a MarketSnapshot from historical MarketState data.
 
@@ -452,6 +453,8 @@ def create_market_snapshot_from_state(
         wallet_address=wallet_address,
         timestamp=market_state.timestamp,
     )
+    if token_aliases:
+        snapshot.set_token_aliases(token_aliases)
     _seed_snapshot_prices(snapshot, market_state)
     if portfolio:
         _seed_snapshot_balances(snapshot, market_state, portfolio)
@@ -918,6 +921,15 @@ class PnLBacktester:
             slippage_models=slippage_models,
             data_config=data_config,
         )
+    """
+    token_addresses: dict[str, tuple[str, str]] | None = None
+    """Optional ``{SYMBOL_UPPER: (chain, address)}`` map of tracked tokens.
+
+    Supplied by the CLI (``build_token_address_map``) — the same map handed to
+    the CoinGecko provider for coin-id resolution. The engine reverses it (per
+    run chain) into an ``{address_lower: SYMBOL}`` alias map so a strategy that
+    references tokens by contract address resolves to the symbol-keyed data the
+    backtest seeds. ``None`` keeps the historical symbol-only behaviour.
     """
     _mev_simulator: MEVSimulator | None = None
     _current_backtest_id: str = ""
@@ -2291,7 +2303,7 @@ class PnLBacktester:
     ) -> _GenericIntentDetails:
         intent_type = self._get_intent_type(intent)
         protocol = self._get_intent_protocol(intent)
-        tokens = self._get_intent_tokens(intent)
+        tokens = self._get_intent_tokens(intent, getattr(market_state, "token_aliases", None))
         amount_usd = self._get_intent_amount_usd(
             intent,
             market_state,
@@ -2839,11 +2851,20 @@ class PnLBacktester:
 
         return get_intent_protocol(intent)
 
-    def _get_intent_tokens(self, intent: Any) -> list[str]:
-        """Extract the tokens involved in an intent. Delegates to intent_extraction module."""
+    def _get_intent_tokens(self, intent: Any, aliases: dict[str, str] | None = None) -> list[str]:
+        """Extract the tokens involved in an intent. Delegates to intent_extraction module.
+
+        When ``aliases`` (an ``{address_lower: SYMBOL}`` map) is supplied, each
+        resolved token is canonicalized address->symbol so simulated position
+        labels (LP token0/token1, perp/lending asset) stay symbol-keyed and the
+        valuation / close-matching paths price them via the seeded symbol.
+        """
         from .intent_extraction import get_intent_tokens
 
-        return get_intent_tokens(intent)
+        tokens = get_intent_tokens(intent)
+        if aliases:
+            return [aliases.get(token.lower(), token) if isinstance(token, str) else token for token in tokens]
+        return tokens
 
     def _get_intent_amount_usd(
         self,
@@ -3124,6 +3145,12 @@ class PnLBacktester:
                 token,
             )
         if isinstance(token, str):
+            # Canonicalize address->symbol so the supply position is created
+            # under the same symbol key as the flows (keeps close/reporting and
+            # valuation alias-consistent); no-op for symbols / symbol-only runs.
+            aliases = getattr(market_state, "token_aliases", None)
+            if aliases:
+                token = aliases.get(token.lower(), token)
             token = token.upper()
         amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
 
