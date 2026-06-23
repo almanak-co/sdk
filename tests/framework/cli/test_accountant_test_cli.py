@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from almanak.framework.cli.accountant_test_cli import main
+from almanak.framework.accounting.accountant_test import SCORECARD_PROFILES
+from almanak.framework.cli.accountant_test_cli import _PRIMITIVE_CHOICES, _build_parser, main
 
 
 def _make_minimal_passing_lp_db() -> Path:
@@ -214,6 +215,31 @@ def test_default_mode_fails_when_cells_fail():
         assert rc == 1
     finally:
         path.unlink(missing_ok=True)
+
+
+def test_primitive_choices_equal_registered_profiles():
+    """VIB-5319: the ``--primitive`` choices must be derived from the canonical
+    scorecard-profile registry, not a hardcoded list.
+
+    The matrix runner invokes ``accountant_test_cli --primitive <row.primitive>``;
+    when ``pendle_pt`` / ``pendle_lp`` were registered as runnable profiles (and
+    wired into the ratchet + matrix YAML) but this list was left as
+    ``["lp", "looping", "perp"]``, the ``pendle_lp`` matrix row errored with
+    argparse "invalid choice". Asserting parity here makes a future profile
+    addition automatically callable from the CLI and fails loudly if the two
+    ever drift.
+    """
+    assert set(_PRIMITIVE_CHOICES) == set(SCORECARD_PROFILES)
+    # Both Pendle profiles are reachable from the CLI (the gap VIB-5319 closed).
+    assert "pendle_pt" in _PRIMITIVE_CHOICES
+    assert "pendle_lp" in _PRIMITIVE_CHOICES
+
+
+@pytest.mark.parametrize("primitive", sorted(SCORECARD_PROFILES))
+def test_parser_accepts_every_registered_primitive(primitive):
+    """argparse must accept every registered profile string for ``--primitive``."""
+    args = _build_parser().parse_args(["--db", "x.db", "--primitive", primitive])
+    assert args.primitive == primitive
 
 
 @pytest.mark.parametrize("flag", ["--strict", "--require-cells"])

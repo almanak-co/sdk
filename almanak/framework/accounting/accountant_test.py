@@ -3606,6 +3606,7 @@ def _cell22_preflight(
 
 
 __all__ = [
+    "SCORECARD_PROFILES",
     "AccountantReport",
     "CellResult",
     "FixtureLifecycleError",

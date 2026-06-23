@@ -21,9 +21,20 @@ import sys
 from pathlib import Path
 
 from almanak.framework.accounting.accountant_test import (
+    SCORECARD_PROFILES,
     MultipleDeploymentsError,
     run_against_sqlite,
 )
+
+# Single source of truth for the ``--primitive`` choices: the canonical
+# scorecard-profile registry. Hardcoding ``["lp", "looping", "perp"]`` here let
+# the CLI silently drift behind the registry — when ``pendle_pt`` / ``pendle_lp``
+# were registered as runnable profiles (and wired into the ratchet + matrix YAML),
+# the matrix runner's ``accountant_test_cli --primitive pendle_lp`` invocation
+# errored with "invalid choice" because this list was never updated (VIB-5319).
+# Deriving the choices from ``SCORECARD_PROFILES`` makes a newly-registered
+# profile callable from the CLI the moment it lands — no second edit to forget.
+_PRIMITIVE_CHOICES: tuple[str, ...] = tuple(sorted(SCORECARD_PROFILES))
 
 
 # crap-allowlist: Phase 5e (#2097) swaps four direct ``os.environ.<get|pop|set>``
@@ -112,9 +123,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", default=None, help="Explicit path to a sqlite DB file (overrides -d).")
     p.add_argument(
         "--primitive",
-        choices=["lp", "looping", "perp"],
+        choices=_PRIMITIVE_CHOICES,
         required=True,
-        help="Which primitive's cell matrix to evaluate.",
+        help="Which primitive's cell matrix to evaluate (choices derived from the registered scorecard profiles).",
     )
     p.add_argument(
         "--deployment-id",
