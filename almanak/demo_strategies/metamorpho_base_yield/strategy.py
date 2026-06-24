@@ -1,26 +1,40 @@
-"""MetaMorpho Base Yield Strategy.
+"""MetaMorpho Base Yield Strategy — yield-floor-gated ERC4626 vault rotation.
 
 Deposits USDC into the Moonwell Flagship USDC MetaMorpho vault on Base for
-optimized lending yield across Morpho Blue markets. The vault is curated by
-Gauntlet, allocating across multiple USDC lending markets on Base's Morpho
-Blue deployment.
+optimized lending yield across Morpho Blue markets (curated by Gauntlet). It is
+the reference for archetype #10 (ERC4626 vault yield) and exists to demonstrate
+the one thing a yield-vault strategy MUST do that a deposit-and-forget tutorial
+does not: **time entry and exit on the live yield**, not just deposit and wait
+for teardown.
 
-Strategy Logic:
-1. IDLE: Check wallet USDC balance. If above min_deposit_usd, deposit into vault
-   respecting max_vault_allocation_pct of total portfolio value.
-2. DEPOSITED: Monitor position. Track yield via share price appreciation.
-   Auto-compound by re-depositing any idle USDC above threshold every
-   compound_interval_hours. Redeem on teardown.
-3. COMPOUNDING: Re-deposit idle USDC that has accumulated (e.g., from other
-   strategy activity or manual transfers) into the vault.
+Strategy Logic (a real yield-timing loop, symmetric in/out):
+1. IDLE → DEPOSIT only when the live supply APY is at or above ``min_apy_floor``
+   (read via ``market.lending_rate``); the yield must justify the position
+   before capital enters. (Entry is NOT blocked when the APY read is merely
+   unavailable — only when it is readable AND below the floor.)
+2. DEPOSITED → HOLD while APY ≥ floor, auto-compounding idle USDC every
+   ``compound_interval_hours``; **REDEEM (exit) when APY falls below the floor
+   for ``exit_confirm_checks`` consecutive checks** (hysteresis — a single
+   transient dip does not churn the position). Also redeems on teardown.
+3. After an APY-floor exit the strategy returns to IDLE and only re-enters once
+   the APY recovers above the floor — so it rotates capital in and out with the
+   yield rather than sitting in a vault whose rate has collapsed.
+
+Design rules honoured (the golden promotion gate):
+- The exit is gated on a real economic signal (live APY vs a configured floor),
+  not a fixed timer; state commits only in ``on_intent_executed`` after a fill.
+- Data-unavailable reads degrade to HOLD (exit only on a *readable* sub-floor
+  rate — never churn out on a missing read); any other exception propagates.
+- No direct network egress — APY via ``lending_rate`` (gateway), value via the
+  framework.
+
+Note: a share-price *drawdown* guard (exit on a vault loss / de-peg event) needs
+a correct ERC4626 vault NAV read, which is currently blocked by the vault-NAV
+units bug (VIB-5392); it is a deliberate follow-up, not implemented here.
 
 Target vault:
   Moonwell Flagship USDC (0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca)
-  - Curated by Gauntlet / Moonwell
-  - Allocates across Morpho Blue USDC markets on Base
-  - Significant TVL, production-grade vault
-
-Maturity: Candidate -- pending Anvil fork validation.
+  - Curated by Gauntlet / Moonwell; allocates across Morpho Blue USDC markets.
 """
 
 import logging
@@ -67,6 +81,18 @@ class MetaMorphoBaseYield(IntentStrategy):
         self.max_vault_allocation_pct = int(self.get_config("max_vault_allocation_pct", 80))
         self.compound_interval_hours = int(self.get_config("compound_interval_hours", 24))
 
+        # Yield-floor gate: enter only when the live supply APY >= floor, exit
+        # when it stays below the floor for exit_confirm_checks consecutive ticks.
+        self.min_apy_floor = Decimal(str(self.get_config("min_apy_floor", "3.0")))  # percent
+        self.exit_confirm_checks = int(self.get_config("exit_confirm_checks", 2))
+        self.rate_protocol = str(self.get_config("rate_protocol", "morpho_blue"))
+        self.rate_token = str(self.get_config("rate_token", self.deposit_token))
+
+        if self.min_apy_floor < 0:
+            raise ValueError("min_apy_floor must be >= 0")
+        if self.exit_confirm_checks < 1:
+            raise ValueError("exit_confirm_checks must be >= 1")
+
         # State
         self._state = "idle"
         self._previous_stable_state = "idle"
@@ -78,6 +104,8 @@ class MetaMorphoBaseYield(IntentStrategy):
         self._total_yield_earned = Decimal("0")
         self._epochs_completed = 0
         self._compounds_completed = 0
+        self._current_apy: Decimal | None = None  # last readable supply APY (percent)
+        self._below_floor_count = 0  # consecutive sub-floor reads (exit hysteresis)
 
         logger.info(
             "MetaMorphoBaseYield initialized: vault=%s, deposit=%s %s, "
@@ -125,6 +153,16 @@ class MetaMorphoBaseYield(IntentStrategy):
                 reason=f"Insufficient {self.deposit_token}: ${available_usd:.2f} < ${self.min_deposit_usd}"
             )
 
+        # Yield-floor entry gate: only enter when the live supply APY justifies
+        # the position. A merely *unavailable* read does not block entry (the
+        # deposit is low-risk and we should not NULL the strategy on a flaky
+        # feed); only a readable, sub-floor APY holds capital out.
+        apy = self._read_apy(market)
+        if apy is not None and apy < self.min_apy_floor:
+            return Intent.hold(
+                reason=f"APY {apy:.2f}% below floor {self.min_apy_floor:.2f}% — staying out of the vault"
+            )
+
         # Respect max allocation cap
         max_deposit = available * Decimal(self.max_vault_allocation_pct) / Decimal("100")
         deposit_amount = min(self.deposit_amount, max_deposit)
@@ -150,7 +188,37 @@ class MetaMorphoBaseYield(IntentStrategy):
         )
 
     def _handle_deposited(self, market: MarketSnapshot) -> Intent:
-        """Monitor position, auto-compound idle USDC if enough time has passed."""
+        """Monitor yield: exit on a sustained sub-floor APY, else compound/hold."""
+        # Yield-floor EXIT gate (checked before compound/hold). Exit only on a
+        # *readable* sub-floor APY, and only after exit_confirm_checks consecutive
+        # sub-floor reads (hysteresis — a single transient dip must not churn the
+        # position). A missing read holds (never exit on unavailable data).
+        apy = self._read_apy(market)
+        if apy is None:
+            # Data-unavailable: HOLD without compounding. Adding capital (a fresh
+            # VAULT_DEPOSIT) without a readable yield signal would violate the
+            # golden-demo "degrade to HOLD on unavailable data" gate.
+            return Intent.hold(
+                reason=f"APY unavailable; holding vault position without compounding "
+                f"(floor {self.min_apy_floor:.2f}%)"
+            )
+        if apy < self.min_apy_floor:
+            self._below_floor_count += 1
+            if self._below_floor_count >= self.exit_confirm_checks:
+                logger.info(
+                    "EXIT: APY %.2f%% < floor %.2f%% for %d checks — redeeming vault position",
+                    apy, self.min_apy_floor, self._below_floor_count,
+                )
+                self._previous_stable_state = self._state
+                self._state = "redeeming"
+                return self._create_redeem_intent()
+            return Intent.hold(
+                reason=f"APY {apy:.2f}% below floor {self.min_apy_floor:.2f}% "
+                f"({self._below_floor_count}/{self.exit_confirm_checks} confirms before exit)"
+            )
+        # APY healthy — reset the exit counter.
+        self._below_floor_count = 0
+
         # Check if we should compound idle USDC back into the vault
         if self._should_compound():
             try:
@@ -183,8 +251,42 @@ class MetaMorphoBaseYield(IntentStrategy):
             self._deposit_shares, self._total_deposited, self.deposit_token,
             self._epochs_completed, self._compounds_completed,
         )
+        apy_str = f"{self._current_apy:.2f}%" if self._current_apy is not None else "n/a"
         return Intent.hold(
-            reason=f"Vault position active, earning yield (epoch {self._epochs_completed})"
+            reason=f"Vault active, earning yield (APY {apy_str} >= floor {self.min_apy_floor:.2f}%, "
+            f"epoch {self._epochs_completed})"
+        )
+
+    def _read_apy(self, market: MarketSnapshot) -> Decimal | None:
+        """Live supply APY (percent) for the vault's underlying market, or None if unavailable.
+
+        Reads via the gateway-backed ``lending_rate`` (off-chain subgraph data,
+        so it works on Anvil forks too). The morpho_blue USDC supply rate is the
+        yield proxy for this Morpho-Blue-backed vault. Caches the last good read
+        on ``_current_apy`` for status/dashboard. Returns None on any
+        data-unavailable error (caller treats None as "hold, don't churn").
+        """
+        try:
+            rate = market.lending_rate(self.rate_protocol, self.rate_token, "supply", chain=self.chain)
+        except ValueError as e:  # genuinely-unavailable rate -> None (lending_rate's contract is ValueError)
+            logger.warning("APY read unavailable (%s %s): %s", self.rate_protocol, self.rate_token, e)
+            return None
+        # A malformed/non-finite rate is a bug, not "unavailable" — let it propagate
+        # rather than silently degrading to a capital-adding deposit.
+        apy = Decimal(str(rate.apy_percent))
+        if not apy.is_finite():
+            raise ValueError(f"APY read returned non-finite value: {rate.apy_percent!r}")
+        self._current_apy = apy
+        return apy
+
+    def _create_redeem_intent(self) -> Intent:
+        """Redeem the full vault position (shares='all')."""
+        return Intent.vault_redeem(
+            protocol="metamorpho",
+            vault_address=self.vault_address,
+            shares="all",
+            deposit_token=self.deposit_token,
+            chain=self.chain,
         )
 
     def _should_compound(self) -> bool:
@@ -244,6 +346,12 @@ class MetaMorphoBaseYield(IntentStrategy):
                 self._state = "idle"
                 self._total_deposited = Decimal("0")
                 self._deposit_shares = Decimal("0")
+                self._below_floor_count = 0  # reset exit hysteresis; re-entry needs APY back above floor
+                # Clear the compound timers so a later re-entry starts a fresh
+                # compound_interval_hours epoch instead of compounding immediately
+                # off a stale _last_compound_time.
+                self._deposit_timestamp = None
+                self._last_compound_time = None
                 logger.info("VAULT_REDEEM successful -> state=idle")
         else:
             revert_to = self._previous_stable_state
@@ -266,6 +374,9 @@ class MetaMorphoBaseYield(IntentStrategy):
             "total_yield_earned": str(self._total_yield_earned),
             "epochs_completed": self._epochs_completed,
             "compounds_completed": self._compounds_completed,
+            "current_apy": str(self._current_apy) if self._current_apy is not None else None,
+            "min_apy_floor": str(self.min_apy_floor),
+            "below_floor_count": self._below_floor_count,
         }
 
     def get_persistent_state(self) -> dict[str, Any]:
@@ -281,6 +392,8 @@ class MetaMorphoBaseYield(IntentStrategy):
             "total_yield_earned": str(self._total_yield_earned),
             "epochs_completed": self._epochs_completed,
             "compounds_completed": self._compounds_completed,
+            "current_apy": str(self._current_apy) if self._current_apy is not None else None,
+            "below_floor_count": self._below_floor_count,
         }
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -305,6 +418,10 @@ class MetaMorphoBaseYield(IntentStrategy):
             self._epochs_completed = int(state["epochs_completed"])
         if "compounds_completed" in state:
             self._compounds_completed = int(state["compounds_completed"])
+        if "below_floor_count" in state:
+            self._below_floor_count = int(state["below_floor_count"])
+        if state.get("current_apy"):
+            self._current_apy = Decimal(str(state["current_apy"]))
         logger.info(
             "Restored state: %s (epoch %d, compounds %d)",
             self._state, self._epochs_completed, self._compounds_completed,

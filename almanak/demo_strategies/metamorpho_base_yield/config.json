@@ -15,6 +15,10 @@
     "min_deposit_usd": "25",
     "max_vault_allocation_pct": 80,
     "compound_interval_hours": 24,
+    "min_apy_floor": "3.0",
+    "exit_confirm_checks": 2,
+    "rate_protocol": "morpho_blue",
+    "rate_token": "USDC",
     "anvil_funding": {
         "ETH": 10,
         "USDC": 50000
