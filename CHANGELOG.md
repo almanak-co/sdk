@@ -6,6 +6,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.20.0] - 2026-06-24
+
+### Added
+
+- **Pendle PT accounting vertical.** Completes the Principal-Token (PT)
+  accounting surface on top of the 2.19.0 PT/YT price foundation: a PT
+  Accountant gate (cell matrix + CLI + cell-applicability matrix + QA
+  checklist), generic cells G1/G3/G6 reading a typed `PendleAccountingEvent`,
+  open-PT mark-to-market via the gateway PT implied-price, PT disposal booking
+  realized-yield PnL, strict-USD realized yield from a measured base price,
+  held-PT inventory rendered in the dashboard Open Positions, PT/YT price-path
+  telemetry + staleness observability, and a `pendle_basics` demo (Anvil runner
+  + funding). (#2997, #3009, #3010, #3013, #2982, #3001, #3006, #2965, #2995)
+- **CAIP-2 / CAIP-19 identity layer (VIB-5175, Phase 1).** Additive interop
+  codec for chain ids (`eip155:42161`) and asset ids (`eip155:1/erc20:0x…`,
+  `eip155:1/slip44:60`), built on a new typed `TokenRef` chain-scoped token
+  identity. `resolve("eip155:42161") ≡ resolve("arbitrum")`; native `slip44`
+  populated for ETH-chains, Solana, Polygon, Avalanche, BSC, and Berachain
+  (others fail loud rather than guess). No change to internal canonical
+  chain/address forms, persistence, or deployment-id. (#2994, #2967, #3000, #3002)
+- **Pre-submit feasibility preflight seam.** Connector-owned `preflight` hook
+  that turns structurally-doomed intents into clean compile FAILs (routed to
+  HOLD) instead of paying gas on an inevitable revert, with GMX exec-fee,
+  Stargate native-fee, Euler LTV, and Pendle market-expiry adapters. (#2986)
+- **`LP_CLOSE` `amount="all"` chaining.** A first-class WEI-denominated marker
+  lets a strategy emit `IntentSequence([LP_OPEN, LP_CLOSE(amount="all")])` and
+  size the close from the prior open's minted-LP balance. (#2980)
+- **Backtesting: address-keyed strategies.** The PnL engine now supports
+  address-keyed strategies (token resolution + EMA). (#3005)
+
+### Changed
+
+- **Gateway price aggregation is bounded.** New
+  `ALMANAK_GATEWAY_PRICE_AGGREGATOR_TIMEOUT_SECONDS` (default `15.0`) caps the
+  whole concurrent price fan-out; slow sources are recorded as timeouts and the
+  aggregate proceeds with whatever returned. (#2984)
+
+### Fixed
+
+- **Market data.** LWAP for all Uniswap V3 forks + Aerodrome Slipstream TWAP
+  (#2977); tick-spacing-aware pool resolution and a SushiSwap V3 reader (#2976);
+  Binance OHLCV + spot-price symbols resolved via a canonical `CEX_SYMBOL_MAP`
+  (#2978); repaired DEX-volume subgraphs (SushiSwap/TraderJoe schemas + dead
+  Uniswap V3 Base/Optimism IDs) (#3003).
+- **Accounting.** Portfolio snapshot now includes the native-token balance so
+  equity reflects gas drain (#2991); pre-existing wallet inventory is
+  boot-seeded as FIFO lots (G6 no longer conflates `None` basis with missing)
+  (#2990); Curve single-sided `LP_OPEN` declares funded legs instead of a
+  zero-leg (#2989); `total_value_usd` is sourced from the snapshot in gRPC
+  reconstruction (#2987); PT partial-disposal proceeds are pro-rated to the
+  matched quantity (#2999); held-PT canonical symbol unified across teardown,
+  valuer, and FIFO inventory (#2964).
+- **Gateway.** PT `maturity_ts` populated from on-chain expiry (#2996); asyncpg
+  statement cache disabled in the boot schema validator to stop a pgbouncer
+  crash loop (#3004).
+- **Execution / runner.** Enriched fields (`bin_ids`, `protocol_fees`,
+  `primitive_money_legs`) now reach the strategy callback as top-level slots
+  (#2985); the runner awaits current-iteration outbox drains before snapshotting
+  to fix a held-PT/swap NAV race (#3012); `position_events.tx_hash` points at
+  the ACTION transaction, not the approval (#2983).
+- **Pendle.** Receipt `extract_*` now returns tagged ExtractOk/Missing/Error (no
+  silent parse-error masking) (#2979); `getOracleState` reverts wrap in a typed
+  `PendleOnChainError` (#2966); `days_to_maturity` decoupled from the M1 path
+  (#2995).
+
 ## [2.19.1] - 2026-06-22
 
 ### Changed
