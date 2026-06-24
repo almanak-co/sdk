@@ -1,9 +1,19 @@
 """
-BENQI Full Lending Lifecycle on Avalanche (Demo)
-=================================================
+BENQI Lending Lifecycle on Avalanche (Tutorial Demo)
+====================================================
 
-Demo strategy showcasing the complete BENQI lending lifecycle on Avalanche.
-Promoted from incubating after Kitchen Loop validation (iter 52, 97).
+**Archetype: lending LIFECYCLE walkthrough — a tutorial, not a quant strategy.**
+This demo runs the four canonical lending legs **once, back-to-back**
+(supply -> borrow -> repay -> withdraw) to teach the BENQI/Compound-V2 intent
+vocabulary and the standalone-supply accounting contract (VIB-3586). It does
+**not** build leverage, hold a position, or defend a health factor — it has no
+"wait then unwind" behaviour because it never carries risk between iterations.
+
+If you want a real BENQI *quant* strategy — recursive leverage with a
+health-factor defense and an unwind on HF-danger-or-teardown — see the sibling
+demo ``benqi_looping`` (PRD §5 archetype #9, the crown-jewel leverage-loop
+shape, BENQI variant). This lifecycle demo is the §5 archetype #8 (lending
+lifecycle) tutorial that ``benqi_looping`` is the leveraged counterpart to.
 
 BENQI is a Compound V2 fork on Avalanche using qiToken architecture:
 - Supply mints qiTokens (e.g., qiUSDC)
@@ -58,10 +68,10 @@ if TYPE_CHECKING:
 
 @almanak_strategy(
     name="benqi_lending_lifecycle",
-    description="BENQI full lending lifecycle on Avalanche: borrow -> repay -> withdraw",
+    description="BENQI lending lifecycle TUTORIAL on Avalanche: supply -> borrow -> repay -> withdraw, once (no leverage/HF). See benqi_looping for the leveraged quant strategy.",
     version="1.0.0",
     author="Kitchen Loop",
-    tags=["kitchenloop", "lending", "benqi", "lifecycle", "avalanche"],
+    tags=["demo", "tutorial", "lending", "lifecycle", "benqi", "avalanche"],
     supported_chains=["avalanche"],
     default_chain="avalanche",
     supported_protocols=["benqi"],

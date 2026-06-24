@@ -1,0 +1,26 @@
+{
+  "chain": "avalanche",
+  "collateral_token": "AVAX",
+  "borrow_token": "USDC",
+  "wrapped_native": "WAVAX",
+  "initial_collateral": 0.3,
+  "target_loops": 2,
+  "target_ltv": 0.3,
+  "collateral_factor": 0.5,
+  "hf_danger": 1.30,
+  "hf_unwind_floor": 1.10,
+  "swap_slippage": 0.01,
+  "gas_reserve": 0.05,
+  "token_funding": [
+    {
+      "symbol": "AVAX",
+      "chain": "avalanche",
+      "amount": "0.3",
+      "amount_type": "token"
+    }
+  ],
+  "anvil_funding": {
+    "AVAX": 10,
+    "USDC": 1000
+  }
+}
