@@ -88,6 +88,7 @@ from ..intents.state_machine import (
 )
 from ..intents.vocabulary import AnyIntent, HoldIntent, Intent, IntentSequence, IntentType
 from ..state.exceptions import AccountingPersistenceError
+from ..state.registry_errors import RegistryAutoCollisionError
 from ..state.state_manager import StateManager
 from ..utils.grpc_utils import TRANSIENT_GRPC_CODES, get_grpc_status_code
 from ..utils.log_formatters import (
@@ -1156,6 +1157,34 @@ class StrategyRunner:
             # handler kicks in, and alert the operator before books drift.
             from ..state.exceptions import AccountingPersistenceError
 
+            if isinstance(e, RegistryAutoCollisionError):
+                # VIB-5409 (layer 3): a registry auto-mode collision is a strategy
+                # programming bug, not an infra failure. It is now re-raised typed
+                # from _persist_trade (not laundered into a generic ledger
+                # AccountingPersistenceError, VIB-5360 defect 2). Halt the
+                # iteration with ACCOUNTING_FAILED — same status the generic
+                # accounting path uses, so run_loop's consecutive-error handler
+                # and the operator alert both fire — but the log/alert carry the
+                # typed collision detail (orphan-reopen signal) instead of a
+                # write_kind='ledger' infra shape. Teardown behaviour is
+                # unchanged here (deferred layer 4).
+                logger.exception(
+                    "Registry auto-mode collision in live mode for %s "
+                    "(accounting_category=%s, semantic_grouping_key=%s, existing pih=%s); "
+                    "a same-group open landed on-chain without a registry_handle — likely an "
+                    "orphan reopen whose prior close never freed the group",
+                    deployment_id,
+                    e.accounting_category,
+                    e.semantic_grouping_key,
+                    e.existing_physical_identity_hash,
+                )
+                await self._alert_accounting_failure(strategy, e)
+                return self._create_error_result(
+                    deployment_id,
+                    IterationStatus.ACCOUNTING_FAILED,
+                    f"Registry auto-mode collision (accounting_category={e.accounting_category}): {e}",
+                    start_time,
+                )
             if isinstance(e, AccountingPersistenceError):
                 logger.exception(
                     "Accounting persistence failed in live mode for %s (write_kind=%s)",
@@ -2954,6 +2983,21 @@ class StrategyRunner:
                 "fix before promoting to live",
                 strategy.deployment_id,
             )
+        except RegistryAutoCollisionError:
+            # VIB-5409 (layer 3): a registry auto-mode collision is a strategy
+            # programming bug (a same-group open without a registry_handle —
+            # typically an orphan reopen whose prior close never freed the group),
+            # NOT an infra failure. ``RegistryAutoCollisionError`` is deliberately
+            # NOT an ``AccountingPersistenceError`` subclass (registry_errors.py;
+            # VIB-4200) so the two stay distinguishable. The pre-existing broad
+            # ``except Exception`` below would re-wrap it as a generic
+            # ``AccountingPersistenceError(write_kind="ledger")``, laundering the
+            # typed signal (VIB-5360 defect 2). Re-raise the typed class verbatim
+            # so ``run_iteration`` can surface it as itself. Surface uniformly
+            # across live / paper / dry_run (per registry_errors.py rationale:
+            # the collision must never ship to live unnoticed) — it is re-raised
+            # in all modes, unlike the mode-lenient ledger path above.
+            raise
         except Exception as e:  # noqa: BLE001
             # Unexpected failure outside the persistence path (build_ledger_entry
             # raised, position_event emission re-raised, etc.). Live mode still
@@ -3353,11 +3397,38 @@ class StrategyRunner:
             fee_tier=fee_tier,
         )
         if payload is None:
-            logger.info(
-                "Registry-mode skip: V4 parser returned no LP_CLOSE registry payload "
-                "(token_id / pool_id missing or pool mismatch); falling back to save_ledger_entry",
+            # VIB-5409 — degrade-not-strand. The parser refused (burn receipt
+            # carried no usable ModifyLiquidity / pool_id, or the close legs were
+            # unmeasurable). If we matched the OPEN-side row, we still hold its
+            # identity (token_id + pool_id + PositionManager) and MUST flip that
+            # row to ``status='closed'`` so the auto-mode group key is freed —
+            # otherwise the OLD row stays ``status='open'`` and a same-pool reopen
+            # collides (VIB-5360). Build a minimal close row from the OPEN payload:
+            # close-leg amounts stay UNMEASURED (Empty ≠ Zero), but the lifecycle
+            # transition lands. A genuine identity mismatch (pool disagreement) is
+            # NOT recoverable this way — the parser already returned None for it,
+            # and we only trust the OPEN payload's own pool_id here.
+            fallback = self._build_v4_close_fallback_payload(
+                open_payload=open_payload,
+                token_id=intent_token_id,
+                position_manager=position_manager,
+                fee_tier=fee_tier,
             )
-            return None
+            if fallback is None:
+                logger.info(
+                    "Registry-mode skip: V4 parser returned no LP_CLOSE registry payload "
+                    "and no matched OPEN row to recover identity from; falling back to "
+                    "save_ledger_entry",
+                )
+                return None
+            logger.warning(
+                "v4_registry_close_parser_refuse_recovered: V4 LP_CLOSE parser produced no "
+                "payload for token_id=%s chain=%s; building a degraded close row from the "
+                "matched OPEN payload to free the registry group (close legs unmeasured)",
+                intent_token_id,
+                chain,
+            )
+            payload = fallback
         try:
             token_id = int(payload["token_id"])
         except (KeyError, TypeError, ValueError):
@@ -3385,6 +3456,102 @@ class StrategyRunner:
             handle=getattr(intent, "registry_handle", None),
         )
         return registry_row, payload, token_id
+
+    @staticmethod
+    def _build_v4_close_fallback_payload(
+        *,
+        open_payload: dict | None,
+        token_id: int | None,
+        position_manager: str,
+        fee_tier: int | None,
+    ) -> dict | None:
+        """Build a minimal V4 LP_CLOSE payload from the matched OPEN row (VIB-5409).
+
+        Used only when ``extract_registry_payload_close`` refused (the burn
+        receipt yielded no usable close legs) but the runner DID match an
+        OPEN-side registry row. The OPEN payload carries the position identity —
+        ``token_id`` (the intent's ``position_id``, re-confirmed against the OPEN
+        row), ``pool_id``, and ``position_manager`` — which is everything the
+        ``status='closed'`` UPSERT needs to flip the OPEN row closed and free the
+        auto-mode group key (the same ``physical_identity_hash`` keys both rows).
+
+        ``position_manager`` is the close-side PositionManager the runner already
+        resolved for this chain; it (and ``token_id``) MUST match the OPEN row's
+        own anchors, else the helper would build a close from a DIFFERENT
+        position and free the wrong registry group. Returns ``None`` when the
+        OPEN payload is missing the identity anchors (``pool_id`` /
+        ``position_manager``), its ``token_id`` / ``position_manager`` disagree
+        with the close being written, or the token_id is unusable — in each case
+        there is no safe identity to write, so the caller falls back to
+        ``save_ledger_entry`` (degrade, never fabricate or misattribute an
+        identity).
+
+        Per CLAUDE.md "Empty ≠ Zero": the close-leg amounts/fees the burn receipt
+        could not observe are left ABSENT (unmeasured), never coerced to zero.
+        OPEN-time anchors (ticks / liquidity / fee tier) are carried forward so
+        the closed row keeps the lifecycle context, mirroring
+        ``_merge_open_payload_fields_v4``.
+        """
+        if not isinstance(open_payload, dict):
+            return None
+        if token_id is None or token_id <= 0:
+            return None
+        # Identity guard (VIB-5409, CodeRabbit): the close payload combines the
+        # caller's ``token_id`` with ``pool_id`` / ticks / liquidity from
+        # ``open_payload``. Before reusing the OPEN row's fields we MUST confirm
+        # the OPEN row is the SAME position the close is being written for —
+        # otherwise a lookup regression or direct helper misuse could flip the
+        # WRONG registry group ``status='closed'`` and free its auto-mode key.
+        # Reject when the OPEN row's own ``token_id`` / ``position_manager`` does
+        # not match the close being written (degrade-not-corrupt). The correct
+        # matched-identity path is unchanged.
+        open_token_id_raw = open_payload.get("token_id")
+        if open_token_id_raw is None:
+            return None
+        try:
+            open_token_id = int(open_token_id_raw)
+        except (TypeError, ValueError):
+            return None
+        if open_token_id != token_id:
+            return None
+        pool_id = str(open_payload.get("pool_id") or "").lower()
+        open_position_manager = str(open_payload.get("position_manager") or "")
+        if (
+            not pool_id
+            or not open_position_manager
+            or open_position_manager.lower() != str(position_manager or "").lower()
+        ):
+            return None
+        payload: dict = {
+            "token_id": str(token_id),
+            "pool_id": pool_id,
+            "position_manager": open_position_manager,
+        }
+        # Carry OPEN-time anchors forward. ``tick_lower`` / ``tick_upper`` /
+        # ``currency0`` / ``currency1`` / ``liquidity`` copy as-is; the OPEN
+        # principal amounts re-key to the ``*_open`` suffix the close payload
+        # uses. Close-leg amounts stay UNMEASURED (Empty ≠ Zero) — never
+        # zero-filled. Each copy is skipped when the source is ``None`` so the
+        # close row never stamps a fabricated field.
+        copy_map = {
+            "tick_lower": "tick_lower",
+            "tick_upper": "tick_upper",
+            "currency0": "currency0",
+            "currency1": "currency1",
+            "liquidity": "liquidity",
+            "amount0": "amount0_open",
+            "amount1": "amount1_open",
+        }
+        for src_key, dst_key in copy_map.items():
+            value = open_payload.get(src_key)
+            if value is not None:
+                payload[dst_key] = value
+        open_fee_tier = open_payload.get("fee_tier")
+        if open_fee_tier is not None:
+            payload["fee_tier"] = open_fee_tier
+        elif fee_tier is not None and fee_tier > 0:
+            payload["fee_tier"] = int(fee_tier)
+        return payload
 
     @staticmethod
     def _v4_close_intent_token_id(intent: AnyIntent) -> int | None:

@@ -184,6 +184,83 @@ async def test_v4_close_builds_row_from_intent_token_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v4_close_parser_refuse_with_open_match_builds_closed_row() -> None:
+    """VIB-5409 layer 1: when the V4 close parser refuses (returns ``None``) but
+    the runner matched the OPEN-side registry row, the builder must NOT return
+    ``None`` (which would fall back to a registry-less ledger write and strand the
+    OLD row at ``status='open'`` → VIB-5360 collision). It recovers the close
+    identity from the OPEN payload and builds a ``status='closed'`` row keyed on
+    the SAME physical identity, freeing the auto-mode group.
+    """
+    runner = SimpleNamespace()
+    runner.config = SimpleNamespace(chain=CHAIN)
+    runner._extract_block_number_from_result = MagicMock(return_value=999)
+    runner._build_registry_row = _stub_build_registry_row
+    runner._lookup_open_v4_registry_payload = AsyncMock(return_value=_open_payload())
+    runner._v4_close_intent_token_id = _v4_close_intent_token_id
+    runner._build_v4_close_fallback_payload = StrategyRunner._build_v4_close_fallback_payload
+    # Parser refuses — burn receipt yielded no usable close legs.
+    parser = SimpleNamespace(extract_registry_payload_close=MagicMock(return_value=None))
+
+    out = await _build_v4_close(
+        runner,
+        strategy=_strategy(),
+        intent=SimpleNamespace(registry_handle=None, position_id=str(TOKEN_ID)),
+        result=SimpleNamespace(),
+        entry=SimpleNamespace(tx_hash="0x" + "ef" * 32),
+        chain=CHAIN,
+        position_manager=PM,
+        receipt={"logs": []},
+        parser=parser,
+        fee_tier=None,
+    )
+    assert out is not None  # no longer strands — the close row lands
+    row, payload, token_id = out
+    assert token_id == TOKEN_ID
+    assert row.primitive == Primitive.LP_V4
+    assert row.status == "closed"
+    # Same physical identity as the OPEN row → the closed UPSERT frees the group.
+    assert row.physical_identity_hash == physical_identity_hash_univ4(
+        chain=CHAIN, position_manager_addr=PM, token_id=TOKEN_ID
+    )
+    assert row.semantic_grouping_key == semantic_grouping_key_univ4(chain=CHAIN, pool_id=POOL_ID)
+    # Close legs stay UNMEASURED (Empty ≠ Zero) — degraded, not fabricated.
+    assert "amount0_close" not in payload
+    assert "amount1_close" not in payload
+
+
+@pytest.mark.asyncio
+async def test_v4_close_parser_refuse_without_open_match_returns_none() -> None:
+    """VIB-5409 layer 1 boundary: parser refuses AND no OPEN row matched → there
+    is no identity to recover, so the builder still returns ``None`` (fall back to
+    ``save_ledger_entry``). There is no OPEN row to free, so no collision risk —
+    this preserves the pre-fix behaviour for the genuinely-unknown case.
+    """
+    runner = SimpleNamespace()
+    runner.config = SimpleNamespace(chain=CHAIN)
+    runner._extract_block_number_from_result = MagicMock(return_value=999)
+    runner._build_registry_row = _stub_build_registry_row
+    runner._lookup_open_v4_registry_payload = AsyncMock(return_value=None)
+    runner._v4_close_intent_token_id = _v4_close_intent_token_id
+    runner._build_v4_close_fallback_payload = StrategyRunner._build_v4_close_fallback_payload
+    parser = SimpleNamespace(extract_registry_payload_close=MagicMock(return_value=None))
+
+    out = await _build_v4_close(
+        runner,
+        strategy=_strategy(),
+        intent=SimpleNamespace(registry_handle=None, position_id=str(TOKEN_ID)),
+        result=SimpleNamespace(),
+        entry=SimpleNamespace(tx_hash="0x"),
+        chain=CHAIN,
+        position_manager=PM,
+        receipt={"logs": []},
+        parser=parser,
+        fee_tier=None,
+    )
+    assert out is None
+
+
+@pytest.mark.asyncio
 async def test_v4_close_returns_none_without_intent_token_id() -> None:
     runner = SimpleNamespace()
     runner.config = SimpleNamespace(chain=CHAIN)
