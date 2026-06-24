@@ -48,6 +48,24 @@ from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
 logger = logging.getLogger(__name__)
 
+# USD-pegged deposit tokens whose HUMAN amount ≈ USD value, so this demo may
+# report ``value_usd = human_assets`` without an oracle price step (VIB-5392).
+# A non-pegged deposit token (e.g. WETH, where 1 token ≠ $1) needs the framework
+# PositionType.VAULT on-chain repricer instead — out of scope for this demo.
+# Each token maps to its canonical on-chain decimals: scaling the raw ERC-4626
+# receipt amount with the wrong precision silently mis-reports NAV (e.g. an
+# 18-decimal DAI/USDS deposit read at the 6-decimal default would still be off
+# by 1e12×), so the allowlist pins the decimals and __init__ fails closed on any
+# token/decimals mismatch — the USD-peg guard alone does not close this hole.
+_USD_PEGGED_DEPOSIT_TOKEN_DECIMALS = {
+    "USDC": 6,
+    "USDT": 6,
+    "USDBC": 6,
+    "DAI": 18,
+    "USDS": 18,
+}
+_USD_PEGGED_DEPOSIT_TOKENS = frozenset(_USD_PEGGED_DEPOSIT_TOKEN_DECIMALS)
+
 
 @almanak_strategy(
     name="metamorpho_base_yield",
@@ -81,6 +99,57 @@ class MetaMorphoBaseYield(IntentStrategy):
         self.max_vault_allocation_pct = int(self.get_config("max_vault_allocation_pct", 80))
         self.compound_interval_hours = int(self.get_config("compound_interval_hours", 24))
 
+        # VIB-5392: the ERC-4626 Deposit/Withdraw events report ``assets`` in the
+        # underlying token's RAW base units (6 for USDC, 18 for an 18-decimal
+        # vault asset). This strategy reports a ``value_usd`` to
+        # ``portfolio_snapshots``; for a TOKEN-typed position the framework
+        # consumes that value verbatim (no on-chain reprice), so surfacing a raw
+        # 6-decimal amount as USD inflated NAV by exactly 1e6× — a $4 deposit
+        # read as $4,000,000 for the entire hold, dominating every drawdown /
+        # max-DD fold. We scale the raw receipt amount to human units here,
+        # sourcing the underlying decimals from config (NOT a hardcoded 6) so a
+        # non-6-decimal deposit token (e.g. an 18-decimal vault asset) values
+        # correctly. The accounting layer already records the correct
+        # human-unit ``assets_amount`` from the intent amount, so the books tie;
+        # this only fixes the snapshot NAV the strategy reports.
+        deposit_token_symbol = self.deposit_token.upper()
+        self.deposit_token_decimals = int(self.get_config("deposit_token_decimals", 6))
+        if self.deposit_token_decimals < 0:
+            raise ValueError("deposit_token_decimals must be >= 0")
+
+        # This demo reports ``value_usd`` as the deposit token's HUMAN amount
+        # (see ``get_open_positions``). That equals USD ONLY when 1 deposit
+        # token ≈ $1, i.e. a USD-pegged stablecoin. The demo ships pinned to
+        # USDC/Base, so this holds. We do NOT price the deposit token through an
+        # oracle here — true multi-asset USD valuation (e.g. an ETH-denominated
+        # vault, where 1 ETH ≠ $1) is the framework ``PositionType.VAULT`` path
+        # (on-chain convertToAssets → price-oracle USD), out of scope for this
+        # demo fix. Fail closed if someone points the demo at a non-pegged
+        # deposit token rather than silently mis-reporting NAV (VIB-5392).
+        if deposit_token_symbol not in _USD_PEGGED_DEPOSIT_TOKENS:
+            raise ValueError(
+                f"metamorpho_base_yield reports value_usd as the deposit token's human "
+                f"amount, which is only USD-accurate for a USD-pegged token; got "
+                f"deposit_token={self.deposit_token!r}. Use a stablecoin "
+                f"({sorted(_USD_PEGGED_DEPOSIT_TOKENS)}) or value the position via the "
+                f"framework PositionType.VAULT on-chain repricer."
+            )
+
+        # The raw ERC-4626 receipt is scaled by ``deposit_token_decimals`` before
+        # it becomes ``value_usd``. A token/decimals mismatch (e.g. 18-decimal
+        # DAI/USDS left at the 6-decimal default) silently mis-scales NAV by
+        # 1e12×, the exact failure mode VIB-5392 fixes — the USD-peg check above
+        # does not catch it. Pin each allowlisted token to its on-chain decimals
+        # and fail closed rather than mis-report.
+        expected_decimals = _USD_PEGGED_DEPOSIT_TOKEN_DECIMALS[deposit_token_symbol]
+        if self.deposit_token_decimals != expected_decimals:
+            raise ValueError(
+                f"deposit_token_decimals={self.deposit_token_decimals} does not match the "
+                f"on-chain decimals for deposit_token={self.deposit_token!r} "
+                f"(expected {expected_decimals}); a mismatch mis-scales the reported "
+                f"value_usd (VIB-5392)."
+            )
+
         # Yield-floor gate: enter only when the live supply APY >= floor, exit
         # when it stays below the floor for exit_confirm_checks consecutive ticks.
         self.min_apy_floor = Decimal(str(self.get_config("min_apy_floor", "3.0")))  # percent
@@ -108,8 +177,7 @@ class MetaMorphoBaseYield(IntentStrategy):
         self._below_floor_count = 0  # consecutive sub-floor reads (exit hysteresis)
 
         logger.info(
-            "MetaMorphoBaseYield initialized: vault=%s, deposit=%s %s, "
-            "max_alloc=%d%%, compound_interval=%dh",
+            "MetaMorphoBaseYield initialized: vault=%s, deposit=%s %s, max_alloc=%d%%, compound_interval=%dh",
             self.vault_address[:10],
             self.deposit_amount,
             self.deposit_token,
@@ -132,7 +200,8 @@ class MetaMorphoBaseYield(IntentStrategy):
             revert_to = self._previous_stable_state
             logger.warning(
                 "Stuck in transitional state '%s' -- reverting to '%s'",
-                self._state, revert_to,
+                self._state,
+                revert_to,
             )
             self._state = revert_to
             return Intent.hold(reason=f"Reverted from stuck state to '{revert_to}'")
@@ -172,7 +241,10 @@ class MetaMorphoBaseYield(IntentStrategy):
 
         logger.info(
             "DEPOSIT: %s %s into Moonwell vault on Base (available: %s, alloc cap: %d%%)",
-            deposit_amount, self.deposit_token, available, self.max_vault_allocation_pct,
+            deposit_amount,
+            self.deposit_token,
+            available,
+            self.max_vault_allocation_pct,
         )
 
         self._previous_stable_state = self._state
@@ -233,7 +305,9 @@ class MetaMorphoBaseYield(IntentStrategy):
                 compound_amount = min(idle_usdc, self.deposit_amount)
                 logger.info(
                     "COMPOUND: Re-depositing %s idle %s into vault (compound #%d)",
-                    compound_amount, self.deposit_token, self._compounds_completed + 1,
+                    compound_amount,
+                    self.deposit_token,
+                    self._compounds_completed + 1,
                 )
                 self._previous_stable_state = self._state
                 self._state = "compounding"
@@ -301,6 +375,17 @@ class MetaMorphoBaseYield(IntentStrategy):
         elapsed_hours = (datetime.now(UTC) - reference_time).total_seconds() / 3600
         return elapsed_hours >= self.compound_interval_hours
 
+    def _assets_to_human(self, raw_assets: Decimal) -> Decimal:
+        """Scale a raw base-unit asset amount to human (USD-pegged) units.
+
+        VIB-5392: the ERC-4626 ``Deposit``/``Withdraw`` events carry ``assets``
+        in the underlying token's raw base units. ``_total_deposited`` /
+        ``_redeem_assets`` (and the ``value_usd`` derived from them) must be in
+        human units so the snapshot NAV is correct, not inflated by
+        ``10**decimals``.
+        """
+        return raw_assets / Decimal(10**self.deposit_token_decimals)
+
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
         """Update state after intent execution."""
         intent_type = intent.intent_type.value
@@ -312,7 +397,11 @@ class MetaMorphoBaseYield(IntentStrategy):
                 if hasattr(result, "extracted_data") and result.extracted_data:
                     deposit_data = result.extracted_data.get("deposit_data")
                     if deposit_data:
-                        new_assets = Decimal(str(deposit_data.get("assets", 0)))
+                        # ``assets`` is in raw underlying base units (VIB-5392) —
+                        # scale to human units before accumulating. ``shares`` is
+                        # the 18-decimal vault-share count, used only as a
+                        # position-active flag, so it is left in raw units.
+                        new_assets = self._assets_to_human(Decimal(str(deposit_data.get("assets", 0))))
                         new_shares = Decimal(str(deposit_data.get("shares", 0)))
 
                 if self._state == "compounding":
@@ -321,7 +410,9 @@ class MetaMorphoBaseYield(IntentStrategy):
                     self._state = "deposited"
                     logger.info(
                         "Compound #%d confirmed: +%s assets, +%s shares",
-                        self._compounds_completed, new_assets, new_shares,
+                        self._compounds_completed,
+                        new_assets,
+                        new_shares,
                     )
                 else:
                     self._state = "deposited"
@@ -335,13 +426,18 @@ class MetaMorphoBaseYield(IntentStrategy):
                 if hasattr(result, "extracted_data") and result.extracted_data:
                     redeem_data = result.extracted_data.get("redeem_data")
                     if redeem_data:
-                        self._redeem_assets = Decimal(str(redeem_data.get("assets_received", 0)))
+                        # ``assets_received`` is raw base units (VIB-5392) — scale
+                        # to human units so yield = redeemed − deposited is a real
+                        # USD-pegged figure, not a 1e6× artifact.
+                        self._redeem_assets = self._assets_to_human(Decimal(str(redeem_data.get("assets_received", 0))))
                         yield_earned = self._redeem_assets - self._total_deposited
                         if yield_earned > 0:
                             self._total_yield_earned += yield_earned
                         logger.info(
                             "Redeem confirmed: received=%s, yield=%s, total_yield=%s",
-                            self._redeem_assets, yield_earned, self._total_yield_earned,
+                            self._redeem_assets,
+                            yield_earned,
+                            self._total_yield_earned,
                         )
                 self._state = "idle"
                 self._total_deposited = Decimal("0")
@@ -357,7 +453,9 @@ class MetaMorphoBaseYield(IntentStrategy):
             revert_to = self._previous_stable_state
             logger.warning(
                 "%s failed in state '%s' -- reverting to '%s'",
-                intent_type, self._state, revert_to,
+                intent_type,
+                self._state,
+                revert_to,
             )
             self._state = revert_to
 
@@ -424,7 +522,9 @@ class MetaMorphoBaseYield(IntentStrategy):
             self._current_apy = Decimal(str(state["current_apy"]))
         logger.info(
             "Restored state: %s (epoch %d, compounds %d)",
-            self._state, self._epochs_completed, self._compounds_completed,
+            self._state,
+            self._epochs_completed,
+            self._compounds_completed,
         )
 
     # -------------------------------------------------------------------------
@@ -442,6 +542,14 @@ class MetaMorphoBaseYield(IntentStrategy):
                     position_id=f"metamorpho-base-{self.vault_address[:16]}",
                     chain=self.chain,
                     protocol="metamorpho",
+                    # ``_total_deposited`` is in HUMAN units of the deposit token
+                    # (VIB-5392). value_usd == human_assets is USD-accurate ONLY
+                    # because __init__ pins this demo to a USD-pegged deposit
+                    # token (1 token ≈ $1); a non-pegged token would need an
+                    # oracle price step, which is the framework PositionType.VAULT
+                    # path, not this demo. The framework consumes this value
+                    # directly for a TOKEN-typed position (no on-chain reprice),
+                    # so the base-unit→human scaling MUST happen before here.
                     value_usd=self._total_deposited,
                     details={
                         "vault_address": self.vault_address,

@@ -11,6 +11,7 @@
     ],
     "vault_address": "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca",
     "deposit_token": "USDC",
+    "deposit_token_decimals": 6,
     "deposit_amount": "50",
     "min_deposit_usd": "25",
     "max_vault_allocation_pct": 80,
