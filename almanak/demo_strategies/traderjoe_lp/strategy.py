@@ -56,9 +56,9 @@ USAGE:
 
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # Timeline API for logging
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
@@ -69,6 +69,9 @@ from almanak.framework.intents import Intent
 # Core strategy framework imports
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
+
+if TYPE_CHECKING:
+    from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
 
 # =============================================================================
 # STRATEGY CONFIGURATION
@@ -94,6 +97,10 @@ class TraderJoeLPConfig:
     num_bins: int = 11
     # Minimum total inventory (USD) required to (re)open a position
     min_position_usd: Decimal = field(default_factory=lambda: Decimal("100"))
+    # Rebalance hysteresis: deadband (fraction of range width beyond an edge
+    # before recentering) + cooldown (minutes a fresh position must live first).
+    rebalance_buffer_pct: Decimal = field(default_factory=lambda: Decimal("0.5"))
+    rebalance_cooldown_minutes: int = 30
     force_action: str = ""
     position_id: str | None = None
 
@@ -109,6 +116,10 @@ class TraderJoeLPConfig:
             self.num_bins = int(self.num_bins)
         if isinstance(self.min_position_usd, str):
             self.min_position_usd = Decimal(self.min_position_usd)
+        if isinstance(self.rebalance_buffer_pct, str):
+            self.rebalance_buffer_pct = Decimal(self.rebalance_buffer_pct)
+        if isinstance(self.rebalance_cooldown_minutes, str):
+            self.rebalance_cooldown_minutes = int(self.rebalance_cooldown_minutes)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert config to dictionary."""
@@ -121,6 +132,8 @@ class TraderJoeLPConfig:
             "amount_y": str(self.amount_y),
             "num_bins": self.num_bins,
             "min_position_usd": str(self.min_position_usd),
+            "rebalance_buffer_pct": str(self.rebalance_buffer_pct),
+            "rebalance_cooldown_minutes": self.rebalance_cooldown_minutes,
             "force_action": self.force_action,
             "position_id": self.position_id,
         }
@@ -255,6 +268,16 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         # Minimum total inventory (USD) required to (re)open a position.
         self.min_position_usd = Decimal(str(self.get_config("min_position_usd", "100")))
 
+        # Rebalance hysteresis — prevents close->reopen->close thrash when price
+        # oscillates around the band edge (a recentering LP with no hysteresis
+        # bleeds gas + realizes IL on every edge crossing):
+        #   (1) DEADBAND: price must exit the LP range by rebalance_buffer_pct of
+        #       the range width BEYOND an edge before a rebalance triggers.
+        #   (2) COOLDOWN: a freshly-opened position must live at least
+        #       rebalance_cooldown_minutes before it can be closed to rebalance.
+        self.rebalance_buffer_pct = Decimal(str(self.get_config("rebalance_buffer_pct", "0.5")))
+        self.rebalance_cooldown = timedelta(minutes=int(self.get_config("rebalance_cooldown_minutes", 30)))
+
         # Internal state - track bin IDs where we have liquidity
         self._position_bin_ids: list[int] = []
 
@@ -264,6 +287,9 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         # mirroring traderjoe_crisis_lp.
         self._range_lower: Decimal | None = None
         self._range_upper: Decimal | None = None
+        # Hysteresis bookkeeping (committed in on_intent_executed, post-fill).
+        self._last_open_time: datetime | None = None
+        self._rebalance_count = 0
 
         logger.info(
             f"TraderJoeLPStrategy initialized: "
@@ -332,15 +358,33 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         # preserves the TraderJoe bin_ids/protocol_params).
         if self._position_bin_ids:
             if self._range_lower is not None and self._range_upper is not None:
-                if current_price < self._range_lower or current_price > self._range_upper:
+                # Hysteresis DEADBAND: only rebalance once price exits the LP
+                # range by rebalance_buffer_pct of the range width beyond an edge,
+                # so a small overshoot at the band edge does not trigger a churn.
+                width = self._range_upper - self._range_lower
+                buffer = width * self.rebalance_buffer_pct
+                exit_lower = self._range_lower - buffer
+                exit_upper = self._range_upper + buffer
+                if current_price < exit_lower or current_price > exit_upper:
+                    # COOLDOWN: don't rebalance a freshly-opened position; let it
+                    # earn fees for at least rebalance_cooldown before recentering.
+                    if not self._rebalance_cooldown_passed():
+                        return Intent.hold(
+                            reason=f"Price {current_price:.4f} out of deadband "
+                            f"[{exit_lower:.4f}, {exit_upper:.4f}] but rebalance cooldown active "
+                            f"({self.rebalance_cooldown})"
+                        )
                     logger.info(
-                        f"Price {current_price:.4f} exited band "
-                        f"[{self._range_lower:.4f}, {self._range_upper:.4f}] - closing to rebalance"
+                        f"Price {current_price:.4f} exited deadband "
+                        f"[{exit_lower:.4f}, {exit_upper:.4f}] (range [{self._range_lower:.4f}, "
+                        f"{self._range_upper:.4f}] ± {self.rebalance_buffer_pct} width) — "
+                        f"closing to rebalance (#{self._rebalance_count + 1})"
                     )
                     return self._create_close_intent()
                 return Intent.hold(
                     reason=f"Position in bins {self._position_bin_ids[:3]}... in band "
-                    f"[{self._range_lower:.4f}, {self._range_upper:.4f}]"
+                    f"[{self._range_lower:.4f}, {self._range_upper:.4f}] "
+                    f"(deadband ±{self.rebalance_buffer_pct} width, {self._rebalance_count} rebalances)"
                 )
             # Band unknown (e.g. opened by an older version) -- hold rather than
             # rebalance blindly.
@@ -588,6 +632,8 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             ru = getattr(intent, "range_upper", None)
             self._range_lower = Decimal(str(rl)) if rl is not None else None
             self._range_upper = Decimal(str(ru)) if ru is not None else None
+            # Start the rebalance cooldown clock from this confirmed open.
+            self._last_open_time = datetime.now(UTC)
 
             add_event(
                 TimelineEvent(
@@ -600,10 +646,27 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             )
 
         elif success and intent.intent_type.value == "LP_CLOSE":
-            logger.info("TraderJoe LP position closed successfully")
+            # A drift-triggered close is the first half of a rebalance (the
+            # reopen follows on later ticks). Teardown closes also land here but
+            # leave _position_bin_ids cleared, so the count harmlessly reflects
+            # "closes for recentering" over the run.
+            self._rebalance_count += 1
+            logger.info("TraderJoe LP position closed successfully (rebalance #%d)", self._rebalance_count)
             self._position_bin_ids = []
             self._range_lower = None
             self._range_upper = None
+            self._last_open_time = None
+
+    def _rebalance_cooldown_passed(self) -> bool:
+        """True if the live position has existed at least rebalance_cooldown.
+
+        Returns True when there is no recorded open time (e.g. a position
+        restored from persisted state without one) so a genuinely out-of-range
+        position is never stranded indefinitely.
+        """
+        if self._last_open_time is None:
+            return True
+        return datetime.now(UTC) - self._last_open_time >= self.rebalance_cooldown
 
     def get_persistent_state(self) -> dict[str, Any]:
         """Persist bin IDs so teardown can recover after process restarts."""
@@ -617,6 +680,12 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             state["range_lower"] = str(range_lower)
         if range_upper is not None:
             state["range_upper"] = str(range_upper)
+        # Defensive getattr: the demo-teardown regression test constructs the
+        # strategy via __new__ (bypassing __init__), so these may be unset.
+        state["rebalance_count"] = getattr(self, "_rebalance_count", 0)
+        last_open = getattr(self, "_last_open_time", None)
+        if last_open is not None:
+            state["last_open_time"] = last_open.isoformat()
         return state
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -638,6 +707,22 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             self._range_lower = Decimal(str(state["range_lower"]))
         if state and state.get("range_upper") is not None:
             self._range_upper = Decimal(str(state["range_upper"]))
+        if state and state.get("rebalance_count") is not None:
+            try:
+                self._rebalance_count = int(state["rebalance_count"])
+            except (TypeError, ValueError):
+                logger.warning("Invalid rebalance_count in persisted state: %r", state.get("rebalance_count"))
+        if state and state.get("last_open_time"):
+            try:
+                # fromisoformat() can yield a naive datetime; force aware UTC so the
+                # later `datetime.now(UTC) - self._last_open_time` cooldown math
+                # never raises on naive/aware subtraction.
+                last_open_time = datetime.fromisoformat(state["last_open_time"])
+                if last_open_time.tzinfo is None:
+                    last_open_time = last_open_time.replace(tzinfo=UTC)
+                self._last_open_time = last_open_time.astimezone(UTC)
+            except (TypeError, ValueError):
+                logger.warning("Invalid last_open_time in persisted state: %r", state.get("last_open_time"))
 
     # =========================================================================
     # STATUS REPORTING
@@ -663,6 +748,9 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             },
             "state": {
                 "position_bin_ids": self._position_bin_ids,
+                "rebalance_count": getattr(self, "_rebalance_count", 0),
+                "range_lower": str(self._range_lower) if getattr(self, "_range_lower", None) is not None else None,
+                "range_upper": str(self._range_upper) if getattr(self, "_range_upper", None) is not None else None,
             },
         }
 

@@ -21,6 +21,8 @@
     "amount_x": "0.001",
     "amount_y": "3",
     "num_bins": 11,
+    "rebalance_buffer_pct": "0.5",
+    "rebalance_cooldown_minutes": 30,
     "anvil_funding": {
         "AVAX": 100,
         "WAVAX": 100,
