@@ -959,10 +959,15 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         """Compose a Pendle PT/YT-USD price (VIB-5310, epic VIB-5299, M1).
 
         The gateway is the PRICE AUTHORITY: ``pt_usd = underlying/USD ×
-        pt_to_asset_rate`` is composed HERE from two gateway-sourced legs —
-        ``pt_to_asset_rate`` via the connector's on-chain market reader (a
+        pt_to_sy_rate`` is composed HERE from two gateway-sourced legs — the
+        PT→SY market rate via the connector's on-chain market reader (a
         gateway-internal eth_call, no new egress) and underlying/USD via the
         existing price aggregator. There is no direct Pendle price feed.
+
+        VIB-5407: the mark rate is the PT→SY rate (``getPtToSyRate``), the PT's
+        discounted market price in SY≈mint-token units — NOT ``getPtToAssetRate``
+        (the SY accounting-asset rate), which accretes toward ~par for a wrapped-
+        staking SY (e.g. SY-wstETH/stETH) and over-marks the held PT.
 
         Honest availability per the ratified AC (Empty≠Zero — never ``"0"`` for
         unmeasured, never an at-par fabrication):
@@ -1085,7 +1090,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
 
         underlying_price = underlying_result.price
 
-        # 4. Read pt_to_asset_rate + days-to-maturity (gateway-internal eth_call).
+        # 4. Read the PT→SY market rate + days-to-maturity (gateway-internal
+        #    eth_call; VIB-5407 — the discounted market mark, not the asset rate).
         #    The direct-mode reader does a BLOCKING web3 .call(); run it OFF the
         #    asyncio event loop via to_thread so a slow RPC can't stall every
         #    concurrent gRPC handler on the gateway (perimeter liveness). The
@@ -1100,7 +1106,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         maturity_ts = _resolve_maturity_ts(expiry_ts, ref.maturity_ts)
 
         # 5. Missing PT rate → UNMEASURED. Per the ratified AC, a missing
-        #    required read is NEVER fabricated: defaulting pt_to_asset_rate to
+        #    required read is NEVER fabricated: defaulting the PT→SY rate to
         #    1.0 (at-par) would overvalue the PT to its maximum redemption value
         #    (PT trades at ≤ par before maturity), so there is no AVAILABLE path
         #    here. ``underlying_price`` is echoed for transparency (it WAS
@@ -1172,8 +1178,11 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             confidence_band=band,
             price=str(pt_usd),
             underlying_price=str(underlying_price),
+            # VIB-5407: ``rate`` is the PT→SY market rate (the rate the mark uses);
+            # the proto field name is retained for wire stability — it echoes the
+            # PT-to-underlying-mint exchange rate driving the composed price.
             pt_to_asset_rate=str(rate),
-            source=f"composition:getPtToAssetRate×{underlying_result.source}",
+            source=f"composition:getPtToSyRate×{underlying_result.source}",
             confidence=confidence,
             timestamp=int(underlying_result.timestamp.timestamp()),
             stale=underlying_result.stale,
@@ -1232,10 +1241,18 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             raise _UnpriceableUnderlying(str(e)) from e
 
     def _read_pt_market(self, ref, chain: str) -> tuple[Decimal | None, int | None, int | None, str]:
-        """Read ``pt_to_asset_rate`` + on-chain expiry/maturity via the connector.
+        """Read the PT→SY market rate + on-chain expiry/maturity via the connector.
 
         Returns ``(rate_or_None, days_or_None, expiry_ts_or_None, reason)``.
 
+        * ``rate`` is the **PT→SY** TWAP rate — the PT's discounted market mark in
+          SY (≈ mint-token) units, which the caller multiplies by the priced
+          underlying to compose ``PT/USD`` (VIB-5407). It is deliberately NOT
+          ``getPtToAssetRate`` (the SY accounting-asset rate): for a wrapped-
+          staking SY (e.g. SY-wstETH whose accounting asset is stETH) the asset
+          rate accretes toward ~1.0 well before maturity and over-marks the PT to
+          ~par when the gateway prices the wrap token (wstETH). The PT→SY rate
+          matches the AMM swap price a holder would actually realize.
         * ``rate`` is ``None`` when the reader cannot be built or the read fails /
           is non-positive; the CALLER maps a ``None`` rate to ``UNMEASURED`` (no
           price) — deliberately NOT ``valuation.py``'s at-par (1.0) fallback,
@@ -1258,14 +1275,17 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         rate: Decimal | None = None
         reason = ""
         try:
-            raw = reader.get_pt_to_asset_rate(ref.market_address)
+            # VIB-5407: the money mark is the PT→SY rate (discounted market price
+            # in SY≈mint-token units), NOT getPtToAssetRate (the accounting-asset
+            # rate that over-marks toward par for wrapped-staking SYs).
+            raw = reader.get_pt_to_sy_rate(ref.market_address)
             if raw is not None and raw > 0:
                 rate = raw
             else:
-                reason = "pt_to_asset_rate-non-positive"
+                reason = "pt_to_sy_rate-non-positive"
         except Exception as e:
-            logger.debug("GetPtPrice: pt_to_asset_rate read failed for %s: %s", ref.market_address, e)
-            reason = "pt_to_asset_rate-read-failed"
+            logger.debug("GetPtPrice: pt_to_sy_rate read failed for %s: %s", ref.market_address, e)
+            reason = "pt_to_sy_rate-read-failed"
 
         # On-chain expiry is the authoritative maturity. Read it once and derive
         # days-to-maturity from the SAME timestamp so the response's maturity_ts

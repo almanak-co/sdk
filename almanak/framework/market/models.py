@@ -130,7 +130,8 @@ class PtPriceData:
 
     A pure pass-through of the gateway PT/YT-USD price contract
     (``PtPriceResponse``, VIB-5309/5310) — the gateway is the single price
-    authority that composes ``price = pt_to_asset_rate × underlying/USD`` and
+    authority that composes ``price = pt_to_sy_rate × underlying/USD`` (VIB-5407
+    — the discounted market mark, not the accounting-asset rate) and
     originates confidence + staleness. This object carries that one number to
     every consumer (valuation, dashboard, Accountant Test) so two tiles can
     never disagree (design spine §0/§1).

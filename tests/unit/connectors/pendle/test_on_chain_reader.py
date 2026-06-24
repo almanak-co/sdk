@@ -14,7 +14,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak.connectors.pendle.on_chain_reader import (
+    GET_PT_TO_ASSET_RATE_SELECTOR,
+    GET_PT_TO_SY_RATE_SELECTOR,
     PT_ORACLE_ADDRESSES,
+    PT_ORACLE_TWAP_DURATION_SECONDS,
     ROUTER_STATIC_ADDRESSES,
     PendleOnChainError,
     PendleOnChainReader,
@@ -209,6 +212,54 @@ class TestGetPtToAssetRate:
             reader.get_pt_to_asset_rate("0xmarket")
         # The readiness gate failed first — the rate read must NOT be attempted.
         assert reader.pt_oracle.functions.getPtToAssetRate.return_value.call.call_count == 0
+
+
+class TestGetPtToSyRate:
+    """Test get_pt_to_sy_rate — the discounted market mark (VIB-5407)."""
+
+    def test_returns_normalized_sy_rate(self, reader):
+        """The PT→SY rate is the discounted market price (well below 1.0 even when
+        the asset rate has accreted toward par for a wrapped-staking SY)."""
+        _set_oracle_ready(reader)
+        # 0.8079 — the live PT-wstETH-25JUN2026 PT→SY rate (matches the AMM swap).
+        reader.pt_oracle.functions.getPtToSyRate.return_value.call.return_value = 807868722071417353
+        rate = reader.get_pt_to_sy_rate("0xmarket")
+        assert rate == Decimal("807868722071417353") / Decimal("1000000000000000000")
+        # Fixed non-zero TWAP window.
+        assert reader.pt_oracle.functions.getPtToSyRate.call_args.args[1] == 900
+
+    def test_oracle_not_ready_raises_unmeasured(self, reader):
+        """oldestObservationSatisfied=False → UNMEASURED (raise), never fabricated."""
+        _set_oracle_ready(reader, oldest_ok=False)
+        with pytest.raises(PendleOnChainError, match="not ready"):
+            reader.get_pt_to_sy_rate("0xmarket")
+        assert reader.pt_oracle.functions.getPtToSyRate.return_value.call.call_count == 0
+
+    def test_caches_result(self, reader):
+        _set_oracle_ready(reader)
+        reader.pt_oracle.functions.getPtToSyRate.return_value.call.return_value = 807868722071417353
+        r1 = reader.get_pt_to_sy_rate("0xmarket")
+        r2 = reader.get_pt_to_sy_rate("0xmarket")
+        assert r1 == r2
+        assert reader.pt_oracle.functions.getPtToSyRate.return_value.call.call_count == 1
+
+    def test_sy_rate_cache_is_distinct_from_asset_rate_cache(self, reader):
+        """The PT→SY and PT→asset caches must not collide — a wrapped-staking SY
+        returns materially different rates from the two reads (VIB-5407)."""
+        _set_oracle_ready(reader)
+        reader.pt_oracle.functions.getPtToSyRate.return_value.call.return_value = 807868722071417353
+        reader.pt_oracle.functions.getPtToAssetRate.return_value.call.return_value = 999927599281149967
+        sy_rate = reader.get_pt_to_sy_rate("0xmarket")
+        asset_rate = reader.get_pt_to_asset_rate("0xmarket")
+        assert sy_rate == Decimal("807868722071417353") / Decimal("1000000000000000000")
+        assert asset_rate == Decimal("999927599281149967") / Decimal("1000000000000000000")
+        assert sy_rate != asset_rate
+
+    def test_rpc_error_raises(self, reader):
+        _set_oracle_ready(reader)
+        reader.pt_oracle.functions.getPtToSyRate.return_value.call.side_effect = Exception("RPC error")
+        with pytest.raises(PendleOnChainError, match="getPtToSyRate failed"):
+            reader.get_pt_to_sy_rate("0xmarket")
 
 
 # =========================================================================
@@ -545,6 +596,90 @@ class TestGatewayPtRate:
         gateway_client.rpc.Call.side_effect = Exception("connection refused")
         with pytest.raises(PendleOnChainError, match="Gateway RPC call failed"):
             gw_reader.get_pt_to_asset_rate("0x1234567890abcdef1234567890abcdef12345678")
+
+
+# =========================================================================
+# Gateway Mode PT→SY Rate Tests (VIB-5407 — the money-path mark)
+# =========================================================================
+
+
+class TestGatewaySyRate:
+    """Test get_pt_to_sy_rate via gateway mode — the VIB-5407 money-path mark.
+
+    PendleOnChainReader's PRODUCTION path is the gateway client, and
+    ``get_pt_to_sy_rate`` encodes its OWN selector (``getPtToSyRate``,
+    ``0xa31426d1``) and decodes the gateway ``eth_call`` result independently of
+    the direct/web3 branch. A selector swap or decode bug in the hosted path would
+    over-mark held PT toward par (the exact VIB-5407 defect) while the direct-mode
+    ``TestGetPtToSyRate`` stayed green — so the gateway branch is covered here.
+    """
+
+    _MARKET = "0x1234567890abcdef1234567890abcdef12345678"
+
+    def test_returns_normalized_sy_rate(self, gw_reader, gateway_client):
+        # 0.8079 — the live PT-wstETH-25JUN2026 PT→SY rate (discounted market mark).
+        gateway_client.rpc.Call.side_effect = [
+            _mock_rpc_response(_oracle_state_hex(False, 901, True)),  # readiness gate
+            _mock_rpc_response(hex(807868722071417353)),  # the rate read
+        ]
+        rate = gw_reader.get_pt_to_sy_rate(self._MARKET)
+        assert rate == Decimal("807868722071417353") / Decimal("1000000000000000000")
+
+    def test_arbitrum_sy_rate(self, gw_arb_reader, gateway_client):
+        gateway_client.rpc.Call.side_effect = [
+            _mock_rpc_response(_oracle_state_hex(False, 901, True)),
+            _mock_rpc_response(hex(806000000000000000)),
+        ]
+        rate = gw_arb_reader.get_pt_to_sy_rate(self._MARKET)
+        assert rate == Decimal("806000000000000000") / Decimal("1000000000000000000")
+
+    def test_gateway_uses_sy_selector_and_twap_window(self, gw_reader, gateway_client):
+        """Regression guard for the hosted path: the rate read MUST encode the
+        ``getPtToSyRate`` selector (NOT ``getPtToAssetRate``) and the fixed non-zero
+        TWAP window. A selector swap here IS the VIB-5407 over-mark defect, and it
+        would slip past every direct-mode test."""
+        gateway_client.rpc.Call.side_effect = [
+            _mock_rpc_response(_oracle_state_hex(False, 901, True)),
+            _mock_rpc_response(hex(807868722071417353)),
+        ]
+        gw_reader.get_pt_to_sy_rate(self._MARKET)
+
+        # The second gateway Call is the rate read (the first is the readiness gate).
+        rate_req = gateway_client.rpc.Call.call_args_list[1].args[0]
+        assert rate_req.id == "pendle_pt_sy_rate"
+        assert rate_req.method == "eth_call"
+        calldata = json.loads(rate_req.params)[0]["data"].lower()
+        # Money-path selector — SY, not asset.
+        assert calldata.startswith(GET_PT_TO_SY_RATE_SELECTOR)
+        assert not calldata.startswith(GET_PT_TO_ASSET_RATE_SELECTOR)
+        # The two ABI words: market address + the fixed non-zero TWAP window.
+        assert self._MARKET[2:].lower() in calldata
+        assert calldata.endswith(format(PT_ORACLE_TWAP_DURATION_SECONDS, "064x"))
+        assert PT_ORACLE_TWAP_DURATION_SECONDS == 900  # window must be > 0 (0 reverts)
+
+    def test_oracle_not_ready_raises_unmeasured(self, gw_reader, gateway_client):
+        """Readiness gate fires in gateway mode too — UNMEASURED, never fabricated."""
+        gateway_client.rpc.Call.side_effect = [
+            _mock_rpc_response(_oracle_state_hex(False, 901, False)),
+        ]
+        with pytest.raises(PendleOnChainError, match="not ready"):
+            gw_reader.get_pt_to_sy_rate(self._MARKET)
+        # Only the oracle-state read happened; the rate read was skipped.
+        assert gateway_client.rpc.Call.call_count == 1
+
+    def test_rate_read_rpc_failure_raises(self, gw_reader, gateway_client):
+        """Readiness passes, then the rate read itself returns success=False."""
+        gateway_client.rpc.Call.side_effect = [
+            _mock_rpc_response(_oracle_state_hex(False, 901, True)),
+            _mock_rpc_response("", success=False, error="rpc error"),
+        ]
+        with pytest.raises(PendleOnChainError, match="Gateway RPC call error"):
+            gw_reader.get_pt_to_sy_rate(self._MARKET)
+
+    def test_exception_raises(self, gw_reader, gateway_client):
+        gateway_client.rpc.Call.side_effect = Exception("connection refused")
+        with pytest.raises(PendleOnChainError, match="Gateway RPC call failed"):
+            gw_reader.get_pt_to_sy_rate(self._MARKET)
 
 
 # =========================================================================

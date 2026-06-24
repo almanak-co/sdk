@@ -303,8 +303,9 @@ class DashboardAPIClient:
         Typed accessor over the ``MarketService.GetPtPrice`` RPC (VIB-5309/5310)
         so a custom dashboard never re-derives a PT mark from a raw
         ``get_price`` ratio. PT/USD is composed gateway-side as
-        ``pt_to_asset_rate × underlying/USD`` and stamped with confidence +
-        staleness + maturity (design spine §1).
+        ``pt_to_sy_rate × underlying/USD`` — the PT's discounted market price
+        (VIB-5407), NOT the accounting-asset rate that over-marks toward par —
+        and stamped with confidence + staleness + maturity (design spine §1).
 
         **Empty != Zero**: ``price`` is ``None`` (never ``0.0``) unless
         ``availability == AVAILABLE``. A PT that is genuinely unpriceable

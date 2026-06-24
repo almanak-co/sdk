@@ -66,6 +66,7 @@ PT_ORACLE_TWAP_DURATION_SECONDS = 900
 
 # Function selectors (keccak256 of canonical signatures, first 4 bytes)
 GET_PT_TO_ASSET_RATE_SELECTOR = "0xabca0eab"  # getPtToAssetRate(address,uint32) on PendlePYLpOracle
+GET_PT_TO_SY_RATE_SELECTOR = "0xa31426d1"  # getPtToSyRate(address,uint32) on PendlePYLpOracle
 GET_ORACLE_STATE_SELECTOR = "0x873e9600"  # getOracleState(address,uint32) on PendlePYLpOracle
 GET_IMPLIED_APY_SELECTOR = "0xfc0e022c"  # getImpliedApy(address) on RouterStatic (informational only)
 READ_TOKENS_SELECTOR = "0x2c8ce6bc"  # readTokens() on the market contract (no-arg)
@@ -79,6 +80,16 @@ PT_ORACLE_ABI = [
             {"internalType": "uint32", "name": "duration", "type": "uint32"},
         ],
         "name": "getPtToAssetRate",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "market", "type": "address"},
+            {"internalType": "uint32", "name": "duration", "type": "uint32"},
+        ],
+        "name": "getPtToSyRate",
         "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
         "stateMutability": "view",
         "type": "function",
@@ -407,11 +418,17 @@ class PendleOnChainReader:
             )
 
     def get_pt_to_asset_rate(self, market_address: str) -> Decimal:
-        """Get the PT-to-underlying-asset exchange rate via the PT oracle TWAP.
+        """Get the PT-to-**accounting-asset** exchange rate via the PT oracle TWAP.
 
-        This is the key pricing function: it returns how much underlying
-        asset 1 PT is worth. Before maturity, this is typically < 1.0
-        (PT trades at a discount). At maturity, it converges to 1.0.
+        Returns how much of the SY's *accounting asset* 1 PT is worth. NOTE the
+        denomination trap (VIB-5407): the SY accounting asset is NOT necessarily
+        the SY's mint/underlying token. For a wrapped-staking SY (e.g. SY-wstETH
+        whose accounting asset is stETH), ``getPtToAssetRate`` bakes in the
+        wstETH→stETH wrap accretion, so it converges toward ~1.0 well before
+        maturity and OVER-marks the PT versus its discounted market price when the
+        gateway prices the mint/underlying token (wstETH). It is therefore **NOT
+        the money-path mark** — use :meth:`get_pt_to_sy_rate` for valuation. This
+        read is retained for transparency/health (implied-APR context) only.
 
         Read from the per-chain PendlePYLpOracle using the 2-arg
         ``getPtToAssetRate(market, duration)`` TWAP call (``duration`` fixed at
@@ -457,6 +474,67 @@ class PendleOnChainReader:
         except Exception as e:
             logger.warning("Failed to read PT-to-asset rate for %s: %s", market_address, e)
             raise PendleOnChainError(f"getPtToAssetRate failed: {e}") from e
+
+    def get_pt_to_sy_rate(self, market_address: str) -> Decimal:
+        """Get the PT-to-**SY** exchange rate via the PT oracle TWAP (the money mark).
+
+        Returns how many SY units 1 PT is currently worth — i.e. the PT's
+        **discounted market price** in SY terms. Because the gateway prices the
+        SY's mint/underlying token (which the SY wraps ~1:1, e.g. wstETH for
+        SY-wstETH), ``PT/USD = getPtToSyRate × underlying/USD`` is the honest
+        market mark a holder would realize selling the PT now.
+
+        This is the canonical money-path rate for open-PT mark-to-market
+        (VIB-5407), correcting :meth:`get_pt_to_asset_rate`, which is denominated
+        in the SY *accounting asset* (e.g. stETH) and therefore over-marks the PT
+        to ~par when the priced underlying is the wrap token (wstETH). The two
+        rates differ by exactly the SY wrap-accretion (``SY.exchangeRate()``); they
+        coincide only when the mint token equals the accounting asset 1:1.
+
+        Read from the per-chain PendlePYLpOracle using the 2-arg
+        ``getPtToSyRate(market, duration)`` TWAP call (same oracle, same
+        ``PT_ORACLE_TWAP_DURATION_SECONDS`` window). Gated on oracle readiness
+        (:meth:`_assert_oracle_ready`) so a not-ready oracle surfaces as
+        UNMEASURED rather than a fabricated rate (Empty≠Zero).
+
+        Args:
+            market_address: Market contract address
+
+        Returns:
+            PT/SY exchange rate as Decimal (1e18 scale normalized to human-readable)
+
+        Raises:
+            PendleOnChainError: If the oracle is not ready or the RPC call fails
+        """
+        cache_key = f"pt_sy_rate:{market_address.lower()}"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        # Readiness gate first — never cache or fabricate when UNMEASURED.
+        self._assert_oracle_ready(market_address)
+
+        try:
+            if self._gateway_client is not None:
+                calldata = GET_PT_TO_SY_RATE_SELECTOR + _encode_address_uint32(
+                    market_address, PT_ORACLE_TWAP_DURATION_SECONDS
+                )
+                result = self._gateway_eth_call(self.pt_oracle_address, calldata, "pendle_pt_sy_rate")
+                raw_rate = _decode_uint256(result)
+            else:
+                assert self.web3 is not None and self.pt_oracle is not None
+                raw_rate = self.pt_oracle.functions.getPtToSyRate(
+                    self.web3.to_checksum_address(market_address),
+                    PT_ORACLE_TWAP_DURATION_SECONDS,
+                ).call()
+            rate = Decimal(str(raw_rate)) / SCALE_1E18
+            self._set_cached(cache_key, rate)
+            return rate
+        except PendleOnChainError:
+            raise
+        except Exception as e:
+            logger.warning("Failed to read PT-to-SY rate for %s: %s", market_address, e)
+            raise PendleOnChainError(f"getPtToSyRate failed: {e}") from e
 
     def get_implied_apy(self, market_address: str) -> Decimal:
         """Get the implied APY for a market.

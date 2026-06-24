@@ -180,6 +180,13 @@ class TestPendleSelectors:
 
         assert GET_PT_TO_ASSET_RATE_SELECTOR == _selector("getPtToAssetRate(address,uint32)")
 
+    def test_get_pt_to_sy_rate(self):
+        # VIB-5407: the PT money-path mark reads getPtToSyRate (discounted market
+        # price in SY≈mint-token units), distinct from getPtToAssetRate.
+        from almanak.connectors.pendle.on_chain_reader import GET_PT_TO_SY_RATE_SELECTOR
+
+        assert GET_PT_TO_SY_RATE_SELECTOR == _selector("getPtToSyRate(address,uint32)")
+
     def test_get_oracle_state(self):
         from almanak.connectors.pendle.on_chain_reader import GET_ORACLE_STATE_SELECTOR
 

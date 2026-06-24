@@ -846,7 +846,8 @@ class MarketSnapshot:
 
         Strategy-safe, typed pass-through of the gateway PT/YT-USD price
         authority (``GetPtPrice``, VIB-5309/5310). The gateway composes
-        ``price = pt_to_asset_rate × underlying/USD``, sources both legs, and
+        ``price = pt_to_sy_rate × underlying/USD`` (VIB-5407 — the discounted
+        market mark, not the accounting-asset rate), sources both legs, and
         originates the confidence band + staleness; this method performs NO
         on-chain reads and NO composition — it only maps the wire contract to
         the framework ``ValueConfidence`` vocabulary (design spine §1/§2).

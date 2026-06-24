@@ -4,8 +4,10 @@ The wire contract is covered by ``test_pt_price_proto.py`` (VIB-5309). This file
 covers the COMPOSITION + honest-availability logic the provider adds:
 
 * both legs measured       → AVAILABLE + HIGH, ``pt_usd = underlying × rate``
-* rate unavailable         → AVAILABLE + ESTIMATED (rate defaulted 1.0 at-par),
-                             ``pt_to_asset_rate`` left EMPTY (Empty≠Zero)
+                             (rate = PT→SY market rate, VIB-5407 — the discounted
+                             mark, NOT the accounting-asset rate)
+* rate unavailable         → UNMEASURED, NO price (the at-par 1.0 default is
+                             FORBIDDEN), ``pt_to_asset_rate`` left EMPTY (Empty≠Zero)
 * underlying unpriceable    → UNMEASURED, NO price (never "0")
 * a read raised unexpectedly → ERRORED, NO price
 * YT in M1                  → UNMEASURED (held-YT deferred to VIB-5322/M3)
@@ -114,8 +116,51 @@ class TestGetPtPriceAvailableHigh:
         assert resp.days_to_maturity == 120
         # Authoritative on-chain expiry stamped (not the static 1_700_000_000 echo).
         assert resp.maturity_ts == _ONCHAIN_EXPIRY
-        assert "getPtToAssetRate" in resp.source
+        assert "getPtToSyRate" in resp.source
         mock_context.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mark_uses_pt_to_sy_rate_not_asset_rate_vib5407(self, market_service, mock_context):
+        """VIB-5407: the composed PT/USD mark is driven by the PT→SY rate (the
+        discounted market price), NOT getPtToAssetRate (the accounting-asset rate
+        that accretes to ~par for a wrapped-staking SY and over-marks the held PT).
+
+        Real Arbitrum PT-wstETH-25JUN2026 reads (live, captured): the asset rate
+        is ~0.99993 (≈ par) while the PT→SY rate is ~0.80787 (matching the AMM
+        swap). The reader exposes BOTH; ``_read_pt_market`` must select the SY rate
+        so the mark is ~underlying × 0.808, not ~underlying × 1.0.
+        """
+        wsteth_usd = "2065.1422549467247"
+        sy_rate = Decimal("0.807869123467764824")
+        asset_rate = Decimal("0.999928097005235031")
+
+        fake_reader = MagicMock()
+        fake_reader.get_pt_to_sy_rate.return_value = sy_rate
+        fake_reader.get_pt_to_asset_rate.return_value = asset_rate
+        fake_reader.get_market_expiry_ts.return_value = _ONCHAIN_EXPIRY
+
+        with (
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref()),
+            patch.object(
+                market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying(wsteth_usd, 0.97))
+            ),
+            patch.object(market_service, "_build_pt_reader", return_value=fake_reader),
+        ):
+            resp = await market_service.GetPtPrice(_request(), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_AVAILABLE
+        # The mark is underlying × SY-rate (discounted), not underlying × asset-rate.
+        assert Decimal(resp.price) == Decimal(wsteth_usd) * sy_rate
+        assert Decimal(resp.price) != Decimal(wsteth_usd) * asset_rate
+        # The echoed rate field carries the SY (mark) rate.
+        assert Decimal(resp.pt_to_asset_rate) == sy_rate
+        # The over-mark would have been ~24% higher — assert the gap is removed.
+        over_mark = Decimal(wsteth_usd) * asset_rate
+        assert Decimal(resp.price) < over_mark
+        # The money path read the SY rate; it never used the asset rate for the mark.
+        fake_reader.get_pt_to_sy_rate.assert_called_once()
+        fake_reader.get_pt_to_asset_rate.assert_not_called()
+        assert "getPtToSyRate" in resp.source
 
     @pytest.mark.asyncio
     async def test_available_falls_back_to_static_maturity_when_onchain_unread(self, market_service, mock_context):
@@ -198,7 +243,7 @@ class TestGetPtPriceMissingRate:
             patch.object(
                 market_service,
                 "_read_pt_market",
-                return_value=(None, 60, _ONCHAIN_EXPIRY, "pt_to_asset_rate-read-failed"),
+                return_value=(None, 60, _ONCHAIN_EXPIRY, "pt_to_sy_rate-read-failed"),
             ),
         ):
             resp = await market_service.GetPtPrice(_request(), mock_context)
@@ -464,7 +509,7 @@ class TestGetPtPriceTelemetry:
         assert rec.stale is False
         # Empty≠Zero in observability: an AVAILABLE mark has NO unavailable reason.
         assert rec.unavailable_reason is None
-        assert "getPtToAssetRate" in rec.price_source
+        assert "getPtToSyRate" in rec.price_source
         # No secrets leaked — only public market identity + the four signals.
         assert rec.symbol == "PT-sUSDe-13AUG2026"
         assert rec.chain == "ethereum"
@@ -500,7 +545,7 @@ class TestGetPtPriceTelemetry:
             patch.object(
                 market_service,
                 "_read_pt_market",
-                return_value=(None, 60, _ONCHAIN_EXPIRY, "pt_to_asset_rate-read-failed"),
+                return_value=(None, 60, _ONCHAIN_EXPIRY, "pt_to_sy_rate-read-failed"),
             ),
         ):
             resp = await market_service.GetPtPrice(_request(), mock_context)
@@ -703,7 +748,8 @@ class TestServicerResolutionAndReader:
         # Expiry ~90 days out → days_to_maturity ceil((expiry-now)/86400).
         expiry = int(_time.time()) + 90 * 86400
         fake_reader = MagicMock()
-        fake_reader.get_pt_to_asset_rate.return_value = Decimal("0.97")
+        # VIB-5407: the money mark is the PT→SY rate, not the asset rate.
+        fake_reader.get_pt_to_sy_rate.return_value = Decimal("0.97")
         fake_reader.get_market_expiry_ts.return_value = expiry
         with patch.object(market_service, "_build_pt_reader", return_value=fake_reader):
             rate, days, expiry_ts, reason = market_service._read_pt_market(ref, "ethereum")
@@ -720,7 +766,7 @@ class TestServicerResolutionAndReader:
         never a fabricated 0."""
         ref = _pt_ref()
         fake_reader = MagicMock()
-        fake_reader.get_pt_to_asset_rate.return_value = Decimal("0.97")
+        fake_reader.get_pt_to_sy_rate.return_value = Decimal("0.97")
         fake_reader.get_market_expiry_ts.return_value = None
         with patch.object(market_service, "_build_pt_reader", return_value=fake_reader):
             rate, days, expiry_ts, reason = market_service._read_pt_market(ref, "ethereum")
@@ -737,7 +783,7 @@ class TestServicerResolutionAndReader:
         PrincipalTokenMarketReader implementation to do so."""
         ref = _pt_ref()
         fake_reader = MagicMock()
-        fake_reader.get_pt_to_asset_rate.return_value = Decimal("0.97")
+        fake_reader.get_pt_to_sy_rate.return_value = Decimal("0.97")
         fake_reader.get_market_expiry_ts.return_value = 0
         with patch.object(market_service, "_build_pt_reader", return_value=fake_reader):
             rate, days, expiry_ts, reason = market_service._read_pt_market(ref, "ethereum")
@@ -749,31 +795,31 @@ class TestServicerResolutionAndReader:
     def test_read_pt_market_non_positive_rate_is_none(self, market_service):
         ref = _pt_ref()
         fake_reader = MagicMock()
-        fake_reader.get_pt_to_asset_rate.return_value = Decimal("0")
+        fake_reader.get_pt_to_sy_rate.return_value = Decimal("0")
         fake_reader.get_market_expiry_ts.return_value = None
         with patch.object(market_service, "_build_pt_reader", return_value=fake_reader):
             rate, _days, _expiry, reason = market_service._read_pt_market(ref, "ethereum")
         assert rate is None
-        assert reason == "pt_to_asset_rate-non-positive"
+        assert reason == "pt_to_sy_rate-non-positive"
 
     def test_read_pt_market_rate_read_raises_is_graceful(self, market_service):
         ref = _pt_ref()
         fake_reader = MagicMock()
-        fake_reader.get_pt_to_asset_rate.side_effect = RuntimeError("rpc down")
+        fake_reader.get_pt_to_sy_rate.side_effect = RuntimeError("rpc down")
         fake_reader.get_market_expiry_ts.return_value = None
         with patch.object(market_service, "_build_pt_reader", return_value=fake_reader):
             rate, days, expiry_ts, reason = market_service._read_pt_market(ref, "ethereum")
         assert rate is None
         assert days is None
         assert expiry_ts is None
-        assert reason == "pt_to_asset_rate-read-failed"
+        assert reason == "pt_to_sy_rate-read-failed"
 
     def test_read_pt_market_expiry_read_raises_is_graceful(self, market_service):
         """An exception from the expiry read is swallowed → expiry_ts/days None,
         while the rate read still succeeds independently."""
         ref = _pt_ref()
         fake_reader = MagicMock()
-        fake_reader.get_pt_to_asset_rate.return_value = Decimal("0.97")
+        fake_reader.get_pt_to_sy_rate.return_value = Decimal("0.97")
         fake_reader.get_market_expiry_ts.side_effect = RuntimeError("rpc down")
         with patch.object(market_service, "_build_pt_reader", return_value=fake_reader):
             rate, days, expiry_ts, reason = market_service._read_pt_market(ref, "ethereum")

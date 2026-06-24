@@ -21,6 +21,9 @@ class _Reader:
     def get_pt_to_asset_rate(self, market_address: str) -> Decimal:
         return Decimal("0.98")
 
+    def get_pt_to_sy_rate(self, market_address: str) -> Decimal:
+        return Decimal("0.80")
+
     def get_implied_apy(self, market_address: str) -> Decimal:
         return Decimal("0.10")
 

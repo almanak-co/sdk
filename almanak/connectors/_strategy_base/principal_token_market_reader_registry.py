@@ -32,6 +32,17 @@ class PrincipalTokenMarketReader(Protocol):
 
     def get_pt_to_asset_rate(self, market_address: str) -> Decimal: ...
 
+    def get_pt_to_sy_rate(self, market_address: str) -> Decimal:
+        """PT→SY exchange rate (the discounted market mark, VIB-5407).
+
+        Canonical money-path rate for open-PT mark-to-market: ``PT/USD =
+        get_pt_to_sy_rate × underlying/USD`` (the underlying being the SY mint
+        token the SY wraps ~1:1). Distinct from :meth:`get_pt_to_asset_rate`,
+        which is denominated in the SY accounting asset and over-marks the PT
+        toward par when that asset differs from the priced underlying.
+        """
+        ...
+
     def get_implied_apy(self, market_address: str) -> Decimal: ...
 
     def is_market_expired(self, market_address: str) -> bool: ...
