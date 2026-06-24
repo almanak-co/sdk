@@ -15,6 +15,11 @@ ratchet green (``scripts/ci/scan_chain_protocol_coupling.py``).
 
 Supported position kinds:
   - PT (Principal Token): value = pt_amount × pt_price.price
+  - YT (Yield Token): value = yt_amount × pt_price.price, where the gateway has
+    composed ``pt_price.price`` as the YT/USD mark for a YT symbol (VIB-5322:
+    ``yt_usd = (1 − pt_to_asset_rate) × underlying/USD``). YT decays to zero at
+    maturity, so a post-maturity YT marks at the gateway's measured $0 — never a
+    stale non-zero price (the gateway floors the complement rate at zero).
   - SY (Standardized Yield): value = sy_amount × pt_price.underlying_price
   - PT/SY LP: value = sy_component (underlying/USD) + pt_component (PT/USD)
 
@@ -45,6 +50,7 @@ __all__ = [
     "PrincipalTokenPositionValue",
     "compute_pt_implied_apy_bps",
     "value_pt_position",
+    "value_yt_position",
     "value_sy_position",
     "value_principal_token_lp_from_components",
     "value_principal_token_position",
@@ -159,6 +165,33 @@ def value_pt_position(
     return pt_amount * pt_price_usd
 
 
+def value_yt_position(
+    yt_amount: Decimal,
+    yt_price_usd: Decimal,
+) -> Decimal:
+    """Value a YT (Yield Token) position (VIB-5322).
+
+    YT value = yt_amount × yt_price_usd
+
+    ``yt_price_usd`` is the gateway-composed YT/USD mark — for a YT symbol the
+    gateway composes ``yt_usd = (1 − pt_to_asset_rate) × underlying/USD`` and
+    stamps confidence + staleness (spine §0/§1, mirroring the PT path). The
+    valuer does NOT re-derive the composition — it only multiplies quantity by
+    the authority's mark. A YT decays to zero as its market approaches maturity
+    (``pt_to_asset_rate → 1``), so at/after maturity the gateway mark is a
+    measured $0 and a worthless YT is valued at exactly zero (never a stale
+    non-zero price).
+
+    Args:
+        yt_amount: Human-readable YT amount (NOT wei).
+        yt_price_usd: Gateway-composed YT/USD price (per 1 YT).
+
+    Returns:
+        USD value of the YT position.
+    """
+    return yt_amount * yt_price_usd
+
+
 def value_sy_position(
     sy_amount: Decimal,
     underlying_price_usd: Decimal,
@@ -236,6 +269,7 @@ def value_principal_token_position(
     *,
     pt_price: PtPriceData,
     pt_amount: Decimal | None = None,
+    yt_amount: Decimal | None = None,
     sy_amount: Decimal | None = None,
     lp_amount: Decimal | None = None,
     lp_pool_sy_amount: Decimal | None = None,
@@ -252,6 +286,11 @@ def value_principal_token_position(
 
     Paths:
       - **PT-only** (``pt_amount``): ``value = pt_amount × pt_price.price``.
+      - **YT-only** (``yt_amount``): ``value = yt_amount × pt_price.price`` —
+        ``pt_price`` is the gateway's YT/USD mark for a YT symbol (VIB-5322).
+        Unlike PT, a measured ``price == 0`` is a VALID YT value (a post-maturity
+        YT is worth exactly $0), so the YT path accepts a measured zero — it only
+        rejects an UNAVAILABLE/absent mark (Empty ≠ Zero).
       - **SY-only** (``sy_amount``): ``value = sy_amount × underlying/USD``.
       - **LP** (``lp_amount`` + pool reserves): SY + PT decomposition, SY priced
         from underlying/USD and PT from the composed PT/USD. Without reserves,
@@ -267,8 +306,11 @@ def value_principal_token_position(
     (spine §3.4 — never upgraded).
 
     Args:
-        pt_price: Gateway PT/USD price object (``MarketSnapshot.pt_price``).
+        pt_price: Gateway PT/USD (or YT/USD for a YT symbol) price object
+            (``MarketSnapshot.pt_price``).
         pt_amount: Human-readable PT balance. Provide when valuing PT directly.
+        yt_amount: Human-readable YT balance. Provide when valuing YT directly
+            (``pt_price`` must be the gateway's YT/USD mark for the YT symbol).
         sy_amount: Human-readable SY balance. Provide when valuing SY directly.
         lp_amount: Human-readable LP token balance. Provide when valuing LP.
         lp_pool_sy_amount: Total SY in the LP pool (human-readable).
@@ -310,15 +352,17 @@ def value_principal_token_position(
         [
             lp_amount is not None,
             pt_amount is not None,
+            yt_amount is not None,
             sy_amount is not None,
         ]
     )
     if position_kinds > 1:
-        # Mixing lp_amount with pt_amount or sy_amount is not supported.
+        # Mixing lp_amount with pt_amount / yt_amount / sy_amount is not supported.
         # Each call must represent exactly one position type.
         raise ValueError(
-            "value_principal_token_position: at most one of lp_amount, pt_amount, sy_amount may be provided. "
-            f"Got lp_amount={lp_amount!r}, pt_amount={pt_amount!r}, sy_amount={sy_amount!r}."
+            "value_principal_token_position: at most one of lp_amount, pt_amount, yt_amount, sy_amount "
+            f"may be provided. Got lp_amount={lp_amount!r}, pt_amount={pt_amount!r}, "
+            f"yt_amount={yt_amount!r}, sy_amount={sy_amount!r}."
         )
 
     pt_usd = pt_price.price
@@ -341,6 +385,39 @@ def value_principal_token_position(
             underlying_price_usd=underlying_price,
             pt_to_asset_rate=rate,
             implied_apy_bps=implied_apy_bps,
+            days_to_maturity=days,
+            confidence=gateway_confidence,  # propagate verbatim, never upgrade
+            unavailable_reason=_confidence_note(gateway_confidence),
+        )
+
+    # ----------------------------------------------------------------
+    # 1b. YT-only position — needs the composed YT/USD mark (VIB-5322).
+    #     ``pt_price`` IS the gateway's YT/USD mark for a YT symbol (the gateway
+    #     composes ``yt_usd = (1 − pt_to_asset_rate) × underlying/USD`` and floors
+    #     it at zero past maturity). Unlike PT, a measured ``price == 0`` is a
+    #     VALID YT value — a fully-decayed (post-maturity) YT is worth exactly
+    #     $0 — so the YT measured-test accepts a measured zero and only rejects an
+    #     UNAVAILABLE/absent mark (Empty ≠ Zero: an unmeasured mark is None, a
+    #     worthless YT is a measured 0). The composed value is booked into the PT
+    #     component slot (the single "principal-token component" of the result);
+    #     ``pt_to_asset_rate`` echoes the YT complement rate the gateway stamped.
+    #     ``implied_apy_bps`` is left None: the PT-discount-to-par APY formula does
+    #     NOT describe a YT's return (a YT earns the yield stream, not a
+    #     pull-to-par), so a PT-style APY off the YT rate would be a misleading
+    #     number — Empty ≠ Zero (unmeasured, not a wrong figure).
+    # ----------------------------------------------------------------
+    if yt_amount is not None:
+        yt_measured = pt_usd is not None and pt_usd >= 0 and gateway_confidence != ValueConfidence.UNAVAILABLE
+        if not yt_measured:
+            return _unavailable("yt price unmeasured (gateway UNAVAILABLE)")
+        yt_val = value_yt_position(yt_amount, pt_usd)  # type: ignore[arg-type]
+        return PrincipalTokenPositionValue(
+            current_value_usd=yt_val,
+            sy_component_usd=None,
+            pt_component_usd=yt_val,
+            underlying_price_usd=underlying_price,
+            pt_to_asset_rate=rate,
+            implied_apy_bps=None,
             days_to_maturity=days,
             confidence=gateway_confidence,  # propagate verbatim, never upgrade
             unavailable_reason=_confidence_note(gateway_confidence),

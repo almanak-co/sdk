@@ -1027,19 +1027,20 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 maturity_ts=request.maturity_ts,
             )
 
-        # 2. YT held-valuation is deferred to VIB-5322 / M3 — never a guess.
+        # 2. YT held-valuation (VIB-5322 / M3). A YT and its sibling PT split one
+        #    unit of SY at par: ``pt_to_sy_rate + yt_to_sy_rate = 1`` (the gateway
+        #    reads ``pt_to_sy_rate`` for the PT path — the VIB-5407 money mark; the
+        #    asset-rate invariant does NOT equal 1 for a wrapped-staking SY). So
+        #    ``yt_usd = (1 − pt_to_sy_rate) × underlying/USD`` — composed HERE
+        #    from the SAME two gateway-sourced legs as PT, with the SAME honest
+        #    availability (Empty≠Zero — never ``"0"`` for a missing leg, never a
+        #    fabricated rate). At/after maturity the PT rate pulls to (or slightly
+        #    past) 1.0, so the YT mark is a MEASURED zero — a worthless YT is never
+        #    marked at a stale non-zero price.
         if ref.family == "YT":
-            return _build_pt_price_response(
-                symbol=symbol,
-                chain=chain,
-                quote=quote,
-                availability=gateway_pb2.PT_PRICE_AVAILABILITY_UNMEASURED,
-                confidence_band=unmeasured_band,
-                source="unmeasured:yt-valuation-deferred-VIB-5322",
-                maturity_ts=ref.maturity_ts,
-            )
+            return await self._get_yt_price(symbol=symbol, chain=chain, quote=quote, ref=ref)
 
-        # 2b. Only PT proceeds to composition. ``PrincipalTokenMarketRef.family``
+        # 2b. Only PT proceeds to PT composition. ``PrincipalTokenMarketRef.family``
         #     is a free str documented as PT/YT/LP; YT is handled above, and any
         #     OTHER family (a future "LP", or an unknown value) must NOT silently
         #     fall through to PT pricing — an LP token mispriced as a single PT
@@ -1183,6 +1184,169 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             # PT-to-underlying-mint exchange rate driving the composed price.
             pt_to_asset_rate=str(rate),
             source=f"composition:getPtToSyRate×{underlying_result.source}",
+            confidence=confidence,
+            timestamp=int(underlying_result.timestamp.timestamp()),
+            stale=underlying_result.stale,
+            maturity_ts=maturity_ts,
+            days_to_maturity=days_to_maturity or 0,
+        )
+
+    async def _get_yt_price(
+        self,
+        *,
+        symbol: str,
+        chain: str,
+        quote: str,
+        ref: Any,
+    ) -> "gateway_pb2.PtPriceResponse":
+        """Compose a Pendle YT/USD price (VIB-5322, epic VIB-5299, M3).
+
+        The gateway is the price authority, exactly as for PT. A YT and its
+        sibling PT split one unit of SY at par, so the YT intrinsic mark is the
+        COMPLEMENT of the PT mark (in SY terms):
+
+            ``yt_to_sy_rate = 1 − pt_to_sy_rate``  (SY per 1 YT)
+            ``yt_usd        = yt_to_sy_rate × underlying/USD``
+
+        valid because the SY invariant ``pt_to_sy + yt_to_sy = 1`` holds and the
+        priced underlying is the SY mint token (the asset-rate invariant does NOT
+        equal 1 for a wrapped-staking SY — VIB-5407, which fixed the PT mark to
+        read the SY rate, not the asset rate). Composed HERE from the SAME two
+        gateway-sourced legs the PT path uses — ``pt_to_sy_rate`` via the
+        connector's on-chain reader and underlying/USD via the price aggregator —
+        so a YT and its PT can never disagree about the underlying.
+
+        Honest availability mirrors PT (Empty≠Zero — never ``"0"`` for an
+        unmeasured leg, never a fabricated rate):
+
+        * both legs measured AND fresh → ``AVAILABLE`` + band ``HIGH``.
+        * both legs measured but underlying STALE → ``AVAILABLE`` + ``ESTIMATED``
+          + ``stale=True``.
+        * ``pt_to_asset_rate`` missing → ``UNMEASURED`` (NO price).
+        * underlying unpriceable → ``UNMEASURED`` (NO price).
+        * underlying-price read raised unexpectedly → ``ERRORED`` (NO price).
+
+        At/after maturity the PT rate pulls to (or slightly past) 1.0, so
+        ``yt_to_sy_rate`` is a MEASURED zero (clamped at the floor — a TWAP
+        rate marginally above 1.0 must never produce a negative YT mark) and the
+        YT marks at exactly $0. A worthless post-maturity YT is therefore an
+        AVAILABLE measured zero, NOT a stale non-zero mark.
+        """
+        unmeasured_band = gateway_pb2.PT_PRICE_CONFIDENCE_BAND_UNAVAILABLE
+
+        # 1. Price the underlying (existing aggregator). Same split as PT:
+        #    unpriceable → UNMEASURED (expected); unexpected error → ERRORED.
+        try:
+            underlying_result = await self._price_underlying_usd(ref.underlying_token, chain)
+        except _UnpriceableUnderlying as e:
+            logger.warning("GetPtPrice(YT): underlying %s unpriceable for %s: %s", ref.underlying_token, symbol, e)
+            return _build_pt_price_response(
+                symbol=symbol,
+                chain=chain,
+                quote=quote,
+                availability=gateway_pb2.PT_PRICE_AVAILABILITY_UNMEASURED,
+                confidence_band=unmeasured_band,
+                source=f"unmeasured:underlying-unpriceable:{ref.underlying_token}",
+                maturity_ts=ref.maturity_ts,
+            )
+        except Exception as e:
+            logger.error("GetPtPrice(YT): underlying price read errored for %s: %s", symbol, e)
+            return _build_pt_price_response(
+                symbol=symbol,
+                chain=chain,
+                quote=quote,
+                availability=gateway_pb2.PT_PRICE_AVAILABILITY_ERRORED,
+                confidence_band=unmeasured_band,
+                source="errored:underlying-price-read",
+                maturity_ts=ref.maturity_ts,
+            )
+
+        underlying_price = underlying_result.price
+
+        # 2. Read pt_to_sy_rate + on-chain expiry (gateway-internal eth_call,
+        #    off the event loop — same liveness contract as the PT path).
+        rate, days_to_maturity, expiry_ts, rate_reason = await asyncio.to_thread(self._read_pt_market, ref, chain)
+        maturity_ts = _resolve_maturity_ts(expiry_ts, ref.maturity_ts)
+
+        # 3. Missing PT rate → UNMEASURED. A YT mark needs the SAME measured rate
+        #    the PT mark needs; fabricating it (e.g. defaulting to a 0 YT) would
+        #    silently hide a held YT from NAV. ``underlying_price`` is echoed for
+        #    transparency (it WAS measured); ``price`` stays empty (Empty≠Zero).
+        if rate is None:
+            return _build_pt_price_response(
+                symbol=symbol,
+                chain=chain,
+                quote=quote,
+                availability=gateway_pb2.PT_PRICE_AVAILABILITY_UNMEASURED,
+                confidence_band=unmeasured_band,
+                underlying_price=str(underlying_price),
+                source=f"unmeasured:pt-rate-unavailable({rate_reason})",
+                timestamp=int(underlying_result.timestamp.timestamp()),
+                maturity_ts=maturity_ts,
+                days_to_maturity=days_to_maturity or 0,
+            )
+
+        # 4. Both legs measured → compose the complement mark.
+        return self._compose_available_yt_response(
+            symbol=symbol,
+            chain=chain,
+            quote=quote,
+            underlying_result=underlying_result,
+            rate=rate,
+            maturity_ts=maturity_ts,
+            days_to_maturity=days_to_maturity,
+        )
+
+    def _compose_available_yt_response(
+        self,
+        *,
+        symbol: str,
+        chain: str,
+        quote: str,
+        underlying_result: Any,
+        rate: Decimal,
+        maturity_ts: int,
+        days_to_maturity: int | None,
+    ) -> "gateway_pb2.PtPriceResponse":
+        """Stamp an AVAILABLE YT/USD response from two measured legs (VIB-5322).
+
+        Mirrors :meth:`_compose_available_pt_response`, but the per-token rate is
+        the YT complement ``yt_to_sy_rate = max(0, 1 − pt_to_sy_rate)`` and the
+        mark is ``yt_usd = yt_to_sy_rate × underlying/USD``. The complement is
+        floored at zero so a post-maturity TWAP rate marginally above 1.0 yields a
+        MEASURED $0 YT, never a negative mark (Empty≠Zero — a worthless YT is a
+        measured zero, not a fabricated number).
+
+        The response's ``pt_to_asset_rate`` field (a generic per-token-rate wire
+        field, NOT a fresh asset-rate read) echoes the YT's own ``yt_to_sy_rate``
+        (the SY-complement rate this mark was composed from) for composition
+        transparency — consumers read it as "the per-token rate that produced
+        ``price``", which for a YT symbol is the YT's SY-complement rate.
+        Band/stale/confidence semantics are identical to PT: HIGH only when fresh.
+        """
+        underlying_price = underlying_result.price
+        yt_rate = Decimal("1") - rate
+        if yt_rate < 0:
+            yt_rate = Decimal("0")
+        yt_usd = underlying_price * yt_rate
+        fresh = not underlying_result.stale
+        if fresh:
+            band = gateway_pb2.PT_PRICE_CONFIDENCE_BAND_HIGH
+            confidence = underlying_result.confidence
+        else:
+            band = gateway_pb2.PT_PRICE_CONFIDENCE_BAND_ESTIMATED
+            confidence = min(underlying_result.confidence, _PT_ESTIMATED_CONF_CAP)
+
+        return _build_pt_price_response(
+            symbol=symbol,
+            chain=chain,
+            quote=quote,
+            availability=gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE,
+            confidence_band=band,
+            price=str(yt_usd),
+            underlying_price=str(underlying_price),
+            pt_to_asset_rate=str(yt_rate),
+            source=f"composition:yt=(1−getPtToSyRate)×{underlying_result.source}",
             confidence=confidence,
             timestamp=int(underlying_result.timestamp.timestamp()),
             stale=underlying_result.stale,

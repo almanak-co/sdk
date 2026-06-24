@@ -494,6 +494,15 @@ def _classify_swap_inventory(
 # ``scripts/ci/scan_chain_protocol_coupling.py``, stays green).
 _PT_INVENTORY_SOURCE = "pt_inventory_lots"
 
+# VIB-5322 — data-shape marker for a held-YT (Pendle yield token) position valued
+# from the gateway YT/USD mark. Mirrors ``_PT_INVENTORY_SOURCE`` so YT-inventory
+# consumers detect the row by the marker (never a protocol-name string, keeping
+# this file free of connector-name coupling). A YT, like a PT, is
+# KNOWN_UNPRICEABLE in the spot oracle (the ``YT-`` prefix), so it is dropped from
+# the wallet token valuation — its USD value enters NAV ONLY through this reprice
+# path, no double-count.
+_YT_INVENTORY_SOURCE = "yt_inventory_lots"
+
 
 @dataclass(frozen=True)
 class _PtInventoryClassification:
@@ -2416,21 +2425,18 @@ class PortfolioValuer:
         """
         from almanak.framework.teardown.models import PositionType
 
-        # VIB-5313: principal-token (Pendle PT) positions are valued from the
-        # gateway PT/USD price authority (MarketSnapshot.pt_price →
-        # value_principal_token_position). Detected by DATA SHAPE — a ``pt_token``
-        # in details — not by a protocol-name string (the VIB-4636 capability-gate
-        # discipline that keeps this file free of connector-name coupling and the
-        # framework→connector coupling ratchet green). Intercepted BEFORE the type
-        # dispatch so a PT a strategy mis-reports under SUPPLY (e.g. exp8) does not
-        # fall into the lending repricer and book its placeholder value. Returns
-        # None for a position this path cannot value (no pt_token / no pt_price
-        # surface) → fall through to the normal dispatch.
-        details = getattr(position, "details", None) or {}
-        if details.get("pt_token") or details.get("pt_token_symbol"):
-            pt = self._reprice_principal_token_enriched(position, chain, market)
-            if pt is not None:
-                return pt
+        # VIB-5313 / VIB-5322: principal-token (Pendle PT / held-YT) positions are
+        # valued from the gateway price authority (``MarketSnapshot.pt_price`` →
+        # ``value_principal_token_position``). Detected by DATA SHAPE — a
+        # ``pt_token`` / ``yt_token`` in details — not by a protocol-name string
+        # (the VIB-4636 capability-gate discipline that keeps this file free of
+        # connector-name coupling and the framework→connector coupling ratchet
+        # green). Intercepted BEFORE the type dispatch so a PT/YT a strategy
+        # mis-reports under SUPPLY (e.g. exp8) does not fall into the lending
+        # repricer and book its placeholder value.
+        principal_token = self._reprice_principal_token_shape(position, chain, market)
+        if principal_token is not None:
+            return principal_token
 
         if position.position_type == PositionType.LP:
             return self._reprice_lp_enriched_dispatch(position, chain, market)
@@ -2488,6 +2494,153 @@ class PortfolioValuer:
             return position.value_usd, {}, True
 
         return position.value_usd, {}, True
+
+    def _reprice_principal_token_shape(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any], bool] | None:
+        """Intercept a principal-token-shaped position (PT or held-YT) for repricing.
+
+        Data-shape dispatch (VIB-5313 / VIB-5322): a ``pt_token`` in details routes
+        to the PT mark, a ``yt_token`` to the YT mark — both via the gateway price
+        authority. Returns the repriced tuple, or ``None`` when the position is not
+        principal-token-shaped (or the shaped path cannot value it) so the caller
+        falls through to the normal type dispatch. A position never carries both
+        shapes; PT is checked first.
+        """
+        details = getattr(position, "details", None) or {}
+        if details.get("pt_token") or details.get("pt_token_symbol"):
+            return self._reprice_principal_token_enriched(position, chain, market)
+        if details.get("yt_token") or details.get("yt_token_symbol"):
+            return self._reprice_yield_token_enriched(position, chain, market)
+        return None
+
+    def _reprice_yield_token_enriched(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any], bool] | None:
+        """Re-price a held-YT (Pendle yield token) position via the gateway (VIB-5322).
+
+        Mirrors :meth:`_reprice_principal_token_enriched`: the gateway is the
+        single price authority and composes the YT/USD mark for a YT symbol
+        (``yt_usd = (1 − pt_to_asset_rate) × underlying/USD``, floored at zero past
+        maturity). This path reads that one number via ``MarketSnapshot.pt_price``
+        (the strategy-safe surface — NO on-chain read, NO composition here) and
+        multiplies by the wallet's YT holding through
+        ``value_principal_token_position(yt_amount=...)``.
+
+        Returns ``(value_usd, enriched_details, repriced)`` or ``None`` when the
+        position is not a YT-shaped position this path can value (caller falls
+        through to the type dispatch).
+
+        Empty ≠ Zero: an unmeasured gateway price (``UNAVAILABLE`` / ``price=None``)
+        returns ``repriced=False`` so the snapshot confidence drops to
+        ``UNAVAILABLE`` — NEVER a booked ``Decimal("0")``. A MEASURED $0 (a fully
+        decayed post-maturity YT) is DISTINCT: the gateway returns an AVAILABLE
+        ``price=0`` and this path books a real, measured $0 with ``repriced=True``
+        (a worthless YT is measured zero, not unmeasured). A degraded-but-measured
+        price (``ESTIMATED`` / ``STALE``) is valued and flagged
+        ``valuation_status="estimated"`` so the snapshot degrades (never upgraded).
+        """
+        from almanak.framework.portfolio.models import ValueConfidence
+
+        details = getattr(position, "details", None) or {}
+        # Symbol is the YT identity + price-contract key (spine §3.1).
+        symbol = details.get("yt_token") or details.get("yt_token_symbol") or details.get("symbol")
+        pt_price_fn = getattr(market, "pt_price", None)
+        if not symbol or not callable(pt_price_fn):
+            # No YT symbol, or the market surface predates pt_price (e.g. a bare
+            # test double / data-layer snapshot) → not valuable here.
+            return None
+
+        # YT quantity = the wallet's YT holding (human units). YT is
+        # KNOWN_UNPRICEABLE in the spot oracle, so it is dropped from the wallet
+        # balance valuation — its USD value enters NAV ONLY here, no double-count.
+        try:
+            bal = market.balance(symbol)
+            yt_amount = bal.balance if hasattr(bal, "balance") else Decimal(str(bal))
+        except Exception as e:  # noqa: BLE001 — fail to unmeasured, never crash the snapshot
+            logger.warning("yield-token reprice: balance(%s) failed (%s); cannot size YT position", symbol, e)
+            return (
+                Decimal("0"),
+                {
+                    "yt_symbol": symbol,
+                    "source": _YT_INVENTORY_SOURCE,
+                    "classification": "deployed_inventory",
+                    "valuation_status": "no_path",
+                    "mark_unmeasured": True,
+                    "cost_basis_unmeasured": True,
+                    "unrealized_pnl_unmeasured": True,
+                },
+                False,
+            )
+
+        try:
+            yt_price = pt_price_fn(symbol, chain)
+        except Exception as e:  # noqa: BLE001 — PriceUnavailableError (no gateway client) / transport
+            logger.warning("yield-token reprice: pt_price(%s) failed (%s)", symbol, e)
+            return (
+                Decimal("0"),
+                {
+                    "yt_symbol": symbol,
+                    "source": _YT_INVENTORY_SOURCE,
+                    "classification": "deployed_inventory",
+                    "quantity": str(yt_amount),
+                    "valuation_status": "no_path",
+                    "mark_unmeasured": True,
+                    "cost_basis_unmeasured": True,
+                    "unrealized_pnl_unmeasured": True,
+                },
+                False,
+            )
+
+        from almanak.connectors._strategy_base.principal_token_valuation import (
+            value_principal_token_position,
+        )
+
+        valued = value_principal_token_position(pt_price=yt_price, yt_amount=yt_amount)
+
+        # Stamp the SAME display field shape the PT reprice path uses so the
+        # dashboard / CLI render a held YT consistently. ``source`` is the
+        # data-shape marker (never a protocol-name string). Cost basis is not
+        # tracked for held YT here (no YT FIFO lane — VIB-5322 scope is the mark),
+        # so cost / unrealized PnL stay explicitly unmeasured rather than a
+        # fabricated zero (Empty ≠ Zero).
+        enriched: dict[str, Any] = {
+            "yt_symbol": symbol,
+            "source": _YT_INVENTORY_SOURCE,
+            "classification": "deployed_inventory",
+            "quantity": str(yt_amount),
+            "yt_amount": str(yt_amount),
+            "price_confidence": str(valued.confidence),
+            "underlying_price_usd": (str(yt_price.underlying_price) if yt_price.underlying_price is not None else ""),
+            "yt_to_asset_rate": (str(yt_price.pt_to_asset_rate) if yt_price.pt_to_asset_rate is not None else ""),
+            "days_to_maturity": yt_price.days_to_maturity,
+            "price_source": yt_price.source,
+            "cost_basis_unmeasured": True,
+            "unrealized_pnl_unmeasured": True,
+        }
+
+        if valued.current_value_usd is None or valued.confidence == ValueConfidence.UNAVAILABLE:
+            # Empty ≠ Zero: unmeasured price → no_path so the snapshot confidence
+            # drops to UNAVAILABLE rather than masquerade as a measured $0. The row
+            # still surfaces (qty shown) but with NO USD mark. NOTE this is the
+            # UNMEASURED case — a MEASURED $0 (post-maturity worthless YT) falls
+            # through to the booked path below with repriced=True.
+            enriched["valuation_status"] = "no_path"
+            enriched["mark_unmeasured"] = True
+            return Decimal("0"), enriched, False
+
+        if valued.confidence != ValueConfidence.HIGH:
+            # ESTIMATED / STALE gateway price → snapshot ESTIMATED (never folded
+            # into a HIGH-confidence NAV). The value is real and traceable.
+            enriched["valuation_status"] = "estimated"
+
+        return valued.current_value_usd, enriched, True
 
     def _reprice_principal_token_enriched(
         self,

@@ -21,6 +21,7 @@ from almanak.connectors._strategy_base.principal_token_valuation import (
     compute_pt_implied_apy_bps,
     value_pt_position,
     value_sy_position,
+    value_yt_position,
 )
 from almanak.connectors._strategy_base.principal_token_valuation import (
     PrincipalTokenPositionValue as PendlePositionValue,
@@ -40,4 +41,5 @@ __all__ = [
     "value_pendle_position",
     "value_pt_position",
     "value_sy_position",
+    "value_yt_position",
 ]

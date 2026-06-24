@@ -28,6 +28,7 @@ from almanak.connectors.pendle.valuation import (
     value_pendle_position,
     value_pt_position,
     value_sy_position,
+    value_yt_position,
 )
 from almanak.framework.market.models import PtPriceData
 from almanak.framework.portfolio.models import ValueConfidence
@@ -103,6 +104,18 @@ class TestValuePtPosition:
     def test_pt_at_par_mark(self):
         # At maturity the gateway mark pulls to par ($3500).
         assert value_pt_position(Decimal("1.0"), Decimal("3500")) == Decimal("3500")
+
+
+class TestValueYtPosition:
+    """YT position math: value = yt_amount × gateway YT/USD mark (VIB-5322)."""
+
+    def test_yt_basic(self):
+        # gateway YT/USD mark = $0.10 (= (1 − 0.95) × 2.00, composed gateway-side)
+        assert value_yt_position(Decimal("100"), Decimal("0.10")) == Decimal("10.0")
+
+    def test_yt_at_maturity_zero_mark(self):
+        # At maturity the gateway YT mark is exactly $0 (rate pulled to par).
+        assert value_yt_position(Decimal("100"), Decimal("0")) == Decimal("0")
 
 
 class TestValueSyPosition:
@@ -250,6 +263,109 @@ class TestValuePendlePositionPT:
             assert result.confidence == ValueConfidence.UNAVAILABLE, bad
 
 
+class TestValuePendlePositionYT:
+    """YT-only valuation from the gateway YT/USD mark (VIB-5322).
+
+    For a YT symbol ``pt_price.price`` IS the composed YT/USD mark
+    (``(1 − pt_to_asset_rate) × underlying/USD``). The valuer multiplies the
+    held quantity by that mark and propagates confidence verbatim. The defining
+    YT difference vs PT: a MEASURED ``price == 0`` (a fully-decayed post-maturity
+    YT) is a VALID value, not an unmeasured/unavailable one.
+    """
+
+    def test_yt_high_confidence(self):
+        """HIGH gateway YT mark → value = yt_amount × price, confidence propagated."""
+        result = value_pendle_position(
+            pt_price=_pt_price(
+                price=Decimal("0.10"),
+                confidence=ValueConfidence.HIGH,
+                underlying_price=Decimal("2.00"),
+                pt_to_asset_rate=Decimal("0.05"),  # YT complement rate echoed by the gateway
+                days_to_maturity=120,
+                symbol="YT-sUSDe-13AUG2026",
+            ),
+            yt_amount=Decimal("100"),
+        )
+        assert result.current_value_usd == Decimal("10.00")  # 100 × $0.10
+        assert result.pt_component_usd == Decimal("10.00")
+        assert result.sy_component_usd is None
+        assert result.confidence == ValueConfidence.HIGH
+        assert result.unavailable_reason == ""
+        assert result.days_to_maturity == 120
+        # The PT pull-to-par APY formula does not describe a YT's return → None,
+        # never a misleading PT-style number off the YT rate (Empty ≠ Zero).
+        assert result.implied_apy_bps is None
+
+    def test_yt_at_maturity_measured_zero_is_valid(self):
+        """A MEASURED $0 mark (post-maturity worthless YT) → value Decimal("0"), HIGH.
+
+        Empty ≠ Zero in the OTHER direction: a YT mark of exactly 0 is a real,
+        measured value (the gateway composed it), NOT an unmeasured price. The
+        value must be ``Decimal("0")`` with the gateway confidence, never None.
+        """
+        result = value_pendle_position(
+            pt_price=_pt_price(
+                price=Decimal("0"),
+                confidence=ValueConfidence.HIGH,
+                underlying_price=Decimal("1.50"),
+                pt_to_asset_rate=Decimal("0"),
+                days_to_maturity=0,
+                symbol="YT-sUSDe-13AUG2026",
+            ),
+            yt_amount=Decimal("100"),
+        )
+        assert result.current_value_usd == Decimal("0")
+        assert result.current_value_usd is not None  # measured zero, NOT unmeasured None
+        assert result.confidence == ValueConfidence.HIGH
+
+    def test_yt_unavailable_is_unmeasured_not_zero(self):
+        """UNAVAILABLE gateway price → value None (Empty ≠ Zero), distinct from a measured 0."""
+        result = value_pendle_position(
+            pt_price=_pt_price(price=None, confidence=ValueConfidence.UNAVAILABLE),
+            yt_amount=Decimal("100"),
+        )
+        assert result.current_value_usd is None  # NOT Decimal("0")
+        assert result.confidence == ValueConfidence.UNAVAILABLE
+        assert result.unavailable_reason
+
+    def test_yt_negative_price_is_unavailable(self):
+        """A negative YT mark is never a measured value → unavailable (Empty ≠ Zero).
+
+        The gateway floors YT at $0, so a negative price can only arrive on a
+        corrupt/leaked response; the valuer fails closed rather than book a
+        negative NAV contribution.
+        """
+        result = value_pendle_position(
+            pt_price=_pt_price(
+                price=Decimal("-0.01"),
+                confidence=ValueConfidence.HIGH,
+                underlying_price=Decimal("2.00"),
+                pt_to_asset_rate=Decimal("1.005"),
+                symbol="YT-sUSDe-13AUG2026",
+            ),
+            yt_amount=Decimal("100"),
+        )
+        assert result.current_value_usd is None
+        assert result.confidence == ValueConfidence.UNAVAILABLE
+
+    def test_yt_estimated_and_stale_confidence_propagated(self):
+        """ESTIMATED / STALE gateway price → valued, confidence propagated (not upgraded)."""
+        for conf in (ValueConfidence.ESTIMATED, ValueConfidence.STALE):
+            result = value_pendle_position(
+                pt_price=_pt_price(
+                    price=Decimal("0.20"),
+                    confidence=conf,
+                    underlying_price=Decimal("2.00"),
+                    pt_to_asset_rate=Decimal("0.90"),
+                    symbol="YT-sUSDe-13AUG2026",
+                ),
+                yt_amount=Decimal("50"),
+            )
+            assert result.current_value_usd == Decimal("10.00"), conf  # 50 × $0.20
+            assert result.confidence == conf
+            assert result.unavailable_reason  # non-empty degradation note
+
+
 class TestValuePendlePositionSY:
     """SY-only valuation from the underlying/USD leg."""
 
@@ -377,6 +493,20 @@ class TestValuePendlePositionGuards:
             assert "at most one of" in str(e)
         else:
             raise AssertionError("expected ValueError for multi-type input")
+
+    def test_ambiguous_yt_plus_pt_raises(self):
+        """Mixing yt_amount with pt_amount is ambiguous → ValueError (VIB-5322)."""
+        try:
+            value_pendle_position(
+                pt_price=_pt_price(price=Decimal("0.10"), confidence=ValueConfidence.HIGH),
+                pt_amount=Decimal("1"),
+                yt_amount=Decimal("1"),
+            )
+        except ValueError as e:
+            assert "at most one of" in str(e)
+            assert "yt_amount" in str(e)
+        else:
+            raise AssertionError("expected ValueError for yt+pt multi-type input")
 
     def test_result_type(self):
         result = value_pendle_position(

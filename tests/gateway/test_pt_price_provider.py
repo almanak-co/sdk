@@ -10,7 +10,9 @@ covers the COMPOSITION + honest-availability logic the provider adds:
                              FORBIDDEN), ``pt_to_asset_rate`` left EMPTY (Empty≠Zero)
 * underlying unpriceable    → UNMEASURED, NO price (never "0")
 * a read raised unexpectedly → ERRORED, NO price
-* YT in M1                  → UNMEASURED (held-YT deferred to VIB-5322/M3)
+* YT (VIB-5322)            → AVAILABLE, ``yt_usd = (1 − rate) × underlying``,
+                             floored at $0 past maturity; UNMEASURED on a
+                             missing rate / unpriceable underlying (Empty≠Zero)
 * unknown symbol           → UNMEASURED
 * the structural guard: a response can never be AVAILABLE with an empty price.
 
@@ -291,20 +293,6 @@ class TestGetPtPriceUnmeasured:
         assert resp.price == ""
 
     @pytest.mark.asyncio
-    async def test_yt_is_unmeasured_in_m1(self, market_service, mock_context):
-        """Held-YT valuation is deferred to VIB-5322/M3 → UNMEASURED, never a guess."""
-        with (
-            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref(family="YT")),
-            patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying())) as priced,
-        ):
-            resp = await market_service.GetPtPrice(_request("YT-sUSDe-13AUG2026"), mock_context)
-
-        assert resp.availability == pb.PT_PRICE_AVAILABILITY_UNMEASURED
-        assert resp.price == ""
-        assert "yt-valuation-deferred" in resp.source
-        priced.assert_not_called()  # never even prices the underlying for YT
-
-    @pytest.mark.asyncio
     async def test_unknown_family_is_unmeasured_never_priced_as_pt(self, market_service, mock_context):
         """A non-PT/YT family (e.g. a future "LP") must NOT silently price as PT.
 
@@ -323,6 +311,134 @@ class TestGetPtPriceUnmeasured:
         assert "unrecognized-family" in resp.source
         assert "LP" in resp.source
         priced.assert_not_called()  # never even prices the underlying for an unknown family
+
+
+class TestGetYtPriceComposition:
+    """YT/USD composition (VIB-5322): ``yt_usd = (1 − pt_to_asset_rate) × underlying``.
+
+    A YT and its sibling PT split one unit of underlying at par, so the YT mark is
+    the complement of the PT mark. Honest availability mirrors PT exactly (Empty ≠
+    Zero), and a post-maturity YT (rate → 1) marks at a MEASURED $0.
+    """
+
+    def _yt_request(self) -> pb.PtPriceRequest:
+        return pb.PtPriceRequest(symbol="YT-sUSDe-13AUG2026", chain="ethereum", quote="USD")
+
+    @pytest.mark.asyncio
+    async def test_yt_both_legs_measured_is_available_high_complement(self, market_service, mock_context):
+        """Underlying priced + rate read → AVAILABLE + HIGH, yt = (1 − rate) × underlying."""
+        with (
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref(family="YT")),
+            patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("2.00", 0.9))),
+            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.95"), 120, _ONCHAIN_EXPIRY, "")),
+        ):
+            resp = await market_service.GetPtPrice(self._yt_request(), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_AVAILABLE
+        assert resp.confidence_band == pb.PT_PRICE_CONFIDENCE_BAND_HIGH
+        # yt_usd = (1 − 0.95) × 2.00 = 0.10
+        assert Decimal(resp.price) == Decimal("0.10")
+        assert resp.underlying_price == "2.00"
+        # pt_to_asset_rate echoes the YT complement rate (1 − 0.95 = 0.05).
+        assert resp.pt_to_asset_rate == "0.05"
+        assert resp.confidence == pytest.approx(0.9)
+        assert resp.days_to_maturity == 120
+        assert resp.maturity_ts == _ONCHAIN_EXPIRY
+        assert "yt=(1" in resp.source
+        mock_context.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_yt_at_maturity_is_measured_zero_not_unmeasured(self, market_service, mock_context):
+        """Rate → 1.0 at maturity → YT marks at a MEASURED $0 (AVAILABLE), never a stale price."""
+        with (
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref(family="YT")),
+            patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("1.50", 0.9))),
+            patch.object(market_service, "_read_pt_market", return_value=(Decimal("1.0"), 0, _ONCHAIN_EXPIRY, "")),
+        ):
+            resp = await market_service.GetPtPrice(self._yt_request(), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_AVAILABLE
+        assert Decimal(resp.price) == Decimal("0")  # measured zero, not empty/unmeasured
+        assert resp.price != ""  # AVAILABLE structural guard: a real "0" string
+        assert Decimal(resp.pt_to_asset_rate) == Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_yt_post_maturity_rate_above_one_floors_at_zero(self, market_service, mock_context):
+        """A TWAP rate marginally > 1.0 (post-maturity drift) floors YT at $0, never negative."""
+        with (
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref(family="YT")),
+            patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("1.00", 0.9))),
+            patch.object(market_service, "_read_pt_market", return_value=(Decimal("1.0002"), 0, _ONCHAIN_EXPIRY, "")),
+        ):
+            resp = await market_service.GetPtPrice(self._yt_request(), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_AVAILABLE
+        assert Decimal(resp.price) == Decimal("0")  # floored, never a negative mark
+        assert Decimal(resp.pt_to_asset_rate) == Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_yt_stale_underlying_is_available_estimated(self, market_service, mock_context):
+        """A measured-but-stale underlying → AVAILABLE + ESTIMATED + stale (mirrors PT)."""
+        with (
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref(family="YT")),
+            patch.object(
+                market_service,
+                "_price_underlying_usd",
+                AsyncMock(return_value=_underlying("2.00", 0.9, stale=True)),
+            ),
+            patch.object(market_service, "_read_pt_market", return_value=(Decimal("0.90"), 30, _ONCHAIN_EXPIRY, "")),
+        ):
+            resp = await market_service.GetPtPrice(self._yt_request(), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_AVAILABLE
+        assert resp.confidence_band == pb.PT_PRICE_CONFIDENCE_BAND_ESTIMATED
+        assert resp.stale is True
+        # yt_usd = (1 − 0.90) × 2.00 = 0.20
+        assert Decimal(resp.price) == Decimal("0.20")
+
+    @pytest.mark.asyncio
+    async def test_yt_missing_rate_is_unmeasured_no_price(self, market_service, mock_context):
+        """Missing pt_to_asset_rate → UNMEASURED, NO price (never a fabricated YT)."""
+        with (
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref(family="YT")),
+            patch.object(market_service, "_price_underlying_usd", AsyncMock(return_value=_underlying("2.00", 0.9))),
+            patch.object(market_service, "_read_pt_market", return_value=(None, None, None, "rate-reader-unavailable")),
+        ):
+            resp = await market_service.GetPtPrice(self._yt_request(), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_UNMEASURED
+        assert resp.price == ""
+        assert resp.underlying_price == "2.00"  # echoed (it WAS measured)
+        assert "pt-rate-unavailable" in resp.source
+
+    @pytest.mark.asyncio
+    async def test_yt_underlying_unpriceable_is_unmeasured(self, market_service, mock_context):
+        """Underlying unpriceable → UNMEASURED, NO price (Empty ≠ Zero)."""
+        with (
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref(family="YT")),
+            patch.object(
+                market_service,
+                "_price_underlying_usd",
+                AsyncMock(side_effect=_UnpriceableUnderlying("no source")),
+            ),
+        ):
+            resp = await market_service.GetPtPrice(self._yt_request(), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_UNMEASURED
+        assert resp.price == ""
+        assert "underlying-unpriceable" in resp.source
+
+    @pytest.mark.asyncio
+    async def test_yt_underlying_read_error_is_errored(self, market_service, mock_context):
+        """An unexpected underlying read error → ERRORED, NO price."""
+        with (
+            patch.object(market_service, "_resolve_principal_token_ref", return_value=_pt_ref(family="YT")),
+            patch.object(market_service, "_price_underlying_usd", AsyncMock(side_effect=RuntimeError("rpc exploded"))),
+        ):
+            resp = await market_service.GetPtPrice(self._yt_request(), mock_context)
+
+        assert resp.availability == pb.PT_PRICE_AVAILABILITY_ERRORED
+        assert resp.price == ""
 
 
 class TestGetPtPriceErrored:
