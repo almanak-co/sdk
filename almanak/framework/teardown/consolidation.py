@@ -79,6 +79,13 @@ logger = logging.getLogger(__name__)
 _INTENT_TOKEN_KEYS: tuple[str, ...] = ("from_token", "to_token", "token", "asset")
 _POSITION_DETAIL_TOKEN_KEYS: tuple[str, ...] = ("token0", "token1", "asset")
 
+# VIB-5393 (Case A): a below-dust residual worth at least this fraction of the
+# dust floor is "material" — not negligible dust the operator should ignore —
+# so its skip surfaces a result-level warning (and, via the runner, a hosted
+# log line). At the default $5 floor this is $1.00. Sized to flag real stranded
+# value (e.g. $4 WETH) while staying quiet on true sub-dollar dust.
+_MATERIAL_DUST_FRACTION: Decimal = Decimal("1") / Decimal("5")
+
 
 @dataclass(frozen=True)
 class ConsolidationDecision:
@@ -89,7 +96,7 @@ class ConsolidationDecision:
     value_usd: Decimal | None
     action: Literal["swap", "skip"]
     # Examples: "consolidate", "below_dust", "zero_balance", "native_gas",
-    # "target", "keep_token", "not_in_universe", "no_price",
+    # "target", "keep_token", "not_in_universe", "not_a_token", "no_price",
     # "balance_unavailable".
     reason: str
 
@@ -122,9 +129,40 @@ class ConsolidationOutcome:
     accounting_degraded_count: int = 0
 
 
+def _is_consolidatable_symbol(value: str) -> bool:
+    """True when *value* is a single swappable token symbol, not a pool label.
+
+    VIB-5393 (Case B): some LP connectors stamp a **pool-pair label** into the
+    ``PositionInfo.details`` ``asset``/``token0``/``token1`` slots — TraderJoe
+    V2's ``get_open_positions`` sets ``details["asset"] = "WAVAX/USDC"`` (and a
+    Uniswap-style pool triple reads ``"WAVAX/USDC/20"``). The universe scan
+    treats every ``asset``-keyed string as a swappable token symbol, so the
+    pair label leaks in and the planner calls ``market.balance("WAVAX/USDC")``
+    — which can never resolve (``Cannot determine balance for
+    WAVAX/USDC@avalanche``), producing a ``balance_unavailable`` skip that
+    looks like a real residual was stranded.
+
+    A token symbol is a single asset ticker: it never contains a ``/`` (the
+    pair/pool separator) or whitespace. Excluding these labels is correct —
+    each underlying leg (``WAVAX``, ``USDC``) still enters the universe via the
+    **SWAP accounting footprint** (``extract_token_footprint`` reads
+    ``token_in`` / ``token_out`` off the entry/rebalance swap events), so the
+    real residuals are still consolidated. Note the LP_CLOSE that unwinds the
+    position carries **no** leg symbols (``LPCloseIntent`` has only
+    ``position_id`` / ``pool``), and the TraderJoe demo stamps only
+    ``details["asset"]`` (the pair label) + ``details["pool"]`` — so the legs
+    do NOT re-enter via the closing intent or position details, only via the
+    footprint. Dropping the label is best-effort, like every other universe
+    source: a narrower universe means fewer swaps, never a raise.
+    """
+    return "/" not in value and not any(ch.isspace() for ch in value)
+
+
 def _token_from(obj: Any, key: str) -> str | None:
     val = obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
-    return val if isinstance(val, str) and val else None
+    if not (isinstance(val, str) and val):
+        return None
+    return val if _is_consolidatable_symbol(val) else None
 
 
 def derive_strategy_token_universe(
@@ -166,7 +204,7 @@ def derive_strategy_token_universe(
         for key in _POSITION_DETAIL_TOKEN_KEYS:
             val = details.get(key)
             if isinstance(val, str) and val:
-                universe.add(val)
+                universe.add(val)  # filtered below alongside every other source
 
     if (
         accounting_state_manager is not None
@@ -188,7 +226,16 @@ def derive_strategy_token_universe(
     except Exception:  # noqa: BLE001 — profile is UX metadata; never block
         logger.debug("get_teardown_profile failed while deriving token universe", exc_info=True)
 
-    return universe
+    # VIB-5393 (Case B): drop pool-pair labels that any source may have
+    # contributed (e.g. PositionInfo.details["asset"]="WAVAX/USDC", or the same
+    # label persisted into an accounting-event payload). They are not swappable
+    # token symbols; left in, the planner calls market.balance() on them and
+    # logs a misleading balance_unavailable skip. Single filter seam so every
+    # source — intents, positions, accounting footprint, profile — is covered.
+    dropped = {sym for sym in universe if not _is_consolidatable_symbol(sym)}
+    if dropped:
+        logger.debug("consolidation universe dropped non-token pool labels: %s", sorted(dropped))
+    return universe - dropped
 
 
 def _earliest_swap_entry_token(accounting_events: Sequence[dict] | None) -> str | None:
@@ -358,6 +405,13 @@ def _decide_token(
     Membership comparisons fold to upper.
     """
     token_upper = token.upper()
+    if not _is_consolidatable_symbol(token):
+        # VIB-5393 (Case B) defense-in-depth: a pool-pair label (e.g.
+        # "WAVAX/USDC") is not a swappable token. The universe derivation
+        # already filters these, but the planner must never hand one to
+        # market.balance() even if a caller passes a raw universe — that read
+        # can only fail and emit a misleading balance_unavailable skip.
+        return _skip(token, "not_a_token")
     if token_upper in targets_upper:
         return _skip(token, "target")
     if token_upper == native_symbol:
@@ -433,6 +487,23 @@ def _decide_token(
 
     value_usd = balance * price
     if value_usd < min_swap_value:
+        # VIB-5393 (Case A): below the dust floor is WORKING AS CONFIGURED —
+        # the floor (default $5, VIB-5011) deliberately leaves sub-floor
+        # residuals unswapped because the swap gas would eat the proceeds. But
+        # a residual that is a MEANINGFUL fraction of the floor (e.g. $4.12 WETH
+        # at a $5 floor) is not negligible dust the operator should ignore: on a
+        # hosted run with no operator sweep it strands in the strategy wallet.
+        # The bare "below_dust" decision is only logged at INFO; surface a
+        # result-level WARNING (visible on `teardown status` / `--wait`) so the
+        # operator can sweep or lower the floor. The floor itself is unchanged —
+        # raising it would just consolidate more gas-uneconomic dust.
+        if value_usd >= min_swap_value * _MATERIAL_DUST_FRACTION:
+            warnings.append(
+                f"{token} residual is ${value_usd:.2f} — below the ${min_swap_value} "
+                f"consolidation dust floor so it was NOT swapped to the target token "
+                f"and stays in the wallet. On a hosted run with no operator sweep this "
+                f"strands. Lower token_consolidation.min_swap_value_usd to consolidate it."
+            )
         return _skip(token, "below_dust", balance=balance, value_usd=value_usd)
 
     return ConsolidationDecision(token=token, balance=balance, value_usd=value_usd, action="swap", reason="consolidate")

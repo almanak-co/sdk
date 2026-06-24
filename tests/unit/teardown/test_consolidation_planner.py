@@ -139,6 +139,51 @@ class TestTargetPolicyPlanning:
         assert plan.intents == []
         assert _decision(plan, "DAI").reason == "below_dust"
 
+    def test_below_dust_material_residual_surfaces_warning(self):
+        """VIB-5393 Case A: a ~$4 WETH leg is below the $5 floor (working as
+        configured — gas would eat a sub-$5 swap) but is NOT negligible dust:
+        on a hosted run with no operator sweep it strands. The skip must surface
+        a result-level WARNING (visible on `teardown status`), not just the
+        INFO-level decision log. Reproduces the uniswap_lp field line
+        ``skip WETH (reason=below_dust, value_usd=4.1155...)``."""
+        market = FakeMarket(
+            balances={"WETH": Decimal("0.002489")},
+            prices={"WETH": Decimal("1653")},
+        )
+        plan = _plan(market=market, universe={"WETH"})
+        weth = _decision(plan, "WETH")
+        assert weth.action == "skip"
+        assert weth.reason == "below_dust"
+        assert Decimal("4") < weth.value_usd < Decimal("5")
+        # The floor itself is unchanged: still no swap.
+        assert plan.intents == []
+        # ...but the operator is warned that a real residual stranded.
+        assert any("WETH residual is $" in w and "stays in the wallet" in w for w in plan.warnings), plan.warnings
+
+    def test_below_dust_trivial_residual_stays_quiet(self):
+        """A genuinely trivial sub-floor residual ($0.02) stays quiet — no
+        result-level warning noise for true dust."""
+        market = FakeMarket(
+            balances={"DAI": Decimal("0.02")},
+            prices={"DAI": Decimal("1")},
+        )
+        plan = _plan(market=market, universe={"DAI"})
+        assert _decision(plan, "DAI").reason == "below_dust"
+        assert not any("residual is $" in w for w in plan.warnings), plan.warnings
+
+    def test_below_dust_material_warning_boundary_at_floor_fifth(self):
+        """Boundary: the "material residual" threshold is floor/5 ($1.00 at the
+        $5 default, inclusive). Exactly $1.00 warns; $0.99 stays quiet."""
+        at_floor_fifth = FakeMarket(balances={"DAI": Decimal("1")}, prices={"DAI": Decimal("1")})
+        plan_at = _plan(market=at_floor_fifth, universe={"DAI"})
+        assert _decision(plan_at, "DAI").reason == "below_dust"
+        assert any("DAI residual is $" in w for w in plan_at.warnings), plan_at.warnings
+
+        just_below = FakeMarket(balances={"DAI": Decimal("0.99")}, prices={"DAI": Decimal("1")})
+        plan_below = _plan(market=just_below, universe={"DAI"})
+        assert _decision(plan_below, "DAI").reason == "below_dust"
+        assert not any("residual is $" in w for w in plan_below.warnings), plan_below.warnings
+
     def test_native_gas_never_swapped_wrapped_native_is(self):
         market = FakeMarket(
             balances={"ETH": Decimal("1"), "WETH": Decimal("1")},
@@ -393,6 +438,102 @@ class TestTokenUniverse:
         # Original casing preserved (Codex audit) — folding happens only at
         # comparison time inside plan_consolidation.
         assert universe == {"weth", "usdc"}
+
+    def _traderjoe_positions(self):
+        """The real TraderJoe LP position shape: details carry ONLY the
+        pair-label ``asset`` + ``pool`` — no token0/token1 (the demo stamps
+        neither), matching ``almanak/demo_strategies/traderjoe_lp/strategy.py``."""
+        return TeardownPositionSummary(
+            deployment_id="dep-1",
+            timestamp=datetime.now(UTC),
+            positions=[
+                PositionInfo(
+                    position_type=PositionType.LP,
+                    position_id="traderjoe-lp-WAVAX/USDC/20-avalanche",
+                    chain="avalanche",
+                    protocol="traderjoe_v2",
+                    value_usd=Decimal("4"),
+                    details={"asset": "WAVAX/USDC", "pool": "WAVAX/USDC/20"},
+                )
+            ],
+        )
+
+    def test_pool_pair_label_in_position_details_dropped(self):
+        """VIB-5393 Case B: TraderJoe V2's get_open_positions stamps
+        ``details["asset"] = "WAVAX/USDC"`` (a pool-pair label, not a token).
+        The universe must NOT contain it — left in, the planner would call
+        ``market.balance("WAVAX/USDC")`` and log a misleading
+        ``balance_unavailable`` skip.
+
+        This test pins ONLY that the label is dropped (the bug). It deliberately
+        passes NO closing intents and NO footprint, so it does not assert
+        leg-survival — the real teardown re-enters legs via the SWAP footprint,
+        which ``test_real_legs_survive_via_swap_footprint`` covers."""
+        strategy = SimpleNamespace(get_teardown_profile=lambda: SimpleNamespace(natural_exit_assets=[]))
+        universe = derive_strategy_token_universe(None, "dep-1", strategy, [], self._traderjoe_positions())
+        assert "WAVAX/USDC" not in universe
+        # With no footprint/intents, the label is the only candidate → empty.
+        assert universe == set()
+
+    def test_real_legs_survive_via_swap_footprint(self):
+        """VIB-5393 Case B (representative path): a real TraderJoe LP teardown
+        closes via ``LPCloseIntent`` (no from_token/to_token/token/asset) and
+        the position details carry only the pair label — so the real legs
+        re-enter the universe ONLY through the SWAP accounting footprint
+        (``extract_token_footprint`` reading ``token_in`` / ``token_out`` off
+        the entry/rebalance swap events). Assert the legs survive and the pair
+        label is still dropped."""
+        # LP_CLOSE shape: position_id + pool only, no leg-token attributes.
+        lp_close = SimpleNamespace(position_id="traderjoe-lp-WAVAX/USDC/20-avalanche", pool="WAVAX/USDC/20")
+        sm = SimpleNamespace(
+            get_accounting_events_sync=lambda deployment_id: [
+                # Entry swap that funded the position: USDC -> WAVAX.
+                {"payload_json": '{"token_in": "USDC", "token_out": "WAVAX"}'},
+            ]
+        )
+        strategy = SimpleNamespace(get_teardown_profile=lambda: SimpleNamespace(natural_exit_assets=[]))
+        universe = derive_strategy_token_universe(sm, "dep-1", strategy, [lp_close], self._traderjoe_positions())
+        assert "WAVAX/USDC" not in universe
+        assert universe == {"USDC", "WAVAX"}
+
+    def test_usdc_e_suffix_survives_filter(self):
+        """A canonical mixed-case suffix symbol (``USDC.e`` on Avalanche) has a
+        ``.`` but no ``/`` or whitespace — it is a real token and must survive
+        the pool-label filter."""
+        strategy = SimpleNamespace(get_teardown_profile=lambda: SimpleNamespace(natural_exit_assets=["USDC.e"]))
+        closing = [SimpleNamespace(from_token="WAVAX", to_token="USDC.e", token=None, asset="WAVAX/USDC.e")]
+        universe = derive_strategy_token_universe(None, "dep-1", strategy, closing, None)
+        # Real tokens survive; only the "WAVAX/USDC.e" pair label is dropped.
+        assert universe == {"WAVAX", "USDC.e"}
+
+    def test_pool_label_from_intent_key_excluded(self):
+        """A pool triple in an intent ``asset`` slot is dropped too — single
+        filter seam covers every source (whitespace labels likewise)."""
+        strategy = SimpleNamespace(get_teardown_profile=lambda: SimpleNamespace(natural_exit_assets=[]))
+        closing = [SimpleNamespace(from_token="WAVAX", to_token=None, token=None, asset="WAVAX/USDC/20")]
+        universe = derive_strategy_token_universe(None, "dep-1", strategy, closing, None)
+        assert universe == {"WAVAX"}
+
+
+class TestCaseBPoolLabelPlanner:
+    """VIB-5393 Case B at the planner seam: a pool-pair label that somehow
+    reaches plan_consolidation is never handed to market.balance()."""
+
+    def test_pool_label_never_reaches_market_balance(self):
+        # WAVAX has a real (sub-floor) residual; the pool label is a phantom.
+        market = FakeMarket(
+            balances={"WAVAX": Decimal("0.1")},
+            prices={"WAVAX": Decimal("30")},
+        )
+        plan = _plan(market=market, universe={"WAVAX", "WAVAX/USDC"})
+        # The un-swappable pool label must never be read as a balance.
+        assert "WAVAX/USDC" not in market.balance_calls
+        # It is skipped as not_a_token, never the misleading balance_unavailable.
+        label = _decision(plan, "WAVAX/USDC")
+        assert label.action == "skip"
+        assert label.reason == "not_a_token"
+        # The real WAVAX leg is still considered (sub-floor here → below_dust).
+        assert _decision(plan, "WAVAX").reason == "below_dust"
 
 
 class TestFoldOutcome:

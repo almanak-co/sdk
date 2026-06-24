@@ -701,6 +701,20 @@ def map_teardown_result(
                 deployment_id,
                 teardown_result.consolidation_succeeded,
             )
+        elif teardown_result.consolidation_warnings:
+            # VIB-5393 (Case A): a below-dust material residual produces
+            # planned=succeeded=failed=0, so it hits neither branch above. On a
+            # hosted run the passive operator surface IS this runner log — the
+            # CLI `teardown status` / --wait render is only seen by someone who
+            # actively polls. Surface the consolidation warnings loud here so a
+            # stranded sub-floor residual (e.g. ~$4 WETH) is visible without an
+            # operator sweep. Non-failure warnings only — the failure case is
+            # handled by the first branch.
+            logger.warning(
+                "🛑 %s teardown completed with consolidation warnings (no swap failed): %s",
+                deployment_id,
+                "; ".join(teardown_result.consolidation_warnings) or "none",
+            )
         runner.request_shutdown()
         runner._lifecycle_write_state(deployment_id, "TERMINATED")
         if request:

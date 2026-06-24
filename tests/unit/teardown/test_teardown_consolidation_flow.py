@@ -225,7 +225,9 @@ class TestManagerExecuteHook:
     async def test_consolidation_runs_only_after_successful_closure_and_verify(self):
         mgr = TeardownManager(config=TeardownConfig.default())
         mgr._execute_intents = AsyncMock(return_value=_result(success=True))
-        mgr._verify_closure_detailed = AsyncMock(return_value=ClosureVerification(all_closed=True, positions_total=1, positions_closed=1))
+        mgr._verify_closure_detailed = AsyncMock(
+            return_value=ClosureVerification(all_closed=True, positions_total=1, positions_closed=1)
+        )
         mgr.run_token_consolidation = AsyncMock(return_value=ConsolidationOutcome(planned=1, succeeded=1, failed=0))
 
         result = await mgr.execute(_closing_strategy_for_execute(), mode="graceful", is_auto_mode=True)
@@ -242,7 +244,9 @@ class TestManagerExecuteHook:
     async def test_consolidation_skipped_when_closure_fails(self):
         mgr = TeardownManager(config=TeardownConfig.default())
         mgr._execute_intents = AsyncMock(return_value=_result(success=False, succeeded=0, failed=1))
-        mgr._verify_closure_detailed = AsyncMock(return_value=ClosureVerification(all_closed=True, positions_total=1, positions_closed=1))
+        mgr._verify_closure_detailed = AsyncMock(
+            return_value=ClosureVerification(all_closed=True, positions_total=1, positions_closed=1)
+        )
         mgr.run_token_consolidation = AsyncMock()
 
         result = await mgr.execute(_closing_strategy_for_execute(), mode="graceful", is_auto_mode=True)
@@ -254,7 +258,9 @@ class TestManagerExecuteHook:
     async def test_consolidation_skipped_when_verify_fails(self):
         mgr = TeardownManager(config=TeardownConfig.default())
         mgr._execute_intents = AsyncMock(return_value=_result(success=True))
-        mgr._verify_closure_detailed = AsyncMock(return_value=ClosureVerification(all_closed=False, positions_total=1, positions_closed=0))
+        mgr._verify_closure_detailed = AsyncMock(
+            return_value=ClosureVerification(all_closed=False, positions_total=1, positions_closed=0)
+        )
         mgr.run_token_consolidation = AsyncMock()
 
         result = await mgr.execute(_closing_strategy_for_execute(), mode="graceful", is_auto_mode=True)
@@ -266,7 +272,9 @@ class TestManagerExecuteHook:
     async def test_consolidation_failure_keeps_execute_success_true(self):
         mgr = TeardownManager(config=TeardownConfig.default())
         mgr._execute_intents = AsyncMock(return_value=_result(success=True))
-        mgr._verify_closure_detailed = AsyncMock(return_value=ClosureVerification(all_closed=True, positions_total=1, positions_closed=1))
+        mgr._verify_closure_detailed = AsyncMock(
+            return_value=ClosureVerification(all_closed=True, positions_total=1, positions_closed=1)
+        )
         mgr.run_token_consolidation = AsyncMock(
             return_value=ConsolidationOutcome(planned=1, succeeded=0, failed=1, warnings=["swap failed"])
         )
@@ -287,7 +295,9 @@ def _mgr_mock_for_runner_lane(*, closure_result: TeardownResult, verify_ok: bool
     mgr = MagicMock(name="TeardownManager")
     mgr._execute_intents = AsyncMock(return_value=closure_result)
     mgr._verify_closure_detailed = AsyncMock(
-        return_value=ClosureVerification(all_closed=verify_ok, positions_total=1, positions_closed=1 if verify_ok else 0)
+        return_value=ClosureVerification(
+            all_closed=verify_ok, positions_total=1, positions_closed=1 if verify_ok else 0
+        )
     )
     mgr.run_token_consolidation = AsyncMock(return_value=ConsolidationOutcome(planned=1, succeeded=1, failed=0))
     # execute() must never be reached from the runner lane.
@@ -692,6 +702,88 @@ class TestResultJsonContract:
         assert consolidation["failed"] == 1
         assert consolidation["target_token"] == "USDC"
         assert consolidation["warnings"] == ["1 consolidation swap(s) failed"]
+
+    def test_below_dust_only_residual_fires_runner_warning(self, caplog):
+        """VIB-5393 (Case A): a below-dust material residual produces
+        planned=succeeded=failed=0 with a non-empty warnings list. On hosted the
+        passive operator surface IS the runner log — so map_teardown_result must
+        emit a WARNING even though no swap failed, otherwise the stranded ~$4
+        residual is silent (the whole point of the warning)."""
+        import logging
+        from dataclasses import replace as _replace
+
+        from almanak.framework.runner._teardown_helpers import map_teardown_result
+
+        runner = MagicMock()
+        runner._calculate_duration_ms = MagicMock(return_value=10)
+        request = MagicMock()
+        request.target_token = "USDC"
+        state_manager = MagicMock()
+
+        teardown_result = _replace(
+            _result(success=True),
+            consolidation_planned=0,
+            consolidation_succeeded=0,
+            consolidation_failed=0,
+            consolidation_warnings=[
+                "WETH residual is $4.12 — below the $5 consolidation dust floor so it "
+                "was NOT swapped to the target token and stays in the wallet."
+            ],
+        )
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.runner.strategy_runner"):
+            map_teardown_result(
+                runner,
+                _make_strategy(),
+                datetime.now(UTC),
+                teardown_result,
+                TeardownMode.SOFT,
+                request,
+                state_manager,
+            )
+
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("consolidation warnings" in r.getMessage() for r in warning_records), [
+            r.getMessage() for r in warning_records
+        ]
+        assert any("WETH residual is $4.12" in r.getMessage() for r in warning_records)
+
+    def test_clean_consolidation_no_residual_warning_stays_quiet(self, caplog):
+        """A clean consolidation (a swap executed, no warnings) does NOT emit
+        the residual WARNING — no false alarms."""
+        import logging
+        from dataclasses import replace as _replace
+
+        from almanak.framework.runner._teardown_helpers import map_teardown_result
+
+        runner = MagicMock()
+        runner._calculate_duration_ms = MagicMock(return_value=10)
+        request = MagicMock()
+        request.target_token = "USDC"
+        state_manager = MagicMock()
+
+        teardown_result = _replace(
+            _result(success=True),
+            consolidation_planned=1,
+            consolidation_succeeded=1,
+            consolidation_failed=0,
+            consolidation_warnings=[],
+        )
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.runner.strategy_runner"):
+            map_teardown_result(
+                runner,
+                _make_strategy(),
+                datetime.now(UTC),
+                teardown_result,
+                TeardownMode.SOFT,
+                request,
+                state_manager,
+            )
+
+        assert not any(
+            "consolidation warnings" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        )
 
     def test_build_teardown_config_from_request_none_disables_consolidation(self):
         """No operator request → close-only (pr-auditor blocker): the
