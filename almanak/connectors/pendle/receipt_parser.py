@@ -1655,7 +1655,11 @@ class PendleReceiptParser:
     # legacy return type — mirroring the canonical aave_v3 migration.
     # =========================================================================
 
-    def _strict_parse(self, receipt: dict[str, Any]) -> ExtractError | None:
+    def _strict_parse(
+        self,
+        receipt: dict[str, Any],
+        parse_kwargs: dict[str, Any] | None = None,
+    ) -> ExtractError | None:
         """Run ``parse_receipt`` and return ``ExtractError`` if it crashed or
         reported failure; ``None`` when parsing succeeded.
 
@@ -1664,9 +1668,19 @@ class PendleReceiptParser:
         so both the raising case and the reported-failure case must be checked
         to surface a parse error rather than treating it as "no event"
         (VIB-3159 / VIB-5354). Canonical idiom shared with aave_v3 / uniswap_v3.
+
+        ``parse_kwargs`` are the PARSE-AFFECTING kwargs the wrapped extractor
+        itself forwards into ``parse_receipt`` (e.g. ``intent_swap_type`` /
+        ``token_*`` for :meth:`extract_swap_amounts` — VIB-3751 YT amount
+        reconstruction). They MUST be forwarded here so the strict probe parses
+        the receipt the same way the real extractor does; otherwise the probe
+        could report success while the real (kwarg-driven) parse fails, or
+        vice-versa (VIB-5368). Extractors whose kwargs are post-parse only
+        (``pt_address`` / ``out_token_*`` — the four VIB-5354 methods) pass
+        ``None`` (the default) and the probe runs ``parse_receipt(receipt)``.
         """
         try:
-            parsed = self.parse_receipt(receipt)
+            parsed = self.parse_receipt(receipt, **(parse_kwargs or {}))
         except Exception as exc:  # noqa: BLE001 — malformed receipt shape
             return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
         if not parsed.success:
@@ -1678,9 +1692,10 @@ class PendleReceiptParser:
         fn: Any,
         receipt: dict[str, Any],
         missing_reason: str,
+        parse_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> ExtractResult[Any]:
-        """Shared wrapper for the no-extra-kwargs tagged extractors.
+        """Shared wrapper for the tagged extractors.
 
         Runs ``_strict_parse`` first so an actual parse crash / reported failure
         propagates as ``ExtractError`` rather than being silently swallowed by
@@ -1688,15 +1703,18 @@ class PendleReceiptParser:
         from the legacy method then means a genuinely absent event
         (``ExtractMissing``); any value is wrapped in ``ExtractOk``.
 
-        NOTE: ``_strict_parse`` probes ``parse_receipt(receipt)`` with NO extra
-        kwargs. This is only sound for extractors whose ``**kwargs`` do not reach
-        ``parse_receipt`` (true for all four migrated methods — their kwargs are
-        post-parse, e.g. ``pt_address`` / ``out_token_*``). Before migrating an
-        extractor whose kwargs DO change parsing (e.g. ``swap_amounts`` with
-        ``intent_swap_type``), make ``_strict_parse`` forward those kwargs, or the
-        probe and the real call could disagree.
+        ``parse_kwargs`` is the subset of the extractor's kwargs that it forwards
+        into ``parse_receipt`` and which CHANGE how the receipt parses. For
+        extractors whose kwargs are post-parse only (``pt_address`` /
+        ``out_token_*`` — the four VIB-5354 methods) leave it ``None`` and the
+        probe runs ``parse_receipt(receipt)``. For :meth:`extract_swap_amounts`
+        (VIB-5368) the YT-reconstruction kwargs DO reach ``parse_receipt``, so
+        they are threaded through ``parse_kwargs`` to keep the strict probe and
+        the real extractor in agreement. ``**kwargs`` are forwarded verbatim to
+        ``fn`` (and are a superset of ``parse_kwargs`` for the swap path —
+        ``expected_out`` is post-parse so it stays out of ``parse_kwargs``).
         """
-        err = self._strict_parse(receipt)
+        err = self._strict_parse(receipt, parse_kwargs)
         if err is not None:
             return err
         try:
@@ -1718,6 +1736,58 @@ class PendleReceiptParser:
     def extract_lp_close_data_result(self, receipt: dict[str, Any]) -> "ExtractResult[LPCloseData]":
         """Fail-closed variant of :meth:`extract_lp_close_data` — see VIB-5354."""
         return self._wrap_extract(self.extract_lp_close_data, receipt, "no Pendle Burn event in receipt")
+
+    def extract_swap_amounts_result(
+        self,
+        receipt: dict[str, Any],
+        *,
+        expected_out: "Decimal | None" = None,
+        intent_swap_type: str | None = None,
+        token_in_address: str | None = None,
+        token_out_address: str | None = None,
+        token_in_decimals: int | None = None,
+        token_out_decimals: int | None = None,
+        wallet_address: str | None = None,
+    ) -> "ExtractResult[SwapAmounts]":
+        """Fail-closed variant of :meth:`extract_swap_amounts` — VIB-5368.
+
+        Unlike the four VIB-5354 extractors, ``extract_swap_amounts`` forwards
+        PARSE-AFFECTING kwargs (``intent_swap_type`` + the ``token_*`` /
+        ``wallet_address`` identity hints, VIB-3751) into ``parse_receipt`` to
+        reconstruct user-facing YT swap amounts. The strict probe must parse the
+        receipt the SAME way the real extractor does, so those kwargs are
+        threaded through ``parse_kwargs`` (see the note on :meth:`_wrap_extract`).
+        ``expected_out`` is consumed POST-parse (realized-slippage computation,
+        VIB-3203), so it is forwarded to the extractor but kept out of
+        ``parse_kwargs``.
+
+        ``ExtractMissing`` preserves the legacy ``None`` contract: no Swap event
+        resolvable in the receipt (benign). Only a ``parse_receipt`` crash /
+        reported failure, or an extractor crash, becomes ``ExtractError`` — a
+        silent decode failure on the SWAP money path must be loud, not "no data"
+        (Empty != Zero adjacent).
+        """
+        parse_kwargs = {
+            "intent_swap_type": intent_swap_type,
+            "token_in_address": token_in_address,
+            "token_out_address": token_out_address,
+            "token_in_decimals": token_in_decimals,
+            "token_out_decimals": token_out_decimals,
+            "wallet_address": wallet_address,
+        }
+        return self._wrap_extract(
+            self.extract_swap_amounts,
+            receipt,
+            "no Pendle Swap event in receipt",
+            parse_kwargs=parse_kwargs,
+            expected_out=expected_out,
+            intent_swap_type=intent_swap_type,
+            token_in_address=token_in_address,
+            token_out_address=token_out_address,
+            token_in_decimals=token_in_decimals,
+            token_out_decimals=token_out_decimals,
+            wallet_address=wallet_address,
+        )
 
     @staticmethod
     def _pt_transfer_amount(
@@ -2035,6 +2105,27 @@ class PendleReceiptParser:
         except Exception as e:
             logger.warning(f"Failed to extract redemption amounts: {e}")
             return None
+
+    def extract_redemption_amounts_result(self, receipt: dict[str, Any]) -> "ExtractResult[dict[str, int]]":
+        """Fail-closed variant of :meth:`extract_redemption_amounts` — VIB-5368.
+
+        ``extract_redemption_amounts`` takes no parse-affecting kwargs (it calls
+        ``parse_receipt(receipt)`` with no extra arguments), so the vanilla
+        ``_wrap_extract`` probe (``parse_kwargs=None``) parses the receipt
+        identically to the real extractor — no kwarg threading is required here,
+        unlike :meth:`extract_swap_amounts_result`.
+
+        ``ExtractMissing`` preserves the legacy ``None`` contract: no RedeemPY
+        (pre-maturity) and no SY Redeem (post-maturity) event in the receipt
+        (benign). Only a ``parse_receipt`` crash / reported failure, or an
+        extractor crash, becomes ``ExtractError`` — a silent decode failure on
+        the PT-redeem / WITHDRAW money path must be loud, not "no data".
+        """
+        return self._wrap_extract(
+            self.extract_redemption_amounts,
+            receipt,
+            "no Pendle RedeemPY / SY-Redeem event in receipt",
+        )
 
 
 __all__ = [
