@@ -35,6 +35,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from almanak.framework.observability.ledger import LedgerQuantStats, lenient_ledger_decimal
+from almanak.framework.portfolio.models import ValueConfidence
 from almanak.framework.valuation.net_debt import (
     net_debt_from_positions_json,
     net_debt_from_snapshot,
@@ -1090,9 +1091,27 @@ def _drawdowns(snapshots: list[Any]) -> tuple[Decimal, Decimal]:
     at open and collapsing at teardown, manufacturing a large lifecycle
     drawdown on a flat equity loop — is removed here. Non-leveraged snapshots
     subtract ``Decimal("0")`` (no negative leg) and stay byte-identical.
+
+    VIB-5408: skip any snapshot that is ``UNAVAILABLE`` (== ``not
+    PortfolioSnapshot.is_valid``). An ``UNAVAILABLE`` snapshot's ``total_value_usd``
+    deliberately excludes an unmeasured position, so it is *deflated*; folding it
+    would manufacture a phantom drawdown dip / corrupt the displayed high-watermark
+    on the recent-window fallback path too — the same trust gate as
+    :func:`_wallet_navs_from_nav_text`. The gate is UNAVAILABLE-only: ``ESTIMATED``
+    / ``STALE`` snapshots are valued (priced, just imprecise / late), so they are
+    kept — skipping them would mask a real drawdown. Empty/absent confidence is not
+    ``UNAVAILABLE`` and is NOT skipped — byte-identical to before.
     """
     values: list[Decimal] = []
     for snap in snapshots:
+        confidence = getattr(snap, "value_confidence", None)
+        if confidence is None and isinstance(snap, dict):
+            confidence = snap.get("value_confidence")
+        # ``value_confidence`` may be a ValueConfidence enum (typed snapshot) or a
+        # raw string (dict / DB text). Both compare equal to the StrEnum value, so
+        # gate on == UNAVAILABLE — the deflated-NAV case — and keep everything else.
+        if confidence is not None and str(confidence) == ValueConfidence.UNAVAILABLE.value:
+            continue
         v = getattr(snap, "total_value_usd", None)
         if v is None and isinstance(snap, dict):
             v = snap.get("total_value_usd")
@@ -1174,8 +1193,9 @@ def _wallet_navs_from_nav_text(rows: Iterable[tuple[Any, ...]]) -> list[Decimal]
 
     Reads ``total_value_usd`` / ``available_cash_usd`` by position (row[1], row[2])
     so it is tolerant of the row arity — the reader appends ``id`` (row[3],
-    VIB-5134) and ``positions_json`` text (row[4], VIB-5170); legacy 3-/4-tuples
-    still extract the NAV columns identically and simply skip the debt netting.
+    VIB-5134), ``positions_json`` text (row[4], VIB-5170), and ``value_confidence``
+    text (row[5], VIB-5408); legacy 3-/4-/5-tuples still extract the NAV columns
+    identically and simply skip the debt netting / confidence gate.
 
     Each wallet-NAV is ``total − debt_mark + cash`` — the BORROW leg
     (Σ|negative value_usd| from ``positions_json``) is netted per row so the
@@ -1185,9 +1205,48 @@ def _wallet_navs_from_nav_text(rows: Iterable[tuple[Any, ...]]) -> list[Decimal]
     teardown for a flat leverage loop. Filtered to ``> 0`` so ``""`` / ``None`` /
     garbage (unmeasured) drop out; a row with no ``positions_json`` (short tuple)
     nets ``Decimal("0")`` debt — byte-identical to the pre-VIB-5170 behaviour.
+
+    **VIB-5408 confidence gate (display-correctness, not fund-safety).** A row whose
+    ``value_confidence`` (row[5]) is exactly ``UNAVAILABLE`` is SKIPPED: an
+    ``UNAVAILABLE`` snapshot's ``total_value_usd`` deliberately *excludes* an
+    unmeasured position (e.g. a held PT that could not be priced —
+    ``portfolio_valuer.py`` ``_pt_unmeasured_row`` — or VIB-5406's drain-barrier
+    degrade), so the NAV is *deflated*. Folding it would manufacture a phantom
+    drawdown dip and corrupt the displayed high-watermark / max-drawdown tiles.
+    These tiles feed dashboard display + an agent-tools report dict only — no risk
+    breaker or auto-teardown consumes them — so this is a display-correctness fix.
+
+    The gate is **UNAVAILABLE-only**, deliberately narrower than the ticket's
+    "non-HIGH" wording, and aligned with ``PortfolioSnapshot.is_valid`` (==
+    ``value_confidence != UNAVAILABLE``, ``portfolio/models.py``) — the codebase's
+    one measured/unmeasured line. ``ESTIMATED`` (CEX / API estimates) and ``STALE``
+    (old-but-real) snapshots ARE valued — the position is priced, just imprecisely
+    or late — so they are *not* deflated and must NOT be skipped: dropping them
+    would remove legitimate NAV samples and could MASK a real drawdown (a strategy
+    legitimately ``ESTIMATED`` for its whole life would otherwise show 0% max-DD
+    forever). For a drawdown metric a masked-dip false-negative is worse than an
+    imprecise-but-real point.
+
+    Skip-carry-forward is the chosen policy: dropping the ``UNAVAILABLE`` sample
+    leaves the running peak untouched, so the fold behaves as if the last measured
+    point persisted — no interpolation (which would invent a value) and no hard gap
+    (lifetime drawdown is a default header metric that must degrade gracefully). A
+    row with NO confidence element (short legacy tuple) is treated as measured —
+    byte-identical to the pre-VIB-5408 behaviour. Empty (``""`` / ``None``)
+    confidence is unmeasured-*confidence*, NOT ``UNAVAILABLE``: it cannot prove the
+    row is unmeasured, so it falls THROUGH this gate and is filtered only by the
+    existing ``> 0`` NAV check (the legacy success path is kept intact).
     """
     navs: list[Decimal] = []
     for row in rows:
+        if len(row) > 5 and row[5] == ValueConfidence.UNAVAILABLE.value:
+            # UNAVAILABLE ⇒ a position dropped out of total_value_usd ⇒ deflated NAV
+            # ⇒ skip the sample so it never moves the running peak / drawdown
+            # (skip-carry-forward). ESTIMATED / STALE are valued (priced, just
+            # imprecise/late) and NOT skipped — skipping them would mask a real
+            # drawdown. Empty/None confidence is not UNAVAILABLE, so it falls through
+            # and the > 0 NAV filter below gates it (legacy behaviour preserved).
+            continue
         debt_mark = Decimal("0")
         if len(row) > 4:
             _count, debt_mark, _debt_cost = net_debt_from_positions_json(row[4])
@@ -1235,14 +1294,15 @@ def lifetime_drawdowns_from_nav_text(
 ) -> tuple[Decimal, Decimal]:
     """Lifetime ``(max_drawdown_pct, current_drawdown_pct)`` from a full NAV series.
 
-    ``rows`` are ``(timestamp, total_value_usd_text, available_cash_usd_text, id)``
-    oldest-first, as returned by ``StateManager.get_nav_series`` — the **whole**
-    snapshot history rather than the recent 168-row window that
-    :func:`_drawdowns` sees via the dashboard loader. Fixes VIB-5118, where a
-    lifetime peak/drawdown older than ~14h was silently understated because the
-    running peak only saw the recent window.
+    ``rows`` are ``(timestamp, total_value_usd_text, available_cash_usd_text, id,
+    positions_json_text, value_confidence_text)`` oldest-first, as returned by
+    ``StateManager.get_nav_series`` — the **whole** snapshot history rather than the
+    recent 168-row window that :func:`_drawdowns` sees via the dashboard loader.
+    Fixes VIB-5118, where a lifetime peak/drawdown older than ~14h was silently
+    understated because the running peak only saw the recent window.
 
-    The NAV columns arrive as raw text so the Empty≠Zero decision lives in
+    The NAV columns arrive as raw text so the Empty≠Zero decision (including the
+    VIB-5408 ``UNAVAILABLE``-confidence skip) lives in
     :func:`_wallet_navs_from_nav_text`; the filtered series is then fed through
     the shared :func:`fold_drawdowns` recurrence. Equivalent to
     ``fold_nav_text(EMPTY, rows).as_pcts()``; kept as a named entry point for the

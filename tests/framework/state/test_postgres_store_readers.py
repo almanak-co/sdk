@@ -1658,7 +1658,14 @@ async def test_get_ledger_anchor_candidates_zero_limit_short_circuits():
 _NAV_BASE_TS = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
 
 
-def _nav_row(minute: int, total: str | None, cash: str | None, id_: int, positions: str | None = "[]") -> _DictRow:
+def _nav_row(
+    minute: int,
+    total: str | None,
+    cash: str | None,
+    id_: int,
+    positions: str | None = "[]",
+    confidence: str | None = "HIGH",
+) -> _DictRow:
     """asyncpg-shaped row for get_nav_series (column aliases as the SELECT emits)."""
     return _DictRow(
         {
@@ -1668,6 +1675,9 @@ def _nav_row(minute: int, total: str | None, cash: str | None, id_: int, positio
             "id": id_,
             # VIB-5170: positions_json::text rides along for per-row debt netting.
             "positions_text": positions,
+            # VIB-5408: value_confidence::text rides along (6th element) so the fold
+            # can skip an UNAVAILABLE (deflated) NAV.
+            "value_confidence_text": confidence,
         }
     )
 
@@ -1683,10 +1693,11 @@ async def test_get_nav_series_full_scan_sql_shape_and_oldest_first():
     rows, truncated = await store.get_nav_series(_DEPLOYMENT_ID)
 
     assert truncated is False
-    # Reversed to oldest-first; 5-tuple shape (ts, total_text, cash_text, id,
-    # positions_json_text) — VIB-5170 adds positions_json for per-row debt netting.
+    # Reversed to oldest-first; 6-tuple shape (ts, total_text, cash_text, id,
+    # positions_json_text, value_confidence_text) — VIB-5170 adds positions_json for
+    # per-row debt netting; VIB-5408 adds value_confidence for the UNAVAILABLE skip gate.
     assert [r[3] for r in rows] == [1, 3]
-    assert rows[0] == (_NAV_BASE_TS, "100", "0", 1, "[]")
+    assert rows[0] == (_NAV_BASE_TS, "100", "0", 1, "[]", "HIGH")
 
     kind, sql, args = conn.calls[0]
     assert kind == "fetch"
@@ -1701,6 +1712,8 @@ async def test_get_nav_series_full_scan_sql_shape_and_oldest_first():
     # VIB-5170: positions_json::text projected for debt netting; other JSON blobs
     # still excluded (transfer-size discipline).
     assert "positions_json::text AS positions_text" in select_clause
+    # VIB-5408: value_confidence::text projected for the UNAVAILABLE skip gate.
+    assert "value_confidence::text AS value_confidence_text" in select_clause
     assert "token_prices_json" not in sql
     assert "wallet_balances_json" not in sql
     # Full scan: no cursor predicate, newest-first ordering, scan_cap+1 bound.
@@ -1759,6 +1772,25 @@ async def test_get_nav_series_incremental_truncates_oldest_after_cursor():
 
     assert truncated is True
     assert [r[3] for r in rows] == [6, 7]  # oldest two after the cursor, NOT reversed
+
+
+@pytest.mark.asyncio
+async def test_get_nav_series_projects_value_confidence_sixth_element_pg_twin():
+    # VIB-5408: the PG twin must carry value_confidence::text through to the 6th
+    # tuple element (byte-identical to the SQLite twin) so the fold can skip an
+    # UNAVAILABLE (deflated) NAV on hosted Postgres too.
+    high = _nav_row(0, "100", "0", 1, confidence="HIGH")
+    degraded = _nav_row(1, "5", "0", 2, confidence="UNAVAILABLE")
+    # DB yields DESC (newest-first); the reader reverses to oldest-first.
+    conn = _FakeConn(fetch_rows=[degraded, high])
+    store = _make_store(conn)
+
+    rows, _truncated = await store.get_nav_series(_DEPLOYMENT_ID)
+
+    assert all(len(r) == 6 for r in rows)
+    # Oldest-first: HIGH row 1 then UNAVAILABLE row 2.
+    assert rows[0] == (_NAV_BASE_TS, "100", "0", 1, "[]", "HIGH")
+    assert rows[1][5] == "UNAVAILABLE"
 
 
 @pytest.mark.asyncio

@@ -925,15 +925,19 @@ class PostgresStore:
         *,
         since: tuple[datetime, int] | None = None,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, int, str | None]], bool]:
+    ) -> tuple[list[tuple[datetime, str | None, str | None, int, str | None, str | None]], bool]:
         """NAV-component series for lifetime drawdown (VIB-5118/5134). Postgres twin
         of :meth:`SQLiteStore.get_nav_series` — identical contract.
 
         Returns ``(rows, truncated)`` with ``rows`` = ``(timestamp,
-        total_value_usd_text, available_cash_usd_text, id, positions_json_text)``
-        oldest-first. Projects the two NAV columns plus the row ``id`` cursor
-        tiebreaker and ``positions_json`` (VIB-5170 debt-netting input), casting
-        all to ``::text`` so the caller owns the Empty≠Zero decision.
+        total_value_usd_text, available_cash_usd_text, id, positions_json_text,
+        value_confidence_text)`` oldest-first. Projects the two NAV columns plus the
+        row ``id`` cursor tiebreaker, ``positions_json`` (VIB-5170 debt-netting
+        input), and ``value_confidence`` (VIB-5408 trust gate — the fold SKIPs an
+        ``UNAVAILABLE`` row, whose deflated NAV would otherwise corrupt the displayed
+        high-watermark / drawdown on hosted Postgres too; ``ESTIMATED`` / ``STALE``
+        are valued and kept), casting all to ``::text`` so the caller owns the
+        Empty≠Zero decision.
 
         Two fetch modes (VIB-5134), mirroring the SQLite twin:
 
@@ -979,7 +983,8 @@ class PostgresStore:
                        total_value_usd::text AS total_value_text,
                        available_cash_usd::text AS available_cash_text,
                        id,
-                       positions_json::text AS positions_text
+                       positions_json::text AS positions_text,
+                       value_confidence::text AS value_confidence_text
                 FROM portfolio_snapshots
                 WHERE {" AND ".join(clauses)}
                 ORDER BY timestamp {order}
@@ -997,8 +1002,18 @@ class PostgresStore:
         # SQLite twin (whose column is TEXT). Without it the lifetime drawdown —
         # preferred over the recent window on the main PnL surface — overstates
         # drawdown for a leverage loop on hosted Postgres too.
+        # VIB-5408: value_confidence::text rides along LAST (6th element) so the fold
+        # can skip an UNAVAILABLE (deflated) NAV — byte-identical to the SQLite twin
+        # and kept after positions_json so the consumer's positional reads are stable.
         return [
-            (r["timestamp"], r["total_value_text"], r["available_cash_text"], r["id"], r["positions_text"])
+            (
+                r["timestamp"],
+                r["total_value_text"],
+                r["available_cash_text"],
+                r["id"],
+                r["positions_text"],
+                r["value_confidence_text"],
+            )
             for r in ordered
         ], truncated
 
@@ -2913,7 +2928,7 @@ class StateManager:
         *,
         since: tuple[datetime, int] | None = None,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, int, str | None]], bool]:
+    ) -> tuple[list[tuple[datetime, str | None, str | None, int, str | None, str | None]], bool]:
         """NAV-component series for lifetime drawdown / high-watermark (VIB-5118/5134).
 
         Returns ``(rows, truncated)`` — see the backend method for the row shape and

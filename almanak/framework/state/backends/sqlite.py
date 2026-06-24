@@ -2513,12 +2513,20 @@ class SQLiteStore:
         *,
         since: tuple[datetime, int] | None = None,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, int, str | None]], bool]:
+    ) -> tuple[list[tuple[datetime, str | None, str | None, int, str | None, str | None]], bool]:
         """NAV-component series for lifetime drawdown / high-watermark (VIB-5118/5134).
 
         Returns ``(rows, truncated)`` where ``rows`` is ``(timestamp,
-        total_value_usd_text, available_cash_usd_text, id, positions_json_text)``
-        oldest-first (``positions_json`` is the VIB-5170 debt-netting input). Unlike
+        total_value_usd_text, available_cash_usd_text, id, positions_json_text,
+        value_confidence_text)`` oldest-first (``positions_json`` is the VIB-5170
+        debt-netting input; ``value_confidence`` is the VIB-5408 trust gate). The
+        fold (:func:`_wallet_navs_from_nav_text`) SKIPs any ``UNAVAILABLE`` row (==
+        ``not PortfolioSnapshot.is_valid``) — an ``UNAVAILABLE`` NAV is *deflated*
+        (a position dropped out of ``total_value_usd``), not a real dip, so folding
+        it would corrupt the displayed high-watermark / max-drawdown tiles
+        (display-correctness; no risk breaker consumes them). ``ESTIMATED`` /
+        ``STALE`` rows are valued and kept (blueprint 27 §7.5: "Consumers must check
+        confidence before trusting a valuation"). Unlike
         :meth:`get_recent_snapshots` (newest 168 rows — a ~14h window at the
         5-min cadence), the default (``since=None``) projects the **whole**
         history so a lifetime peak or drawdown older than the recent window is no
@@ -2553,7 +2561,7 @@ class SQLiteStore:
         if not self._initialized:
             await self.initialize()
 
-        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None, int, str | None]], bool]:
+        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None, int, str | None, str | None]], bool]:
             params: list[object] = [deployment_id]
             where = "deployment_id = ?"
             if since is not None:
@@ -2586,7 +2594,7 @@ class SQLiteStore:
             with self._db_lock:
                 cursor = self._conn.execute(  # type: ignore[union-attr]
                     f"""
-                    SELECT timestamp, total_value_usd, available_cash_usd, id, positions_json
+                    SELECT timestamp, total_value_usd, available_cash_usd, id, positions_json, value_confidence
                     FROM portfolio_snapshots
                     WHERE {where}
                     ORDER BY timestamp {order}
@@ -2604,7 +2612,7 @@ class SQLiteStore:
             # Incremental (ASC) is already oldest-first; full (DESC) is reversed.
             ordered = fetched if since is not None else list(reversed(fetched))
 
-            rows: list[tuple[datetime, str | None, str | None, int, str | None]] = []
+            rows: list[tuple[datetime, str | None, str | None, int, str | None, str | None]] = []
             for row in ordered:
                 ts = row["timestamp"]
                 if isinstance(ts, str):
@@ -2615,7 +2623,20 @@ class SQLiteStore:
                 # lifetime drawdown — preferred over the recent window on the main
                 # PnL surface — overstates drawdown for a leverage loop whose NAV
                 # phantom-spikes at open and collapses at teardown.
-                rows.append((ts, row["total_value_usd"], row["available_cash_usd"], row["id"], row["positions_json"]))
+                # VIB-5408: value_confidence rides along (6th element) so the fold
+                # can skip an UNAVAILABLE (deflated) NAV — kept LAST so the existing
+                # ``len(row) > 4`` positions_json arity check and the row[1]/[2]/[4]
+                # positional reads stay byte-identical.
+                rows.append(
+                    (
+                        ts,
+                        row["total_value_usd"],
+                        row["available_cash_usd"],
+                        row["id"],
+                        row["positions_json"],
+                        row["value_confidence"],
+                    )
+                )
             return rows, truncated
 
         loop = asyncio.get_event_loop()
