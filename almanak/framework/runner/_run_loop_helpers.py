@@ -935,9 +935,22 @@ async def _ensure_native_gas_in_teardown_oracle(
 
     Best-effort: failure is logged at DEBUG and returns the oracle untouched
     (mirrors the iteration lane's silent-skip on its native pre-fetch).
+
+    VIB-5365: this helper does NOT early-return on an empty / ``None`` oracle.
+    Gas is paid in the native token on EVERY teardown TX regardless of whether
+    the strategy holds any priced asset — so the stash must be INITIALISED here
+    when there is native-gas work to do, exactly like the sibling
+    :func:`_ensure_intent_tokens_in_teardown_oracle` initialises ``{}`` for an
+    intent-token top-off. A Pendle LP / PT teardown holds only USD-less assets
+    (B1/B2), so its pre-bracket ``PortfolioSnapshot.token_prices`` is empty and
+    the stash arrives ``None`` here. The previous ``if not oracle: return``
+    early-out left that row with NO native ETH price → ``gas_usd`` empty
+    (Accountant G2 FAIL) AND ``price_inputs_json`` empty (G12 FAIL). Blueprint 27
+    §6.2 / §10.10: native gas is "the first instance of the general rule, not a
+    special case" — it is tracked end-to-end even when nothing else is priced.
+    The uniswap_v3 LP teardown never hit this because it returns priced
+    USDC/WETH legs (non-empty snapshot), which is why the bug was Pendle-only.
     """
-    if not oracle:
-        return oracle
     chain = getattr(strategy, "chain", None) or getattr(runner.config, "chain", "")
     if not chain:
         return oracle
@@ -947,7 +960,7 @@ async def _ensure_native_gas_in_teardown_oracle(
     native_symbol = native_token_for_chain(chain)
     if not native_symbol:
         return oracle
-    if any(key in oracle for key in (native_symbol, native_symbol.upper(), native_symbol.lower())):
+    if oracle and any(key in oracle for key in (native_symbol, native_symbol.upper(), native_symbol.lower())):
         return oracle
 
     price_oracle_obj = getattr(runner, "price_oracle", None)
@@ -967,6 +980,8 @@ async def _ensure_native_gas_in_teardown_oracle(
 
     price = getattr(result, "price", None)
     if price is None:
+        # Empty != Zero: a missing native price stays missing — never fabricate.
+        # Returns the oracle untouched (``None`` stays ``None``).
         return oracle
     timestamp = getattr(result, "timestamp", None)
     fetched_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
@@ -974,13 +989,19 @@ async def _ensure_native_gas_in_teardown_oracle(
     confidence_str = str(confidence_attr or "ESTIMATED").upper()
     if confidence_str not in {"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"}:
         confidence_str = "ESTIMATED"
-    oracle[native_symbol] = {
+    # Initialise the stash when it arrived empty / None AND we have a real
+    # native price to add (mutate-in-place when it already exists). Returning
+    # the initialised dict propagates to ``commit_teardown_intent``'s
+    # ``price_oracle=teardown_price_oracle`` so the ledger writer stamps both
+    # ``gas_usd`` and ``price_inputs_json`` on the teardown row.
+    merged: dict = oracle if oracle else {}
+    merged[native_symbol] = {
         "price_usd": str(price),
         "oracle_source": getattr(result, "source", "") or "gateway",
         "fetched_at": fetched_at,
         "confidence": confidence_str,
     }
-    return oracle
+    return merged
 
 
 def _augment_intent_tokens_with_address_resolution(intent: Any, symbol_tokens: list[str], chain: str) -> list[str]:

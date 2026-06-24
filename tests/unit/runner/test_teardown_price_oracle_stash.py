@@ -123,17 +123,39 @@ def test_decimal_price_preserved_as_string():
 
 class _FakeOracle:
     """Stand-in for runner.price_oracle. Captures the call args and returns
-    a PriceResult-shaped object — enough for the helper's contract."""
+    a PriceResult-shaped object — enough for the helper's contract.
 
-    def __init__(self, *, price: str | None = "3500.00", source: str = "gateway"):
+    ``price=None`` models two distinct miss modes, selected by ``raises``:
+    ``raises=True`` (default) → ``get_aggregated_price`` throws (the oracle
+    errored); ``raises=False`` → it returns successfully with a PriceResult-shaped
+    object whose ``price`` is ``None`` (a clean fetch that simply carries no
+    price). The helper handles these on separate branches, so the tests need
+    both."""
+
+    def __init__(
+        self,
+        *,
+        price: str | None = "3500.00",
+        source: str = "gateway",
+        raises: bool = True,
+    ):
         self.calls: list[tuple[str, str, str | None]] = []
         self._price = price
         self._source = source
+        self._raises = raises
 
     async def get_aggregated_price(self, token, quote="USD", *, chain=None):
         self.calls.append((token, quote, chain))
         if self._price is None:
-            raise RuntimeError("simulated oracle failure")
+            if self._raises:
+                raise RuntimeError("simulated oracle failure")
+            # Successful fetch that carries no price (PriceResult.price is None).
+            return SimpleNamespace(
+                price=None,
+                source=self._source,
+                timestamp=datetime(2026, 5, 3, 14, 30, tzinfo=UTC),
+                confidence="UNAVAILABLE",
+            )
         return SimpleNamespace(
             price=Decimal(self._price),
             source=self._source,
@@ -198,15 +220,44 @@ def test_native_topoff_polygon_uses_matic():
     assert fake_oracle.calls == [("MATIC", "USD", "polygon")]
 
 
-def test_native_topoff_noop_when_oracle_dict_empty():
-    fake_oracle = _FakeOracle()
+def test_native_topoff_initialises_oracle_when_none_or_empty():
+    """VIB-5365: gas is paid in ETH on every teardown TX regardless of whether
+    the strategy holds any priced asset, so a ``None`` / empty pre-bracket oracle
+    (the Pendle LP / PT case — USD-less holdings → empty snapshot) MUST still be
+    initialised with the native gas price. The previous ``if not oracle: return``
+    early-out left ``gas_usd`` + ``price_inputs_json`` empty on those rows
+    (Accountant G2/G12 FAIL)."""
+    fake_oracle = _FakeOracle(price="3500.00")
+    runner = _fake_runner(fake_oracle)
+    strategy = _fake_strategy("arbitrum")
+
+    out_none = asyncio.run(_ensure_native_gas_in_teardown_oracle(runner, strategy, None))
+    assert out_none is not None
+    assert out_none["ETH"]["price_usd"] == "3500.00"
+    assert out_none["ETH"]["oracle_source"] == "gateway"
+
+    out_empty = asyncio.run(_ensure_native_gas_in_teardown_oracle(runner, strategy, {}))
+    assert out_empty["ETH"]["price_usd"] == "3500.00"
+
+    # One native price fetch per call (None + {}).
+    assert fake_oracle.calls == [("ETH", "USD", "arbitrum"), ("ETH", "USD", "arbitrum")]
+
+
+def test_native_topoff_leaves_none_when_native_price_unavailable():
+    """Empty != Zero: when the oracle returns successfully but the result carries
+    no native price (``PriceResult.price is None`` — a clean miss, not an
+    exception), a ``None`` oracle stays ``None`` (no fabricated entry) and the
+    row's ``gas_usd`` stays empty. Exercises the ``if price is None: return oracle``
+    branch in ``_ensure_native_gas_in_teardown_oracle`` — distinct from the
+    raise/except path covered by ``test_native_topoff_returns_input_on_oracle_failure``."""
+    fake_oracle = _FakeOracle(price=None, raises=False)  # returns price-None object, no raise
     runner = _fake_runner(fake_oracle)
     strategy = _fake_strategy("arbitrum")
     out = asyncio.run(_ensure_native_gas_in_teardown_oracle(runner, strategy, None))
     assert out is None
-    out_empty = asyncio.run(_ensure_native_gas_in_teardown_oracle(runner, strategy, {}))
-    assert out_empty == {}
-    assert fake_oracle.calls == []
+    # The fetch DID happen and returned (vs the except path) — the None comes from
+    # the price-is-None branch, not from an oracle exception.
+    assert fake_oracle.calls == [("ETH", "USD", "arbitrum")]
 
 
 def test_native_topoff_noop_when_runner_has_no_price_oracle():
