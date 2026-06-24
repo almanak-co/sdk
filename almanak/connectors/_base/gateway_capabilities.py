@@ -863,15 +863,22 @@ class GatewayPrincipalTokenPriceCapability(Protocol):
         maturity_ts: int = 0,
     ) -> PrincipalTokenMarketRef | None: ...
 
-    def build_principal_token_market_reader(self, *, chain: str, rpc_url: str) -> Any | None:
-        """Build the connector's on-chain market reader (``get_pt_to_asset_rate``,
-        ``get_days_to_maturity``) for ``chain``, or ``None`` if unsupported.
+    def build_principal_token_market_reader(self, *, chain: str, rpc_client: Any) -> Any | None:
+        """Build the connector's on-chain market reader (``get_pt_to_sy_rate``,
+        ``get_market_expiry_ts``) for ``chain``, or ``None`` if unsupported.
 
         Returned here — on the same capability as resolution — so the gateway
         never reaches into a strategy-side connector registry to construct it
-        (gateway/connector isolation, VIB-4121). The reader reads on-chain via
-        the connector's existing gateway-internal eth_call path; the gateway
-        passes a resolved ``rpc_url`` so the read happens inside the egress
-        layer with no new egress surface.
+        (gateway/connector isolation, VIB-4121).
+
+        ``rpc_client`` is a gateway-supplied eth_call transport injected into the
+        reader's gateway-mode seam (VIB-5348). It must duck-type the reader's
+        ``gateway_client``: expose ``rpc.Call(request, timeout=...)`` returning an
+        object with ``.success`` / ``.result`` / ``.error``, backed by the
+        gateway's own audited async egress (e.g.
+        :class:`~almanak.gateway.services.pt_rpc_adapter.GatewayPtRpcClient`).
+        The connector forwards it straight into the reader so the read happens
+        inside the egress layer with NO connector-side ``Web3(HTTPProvider(...))``
+        — the gateway never instantiates a raw provider on the hosted perimeter.
         """
         ...

@@ -1314,8 +1314,13 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         Routes through the SAME ``GatewayPrincipalTokenPriceCapability`` provider
         that resolved the symbol (gateway/connector isolation, VIB-4121 — the
         gateway never reaches into a strategy-side connector registry). The
-        provider builds its reader in direct (rpc_url) mode, reusing the on-chain
-        reader's established ``# vib-2986-exempt`` web3 path (no new egress).
+        provider builds its reader in **gateway mode** (VIB-5348): the gateway
+        injects a :class:`~almanak.gateway.services.pt_rpc_adapter.GatewayPtRpcClient`
+        — its own audited async ``aiohttp`` eth_call transport — so the reader
+        runs with ``web3 is None`` and instantiates NO raw ``HTTPProvider`` on
+        the hosted perimeter. (Before VIB-5348 the gateway passed an ``rpc_url``,
+        forcing the reader's ``# vib-2986-exempt`` direct-web3 path; that path
+        stays only for the local-dev strategy-container consumer, untouched.)
         Returns ``None`` (→ caller emits ``UNMEASURED``, never at-par) when no
         provider/reader/chain supports the read.
         """
@@ -1324,7 +1329,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         )
         from almanak.connectors._base.types import ProtocolName
         from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
-        from almanak.gateway.utils import get_rpc_url
+        from almanak.gateway.services.pt_rpc_adapter import GatewayPtRpcClient
 
         # Protocol-keyed lookup (no ``.protocol`` access on the capability
         # Protocol): the connector that owns ``protocol`` is also the capability
@@ -1334,8 +1339,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         if not isinstance(connector, GatewayPrincipalTokenPriceCapability):
             return None
         try:
-            rpc_url = get_rpc_url(chain, network=self.settings.network)
-            return connector.build_principal_token_market_reader(chain=chain, rpc_url=rpc_url)
+            rpc_client = GatewayPtRpcClient(chain=chain, network=self.settings.network)
+            return connector.build_principal_token_market_reader(chain=chain, rpc_client=rpc_client)
         except Exception as e:
             logger.debug("GetPtPrice: could not build %s reader for %s: %s", protocol, chain, e)
             return None

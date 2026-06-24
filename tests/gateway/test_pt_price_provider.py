@@ -411,22 +411,30 @@ class TestPerimeterLiveness:
         # the FUNCTION dispatched off-loop is exactly the blocking rate read
         assert to_thread_spy.call_args.args[0] == read
 
-    def test_gateway_reader_built_with_bounded_timeout(self):
-        """The gateway builds the reader with the bounded request timeout."""
-        from almanak.connectors.pendle.gateway.provider import (
-            _GATEWAY_PT_RPC_TIMEOUT_SECONDS,
-            PendleGatewayConnector,
-        )
+    def test_gateway_reader_built_in_gateway_mode_no_httpprovider(self):
+        """VIB-5348: the gateway builds the reader in GATEWAY mode.
 
+        The connector forwards the injected gateway-native rpc client into the
+        reader's ``gateway_client`` seam — NOT an ``rpc_url`` — so the reader runs
+        with ``web3 is None`` and no raw ``HTTPProvider`` is instantiated on the
+        hosted perimeter.
+        """
+        from almanak.connectors.pendle.gateway.provider import PendleGatewayConnector
+        from almanak.connectors.pendle.on_chain_reader import PendleOnChainReader
+
+        sentinel_client = object()
         with patch("almanak.connectors.pendle.on_chain_reader.PendleOnChainReader") as MockReader:
             PendleGatewayConnector().build_principal_token_market_reader(
-                chain="ethereum", rpc_url="http://localhost:8545"
+                chain="ethereum", rpc_client=sentinel_client
             )
-        MockReader.assert_called_once_with(
-            chain="ethereum",
-            rpc_url="http://localhost:8545",
-            request_timeout_seconds=_GATEWAY_PT_RPC_TIMEOUT_SECONDS,
+        MockReader.assert_called_once_with(chain="ethereum", gateway_client=sentinel_client)
+
+        # And a real reader built that way carries NO web3 provider.
+        reader = PendleGatewayConnector().build_principal_token_market_reader(
+            chain="ethereum", rpc_client=sentinel_client
         )
+        assert isinstance(reader, PendleOnChainReader)
+        assert reader.web3 is None
 
     def test_direct_mode_reader_wires_timeout_into_web3(self):
         """The timeout is NOT inert — it reaches the web3 HTTPProvider request_kwargs."""
@@ -676,10 +684,12 @@ class TestPendlePrincipalTokenResolution:
     def test_build_reader_supported_and_unsupported_chain(self, connector):
         from almanak.connectors.pendle.on_chain_reader import PendleOnChainReader
 
-        reader = connector.build_principal_token_market_reader(chain="ethereum", rpc_url="http://localhost:8545")
+        sentinel_client = object()
+        reader = connector.build_principal_token_market_reader(chain="ethereum", rpc_client=sentinel_client)
         assert isinstance(reader, PendleOnChainReader)
-        # No RouterStatic mapping for base → None (gateway composes at-par ESTIMATED).
-        assert connector.build_principal_token_market_reader(chain="base", rpc_url="http://localhost:8545") is None
+        assert reader.web3 is None  # gateway mode — no raw HTTPProvider
+        # No PT-oracle mapping for base → None (gateway emits UNMEASURED, never at-par).
+        assert connector.build_principal_token_market_reader(chain="base", rpc_client=sentinel_client) is None
 
 
 class TestPendleProviderHelpers:
@@ -725,6 +735,8 @@ class TestServicerResolutionAndReader:
 
         reader = market_service._build_pt_reader("pendle", "ethereum")
         assert isinstance(reader, PendleOnChainReader)
+        # VIB-5348: gateway-native transport — the reader holds no web3 provider.
+        assert reader.web3 is None
 
     def test_build_pt_reader_unknown_protocol_is_none(self, market_service):
         assert market_service._build_pt_reader("not-a-protocol", "ethereum") is None
