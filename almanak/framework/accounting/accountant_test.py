@@ -1149,19 +1149,25 @@ def _cell_g6_reconciliation(  # noqa: C901
     null_perp_funding = 0
     null_withdraw_interest = 0
     null_repay_interest = 0
-    # VIB-5319: a Pendle PT disposal (PT_SELL / PT_REDEEM) whose realized-yield
-    # USD payoff is unmeasured because the gateway PT/SY sell-side implied price
-    # is absent (sy_price=None on the fork — VIB-5276). The proceeds leg
-    # (sy_amount × sy_price) the component method needs to reconcile against the
-    # wallet inflow cannot be computed, so the reconciliation runs on an
-    # unmeasured input (Empty≠Zero) — never folded to a silent zero.
-    #
-    # The XFAIL waiver applies ONLY to this price gap (amount measured, price
-    # absent). A disposal whose proceeds AMOUNT (sy_amount) is itself unmeasured
-    # is a real receipt/writer data loss — counted in ``null_pt_proceeds_amount``,
-    # which always FAILs G6 and is never eligible for the VIB-5276 waiver.
-    null_pt_proceeds = 0
-    null_pt_proceeds_amount = 0
+    # VIB-5403: a Pendle PT disposal (PT_SELL / PT_REDEEM) rides Primitive.SWAP,
+    # so per blueprint 27 §11.3 its SELL leg books its REALIZED PnL
+    # (``realized_yield_usd``), a delta — NOT gross proceeds. Three measured
+    # states are distinguished (Empty≠Zero), mirroring the canonical SWAP
+    # SELL-leg / VIB-4394 no-prior-basis handling above:
+    #   * ``realized_yield_usd`` measured  → booked into sum_swap (PASS).
+    #   * matched FIFO lot but USD projection unmeasured (sy_price=None on the
+    #     fork — VIB-5276): ``realized_yield_sy`` present, ``realized_yield_usd``
+    #     None → ``null_pt_realized_usd`` (the ONLY waiver-eligible bucket).
+    #   * a disposal with no matched FIFO lot to realize against (first disposal
+    #     of pre-existing PT) → ``no_prior_basis_pt`` — a legitimate measured
+    #     state, surfaced for forensics, NON-failing (mirror VIB-4394).
+    # A disposal whose amounts are themselves unmeasured (no realized_yield_usd,
+    # no realized_yield_sy, no sy_amount) is a real receipt/writer data loss —
+    # counted in ``null_pt_amount``, which always FAILs G6 and is never eligible
+    # for the VIB-5276 waiver.
+    null_pt_realized_usd = 0
+    null_pt_amount = 0
+    no_prior_basis_pt = 0
 
     # VIB-3869 (B): notional accumulators for primitive-aware tolerance.
     notional_traded = Decimal(0)  # LP / Spot scaling base
@@ -1291,45 +1297,60 @@ def _cell_g6_reconciliation(  # noqa: C901
                 notional = abs(size) * abs(entry_price)
                 if notional > max_perp_notional:
                     max_perp_notional = notional
-        # VIB-5319: Pendle PT registry rows (blueprint 27 §11.3 — a contribution
-        # row per event_type; PT rides Primitive.SWAP, so its realized payoff
-        # lands in the SWAP bucket).
+        # VIB-5403: Pendle PT registry rows (blueprint 27 §11.3 — a contribution
+        # row per event_type; PT rides Primitive.SWAP, so its disposal leg obeys
+        # the SWAP SELL-leg registry: it books REALIZED PnL, a delta — NOT gross
+        # proceeds).
         #   PT_BUY  — the basis (acquiring) leg: records a FIFO lot, contributes
         #             nothing to PnL (mirrors a SWAP BUY leg). No bucket entry.
-        #   PT_SELL / PT_REDEEM — the disposal leg.
-        # The wallet (equity) method moves by the GROSS proceeds the disposal
-        # returns to the wallet (sy_amount × sy_price), so the component method
-        # must book those gross proceeds — NOT merely the realized_yield delta —
-        # to reconcile (the SY token the proceeds arrive as is an inflow the
-        # ambient lane structurally cannot represent; §11.5). When the sell-side
-        # SY price is present, proceeds are measured and contribute to sum_swap;
-        # when sy_price=None (VIB-5276 gateway PT price absent on the fork) the
-        # proceeds leg is UNMEASURED (Empty≠Zero) — it increments null_pt_proceeds
-        # and never folds to a silent zero. realized_yield_usd alone (a small
-        # delta) cannot stand in for the gross proceeds.
+        #   PT_SELL / PT_REDEEM — the disposal (SELL) leg: books
+        #             ``realized_yield_usd`` (= amount_in_usd − cost_basis_consumed
+        #             for the PT primitive), exactly as the SWAP SELL leg books
+        #             ``realized_pnl_usd``. A closed-form W(t)/C(t) analysis proved
+        #             the realized-PnL model ties on a symmetric round-trip bracket;
+        #             gross-proceeds booking was a workaround for a defective fixture.
+        # Empty≠Zero on the disposal leg, mirroring the SWAP SELL / VIB-4394 path:
+        #   * realized_yield_usd measured → booked into sum_swap (PASS);
+        #   * matched lot but USD projection unmeasured (realized_yield_sy present,
+        #     realized_yield_usd None — sy_price absent, VIB-5276) → the ONLY
+        #     waiver-eligible bucket (null_pt_realized_usd);
+        #   * disposal with no matched FIFO lot (sy_amount measured, no realized
+        #     yield) → forensic no_prior_basis_pt — legitimate, NON-failing;
+        #   * genuinely unmeasured disposal → null_pt_amount, always FAIL.
+        # The ε notional base is booked independently of the PnL leg, from the
+        # measured (sy_amount × sy_price) when present.
         if et in ("PT_SELL", "PT_REDEEM"):
+            rpnl_pt = _dec(p.get("realized_yield_usd"))
+            ryield_sy = _dec(p.get("realized_yield_sy"))
             sy_amount = _dec(p.get("sy_amount"))
             sy_price = _dec(p.get("sy_price"))
-            # ``sy_price is None`` from the gateway (VIB-5276) is the only ticketed
-            # waiver; a parser omission (``sy_price == ""``) is a real defect that
-            # must FAIL like a missing amount (Empty≠Unmeasured), so distinguish
-            # the gateway-None sentinel from the empty-string omission on the raw.
-            raw_price = p.get("sy_price")
-            price_is_gateway_gap = raw_price is None
-            if sy_amount is not None and sy_price is not None:
-                # Measured gross proceeds returned to the wallet on disposal.
-                sum_swap += sy_amount * sy_price
-                notional_traded += abs(sy_amount * sy_price)
-            elif sy_amount is not None and price_is_gateway_gap:
-                # Proceeds AMOUNT measured, sell-side SY price absent from the
-                # gateway (sy_price=None — VIB-5276). The ONLY waiver-eligible
-                # bucket; the profile decides FAIL vs XFAIL.
-                null_pt_proceeds += 1
+            if rpnl_pt is not None:
+                # Disposal-leg realized PnL (§11.3 SELL-leg contribution).
+                sum_swap += rpnl_pt
+            elif ryield_sy is not None and sy_price is None:
+                # Matched FIFO lot, USD projection unmeasured because the sell-side
+                # SY price is GENUINELY absent (sy_price=None). The ONLY waiver-
+                # eligible bucket; the profile decides FAIL/XFAIL.
+                null_pt_realized_usd += 1
+            elif ryield_sy is not None:
+                # Matched lot AND a measured sy_price, yet realized_yield_usd is
+                # None: the USD projection (realized_yield_sy × sy_price) was
+                # DERIVABLE but not booked — a real builder defect, not a price
+                # gap. FAIL, never waive (Empty≠Zero; a measured price is not an
+                # excuse for a missing USD value).
+                null_pt_amount += 1
+            elif sy_amount is not None:
+                # Disposal with no matched FIFO lot to realize against (first
+                # disposal of pre-existing PT). A legitimate measured state —
+                # surfaced for forensics, NON-failing (mirror VIB-4394 SWAP).
+                no_prior_basis_pt += 1
             else:
-                # Proceeds AMOUNT unmeasured, or sy_price=="" (parser omission) —
-                # a receipt/writer data loss, NOT the gateway-price gap. Always
-                # FAIL G6; never waiver-eligible (Empty≠Zero, never a silent zero).
-                null_pt_proceeds_amount += 1
+                # Genuinely unmeasured disposal — a receipt/writer data loss.
+                # Always FAIL G6; never waiver-eligible (Empty≠Zero).
+                null_pt_amount += 1
+            # ε notional base, independent of the PnL booking above.
+            if sy_amount is not None and sy_price is not None:
+                notional_traded += abs(sy_amount * sy_price)
         if et == "PT_BUY":
             # Basis leg: the SY cost the wallet paid to acquire the PT. Adds to
             # the ε notional base (so ε scales to PT trade size); not a PnL term.
@@ -1409,16 +1430,18 @@ def _cell_g6_reconciliation(  # noqa: C901
         # an open lot with no basis) is a null input to the reconciliation, not
         # a measured zero — FAIL the cell rather than fold it in as zero.
         "Σ_inventory_reval_usd_null_count": null_inventory_reval,
-        # VIB-5319: a Pendle PT disposal whose USD proceeds are unmeasured
-        # (sy_price=None on the fork — VIB-5276 gateway PT price). Null input to
-        # the reconciliation, surfaced separately so the profile can classify it
-        # as a known ticketed measurement gap (XFAIL) vs a real bug (FAIL).
-        "Σ_pt_proceeds_usd_null_count": null_pt_proceeds,
-        # VIB-5319: a PT disposal whose proceeds AMOUNT (not price) is unmeasured.
-        # A real receipt/writer data loss — always FAILs (never the VIB-5276
-        # waiver, which is price-only). Kept as its own bucket so the XFAIL gate
-        # below (which keys on the price-only bucket) can never absorb it.
-        "Σ_pt_proceeds_amount_null_count": null_pt_proceeds_amount,
+        # VIB-5403: a Pendle PT disposal with a matched FIFO lot but whose
+        # realized-PnL USD projection is unmeasured (sy_price=None on the fork —
+        # VIB-5276 gateway PT price). Null input to the reconciliation, surfaced
+        # separately so the profile can classify it as a known ticketed
+        # measurement gap (XFAIL) vs a real bug (FAIL).
+        "Σ_pt_realized_usd_null_count": null_pt_realized_usd,
+        # VIB-5403: a PT disposal whose amounts are themselves unmeasured (no
+        # realized_yield_usd, no realized_yield_sy, no sy_amount). A real
+        # receipt/writer data loss — always FAILs (never the VIB-5276 waiver,
+        # which is the realized-USD-only price gap). Kept as its own bucket so
+        # the XFAIL gate below can never absorb it.
+        "Σ_pt_amount_null_count": null_pt_amount,
     }
     has_nulls = any(v > 0 for v in null_breakdown.values())
 
@@ -1431,6 +1454,12 @@ def _cell_g6_reconciliation(  # noqa: C901
         # pre-existing inventory). A legitimate measured state — surfaced for
         # forensics but deliberately NOT in null_breakdown, so it never fails G6.
         "Σ_swaps_no_prior_basis_count": str(no_prior_basis_swap),
+        # VIB-5403: a Pendle PT disposal with measured amounts but no matched
+        # FIFO lot to realize against (first disposal of pre-existing PT).
+        # Mirrors Σ_swaps_no_prior_basis_count — a legitimate measured state,
+        # surfaced for forensics but deliberately NOT in null_breakdown, so it
+        # never fails G6.
+        "Σ_pt_no_prior_basis_count": str(no_prior_basis_pt),
         "Σ_lp_usd": str(sum_lp),
         "Σ_perp_usd": str(sum_perp),
         "Σ_fees_usd": str(sum_fees),
@@ -1459,25 +1488,26 @@ def _cell_g6_reconciliation(  # noqa: C901
     # otherwise running on unmeasured zero, not a real signal.
     if has_nulls:
         nonzero = {k: v for k, v in null_breakdown.items() if v > 0}
-        # VIB-5319: a Pendle PT disposal blocked ONLY because its USD proceeds are
-        # unmeasured (sy_price=None on the fork — VIB-5276 gateway PT price) is a
-        # known, ticketed measurement gap, not a books error. When the profile
-        # opts in AND the sole non-zero null bucket is the PT-proceeds counter,
-        # surface XFAIL (measured-but-blocked) instead of FAIL. Any OTHER null
-        # bucket — a real swap/lp/perp/ambient gap — still FAILs: the XFAIL is
+        # VIB-5403: a Pendle PT disposal blocked ONLY because its realized-PnL USD
+        # projection is unmeasured (matched FIFO lot, but sy_price=None on the fork
+        # — VIB-5276 gateway PT price) is a known, ticketed measurement gap, not a
+        # books error. When the profile opts in AND the sole non-zero null bucket
+        # is the PT realized-USD counter, surface XFAIL (measured-but-blocked)
+        # instead of FAIL. Any OTHER null bucket — a real swap/lp/perp/ambient gap,
+        # or the always-failing Σ_pt_amount_null_count — still FAILs: the XFAIL is
         # narrowly scoped to the one ticketed gap and never blanket-passes Pendle.
         if (
             _profile.disposal_usd_unmeasured_is_xfail
-            and null_pt_proceeds > 0
-            and set(nonzero) == {"Σ_pt_proceeds_usd_null_count"}
+            and null_pt_realized_usd > 0
+            and set(nonzero) == {"Σ_pt_realized_usd_null_count"}
         ):
             return (
                 CellResult(
                     "G6",
                     "Reconciliation",
                     "XFAIL",
-                    f"PT disposal proceeds unmeasured: sy_price=None on "
-                    f"{null_pt_proceeds} PT_SELL/PT_REDEEM row(s) (VIB-5276 gateway "
+                    f"PT disposal realized-PnL USD unmeasured: sy_price=None on "
+                    f"{null_pt_realized_usd} PT_SELL/PT_REDEEM row(s) (VIB-5276 gateway "
                     f"PT/SY price); wallet=${wallet_pnl} component=${component_pnl} "
                     f"gap=${gap} — measured-but-blocked, not a books error. "
                     "Flips to PASS once the sell-side SY price lands.",

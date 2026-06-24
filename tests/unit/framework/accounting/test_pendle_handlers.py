@@ -500,6 +500,46 @@ def test_pt_sell_missing_sy_price_usd_none_sy_carried() -> None:
     assert "SY-denominated" in event.unavailable_reason
 
 
+def test_pt_sell_persists_sy_price_when_measured_vib5403() -> None:
+    """VIB-5403: the base/SY USD price used for the realized-yield USD projection
+    is PERSISTED on the PT_SELL event (and its payload), not silently dropped.
+
+    Pre-fix ``_build_pt_sell`` computed ``sy_price`` locally, used it for
+    ``realized_yield_usd``, but omitted ``sy_price=`` from the constructor — so the
+    typed event carried ``sy_price=None`` even though the price was measured. G1
+    (money trail) / G6 (reconciliation) read ``pt_payload['sy_price']`` and saw
+    None → XFAIL. This pins that the measured price rides the event AND the
+    serialized payload.
+    """
+    pt_symbol = _future_pt()
+    basis = FIFOBasisStore()
+    _buy_lot(basis, pt_symbol, sy=0.9, pt=1.0)
+
+    sell_ext = json.dumps({"swap_amounts": {"amount_in": int(1.0 * 10**18), "amount_out": int(0.95 * 10**18)}})
+    ob = _outbox("SWAP", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger(
+        "SWAP",
+        protocol="pendle",
+        token_in=pt_symbol,
+        token_out="WSTETH",
+        extracted_data_json=sell_ext,
+        price_inputs_json=json.dumps({"WSTETH": "2143.13"}),
+    )
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+
+    assert event is not None
+    assert event.event_type == PendleEventType.PT_SELL
+    # The measured base/SY USD price rides the typed event (was None pre-fix).
+    assert event.sy_price == Decimal("2143.13")
+    # …and the SERIALIZED payload (what G1/G6 read off the persisted row).
+    payload = json.loads(event.to_payload_json())
+    assert Decimal(payload["sy_price"]) == Decimal("2143.13")
+    # realized_yield_usd still equals sy_yield * sy_price (unchanged behaviour).
+    assert event.realized_yield_sy == Decimal("0.05")
+    assert event.realized_yield_usd == Decimal("0.05") * Decimal("2143.13")
+
+
 def test_pt_sell_stores_human_amounts() -> None:
     """PT_SELL event payload stores HUMAN amounts (matches _replay_pt_sell)."""
     pt_symbol = _future_pt()
@@ -561,6 +601,41 @@ def test_pt_redeem_at_maturity_human_amounts_and_yield() -> None:
     assert event.realized_yield_usd == Decimal("0.1")
     assert event.realized_yield_sy == Decimal("0.1")  # measured SY primitive (USDC @ $1)
     assert event.basis_lot_id is not None
+
+
+def test_pt_redeem_persists_sy_price_when_measured_vib5403() -> None:
+    """VIB-5403: the base/SY USD price is PERSISTED on the PT_REDEEM event (and its
+    payload), mirroring PT_SELL. Pre-fix ``_build_pt_redeem`` measured ``sy_price``
+    locally but omitted it from the constructor → typed event ``sy_price=None`` →
+    G1/G6 XFAIL.
+    """
+    pt_symbol = _future_pt()
+    basis = FIFOBasisStore()
+    _buy_lot(basis, pt_symbol, sy=0.9, pt=1.0)
+
+    py_raw = int(1.0 * 10**18)
+    sy_raw = int(1.0 * 10**18)
+    red_ext = json.dumps({"redemption_amounts": {"py_redeemed": py_raw, "sy_received": sy_raw}})
+    ob = _outbox("WITHDRAW", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger(
+        "WITHDRAW",
+        protocol="pendle",
+        token_in=pt_symbol,
+        token_out="WSTETH",
+        extracted_data_json=red_ext,
+        price_inputs_json=json.dumps({"WSTETH": "2143.13"}),
+    )
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+
+    assert event is not None
+    assert event.event_type == PendleEventType.PT_REDEEM
+    assert event.sy_price == Decimal("2143.13")
+    payload = json.loads(event.to_payload_json())
+    assert Decimal(payload["sy_price"]) == Decimal("2143.13")
+    # Yield = (1.0 received - 0.9 cost) = 0.1 SY * $2143.13 (unchanged behaviour).
+    assert event.realized_yield_sy == Decimal("0.1")
+    assert event.realized_yield_usd == Decimal("0.1") * Decimal("2143.13")
 
 
 def test_pt_redeem_sources_pt_count_from_declared_legs_pen6() -> None:

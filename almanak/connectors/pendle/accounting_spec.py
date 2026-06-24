@@ -578,6 +578,11 @@ def _build_pt_sell(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pendl
     basis_lot_id: str | None = None
     confidence = AccountingConfidence.ESTIMATED
     unavailable_reason = "PT sell amounts unavailable from receipt"
+    # The base/SY token USD price the realized-yield USD projection is computed
+    # against (VIB-5403). Hoisted to function scope so it is PERSISTED on the
+    # event below — measured data from the disposal ledger's price_inputs_json,
+    # no gateway egress. Stays None when unmeasured (Empty ≠ Zero).
+    sy_price: Decimal | None = None
 
     # Inline the None-guard (not a stored bool) so the type checker narrows
     # pt_human / sy_human to ``Decimal`` for the match call below.
@@ -609,6 +614,7 @@ def _build_pt_sell(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pendl
         pt_amount=pt_human,
         sy_amount=sy_human,
         pt_price=None,
+        sy_price=sy_price,
         implied_apr_bps=None,
         days_to_maturity=None,
         realized_yield_usd=realized_yield_usd,
@@ -721,6 +727,11 @@ def _build_pt_redeem(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pen
     basis_lot_id: str | None = None
     confidence = AccountingConfidence.ESTIMATED
     unavailable_reason = "PT redeem amounts unavailable from receipt"
+    # The base/SY token USD price the realized-yield USD projection is computed
+    # against (VIB-5403). Hoisted to function scope so it is PERSISTED on the
+    # event below — measured data from the disposal ledger's price_inputs_json,
+    # no gateway egress. Stays None when unmeasured (Empty ≠ Zero).
+    sy_price: Decimal | None = None
 
     # R6: degrade (do not mismatch the FIFO key) when token_in is not a PT symbol.
     # The degrade note is set only inside the match block below, so a missing-amounts
@@ -763,6 +774,7 @@ def _build_pt_redeem(ctx: _PTContext, basis_store: FIFOBasisStore | None) -> Pen
         pt_amount=pt_human,
         sy_amount=sy_human,
         pt_price=None,
+        sy_price=sy_price,
         implied_apr_bps=None,
         days_to_maturity=None,
         realized_yield_usd=realized_yield_usd,

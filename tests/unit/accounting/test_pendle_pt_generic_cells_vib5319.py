@@ -1,4 +1,4 @@
-"""VIB-5319 — generic Accountant Test cells (G1/G3/G6) read the typed PT event.
+"""VIB-5319 / VIB-5403 — generic Accountant Test cells (G1/G3/G6) read the typed PT event.
 
 A Pendle PT trade rides the SWAP intent_type in the ledger but is booked as a
 typed ``PendleAccountingEvent`` (PT_BUY / PT_SELL / PT_REDEEM), not a generic
@@ -7,25 +7,30 @@ and reconciliation (G6) cells could not see the PT economics — they false-FAIL
 on a "missing SwapEventPayload" / "no realized yield" / "$X reconciliation gap"
 even though the PT payoff is fully captured by the PEN cells.
 
-This file pins the three behaviours VIB-5319 ships:
+This file pins the behaviours VIB-5319 + VIB-5403 ship:
 
 * **G3** PASSES off ``realized_yield_usd`` (the PT disposal's realised payoff).
 * **G1** treats a PT-backed SWAP ledger row's USD proof as the Pendle payload,
   and surfaces a measured **XFAIL** (not FAIL) when the disposal's sell-side SY
   price is unmeasured (sy_price=None — VIB-5276 gateway PT price), but only for a
   profile that opts in via ``disposal_usd_unmeasured_is_xfail``.
-* **G6** books the PT disposal into the component method and surfaces the same
-  measured **XFAIL** when the proceeds leg is unmeasured — never a silent zero,
-  never a fabricated PASS.
+* **G6** (VIB-5403) books the PT disposal's **realized PnL** (``realized_yield_usd``,
+  a delta — NOT gross proceeds) into the component method per blueprint 27 §11.3
+  SELL-leg registry. A matched disposal with a measured ``realized_yield_usd``
+  PASSES; a matched disposal whose USD projection is unmeasured (``realized_yield_sy``
+  present, ``realized_yield_usd`` None — VIB-5276) surfaces a measured **XFAIL**;
+  a disposal with no matched FIFO lot is a non-failing forensic state; a genuinely
+  unmeasured disposal FAILs — never a silent zero, never a fabricated PASS.
 
-Empty ≠ Zero is enforced throughout: a null sell-side price is *unmeasured*
-(XFAIL on the opted-in profile / FAIL otherwise), never folded to a measured
-zero.
+Empty ≠ Zero is enforced throughout: a null realized-PnL USD projection on a
+matched lot is *unmeasured* (XFAIL on the opted-in profile / FAIL otherwise),
+never folded to a measured zero.
 """
 
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from typing import Any
 
 from almanak.framework.accounting.accountant_test import (
@@ -67,6 +72,7 @@ def _pt_sell_event(
     realized_yield_usd: str | None,
     sy_price: str | None,
     sy_amount: str | None = "0.0099994",
+    realized_yield_sy: str | None = "-6.25e-8",
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "event_type": "PT_SELL",
@@ -76,8 +82,9 @@ def _pt_sell_event(
         "confidence": "HIGH",
         "matching_policy_version": 4,
         "realized_yield_usd": realized_yield_usd,
-        "realized_yield_sy": "-6.25e-8",
     }
+    if realized_yield_sy is not None:
+        payload["realized_yield_sy"] = realized_yield_sy
     if sy_amount is not None:
         payload["sy_amount"] = sy_amount
     if sy_price is not None:
@@ -217,10 +224,12 @@ def test_g1_fail_on_unmeasured_pt_disposal_for_non_optin_profile() -> None:
     assert cell.status == "FAIL", cell.diagnostic
 
 
-# ── G6 — reconciliation books the PT disposal, XFAILs on unmeasured proceeds ──
+# ── G6 — reconciliation books the PT disposal's realized PnL (§11.3 SELL-leg) ──
 
 
 def _snapshots() -> list[dict[str, Any]]:
+    # Endpoints used by the XFAIL / FAIL tests, where G6 short-circuits on a null
+    # bucket BEFORE the gap check, so the exact equity figures are immaterial.
     return [
         {
             "deployment_id": "deployment:pt",
@@ -243,11 +252,65 @@ def _snapshots() -> list[dict[str, Any]]:
     ]
 
 
-def test_g6_xfail_on_unmeasured_pt_proceeds_for_pendle_pt_profile() -> None:
+def _balanced_snapshots(component_pnl: str) -> list[dict[str, Any]]:
+    # Endpoints with no ambient inventory (empty wallet balances → measured-zero
+    # revaluation) and equity that moves by exactly ``component_pnl``. Pairs with
+    # a zero-gas ledger so wallet_pnl == component_pnl and G6 reaches a clean PASS.
+    final_cash = Decimal("100.0") + Decimal(component_pnl)
+    return [
+        {
+            "deployment_id": "deployment:pt",
+            "timestamp": "2026-06-23T01:11:55+00:00",
+            "total_value_usd": "0",
+            "available_cash_usd": "100.0",
+            "wallet_balances_json": "[]",
+        },
+        {
+            "deployment_id": "deployment:pt",
+            "timestamp": "2026-06-23T01:15:19+00:00",
+            "total_value_usd": "0",
+            "available_cash_usd": str(final_cash),
+            "wallet_balances_json": "[]",
+        },
+    ]
+
+
+def _ledger_swap_row_no_gas(ledger_id: str) -> dict[str, Any]:
+    row = _ledger_swap_row(ledger_id)
+    row["gas_usd"] = "0"
+    return row
+
+
+def test_g6_pass_books_pt_disposal_realized_yield() -> None:
+    # VIB-5403: a matched PT_SELL with a measured ``realized_yield_usd`` books
+    # that REALIZED PnL (a delta, §11.3 SELL-leg) into the SWAP bucket — NOT the
+    # gross proceeds. With a balanced fixture (wallet_pnl == component_pnl) G6
+    # PASSES, and the booked delta lands in Σ_swaps_usd.
+    rpnl = "-0.000134"
+    ledger = [_ledger_swap_row_no_gas(_LEDGER_SELL_ID)]
+    acct = [
+        _pt_buy_event(ledger_id=_LEDGER_BUY_ID, sy_price="2143.8"),
+        _pt_sell_event(ledger_id=_LEDGER_SELL_ID, realized_yield_usd=rpnl, sy_price="2143.1"),
+    ]
+    payloads, errors, _ = _typed_acct_payloads(acct)
+    cell, decomp = _cell_g6_reconciliation(
+        _balanced_snapshots(rpnl), ledger, [], acct, "pendle_pt", payloads, errors
+    )
+    assert cell.status == "PASS", cell.diagnostic
+    # The realized-PnL delta is booked into the SWAP bucket (not gross proceeds).
+    assert decomp["Σ_swaps_usd"] == rpnl
+    assert decomp["Σ_pt_realized_usd_null_count"] == "0"
+    assert decomp["Σ_pt_amount_null_count"] == "0"
+
+
+def test_g6_xfail_on_unmeasured_pt_realized_usd_for_pendle_pt_profile() -> None:
+    # VIB-5403: a matched disposal whose realized-PnL USD projection is unmeasured
+    # (``realized_yield_sy`` present, ``realized_yield_usd`` None — sy_price=None,
+    # VIB-5276) → the waiver-eligible Σ_pt_realized_usd null bucket → XFAIL.
     ledger = [_ledger_swap_row(_LEDGER_SELL_ID)]
     acct = [
         _pt_buy_event(ledger_id=_LEDGER_BUY_ID, sy_price="2143.8"),
-        _pt_sell_event(ledger_id=_LEDGER_SELL_ID, realized_yield_usd="-0.000134", sy_price=None),
+        _pt_sell_event(ledger_id=_LEDGER_SELL_ID, realized_yield_usd=None, sy_price=None),
     ]
     payloads, errors, _ = _typed_acct_payloads(acct)
     cell, decomp = _cell_g6_reconciliation(
@@ -256,30 +319,79 @@ def test_g6_xfail_on_unmeasured_pt_proceeds_for_pendle_pt_profile() -> None:
     assert cell.status == "XFAIL", cell.diagnostic
     assert "VIB-5276" in cell.diagnostic
     # The null bucket is surfaced (not folded to zero).
-    assert decomp["Σ_pt_proceeds_usd_null_count"] == "1"
+    assert decomp["Σ_pt_realized_usd_null_count"] == "1"
 
 
-def test_g6_fail_on_unmeasured_pt_proceeds_for_non_optin_profile() -> None:
-    # Same unmeasured proceeds, but a profile that does not opt in still FAILs.
+def test_g6_fail_on_null_realized_usd_with_measured_sy_price_vib5403() -> None:
+    # VIB-5403 (CodeRabbit): the realized-USD waiver is ONLY for a genuinely absent
+    # sell-side price (sy_price=None). A matched disposal with a MEASURED sy_price
+    # but a None realized_yield_usd means the USD projection
+    # (realized_yield_sy × sy_price) was DERIVABLE yet not booked — a real builder
+    # defect, NOT a price gap. It must FAIL (the always-failing Σ_pt_amount bucket),
+    # never the XFAIL waiver, even on the opted-in pendle_pt profile (Empty≠Zero;
+    # a measured price is not an excuse for a missing USD value).
     ledger = [_ledger_swap_row(_LEDGER_SELL_ID)]
     acct = [
-        _pt_sell_event(ledger_id=_LEDGER_SELL_ID, realized_yield_usd="-0.000134", sy_price=None),
+        _pt_buy_event(ledger_id=_LEDGER_BUY_ID, sy_price="2143.8"),
+        _pt_sell_event(ledger_id=_LEDGER_SELL_ID, realized_yield_usd=None, sy_price="2143.1"),
+    ]
+    payloads, errors, _ = _typed_acct_payloads(acct)
+    cell, decomp = _cell_g6_reconciliation(
+        _snapshots(), ledger, [], acct, "pendle_pt", payloads, errors
+    )
+    assert cell.status == "FAIL", cell.diagnostic
+    assert decomp["Σ_pt_realized_usd_null_count"] == "0"
+    assert decomp["Σ_pt_amount_null_count"] == "1"
+
+
+def test_g6_fail_on_unmeasured_pt_realized_usd_for_non_optin_profile() -> None:
+    # Same unmeasured realized-USD projection, but a profile that does not opt in
+    # still FAILs — the XFAIL is narrowly scoped to the ticketed pendle_pt gap.
+    ledger = [_ledger_swap_row(_LEDGER_SELL_ID)]
+    acct = [
+        _pt_sell_event(ledger_id=_LEDGER_SELL_ID, realized_yield_usd=None, sy_price=None),
     ]
     payloads, errors, _ = _typed_acct_payloads(acct)
     cell, _ = _cell_g6_reconciliation(_snapshots(), ledger, [], acct, "perp", payloads, errors)
     assert cell.status == "FAIL", cell.diagnostic
 
 
-def test_g6_fail_on_missing_disposal_amount_even_for_pendle_pt_profile() -> None:
-    # A PT disposal whose proceeds AMOUNT is unmeasured is a real data loss, not
-    # the VIB-5276 price gap — G6 must FAIL even on the opted-in pendle_pt
-    # profile, and the amount-null bucket is surfaced separately (Empty≠Zero).
+def test_g6_no_prior_basis_pt_disposal_is_non_failing() -> None:
+    # VIB-5403: a disposal with measured amounts but NO matched FIFO lot (no
+    # realized yield at all — first disposal of pre-existing PT) is a legitimate
+    # measured state. It increments the forensic Σ_pt_no_prior_basis counter,
+    # which is NOT in null_breakdown, so it never trips has_nulls / FAIL.
+    ledger = [_ledger_swap_row_no_gas(_LEDGER_SELL_ID)]
+    acct = [
+        _pt_sell_event(
+            ledger_id=_LEDGER_SELL_ID,
+            realized_yield_usd=None,
+            realized_yield_sy=None,
+            sy_price="2143.1",
+        ),
+    ]
+    payloads, errors, _ = _typed_acct_payloads(acct)
+    cell, decomp = _cell_g6_reconciliation(
+        _balanced_snapshots("0"), ledger, [], acct, "pendle_pt", payloads, errors
+    )
+    assert cell.status == "PASS", cell.diagnostic
+    assert decomp["Σ_pt_no_prior_basis_count"] == "1"
+    assert decomp["Σ_pt_realized_usd_null_count"] == "0"
+    assert decomp["Σ_pt_amount_null_count"] == "0"
+
+
+def test_g6_fail_on_unmeasured_disposal_amount_even_for_pendle_pt_profile() -> None:
+    # VIB-5403: a PT disposal with no realized yield AND no measured amount is a
+    # genuine receipt/writer data loss — G6 must FAIL even on the opted-in
+    # pendle_pt profile, surfacing the always-failing Σ_pt_amount null bucket
+    # (Empty≠Zero), never the VIB-5276 realized-USD waiver.
     ledger = [_ledger_swap_row(_LEDGER_SELL_ID)]
     acct = [
         _pt_buy_event(ledger_id=_LEDGER_BUY_ID, sy_price="2143.8"),
         _pt_sell_event(
             ledger_id=_LEDGER_SELL_ID,
-            realized_yield_usd="-0.000134",
+            realized_yield_usd=None,
+            realized_yield_sy=None,
             sy_price="2143.1",
             sy_amount=None,
         ),
@@ -290,5 +402,5 @@ def test_g6_fail_on_missing_disposal_amount_even_for_pendle_pt_profile() -> None
     )
     assert cell.status == "FAIL", cell.diagnostic
     assert "VIB-5276" not in cell.diagnostic
-    assert decomp["Σ_pt_proceeds_amount_null_count"] == "1"
-    assert decomp["Σ_pt_proceeds_usd_null_count"] == "0"
+    assert decomp["Σ_pt_amount_null_count"] == "1"
+    assert decomp["Σ_pt_realized_usd_null_count"] == "0"
