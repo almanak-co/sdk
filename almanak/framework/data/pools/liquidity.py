@@ -132,6 +132,62 @@ class SlippageEstimate:
     recommended_max_size: Decimal
 
 
+# Plausible band for a *stable* 2-coin realized rate (token_out per token_in).
+# A quote landing outside this band is not a stableswap-pegged pair (e.g. a
+# tricrypto USDT/WBTC/WETH leg), so the 1.0-mid impact model does not apply and
+# the swap-quote slippage fallback declines (returns None) rather than emitting
+# a nonsense estimate.
+_STABLE_QUOTE_RATE_LOWER = Decimal("0.5")
+_STABLE_QUOTE_RATE_UPPER = Decimal("1.5")
+
+
+def _slippage_estimate_from_stable_quote(
+    *,
+    amount_in_human: Decimal,
+    amount_out_human: Decimal,
+) -> SlippageEstimate | None:
+    """Derive a ``SlippageEstimate`` from an executable stableswap quote.
+
+    For a stableswap 2-coin pegged pair the mid price is ~1.0, so the realized
+    execution price ``amount_out / amount_in`` directly yields price impact:
+    ``impact = 1 - exec_price`` (positive means you received less than 1:1 —
+    fee + curvature). ``get_dy`` is net-of-fee, so for stables price impact and
+    effective slippage coincide.
+
+    Returns ``None`` when the realized rate is outside the stable band (not a
+    pegged pair) — the caller then declines the fallback. A favourable quote
+    (exec_price > 1, e.g. rounding/depeg-in-your-favour) is floored at zero
+    impact rather than reported negative; this never fabricates a successful
+    zero out of a *failed* quote, since a failed quote never reaches here.
+    """
+    if amount_in_human <= 0 or amount_out_human <= 0:
+        return None
+
+    exec_price = amount_out_human / amount_in_human
+    if not (_STABLE_QUOTE_RATE_LOWER <= exec_price <= _STABLE_QUOTE_RATE_UPPER):
+        return None
+
+    slip = Decimal(1) - exec_price
+    if slip < 0:
+        slip = Decimal(0)
+    price_impact_bps = int(slip * 10000)
+    effective_slippage_bps = price_impact_bps
+
+    if price_impact_bps > 0:
+        # Linear extrapolation to the 1% (100 bps) budget — mirrors the V2/V3
+        # ``recommended_max`` convention.
+        recommended_max = amount_in_human * Decimal(100) / Decimal(price_impact_bps)
+    else:
+        recommended_max = amount_in_human * Decimal(10)
+
+    return SlippageEstimate(
+        expected_price=exec_price,
+        price_impact_bps=price_impact_bps,
+        effective_slippage_bps=effective_slippage_bps,
+        recommended_max_size=recommended_max,
+    )
+
+
 # ---------------------------------------------------------------------------
 # ABI encoding/decoding helpers
 # ---------------------------------------------------------------------------
@@ -747,11 +803,21 @@ class SlippageEstimator:
         pool_reader_registry: Any | None = None,
         high_slippage_threshold_bps: int = 100,
         source_name: str = "alchemy_rpc",
+        swap_quote_registry: Any | None = None,
+        quote_ctx: Any | None = None,
+        token_resolver: Any | None = None,
     ) -> None:
         self._liquidity_reader = liquidity_reader
         self._pool_reader_registry = pool_reader_registry
         self._high_slippage_threshold_bps = high_slippage_threshold_bps
         self._source_name = source_name
+        # ALM-2896: connector-owned swap-quote fallback for AMM/stableswap
+        # protocols (e.g. Curve) that have no V3 tick reader. When any of these
+        # is None (backtest / V3-only construction), the fallback short-circuits
+        # and behaviour is identical to the V3-only estimator.
+        self._swap_quote_registry = swap_quote_registry
+        self._quote_ctx = quote_ctx
+        self._token_resolver = token_resolver
 
     def estimate_slippage(
         self,
@@ -796,6 +862,17 @@ class SlippageEstimator:
                 pool_address = self._resolve_pool(token_in, token_out, chain_lower, protocol, fee_tier)
 
             if pool_address is None:
+                # ALM-2896: no V3 tick reader resolved a pool. Before failing,
+                # try the connector-owned swap-quote fallback — this covers
+                # AMM/stableswap protocols (Curve) that publish a
+                # SwapQuoteCapability but have no tick-based reader. A genuine
+                # quote failure still raises (fail-loud); only "no quoter
+                # registered for this protocol" falls through to the raise below.
+                quote_estimate = self._estimate_via_swap_quote(token_in, token_out, amount, chain_lower, protocol)
+                if quote_estimate is not None:
+                    return self._finalize_quote_envelope(
+                        quote_estimate, token_in, token_out, amount, chain_lower, start_time
+                    )
                 raise DataUnavailableError(
                     data_type="slippage_estimate",
                     instrument=f"{token_in}/{token_out}",
@@ -876,6 +953,115 @@ class SlippageEstimator:
             cache_hit=False,
         )
 
+        return DataEnvelope(
+            value=estimate,
+            meta=meta,
+            classification=DataClassification.EXECUTION_GRADE,
+        )
+
+    def _estimate_via_swap_quote(
+        self,
+        token_in: str,
+        token_out: str,
+        amount: Decimal,
+        chain: str,
+        protocol: str | None,
+    ) -> SlippageEstimate | None:
+        """Estimate slippage for an AMM protocol via its connector swap quoter.
+
+        Returns ``None`` when the fallback is not wired or no quoter is
+        registered for ``protocol`` (so the caller re-raises the original
+        "no pool found"). A registered-but-failing quoter raises (fail-loud):
+        the connector's ``SwapQuoteUnavailable`` / a resolution ``ValueError``
+        propagates out and is wrapped as ``DataUnavailableError`` by the caller,
+        so a strategy that wants fail-closed still sees an unavailable signal.
+
+        For stableswap 2-coin pairs the mid price is ~1.0; price impact is the
+        realized deviation of (amount_out / amount_in) from parity. The estimate
+        is only produced when the realized rate is inside a plausible stable
+        band — a non-stable pool (e.g. tricrypto) returns ``None`` rather than a
+        nonsense 1.0-mid result.
+        """
+        if protocol is None or self._swap_quote_registry is None or self._quote_ctx is None:
+            return None
+        if self._token_resolver is None:
+            return None
+        if self._swap_quote_registry.get(protocol) is None:
+            return None
+
+        from almanak.connectors._strategy_base.swap_quote_registry import SwapQuoteRequest
+
+        in_token = self._token_resolver.resolve_for_swap(token_in, chain)
+        out_token = self._token_resolver.resolve_for_swap(token_out, chain)
+        if in_token is None or out_token is None:
+            # A conforming TokenResolver raises on an unresolvable token (which
+            # the caller wraps as DataUnavailableError); guard the None case so
+            # a non-conforming resolver declines the fallback instead of an
+            # opaque AttributeError on .decimals/.address.
+            return None
+        in_decimals = int(in_token.decimals)
+        out_decimals = int(out_token.decimals)
+
+        amount_in_wei = int(amount * (Decimal(10) ** in_decimals))
+        if amount_in_wei <= 0:
+            return None
+
+        request = SwapQuoteRequest(
+            chain=chain,
+            protocol=protocol,
+            token_in=in_token.address,
+            token_out=out_token.address,
+            amount_in=amount_in_wei,
+            token_in_symbol=token_in,
+            token_out_symbol=token_out,
+            token_in_decimals=in_decimals,
+            token_out_decimals=out_decimals,
+        )
+
+        result = self._swap_quote_registry.quote_swap(self._quote_ctx, request)
+        if result is None:
+            return None
+
+        amount_out_human = Decimal(result.amount_out) / (Decimal(10) ** out_decimals)
+        return _slippage_estimate_from_stable_quote(
+            amount_in_human=amount,
+            amount_out_human=amount_out_human,
+        )
+
+    def _finalize_quote_envelope(
+        self,
+        estimate: SlippageEstimate,
+        token_in: str,
+        token_out: str,
+        amount: Decimal,
+        chain: str,
+        start_time: float,
+    ) -> DataEnvelope[SlippageEstimate]:
+        """Wrap a swap-quote-derived estimate in an EXECUTION_GRADE envelope."""
+        if estimate.effective_slippage_bps > self._high_slippage_threshold_bps:
+            logger.warning(
+                "high_slippage_warning",
+                extra={
+                    "token_in": token_in,
+                    "token_out": token_out,
+                    "amount": str(amount),
+                    "chain": chain,
+                    "slippage_bps": estimate.effective_slippage_bps,
+                    "threshold_bps": self._high_slippage_threshold_bps,
+                },
+            )
+
+        latency_ms = int((time.monotonic() - start_time) * 1000)
+        meta = DataMeta(
+            source=self._source_name,
+            observed_at=datetime.now(UTC),
+            block_number=None,
+            finality="latest",
+            staleness_ms=0,
+            latency_ms=latency_ms,
+            confidence=1.0,
+            cache_hit=False,
+        )
         return DataEnvelope(
             value=estimate,
             meta=meta,

@@ -19,6 +19,7 @@ Each factory:
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -561,6 +562,20 @@ def _build_gateway_price_providers(
     return price_aggregator, pool_reader_registry
 
 
+@dataclass(frozen=True)
+class _SlippageQuoteCtx:
+    """Context passed to connector swap-quote providers for the ALM-2896
+    AMM-slippage fallback. Carries only the attributes the providers read via
+    ``getattr(ctx, ...)`` — ``wallet_address``, ``rpc_url`` (None: gateway-only,
+    no egress), ``gateway_client``, ``token_resolver``.
+    """
+
+    wallet_address: str
+    rpc_url: str | None
+    gateway_client: Any
+    token_resolver: Any
+
+
 def _make_gateway_rpc_call(gateway_client: Any) -> Any:
     """Return the sanctioned gateway ``eth_call`` proxy closure.
 
@@ -650,10 +665,31 @@ def _build_gateway_rpc_readers(
         if liquidity_depth_reader is None:
             liquidity_depth_reader = LiquidityDepthReader(rpc_call=rpc_call, source_name="gateway_rpc")
         if slippage_estimator is None:
+            # ALM-2896: wire the connector-owned swap-quote fallback so
+            # estimate_slippage() works for AMM/stableswap protocols (Curve)
+            # that have no V3 tick reader. The quote routes through the gateway
+            # client (no strategy-container egress); rpc_url=None forces the
+            # gateway path inside the connector adapters.
+            from almanak.connectors._strategy_swap_quote_registry import (
+                SWAP_QUOTE_REGISTRY,
+                ensure_swap_quote_registry_loaded,
+            )
+
+            ensure_swap_quote_registry_loaded()
+            quote_ctx = _SlippageQuoteCtx(
+                wallet_address=getattr(strategy, "wallet_address", None)
+                or "0x0000000000000000000000000000000000000000",
+                rpc_url=None,
+                gateway_client=gateway_client,
+                token_resolver=token_resolver,
+            )
             slippage_estimator = SlippageEstimator(
                 liquidity_reader=liquidity_depth_reader,
                 pool_reader_registry=pool_reader_registry,
                 source_name="gateway_rpc",
+                swap_quote_registry=SWAP_QUOTE_REGISTRY,
+                quote_ctx=quote_ctx,
+                token_resolver=token_resolver,
             )
 
     return pool_reserve_reader, liquidity_depth_reader, slippage_estimator, rate_history_reader

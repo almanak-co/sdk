@@ -577,19 +577,24 @@ def test_aerodrome_provider_defaults_to_classic_without_cl_quoter(monkeypatch: p
     ]
 
 
-def test_curve_provider_requires_pool_address() -> None:
+def test_curve_provider_resolves_pool_when_address_omitted() -> None:
+    """ALM-2896: pool_address is now optional — the provider resolves it from
+    the connector's own pool registry. An unknown pair (no Curve pool) raises
+    SwapQuoteUnavailable with a 'No Curve pool' message rather than demanding a
+    caller-supplied pool_address.
+    """
     from almanak.connectors.curve.swap_quote_provider import CurveSwapQuoteConnector
 
     provider = CurveSwapQuoteConnector()
 
-    with pytest.raises(SwapQuoteUnavailable, match="pool_address"):
+    with pytest.raises(SwapQuoteUnavailable, match="No Curve pool"):
         provider.quote_swap(
             SimpleNamespace(rpc_url="http://anvil.local", gateway_client=None),
             SwapQuoteRequest(
                 chain="base",
                 protocol="curve",
                 token_in="USDC",
-                token_out="USDbC",
+                token_out="0x000000000000000000000000000000000000dEaD",
                 amount_in=100_000_000,
             ),
         )
