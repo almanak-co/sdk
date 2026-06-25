@@ -384,6 +384,18 @@ service StateService {
   // DB read because hosted strategy containers cannot access Postgres directly.
   rpc SumLedgerGasUsd(SumLedgerGasUsdRequest) returns (SumLedgerGasUsdResponse);
 
+  // VIB-5416 — deployment-scoped transaction_ledger read WITH the measured
+  // backend signal, for the teardown swap-back clamp. NO_ACCOUNTING primitives
+  // (STAKE->wstETH, WRAP->WETH, CDP MINT->stablecoin) write a transaction_ledger
+  // row but ZERO accounting_events, so their wallet inventory is invisible to
+  // the accounting-event FIFO read (GetAccountingEvents) and the clamp strands
+  // the strategy's own closing swap as ``untracked_token``. The clamp reads
+  // these ledger rows and folds the NO_ACCOUNTING ones into the tracked map.
+  // Mirrors GetAccountingEvents' Empty != Zero contract: a fund-moving clamp
+  // read MUST carry backend_status (DashboardService.GetTransactionLedger does
+  // not, so it cannot be reused). Read-only, no stored column.
+  rpc GetLedgerEntriesMeasured(GetLedgerEntriesMeasuredRequest) returns (GetLedgerEntriesMeasuredResponse);
+
   // Cutover storage RPCs — per-(deployment_id, primitive, cutover_key)
   // migration_state CRUD + position_registry read + atomic ledger+registry
   // commit (VIB-4208 / T22 of multi-position-tracking epic).
@@ -2976,6 +2988,28 @@ message LedgerEntryInfo {
   string protocol = 16;
   bool success = 17;
   string error = 18;
+}
+
+// VIB-5416 — request/response for StateService.GetLedgerEntriesMeasured.
+// Same field shape as GetTransactionLedgerRequest (deployment-scoped, optional
+// since/intent filters) but on StateService and with the measured response
+// signal. limit=0 means NO limit: the teardown clamp needs the deployment's
+// full NO_ACCOUNTING history so a STAKE acquisition is never paginated out
+// while a later disposal is kept (which would over-count).
+message GetLedgerEntriesMeasuredRequest {
+  string deployment_id = 1;       // required
+  int64 since_timestamp = 2;      // Unix epoch seconds; 0 = no lower bound
+  string intent_type_filter = 3;  // "" = no filter
+  int32 limit = 4;                // 0 = no limit (full history)
+}
+
+message GetLedgerEntriesMeasuredResponse {
+  repeated LedgerEntryInfo entries = 1;
+  // VIB-5185/VIB-5416 — see AccountingBackendStatus. The teardown swap-back
+  // clamp MUST gate on this: an ABSENT/ERRORED/UNSPECIFIED status is UNMEASURED,
+  // so the NO_ACCOUNTING tracked lane is dropped (the token strands — the safe
+  // under-sweep direction) rather than treating an empty read as measured-zero.
+  AccountingBackendStatus backend_status = 2;
 }
 
 // Senior-Quant header messages -----------------------------------------------

@@ -1850,6 +1850,64 @@ class GatewayStateManager:
         """
         return self._fetch_accounting_events(deployment_id, position_key)
 
+    def read_ledger_entries_measured(
+        self,
+        deployment_id: str,
+    ) -> tuple[list[dict], bool]:
+        """transaction_ledger rows plus whether the read is MEASURED (VIB-5416).
+
+        The teardown swap-back clamp folds this deployment's NO_ACCOUNTING ledger
+        rows (STAKE→wstETH, WRAP→WETH, CDP MINT→stablecoin) into its tracked map —
+        those primitives write a transaction_ledger row but ZERO accounting_events,
+        so the accounting-event FIFO read (:meth:`read_accounting_events_measured`)
+        cannot see their wallet inventory and the clamp would strand the strategy's
+        own closing swap as ``untracked_token``.
+
+        Returns ``(rows, measured)`` with the SAME Empty ≠ Zero contract as
+        :meth:`read_accounting_events_measured`: ``measured=True`` only on
+        ``ACCOUNTING_BACKEND_STATUS_AVAILABLE``; ABSENT / ERRORED / UNSPECIFIED
+        (old gateway) / transport error all yield ``measured=False``. The clamp
+        drops the NO_ACCOUNTING tracked lane on ``measured=False`` (the token
+        strands — the safe under-sweep direction), and NEVER over-/under-sweeps a
+        shared wallet on an unmeasured read. ``limit`` is unset (0 → full history)
+        so a STAKE acquisition is never paginated out while a later disposal is
+        kept. Never raises.
+        """
+        deployment_id = (deployment_id or "").strip()
+        if not deployment_id:
+            return [], False
+        try:
+            request = gateway_pb2.GetLedgerEntriesMeasuredRequest(deployment_id=deployment_id)
+            response = self._client.state.GetLedgerEntriesMeasured(request, timeout=self._timeout)
+            rows = [_proto_ledger_to_dict(e) for e in response.entries]
+            measured = response.backend_status == gateway_pb2.ACCOUNTING_BACKEND_STATUS_AVAILABLE
+            return rows, measured
+        except Exception as e:  # noqa: BLE001 — transport failure → UNMEASURED, never raise.
+            logger.warning("GetLedgerEntriesMeasured via gateway failed: %s", e)
+            return [], False
+
+
+def _proto_ledger_to_dict(entry: "gateway_pb2.LedgerEntryInfo") -> dict:
+    """Convert a wire ``LedgerEntryInfo`` to the dict shape the clamp's synthetic
+    NO_ACCOUNTING projection reads (VIB-5416, ``basis.synthetic_wallet_movement_events``).
+
+    Only the fields the projection consumes are mapped (id / intent_type / token &
+    amount legs / chain / success / timestamp). ``timestamp`` stays an int epoch —
+    ``basis._timestamp_to_iso`` normalises it.
+    """
+    return {
+        "id": entry.id,
+        "deployment_id": entry.deployment_id,
+        "intent_type": entry.intent_type,
+        "token_in": entry.token_in,
+        "amount_in": entry.amount_in,
+        "token_out": entry.token_out,
+        "amount_out": entry.amount_out,
+        "chain": entry.chain,
+        "timestamp": entry.timestamp,
+        "success": entry.success,
+    }
+
 
 def _proto_position_event_to_dict(event: "gateway_pb2.PositionEventData") -> dict:
     """Convert proto PositionEventData -> dict matching SQLite ``position_events`` row shape.

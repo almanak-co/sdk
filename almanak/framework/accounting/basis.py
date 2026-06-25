@@ -543,6 +543,74 @@ class FIFOBasisStore:
         )
         return 1
 
+    def _replay_wallet_movement(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
+        """Replay a synthetic NO_ACCOUNTING wallet movement (VIB-5416).
+
+        NO_ACCOUNTING primitives (Lido STAKE→wstETH, WRAP_NATIVE→WETH, CDP
+        MINT_STABLE→stablecoin, …) move a fungible wallet token but emit ZERO
+        ``accounting_events`` — so their inventory is invisible to the teardown
+        swap-back clamp, which strands the strategy's own closing swap as
+        ``untracked_token`` (the VIB-5416 fund-safety bug). The clamp's tracked
+        read projects each such ``transaction_ledger`` row into a synthetic
+        ``WALLET_MOVEMENT`` event (:func:`synthetic_wallet_movement_events`) and
+        replays it HERE, into the SAME fungible ``swap:{chain}:{wallet}`` pool as
+        real SWAP lots.
+
+        Mirrors :meth:`_replay_swap` exactly — dispose ``token_in``, acquire
+        ``token_out`` — with two deliberate differences:
+
+        * ``source="NO_ACCOUNTING"`` stamps the acquisition lot, keeping it OUT of
+          the SWAP-only :meth:`iter_open_swap_lots` (VIB-4984 dashboard tile) while
+          still counting in the source-agnostic :meth:`iter_open_wallet_basis_lots`
+          the clamp sums.
+        * Both legs are replayed (not output-only): an UNSTAKE / UNWRAP *disposes*
+          the tracked token, so the input-leg disposal nets it via the same
+          ``match_swap_disposal`` machinery a real SWAP uses — without it a
+          STAKE→UNSTAKE round-trip would leave a phantom tracked balance the clamp
+          could over-sweep on a shared wallet.
+
+        Cost basis is intentionally ``None`` (the clamp reads ``remaining``
+        quantity only, never PnL); this store is ephemeral and clamp-scoped.
+        """
+        from almanak.connectors._strategy_base.base import resolve_swap_token_symbol
+
+        swap_position_key = ctx.payload.get("swap_position_key") or ctx.position_key or ctx.swap_wallet_key
+        if not swap_position_key:
+            return 0
+
+        acted = 0
+        # 1. Dispose token_in so a NO_ACCOUNTING disposal (UNSTAKE/UNWRAP) drains
+        #    prior acquisition lots (real or synthetic) in FIFO timestamp order —
+        #    source-agnostic, identical to a real SWAP's disposal leg.
+        token_in_r = resolve_swap_token_symbol(ctx.payload.get("token_in", ""), ctx.chain) or ""
+        amount_in_r = _parse_decimal(ctx.payload.get("amount_in"))
+        if token_in_r and amount_in_r is not None and amount_in_r > 0:
+            self.match_swap_disposal(
+                deployment_id=ctx.deployment_id,
+                position_key=swap_position_key,
+                token=token_in_r,
+                amount=amount_in_r,
+            )
+            acted = 1
+
+        # 2. Acquire token_out so the held NO_ACCOUNTING token is TRACKED inventory
+        #    the clamp may swap back (and a later disposal can FIFO-match).
+        token_out = resolve_swap_token_symbol(ctx.payload.get("token_out", ""), ctx.chain) or ""
+        if token_out:
+            amount_out = _parse_decimal(ctx.payload.get("amount_out"))
+            if amount_out is not None and amount_out > 0:
+                self.record_swap_acquisition(
+                    deployment_id=ctx.deployment_id,
+                    position_key=swap_position_key,
+                    token=token_out,
+                    amount=amount_out,
+                    cost_usd=None,
+                    timestamp=ctx.timestamp,
+                    source="NO_ACCOUNTING",
+                )
+                acted = 1
+        return acted
+
     def _replay_prediction(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
         # Replay prediction-market aggregate from the post-trade
         # snapshot stored on the event (position_size_after,
@@ -1512,9 +1580,183 @@ def canonical_pt_symbol(symbol: Any) -> str:
     return base[: m.start()]
 
 
+def _ledger_field(row: Any, name: str) -> Any:
+    """Read ``name`` from a ledger row that may be a dict or a ``LedgerEntry``."""
+    if isinstance(row, dict):
+        return row.get(name)
+    return getattr(row, name, None)
+
+
+def _timestamp_to_iso(value: Any) -> str | None:
+    """Normalise a ledger-row timestamp (datetime / ISO str / unix int) to an ISO string.
+
+    Returns ``None`` when the value is absent or unparseable — the synthetic event then
+    sorts LAST in the FIFO replay (the safe under-sweep bias, see
+    :func:`_merge_events_by_timestamp`).
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, int | float):
+        try:
+            return datetime.fromtimestamp(value, tz=UTC).isoformat()
+        except (ValueError, OverflowError, OSError):
+            return None
+    return str(value)
+
+
+def synthetic_wallet_movement_events(
+    ledger_rows: list[Any],
+    deployment_id: str,
+    *,
+    chain: str,
+    wallet_address: str,
+) -> list[dict[str, Any]]:
+    """Project NO_ACCOUNTING ``transaction_ledger`` rows into synthetic FIFO events (VIB-5416).
+
+    NO_ACCOUNTING primitives (STAKE / UNSTAKE / WRAP_NATIVE / CDP MINT_STABLE / …)
+    move a fungible wallet token but write ZERO ``accounting_events``, so the
+    teardown swap-back clamp — which reads only the accounting-event FIFO store —
+    classifies the strategy's own closing swap as ``untracked_token`` and strands
+    the token. This projects each such ledger row into a ``WALLET_MOVEMENT`` event
+    shaped exactly like a SWAP accounting row, so :meth:`FIFOBasisStore._replay_wallet_movement`
+    folds it into the SAME ``swap:{chain}:{wallet}`` wallet-basis pool as real SWAP
+    lots (the key is built from the deployment's ``chain``/``wallet_address``, which
+    by the 1-gateway:1-strategy invariant equal every real swap lot's key).
+
+    Only rows whose ``intent_type`` classifies to :attr:`AccountingCategory.NO_ACCOUNTING`
+    AND that succeeded are projected — SWAP/BORROW/WITHDRAW/PT rows already replay
+    through their own dispatch entries, so the two lanes are disjoint by accounting
+    category and no lot is double-counted. Both legs are carried (input → disposal,
+    output → acquisition) so an UNSTAKE/UNWRAP disposal nets a prior acquisition.
+
+    These events are EPHEMERAL — emitted only for the clamp's tracked read, never
+    persisted. ``synthetic=True`` is stamped for forensic clarity.
+    """
+    # Function-level import to avoid any module-load cycle (basis is a low layer).
+    import json as _json
+
+    from almanak.framework.primitives.taxonomy import record_for
+    from almanak.framework.primitives.types import AccountingCategory
+
+    chain_norm = (chain or "").lower().strip()
+    wallet_norm = (wallet_address or "").lower().strip()
+    if not chain_norm or not wallet_norm:
+        # Without the deployment's chain+wallet we cannot key the synthetic lot
+        # into the same pool as real swaps — emit nothing (the clamp then has no
+        # NO_ACCOUNTING lane and strands, the safe under-sweep direction).
+        return []
+    swap_position_key = f"swap:{chain_norm}:{wallet_norm}"
+
+    out: list[dict[str, Any]] = []
+    for row in ledger_rows or []:
+        if not _ledger_field(row, "success"):
+            continue
+        intent_type = str(_ledger_field(row, "intent_type") or "")
+        if not intent_type:
+            continue
+        # ``record_for`` raises ``UnknownIntentTypeError`` for an UNREGISTERED
+        # intent — unlike ``classify``, which deliberately returns NO_ACCOUNTING
+        # for unknowns. A typo'd / unknown intent string must NOT be projected
+        # into the tracked lane (it would over-count a token the deployment never
+        # acquired), so require a registered primitive AND the NO_ACCOUNTING category.
+        try:
+            record = record_for(intent_type)
+        except Exception:  # noqa: BLE001 — unknown/unregistered intent → not our lane; skip
+            continue
+        if record.accounting_category is not AccountingCategory.NO_ACCOUNTING:
+            continue
+        token_in = str(_ledger_field(row, "token_in") or "")
+        token_out = str(_ledger_field(row, "token_out") or "")
+        amount_in = _ledger_field(row, "amount_in")
+        amount_out = _ledger_field(row, "amount_out")
+        # Nothing measurable to project (Empty ≠ Zero: empty legs contribute no lot).
+        has_in = bool(token_in) and amount_in not in (None, "")
+        has_out = bool(token_out) and amount_out not in (None, "")
+        if not has_in and not has_out:
+            continue
+        out.append(
+            {
+                "event_type": "WALLET_MOVEMENT",
+                "deployment_id": deployment_id,
+                "position_key": swap_position_key,
+                "chain": chain_norm,
+                "wallet_address": wallet_norm,
+                "timestamp": _timestamp_to_iso(_ledger_field(row, "timestamp")),
+                "ledger_entry_id": _ledger_field(row, "id"),
+                "synthetic": True,
+                "payload_json": _json.dumps(
+                    {
+                        "swap_position_key": swap_position_key,
+                        "token_in": token_in,
+                        "amount_in": "" if amount_in is None else str(amount_in),
+                        "token_out": token_out,
+                        "amount_out": "" if amount_out is None else str(amount_out),
+                    }
+                ),
+            }
+        )
+    return out
+
+
+def _merge_events_by_timestamp(
+    real_events: list[dict[str, Any]],
+    synthetic_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Stable-merge real accounting events and synthetic ledger events by timestamp.
+
+    The FIFO replay processes events in order, and the ONLY over-count (over-sweep)
+    direction is an acquisition left undrained because its disposal ran first. Every
+    synthetic ``WALLET_MOVEMENT`` event carries an acquisition leg, so synthetic
+    events must always be DRAINABLE — i.e. never sort after a real disposal of the
+    same token. Two rules enforce that, both biased to the under-sweep-safe side:
+
+    * **Equal timestamp (EVM same-block txs share a block timestamp):** synthetic
+      events sort BEFORE real events on a tie (secondary key ``0`` vs ``1``), so a
+      synthetic STAKE acquisition is in the pool before a same-timestamp real SWAP
+      that disposes it. (A synthetic *disposal* — UNSTAKE/UNWRAP — drains the OLDEST
+      lot under FIFO regardless of tie order, so this ordering never orphans a real
+      acquisition.) The sort is stable, so real events keep their gateway order AND
+      same-second SYNTHETIC events keep theirs — which the gateway delivers in
+      deterministic chronological (execution) order (``GetLedgerEntriesMeasured``
+      re-sorts ascending by ``(timestamp, id)``), so a same-block STAKE→UNSTAKE
+      never replays the disposal before its acquisition.
+    * **Missing / unparseable timestamp:** a *synthetic* event sorts FIRST
+      (``-inf``) so its acquisition stays drainable; a *real* event sorts LAST
+      (``+inf``) so its disposal drains already-created lots (under-count, safe).
+      In production this branch is unreachable — the gateway always serialises
+      ``LedgerEntry.timestamp`` to an int epoch — but the bias keeps the merge
+      correct without relying on that external invariant.
+    """
+
+    def _sortkey(ev: dict[str, Any]) -> float:
+        ts = ev.get("timestamp")
+        unmeasured_bias = float("-inf") if ev.get("synthetic") else float("inf")
+        if not isinstance(ts, str) or not ts:
+            return unmeasured_bias
+        try:
+            normalized = ts.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(normalized)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            return dt.timestamp()
+        except (ValueError, TypeError, OverflowError, OSError):
+            return unmeasured_bias
+
+    # Secondary key: synthetic (acquisition-bearing) events before real events on a
+    # timestamp tie, so a synthetic acquisition is drained by a same-timestamp real
+    # disposal rather than orphaned (the over-sweep direction).
+    return sorted([*real_events, *synthetic_events], key=lambda ev: (_sortkey(ev), 0 if ev.get("synthetic") else 1))
+
+
 def sum_open_wallet_basis_by_token(
     events: list[dict[str, Any]],
     deployment_id: str,
+    *,
+    ledger_rows: list[Any] | None = None,
+    chain: str = "",
+    wallet_address: str = "",
 ) -> dict[str, Decimal] | None:
     """Tracked wallet inventory per token for ``deployment_id`` (ALM-2766).
 
@@ -1541,6 +1783,16 @@ def sum_open_wallet_basis_by_token(
     (config) matches the maturity-bearing FIFO lot (ledger); it is identical to
     ``canonical_symbol`` for every non-PT token (no behaviour change there).
 
+    VIB-5416: when ``ledger_rows`` is supplied (the teardown clamp's tracked read),
+    the deployment's NO_ACCOUNTING ledger rows (STAKE→wstETH, WRAP→WETH, CDP MINT→…)
+    are projected into synthetic ``WALLET_MOVEMENT`` events
+    (:func:`synthetic_wallet_movement_events`), timestamp-merged into the replay, and
+    folded into the SAME wallet-basis pool — so a held NO_ACCOUNTING token is TRACKED
+    inventory the clamp may swap back, instead of being stranded as ``untracked_token``.
+    ``chain``/``wallet_address`` are the deployment's (used to key the synthetic lot
+    identically to real swaps). ``ledger_rows=None`` (every non-clamp caller) is
+    byte-identical to the pre-VIB-5416 behaviour.
+
     Deployment-scoped: only events whose ``deployment_id`` matches are replayed
     (a shared wallet's sibling-strategy lots are not ours). An empty / missing
     ``deployment_id`` returns the UNMEASURED sentinel ``None`` (Empty ≠ Zero) —
@@ -1551,6 +1803,12 @@ def sum_open_wallet_basis_by_token(
     if not deployment_id:
         return None
     scoped = [ev for ev in events if isinstance(ev, dict) and ev.get("deployment_id") == deployment_id]
+    if ledger_rows:
+        synthetic = synthetic_wallet_movement_events(
+            ledger_rows, deployment_id, chain=chain, wallet_address=wallet_address
+        )
+        if synthetic:
+            scoped = _merge_events_by_timestamp(scoped, synthetic)
     store = FIFOBasisStore()
     store.reconstruct_from_events(scoped)
     by_token: dict[str, Decimal] = {}
@@ -1584,6 +1842,11 @@ _REPLAY_DISPATCH: dict[str, _ReplayCallable] = {
     "PT_SELL": FIFOBasisStore._replay_pt_sell,
     "PT_REDEEM": FIFOBasisStore._replay_pt_redeem,
     "SWAP": FIFOBasisStore._replay_swap,
+    # VIB-5416: synthetic event type emitted ONLY by the teardown clamp's
+    # tracked-inventory read (synthetic_wallet_movement_events) — never persisted
+    # to accounting_events. Replays a NO_ACCOUNTING ledger row into the wallet-basis
+    # pool so STAKE/WRAP/MINT inventory is clamp-visible.
+    "WALLET_MOVEMENT": FIFOBasisStore._replay_wallet_movement,
     "PREDICTION_OPEN": FIFOBasisStore._replay_prediction,
     "PREDICTION_INCREASE": FIFOBasisStore._replay_prediction,
     "PREDICTION_REDUCE": FIFOBasisStore._replay_prediction,

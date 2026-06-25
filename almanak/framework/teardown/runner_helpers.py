@@ -337,11 +337,18 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         # teardown swap-back clamp. Reads the runner's accounting StateManager
         # and replays FIFO lots; returns the UNMEASURED sentinel (None) on any
         # failure (the clamp then fails closed). Never raises.
+        #
+        # VIB-5416 — pass the deployment's chain + wallet so the clamp can key
+        # NO_ACCOUNTING ledger acquisitions (STAKE/WRAP/MINT) into the SAME
+        # ``swap:{chain}:{wallet}`` pool as real swap lots (1 gateway : 1
+        # strategy guarantees these equal every real swap lot's key).
         from .swap_clamp import read_tracked_swap_inventory
 
         return read_tracked_swap_inventory(
             state_manager=getattr(runner, "state_manager", None),
             deployment_id=(getattr(strategy, "deployment_id", "") or ""),
+            chain=(getattr(strategy, "chain", "") or ""),
+            wallet_address=(getattr(strategy, "wallet_address", "") or ""),
         )
 
     async def _snapshot_intent_lending_state(strategy: Any, intent: Any) -> Any | None:

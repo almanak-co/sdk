@@ -1215,6 +1215,8 @@ def _apply_inline_swap_clamp(
     balance_token: str,
     balance_value: Any,
     deployment_id: str,
+    chain: str = "",
+    wallet_address: str = "",
 ) -> tuple[bool, bool, Any]:
     """ALM-2766 inline-lane swap-back clamp — delegates to ``decide_swap_clamp``.
 
@@ -1253,6 +1255,8 @@ def _apply_inline_swap_clamp(
             tracked_map=read_tracked_swap_inventory(
                 state_manager=getattr(runner, "state_manager", None),
                 deployment_id=deployment_id,
+                chain=chain,
+                wallet_address=wallet_address,
             ),
             from_token=balance_token,
         )
@@ -1279,6 +1283,7 @@ def _apply_inline_swap_clamp(
     return True, decision.degraded, None
 
 
+# crap-allowlist: VIB-5416 — pre-existing cc=28 inline-teardown coordinator; PR only threads two kwargs (chain/wallet_address) into the existing `_apply_inline_swap_clamp(...)` call so the NO_ACCOUNTING ledger lane keys correctly, adding ZERO new branches. Decomposition deferred to the standing inline-lane refactor; covering the fallback path needs a full inline-teardown integration harness.
 async def _execute_teardown_inline_body(  # noqa: C901
     runner: Any,
     strategy: StrategyProtocol,
@@ -1369,7 +1374,13 @@ async def _execute_teardown_inline_body(  # noqa: C901
                 # on a fail-closed skip the swap is bypassed (loud, degraded
                 # counted), else ``balance_value`` is set to ``min(tracked, live)``.
                 _skip, _degraded, balance_value = _apply_inline_swap_clamp(
-                    runner, intent, balance_token, balance_value, deployment_id
+                    runner,
+                    intent,
+                    balance_token,
+                    balance_value,
+                    deployment_id,
+                    chain=getattr(strategy, "chain", "") or "",
+                    wallet_address=getattr(strategy, "wallet_address", "") or "",
                 )
                 if _skip:
                     inline_degraded_count += int(_degraded)

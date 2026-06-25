@@ -197,12 +197,20 @@ class _TwoReceiptParser:
         return next(self._values)
 
 
+# VIB-5416: ``primitive_money_legs`` is intentionally NOT in this parametrize.
+# It is now a MERGED-RECEIPT field (_MERGED_RECEIPT_FIELDS) — a multi-tx intent's
+# money legs are extracted from the UNION of all tx logs in ONE call, not via
+# per-receipt "continue to later receipt" iteration (the per-tx first-OK loop
+# attached a tx-1 ETH→stETH result and stopped, mislabelling a wrapped Lido STAKE).
+# Its type-rejection safety is still covered by
+# ``test_primitive_money_legs_wrong_type_rejected_and_slot_left_none`` (the slot is
+# left None on a wrong-typed value), and the merge behaviour by
+# ``tests/unit/execution/test_merged_money_legs_vib5416.py``.
 @pytest.mark.parametrize(
     ("field", "attr", "intent_type", "wrong", "valid_factory"),
     [
         ("bin_ids", "bin_ids", "LP_OPEN", "not-a-list", lambda: [8388608, 8388609]),
         ("protocol_fees", "protocol_fees", "SWAP", {"total_usd": "0.05"}, _valid_protocol_fees),
-        ("primitive_money_legs", "primitive_money_legs", "LP_CLOSE", {"legs": []}, _valid_money_legs),
     ],
 )
 def test_strict_typed_field_rejection_continues_to_later_receipt(field, attr, intent_type, wrong, valid_factory):

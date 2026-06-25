@@ -113,10 +113,50 @@ def decide_swap_clamp(
     return SwapClampDecision(swap_qty, False, False, "clamped")
 
 
+def _read_no_accounting_ledger_rows(state_manager: Any, deployment_id: str) -> list[dict] | None:
+    """Measured transaction_ledger rows for the NO_ACCOUNTING clamp lane (VIB-5416), or ``None``.
+
+    Returns the deployment's ledger rows ONLY when the gateway reports a MEASURED
+    read (``ACCOUNTING_BACKEND_STATUS_AVAILABLE``). Returns ``None`` — *drop the
+    NO_ACCOUNTING lane*, so STAKE/WRAP/MINT tokens strand as ``untracked_token``
+    (the safe under-sweep direction, == pre-VIB-5416 behaviour) — when the reader
+    is absent (old gateway / wrong-flavour manager) or the read is UNMEASURED.
+
+    Crucially this degrades ONLY the NO_ACCOUNTING lane: it is additive, never a
+    reason to fail the whole tracked read. The accounting-event lane (the primary
+    fail-closed signal) is independent, so an unmeasured / absent ledger backend
+    must NOT strand accounted (SWAP/BORROW/WITHDRAW/PT) swap-backs — those keep
+    their existing clamp behaviour. Never raises.
+    """
+    reader = getattr(state_manager, "read_ledger_entries_measured", None)
+    if not callable(reader):
+        return None
+    try:
+        rows, measured = reader(deployment_id)
+    except Exception:  # noqa: BLE001 — read-only DX guard; never block the unwind.
+        logger.warning(
+            "VIB-5416 ledger read raised for %s — NO_ACCOUNTING tokens will not be clamp-tracked "
+            "(strand, safe); accounted swap-backs unaffected",
+            deployment_id,
+            exc_info=True,
+        )
+        return None
+    if not measured:
+        logger.warning(
+            "VIB-5416 ledger read for %s UNMEASURED — NO_ACCOUNTING tokens will not be clamp-tracked "
+            "(strand, safe); accounted swap-backs unaffected",
+            deployment_id,
+        )
+        return None
+    return rows
+
+
 def read_tracked_swap_inventory(
     *,
     state_manager: Any,
     deployment_id: str,
+    chain: str = "",
+    wallet_address: str = "",
 ) -> dict[str, Decimal] | None:
     """Deployment-scoped tracked wallet inventory, or the UNMEASURED sentinel.
 
@@ -184,7 +224,13 @@ def read_tracked_swap_inventory(
                 deployment_id,
             )
             return None
-        return sum_open_wallet_basis_by_token(events, deployment_id)
+        # VIB-5416: additively fold the deployment's NO_ACCOUNTING ledger rows
+        # (STAKE/WRAP/MINT) into the tracked map so their wallet inventory is
+        # clamp-visible. A None ledger read drops ONLY that lane (strand, safe).
+        ledger_rows = _read_no_accounting_ledger_rows(state_manager, deployment_id)
+        return sum_open_wallet_basis_by_token(
+            events, deployment_id, ledger_rows=ledger_rows, chain=chain, wallet_address=wallet_address
+        )
     # VIB-5173 fallback (local ``StateManager``): no per-read measured signal,
     # but a cheap structural probe distinguishes a structurally-absent backend
     # (UNMEASURED) from a genuinely-empty event set (measured zero). Require the
@@ -210,7 +256,11 @@ def read_tracked_swap_inventory(
             return None
     try:
         events = state_manager.get_accounting_events_sync(deployment_id)
-        return sum_open_wallet_basis_by_token(events, deployment_id)
+        # VIB-5416: same additive NO_ACCOUNTING ledger fold as the measured path.
+        ledger_rows = _read_no_accounting_ledger_rows(state_manager, deployment_id)
+        return sum_open_wallet_basis_by_token(
+            events, deployment_id, ledger_rows=ledger_rows, chain=chain, wallet_address=wallet_address
+        )
     except Exception:  # noqa: BLE001 — read-only DX guard; never block the unwind.
         logger.warning(
             "ALM-2766 tracked-inventory read failed for %s — swap-back clamp will fail closed",

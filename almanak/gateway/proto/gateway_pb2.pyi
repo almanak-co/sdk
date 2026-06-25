@@ -67,11 +67,19 @@ class _PtPriceConfidenceBandEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[
     PT_PRICE_CONFIDENCE_BAND_UNAVAILABLE: _PtPriceConfidenceBand.ValueType  # 3
 
 class PtPriceConfidenceBand(_PtPriceConfidenceBand, metaclass=_PtPriceConfidenceBandEnumTypeWrapper):
-    """Coarse confidence band mapping 1:1 to the framework ``ValueConfidence`` enum
-    (``almanak/framework/portfolio/models.py``) so clients do NOT re-threshold
-    the raw ``confidence`` double. HIGH = all inputs measured; ESTIMATED = a
-    fallback was used (e.g. ``pt_to_asset_rate`` defaulted to 1.0 at-par);
-    UNAVAILABLE = cannot be valued (pairs with UNMEASURED/ERRORED availability).
+    """Coarse confidence band so clients do NOT re-threshold the raw ``confidence``
+    double. This maps to the three *origination* bands of the framework
+    ``ValueConfidence`` enum (``almanak/framework/portfolio/models.py``):
+    HIGH = all inputs measured; ESTIMATED = a fallback was used (e.g.
+    ``pt_to_asset_rate`` defaulted to 1.0 at-par); UNAVAILABLE = cannot be valued
+    (pairs with UNMEASURED/ERRORED availability).
+
+    NOT 1:1 with ``ValueConfidence``: that enum has a fourth member, STALE, which
+    is NOT a band here. Staleness is carried separately by the ``stale`` bool
+    (PtPriceResponse field 12). Consumers (VIB-5311) MUST combine band + ``stale``
+    to produce the final ``ValueConfidence`` — never map band→enum directly, or a
+    stale price silently renders as HIGH and drops the staleness signal.
+
     Confidence only ever DEGRADES downstream — a consumer cannot upgrade it.
     """
 
@@ -634,9 +642,9 @@ class PtPriceRequest(_message.Message):
     quote: _builtins.str
     """Default: USD"""
     maturity_ts: _builtins.int
-    """Optional maturity hint. Config is maturity-less; the parser / price
-    contract are maturity-bearing. 0 = let the gateway resolve the active
-    maturity for ``symbol``.
+    """Optional maturity hint, as a Unix timestamp in SECONDS. Config is
+    maturity-less; the parser / price contract are maturity-bearing.
+    0 = let the gateway resolve the active maturity for ``symbol``.
     """
     def __init__(
         self,
@@ -692,8 +700,10 @@ class PtPriceResponse(_message.Message):
     source: _builtins.str
     """e.g. ``composition:getPtToAssetRate×<oracle>``."""
     timestamp: _builtins.int
+    """Unix timestamp in SECONDS when the price was composed."""
     stale: _builtins.bool
     maturity_ts: _builtins.int
+    """Unix timestamp in SECONDS of contract maturity."""
     days_to_maturity: _builtins.int
     def __init__(
         self,
@@ -7830,6 +7840,68 @@ class LedgerEntryInfo(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___LedgerEntryInfo: _TypeAlias = LedgerEntryInfo  # noqa: Y015
+
+@_typing.final
+class GetLedgerEntriesMeasuredRequest(_message.Message):
+    """VIB-5416 — request/response for StateService.GetLedgerEntriesMeasured.
+    Same field shape as GetTransactionLedgerRequest (deployment-scoped, optional
+    since/intent filters) but on StateService and with the measured response
+    signal. limit=0 means NO limit: the teardown clamp needs the deployment's
+    full NO_ACCOUNTING history so a STAKE acquisition is never paginated out
+    while a later disposal is kept (which would over-count).
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
+    SINCE_TIMESTAMP_FIELD_NUMBER: _builtins.int
+    INTENT_TYPE_FILTER_FIELD_NUMBER: _builtins.int
+    LIMIT_FIELD_NUMBER: _builtins.int
+    deployment_id: _builtins.str
+    """required"""
+    since_timestamp: _builtins.int
+    """Unix epoch seconds; 0 = no lower bound"""
+    intent_type_filter: _builtins.str
+    """"" = no filter"""
+    limit: _builtins.int
+    """0 = no limit (full history)"""
+    def __init__(
+        self,
+        *,
+        deployment_id: _builtins.str = ...,
+        since_timestamp: _builtins.int = ...,
+        intent_type_filter: _builtins.str = ...,
+        limit: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "intent_type_filter", b"intent_type_filter", "limit", b"limit", "since_timestamp", b"since_timestamp"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetLedgerEntriesMeasuredRequest: _TypeAlias = GetLedgerEntriesMeasuredRequest  # noqa: Y015
+
+@_typing.final
+class GetLedgerEntriesMeasuredResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ENTRIES_FIELD_NUMBER: _builtins.int
+    BACKEND_STATUS_FIELD_NUMBER: _builtins.int
+    backend_status: Global___AccountingBackendStatus.ValueType
+    """VIB-5185/VIB-5416 — see AccountingBackendStatus. The teardown swap-back
+    clamp MUST gate on this: an ABSENT/ERRORED/UNSPECIFIED status is UNMEASURED,
+    so the NO_ACCOUNTING tracked lane is dropped (the token strands — the safe
+    under-sweep direction) rather than treating an empty read as measured-zero.
+    """
+    @_builtins.property
+    def entries(self) -> _containers.RepeatedCompositeFieldContainer[Global___LedgerEntryInfo]: ...
+    def __init__(
+        self,
+        *,
+        entries: _abc.Iterable[Global___LedgerEntryInfo] | None = ...,
+        backend_status: Global___AccountingBackendStatus.ValueType = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["backend_status", b"backend_status", "entries", b"entries"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetLedgerEntriesMeasuredResponse: _TypeAlias = GetLedgerEntriesMeasuredResponse  # noqa: Y015
 
 @_typing.final
 class PnLSummary(_message.Message):

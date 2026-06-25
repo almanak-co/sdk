@@ -207,7 +207,35 @@ class LidoStakerStrategy(IntentStrategy):
 
         if self._staked:
             output_token = "wstETH" if self.receive_wrapped else "stETH"
-            return Intent.hold(reason=f"Already staked {self._staked_amount} ETH -> {output_token}")
+            # Self-heal (VIB-5416): ``_staked`` is cleared in ``on_intent_executed``
+            # only on a *successful* teardown SWAP. If the position was exited some
+            # other way — a teardown swap legitimately skipped at zero balance, an
+            # out-of-band unwind, or a crash-restart that reloaded ``staked=True``
+            # after the position was already closed — the flag would otherwise pin
+            # the strategy in HOLD("Already staked") forever. Reconcile against
+            # on-chain truth: if the wallet no longer holds the staking token, clear
+            # the flag and fall through to re-evaluate (CLAUDE.md teardown contract —
+            # prefer on-chain balance over cached state).
+            try:
+                held = market.balance(output_token)
+                if held is None:
+                    # No balance loaded — leave reconciliation to a later cycle
+                    # rather than raising InvalidOperation on Decimal(str(None)).
+                    held_amount = None
+                else:
+                    held_amount = held.balance if hasattr(held, "balance") else Decimal(str(held))
+            except Exception as exc:  # noqa: BLE001 — balance read is best-effort
+                logger.debug(f"Could not reconcile {output_token} balance: {exc!r}")
+                held_amount = None
+            if held_amount is not None and held_amount <= _DUST_THRESHOLD:
+                logger.info(
+                    f"Reconciled staked state: wallet holds {held_amount} {output_token} "
+                    f"(<= dust) — clearing stale staked flag and re-evaluating"
+                )
+                self._staked = False
+                self._staked_amount = Decimal("0")
+            else:
+                return Intent.hold(reason=f"Already staked {self._staked_amount} ETH -> {output_token}")
 
         # =================================================================
         # STEP 3: Check ETH balance
@@ -425,9 +453,7 @@ class LidoStakerStrategy(IntentStrategy):
             amount = balance.balance if hasattr(balance, "balance") else Decimal(str(balance))
             has_balance = amount > _DUST_THRESHOLD
         except Exception as exc:
-            logger.warning(
-                f"Unable to query on-chain {output_token} balance for teardown intents: {exc!r}"
-            )
+            logger.warning(f"Unable to query on-chain {output_token} balance for teardown intents: {exc!r}")
             has_balance = self._staked and self._staked_amount > _DUST_THRESHOLD
 
         if not has_balance:
@@ -445,5 +471,3 @@ class LidoStakerStrategy(IntentStrategy):
                 chain="ethereum",
             )
         ]
-
-

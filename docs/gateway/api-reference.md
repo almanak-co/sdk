@@ -8,7 +8,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 |---------|---------|-------------|
 | Health | 3 | Standard gRPC health checks and chain registration |
 | MarketService | 6 | Price data, Pendle PT/YT-USD price, balances, batch balances, technical indicators, and Uniswap V4 pool key lookup |
-| StateService | 29 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, accounting outbox, atomic ledger+registry writes, and cutover migration state |
+| StateService | 30 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, accounting outbox, atomic ledger+registry writes, and cutover migration state |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
 | RpcService | 7 | JSON-RPC proxy to blockchains with typed queries |
@@ -415,6 +415,21 @@ read because hosted strategy containers cannot access Postgres directly.
 
 ```protobuf
 rpc SumLedgerGasUsd(SumLedgerGasUsdRequest) returns (SumLedgerGasUsdResponse)
+```
+
+### GetLedgerEntriesMeasured
+
+Read a deployment's `transaction_ledger` rows WITH a measured `backend_status`
+signal (VIB-5416). The teardown swap-back clamp folds `NO_ACCOUNTING` ledger rows
+(STAKE→wstETH, WRAP→WETH, CDP MINT→stablecoin — primitives that write a ledger row
+but no accounting event) into its tracked inventory. Mirrors `GetAccountingEvents`'
+Empty ≠ Zero contract: an `ABSENT`/`ERRORED`/`UNSPECIFIED` status is UNMEASURED, so
+the clamp drops the `NO_ACCOUNTING` lane (the token strands — the safe under-sweep
+direction) rather than treating an empty read as measured-zero. `limit=0` means
+full history. Read-only; no stored column.
+
+```protobuf
+rpc GetLedgerEntriesMeasured(GetLedgerEntriesMeasuredRequest) returns (GetLedgerEntriesMeasuredResponse)
 ```
 
 ### SaveAccountingEvent

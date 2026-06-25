@@ -131,6 +131,37 @@ def _item_int(row: Any, key: str, default: int = 0) -> int:
     return int(row[key] or default)
 
 
+def _ledger_entry_to_proto(entry: Any) -> gateway_pb2.LedgerEntryInfo:
+    """Convert a ``LedgerEntry`` to the wire ``LedgerEntryInfo`` (VIB-5416).
+
+    Mirrors the conversion in ``DashboardService.GetTransactionLedger`` so the
+    measured-read RPC returns byte-identical row shapes. ``timestamp`` is a
+    ``datetime`` on the dataclass and is serialised to Unix seconds.
+    """
+    ts = getattr(entry, "timestamp", None)
+    ts_epoch = int(ts.timestamp()) if isinstance(ts, datetime) else 0
+    return gateway_pb2.LedgerEntryInfo(
+        id=entry.id or "",
+        cycle_id=entry.cycle_id or "",
+        deployment_id=entry.deployment_id or "",
+        timestamp=ts_epoch,
+        intent_type=entry.intent_type or "",
+        token_in=entry.token_in or "",
+        amount_in=entry.amount_in or "",
+        token_out=entry.token_out or "",
+        amount_out=entry.amount_out or "",
+        effective_price=entry.effective_price or "",
+        slippage_bps=entry.slippage_bps or 0.0,
+        gas_used=entry.gas_used or 0,
+        gas_usd=entry.gas_usd or "",
+        tx_hash=entry.tx_hash or "",
+        chain=entry.chain or "",
+        protocol=entry.protocol or "",
+        success=bool(entry.success),
+        error=entry.error or "",
+    )
+
+
 def _pg_row_to_accounting_event(row: Any) -> gateway_pb2.AccountingEvent:
     """Convert one Postgres asyncpg.Record to the proto wire shape.
 
@@ -2535,6 +2566,103 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         if self._snapshot_pool is not None:
             return await self._get_accounting_events_pg(request, deployment_id)
         return await self._get_accounting_events_sqlite(request, deployment_id)
+
+    async def GetLedgerEntriesMeasured(
+        self,
+        request: gateway_pb2.GetLedgerEntriesMeasuredRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetLedgerEntriesMeasuredResponse:
+        """Deployment-scoped transaction_ledger read WITH the measured backend signal (VIB-5416).
+
+        The teardown swap-back clamp folds NO_ACCOUNTING ledger rows
+        (STAKE→wstETH, WRAP→WETH, CDP MINT→stablecoin) into its tracked map so a
+        held no-accounting token is not stranded as ``untracked_token``. Empty ≠
+        Zero (mirrors :meth:`GetAccountingEvents` / VIB-5185): an UNMEASURED read
+        (backend ABSENT or ERRORED) must be distinguishable from a measured-empty
+        one so the client drops the NO_ACCOUNTING lane (the token strands — the
+        safe under-sweep direction) rather than treating an empty read as
+        measured-zero inventory. ``DashboardService.GetTransactionLedger`` carries
+        no such signal, which is why this fund-safety read lives on StateService.
+
+        ``limit=0`` means full history: the clamp must not paginate a STAKE
+        acquisition out while keeping a later disposal (which would over-count) —
+        newest-first truncation only ever drops OLD rows (under-count, safe).
+        """
+        try:
+            validate_deployment_id(request.deployment_id)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.GetLedgerEntriesMeasuredResponse(
+                backend_status=gateway_pb2.ACCOUNTING_BACKEND_STATUS_ERRORED,
+            )
+        deployment_id = request.deployment_id.strip() if request.deployment_id else ""
+        if not deployment_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("deployment_id is required")
+            return gateway_pb2.GetLedgerEntriesMeasuredResponse(
+                backend_status=gateway_pb2.ACCOUNTING_BACKEND_STATUS_ERRORED,
+            )
+        if request.limit < 0 or request.since_timestamp < 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("limit and since_timestamp must be >= 0")
+            return gateway_pb2.GetLedgerEntriesMeasuredResponse(
+                backend_status=gateway_pb2.ACCOUNTING_BACKEND_STATUS_ERRORED,
+            )
+
+        await self._ensure_initialized()
+        # Read the warm backend DIRECTLY (not via ``StateManager.get_ledger_entries``,
+        # which collapses "no warm backend", "missing method", and caught backend
+        # exceptions into an empty list). Empty ≠ Zero: the clamp must distinguish a
+        # measured-empty read from an ABSENT/ERRORED one, exactly as
+        # ``_get_accounting_events_sqlite`` does for accounting events.
+        warm = getattr(self._state_manager, "warm_backend", None) if self._state_manager is not None else None
+        if warm is None or not hasattr(warm, "get_ledger_entries"):
+            # No warm backend able to serve ledger rows → structurally ABSENT.
+            return gateway_pb2.GetLedgerEntriesMeasuredResponse(
+                backend_status=gateway_pb2.ACCOUNTING_BACKEND_STATUS_ABSENT,
+            )
+
+        # A huge positive epoch overflows ``datetime.fromtimestamp`` — reject at the
+        # boundary as INVALID_ARGUMENT rather than letting OverflowError/OSError
+        # escape the validated path.
+        since = None
+        if request.since_timestamp > 0:
+            try:
+                since = datetime.fromtimestamp(request.since_timestamp, tz=UTC)
+            except (OverflowError, OSError, ValueError):
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("since_timestamp out of range")
+                return gateway_pb2.GetLedgerEntriesMeasuredResponse(
+                    backend_status=gateway_pb2.ACCOUNTING_BACKEND_STATUS_ERRORED,
+                )
+        intent_type = request.intent_type_filter or None
+        # limit=0 → effectively-full history (SQLite ``LIMIT 0`` returns ZERO rows,
+        # so 0 cannot be passed through as "no limit"). 100k bounds the
+        # pathological case while covering every real deployment's lifetime ledger.
+        limit = request.limit if request.limit > 0 else 100_000
+        try:
+            entries = await warm.get_ledger_entries(deployment_id, since=since, intent_type=intent_type, limit=limit)
+        except Exception as e:  # noqa: BLE001 — Empty ≠ Zero: an errored read is UNMEASURED.
+            logger.warning("GetLedgerEntriesMeasured failed for deployment=%s: %s", deployment_id, e)
+            return gateway_pb2.GetLedgerEntriesMeasuredResponse(
+                backend_status=gateway_pb2.ACCOUNTING_BACKEND_STATUS_ERRORED,
+            )
+
+        # VIB-5416: the backend read is ``ORDER BY timestamp DESC`` (and the wire
+        # ``LedgerEntryInfo.timestamp`` is truncated to whole seconds), so same-block
+        # rows could otherwise reach the clamp in an arbitrary order and replay a
+        # NO_ACCOUNTING disposal before its acquisition (over-count → over-sweep).
+        # Return entries in DETERMINISTIC chronological order at full datetime
+        # precision (``id`` as the final tiebreak for the impossible exact-micros
+        # tie); the clamp's stable timestamp-merge then preserves this execution
+        # order for same-second synthetic events.
+        entries = sorted(entries, key=lambda e: (e.timestamp, e.id or ""))
+        proto_entries = [_ledger_entry_to_proto(entry) for entry in entries]
+        return gateway_pb2.GetLedgerEntriesMeasuredResponse(
+            entries=proto_entries,
+            backend_status=gateway_pb2.ACCOUNTING_BACKEND_STATUS_AVAILABLE,
+        )
 
     # =========================================================================
     # Accounting Outbox RPCs — crash-safe durability for AccountingProcessor

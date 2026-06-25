@@ -116,6 +116,19 @@ _AGGREGATE_FIELDS: dict[str, str] = {
     "lp_close_data": "collect",
 }
 
+# VIB-5416 — fields whose extractor must see the UNION of all the intent's
+# transaction logs, not a single tx. A multi-transaction intent can split its
+# money legs across txs: a Lido wrapped STAKE submits ETH→stETH in tx 1 and wraps
+# stETH→wstETH in a later tx, so neither receipt alone carries BOTH the ETH input
+# leg AND the wstETH output leg. The per-receipt first-OK loop would attach the
+# tx-1 (ETH→stETH) legs and stop, mislabelling the ledger ``token_out`` as the
+# intermediate ``stETH`` while the wallet (and the teardown swap-back) actually
+# holds ``wstETH`` — which strands the teardown swap as ``untracked_token``
+# (VIB-5416). Extracting from the merged-logs receipt lets the parser declare the
+# true ETH→wstETH legs. Parsers filter logs by contract+topic, so the extra logs
+# from sibling txs are inert for single-tx intents.
+_MERGED_RECEIPT_FIELDS: frozenset[str] = frozenset({"primitive_money_legs"})
+
 
 def _legacy_warn(parser: Any, field: str) -> None:
     """Emit a one-shot DeprecationWarning for parsers that still return raw values.
@@ -1458,6 +1471,12 @@ class ResultEnricher:
         # ExtractOk across receipts and select the preferred-``source``
         # variant once the loop completes. VIB-4310.
         aggregate_preferred = _AGGREGATE_FIELDS.get(field)
+        # VIB-5416 — holistic money-leg fields must see every tx's logs at once
+        # (the intent's input and output legs can land in different txs). Collapse
+        # the per-tx receipts into one merged-logs receipt so the extractor sees
+        # the whole intent. No-op for a single-tx intent.
+        if field in _MERGED_RECEIPT_FIELDS and len(receipts) > 1:
+            receipts = [self._merge_receipt_logs(receipts)]
         candidates: list[Any] = []
         last_error: ExtractError | None = None
         for receipt in receipts:
@@ -2216,6 +2235,55 @@ class ResultEnricher:
         if self._pool_key_lookup is not None and protocol.lower() in _pool_key_lookup_protocols():
             kwargs["pool_key_lookup"] = self._pool_key_lookup
         return kwargs
+
+    @staticmethod
+    def _merge_receipt_logs(receipts: list[dict[str, Any]]) -> dict[str, Any]:
+        """Union the ``logs`` of every receipt into one synthetic receipt (VIB-5416).
+
+        A multi-transaction intent (e.g. a Lido wrapped STAKE: submit ETH→stETH,
+        then wrap stETH→wstETH) splits its money legs across txs. A receipt parser
+        that scans logs by contract address + event topic can declare the whole
+        intent's legs (ETH input + wstETH output) ONLY if it sees every tx's logs
+        at once. This concatenates the per-tx ``logs`` in order and carries the
+        first receipt's scalar context (``from_address`` / ``status`` / their
+        camelCase aliases) so the parser's address-based wrap/unwrap disambiguation
+        still works. Does not mutate the input receipts.
+
+        The merged receipt is stamped with a SYNTHETIC ``transactionHash`` derived
+        from every constituent tx hash. The enricher installs a ``parse_receipt``
+        cache keyed on ``transactionHash`` (``_install_parse_cache``); without a
+        distinct key the merged call would inherit the first tx's hash and the
+        cache would return that tx's STALE per-tx parse (e.g. ``wraps=0`` for a
+        wrapped STAKE), silently defeating the merge. The key is set-unique (a
+        function of all constituent hashes) so it collides with neither any single
+        tx nor a different intent's merge, while staying stable within one
+        enrichment so caching still elides repeat parses of the merged receipt.
+        """
+        merged: dict[str, Any] = {}
+        # Preserve first-receipt scalar context (sender / status + aliases) so
+        # parsers that key on it (e.g. swap/wrap direction) behave as before.
+        # Defensive: guard against a None / non-dict first receipt.
+        if receipts and isinstance(receipts[0], dict):
+            for key, value in receipts[0].items():
+                if key != "logs":
+                    merged[key] = value
+        all_logs: list[Any] = []
+        constituent_hashes: list[str] = []
+        for receipt in receipts:
+            if not isinstance(receipt, dict):
+                continue
+            logs = receipt.get("logs")
+            if isinstance(logs, list):
+                all_logs.extend(logs)
+            tx_hash = receipt.get("transactionHash") or receipt.get("tx_hash")
+            constituent_hashes.append(str(tx_hash) if tx_hash is not None else "")
+        merged["logs"] = all_logs
+        # Override the inherited first-tx hash with a set-unique synthetic key so
+        # the parse cache never returns a stale per-tx result for the merged call.
+        synthetic_hash = "merged:" + "|".join(constituent_hashes)
+        merged["transactionHash"] = synthetic_hash
+        merged["tx_hash"] = synthetic_hash
+        return merged
 
     def _collect_receipts(self, result: ExecutionResult) -> list[dict[str, Any]]:
         """Collect receipts from successful transaction results.
