@@ -343,6 +343,13 @@ class LPOpenIntent(BaseIntent):
             Additive and optional: connectors that do not consume it (Uniswap V3/V4,
             Aerodrome, TraderJoe V2, Pendle, …) ignore it entirely and continue to read
             ``amount0``/``amount1``. When ``None`` (the default), behaviour is unchanged.
+        max_slippage: Optional maximum acceptable slippage applied to the deposit's
+            min-mint floor (e.g. ``0.005`` = 0.5%), in the same units as
+            :attr:`SwapIntent.max_slippage`. Consumed by the Curve compiler to size the
+            ``add_liquidity`` ``min_mint`` calldata. When ``None`` (the default), the
+            connector falls back to its built-in default (Curve: 50 bps), so existing
+            callers are byte-for-byte unchanged. Connectors that do not consume it ignore
+            it entirely.
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
     """
@@ -356,6 +363,7 @@ class LPOpenIntent(BaseIntent):
     chain: str | None = None
     protocol_params: dict[str, Any] | None = None
     coin_amounts: list[SafeDecimal] | None = None
+    max_slippage: OptionalSafeDecimal = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
@@ -375,6 +383,8 @@ class LPOpenIntent(BaseIntent):
             raise ValueError("At least one amount must be positive")
         if self.coin_amounts is not None:
             self._validate_coin_amounts()
+        if self.max_slippage is not None and (self.max_slippage < 0 or self.max_slippage > 1):
+            raise ValueError("max_slippage must be between 0 and 1")
         if self.range_lower >= self.range_upper:
             raise ValueError("range_lower must be less than range_upper")
         # Skip positivity check for tick-based protocols: their range values are raw
@@ -473,6 +483,13 @@ class LPCloseIntent(BaseIntent):
             a COMPILATION_FAILED result BEFORE the minted wei is resolved into
             ``position_id``. Per-connector LP_CLOSE compiler guards are
             defense-in-depth for the direct-compile path only.
+        max_slippage: Optional maximum acceptable slippage applied to the
+            withdrawal's min-amounts floor (e.g. ``0.005`` = 0.5%), in the same
+            units as :attr:`SwapIntent.max_slippage`. Consumed by the Curve
+            compiler to size the ``remove_liquidity`` ``min_amounts`` calldata.
+            When ``None`` (the default), the connector falls back to its built-in
+            default (Curve: 50 bps), so existing callers are byte-for-byte
+            unchanged. Connectors that do not consume it ignore it entirely.
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
     """
@@ -484,6 +501,7 @@ class LPCloseIntent(BaseIntent):
     chain: str | None = None
     protocol_params: dict[str, Any] | None = None
     amount: OptionalChainedAmount = None
+    max_slippage: OptionalSafeDecimal = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
@@ -505,6 +523,8 @@ class LPCloseIntent(BaseIntent):
                 )
         elif not isinstance(self.position_id, str) or not self.position_id:
             raise ValueError("position_id must be a non-empty string when amount is None")
+        if self.max_slippage is not None and (self.max_slippage < 0 or self.max_slippage > 1):
+            raise ValueError("max_slippage must be between 0 and 1")
         return self
 
     @property
@@ -923,6 +943,7 @@ class Intent:
         chain: str | None = None,
         protocol_params: dict[str, Any] | None = None,
         coin_amounts: list[Decimal] | None = None,
+        max_slippage: Decimal | None = None,
         registry_handle: str | None = None,
     ) -> LPOpenIntent:
         """Create an LP open intent.
@@ -947,6 +968,9 @@ class Intent:
                 uses it directly instead of mapping ``amount0``/``amount1`` to indices
                 0/1, so non-leading coins (index 2+) can be targeted. Connectors that
                 do not consume it ignore it entirely.
+            max_slippage: Optional maximum acceptable slippage on the deposit's min-mint
+                floor (e.g. 0.005 = 0.5%). When None (the default), the connector uses its
+                built-in default (Curve: 50 bps). Consumed only by the Curve compiler.
 
         Returns:
             LPOpenIntent: The created LP open intent
@@ -980,6 +1004,7 @@ class Intent:
             chain=chain,
             protocol_params=protocol_params,
             coin_amounts=coin_amounts,
+            max_slippage=max_slippage,
             registry_handle=registry_handle,
         )
 
@@ -992,6 +1017,7 @@ class Intent:
         chain: str | None = None,
         protocol_params: dict[str, Any] | None = None,
         amount: ChainedAmount | None = None,
+        max_slippage: Decimal | None = None,
         registry_handle: str | None = None,
     ) -> LPCloseIntent:
         """Create an LP close intent.
@@ -1014,6 +1040,10 @@ class Intent:
                 non-allowlisted protocol (NFT token-ids, bin-ids, pool/wrapper
                 identities) with COMPILATION_FAILED BEFORE resolving the wei;
                 per-connector compiler guards are defense-in-depth only.
+            max_slippage: Optional maximum acceptable slippage on the withdrawal's
+                min-amounts floor (e.g. 0.005 = 0.5%). When None (the default), the
+                connector uses its built-in default (Curve: 50 bps). Consumed only by
+                the Curve compiler.
 
         Returns:
             LPCloseIntent: The created LP close intent
@@ -1037,6 +1067,7 @@ class Intent:
             chain=chain,
             protocol_params=protocol_params,
             amount=amount,
+            max_slippage=max_slippage,
             registry_handle=registry_handle,
         )
 

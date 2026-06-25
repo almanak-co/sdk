@@ -13,6 +13,25 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 
 logger = logging.getLogger(__name__)
 
+# Built-in LP slippage floor used when an intent does not request its own
+# tolerance. 50 bps (0.5%) — the historical Curve LP default. Kept as a named
+# constant so the fallback is explicit at both the LP_OPEN and LP_CLOSE sites.
+_DEFAULT_LP_SLIPPAGE_BPS = 50
+
+
+def _resolve_lp_slippage_bps(max_slippage: Decimal | None) -> int:
+    """Convert an intent's optional ``max_slippage`` to integer basis points.
+
+    Mirrors the SWAP path's ``int(intent.max_slippage * Decimal("10000"))``
+    conversion so LP and SWAP read the same field in the same units. When
+    ``max_slippage`` is ``None`` (the historical case — LP intents never carried
+    a slippage field before audit P0-7), fall back to the built-in
+    ``_DEFAULT_LP_SLIPPAGE_BPS`` so existing callers are byte-for-byte unchanged.
+    """
+    if max_slippage is None:
+        return _DEFAULT_LP_SLIPPAGE_BPS
+    return int(max_slippage * Decimal("10000"))
+
 
 def _normalize_asset_set_token(token: str, ctx: BaseCompilerContext) -> str:
     """Canonicalize a single asset-set token to its uppercase registry symbol.
@@ -575,7 +594,9 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 )
             amounts, is_underlying_deposit = amounts_or_error
 
-            slippage_bps = 50
+            # Honor the intent's requested LP slippage (audit P0-7); fall back to
+            # the built-in 50 bps default when the caller didn't set one.
+            slippage_bps = _resolve_lp_slippage_bps(intent.max_slippage)
             config = CurveConfig(
                 chain=ctx.chain,
                 wallet_address=ctx.wallet_address,
@@ -788,7 +809,9 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                         intent_id=intent.intent_id,
                     )
 
-            slippage_bps = 50
+            # Honor the intent's requested LP slippage (audit P0-7); fall back to
+            # the built-in 50 bps default when the caller didn't set one.
+            slippage_bps = _resolve_lp_slippage_bps(intent.max_slippage)
 
             logger.info(
                 "Compiling Curve LP_CLOSE: pool=%s (%s), lp_amount=%s",
