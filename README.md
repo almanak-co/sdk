@@ -134,8 +134,8 @@ class MyStrategy(IntentStrategy):
 | `PerpOpenIntent` / `PerpCloseIntent` | Open/close perpetuals positions |
 | `BridgeIntent` | Cross-chain asset bridging |
 | `VaultDepositIntent` / `VaultRedeemIntent` | Deposit into / redeem from ERC-4626-style vaults |
-| `FlashLoanIntent` | Flash loan operations |
-| `PredictionBuyIntent` / `PredictionSellIntent` / `PredictionRedeemIntent` | Prediction market trading |
+| `FlashLoanIntent` | Flash loan operations _(experimental — not yet listed as supported in `almanak info matrix`; pending testing)_ |
+| `PredictionBuyIntent` / `PredictionSellIntent` / `PredictionRedeemIntent` | Prediction market trading _(experimental — not yet listed as supported in `almanak info matrix`; pending testing)_ |
 
 ## CLI Commands
 
@@ -288,11 +288,15 @@ For the authoritative per-protocol chain matrix, see the [connector reference](h
 - **Liquid Staking & yield-bearing assets**: Lido, Ethena, Gimo
 - **Yield tokenization**: Pendle
 - **Perpetuals**: GMX V2, Aster Perps, PancakeSwap Perps, Drift
-- **Prediction Markets**: Polymarket
 - **CEX Integration**: Kraken
 - **Bridges**: Across, Stargate, LiFi
 - **Vaults**: Morpho Vault, Lagoon
-- **Flash loans**: Balancer (FLASH_LOAN-only — not a DEX in the Almanak registry), Aave V3, Morpho Blue
+
+> **Pending testing (not currently listed as supported):** Prediction Markets
+> (Polymarket) and Flash loans (Balancer, Aave V3, Morpho Blue) are
+> undergoing further validation and are temporarily withheld from the
+> supported matrix (`almanak info matrix`). The connectors remain in the
+> codebase but should be treated as experimental until re-listed.
 
 ## Demo Strategies
 

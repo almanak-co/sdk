@@ -283,7 +283,8 @@ class TestPreviouslyMissingConnectors:
             ("aster_perps", "perps", {"bsc"}),
             ("pancakeswap_perps", "perps", {"bsc"}),
             ("gimo", "yield", {"zerog"}),
-            ("polymarket", "prediction", {"polygon"}),
+            # polymarket / prediction temporarily withheld from the matrix
+            # pending further testing — see TestPredictionDisabledPendingTesting.
             ("fluid", "swap", {"arbitrum", "base", "ethereum", "polygon"}),
         ],
     )
@@ -337,63 +338,71 @@ class TestPreviouslyMissingConnectors:
 
 
 # =============================================================================
-# Prediction-market Category Tests (VIB-3139)
+# Prediction-market / Flash-loan disabled-pending-testing Tests
 # =============================================================================
 
 
-class TestPredictionCategory:
-    """Regression guards for the prediction-market category.
+class TestPredictionDisabledPendingTesting:
+    """Guards that the `prediction` and `flash_loan` categories are withheld
+    from `almanak info matrix` while those capabilities undergo further
+    testing.
 
-    Edge / agent-side compatibility filters read `almanak info matrix` to
-    decide whether a signal's protocol is supported. Polymarket must surface
-    under a dedicated `prediction` category so those filters do not drop every
-    prediction-market signal (VIB-3139).
+    The connectors stay registered and the intents still compile/execute —
+    they are simply not advertised as supported until validation completes.
+    Removing `ACTION_PREDICTION` / `ACTION_FLASH_LOAN` from
+    `SUPPORTED_CATEGORIES` is what gates rendering (see support_matrix.py).
+    Re-enable by adding the constants back and restoring the original
+    presence assertions (previously TestPredictionCategory / VIB-3139).
     """
 
-    def test_prediction_category_present(self, matrix_data: dict) -> None:
+    def test_prediction_category_absent(self, matrix_data: dict) -> None:
         categories = {p["category"] for p in matrix_data["protocols"]}
-        assert "prediction" in categories
+        assert "prediction" not in categories
 
-    def test_polymarket_in_prediction_not_yield(self, matrix_data: dict) -> None:
-        """Polymarket belongs in `prediction`, not `yield` (VIB-3139)."""
-        prediction_entries = [
-            p for p in matrix_data["protocols"] if p["name"] == "polymarket" and p["category"] == "prediction"
-        ]
-        yield_entries = [
-            p for p in matrix_data["protocols"] if p["name"] == "polymarket" and p["category"] == "yield"
-        ]
-        assert len(prediction_entries) == 1, "polymarket must appear exactly once in prediction category"
-        assert prediction_entries[0]["chains"] == ["polygon"]
-        assert yield_entries == [], "polymarket must NOT also appear under yield"
+    def test_flash_loan_category_absent(self, matrix_data: dict) -> None:
+        categories = {p["category"] for p in matrix_data["protocols"]}
+        assert "flash_loan" not in categories
 
-    def test_filter_by_prediction_category(self, cli_runner: CliRunner) -> None:
-        """`almanak info matrix -c prediction` should return a non-empty list including polymarket."""
-        result = cli_runner.invoke(support_matrix, ["--json", "-c", "prediction"])
-        assert result.exit_code == 0
-        data = json.loads(result.output)
-        assert len(data["protocols"]) >= 1
-        names = {p["name"] for p in data["protocols"]}
-        assert "polymarket" in names
-        for p in data["protocols"]:
-            assert p["category"] == "prediction"
+    def test_polymarket_absent_from_matrix(self, matrix_data: dict) -> None:
+        """Polymarket must not surface while prediction is withheld."""
+        entries = [p for p in matrix_data["protocols"] if p["name"] == "polymarket"]
+        assert entries == [], "polymarket must not appear while prediction is disabled"
 
-    def test_prediction_in_supported_categories(self) -> None:
-        """`prediction` must be registered in SUPPORTED_CATEGORIES so the CLI
-        --category help text and any future centralized category validation
-        stay in sync with `_build_matrix()`."""
+    def test_balancer_absent_from_matrix(self, matrix_data: dict) -> None:
+        """Balancer (flash-loan-only venue) must not surface while flash loans
+        are withheld."""
+        entries = [p for p in matrix_data["protocols"] if p["name"] == "balancer"]
+        assert entries == [], "balancer must not appear while flash loans are disabled"
+
+    def test_filter_by_prediction_category_empty(self, cli_runner: CliRunner) -> None:
+        """`almanak info matrix -c prediction` should now match nothing."""
+        result = cli_runner.invoke(support_matrix, ["-c", "prediction"])
+        assert "No protocols match" in result.output or "No protocols match" in (result.stderr or "")
+
+    def test_filter_by_flash_loan_category_empty(self, cli_runner: CliRunner) -> None:
+        """`almanak info matrix -c flash_loan` should now match nothing."""
+        result = cli_runner.invoke(support_matrix, ["-c", "flash_loan"])
+        assert "No protocols match" in result.output or "No protocols match" in (result.stderr or "")
+
+    def test_disabled_categories_absent_from_supported(self) -> None:
+        """Neither category should be registered in SUPPORTED_CATEGORIES while
+        withheld; the underlying constants remain defined for easy re-enable."""
         from almanak.framework.cli.support_matrix import (
+            ACTION_FLASH_LOAN,
             ACTION_PREDICTION,
             SUPPORTED_CATEGORIES,
         )
 
         assert ACTION_PREDICTION == "prediction"
-        assert ACTION_PREDICTION in SUPPORTED_CATEGORIES
+        assert ACTION_FLASH_LOAN == "flash_loan"
+        assert ACTION_PREDICTION not in SUPPORTED_CATEGORIES
+        assert ACTION_FLASH_LOAN not in SUPPORTED_CATEGORIES
 
-    def test_category_help_text_includes_prediction(self) -> None:
-        """CLI --category help text must advertise the prediction category so
-        users discover the new filter via `almanak info matrix --help`."""
+    def test_category_help_text_excludes_disabled(self) -> None:
+        """CLI --category help text must not advertise the withheld categories."""
         opt = next(p for p in support_matrix.params if p.name == "category")
-        assert "prediction" in (opt.help or "")
+        assert "prediction" not in (opt.help or "")
+        assert "flash_loan" not in (opt.help or "")
 
 
 # =============================================================================

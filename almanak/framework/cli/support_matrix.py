@@ -55,14 +55,18 @@ ACTION_BRIDGE = "bridge"
 # stable order inside `_build_matrix()` and to derive the CLI --category help
 # text, so adding a new ACTION_* constant above only requires adding it here
 # once to flow through to the rendered table and CLI help.
+#
+# NOTE: `ACTION_PREDICTION` and `ACTION_FLASH_LOAN` are intentionally omitted
+# while those capabilities undergo further testing. The connectors stay
+# registered and the intents still compile/execute — they are simply not
+# advertised as supported in `almanak info matrix` (or the rendered docs)
+# until validation completes. Re-enable by adding the constants back here.
 SUPPORTED_CATEGORIES: tuple[str, ...] = (
     ACTION_SWAP,
     ACTION_LP,
     ACTION_LENDING,
     ACTION_PERPS,
     ACTION_YIELD,
-    ACTION_PREDICTION,
-    ACTION_FLASH_LOAN,
     ACTION_AGGREGATOR,
     ACTION_BRIDGE,
 )

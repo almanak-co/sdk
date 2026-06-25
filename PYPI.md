@@ -11,7 +11,7 @@ The Almanak SDK is a powerful Python library for developing, testing, and deploy
 - **Three-Tier State Management**: Automatic persistence with HOT/WARM/COLD tiers
 - **Comprehensive Backtesting**: PnL simulation, paper trading on Anvil forks, and parameter sweeps
 - **Multi-Chain Support**: Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Blast, Mantle, Berachain
-- **Protocol Integration**: Uniswap V3, Aave V3, Morpho Blue, GMX V2, Lido, Ethena, Polymarket, Kraken, and more
+- **Protocol Integration**: Uniswap V3, Aave V3, Morpho Blue, GMX V2, Lido, Ethena, Kraken, and more
 - **Non-Custodial Design**: Full control over your funds through Safe smart accounts
 
 ## Installation
@@ -81,14 +81,17 @@ Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Plasma, Blas
 
 ## Supported Protocols
 
-- **DEXs**: Uniswap V3, SushiSwap V3, PancakeSwap V3, TraderJoe V2, Aerodrome, Curve, Balancer
+- **DEXs**: Uniswap V3, SushiSwap V3, PancakeSwap V3, TraderJoe V2, Aerodrome, Curve
 - **Lending**: Aave V3, Morpho Blue, Compound V3, Spark
 - **Liquid Staking**: Lido, Ethena
 - **Yield**: Pendle
 - **Perpetuals**: GMX V2, Hyperliquid
-- **Prediction Markets**: Polymarket
 - **CEX Integration**: Kraken
 - **Aggregators**: Enso, LiFi
+
+> **Pending testing:** Prediction Markets (Polymarket) and Flash loans are
+> undergoing further validation and are temporarily withheld from the
+> supported matrix (`almanak info matrix`). Treat them as experimental.
 
 ## Contributing
 

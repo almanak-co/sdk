@@ -246,11 +246,11 @@ value is frozen at boot and is not hot-reloadable.
 | `UnstakeIntent` | Unstake tokens |
 | `PerpOpenIntent` | Open perpetuals position |
 | `PerpCloseIntent` | Close perpetuals position |
-| `FlashLoanIntent` | Flash loan operations |
+| `FlashLoanIntent` | Flash loan operations _(experimental — pending testing; not listed in `almanak info matrix`)_ |
 | `CollectFeesIntent` | Collect LP fees |
-| `PredictionBuyIntent` | Buy prediction market shares |
-| `PredictionSellIntent` | Sell prediction market shares |
-| `PredictionRedeemIntent` | Redeem prediction market winnings |
+| `PredictionBuyIntent` | Buy prediction market shares _(experimental — pending testing; not listed in `almanak info matrix`)_ |
+| `PredictionSellIntent` | Sell prediction market shares _(experimental — pending testing; not listed in `almanak info matrix`)_ |
+| `PredictionRedeemIntent` | Redeem prediction market winnings _(experimental — pending testing; not listed in `almanak info matrix`)_ |
 | `VaultDepositIntent` | Deposit into a vault |
 | `VaultRedeemIntent` | Redeem from a vault |
 | `WrapNativeIntent` | Wrap native tokens (e.g., ETH to WETH). Factory: `Intent.wrap()` |
