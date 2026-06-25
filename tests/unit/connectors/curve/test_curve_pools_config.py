@@ -133,10 +133,14 @@ def _query_coin_address(rpc_url: str, pool_address: str, index: int) -> str | No
     try:
         resp = httpx.post(rpc_url, json=payload, timeout=10)
         result = resp.json().get("result")
-        if not result or result == "0x" or len(result) < 66:
+        if not result or not result.startswith("0x") or result == "0x" or len(result) < 66:
             return None
-        # Extract address from 32-byte return value (last 20 bytes)
-        return "0x" + result[-40:]
+        # The address is the FIRST 32-byte ABI word (left-padded). Some Vyper
+        # pools (notably factory metapools) return extra trailing words, so
+        # slice the first word's low 20 bytes rather than the response tail —
+        # ``result[-40:]`` would grab trailing padding for a >32-byte response.
+        first_word = result[2:66]
+        return "0x" + first_word[24:]
     except (httpx.RequestError, KeyError, ValueError) as e:
         _logger.debug("RPC call failed for %s coins(%d): %s", pool_address, index, e)
         return None

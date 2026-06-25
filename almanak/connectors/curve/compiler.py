@@ -83,6 +83,198 @@ def _resolve_pool_by_asset_set(
     return matches[0]
 
 
+def _metapool_combined_coins(pool_data: dict[str, Any]) -> set[str]:
+    """Uppercased COMBINED coin symbols of a metapool (meta coin + base coins).
+
+    Returns the empty set for non-metapools. The combined space is
+    ``[coins[0]] + base_pool_coins`` (index 0 is the meta coin; the base-LP
+    token ``coins[1]`` is intentionally excluded — it is not a tradeable
+    underlying coin).
+    """
+    if not pool_data.get("is_metapool"):
+        return set()
+    coins = pool_data.get("coins") or []
+    if not coins:
+        # A metapool with no coins is a malformed registry entry; treat as having
+        # no combined space rather than raising on the index access.
+        return set()
+    meta_coin = coins[0]
+    base = pool_data.get("base_pool_coins") or []
+    return {str(meta_coin).upper(), *(str(c).upper() for c in base)}
+
+
+def _pair_on_metapool_underlying(from_symbol: str, to_symbol: str, pool_data: dict[str, Any]) -> bool:
+    """True when BOTH tokens live on the metapool's combined coin space."""
+    combined = _metapool_combined_coins(pool_data)
+    return from_symbol.upper() in combined and to_symbol.upper() in combined
+
+
+def _resolve_metapool_by_underlying_pair(
+    from_symbol: str,
+    to_symbol: str,
+    chain_pools: dict[str, dict[str, Any]],
+) -> tuple[str, dict[str, Any]] | None:
+    """Find the unique metapool whose combined coin space carries the pair.
+
+    Mirrors the SWAP native pool resolver but searches the COMBINED (underlying)
+    coin space of metapools. Returns ``(pool_name, pool_data)`` on a unique
+    match, else ``None``. Like the asset-set resolver, raises on ambiguity
+    rather than auto-picking (VIB-3946 discipline).
+    """
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for name, data in chain_pools.items():
+        if _pair_on_metapool_underlying(from_symbol, to_symbol, data):
+            matches.append((name, data))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        colliding = {name: data.get("address") for name, data in matches}
+        raise ValueError(
+            f"Ambiguous Curve metapool underlying swap {from_symbol}->{to_symbol}: matches "
+            f"{colliding}. Disambiguate via swap_params={{'pool': '0x...'}}."
+        )
+    return matches[0]
+
+
+def _metapool_data_for_address(
+    pool_address: str,
+    chain_pools: dict[str, dict[str, Any]],
+) -> tuple[str, dict[str, Any]] | None:
+    """Return ``(name, data)`` for a registered metapool by name or address, else ``None``."""
+    if pool_address in chain_pools and chain_pools[pool_address].get("is_metapool"):
+        return pool_address, chain_pools[pool_address]
+    for name, data in chain_pools.items():
+        if data.get("is_metapool") and str(data.get("address", "")).lower() == pool_address.lower():
+            return name, data
+    return None
+
+
+def _resolve_swap_pool_and_route(
+    from_symbol: str,
+    to_symbol: str,
+    swap_params: dict[str, Any],
+    chain_pools: dict[str, dict[str, Any]],
+) -> tuple[str | None, str, bool]:
+    """Resolve ``(pool_address, pool_name, use_metapool_underlying)`` for a Curve swap.
+
+    Pure pool selection — no ``ctx``, no adapter, no I/O. Mirrors the existing
+    module-level resolver helpers (blueprint 05 §6). Resolution order:
+
+    1. Explicit ``swap_params["pool"]`` (address) if given.
+    2. NATIVE pool whose ``coins`` carry both tokens.
+    3. Metapool UNDERLYING fallback (VIB-5419): a metapool whose COMBINED coin
+       space (meta coin + base-pool coins) carries the pair → route through
+       ``exchange_underlying`` (``use_metapool_underlying=True``).
+
+    When the pool was given/matched natively but the pair lives only on a
+    metapool's combined space, flips to the underlying route.
+
+    Returns ``pool_address=None`` when nothing carries the pair (the caller emits
+    the "No Curve pool found" error). Propagates ``ValueError`` on an ambiguous
+    metapool underlying match (the caller's ``except`` turns it into a FAILED
+    result — identical to the prior inline behaviour).
+    """
+    pool_address: str | None = swap_params.get("pool")
+    pool_name: str = ""
+    use_metapool_underlying = False
+
+    if not pool_address:
+        for name, pool_data in chain_pools.items():
+            coins_upper = [c.upper() for c in pool_data["coins"]]
+            if from_symbol.upper() in coins_upper and to_symbol.upper() in coins_upper:
+                pool_address = pool_data["address"]
+                pool_name = name
+                break
+
+    # Metapool underlying fallback (VIB-5419): no NATIVE pool carries the pair,
+    # but a metapool's COMBINED coin space (meta coin + base-pool coins) does.
+    # Only triggers when the native loop above found nothing, so non-meta
+    # behaviour is untouched.
+    if not pool_address:
+        meta_match = _resolve_metapool_by_underlying_pair(from_symbol, to_symbol, chain_pools)
+        if meta_match is not None:
+            pool_name, meta_data = meta_match
+            pool_address = meta_data["address"]
+            use_metapool_underlying = True
+
+    # When the pool was given explicitly (or matched a metapool nickname) and the
+    # pair lives on the combined space rather than the native coins, prefer the
+    # underlying route.
+    if pool_address and not use_metapool_underlying:
+        resolved_meta = _metapool_data_for_address(pool_address, chain_pools)
+        if resolved_meta is not None:
+            meta_name, meta_data = resolved_meta
+            native_coins = {c.upper() for c in meta_data["coins"]}
+            pair = {from_symbol.upper(), to_symbol.upper()}
+            if not pair.issubset(native_coins) and _pair_on_metapool_underlying(from_symbol, to_symbol, meta_data):
+                use_metapool_underlying = True
+                if not pool_name:
+                    pool_name = meta_name
+
+    return pool_address, pool_name, use_metapool_underlying
+
+
+def _resolve_lp_open_amounts(
+    intent: LPOpenIntent,
+    pool_data: dict[str, Any],
+    pool_name: str,
+    pool_address: str,
+    chain: str,
+) -> tuple[list[Decimal], bool] | str:
+    """Decide the LP_OPEN deposit vector and whether it is an underlying (zap) deposit.
+
+    Pure — reads only ``intent`` + static ``pool_data``. Returns
+    ``(amounts, is_underlying_deposit)`` on success, or an error STRING when a
+    ``coin_amounts`` vector has an invalid length (the caller builds the FAILED
+    result, keeping this helper free of ``ctx`` / ``CompilationResult`` — same
+    shape as ``_resolve_pool_by_asset_set`` returning ``None``-or-tuple).
+
+    Distinctions (VIB-5419 + VIB-5154):
+    - Metapool UNDERLYING deposit: a ``coin_amounts`` vector whose length matches
+      the COMBINED space (meta coin + base coins = ``n_coins`` is always the
+      native count, combined is ``1 + len(base_pool_coins)``), routed through the
+      zap. Native is always exactly ``n_coins``, so the two are unambiguous.
+    - Native pool-coin-aligned vector: ``coin_amounts`` length == ``n_coins``.
+    - Legacy two-slot: ``amount0`` / ``amount1`` -> indices 0/1, tail zero-filled.
+    """
+    n_coins = pool_data["n_coins"]
+    # Combined (underlying) coin-space size for a metapool: meta coin + base-pool
+    # coins. None for non-metapools.
+    combined_len: int | None = None
+    if pool_data.get("is_metapool"):
+        combined_len = 1 + len(pool_data.get("base_pool_coins") or [])
+
+    coin_amounts = getattr(intent, "coin_amounts", None)
+
+    is_underlying_deposit = coin_amounts is not None and combined_len is not None and len(coin_amounts) == combined_len
+    if is_underlying_deposit:
+        assert coin_amounts is not None  # narrowed by is_underlying_deposit
+        return ([Decimal(str(a)) for a in coin_amounts], True)
+
+    if coin_amounts is not None:
+        # Pool-coin-aligned full allocation vector (VIB-5154 / ALM-2728).
+        # coin_amounts[i] maps directly to pool coin index i, so non-leading
+        # coins (index 2+) can be funded without forcing index 0.
+        if len(coin_amounts) != n_coins:
+            meta_hint = (
+                f" (or {combined_len} for an underlying deposit via the zap)" if combined_len is not None else ""
+            )
+            return (
+                f"coin_amounts has {len(coin_amounts)} entries but Curve pool "
+                f"'{pool_name or pool_address}' on {chain} has {n_coins} coins{meta_hint}. "
+                f"coin_amounts must provide exactly one amount per pool coin, "
+                f"indexed as {pool_data.get('coins')}."
+            )
+        return ([Decimal(str(a)) for a in coin_amounts], False)
+
+    # Legacy two-slot mapping: amount0/amount1 -> indices 0/1, tail zero-filled.
+    # Unchanged behaviour for every existing caller.
+    amounts = [intent.amount0, intent.amount1]
+    while len(amounts) < n_coins:
+        amounts.append(Decimal("0"))
+    return (amounts, False)
+
+
 class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
     """Compiler for Curve pool-based swaps and fungible LP positions."""
 
@@ -171,20 +363,18 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 )
 
             swap_params = intent.swap_params if hasattr(intent, "swap_params") and intent.swap_params else {}
-            pool_address: str | None = swap_params.get("pool")
-            pool_name: str = ""
+            chain_pools = CURVE_POOLS.get(ctx.chain, {})
+
+            # Pool selection + route detection (native vs metapool-underlying).
+            # `use_metapool_underlying` is True when the resolved Curve pool is a
+            # metapool whose combined (underlying) coin space — not its native
+            # 2-coin space — carries the requested pair (e.g. FRAX -> USDC on a
+            # FRAX/3CRV metapool). Ambiguity raises ValueError, caught below.
+            pool_address, pool_name, use_metapool_underlying = _resolve_swap_pool_and_route(
+                from_token.symbol, to_token.symbol, swap_params, chain_pools
+            )
 
             if not pool_address:
-                chain_pools = CURVE_POOLS.get(ctx.chain, {})
-                for name, pool_data in chain_pools.items():
-                    coins_upper = [c.upper() for c in pool_data["coins"]]
-                    if from_token.symbol.upper() in coins_upper and to_token.symbol.upper() in coins_upper:
-                        pool_address = pool_data["address"]
-                        pool_name = name
-                        break
-
-            if not pool_address:
-                chain_pools = CURVE_POOLS.get(ctx.chain, {})
                 available = {name: d["coins"] for name, d in chain_pools.items()}
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
@@ -230,14 +420,27 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                     to_token.symbol,
                 )
 
-            swap_result = adapter.swap(
-                pool_address=pool_address,
-                token_in=from_token.symbol,
-                token_out=to_token.symbol,
-                amount_in=amount_decimal,
-                slippage_bps=slippage_bps,
-                price_ratio=price_ratio,
-            )
+            if use_metapool_underlying:
+                # Metapool combined-space swap via exchange_underlying. The
+                # combined coins are all USD stables, so price_ratio is not
+                # needed (the adapter uses the on-chain get_dy_underlying quote
+                # or a 1:1 decimal-adjusted estimate).
+                swap_result = adapter.swap_underlying(
+                    pool_address=pool_address,
+                    token_in=from_token.symbol,
+                    token_out=to_token.symbol,
+                    amount_in=amount_decimal,
+                    slippage_bps=slippage_bps,
+                )
+            else:
+                swap_result = adapter.swap(
+                    pool_address=pool_address,
+                    token_in=from_token.symbol,
+                    token_out=to_token.symbol,
+                    amount_in=amount_decimal,
+                    slippage_bps=slippage_bps,
+                    price_ratio=price_ratio,
+                )
 
             if not swap_result.success:
                 return CompilationResult(
@@ -361,41 +564,18 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
 
             n_coins = pool_data["n_coins"]
 
-            coin_amounts = getattr(intent, "coin_amounts", None)
-            if coin_amounts is not None:
-                # Pool-coin-aligned full allocation vector (VIB-5154 / ALM-2728).
-                # coin_amounts[i] maps directly to pool coin index i, so non-leading
-                # coins (index 2+) can be funded without forcing index 0. This is the
-                # only mapping that can express e.g. a Polygon 3pool deposit of USDC.e
-                # (idx 1) + USDT (idx 2) while leaving DAI (idx 0) at zero.
-                if len(coin_amounts) != n_coins:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            f"coin_amounts has {len(coin_amounts)} entries but Curve pool "
-                            f"'{pool_name or pool_address}' on {ctx.chain} has {n_coins} coins. "
-                            f"coin_amounts must provide exactly one amount per pool coin, "
-                            f"indexed as {pool_data.get('coins')}."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-                amounts: list[Decimal] = [Decimal(str(a)) for a in coin_amounts]
-            else:
-                # Legacy two-slot mapping: amount0/amount1 -> indices 0/1, tail zero-filled.
-                # Unchanged behaviour for every existing caller.
-                amounts = [intent.amount0, intent.amount1]
-                while len(amounts) < n_coins:
-                    amounts.append(Decimal("0"))
+            # Resolve the deposit vector + route (native vs metapool-underlying).
+            # Returns an error string on an invalid coin_amounts length.
+            amounts_or_error = _resolve_lp_open_amounts(intent, pool_data, pool_name, pool_address, ctx.chain)
+            if isinstance(amounts_or_error, str):
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=amounts_or_error,
+                    intent_id=intent.intent_id,
+                )
+            amounts, is_underlying_deposit = amounts_or_error
 
             slippage_bps = 50
-
-            logger.info(
-                "Compiling Curve LP_OPEN: pool=%s (%s), amounts=%s",
-                pool_name,
-                ctx.chain,
-                amounts,
-            )
-
             config = CurveConfig(
                 chain=ctx.chain,
                 wallet_address=ctx.wallet_address,
@@ -405,11 +585,25 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             )
             adapter = CurveAdapter(config)
 
-            liq_result = adapter.add_liquidity(
-                pool_address=pool_address,
-                amounts=amounts,
-                slippage_bps=slippage_bps,
+            logger.info(
+                "Compiling Curve LP_OPEN%s: pool=%s (%s), amounts=%s",
+                " (metapool underlying)" if is_underlying_deposit else "",
+                pool_name,
+                ctx.chain,
+                amounts,
             )
+            if is_underlying_deposit:
+                liq_result = adapter.add_liquidity_underlying(
+                    pool_address=pool_address,
+                    underlying_amounts=amounts,
+                    slippage_bps=slippage_bps,
+                )
+            else:
+                liq_result = adapter.add_liquidity(
+                    pool_address=pool_address,
+                    amounts=amounts,
+                    slippage_bps=slippage_bps,
+                )
 
             if not liq_result.success:
                 return CompilationResult(

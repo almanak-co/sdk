@@ -20,8 +20,11 @@ from almanak.connectors.curve.adapter import (
     CURVE_GAS_ESTIMATES,
     CURVE_POOLS,
     EXCHANGE_SELECTOR,
+    EXCHANGE_UNDERLYING_SELECTOR,
     REMOVE_LIQUIDITY_3_SELECTOR,
     REMOVE_LIQUIDITY_ONE_SELECTOR,
+    ZAP_ADD_LIQUIDITY_4_SELECTOR,
+    ZAP_REMOVE_LIQUIDITY_4_SELECTOR,
     CurveAdapter,
     CurveConfig,
     LiquidityResult,
@@ -1234,3 +1237,236 @@ class TestQueryCalcTokenAmountNGOnchain:
             ) as mocked:
                 adapter._estimate_add_liquidity(pool_info, amounts=[10 * 10**18, 10 * 10**6])
         mocked.assert_not_called()
+
+
+# =============================================================================
+# Metapool Tier B tests (VIB-5419)
+# =============================================================================
+
+# FRAX/3CRV factory metapool. Native coins: FRAX(0), 3CRV(1). Combined coin
+# space: FRAX(0), DAI(1), USDC(2), USDT(3). The metapool IS its own LP token.
+_META = "frax_3crv"
+_META_ADDR = "0xd632f22692FaC7611d2AA1C0D552930D43CAEd3B"
+_ZAP_ADDR = "0xA79828DF1850E8a3A3064576f380D90aECDD3359"
+_DAI_ADDR = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+
+
+def _word(calldata: str, index: int) -> int:
+    """Decode the ``index``-th 32-byte word of calldata (after the 4-byte selector)."""
+    body = calldata[10:]  # strip "0x" + 8 hex selector chars
+    start = index * 64
+    return int(body[start : start + 64], 16)
+
+
+class TestUnderlyingCoinIndex:
+    """PoolInfo.underlying_coin_index + _match_coin (metapool combined space)."""
+
+    def test_meta_coin_index_zero(self, adapter: CurveAdapter) -> None:
+        pool = adapter.get_pool_by_name(_META)
+        assert pool is not None
+        assert pool.underlying_coin_index("FRAX") == 0
+        # also resolvable by the meta coin's address
+        assert pool.underlying_coin_index(pool.coin_addresses[0]) == 0
+
+    def test_base_coin_indices(self, adapter: CurveAdapter) -> None:
+        pool = adapter.get_pool_by_name(_META)
+        assert pool is not None
+        assert pool.underlying_coin_index("DAI") == 1
+        assert pool.underlying_coin_index("USDC") == 2
+        assert pool.underlying_coin_index("USDT") == 3
+        # by address (DAI is combined index 1)
+        assert pool.underlying_coin_index(_DAI_ADDR) == 1
+
+    def test_base_lp_token_excluded(self, adapter: CurveAdapter) -> None:
+        """3CRV is the native coins[1] base-LP token, NOT a combined-space coin."""
+        pool = adapter.get_pool_by_name(_META)
+        assert pool is not None
+        assert pool.underlying_coin_index("3CRV") is None
+
+    def test_absent_coin_returns_none(self, adapter: CurveAdapter) -> None:
+        pool = adapter.get_pool_by_name(_META)
+        assert pool is not None
+        assert pool.underlying_coin_index("WETH") is None
+
+    def test_non_metapool_returns_none(self, adapter: CurveAdapter) -> None:
+        pool = adapter.get_pool_by_name("3pool")
+        assert pool is not None
+        assert pool.underlying_coin_index("DAI") is None
+
+
+class TestSwapUnderlying:
+    """CurveAdapter.swap_underlying (metapool exchange_underlying)."""
+
+    def test_swap_underlying_success(self, adapter: CurveAdapter) -> None:
+        adapter.clear_allowance_cache()
+        result = adapter.swap_underlying(
+            pool_address=_META_ADDR,
+            token_in="FRAX",
+            token_out="USDT",
+            amount_in=Decimal("50"),
+        )
+        assert result.success is True, result.error
+        assert len(result.transactions) == 2  # approve + swap
+        assert result.transactions[0].tx_type == "approve"
+        swap_tx = result.transactions[1]
+        assert swap_tx.tx_type == "swap"
+        assert swap_tx.to == _META_ADDR
+        assert swap_tx.data.startswith(EXCHANGE_UNDERLYING_SELECTOR)
+        # combined indices: i=0 (FRAX), j=3 (USDT)
+        assert _word(swap_tx.data, 0) == 0
+        assert _word(swap_tx.data, 1) == 3
+
+    def test_swap_underlying_non_metapool_error(self, adapter: CurveAdapter) -> None:
+        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        result = adapter.swap_underlying(
+            pool_address=pool_address, token_in="DAI", token_out="USDC", amount_in=Decimal("10")
+        )
+        assert result.success is False
+        assert "requires a metapool" in (result.error or "")
+
+    def test_swap_underlying_coin_not_on_combined_space(self, adapter: CurveAdapter) -> None:
+        result = adapter.swap_underlying(
+            pool_address=_META_ADDR, token_in="FRAX", token_out="WETH", amount_in=Decimal("10")
+        )
+        assert result.success is False
+        assert "not on metapool" in (result.error or "")
+
+    def test_swap_underlying_same_coin_error(self, adapter: CurveAdapter) -> None:
+        result = adapter.swap_underlying(
+            pool_address=_META_ADDR, token_in="DAI", token_out="DAI", amount_in=Decimal("10")
+        )
+        assert result.success is False
+        assert "same coin" in (result.error or "")
+
+    def test_swap_underlying_estimate_offline(self, adapter: CurveAdapter) -> None:
+        """No rpc/gateway -> 1:1 decimal-adjusted stable estimate (FRAX 18 -> USDT 6)."""
+        adapter.clear_allowance_cache()
+        result = adapter.swap_underlying(
+            pool_address=_META_ADDR, token_in="FRAX", token_out="USDT", amount_in=Decimal("50")
+        )
+        assert result.success is True
+        amount_in_wei = int(Decimal("50") * Decimal(10**18))
+        # 18 -> 6 decimals: divide by 10**12
+        assert result.amount_out_estimate == amount_in_wei // (10**12)
+        assert result.amount_out_minimum > 0
+
+
+class TestAddLiquidityUnderlying:
+    """CurveAdapter.add_liquidity_underlying (generic zap)."""
+
+    def test_add_liquidity_underlying_success(self, adapter: CurveAdapter) -> None:
+        adapter.clear_allowance_cache()
+        result = adapter.add_liquidity_underlying(
+            pool_address=_META_ADDR,
+            underlying_amounts=[Decimal("100"), Decimal("100"), Decimal("0"), Decimal("0")],
+        )
+        assert result.success is True, result.error
+        assert result.operation == "add_liquidity_underlying"
+        zap_txs = [tx for tx in result.transactions if tx.to == _ZAP_ADDR]
+        assert len(zap_txs) == 1
+        zap_tx = zap_txs[0]
+        assert zap_tx.data.startswith(ZAP_ADD_LIQUIDITY_4_SELECTOR)
+        # first arg is the POOL address (generic zap signature)
+        assert _word(zap_tx.data, 0) == int(_META_ADDR, 16)
+
+    def test_add_liquidity_underlying_wrong_length(self, adapter: CurveAdapter) -> None:
+        result = adapter.add_liquidity_underlying(
+            pool_address=_META_ADDR,
+            underlying_amounts=[Decimal("100"), Decimal("100"), Decimal("0")],  # 3 != combined 4
+        )
+        assert result.success is False
+        assert "combined coin space has 4" in (result.error or "")
+
+    def test_add_liquidity_underlying_non_metapool(self, adapter: CurveAdapter) -> None:
+        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        result = adapter.add_liquidity_underlying(
+            pool_address=pool_address, underlying_amounts=[Decimal("1"), Decimal("1")]
+        )
+        assert result.success is False
+        assert "is not a metapool" in (result.error or "")
+
+    def test_add_liquidity_underlying_min_lp_offline(self, adapter: CurveAdapter) -> None:
+        """No rpc -> sum/virtual_price fallback yields a positive min-LP estimate."""
+        adapter.clear_allowance_cache()
+        result = adapter.add_liquidity_underlying(
+            pool_address=_META_ADDR,
+            underlying_amounts=[Decimal("100"), Decimal("100"), Decimal("0"), Decimal("0")],
+        )
+        assert result.success is True
+        assert result.lp_amount > 0
+
+
+class TestRemoveLiquidityUnderlying:
+    """CurveAdapter.remove_liquidity_underlying (generic zap)."""
+
+    def test_remove_liquidity_underlying_fail_closed_no_rpc(self, adapter: CurveAdapter) -> None:
+        """No rpc/gateway -> all-zero min_amounts -> fail closed."""
+        result = adapter.remove_liquidity_underlying(pool_address=_META_ADDR, lp_amount=Decimal("1000"))
+        assert result.success is False
+        assert "cannot compute slippage protection" in (result.error or "")
+        assert "not configured" in (result.error or "")
+
+    def test_remove_liquidity_underlying_non_metapool(self, adapter: CurveAdapter) -> None:
+        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        result = adapter.remove_liquidity_underlying(pool_address=pool_address, lp_amount=Decimal("1000"))
+        assert result.success is False
+        assert "is not a metapool" in (result.error or "")
+
+    def test_remove_liquidity_underlying_success_with_rpc(self) -> None:
+        """rpc-configured: metapool native split + base-pool decomposition -> 4 combined amounts.
+
+        Read order in _estimate_remove_liquidity_underlying:
+          1. _query_proportional_amounts_onchain(metapool): totalSupply, balances(0)=FRAX, balances(1)=3CRV
+          2. _query_base_pool_underlying_amounts -> _query_proportional_amounts_onchain(3pool):
+             totalSupply, balances(0..2) = DAI/USDC/USDT
+        = 7 mocked eth_calls in order.
+        """
+        from unittest.mock import MagicMock, patch
+
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            rpc_url="http://localhost:8545",
+        )
+        adapter = CurveAdapter(config)
+
+        meta_total_supply = 575_000 * 10**18
+        meta_frax_balance = 531_000 * 10**18
+        meta_3crv_balance = 53_000 * 10**18
+        base_total_supply = 100_000_000 * 10**18
+        base_dai = 10_000_000 * 10**18
+        base_usdc = 56_000_000 * 10**6
+        base_usdt = 37_000_000 * 10**6
+
+        def _hex(v: int) -> str:
+            return "0x" + hex(v)[2:].zfill(64)
+
+        def mock_resp(v: int) -> MagicMock:
+            m = MagicMock()
+            m.raise_for_status = MagicMock()
+            m.json.return_value = {"jsonrpc": "2.0", "id": 1, "result": _hex(v)}
+            return m
+
+        rpc_responses = [
+            mock_resp(meta_total_supply),
+            mock_resp(meta_frax_balance),
+            mock_resp(meta_3crv_balance),
+            mock_resp(base_total_supply),
+            mock_resp(base_dai),
+            mock_resp(base_usdc),
+            mock_resp(base_usdt),
+        ]
+
+        with patch("httpx.post", side_effect=rpc_responses):
+            result = adapter.remove_liquidity_underlying(pool_address=_META_ADDR, lp_amount=Decimal("1000"))
+
+        assert result.success is True, result.error
+        assert result.operation == "remove_liquidity_underlying"
+        zap_txs = [tx for tx in result.transactions if tx.to == _ZAP_ADDR]
+        assert len(zap_txs) == 1
+        assert zap_txs[0].data.startswith(ZAP_REMOVE_LIQUIDITY_4_SELECTOR)
+        # first arg is the POOL address
+        assert _word(zap_txs[0].data, 0) == int(_META_ADDR, 16)
+        # combined min-amounts vector: [meta, DAI, USDC, USDT] all > 0
+        assert len(result.amounts) == 4
+        assert all(a > 0 for a in result.amounts)

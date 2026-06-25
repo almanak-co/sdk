@@ -135,6 +135,58 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
             "n_coins": 3,
             "virtual_price": Decimal("1.0"),
         },
+        # FRAX/3CRV factory metapool (VIB-5419).
+        # A Curve metapool is NATIVELY a 2-coin StableSwap pool whose coins are
+        # [meta coin, base-pool LP token]: here coins(0)=FRAX, coins(1)=3CRV.
+        # The metapool IS its own LP token (FRAX3CRV-f), so lp_token == address.
+        # Coin order verified on-chain 2026-06-25 via cast call coins(0..1):
+        #   coins(0) = FRAX (0x853d..., 18 dec)
+        #   coins(1) = 3CRV (0x6c3F..., 18 dec — the 3pool LP token)
+        #   get_virtual_price() = 1020475713094786446 -> 1.0205
+        #
+        # Two interfaces (see PoolInfo.is_metapool):
+        #   - Native 2-coin: add_liquidity([fraxAmt, 3crvAmt], min) / exchange(0,1,...)
+        #     — handled by the SAME flat-pool code paths as any 2-coin StableSwap
+        #     (Tier A). The base LP token (3CRV) is just coins[1].
+        #   - Underlying (combined coin space, index 0=FRAX, 1..3=DAI/USDC/USDT):
+        #     exchange_underlying(i,j,...) is on the metapool itself; the combined
+        #     add_liquidity/remove_liquidity route through the generic 3CRV
+        #     DepositZap (zap_address below) whose ABI takes the POOL as the first
+        #     arg (Tier B).
+        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query get_virtual_price() at runtime.
+        # ACCOUNTING NOTE (VIB-5420): coins[1] (3CRV) is a base-LP token, NOT a
+        # price-oracle symbol — valuing the native LP's base-LP leg to underlying
+        # USD needs a base-pool decomposition / virtual_price mark not yet wired.
+        "frax_3crv": {
+            "address": "0xd632f22692FaC7611d2AA1C0D552930D43CAEd3B",
+            "lp_token": "0xd632f22692FaC7611d2AA1C0D552930D43CAEd3B",  # metapool IS its own LP token
+            "coins": ["FRAX", "3CRV"],
+            "coin_addresses": [
+                "0x853d955aCEf822Db058eb8505911ED77F175b99e",  # FRAX (meta coin)
+                "0x6c3F90f043a72FA612cbac8115EE7e52BDe6E490",  # 3CRV (base-pool LP token)
+            ],
+            "pool_type": "stableswap",
+            "n_coins": 2,
+            "virtual_price": Decimal("1.0205"),
+            "is_metapool": True,
+            "base_pool": "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7",  # 3pool
+            # Underlying coins exposed by the combined interface, in COMBINED index
+            # order MINUS the meta coin: i.e. base_pool_coins[k] is combined index
+            # k+1 (combined index 0 is always the meta coin). Here 3pool order:
+            #   combined 1 = DAI, combined 2 = USDC, combined 3 = USDT.
+            "base_pool_coins": ["DAI", "USDC", "USDT"],
+            "base_pool_coin_addresses": [
+                "0x6B175474E89094C44Da98b954EedeAC495271d0F",  # DAI
+                "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",  # USDC
+                "0xdAC17F958D2ee523a2206206994597C13D831ec7",  # USDT
+            ],
+            # Generic 3CRV DepositZap (Curve metapool deposit/withdraw zap).
+            # ABI: add_liquidity(address _pool, uint256[4], uint256),
+            #      remove_liquidity(address _pool, uint256, uint256[4]),
+            #      calc_token_amount(address _pool, uint256[4], bool).
+            # The POOL address is the FIRST arg (generic zap, not pool-specific).
+            "zap_address": "0xA79828DF1850E8a3A3064576f380D90aECDD3359",
+        },
     },
     "arbitrum": {
         "2pool": {
@@ -285,6 +337,15 @@ CURVE_GAS_ESTIMATES: dict[str, int] = {
     "approve": 65000,  # 65K to accommodate proxy tokens (USDC FiatTokenProxy ~56-65K)
     "exchange": 500000,
     "exchange_underlying": 300000,
+    # Metapool exchange_underlying routes a leg through the BASE pool (two pools,
+    # extra SLOADs/SSTOREs), so it costs more than a flat aave-type
+    # exchange_underlying — measured ~284K on FRAX/3CRV. 300K is too tight a
+    # limit for the orchestrator's cap; 600K gives safe headroom (VIB-5419).
+    "exchange_underlying_metapool": 600000,
+    # Metapool zap add/remove deposit into the base pool AND the metapool, so
+    # they cost more than a single flat add/remove. 700K headroom.
+    "metapool_zap_add_liquidity": 700000,
+    "metapool_zap_remove_liquidity": 600000,
     "add_liquidity_2": 250000,
     "add_liquidity_3": 350000,
     "add_liquidity_4": 450000,
@@ -311,6 +372,17 @@ GET_DY_SELECTOR = "0x5e0d443f"  # get_dy(int128,int128,uint256)
 GET_DY_UINT256_SELECTOR = "0x556d6e9f"  # get_dy(uint256,uint256,uint256)
 GET_DY_UNDERLYING_SELECTOR = "0x07211ef7"  # get_dy_underlying(int128,int128,uint256)
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
+
+# Metapool generic-zap selectors (VIB-5419 — Tier B underlying routing).
+# The generic 3CRV DepositZap takes the POOL address as the FIRST argument, so
+# its add/remove/calc selectors differ from the pool-direct ones above. The
+# `_deposit_amounts` / `_min_amounts` arrays span the COMBINED coin space
+# (index 0 = meta coin, 1..N = base-pool coins). N_COINS+1 is the array length;
+# the FRAX/3CRV zap is fixed at uint256[4] (1 meta + 3 base coins).
+ZAP_ADD_LIQUIDITY_4_SELECTOR = "0x384e03db"  # add_liquidity(address,uint256[4],uint256)
+ZAP_REMOVE_LIQUIDITY_4_SELECTOR = "0xad5cc918"  # remove_liquidity(address,uint256,uint256[4])
+ZAP_CALC_TOKEN_AMOUNT_4_SELECTOR = "0x861cdef0"  # calc_token_amount(address,uint256[4],bool)
+ZAP_GET_DY_UNDERLYING_SELECTOR = "0x07211ef7"  # exchange_underlying lives on the metapool itself
 
 # Max uint256 for unlimited approvals
 MAX_UINT256 = 2**256 - 1
@@ -409,6 +481,55 @@ class PoolInfo:
     # Optimism crvUSD/USDC pool (0x03771e24…) on 2026-05-26 confirmed only the
     # dynamic-array selectors are present.
     is_ng: bool = False
+    # Metapool support (VIB-5419). A Curve metapool is NATIVELY a 2-coin pool
+    # `[meta coin, base-pool LP token]` (coins[1] is itself an LP token like
+    # 3CRV). All native operations (`add_liquidity([meta, baseLP])`,
+    # `exchange(0, 1)`, `remove_liquidity`) reuse the flat 2-coin paths
+    # unchanged (Tier A). The fields below describe the UNDERLYING / combined
+    # coin space (index 0 = meta coin, 1..N = base-pool coins) reached through
+    # the generic deposit zap and the metapool's own `exchange_underlying`
+    # (Tier B). All additive — non-meta pools keep `is_metapool=False` and
+    # ignore the rest.
+    is_metapool: bool = False
+    base_pool: str | None = None  # base-pool contract address (e.g. 3pool)
+    base_pool_coins: list[str] | None = None  # underlying symbols, combined index 1..N
+    base_pool_coin_addresses: list[str] | None = None  # underlying addresses, combined index 1..N
+    zap_address: str | None = None  # generic deposit zap (pool is first arg)
+
+    @staticmethod
+    def _match_coin(coin: str, symbols: list[str], addresses: list[str]) -> int | None:
+        """Index of ``coin`` in the parallel symbol / address lists, or ``None``.
+
+        Matches case-insensitively by symbol first, then by address — so a caller
+        may pass either form. ``symbols`` and ``addresses`` are positionally
+        aligned (entry ``k`` is the same coin in both); a match in either list
+        returns that shared index.
+        """
+        for k, sym in enumerate(symbols):
+            if sym.upper() == coin.upper():
+                return k
+        for k, addr in enumerate(addresses):
+            if addr.lower() == coin.lower():
+                return k
+        return None
+
+    def underlying_coin_index(self, coin: str) -> int | None:
+        """Return the COMBINED-space index of ``coin`` for a metapool, or ``None``.
+
+        Combined index 0 is always the meta coin (``coins[0]``); indices 1..N map
+        to ``base_pool_coins`` / ``base_pool_coin_addresses`` in order. ``coin``
+        may be a symbol or an address. Returns ``None`` when this is not a
+        metapool or ``coin`` is neither the meta coin nor a base-pool coin — the
+        caller then falls back to the native 2-coin path.
+        """
+        if not self.is_metapool:
+            return None
+        # Combined coin space = [meta coin, *base-pool coins], so combined index 0
+        # is coins[0] and base coin k lands at k+1 — preserved by ordering the
+        # meta coin first in both parallel lists.
+        combined_syms = [self.coins[0], *(self.base_pool_coins or [])]
+        combined_addrs = [self.coin_addresses[0], *(self.base_pool_coin_addresses or [])]
+        return self._match_coin(coin, combined_syms, combined_addrs)
 
     def get_coin_index(self, coin: str) -> int:
         """Get the index of a coin in the pool.
@@ -447,6 +568,11 @@ class PoolInfo:
             "virtual_price": str(self.virtual_price),
             "use_underlying": self.use_underlying,
             "is_ng": self.is_ng,
+            "is_metapool": self.is_metapool,
+            "base_pool": self.base_pool,
+            "base_pool_coins": self.base_pool_coins,
+            "base_pool_coin_addresses": self.base_pool_coin_addresses,
+            "zap_address": self.zap_address,
         }
 
 
@@ -652,6 +778,11 @@ class CurveAdapter:
                     virtual_price=pool_data.get("virtual_price", Decimal("1.0")),
                     use_underlying=pool_data.get("use_underlying", False),
                     is_ng=pool_data.get("is_ng", False),
+                    is_metapool=pool_data.get("is_metapool", False),
+                    base_pool=pool_data.get("base_pool"),
+                    base_pool_coins=pool_data.get("base_pool_coins"),
+                    base_pool_coin_addresses=pool_data.get("base_pool_coin_addresses"),
+                    zap_address=pool_data.get("zap_address"),
                 )
         return None
 
@@ -677,6 +808,11 @@ class CurveAdapter:
                 virtual_price=pool_data.get("virtual_price", Decimal("1.0")),
                 use_underlying=pool_data.get("use_underlying", False),
                 is_ng=pool_data.get("is_ng", False),
+                is_metapool=pool_data.get("is_metapool", False),
+                base_pool=pool_data.get("base_pool"),
+                base_pool_coins=pool_data.get("base_pool_coins"),
+                base_pool_coin_addresses=pool_data.get("base_pool_coin_addresses"),
+                zap_address=pool_data.get("zap_address"),
             )
         return None
 
@@ -1108,6 +1244,466 @@ class CurveAdapter:
         except Exception as e:
             logger.exception(f"Failed to build remove_liquidity_one_coin: {e}")
             return LiquidityResult(success=False, error=str(e))
+
+    # =========================================================================
+    # Metapool Underlying (Zap) Operations — Tier B (VIB-5419)
+    # =========================================================================
+
+    def swap_underlying(
+        self,
+        pool_address: str,
+        token_in: str,
+        token_out: str,
+        amount_in: Decimal,
+        slippage_bps: int | None = None,
+        recipient: str | None = None,
+    ) -> SwapResult:
+        """Build a metapool underlying swap via ``exchange_underlying``.
+
+        Routes a swap across the COMBINED coin space of a metapool (index 0 =
+        meta coin, 1..N = base-pool coins) — e.g. FRAX -> USDC through a
+        FRAX/3CRV metapool. ``exchange_underlying`` lives on the metapool
+        contract itself (NOT the zap); the metapool transparently routes the
+        leg through its base pool.
+
+        Stablecoin-only assumption: every coin on a 3CRV/FRAX-style metapool's
+        combined space is a USD stable, so the 1:1 decimal-adjusted estimate
+        (the same the StableSwap path uses) is the correct slippage floor, and
+        the on-chain ``get_dy_underlying`` quote is preferred when a gateway /
+        rpc is wired.
+        """
+        try:
+            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            recipient = recipient or self.wallet_address
+
+            pool_info = self.get_pool_info(pool_address)
+            if not pool_info:
+                return SwapResult(success=False, error=f"Unknown pool: {pool_address}")
+            if not pool_info.is_metapool:
+                return SwapResult(
+                    success=False,
+                    error=f"swap_underlying requires a metapool; {pool_info.name} is not one",
+                )
+
+            i = pool_info.underlying_coin_index(token_in)
+            j = pool_info.underlying_coin_index(token_out)
+            if i is None or j is None:
+                return SwapResult(
+                    success=False,
+                    error=(
+                        f"Underlying swap {token_in}->{token_out} not on metapool "
+                        f"{pool_info.name} combined coin space "
+                        f"[{pool_info.coins[0]}]+{pool_info.base_pool_coins}"
+                    ),
+                )
+            if i == j:
+                return SwapResult(success=False, error="token_in and token_out resolve to the same coin")
+
+            token_in_address = self._underlying_coin_address(pool_info, i)
+            token_out_address = self._underlying_coin_address(pool_info, j)
+            token_in_symbol = self._underlying_coin_symbol(pool_info, i)
+            token_out_symbol = self._underlying_coin_symbol(pool_info, j)
+
+            token_in_decimals = self._get_token_decimals(token_in_symbol)
+            amount_in_wei = int(amount_in * Decimal(10**token_in_decimals))
+
+            # Quote on-chain via get_dy_underlying when available; otherwise use
+            # the stable 1:1 decimal-adjusted estimate.
+            amount_out_estimate = self._estimate_underlying_swap_output(
+                pool_info, i, j, amount_in_wei, token_in_symbol, token_out_symbol
+            )
+            amount_out_minimum = max(1, int(amount_out_estimate * (10000 - slippage_bps) // 10000))
+            token_out_decimals = self._get_token_decimals(token_out_symbol)
+
+            transactions: list[TransactionData] = []
+            approve_tx = self._build_approve_tx(token_in_address, pool_address, amount_in_wei)
+            if approve_tx is not None:
+                transactions.append(approve_tx)
+
+            # exchange_underlying(int128 i, int128 j, uint256 dx, uint256 min_dy)
+            calldata = (
+                EXCHANGE_UNDERLYING_SELECTOR
+                + self._pad_int128(i)
+                + self._pad_int128(j)
+                + self._pad_uint256(amount_in_wei)
+                + self._pad_uint256(amount_out_minimum)
+            )
+            transactions.append(
+                TransactionData(
+                    to=pool_address,
+                    value=0,
+                    data=calldata,
+                    gas_estimate=CURVE_GAS_ESTIMATES["exchange_underlying_metapool"],
+                    description=f"Curve metapool underlying swap {token_in_symbol} -> {token_out_symbol}",
+                    tx_type="swap",
+                )
+            )
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            logger.info(
+                "Built Curve metapool underlying swap: %s(%d) -> %s(%d), pool=%s, amount_in=%s",
+                token_in_symbol,
+                i,
+                token_out_symbol,
+                j,
+                pool_info.name,
+                amount_in,
+            )
+            return SwapResult(
+                success=True,
+                transactions=transactions,
+                pool_address=pool_address,
+                amount_in=amount_in_wei,
+                amount_out_minimum=amount_out_minimum,
+                amount_out_estimate=amount_out_estimate,
+                token_out_decimals=token_out_decimals,
+                token_in=token_in_address,
+                token_out=token_out_address,
+                gas_estimate=total_gas,
+            )
+        except Exception as e:
+            logger.exception(f"Failed to build Curve metapool underlying swap: {e}")
+            return SwapResult(success=False, error=str(e))
+
+    def add_liquidity_underlying(
+        self,
+        pool_address: str,
+        underlying_amounts: list[Decimal],
+        slippage_bps: int | None = None,
+        recipient: str | None = None,
+    ) -> LiquidityResult:
+        """Build a metapool deposit over the COMBINED coin space via the zap.
+
+        ``underlying_amounts`` is indexed in COMBINED order: index 0 = meta coin,
+        indices 1..N = base-pool coins (DAI/USDC/USDT). The generic 3CRV
+        DepositZap's ABI takes the metapool as the first argument:
+        ``add_liquidity(address _pool, uint256[N+1] _deposit, uint256 _min_mint)``.
+        It deposits the base coins into the base pool (minting the base-LP), then
+        the base-LP plus the meta coin into the metapool — a user only has to
+        hold/approve the underlying coins.
+        """
+        try:
+            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            recipient = recipient or self.wallet_address
+
+            pool_info = self.get_pool_info(pool_address)
+            if not pool_info:
+                return LiquidityResult(success=False, error=f"Unknown pool: {pool_address}")
+            zap, combined_len = self._require_metapool_zap(pool_info)
+
+            if len(underlying_amounts) != combined_len:
+                return LiquidityResult(
+                    success=False,
+                    error=(
+                        f"underlying_amounts has {len(underlying_amounts)} entries but metapool "
+                        f"'{pool_info.name}' combined coin space has {combined_len} "
+                        f"([{pool_info.coins[0]}]+{pool_info.base_pool_coins})"
+                    ),
+                )
+
+            amounts_wei: list[int] = []
+            for idx, amt in enumerate(underlying_amounts):
+                decimals = self._get_token_decimals(self._underlying_coin_symbol(pool_info, idx))
+                amounts_wei.append(int(amt * Decimal(10**decimals)))
+
+            min_lp_tokens = self._estimate_add_liquidity_underlying(pool_info, zap, amounts_wei)
+            min_lp_tokens = int(min_lp_tokens * (10000 - slippage_bps) // 10000)
+
+            transactions: list[TransactionData] = []
+            for idx, amount_wei in enumerate(amounts_wei):
+                if amount_wei > 0:
+                    coin_addr = self._underlying_coin_address(pool_info, idx)
+                    approve_tx = self._build_approve_tx(coin_addr, zap, amount_wei)
+                    if approve_tx is not None:
+                        transactions.append(approve_tx)
+
+            # add_liquidity(address _pool, uint256[4] _deposit_amounts, uint256 _min_mint_amount)
+            calldata = ZAP_ADD_LIQUIDITY_4_SELECTOR + self._pad_address(pool_address)
+            for amount in amounts_wei:
+                calldata += self._pad_uint256(amount)
+            calldata += self._pad_uint256(min_lp_tokens)
+            transactions.append(
+                TransactionData(
+                    to=zap,
+                    value=0,
+                    data=calldata,
+                    gas_estimate=CURVE_GAS_ESTIMATES["metapool_zap_add_liquidity"],
+                    description=f"Add underlying liquidity to Curve metapool {pool_info.name} (zap)",
+                    tx_type="add_liquidity",
+                )
+            )
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            logger.info(
+                "Built Curve metapool zap add_liquidity: pool=%s, underlying_amounts=%s, min_lp=%s",
+                pool_info.name,
+                underlying_amounts,
+                min_lp_tokens,
+            )
+            return LiquidityResult(
+                success=True,
+                transactions=transactions,
+                pool_address=pool_address,
+                operation="add_liquidity_underlying",
+                amounts=amounts_wei,
+                lp_amount=min_lp_tokens,
+                gas_estimate=total_gas,
+            )
+        except Exception as e:
+            logger.exception(f"Failed to build metapool add_liquidity_underlying: {e}")
+            return LiquidityResult(success=False, error=str(e))
+
+    def remove_liquidity_underlying(
+        self,
+        pool_address: str,
+        lp_amount: Decimal,
+        slippage_bps: int | None = None,
+        recipient: str | None = None,
+    ) -> LiquidityResult:
+        """Build a metapool proportional withdrawal to underlying coins via the zap.
+
+        Burns ``lp_amount`` metapool LP and returns the COMBINED underlying coins
+        (meta coin + base-pool coins) using the generic zap's
+        ``remove_liquidity(address _pool, uint256 _amount, uint256[N+1] _min_amounts)``.
+        The min-amounts vector is derived from the metapool's native proportional
+        split (meta coin + base-LP), then the base-LP leg is decomposed across the
+        base pool's coins by its on-chain reserves. When the on-chain reads are
+        unavailable, fails closed (no slippage floor) — mirrors the native
+        ``remove_liquidity`` guard.
+        """
+        try:
+            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            recipient = recipient or self.wallet_address
+
+            pool_info = self.get_pool_info(pool_address)
+            if not pool_info:
+                return LiquidityResult(success=False, error=f"Unknown pool: {pool_address}")
+            zap, combined_len = self._require_metapool_zap(pool_info)
+
+            lp_amount_wei = int(lp_amount * Decimal(10**18))
+
+            self._last_estimation_error = None
+            min_amounts = self._estimate_remove_liquidity_underlying(pool_info, lp_amount_wei)
+            min_amounts = [int(a * (10000 - slippage_bps) // 10000) for a in min_amounts]
+
+            if all(a == 0 for a in min_amounts):
+                reason = self._last_estimation_error or "unknown"
+                return LiquidityResult(
+                    success=False,
+                    error=(
+                        f"remove_liquidity_underlying: cannot compute slippage protection "
+                        f"(min_amounts are all zero). Cause: {reason}. "
+                        f"Set CurveConfig.gateway_client for on-chain estimation."
+                    ),
+                )
+
+            transactions: list[TransactionData] = []
+            # The zap pulls the metapool LP from the caller, so approve the LP
+            # token (== metapool address) to the zap.
+            approve_tx = self._build_approve_tx(pool_info.lp_token, zap, lp_amount_wei)
+            if approve_tx is not None:
+                transactions.append(approve_tx)
+
+            # remove_liquidity(address _pool, uint256 _amount, uint256[4] _min_amounts)
+            calldata = (
+                ZAP_REMOVE_LIQUIDITY_4_SELECTOR + self._pad_address(pool_address) + self._pad_uint256(lp_amount_wei)
+            )
+            for min_amount in min_amounts:
+                calldata += self._pad_uint256(min_amount)
+            transactions.append(
+                TransactionData(
+                    to=zap,
+                    value=0,
+                    data=calldata,
+                    gas_estimate=CURVE_GAS_ESTIMATES["metapool_zap_remove_liquidity"],
+                    description=f"Remove underlying liquidity from Curve metapool {pool_info.name} (zap)",
+                    tx_type="remove_liquidity",
+                )
+            )
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+            logger.info(
+                "Built Curve metapool zap remove_liquidity: pool=%s, lp_amount=%s",
+                pool_info.name,
+                lp_amount,
+            )
+            return LiquidityResult(
+                success=True,
+                transactions=transactions,
+                pool_address=pool_address,
+                operation="remove_liquidity_underlying",
+                amounts=min_amounts,
+                lp_amount=lp_amount_wei,
+                gas_estimate=total_gas,
+            )
+        except Exception as e:
+            logger.exception(f"Failed to build metapool remove_liquidity_underlying: {e}")
+            return LiquidityResult(success=False, error=str(e))
+
+    # ---- Metapool underlying helpers -------------------------------------
+
+    @staticmethod
+    def _require_metapool_zap(pool_info: PoolInfo) -> tuple[str, int]:
+        """Return ``(zap_address, combined_coin_count)`` or raise for a non-zap metapool."""
+        if not pool_info.is_metapool:
+            raise ValueError(f"{pool_info.name} is not a metapool")
+        if not pool_info.zap_address:
+            raise ValueError(f"metapool {pool_info.name} has no zap_address configured")
+        combined_len = 1 + len(pool_info.base_pool_coins or [])
+        return pool_info.zap_address, combined_len
+
+    def _underlying_coin_symbol(self, pool_info: PoolInfo, combined_index: int) -> str:
+        """Symbol for a COMBINED-space index (0 = meta coin, 1..N = base coins)."""
+        if combined_index == 0:
+            return pool_info.coins[0]
+        return (pool_info.base_pool_coins or [])[combined_index - 1]
+
+    def _underlying_coin_address(self, pool_info: PoolInfo, combined_index: int) -> str:
+        """Address for a COMBINED-space index (0 = meta coin, 1..N = base coins)."""
+        if combined_index == 0:
+            return pool_info.coin_addresses[0]
+        return (pool_info.base_pool_coin_addresses or [])[combined_index - 1]
+
+    def _estimate_underlying_swap_output(
+        self,
+        pool_info: PoolInfo,
+        i: int,
+        j: int,
+        amount_in: int,
+        token_in_symbol: str,
+        token_out_symbol: str,
+    ) -> int:
+        """Estimate an underlying-swap output (prefer on-chain get_dy_underlying)."""
+        if self._gateway_client is not None or self._rpc_url:
+            try:
+                calldata = (
+                    GET_DY_UNDERLYING_SELECTOR
+                    + self._pad_int128(i)
+                    + self._pad_int128(j)
+                    + self._pad_uint256(amount_in)
+                )
+                amount_out = eth_call_uint256(
+                    chain=self.chain,
+                    to=pool_info.address,
+                    data=calldata,
+                    rpc_url=self._rpc_url,
+                    gateway_client=self._gateway_client,
+                    timeout=10.0,
+                )
+                if amount_out is not None and amount_out > 0:
+                    return amount_out
+            except Exception as exc:  # noqa: BLE001 — fall back to the stable 1:1 estimate
+                logger.warning(
+                    "Curve metapool get_dy_underlying unavailable for %s (%s -> %s): %s; "
+                    "falling back to decimal-adjusted stable estimate",
+                    pool_info.name,
+                    token_in_symbol,
+                    token_out_symbol,
+                    exc,
+                )
+        # Combined coin space of a 3CRV/FRAX metapool is all USD stables -> 1:1.
+        in_decimals = self._get_token_decimals(token_in_symbol)
+        out_decimals = self._get_token_decimals(token_out_symbol)
+        decimal_diff = out_decimals - in_decimals
+        if decimal_diff > 0:
+            return amount_in * (10**decimal_diff)
+        if decimal_diff < 0:
+            return amount_in // (10 ** abs(decimal_diff))
+        return amount_in
+
+    def _estimate_add_liquidity_underlying(self, pool_info: PoolInfo, zap: str, amounts: list[int]) -> int:
+        """Estimate metapool LP minted for a combined-space deposit via the zap.
+
+        Prefers the zap's ``calc_token_amount(address,uint256[4],bool)`` on-chain
+        quote; falls back to the deposit-sum / virtual_price stable estimate
+        (the combined coins are all USD-denominated 1.0 stables).
+        """
+        if self._gateway_client is not None or self._rpc_url:
+            try:
+                calldata = ZAP_CALC_TOKEN_AMOUNT_4_SELECTOR + self._pad_address(pool_info.address)
+                for amount in amounts:
+                    calldata += self._pad_uint256(amount)
+                calldata += self._pad_uint256(1)  # is_deposit = True
+                minted = eth_call_uint256(
+                    chain=self.chain,
+                    to=zap,
+                    data=calldata,
+                    rpc_url=self._rpc_url,
+                    gateway_client=self._gateway_client,
+                    timeout=10.0,
+                )
+                if minted is not None and minted > 0:
+                    return minted
+            except Exception as exc:  # noqa: BLE001 — fall back to naive estimate
+                logger.warning(
+                    "Curve metapool zap calc_token_amount unavailable for %s (%s); naive estimate",
+                    pool_info.name,
+                    exc,
+                )
+        total = 0
+        for idx, amount in enumerate(amounts):
+            decimals = self._get_token_decimals(self._underlying_coin_symbol(pool_info, idx))
+            total += amount * (10 ** (18 - decimals))
+        return int(Decimal(total) / pool_info.virtual_price)
+
+    def _estimate_remove_liquidity_underlying(self, pool_info: PoolInfo, lp_amount: int) -> list[int]:
+        """Estimate combined-space min amounts for a proportional metapool withdrawal.
+
+        Splits the burned LP across the metapool's NATIVE coins (meta + base-LP)
+        by on-chain reserves, then decomposes the base-LP leg across the base
+        pool's underlying coins by ITS reserves — yielding the combined vector
+        the zap returns: [meta, base_coin_0, base_coin_1, ...]. Returns all-zeros
+        (fail closed) when on-chain reads are unavailable.
+        """
+        combined_len = 1 + len(pool_info.base_pool_coins or [])
+        zero = [0] * combined_len
+        if self._gateway_client is None and not self._rpc_url:
+            self._last_estimation_error = "gateway_client or rpc_url not configured"
+            return zero
+        try:
+            # 1. Native proportional split of the metapool: [meta, base-LP].
+            native = self._query_proportional_amounts_onchain(pool_info, lp_amount)
+            meta_amount = native[0]
+            base_lp_amount = native[1]
+            # 2. Decompose the base-LP leg across the base pool's coins by reserves.
+            base_amounts = self._query_base_pool_underlying_amounts(pool_info, base_lp_amount)
+            return [meta_amount, *base_amounts]
+        except Exception as e:  # noqa: BLE001
+            self._last_estimation_error = str(e)
+            logger.warning(
+                "remove_liquidity_underlying: on-chain estimation failed for %s: %s -- "
+                "falling back to all-zeros (no slippage protection)",
+                pool_info.name,
+                e,
+            )
+            return zero
+
+    def _query_base_pool_underlying_amounts(self, pool_info: PoolInfo, base_lp_amount: int) -> list[int]:
+        """Proportional share of base-pool reserves for ``base_lp_amount`` base-LP tokens.
+
+        Reuses the proportional-amounts query against the base pool (3pool) by
+        building a transient PoolInfo for it: base_lp / base_pool.totalSupply()
+        times each base reserve. The base LP token is the base pool's coins[1]
+        (3CRV) on the metapool, i.e. ``coin_addresses[1]``.
+        """
+        base_pool_addr = pool_info.base_pool or ""
+        base_addrs = pool_info.base_pool_coin_addresses or []
+        # A metapool's native coins are [meta coin, base-LP token], so the base LP
+        # token is coins[1]. Guard the index access before reading it so a
+        # misconfigured pool fails loudly with a clear message, not an IndexError.
+        if not base_pool_addr or not base_addrs or len(pool_info.coin_addresses) < 2:
+            raise ValueError(f"metapool {pool_info.name} missing base-pool metadata")
+        base_lp_token = pool_info.coin_addresses[1]  # 3CRV is the metapool's coin 1
+        base_info = PoolInfo(
+            address=base_pool_addr,
+            lp_token=base_lp_token,
+            coins=list(pool_info.base_pool_coins or []),
+            coin_addresses=list(base_addrs),
+            pool_type=PoolType.STABLESWAP,
+            n_coins=len(base_addrs),
+            name=f"{pool_info.name}:base_pool",
+        )
+        return self._query_proportional_amounts_onchain(base_info, base_lp_amount)
 
     # =========================================================================
     # Transaction Building
@@ -1596,7 +2192,7 @@ class CurveAdapter:
                 hex_result = _json.loads(response.result) if response.result else "0x"
                 if not hex_result or hex_result == "0x":
                     raise ValueError("eth_call returned empty result")
-                return int(hex_result, 16)
+                return self._decode_first_uint256_word(hex_result)
 
             # Fallback: direct RPC (deprecated, ad-hoc use only)
             import httpx
@@ -1618,7 +2214,7 @@ class CurveAdapter:
             hex_result = result.get("result", "0x0")
             if not hex_result or hex_result == "0x":
                 raise ValueError("eth_call returned empty result")
-            return int(hex_result, 16)
+            return self._decode_first_uint256_word(hex_result)
 
         # 1. Query LP totalSupply
         total_supply = _eth_call(
@@ -1722,7 +2318,26 @@ class CurveAdapter:
 
         if not hex_result or hex_result == "0x":
             raise ValueError("calc_token_amount returned empty result")
-        return int(hex_result, 16)
+        return self._decode_first_uint256_word(hex_result)
+
+    @staticmethod
+    def _decode_first_uint256_word(hex_result: str) -> int:
+        """Decode the FIRST 32-byte word of an ``eth_call`` hex response.
+
+        A single-``uint256`` return is the first 32-byte (64 hex char) word.
+        Some Vyper pools — notably factory METAPOOLS — return extra trailing
+        words for getters like ``balances(uint256)``, so decoding the whole
+        response with ``int(hex_result, 16)`` builds a multi-thousand-digit
+        integer that trips Python's ``int``-string-conversion guard (VIB-5419).
+        Slicing the first word is correct for every single-value getter and a
+        no-op for the legacy flat pools that already return exactly 32 bytes.
+        """
+        body = hex_result[2:] if hex_result.startswith("0x") else hex_result
+        if len(body) < 64:
+            # Fewer than one full word — decode whatever is present (preserves
+            # the prior behaviour for short/edge responses).
+            return int(body or "0", 16)
+        return int(body[:64], 16)
 
     def _estimate_remove_liquidity_one(self, pool_info: PoolInfo, lp_amount: int, coin_index: int) -> int:
         """Estimate tokens from remove_liquidity_one_coin.
