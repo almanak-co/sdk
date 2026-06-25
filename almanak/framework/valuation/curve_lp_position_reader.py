@@ -60,7 +60,7 @@ _VIRTUAL_PRICE_SCALE = Decimal(10**18)
 _USD_STABLE_SYMBOLS = frozenset(
     {
         "USDC",
-        "USDC.E",
+        "USDC.E",  # bridged USDC (Arbitrum/Optimism/Polygon) — 1:1 USDC
         "USDT",
         "DAI",
         "FRAX",
@@ -77,6 +77,11 @@ _USD_STABLE_SYMBOLS = frozenset(
         "GHO",
         "PYUSD",
         "USDE",
+        # Bridged / wrapped USDC variants held by PLAIN USD-stable Curve pools
+        # (audit P0-3). Each is a 1:1 USD-pegged wrapper of canonical USDC, so the
+        # peg = $1 numeraire holds exactly as for native USDC:
+        "USDBC",  # USD Base Coin — native-bridge bridged USDC on Base, 1:1 USDC
+        "AXLUSDC",  # Axelar-wrapped USDC, 1:1 backed by USDC. Used by Base 4pool.
     }
 )
 

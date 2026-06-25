@@ -28,6 +28,12 @@ POOL_3POOL = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"
 LP_3POOL = "0x6c3F90f043a72FA612cbac8115EE7e52BDe6E490"
 WALLET = "0x1234567890123456789012345678901234567890"
 
+# Base 4pool — USDC / USDbC / axlUSDC / crvUSD. StableSwap NG: LP == pool address.
+# Plain USD-stable pool that was falsely excluded before audit P0-3 (USDbC and
+# axlUSDC missing from the allowlist).
+POOL_4POOL_BASE = "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f"
+LP_4POOL_BASE = "0xf6C5F01C7F3148891ad0e19DF78743D31E390D1f"
+
 GET_VIRTUAL_PRICE = "0xbb7b8b80"
 VIRTUAL_PRICE_ALIAS = "0x0c46b72a"
 BALANCE_OF = "0x70a08231"
@@ -228,6 +234,70 @@ def test_read_position_virtual_price_alias_fallback() -> None:
     )
     assert pos is not None
     assert pos.virtual_price == Decimal("1")
+
+
+def test_read_position_base_4pool_usdbc_axlusdc_values() -> None:
+    # Audit P0-3 regression: Base 4pool (USDC/USDbC/axlUSDC/crvUSD) is a PLAIN
+    # USD-stable pool. USDbC and axlUSDC are 1:1 USDC wrappers, so it must now
+    # value at lp_balance * virtual_price * $1 — previously fail-closed because
+    # the two wrapped-USDC symbols were missing from the allowlist.
+    reader = CurveLpPositionReader(
+        _StubGatewayClient(
+            {
+                (LP_4POOL_BASE.lower(), BALANCE_OF): 10 * 10**18,
+                (POOL_4POOL_BASE.lower(), GET_VIRTUAL_PRICE): 1_019_566_780_337_011_070,
+                (POOL_4POOL_BASE.lower(), VIRTUAL_PRICE_ALIAS): None,
+            }
+        )
+    )
+    pos = reader.read_position(
+        protocol="curve",
+        chain="base",
+        pool="4pool",
+        lp_token=LP_4POOL_BASE,
+        wallet_address=WALLET,
+    )
+    assert pos is not None
+    assert pos.is_active
+    assert pos.lp_balance_wei == 10 * 10**18
+    assert pos.virtual_price == Decimal("1019566780337011070") / Decimal(10**18)
+    assert pos.coins == ["USDC", "USDbC", "axlUSDC", "crvUSD"]
+
+
+def test_usdbc_and_axlusdc_in_usd_stable_allowlist() -> None:
+    # Peg justification (audit P0-3): both are 1:1 USDC wrappers. The allowlist
+    # check upper-cases coin symbols, so the canonical-cased entries must match
+    # the registry's mixed-case "USDbC" / "axlUSDC".
+    from almanak.framework.valuation.curve_lp_position_reader import _USD_STABLE_SYMBOLS
+
+    assert "USDbC".upper() in _USD_STABLE_SYMBOLS
+    assert "axlUSDC".upper() in _USD_STABLE_SYMBOLS
+
+
+def test_base_weth_cbeth_still_fails_closed() -> None:
+    # Base weth_cbeth is a cryptoswap (WETH/cbETH) — non-USD numeraire. Adding
+    # the wrapped-USDC symbols must NOT widen scope to volatile pools: still None.
+    pool = "weth_cbeth"
+    lp = "0x98244d93D42b42aB3E3A4D12A5dc0B3e7f8F32f9"
+    pool_addr = "0x11C1fBd4b3De66bC0565779b35171a6CF3E71f59"
+    reader = CurveLpPositionReader(
+        _StubGatewayClient(
+            {
+                (lp.lower(), BALANCE_OF): 10**18,
+                (pool_addr.lower(), GET_VIRTUAL_PRICE): 10**18,
+            }
+        )
+    )
+    assert (
+        reader.read_position(
+            protocol="curve",
+            chain="base",
+            pool=pool,
+            lp_token=lp,
+            wallet_address=WALLET,
+        )
+        is None
+    )
 
 
 def test_read_position_non_usd_pool_fails_closed() -> None:

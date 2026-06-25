@@ -1,0 +1,29 @@
+{
+  "accounting_events_row_count": 2,
+  "cells": {
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "PASS",
+    "G15": "PASS",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L5_22": "XFAIL",
+    "LP1": "FAIL",
+    "LP2": "FAIL",
+    "LP3": "PASS",
+    "LP4": "XFAIL",
+    "LP5": "PASS",
+    "LP6": "PASS"
+  },
+  "ledger_row_count": 2,
+  "matching_policy_version": 6
+}
