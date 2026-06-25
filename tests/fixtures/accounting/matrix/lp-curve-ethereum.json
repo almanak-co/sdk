@@ -5,13 +5,14 @@
     "chain": "ethereum",
     "primitive": "lp",
     "captured_from": "docs/internal/notes/.tmp/accounting-matrix/lp-curve-ethereum/accountant.json",
-    "captured_at": "2026-06-22T00:00:00.000000+00:00",
-    "captured_at_commit": "e16489116",
+    "captured_at": "2026-06-25T00:00:00.000000+00:00",
+    "captured_at_commit": "74a8362e0",
     "post_fix_for": [
       "VIB-4316 Tier 1+2 matrix expansion (2026-05-14 overnight)",
-      "VIB-3587 Curve single-sided LP_OPEN declares funded legs (no zero-leg)"
+      "VIB-3587 Curve single-sided LP_OPEN declares funded legs (no zero-leg)",
+      "VIB-5420 Curve LP USD valuation via live virtual_price (PortfolioValuer)"
     ],
-    "note": "Re-baselined for VIB-3587: the lp_curve fixture now deposits SINGLE-SIDED (USDC only, coin idx 1) so the matrix exercises the single-sided leg shape. The Curve connector DECLARES typed PrimitiveMoneyLegs for its funded coin(s) and the ledger dispatcher consumes them, so the LP_OPEN row books token_in=USDC/amount_in=10 with NO fabricated zero leg (the unfunded DAI/USDT coins are ABSENT, not measured-zero). The LPOpenEventPayload was widened to amount0/amount1 = Decimal|None (mirrors VIB-5117 on LP_CLOSE) so the unfunded coin's None no longer FAILs Pydantic, which unblocked G13/LP4. Forward vs the two-sided baseline: G13 FAIL->PASS, G14 XFAIL->PASS, G15 XFAIL->PASS, LP5 XFAIL->PASS (passed 11->15). LP1/LP2/LP6 are concentrated-liquidity cells (ticks / in-range-time / liquidity-over-time) that DO NOT APPLY to a fungible Curve StableSwap pool and are inapplicable-FAIL here, unchanged by this fix. G6 (native-gas-in-equity, VIB-4256) and LP4 (single-sided IL undefined -> XFAIL) are out of scope for VIB-3587."
+    "note": "Re-baselined for VIB-5420 (LP6 FAIL->PASS, passed 15->16): the PortfolioValuer now values a Curve LP position via the new _reprice_curve_lp_enriched path (lp_balance x live virtual_price x $1 USD peg) instead of the stale strategy-reported estimate. That path stamps `liquidity` and `lp_balance` into the position-state snapshot details, which is exactly what LP6 (liquidity-over-time) reads -- so LP6 moves from inapplicable-FAIL to PASS for the fungible Curve LP (the LP-token balance IS its liquidity measure; no concentrated-liquidity ticks are needed). Real-fork proof: tests/reports/curve_nleg_valuation_anvil_vib5420_report.md (virtual_price=1.0398 live, value_usd=10.0059 = lp_balance x vp x $1). LP1/LP2 remain inapplicable-FAIL (tick exposure / in-range-time DO NOT APPLY to a fungible StableSwap pool). G6 (native-gas-in-equity reconciliation, VIB-4256) and LP4 (single-sided IL undefined -> XFAIL) are out of scope for VIB-5420 and unchanged. Prior VIB-3587 history: single-sided USDC deposit, typed PrimitiveMoneyLegs, G13/G14/G15/LP5 forward (passed 11->15)."
   },
   "cells": {
     "G1": "PASS",
@@ -35,11 +36,11 @@
     "LP3": "PASS",
     "LP4": "XFAIL",
     "LP5": "PASS",
-    "LP6": "FAIL"
+    "LP6": "PASS"
   },
   "scores": {
-    "passed": 15,
-    "failed": 4,
+    "passed": 16,
+    "failed": 3,
     "xfailed": 2,
     "total": 22
   }

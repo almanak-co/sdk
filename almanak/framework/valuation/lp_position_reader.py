@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 # Function selectors
 POSITIONS_SELECTOR = "0x99fbab88"  # positions(uint256)
 SLOT0_SELECTOR = "0x3850c7bd"  # slot0()
+ERC20_BALANCE_OF_SELECTOR = "0x70a08231"  # balanceOf(address)
 
 
 @dataclass
@@ -170,6 +171,65 @@ class LPPositionReader:
             return None
 
         return _parse_slot0_hex(result_hex)
+
+    def read_erc20_balance(
+        self,
+        chain: str,
+        token_address: str,
+        wallet_address: str,
+    ) -> int | None:
+        """Read an ERC-20 ``balanceOf(wallet)`` live via the gateway eth_call.
+
+        Generic, decode-trivial counterpart to :meth:`read_position`: encodes the
+        standard ``balanceOf(address)`` selector client-side (exactly as
+        ``positions(uint256)`` is encoded) and routes the read through the same
+        gateway-boundary-correct ``_eth_call`` primitive. Used by the Curve LP
+        valuation path (VIB-5420) to read the LP-token balance for the wallet.
+
+        Returns the balance in wei, or ``None`` on any failure (Empty ≠ Zero — a
+        miss is unmeasured, never a fabricated zero). A genuine zero balance
+        returns the measured ``0``.
+        """
+        if self._gateway is None:
+            return None
+        if not token_address or not wallet_address:
+            return None
+        wallet_hex = wallet_address.lower().removeprefix("0x").zfill(64)
+        calldata = ERC20_BALANCE_OF_SELECTOR + wallet_hex
+        result_hex = self._eth_call(chain, token_address, calldata)
+        if not result_hex:
+            return None
+        try:
+            return int(result_hex, 16)
+        except (ValueError, TypeError):
+            return None
+
+    def read_uint256_call(
+        self,
+        chain: str,
+        contract_address: str,
+        selector: str,
+    ) -> int | None:
+        """Read a zero-arg ``uint256`` getter live via the gateway eth_call.
+
+        Generic counterpart used by the Curve LP valuation path (VIB-5420) to read
+        a pool's live ``get_virtual_price()`` / ``virtual_price()`` (1e18-scaled).
+        ``selector`` is the 4-byte function selector (``"0x...."``).
+
+        Returns the decoded ``uint256``, or ``None`` on any failure (Empty ≠ Zero —
+        an unreadable getter is unmeasured, never a fabricated zero).
+        """
+        if self._gateway is None:
+            return None
+        if not contract_address or not selector:
+            return None
+        result_hex = self._eth_call(chain, contract_address, selector)
+        if not result_hex:
+            return None
+        try:
+            return int(result_hex, 16)
+        except (ValueError, TypeError):
+            return None
 
     def _eth_call(self, chain: str, to: str, data: str) -> str | None:
         """Make an eth_call via gateway generic RPC."""

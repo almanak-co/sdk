@@ -33,6 +33,7 @@ from almanak.framework.portfolio.models import (
     ValueConfidence,
 )
 from almanak.framework.teardown.models import PositionInfo, PositionType
+from almanak.framework.valuation.curve_lp_position_reader import CurveLpPositionReader
 from almanak.framework.valuation.fungible_lp_position_reader import FungibleLpPositionReader
 from almanak.framework.valuation.lending_position_reader import LendingPositionReader
 from almanak.framework.valuation.lending_valuer import value_lending_position
@@ -914,6 +915,10 @@ class PortfolioValuer:
         # per-share (token0, token1) via the connector resolver. The V3-NFT LP
         # reader cannot value a share-balance position.
         self._fungible_lp_reader = FungibleLpPositionReader(gateway_client)
+        # VIB-5420: Curve LP (single fungible LP token, N coins) — lp_balance ×
+        # live virtual_price × USD peg. Neither the V3-NFT reader (tick math) nor
+        # the fungible two-token reader fits a Curve StableSwap pool.
+        self._curve_lp_reader = CurveLpPositionReader(gateway_client)
         self._discovery = PositionDiscoveryService(gateway_client)
         # VIB-3424: per-position PnL enrichment from accounting_events store.
         self._accounting_store: Any = None
@@ -932,6 +937,11 @@ class PortfolioValuer:
         # degraded stamp — never a silent no-op).
         self._snapshot_events_flat: list[dict] | None = None
         self._snapshot_prefetch_failed: bool = False
+        # VIB-5420: the strategy wallet for THIS snapshot, set at the top of
+        # value(). On-chain repricers (Curve LP) use it to read ``balanceOf`` for
+        # strategy-reported positions whose details omit a wallet. Reset in the
+        # value() finally so it never leaks across snapshots.
+        self._strategy_wallet_address: str = ""
         # VIB-5406: set True by the snapshot caller when the per-unit outbox-drain
         # barrier timed out before this snapshot. When True, replay-derived
         # inventory (PT, swap) would be built from an INCOMPLETE event stream
@@ -952,6 +962,7 @@ class PortfolioValuer:
         self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
         self._vault_reader.set_gateway_client(gateway_client)
         self._fungible_lp_reader.set_gateway_client(gateway_client)
+        self._curve_lp_reader.set_gateway_client(gateway_client)
         self._discovery.set_gateway_client(gateway_client)
 
     def set_accounting_context(self, store: Any, deployment_id: str) -> None:
@@ -1016,6 +1027,10 @@ class PortfolioValuer:
         try:
             deployment_id = strategy.deployment_id
             chain = strategy.chain
+            # VIB-5420: cache the strategy wallet so on-chain repricers (Curve LP)
+            # can read ``balanceOf`` for strategy-reported positions whose details
+            # omit a wallet. Cleared in the finally so a stale wallet never leaks.
+            self._strategy_wallet_address = getattr(strategy, "wallet_address", "") or ""
 
             # Step 1: Discover tracked tokens from strategy config
             tracked_tokens = strategy._get_tracked_tokens()
@@ -1228,6 +1243,9 @@ class PortfolioValuer:
             # VIB-5406: consume-once — the drain-barrier flag applies to THIS
             # snapshot only; the next caller re-sets it before value().
             self._drain_barrier_incomplete = False
+            # VIB-5420: drop the cached strategy wallet so it never leaks across
+            # snapshots / strategies (1 valuer instance is reused per runner).
+            self._strategy_wallet_address = ""
 
     @staticmethod
     def _determine_value_confidence(
@@ -4327,6 +4345,19 @@ class PortfolioValuer:
                 return result[0], result[1], True
             return position.value_usd, {}, False
 
+        # VIB-5420: Curve LP (single fungible LP token, N coins) — valued as
+        # lp_balance × live virtual_price × USD peg. Like the fungible and V4
+        # families above, it MUST NOT fall into the V3 ``positions(uint256)`` read
+        # below, which fails on a Curve LP-token address and corrupts the decode.
+        # Fail-closed to UNAVAILABLE (no fall-through to the stale strategy
+        # estimate at line ``value_usd > 0`` below) — a stale static mark is
+        # exactly what this replaces (Empty ≠ Zero).
+        if self._curve_lp_reader.supports(position.protocol):
+            result = self._reprice_curve_lp_enriched(position, chain, market)
+            if result is not None:
+                return result[0], result[1], True
+            return position.value_usd, {}, False
+
         result = self._reprice_lp_on_chain_enriched(position, chain, market)
         if result is not None:
             return result[0], result[1], True
@@ -4441,6 +4472,93 @@ class PortfolioValuer:
             return value_usd, details
         except Exception:
             logger.debug("Fungible-LP on-chain re-pricing failed for %s", position.position_id, exc_info=True)
+            return None
+
+    def _reprice_curve_lp_enriched(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,  # noqa: ARG002 — value derives from virtual_price, not the price oracle
+    ) -> tuple[Decimal, dict[str, Any]] | None:
+        """Re-price a Curve LP position — VIB-5420.
+
+        Mark = ``lp_balance(human) × virtual_price × peg``. ``virtual_price`` is
+        read LIVE from the pool's ``get_virtual_price()`` getter (1e18-scaled,
+        underlying-invariant units per LP token); ``peg`` is ``$1`` because the
+        reader only resolves USD-pegged StableSwap pools (it returns ``None`` for
+        any non-USD-numeraire pool, which fails closed to UNAVAILABLE here).
+
+        Returns ``None`` on any failure (Empty ≠ Zero — the caller flags
+        ``no_path`` / ``UNAVAILABLE``); a measured ``Decimal("0")`` for a
+        genuinely empty (zero-balance) position. Blueprint 27 §7.11 projection
+        contract; mirrors :meth:`_reprice_fungible_lp_enriched`.
+        """
+        try:
+            wallet_address = (
+                position.details.get("wallet")
+                or position.details.get("wallet_address")
+                or position.details.get("owner")
+                or getattr(self, "_strategy_wallet_address", "")
+            )
+            pool = position.details.get("pool") or position.details.get("pool_name") or ""
+            lp_token = (
+                position.details.get("lp_token") or position.details.get("pool_address") or position.position_id or ""
+            )
+            coins = position.details.get("coins")
+            protocol = position.protocol
+            if not wallet_address or not protocol:
+                return None
+
+            on_chain = self._curve_lp_reader.read_position(
+                protocol=protocol,
+                chain=chain,
+                pool=str(pool),
+                lp_token=str(lp_token),
+                wallet_address=str(wallet_address),
+                coins=list(coins) if isinstance(coins, list | tuple) else None,
+            )
+            if on_chain is None:
+                return None
+            if not on_chain.is_active:
+                return Decimal("0"), {
+                    "position_id": position.position_id,
+                    "lp_token": on_chain.lp_token,
+                    "pool_address": on_chain.pool_address,
+                    "liquidity": "0",
+                    "valuation_source": "curve_virtual_price",
+                }
+
+            lp_balance = Decimal(on_chain.lp_balance_wei) / Decimal(10**on_chain.decimals)
+            # peg = $1 (USD-pegged StableSwap — the reader rejects non-USD pools).
+            value_usd = lp_balance * on_chain.virtual_price
+            if value_usd <= 0:
+                return None
+
+            details: dict[str, Any] = {
+                "position_id": position.position_id,
+                "lp_token": on_chain.lp_token,
+                "pool_address": on_chain.pool_address,
+                # The LP-token balance IS the liquidity measure (no tick-bracketed
+                # concentrated liquidity), so Accountant LP6 reads a real value.
+                "liquidity": str(on_chain.lp_balance_wei),
+                "lp_balance": str(lp_balance),
+                "virtual_price": str(on_chain.virtual_price),
+                "peg_usd": "1",
+                "coins": on_chain.coins,
+                "value_usd": str(value_usd),
+                "valuation_source": "curve_virtual_price",
+            }
+            logger.debug(
+                "Curve-LP re-priced: position=%s pool=%s value=$%s (lp=%s × vp=%s)",
+                position.position_id,
+                on_chain.pool_address,
+                value_usd,
+                lp_balance,
+                on_chain.virtual_price,
+            )
+            return value_usd, details
+        except Exception:
+            logger.debug("Curve-LP on-chain re-pricing failed for %s", position.position_id, exc_info=True)
             return None
 
     def _reprice_vault_on_chain_enriched(
