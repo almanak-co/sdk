@@ -1,0 +1,25 @@
+{
+    "_comment": "VIB-5410 held-PT fixture capture config. Reproduces tests/fixtures/accounting/pendle_pt_held/expected_baseline.sqlite. Run: `uv run almanak strat run -d strategies/accounting/pendle_pt -c <this file> --network anvil --fresh --interval 20`, let it warmup-hold -> PT_BUY -> hold, then SIGTERM the runner WHILE STILL HOLDING (no teardown signal) so the final snapshot keeps the PT (PT!=0). hold_iterations_before_exit=50 ensures it never sells in the window. trade_size 15 wstETH sizes the buy-vs-mark spread above the G6 epsilon so the held-PT MTM term is load-bearing (a 0.01 buy is under epsilon on this deep pool). The strategy advertises ethereum (decorator) and resolves the chain via self.chain, so this runs on the committed source unchanged.",
+    "chain": "ethereum",
+    "anvil_fork_block": 25396533,
+    "token_funding": [
+        {
+            "symbol": "WSTETH",
+            "address": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+            "chain": "ethereum",
+            "amount": "20",
+            "amount_type": "token"
+        }
+    ],
+    "market": "0x34280882267ffa6383b363e278b027be083bbe3b",
+    "base_token": "wstETH",
+    "pt_token": "PT-stETH-30DEC2027",
+    "trade_size_token": "15.0",
+    "max_slippage": "0.20",
+    "hold_iterations_before_buy": 1,
+    "hold_iterations_before_exit": 50,
+    "anvil_funding": {
+        "ETH": 10,
+        "WSTETH": 20
+    }
+}

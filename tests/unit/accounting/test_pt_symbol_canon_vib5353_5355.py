@@ -68,6 +68,10 @@ CHAIN = "arbitrum"
 PT_BEARING = "PT-wstETH-25JUN2026"
 PT_LESS = "PT-wstETH"
 POS_KEY = f"pendle_pt:{CHAIN}:{WALLET}:{PT_BEARING.lower()}"
+# VIB-5413: the YT analogue — same two-form split (maturity-BEARING ledger vs
+# maturity-LESS teardown from_token) that strands a swap-acquired YT.
+YT_BEARING = "YT-wstETH-25JUN2026"
+YT_LESS = "YT-wstETH"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -104,6 +108,38 @@ class TestCanonicalPtSymbol:
         # No DDMONYYYY suffix → behaves like canonical_symbol (no spurious strip).
         assert canonical_pt_symbol("PT-wstETH") == "PT-WSTETH"
         assert canonical_pt_symbol("PT-foobar") == "PT-FOOBAR"
+
+
+class TestCanonicalYtSymbol:
+    """VIB-5413: ``canonical_pt_symbol`` strips the maturity suffix for ``YT-``
+    symbols too (it previously only special-cased ``PT-``), so a swap-acquired
+    YT named in its maturity-BEARING ledger form joins the maturity-LESS teardown
+    ``from_token`` and is recognised as tracked inventory instead of being
+    stranded as ``untracked_token``."""
+
+    def test_yt_maturity_bearing_strips_to_maturity_less_upper(self):
+        assert canonical_pt_symbol(YT_BEARING) == "YT-WSTETH"
+
+    def test_yt_maturity_less_unchanged(self):
+        assert canonical_pt_symbol(YT_LESS) == "YT-WSTETH"
+
+    def test_yt_both_forms_converge_on_one_key(self):
+        assert canonical_pt_symbol(YT_BEARING) == canonical_pt_symbol(YT_LESS)
+
+    def test_yt_mixed_case_and_underscore_separator_converge(self):
+        assert canonical_pt_symbol("yt-WSTeth-25jun2026") == "YT-WSTETH"
+        assert canonical_pt_symbol("YT-sUSDe_29MAY2025") == "YT-SUSDE"
+
+    def test_yt_without_parseable_maturity_left_intact(self):
+        assert canonical_pt_symbol("YT-wstETH") == "YT-WSTETH"
+
+    def test_yt_and_pt_of_same_underlying_stay_distinct(self):
+        # YT and PT of the same maturity must NOT collide (distinct prefixes) —
+        # otherwise a teardown YT swap-back could match a held-PT lot.
+        assert canonical_pt_symbol(YT_BEARING) != canonical_pt_symbol(PT_BEARING)
+
+    def test_yt_distinct_underlyings_stay_distinct(self):
+        assert canonical_pt_symbol("YT-sUSDe-29MAY2025") != canonical_pt_symbol(YT_BEARING)
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -1471,24 +1471,28 @@ _PT_MATURITY_RE = re.compile(r"[-_](\d{1,2})([A-Z]{3})(\d{4})(?:$|[-_])")
 
 
 def canonical_pt_symbol(symbol: Any) -> str:
-    """Cross-surface canonical identity for a token, maturity-INSENSITIVE for PTs.
+    """Cross-surface canonical identity for a token, maturity-INSENSITIVE for PT/YT.
 
-    Identical to :func:`canonical_symbol` for every non-PT token (so non-Pendle
-    inventory is byte-identical), AND for a ``PT-`` symbol that carries no
-    parseable maturity suffix. For a ``PT-`` symbol WITH a maturity suffix it
+    Identical to :func:`canonical_symbol` for every token that is NOT a Pendle
+    principal- (``PT-``) or yield- (``YT-``) token (so non-Pendle inventory is
+    byte-identical), AND for a ``PT-`` / ``YT-`` symbol that carries no parseable
+    maturity suffix. For a ``PT-`` / ``YT-`` symbol WITH a maturity suffix it
     strips the suffix to the maturity-less identity:
 
         canonical_pt_symbol("PT-wstETH-25JUN2026") == "PT-WSTETH"
         canonical_pt_symbol("PT-wstETH")           == "PT-WSTETH"
+        canonical_pt_symbol("YT-wstETH-25JUN2026") == "YT-WSTETH"
+        canonical_pt_symbol("YT-wstETH")           == "YT-WSTETH"
 
-    WHY (VIB-5353 / VIB-5355): the SAME held PT is named in two forms across
-    surfaces — the framework/ledger/accounting layer resolves the maturity-
-    BEARING symbol (receipt parser → SWAP ledger row → ``PT_BUY.pt_token`` →
-    FIFO lot), while the strategy/config layer can only emit the maturity-LESS
-    form (``get_config("pt_token", "PT-wstETH")`` → teardown ``from_token`` and
-    ``details["pt_token"]``). ``canonical_symbol`` (bare upper/strip) never joins
-    them, so the teardown clamp strands a swap-acquired PT (``untracked_token``)
-    and the PortfolioValuer dedup misses (counting the PT in BOTH the reprice and
+    WHY (VIB-5353 / VIB-5355 for PT; VIB-5413 for YT): the SAME held position
+    token is named in two forms across surfaces — the framework/ledger/accounting
+    layer resolves the maturity-BEARING symbol (receipt parser → SWAP ledger row
+    → FIFO lot; ``_resolve_pt_symbol`` / ``_resolve_yt_symbol``), while the
+    strategy/config layer can only emit the maturity-LESS form
+    (``get_config("yt_token", "YT-wstETH-25JUN2026")`` → teardown ``from_token``).
+    ``canonical_symbol`` (bare upper/strip) never joins them, so the teardown
+    clamp strands a swap-acquired PT/YT (``untracked_token``) and the
+    PortfolioValuer dedup misses (counting a held PT in BOTH the reprice and
     FIFO-inventory paths → ~2× NAV). The maturity-less form is the ONLY form both
     layers can produce, so it is the cross-surface join key.
 
@@ -1500,7 +1504,7 @@ def canonical_pt_symbol(symbol: Any) -> str:
     distinct for matching and pricing.
     """
     base = canonical_symbol(symbol)
-    if not base.startswith("PT-"):
+    if not (base.startswith("PT-") or base.startswith("YT-")):
         return base
     m = _PT_MATURITY_RE.search(base)
     if not m:

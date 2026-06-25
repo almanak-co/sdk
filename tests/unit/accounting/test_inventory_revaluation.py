@@ -56,6 +56,102 @@ def _snapshot(balances: list[dict], *, deployment_id: str = _DEP) -> dict:
     }
 
 
+def _pt_position(
+    *,
+    pt_symbol: str,
+    quantity: str,
+    value_usd: str,
+    cost_basis_usd: str | None = None,
+    mark_unmeasured: bool = False,
+    cost_basis_unmeasured: bool = False,
+    unrealized_pnl_unmeasured: bool = False,
+) -> dict:
+    """A ``positions_json`` row in the valuer's ``pt_inventory_lots`` shape.
+
+    Mirrors ``portfolio_valuer._classify_pt_inventory`` / ``_pt_unmeasured_row``:
+    top-level ``value_usd`` is the whole-lot mark, ``details.quantity`` the held
+    PT amount, and the three ``*_unmeasured`` flags live under ``details``.
+    """
+    details: dict = {
+        "source": "pt_inventory_lots",
+        "classification": "deployed_inventory",
+        "pt_symbol": pt_symbol,
+        "asset": pt_symbol,
+        "quantity": quantity,
+    }
+    if mark_unmeasured:
+        details["mark_unmeasured"] = True
+    if cost_basis_unmeasured:
+        details["cost_basis_unmeasured"] = True
+    if unrealized_pnl_unmeasured:
+        details["unrealized_pnl_unmeasured"] = True
+    row: dict = {
+        "position_type": "token",
+        "protocol": "pt",
+        "chain": "arbitrum",
+        "value_usd": value_usd,
+        "label": f"PT inventory {pt_symbol}",
+        "tokens": [pt_symbol],
+        "details": details,
+    }
+    if cost_basis_unmeasured or unrealized_pnl_unmeasured:
+        # ``_position_to_dict`` omits cost_basis_usd when falsy; the valuer pairs a
+        # placeholder 0 with the unmeasured flags (Empty ≠ Zero).
+        pass
+    elif cost_basis_usd is not None:
+        row["cost_basis_usd"] = cost_basis_usd
+    return row
+
+
+def _snapshot_with_positions(
+    balances: list[dict],
+    positions: list[dict],
+    *,
+    deployment_id: str = _DEP,
+    envelope: bool = False,
+) -> dict:
+    """A snapshot row carrying both ``wallet_balances_json`` and ``positions_json``.
+
+    ``envelope=True`` writes the versioned ``{"positions": [...]}`` envelope shape
+    (VIB-3923); otherwise a legacy bare list. Both are read-tolerated.
+    """
+    snap = _snapshot(balances, deployment_id=deployment_id)
+    snap["positions_json"] = json.dumps({"positions": positions} if envelope else positions)
+    return snap
+
+
+def _pt_buy_event(
+    *,
+    pt_token: str,
+    pt_amount: str,
+    sy_amount: str,
+    sy_price: str | None,
+    deployment_id: str = _DEP,
+) -> dict:
+    """A PT_BUY accounting_events row (persisted ``payload_json`` shape).
+
+    ``FIFOBasisStore.reconstruct_from_events`` mints a held-PT lot from this;
+    the lot's buy-time-anchored USD cost is ``sy_amount × sy_price``.
+    """
+    return {
+        "deployment_id": deployment_id,
+        "event_type": "PT_BUY",
+        "position_key": "pendle_pt",
+        "chain": "arbitrum",
+        "wallet_address": "0xwallet",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "payload_json": json.dumps(
+            {
+                "event_type": "PT_BUY",
+                "pt_token": pt_token,
+                "pt_amount": pt_amount,
+                "sy_amount": sy_amount,
+                "sy_price": sy_price,
+            }
+        ),
+    }
+
+
 def _swap_event(
     *,
     token_in: str,
@@ -442,9 +538,7 @@ def test_empty_deployment_id_no_events_measures_pure_ambient() -> None:
     """
     si = _snapshot([{"symbol": "WETH", "balance": "1", "price_usd": "1000"}], deployment_id="")
     sf = _snapshot([{"symbol": "WETH", "balance": "1", "price_usd": "1500"}], deployment_id="")
-    out = compute_inventory_revaluation(
-        snapshot_initial=si, snapshot_final=sf, accounting_events=[], deployment_id=""
-    )
+    out = compute_inventory_revaluation(snapshot_initial=si, snapshot_final=sf, accounting_events=[], deployment_id="")
     # 1 WETH × ($1500 − $1000) = $500.
     assert out.total_usd == Decimal("500")
     assert out.confidence == "measured"
@@ -501,9 +595,7 @@ def test_reads_payload_json_string_column() -> None:
         "deployment_id": _DEP,
         "event_type": "SWAP",
         "timestamp": "2026-01-01T00:00:00+00:00",
-        "payload_json": json.dumps(
-            {"event_type": "SWAP", "token_in": "WETH", "token_out": "USDC", "amount_in": "0.3"}
-        ),
+        "payload_json": json.dumps({"event_type": "SWAP", "token_in": "WETH", "token_out": "USDC", "amount_in": "0.3"}),
     }
     out = compute_inventory_revaluation(
         snapshot_initial=si, snapshot_final=sf, accounting_events=[ev], deployment_id=_DEP
@@ -527,9 +619,7 @@ def test_lane_has_no_hardcoded_token_symbol_literals() -> None:
     # Common token symbols that must never appear as code literals.
     forbidden = ("USDC", "USDT", "WETH", "WBTC", "DAI", "ARB", "WAVAX", "WBNB")
     for sym in forbidden:
-        assert f'"{sym}"' not in code and f"'{sym}'" not in code, (
-            f"lane code hardcodes token symbol literal {sym!r}"
-        )
+        assert f'"{sym}"' not in code and f"'{sym}'" not in code, f"lane code hardcodes token symbol literal {sym!r}"
 
 
 def test_field_name_allowlist_is_generic_not_per_primitive() -> None:
@@ -568,3 +658,302 @@ def test_open_lot_term_matches_fifo_store_iter() -> None:
         snapshot_initial=si, snapshot_final=sf, accounting_events=[ev], deployment_id=_DEP
     )
     assert out.total_usd == direct == Decimal("200")
+
+
+# ── Held-PT inventory revaluation (VIB-5410, §11.5 second mark source) ───────
+#
+# A held PT is KNOWN_UNPRICEABLE in the spot oracle (PT- prefix), so it produces
+# NO wallet_balances_json row; its discounted mark + buy-time cost basis live on
+# the positions_json ``pt_inventory_lots`` row. The lane's SECOND mark source
+# (``_pt_inventory_marks``) reads those rows so the held-PT MTM lands in the G6
+# component sum (closing the gap the wallet/equity side already carries via
+# total_value_usd).
+
+
+def test_pt_inventory_marks_parses_bare_list_shape() -> None:
+    """``_pt_inventory_marks`` parses a legacy bare-list positions_json."""
+    snap = _snapshot_with_positions(
+        [],
+        [_pt_position(pt_symbol="PT-wstETH-25JUN2026", quantity="2", value_usd="2100", cost_basis_usd="2000")],
+    )
+    marks = inv_mod._pt_inventory_marks(snap)
+    # Maturity-BEARING key (``_canonical``): each maturity stays distinct,
+    # mirroring the valuer's PT pricing key (NOT the maturity-stripped
+    # ``canonical_pt_symbol`` JOIN/DEDUP identity).
+    assert set(marks) == {"PT-WSTETH-25JUN2026"}
+    row = marks["PT-WSTETH-25JUN2026"]
+    assert row["balance"] == Decimal("2")
+    assert row["price"] == Decimal("1050")  # 2100 / 2 per-unit mark
+    assert row["cost"] == Decimal("2000")
+    assert row["unmeasured"] is False
+
+
+def test_pt_inventory_marks_parses_envelope_shape() -> None:
+    """``_pt_inventory_marks`` parses the versioned {"positions": [...]} envelope."""
+    snap = _snapshot_with_positions(
+        [],
+        [_pt_position(pt_symbol="PT-wstETH-25JUN2026", quantity="1", value_usd="1000", cost_basis_usd="950")],
+        envelope=True,
+    )
+    marks = inv_mod._pt_inventory_marks(snap)
+    assert marks["PT-WSTETH-25JUN2026"]["price"] == Decimal("1000")
+    assert marks["PT-WSTETH-25JUN2026"]["cost"] == Decimal("950")
+
+
+def test_pt_inventory_marks_unmeasured_flag_propagates() -> None:
+    """Any details.*_unmeasured flag ⇒ the PT mark row is unmeasured (Empty≠Zero)."""
+    snap = _snapshot_with_positions(
+        [],
+        [
+            _pt_position(
+                pt_symbol="PT-wstETH-25JUN2026",
+                quantity="1",
+                value_usd="0",
+                mark_unmeasured=True,
+                cost_basis_unmeasured=True,
+                unrealized_pnl_unmeasured=True,
+            )
+        ],
+    )
+    marks = inv_mod._pt_inventory_marks(snap)
+    assert marks["PT-WSTETH-25JUN2026"]["unmeasured"] is True
+
+
+def test_held_pt_mark_to_market_lands_in_term() -> None:
+    """A held PT whose mark moves contributes ``remaining × mark_final − basis``.
+
+    PT bought via SWAP-style PT_BUY: 2 PT for 2 SY @ underlying $1000 ⇒ buy-time
+    USD basis = sy_amount × sy_price = 2 × $1000 = $2000. At the final endpoint
+    the gateway discount mark is $2100 for the lot ($1050/PT). The held-PT term
+    is ``2 × $1050 − $2000 = $100`` — the unrealised discount accretion the
+    wallet (equity) side already shows via total_value_usd, now mirrored
+    component-side so G6 reconciles.
+    """
+    ev = _pt_buy_event(pt_token="PT-wstETH-25JUN2026", pt_amount="2", sy_amount="2", sy_price="1000")
+    # No wallet_balances_json row for the PT (KNOWN_UNPRICEABLE); the PT mark
+    # lives ONLY on the positions_json row.
+    si = _snapshot_with_positions([], [])
+    sf = _snapshot_with_positions(
+        [],
+        [_pt_position(pt_symbol="PT-wstETH-25JUN2026", quantity="2", value_usd="2100", cost_basis_usd="2000")],
+    )
+    out = compute_inventory_revaluation(
+        snapshot_initial=si, snapshot_final=sf, accounting_events=[ev], deployment_id=_DEP
+    )
+    # held-PT open-lot MTM: 2 × $1050 − $2000 basis = $100. No ambient term
+    # (qty_idle == 0 for a PT).
+    assert out.total_usd == Decimal("100")
+    assert out.per_token.get("<open_swap_lots_total>") == "100"
+    assert out.per_token.get("PT-WSTETH-25JUN2026:open_lot") == "100"
+
+
+def test_held_pt_unmeasured_row_degrades_whole_term() -> None:
+    """An unmeasured PT mark row ⇒ whole term None + unmeasured_price (Empty≠Zero)."""
+    ev = _pt_buy_event(pt_token="PT-wstETH-25JUN2026", pt_amount="2", sy_amount="2", sy_price="1000")
+    si = _snapshot_with_positions([], [])
+    sf = _snapshot_with_positions(
+        [],
+        [
+            _pt_position(
+                pt_symbol="PT-wstETH-25JUN2026",
+                quantity="2",
+                value_usd="0",
+                mark_unmeasured=True,
+                cost_basis_unmeasured=True,
+                unrealized_pnl_unmeasured=True,
+            )
+        ],
+    )
+    out = compute_inventory_revaluation(
+        snapshot_initial=si, snapshot_final=sf, accounting_events=[ev], deployment_id=_DEP
+    )
+    assert out.total_usd is None
+    assert out.confidence == "unmeasured_price"
+
+
+def test_held_pt_missing_basis_degrades_unmeasured_basis() -> None:
+    """A held PT with an unmeasured open-lot basis ⇒ None + unmeasured_basis.
+
+    ``sy_price=None`` at buy ⇒ the FIFO lot's buy-time USD cost is unmeasured
+    (Empty≠Zero), so the open-lot basis fold yields None and the term degrades —
+    never marking held PT inventory as pure profit.
+    """
+    ev = _pt_buy_event(pt_token="PT-wstETH-25JUN2026", pt_amount="2", sy_amount="2", sy_price=None)
+    si = _snapshot_with_positions([], [])
+    sf = _snapshot_with_positions(
+        [],
+        [_pt_position(pt_symbol="PT-wstETH-25JUN2026", quantity="2", value_usd="2100", cost_basis_usd="2000")],
+    )
+    out = compute_inventory_revaluation(
+        snapshot_initial=si, snapshot_final=sf, accounting_events=[ev], deployment_id=_DEP
+    )
+    assert out.total_usd is None
+    assert out.confidence == "unmeasured_basis"
+
+
+def test_round_trip_pt_redeemed_contributes_zero() -> None:
+    """A symmetric round-trip (PT fully redeemed by the final endpoint) ⇒ 0.
+
+    PT_BUY then PT_REDEEM the whole lot: no open PT lot remains and no PT
+    inventory row at the final endpoint ⇒ the held-PT term collapses to exactly
+    zero (rule 5), with non-PT behaviour untouched.
+    """
+    buy = _pt_buy_event(pt_token="PT-wstETH-25JUN2026", pt_amount="2", sy_amount="2", sy_price="1000")
+    redeem = {
+        "deployment_id": _DEP,
+        "event_type": "PT_REDEEM",
+        "position_key": "pendle_pt",
+        "chain": "arbitrum",
+        "wallet_address": "0xwallet",
+        "timestamp": "2026-01-02T00:00:00+00:00",
+        "payload_json": json.dumps(
+            {
+                "event_type": "PT_REDEEM",
+                "pt_token": "PT-wstETH-25JUN2026",
+                "pt_amount": "2",
+                "sy_amount": "2",
+            }
+        ),
+    }
+    # Idle WETH present at both endpoints to prove non-PT ambient is unchanged.
+    si = _snapshot_with_positions([{"symbol": "WETH", "balance": "1", "price_usd": "1000"}], [])
+    sf = _snapshot_with_positions([{"symbol": "WETH", "balance": "1", "price_usd": "1100"}], [])
+    out = compute_inventory_revaluation(
+        snapshot_initial=si, snapshot_final=sf, accounting_events=[buy, redeem], deployment_id=_DEP
+    )
+    # No open PT lot, no PT row ⇒ PT contributes 0; WETH ambient: 1 × $100 = $100.
+    assert out.total_usd == Decimal("100")
+    assert out.per_token.get("WETH") == "100"
+    assert "PT-WSTETH-25JUN2026:open_lot" not in out.per_token
+
+
+def test_pt_term_does_not_perturb_non_pt_inventory() -> None:
+    """Regression guard: a held-PT term coexists with a swap lot + ambient token.
+
+    The PT lands its own open-lot MTM while an idle WETH ambient term and an open
+    USDC→ARB swap lot are valued byte-identically to the no-PT case.
+    """
+    pt_buy = _pt_buy_event(pt_token="PT-wstETH-25JUN2026", pt_amount="1", sy_amount="1", sy_price="1000")
+    swap = _swap_event(token_in="USDC", amount_in="100", token_out="ARB", amount_out="100", amount_out_usd="100")
+    si = _snapshot_with_positions(
+        [
+            {"symbol": "WETH", "balance": "2", "price_usd": "1000"},
+            {"symbol": "ARB", "balance": "100", "price_usd": "1.0"},
+        ],
+        [],
+    )
+    sf = _snapshot_with_positions(
+        [
+            {"symbol": "WETH", "balance": "2", "price_usd": "1100"},
+            {"symbol": "ARB", "balance": "100", "price_usd": "1.2"},
+        ],
+        [_pt_position(pt_symbol="PT-wstETH-25JUN2026", quantity="1", value_usd="1050", cost_basis_usd="1000")],
+    )
+    out = compute_inventory_revaluation(
+        snapshot_initial=si, snapshot_final=sf, accounting_events=[pt_buy, swap], deployment_id=_DEP
+    )
+    # WETH ambient: 2 × $100 = $200.
+    # ARB open-lot MTM: 100 × $1.2 − $100 basis = $20.
+    # PT open-lot MTM: 1 × $1050 − $1000 basis = $50.
+    # total = $270.
+    assert out.per_token.get("WETH") == "200"
+    assert Decimal(out.per_token["ARB:open_lot"]) == Decimal("20")  # 20.0 from 1.2 arith
+    assert out.per_token.get("PT-WSTETH-25JUN2026:open_lot") == "50"
+    assert out.total_usd == Decimal("270")
+
+
+def test_pt_inventory_marks_malformed_positions_json_yields_no_marks() -> None:
+    """Unreadable positions_json ⇒ no PT marks (Empty≠Zero; never a fabricated 0)."""
+    snap = _snapshot([])
+    snap["positions_json"] = "{not json"
+    assert inv_mod._pt_inventory_marks(snap) == {}
+
+
+def test_held_pt_disposed_by_final_contributes_zero() -> None:
+    """PT in the INITIAL snapshot, ABSENT from the final, FIFO lot fully matched
+    ⇒ MEASURED, PT contributes 0 (NOT unmeasured_price). Pins FIX 2.
+
+    PT_BUY then PT_SELL the whole lot: no open PT lot remains, and the final
+    snapshot has no ``pt_inventory_lots`` row. A held→flat bracket whose realized
+    leg is already booked in the SWAP/PEN buckets must value the held-PT term at 0
+    (held = 0), exactly like a non-PT token absent from the final wallet — it must
+    NOT fail closed as unmeasured_price.
+    """
+    buy = _pt_buy_event(pt_token="PT-wstETH-25JUN2026", pt_amount="2", sy_amount="2", sy_price="1000")
+    sell = {
+        "deployment_id": _DEP,
+        "event_type": "PT_SELL",
+        "position_key": "pendle_pt",
+        "chain": "arbitrum",
+        "wallet_address": "0xwallet",
+        "timestamp": "2026-01-02T00:00:00+00:00",
+        "payload_json": json.dumps(
+            {
+                "event_type": "PT_SELL",
+                "pt_token": "PT-wstETH-25JUN2026",
+                "pt_amount": "2",
+                "sy_amount": "2",
+            }
+        ),
+    }
+    # PT present in the INITIAL positions_json, ABSENT from the final.
+    si = _snapshot_with_positions(
+        [],
+        [_pt_position(pt_symbol="PT-wstETH-25JUN2026", quantity="2", value_usd="2000", cost_basis_usd="2000")],
+    )
+    sf = _snapshot_with_positions([], [])
+    out = compute_inventory_revaluation(
+        snapshot_initial=si, snapshot_final=sf, accounting_events=[buy, sell], deployment_id=_DEP
+    )
+    # Open lot fully matched + no final PT row ⇒ held = 0, contribute 0. MEASURED.
+    assert out.confidence == "measured"
+    assert out.total_usd == Decimal("0")
+    assert "PT-WSTETH-25JUN2026:open_lot" not in out.per_token
+
+
+def test_still_open_pt_without_final_mark_degrades() -> None:
+    """A STILL-OPEN PT lot (open_remaining > 0) with no final positions_json mark
+    ⇒ unmeasured_price. Pins the other side of FIX 2.
+
+    PT_BUY with NO redeem/sell (the FIFO lot stays open), but the final snapshot
+    carries no ``pt_inventory_lots`` row. We hold PT we cannot mark — Empty ≠ Zero
+    — so the whole term degrades rather than silently contributing 0.
+    """
+    buy = _pt_buy_event(pt_token="PT-wstETH-25JUN2026", pt_amount="2", sy_amount="2", sy_price="1000")
+    si = _snapshot_with_positions([], [])
+    sf = _snapshot_with_positions([], [])  # no final PT mark, but the lot is open
+    out = compute_inventory_revaluation(
+        snapshot_initial=si, snapshot_final=sf, accounting_events=[buy], deployment_id=_DEP
+    )
+    assert out.total_usd is None
+    assert out.confidence == "unmeasured_price"
+
+
+def test_two_pt_maturities_same_underlying_keep_distinct_marks() -> None:
+    """Two PT lots, same underlying, DIFFERENT maturities, both held to the
+    endpoint with DIFFERENT marks ⇒ each valued with its own mark (NOT collapsed
+    into one bucket). Pins FIX 1 (maturity-BEARING valuation key).
+
+    Without the fix both maturities canonicalise to ``PT-WSTETH`` and the first
+    mark wins, mis-valuing the second. With the fix each keeps its own
+    maturity-bearing key + mark.
+    """
+    buy_a = _pt_buy_event(pt_token="PT-stETH-30DEC2027", pt_amount="1", sy_amount="1", sy_price="1000")
+    buy_b = _pt_buy_event(pt_token="PT-stETH-26JUN2028", pt_amount="1", sy_amount="1", sy_price="1000")
+    si = _snapshot_with_positions([], [])
+    sf = _snapshot_with_positions(
+        [],
+        [
+            # maturity A: 1 × $1100 − $1000 basis = $100
+            _pt_position(pt_symbol="PT-stETH-30DEC2027", quantity="1", value_usd="1100", cost_basis_usd="1000"),
+            # maturity B: 1 × $1050 − $1000 basis = $50
+            _pt_position(pt_symbol="PT-stETH-26JUN2028", quantity="1", value_usd="1050", cost_basis_usd="1000"),
+        ],
+    )
+    out = compute_inventory_revaluation(
+        snapshot_initial=si, snapshot_final=sf, accounting_events=[buy_a, buy_b], deployment_id=_DEP
+    )
+    # Each maturity keeps its OWN distinct key + mark — NOT collapsed.
+    assert out.per_token.get("PT-STETH-30DEC2027:open_lot") == "100"
+    assert out.per_token.get("PT-STETH-26JUN2028:open_lot") == "50"
+    assert out.total_usd == Decimal("150")

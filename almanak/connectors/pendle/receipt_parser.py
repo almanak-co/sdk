@@ -128,26 +128,34 @@ EVENT_NAME_TO_TYPE: dict[str, PendleEventType] = {
 # real on-chain symbol for every downstream consumer, not just accounting.
 
 
-def _resolve_pt_symbol(chain: str, pt_address: str | None) -> str | None:
-    """Return the canonical maturity-bearing PT symbol for ``pt_address``.
+def _resolve_market_token_symbol(
+    chain: str,
+    address: str | None,
+    catalogue: dict[str, dict[str, tuple[str, int]]],
+) -> str | None:
+    """Reverse-map a Pendle position-token address to its canonical symbol.
 
-    Reverse-looks the PT token address up in :data:`PT_TOKEN_INFO` and returns
-    the alias that embeds the maturity date (``PT-<asset>-<DDMONYYYY>``) so that
+    Shared by :func:`_resolve_pt_symbol` (``PT_TOKEN_INFO``) and
+    :func:`_resolve_yt_symbol` (``YT_TOKEN_INFO``) — the two catalogues have the
+    same ``{chain: {symbol: (address, decimals)}}`` shape and the same alias
+    semantics. Returns the alias that embeds the maturity date
+    (``<PREFIX>-<asset>-<DDMONYYYY>``) so that
     :func:`accounting_spec._parse_pt_maturity` can read the expiry. When several
-    aliases share the address (the catalogue stores upper-case + mixed-case +
+    aliases share the address (each catalogue stores upper-case + mixed-case +
     maturity-less spellings of the same token), the longest alias that matches
-    ``[-_]\\d{1,2}[A-Z]{3}\\d{4}`` wins — that is the maturity-bearing one.
+    ``[-_]\\d{1,2}[A-Z]{3}\\d{4}`` wins — that is the maturity-bearing one. Among
+    equal-length ties the mixed-case spelling wins (the human-readable canonical
+    symbol the strategy config carries; the downstream maturity parse is
+    case-insensitive, so this only affects ledger readability).
 
     Returns ``None`` (never a fabricated symbol) when the chain/address is
     unknown or no catalogue alias carries a maturity — the caller then degrades
     to the generic label rather than guessing wrong (Empty != Zero).
     """
-    if not pt_address:
+    if not address:
         return None
-    from almanak.connectors.pendle.sdk import PT_TOKEN_INFO
-
-    target = pt_address.lower()
-    chain_info = PT_TOKEN_INFO.get(chain.lower(), {})
+    target = address.lower()
+    chain_info = catalogue.get(chain.lower(), {})
     maturity_re = re.compile(r"[-_]\d{1,2}[A-Z]{3}\d{4}(?:$|[-_])")
     best: str | None = None
     for symbol, (addr, _decimals) in chain_info.items():
@@ -155,21 +163,62 @@ def _resolve_pt_symbol(chain: str, pt_address: str | None) -> str | None:
             continue
         if not maturity_re.search(symbol.upper()):
             continue
-        # The catalogue stores several maturity-bearing aliases at one address
-        # (a fully-upper-case spelling kept only "for compiler lookup" plus the
-        # canonical mixed-case form). Prefer the longest, and among equal-length
-        # ties prefer the mixed-case spelling — that is the human-readable
-        # canonical symbol the strategy config carries
-        # (``market_name="PT-wstETH-25JUN2026"``). The downstream maturity parse
-        # is case-insensitive, so this only affects ledger readability.
         if best is None or _pt_symbol_rank(symbol) > _pt_symbol_rank(best):
             best = symbol
     return best
 
 
-def _pt_symbol_rank(symbol: str) -> tuple[int, int]:
-    """Rank a PT alias: longer wins; among ties, a non-all-caps spelling wins."""
-    return (len(symbol), 0 if symbol.isupper() else 1)
+def _resolve_pt_symbol(chain: str, pt_address: str | None) -> str | None:
+    """Return the canonical maturity-bearing PT symbol for ``pt_address``.
+
+    Thin wrapper over :func:`_resolve_market_token_symbol` against the connector's
+    ``PT_TOKEN_INFO`` catalogue (e.g. ``PT-wstETH-25JUN2026``). See that helper
+    for the alias-selection contract.
+    """
+    from almanak.connectors.pendle.sdk import PT_TOKEN_INFO
+
+    return _resolve_market_token_symbol(chain, pt_address, PT_TOKEN_INFO)
+
+
+def _resolve_yt_symbol(chain: str, yt_address: str | None) -> str | None:
+    """Return the canonical maturity-bearing YT symbol for ``yt_address``.
+
+    Thin wrapper over :func:`_resolve_market_token_symbol` against the connector's
+    ``YT_TOKEN_INFO`` catalogue (e.g. ``YT-wstETH-25JUN2026``). VIB-5413: a YT
+    bought via a SWAP intent must carry its FULL maturity-bearing symbol on the
+    ledger (not the bare ``"YT"`` label) so the held YT is TRACKED wallet
+    inventory — otherwise the teardown swap-back clamp keys the maturity-bearing
+    teardown ``from_token`` against a bare-``"YT"`` accounting event, finds no
+    match, classifies the real held YT as ``untracked_token``, and strands it.
+    Mirrors the PT fix (VIB-5353 / VIB-5355).
+    """
+    from almanak.connectors.pendle.sdk import YT_TOKEN_INFO
+
+    return _resolve_market_token_symbol(chain, yt_address, YT_TOKEN_INFO)
+
+
+def _pt_symbol_rank(symbol: str) -> int:
+    """Rank a maturity-bearing alias for reverse (address → symbol) resolution:
+    prefer a mixed-case spelling over an ALL-CAPS one (the ALL-CAPS aliases are
+    kept "for compiler lookup" only; the mixed-case form is the human-readable
+    canonical symbol).
+
+    Length is deliberately NOT part of the rank. Maturity-LESS aliases are
+    already filtered out before ranking (the caller's ``maturity_re`` guard), so
+    among the survivors length only distinguishes the underlying SPELLING — e.g.
+    the on-chain ``stETH`` vs the convenience ``wstETH`` spelling registered for
+    the SAME Ethereum market — and a longer underlying spelling is NOT more
+    canonical. The selection loop keeps the FIRST-inserted alias on a rank tie,
+    so the maintainer's catalogue order decides between same-case spellings: the
+    on-chain ``symbol()`` spelling is listed first (``PT-/YT-stETH-30DEC2027``
+    before the ``wstETH`` alias on Ethereum; ``wstETH`` first on Arbitrum), so it
+    wins. VIB-5413: a swap-acquired PT/YT must carry the ON-CHAIN symbol on the
+    ledger so the teardown clamp's config-sourced ``from_token`` canonicalises to
+    the same key (``YT-stETH-30DEC2027`` → ``YT-STETH`` on both sides), instead of
+    a ``wstETH``-spelled ledger symbol that strands the position as
+    ``untracked_token`` against an ``stETH``-spelled teardown ``from_token``.
+    """
+    return 0 if symbol.isupper() else 1
 
 
 def _resolve_base_symbol(chain: str, base_address: str | None) -> str | None:
@@ -1427,14 +1476,24 @@ class PendleReceiptParser:
             slippage_bps = int((self.quoted_price - effective_price) / self.quoted_price * 10000)
 
         # Surface user-facing labels: for buy_yt the input is the underlying
-        # (e.g. "sUSDe") and the output is "YT"; vice versa for sell_yt.
+        # (e.g. "sUSDe") and the output is the YT; vice versa for sell_yt.
+        #
+        # VIB-5413: resolve the YT leg to its FULL maturity-bearing symbol
+        # (``YT-wstETH-25JUN2026``) via the connector's ``YT_TOKEN_INFO``
+        # catalogue — mirroring how the PT path resolves ``token_out`` via
+        # ``_resolve_pt_symbol``. The bare ``"YT"`` label made a swap-acquired YT
+        # invisible to the teardown swap-back clamp (keyed on the maturity-bearing
+        # ``from_token``) → ``untracked_token`` → stranded. Degrade to the generic
+        # ``"YT"`` only when the address is uncatalogued (Empty != Zero — never a
+        # fabricated symbol). The base/underlying leg stays the generic ``"TOKEN"``
+        # label (out of scope here; the strand is the YT leg).
         if intent_swap_type == "token_to_yt":
             swap_type = "buy_yt"
             token_in = "TOKEN"
-            token_out = "YT"
+            token_out = _resolve_yt_symbol(self.chain, token_out_address) or "YT"
         else:
             swap_type = "sell_yt"
-            token_in = "YT"
+            token_in = _resolve_yt_symbol(self.chain, token_in_address) or "YT"
             token_out = "TOKEN"
 
         return ParsedSwapResult(

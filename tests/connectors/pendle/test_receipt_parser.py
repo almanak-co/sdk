@@ -665,7 +665,12 @@ class TestYTSwapReconstruction:
         assert amounts.amount_in_decimal == Decimal("50")
         assert amounts.amount_out_decimal == Decimal("60971")
         assert amounts.token_in == "TOKEN"
-        assert amounts.token_out == "YT"
+        # VIB-5413: the YT leg now carries its FULL maturity-bearing symbol
+        # (resolved from YT_TOKEN_INFO), not the bare "YT" label — so a
+        # swap-acquired YT is TRACKED wallet inventory and the teardown
+        # swap-back clamp matches it instead of stranding it as untracked_token.
+        assert amounts.token_out == "YT-sUSDE-7MAY2026"
+        assert amounts.token_out.startswith("YT-")
 
     def test_yt_buy_no_decimals_double_application(self):
         """Decimals must be applied exactly once — NEVER 18 then 18 again."""
@@ -723,7 +728,9 @@ class TestYTSwapReconstruction:
         assert amounts is not None
         assert amounts.amount_in_decimal == Decimal("60971")
         assert amounts.amount_out_decimal == Decimal("50")
-        assert amounts.token_in == "YT"
+        # VIB-5413: the YT leg now carries its FULL maturity-bearing symbol.
+        assert amounts.token_in == "YT-sUSDE-7MAY2026"
+        assert amounts.token_in.startswith("YT-")
         assert amounts.token_out == "TOKEN"
 
     def test_yt_swap_falls_back_to_legacy_when_context_missing(self):
@@ -900,7 +907,8 @@ class TestYTSwapReconstruction:
         assert amounts is not None, "YT entry without a Swap event must still reconstruct from Transfers"
         assert amounts.amount_in_decimal == Decimal("50")
         assert amounts.amount_out_decimal == Decimal("60971")
-        assert amounts.token_out == "YT"
+        # VIB-5413: full maturity-bearing YT symbol (tracked-inventory join key).
+        assert amounts.token_out == "YT-sUSDE-7MAY2026"
 
     def test_yt_exit_no_swap_event_reconstructs_from_transfers(self):
         """YT SELL receipt with YT-in + token-out Transfers but NO Swap event
@@ -926,7 +934,8 @@ class TestYTSwapReconstruction:
         assert amounts is not None
         assert amounts.amount_in_decimal == Decimal("60971")
         assert amounts.amount_out_decimal == Decimal("49")
-        assert amounts.token_in == "YT"
+        # VIB-5413: full maturity-bearing YT symbol (tracked-inventory join key).
+        assert amounts.token_in == "YT-sUSDE-7MAY2026"
 
     def test_yt_entry_no_swap_event_unmeasured_when_yt_transfer_missing(self):
         """Empty != Zero: a YT entry with NO Swap event AND no matching YT
@@ -1379,14 +1388,35 @@ class TestPTSymbolResolverHelpers:
 
     _ADDR = "0x" + "ab" * 20
 
-    def test_pt_symbol_rank_orders_longest_then_mixed_case(self):
+    def test_pt_symbol_rank_prefers_mixed_case_length_independent(self):
         from almanak.connectors.pendle.receipt_parser import _pt_symbol_rank
 
-        # Longer alias wins.
-        assert _pt_symbol_rank("PT-wstETH-25JUN2026") > _pt_symbol_rank("PT-25JUN2026")
-        # Equal length: the mixed-case (canonical, human-readable) spelling wins.
-        assert len("PT-wstETH-25JUN2026") == len("PT-WSTETH-25JUN2026")
+        # Mixed-case (canonical, human-readable) spelling beats the all-caps
+        # ("for compiler lookup") spelling.
         assert _pt_symbol_rank("PT-wstETH-25JUN2026") > _pt_symbol_rank("PT-WSTETH-25JUN2026")
+        # VIB-5413: length is NOT part of the rank — two same-case spellings of
+        # different underlying length TIE, so the selection loop's insertion order
+        # decides (the on-chain spelling is listed first). A longer underlying
+        # spelling (``wstETH``) is NOT more canonical than the on-chain (``stETH``).
+        assert _pt_symbol_rank("PT-stETH-30DEC2027") == _pt_symbol_rank("PT-wstETH-30DEC2027")
+
+    def test_resolve_symbol_returns_onchain_steth_spelling_for_30dec2027(self):
+        """VIB-5413 (live catalogue): the Ethereum stETH-30DEC2027 market registers
+        BOTH the on-chain ``stETH`` symbol and a ``wstETH`` convenience alias at one
+        address. Reverse resolution must return the on-chain ``stETH`` spelling
+        (listed first) so the ledger symbol canonicalises to the SAME key as the
+        strategy/teardown ``from_token``. The old longest-alias rank returned the
+        ``wstETH`` spelling, stranding a swap-acquired YT as ``untracked_token``."""
+        from almanak.connectors.pendle.receipt_parser import _resolve_pt_symbol, _resolve_yt_symbol
+
+        assert (
+            _resolve_yt_symbol("ethereum", "0x04b7fa1e727d7290d6e24fa9b426d0c940283a95")
+            == "YT-stETH-30DEC2027"
+        )
+        assert (
+            _resolve_pt_symbol("ethereum", "0xb253Eff1104802b97aC7E3aC9FdD73AecE295a2c")
+            == "PT-stETH-30DEC2027"
+        )
 
     def test_resolve_pt_symbol_prefers_maturity_bearing_mixed_case(self, monkeypatch):
         from almanak.connectors.pendle import sdk

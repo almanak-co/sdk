@@ -114,9 +114,7 @@ class TestDecideSwapClamp:
 
     def test_non_finite_tracked_qty_skips_and_degrades(self):
         # CR#1: a non-finite tracked qty fails closed for THIS token.
-        d = decide_swap_clamp(
-            live_balance=Decimal("100"), tracked_map={"USDC": Decimal("Infinity")}, from_token="USDC"
-        )
+        d = decide_swap_clamp(live_balance=Decimal("100"), tracked_map={"USDC": Decimal("Infinity")}, from_token="USDC")
         assert d.skip is True and d.degraded is True
         assert d.reason == "tracked_qty_unmeasured"
 
@@ -187,6 +185,24 @@ class TestSumOpenWalletBasisByToken:
     def test_sums_swap_acquisition(self):
         out = sum_open_wallet_basis_by_token([_swap_event(_DEP, "USDC", "42")], _DEP)
         assert out == {"USDC": Decimal("42")}
+
+    def test_swap_acquired_yt_tracked_under_maturity_less_key_and_clamps(self):
+        # VIB-5413: a YT bought via a SWAP intent is a plain wallet-basis lot
+        # (NOT a separate PT lane). Once the receipt parser stores the FULL
+        # maturity-bearing symbol on the ledger row, the lot surfaces under the
+        # maturity-LESS canonical key, so the maturity-bearing teardown
+        # ``from_token`` matches it → ``clamped`` instead of ``untracked_token``
+        # (the strand). End-to-end mirror of the PT path (VIB-5353).
+        out = sum_open_wallet_basis_by_token([_swap_event(_DEP, "YT-wstETH-25JUN2026", "16.82")], _DEP)
+        assert out == {"YT-WSTETH": Decimal("16.82")}
+        decision = decide_swap_clamp(
+            live_balance=Decimal("16.82"),
+            tracked_map=out,
+            from_token="YT-wstETH-25JUN2026",
+        )
+        assert decision.reason == "clamped"
+        assert decision.skip is False
+        assert decision.amount == Decimal("16.82")
 
     def test_counts_borrow_and_withdraw_sourced_lots(self):
         # ALM-2766: borrowed/withdrawn-then-held tokens ARE tracked wallet
@@ -361,9 +377,7 @@ class TestReadTrackedSwapInventoryMeasuredReader:
     def _reader_sm(result):
         # SimpleNamespace so only the measured reader is present — no
         # auto-vivified has_accounting_event_backend / get_accounting_events_sync.
-        return SimpleNamespace(
-            read_accounting_events_measured=lambda deployment_id, position_key=None: result
-        )
+        return SimpleNamespace(read_accounting_events_measured=lambda deployment_id, position_key=None: result)
 
     def test_available_nonempty_returns_tracked_map(self):
         # measured=True with events → real tracked inventory.

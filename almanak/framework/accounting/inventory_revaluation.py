@@ -73,6 +73,16 @@ from typing import Any
 
 from almanak.framework.accounting.basis import FIFOBasisStore
 
+# The persisted ``positions_json`` row marker the portfolio valuer stamps on a
+# held-PT inventory position (``portfolio_valuer._PT_INVENTORY_SOURCE`` /
+# ``_classify_pt_inventory``, VIB-5316). A held PT is KNOWN_UNPRICEABLE in the
+# spot oracle (the ``PT-`` prefix), so it produces NO ``wallet_balances_json``
+# row — its gateway-discounted mark lives ONLY on this position row. The lane
+# matches the marker as a literal (VIB-4636 discipline — detect by data-shape
+# marker, never by a protocol-name string) so it does not import the valuer;
+# mirrors ``accountant_test._open_pt_inventory_rows``.
+_PT_INVENTORY_SOURCE = "pt_inventory_lots"
+
 # Canonical token-SYMBOL-bearing payload fields, across every primitive's
 # accounting-event payload (``payload_schemas.py``): SWAP carries
 # ``token_in`` / ``token_out``; LP_OPEN / LP_CLOSE carry ``token0`` / ``token1``;
@@ -196,6 +206,117 @@ def _loads_list(raw: Any) -> list[Any]:
     return []
 
 
+def _pt_inventory_marks(snapshot: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Held-PT marks read from ``positions_json`` (the SECOND mark source).
+
+    The §11.5 lane's primary mark source — ``_wallet_marks`` over
+    ``wallet_balances_json`` — never carries a held PT: a held PT is
+    KNOWN_UNPRICEABLE in the spot oracle (the ``PT-`` prefix; ``portfolio_valuer``
+    skips it from the wallet/position spot valuation to avoid double-counting), so
+    it produces NO wallet-balances row. Its gateway-discounted mark lives ONLY on
+    the synthetic ``positions_json`` row tagged ``details.source ==
+    "pt_inventory_lots"`` (``_classify_pt_inventory``, VIB-5316). This reader is
+    that second mark source.
+
+    Returns ``{canonical_symbol: {"balance", "price", "cost", "unmeasured"}}``,
+    keyed on the MATURITY-BEARING canonical symbol (``_canonical`` /
+    ``basis.canonical_symbol``) — NOT the maturity-insensitive
+    ``canonical_pt_symbol`` (a JOIN/DEDUP identity only, never a pricing key). Two
+    maturities of the same underlying therefore stay distinct here, mirroring the
+    valuer's pricing key (``portfolio_valuer._aggregate_open_pt_lots`` keys PT
+    pricing on the maturity-bearing ``canonical_symbol`` for exactly this reason).
+
+    * ``balance`` — the held PT quantity (``details.quantity``);
+    * ``price`` — the PER-UNIT mark ``value_usd / quantity`` (the top-level
+      ``value_usd`` is the whole-lot mark);
+    * ``cost`` — the buy-time-anchored USD cost basis (top-level
+      ``cost_basis_usd``; omitted/falsy on the row → unmeasured);
+    * ``unmeasured`` — True when ANY of the row's ``details.mark_unmeasured`` /
+      ``cost_basis_unmeasured`` / ``unrealized_pnl_unmeasured`` flags is set, OR
+      the quantity / ``value_usd`` is absent/unparseable. Empty ≠ Zero: a missing
+      measurement is unmeasured, never a fabricated 0.
+
+    Parse discipline mirrors ``accountant_test._open_pt_inventory_rows`` exactly:
+    accept a bare list OR the versioned envelope ``{"positions": [...]}``; a
+    malformed / unreadable ``positions_json`` yields no PT marks (the caller's
+    Empty ≠ Zero handling then governs — a held PT with no readable mark surfaces
+    as unmeasured via the missing-mark path, never a silent zero).
+
+    When the same maturity-bearing canonical PT symbol appears in more than one row (defensive — the
+    valuer emits one row per symbol), quantities accumulate and the first usable
+    mark/cost wins, with ``unmeasured`` latching True if any contributing row is
+    unmeasured.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    if not snapshot:
+        return out
+    positions = _loads_positions(snapshot.get("positions_json"))
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        details = p.get("details")
+        if not isinstance(details, dict) or details.get("source") != _PT_INVENTORY_SOURCE:
+            continue
+        # Maturity-BEARING key (``_canonical``, identical to
+        # ``basis.canonical_symbol``): two maturities of the same underlying must
+        # NOT collapse into one bucket and keep the first mark. The valuer's PT
+        # pricing aggregation keys the same way (``_aggregate_open_pt_lots``). The
+        # ``positions_json`` ``pt_symbol`` and the FIFO ``pt_token`` are BOTH the
+        # maturity-bearing on-chain ledger symbol (same source), so ``_canonical``
+        # of both yields the identical join key — but distinct maturities stay
+        # distinct. ``_canonical(None) == ""``; the ``if not sym`` below skips it.
+        sym = _canonical(details.get("pt_symbol") or details.get("asset"))
+        if not sym:
+            continue
+        qty = _parse_dec(details.get("quantity"))
+        value_usd = _parse_dec(p.get("value_usd"))
+        cost = _parse_dec(p.get("cost_basis_usd"))
+        # Empty ≠ Zero: a flagged-unmeasured row, or one missing its quantity /
+        # whole-lot mark, is unmeasured — never coerce to a 0 holding or 0 mark.
+        flag_unmeasured = bool(
+            details.get("mark_unmeasured")
+            or details.get("cost_basis_unmeasured")
+            or details.get("unrealized_pnl_unmeasured")
+        )
+        row_unmeasured = flag_unmeasured or qty is None or qty <= 0 or value_usd is None
+        per_unit = (value_usd / qty) if (value_usd is not None and qty is not None and qty > 0) else None
+
+        slot = out.setdefault(sym, {"balance": None, "price": None, "cost": None, "unmeasured": False})
+        if qty is not None:
+            slot["balance"] = (slot["balance"] or Decimal("0")) + qty
+        if slot["price"] is None and per_unit is not None:
+            slot["price"] = per_unit
+        if slot["cost"] is None and cost is not None:
+            slot["cost"] = cost
+        if row_unmeasured:
+            slot["unmeasured"] = True
+    return out
+
+
+def _loads_positions(raw: Any) -> list[Any]:
+    """Decode a persisted ``positions_json`` column to its positions list.
+
+    Accepts the two shapes ``accountant_test._open_pt_inventory_rows`` tolerates:
+    a legacy bare list, OR the versioned envelope ``{"positions": [...]}``
+    (VIB-3923). An unreadable / unexpected shape yields ``[]`` (no PT marks).
+    """
+    if raw is None or raw == "" or raw == "[]":
+        return []
+    decoded: Any = raw
+    if isinstance(raw, str):
+        import json
+
+        try:
+            decoded = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+    if isinstance(decoded, list):
+        return decoded
+    if isinstance(decoded, dict) and isinstance(decoded.get("positions"), list):
+        return decoded["positions"]
+    return []
+
+
 def _tracked_symbols(accounting_events: list[dict[str, Any]]) -> set[str]:
     """Canonical symbols named by ANY accounting-event payload's token fields.
 
@@ -278,6 +399,21 @@ def _open_lot_remaining_by_token(store: FIFOBasisStore) -> dict[str, Decimal]:
         if not sym:
             continue
         by_token[sym] = by_token.get(sym, Decimal("0")) + remaining
+    # Fold held-PT lots into the same open-lot remaining map (VIB-5410). A held
+    # PT is the unmatched ``PT_BUY`` residual; it is NOT a swap lot (disjoint key
+    # namespace + ``remaining_pt`` field), so it must be summed separately. Keyed
+    # by the MATURITY-BEARING ``_canonical`` (CR: NOT ``canonical_pt_symbol``,
+    # which is a JOIN/DEDUP identity only — never a pricing key): each maturity of
+    # the same underlying stays DISTINCT, mirroring the valuer's PT pricing key
+    # (``portfolio_valuer._aggregate_open_pt_lots``). The PT lot joins its
+    # ``positions_json`` mark (same maturity-bearing on-chain symbol) and never
+    # collides with a swap-lane/ambient symbol (PT symbols carry the ``PT-``
+    # prefix — disjoint namespace, VIB-5353, basis.py).
+    for _position_key, pt_token, remaining_pt, _sy_cost, _usd_cost in store.iter_open_pt_lots():
+        sym = _canonical(pt_token)
+        if not sym:
+            continue
+        by_token[sym] = by_token.get(sym, Decimal("0")) + remaining_pt
     return by_token
 
 
@@ -291,19 +427,119 @@ def _open_lot_basis_by_token(store: FIFOBasisStore) -> dict[str, Decimal | None]
     (the lot's ``cost_usd`` pro-rated by ``remaining / amount``).
     """
     by_token: dict[str, Decimal | None] = {}
+
+    def _add(sym: str, cost: Decimal | None) -> None:
+        """Accumulate a lot's basis with None-poisoning (Empty ≠ Zero)."""
+        if cost is None:
+            by_token[sym] = None
+            return
+        prior = by_token.get(sym, Decimal("0"))
+        if prior is None:  # already unmeasured — keep it unmeasured.
+            return
+        by_token[sym] = prior + cost
+
     for _position_key, token, _remaining, cost_for_remaining in store.iter_open_swap_lots():
         sym = _canonical(token)
-        if not sym:
-            continue
-        if cost_for_remaining is None:
-            by_token[sym] = None
-            continue
-        prior = by_token.get(sym, Decimal("0"))
-        # Once a token is marked unmeasured (None), keep it unmeasured.
-        if prior is None:
-            continue
-        by_token[sym] = prior + cost_for_remaining
+        if sym:
+            _add(sym, cost_for_remaining)
+    # Fold held-PT lots (VIB-5410): the 5th tuple element ``usd_cost`` is the
+    # buy-time-anchored USD cost ALREADY pro-rated for ``remaining_pt``
+    # (basis.py:iter_open_pt_lots) — the direct analogue of the swap lane's
+    # ``cost_for_remaining``. Same None-poisoning discipline; keyed by the
+    # MATURITY-BEARING ``_canonical`` (CR: NOT ``canonical_pt_symbol``) so each
+    # maturity stays distinct, mirroring the valuer's PT pricing key.
+    for _position_key, pt_token, _remaining_pt, _sy_cost, usd_cost in store.iter_open_pt_lots():
+        sym = _canonical(pt_token)
+        if sym:
+            _add(sym, usd_cost)
     return by_token
+
+
+def _open_pt_lot_symbols(store: FIFOBasisStore) -> set[str]:
+    """Maturity-BEARING canonical symbols of the open held-PT lots (VIB-5410).
+
+    A held PT is the unmatched ``PT_BUY`` residual — it carries NO
+    ``wallet_balances_json`` row (KNOWN_UNPRICEABLE) and, when the final
+    ``positions_json`` carries no ``pt_inventory_lots`` mark, it would otherwise be
+    indistinguishable from an ordinary swap-lane token whose balance left the
+    wallet (``held = 0`` ⇒ contributes 0). This set lets the caller route such a
+    STILL-OPEN PT through the PT branch so the missing-mark case degrades
+    (Empty ≠ Zero) instead of silently contributing 0. Keyed identically to the
+    PT marks (``_canonical`` of the lot's ``pt_token``), so the two join.
+    """
+    return {
+        sym
+        for _position_key, pt_token, _remaining_pt, _sy_cost, _usd_cost in store.iter_open_pt_lots()
+        if (sym := _canonical(pt_token))
+    }
+
+
+@dataclass(frozen=True)
+class _HeldResolution:
+    """Per-symbol resolution of held quantity + open-lot remaining (or degrade/skip).
+
+    Exactly one of three states (mutually exclusive):
+
+    * ``skip`` — the symbol contributes nothing (a held→flat PT disposed by the
+      bracket end: no open lot remains, no final mark). The caller ``continue``s.
+    * ``degrade`` — a non-empty ``confidence`` string (``unmeasured_*``); the
+      caller returns a ``None``-total :class:`InventoryRevaluation` immediately
+      (Empty ≠ Zero).
+    * **measured** — both ``held`` and ``lot_remaining`` are non-``None`` and the
+      caller proceeds to the open-lot / ambient terms.
+    """
+
+    held: Decimal | None = None
+    lot_remaining: Decimal | None = None
+    degrade: str = ""
+    skip: bool = False
+
+
+def _resolve_held_quantity(
+    sym: str,
+    *,
+    is_pt: bool,
+    pt_final: dict[str, dict[str, Any]],
+    final_marks: dict[str, dict[str, Any]],
+    open_remaining: dict[str, Decimal],
+) -> _HeldResolution:
+    """Resolve a symbol's held quantity and open-lot remaining for one bracket.
+
+    PT path (VIB-5410): held quantity + mark come from the ``positions_json``
+    ``pt_inventory_lots`` row (``pt_final``), NOT ``wallet_balances_json``. A PT
+    absent from the FINAL snapshot whose FIFO lot is fully matched was
+    disposed/redeemed by the bracket end → ``skip`` (held = 0, its realized leg is
+    in the SWAP/PEN buckets); a STILL-OPEN PT lot lacking a final mark, or a
+    flagged-unmeasured PT row, degrades (``unmeasured_price`` — mirrors PEN3).
+
+    Non-PT path: a present final wallet row with an unmeasured (``None``) balance
+    degrades (``unmeasured_balance`` — cannot assert "holds nothing" from an
+    unmeasured balance); a token genuinely ABSENT from the final wallet correctly
+    has ``held = 0``.
+    """
+    if is_pt:
+        pt_row = pt_final.get(sym)
+        if pt_row is None:
+            # PT absent from the FINAL snapshot. No open lot remaining ⇒ disposed
+            # by the bracket end → contribute 0 (skip); a still-open lot lacking a
+            # final mark is genuinely unmeasured.
+            if open_remaining.get(sym, Decimal("0")) <= 0:
+                return _HeldResolution(skip=True)
+            return _HeldResolution(degrade="unmeasured_price")
+        if pt_row.get("unmeasured"):
+            # Empty ≠ Zero: a flagged-unmeasured PT row degrades the whole term.
+            return _HeldResolution(degrade="unmeasured_price")
+        held = pt_row.get("balance") or Decimal("0")
+        # The held PT is the open-lot residual: ``lot_remaining`` tracks it via the
+        # PT-fold in ``_open_lot_remaining_by_token`` (no ambient remainder).
+        return _HeldResolution(held=held, lot_remaining=open_remaining.get(sym, held))
+
+    # Non-PT: Empty ≠ Zero on a present-but-unmeasured final balance.
+    final_row = final_marks.get(sym)
+    if final_row is not None and final_row.get("balance") is None:
+        return _HeldResolution(degrade="unmeasured_balance")
+    held = (final_row.get("balance") if final_row is not None else None) or Decimal("0")
+    return _HeldResolution(held=held, lot_remaining=open_remaining.get(sym, Decimal("0")))
 
 
 def compute_inventory_revaluation(
@@ -326,6 +562,23 @@ def compute_inventory_revaluation(
     * **Open swap-lot term** (Q1b): for each open swap lot, contribute
       ``remaining × mark_final − basis_remaining`` (the lot's residual MTM),
       reusing VIB-4984's ``cost_for_remaining`` as the basis.
+    * **Held-PT term** (VIB-5410): a held PT is KNOWN_UNPRICEABLE in the spot
+      oracle, so it never enters ``wallet_balances_json``; its discounted mark and
+      buy-time cost basis live on the ``positions_json`` ``pt_inventory_lots`` row
+      instead. A PT symbol therefore sources its ``held`` quantity and
+      ``mark_final`` from :func:`_pt_inventory_marks` (NOT ``final_marks``) and
+      takes ONLY the open-lot MTM branch (``lot_held × mark_final − basis_held``;
+      ``qty_idle == 0`` — it has no wallet ambient marks). The held-PT valuation
+      key is the MATURITY-BEARING canonical symbol (``_canonical``), so two
+      maturities of the same underlying stay DISTINCT (each valued with its own
+      mark) — mirroring the valuer's PT pricing key
+      (``portfolio_valuer._aggregate_open_pt_lots``), NOT the maturity-insensitive
+      ``canonical_pt_symbol`` (a JOIN/DEDUP identity only). A PT disposed by the
+      final endpoint (fully matched by ``PT_SELL`` / ``PT_REDEEM``, no open lot
+      remaining) contributes 0 like any non-PT token absent from the final wallet
+      — its realized leg is already in the SWAP / PEN buckets. The whole term
+      degrades to ``None`` only when a STILL-OPEN PT row is flagged unmeasured or
+      its open-lot basis is missing, mirroring PEN3.
     * **Confidence**: ``None`` total + ``unmeasured_price`` when a held token has
       a non-zero quantity at an endpoint but no usable mark there;
       ``unmeasured_basis`` when an open lot is missing its basis. Empty ≠ Zero.
@@ -343,6 +596,13 @@ def compute_inventory_revaluation(
     """
     initial_marks = _wallet_marks(snapshot_initial)
     final_marks = _wallet_marks(snapshot_final)
+    # SECOND mark source (VIB-5410): held PTs are KNOWN_UNPRICEABLE in the spot
+    # oracle, so they never appear in ``wallet_balances_json`` — their discounted
+    # gateway mark + buy-time cost basis live ONLY on the ``positions_json``
+    # ``pt_inventory_lots`` rows. A PT symbol sources its held quantity / mark /
+    # cost from these maps, NOT from ``final_marks``.
+    pt_final = _pt_inventory_marks(snapshot_final)
+    pt_initial = _pt_inventory_marks(snapshot_initial)
     # ``tracked`` is the set of canonical symbols any accounting payload names —
     # a diagnostic audit field (``excluded_tokens``). It is NOT the partition
     # itself: the partition is by HELD QUANTITY (below). A token can be both
@@ -366,6 +626,7 @@ def compute_inventory_revaluation(
         store.reconstruct_from_events(scoped_events)
         open_remaining = _open_lot_remaining_by_token(store)
         open_basis = _open_lot_basis_by_token(store)
+        open_pt_symbols = _open_pt_lot_symbols(store)
     elif _has_unattributable_trading_activity(accounting_events):
         # Empty deployment_id but the event stream carries SWAP activity we
         # cannot attribute to a FIFO store (a shared wallet's lots are not ours
@@ -385,6 +646,7 @@ def compute_inventory_revaluation(
     else:
         open_remaining = {}
         open_basis = {}
+        open_pt_symbols = set()
 
     per_token: dict[str, str] = {}
     ambient_total = Decimal("0")
@@ -396,36 +658,58 @@ def compute_inventory_revaluation(
     # entirely — deployed into an LP, disposed via a later swap — has
     # ``held_final = 0`` and contributes nothing, which is exactly the
     # double-count guard for a round-trip that ends flat: rule 5, §11.2).
-    all_symbols = set(initial_marks) | set(final_marks) | set(open_remaining)
+    all_symbols = (
+        set(initial_marks) | set(final_marks) | set(open_remaining) | set(pt_final) | set(pt_initial) | open_pt_symbols
+    )
     for sym in sorted(all_symbols):
-        # Empty ≠ Zero: a token whose final wallet ROW is present but whose
-        # balance is unmeasured (``None``) must fail closed — we cannot assert
-        # "holds nothing" from an unmeasured balance. A token genuinely ABSENT
-        # from the final wallet (no row at all — deployed into an LP, fully
-        # disposed) correctly has held=0; that is NOT the same as a present row
-        # with an unmeasured balance.
-        final_row = final_marks.get(sym)
-        if final_row is not None and final_row.get("balance") is None:
+        # VIB-5410: a PT symbol (present in either PT map OR as an open held-PT
+        # FIFO lot) is sourced ENTIRELY from ``positions_json`` — held quantity and
+        # mark from ``pt_final`` (NOT
+        # ``final_marks``, which has no PT row), so ``lot_held == held`` and
+        # ``qty_idle == 0`` (a PT never takes the ambient ``qty_idle × Δmark``
+        # branch — it has no wallet ambient marks). The held-PT valuation key is
+        # the MATURITY-BEARING ``_canonical`` symbol (CR), so two distinct
+        # maturities of the same underlying stay distinct (each marked from its own
+        # ``pt_final`` row) — never collapsed into one bucket. PT symbols carry the
+        # ``PT-`` prefix and live in a disjoint namespace from swap/ambient wallet
+        # symbols (VIB-5353), so this branch never shadows an ordinary token.
+        is_pt = sym in pt_final or sym in pt_initial or sym in open_pt_symbols
+
+        resolution = _resolve_held_quantity(
+            sym,
+            is_pt=is_pt,
+            pt_final=pt_final,
+            final_marks=final_marks,
+            open_remaining=open_remaining,
+        )
+        if resolution.skip:
+            # Held → flat: a PT disposed/redeemed by the bracket end contributes 0.
+            continue
+        if resolution.degrade:
+            # Empty ≠ Zero: an unmeasured PT row / balance degrades the whole term.
             return InventoryRevaluation(
                 total_usd=None,
                 per_token=per_token,
-                confidence="unmeasured_balance",
+                confidence=resolution.degrade,
                 excluded_tokens=sorted(tracked),
             )
-        held = (final_row.get("balance") if final_row is not None else None) or Decimal("0")
-        lot_remaining = open_remaining.get(sym, Decimal("0"))
+        assert resolution.held is not None and resolution.lot_remaining is not None
+        held = resolution.held
+        lot_remaining = resolution.lot_remaining
 
         # The held balance partitions into (a) the portion still backed by an
         # open swap lot — valued by the open-lot MTM term — and (b) the idle
         # remainder — valued by the ambient Δmark term. ``lot_held`` is bounded
         # by what is ACTUALLY in the wallet so a FIFO lot whose token was
         # deployed/disposed (held=0) is not re-marked. Each held unit is counted
-        # exactly once and ``lot_held + qty_idle == held``.
+        # exactly once and ``lot_held + qty_idle == held``. (For a PT,
+        # ``lot_held == held`` and ``qty_idle == 0`` — the held-PT term is purely
+        # the open-lot MTM branch.)
         lot_held = min(lot_remaining, held) if held > 0 else Decimal("0")
         qty_idle = held - lot_held
 
-        # ── Open swap-lot term (Q1b): remaining × mark_final − basis_remaining,
-        # pro-rated to the portion of the lot still held in the wallet.
+        # ── Open swap-lot / held-PT term (Q1b): remaining × mark_final −
+        # basis_remaining, pro-rated to the portion of the lot still held.
         if lot_held > 0:
             saw_open_lot = True
             full_remaining = lot_remaining
@@ -438,7 +722,9 @@ def compute_inventory_revaluation(
                     confidence="unmeasured_basis",
                     excluded_tokens=sorted(tracked),
                 )
-            mark = final_marks.get(sym, {}).get("price")
+            # PT mark comes from the ``positions_json`` row (its discounted
+            # gateway mark); a non-PT mark comes from ``wallet_balances_json``.
+            mark = pt_final[sym]["price"] if is_pt else final_marks.get(sym, {}).get("price")
             if mark is None:
                 # No persisted final mark — degrade (never fetch a live price;
                 # gateway boundary). Empty ≠ Zero.
