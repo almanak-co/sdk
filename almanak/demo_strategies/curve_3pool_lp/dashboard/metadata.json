@@ -1,0 +1,5 @@
+{
+    "display_name": "Curve 3pool LP",
+    "description": "Curve 3pool (DAI/USDC/USDT) 3-coin stableswap LP dashboard showing the per-coin deposit and fungible 3Crv position",
+    "icon": "🌀"
+}
