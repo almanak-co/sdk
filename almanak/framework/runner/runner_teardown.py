@@ -331,7 +331,7 @@ def _make_approval_callback(runner: Any, state_adapter: Any):
     return on_approval_needed
 
 
-def _count_open_positions(strategy: Any) -> int | None:
+async def _count_open_positions(strategy: Any) -> int | None:
     """Best-effort pre-execution open-position count for teardown bookkeeping.
 
     VIB-5085: lifecycle ``positions_total`` / ``positions_closed`` must count
@@ -340,14 +340,23 @@ def _count_open_positions(strategy: Any) -> int | None:
     over-reports (the field-report symptom: 2 positions closed via 6 intents
     logged as ``positions_closed=6``).
 
+    VIB-5459 / TD-01: the enumeration is reconciled against the
+    ``position_registry`` WARM read path (additive union) so a restarted runner
+    counts the cut-over LP positions the registry still remembers even when
+    in-memory state was wiped. Non-LP / non-cut-over primitives fall through to
+    the strategy's own ``get_open_positions`` unchanged, and the read degrades to
+    the legacy enumeration on a backend without cutover storage.
+
     Returns ``None`` when the count can't be read. Callers MUST NOT substitute
     the intent count for ``positions_closed`` — that re-introduces the exact
     conflation this ticket fixes. On the unverified multi-chain / inline lanes
     they instead omit ``positions_closed`` from the result payload and let the
     persistence lift fall back to the legacy ``result_json["intents"]`` key.
     """
+    from ..teardown.registry_enumeration import resolve_open_positions_with_registry
+
     try:
-        positions = strategy.get_open_positions()
+        positions = await resolve_open_positions_with_registry(strategy)
         return len(positions.positions)
     except Exception:
         logger.debug(
@@ -735,7 +744,7 @@ async def execute_teardown(  # noqa: C901
     # denominator then degrades to the intent count (cosmetic; the completion
     # mark is authoritative), but the completed ``positions_closed`` is NEVER
     # fabricated from intents (see the multi-chain completion mark below).
-    open_positions_count = _count_open_positions(strategy)
+    open_positions_count = await _count_open_positions(strategy)
     total_positions = open_positions_count if open_positions_count is not None else len(teardown_intents)
     if request:
         _safe_mark(manager, "mark_started", deployment_id, total_positions=total_positions)
@@ -1327,7 +1336,7 @@ async def _execute_teardown_inline_body(  # noqa: C901
     # fully-successful inline teardown reports positions closed, not intents
     # (this lane has no position verifier). ``None`` when unreadable — the
     # completion mark then omits ``positions_closed`` rather than fabricate it.
-    pre_exec_positions_total = _count_open_positions(strategy)
+    pre_exec_positions_total = await _count_open_positions(strategy)
 
     inline_degraded_count = 0
     all_success = True

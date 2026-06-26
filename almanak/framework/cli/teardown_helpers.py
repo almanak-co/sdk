@@ -699,8 +699,21 @@ def discover_positions(
         click.echo(f"  Found {len(discovered)} on-chain LP position(s).")
         return positions
 
+    # VIB-5459 / TD-01: reconcile the strategy's own enumeration against the
+    # ``position_registry`` WARM read path so the CLI teardown lane (preview +
+    # execute) also surfaces cut-over LP (UniV3 + UniV4) the registry still
+    # remembers after a restart. Additive (never drops a strategy-reported
+    # position). The registry-capable state manager was injected onto the
+    # strategy via ``set_state_manager`` during CLI setup; absent it the read
+    # degrades to the strategy's own enumeration. This is the non-``--discover``
+    # (Plan A) lane — a precise, deployment-scoped registry read, never a
+    # wallet-wide scan.
+    import asyncio
+
+    from ..teardown.registry_enumeration import resolve_open_positions_with_registry
+
     try:
-        return strategy.get_open_positions()
+        return asyncio.run(resolve_open_positions_with_registry(strategy))
     except Exception as e:
         logger.error("Failed to get positions from strategy", exc_info=True)
         raise click.ClickException(f"Failed to get positions: {e}") from e

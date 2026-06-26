@@ -120,11 +120,19 @@ async def fetch_positions_or_fallback(
         - ``positions`` is ``None`` when the caller should return
           ``early_result`` immediately.
     """
+    from ..teardown.registry_enumeration import resolve_open_positions_with_registry
     from .runner_models import IterationStatus
 
     deployment_id = strategy.deployment_id
     try:
-        positions = strategy.get_open_positions()
+        # VIB-5459 / TD-01: reconcile the strategy's enumeration against the
+        # position_registry WARM read path so safety validation + closure
+        # verification see the cut-over LP set the registry still remembers
+        # after a restart. Additive (never drops a strategy-reported position);
+        # non-LP / non-cut-over primitives fall through to get_open_positions
+        # unchanged, and the read degrades to legacy enumeration on a backend
+        # without cutover storage.
+        positions = await resolve_open_positions_with_registry(strategy)
     except Exception as pos_err:
         if not runner.config.allow_unsafe_teardown_fallback:
             error_msg = (

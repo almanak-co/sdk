@@ -1920,6 +1920,33 @@ class IntentStrategy(StrategyBase[ConfigT]):
         """
         ...
 
+    async def resolve_open_positions(self) -> "TeardownPositionSummary":
+        """Teardown enumeration reconciled against the ``position_registry`` WARM read path.
+
+        VIB-5459 / TD-01 — the single WARM read path for cut-over LP. Wraps the
+        strategy's own :meth:`get_open_positions` (its authoritative,
+        primitive-complete enumeration) and reconciles the cut-over LP slice
+        (UniV3 ``primitive='lp'`` + UniV4 ``primitive='lp_v4'``) against
+        ``position_registry status='open'`` — the durable WARM source (SQLite
+        local / Postgres hosted) written atomically with the ledger at LP_OPEN.
+
+        A restarted runner therefore re-derives the same open LP set from WARM
+        even when in-memory state was wiped; a backend without cutover storage
+        degrades transparently to the legacy enumeration. The framework runner
+        and CLI teardown paths apply the same reconciliation (via
+        ``teardown.registry_enumeration``) so the registry — not the in-memory
+        ``_position_id`` / ``position_events`` / ``LPPositionTracker`` shadow —
+        is the durable read path for the two cut-over LP primitives. The fold is
+        additive: a strategy-reported position is never dropped, and non-LP /
+        non-cut-over LP primitives are left to ``get_open_positions`` unchanged.
+        This method is the strategy-level convenience surface for the same logic.
+        """
+        from almanak.framework.teardown.registry_enumeration import (
+            resolve_open_positions_with_registry,
+        )
+
+        return await resolve_open_positions_with_registry(self)
+
     def on_teardown_started(self, mode: "TeardownMode") -> None:
         """Hook called when teardown starts.
 
