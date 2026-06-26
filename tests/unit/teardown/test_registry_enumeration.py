@@ -556,3 +556,125 @@ def test_reconcile_preserves_strategy_summary_totals() -> None:
     assert {p.position_id for p in merged.positions} == {"11", "22"}
     assert merged.total_value_usd == Decimal("1234.56")  # preserved, not recomputed to 0
     assert merged.has_liquidation_risk is True  # preserved, not recomputed to False
+
+
+# ---------------------------------------------------------------------------
+# Lending cutover enumeration (TD-04 / VIB-5462)
+# ---------------------------------------------------------------------------
+
+
+def _lending_row(
+    *,
+    market_id: str = "usdc",
+    leg: str = "collateral",
+    protocol: str = "aave_v3",
+    chain: str = "arbitrum",
+    asset: str = "USDC",
+) -> dict[str, Any]:
+    return {
+        "chain": chain,
+        "primitive": "lending",
+        "accounting_category": "lending",
+        "status": "open",
+        "payload": {"protocol": protocol, "market_id": market_id, "leg": leg, "asset": asset},
+    }
+
+
+@pytest.mark.asyncio
+async def test_read_builds_lending_collateral_and_debt_positions() -> None:
+    from almanak.framework.teardown.registry_enumeration import read_open_lending_positions_from_registry
+
+    sm = _FakeRegistrySM(
+        {"lending": [_lending_row(market_id="usdc", leg="collateral"), _lending_row(market_id="dai", leg="debt")]}
+    )
+    positions, available = await read_open_lending_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    assert available is True
+    by_id = {p.position_id: p for p in positions}
+    assert set(by_id) == {"usdc", "dai"}
+    # Collateral → SUPPLY (withdraw), debt → BORROW (repay) — teardown risk order.
+    assert by_id["usdc"].position_type == PositionType.SUPPLY
+    assert by_id["dai"].position_type == PositionType.BORROW
+    assert by_id["usdc"].protocol == "aave_v3"
+    assert by_id["usdc"].details["source"] == "position_registry"
+    assert by_id["usdc"].details["leg"] == "collateral"
+
+
+@pytest.mark.asyncio
+async def test_read_lending_skips_row_without_market_id() -> None:
+    from almanak.framework.teardown.registry_enumeration import read_open_lending_positions_from_registry
+
+    bad = _lending_row()
+    bad["payload"].pop("market_id")
+    sm = _FakeRegistrySM({"lending": [bad]})
+    positions, available = await read_open_lending_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    assert available is True  # the read answered
+    assert positions == []  # but the unusable row is not surfaced
+
+
+@pytest.mark.asyncio
+async def test_read_lending_unavailable_on_backend_without_cutover_storage() -> None:
+    from almanak.framework.teardown.registry_enumeration import read_open_lending_positions_from_registry
+
+    sm = _FakeRegistrySM({"lending": [_lending_row()]}, unsupported={"lending"})
+    positions, available = await read_open_lending_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    assert available is False  # degrade — never "nothing open"
+    assert positions == []
+
+
+@pytest.mark.asyncio
+async def test_read_lending_generalises_to_spark() -> None:
+    """The enumeration is protocol-agnostic: a Spark row (non-Aave) flows through
+    the SAME builder with no Aave-specific code (AC2)."""
+    from almanak.framework.teardown.registry_enumeration import read_open_lending_positions_from_registry
+
+    sm = _FakeRegistrySM(
+        {"lending": [_lending_row(protocol="spark", market_id="dai", leg="debt", chain="ethereum", asset="DAI")]}
+    )
+    positions, available = await read_open_lending_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    assert available is True
+    assert len(positions) == 1
+    assert positions[0].protocol == "spark"
+    assert positions[0].position_type == PositionType.BORROW
+    assert positions[0].position_id == "dai"
+
+
+@pytest.mark.asyncio
+async def test_resolve_restart_rederives_lending_legs_from_warm() -> None:
+    """Wiped-state restart re-derives the open lending position (supply+borrow)
+    from the durable registry — the AC4 restart-safe read for lending."""
+    registry_rows = {
+        "lp": [],
+        "lp_v4": [],
+        "lending": [_lending_row(market_id="usdc", leg="collateral"), _lending_row(market_id="dai", leg="debt")],
+    }
+
+    async def _resolve_after_restart() -> set[tuple[str, str]]:
+        sm = _FakeRegistrySM(registry_rows)  # WARM survives the restart
+        strategy = _FakeStrategy(summary=_empty_summary(), state_manager=sm)  # HOT wiped
+        summary = await resolve_open_positions_with_registry(strategy)
+        return {(str(p.position_type), p.position_id) for p in summary.positions}
+
+    first = await _resolve_after_restart()
+    second = await _resolve_after_restart()
+    assert first == {(str(PositionType.SUPPLY), "usdc"), (str(PositionType.BORROW), "dai")}
+    assert first == second  # deterministic across restarts
+
+
+@pytest.mark.asyncio
+async def test_resolve_unions_lp_and_lending_and_keeps_strategy_positions() -> None:
+    """The union spans BOTH primitive streams and never drops a strategy-reported
+    position (additive-union invariant)."""
+    sm = _FakeRegistrySM({"lp": [_v3_row("99")], "lp_v4": [], "lending": [_lending_row(market_id="usdc")]})
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[_lp("11")],
+    )
+    strategy = _FakeStrategy(summary=strat, state_manager=sm)
+    summary = await resolve_open_positions_with_registry(strategy)
+    keys = {(str(p.position_type), p.position_id) for p in summary.positions}
+    assert keys == {
+        (str(PositionType.LP), "11"),  # strategy-reported — never dropped
+        (str(PositionType.LP), "99"),  # registry LP
+        (str(PositionType.SUPPLY), "usdc"),  # registry lending collateral
+    }

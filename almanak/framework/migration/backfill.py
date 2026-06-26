@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from almanak.framework.accounting.commit import RegistryRow
 from almanak.framework.accounting.policy import MatchingPolicy
 from almanak.framework.intents.compiler_constants import (
+    AAVE_COMPATIBLE_PROTOCOLS,
     PANCAKESWAP_V3_NFT_POSITION_MANAGERS,
     SLIPSTREAM_NFT_POSITION_MANAGERS,
     UNIV3_LP_GROUPING_PROTOCOLS,
@@ -397,6 +398,133 @@ def semantic_grouping_key_univ4(*, chain: str, pool_id: str) -> str:
 
 
 # =============================================================================
+# Lending identity helpers — receipt/intent-fact-only (TD-04 / VIB-5462)
+# =============================================================================
+#
+# A money-market position has no NFT, so its identity is the on-chain
+# *(market, leg)* tuple, not a tokenId. The same shape generalises across the
+# whole lending family the live-prod teardown bugs hit (Aave canonical; Spark /
+# Fluid / Morpho / Compound follow): every protocol exposes a per-market
+# discriminator (Aave/Spark: the reserve asset; Morpho Blue: the isolated
+# market id; Compound v3: the comet/base asset) and partitions value into a
+# COLLATERAL (supply) and a DEBT (borrow) leg. The registry encodes those two
+# axes — ``market_id`` (opaque string) and ``leg`` — so downstream HF-safe
+# unwind (TD-09) reads every ``debt`` leg to repay and every ``collateral`` leg
+# to withdraw without re-deriving a protocol-specific key.
+
+# The two canonical lending legs. ``leg`` is part of the physical identity so a
+# supply and a borrow of the SAME asset (degenerate, but legal on Aave) never
+# collapse onto one registry row.
+_LENDING_LEG_COLLATERAL = "collateral"
+_LENDING_LEG_DEBT = "debt"
+
+# Map the durable ``position_events.position_type`` (and the taxonomy
+# ``PositionKind``) lending values onto the registry leg. The runtime path maps
+# intent type → leg via the canonical taxonomy (SUPPLY/WITHDRAW → collateral,
+# BORROW/REPAY → debt); the backfill maps the persisted ``position_type``. Both
+# funnel through this single table so the two paths can never disagree.
+_LENDING_POSITION_TYPE_TO_LEG: dict[str, str] = {
+    "LENDING_COLLATERAL": _LENDING_LEG_COLLATERAL,
+    "LENDING_DEBT": _LENDING_LEG_DEBT,
+}
+
+
+def lending_leg_for_position_type(position_type: str) -> str | None:
+    """Map a lending ``position_type`` to its registry leg, or ``None``.
+
+    ``None`` for any non-lending position type — the caller treats that as
+    "not this cutover" and skips the row (never fabricates a leg).
+    """
+    return _LENDING_POSITION_TYPE_TO_LEG.get((position_type or "").strip().upper())
+
+
+def lending_registry_market_id(*, market_id: str | None, token: str) -> str:
+    """Canonical per-market discriminator for a lending registry row.
+
+    Protocol-agnostic by construction:
+
+    * Isolated-market protocols (Morpho Blue) carry an explicit ``market_id`` on
+      the intent — that id IS the discriminator.
+    * Unified-pool protocols (Aave V3 / Spark / Compound v3 base asset) leave
+      ``market_id`` unset; the supplied/borrowed ``token`` (the reserve) is the
+      discriminator.
+
+    The runtime path passes ``(intent.market_id, intent.token)``; the backfill
+    passes ``(None, position_events.token0)`` (the asset symbol the legacy
+    writer persisted). Both lowercase to one canonical string so a runtime
+    UPSERT lands on the same ``physical_identity_hash`` the backfill synthesized.
+
+    Raises ``ValueError`` when neither input yields a non-empty anchor — per
+    CLAUDE.md "Empty ≠ Zero" we never hash a fabricated/blank market.
+    """
+    raw = (market_id or "").strip() or (token or "").strip()
+    norm = raw.lower()
+    if not norm:
+        raise ValueError("lending_registry_market_id: market_id and token both empty")
+    return norm
+
+
+def physical_identity_hash_lending(*, chain: str, protocol: str, market_id: str, leg: str) -> str:
+    """Compute the canonical lending ``physical_identity_hash``.
+
+    Identity tuple (no config — blueprint 28 §6.6) is the on-chain
+    *(chain, protocol, market, leg)*::
+
+        seed = f"{chain}:{protocol}:{market_id.lower()}:{leg}"
+        hash = "0x" + sha256(seed.encode()).hexdigest()
+
+    A lending leg is a *singleton* per ``(chain, protocol, market, leg)`` — a
+    second SUPPLY to the same reserve increases the aToken balance, it does not
+    mint a new position — so the physical hash and the semantic grouping key
+    share the same tuple (unlike LP, where many NFTs share one pool). The
+    auto-mode unique index then keeps exactly one OPEN row per leg and a re-open
+    UPSERTs it idempotently.
+
+    Raises ``ValueError`` on any empty anchor or an unknown ``leg``.
+    """
+    chain_norm = (chain or "").strip().lower()
+    if not chain_norm:
+        raise ValueError("physical_identity_hash_lending: chain must be non-empty")
+    protocol_norm = (protocol or "").strip().lower()
+    if not protocol_norm:
+        raise ValueError("physical_identity_hash_lending: protocol must be non-empty")
+    market_norm = (market_id or "").strip().lower()
+    if not market_norm:
+        raise ValueError("physical_identity_hash_lending: market_id must be non-empty")
+    leg_norm = (leg or "").strip().lower()
+    if leg_norm not in (_LENDING_LEG_COLLATERAL, _LENDING_LEG_DEBT):
+        raise ValueError(f"physical_identity_hash_lending: leg must be collateral/debt, got {leg!r}")
+    seed = f"{chain_norm}:{protocol_norm}:{market_norm}:{leg_norm}"
+    return "0x" + hashlib.sha256(seed.encode()).hexdigest()
+
+
+def semantic_grouping_key_lending(*, chain: str, protocol: str, market_id: str, leg: str) -> str:
+    """Compute the lending ``semantic_grouping_key``.
+
+        f"{chain}:{protocol}:{market_id.lower()}:{leg}"
+
+    Equal to the physical hash's seed (sans sha256): a lending leg is a
+    singleton, so the auto-mode collision predicate is "one open row per
+    ``(chain, protocol, market, leg)``" — exactly the desired idempotent
+    re-supply / re-borrow behaviour. Raises ``ValueError`` on empty anchors or
+    an unknown ``leg``.
+    """
+    chain_norm = (chain or "").strip().lower()
+    if not chain_norm:
+        raise ValueError("semantic_grouping_key_lending: chain must be non-empty")
+    protocol_norm = (protocol or "").strip().lower()
+    if not protocol_norm:
+        raise ValueError("semantic_grouping_key_lending: protocol must be non-empty")
+    market_norm = (market_id or "").strip().lower()
+    if not market_norm:
+        raise ValueError("semantic_grouping_key_lending: market_id must be non-empty")
+    leg_norm = (leg or "").strip().lower()
+    if leg_norm not in (_LENDING_LEG_COLLATERAL, _LENDING_LEG_DEBT):
+        raise ValueError(f"semantic_grouping_key_lending: leg must be collateral/debt, got {leg!r}")
+    return f"{chain_norm}:{protocol_norm}:{market_norm}:{leg_norm}"
+
+
+# =============================================================================
 # UniV3 OPEN/CLOSE fold over `position_events`
 # =============================================================================
 
@@ -732,6 +860,149 @@ def fold_position_events_for_univ4(  # noqa: C901 — explicit identity-anchor c
 
 
 # =============================================================================
+# Lending OPEN/CLOSE fold over `position_events` (TD-04 / VIB-5462)
+# =============================================================================
+
+
+def _resolve_lending_lifecycle(group: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Last-state-wins fold over a leg's chronological event group.
+
+    Returns ``(open_ev, close_ev)``. A lending *(market, leg)* identity is REUSED
+    across open→close→reopen cycles (unlike an LP NFT, which mints a fresh
+    token_id per lifecycle), so the FINAL chronological state decides open vs
+    closed — a CLOSE followed by a later SUPPLY/BORROW is an OPEN leg. OPEN/
+    INCREASE start/continue an active period (clearing any prior close); a genuine
+    CLOSE (FULL exit) terminates it; a DECREASE (partial withdraw/repay) leaves
+    the leg open (closing it would strand the residual on a wiped restart). A
+    non-None ``close_ev`` ⇒ the leg is currently closed.
+    """
+    open_ev: dict[str, Any] | None = None
+    close_ev: dict[str, Any] | None = None
+    for ev in sorted(group, key=lambda e: e.get("timestamp") or ""):
+        et = (ev.get("event_type") or "").upper()
+        if et in ("OPEN", "INCREASE"):
+            open_ev = ev
+            close_ev = None  # a new active period supersedes any prior close
+        elif et == "CLOSE":
+            close_ev = ev
+        elif et == "DECREASE" and open_ev is None:
+            # Defensive: a DECREASE with no preceding OPEN in the group (legacy
+            # rows pre-dating the OPEN seeder) still anchors an open leg.
+            open_ev = ev
+    return open_ev, close_ev
+
+
+def fold_position_events_for_lending(*, deployment_id: str, group: list[dict[str, Any]]) -> RegistryRow | None:
+    """Fold a leg-homogeneous group of lending ``position_events`` into a ``RegistryRow``.
+
+    The driver's group key includes ``position_type`` (see :meth:`BackfillReader.run`),
+    so every event in ``group`` shares one leg (COLLATERAL or DEBT) — a SUPPLY and a
+    BORROW of the same asset land in separate groups even though they share a
+    ``position_id``. Cutover spec §3.5: presence of any CLOSE ⇒ ``status='closed'``,
+    else ``'open'``. WITHDRAW/REPAY seed CLOSE; SUPPLY/BORROW seed OPEN (the legacy
+    lending position-event seeder, ``observability/position_events.py``).
+
+    Returns ``None`` (skip, structured WARN) for:
+
+    * empty groups / groups whose protocol is not in the lending cutover set
+      (defense-in-depth; the reader's ``matches_this_cutover`` already filters);
+    * groups missing chain, a resolvable leg, or the asset anchor — per
+      CLAUDE.md "Empty ≠ Zero" a missing anchor stays missing, never zero-filled.
+    """
+    if not group:
+        return None
+
+    # Last-state-wins lifecycle fold (see :func:`_resolve_lending_lifecycle`):
+    # a lending leg is a REUSED identity, so the final chronological state — not
+    # "any CLOSE ever" — decides open vs closed.
+    open_ev, close_ev = _resolve_lending_lifecycle(group)
+    anchor_ev = close_ev if close_ev is not None else open_ev
+    if anchor_ev is None:
+        logger.warning(
+            "Backfill: lending position_events group %s has no usable event; skipping",
+            group[0].get("position_id", "<unknown>"),
+        )
+        return None
+
+    protocol = (anchor_ev.get("protocol") or "").lower()
+    if protocol not in _LENDING_REGISTRY_PROTOCOLS:
+        return None
+
+    chain = (anchor_ev.get("chain") or "").lower()
+    if not chain:
+        logger.warning(
+            "Backfill: lending event %s missing chain; skipping",
+            anchor_ev.get("position_id", "<unknown>"),
+        )
+        return None
+
+    leg = lending_leg_for_position_type(str(anchor_ev.get("position_type") or ""))
+    if leg is None:
+        logger.warning(
+            "Backfill: lending event %s has non-lending position_type %r; skipping",
+            anchor_ev.get("position_id", "<unknown>"),
+            anchor_ev.get("position_type"),
+        )
+        return None
+
+    # The legacy writer persists the reserve asset symbol on ``token0`` for the
+    # lending leg. Unified-pool protocols (the only ones currently in the cutover
+    # set) carry no isolated ``market_id`` column, so the asset IS the market —
+    # identical to the runtime path's ``intent.market_id or intent.token``.
+    asset = anchor_ev.get("token0")
+    try:
+        market_id = lending_registry_market_id(market_id=None, token=str(asset or ""))
+    except ValueError:
+        logger.warning(
+            "Backfill: lending %s event for %s has no derivable asset/market; skipping",
+            leg,
+            anchor_ev.get("position_id", "<unknown>"),
+        )
+        return None
+
+    pih = physical_identity_hash_lending(chain=chain, protocol=protocol, market_id=market_id, leg=leg)
+    sgk = semantic_grouping_key_lending(chain=chain, protocol=protocol, market_id=market_id, leg=leg)
+    status: Literal["open", "closed", "reorg_invalidated"] = "closed" if close_ev is not None else "open"
+
+    payload: dict[str, Any] = {
+        "protocol": protocol,
+        "market_id": market_id,
+        "leg": leg,
+        "asset": str(asset) if asset is not None and asset != "" else None,
+        "legacy_position_id": str(anchor_ev.get("position_id") or ""),
+        "synthesized_handle": False,
+        "source": "backfill",
+    }
+    # Best-effort principal carry (Empty ≠ Zero: only copy what the parser
+    # actually captured for the leg).
+    leg_amount = anchor_ev.get("amount0")
+    if leg_amount is not None and leg_amount != "":
+        payload["amount"] = leg_amount
+
+    opened_tx = (open_ev or {}).get("tx_hash") or None
+    closed_tx = (close_ev or {}).get("tx_hash") if close_ev is not None else None
+
+    return RegistryRow(
+        deployment_id=deployment_id,
+        chain=chain,
+        primitive=Primitive.LENDING,
+        accounting_category=AccountingCategory.LENDING,
+        physical_identity_hash=pih,
+        semantic_grouping_key=sgk,
+        grouping_policy_version=_LENDING_GROUPING_POLICY_VERSION,
+        handle=None,
+        status=status,
+        payload=payload,
+        opened_at_block=None,
+        opened_tx=opened_tx,
+        closed_at_block=None,
+        closed_tx=closed_tx,
+        last_reconciled_at_block=None,
+        matching_policy_version=MatchingPolicy.for_primitive(Primitive.LENDING),
+    )
+
+
+# =============================================================================
 # Module-level constants
 # =============================================================================
 
@@ -756,6 +1027,25 @@ _UNIV4_LP_PROTOCOLS: frozenset[str] = UNIV4_LP_GROUPING_PROTOCOLS
 
 
 _UNIV4_GROUPING_POLICY_VERSION: str = "univ4_lp@v1"
+
+
+# TD-04 (VIB-5462): lending family cutover. Bound to the connector-self-declared
+# Aave-compatible lending family (``ProtocolFamily.AAVE_V3`` →
+# ``AAVE_COMPATIBLE_PROTOCOLS``), exactly as ``_UNIV3_LP_PROTOCOLS`` binds to the
+# LP grouping family — so there is NO protocol-name string literal in framework
+# code (chain/protocol coupling ratchet) and enabling a new Aave-fork lending
+# protocol (Spark / Fluid-as-Aave) is a one-line family declaration in that
+# connector's ``protocol_family.py``, NOT a reshape: the registry row shape
+# (market_id + leg + protocol) is already protocol-agnostic. Today the family is
+# {aave_v3}. Isolated-market protocols (Morpho Blue) / single-base (Compound v3)
+# are not Aave-ABI-compatible and join via their own enablement, but the SHAPE
+# already supports them (opaque ``market_id``; proven generalisable by the Spark
+# fold test). The grouping-policy version is independent of the LP families so a
+# lending grouping-rule change never re-baselines LP rows.
+_LENDING_REGISTRY_PROTOCOLS: frozenset[str] = AAVE_COMPATIBLE_PROTOCOLS
+
+
+_LENDING_GROUPING_POLICY_VERSION: str = "lending@v1"
 
 
 def _assign_synthesized_handles(rows: list[RegistryRow]) -> list[RegistryRow]:
@@ -1103,7 +1393,15 @@ class BackfillReader(ABC):
             # only one synthesized registry row instead of one per physical
             # identity. The group key now matches
             # ``physical_identity_hash``'s identity tuple.
-            grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+            # TD-04 (VIB-5462): the group key also carries ``position_type``. For
+            # LP this is a NO-OP — every position_event of an LP position_id is
+            # ``position_type='LP'`` (the type is derived from the intent and LP
+            # intents only mint LP), so the partition is byte-identical. It is
+            # load-bearing for LENDING: a SUPPLY (COLLATERAL leg) and a BORROW
+            # (DEBT leg) of the SAME asset share one ``position_id`` but are two
+            # distinct registry rows; without ``position_type`` in the key the
+            # fold would collapse them and silently drop one leg.
+            grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
             for ev in events:
                 if not self.matches_this_cutover(ev):
                     continue
@@ -1112,7 +1410,8 @@ class BackfillReader(ABC):
                     continue
                 ev_chain = str(ev.get("chain") or "").lower()
                 ev_protocol = str(ev.get("protocol") or "").lower()
-                grouped.setdefault((pos_id, ev_chain, ev_protocol), []).append(ev)
+                ev_position_type = str(ev.get("position_type") or "").upper()
+                grouped.setdefault((pos_id, ev_chain, ev_protocol, ev_position_type), []).append(ev)
 
             # 3) fold + (synthesize collision-resolving handles per
             # cutover spec §3.4.1) + INSERT OR IGNORE.
@@ -1249,3 +1548,32 @@ class UniV4LPCutoverReader(BackfillReader):
 
     def fold_group_to_registry_row(self, *, deployment_id: str, group: list[dict[str, Any]]) -> RegistryRow | None:
         return fold_position_events_for_univ4(deployment_id=deployment_id, group=group)
+
+
+class LendingCutoverReader(BackfillReader):
+    """TD-04 (VIB-5462) — lending per-primitive cutover backfill reader.
+
+    Aave V3 is the canonical first protocol; the reader narrows on
+    :data:`_LENDING_REGISTRY_PROTOCOLS` so enabling Spark / Fluid / Morpho /
+    Compound later is a one-line frozenset add, not a reshape. Reads both lending
+    legs (``LENDING_COLLATERAL`` + ``LENDING_DEBT``); the driver's
+    ``position_type``-aware grouping keeps the two legs as independent registry
+    rows. Keys its own ``migration_state`` row (``primitive='lending'``,
+    ``cutover_key='lending'``) so its backfill-complete flag is tracked
+    separately from the LP cutovers.
+    """
+
+    primitive = Primitive.LENDING
+    accounting_category = AccountingCategory.LENDING
+    cutover_key = "lending"
+    grouping_policy_version = _LENDING_GROUPING_POLICY_VERSION
+    legacy_position_types = frozenset({"LENDING_COLLATERAL", "LENDING_DEBT"})
+
+    def matches_this_cutover(self, ev: dict[str, Any]) -> bool:
+        if lending_leg_for_position_type(str(ev.get("position_type") or "")) is None:
+            return False
+        protocol = (ev.get("protocol") or "").lower()
+        return protocol in _LENDING_REGISTRY_PROTOCOLS
+
+    def fold_group_to_registry_row(self, *, deployment_id: str, group: list[dict[str, Any]]) -> RegistryRow | None:
+        return fold_position_events_for_lending(deployment_id=deployment_id, group=group)

@@ -29,7 +29,11 @@ from almanak.framework.migration import (
     RegistryBackfillIncompleteError,
     RegistryCutoverNotDeployedError,
 )
-from almanak.framework.migration.backfill import UniV3LPCutoverReader, UniV4LPCutoverReader
+from almanak.framework.migration.backfill import (
+    LendingCutoverReader,
+    UniV3LPCutoverReader,
+    UniV4LPCutoverReader,
+)
 from almanak.framework.primitives.types import Primitive
 
 if TYPE_CHECKING:
@@ -67,6 +71,13 @@ class CutoverSpec:
 # VIB-4583: UniV4 LP is its own isolated cutover (Primitive.LP_V4 / 'lp_v4').
 # It is tracked by a SEPARATE migration_state row from the V3 'lp' cutover so
 # their backfill-complete flags and grouping-policy versions stay independent.
+#
+# TD-04 (VIB-5462): LENDING (Aave canonical) is its own isolated cutover
+# (Primitive.LENDING / 'lending'). The registry row shape (market_id + leg +
+# protocol) is protocol-agnostic, so enabling Spark / Fluid / Morpho / Compound
+# is a thin add to ``_LENDING_REGISTRY_PROTOCOLS`` in migration/backfill.py — no
+# new entry here. Kept minimal and self-contained so the parallel GMX/Pendle
+# cutover tickets (TD-02/TD-03) append cleanly after.
 ACTIVE_CUTOVERS: tuple[CutoverSpec, ...] = (
     CutoverSpec(
         primitive=Primitive.LP,
@@ -77,6 +88,11 @@ ACTIVE_CUTOVERS: tuple[CutoverSpec, ...] = (
         primitive=Primitive.LP_V4,
         cutover_key="lp_v4",
         reader_factory=UniV4LPCutoverReader,
+    ),
+    CutoverSpec(
+        primitive=Primitive.LENDING,
+        cutover_key="lending",
+        reader_factory=LendingCutoverReader,
     ),
 )
 

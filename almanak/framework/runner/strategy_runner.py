@@ -36,7 +36,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -2934,6 +2934,7 @@ class StrategyRunner:
                     result=result,
                     success=success,
                     entry=entry,
+                    post_state=post_state,
                 )
                 if not used_atomic:
                     await self.state_manager.save_ledger_entry(entry)
@@ -3669,6 +3670,7 @@ class StrategyRunner:
         result: Any | None,
         success: bool,
         entry: Any,
+        post_state: dict | None = None,
     ) -> bool:
         """Route UniV3 LP_OPEN / LP_CLOSE through ``save_ledger_and_registry``.
 
@@ -3723,6 +3725,20 @@ class StrategyRunner:
             return False
 
         intent_type_str = self._registry_intent_type_str(intent)
+        # TD-04 (VIB-5462): lending family has its own isolated cutover stream
+        # (Primitive.LENDING / 'lending'). Delegate SUPPLY/BORROW/WITHDRAW/REPAY
+        # to the dedicated lending dispatch BEFORE the LP gate so the two
+        # primitive streams never cross-pollinate.
+        if intent_type_str in ("SUPPLY", "BORROW", "WITHDRAW", "REPAY"):
+            return await self._maybe_save_ledger_with_registry_lending(
+                strategy=strategy,
+                intent=intent,
+                result=result,
+                success=success,
+                entry=entry,
+                intent_type_str=intent_type_str,
+                post_state=post_state,
+            )
         if intent_type_str not in ("LP_OPEN", "LP_CLOSE"):
             return False
         if result is None or not bool(getattr(result, "success", False)):
@@ -3931,6 +3947,249 @@ class StrategyRunner:
             registry_row.physical_identity_hash,
         )
         return True
+
+    @staticmethod
+    def _lending_intent_market_token(intent: AnyIntent, intent_type_str: str) -> str:
+        """Return the leg-asset token for a lending intent (TD-04 / VIB-5462).
+
+        The asset field name differs per intent: ``BORROW`` names its debt asset
+        ``borrow_token`` (``token``/``collateral_token`` name different things),
+        while SUPPLY / WITHDRAW / REPAY name the leg asset ``token``. Returns
+        ``""`` when absent (the caller treats that as "no anchor" and falls back).
+        """
+        if intent_type_str == "BORROW":
+            return getattr(intent, "borrow_token", "") or ""
+        return getattr(intent, "token", "") or ""
+
+    @staticmethod
+    def _lending_leg_is_fully_exited(*, intent: AnyIntent, leg: str, post_state: dict | None) -> bool:
+        """True iff a WITHDRAW / REPAY fully exits its lending leg (TD-04 / VIB-5462).
+
+        A money-market leg is a *balance*, not an NFT — a PARTIAL withdraw/repay
+        leaves a residual, so the registry leg MUST stay ``status='open'`` (closing
+        it would strand the residual on a wiped-state restart). Full-exit signals,
+        in order:
+
+        1. The intent's explicit full-exit flag (``withdraw_all`` / ``repay_full``).
+        2. The ``"all"`` chained-amount sentinel.
+        3. The on-chain post-state leg residual ``<=`` the lending dust threshold —
+           the SAME canonical signal the ``position_events`` lane uses to refine
+           CLOSE vs DECREASE (``_resolve_lending_post_state`` +
+           ``LENDING_CLOSE_DUST_USD``), so the registry status and the position
+           event never disagree. This is what flips a teardown's snapshotted
+           full WITHDRAW/REPAY (a numeric amount, no flag) to closed.
+
+        A missing / unmeasured post-state residual returns ``False`` (bias-to-open:
+        never strand on an unmeasured close), exactly as the position-event
+        refiner defaults such a leg to DECREASE.
+        """
+        if getattr(intent, "withdraw_all", False) or getattr(intent, "repay_full", False):
+            return True
+        amount = getattr(intent, "amount", None)
+        if isinstance(amount, str) and amount.strip().lower() == "all":
+            return True
+        from almanak.framework.observability.position_events import (
+            LENDING_CLOSE_DUST_USD,
+            _resolve_lending_post_state,
+        )
+
+        post = _resolve_lending_post_state(post_state)
+        residual = post.get("collateral_value_usd") if leg == "collateral" else post.get("debt_value_usd")
+        if residual is None:
+            return False
+        try:
+            value = Decimal(str(residual))
+            if not value.is_finite():
+                return False
+        except (InvalidOperation, ValueError, TypeError):
+            return False
+        return value <= Decimal(LENDING_CLOSE_DUST_USD)
+
+    async def _maybe_save_ledger_with_registry_lending(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        intent: AnyIntent,
+        result: Any,
+        success: bool,
+        entry: Any,
+        intent_type_str: str,
+        post_state: dict | None = None,
+    ) -> bool:
+        """Route a lending SUPPLY / BORROW / WITHDRAW / REPAY through ``save_ledger_and_registry``.
+
+        TD-04 (VIB-5462) — the lending sibling of
+        :meth:`_maybe_save_ledger_with_registry`. Persists the on-chain
+        *(market, leg)* identity (collateral for SUPPLY/WITHDRAW, debt for
+        BORROW/REPAY) so a wiped-state restart re-derives the open lending
+        position from the durable registry. Returns ``True`` iff the row routed
+        through the atomic primitive; ``False`` on any path-miss (caller falls
+        back to plain ``save_ledger_entry``):
+
+        - the lending cutover boot-guard hasn't cleared ``(Primitive.LENDING, 'lending')``;
+        - the protocol is not in :data:`_LENDING_REGISTRY_PROTOCOLS` (Aave first);
+        - the on-chain TX did not land (chain truth, NOT the framework verdict);
+        - a WITHDRAW/REPAY that is only a PARTIAL exit (leg stays open — never
+          stranded);
+        - the intent carries no usable market/asset anchor (Empty ≠ Zero — we
+          never hash a fabricated market).
+
+        The leg is resolved through the canonical taxonomy
+        (``record_for(intent_type).position_type``), never a parallel string map
+        (blueprint 28 §6.10).
+        """
+        from almanak.framework.migration.backfill import (
+            _LENDING_REGISTRY_PROTOCOLS,
+            lending_leg_for_position_type,
+            lending_registry_market_id,
+            physical_identity_hash_lending,
+            semantic_grouping_key_lending,
+        )
+        from almanak.framework.primitives.taxonomy import record_for
+        from almanak.framework.primitives.types import Primitive
+        from almanak.framework.runner.cutover import is_cutover_active
+
+        if result is None or not bool(getattr(result, "success", False)):
+            return False
+        # ``success`` is forwarded only for telemetry; do NOT gate on it (audit
+        # P1: slippage / reconciliation can flip it False post-confirmation, but
+        # the registry must still record the landed state).
+        _ = success
+        if not is_cutover_active(self, Primitive.LENDING, "lending"):
+            return False
+        protocol = (getattr(intent, "protocol", "") or "").lower()
+        if protocol not in _LENDING_REGISTRY_PROTOCOLS:
+            return False
+
+        leg = lending_leg_for_position_type(str(record_for(intent_type_str).position_type or ""))
+        if leg is None:
+            return False
+        is_open = intent_type_str in ("SUPPLY", "BORROW")
+        if not is_open and not self._lending_leg_is_fully_exited(intent=intent, leg=leg, post_state=post_state):
+            # Partial WITHDRAW/REPAY — leave the OPEN leg untouched (bias-to-open).
+            logger.info(
+                "Registry-mode skip: partial %s leaves lending leg open; falling back to save_ledger_entry",
+                intent_type_str,
+            )
+            return False
+
+        chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
+        if not chain:
+            return False
+        token = self._lending_intent_market_token(intent, intent_type_str)
+        try:
+            market_id = lending_registry_market_id(market_id=getattr(intent, "market_id", None), token=token)
+        except ValueError:
+            logger.info(
+                "Registry-mode skip: lending %s has no market/asset anchor; falling back to save_ledger_entry",
+                intent_type_str,
+            )
+            return False
+
+        pih = physical_identity_hash_lending(chain=chain, protocol=protocol, market_id=market_id, leg=leg)
+        sgk = semantic_grouping_key_lending(chain=chain, protocol=protocol, market_id=market_id, leg=leg)
+        # KNOWN LIMITATION (reused-identity primitive): a lending (market, leg)
+        # identity is reused across open→close→reopen cycles, but the registry
+        # UPSERT enforces a strict monotone status (open→closed only, never the
+        # reverse — blueprint 28 §4.3). So a SUPPLY/BORROW that re-opens a reserve
+        # the strategy previously FULLY exited cannot flip the closed row back to
+        # open here. This does not strand on a live run — the additive-union
+        # teardown enumeration also reads the strategy's own get_open_positions()
+        # — only on a full-close → reopen → total-state-wipe → teardown sequence.
+        # A first-class reopen path for reused-identity primitives is follow-up
+        # work (TD-09 / a dedicated ticket); LP/perp/Pendle-LP never hit this
+        # because each reopen mints a fresh physical identity.
+        status: Literal["open", "closed", "reorg_invalidated"] = "open" if is_open else "closed"
+        block = self._extract_block_number_from_result(result)
+        tx_hash = getattr(entry, "tx_hash", "") or None
+        payload: dict[str, Any] = {
+            "protocol": protocol,
+            "market_id": market_id,
+            "leg": leg,
+            "asset": token or None,
+            "source": "runtime",
+        }
+        registry_row = self._build_lending_registry_row(
+            strategy=strategy,
+            physical_identity_hash=pih,
+            semantic_grouping_key=sgk,
+            payload=payload,
+            status=status,
+            # On a CLOSE the OPEN-side anchors are preserved by the ON CONFLICT
+            # UPSERT (it never overwrites opened_at_block / opened_tx), so we pass
+            # them only on the OPEN write.
+            opened_at_block=block if is_open else None,
+            opened_tx=tx_hash if is_open else None,
+            closed_at_block=None if is_open else block,
+            closed_tx=None if is_open else tx_hash,
+            handle=getattr(intent, "registry_handle", None),
+        )
+
+        from almanak.framework.accounting.commit import save_ledger_and_registry
+
+        await save_ledger_and_registry(
+            self.state_manager,
+            ledger=entry,
+            registry=registry_row,
+            mode="registry",
+        )
+        logger.info(
+            "Registry-mode lending write OK for %s on %s market=%s leg=%s status=%s pih=%s",
+            intent_type_str,
+            chain,
+            market_id,
+            leg,
+            status,
+            pih,
+        )
+        return True
+
+    def _build_lending_registry_row(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        physical_identity_hash: str,
+        semantic_grouping_key: str,
+        payload: dict,
+        status: Literal["open", "closed", "reorg_invalidated"],
+        opened_at_block: int | None,
+        opened_tx: str | None,
+        closed_at_block: int | None,
+        closed_tx: str | None,
+        handle: str | None,
+    ) -> Any:
+        """Construct a lending ``RegistryRow`` (TD-04 / VIB-5462).
+
+        The lending sibling of :meth:`_build_registry_row` — separate because
+        that helper hardcodes ``accounting_category=AccountingCategory.LP`` and
+        the LP grouping-policy version. Stamps ``Primitive.LENDING`` /
+        ``AccountingCategory.LENDING`` / ``lending@v1`` and the per-primitive
+        ``matching_policy_version`` (never hardcoded).
+        """
+        from almanak.framework.accounting.commit import RegistryRow
+        from almanak.framework.accounting.policy import MatchingPolicy
+        from almanak.framework.migration.backfill import _LENDING_GROUPING_POLICY_VERSION
+        from almanak.framework.primitives.types import AccountingCategory, Primitive
+
+        chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
+        return RegistryRow(
+            deployment_id=strategy.deployment_id,
+            chain=chain,
+            primitive=Primitive.LENDING,
+            accounting_category=AccountingCategory.LENDING,
+            physical_identity_hash=physical_identity_hash,
+            semantic_grouping_key=semantic_grouping_key,
+            grouping_policy_version=_LENDING_GROUPING_POLICY_VERSION,
+            handle=handle,
+            status=status,
+            payload=dict(payload),
+            opened_at_block=opened_at_block,
+            opened_tx=opened_tx,
+            closed_at_block=closed_at_block,
+            closed_tx=closed_tx,
+            last_reconciled_at_block=None,
+            matching_policy_version=MatchingPolicy.for_primitive(Primitive.LENDING),
+        )
 
     def _build_registry_row(
         self,

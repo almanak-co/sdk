@@ -96,6 +96,25 @@ _LP_REGISTRY_SPECS: tuple[tuple[str, str], ...] = (
 )
 
 
+# (primitive, accounting_category) for the lending cutover (TD-04 / VIB-5462).
+# Mirrors the lending ``CutoverSpec`` in ``almanak/framework/runner/cutover.py``
+# (``Primitive.LENDING`` / 'lending'). Aave is canonical; the registry row shape
+# (market_id + leg) is protocol-agnostic, so the SAME enumeration surfaces every
+# lending protocol the cutover enables — no per-protocol code here.
+_LENDING_REGISTRY_SPECS: tuple[tuple[str, str], ...] = (("lending", "lending"),)
+
+
+# A lending registry leg maps onto the teardown-lane risk-ordered position type:
+# a supply (collateral) leg is withdrawn (SUPPLY), a borrow (debt) leg is repaid
+# (BORROW). The teardown ``PositionType`` priorities already close BORROW before
+# SUPPLY (repay frees collateral), so surfacing the legs separately is exactly
+# what the HF-safe unwind (TD-09) needs.
+_LENDING_LEG_TO_POSITION_TYPE: dict[str, PositionType] = {
+    "collateral": PositionType.SUPPLY,
+    "debt": PositionType.BORROW,
+}
+
+
 def _position_info_from_registry_row(row: Any, *, primitive: str) -> PositionInfo | None:
     """Build an LP :class:`PositionInfo` from one OPEN ``position_registry`` row.
 
@@ -253,6 +272,105 @@ async def read_open_lp_positions_from_registry(
     return result.positions, result.available
 
 
+def _position_info_from_lending_registry_row(row: Any) -> PositionInfo | None:
+    """Build a lending :class:`PositionInfo` from one OPEN ``position_registry`` row.
+
+    Returns ``None`` when the row carries no usable ``market_id`` (the identity
+    anchor) or an unknown ``leg`` — a registry row without a resolvable
+    *(market, leg)* cannot be unwound and must not be surfaced.
+
+    USD value is left at ``Decimal("0")``: the registry is the identity surface,
+    not a valuation surface (blueprint 28 §2). The reserve symbol is carried in
+    ``details["asset_symbol"]`` (NOT ``details["asset"]``) so it never trips the
+    PortfolioValuer wallet-overlap special-casing reserved for TOKEN
+    pseudo-positions — these are real protocol legs whose valuation TD-09 / the
+    valuer owns, out of scope for this read-path cutover.
+    """
+    if not isinstance(row, dict):
+        return None
+    payload = row.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    market_id = payload.get("market_id")
+    if market_id is None or market_id == "":
+        return None
+    leg = str(payload.get("leg") or "").strip().lower()
+    position_type = _LENDING_LEG_TO_POSITION_TYPE.get(leg)
+    if position_type is None:
+        return None
+    chain = str(row.get("chain") or "").lower()
+    # The protocol slug IS carried in the lending payload (unlike LP, whose
+    # payload carries no slug). Prefer it so teardown / TD-09 can route the
+    # closing intent to the right connector; fall back to the registry primitive.
+    protocol = str(payload.get("protocol") or row.get("primitive") or "lending").lower()
+    details: dict[str, Any] = {"source": "position_registry", "leg": leg, "market_id": str(market_id)}
+    asset = payload.get("asset")
+    if asset:
+        details["asset_symbol"] = str(asset)
+    return PositionInfo(
+        position_type=position_type,
+        position_id=str(market_id),
+        chain=chain,
+        protocol=protocol,
+        value_usd=Decimal("0"),
+        details=details,
+    )
+
+
+async def read_open_lending_positions_from_registry(
+    *,
+    state_manager: Any,
+    deployment_id: str,
+    chain: str | None = None,
+) -> tuple[list[PositionInfo], bool]:
+    """Read this deployment's OPEN lending legs from WARM (TD-04 / VIB-5462).
+
+    The lending sibling of :func:`read_open_lp_positions_from_registry`: reads
+    ``position_registry`` rows for ``primitive='lending'`` and builds one
+    :class:`PositionInfo` per open leg (collateral → SUPPLY, debt → BORROW).
+    Same ``(positions, available)`` contract and same never-raise discipline —
+    ``available=False`` on a backend without cutover storage degrades to the
+    strategy's own enumeration; it never means "nothing open".
+    """
+    from almanak.framework.migration import CutoverStorageNotSupported
+
+    dep = str(deployment_id or "").strip()
+    if state_manager is None or not dep or not hasattr(state_manager, "get_position_registry_open_rows"):
+        return [], False
+
+    positions: list[PositionInfo] = []
+    available = False
+    for primitive, accounting_category in _LENDING_REGISTRY_SPECS:
+        try:
+            rows = await state_manager.get_position_registry_open_rows(
+                dep,
+                chain=chain,
+                primitive=primitive,
+                accounting_category=accounting_category,
+            )
+        except (CutoverStorageNotSupported, NotImplementedError) as exc:
+            logger.debug(
+                "Teardown registry enumeration: lending read unavailable for %s (%s)",
+                dep,
+                exc,
+            )
+            continue
+        except Exception:  # noqa: BLE001 — enumeration must never raise into teardown
+            logger.warning(
+                "Teardown registry enumeration: lending read FAILED for %s — falling back "
+                "to strategy enumeration this teardown",
+                dep,
+                exc_info=True,
+            )
+            continue
+        available = True
+        for row in rows or []:
+            info = _position_info_from_lending_registry_row(row)
+            if info is not None:
+                positions.append(info)
+    return positions, available
+
+
 def reconcile_lp_with_registry(
     *,
     strategy_summary: TeardownPositionSummary | None,
@@ -338,15 +456,27 @@ async def resolve_open_positions_with_registry(strategy: Any) -> TeardownPositio
         # the deployment id for downstream tracking instead of falling back to
         # the bare "unknown" sentinel inside ``reconcile_lp_with_registry``.
         summary = TeardownPositionSummary.empty(deployment_id or "unknown")
+    state_manager = getattr(strategy, "_state_manager", None)
     read = await read_open_lp_positions_detailed(
-        state_manager=getattr(strategy, "_state_manager", None),
+        state_manager=state_manager,
+        deployment_id=deployment_id,
+        chain=None,
+    )
+    # TD-04 (VIB-5462): the lending cutover surfaces open collateral/debt legs
+    # through the SAME additive-union reconcile. Read both primitive streams and
+    # union them so the restart-safe re-derivation is identical across LP and
+    # lending; ``available`` is True if EITHER stream answered. The completeness
+    # chain-verify below is TD-05's LP-only concern and stays scoped to LP
+    # (lending chain-verify is TD-09's HF-safe-unwind job, not this read path).
+    lending_positions, lending_available = await read_open_lending_positions_from_registry(
+        state_manager=state_manager,
         deployment_id=deployment_id,
         chain=None,
     )
     reconciled = reconcile_lp_with_registry(
         strategy_summary=summary,
-        registry_positions=read.positions,
-        registry_available=read.available,
+        registry_positions=read.positions + lending_positions,
+        registry_available=read.available or lending_available,
     )
     # TD-05 (VIB-5463): chain-verify the enumeration completeness. This NEVER
     # mutates the additive union (the union→authoritative flip is TD-06's job) —
@@ -470,6 +600,7 @@ async def _verify_lp_enumeration_completeness(
 
 __all__ = [
     "RegistryReadResult",
+    "read_open_lending_positions_from_registry",
     "read_open_lp_positions_detailed",
     "read_open_lp_positions_from_registry",
     "reconcile_lp_with_registry",
