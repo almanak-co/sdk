@@ -50,6 +50,7 @@ from almanak.framework.teardown.models import (
     encode_consolidation_consent,
 )
 from almanak.framework.teardown.oracle_warmup import warm_and_validate_oracle
+from almanak.framework.teardown.revert_hints import annotate_teardown_error
 from almanak.framework.teardown.safety_guard import SafetyGuard
 from almanak.framework.teardown.slippage_manager import (
     EscalatingSlippageManager,
@@ -1877,19 +1878,26 @@ class TeardownManager:
                         # blip retries at the same level — instead of every failure
                         # escalating slippage to the operator-approval gate.
                         revert_class, disposition = classify_teardown_failure(exec_result.error)
+                        # VIB-5470 (subsumes VIB-5152): decode raw lending /
+                        # Safe-Roles revert selectors (e.g. 0x6679996d dust-debt
+                        # withdraw-all, 0xd27b44a9 ModuleTransactionFailed,
+                        # 0xd0a9bf58 ConditionViolation) into an operator-clear
+                        # explanation so the failure is self-diagnosing. No-op
+                        # when no known selector is embedded.
+                        annotated_error = annotate_teardown_error(exec_result.error)
                         logger.error(
                             "Intent %d/%d execution failed [%s -> %s]: %s",
                             intent_index + 1,
                             len(intents),
                             revert_class.value,
                             disposition.value,
-                            exec_result.error,
+                            annotated_error,
                         )
                         return ExecutionAttempt(
                             success=False,
                             slippage_used=slippage,
                             actual_slippage=Decimal("0"),
-                            error=exec_result.error,
+                            error=annotated_error,
                             retryable=disposition != Disposition.NON_RETRYABLE,
                             disposition=disposition.value,
                         )

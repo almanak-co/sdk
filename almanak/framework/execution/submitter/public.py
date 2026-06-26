@@ -202,6 +202,14 @@ KNOWN_CUSTOM_ERRORS: dict[str, str] = {
     "0x3a23d825": "InsufficientCollateral()",
     "0xf0788fb2": "NoDebtOfSelectedType()",
     "0xdff88f51": "SameBlockBorrowRepay()",
+    # Safe / Zodiac Roles modifier errors (VIB-5470). Every intent runs through
+    # Safe + Roles ``execTransactionWithRole``, so a lending teardown revert is
+    # frequently surfaced with one of these wrapper/authz selectors rather than
+    # the bare protocol error. keccak-verified (see
+    # ``tests/unit/teardown/test_revert_hints.py``); operator-clear explanations
+    # live in ``almanak.framework.teardown.revert_hints``.
+    "0xd27b44a9": "ModuleTransactionFailed()",
+    "0xd0a9bf58": "ConditionViolation(uint8,bytes32)",
     # Compound V3 Comet custom errors
     "0xe273b446": "BorrowTooSmall()",
     "0x14c5f7b6": "NotCollateralized()",

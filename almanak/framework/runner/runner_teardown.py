@@ -815,9 +815,16 @@ async def execute_teardown(  # noqa: C901
                         result=_positions_completion_result(open_positions_count, len(teardown_intents)),
                     )
         else:
+            # VIB-5470 (subsumes VIB-5152): decode lending / Safe-Roles revert
+            # selectors into an operator-clear message before persisting +
+            # surfacing the failure (the single-chain manager path annotates at
+            # its own source). No-op when no known selector is embedded.
+            from ..teardown.revert_hints import annotate_teardown_error
+
+            failure_error = annotate_teardown_error(result.error) or "multi-chain teardown execution failed"
             if request:
-                _safe_mark(manager, "mark_failed", deployment_id, error=result.error or "execution failed")
-            runner._request_teardown_failure_shutdown(result.error or "multi-chain teardown execution failed")
+                _safe_mark(manager, "mark_failed", deployment_id, error=failure_error)
+            runner._request_teardown_failure_shutdown(failure_error)
         return result
     else:
         # Single-chain: route through TeardownManager for safety guarantees
