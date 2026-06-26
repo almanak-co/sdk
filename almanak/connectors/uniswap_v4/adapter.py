@@ -507,7 +507,7 @@ class UniswapV4Adapter:
                 error=(
                     f"Price impact too high for {token_in} -> {token_out}: on-chain quote "
                     f"implies {result.price_impact:.1%} impact vs oracle (max allowed "
-                    f"{result.effective_max_impact:.0%}). Likely cause: insufficient pool "
+                    f"{result.effective_max_impact:.2%}). Likely cause: insufficient pool "
                     f"liquidity at the selected fee tier. Refusing to compile a swap that "
                     f"would likely no-op or be sandwiched."
                 ),

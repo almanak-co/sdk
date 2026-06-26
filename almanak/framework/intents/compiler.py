@@ -1711,7 +1711,7 @@ class IntentCompiler:
                     f"Price impact too high: quoter returned amount implying "
                     f"{impact.price_impact:.1%} price impact "
                     f"(oracle estimate: {oracle_estimate}, quoter: {quoter_amount}). "
-                    f"Maximum allowed: {impact.effective_max_impact:.0%}. "
+                    f"Maximum allowed: {impact.effective_max_impact:.2%}. "
                     f"Likely cause: pool has insufficient liquidity for "
                     f"{intent.from_token}->{intent.to_token}."
                 ),

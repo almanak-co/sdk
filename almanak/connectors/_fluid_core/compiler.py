@@ -180,7 +180,7 @@ class FluidCompiler(BaseProtocolCompiler[SwapCompilerContext]):
                         f"Price impact too high: resolver quote implies "
                         f"{impact.price_impact:.1%} price impact "
                         f"(oracle estimate: {expected_output}, resolver: {quoter_amount}). "
-                        f"Maximum allowed: {impact.effective_max_impact:.0%}. "
+                        f"Maximum allowed: {impact.effective_max_impact:.2%}. "
                         f"Likely cause: Fluid pool {pool_address} has insufficient depth for "
                         f"{intent.from_token}->{intent.to_token} at this size."
                     ),

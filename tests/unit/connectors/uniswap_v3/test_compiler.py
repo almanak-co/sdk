@@ -181,6 +181,29 @@ def test_uniswap_v3_swap_price_impact_guard_fails_nonlocal_rpc() -> None:
     assert "Price impact too high" in result.error
 
 
+def test_uniswap_v3_swap_price_impact_error_renders_sub_one_percent_limit() -> None:
+    """A tight sub-1% limit must render precisely, not round to '0%' (ALM-2888).
+
+    The configured limit (e.g. 0.3% from max_price_impact_bps=30) was formatted with
+    ``:.0%``, so the user saw 'Maximum allowed: 0%' for a non-zero limit. The error
+    must show the real threshold (here 0.30%) so the limit isn't misread as zero.
+    """
+    intent = _swap_intent()
+    intent.max_price_impact = Decimal("0.003")  # 30 bps
+
+    result = UniswapV3Compiler._apply_swap_slippage_and_impact(
+        ctx=_ctx(_Adapter(), rpc_url="https://arb.example.invalid"),
+        intent=intent,
+        oracle_estimate=1_000,
+        quoter_amount=100,
+    )
+
+    assert isinstance(result, CompilationResult)
+    assert result.status is CompilationStatus.FAILED
+    assert "Maximum allowed: 0.30%" in result.error
+    assert "Maximum allowed: 0%" not in result.error
+
+
 def test_uniswap_v3_local_rpc_detection_delegates_to_canonical_helper() -> None:
     assert UniswapV3Compiler._is_local_anvil_rpc("http://0.0.0.0:8545")
     assert UniswapV3Compiler._is_local_anvil_rpc("http://[::1]:8545")
