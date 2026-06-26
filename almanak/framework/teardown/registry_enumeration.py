@@ -43,6 +43,7 @@ the on-chain scan is wallet-scoped, not deployment-scoped).
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
@@ -53,6 +54,31 @@ from almanak.framework.teardown.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RegistryReadResult:
+    """Outcome of a ``position_registry`` WARM read for the cut-over LP primitives.
+
+    Richer than the legacy ``(positions, available)`` tuple so the caller can
+    tell a *partial* read (some primitive's SQL read raised transiently) apart
+    from a clean read — the distinction TD-05 (VIB-5463) needs to stop the
+    registry-read failure path being warn-only.
+
+    Attributes:
+        positions: The OPEN LP positions the registry could read.
+        available: ``True`` iff at least one primitive's read returned (an
+            answerable registry). ``False`` ⇒ no backend / hosted pre-T19 ⇒ the
+            caller keeps the legacy enumeration unchanged.
+        failed_primitives: Primitives whose read RAISED a non-cutover error
+            (transient gateway / decode fault). Non-empty ⇒ the registry answer
+            is **incomplete** for those primitives, so a chain-verify of the
+            known set must run before the enumeration is trusted.
+    """
+
+    positions: list[PositionInfo] = field(default_factory=list)
+    available: bool = False
+    failed_primitives: tuple[str, ...] = ()
 
 
 # (primitive, accounting_category) for the two cut-over LP primitives. Mirrors
@@ -117,13 +143,17 @@ def _position_info_from_registry_row(row: Any, *, primitive: str) -> PositionInf
     )
 
 
-async def read_open_lp_positions_from_registry(
+async def read_open_lp_positions_detailed(
     *,
     state_manager: Any,
     deployment_id: str,
     chain: str | None = None,
-) -> tuple[list[PositionInfo], bool]:
-    """Read this deployment's OPEN UniV3 + UniV4 LP positions from WARM.
+) -> RegistryReadResult:
+    """Read this deployment's OPEN UniV3 + UniV4 LP positions from WARM (detailed).
+
+    The richer counterpart of :func:`read_open_lp_positions_from_registry`: it
+    additionally reports which primitives' reads RAISED so the caller can chain-
+    verify the known set instead of silently warning (TD-05 / VIB-5463).
 
     Args:
         state_manager: The registry-capable :class:`StateManager` (the runner's
@@ -136,12 +166,14 @@ async def read_open_lp_positions_from_registry(
             strategy's positions.
 
     Returns:
-        ``(positions, available)``. ``available`` is ``False`` when the backend
-        cannot answer a registry read (no state manager, missing accessor, or
-        hosted pre-T19 → :class:`CutoverStorageNotSupported`); the caller then
-        keeps the strategy's own enumeration unchanged. ``available`` ``True``
-        with an empty list means "registry is authoritative and this deployment
-        has zero open LP" (a closed position correctly does not appear).
+        A :class:`RegistryReadResult`. ``available`` is ``False`` when the
+        backend cannot answer a registry read (no state manager, missing
+        accessor, or hosted pre-T19 → :class:`CutoverStorageNotSupported`); the
+        caller then keeps the strategy's own enumeration unchanged. ``available``
+        ``True`` with an empty list means "registry is authoritative and this
+        deployment has zero open LP". ``failed_primitives`` names any primitive
+        whose read RAISED a transient fault — the registry answer is incomplete
+        for those.
 
     Never raises — enumeration must never fault the teardown lane.
     """
@@ -149,10 +181,11 @@ async def read_open_lp_positions_from_registry(
 
     dep = str(deployment_id or "").strip()
     if state_manager is None or not dep or not hasattr(state_manager, "get_position_registry_open_rows"):
-        return [], False
+        return RegistryReadResult(positions=[], available=False, failed_primitives=())
 
     positions: list[PositionInfo] = []
     available = False
+    failed: list[str] = []
     for primitive, accounting_category in _LP_REGISTRY_SPECS:
         try:
             rows = await state_manager.get_position_registry_open_rows(
@@ -175,23 +208,49 @@ async def read_open_lp_positions_from_registry(
             # A genuinely-failed registry read (transient gateway error, decode
             # fault) during teardown must be OBSERVABLE — this primitive then
             # falls back to the strategy's own enumeration, but on a wiped-state
-            # restart it would be invisible. Log at WARNING (not the benign
-            # cutover-unavailable case above). Live re-derivation when the
-            # registry read fails is owned by TD-05 (VIB-5463).
+            # restart it would be invisible. Surface it as a failed primitive so
+            # the caller (TD-05) chain-verifies the known set rather than trusting
+            # the strategy enumeration blindly (no longer warn-only).
             logger.warning(
-                "Teardown registry enumeration: %s read FAILED for %s — this primitive "
-                "falls back to strategy enumeration this teardown",
+                "Teardown registry enumeration: %s read FAILED for %s — registry "
+                "answer is incomplete; the known LP set will be chain-verified",
                 primitive,
                 dep,
                 exc_info=True,
             )
+            failed.append(primitive)
             continue
         available = True
         for row in rows or []:
             info = _position_info_from_registry_row(row, primitive=primitive)
             if info is not None:
                 positions.append(info)
-    return positions, available
+    return RegistryReadResult(positions=positions, available=available, failed_primitives=tuple(failed))
+
+
+async def read_open_lp_positions_from_registry(
+    *,
+    state_manager: Any,
+    deployment_id: str,
+    chain: str | None = None,
+) -> tuple[list[PositionInfo], bool]:
+    """Read this deployment's OPEN UniV3 + UniV4 LP positions from WARM.
+
+    Back-compat 2-tuple facade over :func:`read_open_lp_positions_detailed`.
+
+    Returns:
+        ``(positions, available)``. ``available`` is ``False`` when the backend
+        cannot answer a registry read; ``True`` with an empty list means the
+        registry is authoritative and this deployment has zero open LP.
+
+    Never raises — enumeration must never fault the teardown lane.
+    """
+    result = await read_open_lp_positions_detailed(
+        state_manager=state_manager,
+        deployment_id=deployment_id,
+        chain=chain,
+    )
+    return result.positions, result.available
 
 
 def reconcile_lp_with_registry(
@@ -279,19 +338,139 @@ async def resolve_open_positions_with_registry(strategy: Any) -> TeardownPositio
         # the deployment id for downstream tracking instead of falling back to
         # the bare "unknown" sentinel inside ``reconcile_lp_with_registry``.
         summary = TeardownPositionSummary.empty(deployment_id or "unknown")
-    registry_positions, available = await read_open_lp_positions_from_registry(
+    read = await read_open_lp_positions_detailed(
         state_manager=getattr(strategy, "_state_manager", None),
         deployment_id=deployment_id,
         chain=None,
     )
-    return reconcile_lp_with_registry(
+    reconciled = reconcile_lp_with_registry(
         strategy_summary=summary,
-        registry_positions=registry_positions,
-        registry_available=available,
+        registry_positions=read.positions,
+        registry_available=read.available,
     )
+    # TD-05 (VIB-5463): chain-verify the enumeration completeness. This NEVER
+    # mutates the additive union (the union→authoritative flip is TD-06's job) —
+    # it (a) upgrades the registry-read-failure path from warn-only to an active
+    # per-position chain-verify of the known LP set, and (b) emits the structured
+    # "registry incomplete" signal TD-06 consumes to decide when the registry can
+    # be trusted (a strategy LP that is open on-chain yet absent from the registry
+    # is a write-skipped / pre-cutover row, not a closed position).
+    await _verify_lp_enumeration_completeness(
+        strategy=strategy,
+        strategy_summary=summary,
+        read=read,
+    )
+    return reconciled
+
+
+def _registry_open_keys(read: RegistryReadResult) -> set[tuple[str, str]]:
+    """``(chain, token_id)`` keys for the registry-reported OPEN LP positions."""
+    return {(str(p.chain or "").lower(), str(p.position_id)) for p in read.positions}
+
+
+async def _verify_lp_enumeration_completeness(
+    *,
+    strategy: Any,
+    strategy_summary: TeardownPositionSummary,
+    read: RegistryReadResult,
+) -> None:
+    """Chain-verify the LP enumeration's completeness (TD-05 / VIB-5463).
+
+    Observation-only — it NEVER mutates the returned enumeration (the additive
+    union is preserved; the authoritative flip is TD-06's). It does two things,
+    both bounded to the *discrepancy* set so the common matched case issues zero
+    chain reads:
+
+    1. **Registry-read-failure verification (no longer warn-only).** When a
+       primitive's registry read RAISED (``read.failed_primitives``), the
+       registry answer is incomplete, so the strategy-reported LP set is the only
+       known identity. Each such LP is chain-verified; a structured ERROR is
+       logged when a position cannot be confirmed open, so an operator sees an
+       unverified teardown instead of a silent warning.
+
+    2. **Completeness signal for TD-06 (AC3).** When the registry WAS available
+       but a strategy-reported LP is ABSENT from its OPEN rows, chain-verify it:
+       if the chain confirms it is open, that row is a write-skipped / pre-cutover
+       gap (the registry is not yet complete) — logged so TD-06 knows the
+       union→authoritative flip is not yet safe.
+
+    Gateway boundary: verification is gateway-routed via
+    :func:`live_position_reads.chain_verify_lp_open`. A strategy without a wired
+    gateway client simply skips verification (the additive union still stands).
+    """
+    gateway_client = getattr(strategy, "_gateway_client", None)
+    if gateway_client is None:
+        if read.failed_primitives:
+            logger.error(
+                "Teardown LP enumeration: registry read failed for %s and no gateway "
+                "client is available to chain-verify the known LP set — completeness "
+                "is UNVERIFIED for this teardown",
+                ", ".join(read.failed_primitives),
+            )
+        return
+
+    from almanak.framework.teardown.live_position_reads import chain_verify_lp_open
+
+    strategy_lp = [p for p in strategy_summary.positions if p.position_type == PositionType.LP]
+    if not strategy_lp:
+        if read.failed_primitives:
+            logger.error(
+                "Teardown LP enumeration: registry read failed for %s and the strategy "
+                "reported no LP — a forgotten LP cannot be re-derived per-position "
+                "(wallet-scan recovery is the separate --discover lane); completeness "
+                "is UNVERIFIED",
+                ", ".join(read.failed_primitives),
+            )
+        return
+
+    registry_keys = _registry_open_keys(read)
+    network = str(getattr(strategy, "_gateway_network", "") or "")
+
+    for position in strategy_lp:
+        key = (str(position.chain or "").lower(), str(position.position_id))
+        absent_from_registry = key not in registry_keys
+        # Only verify the discrepancy set: a strategy LP the registry already
+        # confirms (matched) needs no chain read unless its primitive's read
+        # failed (registry answer incomplete for it).
+        if not absent_from_registry and not read.failed_primitives:
+            continue
+
+        verdict = await chain_verify_lp_open(gateway_client=gateway_client, position=position, network=network)
+
+        if read.failed_primitives:
+            if verdict is True:
+                logger.warning(
+                    "Teardown LP enumeration: registry read failed (%s); LP token_id=%s "
+                    "on %s CONFIRMED open on-chain — retained in the teardown set",
+                    ", ".join(read.failed_primitives),
+                    position.position_id,
+                    position.chain,
+                )
+            elif verdict is None:
+                logger.error(
+                    "Teardown LP enumeration: registry read failed (%s) AND LP token_id=%s "
+                    "on %s could not be confirmed open on-chain — completeness UNVERIFIED; "
+                    "manual on-chain check advised before treating teardown as complete",
+                    ", ".join(read.failed_primitives),
+                    position.position_id,
+                    position.chain,
+                )
+            # verdict is False ⇒ the position is closed on-chain; it harmlessly
+            # plans a no-op close — left in the union (no subtraction here).
+        elif absent_from_registry and verdict is True:
+            logger.warning(
+                "Teardown LP enumeration: LP token_id=%s on %s is open on-chain but ABSENT "
+                "from position_registry — a write-skipped / pre-cutover row. Union retained "
+                "(no position dropped); registry is not yet complete, so the "
+                "union→authoritative flip (TD-06) stays blocked",
+                position.position_id,
+                position.chain,
+            )
 
 
 __all__ = [
+    "RegistryReadResult",
+    "read_open_lp_positions_detailed",
     "read_open_lp_positions_from_registry",
     "reconcile_lp_with_registry",
     "resolve_open_positions_with_registry",

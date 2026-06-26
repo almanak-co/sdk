@@ -27,6 +27,8 @@ from almanak.framework.teardown.models import (
     TeardownPositionSummary,
 )
 from almanak.framework.teardown.registry_enumeration import (
+    RegistryReadResult,
+    read_open_lp_positions_detailed,
     read_open_lp_positions_from_registry,
     reconcile_lp_with_registry,
     resolve_open_positions_with_registry,
@@ -416,6 +418,118 @@ async def test_dedup_is_chain_scoped_cross_chain_token_id_not_suppressed() -> No
     # base:555 is net-new (cross-chain, not suppressed); arbitrum:555 kept;
     # arbitrum:999 deduped (same chain + token id) — appears once.
     assert keys == [("arbitrum", "555"), ("arbitrum", "999"), ("base", "555")]
+
+
+# ---------------------------------------------------------------------------
+# TD-05 (VIB-5463) — detailed read + chain-verify completeness wiring
+# ---------------------------------------------------------------------------
+
+
+class _RaisingRegistrySM:
+    """Registry SM whose read RAISES a transient (non-cutover) fault."""
+
+    async def get_position_registry_open_rows(self, deployment_id, *, chain=None, primitive=None, accounting_category=None):
+        raise RuntimeError("transient gateway fault")
+
+
+class _VerifyStrategy:
+    """Strategy double exposing the bits the completeness verifier touches."""
+
+    def __init__(self, summary, state_manager, gateway_client=None):
+        self._summary = summary
+        self._state_manager = state_manager
+        self._gateway_client = gateway_client
+        self._gateway_network = ""
+        self.deployment_id = DEPLOYMENT_ID
+
+    def get_open_positions(self):
+        return self._summary
+
+
+@pytest.mark.asyncio
+async def test_detailed_read_reports_failed_primitive() -> None:
+    result = await read_open_lp_positions_detailed(state_manager=_RaisingRegistrySM(), deployment_id=DEPLOYMENT_ID)
+    assert isinstance(result, RegistryReadResult)
+    assert result.available is False
+    # Both cut-over primitives failed transiently.
+    assert set(result.failed_primitives) == {"lp", "lp_v4"}
+    assert result.positions == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_chain_verifies_known_lp_when_registry_read_failed(monkeypatch) -> None:
+    # Registry read fails ⇒ the strategy-reported LP set is chain-verified
+    # (no longer warn-only). The additive union is unchanged.
+    verified: list[str] = []
+
+    async def _verify(*, gateway_client, position, network=""):
+        verified.append(str(position.position_id))
+        return True
+
+    monkeypatch.setattr(
+        "almanak.framework.teardown.live_position_reads.chain_verify_lp_open", _verify
+    )
+    strat = TeardownPositionSummary(deployment_id=DEPLOYMENT_ID, timestamp=datetime.now(UTC), positions=[_lp("77")])
+    strategy = _VerifyStrategy(summary=strat, state_manager=_RaisingRegistrySM(), gateway_client=object())
+    out = await resolve_open_positions_with_registry(strategy)
+    # Union preserved — verification never drops a position.
+    assert {p.position_id for p in out.positions} == {"77"}
+    assert verified == ["77"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_flags_strategy_lp_absent_from_registry(monkeypatch) -> None:
+    # Registry available (id 22) but strategy reports an LP (id 11) the registry
+    # does NOT have AND chain confirms open ⇒ completeness signal fires; the
+    # union still keeps both (no flip).
+    seen: list[str] = []
+
+    async def _verify(*, gateway_client, position, network=""):
+        seen.append(str(position.position_id))
+        return True
+
+    monkeypatch.setattr(
+        "almanak.framework.teardown.live_position_reads.chain_verify_lp_open", _verify
+    )
+    sm = _FakeRegistrySM({"lp": [_v3_row("22")], "lp_v4": []})
+    strat = TeardownPositionSummary(deployment_id=DEPLOYMENT_ID, timestamp=datetime.now(UTC), positions=[_lp("11")])
+    strategy = _VerifyStrategy(summary=strat, state_manager=sm, gateway_client=object())
+    out = await resolve_open_positions_with_registry(strategy)
+    assert {p.position_id for p in out.positions} == {"11", "22"}
+    assert seen == ["11"]  # only the discrepancy (absent-from-registry) LP is verified
+
+
+@pytest.mark.asyncio
+async def test_resolve_skips_chain_verify_for_matched_positions(monkeypatch) -> None:
+    # Strategy LP 22 matches a registry row 22 (same chain) and no read failed ⇒
+    # ZERO chain reads (the common steady-state path stays cheap).
+    calls: list[str] = []
+
+    async def _verify(*, gateway_client, position, network=""):
+        calls.append(str(position.position_id))
+        return True
+
+    monkeypatch.setattr(
+        "almanak.framework.teardown.live_position_reads.chain_verify_lp_open", _verify
+    )
+    sm = _FakeRegistrySM({"lp": [_v3_row("22")], "lp_v4": []})
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID, timestamp=datetime.now(UTC), positions=[_lp("22", chain="arbitrum")]
+    )
+    strategy = _VerifyStrategy(summary=strat, state_manager=sm, gateway_client=object())
+    out = await resolve_open_positions_with_registry(strategy)
+    assert {p.position_id for p in out.positions} == {"22"}
+    assert calls == []  # matched + no failure ⇒ no chain read
+
+
+@pytest.mark.asyncio
+async def test_resolve_no_gateway_client_skips_verify_safely() -> None:
+    # Registry read fails and there is no gateway client ⇒ no verify, union still
+    # stands (must not raise).
+    strat = TeardownPositionSummary(deployment_id=DEPLOYMENT_ID, timestamp=datetime.now(UTC), positions=[_lp("9")])
+    strategy = _VerifyStrategy(summary=strat, state_manager=_RaisingRegistrySM(), gateway_client=None)
+    out = await resolve_open_positions_with_registry(strategy)
+    assert {p.position_id for p in out.positions} == {"9"}
 
 
 def test_reconcile_preserves_strategy_summary_totals() -> None:

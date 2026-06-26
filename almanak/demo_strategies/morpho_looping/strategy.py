@@ -1068,56 +1068,143 @@ class MorphoLoopingStrategy(IntentStrategy):
     # =========================================================================
 
     def get_open_positions(self) -> "TeardownPositionSummary":  # noqa: F821
-        """Get all open positions for teardown.
+        """Get all open positions for teardown — re-derived from chain (14:811).
+
+        Blueprint 14:811 requires this to *"query on-chain state - do not use
+        cached state."* The in-memory ``_total_collateral`` / ``_total_borrowed``
+        counters are zero after a wiped / ``--fresh`` / corrupt-WARM restart, even
+        though the leveraged position is still live on-chain — reporting from them
+        would silently strand the debt + collateral at teardown. So we re-derive
+        the live position from chain via the gateway-routed ``position_health``
+        read (VIB-5463 / TD-05). The market identity (``market_id`` + tokens)
+        comes from config, which survives any state wipe.
+
+        The chain read is **authoritative** when it succeeds; it falls back to the
+        cached counters ONLY when the read is unavailable (gateway blip), so a
+        transient fault can never DROP a known position (Empty ≠ Zero).
 
         Returns:
-            TeardownPositionSummary with supply and borrow positions
+            TeardownPositionSummary with the live supply + borrow positions.
         """
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
+        from almanak.framework.teardown.live_position_reads import redrive_lending_position
 
-        positions = []
+        try:
+            snapshot = self.create_market_snapshot()
+        except Exception:  # noqa: BLE001 — read unavailable ⇒ cache fallback below
+            logger.debug("Could not build market snapshot for teardown enumeration", exc_info=True)
+            snapshot = None
 
-        # Collateral position
-        if self._total_collateral > 0:
+        collateral_price: Decimal | None = None
+        live = None
+        if snapshot is not None:
             try:
-                snapshot = self.create_market_snapshot()
-                collateral_price = snapshot.price(self.collateral_token)
+                collateral_price = Decimal(str(snapshot.price(self.collateral_token)))
             except Exception:  # noqa: BLE001
-                logger.debug(f"Could not get live price for {self.collateral_token}, using fallback $1")
-                collateral_price = Decimal("1")
-            collateral_value = self._total_collateral * collateral_price
-            positions.append(
-                PositionInfo(
-                    position_type=PositionType.SUPPLY,
-                    position_id=f"morpho-collateral-{self.market_id[:16]}",
-                    chain=self.chain,
-                    protocol="morpho_blue",
-                    value_usd=collateral_value,
-                    details={
-                        "market_id": self.market_id,
-                        "asset": self.collateral_token,
-                        "amount": str(self._total_collateral),
-                    },
-                )
+                collateral_price = None
+            try:
+                debt_price: Decimal | None = Decimal(str(snapshot.price(self.borrow_token)))
+            except Exception:  # noqa: BLE001
+                debt_price = None
+            live = redrive_lending_position(
+                market=snapshot,
+                protocol="morpho_blue",
+                market_id=self.market_id,
+                collateral_token=self.collateral_token,
+                borrow_token=self.borrow_token,
+                collateral_price_usd=collateral_price,
+                debt_price_usd=debt_price,
             )
 
-        # Borrow position
-        if self._total_borrowed > 0:
-            positions.append(
-                PositionInfo(
-                    position_type=PositionType.BORROW,
-                    position_id=f"morpho-borrow-{self.market_id[:16]}",
-                    chain=self.chain,
-                    protocol="morpho_blue",
-                    value_usd=self._total_borrowed,
-                    health_factor=self._current_health_factor,
-                    details={
-                        "market_id": self.market_id,
-                        "asset": self.borrow_token,
-                        "amount": str(self._total_borrowed),
-                    },
-                )
+        positions: list[PositionInfo] = []
+        dust_usd = Decimal("0.01")
+
+        if live is not None:
+            # Chain is authoritative (14:811). Include a leg only when it carries
+            # real on-chain value; an all-zero live read is a genuinely closed
+            # market and correctly yields no teardown intents.
+            collateral_amount = (
+                live.collateral_amount if live.collateral_amount is not None else self._total_collateral
             )
+            borrow_amount = live.debt_amount if live.debt_amount is not None else self._total_borrowed
+            health_factor = live.health_factor if live.health_factor is not None else self._current_health_factor
+            if live.collateral_value_usd > dust_usd:
+                positions.append(
+                    PositionInfo(
+                        position_type=PositionType.SUPPLY,
+                        position_id=f"morpho-collateral-{self.market_id[:16]}",
+                        chain=self.chain,
+                        protocol="morpho_blue",
+                        value_usd=live.collateral_value_usd,
+                        details={
+                            "market_id": self.market_id,
+                            "asset": self.collateral_token,
+                            "amount": str(collateral_amount),
+                            "source": "chain",
+                        },
+                    )
+                )
+            if live.debt_value_usd > dust_usd:
+                positions.append(
+                    PositionInfo(
+                        position_type=PositionType.BORROW,
+                        position_id=f"morpho-borrow-{self.market_id[:16]}",
+                        chain=self.chain,
+                        protocol="morpho_blue",
+                        value_usd=live.debt_value_usd,
+                        health_factor=health_factor,
+                        details={
+                            "market_id": self.market_id,
+                            "asset": self.borrow_token,
+                            "amount": str(borrow_amount),
+                            "source": "chain",
+                        },
+                    )
+                )
+        else:
+            # Live read UNAVAILABLE — fall back to the cached counters so a gateway
+            # blip never drops a known position. Mirrors the pre-TD-05 behaviour.
+            logger.warning(
+                "Teardown enumeration: on-chain position read unavailable for market "
+                "%s — falling back to cached counters (collateral=%s, borrowed=%s)",
+                self.market_id[:16],
+                self._total_collateral,
+                self._total_borrowed,
+            )
+            if self._total_collateral > 0:
+                collateral_value = self._total_collateral * (collateral_price or Decimal("1"))
+                positions.append(
+                    PositionInfo(
+                        position_type=PositionType.SUPPLY,
+                        position_id=f"morpho-collateral-{self.market_id[:16]}",
+                        chain=self.chain,
+                        protocol="morpho_blue",
+                        value_usd=collateral_value,
+                        details={
+                            "market_id": self.market_id,
+                            "asset": self.collateral_token,
+                            "amount": str(self._total_collateral),
+                            "source": "cache",
+                        },
+                    )
+                )
+            if self._total_borrowed > 0:
+                positions.append(
+                    PositionInfo(
+                        position_type=PositionType.BORROW,
+                        position_id=f"morpho-borrow-{self.market_id[:16]}",
+                        chain=self.chain,
+                        protocol="morpho_blue",
+                        value_usd=self._total_borrowed,
+                        health_factor=self._current_health_factor,
+                        details={
+                            "market_id": self.market_id,
+                            "asset": self.borrow_token,
+                            "amount": str(self._total_borrowed),
+                            "source": "cache",
+                        },
+                    )
+                )
 
         return TeardownPositionSummary(
             deployment_id=self.STRATEGY_NAME,
