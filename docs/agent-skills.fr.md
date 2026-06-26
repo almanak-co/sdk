@@ -253,7 +253,7 @@ Lorsque vous créez une nouvelle stratégie avec `almanak strat new`, un fichier
 Chaque stratégie créée est un projet Python autonome avec `pyproject.toml`, `.venv/` et `uv.lock`, le `AGENTS.md` par stratégie documente donc aussi l'ajout de dépendances (`uv add`) et l'exécution de tests (`uv run pytest`).
 
 ```bash
-almanak strat new --template mean_reversion --name my_rsi --chain arbitrum
+almanak strat new --template ta_swap --name my_rsi --chain arbitrum
 # Crée my_rsi/AGENTS.md aux côtés de strategy.py, config.json, pyproject.toml, etc.
 ```
 

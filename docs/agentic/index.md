@@ -175,6 +175,6 @@ See [almanak ax CLI reference](../cli/almanak-ax.md) for full documentation.
 
 ## Next Steps
 
-- [Agent Tools API Reference](agent-tools.md) -- All 38 tools, ToolExecutor, PolicyEngine, error types
+- [Agent Tools API Reference](agent-tools.md) -- All 39 tools, ToolExecutor, PolicyEngine, error types
 - [Framework Adapters](adapters.md) -- OpenAI, MCP, and LangChain integrations
 - Agentic example strategies -- not currently bundled in the public SDK; a curated set is planned as Tutorials (VIB-5332)

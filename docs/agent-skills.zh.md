@@ -253,7 +253,7 @@ almanak agent install -d /path/to/my-project -p claude
 每个创建的策略都是一个独立的 Python 项目，包含 `pyproject.toml`、`.venv/` 和 `uv.lock`，因此每个策略的 `AGENTS.md` 也会说明如何添加依赖（`uv add`）和运行测试（`uv run pytest`）。
 
 ```bash
-almanak strat new --template mean_reversion --name my_rsi --chain arbitrum
+almanak strat new --template ta_swap --name my_rsi --chain arbitrum
 # 在 strategy.py、config.json、pyproject.toml 等旁边创建 my_rsi/AGENTS.md
 ```
 

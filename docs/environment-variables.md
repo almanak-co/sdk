@@ -5,7 +5,7 @@ All strategies run through the **gateway sidecar** (auto-started by `almanak str
 Create a `.env` file in your strategy directory with the variables below.
 
 !!! info "ALMANAK_GATEWAY_ env_prefix"
-    Every field in `GatewaySettings` is automatically bound to `ALMANAK_GATEWAY_<UPPER_FIELD_NAME>`; only the ones documented below have load-bearing effects worth calling out. The full list lives in `almanak/gateway/core/settings.py` and in the project's [`.env.example`](https://github.com/almanak-co/sdk/blob/main/.env.example).
+    Every field in `GatewaySettings` is automatically bound to `ALMANAK_GATEWAY_<UPPER_FIELD_NAME>`; only the ones documented below have load-bearing effects worth calling out. The full list lives in `almanak/gateway/core/settings.py` and in the project's [`.env.example`](https://github.com/almanak-co/almanak-sdk/blob/main/.env.example).
 
 ---
 
@@ -409,4 +409,4 @@ For deployed or sidecar gateway environments, set
 valid Pro API key via the gateway; without it, pool analytics, pool history, and
 DEX-native OHLCV fallbacks fail fast with an explicit key error.
 
-All other gateway and framework settings have sensible defaults and do not need to be set. See [`.env.example`](https://github.com/almanak-co/sdk/blob/main/.env.example) for the full list of advanced options.
+All other gateway and framework settings have sensible defaults and do not need to be set. See [`.env.example`](https://github.com/almanak-co/almanak-sdk/blob/main/.env.example) for the full list of advanced options.

@@ -161,8 +161,9 @@ Consulta [Variables de entorno](environment-variables.md) para la lista completa
     - Si los swaps fallan con "Too little received", cambia de `amount_usd=` a `amount=` (unidades de
       tokens). `amount_usd=` depende del oraculo de precios de la pasarela para la conversion USD a
       token, que puede diferir del precio del DEX.
-    - Comienza con cantidades pequenas, monitorea las primeras iteraciones y anota tu ID de instancia
-      para reanudar con `--id`.
+    - Comienza con cantidades pequeñas y monitorea las primeras iteraciones. El deployment ID se
+      deriva de forma determinista de tu wallet y cadena, por lo que un reinicio reanuda
+      automáticamente la misma ejecución.
 
 ## Estructura de una estrategia
 
@@ -313,7 +314,7 @@ El comando lee `supported_protocols` e `intent_types` de tu decorador `@almanak_
 ## Quieres que un LLM tome las decisiones?
 
 El SDK tambien soporta **estrategias agentivas** donde un LLM decide
-autonomamente que hacer usando las 38 herramientas integradas de Almanak. En lugar de
+autonomamente que hacer usando las 39 herramientas integradas de Almanak. En lugar de
 escribir la logica `decide()` en Python, escribes un prompt de sistema y dejas que
 el LLM razone sobre los datos de mercado.
 

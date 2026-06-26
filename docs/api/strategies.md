@@ -4,15 +4,15 @@ Strategy base classes and the market snapshot interface.
 
 ## Implementing Teardown
 
-Every strategy **must** implement three teardown methods so operators can safely close positions. Without them, close-requests are silently ignored.
+To support teardown, a strategy implements `get_open_positions()` and `generate_teardown_intents()` so operators can safely close positions. **Implementing `get_open_positions()` is what enables teardown** — the runner checks for that method. Without it, close-requests are silently ignored.
 
-### Required Methods
+### Teardown Methods
 
-| Method | Purpose |
-|--------|---------|
-| `supports_teardown() -> bool` | Return `True` to enable teardown |
-| `get_open_positions()` | Return a `TeardownPositionSummary` listing all open positions |
-| `generate_teardown_intents(mode, market)` | Return an ordered list of `Intent` objects that unwind positions |
+| Method | Required? | Purpose |
+|--------|-----------|---------|
+| `get_open_positions()` | **Yes** | Return a `TeardownPositionSummary` listing all open positions. The runner gates teardown on the presence of this method. |
+| `generate_teardown_intents(mode, market)` | **Yes** | Return an ordered list of `Intent` objects that unwind positions |
+| `supports_teardown() -> bool` | Optional | Author-side convenience guard (return `False` to short-circuit your own teardown path). The runner does **not** gate on this flag — it is a convention many demos follow, not a framework requirement. |
 
 ### Execution Order
 

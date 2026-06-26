@@ -253,7 +253,7 @@ When you scaffold a new strategy with `almanak strat new`, an `AGENTS.md` file i
 Each scaffolded strategy is a self-contained Python project with `pyproject.toml`, `.venv/`, and `uv.lock`, so the per-strategy `AGENTS.md` also documents adding dependencies (`uv add`) and running tests (`uv run pytest`).
 
 ```bash
-almanak strat new --template mean_reversion --name my_rsi --chain arbitrum
+almanak strat new --template ta_swap --name my_rsi --chain arbitrum
 # Creates my_rsi/AGENTS.md alongside strategy.py, config.json, pyproject.toml, etc.
 ```
 

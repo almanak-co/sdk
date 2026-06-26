@@ -159,7 +159,7 @@ almanak strat run --once
     - 首次实际执行前，务必先运行 `--dry-run --once` 以验证 intent 编译，而不提交交易。
     - 如果交换因 "Too little received" 而回滚，请将 `amount_usd=` 改为 `amount=`（代币单位）。
       `amount_usd=` 依赖网关价格预言机进行 USD 到代币的转换，可能与 DEX 价格有偏差。
-    - 从小额开始，监控前几次迭代，并记录您的实例 ID 以便使用 `--id` 恢复。
+    - 从小额开始，监控前几次迭代。部署 ID 由您的钱包和链确定性地派生，因此重启会自动恢复同一次运行。
 
 ## 策略结构
 
@@ -309,7 +309,7 @@ almanak strat permissions -o permissions.json
 
 ## 想让 LLM 来做决策？
 
-SDK 还支持**代理策略**，其中 LLM 使用 Almanak 的 38 个内置工具自主决定
+SDK 还支持**代理策略**，其中 LLM 使用 Almanak 的 39 个内置工具自主决定
 要做什么。您无需在 Python 中编写 `decide()` 逻辑，而是编写系统提示词，
 让 LLM 基于市场数据进行推理。
 
