@@ -196,6 +196,7 @@ KNOWN_CUSTOM_ERRORS: dict[str, str] = {
     "0xf58f733a": "SupplyCapExceeded()",
     "0xcdd36a97": "CallerNotPoolAdmin()",
     "0x6679996d": "HealthFactorLowerThanLiquidationThreshold()",
+    "0x975ae09f": "HealthFactorLowerThanThreshold()",
     "0x930bb771": "HealthFactorNotBelowThreshold()",
     "0x979b5ce8": "CollateralCannotBeLiquidated()",
     "0x3a23d825": "InsufficientCollateral()",

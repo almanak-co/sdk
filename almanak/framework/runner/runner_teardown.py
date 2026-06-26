@@ -545,19 +545,21 @@ def _safe_mark(state_manager: Any, method_name: str, deployment_id: str, **kwarg
 # -------------------------------------------------------------------------
 
 
-def _apply_lending_unwind_guard(teardown_intents: list, teardown_market: Any, deployment_id: str) -> list:
+def _apply_lending_unwind_guard(
+    teardown_intents: list, teardown_market: Any, deployment_id: str, mode: TeardownMode | None = None
+) -> list:
     """Sanitise strategy-emitted lending teardown intents against fresh state.
 
-    Wraps the pure ``sanitize_lending_teardown_intents`` guard (VIB-5139) and
-    logs any dropped / reordered / degraded outcome. Returns the guarded intent
-    list. A guard failure must never block teardown (its first job is removing
-    on-chain risk), so any unexpected error falls back to the original intents
-    with a loud WARNING.
+    Wraps the pure ``sanitize_lending_teardown_intents`` guard (VIB-5139 /
+    VIB-4466) and logs any dropped / reordered / synthesised / degraded outcome.
+    Returns the guarded intent list. A guard failure must never block teardown
+    (its first job is removing on-chain risk), so any unexpected error falls back
+    to the original intents with a loud WARNING.
     """
     from ..teardown.lending_unwind_guard import sanitize_lending_teardown_intents
 
     try:
-        guarded = sanitize_lending_teardown_intents(teardown_intents, teardown_market)
+        guarded = sanitize_lending_teardown_intents(teardown_intents, teardown_market, mode=mode)
     except Exception as e:  # pragma: no cover - defensive; guard is pure
         logger.warning(
             "Lending fresh-state guard errored for %s (%s); using original intents",
@@ -569,6 +571,13 @@ def _apply_lending_unwind_guard(teardown_intents: list, teardown_market: Any, de
 
     for reason in guarded.dropped:
         logger.info("🛑 %s lending guard dropped intent — %s", deployment_id, reason)
+    if guarded.synthesized_positions:
+        logger.info(
+            "🛑 %s lending guard synthesised HF-safe unwind staircase (wallet cannot fully repay live "
+            "debt — naive withdraw-all would revert) for: %s (VIB-4466)",
+            deployment_id,
+            ", ".join(guarded.synthesized_positions),
+        )
     if guarded.no_op_positions:
         logger.info(
             "🛑 %s lending guard: positions already flat (no debt, no collateral): %s",
@@ -685,7 +694,7 @@ async def execute_teardown(  # noqa: C901
     # Zero — never acts on a None as if it were zero). Pure list transform: the
     # sanitised intents flow through the same dispatch funnel, so the per-intent
     # commit pairing / anti-bypass guards are untouched.
-    teardown_intents = _apply_lending_unwind_guard(teardown_intents, teardown_market, deployment_id)
+    teardown_intents = _apply_lending_unwind_guard(teardown_intents, teardown_market, deployment_id, teardown_mode)
 
     if not teardown_intents:
         if recovery_incomplete:

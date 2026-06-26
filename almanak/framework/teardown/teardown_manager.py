@@ -917,11 +917,19 @@ class TeardownManager:
             # routes through _execute_intents with the commit pairing intact.
             from .lending_unwind_guard import sanitize_lending_teardown_intents
 
-            guarded = sanitize_lending_teardown_intents(intents, market)
+            guarded = sanitize_lending_teardown_intents(intents, market, mode=state.mode)
             for reason in guarded.dropped:
                 logger.info("Teardown resume lending guard dropped intent — %s", reason)
+            for synth in guarded.synthesized_positions:
+                logger.info(
+                    "Teardown resume lending guard synthesised HF-safe unwind staircase for %s (VIB-4466)", synth
+                )
             intents = guarded.intents
             state.pending_intents_json = json.dumps([_serialize_intent_for_state(i) for i in intents])
+            # The guard can EXPAND (synthesis) or SHRINK (drops) the plan, so keep the
+            # progress denominator in sync — otherwise a resumed teardown reports
+            # progress against the stale pre-guard intent count (VIB-4466 / CodeRabbit).
+            state.total_intents = len(intents)
             state.current_intent_index = 0
             # Codex re-audit P1: the freshly generated plan is a brand-new
             # intent list with zero completed work, so reset the progress

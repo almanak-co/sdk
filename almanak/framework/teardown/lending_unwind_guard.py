@@ -19,10 +19,23 @@ but it is opt-in. This guard makes the fresh-exposure discipline the DEFAULT for
 is dispatched — in the runner lane, the CLI lane, and the inline fallback lane
 (all three derive their intents from ``generate_teardown_intents``).
 
-The guard is a **pure transformation on the intent list**: it never executes,
-signs, or commits. The sanitised list flows through the same ``_execute_intents``
-funnel, so the per-intent ``runner_helpers.commit`` pairing and the VIB-3773
-anti-bypass guards are untouched.
+It does two things: (1) **drop / reorder** — drop measured-zero REPAY/WITHDRAW
+legs, enforce repay-before-withdraw; and (2) **synthesise** (VIB-4466 / VIB-589)
+— when a simple single-round plan would STRAND because the wallet cannot fully
+repay live debt (a plain borrow holds only the borrowed principal, but owes
+principal + accrued interest, so the repay leaves dust debt and ``withdraw_all``
+reverts ``HealthFactorLowerThanLiquidationThreshold``), the guard REPLACES that
+position's naive ``REPAY → WITHDRAW(all)`` with the health-factor-aware unwind
+staircase (``generate_leverage_loop_teardown``), which sources the interest
+shortfall from collateral before the final withdraw-all. Synthesis fires ONLY
+when the strand is provable (measured debt + readable prices/balance + wallet
+< debt); otherwise the drop/reorder path is unchanged.
+
+The guard remains a **pure transformation on the intent list**: it never
+executes, signs, or commits — synthesis returns a *different* list of typed
+intents. The result flows through the same ``_execute_intents`` funnel, so the
+per-intent ``runner_helpers.commit`` pairing and the VIB-3773 anti-bypass guards
+are untouched (no new execute site is introduced upstream of dispatch).
 
 Correctness contract (CLAUDE.md §Accounting — Empty ≠ Zero):
 
@@ -73,10 +86,10 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.intents.vocabulary import Intent, IntentType
 
 if TYPE_CHECKING:  # pragma: no cover
-    pass
+    from almanak.framework.teardown.models import TeardownMode
 
 # Exposure (collateral or debt) below this USD value is treated as measured-flat.
 # Deliberately matches ``leverage_loop._DUST_USD`` ($0.01) — both answer the same
@@ -86,6 +99,23 @@ if TYPE_CHECKING:  # pragma: no cover
 # (``TokenConsolidationConfig.min_swap_value_usd``), which is "is a residual swap
 # worth the gas?" — a much higher, economic threshold. Do not unify the two.
 _DUST_USD = Decimal("0.01")
+
+# Strand-predicate interest buffer: the naive plan is replaced when the wallet
+# cannot cover the live debt by at least this margin. The debt read is a snapshot;
+# variable-rate interest accrues between the read and on-chain execution, so a
+# wallet that *just barely* covers snapshot debt can still strand at execution. We
+# fire the (always-correct) staircase when the wallet doesn't exceed debt by >1% —
+# the staircase itself handles the wallet-covers case (repay_full → withdraw_all),
+# so erring toward synthesis here is safe and only costs a little gas in the thin
+# near-parity band. Same 1% family as ``leverage_loop._REPAY_SAFETY_HAIRCUT``.
+_STRAND_PREDICATE_BUFFER = Decimal("1.01")
+
+# Degrade-path repay haircut: when synthesis fails and we keep only a risk-reducing
+# partial repay, repay slightly under the wallet balance so a partial repay never
+# tips into over-pull/revert on Morpho/Compound from rounding/interest at execution
+# time. Mirrors ``leverage_loop._REPAY_SAFETY_HAIRCUT`` (under-repay is the safe
+# direction for a degraded teardown).
+_DEGRADE_REPAY_HAIRCUT = Decimal("0.01")
 
 # Intent types this guard reasons about. SUPPLY/BORROW never appear in a teardown
 # (they ADD exposure); the guard leaves any non-lending or non-unwind intent
@@ -105,12 +135,17 @@ class LendingGuardResult:
             (unmeasured) and the guard had to make a conservative call.
         no_op_positions: Position keys found fully flat (no debt, no collateral)
             on the fresh read — their intents were all dropped.
+        synthesized_positions: Position keys whose naive ``REPAY → WITHDRAW(all)``
+            plan was REPLACED with a health-factor-aware unwind staircase because
+            the wallet could not fully repay live debt (VIB-4466 / VIB-589) — the
+            naive plan would have left dust debt and reverted the withdraw-all.
     """
 
     intents: list[Any]
     dropped: list[str] = field(default_factory=list)
     degraded: bool = False
     no_op_positions: list[str] = field(default_factory=list)
+    synthesized_positions: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -350,28 +385,32 @@ def _decide_keeps(
 def _is_order_locked(intents: list[Any]) -> bool:
     """Whether the lending plan is an ORDER-SENSITIVE interleaved staircase.
 
-    Order-locked when EITHER:
-      (a) a passthrough (non-lending-unwind) intent sits BETWEEN two lending-unwind
-          intents — the SWAPs interleaved in ``generate_leverage_loop_teardown``'s
-          ``WITHDRAW → SWAP → REPAY`` staircase; OR
-      (b) there is more than one repay/withdraw round — i.e. the lending block holds
-          more than one REPAY or more than one WITHDRAW (a multi-round staircase).
+    Order-locked ONLY when a passthrough (non-lending-unwind) intent sits BETWEEN
+    two lending-unwind intents — the SWAPs interleaved in
+    ``generate_leverage_loop_teardown``'s ``WITHDRAW → SWAP → REPAY`` staircase. A
+    genuine HF-safe staircase ALWAYS interleaves a collateral→debt SWAP between its
+    withdraw and repay, so interleaving is the reliable signal that the plan is a
+    known-safe, self-clearing unwind that must not be reordered or re-synthesized.
 
-    A staircase must NOT be globally reordered (P0): reordering would front-load a
-    REPAY before the WITHDRAW+SWAP that funds it. Operates on the ORIGINAL list so
-    the structure is read before any drop is applied.
+    We deliberately do NOT order-lock on a raw repay/withdraw round count (the old
+    clause (b)): a non-interleaved multi-round plan — e.g. two independent borrow
+    positions (an Aave borrow + a Morpho borrow), or a hand-rolled
+    ``partial REPAY → partial REPAY → WITHDRAW(all)`` — is NOT a known-safe
+    staircase. Order-locking it would skip the strand/synthesis safety check and
+    let an unsafe withdraw-all through if residual debt remains. Routing such plans
+    through the normal decide→synthesise→reorder path is fail-closed: each position
+    is checked, and a proven strand is replaced with the HF-safe staircase. The
+    reorder of a non-interleaved plan is a no-op (repays already precede withdraws
+    after ``_reorder_simple``), so nothing safe is broken.
+
+    Operates on the ORIGINAL list so the structure is read before any drop applies.
     """
     lending_indices = [idx for idx, i in enumerate(intents) if _is_lending_unwind(i)]
     if len(lending_indices) <= 1:
         return False
-    # (a) a passthrough intent interleaved inside the lending span.
+    # A passthrough intent interleaved inside the lending span ⇒ genuine staircase.
     span = range(lending_indices[0], lending_indices[-1] + 1)
-    if any(not _is_lending_unwind(intents[idx]) for idx in span):
-        return True
-    # (b) more than one repay or more than one withdraw round.
-    repay_count = sum(1 for idx in lending_indices if _is_repay(intents[idx]))
-    withdraw_count = sum(1 for idx in lending_indices if _is_withdraw(intents[idx]))
-    return repay_count > 1 or withdraw_count > 1
+    return any(not _is_lending_unwind(intents[idx]) for idx in span)
 
 
 def _reorder_simple(kept: list[Any]) -> list[Any]:
@@ -399,21 +438,325 @@ def _reorder_simple(kept: list[Any]) -> list[Any]:
     return [*before, *repays, *withdraws, *after]
 
 
-def sanitize_lending_teardown_intents(intents: list[Any], market: Any) -> LendingGuardResult:
+def _market_price(market: Any, token: str) -> Decimal:
+    """Oracle price of ``token`` via the gateway-backed market; 0 if unavailable."""
+    try:
+        p = market.price(token)
+        return Decimal(str(p)) if p else Decimal("0")
+    except Exception:
+        return Decimal("0")
+
+
+def _market_wallet_balance(market: Any, token: str) -> Decimal | None:
+    """Live wallet balance of ``token``; ``None`` (unmeasured) on read failure.
+
+    Empty ≠ Zero: a failed balance read is unmeasured, NEVER ``Decimal("0")`` —
+    a fabricated zero here would make the strand predicate fire spuriously.
+    """
+    try:
+        bal = market.balance(token)
+        amount = getattr(bal, "balance", bal)
+        if amount is None:
+            return None
+        return Decimal(str(amount))
+    except Exception:
+        return None
+
+
+def _extract_position_legs(intents: list[Any], key: tuple[str, str, str]) -> tuple[str, str] | None:
+    """``(collateral_token, borrow_token)`` for a position, from its WITHDRAW / REPAY legs.
+
+    The WITHDRAW intent's ``token`` is the collateral leg; the REPAY intent's
+    ``token`` is the borrow leg. Returns ``None`` when either leg is missing — a
+    position the guard cannot re-plan, so it falls through to the existing
+    keep/drop gates untouched.
+    """
+    collateral_token: str | None = None
+    borrow_token: str | None = None
+    for intent in intents:
+        if not _is_lending_unwind(intent) or _position_key(intent) != key:
+            continue
+        token = getattr(intent, "token", None)
+        if not token:
+            continue
+        if _is_withdraw(intent) and collateral_token is None:
+            collateral_token = token
+        elif _is_repay(intent) and borrow_token is None:
+            borrow_token = token
+    if collateral_token is None or borrow_token is None:
+        return None
+    return (collateral_token, borrow_token)
+
+
+def _plan_has_withdraw_all(intents: list[Any], key: tuple[str, str, str]) -> bool:
+    """Whether the plan withdraws the FULL collateral (``withdraw_all``) for this position.
+
+    The dust-debt strand is specific to a withdraw-all (MAX_UINT256) withdraw: Aave
+    rejects withdrawing 100% of collateral while ANY debt remains. A plan that
+    withdraws a specific (partial) amount keeps HF headroom and does not hit that
+    revert, so it must NOT be replaced with a full unwind — only withdraw-all plans
+    are eligible for synthesis.
+    """
+    return any(
+        _is_lending_unwind(intent)
+        and _is_withdraw(intent)
+        and _position_key(intent) == key
+        and bool(getattr(intent, "withdraw_all", False))
+        for intent in intents
+    )
+
+
+def _planned_repay_covers_debt(
+    intents: list[Any],
+    key: tuple[str, str, str],
+    *,
+    debt_usd: Decimal,
+    borrow_price: Decimal,
+) -> bool:
+    """Whether the plan's REPAY for this position would clear the measured debt.
+
+    ``repay_full=True`` clears it (Aave caps at the debt). An explicit partial
+    ``amount`` only clears it when ``amount * price >= debt``. A partial repay that
+    does NOT cover the debt leaves residual debt before the withdraw-all — the same
+    revert this guard fixes, even when the wallet itself could cover the debt.
+    """
+    for intent in intents:
+        if not (_is_lending_unwind(intent) and _is_repay(intent) and _position_key(intent) == key):
+            continue
+        if bool(getattr(intent, "repay_full", False)):
+            return True
+        amount = getattr(intent, "amount", None)
+        # Require the SAME interest buffer as the strand predicate: a partial repay
+        # that only covers the snapshot debt can still leave dust once interest
+        # accrues before execution, recreating the withdraw-all revert.
+        if isinstance(amount, Decimal) and amount * borrow_price >= debt_usd * _STRAND_PREDICATE_BUFFER:
+            return True
+    return False
+
+
+def _position_needs_staircase(
+    market: Any,
+    intents: list[Any],
+    key: tuple[str, str, str],
+    exposure: _Exposure,
+) -> bool:
+    """Whether a naive ``REPAY → WITHDRAW(all)`` for this position would STRAND.
+
+    The bug (VIB-589 / VIB-4466): a plain borrow holds only the borrowed
+    principal while it owes principal + accrued interest. Repaying the wallet
+    balance leaves dust debt, and ``withdraw_all`` (MAX_UINT256) then reverts
+    ``HealthFactorLowerThanLiquidationThreshold`` because no collateral can be
+    fully withdrawn while ANY debt remains.
+
+    We only intervene when we can PROVE the strand — i.e. all of:
+
+    * MEASURED debt above the dust floor (Empty ≠ Zero — never act on ``None``),
+    * both legs resolvable (a collateral WITHDRAW and a borrow REPAY),
+    * live borrow / collateral prices and the wallet's borrow-token balance are
+      all measured (the staircase planner needs them),
+    * the plan actually issues a ``withdraw_all`` (only the withdraw-all-with-debt
+      revert is in scope; a deliberate partial withdraw keeps HF headroom and must
+      not be replaced), and
+    * the position would still carry debt at the final withdraw-all — either the
+      wallet cannot cover the live debt (with a small interest buffer for accrual
+      between the snapshot read and execution), OR the plan's REPAY is an explicit
+      partial that does not cover the measured debt.
+
+    When the wallet covers the debt AND the planned repay clears it, the naive plan
+    works (Aave caps the repay at the debt, so the withdraw-all is safe) — we leave
+    it untouched. When any input is unmeasured, we do NOT synthesise (the planner
+    would size against fabricated zeros); the existing keep/drop gates handle that.
+    """
+    if market is None or not exposure.measured or exposure.debt_is_zero:
+        return False
+    legs = _extract_position_legs(intents, key)
+    if legs is None:
+        return False
+    # Only a withdraw-all plan can hit the dust-debt withdraw-all revert.
+    if not _plan_has_withdraw_all(intents, key):
+        return False
+    collateral_token, borrow_token = legs
+    borrow_price = _market_price(market, borrow_token)
+    collateral_price = _market_price(market, collateral_token)
+    if borrow_price <= 0 or collateral_price <= 0:
+        return False
+    wallet_borrow = _market_wallet_balance(market, borrow_token)
+    if wallet_borrow is None:
+        return False
+    debt_usd = exposure.debt_usd
+    assert debt_usd is not None  # guaranteed measured by the guard above
+    # Proven strand (a): the wallet's borrow token cannot cover the live debt (with
+    # a small interest buffer for accrual between the snapshot read and execution),
+    # so a wallet-balance repay leaves residual debt and withdraw-all reverts.
+    if wallet_borrow * borrow_price < debt_usd * _STRAND_PREDICATE_BUFFER:
+        return True
+    # Proven strand (b): the wallet could cover the debt, but the plan's REPAY is an
+    # explicit partial that does NOT clear the measured debt, so residual debt
+    # remains before the withdraw-all and it reverts the same way.
+    return not _planned_repay_covers_debt(intents, key, debt_usd=debt_usd, borrow_price=borrow_price)
+
+
+def _degrade_to_hf_safe_partial(
+    market: Any,
+    key: tuple[str, str, str],
+    collateral_token: str,
+    borrow_token: str,
+    result: LendingGuardResult,
+    reason: str,
+) -> list[Any]:
+    """Safe fallback when the staircase planner cannot size a full unwind.
+
+    Reached only when synthesis raised (health factor too low to withdraw any
+    collateral safely, or a price/LLTV read failed). Emits at most a
+    risk-reducing REPAY (explicit partial of the wallet balance — never
+    ``repay_full``, which over-pulls on Morpho/Compound) and NEVER a MAX_UINT256
+    ``withdraw_all`` while debt may remain (that is the revert we are avoiding).
+    Removing on-chain risk is teardown's first job; a residual collateral leg is
+    surfaced loudly via ``degraded`` rather than stranded by a reverting tx.
+    """
+    protocol, chain, market_id = key
+    result.degraded = True
+    result.dropped.append(
+        f"WITHDRAW {key}: staircase unavailable ({reason}) — degraded to repay-only, "
+        "withholding unsafe withdraw_all (residual collateral surfaced via degraded)"
+    )
+    wallet_borrow = _market_wallet_balance(market, borrow_token)
+    if wallet_borrow is not None and wallet_borrow > 0:
+        # Repay slightly under the wallet balance (parity with leverage_loop's
+        # partial repay) so rounding/interest at execution can't tip a partial
+        # repay into an over-pull/revert on Morpho/Compound. Under-repay is safe.
+        repay_amount = wallet_borrow * (Decimal("1") - _DEGRADE_REPAY_HAIRCUT)
+        kwargs: dict[str, Any] = {
+            "protocol": protocol,
+            "token": borrow_token,
+            "amount": repay_amount,
+            "repay_full": False,
+        }
+        if market_id:
+            kwargs["market_id"] = market_id
+        if chain:
+            kwargs["chain"] = chain
+        return [Intent.repay(**kwargs)]
+    return []
+
+
+def _synthesize_or_degrade(
+    market: Any,
+    intents: list[Any],
+    key: tuple[str, str, str],
+    exposure: _Exposure,
+    mode: TeardownMode | None,
+    result: LendingGuardResult,
+) -> list[Any]:
+    """Replace a position's naive plan with the HF-aware unwind staircase.
+
+    Reuses ``generate_leverage_loop_teardown`` (the proven leverage-loop unwind,
+    blueprint 14 §"Leveraged-loop teardown") as the universal lending unwind: it
+    repays wallet-held debt first, then runs HF-safe WITHDRAW→SWAP→REPAY rounds
+    that source the interest shortfall from collateral, then a final
+    ``withdraw_all`` once debt is TRULY zero, then a residual sweep.
+
+    ``consolidate_to=collateral_token`` for a cross-asset position (collateral ≠
+    borrow, the plain-borrow case): the final sweep only converts the small
+    over-funded BORROW-token buffer back to collateral, leaving the recovered
+    collateral as-is for the framework's TOKEN_CONSOLIDATION phase — NOT swapping
+    the whole collateral stack into the debt token (which would force a gratuitous
+    collateral→debt→target round-trip). On planner failure, degrade safely.
+    """
+    legs = _extract_position_legs(intents, key)
+    if legs is None:  # pragma: no cover - guarded by _position_needs_staircase
+        return []
+    collateral_token, borrow_token = legs
+    protocol, chain, market_id = key
+    from almanak.framework.teardown.leverage_loop import generate_leverage_loop_teardown
+
+    try:
+        synth = generate_leverage_loop_teardown(
+            market=market,
+            protocol=protocol,
+            collateral_token=collateral_token,
+            borrow_token=borrow_token,
+            market_id=market_id or None,
+            chain=chain or None,
+            mode=mode,
+            consolidate_to=collateral_token if collateral_token != borrow_token else None,
+        )
+    except Exception as exc:  # LeverageUnwindError / ValueError (missing price/LLTV)
+        return _degrade_to_hf_safe_partial(market, key, collateral_token, borrow_token, result, str(exc))
+
+    result.synthesized_positions.append(f"{protocol}/{chain}/{market_id}")
+    return synth
+
+
+def _build_with_synthesis(
+    intents: list[Any],
+    exposures: dict[tuple[str, str, str], _Exposure],
+    synth_keys: set[tuple[str, str, str]],
+    kept: list[Any],
+    market: Any,
+    mode: TeardownMode | None,
+    result: LendingGuardResult,
+) -> list[Any]:
+    """Splice synthesised staircases into the simple (non-order-locked) plan.
+
+    Passthrough intents keep their before/after placement relative to the lending
+    block (same contract as ``_reorder_simple``). Synthesised positions emit the
+    staircase in planner order; non-synthesised positions keep their gated
+    repay-first intents from ``kept``. Position order follows first appearance.
+
+    Multi-position is genuinely reachable: ``_is_order_locked`` counts rounds PER
+    position, so two independent single-round positions are NOT order-locked and
+    each is evaluated for synthesis here. The per-position loop handles a mix of
+    synth and non-synth positions in one simple plan.
+    """
+    first_lending_index = next((idx for idx, i in enumerate(intents) if _is_lending_unwind(i)), None)
+    if first_lending_index is None:  # pragma: no cover - synth_keys implies a lending intent
+        return _reorder_simple(kept)
+    before = [i for idx, i in enumerate(intents) if idx < first_lending_index and not _is_lending_unwind(i)]
+    after = [i for idx, i in enumerate(intents) if idx > first_lending_index and not _is_lending_unwind(i)]
+
+    lending_block: list[Any] = []
+    seen_keys: list[tuple[str, str, str]] = []
+    for intent in intents:
+        if not _is_lending_unwind(intent):
+            continue
+        key = _position_key(intent)
+        if key in seen_keys:
+            continue
+        seen_keys.append(key)
+        if key in synth_keys:
+            lending_block.extend(_synthesize_or_degrade(market, intents, key, exposures[key], mode, result))
+        else:
+            # Non-synthesised position: keep its gated intents, repay-first.
+            repays = [i for i in kept if _is_lending_unwind(i) and _is_repay(i) and _position_key(i) == key]
+            withdraws = [i for i in kept if _is_lending_unwind(i) and _is_withdraw(i) and _position_key(i) == key]
+            lending_block.extend([*repays, *withdraws])
+    return [*before, *lending_block, *after]
+
+
+def sanitize_lending_teardown_intents(
+    intents: list[Any], market: Any, *, mode: TeardownMode | None = None
+) -> LendingGuardResult:
     """Sanitise strategy-emitted lending teardown intents against fresh state.
 
     Args:
         intents: The ordered intent list from ``generate_teardown_intents``.
-        market: A ``MarketSnapshot`` (gateway-backed) exposing ``position_health``.
-            May be ``None`` (no market available) — every lending position then
-            reads as unmeasured and the guard degrades conservatively.
+        market: A ``MarketSnapshot`` (gateway-backed) exposing ``position_health``,
+            ``price`` and ``balance``. May be ``None`` (no market available) —
+            every lending position then reads as unmeasured and the guard degrades
+            conservatively (no synthesis from fabricated zeros).
+        mode: TeardownMode (SOFT/HARD). Threaded into a synthesised unwind so an
+            emergency (HARD) teardown uses the lower HF floor + wider slippage.
 
     Returns:
         A :class:`LendingGuardResult` whose ``intents`` is the fresh-state-validated
         list to dispatch. An interleaved leveraged-loop staircase keeps its EXACT
-        original order (drops applied in place); a simple single-round hand-rolled
-        plan gets the repay-before-withdraw reorder. Non-lending intents pass
-        through unchanged and keep their relative order.
+        original order (drops applied in place). A simple single-round hand-rolled
+        plan gets the repay-before-withdraw reorder — UNLESS a position's wallet
+        cannot fully repay its live debt, in which case the naive
+        ``REPAY → WITHDRAW(all)`` (which would strand collateral on a withdraw-all
+        revert) is REPLACED with a health-factor-aware unwind staircase (VIB-4466 /
+        VIB-589). Non-lending intents pass through unchanged.
     """
     result = LendingGuardResult(intents=list(intents))
     if not intents:
@@ -438,5 +781,17 @@ def sanitize_lending_teardown_intents(intents: list[Any], market: Any) -> Lendin
         f"{p}/{c}/{m}" for (p, c, m), e in exposures.items() if e.debt_is_zero and e.collateral_is_zero
     ]
 
-    result.intents = list(kept) if order_locked else _reorder_simple(kept)
+    if order_locked:
+        # An already-correct interleaved staircase — never re-synthesise or reorder.
+        result.intents = list(kept)
+        return result
+
+    # Simple single-round plan: replace any position whose naive plan would strand
+    # (wallet cannot fully repay live debt) with the HF-aware unwind staircase. When
+    # no position needs it, behaviour is identical to the prior repay-first reorder.
+    synth_keys = {key for key in exposures if _position_needs_staircase(market, intents, key, exposures[key])}
+    if not synth_keys:
+        result.intents = _reorder_simple(kept)
+    else:
+        result.intents = _build_with_synthesis(intents, exposures, synth_keys, kept, market, mode, result)
     return result

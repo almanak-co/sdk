@@ -54,6 +54,34 @@ _REPAY_SAFETY_HAIRCUT = Decimal("0.01")
 # stays funded despite swap slippage and interest accrued during teardown.
 _SETTLE_BUFFER = Decimal("0.02")
 
+# The wallet must exceed the snapshot debt by this margin before we take the
+# wallet-first ``repay_full`` shortcut. Below the margin we route through the
+# staircase (partial repay + withdraw→swap→repay) so a near-parity wallet whose
+# debt accrues interest between the snapshot read and execution sources the
+# shortfall from collateral instead of leaving dust that reverts the final
+# withdraw-all. Mirrors ``lending_unwind_guard._STRAND_PREDICATE_BUFFER`` (1%) so
+# the guard's strand buffer is not silently undone here.
+_WALLET_FIRST_BUFFER = Decimal("1.01")
+
+
+def hf_safe_withdraw_slice_usd(
+    *,
+    collateral_usd: Decimal,
+    debt_usd: Decimal,
+    lltv: Decimal,
+    hf_floor: Decimal,
+) -> Decimal:
+    """Largest collateral USD slice whose post-withdraw health factor stays >= ``hf_floor``.
+
+    Solves ``(collateral - slice) * lltv / debt == hf_floor`` for ``slice``. A
+    value <= 0 means no collateral can be withdrawn while keeping the position
+    above the floor (the position needs a flash-loan deleverage). ``lltv`` must
+    be positive (callers validate). Single source of truth for the safe-slice
+    math: the staircase loop below and the lending-unwind guard's degrade path
+    both call it so their sizing never drifts (VIB-4466).
+    """
+    return collateral_usd - (hf_floor * debt_usd / lltv)
+
 
 def generate_leverage_loop_teardown(
     *,
@@ -169,7 +197,7 @@ def generate_leverage_loop_teardown(
     wallet_borrow = _wallet_balance(market, borrow_token)
     remaining_debt_usd = debt_usd
     if wallet_borrow > 0:
-        if wallet_borrow * borrow_price >= debt_usd:
+        if wallet_borrow * borrow_price >= debt_usd * _WALLET_FIRST_BUFFER:
             intents.append(_repay_full(protocol, borrow_token, market_id=market_id, chain=chain))
             remaining_debt_usd = Decimal("0")
         else:
@@ -190,7 +218,12 @@ def generate_leverage_loop_teardown(
             break
 
         # safe slice solves (collateral - slice) * lltv / debt == floor
-        safe_slice_usd = remaining_collateral_usd - (floor * remaining_debt_usd / lltv)
+        safe_slice_usd = hf_safe_withdraw_slice_usd(
+            collateral_usd=remaining_collateral_usd,
+            debt_usd=remaining_debt_usd,
+            lltv=lltv,
+            hf_floor=floor,
+        )
         if safe_slice_usd <= _DUST_USD:
             raise LeverageUnwindError(
                 f"Cannot unwind {protocol} {collateral_token}/{borrow_token}: health factor too low "

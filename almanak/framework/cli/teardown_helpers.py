@@ -833,23 +833,29 @@ def build_market_and_oracle(strategy: Any) -> tuple[Any | None, Any | None]:
 # =============================================================================
 
 
-def _apply_lending_unwind_guard_cli(intents: list[Any], market: Any) -> list[Any]:
-    """CLI wrapper around the VIB-5139 lending fresh-state guard.
+def _apply_lending_unwind_guard_cli(intents: list[Any], market: Any, mode: Any = None) -> list[Any]:
+    """CLI wrapper around the VIB-5139 / VIB-4466 lending fresh-state guard.
 
-    Returns the guarded intent list and echoes drops / degraded outcomes for the
-    operator. A guard error never blocks teardown — it falls back to the original
-    intents with a warning (teardown's first job is removing on-chain risk).
+    Returns the guarded intent list and echoes drops / synthesis / degraded
+    outcomes for the operator. A guard error never blocks teardown — it falls
+    back to the original intents with a warning (teardown's first job is removing
+    on-chain risk).
     """
     from ..teardown.lending_unwind_guard import sanitize_lending_teardown_intents
 
     try:
-        guarded = sanitize_lending_teardown_intents(intents, market)
+        guarded = sanitize_lending_teardown_intents(intents, market, mode=mode)
     except Exception as e:  # pragma: no cover - defensive; guard is pure
         click.echo(f"\n  Warning: lending fresh-state guard errored ({e}); using original intents")
         return intents
 
     for reason in guarded.dropped:
         click.echo(f"  Lending guard dropped intent — {reason}")
+    for synth in guarded.synthesized_positions:
+        click.echo(
+            f"  Lending guard synthesised HF-safe unwind staircase for {synth} "
+            "(wallet cannot fully repay live debt; naive withdraw-all would revert)"
+        )
     if guarded.no_op_positions:
         click.echo(f"  Lending guard: positions already flat: {', '.join(guarded.no_op_positions)}")
     if guarded.degraded:
@@ -919,7 +925,7 @@ def generate_teardown_intents_for_cli(
     # gateway-backed exposure read; degrades conservatively on an unmeasured
     # read (Empty ≠ Zero). LP_CLOSE / discover-path intents pass through. Pure
     # list transform — dispatch funnel + commit pairing unchanged.
-    intents = _apply_lending_unwind_guard_cli(intents, market)
+    intents = _apply_lending_unwind_guard_cli(intents, market, internal_mode)
 
     click.echo(f"\nTeardown Steps ({len(intents)}):")
     for i, intent in enumerate(intents, 1):

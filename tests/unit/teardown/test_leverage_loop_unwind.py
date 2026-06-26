@@ -198,14 +198,32 @@ def test_loose_position_unwinds_in_one_round(protocol: str) -> None:
 
 @pytest.mark.parametrize("protocol", _PROTOCOLS)
 def test_wallet_debt_token_fully_covers_debt_is_repaid_first(protocol: str) -> None:
-    # Idle USDC equal to the full debt -> a single wallet-first repay_full clears
-    # it (wallet covers the debt), so the staircase does zero withdraw rounds.
-    sim = _LendingSim(protocol, "10000", "5000", wallet_borrow="5000")
+    # Idle USDC COMFORTABLY above the debt (beyond the wallet-first buffer) -> a
+    # single wallet-first repay_full clears it, so the staircase does zero withdraw
+    # rounds. The wallet must exceed debt * _WALLET_FIRST_BUFFER (1%) to take the
+    # shortcut; 5100 > 5000 * 1.01 = 5050.
+    sim = _LendingSim(protocol, "10000", "5000", wallet_borrow="5100")
     intents = _run(sim)
     repays = sum(1 for i in intents if type(i).__name__ == "RepayIntent")
     withdraws = sum(1 for i in intents if type(i).__name__ == "WithdrawIntent")
     assert repays == 1, "should repay idle wallet debt token directly"
     assert withdraws == 1, "only the final withdraw_all, no staircase withdraws"
+    assert sim.debt_usd <= Decimal("0.5")
+    assert sim.collateral_usd <= Decimal("0.5")
+
+
+@pytest.mark.parametrize("protocol", _PROTOCOLS)
+def test_wallet_at_exact_debt_parity_uses_staircase_not_dust_prone_repay_full(protocol: str) -> None:
+    # Wallet EXACTLY equal to snapshot debt is within the wallet-first buffer:
+    # interest accruing between the snapshot read and execution would push debt
+    # above the wallet, so a bare repay_full would leave dust and revert the final
+    # withdraw-all. The planner instead routes through the staircase (partial repay
+    # + withdraw->swap->repay), sourcing the shortfall from collateral. (VIB-4466 /
+    # CodeRabbit: the wallet-first repay_full must require buffered coverage.)
+    sim = _LendingSim(protocol, "10000", "5000", wallet_borrow="5000")
+    intents = _run(sim)
+    repays = sum(1 for i in intents if type(i).__name__ == "RepayIntent")
+    assert repays >= 2, "exact-parity wallet must route through the buffered staircase, not a bare repay_full"
     assert sim.debt_usd <= Decimal("0.5")
     assert sim.collateral_usd <= Decimal("0.5")
 

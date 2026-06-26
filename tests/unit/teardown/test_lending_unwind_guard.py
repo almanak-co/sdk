@@ -25,6 +25,7 @@ from almanak.framework.intents.vocabulary import Intent
 from almanak.framework.teardown.lending_unwind_guard import (
     sanitize_lending_teardown_intents,
 )
+from almanak.framework.teardown.models import TeardownMode
 
 _PROTOCOL = "aave_v3"
 _CHAIN = "arbitrum"
@@ -329,14 +330,17 @@ def test_p0_staircase_drops_genuinely_zero_leg_in_place():
     assert len(result.dropped) == 2
 
 
-def test_p0_multi_round_no_interleave_is_still_order_locked():
-    """Two REPAYs back-to-back then two WITHDRAWs (multi-round, no passthrough
-    between) is still order-locked — more than one round means we must not assume
-    a simple single-round reorder is safe."""
+def test_p0_multi_round_no_interleave_is_not_order_locked():
+    """Two REPAYs then two WITHDRAWs with NO interleaved swap is NOT a genuine
+    staircase (only an interleaved collateral→debt SWAP makes one). It is NOT
+    order-locked — it routes through the normal decide→reorder path so the strand
+    safety check applies. On a price-less market no synthesis fires and the
+    repay-first reorder is a no-op, so the plan is passed through unchanged."""
     market = _FakeMarket(collateral_usd=Decimal("2000"), debt_usd=Decimal("900"))
     plan = [_repay_partial("400"), _repay_partial("500"), _withdraw_slice("0.3"), _withdraw_all()]
     result = sanitize_lending_teardown_intents(plan, market)
-    assert result.intents == plan  # preserved in place
+    assert result.intents == plan  # reorder is a no-op (repays already precede withdraws)
+    assert not result.synthesized_positions  # price-less fake market -> no strand proof
 
 
 def test_p0_simple_single_round_still_reorders():
@@ -476,3 +480,268 @@ def test_high1_morpho_alias_normalizes_and_groups():
     result = sanitize_lending_teardown_intents([repay, withdraw], market)
     assert market.reads == 1  # one canonical position
     assert _types(result.intents) == ["REPAY", "WITHDRAW"]
+
+
+# ---------------------------------------------------------------------------
+# VIB-4466 / VIB-589: synthesise the HF-safe staircase when the naive plan would
+# STRAND (wallet cannot fully repay live debt -> dust debt -> withdraw-all reverts)
+# ---------------------------------------------------------------------------
+
+
+class _RichHealth:
+    def __init__(self, collateral_usd: Decimal, debt_usd: Decimal, lltv: Decimal) -> None:
+        self.collateral_value_usd = collateral_usd
+        self.debt_value_usd = debt_usd
+        self.lltv = lltv
+
+
+class _Bal:
+    def __init__(self, amount: Decimal) -> None:
+        self.balance = amount
+
+
+class _RichMarket:
+    """Market exposing position_health (with lltv), price, and wallet balance —
+    enough for the guard to PROVE a strand and for the staircase planner to size.
+
+    Models a plain borrow: collateral_token (WETH) supplied, borrow_token (USDC)
+    drawn. ``wallet_usdc`` is the live wallet balance of the debt token.
+    """
+
+    def __init__(
+        self,
+        *,
+        collateral_usd: Decimal,
+        debt_usd: Decimal,
+        lltv: Decimal,
+        wallet_usdc: Decimal,
+        weth_price: Decimal = Decimal("1000"),
+        usdc_price: Decimal = Decimal("1"),
+        chain: str = _CHAIN,
+    ) -> None:
+        self._health = _RichHealth(collateral_usd, debt_usd, lltv)
+        self._prices = {"WETH": weth_price, "USDC": usdc_price}
+        self._wallet = {"USDC": wallet_usdc, "WETH": Decimal("0")}
+        self.chain = chain
+        self.reads = 0
+
+    def position_health(self, protocol: str, market_id: str, **kwargs: Any) -> _RichHealth:
+        self.reads += 1
+        return self._health
+
+    def price(self, token: str) -> Decimal:
+        return self._prices.get(token, Decimal("0"))
+
+    def balance(self, token: str) -> _Bal:
+        return _Bal(self._wallet.get(token, Decimal("0")))
+
+
+def _plain_borrow_plan() -> list[Any]:
+    """The hand-rolled naive plain-borrow teardown: REPAY(all) -> WITHDRAW(all)."""
+    return [
+        Intent.repay(protocol=_PROTOCOL, token="USDC", repay_full=True, chain=_CHAIN),
+        Intent.withdraw(protocol=_PROTOCOL, token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN),
+    ]
+
+
+def test_vib4466_wallet_cannot_cover_debt_synthesizes_staircase():
+    """Wallet holds less debt token than the live debt (the bug) -> the naive
+    REPAY->WITHDRAW(all) is replaced with the HF-safe unwind staircase, which
+    sources the interest shortfall from collateral before the final withdraw-all."""
+    # collateral 2.3 WETH = $2300; debt $1150; wallet 1140 USDC (< $1150 debt).
+    market = _RichMarket(
+        collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0.8"), wallet_usdc=Decimal("1140")
+    )
+    result = sanitize_lending_teardown_intents(_plain_borrow_plan(), market)
+
+    # Synthesised: NOT the naive 2-intent plan — a real staircase ran.
+    assert result.synthesized_positions, "expected the position to be synthesised"
+    assert not result.degraded
+    types = _types(result.intents)
+    # withdraw->swap->repay rounds then a final withdraw-all (more than 2 intents).
+    assert len(result.intents) > 2
+    assert "SWAP" in types  # collateral->debt swap to clear the shortfall
+    # The final withdraw is the full withdraw-all (debt is truly zero by then).
+    withdraws = [i for i in result.intents if i.intent_type.value == "WITHDRAW"]
+    assert getattr(withdraws[-1], "withdraw_all", False) is True
+
+
+def test_vib4466_consolidate_to_collateral_not_debt_token():
+    """Regression on the design correction: the synthesised residual sweep must
+    swap the over-funded BORROW token back to COLLATERAL (consolidate_to=
+    collateral), NOT swap the whole recovered collateral into the debt token
+    (which would force a gratuitous collateral->debt->target round-trip)."""
+    market = _RichMarket(
+        collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0.8"), wallet_usdc=Decimal("1140")
+    )
+    result = sanitize_lending_teardown_intents(_plain_borrow_plan(), market)
+    swaps = [i for i in result.intents if i.intent_type.value == "SWAP"]
+    # The final (residual sweep) swap must end in the collateral token (WETH),
+    # i.e. sweep stray borrow token back to collateral — never the reverse.
+    last_swap = swaps[-1]
+    assert last_swap.to_token == "WETH"
+    assert last_swap.from_token == "USDC"
+
+
+def test_vib4466_wallet_covers_debt_keeps_naive_plan():
+    """When the wallet CAN fully repay the live debt, the naive plan works (Aave
+    caps the repay at the debt, clearing it, so withdraw-all is safe) — the guard
+    must NOT synthesise an unnecessary staircase."""
+    # wallet 2000 USDC > $1150 debt -> covers it.
+    market = _RichMarket(
+        collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0.8"), wallet_usdc=Decimal("2000")
+    )
+    result = sanitize_lending_teardown_intents(_plain_borrow_plan(), market)
+    assert not result.synthesized_positions
+    assert _types(result.intents) == ["REPAY", "WITHDRAW"]
+
+
+def test_vib4466_planner_failure_degrades_to_repay_only_no_unsafe_withdraw():
+    """When the strand is proven but the staircase planner cannot size a safe
+    unwind (here: lltv unreadable -> ValueError), the guard degrades to a
+    risk-reducing partial REPAY and NEVER emits the reverting withdraw_all."""
+    # lltv=0 makes generate_leverage_loop_teardown raise ValueError (cannot size).
+    market = _RichMarket(
+        collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0"), wallet_usdc=Decimal("1140")
+    )
+    result = sanitize_lending_teardown_intents(_plain_borrow_plan(), market)
+
+    assert result.degraded
+    assert not result.synthesized_positions
+    types = _types(result.intents)
+    assert "WITHDRAW" not in types  # the unsafe withdraw_all is withheld
+    assert types == ["REPAY"]  # only the risk-reducing partial repay survives
+    # The kept repay is an explicit partial (never repay_full on degrade).
+    assert result.intents[0].repay_full is False
+    assert any("staircase unavailable" in d for d in result.dropped)
+
+
+def test_vib4466_dust_debt_below_floor_does_not_synthesize():
+    """A position whose live debt is below the dust floor is measured-zero debt
+    (collateral-only) -> existing path keeps the withdraw_all, no synthesis."""
+    market = _RichMarket(
+        collateral_usd=Decimal("2300"), debt_usd=Decimal("0.005"), lltv=Decimal("0.8"), wallet_usdc=Decimal("0")
+    )
+    result = sanitize_lending_teardown_intents(_plain_borrow_plan(), market)
+    assert not result.synthesized_positions
+    assert _types(result.intents) == ["WITHDRAW"]  # zero-debt -> repay dropped, withdraw kept
+
+
+def test_vib4466_order_locked_staircase_is_never_resynthesized():
+    """An already-correct interleaved staircase (order-locked) must pass through
+    untouched even on a rich market — never double-synthesised."""
+    market = _RichMarket(
+        collateral_usd=Decimal("2300"), debt_usd=Decimal("900"), lltv=Decimal("0.8"), wallet_usdc=Decimal("0")
+    )
+    staircase = _staircase()
+    result = sanitize_lending_teardown_intents(staircase, market)
+    assert result.intents == staircase
+    assert not result.synthesized_positions
+
+
+def test_vib4466_two_independent_positions_each_synthesized_not_order_locked():
+    """Two INDEPENDENT single-round borrow positions in one simple teardown must
+    NOT be mistaken for an order-locked staircase (round count is per-position).
+    Each provable strand is synthesised. (CodeRabbit major: a global round-count
+    would order-lock two independent positions and skip both.)"""
+    market = _RichMarket(
+        collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0.8"), wallet_usdc=Decimal("1140")
+    )
+    mid = "0x" + "cd" * 32
+    plan = [
+        Intent.repay(protocol="aave_v3", token="USDC", repay_full=True, chain=_CHAIN),
+        Intent.withdraw(protocol="aave_v3", token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN),
+        Intent.repay(protocol="morpho_blue", token="USDC", repay_full=True, market_id=mid, chain=_CHAIN),
+        Intent.withdraw(
+            protocol="morpho_blue", token="WETH", amount=Decimal("0"), withdraw_all=True, market_id=mid, chain=_CHAIN
+        ),
+    ]
+    result = sanitize_lending_teardown_intents(plan, market)
+    # Both independent positions are strand-proven and synthesised (not order-locked).
+    assert len(result.synthesized_positions) == 2
+    assert not result.degraded
+
+
+def test_vib4466_partial_repay_not_covering_debt_synthesizes_even_when_wallet_covers():
+    """An explicit PARTIAL repay that does not cover the debt, followed by
+    WITHDRAW(all), strands even when the wallet could cover the debt — the repay
+    only pays the partial amount, leaving residual debt. Must synthesise.
+    (CodeRabbit major.)"""
+    market = _RichMarket(
+        collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0.8"), wallet_usdc=Decimal("2000")
+    )
+    plan = [
+        Intent.repay(protocol=_PROTOCOL, token="USDC", amount=Decimal("100"), chain=_CHAIN),  # partial < debt
+        Intent.withdraw(protocol=_PROTOCOL, token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN),
+    ]
+    result = sanitize_lending_teardown_intents(plan, market)
+    assert result.synthesized_positions  # residual debt after the partial repay -> staircase
+
+
+def test_vib4466_partial_repay_covering_debt_keeps_naive_when_wallet_covers():
+    """A partial repay that DOES cover the measured debt (amount*price >= debt) with
+    the wallet covering it is safe — no synthesis."""
+    market = _RichMarket(
+        collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0.8"), wallet_usdc=Decimal("2000")
+    )
+    plan = [
+        Intent.repay(protocol=_PROTOCOL, token="USDC", amount=Decimal("1200"), chain=_CHAIN),  # covers 1150 debt
+        Intent.withdraw(protocol=_PROTOCOL, token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN),
+    ]
+    result = sanitize_lending_teardown_intents(plan, market)
+    assert not result.synthesized_positions
+
+
+def test_vib4466_partial_withdraw_not_all_is_never_synthesized():
+    """A plan that withdraws a SPECIFIC amount (not withdraw_all) keeps HF headroom
+    and cannot hit the withdraw-all revert — never replaced with a full unwind,
+    even under a provable wallet shortfall."""
+    market = _RichMarket(
+        collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0.8"), wallet_usdc=Decimal("1140")
+    )
+    plan = [
+        Intent.repay(protocol=_PROTOCOL, token="USDC", repay_full=True, chain=_CHAIN),
+        Intent.withdraw(protocol=_PROTOCOL, token="WETH", amount=Decimal("0.5"), chain=_CHAIN),  # partial, not all
+    ]
+    result = sanitize_lending_teardown_intents(plan, market)
+    assert not result.synthesized_positions
+
+
+def test_vib4466_multi_partial_repay_then_withdraw_all_does_not_bypass_strand_guard():
+    """Fail-closed (CodeRabbit major): a non-interleaved
+    ``partial REPAY → partial REPAY → WITHDRAW(all)`` for one position must NOT be
+    treated as a known-safe staircase and bypass synthesis. With a provable strand
+    it is replaced with the HF-safe staircase (not passed through with the unsafe
+    withdraw-all). Two partials summing under the debt still leave residual debt."""
+    market = _RichMarket(
+        collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0.8"), wallet_usdc=Decimal("1140")
+    )
+    plan = [
+        Intent.repay(protocol=_PROTOCOL, token="USDC", amount=Decimal("100"), chain=_CHAIN),
+        Intent.repay(protocol=_PROTOCOL, token="USDC", amount=Decimal("100"), chain=_CHAIN),
+        Intent.withdraw(protocol=_PROTOCOL, token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN),
+    ]
+    result = sanitize_lending_teardown_intents(plan, market)
+    assert result.synthesized_positions  # strand-proven -> staircase, not a bare withdraw-all
+    # The raw multi-partial plan is gone; the dispatched plan is the synthesized staircase.
+    assert result.intents != plan
+
+
+def test_vib4466_mode_soft_vs_hard_changes_synthesized_slippage():
+    """The SOFT/HARD mode threaded into the guard must reach the synthesized
+    staircase: HARD uses a wider per-swap slippage cap than SOFT (CodeRabbit:
+    mode plumbing was previously untested)."""
+    market = _RichMarket(
+        collateral_usd=Decimal("2300"), debt_usd=Decimal("1150"), lltv=Decimal("0.8"), wallet_usdc=Decimal("1140")
+    )
+
+    def staircase_swap_slippages(mode):
+        result = sanitize_lending_teardown_intents(_plain_borrow_plan(), market, mode=mode)
+        assert result.synthesized_positions, f"expected synthesis for mode={mode}"
+        return [i.max_slippage for i in result.intents if i.intent_type.value == "SWAP" and i.max_slippage is not None]
+
+    soft = staircase_swap_slippages(TeardownMode.SOFT)
+    hard = staircase_swap_slippages(TeardownMode.HARD)
+    assert soft and hard, "both modes should emit collateral->debt swaps with a slippage cap"
+    # HARD widens the slippage cap relative to SOFT (emergency unwind makes progress).
+    assert max(hard) > max(soft)
