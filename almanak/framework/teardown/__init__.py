@@ -37,6 +37,7 @@ from almanak.framework.teardown.config import (
     TeardownConfig,
     TokenConsolidationConfig,
 )
+from almanak.framework.teardown.full_close import full_close_intents
 from almanak.framework.teardown.models import (
     ApprovalRequest,
     ApprovalResponse,
@@ -95,6 +96,7 @@ __all__ = [
     "ApprovalResponse",
     # Functions
     "calculate_max_acceptable_loss",
+    "full_close_intents",
     # Config
     "TeardownConfig",
     "TokenConsolidationConfig",

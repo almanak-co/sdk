@@ -315,3 +315,98 @@ class TestStatusReporting:
         assert status["config"]["min_supply_amount"] == "100"
         assert status["state"]["supplied"] is True
         assert status["state"]["supplied_amount"] == "1500"
+
+
+# =============================================================================
+# Teardown Tests (VIB-5465 / VIB-5417)
+# =============================================================================
+
+
+class TestSparkLenderTeardown:
+    """Teardown closes the supply position at the LIVE on-chain size.
+
+    Previously unimplemented (VIB-5417). The fix delegates to the framework's
+    per-KNOWN-position live full-close helper so the WITHDRAW resolves the live
+    spDAI balance (principal + accrued interest) at execution via withdraw_all,
+    never a plan-build snapshot (VIB-5465).
+    """
+
+    def _supplied_strategy(self):
+        strategy = create_strategy()
+        strategy._supplied = True
+        strategy._supplied_amount = Decimal("1000")
+        strategy._deployment_id = "deployment:spark"
+        # get_open_positions reads a live price for preview valuation only.
+        market = MagicMock()
+        market.price.return_value = Decimal("1")
+        strategy.create_market_snapshot = MagicMock(return_value=market)
+        return strategy
+
+    def test_supports_teardown(self):
+        assert self._supplied_strategy().supports_teardown() is True
+
+    def test_open_positions_reports_supply(self):
+        from almanak.framework.teardown import PositionType
+
+        summary = self._supplied_strategy().get_open_positions()
+        assert len(summary.positions) == 1
+        pos = summary.positions[0]
+        assert pos.position_type == PositionType.SUPPLY
+        assert pos.protocol == "spark"
+        assert pos.details["asset"] == "DAI"
+
+    def test_open_positions_empty_when_not_supplied(self):
+        strategy = create_strategy()  # _supplied=False
+        strategy._deployment_id = "deployment:spark"
+        summary = strategy.get_open_positions()
+        assert summary.positions == []
+
+    def test_teardown_emits_live_withdraw_all(self):
+        """The SUPPLY leg compiles to withdraw_all=True (live balance), NOT the
+        hardcoded snapshotted `_supplied_amount`."""
+        intents = self._supplied_strategy().generate_teardown_intents()
+        assert len(intents) == 1
+        wd = intents[0]
+        assert wd.intent_type.value == "WITHDRAW"
+        assert wd.withdraw_all is True
+        assert wd.token == "DAI"
+        assert wd.protocol == "spark"
+
+    def test_teardown_empty_when_nothing_supplied(self):
+        strategy = create_strategy()
+        strategy._deployment_id = "deployment:spark"
+        assert strategy.generate_teardown_intents() == []
+
+
+class TestSparkLenderTeardownStateReset:
+    """A successful teardown WITHDRAW clears cached supply state (CodeRabbit)."""
+
+    def test_withdraw_success_clears_supply_state(self):
+        from types import SimpleNamespace
+
+        strategy = create_strategy()
+        strategy._supplied = True
+        strategy._supplied_amount = Decimal("1000")
+
+        withdraw = SimpleNamespace(intent_type=SimpleNamespace(value="WITHDRAW"))
+        strategy.on_intent_executed(withdraw, success=True, result=None)
+
+        assert strategy._supplied is False
+        assert strategy._supplied_amount == Decimal("0")
+
+    def test_no_open_positions_after_withdraw(self):
+        from types import SimpleNamespace
+
+        strategy = create_strategy()
+        strategy._deployment_id = "deployment:spark"
+        strategy._supplied = True
+        strategy._supplied_amount = Decimal("1000")
+        market = MagicMock()
+        market.price.return_value = Decimal("1")
+        strategy.create_market_snapshot = MagicMock(return_value=market)
+
+        strategy.on_intent_executed(
+            SimpleNamespace(intent_type=SimpleNamespace(value="WITHDRAW")), success=True, result=None
+        )
+        assert strategy.get_open_positions().positions == []
+        assert strategy.generate_teardown_intents() == []

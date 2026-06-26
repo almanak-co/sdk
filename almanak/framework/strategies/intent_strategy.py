@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from ..data.wallet_activity import WalletActivityProvider
+    from ..intents.base import BaseIntent
     from ..portfolio.models import PortfolioSnapshot
     from ..teardown.models import (
         TeardownMode,
@@ -1919,6 +1920,56 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 return intents
         """
         ...
+
+    def teardown_full_close_intents(
+        self,
+        positions: "TeardownPositionSummary | None" = None,
+        *,
+        target_token: str = "USDC",
+        max_slippage: "Decimal | None" = None,
+    ) -> "list[BaseIntent]":
+        """Build live-resolving "close fully" intents for KNOWN positions (VIB-5465).
+
+        Framework helper that lets a strategy stop hardcoding teardown exit
+        sizes. Each KNOWN position (from ``get_open_positions()`` unless
+        ``positions`` is passed) is mapped to a close intent whose amount is the
+        LIVE on-chain figure resolved at EXECUTION — debt + accrued interest for
+        a borrow, current supply for a collateral leg, live liquidity for an LP,
+        live share→asset for a vault — never a plan-build snapshot. The exit
+        carries a live-resolution marker (``repay_full`` / ``withdraw_all`` /
+        ``shares="all"`` / ``amount="all"`` / literal LP ``position_id``) that the
+        teardown execution lane and compiler resolve against the chain just
+        before submission. Resolution is **per-KNOWN-position**, NOT a wallet
+        scan (Plan A).
+
+        Delegate from :meth:`generate_teardown_intents`::
+
+            def generate_teardown_intents(self, mode, market=None):
+                return self.teardown_full_close_intents()
+
+        Positions whose ``details`` lack a field required to build a safe close
+        (or non-generically-closable types) are skipped with a WARNING — the
+        strategy keeps any hand-rolled close for those.
+
+        Args:
+            positions: Known positions to close. Defaults to
+                ``self.get_open_positions()``.
+            target_token: Token to swap residual held / staked tokens into.
+            max_slippage: Starting slippage for the SWAP-shaped close (defaults
+                to the helper's 2% manual-initial tolerance).
+
+        Returns:
+            Close intents ordered by ``PositionType.priority``.
+        """
+        from almanak.framework.teardown.full_close import _DEFAULT_SWAP_SLIPPAGE, full_close_intents
+
+        if positions is None:
+            positions = self.get_open_positions()
+        return full_close_intents(
+            positions,
+            target_token=target_token,
+            max_slippage=_DEFAULT_SWAP_SLIPPAGE if max_slippage is None else max_slippage,
+        )
 
     async def resolve_open_positions(self) -> "TeardownPositionSummary":
         """Teardown enumeration reconciled against the ``position_registry`` WARM read path.

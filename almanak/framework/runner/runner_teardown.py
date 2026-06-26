@@ -1362,6 +1362,25 @@ async def _execute_teardown_inline_body(  # noqa: C901
                 or getattr(intent, "token_in", None)
             )
             if balance_token and teardown_market is not None:
+                # VIB-5465: evict the plan-build balance memo before this LIVE
+                # read so the ``amount="all"`` exit resolves against current
+                # on-chain state. The teardown snapshot was built BEFORE these
+                # closing intents ran; an earlier intent (e.g. a REPAY/WITHDRAW
+                # staircase that moved the wallet) would otherwise leave a stale
+                # memoized balance and over-resolve this swap by exactly the
+                # amount the earlier intent consumed. Mirrors the manager lane
+                # (TeardownManager._execute_intents) and VIB-5074. No-op on
+                # paper/dry-run (no balance provider); best-effort otherwise.
+                _invalidate = getattr(teardown_market, "invalidate_balance", None)
+                if callable(_invalidate):
+                    try:
+                        _invalidate(balance_token)
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "invalidate_balance(%s) failed in inline lane; using cached balance",
+                            balance_token,
+                            exc_info=True,
+                        )
                 # Resolve balance — pass chain for multi-chain market snapshots
                 intent_chain = getattr(intent, "chain", None)
                 try:

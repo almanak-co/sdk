@@ -16,12 +16,12 @@
             "amount_type": "token"
         }
     ],
-    "min_supply_amount": "5",
-    "supply_token": "DAI",
+    "min_supply_amount": "0.1",
+    "supply_token": "WETH",
     "force_action": "supply",
     "anvil_funding": {
         "ETH": 100,
         "DAI": 10,
-        "WETH": 1
+        "WETH": 2
     }
 }

@@ -967,6 +967,61 @@ class TestInlineTeardownAmountResolution:
         assert called_kwargs["intent"] is resolved_intent
 
     @pytest.mark.asyncio
+    async def test_chained_amount_evicts_balance_memo_before_read(self):
+        """VIB-5465: the inline lane evicts the plan-build balance memo BEFORE the
+        live read, so an ``amount='all'`` exit resolves against current on-chain
+        state — never a stale memoized balance from when the teardown snapshot
+        was built (mirrors the manager lane / VIB-5074)."""
+        runner = _make_runner()
+        strategy = _make_strategy()
+
+        intent = MagicMock()
+        intent.intent_type = SimpleNamespace(value="SWAP")
+        intent.chain = "arbitrum"
+        intent.is_chained_amount = True
+        intent.from_token = "PT-wstETH"
+
+        mock_market = MagicMock()
+        mock_market.balance.return_value = MagicMock(balance=Decimal("1.5"))
+
+        runner._execute_single_chain = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.SUCCESS,
+                intent=intent,
+                deployment_id="test_strat",
+                duration_ms=100,
+            )
+        )
+
+        with (
+            patch(
+                "almanak.framework.teardown.swap_clamp.read_tracked_swap_inventory",
+                return_value={"PT-WSTETH": Decimal("5")},
+            ),
+            patch(
+                "almanak.framework.intents.vocabulary.Intent.set_resolved_amount",
+                return_value=_make_intent(),
+            ),
+        ):
+            result = await runner._execute_teardown_inline(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_market=mock_market,
+                start_time=datetime.now(UTC),
+                request=None,
+                state_manager=MagicMock(),
+            )
+
+        assert result.status == IterationStatus.TEARDOWN
+        # Memo evicted for the exact from_token...
+        mock_market.invalidate_balance.assert_called_once_with("PT-wstETH")
+        # ...and the eviction happened BEFORE the balance read (no stale read).
+        method_calls = [c[0] for c in mock_market.mock_calls if c[0] in ("invalidate_balance", "balance")]
+        assert method_calls[0] == "invalidate_balance"
+        assert "balance" in method_calls
+        assert method_calls.index("invalidate_balance") < method_calls.index("balance")
+
+    @pytest.mark.asyncio
     async def test_inline_swap_back_clamps_to_tracked(self):
         """ALM-2766: inline swap-back clamps to min(tracked, live). Tracked 0.5 <
         live 1.5 → the swap executes for 0.5 (the TRACKED quantity), not the full

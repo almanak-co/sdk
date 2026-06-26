@@ -1,17 +1,27 @@
 """
 ===============================================================================
-TUTORIAL: Spark Lender Strategy - Supply DAI to Earn Yield
+TUTORIAL: Spark Lender Strategy - Supply an Asset to Earn Yield
 ===============================================================================
 
-This tutorial strategy demonstrates how to supply DAI to Spark lending
-protocol to earn yield through interest on supplied assets.
+This tutorial strategy demonstrates how to supply an asset (default WETH) to the
+Spark lending protocol to earn yield through interest on supplied assets. The
+asset is configurable via `supply_token`.
 
 WHAT THIS STRATEGY DOES:
 ------------------------
-1. Monitors DAI balance in the wallet
-2. When DAI balance > min_supply_amount: Supplies DAI to Spark
-3. Receives spDAI (Spark's interest-bearing DAI token)
+1. Monitors the supply-token balance in the wallet
+2. When balance > min_supply_amount: Supplies the asset to Spark
+3. Receives the Spark interest-bearing token (e.g. spWETH)
 4. Holds when already supplied or insufficient balance
+5. Teardown reclaims the full LIVE supply (principal + accrued interest) via
+   withdraw_all (VIB-5465 live per-position close)
+
+NOTE ON ASSET CHOICE:
+---------------------
+Default is WETH, a Spark *collateral* asset (LTV > 0). DAI is now LTV=0 on Spark
+(post-USDS migration): it can still be supplied, but reports zero USD collateral
+value, which the lending teardown guard currently treats as "nothing to
+withdraw" — so a DAI deposit would be stranded at teardown.
 
 WHAT IS SPARK?
 --------------
@@ -19,7 +29,7 @@ Spark is a decentralized lending protocol (Aave V3 fork) in the Maker/Sky ecosys
 - Supply assets to earn yield from borrowers
 - Supports DAI, USDC, WETH, wstETH, and other assets
 - Interest rates are determined by supply/demand
-- Currently ~5-8% APY on DAI (varies with market conditions)
+- Yield varies per asset and with market conditions
 
 Key differences from Aave V3:
 - Focused on Maker ecosystem (DAI-centric)
@@ -52,6 +62,7 @@ USAGE:
 # =============================================================================
 
 import logging
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -78,21 +89,22 @@ logger = logging.getLogger(__name__)
     # Unique identifier for CLI
     name="demo_spark_lender",
     # Description
-    description="Tutorial strategy - supply DAI to Spark for lending yield",
+    description="Tutorial strategy - supply an asset (default WETH) to Spark for lending yield",
     # Version
-    version="1.0.0",
+    version="1.1.0",
     # Author
     author="Almanak",
     # Tags
-    tags=["demo", "tutorial", "lending", "spark", "dai", "yield"],
+    tags=["demo", "tutorial", "lending", "spark", "weth", "yield"],
     # Supported chains (Spark is on Ethereum mainnet)
     supported_chains=["ethereum"],
     # Protocols used
     supported_protocols=["spark"],
     # Intent types this strategy may emit
-    # SUPPLY: Supply DAI to earn yield
+    # SUPPLY: Supply the asset (default WETH) to earn yield
+    # WITHDRAW: Reclaim the supplied asset at teardown (withdraw_all -> live balance)
     # HOLD: No action
-    intent_types=["SUPPLY", "HOLD"],
+    intent_types=["SUPPLY", "WITHDRAW", "HOLD"],
     default_chain="ethereum",
     quote_asset="USD",
 )
@@ -101,14 +113,14 @@ class SparkLenderStrategy(IntentStrategy):
     Spark lending strategy for educational purposes.
 
     This strategy demonstrates:
-    - How to supply DAI to Spark
-    - How to receive interest-bearing spDAI
+    - How to supply an asset (default WETH) to Spark
+    - How to receive the interest-bearing Spark token (e.g. spWETH)
     - How to track supply state
 
     Configuration Parameters (from config.yaml or config.json):
     -----------------------------------------------------------
-    - min_supply_amount: Minimum token balance to trigger supply (default: "100")
-    - supply_token: Token symbol to supply (default: "DAI")
+    - min_supply_amount: Minimum token balance to trigger supply (default: "0.1")
+    - supply_token: Token symbol to supply (default: "WETH")
     - force_action: Force "supply" for testing
 
     Note: Spark automatically uses all supplied assets as collateral.
@@ -117,8 +129,8 @@ class SparkLenderStrategy(IntentStrategy):
     Example Config:
     ---------------
     {
-        "min_supply_amount": "100",
-        "supply_token": "DAI",
+        "min_supply_amount": "0.1",
+        "supply_token": "WETH",
         "force_action": ""
     }
     """
@@ -141,8 +153,12 @@ class SparkLenderStrategy(IntentStrategy):
         # =====================================================================
 
         # Supply configuration
-        self.min_supply_amount = Decimal(str(self.get_config("min_supply_amount", "100")))
-        self.supply_token = str(self.get_config("supply_token", "DAI"))
+        # Default to WETH: a Spark collateral asset with LTV > 0. A non-collateral
+        # reserve (e.g. DAI is LTV=0 on Spark post-USDS migration) supplies fine
+        # but reports zero USD collateral value, which the lending teardown guard
+        # currently treats as "nothing to withdraw" (tracked separately).
+        self.min_supply_amount = Decimal(str(self.get_config("min_supply_amount", "0.1")))
+        self.supply_token = str(self.get_config("supply_token", "WETH"))
 
         # Force action for testing
         self.force_action = str(self.get_config("force_action", "")).lower()
@@ -164,7 +180,7 @@ class SparkLenderStrategy(IntentStrategy):
         Decision Flow:
         1. If force_action is set, execute that action
         2. If already supplied, hold
-        3. If DAI balance > min_supply_amount, supply
+        3. If supply-token balance > min_supply_amount, supply
         4. Otherwise, hold
 
         Parameters:
@@ -189,7 +205,7 @@ class SparkLenderStrategy(IntentStrategy):
             return Intent.hold(reason=f"Already supplied {self._supplied_amount} {self.supply_token} -> sp{self.supply_token}")
 
         # =================================================================
-        # STEP 3: Check DAI balance
+        # STEP 3: Check supply-token balance
         # =================================================================
 
         try:
@@ -225,15 +241,15 @@ class SparkLenderStrategy(IntentStrategy):
 
     def _create_supply_intent(self, amount: Decimal) -> Intent:
         """
-        Create a SUPPLY intent to deposit DAI into Spark.
+        Create a SUPPLY intent to deposit the asset into Spark.
 
         Supply flow:
-        1. DAI is deposited into Spark pool
-        2. You receive spDAI (interest-bearing token)
-        3. spDAI accrues interest over time
+        1. The asset is deposited into the Spark pool
+        2. You receive the interest-bearing Spark token (e.g. spWETH)
+        3. The Spark token accrues interest over time
 
         Parameters:
-            amount: Amount of DAI to supply
+            amount: Amount to supply
 
         Returns:
             SupplyIntent ready for compilation
@@ -268,6 +284,13 @@ class SparkLenderStrategy(IntentStrategy):
             if hasattr(intent, "amount"):
                 self._supplied_amount = intent.amount if isinstance(intent.amount, Decimal) else Decimal("0")
             logger.info(f"Supply successful: {self._supplied_amount} {self.supply_token} -> Spark")
+        elif success and intent_type == "WITHDRAW":
+            # Teardown withdrew the supply — clear cached state so status /
+            # get_open_positions() no longer report an open position and a later
+            # full-close is never re-emitted for an already-withdrawn deposit.
+            self._supplied = False
+            self._supplied_amount = Decimal("0")
+            logger.info(f"Withdraw successful: cleared Spark supply state for {self.supply_token}")
         elif not success:
             logger.warning(f"{intent_type} failed")
 
@@ -318,20 +341,57 @@ class SparkLenderStrategy(IntentStrategy):
             self._supplied_amount = Decimal(str(state["supplied_amount"]))
             logger.info(f"Restored supplied_amount: {self._supplied_amount}")
 
+    def supports_teardown(self) -> bool:
+        return True
+
     def get_open_positions(self):
-        """Return open positions for teardown."""
-        from almanak.framework.teardown import TeardownPositionSummary
+        """Return the open Spark supply position (interest-bearing Spark token).
 
-        logger.warning(
-            "%s: teardown not yet implemented — positions may remain open. "
-            "Implement get_open_positions() and generate_teardown_intents() for real teardown.",
-            self.__class__.__name__,
+        The supplied collateral is a single SUPPLY position. Its size is the
+        LIVE Spark-token balance (principal + accrued interest) — we do NOT
+        freeze a plan-build amount here; the teardown WITHDRAW resolves the live
+        figure at execution (see generate_teardown_intents / VIB-5465).
+        """
+        from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
+
+        positions: list[PositionInfo] = []
+        if self._supplied and self._supplied_amount > 0:
+            # Best-effort live valuation for the preview / loss-cap only — never
+            # used to size the exit (which resolves live via withdraw_all).
+            try:
+                market = self.create_market_snapshot()
+                supply_price = Decimal(str(market.price(self.supply_token)))
+            except Exception:
+                logger.warning("Unable to fetch live price in Spark teardown valuation")
+                supply_price = Decimal("0")
+
+            positions.append(
+                PositionInfo(
+                    position_type=PositionType.SUPPLY,
+                    position_id=f"spark-supply-{self.supply_token}-{self.chain}",
+                    chain=self.chain,
+                    protocol="spark",
+                    value_usd=self._supplied_amount * supply_price,
+                    details={"asset": self.supply_token, "type": "collateral"},
+                )
+            )
+
+        return TeardownPositionSummary(
+            deployment_id=self.deployment_id or self.STRATEGY_NAME,
+            timestamp=datetime.now(UTC),
+            positions=positions,
         )
-        return TeardownPositionSummary.empty(self.deployment_id or self.STRATEGY_NAME)
 
-    def generate_teardown_intents(self, mode=None, market=None):
-        """Return intents to close all positions."""
-        return []
+    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+        """Close the Spark supply position fully at the LIVE on-chain size.
+
+        VIB-5465 / VIB-5417: delegates to the framework's per-KNOWN-position
+        live full-close helper. The SUPPLY position compiles to
+        ``Intent.withdraw(..., withdraw_all=True)`` — MAX_UINT256, so Spark
+        settles the full Spark-token balance (e.g. spWETH) INCLUDING interest
+        accrued while held, resolved at execution rather than a plan-build snapshot.
+        """
+        return self.teardown_full_close_intents()
 
 
 # =============================================================================
