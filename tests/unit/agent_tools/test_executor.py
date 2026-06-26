@@ -1135,6 +1135,48 @@ class TestLPClosePartialAmount:
         assert result.status == "success"
 
 
+class TestCloseLPV4PoolThreading:
+    """VIB-5361: `ax lp-close <id>` must route a V4 close (optionally with a pool
+    hint) to the V4 compiler. The `pool` arg is threaded into the lp_close intent
+    only when supplied, leaving V3 / NFT-keyed closes byte-identical."""
+
+    def test_close_v4_with_pool_threads_pool_into_intent(self, executor):
+        intent_type, params = executor._action_to_intent(
+            "close_lp_position",
+            {
+                "position_id": "654321",
+                "amount": "all",
+                "protocol": "uniswap_v4",
+                "pool": "WETH/USDC/3000",
+                "chain": "base",
+            },
+        )
+        assert intent_type == "lp_close"
+        assert params["protocol"] == "uniswap_v4"
+        assert params["pool"] == "WETH/USDC/3000"
+        assert params["position_id"] == "654321"
+
+    def test_close_v4_without_pool_omits_pool_key(self, executor):
+        """By-id close (no pool): the V4 compiler resolves currencies on-chain,
+        so the intent must NOT carry an empty pool that the compiler would treat
+        as a (failing) pool string."""
+        intent_type, params = executor._action_to_intent(
+            "close_lp_position",
+            {"position_id": "654321", "amount": "all", "protocol": "uniswap_v4", "chain": "base"},
+        )
+        assert intent_type == "lp_close"
+        assert "pool" not in params
+
+    def test_close_v3_default_unchanged(self, executor):
+        intent_type, params = executor._action_to_intent(
+            "close_lp_position",
+            {"position_id": "12345", "amount": "all", "chain": "arbitrum"},
+        )
+        assert intent_type == "lp_close"
+        assert "pool" not in params
+        assert params["protocol"] == "uniswap_v3"
+
+
 class TestGetLPPositionDispatch:
     @pytest.mark.asyncio
     async def test_get_lp_position_dispatches_to_rpc(self, executor, mock_gateway):

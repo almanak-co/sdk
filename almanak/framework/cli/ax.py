@@ -357,6 +357,41 @@ def _get_executor(ctx: click.Context):
     return executor, client
 
 
+def _assert_signer_matches_intended_wallet(private_key: str, intended_wallet: str) -> None:
+    """Fail fast when the managed-gateway signer would not match the operator's wallet.
+
+    The gateway rejects a transaction whose ``from_address`` differs from the
+    signer (correct, fund-safe behaviour). Catching the mismatch at gateway
+    startup turns the VIB-5457 footgun (4 silent revert attempts on a
+    pool-wallet recovery) into a single clear error before any tx is built.
+
+    No-op when either side is unknown: if the operator did not pin a wallet
+    (``--wallet`` / ``ALMANAK_WALLET_ADDRESS``), the executor derives the
+    ``from_address`` from the same key the signer uses, so they match by
+    construction. EVM-only — Solana keys / non-derivable inputs are skipped.
+    """
+    if not private_key or not intended_wallet:
+        return
+    try:
+        from eth_account import Account
+
+        key_hex = private_key if private_key.startswith("0x") else f"0x{private_key}"
+        signer_addr = Account.from_key(key_hex).address
+    except Exception:
+        # Non-EVM / unparseable key: nothing to assert against an EVM address.
+        return
+    if signer_addr.lower() != intended_wallet.lower():
+        raise click.ClickException(
+            "Gateway signer does not match the intended wallet:\n"
+            f"  intended wallet (from_address): {intended_wallet}\n"
+            f"  resolved signer (private key) : {signer_addr}\n"
+            "Every mutating op would revert with a from/signer mismatch.\n"
+            "Export the matching ALMANAK_PRIVATE_KEY for this wallet "
+            "(it overrides .env and ALMANAK_GATEWAY_PRIVATE_KEY for `ax`), "
+            "or drop --wallet / ALMANAK_WALLET_ADDRESS to derive it from the key."
+        )
+
+
 # crap-allowlist: Phase 1 (#2097) routes the existing GatewaySettings(...) construction
 # through gateway_config_from_env(...) — no complexity added. Function refactor is
 # tracked separately; allowlist is the documented escape hatch for no-op cutovers.
@@ -404,13 +439,39 @@ def _start_managed_gateway(
     if session_auth_token:
         gateway_kwargs["auth_token"] = session_auth_token
 
-    # Forward private key so the gateway can sign transactions. The typed
-    # ``GatewayConfig.private_key`` carries the same ALMANAK_PRIVATE_KEY
-    # value that the legacy direct-env-read used (populated by the Phase 1
-    # ``_apply_gateway_env_fallbacks`` ladder).
-    private_key = load_config().gateway.private_key or ""
+    # Forward the EFFECTIVE operator signing key so the gateway signs as the
+    # wallet whose positions the operator is managing (VIB-5457).
+    #
+    # `ax` is an operator tool on an operator machine (AGENTS.md §Dogfooding) —
+    # resolving the signing key here is legitimate and does not weaken the
+    # gateway-boundary / no-secrets-in-strategy-container rule: the wallet
+    # `from_address` is already derived from this same env via
+    # `cli_executor._resolve_wallet_address()` (`private_key_from_env`). The bug
+    # was an asymmetry — the wallet came from the bare `ALMANAK_PRIVATE_KEY`
+    # while the signer came from `load_config().gateway.private_key`, which
+    # prefers the gateway-prefixed `ALMANAK_GATEWAY_PRIVATE_KEY`. With a `.env`
+    # master key (or a gateway-prefixed key) present, an inline/exported pool
+    # `ALMANAK_PRIVATE_KEY` override was honored for `from_address` but ignored
+    # for the signer → from_address(pool) ≠ signer(master) → revert. `strat run`
+    # signs with the resolved `ALMANAK_PRIVATE_KEY`; `ax` now matches it.
+    #
+    # Precedence (mirrors `strat run`): the bare `ALMANAK_PRIVATE_KEY` (which the
+    # `from_address` is derived from, and which an inline `VAR=… almanak ax …`
+    # export sets) wins; fall back to the typed gateway config only when the bare
+    # key is unset (covers a gateway-prefixed-only setup). Pass it as an explicit
+    # kwarg so it beats any `ALMANAK_GATEWAY_PRIVATE_KEY` in env.
+    from almanak.config.runtime import private_key_from_env
+
+    private_key = private_key_from_env() or (load_config().gateway.private_key or "")
     if private_key:
         gateway_kwargs["private_key"] = private_key
+
+    # Fail fast (before starting the gateway) when the resolved signer would not
+    # match the wallet the operator intends — instead of letting every mutating
+    # op bounce off the gateway's from/signer-mismatch guard (the 4-revert
+    # footgun from the VIB-5457 incident). ``.get`` keeps this robust if a caller
+    # ever reaches here without the wallet key populated (auto-derive path).
+    _assert_signer_matches_intended_wallet(private_key, (ctx.obj or {}).get("wallet", ""))
 
     # Phase 1: route through the config service so the same env-fallback
     # ladders apply here as for the gateway subcommand and managed gateway.
@@ -1236,7 +1297,16 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_chain, sub_y
 @click.option(
     "--protocol",
     default="uniswap_v3",
-    help="LP protocol (default: uniswap_v3).",
+    help="LP protocol (default: uniswap_v3). Use 'uniswap_v4' to close a V4 position by id.",
+)
+@click.option(
+    "--pool",
+    default=None,
+    help=(
+        "Optional pool hint (e.g. 'WETH/USDC/3000'). Only needed for Uniswap V4 when the "
+        "position's currencies cannot be read from the id on-chain; V4 normally resolves "
+        "the pool from the position id automatically."
+    ),
 )
 @click.option(
     "--no-collect-fees",
@@ -1246,18 +1316,25 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_chain, sub_y
 )
 @_action_options
 @click.pass_context
-def lp_close(ctx, position_id, protocol, no_collect_fees, sub_yes, sub_dry_run, sub_json_output):
+def lp_close(ctx, position_id, protocol, pool, no_collect_fees, sub_yes, sub_dry_run, sub_json_output):
     """Close (fully withdraw) a liquidity position.
 
     Removes all liquidity and collects accrued fees by default.
     Returns the withdrawn token amounts.
 
+    Works for both Uniswap V3 (NFT token-id) and Uniswap V4 (pool-id keyed)
+    positions. For V4, the pool currencies are resolved from the position id
+    on-chain, so a bare id is enough; pass ``--pool`` only if that read is
+    unavailable.
+
     \b
     Examples:
-        almanak ax lp-close 123456                         # Close LP #123456
-        almanak ax lp-close 123456 --dry-run               # Simulate only
-        almanak ax lp-close 123456 --protocol uniswap_v3   # Explicit protocol
+        almanak ax lp-close 123456                          # Close V3 LP #123456
+        almanak ax lp-close 123456 --dry-run                # Simulate only
+        almanak ax lp-close 123456 --protocol uniswap_v3    # Explicit protocol
         almanak ax lp-close 123456 --no-collect-fees        # Skip fee collection
+        almanak ax lp-close 654321 --protocol uniswap_v4    # Close V4 position by id
+        almanak ax lp-close 654321 --protocol uniswap_v4 --pool WETH/USDC/3000
     """
     from almanak.framework.cli.ax_render import (
         check_safety_gate,
@@ -1278,6 +1355,8 @@ def lp_close(ctx, position_id, protocol, no_collect_fees, sub_yes, sub_dry_run, 
             "chain": ctx.obj["chain"],
             "protocol": protocol,
         }
+        if pool:
+            args["pool"] = pool
 
         if dry_run:
             args["dry_run"] = True

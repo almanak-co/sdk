@@ -208,6 +208,24 @@ class UniswapV4Adapter:
             raise ValueError(f"Position {token_id} has zero liquidity — already closed or invalid tokenId")
         return liquidity
 
+    def get_position_currencies(self, token_id: int, rpc_url: str | None = None) -> tuple[str, str]:
+        """Resolve a V4 position's ``(currency0, currency1)`` from its NFT id, on-chain.
+
+        Reads the position's ``PoolKey`` via ``PositionManager.getPoolAndPositionInfo``
+        and returns the two currency addresses in canonical sorted order. Lets a V4
+        position be closed from its id alone when the open-time currencies are not
+        otherwise available (VIB-5361 operator recovery / ``ax lp-close``).
+
+        Args:
+            token_id: NFT token ID of the LP position.
+            rpc_url: Optional RPC URL override.
+
+        Returns:
+            ``(currency0, currency1)`` lowercased EVM addresses, currency0 < currency1.
+        """
+        pool_key = self._sdk.get_position_pool_key(token_id, rpc_url=rpc_url)
+        return pool_key.currency0, pool_key.currency1
+
     def swap_exact_input(
         self,
         token_in: str,

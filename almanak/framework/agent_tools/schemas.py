@@ -561,6 +561,15 @@ class CloseLPPositionRequest(BaseModel):
     collect_fees: bool = Field(default=True, description="Collect accrued fees during close")
     chain: str = Field(default=DEFAULT_CHAIN)
     protocol: str = Field(default="uniswap_v3")
+    pool: str = Field(
+        default="",
+        description=(
+            "Optional pool hint (e.g. 'WETH/USDC/3000'). Only consulted by venues whose "
+            "close path needs the pool currencies — notably Uniswap V4, where the position "
+            "is keyed by a pool-id rather than a self-describing NFT. Leave empty to let the "
+            "connector resolve the pool from the position id on-chain."
+        ),
+    )
     dry_run: bool = Field(default=False)
 
 

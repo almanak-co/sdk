@@ -199,8 +199,9 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
                 currency0 = protocol_params.get("currency0", "")
                 currency1 = protocol_params.get("currency1", "")
 
-            if (not currency0 or not currency1) and intent.pool:
-                currency0, currency1 = self._resolve_pool_currencies(adapter, intent.pool, currency0, currency1)
+            # Resolve the close currencies from (in order) protocol_params, the
+            # pool hint, then the position NFT on-chain (VIB-5361 close-by-id).
+            currency0, currency1 = self._resolve_close_currencies(adapter, intent, ctx.rpc_url, currency0, currency1)
 
             if liquidity == 0:
                 try:
@@ -381,6 +382,56 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
         except Exception as e:
             logger.warning("Failed to resolve currencies from pool '%s': %s", pool, e)
         return currency0, currency1
+
+    @classmethod
+    def _resolve_close_currencies(
+        cls,
+        adapter: Any,
+        intent: LPCloseIntent,
+        rpc_url: str | None,
+        currency0: str,
+        currency1: str,
+    ) -> tuple[str, str]:
+        """Resolve the V4 close currencies from pool hint, then on-chain by id.
+
+        Precedence (each only runs when the currencies are still missing):
+
+        1. ``intent.pool`` string (e.g. ``"WETH/USDC/3000"``) via
+           :meth:`_resolve_pool_currencies`.
+        2. The position NFT on-chain — ``PositionManager.getPoolAndPositionInfo``
+           through ``adapter.get_position_currencies`` (VIB-5361 close-by-id). A V4
+           position is keyed by a pool-id (not a self-describing NFT), so this read
+           is the only way to close it from its id alone — e.g.
+           ``ax lp-close <id> --protocol uniswap_v4``.
+
+        Both rungs are best-effort: on any failure the inputs are returned
+        unchanged so ``compile_lp_close`` emits its existing "currencies required"
+        error rather than a lower-level one.
+        """
+        if currency0 and currency1:
+            return currency0, currency1
+        if intent.pool:
+            currency0, currency1 = cls._resolve_pool_currencies(adapter, intent.pool, currency0, currency1)
+        if currency0 and currency1:
+            return currency0, currency1
+        try:
+            token_id = int(intent.position_id)
+        except (ValueError, TypeError):
+            return currency0, currency1
+        try:
+            resolved0, resolved1 = adapter.get_position_currencies(token_id, rpc_url=rpc_url)
+        except Exception as e:
+            logger.warning(
+                "V4 LP_CLOSE: could not resolve currencies on-chain for position %s: %s", intent.position_id, e
+            )
+            return currency0, currency1
+        logger.info(
+            "V4 LP_CLOSE: resolved currencies on-chain for position %s: %s / %s",
+            intent.position_id,
+            resolved0,
+            resolved1,
+        )
+        return resolved0 or currency0, resolved1 or currency1
 
     @staticmethod
     def _canonical_currency_order(currency0: str, currency1: str) -> tuple[str, str]:

@@ -94,6 +94,76 @@ class TestLpInfoNetwork:
         assert tool_args["network"] == "anvil"
 
 
+class TestLpClose:
+    """`ax lp-close` argument plumbing, incl. V4 close-by-id (VIB-5361)."""
+
+    @patch("almanak.framework.cli.ax._run_tool")
+    def test_lp_close_dry_run_passes_dry_run_flag(self, mock_run_tool):
+        mock_run_tool.return_value = MagicMock(status="success")
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--chain", "arbitrum", "lp-close", "123456", "--dry-run"])
+        assert result.exit_code == 0
+        args = mock_run_tool.call_args[0][2]
+        assert args["dry_run"] is True
+        assert args["position_id"] == "123456"
+        assert args["protocol"] == "uniswap_v3"
+        assert "pool" not in args
+
+    @patch("almanak.framework.cli.ax._run_tool")
+    def test_lp_close_execute_with_yes(self, mock_run_tool):
+        mock_run_tool.return_value = MagicMock(status="success")
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--chain", "arbitrum", "lp-close", "123456", "--yes"])
+        assert result.exit_code == 0
+        args = mock_run_tool.call_args[0][2]
+        assert args["amount"] == "all"
+        assert args["collect_fees"] is True
+
+    @patch("almanak.framework.cli.ax._run_tool")
+    def test_lp_close_v4_by_id_omits_pool(self, mock_run_tool):
+        """V4 close-by-id: no --pool → args carry no pool, so the V4 compiler
+        resolves currencies from the position id on-chain."""
+        mock_run_tool.return_value = MagicMock(status="success")
+        runner = CliRunner()
+        result = runner.invoke(
+            almanak, ["ax", "--chain", "base", "lp-close", "654321", "--protocol", "uniswap_v4", "--yes"]
+        )
+        assert result.exit_code == 0
+        args = mock_run_tool.call_args[0][2]
+        assert args["protocol"] == "uniswap_v4"
+        assert "pool" not in args
+
+    @patch("almanak.framework.cli.ax._run_tool")
+    def test_lp_close_v4_with_pool_hint(self, mock_run_tool):
+        mock_run_tool.return_value = MagicMock(status="success")
+        runner = CliRunner()
+        result = runner.invoke(
+            almanak,
+            ["ax", "--chain", "base", "lp-close", "654321", "--protocol", "uniswap_v4", "--pool", "WETH/USDC/3000", "--yes"],
+        )
+        assert result.exit_code == 0
+        args = mock_run_tool.call_args[0][2]
+        assert args["pool"] == "WETH/USDC/3000"
+
+    @patch("almanak.framework.cli.ax._run_tool")
+    def test_lp_close_no_collect_fees(self, mock_run_tool):
+        mock_run_tool.return_value = MagicMock(status="success")
+        runner = CliRunner()
+        result = runner.invoke(
+            almanak, ["ax", "--chain", "arbitrum", "lp-close", "123456", "--no-collect-fees", "--yes"]
+        )
+        assert result.exit_code == 0
+        args = mock_run_tool.call_args[0][2]
+        assert args["collect_fees"] is False
+
+    @patch("almanak.framework.cli.ax._run_tool")
+    def test_lp_close_error_status_exits_nonzero(self, mock_run_tool):
+        mock_run_tool.return_value = MagicMock(status="error")
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--chain", "arbitrum", "lp-close", "123456", "--yes"])
+        assert result.exit_code == 1
+
+
 class TestGatewayConnectionError:
     def test_error_message(self):
         err = GatewayConnectionError("localhost", 50051)
@@ -117,6 +187,71 @@ class TestResolveWalletAddress:
     def test_invalid_key_returns_empty(self):
         with patch.dict("os.environ", {"ALMANAK_PRIVATE_KEY": "not-a-key"}):
             assert _resolve_wallet_address() == ""
+
+
+class TestAxSignerKeyResolution:
+    """VIB-5457: ax's managed gateway must sign with the EFFECTIVE inline
+    ALMANAK_PRIVATE_KEY (the same key the ``from_address`` is derived from), not a
+    .env master / gateway-prefixed key. The bug was an asymmetry: ``from_address``
+    came from ALMANAK_PRIVATE_KEY but the signer came from
+    ``load_config().gateway.private_key`` (which prefers ALMANAK_GATEWAY_PRIVATE_KEY)
+    → from_address(pool) != signer(master) → every mutating ax op reverts.
+    """
+
+    # Two well-known Anvil keys with distinct addresses.
+    POOL = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"  # anvil #0
+    MASTER = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"  # anvil #1
+
+    @staticmethod
+    def _addr(key: str) -> str:
+        from eth_account import Account
+
+        return Account.from_key(key).address
+
+    def test_inline_key_wins_over_gateway_prefixed_for_signer(self):
+        """The effective signer key (ax's primary resolution rung) is the inline
+        ALMANAK_PRIVATE_KEY, and it matches the wallet ``from_address`` — even when
+        a gateway-prefixed master key is also present."""
+        from almanak.config.runtime import private_key_from_env
+
+        with patch.dict(
+            "os.environ",
+            {"ALMANAK_PRIVATE_KEY": self.POOL, "ALMANAK_GATEWAY_PRIVATE_KEY": self.MASTER},
+            clear=True,
+        ):
+            # This is the primary rung of ax._start_managed_gateway's resolution:
+            # ``private_key_from_env() or (load_config().gateway.private_key or "")``.
+            effective = private_key_from_env() or ""
+            assert self._addr(effective) == self._addr(self.POOL)
+            assert self._addr(effective) != self._addr(self.MASTER)
+            # Symmetry restored: signer address == the from_address ax derives.
+            assert self._addr(effective) == _resolve_wallet_address()
+
+    def test_assert_signer_matches_intended_wallet_raises_on_mismatch(self):
+        import click
+
+        from almanak.framework.cli.ax import _assert_signer_matches_intended_wallet
+
+        with pytest.raises(click.ClickException, match="does not match"):
+            _assert_signer_matches_intended_wallet(self.MASTER, self._addr(self.POOL))
+
+    def test_assert_signer_matches_intended_wallet_noop_on_match(self):
+        from almanak.framework.cli.ax import _assert_signer_matches_intended_wallet
+
+        # No exception when the signer derives the intended wallet.
+        _assert_signer_matches_intended_wallet(self.POOL, self._addr(self.POOL))
+
+    def test_assert_signer_matches_intended_wallet_noop_when_wallet_unset(self):
+        from almanak.framework.cli.ax import _assert_signer_matches_intended_wallet
+
+        # No intended wallet pinned (auto-derive path) → nothing to assert.
+        _assert_signer_matches_intended_wallet(self.POOL, "")
+
+    def test_assert_signer_matches_intended_wallet_noop_on_non_evm_key(self):
+        from almanak.framework.cli.ax import _assert_signer_matches_intended_wallet
+
+        # Unparseable / non-EVM key: skip silently (Solana etc.) rather than crash.
+        _assert_signer_matches_intended_wallet("not-a-hex-key", self._addr(self.POOL))
 
 
 class TestCreateCliExecutor:

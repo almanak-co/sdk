@@ -1282,6 +1282,32 @@ class ToolExecutor:
             },
         )
 
+    def _build_lp_close_params(self, args: dict, tool_name: str) -> dict:
+        """Build the ``lp_close`` intent params from ``close_lp_position`` args.
+
+        ``LPCloseIntent`` only supports a full close, so a partial ``amount`` is
+        rejected. ``pool`` is only meaningful for venues whose close path needs the
+        pool currencies (Uniswap V4 — keyed by pool-id, not a self-describing NFT);
+        it is forwarded ONLY when supplied so V3 / NFT-keyed closes are unchanged,
+        and an empty hint lets the V4 compiler resolve currencies from the position
+        id on-chain (VIB-5361 operator close-by-id recovery).
+        """
+        amount = args.get("amount", "all")
+        if str(amount).lower() != "all":
+            raise ToolValidationError(
+                f"Partial LP close (amount='{amount}') is not supported. "
+                "Only amount='all' is allowed. Use the full close to exit the position.",
+                tool_name=tool_name,
+            )
+        params = {
+            "position_id": args["position_id"],
+            "collect_fees": args.get("collect_fees", True),
+            "protocol": args.get("protocol", DEFAULT_LP_PROTOCOL),
+        }
+        if args.get("pool"):
+            params["pool"] = args["pool"]
+        return params
+
     def _action_to_intent(self, tool_name: str, args: dict) -> tuple[str, dict]:  # noqa: C901
         """Map action tool arguments to intent type + params."""
         if tool_name == "swap_tokens":
@@ -1344,20 +1370,7 @@ class ToolExecutor:
             }
 
         if tool_name == "close_lp_position":
-            # LPCloseIntent only supports full close -- reject partial amounts
-            amount = args.get("amount", "all")
-            if str(amount).lower() != "all":
-                raise ToolValidationError(
-                    f"Partial LP close (amount='{amount}') is not supported. "
-                    "Only amount='all' is allowed. Use the full close to exit the position.",
-                    tool_name=tool_name,
-                )
-            # LPCloseIntent fields: position_id, pool, collect_fees, protocol, chain
-            return "lp_close", {
-                "position_id": args["position_id"],
-                "collect_fees": args.get("collect_fees", True),
-                "protocol": args.get("protocol", DEFAULT_LP_PROTOCOL),
-            }
+            return "lp_close", self._build_lp_close_params(args, tool_name)
 
         if tool_name == "supply_lending":
             params = {

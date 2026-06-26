@@ -361,6 +361,122 @@ class UniswapV4SDK:
         logger.info("V4 position %d liquidity: %d (chain=%s)", token_id, liquidity, self.chain)
         return liquidity
 
+    def get_position_pool_key(self, token_id: int, rpc_url: str | None = None) -> PoolKey:
+        """Resolve a V4 position's ``PoolKey`` from its NFT token id, on-chain.
+
+        Calls ``PositionManager.getPoolAndPositionInfo(uint256)`` (selector
+        ``0x7ba03aad``) and decodes the returned ``PoolKey`` struct. Unlike a V3
+        NFT (whose ``positions(tokenId)`` self-describes token0/token1/fee), a V4
+        position is keyed by a pool-id and the close path needs the underlying
+        currencies — this read recovers them so a position can be closed from its
+        id alone (VIB-5361 operator recovery).
+
+        The ABI return is ``(PoolKey poolKey, uint256 info)``. ``PoolKey`` has no
+        dynamic fields, so it is encoded inline as 5 head words:
+        ``(currency0, currency1, fee, tickSpacing, hooks)``. This mirrors the
+        gateway-side decode in ``almanak/gateway/services/rpc_service.py``
+        (``_decode_v4_pool_and_position_info``) — kept byte-compatible.
+
+        Args:
+            token_id: NFT token ID of the LP position.
+            rpc_url: RPC URL to use. Falls back to ``self.rpc_url``. When a
+                gateway client is configured the call is routed through it.
+
+        Returns:
+            The position's :class:`PoolKey` (currencies returned in sorted order).
+
+        Raises:
+            ValueError: If no RPC URL/gateway is available or the call/decode fails.
+        """
+        # getPoolAndPositionInfo(uint256) selector = 0x7ba03aad (validated against
+        # live positions in rpc_service.QueryV4PositionState).
+        selector = "7ba03aad"
+        token_id_hex = format(token_id, "064x")
+        calldata = "0x" + selector + token_id_hex
+
+        url = rpc_url or self.rpc_url
+        if self._gateway_client is None and not url:
+            raise ValueError("RPC URL required to query on-chain V4 pool key")
+        try:
+            hex_result = eth_call_hex(
+                chain=self.chain,
+                to=self.position_manager,
+                data=calldata,
+                rpc_url=url,
+                gateway_client=self._gateway_client,
+                timeout=10.0,
+            )
+        except Exception as e:
+            raise ValueError(f"RPC call to getPoolAndPositionInfo failed: {e}") from e
+
+        if hex_result is None:
+            raise ValueError("eth_call for getPoolAndPositionInfo returned no result")
+        clean = hex_result[2:] if hex_result.startswith(("0x", "0X")) else hex_result
+        # 5 PoolKey head words + 1 info word = 6 words (384 hex chars) minimum.
+        if len(clean) < 6 * 64:
+            raise ValueError(
+                f"getPoolAndPositionInfo payload too short for position {token_id} "
+                f"on {self.chain}: {len(clean)} hex chars (need >= 384)"
+            )
+
+        def _word_address(index: int) -> str:
+            # An ABI-encoded address occupies the low 20 bytes (last 40 hex) of a word.
+            word = clean[index * 64 : index * 64 + 64]
+            return "0x" + word[24:64]
+
+        def _word_uint(index: int) -> int:
+            return int(clean[index * 64 : index * 64 + 64], 16)
+
+        try:
+            currency0 = _word_address(0)
+            currency1 = _word_address(1)
+            fee = _word_uint(2)
+            tick_spacing_raw = _word_uint(3)
+            hooks = _word_address(4)
+        except (ValueError, TypeError) as e:
+            raise ValueError(
+                f"Malformed getPoolAndPositionInfo payload for position {token_id} on {self.chain}: {hex_result!r}"
+            ) from e
+
+        # An invalid / non-existent / burned token id can decode to a degenerate
+        # PoolKey whose two currencies are IDENTICAL — most often all-zero
+        # (0x0…0 == 0x0…0), but any equal pair is invalid. Reject it loudly rather
+        # than building an unusable PoolKey. The check compares the two currencies
+        # for equality (here via int value, equivalent to ``currency0.lower() ==
+        # currency1.lower()`` for the canonical lowercase addresses decoded above),
+        # so it catches the identical-but-nonzero case too. Note currency0 == 0x0
+        # ALONE is valid — it is V4's native-ETH currency0 — so we only reject when
+        # both currencies are equal. VIB-5361.
+        if int(currency0, 16) == int(currency1, 16):
+            raise ValueError(
+                f"getPoolAndPositionInfo returned a degenerate pool key "
+                f"(currency0 == currency1 == {currency0}) for position {token_id} on {self.chain} — "
+                "the position likely does not exist or has been burned."
+            )
+
+        # tickSpacing is an int24 in the PoolKey; interpret the low 24 bits as signed.
+        tick_spacing = tick_spacing_raw & ((1 << 24) - 1)
+        if tick_spacing >= (1 << 23):
+            tick_spacing -= 1 << 24
+
+        # PoolKey.__post_init__ lowercases and enforces currency0 < currency1.
+        pool_key = PoolKey(
+            currency0=currency0,
+            currency1=currency1,
+            fee=fee,
+            tick_spacing=tick_spacing,
+            hooks=hooks,
+        )
+        logger.info(
+            "V4 position %d pool key: currency0=%s currency1=%s fee=%d (chain=%s)",
+            token_id,
+            pool_key.currency0,
+            pool_key.currency1,
+            pool_key.fee,
+            self.chain,
+        )
+        return pool_key
+
     # crap-allowlist: VIB-4835 — pre-existing complexity (cc=16, cov=20%) relocated by Phase 2 fold from almanak/framework/connectors/uniswap_v4/sdk.py; function body unchanged by this PR. Refactor + coverage backfill tracked in VIB-4688.
     def get_pool_sqrt_price(
         self,

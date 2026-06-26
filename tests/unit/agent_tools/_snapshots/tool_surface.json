@@ -782,6 +782,12 @@
             "title": "Dry Run",
             "type": "boolean"
           },
+          "pool": {
+            "default": "",
+            "description": "Optional pool hint (e.g. 'WETH/USDC/3000'). Only consulted by venues whose close path needs the pool currencies \u2014 notably Uniswap V4, where the position is keyed by a pool-id rather than a self-describing NFT. Leave empty to let the connector resolve the pool from the position id on-chain.",
+            "title": "Pool",
+            "type": "string"
+          },
           "position_id": {
             "description": "NFT token ID of the LP position",
             "title": "Position Id",
@@ -2539,6 +2545,12 @@
               "default": false,
               "title": "Dry Run",
               "type": "boolean"
+            },
+            "pool": {
+              "default": "",
+              "description": "Optional pool hint (e.g. 'WETH/USDC/3000'). Only consulted by venues whose close path needs the pool currencies \u2014 notably Uniswap V4, where the position is keyed by a pool-id rather than a self-describing NFT. Leave empty to let the connector resolve the pool from the position id on-chain.",
+              "title": "Pool",
+              "type": "string"
             },
             "position_id": {
               "description": "NFT token ID of the LP position",
