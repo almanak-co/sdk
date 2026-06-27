@@ -1286,6 +1286,10 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
+    # Teardown-state posture (VIB-5464 / TD-06): whatever get_open_positions()
+    # reads to know a position is open MUST survive a restart - persist it via
+    # get_persistent_state()/load_persistent_state() (both sides), or re-derive
+    # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
@@ -1318,6 +1322,10 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
+    # Teardown-state posture (VIB-5464 / TD-06): whatever get_open_positions()
+    # reads to know a position is open MUST survive a restart - persist it via
+    # get_persistent_state()/load_persistent_state() (both sides), or re-derive
+    # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
@@ -1406,6 +1414,10 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
+    # Teardown-state posture (VIB-5464 / TD-06): whatever get_open_positions()
+    # reads to know a position is open MUST survive a restart - persist it via
+    # get_persistent_state()/load_persistent_state() (both sides), or re-derive
+    # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
@@ -1480,6 +1492,10 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
+    # Teardown-state posture (VIB-5464 / TD-06): whatever get_open_positions()
+    # reads to know a position is open MUST survive a restart - persist it via
+    # get_persistent_state()/load_persistent_state() (both sides), or re-derive
+    # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
@@ -1571,6 +1587,10 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
+    # Teardown-state posture (VIB-5464 / TD-06): whatever get_open_positions()
+    # reads to know a position is open MUST survive a restart - persist it via
+    # get_persistent_state()/load_persistent_state() (both sides), or re-derive
+    # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
@@ -1679,6 +1699,10 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
+    # Teardown-state posture (VIB-5464 / TD-06): whatever get_open_positions()
+    # reads to know a position is open MUST survive a restart - persist it via
+    # get_persistent_state()/load_persistent_state() (both sides), or re-derive
+    # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
@@ -1740,6 +1764,10 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
+    # Teardown-state posture (VIB-5464 / TD-06): whatever get_open_positions()
+    # reads to know a position is open MUST survive a restart - persist it via
+    # get_persistent_state()/load_persistent_state() (both sides), or re-derive
+    # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
@@ -1861,6 +1889,10 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
+    # Teardown-state posture (VIB-5464 / TD-06): whatever get_open_positions()
+    # reads to know a position is open MUST survive a restart - persist it via
+    # get_persistent_state()/load_persistent_state() (both sides), or re-derive
+    # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
@@ -1930,6 +1962,10 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
+    # Teardown-state posture (VIB-5464 / TD-06): whatever get_open_positions()
+    # reads to know a position is open MUST survive a restart - persist it via
+    # get_persistent_state()/load_persistent_state() (both sides), or re-derive
+    # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
@@ -2004,6 +2040,10 @@ def _get_template_teardown(
         return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # Without these methods, operator close-requests are silently ignored.
+    # Teardown-state posture (VIB-5464 / TD-06): whatever get_open_positions()
+    # reads to know a position is open MUST survive a restart - persist it via
+    # get_persistent_state()/load_persistent_state() (both sides), or re-derive
+    # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
     # -------------------------------------------------------------------------
 
@@ -3075,8 +3115,30 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "\n"
         )
 
-    # BLANK template has no state callbacks
-    return ""
+    # BLANK template: scaffold the teardown-state persistence hooks (VIB-5464 /
+    # TD-06) so a blank strategy declares a posture the moment it opens a tracked
+    # position. A strategy that opens a tracked position MUST guarantee it survives
+    # a restart, or teardown goes blind. Fill these in as you add positions —
+    # persist the state get_open_positions() reads.
+    return (
+        "    def get_persistent_state(self):\n"
+        '        """Persist the position-tracking state teardown depends on.\n'
+        "\n"
+        "        VIB-5464 / TD-06: a restarted runner re-derives its open set from\n"
+        "        what you persist here. If your strategy opens a tracked position,\n"
+        "        return the fields get_open_positions() reads (e.g. position id,\n"
+        "        amounts, state-machine phase) so teardown is never blind to it.\n"
+        "        ALTERNATIVE: if get_open_positions() re-derives the open set purely\n"
+        "        from on-chain reads, set the class attribute\n"
+        "        ``teardown_state_derived_from_chain = True`` instead and return {}.\n"
+        '        """\n'
+        '        # TODO: return {"position_id": self._position_id, ...}\n'
+        "        return {}\n\n"
+        "    def load_persistent_state(self, state):\n"
+        '        """Restore the state persisted by get_persistent_state() on restart."""\n'
+        '        # TODO: self._position_id = state.get("position_id")\n'
+        "        return None\n\n"
+    )
 
 
 def _build_strategy_content(

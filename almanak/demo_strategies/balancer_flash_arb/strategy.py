@@ -253,6 +253,29 @@ class BalancerFlashArbStrategy(IntentStrategy):
             "teardown_protocol": self.teardown_protocol,
         }
 
+    def get_persistent_state(self) -> dict[str, Any]:
+        """Persist the teardown-fallback state (VIB-5464 / TD-06).
+
+        ``get_open_positions()`` re-derives the open set from the on-chain wallet
+        balance, but when that read is unavailable it falls back to
+        ``_has_likely_open_position()`` (``_trades_executed`` /
+        ``_fell_back_to_swap``). Those flags must survive a restart, or a
+        post-restart teardown whose chain read also blips would wrongly report
+        the wallet flat and strand a residual. Persisting them keeps the
+        fail-closed fallback honest across restarts.
+        """
+        return {
+            "trades_executed": self._trades_executed,
+            "fell_back_to_swap": self._fell_back_to_swap,
+        }
+
+    def load_persistent_state(self, state: dict[str, Any]) -> None:
+        """Restore the teardown-fallback state persisted above."""
+        if not state:
+            return
+        self._trades_executed = int(state.get("trades_executed", self._trades_executed) or 0)
+        self._fell_back_to_swap = bool(state.get("fell_back_to_swap", self._fell_back_to_swap))
+
     def to_dict(self) -> dict[str, Any]:
         metadata = self.get_metadata()
         config_dict = self.config if isinstance(self.config, dict) else {}

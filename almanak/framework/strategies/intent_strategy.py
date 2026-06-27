@@ -177,6 +177,37 @@ class IntentStrategy(StrategyBase[ConfigT]):
     STRATEGY_METADATA: StrategyMetadata | None = None
     STRATEGY_NAME: str = "INTENT_STRATEGY"
 
+    # Teardown-state posture declaration (VIB-5464 / TD-06).
+    #
+    # A strategy that opens a tracked position MUST guarantee that position
+    # survives a process restart, otherwise teardown is blind: a restarted
+    # runner re-derives its open set from durable storage, and if nothing was
+    # persisted the position is silently stranded on-chain. ``save_state()``
+    # used to persist an empty ``{}`` for a strategy that did not override
+    # ``get_persistent_state()`` — a silent default, not a safe one.
+    #
+    # Enforcement is now opt-in: every concrete strategy that opens a non-LP
+    # tracked position must declare ONE of the following postures
+    # (``scripts/ci/check_teardown_state_persistence.py`` fails CI otherwise,
+    # and the runner logs a loud one-time WARNING at boot):
+    #
+    #   1. override ``get_persistent_state()`` / ``load_persistent_state()`` to
+    #      persist the position-tracking state (the common case), OR
+    #   2. set ``teardown_state_derived_from_chain = True`` AND have
+    #      ``get_open_positions()`` re-derive the open set purely from on-chain
+    #      reads (no cached in-memory state), OR
+    #   3. extend :class:`StatelessStrategy` (the strategy holds no positions).
+    #
+    # UniV3 / UniV4 LP positions are restart-safe automatically — the framework
+    # ``LPPositionTracker`` (``save_state`` auto-persists it) plus the
+    # ``position_registry`` re-derivation cover them regardless of this flag.
+    #
+    # Setting this flag is an explicit author assertion: it should be ``True``
+    # only when teardown has been verified to still see every position on a
+    # wiped-state restart. Do not flip it to silence the warning without that
+    # guarantee — that re-opens the exact teardown-blind hole this closes.
+    teardown_state_derived_from_chain: bool = False
+
     def __init__(
         self,
         config: ConfigT,
@@ -459,6 +490,76 @@ class IntentStrategy(StrategyBase[ConfigT]):
         """
         self._state_manager = state_manager
         self._deployment_id = deployment_id
+        # Default-deny teardown-state posture (VIB-5464 / TD-06): emit a loud,
+        # one-time WARNING at boot for a strategy that tracks positions but has
+        # declared no posture, so the silent ``save_state()`` empty-`{}` default
+        # becomes audible. The CI lint
+        # (``scripts/ci/check_teardown_state_persistence.py``) is the hard gate;
+        # this is the runtime backstop for strategies the lint never scans
+        # (hosted / incubating / user code).
+        self._warn_teardown_state_posture_once()
+
+    def _warn_teardown_state_posture_once(self) -> None:
+        """Warn once if no teardown-state posture is declared (VIB-5464 / TD-06).
+
+        A concrete strategy that opens a tracked position must guarantee that
+        position survives a restart (see ``teardown_state_derived_from_chain``).
+        A strategy that neither overrides ``get_persistent_state()`` nor sets
+        ``teardown_state_derived_from_chain`` nor extends ``StatelessStrategy``
+        has made no such declaration — its open set is silently lost on a
+        wiped-state restart and teardown goes blind. Surface that loudly instead
+        of persisting an empty ``{}`` in silence.
+
+        Fires at most once per instance and never raises — a posture-check
+        failure must never fault strategy boot.
+        """
+        if getattr(self, "_teardown_posture_warned", False):
+            return
+        try:
+            cls = type(self)
+            if self.teardown_state_derived_from_chain:
+                return
+            # StatelessStrategy declares "holds no positions" by base class.
+            # Imported lazily to avoid the stateless_strategy → intent_strategy
+            # import cycle.
+            from .stateless_strategy import StatelessStrategy
+
+            if isinstance(self, StatelessStrategy):
+                return
+            # Persistence is only safe with BOTH sides: save AND restore. A
+            # save-only override (get_persistent_state without load_persistent_state)
+            # persists state that is silently discarded on restart — just as
+            # teardown-blind as no override (CodeRabbit finding 3). Require both.
+            saves = cls.get_persistent_state is not IntentStrategy.get_persistent_state
+            restores = cls.load_persistent_state is not IntentStrategy.load_persistent_state
+            if saves and restores:
+                return
+            self._teardown_posture_warned = True
+            if saves and not restores:
+                logger.warning(
+                    "Strategy %s overrides get_persistent_state() but NOT "
+                    "load_persistent_state(): saved teardown state is silently discarded on "
+                    "restart, so an open position will not be re-derived and teardown will be "
+                    "blind to it. Override load_persistent_state() to restore the state too "
+                    "(VIB-5464 / TD-06; see docs/internal/blueprints/14-teardown-system.md).",
+                    cls.__name__,
+                )
+            else:
+                logger.warning(
+                    "Strategy %s declares no teardown-state posture: it does not override "
+                    "get_persistent_state()/load_persistent_state(), does not set "
+                    "teardown_state_derived_from_chain, and is not a StatelessStrategy. If it "
+                    "opens a tracked position, that position will NOT survive a restart and "
+                    "teardown will be blind to it. Override get_persistent_state()/"
+                    "load_persistent_state() to persist + restore the position state, OR set "
+                    "teardown_state_derived_from_chain=True if get_open_positions() re-derives "
+                    "the open set purely from on-chain reads, OR extend StatelessStrategy if "
+                    "the strategy holds no positions "
+                    "(VIB-5464 / TD-06; see docs/internal/blueprints/14-teardown-system.md).",
+                    cls.__name__,
+                )
+        except Exception:  # noqa: BLE001 — a posture check must never fault boot
+            logger.debug("Teardown-state posture check raised (non-fatal)", exc_info=True)
 
     def get_persistent_state(self) -> dict[str, Any]:
         """Get strategy state to persist.
