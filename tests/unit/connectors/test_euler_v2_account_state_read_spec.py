@@ -92,11 +92,11 @@ def test_catalogue_has_collateral_only_and_directed_pair_entries() -> None:
     assert table["wavax/usdc"]["loan_token"] == "USDC"
 
 
-def test_ethereum_catalogue_has_only_usdc_collateral() -> None:
-    # Ethereum registers only eUSDC-2, so only the collateral-only "usdc" entry
-    # exists (no directed pair — a pair needs two distinct underlying symbols).
+def test_ethereum_catalogue_has_weth_usdc_pair() -> None:
+    # Ethereum registers eWETH-2 (collateral) + eUSDC-2 (borrow), so the catalogue
+    # has collateral-only entries for each underlying plus both directed pairs.
     table = EULER_V2_ACCOUNT_STATE_MARKETS["ethereum"]
-    assert set(table.keys()) == {"usdc"}
+    assert set(table.keys()) == {"usdc", "weth", "usdc/weth", "weth/usdc"}
     assert table["usdc"]["comet_address"] == "0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9"
     assert table["usdc"]["loan_token"] is None
 
@@ -128,7 +128,7 @@ def test_synthesize_market_id_unknown_token_fails_closed() -> None:
     assert _synthesize_market_id(_CHAIN, "NOTATOKEN", None) is None
     assert _synthesize_market_id(_CHAIN, None, None) is None
     assert _synthesize_market_id(_CHAIN, "USDC", "USDC") is None  # no same-asset pair
-    assert _synthesize_market_id("base", "USDC", None) is None  # unsupported chain
+    assert _synthesize_market_id("optimism", "USDC", None) is None  # unsupported chain (not in Euler registry)
 
 
 def test_synthesize_market_id_debt_only_ambiguous_fails_closed() -> None:
@@ -337,7 +337,8 @@ def test_position_manager_address_reports_market_scoped_existence() -> None:
     # published vaults, None for an unsupported chain.
     assert LendingReadRegistry.position_manager_address("euler_v2", _CHAIN)
     assert LendingReadRegistry.position_manager_address("euler_v2", "ethereum")
-    assert LendingReadRegistry.position_manager_address("euler_v2", "base") is None
+    assert LendingReadRegistry.position_manager_address("euler_v2", "base")  # now a supported chain
+    assert LendingReadRegistry.position_manager_address("euler_v2", "optimism") is None  # not in Euler registry
 
 
 def test_market_params_resolves_directed_pair_entry() -> None:
@@ -459,7 +460,7 @@ def test_generic_reader_unsupported_chain_fails_closed() -> None:
     gateway = MagicMock()
     state = read_lending_account_state(
         protocol="euler_v2",
-        chain="base",  # no Euler V2 deployment in the catalogue
+        chain="optimism",  # no Euler V2 deployment in the catalogue
         wallet_address=_WALLET,
         market_id="usdc",
         gateway_client=gateway,

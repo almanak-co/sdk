@@ -470,6 +470,25 @@ def test_euler_within_ltv_is_feasible():
     assert verdict.outcome is PreflightOutcome.FEASIBLE
 
 
+def test_euler_zero_collateral_borrow_is_feasible():
+    """Borrow that supplies no NEW collateral (collateral_amount == 0) draws against
+    collateral already on-chain — the supply-then-borrow lifecycle. The intent carries
+    nothing to size capacity from, so the capacity check must fail open (defer to the
+    on-chain EVC solvency check) rather than guaranteed-false-reject; the LTV-enabled
+    structural check still runs first.
+    """
+    compiler = EulerV2Compiler()
+    p_adapter, p_config = _patch_euler_adapter()
+    # Collateral IS enabled (LTV 80%) but this intent adds zero NEW collateral. Without
+    # the fail-open guard the new-collateral lower bound is 0 → max borrow 0 → the
+    # positive borrow would be wrongly rejected. The guard must keep it FEASIBLE.
+    ctx = _euler_ctx(eth_call_result=_hex_uint(8000), prices={"WETH": Decimal("2000"), "USDC": Decimal("1")})
+    intent = _borrow_intent(collateral_amount=Decimal("0"), borrow_amount=Decimal("500"))
+    with p_adapter, p_config:
+        verdict = compiler.preflight(ctx, intent)
+    assert verdict.outcome is PreflightOutcome.FEASIBLE
+
+
 def test_euler_read_gap_is_unavailable():
     compiler = EulerV2Compiler()
     p_adapter, p_config = _patch_euler_adapter()

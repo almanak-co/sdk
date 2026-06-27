@@ -38,6 +38,19 @@ CHAIN_ADDRESSES: dict[str, dict[str, str]] = {
         "evault_factory": "0x29a56a1b8214D9Cf7c5561811750D5cBDb45CC8e",
         "vault_lens": "0xA18D79deB85C414989D7297F23e5391703Ea66aB",
     },
+    # Core addresses from euler-xyz/euler-interfaces EulerChains.json (status:production),
+    # cross-checked against the ethereum/avalanche values above. Verified 2026-06-26.
+    # See docs/internal/euler-v2-chain-extension-research-20260626.md.
+    "base": {
+        "evc": "0x5301c7dD20bD945D2013b48ed0DEE3A284ca8989",
+        "evault_factory": "0x7F321498A801A191a93C840750ed637149dDf8D0",
+        "vault_lens": "0x601F023CD063324DdbCADa69460e969fb97e98b9",
+    },
+    "arbitrum": {
+        "evc": "0x6302ef0F34100CDDFb5489fbcB6eE1AA95CD1066",
+        "evault_factory": "0x78Df1CF5bf06a7f27f2ACc580B934238C1b80D50",
+        "vault_lens": "0x8E0321a0f6d37411136077215ED9A539C1B16258",
+    },
 }
 
 SUPPORTED_CHAINS = set(CHAIN_ADDRESSES.keys())
@@ -72,6 +85,7 @@ DEBT_OF_SELECTOR = "0xd283e75f"  # debtOf(address)
 MAX_WITHDRAW_SELECTOR = "0xce96cb77"  # maxWithdraw(address)
 
 MAX_UINT256 = 2**256 - 1
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 # =============================================================================
 # Gas Estimates
@@ -139,8 +153,14 @@ _AVALANCHE_VAULTS: dict[str, dict] = {
         "decimals": 8,
         "preferred": True,
     },
-    "esAVAX-2": {
-        "vault_address": "0x38a559c2b6eF3fF7Cdc40a800D6351a2B70b2243",
+    # esAVAX-32 (live, governed). Replaces the defunct esAVAX-2 (0x38a559c2…,
+    # maxDeposit=0). Enabled as collateral on the eUSDC-19 borrow vault at 70% LTV
+    # (LTVBorrow != 0), verified on-chain 2026-06-26 — this is the collateral leg
+    # the avalanche borrow/repay path needs (the "no registered collateral vault"
+    # gap documented in tests/intents/avalanche/test_euler_v2_borrow.py since
+    # 2026-04-10). See docs/internal/euler-v2-chain-extension-research-20260626.md.
+    "esAVAX-32": {
+        "vault_address": "0xf3aCc3Fc22E376fa3dD21CF883B60DDE9cf4E34f",
         "underlying_symbol": "sAVAX",
         "underlying_address": "0x2b2C81e08f1Af8835a78Bb2A90AE924ACE0eA4bE",
         "decimals": 18,
@@ -149,6 +169,15 @@ _AVALANCHE_VAULTS: dict[str, dict] = {
 }
 
 _ETHEREUM_VAULTS: dict[str, dict] = {
+    # eWETH-2 collateral, enabled on eUSDC-2 at 84% LTV (verified on-chain 2026-06-26
+    # via governedPerspective + LTVBorrow). Highest-TVL governed eWETH vault.
+    "eWETH-2": {
+        "vault_address": "0xD8b27CF359b7D15710a5BE299AF6e7Bf904984C2",
+        "underlying_symbol": "WETH",
+        "underlying_address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "decimals": 18,
+        "preferred": True,
+    },
     "eUSDC-2": {
         "vault_address": "0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9",
         "underlying_symbol": "USDC",
@@ -158,10 +187,54 @@ _ETHEREUM_VAULTS: dict[str, dict] = {
     },
 }
 
+# Base (chain 8453). Borrow-capable pair verified on-chain 2026-06-26: eWETH-1 is
+# enabled as collateral on eUSDC-1 at 86% LTV (governedPerspective + LTVBorrow). Note
+# the borrow-capable USDC vault (eUSDC-1, ~$325K) differs from the max-TVL supply vault
+# (eUSDC-86); for the single-preferred-per-underlying model we pick the borrow-capable
+# one, which also has ample supply liquidity. See the chain-extension research doc.
+_BASE_VAULTS: dict[str, dict] = {
+    "eWETH-1": {
+        "vault_address": "0x859160DB5841E5cfB8D3f144C6b3381A85A4b410",
+        "underlying_symbol": "WETH",
+        "underlying_address": "0x4200000000000000000000000000000000000006",
+        "decimals": 18,
+        "preferred": True,
+    },
+    "eUSDC-1": {
+        "vault_address": "0x0A1a3b5f2041F33522C4efc754a7D096f880eE16",
+        "underlying_symbol": "USDC",
+        "underlying_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "decimals": 6,
+        "preferred": True,
+    },
+}
+
+# Arbitrum (chain 42161). Borrow-capable pair verified on-chain 2026-06-26: eWETH-1
+# enabled as collateral on eUSDC-1 at 85% LTV. eUSDC-1 (~$356K) is the borrow-capable
+# USDC vault (vs the max-TVL eUSDC-2).
+_ARBITRUM_VAULTS: dict[str, dict] = {
+    "eWETH-1": {
+        "vault_address": "0x78E3E051D32157AACD550fBB78458762d8f7edFF",
+        "underlying_symbol": "WETH",
+        "underlying_address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+        "decimals": 18,
+        "preferred": True,
+    },
+    "eUSDC-1": {
+        "vault_address": "0x0a1eCC5Fe8C9be3C809844fcBe615B46A869b899",
+        "underlying_symbol": "USDC",
+        "underlying_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        "decimals": 6,
+        "preferred": True,
+    },
+}
+
 # Per-chain vault registries
 EULER_V2_VAULTS_BY_CHAIN: dict[str, dict[str, dict]] = {
     "avalanche": _AVALANCHE_VAULTS,
     "ethereum": _ETHEREUM_VAULTS,
+    "base": _BASE_VAULTS,
+    "arbitrum": _ARBITRUM_VAULTS,
 }
 
 # Legacy alias: flat dict for backward compatibility (Avalanche only)
@@ -472,10 +545,19 @@ class EulerV2Adapter:
 
         # Encode EVC batch call
         # batch(BatchItem[]) where BatchItem = (address targetContract, address onBehalfOfAccount, uint256 value, bytes data)
+        #
+        # EVC self-call rule: when a BatchItem's targetContract is the EVC itself
+        # (the enableCollateral / enableController items), onBehalfOfAccount MUST be
+        # address(0) — the account is already encoded in the call's first argument.
+        # A non-zero onBehalfOfAccount on a self-call reverts with EVC_InvalidAddress()
+        # (0x8133abd1). Only the borrow item targets the vault, so it carries the wallet
+        # as onBehalfOfAccount, telling the EVC to set the execution context to the
+        # wallet for the vault call. Verified against EthereumVaultConnector.sol
+        # (callWithAuthenticationInternal) — see euler-xyz/ethereum-vault-connector.
         batch_calldata = _encode_evc_batch(
             [
-                (self.evc_address, self.wallet_address, 0, bytes.fromhex(enable_collateral_data[2:])),
-                (self.evc_address, self.wallet_address, 0, bytes.fromhex(enable_controller_data[2:])),
+                (self.evc_address, ZERO_ADDRESS, 0, bytes.fromhex(enable_collateral_data[2:])),
+                (self.evc_address, ZERO_ADDRESS, 0, bytes.fromhex(enable_controller_data[2:])),
                 (borrow_vault.vault_address, self.wallet_address, 0, bytes.fromhex(borrow_data[2:])),
             ]
         )

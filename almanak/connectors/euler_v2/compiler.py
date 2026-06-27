@@ -205,6 +205,15 @@ class EulerV2Compiler(BaseLendingCompiler):
         ltv_borrow: int,
     ) -> PreflightVerdict:
         """Check requested borrow value vs collateral value at LTVBorrow."""
+        # A borrow that supplies no NEW collateral (collateral_amount == 0) draws
+        # against collateral already deposited on-chain in a prior step — the canonical
+        # supply-then-borrow lifecycle. The intent carries nothing to size capacity
+        # from, so the "new collateral" lower bound would be 0 and any positive borrow
+        # would be a guaranteed false reject. Defer to the on-chain EVC solvency check
+        # (fail-open, consistent with the price-unavailable branch below). The LTV-
+        # enabled structural check in _euler_borrow_verdict has already run.
+        if intent.collateral_amount == Decimal("0"):
+            return PreflightVerdict.feasible()
         try:
             collateral_price = ctx.services.require_token_price(collateral_token.symbol)
             borrow_price = ctx.services.require_token_price(borrow_token.symbol)

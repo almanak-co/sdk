@@ -22,7 +22,7 @@ The matrix below is generated from ``almanak.connectors._strategy_base.registry.
 | [Drift](drift.md) | Perp | Solana | PERP_CLOSE, PERP_OPEN | `drift` |
 | [Enso](enso.md) | DEX | Arbitrum, Avalanche, Base, BNB Chain, Ethereum, Optimism, Polygon | SWAP | `enso` |
 | [Ethena](ethena.md) | Staking | Ethereum | STAKE, UNSTAKE | `ethena` |
-| [Euler V2](euler_v2.md) | Lending | Avalanche, Ethereum | BORROW, REPAY, SUPPLY, WITHDRAW | `euler_v2` |
+| [Euler V2](euler_v2.md) | Lending | Arbitrum, Avalanche, Base, Ethereum | BORROW, REPAY, SUPPLY, WITHDRAW | `euler_v2` |
 | [Fluid](fluid.md) | DEX | Arbitrum, Base, Ethereum, Polygon | SUPPLY, SWAP, WITHDRAW | `fluid` |
 | [Fluid Dex Lp](fluid_dex_lp.md) | DEX | Arbitrum | LP_CLOSE, LP_OPEN | `fluid_dex_lp` |
 | [Fluid Vault](fluid_vault.md) | Lending | Arbitrum, Base | BORROW, REPAY, SUPPLY, WITHDRAW | `fluid_vault` |

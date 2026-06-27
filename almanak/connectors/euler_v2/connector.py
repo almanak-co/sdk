@@ -37,7 +37,7 @@ CONNECTOR = Connector(
         ),
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-    strategy_chains=("ethereum", "avalanche"),
+    strategy_chains=("ethereum", "avalanche", "base", "arbitrum"),
 )
 
 __all__ = ["CONNECTOR"]

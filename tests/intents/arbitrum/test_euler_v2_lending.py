@@ -1,10 +1,10 @@
-"""Production-grade intent tests for Euler V2 on Ethereum (VIB-4307).
+"""Production-grade intent tests for Euler V2 on Arbitrum (VIB-4307).
 
 Covers all four lending verbs (SUPPLY / WITHDRAW / BORROW / REPAY) for the
-eUSDC-2 vault on Ethereum mainnet:
+eUSDC-1 vault on Arbitrum mainnet:
 
-- USDC: ``0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48``
-- eUSDC-2 vault: ``0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9``
+- USDC: ``0xaf88d065e77c8cC2239327C5EDb3A432268e5831``
+- eUSDC-1 vault: ``0x0a1eCC5Fe8C9be3C809844fcBe615B46A869b899``
 
 Each test runs the full Intent → Compile → Execute → Parse → Verify pipeline
 on an Anvil fork.
@@ -38,7 +38,7 @@ by the reader.
 NO MOCKING. All tests execute real on-chain transactions and verify state
 changes through receipt-event assertions and exact-wei balance deltas.
 
-Borrow/repay tests are marked ``xfail(strict=True)`` until a non-stablecoin
+Borrow/repay use the registered eWETH collateral vault (non-stablecoin
 collateral vault (e.g. eWETH, eWBTC) is added to the Ethereum branch of
 ``EULER_V2_VAULTS_BY_CHAIN`` in
 ``almanak/connectors/euler_v2/adapter.py``. The compilation path
@@ -99,11 +99,11 @@ pytestmark = pytest.mark.no_zodiac(reason="VIB-4307: euler_v2 not in synthetic-i
 # Test Configuration
 # =============================================================================
 
-CHAIN_NAME = "ethereum"
+CHAIN_NAME = "arbitrum"
 
 # Euler V2 vault address on Ethereum (eUSDC-2) — used for receipt-parser filtering
 # so we only count Deposit/Withdraw/Borrow/Repay events emitted by this vault.
-EULER_V2_USDC_VAULT = "0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9"
+EULER_V2_USDC_VAULT = "0x0a1eCC5Fe8C9be3C809844fcBe615B46A869b899"  # eUSDC-1 (arbitrum)
 
 PROTOCOL = "euler_v2"
 
@@ -245,7 +245,7 @@ def _assert_high_confidence_state(payload: dict) -> None:
 # =============================================================================
 
 
-@pytest.mark.ethereum
+@pytest.mark.arbitrum
 @pytest.mark.supply
 @pytest.mark.lending
 class TestEulerV2SupplyIntent:
@@ -263,7 +263,7 @@ class TestEulerV2SupplyIntent:
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ) -> None:
-        """Supply USDC into the eUSDC-2 vault via SupplyIntent."""
+        """Supply USDC into the eUSDC-1 vault via SupplyIntent."""
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc = tokens["USDC"]
         decimals = get_token_decimals(web3, usdc)
@@ -305,7 +305,7 @@ class TestEulerV2SupplyIntent:
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
         assert execution_result.success, f"Execution failed: {execution_result.error}"
 
-        # Layer 3: Receipt parse — locate Deposit event from eUSDC-2 vault
+        # Layer 3: Receipt parse — locate Deposit event from eUSDC-1 vault
         found_supply_event = False
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
@@ -591,7 +591,7 @@ class TestEulerV2SupplyIntent:
 # Avalanche pattern (VIB-2643).
 
 
-@pytest.mark.ethereum
+@pytest.mark.arbitrum
 @pytest.mark.borrow
 @pytest.mark.lending
 class TestEulerV2BorrowIntent:
@@ -609,7 +609,7 @@ class TestEulerV2BorrowIntent:
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ) -> None:
-        """Borrow USDC against WETH collateral on Euler V2 Ethereum.
+        """Borrow USDC against WETH collateral on Euler V2 Arbitrum.
 
         Uses the registered eWETH collateral vault + eUSDC borrow vault.
         """

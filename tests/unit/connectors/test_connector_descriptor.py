@@ -169,7 +169,7 @@ MIGRATED_STRATEGY_REGISTRATION = {
     "drift": (("PERP_OPEN", "PERP_CLOSE"), ("solana",)),
     "enso": (("SWAP",), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb")),
     "ethena": (("STAKE", "UNSTAKE"), ("ethereum",)),
-    "euler_v2": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("ethereum", "avalanche")),
+    "euler_v2": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("ethereum", "avalanche", "base", "arbitrum")),
     "fluid": (("SWAP", "SUPPLY", "WITHDRAW"), ("arbitrum", "base", "ethereum", "polygon")),
     "fluid_dex_lp": (("LP_OPEN", "LP_CLOSE"), ("arbitrum",)),
     "gimo": (("STAKE", "UNSTAKE"), ("zerog",)),

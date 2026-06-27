@@ -10,5 +10,5 @@ from __future__ import annotations
 
 # Euler V2 (ERC-4626 vaults + EVC).
 SUPPORTED_CHAINS_BY_PROTOCOL: dict[str, frozenset[str]] = {
-    "euler_v2": frozenset({"avalanche", "ethereum"}),
+    "euler_v2": frozenset({"avalanche", "ethereum", "base", "arbitrum"}),
 }
