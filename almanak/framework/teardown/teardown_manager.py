@@ -51,6 +51,7 @@ from almanak.framework.teardown.models import (
     encode_consolidation_consent,
 )
 from almanak.framework.teardown.oracle_warmup import warm_and_validate_oracle
+from almanak.framework.teardown.plan_a_reconciliation import reconcile_known_positions_against_chain
 from almanak.framework.teardown.revert_hints import annotate_teardown_error
 from almanak.framework.teardown.safety_guard import SafetyGuard
 from almanak.framework.teardown.slippage_manager import (
@@ -666,6 +667,16 @@ class TeardownManager:
             # risk-reducing closing intents on an unpriceable commingled token.
             price_oracle = _warm_oracle_risk_first(market, intents, fail_loud=True)
 
+            # TD-15 (VIB-5473) AC-(b): capture a PRE-teardown Plan-A reconciliation
+            # over the KNOWN positions BEFORE any closing intent fires. The runner
+            # lane gets this from ``runner._teardown_reconciliation`` (TD-08); the
+            # CLI ``execute`` lane has no runner, so compute it inline here so
+            # ``verify_closure_against_chain`` can downgrade a stale / never-existed
+            # position (one the chain already reports closed *now*, pre-teardown)
+            # from CHAIN_VERIFIED. CHECK-only, never raises (a fault leaves it None
+            # → no AC-(b) downgrade, same as before this wiring existed).
+            pre_teardown_reconciliation = await self._pre_teardown_reconciliation(strategy, positions, market)
+
             # Step 6: Execute intents with safety guardrails
             result = await self._execute_intents(
                 teardown_id=teardown_id,
@@ -726,6 +737,24 @@ class TeardownManager:
                     verify_error_msg = f"Post-teardown verification error: {verify_err}. Manual check required."
                 else:
                     verify_error_msg = "Post-teardown verification failed: positions still open. Manual check required."
+
+                # TD-15 (VIB-5473): fail-closed on-chain POST-teardown
+                # verification on the CLI ``teardown execute`` lane too. Runs
+                # AFTER closure (risk reduction first). Folds in BOTH a FRESH
+                # POST-teardown reconciliation and the PRE-teardown report computed
+                # above: a position the chain STILL reports OPEN flips the result to
+                # FAILED (AC-(a)); a POST-teardown unconfirmable closure is a no-op
+                # (a burned LP NFT reading "not found" is the SUCCESS signal, not a
+                # doubt); a position that read closed / unconfirmable PRE-teardown
+                # lowers CHAIN_VERIFIED to UNVERIFIED (stale / never-existed, AC-(b)).
+                # Never raises.
+                verification = await self.verify_closure_against_chain(
+                    strategy,
+                    verification=verification,
+                    pre_execution_positions=positions,
+                    market=market,
+                    pre_teardown_reconciliation=pre_teardown_reconciliation,
+                )
 
                 # VIB-5085: stamp the position-level counts onto the result so
                 # the CLI lifecycle writer reports positions, not intents.
@@ -2344,6 +2373,152 @@ class TeardownManager:
             all_closed=all_closed,
             verification_status=(VerificationStatus.UNVERIFIED if all_closed else VerificationStatus.FAILED),
         )
+
+    async def _pre_teardown_reconciliation(self, strategy: Any, positions: Any, market: Any) -> Any | None:
+        """PRE-teardown Plan-A reconciliation for the CLI ``execute`` lane (TD-15 AC-(b)).
+
+        Reads each KNOWN position's live chain state BEFORE any closing intent
+        fires, so :meth:`verify_closure_against_chain` can lower CHAIN_VERIFIED for
+        a stale / never-existed enumeration (a position the chain already reports
+        closed / unconfirmable pre-teardown). The runner lane stashes this on
+        ``runner._teardown_reconciliation`` (TD-08); the CLI lane has no runner, so
+        it computes the same CHECK inline. CHECK-only — closes nothing, emits no
+        intent, and NEVER faults the teardown lane (a fault returns ``None``, which
+        simply skips the AC-(b) downgrade).
+        """
+        try:
+            return await reconcile_known_positions_against_chain(
+                summary=positions,
+                gateway_client=self._teardown_gateway_client(),
+                market=market,
+                network=str(getattr(strategy, "_gateway_network", "") or ""),
+            )
+        except Exception:  # noqa: BLE001 — the CHECK must never fault the teardown lane
+            logger.exception(
+                "TD-15 PRE-teardown reconciliation raised for %s — proceeding without "
+                "the PRE report (no AC-(b) downgrade)",
+                getattr(strategy, "deployment_id", "") or "",
+            )
+            return None
+
+    async def verify_closure_against_chain(
+        self,
+        strategy: IntentStrategy,
+        *,
+        verification: ClosureVerification,
+        pre_execution_positions: Any,
+        market: Any | None,
+        pre_teardown_reconciliation: Any | None = None,
+    ) -> ClosureVerification:
+        """Fail-closed on-chain POST-teardown verification (TD-15 / VIB-5473).
+
+        Runs AFTER every closing intent has fired — teardown's inverted failure
+        semantics (blueprint 14 §Teardown) mean risk reduction happens FIRST and
+        this check only then fails loudly; it never blocks a risk-reducing intent.
+        It composes three independent signals into the final
+        :class:`ClosureVerification` the lanes act on, and **only ever lowers
+        confidence or fails** — it never upgrades a status:
+
+        1. ``verification`` — the per-protocol post-condition result from
+           :meth:`_verify_closure_detailed` (TD-14; covers the primitives with a
+           registered ``TeardownPostCondition`` — uniswap_v3 / traderjoe_v2). When
+           it already reports ``all_closed=False`` the teardown has failed and its
+           residual error is the actionable one, so this method returns it
+           unchanged (no redundant chain read).
+        2. A FRESH POST-teardown Plan-A reconciliation
+           (:func:`reconcile_known_positions_against_chain`) over the SAME
+           pre-execution KNOWN set. This adds the lending chain read the
+           post-condition hooks lack (Aave / Morpho / Compound), so a stranded
+           collateral or debt leg the hook-less UNVERIFIED path would have waved
+           through as success is caught. A position the chain STILL reports OPEN
+           flips the result to FAILED (AC-(a)); a POST-teardown position the chain
+           cannot re-read is a deliberate **no-op** (a burned LP NFT reads back
+           "not found" — the SUCCESS signal), so it never downgrades CHAIN_VERIFIED.
+           The never-existed / stale-enumeration downgrade is owned by the
+           PRE-teardown report below (AC-(b)), a different signal.
+        3. ``pre_teardown_reconciliation`` — the report stashed/computed BEFORE the
+           closing intents fired (runner lane: ``runner._teardown_reconciliation``
+           via TD-08; CLI ``execute`` lane: computed inline by
+           :meth:`_pre_teardown_reconciliation`). A position
+           the WARM ledger believed open but the chain reported closed /
+           unconfirmable pre-teardown means the enumeration was stale or the
+           position never existed; certifying CHAIN_VERIFIED off it would be a
+           false success on a never-existed position (AC-(b)), so it lowers
+           CHAIN_VERIFIED → UNVERIFIED.
+
+        Never raises — a reconciliation fault degrades to the incoming
+        ``verification`` (the CHECK must never fault the teardown lane).
+        """
+        # Already failing: the post-condition residual error is the actionable
+        # one; do not spend a second chain read or risk masking it.
+        if not verification.all_closed:
+            return verification
+
+        deployment_id = getattr(strategy, "deployment_id", "") or ""
+        try:
+            gateway_client = self._teardown_gateway_client()
+            network = str(getattr(strategy, "_gateway_network", "") or "")
+            post_report = await reconcile_known_positions_against_chain(
+                summary=pre_execution_positions,
+                gateway_client=gateway_client,
+                market=market,
+                network=network,
+            )
+        except Exception:  # noqa: BLE001 — the CHECK must never fault the teardown lane
+            logger.exception(
+                "TD-15 post-teardown reconciliation raised for %s — keeping the TD-14 "
+                "post-condition verdict unchanged (fail-safe)",
+                deployment_id,
+            )
+            return verification
+
+        # Fold the POST-teardown reconciliation into the status, then the
+        # PRE-teardown report. Neither can raise confidence; the POST report only
+        # ever FAILS (on residual open), the PRE report only ever lowers
+        # CHAIN_VERIFIED (never-existed / stale enumeration — AC-(b)).
+        status = post_report.apply_post_teardown_to_verification_status(verification.verification_status)
+        if pre_teardown_reconciliation is not None:
+            status = pre_teardown_reconciliation.apply_to_verification_status(status)
+
+        # AC-(a): a KNOWN position the chain STILL reports OPEN after every closing
+        # intent fired is residual on-chain risk → fail closed. This is the lane
+        # that catches the hook-less lending strand the post-condition path counts
+        # closed-by-execution. An UNVERIFIABLE re-read (e.g. a burned LP NFT) is
+        # NOT residual — only CONFIRMED_OPEN is.
+        if post_report.has_confirmed_open:
+            residual = post_report.confirmed
+            for entry in residual:
+                logger.error(
+                    "🛑 TD-15 fail-closed: %s %s (%s) on %s is STILL OPEN on-chain after teardown — %s. "
+                    "Flipping teardown result to FAILED (residual on-chain risk).",
+                    entry.protocol,
+                    entry.position_type,
+                    entry.position_id,
+                    entry.chain,
+                    entry.detail,
+                )
+            positions_total = max(verification.positions_total, post_report.checked_count, len(residual))
+            return replace(
+                verification,
+                all_closed=False,
+                positions_total=positions_total,
+                positions_closed=max(positions_total - len(residual), 0),
+                has_position_breakdown=True,
+                verification_status=VerificationStatus.FAILED,  # == status (post report failed)
+            )
+
+        if status is not verification.verification_status:
+            logger.warning(
+                "TD-15 post-teardown verification: lowering %s closure confidence %s → %s (pre-reconcile not-clean=%s)",
+                deployment_id,
+                verification.verification_status,
+                status,
+                None
+                if pre_teardown_reconciliation is None
+                else (pre_teardown_reconciliation.has_divergence or pre_teardown_reconciliation.has_unverifiable),
+            )
+            return replace(verification, verification_status=status)
+        return verification
 
     # ------------------------------------------------------------------
     # Helpers used by _verify_closure to plumb gateway / RPC / wallet to

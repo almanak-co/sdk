@@ -157,6 +157,18 @@ class ReconciliationReport:
         return any(e.unverifiable for e in self.entries)
 
     @property
+    def has_confirmed_open(self) -> bool:
+        """True iff at least one KNOWN position is STILL chain-CONFIRMED open.
+
+        Read in the POST-teardown direction (TD-15 / VIB-5473). PRE-teardown a
+        ``CONFIRMED_OPEN`` verdict is the expected, healthy state. AFTER every
+        closing intent has fired, a position the chain still reports OPEN is
+        residual on-chain risk the teardown failed to remove — the fail-closed
+        trigger. See :meth:`apply_post_teardown_to_verification_status`.
+        """
+        return any(e.verdict is ReconciliationVerdict.CONFIRMED_OPEN for e in self.entries)
+
+    @property
     def is_clean(self) -> bool:
         """True iff every examined position was chain-CONFIRMED open."""
         return self.checked_count > 0 and not self.has_divergence and not self.has_unverifiable
@@ -176,6 +188,40 @@ class ReconciliationReport:
         """
         if proposed is VerificationStatus.CHAIN_VERIFIED and (self.has_divergence or self.has_unverifiable):
             return VerificationStatus.UNVERIFIED
+        return proposed
+
+    def apply_post_teardown_to_verification_status(self, proposed: VerificationStatus) -> VerificationStatus:
+        """Compose a POST-teardown reconciliation with a TD-14 status (fail-closed).
+
+        The POST-teardown mirror of :meth:`apply_to_verification_status` — the
+        contract the TD-15 fail-closed verifier
+        (:meth:`TeardownManager.verify_closure_against_chain`) relies on. Once the
+        closing intents have fired the verdict directions invert relative to the
+        pre-teardown CHECK:
+
+        - ``CONFIRMED_OPEN`` — the chain STILL reports the position open: residual
+          on-chain risk the teardown did not remove. Returns ``FAILED`` regardless
+          of the proposed status — this is the AC-(a) fail-closed trigger (a
+          stranded LP / collateral / debt eliminates the "reports success while a
+          position is still open" false-success class).
+        - ``DIVERGED_CLOSED`` / ``UNVERIFIABLE`` — neither lowers confidence.
+          ``DIVERGED_CLOSED`` is the GOOD POST-teardown outcome (the closing intent
+          worked). ``UNVERIFIABLE`` is deliberately a **no-op**: post-teardown a
+          KNOWN position that Plan-A cannot re-read is overwhelmingly a position
+          that was *closed and removed* — a burned Uniswap-V3 LP NFT reads back as
+          "not found", which is the SUCCESS signal, not a doubt. The closure
+          confidence for a primitive Plan-A cannot re-read is already owned by the
+          TD-14 post-condition hook (the authority for the protocols it covers);
+          letting an UNVERIFIABLE re-read drag a TD-14-proven ``CHAIN_VERIFIED``
+          down to ``UNVERIFIED`` would mislabel every clean V3 LP teardown. The
+          "never-existed / stale-enumeration" downgrade is owned by the PRE-teardown
+          report (:meth:`apply_to_verification_status`, AC-(b)) — a different signal.
+
+        Only ever *fails* (on residual open); never lowers a non-failed status and
+        never raises one. ``checked_count == 0`` (nothing read) passes through.
+        """
+        if self.has_confirmed_open:
+            return VerificationStatus.FAILED
         return proposed
 
     def to_dict(self) -> dict[str, Any]:

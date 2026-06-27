@@ -491,6 +491,23 @@ async def execute_and_verify(
             )
             verify_error_msg = f"Post-teardown verification error: {verify_err}. Manual check required."
 
+        # TD-15 (VIB-5473): fail-closed on-chain POST-teardown verification. After
+        # every closing intent has fired (risk reduction FIRST — inverted
+        # semantics preserved), re-read the KNOWN position set on-chain. A
+        # position the chain still reports OPEN flips the teardown to FAILED
+        # (catching the hook-less lending strand the post-condition path counts
+        # closed-by-execution); the PRE-teardown TD-08 reconciliation
+        # (``runner._teardown_reconciliation``) folds in so a never-existed /
+        # stale-enumeration closure is never certified CHAIN_VERIFIED. Composes
+        # with TD-14's status (only ever lowers confidence), never raises.
+        verification = await teardown_mgr.verify_closure_against_chain(
+            strategy,
+            verification=verification,
+            pre_execution_positions=positions,
+            market=teardown_market,
+            pre_teardown_reconciliation=getattr(runner, "_teardown_reconciliation", None),
+        )
+
         # VIB-5085: stamp the verified position counts onto the result so the
         # success result_json + the Phase-2 progress mark + any failure mark
         # source ``positions_closed`` from positions, not ``intents_succeeded``.

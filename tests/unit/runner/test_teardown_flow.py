@@ -1230,6 +1230,15 @@ def _make_teardown_manager_class_mock(
                 has_position_breakdown=True,
             )
         )
+    # TD-15 (VIB-5473): the lanes now compose the post-condition verification with
+    # a fail-closed on-chain POST-teardown reconciliation. The characterization
+    # default has no residual chain signal, so the real method would return the
+    # incoming verification unchanged — mirror that as a passthrough AsyncMock.
+    # (verify_closure_against_chain's own composition is unit-tested directly.)
+    async def _verify_against_chain(_strategy, *, verification, **_kwargs):
+        return verification
+
+    mgr.verify_closure_against_chain = AsyncMock(side_effect=_verify_against_chain)
     return mgr
 
 

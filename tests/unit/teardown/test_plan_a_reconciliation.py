@@ -245,6 +245,54 @@ def test_apply_to_verification_status(verdict, proposed, expected):
 
 
 # ---------------------------------------------------------------------------
+# POST-teardown composition (TD-15 / VIB-5473) — inverted directions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "verdict,proposed,expected",
+    [
+        # CONFIRMED_OPEN POST-teardown = residual on-chain risk → FAILED, always.
+        (ReconciliationVerdict.CONFIRMED_OPEN, VerificationStatus.CHAIN_VERIFIED, VerificationStatus.FAILED),
+        (ReconciliationVerdict.CONFIRMED_OPEN, VerificationStatus.UNVERIFIED, VerificationStatus.FAILED),
+        (ReconciliationVerdict.CONFIRMED_OPEN, VerificationStatus.NOT_RUN, VerificationStatus.FAILED),
+        # DIVERGED_CLOSED POST-teardown = the GOOD outcome (closing intent worked) → untouched.
+        (ReconciliationVerdict.DIVERGED_CLOSED, VerificationStatus.CHAIN_VERIFIED, VerificationStatus.CHAIN_VERIFIED),
+        (ReconciliationVerdict.DIVERGED_CLOSED, VerificationStatus.UNVERIFIED, VerificationStatus.UNVERIFIED),
+        # UNVERIFIABLE POST-teardown is a NO-OP: a KNOWN position Plan-A cannot
+        # re-read after closure (e.g. a burned LP NFT = "not found") is the success
+        # signal, not a doubt — TD-14's post-condition owns that closure proof, so
+        # this must NOT drag a chain-verified close down to unverified.
+        (ReconciliationVerdict.UNVERIFIABLE, VerificationStatus.CHAIN_VERIFIED, VerificationStatus.CHAIN_VERIFIED),
+        (ReconciliationVerdict.UNVERIFIABLE, VerificationStatus.UNVERIFIED, VerificationStatus.UNVERIFIED),
+    ],
+)
+def test_apply_post_teardown_to_verification_status(verdict, proposed, expected):
+    assert _report(verdict).apply_post_teardown_to_verification_status(proposed) is expected
+
+
+def test_post_teardown_confirmed_open_dominates_mixed_report():
+    """One residual CONFIRMED_OPEN fails the whole report even amid clean closes."""
+    report = ReconciliationReport(
+        deployment_id="d",
+        entries=(
+            PositionReconciliation("PositionType.LP", "1", "arbitrum", "lp", ReconciliationVerdict.DIVERGED_CLOSED),
+            PositionReconciliation("PositionType.SUPPLY", "2", "ethereum", "aave_v3", ReconciliationVerdict.CONFIRMED_OPEN),
+        ),
+    )
+    assert report.has_confirmed_open
+    assert report.apply_post_teardown_to_verification_status(VerificationStatus.CHAIN_VERIFIED) is VerificationStatus.FAILED
+
+
+def test_post_teardown_empty_report_passes_through():
+    """Nothing read POST-teardown ⇒ no signal ⇒ proposed status is untouched."""
+    empty = ReconciliationReport(deployment_id="d", entries=())
+    assert not empty.has_confirmed_open
+    for status in VerificationStatus:
+        assert empty.apply_post_teardown_to_verification_status(status) is status
+
+
+# ---------------------------------------------------------------------------
 # Runner wiring: reconcile_known_positions stashes the structured report
 # ---------------------------------------------------------------------------
 

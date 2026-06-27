@@ -299,6 +299,14 @@ def _mgr_mock_for_runner_lane(*, closure_result: TeardownResult, verify_ok: bool
             all_closed=verify_ok, positions_total=1, positions_closed=1 if verify_ok else 0
         )
     )
+
+    # TD-15 (VIB-5473): the runner lane composes the post-condition verdict with a
+    # fail-closed on-chain POST-teardown reconciliation. No residual chain signal
+    # in this fixture ⇒ passthrough (its own composition is unit-tested directly).
+    async def _verify_against_chain(_strategy, *, verification, **_kwargs):
+        return verification
+
+    mgr.verify_closure_against_chain = AsyncMock(side_effect=_verify_against_chain)
     mgr.run_token_consolidation = AsyncMock(return_value=ConsolidationOutcome(planned=1, succeeded=1, failed=0))
     # execute() must never be reached from the runner lane.
     mgr.execute = AsyncMock(side_effect=AssertionError("runner lane must not call manager.execute"))
@@ -339,6 +347,10 @@ class TestRunnerLaneHook:
             current_phase=TeardownPhase.TOKEN_CONSOLIDATION,
         )
         mgr.run_token_consolidation.assert_awaited_once()
+        # TD-15: prove the runner lane actually drives the fail-closed on-chain
+        # verifier — a regression that drops this wiring must fail the test, not
+        # silently pass on the passthrough mock.
+        mgr.verify_closure_against_chain.assert_awaited_once()
         call = mgr.run_token_consolidation.await_args
         assert call.kwargs["teardown_id"] == state.teardown_id
         assert call.kwargs["teardown_state"] is state
