@@ -326,6 +326,44 @@ class TeardownPreview:
                 setattr(self, attr, Decimal(str(value)))
 
 
+class VerificationStatus(StrEnum):
+    """How a teardown's reported ``positions_closed`` was established (VIB-2932 / VIB-5472).
+
+    ``positions_closed`` is a *count*; this enum records the *confidence* behind
+    that count so an unverifiable closure is never silently presented as a
+    chain-confirmed one. It is the qualitative companion to the quantitative
+    closure counters on :class:`ClosureVerification` / :class:`TeardownResult`.
+
+    Members (distinct categories, not an ordered scale):
+
+    - ``CHAIN_VERIFIED`` — every pre-execution position had a registered on-chain
+      post-condition (``TeardownPostCondition``) and all of them confirmed
+      closure against the chain. The strongest signal: closure is proven, not
+      assumed.
+    - ``UNVERIFIED`` — closure is reported (``all_closed`` is True) but at least
+      one position was counted *closed-by-execution* rather than chain-confirmed:
+      either its protocol has no registered post-condition (e.g. Aave / Morpho /
+      Compound lending today), or the verifier fell back to the in-memory
+      ``get_open_positions()`` read (no pre-execution snapshot). Closure is
+      plausible and nothing contradicts it, but the chain did not prove it — the
+      operator must treat the count as optimistic. This is the explicit, visible
+      surface for VIB-2932: an unverifiable closure is flagged, never hidden
+      inside a ``positions_closed`` number that looks chain-confirmed.
+    - ``FAILED`` — at least one pre-execution position still has residual on-chain
+      liquidity / debt, a post-condition errored, or verification itself raised.
+      Pairs with ``all_closed=False`` and a teardown ``success=False``.
+    - ``NOT_RUN`` — verification did not run for this result (execution failed
+      before the verify step, or a lane / early-exit path that never reaches the
+      verifier, e.g. an empty / cancelled / paused teardown). The default on a
+      freshly-built ``TeardownResult`` before the verify step stamps it.
+    """
+
+    CHAIN_VERIFIED = "chain_verified"
+    UNVERIFIED = "unverified"
+    FAILED = "failed"
+    NOT_RUN = "not_run"
+
+
 @dataclass(frozen=True)
 class ClosureVerification:
     """Position-level result of post-teardown closure verification (VIB-5085).
@@ -350,12 +388,19 @@ class ClosureVerification:
     signal instead (otherwise a balance-driven teardown that closed real positions
     but exposes no ``PositionInfo`` rows would persist ``positions_closed=0`` on
     success — the inverse of the VIB-5085 bug).
+
+    ``verification_status`` (VIB-2932 / VIB-5472) records the *confidence* behind
+    ``positions_closed`` — whether the closure was chain-confirmed, merely
+    counted closed-by-execution (``UNVERIFIED``), or failed. See
+    :class:`VerificationStatus`. It is derived alongside the counts so a caller
+    can both count and qualify the closure without re-deriving it.
     """
 
     all_closed: bool
     positions_total: int = 0
     positions_closed: int = 0
     has_position_breakdown: bool = False
+    verification_status: VerificationStatus = VerificationStatus.NOT_RUN
 
 
 @dataclass
@@ -417,6 +462,16 @@ class TeardownResult:
     positions_total: int = 0
     positions_closed: int = 0
     has_position_breakdown: bool = False
+
+    # VIB-2932 / VIB-5472: confidence behind ``positions_closed`` — whether the
+    # closure was chain-confirmed (``CHAIN_VERIFIED``), counted closed-by-execution
+    # without an on-chain post-condition proving it (``UNVERIFIED``), failed
+    # (``FAILED``), or never verified (``NOT_RUN``, the pre-verify default). The
+    # verify step stamps it from the ``ClosureVerification``; lifecycle persistence
+    # carries it into ``result_json`` so an unverifiable closure is visible to the
+    # operator and never masquerades as a chain-confirmed one. See
+    # :class:`VerificationStatus`.
+    verification_status: VerificationStatus = VerificationStatus.NOT_RUN
 
     # VIB-5140: block number of the last successful close-tx receipt in this
     # teardown. Threaded into the on-chain closure verifier so it pins its

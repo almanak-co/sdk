@@ -1999,9 +1999,14 @@ class TestInlineLanePositionCounts:
             "intents_total": 6,
             "positions_closed": 2,
             "positions_total": 2,
+            # VIB-2932 / VIB-5472: this lane never runs the on-chain verifier, so
+            # a known count is closed-by-execution (UNVERIFIED), never chain-confirmed.
+            "verification_status": "unverified",
         }
 
         unknown = _positions_completion_result(None, 6)
         assert "positions_closed" not in unknown
         assert "positions_total" not in unknown
         assert unknown["intents"] == 6
+        # VIB-2932 / VIB-5472: no count + no verifier ran → NOT_RUN.
+        assert unknown["verification_status"] == "not_run"

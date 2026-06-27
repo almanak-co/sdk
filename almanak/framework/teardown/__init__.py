@@ -54,6 +54,7 @@ from almanak.framework.teardown.models import (
     TeardownResult,
     TeardownState,
     TeardownStatus,
+    VerificationStatus,
     calculate_max_acceptable_loss,
 )
 from almanak.framework.teardown.post_conditions import (
@@ -90,6 +91,7 @@ __all__ = [
     "TeardownStatus",
     "TeardownRequest",
     "TeardownProfile",
+    "VerificationStatus",
     # Models - Escalation
     "EscalationLevel",
     "ApprovalRequest",

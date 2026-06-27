@@ -1107,6 +1107,39 @@ def _consolidation_payload(manager: Any, deployment_id: str) -> dict | None:
     return consolidation if isinstance(consolidation, dict) else None
 
 
+def _render_verification_status(manager: Any, deployment_id: str) -> None:
+    """Render the closure-verification confidence from ``result_json`` (VIB-2932 / VIB-5472).
+
+    Output only; never raises and never changes exit codes. Makes an UNVERIFIED
+    closure visible on the operator's primary surface — the count was reported but
+    not chain-confirmed, so the operator must verify on-chain before trusting it.
+    A CHAIN_VERIFIED closure is shown in green as positive confirmation; NOT_RUN
+    and a missing field are silent (nothing to assert).
+    """
+    getter = getattr(manager, "get_result_payload", None)
+    if not callable(getter):
+        return
+    try:
+        payload = getter(deployment_id)
+    except Exception:  # noqa: BLE001 — display-only, never block the CLI
+        return
+    status = (payload or {}).get("verification_status")
+    if status == "chain_verified":
+        click.secho("  closure verification: chain_verified", fg="green")
+    elif status == "unverified":
+        click.secho(
+            "  closure verification: UNVERIFIED — positions reported closed by execution "
+            "but NOT chain-confirmed; verify on-chain before trusting the count.",
+            fg="yellow",
+        )
+    elif status == "failed":
+        click.secho(
+            "  closure verification: FAILED — closure could not be confirmed on-chain "
+            "(residual position, post-condition error, or verifier exception).",
+            fg="red",
+        )
+
+
 def _render_consolidation_summary(manager: Any, deployment_id: str) -> None:
     """Render the token-consolidation outcome from ``result_json`` (VIB-5011).
 
@@ -1262,6 +1295,9 @@ def _poll_for_terminal_state(
                 f"positions_failed={request_row.positions_failed}, "
                 f"total={request_row.positions_total}"
             )
+            # VIB-2932 / VIB-5472: surface the closure-verification confidence so
+            # an UNVERIFIED (reported-but-not-chain-confirmed) closure is visible.
+            _render_verification_status(manager, deployment_id)
             # VIB-5011: render the token-consolidation outcome. Exit code
             # stays 0 even when consolidation swaps failed — the closure
             # itself succeeded and on-chain risk is removed.
@@ -1365,8 +1401,13 @@ def status(working_dir: str | None, strategy: str, as_json: bool):
     if request.current_phase:
         click.echo(f"  Phase:        {request.current_phase.value}")
     click.echo(f"  Progress:     {format_progress(request)}")
-    # VIB-5011: terminal consolidation summary (from result_json).
+    # Terminal payload (from result_json) — only present on COMPLETED rows
+    # (mark_completed writes result_json; mark_failed does not — a FAILED row's
+    # failure is already loud via Status + error_message).
     if request.status == TeardownStatus.COMPLETED:
+        # VIB-2932 / VIB-5472: closure-verification confidence.
+        _render_verification_status(manager, strategy)
+        # VIB-5011: terminal consolidation summary.
         _render_consolidation_summary(manager, strategy)
     click.echo()
     click.echo(click.style("Timestamps:", bold=True))

@@ -513,7 +513,15 @@ def _positions_completion_result(open_positions_count: int | None, intents_count
     lanes must NEVER fabricate ``positions_closed`` from the intent count — that
     is the conflation this ticket fixes; when the count is unknown the persistence
     lift falls back to the legacy ``intents`` key instead. Shared by both lanes.
+
+    VIB-2932 / VIB-5472: these lanes never run the on-chain closure verifier, so
+    a reported ``positions_closed`` here is counted closed-by-execution, never
+    chain-confirmed — stamp ``verification_status=UNVERIFIED`` so the count is
+    visibly optimistic. When no count is known the verifier simply did not run
+    (``NOT_RUN``).
     """
+    from ..teardown.models import VerificationStatus
+
     result: dict[str, Any] = {
         "intents": intents_count,
         "intents_succeeded": intents_count,
@@ -522,6 +530,9 @@ def _positions_completion_result(open_positions_count: int | None, intents_count
     if open_positions_count is not None:
         result["positions_closed"] = open_positions_count
         result["positions_total"] = open_positions_count
+        result["verification_status"] = VerificationStatus.UNVERIFIED.value
+    else:
+        result["verification_status"] = VerificationStatus.NOT_RUN.value
     return result
 
 

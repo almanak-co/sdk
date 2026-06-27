@@ -46,6 +46,7 @@ from almanak.framework.teardown.models import (
     TeardownResult,
     TeardownState,
     TeardownStatus,
+    VerificationStatus,
     calculate_max_acceptable_loss,
     encode_consolidation_consent,
 )
@@ -720,6 +721,7 @@ class TeardownManager:
                         positions_total=len(getattr(positions, "positions", []) or []),
                         positions_closed=0,
                         has_position_breakdown=True,
+                        verification_status=VerificationStatus.FAILED,
                     )
                     verify_error_msg = f"Post-teardown verification error: {verify_err}. Manual check required."
                 else:
@@ -731,11 +733,14 @@ class TeardownManager:
                 # pre-execution snapshot — on the in-memory fallback (empty
                 # snapshot) it stays False so the writer falls back to the intent
                 # count instead of persisting a misleading ``positions_closed=0``.
+                # VIB-2932 / VIB-5472: also stamp the verification confidence so
+                # the lifecycle surface can flag an unverifiable closure.
                 result = replace(
                     result,
                     positions_total=verification.positions_total,
                     positions_closed=verification.positions_closed,
                     has_position_breakdown=verification.has_position_breakdown,
+                    verification_status=verification.verification_status,
                 )
 
                 if not verification.all_closed:
@@ -2202,6 +2207,13 @@ class TeardownManager:
             wallet_address = self._teardown_wallet_address(strategy)
 
             failed_results: list[ClosureCheckResult] = []
+            # VIB-2932 / VIB-5472: track how many positions actually had an
+            # on-chain post-condition prove closure. When this equals
+            # ``positions_total`` the closure is fully chain-confirmed
+            # (CHAIN_VERIFIED); when some positions had no registered hook the
+            # closure is reported but only counted closed-by-execution
+            # (UNVERIFIED) — the count must not masquerade as chain-confirmed.
+            positions_with_hook = 0
             for position in snapshot_positions:
                 protocol = (getattr(position, "protocol", "") or "").lower()
                 hook = get_teardown_post_condition(protocol)
@@ -2217,6 +2229,7 @@ class TeardownManager:
                     )
                     continue
 
+                positions_with_hook += 1
                 try:
                     check = hook(
                         position=position,
@@ -2275,21 +2288,40 @@ class TeardownManager:
                     positions_total=positions_total,
                     positions_closed=positions_total - len(failed_results),
                     has_position_breakdown=True,
+                    verification_status=VerificationStatus.FAILED,
                 )
 
             # All registered post-conditions passed. We still log the
             # discover-path summary so the existing audit trail is intact.
+            # VIB-2932 / VIB-5472: a closure is CHAIN_VERIFIED only when EVERY
+            # pre-execution position had a post-condition that proved it closed.
+            # If any position lacked a registered hook it was counted
+            # closed-by-execution — report UNVERIFIED so the optimistic count is
+            # visible, never presented as chain-confirmed.
+            fully_chain_verified = positions_with_hook == positions_total
+            status = VerificationStatus.CHAIN_VERIFIED if fully_chain_verified else VerificationStatus.UNVERIFIED
             ids = [getattr(p, "position_id", "") for p in snapshot_positions]
-            logger.info(
-                "Teardown verification: %d position(s) passed on-chain post-condition checks: %s",
-                positions_total,
-                ids,
-            )
+            if fully_chain_verified:
+                logger.info(
+                    "Teardown verification: %d position(s) passed on-chain post-condition checks: %s",
+                    positions_total,
+                    ids,
+                )
+            else:
+                logger.warning(
+                    "Teardown verification UNVERIFIED: %d of %d position(s) had an on-chain "
+                    "post-condition; the remainder are counted closed-by-execution (no chain "
+                    "proof). positions=%s",
+                    positions_with_hook,
+                    positions_total,
+                    ids,
+                )
             return ClosureVerification(
                 all_closed=True,
                 positions_total=positions_total,
                 positions_closed=positions_total,
                 has_position_breakdown=True,
+                verification_status=status,
             )
 
         # Last-resort: legacy in-memory state read. Used when neither a
@@ -2302,8 +2334,16 @@ class TeardownManager:
         # ``positions_total`` to report — leave the counts at 0 and surface
         # only the all-closed signal (VIB-5085). Callers fall back to intent
         # counts when ``has_position_breakdown`` is not asserted.
+        #
+        # VIB-2932 / VIB-5472: this path never reads the chain, so a clear
+        # in-memory state is UNVERIFIED (closed-by-execution, not proven), and a
+        # residual is FAILED. Either way the closure was not chain-confirmed.
         positions = strategy.get_open_positions()
-        return ClosureVerification(all_closed=len(positions.positions) == 0)
+        all_closed = len(positions.positions) == 0
+        return ClosureVerification(
+            all_closed=all_closed,
+            verification_status=(VerificationStatus.UNVERIFIED if all_closed else VerificationStatus.FAILED),
+        )
 
     # ------------------------------------------------------------------
     # Helpers used by _verify_closure to plumb gateway / RPC / wallet to

@@ -424,7 +424,7 @@ async def execute_and_verify(
     Returns the (possibly-replaced) ``TeardownResult``. Does NOT handle
     alerts or cleanup — those are pipelined after this helper.
     """
-    from ..teardown.models import ClosureVerification, TeardownStatus
+    from ..teardown.models import ClosureVerification, TeardownStatus, VerificationStatus
     from .runner_teardown import _make_approval_callback, _safe_mark
 
     deployment_id = strategy.deployment_id
@@ -487,6 +487,7 @@ async def execute_and_verify(
                 positions_total=len(getattr(positions, "positions", []) or []),
                 positions_closed=0,
                 has_position_breakdown=True,
+                verification_status=VerificationStatus.FAILED,
             )
             verify_error_msg = f"Post-teardown verification error: {verify_err}. Manual check required."
 
@@ -497,11 +498,14 @@ async def execute_and_verify(
         # pre-execution snapshot — on the in-memory fallback (empty snapshot)
         # it stays False so callers fall back to the intent count rather than
         # persist a misleading ``positions_closed=0`` on a successful teardown.
+        # VIB-2932 / VIB-5472: also stamp the verification confidence so the
+        # lifecycle surface can flag an unverifiable closure.
         teardown_result = replace(
             teardown_result,
             positions_total=verification.positions_total,
             positions_closed=verification.positions_closed,
             has_position_breakdown=verification.has_position_breakdown,
+            verification_status=verification.verification_status,
         )
 
         if not verification.all_closed:
@@ -679,6 +683,7 @@ def map_teardown_result(
     mark_failed + teardown-failure shutdown).
     """
     from ..teardown import TeardownMode
+    from ..teardown.models import VerificationStatus
     from .runner_models import IterationResult, IterationStatus
     from .runner_teardown import _safe_mark
 
@@ -723,6 +728,31 @@ def map_teardown_result(
                 deployment_id,
                 "; ".join(teardown_result.consolidation_warnings) or "none",
             )
+        # VIB-2932 / VIB-5472: surface the closure-verification confidence on the
+        # passive operator log. An UNVERIFIED success means positions were closed
+        # by execution but NOT chain-confirmed (no on-chain post-condition for the
+        # protocol, or no pre-exec snapshot) — flag it loud so the count is never
+        # read as proven. CHAIN_VERIFIED stays at info; FAILED never reaches this
+        # success branch (it flips success=False upstream).
+        if teardown_result.verification_status == VerificationStatus.UNVERIFIED:
+            # Only quote the position counts when the verifier had a trustworthy
+            # pre-exec breakdown — on the in-memory fallback they are 0/0 and
+            # ``positions_closed`` falls back to the intent count for persistence,
+            # so quoting "0/0 closed" here would be misleading (CodeRabbit).
+            if teardown_result.has_position_breakdown:
+                logger.warning(
+                    "🛑 %s teardown closure UNVERIFIED: %d/%d position(s) reported closed "
+                    "by execution but NOT chain-confirmed — verify on-chain before trusting the count.",
+                    deployment_id,
+                    teardown_result.positions_closed,
+                    teardown_result.positions_total,
+                )
+            else:
+                logger.warning(
+                    "🛑 %s teardown closure UNVERIFIED: positions reported closed by execution "
+                    "but NOT chain-confirmed (no trustworthy position breakdown) — verify on-chain.",
+                    deployment_id,
+                )
         runner.request_shutdown()
         runner._lifecycle_write_state(deployment_id, "TERMINATED")
         if request:
@@ -742,6 +772,11 @@ def map_teardown_result(
                 result={
                     "positions_closed": positions_closed_count,
                     "positions_total": teardown_result.positions_total,
+                    # VIB-2932 / VIB-5472: closure-verification confidence rides
+                    # the existing result_json (no proto / schema change) so the
+                    # CLI `status` / --wait surface can flag an unverifiable
+                    # closure rather than present the count as chain-confirmed.
+                    "verification_status": teardown_result.verification_status.value,
                     "intents": teardown_result.intents_succeeded,  # back-compat alias
                     "intents_succeeded": teardown_result.intents_succeeded,
                     "intents_total": teardown_result.intents_total,

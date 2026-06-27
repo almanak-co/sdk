@@ -20,6 +20,7 @@ from almanak.framework.cli.teardown import (
     _consolidation_payload,
     _echo_warnings,
     _render_consolidation_summary,
+    _render_verification_status,
     status,
 )
 from almanak.framework.teardown.models import (
@@ -134,6 +135,49 @@ class TestRenderConsolidationSummary:
         assert _render_output(manager) == ""
 
 
+class TestRenderVerificationStatus:
+    """VIB-2932 / VIB-5472 — CLI surfacing of closure-verification confidence."""
+
+    @staticmethod
+    def _render(manager) -> str:
+        runner = CliRunner()
+
+        @click.command()
+        def _cmd():
+            _render_verification_status(manager, "deployment:abc")
+
+        result = runner.invoke(_cmd, [])
+        assert result.exit_code == 0
+        return result.output
+
+    def test_chain_verified_shown(self):
+        out = self._render(_manager_with({"verification_status": "chain_verified"}))
+        assert "chain_verified" in out
+
+    def test_unverified_flagged_loud(self):
+        out = self._render(_manager_with({"verification_status": "unverified"}))
+        assert "UNVERIFIED" in out
+        assert "NOT chain-confirmed" in out
+
+    def test_failed_shown(self):
+        out = self._render(_manager_with({"verification_status": "failed"}))
+        assert "FAILED" in out
+
+    def test_not_run_is_silent(self):
+        assert self._render(_manager_with({"verification_status": "not_run"})) == ""
+
+    def test_missing_field_is_silent(self):
+        assert self._render(_manager_with({})) == ""
+
+    def test_no_accessor_is_silent(self):
+        assert self._render(SimpleNamespace()) == ""
+
+    def test_accessor_raising_is_silent(self):
+        manager = MagicMock()
+        manager.get_result_payload.side_effect = RuntimeError("db locked")
+        assert self._render(manager) == ""
+
+
 class TestEchoWarnings:
     def test_caps_at_five(self):
         runner = CliRunner()
@@ -183,6 +227,21 @@ class TestStatusCommandConsolidationRender:
         assert result.exit_code == 0
         assert "Teardown Status" in result.output
         assert "consolidated 1 token(s) → USDC" in result.output
+
+    def test_completed_status_renders_verification(self, patched_env):
+        """VIB-2932 / VIB-5472: the plain `status` command surfaces the
+        closure-verification confidence on COMPLETED rows, not just `--wait`."""
+        manager = patched_env
+        manager.get_request.return_value = _request(TeardownStatus.COMPLETED)
+        manager.get_result_payload.return_value = {
+            "verification_status": "unverified",
+            "consolidation": {"planned": 0, "succeeded": 0, "failed": 0, "warnings": []},
+        }
+
+        result = CliRunner().invoke(status, ["-s", "deployment:abc"])
+
+        assert result.exit_code == 0
+        assert "UNVERIFIED" in result.output
 
     def test_non_completed_status_skips_consolidation(self, patched_env):
         manager = patched_env
