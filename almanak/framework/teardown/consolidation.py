@@ -174,7 +174,7 @@ def derive_strategy_token_universe(
 ) -> set[str]:
     """Build the strategy-scoped token universe (upper-cased symbols).
 
-    Union of three sources — never the full wallet (shared across
+    Union of four sources — never the full wallet (shared across
     deployments; see module docstring):
 
     1. Tokens referenced by this run's closing intents and
@@ -184,7 +184,17 @@ def derive_strategy_token_universe(
        ``accounting_state_manager.get_accounting_events_sync(deployment_id)``
        (the **accounting** StateManager — the teardown lifecycle SM does not
        expose this method).
-    3. ``strategy.get_teardown_profile().natural_exit_assets``.
+    3. The deployment's NO_ACCOUNTING ledger acquisitions (STAKE→wstETH,
+       WRAP→WETH, CDP MINT→stablecoin) via the MEASURED transaction-ledger read
+       (``accounting_state_manager.read_ledger_entries_measured``, VIB-5445).
+       These primitives write a ``transaction_ledger`` row but ZERO
+       ``accounting_events``, so source 2 is blind to them — without this source
+       a held NO_ACCOUNTING token is never a consolidation candidate and strands
+       at teardown (VIB-5471, generalising the VIB-5416 swap-back-clamp fix to
+       the consolidation lane). Measured-gated: an UNMEASURED / absent ledger
+       read contributes nothing (the token strands — the safe under-sweep
+       direction), never over-selecting on a shared wallet.
+    4. ``strategy.get_teardown_profile().natural_exit_assets``.
 
     Every source is best-effort: failures shrink the universe (fewer
     consolidation swaps) rather than raising.
@@ -218,6 +228,22 @@ def derive_strategy_token_universe(
             events = []
         universe |= extract_token_footprint(events)
 
+    # Source 3 (VIB-5471): NO_ACCOUNTING ledger acquisitions. STAKE/WRAP/CDP-mint
+    # write a transaction_ledger row but ZERO accounting_events, so the source-2
+    # footprint cannot see the held token; without this it would never be a
+    # consolidation candidate and would strand at teardown. Reuses the SAME
+    # measured-gated ledger reader as the swap-back clamp (VIB-5416) so the two
+    # fund-safety lanes share one trust gate — an UNMEASURED / absent / old-gateway
+    # read drops this lane (adds nothing → the token strands, the safe under-sweep
+    # direction; never over-selects a shared wallet).
+    if accounting_state_manager is not None and deployment_id:
+        from almanak.framework.accounting.basis import no_accounting_ledger_token_footprint
+
+        from .swap_clamp import read_no_accounting_ledger_rows
+
+        ledger_rows = read_no_accounting_ledger_rows(accounting_state_manager, deployment_id)
+        universe |= no_accounting_ledger_token_footprint(ledger_rows)
+
     try:
         profile = strategy.get_teardown_profile()
         for sym in getattr(profile, "natural_exit_assets", None) or []:
@@ -231,7 +257,8 @@ def derive_strategy_token_universe(
     # label persisted into an accounting-event payload). They are not swappable
     # token symbols; left in, the planner calls market.balance() on them and
     # logs a misleading balance_unavailable skip. Single filter seam so every
-    # source — intents, positions, accounting footprint, profile — is covered.
+    # source — intents, positions, accounting footprint, NO_ACCOUNTING ledger
+    # footprint, profile — is covered.
     dropped = {sym for sym in universe if not _is_consolidatable_symbol(sym)}
     if dropped:
         logger.debug("consolidation universe dropped non-token pool labels: %s", sorted(dropped))

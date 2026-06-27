@@ -1606,6 +1606,79 @@ def _timestamp_to_iso(value: Any) -> str | None:
     return str(value)
 
 
+def _is_no_accounting_ledger_row(row: Any) -> bool:
+    """True iff *row* is a SUCCESSFUL ``transaction_ledger`` row whose ``intent_type``
+    classifies to :attr:`AccountingCategory.NO_ACCOUNTING` (VIB-5416 / VIB-5471).
+
+    Single classification seam shared by every measured-ledger NO_ACCOUNTING
+    consumer — the swap-back clamp's synthetic-event projection
+    (:func:`synthetic_wallet_movement_events`) and the consolidation token
+    universe's footprint extractor (:func:`no_accounting_ledger_token_footprint`)
+    — so the two teardown fund-safety lanes can never drift on *which* primitives
+    count as NO_ACCOUNTING.
+
+    ``record_for`` raises ``UnknownIntentTypeError`` for an UNREGISTERED intent —
+    unlike ``classify``, which deliberately returns NO_ACCOUNTING for unknowns. A
+    typo'd / unknown intent string must NOT be treated as NO_ACCOUNTING (it would
+    over-count a token the deployment never acquired), so we require a REGISTERED
+    primitive AND the NO_ACCOUNTING category. Best-effort: an unreadable row,
+    empty intent type, or unregistered intent returns ``False``.
+    """
+    # Function-level import to avoid any module-load cycle (basis is a low layer).
+    from almanak.framework.primitives.taxonomy import record_for
+    from almanak.framework.primitives.types import AccountingCategory
+
+    if not _ledger_field(row, "success"):
+        return False
+    intent_type = str(_ledger_field(row, "intent_type") or "")
+    if not intent_type:
+        return False
+    # ``record_for`` is typed ``-> PrimitiveRecord`` (which always carries
+    # ``accounting_category``) and raises ``UnknownIntentTypeError`` for an
+    # unregistered intent — it never returns ``None``. The attribute access is
+    # kept INSIDE the ``try`` anyway so any unexpected lookup shape degrades to
+    # "not our lane" (the safe under-sweep direction) rather than raising
+    # (gemini-code-assist).
+    try:
+        return record_for(intent_type).accounting_category is AccountingCategory.NO_ACCOUNTING
+    except Exception:  # noqa: BLE001 — unknown/unregistered intent or malformed record → not our lane
+        return False
+
+
+def no_accounting_ledger_token_footprint(ledger_rows: list[Any] | None) -> set[str]:
+    """Token symbols (BOTH legs) of a deployment's NO_ACCOUNTING ledger rows (VIB-5471).
+
+    Generalises the VIB-5416 measured-ledger lane from the swap-back clamp to the
+    teardown **token-consolidation** universe. NO_ACCOUNTING primitives (Lido
+    STAKE→wstETH, WRAP_NATIVE→WETH, CDP MINT_STABLE→stablecoin, …) acquire a
+    fungible wallet token but emit ZERO ``accounting_events``, so the
+    accounting-event token footprint (:func:`...sweep_warning.extract_token_footprint`)
+    cannot see them — the consolidation planner never selects the held token as a
+    swap candidate and it strands at teardown (the SAME root cause VIB-5416 fixed
+    for the clamp). Folding these symbols into the strategy-scoped token universe
+    makes the held NO_ACCOUNTING token a consolidation candidate; the planner's
+    per-token decision still reads live balances and filters dust / native gas /
+    target, so a broader universe is safe (it never forces a swap).
+
+    Both legs are returned (the disposal ``token_in`` and the acquisition
+    ``token_out``) for symmetry with ``extract_token_footprint`` — a held leg of
+    EITHER side is a legitimate consolidation candidate, and the planner skips a
+    zero / native / target leg on its own. Original casing is preserved (canonical
+    registry symbols can be mixed-case, e.g. ``USDC.e``); membership comparisons
+    fold case downstream. Best-effort and pure: malformed rows are skipped, never
+    raised. ``ledger_rows`` of ``None`` / ``[]`` yields an empty set.
+    """
+    tokens: set[str] = set()
+    for row in ledger_rows or []:
+        if not _is_no_accounting_ledger_row(row):
+            continue
+        for leg in ("token_in", "token_out"):
+            val = str(_ledger_field(row, leg) or "")
+            if val:
+                tokens.add(val)
+    return tokens
+
+
 def synthetic_wallet_movement_events(
     ledger_rows: list[Any],
     deployment_id: str,
@@ -1637,9 +1710,6 @@ def synthetic_wallet_movement_events(
     # Function-level import to avoid any module-load cycle (basis is a low layer).
     import json as _json
 
-    from almanak.framework.primitives.taxonomy import record_for
-    from almanak.framework.primitives.types import AccountingCategory
-
     chain_norm = (chain or "").lower().strip()
     wallet_norm = (wallet_address or "").lower().strip()
     if not chain_norm or not wallet_norm:
@@ -1651,21 +1721,13 @@ def synthetic_wallet_movement_events(
 
     out: list[dict[str, Any]] = []
     for row in ledger_rows or []:
-        if not _ledger_field(row, "success"):
-            continue
-        intent_type = str(_ledger_field(row, "intent_type") or "")
-        if not intent_type:
-            continue
-        # ``record_for`` raises ``UnknownIntentTypeError`` for an UNREGISTERED
-        # intent — unlike ``classify``, which deliberately returns NO_ACCOUNTING
-        # for unknowns. A typo'd / unknown intent string must NOT be projected
-        # into the tracked lane (it would over-count a token the deployment never
-        # acquired), so require a registered primitive AND the NO_ACCOUNTING category.
-        try:
-            record = record_for(intent_type)
-        except Exception:  # noqa: BLE001 — unknown/unregistered intent → not our lane; skip
-            continue
-        if record.accounting_category is not AccountingCategory.NO_ACCOUNTING:
+        # Shared classification seam (:func:`_is_no_accounting_ledger_row`): only a
+        # SUCCESSFUL row whose ``intent_type`` is a REGISTERED NO_ACCOUNTING primitive
+        # is projected. SWAP/BORROW/WITHDRAW/PT rows already replay through their own
+        # dispatch entries (disjoint by accounting category, no double-count); an
+        # unknown/typo'd intent is skipped so it can't over-count a token the
+        # deployment never acquired.
+        if not _is_no_accounting_ledger_row(row):
             continue
         token_in = str(_ledger_field(row, "token_in") or "")
         token_out = str(_ledger_field(row, "token_out") or "")
