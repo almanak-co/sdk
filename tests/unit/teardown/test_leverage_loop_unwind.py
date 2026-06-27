@@ -83,7 +83,7 @@ class _LendingSim:
     def price(self, token: str) -> Decimal:
         return Decimal("1")
 
-    def balance(self, token: str) -> _Bal:
+    def balance(self, token: str, *, chain: str | None = None) -> _Bal:
         return _Bal(self.wallet_borrow if token == "USDC" else self.wallet_collateral)
 
     # ---- execution ----

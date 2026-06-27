@@ -1564,14 +1564,16 @@ def _get_template_teardown(
     def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
         """Health-factor-aware unwind: {teardown_comment}
 
-        Delegates to the framework staircase helper, which sizes each withdraw to
-        keep the post-withdraw health factor safe (avoids the single-shot revert
-        at higher leverage). See generate_leverage_loop_teardown.
+        Delegates to the framework's first-class lending unwind primitive, which
+        sizes each leg from the LIVE on-chain position (variableDebt / balanceOf)
+        and sequences withdraws to keep the post-withdraw health factor safe —
+        avoiding the dust-debt / single-shot withdraw revert. See
+        generate_lending_unwind.
         """
-        from almanak.framework.teardown.leverage_loop import generate_leverage_loop_teardown
+        from almanak.framework.teardown import generate_lending_unwind
 
         snapshot = market if market is not None else self.create_market_snapshot()
-        return generate_leverage_loop_teardown(
+        return generate_lending_unwind(
             market=snapshot,
             protocol=self.lending_protocol,
             collateral_token=self.collateral_token,

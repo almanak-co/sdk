@@ -2,9 +2,10 @@
 
 Covers the D1 deliverable from ``docs/internal/AccountingStrats.md``:
 
-* ``generate_teardown_intents`` delegates to the framework's HF-aware staircase
-  (``generate_leverage_loop_teardown``) with ``consolidate_to`` = the starting
-  collateral asset — the hand-rolled unconditional ``withdraw_all`` path is gone.
+* ``generate_teardown_intents`` delegates to the framework's HF-aware lending
+  unwind primitive (``generate_lending_unwind``) with ``consolidate_to`` = the
+  starting collateral asset — the hand-rolled unconditional ``withdraw_all`` path
+  is gone.
 * Structural acceptance: with live debt on the fake market, the emitted intent
   list contains exactly one ``withdraw_all`` and it comes strictly AFTER the
   last repay; the final sweep lands in the starting asset.
@@ -93,7 +94,7 @@ def _market(
 
 
 def test_teardown_delegates_to_staircase_with_starting_asset_sweep(monkeypatch) -> None:
-    import almanak.framework.teardown.leverage_loop as leverage_loop
+    import almanak.framework.teardown as teardown_pkg
 
     captured: dict[str, Any] = {}
 
@@ -101,7 +102,10 @@ def test_teardown_delegates_to_staircase_with_starting_asset_sweep(monkeypatch) 
         captured.update(kwargs)
         return ["SENTINEL"]
 
-    monkeypatch.setattr(leverage_loop, "generate_leverage_loop_teardown", fake_helper)
+    # The strategy now imports the canonical primitive from the package
+    # (``from almanak.framework.teardown import generate_lending_unwind``), so
+    # patch the package attribute the call site resolves at runtime.
+    monkeypatch.setattr(teardown_pkg, "generate_lending_unwind", fake_helper)
 
     strat = _bare_strategy()
     market = _market("2.0")

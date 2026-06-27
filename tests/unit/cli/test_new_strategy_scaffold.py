@@ -372,6 +372,26 @@ def test_strategy_file_has_teardown_methods(template: StrategyTemplate) -> None:
             assert required in method_names, f"{required}() missing from {strategy_class.name}"
 
 
+def test_lending_loop_scaffold_uses_canonical_unwind_primitive() -> None:
+    """The LENDING_LOOP teardown scaffold must call the canonical
+    ``generate_lending_unwind`` (TD-09), not the legacy
+    ``generate_leverage_loop_teardown`` alias. Locks the template swap so a
+    future fallback to the alias can't slip through silently.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        code = generate_strategy_file(
+            name="Smoke Test",
+            template=StrategyTemplate.LENDING_LOOP,
+            chain="arbitrum",
+            output_dir=Path(tmpdir),
+        )
+    assert "generate_lending_unwind" in code, "scaffold must import/call generate_lending_unwind"
+    assert "import generate_lending_unwind" in code, "scaffold must import the canonical primitive"
+    assert "generate_leverage_loop_teardown" not in code, (
+        "scaffold must not emit the legacy generate_leverage_loop_teardown alias"
+    )
+
+
 def _get_quote_asset_kwarg(code: str):
     """Extract the literal ``quote_asset=`` value from the generated decorator."""
     strategy_class = _get_strategy_class_def(ast.parse(code))
@@ -477,9 +497,7 @@ def test_copy_trader_config_uses_second_anvil_account_as_leader() -> None:
     )
     config = json.loads(config_str)
 
-    assert config["copy_trading"]["leaders"] == [
-        {"address": anvil_default_address(1), "chain": "arbitrum"}
-    ]
+    assert config["copy_trading"]["leaders"] == [{"address": anvil_default_address(1), "chain": "arbitrum"}]
 
 
 # ---------------------------------------------------------------------------

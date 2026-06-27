@@ -13,7 +13,7 @@ on-chain actions:
 Each of those fails simulation / reverts on-chain and strands the position in
 ``STRATEGY_ERROR`` / "Paused awaiting approval".
 
-``generate_leverage_loop_teardown`` already does the correct fresh-state unwind,
+``generate_lending_unwind`` already does the correct fresh-state unwind,
 but it is opt-in. This guard makes the fresh-exposure discipline the DEFAULT for
 *every* lending teardown by sanitising the strategy-emitted intent list before it
 is dispatched — in the runner lane, the CLI lane, and the inline fallback lane
@@ -26,7 +26,7 @@ repay live debt (a plain borrow holds only the borrowed principal, but owes
 principal + accrued interest, so the repay leaves dust debt and ``withdraw_all``
 reverts ``HealthFactorLowerThanLiquidationThreshold``), the guard REPLACES that
 position's naive ``REPAY → WITHDRAW(all)`` with the health-factor-aware unwind
-staircase (``generate_leverage_loop_teardown``), which sources the interest
+staircase (``generate_lending_unwind``), which sources the interest
 shortfall from collateral before the final withdraw-all. Synthesis fires ONLY
 when the strand is provable (measured debt + readable prices/balance + wallet
 < debt); otherwise the drop/reorder path is unchanged.
@@ -48,8 +48,8 @@ Correctness contract (CLAUDE.md §Accounting — Empty ≠ Zero):
 
 Ordering contract — DO NOT mangle an already-correct staircase (VIB-5139 P0):
 
-  ``generate_leverage_loop_teardown`` emits an ORDER-SENSITIVE *interleaved*
-  staircase (blueprint 14 §"Leveraged-loop teardown"):
+  ``generate_lending_unwind`` emits an ORDER-SENSITIVE *interleaved*
+  staircase (blueprint 14 §"Lending unwind primitive"):
   ``WITHDRAW(slice) → SWAP(collat→borrow) → REPAY → … → WITHDRAW(all) → SWAP``.
   Globally rebuilding the list as ``[*repays, *withdraws, …]`` would push a REPAY
   of the borrow token to the FRONT — but the wallet holds no borrow token until a
@@ -387,7 +387,7 @@ def _is_order_locked(intents: list[Any]) -> bool:
 
     Order-locked ONLY when a passthrough (non-lending-unwind) intent sits BETWEEN
     two lending-unwind intents — the SWAPs interleaved in
-    ``generate_leverage_loop_teardown``'s ``WITHDRAW → SWAP → REPAY`` staircase. A
+    ``generate_lending_unwind``'s ``WITHDRAW → SWAP → REPAY`` staircase. A
     genuine HF-safe staircase ALWAYS interleaves a collateral→debt SWAP between its
     withdraw and repay, so interleaving is the reliable signal that the plan is a
     known-safe, self-clearing unwind that must not be reordered or re-synthesized.
@@ -650,11 +650,11 @@ def _synthesize_or_degrade(
 ) -> list[Any]:
     """Replace a position's naive plan with the HF-aware unwind staircase.
 
-    Reuses ``generate_leverage_loop_teardown`` (the proven leverage-loop unwind,
-    blueprint 14 §"Leveraged-loop teardown") as the universal lending unwind: it
-    repays wallet-held debt first, then runs HF-safe WITHDRAW→SWAP→REPAY rounds
-    that source the interest shortfall from collateral, then a final
-    ``withdraw_all`` once debt is TRULY zero, then a residual sweep.
+    Calls the first-class ``generate_lending_unwind`` primitive (VIB-5467,
+    blueprint 14 §"Lending unwind primitive") — the same staircase a strategy can
+    call directly: it repays wallet-held debt first, then runs HF-safe
+    WITHDRAW→SWAP→REPAY rounds that source the interest shortfall from collateral,
+    then a final ``withdraw_all`` once debt is TRULY zero, then a residual sweep.
 
     ``consolidate_to=collateral_token`` for a cross-asset position (collateral ≠
     borrow, the plain-borrow case): the final sweep only converts the small
@@ -668,10 +668,10 @@ def _synthesize_or_degrade(
         return []
     collateral_token, borrow_token = legs
     protocol, chain, market_id = key
-    from almanak.framework.teardown.leverage_loop import generate_leverage_loop_teardown
+    from almanak.framework.teardown.lending_unwind import generate_lending_unwind
 
     try:
-        synth = generate_leverage_loop_teardown(
+        synth = generate_lending_unwind(
             market=market,
             protocol=protocol,
             collateral_token=collateral_token,
@@ -681,7 +681,7 @@ def _synthesize_or_degrade(
             mode=mode,
             consolidate_to=collateral_token if collateral_token != borrow_token else None,
         )
-    except Exception as exc:  # LeverageUnwindError / ValueError (missing price/LLTV)
+    except Exception as exc:  # LendingUnwindError / ValueError (missing price/LLTV)
         return _degrade_to_hf_safe_partial(market, key, collateral_token, borrow_token, result, str(exc))
 
     result.synthesized_positions.append(f"{protocol}/{chain}/{market_id}")

@@ -38,6 +38,11 @@ from almanak.framework.teardown.config import (
     TokenConsolidationConfig,
 )
 from almanak.framework.teardown.full_close import full_close_intents
+from almanak.framework.teardown.lending_unwind import (
+    LendingUnwindError,
+    generate_lending_unwind,
+    hf_safe_withdraw_slice_usd,
+)
 from almanak.framework.teardown.models import (
     ApprovalRequest,
     ApprovalResponse,
@@ -99,6 +104,10 @@ __all__ = [
     # Functions
     "calculate_max_acceptable_loss",
     "full_close_intents",
+    # Lending unwind primitive (VIB-5467 / TD-09)
+    "generate_lending_unwind",
+    "hf_safe_withdraw_slice_usd",
+    "LendingUnwindError",
     # Config
     "TeardownConfig",
     "TokenConsolidationConfig",
