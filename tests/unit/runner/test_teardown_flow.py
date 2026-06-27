@@ -2010,3 +2010,39 @@ class TestInlineLanePositionCounts:
         assert unknown["intents"] == 6
         # VIB-2932 / VIB-5472: no count + no verifier ran → NOT_RUN.
         assert unknown["verification_status"] == "not_run"
+
+
+# ---------------------------------------------------------------------------
+# TD-08 (VIB-5466): Plan-A reconciliation signal is reset per teardown
+# ---------------------------------------------------------------------------
+
+
+class TestReconciliationSignalReset:
+    """A reused runner must never leak a prior teardown's reconciliation report
+    into a later teardown that early-exits before the post-enumeration CHECK."""
+
+    @pytest.mark.asyncio
+    @patch("almanak.framework.teardown.get_teardown_state_manager_for_runtime")
+    async def test_no_positions_early_exit_clears_stale_report(self, mock_get_manager):
+        from almanak.framework.runner.runner_teardown import execute_teardown
+
+        manager = MagicMock()
+        manager.get_active_request.return_value = None  # strategy-self-signalled
+        mock_get_manager.return_value = manager
+
+        runner = _make_runner()
+        runner._get_gateway_client = MagicMock(return_value=None)
+        runner._lifecycle_write_state = MagicMock()
+        runner.request_shutdown = MagicMock()
+        runner._record_success = MagicMock()
+        # Stale report left over from a hypothetical prior teardown on this runner.
+        runner._teardown_reconciliation = object()
+
+        # No positions to close → the lane early-exits BEFORE the reconciliation
+        # CHECK would run; only the top-of-function reset can clear the stale value.
+        strategy = _make_strategy(deployment_id="reuse_strat", teardown_intents=[])
+
+        result = await execute_teardown(runner, strategy, TeardownMode.SOFT, datetime.now(UTC))
+
+        assert result.status == IterationStatus.TEARDOWN
+        assert runner._teardown_reconciliation is None

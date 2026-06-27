@@ -366,6 +366,54 @@ async def _count_open_positions(strategy: Any) -> int | None:
         return None
 
 
+async def reconcile_known_positions(runner: Any, strategy: Any, teardown_market: Any | None) -> Any:
+    """Plan-A on-chain reconciliation CHECK over the KNOWN position set (TD-08 / VIB-5466).
+
+    After teardown ledger enumeration, confirm each KNOWN position's live on-chain
+    state and compare it to the WARM ledger's belief. Divergence (ledger believes
+    open, chain reports closed) and unconfirmable positions are flagged LOUDLY with
+    a structured :class:`~almanak.framework.teardown.plan_a_reconciliation.ReconciliationReport`
+    that the TD-15 fail-closed verification consumes (and that composes with the
+    TD-14 ``verification_status`` via ``report.apply_to_verification_status``).
+
+    This is a CHECK, not an action: it closes/sweeps nothing, emits no intent, and
+    is scoped strictly to the positions the framework already enumerated — NEVER a
+    wallet-wide scan (that is Plan B / ``--discover``). It also never blocks the
+    teardown's risk-reducing intents (blueprint 14 §Teardown — the check is loud
+    but observational). Returns ``None`` only when the known set could not be
+    enumerated at all; otherwise a report (possibly empty) is always returned.
+
+    Never raises — reconciliation must never fault the teardown lane.
+    """
+    from ..teardown.plan_a_reconciliation import reconcile_known_positions_against_chain
+    from ..teardown.registry_enumeration import resolve_open_positions_with_registry
+
+    try:
+        summary = await resolve_open_positions_with_registry(strategy)
+    except Exception:
+        logger.debug(
+            "Teardown Plan-A reconciliation: could not enumerate the known position set — CHECK skipped",
+            exc_info=True,
+        )
+        return None
+
+    gateway_client = getattr(strategy, "_gateway_client", None)
+    network = str(getattr(strategy, "_gateway_network", "") or "")
+    try:
+        return await reconcile_known_positions_against_chain(
+            summary=summary,
+            gateway_client=gateway_client,
+            market=teardown_market,
+            network=network,
+        )
+    except Exception:
+        logger.debug(
+            "Teardown Plan-A reconciliation: CHECK errored — continuing teardown (observational only)",
+            exc_info=True,
+        )
+        return None
+
+
 async def _recover_orphaned_lp_intents(
     runner: Any,
     strategy: Any,
@@ -649,6 +697,12 @@ async def execute_teardown(  # noqa: C901
     from .runner_models import IterationResult, IterationStatus
 
     deployment_id = strategy.deployment_id
+    # TD-08 (VIB-5466): reset the Plan-A reconciliation signal at the very start
+    # so an early-exit path (no positions / all balances zero / generation
+    # failure) on a REUSED runner instance can never let a prior teardown's
+    # divergence report leak into this one. The post-enumeration CHECK below
+    # overwrites it on the lanes that reach it.
+    runner._teardown_reconciliation = None
     # Both modes have a real cross-process teardown channel: SQLite locally,
     # gateway-backed in hosted mode. Any error here is a genuine
     # misconfiguration and should propagate.
@@ -759,6 +813,16 @@ async def execute_teardown(  # noqa: C901
     total_positions = open_positions_count if open_positions_count is not None else len(teardown_intents)
     if request:
         _safe_mark(manager, "mark_started", deployment_id, total_positions=total_positions)
+
+    # TD-08 (VIB-5466): Plan-A on-chain reconciliation CHECK. After ledger
+    # enumeration, a protocol-scoped chain read confirms each KNOWN position's
+    # live state and flags any divergence from the WARM ledger LOUDLY with a
+    # structured signal stashed on the runner for the TD-15 fail-closed verifier
+    # to consume (it composes with TD-14's verification_status). CHECK only:
+    # closes/sweeps nothing, emits no intent, and is position-scoped — never a
+    # wallet-wide sweep (that is Plan B). The attribute was reset to None at the
+    # top of this function, so the early-exit lanes leave no stale report behind.
+    runner._teardown_reconciliation = await reconcile_known_positions(runner, strategy, teardown_market)
 
     # Step T2.5: Pre-fetch prices for tokens in teardown intents
     if teardown_market is not None and hasattr(teardown_market, "price"):
