@@ -3725,6 +3725,23 @@ class StrategyRunner:
             return False
 
         intent_type_str = self._registry_intent_type_str(intent)
+        # TD-03 (VIB-5461): Pendle (PT + LP) has its own isolated cutover stream
+        # (Primitive.SWAP / 'pendle'). Delegate EVERY Pendle intent (LP_OPEN/
+        # LP_CLOSE for the LP holding; SWAP buy/sell + WITHDRAW redeem for the PT
+        # holding) BEFORE the lending and LP gates so the streams never
+        # cross-pollinate — a Pendle PT redeem is a WITHDRAW that the lending gate
+        # below would otherwise swallow.
+        # vib-5292: baselined "pendle" chain/protocol coupling literal (the
+        # connector-owned position-event classifier migration tracks its removal).
+        if "pendle" in (getattr(intent, "protocol", "") or "").lower():
+            return await self._maybe_save_ledger_with_registry_pendle(
+                strategy=strategy,
+                intent=intent,
+                result=result,
+                success=success,
+                entry=entry,
+                intent_type_str=intent_type_str,
+            )
         # TD-04 (VIB-5462): lending family has its own isolated cutover stream
         # (Primitive.LENDING / 'lending'). Delegate SUPPLY/BORROW/WITHDRAW/REPAY
         # to the dedicated lending dispatch BEFORE the LP gate so the two
@@ -4202,6 +4219,250 @@ class StrategyRunner:
             closed_tx=closed_tx,
             last_reconciled_at_block=None,
             matching_policy_version=MatchingPolicy.for_primitive(Primitive.LENDING),
+        )
+
+    @staticmethod
+    def _pendle_lp_market_anchor(result: Any, intent_type_str: str) -> str:
+        """Resolve the Pendle LP market address (the LP identity anchor), or ``""``.
+
+        Pendle's LP token is the market contract itself, so the receipt-derived
+        ``market_address`` on ``lp_open_data`` (OPEN) / ``lp_close_data`` (CLOSE)
+        is the stable identity (one market ⇔ one maturity). Reads the typed
+        attribute first, then the serialised dict — mirroring
+        :meth:`_result_lp_open_data`. Returns ``""`` (never fabricated) when
+        absent so the caller falls back to ``save_ledger_entry``.
+        """
+        data = (
+            StrategyRunner._result_lp_open_data(result)
+            if intent_type_str == "LP_OPEN"
+            else StrategyRunner._result_lp_close_data(result)
+        )
+        if data is None:
+            return ""
+        market = getattr(data, "market_address", None)
+        if market is None and isinstance(data, dict):
+            market = data.get("market_address")
+        return str(market or "").strip()
+
+    def _classify_pendle_registry(
+        self,
+        *,
+        intent: AnyIntent,
+        intent_type_str: str,
+        result: Any,
+        chain: str,
+    ) -> tuple[str, str, bool] | None:
+        """Resolve ``(kind, anchor, is_open)`` for a Pendle intent, or ``None``.
+
+        - ``LP_OPEN`` / ``LP_CLOSE`` → ``kind='lp'``; anchor = receipt
+          ``market_address``; ``is_open`` True on OPEN, False on CLOSE.
+        - PT buy/sell (``SWAP``) / redeem (``WITHDRAW``) → ``kind='pt'``; resolved
+          via the canonical ``_pendle_pt_event`` seam (the SAME classifier the
+          position-events lane uses, so the registry anchor is byte-identical to
+          the PT position key). OPEN on buy, CLOSE on sell/redeem. The anchor IS
+          the maturity-bearing symbol, so maturity is intrinsic to the identity —
+          no separate maturity field (which would need a connector parse).
+
+        Returns ``None`` for any non-PT/non-LP Pendle action (YT / SY swap, a
+        non-PT Pendle withdraw) — the caller then falls back to
+        ``save_ledger_entry``. Per CLAUDE.md "Empty ≠ Zero" a missing anchor is a
+        skip, never a fabricated identity.
+        """
+        from almanak.framework.migration.backfill import _PENDLE_KIND_LP, _PENDLE_KIND_PT
+
+        if intent_type_str in ("LP_OPEN", "LP_CLOSE"):
+            market = self._pendle_lp_market_anchor(result, intent_type_str)
+            if not market:
+                return None
+            return _PENDLE_KIND_LP, market.lower(), intent_type_str == "LP_OPEN"
+
+        # PT path — buy/sell arrive as SWAP, redeem as WITHDRAW. Reuse the
+        # connector-aligned classifier; the wallet segment of its position_id is
+        # irrelevant here (we read only the trailing symbol), so pass "".
+        from almanak.framework.observability.position_events import (
+            PositionEventType,
+            _pendle_pt_event,
+            _redeem_pt_symbol_from_legs,
+        )
+
+        redeem_symbol = _redeem_pt_symbol_from_legs(getattr(result, "extracted_data", None))
+        pt = _pendle_pt_event(intent, intent_type_str, chain, "", redeem_pt_symbol=redeem_symbol)
+        if pt is None:
+            return None
+        event_type, position_id = pt
+        symbol = position_id.rsplit(":", 1)[-1] if ":" in position_id else ""
+        if not symbol:
+            return None
+        return _PENDLE_KIND_PT, symbol, event_type == PositionEventType.OPEN
+
+    async def _maybe_save_ledger_with_registry_pendle(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        intent: AnyIntent,
+        result: Any,
+        success: bool,
+        entry: Any,
+        intent_type_str: str,
+    ) -> bool:
+        """Route a Pendle PT / LP action through ``save_ledger_and_registry``.
+
+        TD-03 (VIB-5461) — the Pendle sibling of
+        :meth:`_maybe_save_ledger_with_registry`. Persists the on-chain
+        *(market, kind)* identity (LP holding for LP_OPEN/LP_CLOSE; PT holding for
+        a PT buy/sell/redeem) so a wiped-state restart re-derives the open Pendle
+        position from the durable registry. Returns ``True`` iff the row routed
+        through the atomic primitive; ``False`` on any path-miss (caller falls
+        back to plain ``save_ledger_entry``):
+
+        - the Pendle cutover boot-guard hasn't cleared ``(Primitive.SWAP, 'pendle')``;
+        - the on-chain TX did not land (chain truth, NOT the framework verdict);
+        - the action is not a tracked PT/LP holding (YT/SY swap, non-PT withdraw);
+        - the intent/receipt carries no usable market/symbol anchor (Empty ≠ Zero).
+
+        Both kinds land in the isolated swap-primitive partition
+        (``Primitive.SWAP`` / ``AccountingCategory.SWAP``) with ``kind`` ∈
+        {pt, lp} the within-partition discriminator. A PT/LP holding is a balance,
+        not an NFT, so a re-buy / re-add UPSERTs the SAME row idempotently and a
+        sell / redeem / LP_CLOSE flips it to ``status='closed'``.
+        """
+        from almanak.framework.accounting.commit import save_ledger_and_registry
+        from almanak.framework.migration.backfill import (
+            physical_identity_hash_pendle,
+            semantic_grouping_key_pendle,
+        )
+        from almanak.framework.primitives.types import Primitive
+        from almanak.framework.runner.cutover import is_cutover_active
+
+        if result is None or not bool(getattr(result, "success", False)):
+            return False
+        # ``success`` is forwarded only for telemetry; do NOT gate on it (audit
+        # P1: slippage / reconciliation can flip it False post-confirmation, but
+        # the registry must still record the landed state).
+        _ = success
+        if not is_cutover_active(self, Primitive.SWAP, "pendle"):
+            return False
+
+        chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
+        if not chain:
+            return False
+
+        classified = self._classify_pendle_registry(
+            intent=intent, intent_type_str=intent_type_str, result=result, chain=chain
+        )
+        if classified is None:
+            return False
+        kind, anchor, is_open = classified
+
+        try:
+            pih = physical_identity_hash_pendle(chain=chain, anchor=anchor, kind=kind)
+            sgk = semantic_grouping_key_pendle(chain=chain, anchor=anchor, kind=kind)
+        except ValueError:
+            logger.info(
+                "Registry-mode skip: pendle %s has no usable anchor; falling back to save_ledger_entry",
+                intent_type_str,
+            )
+            return False
+
+        # KNOWN LIMITATION (reused-identity primitive): a Pendle (market, kind)
+        # identity is reused across open→close→reopen cycles, but the registry
+        # UPSERT enforces a strict monotone status (open→closed only — blueprint
+        # 28 §4.3). A PT re-buy / LP re-add that re-opens a holding the strategy
+        # previously FULLY exited cannot flip the closed row back to open here.
+        # This never strands on a live run (the additive-union teardown
+        # enumeration also reads the strategy's own get_open_positions()); only a
+        # full-close → reopen → total-state-wipe → teardown sequence is affected.
+        # Identical to the lending cutover's documented limitation.
+        status: Literal["open", "closed", "reorg_invalidated"] = "open" if is_open else "closed"
+        block = self._extract_block_number_from_result(result)
+        tx_hash = getattr(entry, "tx_hash", "") or None
+        # Protocol is sourced from the intent (it is "pendle") — no name literal.
+        payload: dict[str, Any] = {
+            "protocol": (getattr(intent, "protocol", "") or "").lower(),
+            "kind": kind,
+            "market_id": anchor,
+            "source": "runtime",
+        }
+        if kind == "pt":
+            payload["pt_symbol"] = anchor
+
+        registry_row = self._build_pendle_registry_row(
+            strategy=strategy,
+            physical_identity_hash=pih,
+            semantic_grouping_key=sgk,
+            payload=payload,
+            status=status,
+            # On a CLOSE the OPEN-side anchors are preserved by the ON CONFLICT
+            # UPSERT (it never overwrites opened_at_block / opened_tx), so we pass
+            # them only on the OPEN write.
+            opened_at_block=block if is_open else None,
+            opened_tx=tx_hash if is_open else None,
+            closed_at_block=None if is_open else block,
+            closed_tx=None if is_open else tx_hash,
+            handle=getattr(intent, "registry_handle", None),
+        )
+
+        await save_ledger_and_registry(
+            self.state_manager,
+            ledger=entry,
+            registry=registry_row,
+            mode="registry",
+        )
+        logger.info(
+            "Registry-mode pendle write OK for %s on %s kind=%s anchor=%s status=%s pih=%s",
+            intent_type_str,
+            chain,
+            kind,
+            anchor,
+            status,
+            pih,
+        )
+        return True
+
+    def _build_pendle_registry_row(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        physical_identity_hash: str,
+        semantic_grouping_key: str,
+        payload: dict,
+        status: Literal["open", "closed", "reorg_invalidated"],
+        opened_at_block: int | None,
+        opened_tx: str | None,
+        closed_at_block: int | None,
+        closed_tx: str | None,
+        handle: str | None,
+    ) -> Any:
+        """Construct a Pendle ``RegistryRow`` (TD-03 / VIB-5461).
+
+        The Pendle sibling of :meth:`_build_lending_registry_row` — stamps the
+        isolated ``Primitive.SWAP`` / ``AccountingCategory.SWAP`` partition,
+        ``pendle@v1`` grouping, and the per-primitive ``matching_policy_version``
+        (never hardcoded).
+        """
+        from almanak.framework.accounting.commit import RegistryRow
+        from almanak.framework.accounting.policy import MatchingPolicy
+        from almanak.framework.migration.backfill import _PENDLE_GROUPING_POLICY_VERSION
+        from almanak.framework.primitives.types import AccountingCategory, Primitive
+
+        chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
+        return RegistryRow(
+            deployment_id=strategy.deployment_id,
+            chain=chain,
+            primitive=Primitive.SWAP,
+            accounting_category=AccountingCategory.SWAP,
+            physical_identity_hash=physical_identity_hash,
+            semantic_grouping_key=semantic_grouping_key,
+            grouping_policy_version=_PENDLE_GROUPING_POLICY_VERSION,
+            handle=handle,
+            status=status,
+            payload=dict(payload),
+            opened_at_block=opened_at_block,
+            opened_tx=opened_tx,
+            closed_at_block=closed_at_block,
+            closed_tx=closed_tx,
+            last_reconciled_at_block=None,
+            matching_policy_version=MatchingPolicy.for_primitive(Primitive.SWAP),
         )
 
     @staticmethod

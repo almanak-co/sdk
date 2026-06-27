@@ -45,10 +45,11 @@ async def test_active_cutovers_includes_lp(tmp_path) -> None:
     isolated UniV4 LP cutover (``Primitive.LP_V4`` / ``'lp_v4'``). TD-04 /
     VIB-5462 adds the lending cutover (``Primitive.LENDING`` / ``'lending'``;
     Aave canonical). TD-02 / VIB-5460 adds the perp cutover (``Primitive.PERP`` /
-    ``'perp'``; GMX V2 canonical). The boot loop iterates every entry, so this
-    pins the exact set so a future PR can't slip an extra entry in (a primitive
-    whose backfill reader / writer aren't yet integrated) without explicit test
-    churn.
+    ``'perp'``; GMX V2 canonical). TD-03 / VIB-5461 adds the Pendle PT+LP cutover
+    keyed on the otherwise-empty swap-primitive partition (``Primitive.SWAP`` /
+    ``'pendle'``). The boot loop iterates every entry, so this pins the exact set
+    so a future PR can't slip an extra entry in (a primitive whose backfill
+    reader / writer aren't yet integrated) without explicit test churn.
     """
     pairs = {(s.primitive, s.cutover_key) for s in ACTIVE_CUTOVERS}
     assert pairs == {
@@ -56,6 +57,7 @@ async def test_active_cutovers_includes_lp(tmp_path) -> None:
         (Primitive.LP_V4, "lp_v4"),
         (Primitive.LENDING, "lending"),
         (Primitive.PERP, "perp"),
+        (Primitive.SWAP, "pendle"),
     }, f"unexpected ACTIVE_CUTOVERS: {[(s.primitive.value, s.cutover_key) for s in ACTIVE_CUTOVERS]}"
 
 

@@ -526,6 +526,146 @@ def semantic_grouping_key_lending(*, chain: str, protocol: str, market_id: str, 
 
 
 # =============================================================================
+# Pendle identity helpers — receipt/intent-fact-only (TD-03 / VIB-5461)
+# =============================================================================
+#
+# A Pendle position has no NFT either: the LP token is a fungible ERC-20 minted
+# by the market contract, and a PT is a fungible ERC-20 whose maturity is
+# embedded in its symbol. Both KINDS share one identity anchor — the market —
+# and differ only by which side of it the strategy holds:
+#
+#   * ``kind='pt'``  — a principal-token holding. The canonical maturity-bearing
+#     PT symbol (e.g. ``pt-wsteth-25jun2026``) is the only identifier present in
+#     BOTH the intent and the persisted ledger row (a Pendle ``SwapIntent``
+#     carries no market and the resolved market address is never persisted), so
+#     the symbol IS the anchor — and it uniquely implies one market ⇔ one
+#     maturity.  This is byte-identical to the accounting / position-event PT key
+#     (``observability/position_events.py:_pendle_pt_event``).
+#   * ``kind='lp'``  — a market-LP holding. The market address (== the LP token
+#     address in Pendle) is the anchor; one market ⇔ one maturity, so the market
+#     alone is a sufficient identity (the receipt parser surfaces it on
+#     ``lp_open_data`` / ``lp_close_data`` ``market_address``).
+#
+# The registry encodes both axes — ``market_id`` (the opaque anchor) and
+# ``kind`` — so a wiped-state restart re-derives every open Pendle PT/LP holding
+# from WARM. Both kinds live in ONE isolated registry partition
+# (``Primitive.SWAP`` / ``cutover_key='pendle'``) — the swap-primitive partition
+# is otherwise empty (plain swaps create no tracked positions), so reading it
+# can never collide with the crowded UniV3/V4 ``lp`` partition. ``kind`` is the
+# within-partition discriminator, exactly as ``leg`` is for lending.
+
+# The two canonical Pendle kinds. ``kind`` is part of the physical identity so a
+# PT and an LP on the same market never collapse onto one registry row.
+_PENDLE_KIND_PT = "pt"
+_PENDLE_KIND_LP = "lp"
+
+# Map the durable ``position_events.position_type`` (and the taxonomy
+# ``PositionKind``) Pendle values onto the registry kind. The runtime path maps
+# the action to a kind directly (a PT swap/redeem → pt, an LP open/close → lp);
+# the backfill maps the persisted ``position_type``. Both funnel through this one
+# table so the two paths can never disagree.
+_PENDLE_POSITION_TYPE_TO_KIND: dict[str, str] = {
+    "PENDLE_PT": _PENDLE_KIND_PT,
+}
+
+
+def pendle_kind_for_position_type(position_type: str) -> str | None:
+    """Map a Pendle ``position_type`` to its registry kind, or ``None``.
+
+    ``None`` for any non-Pendle-PT position type — the backfill caller treats
+    that as "not this cutover" and skips the row (never fabricates a kind). Only
+    ``PENDLE_PT`` is mapped here because the LEGACY ``position_events`` for a
+    Pendle LP carry the generic ``position_type='LP'`` and the LP-token-WEI
+    ``position_id`` (no market column), so the market anchor the runtime path
+    uses is NOT reconstructable from legacy events — Pendle LP is therefore a
+    RUNTIME-only registry write, re-derived on a wiped restart via the additive-
+    union strategy enumeration (see :class:`PendleCutoverReader`).
+    """
+    return _PENDLE_POSITION_TYPE_TO_KIND.get((position_type or "").strip().upper())
+
+
+def pendle_registry_anchor(*, kind: str, market_address: str | None, pt_symbol: str | None) -> str:
+    """Canonical per-market discriminator for a Pendle registry row.
+
+    Kind-driven by construction:
+
+    * ``kind='lp'`` → the ``market_address`` (== the Pendle LP-token address) is
+      the anchor.
+    * ``kind='pt'`` → the maturity-bearing ``pt_symbol`` is the anchor (a PT
+      intent carries no market; the symbol is the only shared identifier).
+
+    Both lowercase to one canonical string so a runtime UPSERT lands on the same
+    ``physical_identity_hash`` a future writer would synthesize. Raises
+    ``ValueError`` when the required input is empty — per CLAUDE.md "Empty ≠
+    Zero" we never hash a fabricated/blank anchor.
+    """
+    kind_norm = (kind or "").strip().lower()
+    if kind_norm == _PENDLE_KIND_LP:
+        raw = (market_address or "").strip()
+    elif kind_norm == _PENDLE_KIND_PT:
+        raw = (pt_symbol or "").strip()
+    else:
+        raise ValueError(f"pendle_registry_anchor: kind must be pt/lp, got {kind!r}")
+    norm = raw.lower()
+    if not norm:
+        raise ValueError(f"pendle_registry_anchor: empty anchor for kind={kind_norm!r}")
+    return norm
+
+
+def physical_identity_hash_pendle(*, chain: str, anchor: str, kind: str) -> str:
+    """Compute the canonical Pendle ``physical_identity_hash``.
+
+    Identity tuple (no config — blueprint 28 §6.6) is the on-chain
+    *(chain, "pendle", anchor, kind)*::
+
+        seed = f"{chain}:pendle:{anchor.lower()}:{kind}"
+        hash = "0x" + sha256(seed.encode()).hexdigest()
+
+    A Pendle holding is a *singleton* per ``(chain, market, kind)`` — a second PT
+    buy increases the PT balance and a second LP add increases the LP-token
+    balance; neither mints a new position — so the physical hash and the semantic
+    grouping key share the same tuple (like lending, unlike LP NFTs). The
+    auto-mode unique index then keeps exactly one OPEN row per holding and a
+    re-buy / re-add UPSERTs it idempotently.
+
+    Raises ``ValueError`` on any empty anchor or an unknown ``kind``.
+    """
+    chain_norm = (chain or "").strip().lower()
+    if not chain_norm:
+        raise ValueError("physical_identity_hash_pendle: chain must be non-empty")
+    kind_norm = (kind or "").strip().lower()
+    if kind_norm not in (_PENDLE_KIND_PT, _PENDLE_KIND_LP):
+        raise ValueError(f"physical_identity_hash_pendle: kind must be pt/lp, got {kind!r}")
+    anchor_norm = (anchor or "").strip().lower()
+    if not anchor_norm:
+        raise ValueError("physical_identity_hash_pendle: anchor must be non-empty")
+    seed = f"{chain_norm}:pendle:{anchor_norm}:{kind_norm}"
+    return "0x" + hashlib.sha256(seed.encode()).hexdigest()
+
+
+def semantic_grouping_key_pendle(*, chain: str, anchor: str, kind: str) -> str:
+    """Compute the Pendle ``semantic_grouping_key``.
+
+        f"{chain}:pendle:{anchor.lower()}:{kind}"
+
+    Equal to the physical hash's seed (sans sha256): a Pendle holding is a
+    singleton, so the auto-mode collision predicate is "one open row per
+    ``(chain, market, kind)``" — exactly the desired idempotent re-buy / re-add
+    behaviour. Raises ``ValueError`` on an empty anchor or an unknown ``kind``.
+    """
+    chain_norm = (chain or "").strip().lower()
+    if not chain_norm:
+        raise ValueError("semantic_grouping_key_pendle: chain must be non-empty")
+    kind_norm = (kind or "").strip().lower()
+    if kind_norm not in (_PENDLE_KIND_PT, _PENDLE_KIND_LP):
+        raise ValueError(f"semantic_grouping_key_pendle: kind must be pt/lp, got {kind!r}")
+    anchor_norm = (anchor or "").strip().lower()
+    if not anchor_norm:
+        raise ValueError("semantic_grouping_key_pendle: anchor must be non-empty")
+    return f"{chain_norm}:pendle:{anchor_norm}:{kind_norm}"
+
+
+# =============================================================================
 # Perp identity helpers — receipt/intent-fact-only (TD-02 / VIB-5460)
 # =============================================================================
 #
@@ -1094,6 +1234,116 @@ def fold_position_events_for_lending(*, deployment_id: str, group: list[dict[str
 
 
 # =============================================================================
+# Pendle PT OPEN/CLOSE fold over `position_events` (TD-03 / VIB-5461)
+# =============================================================================
+
+
+def fold_position_events_for_pendle(*, deployment_id: str, group: list[dict[str, Any]]) -> RegistryRow | None:
+    """Fold a kind-homogeneous group of Pendle PT ``position_events`` into a ``RegistryRow``.
+
+    Scope: **PT only.** The reader's ``legacy_position_types = {"PENDLE_PT"}`` so
+    every event here is a PT lifecycle action keyed on the canonical maturity-
+    bearing PT symbol (``position_id = pendle_pt:<chain>:<wallet>:<symbol>``).
+    Legacy Pendle LP ``position_events`` carry ``position_type='LP'`` and the
+    LP-token-WEI ``position_id`` with NO market column, so the runtime market
+    anchor cannot be reconstructed from them — Pendle LP is a runtime-only
+    registry write whose wiped-restart safety comes from the additive-union
+    strategy enumeration, not this backfill (documented on
+    :class:`PendleCutoverReader`). Per CLAUDE.md "Empty ≠ Zero" we never
+    fabricate a market for an LP row we cannot identity-match.
+
+    A PT ``(market, kind)`` identity is REUSED across buy→sell→rebuy cycles
+    (pre-maturity), so the FINAL chronological state decides open vs closed —
+    reusing :func:`_resolve_lending_lifecycle` (a generic last-state-wins event
+    machine). A non-None ``close_ev`` ⇒ the holding is currently closed.
+
+    Returns ``None`` (skip, structured WARN) for empty groups, a non-PT
+    ``position_type``, or a group missing chain or a parseable PT symbol anchor.
+    """
+    if not group:
+        return None
+
+    open_ev, close_ev = _resolve_lending_lifecycle(group)
+    anchor_ev = close_ev if close_ev is not None else open_ev
+    if anchor_ev is None:
+        logger.warning(
+            "Backfill: pendle position_events group %s has no usable event; skipping",
+            group[0].get("position_id", "<unknown>"),
+        )
+        return None
+
+    kind = pendle_kind_for_position_type(str(anchor_ev.get("position_type") or ""))
+    if kind is None:
+        return None
+
+    chain = (anchor_ev.get("chain") or "").lower()
+    if not chain:
+        logger.warning(
+            "Backfill: pendle event %s missing chain; skipping",
+            anchor_ev.get("position_id", "<unknown>"),
+        )
+        return None
+
+    # The PT position_id is ``pendle_pt:<chain>:<wallet>:<symbol>`` — the symbol
+    # (last colon segment) is the maturity-bearing anchor, byte-identical to the
+    # runtime anchor (``observability/position_events.py:_pendle_pt_event``).
+    legacy_position_id = str(anchor_ev.get("position_id") or "")
+    pt_symbol = legacy_position_id.rsplit(":", 1)[-1] if ":" in legacy_position_id else ""
+    try:
+        anchor = pendle_registry_anchor(kind=kind, market_address=None, pt_symbol=pt_symbol)
+    except ValueError:
+        logger.warning(
+            "Backfill: pendle PT event %s has no parseable symbol anchor; skipping",
+            legacy_position_id or "<unknown>",
+        )
+        return None
+
+    # Protocol is sourced from the event (it is "pendle"); no name literal here.
+    protocol = (anchor_ev.get("protocol") or "").lower()
+    pih = physical_identity_hash_pendle(chain=chain, anchor=anchor, kind=kind)
+    sgk = semantic_grouping_key_pendle(chain=chain, anchor=anchor, kind=kind)
+    status: Literal["open", "closed", "reorg_invalidated"] = "closed" if close_ev is not None else "open"
+
+    # Maturity is intrinsic to the identity: the PT anchor IS the maturity-bearing
+    # symbol (and an LP anchor's market uniquely implies one maturity), so the
+    # registry never carries a separate, connector-parsed maturity field — a
+    # consumer that needs a wall-clock date parses the symbol in the Pendle
+    # connector, where that logic belongs (keeps the framework off a connector
+    # import).
+    payload: dict[str, Any] = {
+        "protocol": protocol,
+        "kind": kind,
+        "market_id": anchor,
+        "pt_symbol": anchor,
+        "legacy_position_id": legacy_position_id,
+        "synthesized_handle": False,
+        "source": "backfill",
+    }
+
+    opened_tx = (open_ev or {}).get("tx_hash") or None
+    closed_tx = (close_ev or {}).get("tx_hash") if close_ev is not None else None
+
+    return RegistryRow(
+        deployment_id=deployment_id,
+        chain=chain,
+        primitive=Primitive.SWAP,
+        accounting_category=AccountingCategory.SWAP,
+        physical_identity_hash=pih,
+        semantic_grouping_key=sgk,
+        grouping_policy_version=_PENDLE_GROUPING_POLICY_VERSION,
+        handle=None,
+        status=status,
+        payload=payload,
+        opened_at_block=None,
+        opened_tx=opened_tx,
+        closed_at_block=None,
+        closed_tx=closed_tx,
+        last_reconciled_at_block=None,
+        matching_policy_version=MatchingPolicy.for_primitive(Primitive.SWAP),
+    )
+
+
+# =============================================================================
 # Perp OPEN/CLOSE fold over `position_events` (TD-02 / VIB-5460)
 # =============================================================================
 
@@ -1279,6 +1529,16 @@ _PERP_REGISTRY_PROTOCOLS: frozenset[str] = GMX_COMPATIBLE_PROTOCOLS
 
 
 _PERP_GROUPING_POLICY_VERSION: str = "perp@v1"
+
+
+# TD-03 (VIB-5461): Pendle (PT + LP) cutover. Both kinds share ONE isolated
+# registry partition (``Primitive.SWAP`` / ``cutover_key='pendle'``) — the
+# swap-primitive partition is otherwise empty, so it can never collide with the
+# crowded UniV3/V4 ``lp`` partition, and the registry row shape
+# (``market_id`` anchor + ``kind``) is kind-agnostic. The grouping-policy version
+# is independent of the LP / lending families so a Pendle grouping-rule change
+# never re-baselines their rows.
+_PENDLE_GROUPING_POLICY_VERSION: str = "pendle@v1"
 
 
 def _assign_synthesized_handles(rows: list[RegistryRow]) -> list[RegistryRow]:
@@ -1810,6 +2070,44 @@ class LendingCutoverReader(BackfillReader):
 
     def fold_group_to_registry_row(self, *, deployment_id: str, group: list[dict[str, Any]]) -> RegistryRow | None:
         return fold_position_events_for_lending(deployment_id=deployment_id, group=group)
+
+
+class PendleCutoverReader(BackfillReader):
+    """TD-03 (VIB-5461) — Pendle per-primitive cutover backfill reader.
+
+    Reads only the cleanly-backfillable kind — ``PENDLE_PT`` — whose legacy
+    ``position_events`` carry the maturity-bearing symbol anchor in their
+    ``position_id``. Pendle LP legacy events carry no market column, so the
+    runtime market anchor is not reconstructable from them; Pendle LP is a
+    RUNTIME-only registry write (the dispatch in ``strategy_runner.py``) whose
+    wiped-restart safety comes from the additive-union teardown enumeration
+    reading the strategy's own ``get_open_positions()``, NOT this backfill —
+    documented here so the asymmetry is explicit and never silently fabricated
+    (CLAUDE.md "Empty ≠ Zero"). A first-class Pendle-LP backfill would require a
+    market column on the legacy events (follow-up).
+
+    Both kinds land in one isolated registry partition (``primitive='swap'`` —
+    the swap-primitive partition is otherwise empty, so it cannot collide with
+    the crowded ``lp`` partition). Keys its own ``migration_state`` row
+    (``primitive='swap'``, ``cutover_key='pendle'``) so its backfill-complete
+    flag is independent of every other cutover.
+    """
+
+    primitive = Primitive.SWAP
+    accounting_category = AccountingCategory.SWAP
+    cutover_key = "pendle"
+    grouping_policy_version = _PENDLE_GROUPING_POLICY_VERSION
+    legacy_position_types = frozenset({"PENDLE_PT"})
+
+    def matches_this_cutover(self, ev: dict[str, Any]) -> bool:
+        # Gate on the PENDLE_PT position_type only (a PositionKind value, not a
+        # protocol-name literal — no chain/protocol coupling): a PENDLE_PT event
+        # only ever originates from the Pendle connector, so this is sufficient
+        # AND keeps the framework free of a "pendle" string here.
+        return pendle_kind_for_position_type(str(ev.get("position_type") or "")) is not None
+
+    def fold_group_to_registry_row(self, *, deployment_id: str, group: list[dict[str, Any]]) -> RegistryRow | None:
+        return fold_position_events_for_pendle(deployment_id=deployment_id, group=group)
 
 
 class PerpCutoverReader(BackfillReader):

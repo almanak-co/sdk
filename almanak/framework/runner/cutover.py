@@ -31,6 +31,7 @@ from almanak.framework.migration import (
 )
 from almanak.framework.migration.backfill import (
     LendingCutoverReader,
+    PendleCutoverReader,
     PerpCutoverReader,
     UniV3LPCutoverReader,
     UniV4LPCutoverReader,
@@ -105,6 +106,16 @@ ACTIVE_CUTOVERS: tuple[CutoverSpec, ...] = (
         primitive=Primitive.PERP,
         cutover_key="perp",
         reader_factory=PerpCutoverReader,
+    ),
+    # TD-03 (VIB-5461): Pendle PT + LP share ONE isolated cutover keyed on the
+    # otherwise-empty swap-primitive partition (Primitive.SWAP / 'pendle'). The
+    # registry row shape (market_id anchor + kind ∈ {pt,lp}) is kind-agnostic;
+    # the backfill covers PT (LP is a runtime-only write — see
+    # PendleCutoverReader). Self-contained single entry.
+    CutoverSpec(
+        primitive=Primitive.SWAP,
+        cutover_key="pendle",
+        reader_factory=PendleCutoverReader,
     ),
 )
 

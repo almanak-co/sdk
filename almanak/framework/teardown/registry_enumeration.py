@@ -113,6 +113,30 @@ _LENDING_REGISTRY_SPECS: tuple[tuple[str, str], ...] = (("lending", "lending"),)
 _PERP_REGISTRY_SPECS: tuple[tuple[str, str], ...] = (("perp", "perp"),)
 
 
+# (primitive, accounting_category) for the Pendle cutover (TD-03 / VIB-5461).
+# Mirrors the Pendle ``CutoverSpec`` in ``almanak/framework/runner/cutover.py``
+# (``Primitive.SWAP`` / 'pendle'). Both Pendle KINDS (PT + LP) live in the
+# otherwise-empty swap-primitive partition, so we read ``primitive='swap'`` with
+# NO ``accounting_category`` filter (None ⇒ all) and discriminate on the payload
+# ``kind`` below — the partition holds nothing but Pendle rows, but the kind
+# filter keeps the read robust if a future non-Pendle swap-registry writer
+# appears. No protocol-name literal is needed here (``kind`` ∈ {pt, lp} is the
+# discriminator), so the framework stays free of chain/protocol coupling.
+_PENDLE_REGISTRY_SPECS: tuple[tuple[str, str | None], ...] = (("swap", None),)
+
+
+# A Pendle registry kind maps onto the teardown-lane position type: a PT holding
+# is a held ERC-20 swapped/redeemed at teardown (TOKEN — the catch-all the
+# teardown lane swaps to target last); an LP holding is a market-LP closed via
+# the strategy's own LP_CLOSE (LP). Both are READ-PATH-ONLY surfaces here — the
+# closing intent is the strategy's own (the registry payload carries the
+# identity, not a protocol slug for synthesis).
+_PENDLE_KIND_TO_POSITION_TYPE: dict[str, PositionType] = {
+    "pt": PositionType.TOKEN,
+    "lp": PositionType.LP,
+}
+
+
 # A lending registry leg maps onto the teardown-lane risk-ordered position type:
 # a supply (collateral) leg is withdrawn (SUPPLY), a borrow (debt) leg is repaid
 # (BORROW). The teardown ``PositionType`` priorities already close BORROW before
@@ -478,6 +502,110 @@ async def read_open_perp_positions_from_registry(
     return positions, available
 
 
+def _position_info_from_pendle_registry_row(row: Any) -> PositionInfo | None:
+    """Build a Pendle :class:`PositionInfo` from one OPEN ``position_registry`` row.
+
+    Returns ``None`` when the row carries no usable ``market_id`` (the identity
+    anchor) or an unknown ``kind`` — a registry row without a resolvable
+    *(market, kind)* cannot be closed/redeemed and must not be surfaced.
+
+    USD value is left at ``Decimal("0")``: the registry is the identity surface,
+    not a valuation surface (blueprint 28 §2). The PT symbol / reserve is carried
+    in ``details["asset_symbol"]`` (NOT ``details["asset"]``) so it never trips
+    the PortfolioValuer wallet-overlap special-casing reserved for TOKEN
+    pseudo-positions — these are real Pendle holdings whose valuation the valuer
+    owns, out of scope for this read-path cutover.
+    """
+    if not isinstance(row, dict):
+        return None
+    payload = row.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    kind = str(payload.get("kind") or "").strip().lower()
+    position_type = _PENDLE_KIND_TO_POSITION_TYPE.get(kind)
+    if position_type is None:
+        return None
+    market_id = payload.get("market_id")
+    if market_id is None or market_id == "":
+        return None
+    chain = str(row.get("chain") or "").lower()
+    # The protocol slug IS carried in the Pendle payload (written from the
+    # intent/event, where the "pendle" string legitimately lives); prefer it,
+    # fall back to the registry primitive so a label is always present — no
+    # protocol-name literal in this framework module.
+    protocol = str(payload.get("protocol") or row.get("primitive") or "").lower()
+    details: dict[str, Any] = {"source": "position_registry", "kind": kind, "market_id": str(market_id)}
+    pt_symbol = payload.get("pt_symbol")
+    if pt_symbol:
+        # The maturity-bearing PT symbol — maturity is intrinsic to it (no
+        # separate connector-parsed maturity field on the registry).
+        details["asset_symbol"] = str(pt_symbol)
+    return PositionInfo(
+        position_type=position_type,
+        position_id=str(market_id),
+        chain=chain,
+        protocol=protocol,
+        value_usd=Decimal("0"),
+        details=details,
+    )
+
+
+async def read_open_pendle_positions_from_registry(
+    *,
+    state_manager: Any,
+    deployment_id: str,
+    chain: str | None = None,
+) -> tuple[list[PositionInfo], bool]:
+    """Read this deployment's OPEN Pendle PT/LP holdings from WARM (TD-03 / VIB-5461).
+
+    The Pendle sibling of :func:`read_open_lp_positions_from_registry`: reads
+    ``position_registry`` rows for ``primitive='swap'`` (the isolated Pendle
+    partition) and builds one :class:`PositionInfo` per open holding (PT → TOKEN,
+    LP → LP). Rows are filtered to the Pendle ``kind`` discriminator so a future
+    non-Pendle swap-registry row can never leak in. Same ``(positions,
+    available)`` contract and same never-raise discipline — ``available=False``
+    on a backend without cutover storage degrades to the strategy's own
+    enumeration; it never means "nothing open".
+    """
+    from almanak.framework.migration import CutoverStorageNotSupported
+
+    dep = str(deployment_id or "").strip()
+    if state_manager is None or not dep or not hasattr(state_manager, "get_position_registry_open_rows"):
+        return [], False
+
+    positions: list[PositionInfo] = []
+    available = False
+    for primitive, accounting_category in _PENDLE_REGISTRY_SPECS:
+        try:
+            rows = await state_manager.get_position_registry_open_rows(
+                dep,
+                chain=chain,
+                primitive=primitive,
+                accounting_category=accounting_category,
+            )
+        except (CutoverStorageNotSupported, NotImplementedError) as exc:
+            logger.debug(
+                "Teardown registry enumeration: pendle read unavailable for %s (%s)",
+                dep,
+                exc,
+            )
+            continue
+        except Exception:  # noqa: BLE001 — enumeration must never raise into teardown
+            logger.warning(
+                "Teardown registry enumeration: pendle read FAILED for %s — falling back "
+                "to strategy enumeration this teardown",
+                dep,
+                exc_info=True,
+            )
+            continue
+        available = True
+        for row in rows or []:
+            info = _position_info_from_pendle_registry_row(row)
+            if info is not None:
+                positions.append(info)
+    return positions, available
+
+
 def reconcile_lp_with_registry(
     *,
     strategy_summary: TeardownPositionSummary | None,
@@ -589,10 +717,19 @@ async def resolve_open_positions_with_registry(strategy: Any) -> TeardownPositio
         deployment_id=deployment_id,
         chain=None,
     )
+    # TD-03 (VIB-5461): the Pendle cutover surfaces open PT/LP holdings through
+    # the SAME additive-union reconcile. Read it and union so the restart-safe
+    # re-derivation is identical across LP / lending / perp / Pendle; ``available``
+    # is True if ANY stream answered.
+    pendle_positions, pendle_available = await read_open_pendle_positions_from_registry(
+        state_manager=state_manager,
+        deployment_id=deployment_id,
+        chain=None,
+    )
     reconciled = reconcile_lp_with_registry(
         strategy_summary=summary,
-        registry_positions=read.positions + lending_positions + perp_positions,
-        registry_available=read.available or lending_available or perp_available,
+        registry_positions=read.positions + lending_positions + perp_positions + pendle_positions,
+        registry_available=read.available or lending_available or perp_available or pendle_available,
     )
     # TD-05 (VIB-5463): chain-verify the enumeration completeness. This NEVER
     # mutates the additive union (the union→authoritative flip is TD-06's job) —
@@ -719,6 +856,7 @@ __all__ = [
     "read_open_lending_positions_from_registry",
     "read_open_lp_positions_detailed",
     "read_open_lp_positions_from_registry",
+    "read_open_pendle_positions_from_registry",
     "read_open_perp_positions_from_registry",
     "reconcile_lp_with_registry",
     "resolve_open_positions_with_registry",

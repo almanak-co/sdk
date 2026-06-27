@@ -681,6 +681,130 @@ async def test_resolve_unions_lp_and_lending_and_keeps_strategy_positions() -> N
 
 
 # ---------------------------------------------------------------------------
+# Pendle cutover enumeration (TD-03 / VIB-5461)
+# ---------------------------------------------------------------------------
+
+
+def _pendle_row(
+    *,
+    kind: str = "pt",
+    market_id: str = "pt-wsteth-25jun2026",
+    chain: str = "ethereum",
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"protocol": "pendle", "kind": kind, "market_id": market_id}
+    if kind == "pt":
+        payload["pt_symbol"] = market_id
+    return {
+        "chain": chain,
+        "primitive": "swap",
+        "accounting_category": "swap",
+        "status": "open",
+        "payload": payload,
+    }
+
+
+@pytest.mark.asyncio
+async def test_read_builds_pendle_pt_and_lp_positions() -> None:
+    from almanak.framework.teardown.registry_enumeration import read_open_pendle_positions_from_registry
+
+    sm = _FakeRegistrySM(
+        {"swap": [_pendle_row(kind="pt", market_id="pt-wsteth-25jun2026"), _pendle_row(kind="lp", market_id="0xmarket")]}
+    )
+    positions, available = await read_open_pendle_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    assert available is True
+    by_id = {p.position_id: p for p in positions}
+    assert set(by_id) == {"pt-wsteth-25jun2026", "0xmarket"}
+    # PT → TOKEN (swapped/redeemed last); LP → LP (closed via strategy LP_CLOSE).
+    assert by_id["pt-wsteth-25jun2026"].position_type == PositionType.TOKEN
+    assert by_id["0xmarket"].position_type == PositionType.LP
+    assert by_id["pt-wsteth-25jun2026"].protocol == "pendle"
+    assert by_id["pt-wsteth-25jun2026"].details["source"] == "position_registry"
+    assert by_id["pt-wsteth-25jun2026"].details["kind"] == "pt"
+    assert by_id["pt-wsteth-25jun2026"].details["asset_symbol"] == "pt-wsteth-25jun2026"
+    assert by_id["0xmarket"].details["kind"] == "lp"
+
+
+@pytest.mark.asyncio
+async def test_read_pendle_skips_row_without_market_id() -> None:
+    from almanak.framework.teardown.registry_enumeration import read_open_pendle_positions_from_registry
+
+    bad = _pendle_row()
+    bad["payload"].pop("market_id")
+    sm = _FakeRegistrySM({"swap": [bad]})
+    positions, available = await read_open_pendle_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    assert available is True  # the read answered
+    assert positions == []  # but the unusable row is not surfaced
+
+
+@pytest.mark.asyncio
+async def test_read_pendle_skips_row_with_unknown_kind() -> None:
+    from almanak.framework.teardown.registry_enumeration import read_open_pendle_positions_from_registry
+
+    bad = _pendle_row()
+    bad["payload"]["kind"] = "yt"  # not a tracked Pendle kind
+    sm = _FakeRegistrySM({"swap": [bad, _pendle_row(kind="lp", market_id="0xmkt")]})
+    positions, available = await read_open_pendle_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    assert available is True
+    assert [p.position_id for p in positions] == ["0xmkt"]
+
+
+@pytest.mark.asyncio
+async def test_read_pendle_unavailable_on_backend_without_cutover_storage() -> None:
+    from almanak.framework.teardown.registry_enumeration import read_open_pendle_positions_from_registry
+
+    sm = _FakeRegistrySM({"swap": [_pendle_row()]}, unsupported={"swap"})
+    positions, available = await read_open_pendle_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    assert available is False  # degrade — never "nothing open"
+    assert positions == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_restart_rederives_pendle_holdings_from_warm() -> None:
+    """Wiped-state restart re-derives the open Pendle holdings (PT + LP) from the
+    durable registry — the headline restart-safe read for Pendle (AC2)."""
+    registry_rows = {
+        "lp": [],
+        "lp_v4": [],
+        "lending": [],
+        "swap": [_pendle_row(kind="pt", market_id="pt-wsteth-25jun2026"), _pendle_row(kind="lp", market_id="0xmkt")],
+    }
+
+    async def _resolve_after_restart() -> set[tuple[str, str]]:
+        sm = _FakeRegistrySM(registry_rows)  # WARM survives the restart
+        strategy = _FakeStrategy(summary=_empty_summary(), state_manager=sm)  # HOT wiped
+        summary = await resolve_open_positions_with_registry(strategy)
+        return {(str(p.position_type), p.position_id) for p in summary.positions}
+
+    first = await _resolve_after_restart()
+    second = await _resolve_after_restart()
+    assert first == {(str(PositionType.TOKEN), "pt-wsteth-25jun2026"), (str(PositionType.LP), "0xmkt")}
+    assert first == second  # deterministic across restarts
+
+
+@pytest.mark.asyncio
+async def test_resolve_unions_pendle_with_lp_and_keeps_strategy_positions() -> None:
+    """The union spans the Pendle stream too and never drops a strategy-reported
+    position (additive-union invariant)."""
+    sm = _FakeRegistrySM(
+        {"lp": [_v3_row("99")], "lp_v4": [], "lending": [], "swap": [_pendle_row(kind="pt", market_id="pt-x")]}
+    )
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[_lp("11")],
+    )
+    strategy = _FakeStrategy(summary=strat, state_manager=sm)
+    summary = await resolve_open_positions_with_registry(strategy)
+    keys = {(str(p.position_type), p.position_id) for p in summary.positions}
+    assert keys == {
+        (str(PositionType.LP), "11"),  # strategy-reported — never dropped
+        (str(PositionType.LP), "99"),  # registry UniV3 LP
+        (str(PositionType.TOKEN), "pt-x"),  # registry Pendle PT
+    }
+
+
+
+# ---------------------------------------------------------------------------
 # Perp cutover enumeration (TD-02 / VIB-5460)
 # ---------------------------------------------------------------------------
 
