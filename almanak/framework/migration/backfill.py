@@ -52,6 +52,7 @@ from almanak.framework.accounting.commit import RegistryRow
 from almanak.framework.accounting.policy import MatchingPolicy
 from almanak.framework.intents.compiler_constants import (
     AAVE_COMPATIBLE_PROTOCOLS,
+    GMX_COMPATIBLE_PROTOCOLS,
     PANCAKESWAP_V3_NFT_POSITION_MANAGERS,
     SLIPSTREAM_NFT_POSITION_MANAGERS,
     UNIV3_LP_GROUPING_PROTOCOLS,
@@ -522,6 +523,96 @@ def semantic_grouping_key_lending(*, chain: str, protocol: str, market_id: str, 
     if leg_norm not in (_LENDING_LEG_COLLATERAL, _LENDING_LEG_DEBT):
         raise ValueError(f"semantic_grouping_key_lending: leg must be collateral/debt, got {leg!r}")
     return f"{chain_norm}:{protocol_norm}:{market_norm}:{leg_norm}"
+
+
+# =============================================================================
+# Perp identity helpers — receipt/intent-fact-only (TD-02 / VIB-5460)
+# =============================================================================
+#
+# A perpetual-futures position has no NFT, but it DOES have a venue-stable
+# *position key* — for GMX V2 the ``positionKey`` is
+# ``keccak256(account, market, collateralToken, isLong)``, the unique on-chain
+# identity the protocol itself keys the position on. That key is the perp's
+# "NFT-equivalent" identity anchor: it is emitted on the open receipt
+# (``OrderCreated`` / position-increase event ``key``) AND on every later
+# increase/decrease/close of the SAME position, so a runtime write
+# (``result.position_id``) and a backfill replay (``position_events.position_id``)
+# land on byte-identical physical identities. The descriptive axes the GMX V2
+# key folds in — market, collateral token, direction (long/short), size — are
+# carried in the JSON payload (no new registry columns), so downstream teardown
+# can render and unwind the position without re-deriving a protocol-specific key.
+#
+# A perp is a REUSED identity (the positionKey is deterministic, so closing and
+# re-opening the same market/collateral/side yields the SAME key) — exactly like
+# a lending leg and UNLIKE an LP NFT (fresh tokenId per mint). The physical hash
+# and the semantic grouping key therefore share one tuple (a singleton), so a
+# re-open UPSERTs the one open row idempotently.
+
+
+def perp_direction_label(is_long: Any) -> str | None:
+    """Map ``is_long`` to the registry direction label, or ``None``.
+
+    Truthy -> ``"long"``, falsy-but-measured -> ``"short"``, ``None`` / ``""``
+    -> ``None``. Per CLAUDE.md "Empty ≠ Zero" an UNMEASURED direction
+    (``None`` from the intent, or ``""`` if a parser never emitted it) stays
+    unmeasured — the caller carries ``None`` in the payload, never a fabricated
+    side — but a MEASURED ``False`` / ``0`` (SQLite round-trips the persisted
+    boolean as an integer) is a real ``short``. Note the direction is
+    descriptive payload only: the perp identity is the venue position key, which
+    already folds the side in.
+    """
+    if is_long is None or is_long == "":
+        return None
+    return "long" if is_long else "short"
+
+
+def physical_identity_hash_perp(*, chain: str, protocol: str, position_key: str) -> str:
+    """Compute the canonical perp ``physical_identity_hash``.
+
+    Identity tuple (no config — blueprint 28 §6.6) is the on-chain
+    *(chain, protocol, position_key)*::
+
+        seed = f"{chain}:{protocol}:{position_key.lower()}"
+        hash = "0x" + sha256(seed.encode()).hexdigest()
+
+    ``position_key`` is the venue's stable position identity (GMX V2
+    ``positionKey``). It already encodes market + collateral + direction, so a
+    perp is a *singleton* per key and the physical hash and semantic grouping
+    key share the tuple. Raises ``ValueError`` on any empty anchor.
+    """
+    chain_norm = (chain or "").strip().lower()
+    if not chain_norm:
+        raise ValueError("physical_identity_hash_perp: chain must be non-empty")
+    protocol_norm = (protocol or "").strip().lower()
+    if not protocol_norm:
+        raise ValueError("physical_identity_hash_perp: protocol must be non-empty")
+    key_norm = (position_key or "").strip().lower()
+    if not key_norm:
+        raise ValueError("physical_identity_hash_perp: position_key must be non-empty")
+    seed = f"{chain_norm}:{protocol_norm}:{key_norm}"
+    return "0x" + hashlib.sha256(seed.encode()).hexdigest()
+
+
+def semantic_grouping_key_perp(*, chain: str, protocol: str, position_key: str) -> str:
+    """Compute the perp ``semantic_grouping_key``.
+
+        f"{chain}:{protocol}:{position_key.lower()}"
+
+    Equal to the physical hash's seed (sans sha256): a perp is a singleton per
+    venue position key, so the auto-mode collision predicate is "one open row
+    per ``(chain, protocol, position_key)``" — the desired idempotent re-open
+    behaviour. Raises ``ValueError`` on any empty anchor.
+    """
+    chain_norm = (chain or "").strip().lower()
+    if not chain_norm:
+        raise ValueError("semantic_grouping_key_perp: chain must be non-empty")
+    protocol_norm = (protocol or "").strip().lower()
+    if not protocol_norm:
+        raise ValueError("semantic_grouping_key_perp: protocol must be non-empty")
+    key_norm = (position_key or "").strip().lower()
+    if not key_norm:
+        raise ValueError("semantic_grouping_key_perp: position_key must be non-empty")
+    return f"{chain_norm}:{protocol_norm}:{key_norm}"
 
 
 # =============================================================================
@@ -1003,6 +1094,132 @@ def fold_position_events_for_lending(*, deployment_id: str, group: list[dict[str
 
 
 # =============================================================================
+# Perp OPEN/CLOSE fold over `position_events` (TD-02 / VIB-5460)
+# =============================================================================
+
+
+def _resolve_perp_lifecycle(group: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Last-state-wins fold over a perp position's chronological event group.
+
+    Returns ``(open_ev, close_ev)``. A perp venue position key is REUSED across
+    open→close→reopen cycles (the GMX V2 ``positionKey`` is deterministic, so
+    re-opening the same market/collateral/side yields the SAME key) — unlike an
+    LP NFT (fresh tokenId per mint) — so the FINAL chronological state decides
+    open vs closed: a CLOSE followed by a later OPEN is an OPEN position.
+    OPEN/INCREASE start/continue an active period (clearing any prior close); a
+    CLOSE terminates it; a DECREASE (partial reduce) leaves it open. A non-None
+    ``close_ev`` ⇒ the position is currently closed.
+    """
+    open_ev: dict[str, Any] | None = None
+    close_ev: dict[str, Any] | None = None
+    for ev in sorted(group, key=lambda e: e.get("timestamp") or ""):
+        et = (ev.get("event_type") or "").upper()
+        if et in ("OPEN", "INCREASE"):
+            open_ev = ev
+            close_ev = None  # a new active period supersedes any prior close
+        elif et == "CLOSE":
+            close_ev = ev
+        elif et == "DECREASE" and open_ev is None:
+            # Defensive: a DECREASE with no preceding OPEN in the group still
+            # anchors an open position (a partial reduce never closes a perp).
+            open_ev = ev
+    return open_ev, close_ev
+
+
+def fold_position_events_for_perp(*, deployment_id: str, group: list[dict[str, Any]]) -> RegistryRow | None:
+    """Fold a perp ``position_events`` group into a ``RegistryRow``.
+
+    The driver's group key includes ``position_type`` (see :meth:`BackfillReader.run`),
+    so every event in ``group`` shares one perp position (``position_type='PERP'``).
+    The venue position key (``position_events.position_id`` — the GMX V2
+    ``positionKey``) is the identity anchor; the final chronological state
+    (:func:`_resolve_perp_lifecycle`) decides ``status``. Market / collateral /
+    direction / size are best-effort payload carry from the persisted event
+    fields (the legacy perp seeder stores the collateral asset on ``token0`` and
+    the direction on ``is_long``; ``market`` / ``size_usd`` are not persisted as
+    columns, so they stay ``None`` here — Empty ≠ Zero).
+
+    Returns ``None`` (skip, structured WARN) for empty groups, groups whose
+    protocol is not in the perp cutover set, or groups missing chain / a usable
+    position key.
+    """
+    if not group:
+        return None
+
+    open_ev, close_ev = _resolve_perp_lifecycle(group)
+    anchor_ev = close_ev if close_ev is not None else open_ev
+    if anchor_ev is None:
+        logger.warning(
+            "Backfill: perp position_events group %s has no usable event; skipping",
+            group[0].get("position_id", "<unknown>"),
+        )
+        return None
+
+    protocol = (anchor_ev.get("protocol") or "").lower()
+    if protocol not in _PERP_REGISTRY_PROTOCOLS:
+        return None
+
+    chain = (anchor_ev.get("chain") or "").lower()
+    if not chain:
+        logger.warning(
+            "Backfill: perp event %s missing chain; skipping",
+            anchor_ev.get("position_id", "<unknown>"),
+        )
+        return None
+
+    position_key = str(anchor_ev.get("position_id") or "").strip()
+    if not position_key:
+        logger.warning(
+            "Backfill: perp event for %s has no venue position key; skipping",
+            anchor_ev.get("position_id", "<unknown>"),
+        )
+        return None
+
+    pih = physical_identity_hash_perp(chain=chain, protocol=protocol, position_key=position_key)
+    sgk = semantic_grouping_key_perp(chain=chain, protocol=protocol, position_key=position_key)
+    status: Literal["open", "closed", "reorg_invalidated"] = "closed" if close_ev is not None else "open"
+
+    # Descriptive metadata (collateral asset, direction) is the open-time fact —
+    # prefer the OPEN event, since a CLOSE event often does not re-emit token0 /
+    # is_long. Fall back to the anchor (the close) only when there is no open in
+    # the group. ``status`` / closed_tx still come from close_ev (above).
+    metadata_ev = open_ev if open_ev is not None else anchor_ev
+    collateral = metadata_ev.get("token0")
+    payload: dict[str, Any] = {
+        "protocol": protocol,
+        "position_id": position_key.lower(),
+        "market": None,
+        "collateral_token": str(collateral) if collateral is not None and collateral != "" else None,
+        "direction": perp_direction_label(metadata_ev.get("is_long")),
+        "size_usd": None,
+        "synthesized_handle": False,
+        "source": "backfill",
+    }
+
+    opened_tx = (open_ev or {}).get("tx_hash") or None
+    closed_tx = (close_ev or {}).get("tx_hash") if close_ev is not None else None
+
+    return RegistryRow(
+        deployment_id=deployment_id,
+        chain=chain,
+        primitive=Primitive.PERP,
+        accounting_category=AccountingCategory.PERP,
+        physical_identity_hash=pih,
+        semantic_grouping_key=sgk,
+        grouping_policy_version=_PERP_GROUPING_POLICY_VERSION,
+        handle=None,
+        status=status,
+        payload=payload,
+        opened_at_block=None,
+        opened_tx=opened_tx,
+        closed_at_block=None,
+        closed_tx=closed_tx,
+        last_reconciled_at_block=None,
+        matching_policy_version=MatchingPolicy.for_primitive(Primitive.PERP),
+    )
+
+
+# =============================================================================
 # Module-level constants
 # =============================================================================
 
@@ -1046,6 +1263,22 @@ _LENDING_REGISTRY_PROTOCOLS: frozenset[str] = AAVE_COMPATIBLE_PROTOCOLS
 
 
 _LENDING_GROUPING_POLICY_VERSION: str = "lending@v1"
+
+
+# TD-02 (VIB-5460): perp family cutover. Bound to the connector-self-declared
+# GMX-V2-perp family (``ProtocolFamily.GMX_V2_PERP`` → ``GMX_COMPATIBLE_PROTOCOLS``),
+# exactly as ``_LENDING_REGISTRY_PROTOCOLS`` binds to the Aave family — so there
+# is NO protocol-name string literal in framework code (chain/protocol coupling
+# ratchet) and enabling another GMX-shape perp venue is a one-line family
+# declaration in that connector's ``protocol_family.py``, NOT a reshape: the
+# registry row shape (venue position_key anchor + market/collateral/direction/size
+# payload) is already protocol-agnostic. Today the family is {gmx_v2}. The
+# grouping-policy version is independent of the LP / lending families so a perp
+# grouping-rule change never re-baselines their rows.
+_PERP_REGISTRY_PROTOCOLS: frozenset[str] = GMX_COMPATIBLE_PROTOCOLS
+
+
+_PERP_GROUPING_POLICY_VERSION: str = "perp@v1"
 
 
 def _assign_synthesized_handles(rows: list[RegistryRow]) -> list[RegistryRow]:
@@ -1577,3 +1810,31 @@ class LendingCutoverReader(BackfillReader):
 
     def fold_group_to_registry_row(self, *, deployment_id: str, group: list[dict[str, Any]]) -> RegistryRow | None:
         return fold_position_events_for_lending(deployment_id=deployment_id, group=group)
+
+
+class PerpCutoverReader(BackfillReader):
+    """TD-02 (VIB-5460) — perp per-primitive cutover backfill reader.
+
+    GMX V2 is the canonical first protocol; the reader narrows on
+    :data:`_PERP_REGISTRY_PROTOCOLS` so enabling another GMX-shape perp venue
+    later is a one-line family declaration, not a reshape. Reads ``PERP``
+    position events; the venue position key (``position_events.position_id``) is
+    the identity anchor. Keys its own ``migration_state`` row (``primitive='perp'``,
+    ``cutover_key='perp'``) so its backfill-complete flag is tracked separately
+    from the LP / lending cutovers.
+    """
+
+    primitive = Primitive.PERP
+    accounting_category = AccountingCategory.PERP
+    cutover_key = "perp"
+    grouping_policy_version = _PERP_GROUPING_POLICY_VERSION
+    legacy_position_types = frozenset({"PERP"})
+
+    def matches_this_cutover(self, ev: dict[str, Any]) -> bool:
+        if str(ev.get("position_type") or "").strip().upper() != "PERP":
+            return False
+        protocol = (ev.get("protocol") or "").lower()
+        return protocol in _PERP_REGISTRY_PROTOCOLS
+
+    def fold_group_to_registry_row(self, *, deployment_id: str, group: list[dict[str, Any]]) -> RegistryRow | None:
+        return fold_position_events_for_perp(deployment_id=deployment_id, group=group)

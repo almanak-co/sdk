@@ -885,6 +885,25 @@ def _build_aave_compatible_protocols() -> frozenset[str]:
 
 AAVE_COMPATIBLE_PROTOCOLS: frozenset[str] = _build_aave_compatible_protocols()
 
+
+# Perp protocols sharing the GMX V2 ``(market, collateralToken, isLong)``
+# position model. TD-02 (VIB-5460): derived from the connector-self-registering
+# ``PROTOCOL_FAMILY_REGISTRY`` (``GMX_V2_PERP`` family), exactly as
+# ``AAVE_COMPATIBLE_PROTOCOLS`` derives from the ``AAVE_V3`` family — so the
+# perp ``position_registry`` cutover carries no protocol-name string literal.
+# Read-only by contract — ``members`` returns a fresh ``frozenset`` so a
+# downstream consumer cannot silently widen the family by mutation.
+def _build_gmx_compatible_protocols() -> frozenset[str]:
+    from almanak.connectors._strategy_protocol_family_registry import (
+        PROTOCOL_FAMILY_REGISTRY,
+        ProtocolFamily,
+    )
+
+    return PROTOCOL_FAMILY_REGISTRY.members(ProtocolFamily.GMX_V2_PERP)
+
+
+GMX_COMPATIBLE_PROTOCOLS: frozenset[str] = _build_gmx_compatible_protocols()
+
 # Aave V3 Pool function selectors
 # supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)
 AAVE_SUPPLY_SELECTOR = "0x617ba037"

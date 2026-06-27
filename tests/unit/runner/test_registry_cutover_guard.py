@@ -39,21 +39,23 @@ def _make_runner(tmp_path: Path) -> SimpleNamespace:
 
 @pytest.mark.asyncio
 async def test_active_cutovers_includes_lp(tmp_path) -> None:
-    """ACTIVE_CUTOVERS contains exactly the V3 LP + V4 LP + lending entries.
+    """ACTIVE_CUTOVERS contains exactly the V3 LP + V4 LP + lending + perp entries.
 
     T12 shipped UniV3 LP (``Primitive.LP`` / ``'lp'``). VIB-4583 adds the
     isolated UniV4 LP cutover (``Primitive.LP_V4`` / ``'lp_v4'``). TD-04 /
     VIB-5462 adds the lending cutover (``Primitive.LENDING`` / ``'lending'``;
-    Aave canonical). T16/T23 each ship their own primitive separately. The boot
-    loop iterates every entry, so this pins the exact set so a future PR can't
-    slip an extra entry in (a primitive whose backfill reader / writer aren't
-    yet integrated) without explicit test churn.
+    Aave canonical). TD-02 / VIB-5460 adds the perp cutover (``Primitive.PERP`` /
+    ``'perp'``; GMX V2 canonical). The boot loop iterates every entry, so this
+    pins the exact set so a future PR can't slip an extra entry in (a primitive
+    whose backfill reader / writer aren't yet integrated) without explicit test
+    churn.
     """
     pairs = {(s.primitive, s.cutover_key) for s in ACTIVE_CUTOVERS}
     assert pairs == {
         (Primitive.LP, "lp"),
         (Primitive.LP_V4, "lp_v4"),
         (Primitive.LENDING, "lending"),
+        (Primitive.PERP, "perp"),
     }, f"unexpected ACTIVE_CUTOVERS: {[(s.primitive.value, s.cutover_key) for s in ACTIVE_CUTOVERS]}"
 
 

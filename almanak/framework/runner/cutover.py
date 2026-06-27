@@ -31,6 +31,7 @@ from almanak.framework.migration import (
 )
 from almanak.framework.migration.backfill import (
     LendingCutoverReader,
+    PerpCutoverReader,
     UniV3LPCutoverReader,
     UniV4LPCutoverReader,
 )
@@ -93,6 +94,17 @@ ACTIVE_CUTOVERS: tuple[CutoverSpec, ...] = (
         primitive=Primitive.LENDING,
         cutover_key="lending",
         reader_factory=LendingCutoverReader,
+    ),
+    # TD-02 (VIB-5460): PERP (GMX V2 canonical) is its own isolated cutover
+    # (Primitive.PERP / 'perp'). The registry row shape (venue position_key anchor
+    # + market/collateral/direction/size payload) is protocol-agnostic, so
+    # enabling another GMX-shape perp venue is a thin add to the GMX_V2_PERP
+    # protocol family — no new entry here. Kept minimal and self-contained so the
+    # parallel Pendle cutover ticket (TD-03) appends cleanly after.
+    CutoverSpec(
+        primitive=Primitive.PERP,
+        cutover_key="perp",
+        reader_factory=PerpCutoverReader,
     ),
 )
 

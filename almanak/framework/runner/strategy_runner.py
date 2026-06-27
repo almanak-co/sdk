@@ -3739,6 +3739,19 @@ class StrategyRunner:
                 intent_type_str=intent_type_str,
                 post_state=post_state,
             )
+        # TD-02 (VIB-5460): perp family has its own isolated cutover stream
+        # (Primitive.PERP / 'perp'). Delegate PERP_OPEN/PERP_CLOSE to the
+        # dedicated perp dispatch BEFORE the LP gate so the primitive streams
+        # never cross-pollinate.
+        if intent_type_str in ("PERP_OPEN", "PERP_CLOSE"):
+            return await self._maybe_save_ledger_with_registry_perp(
+                strategy=strategy,
+                intent=intent,
+                result=result,
+                success=success,
+                entry=entry,
+                intent_type_str=intent_type_str,
+            )
         if intent_type_str not in ("LP_OPEN", "LP_CLOSE"):
             return False
         if result is None or not bool(getattr(result, "success", False)):
@@ -4189,6 +4202,224 @@ class StrategyRunner:
             closed_tx=closed_tx,
             last_reconciled_at_block=None,
             matching_policy_version=MatchingPolicy.for_primitive(Primitive.LENDING),
+        )
+
+    @staticmethod
+    def _perp_close_is_full_exit(intent: AnyIntent) -> bool:
+        """True iff a PERP_CLOSE closes the WHOLE position (TD-02 / VIB-5460).
+
+        A perp is a *size balance*, not an NFT: a sized PERP_CLOSE
+        (``size_usd`` set) reduces the position but leaves a residual, so the
+        registry row MUST stay ``status='open'`` (closing it would strand the
+        residual on a wiped-state restart). A full close carries no ``size_usd``
+        (``PerpCloseIntent.close_full_position`` — the only close path GMX V2
+        teardown uses). Bias-to-open: anything ambiguous stays open.
+        """
+        close_full = getattr(intent, "close_full_position", None)
+        if isinstance(close_full, bool):
+            return close_full
+        return getattr(intent, "size_usd", None) is None
+
+    @staticmethod
+    def _perp_position_key(result: Any, intent: AnyIntent) -> str:
+        """Resolve the venue position key for a perp registry write (TD-02).
+
+        Prefers the receipt-extracted ``result.position_id`` (the GMX V2
+        ``positionKey`` — the stable on-chain identity emitted on every
+        increase/decrease of the position), falling back to an explicit
+        ``intent.position_id`` (venues like PancakeSwap Perps that key on a
+        ``tradeHash``). Returns ``""`` when neither yields a usable anchor —
+        the caller treats that as "no anchor" and falls back (Empty ≠ Zero: we
+        never fabricate a key).
+        """
+        for candidate in (getattr(result, "position_id", None), getattr(intent, "position_id", None)):
+            if candidate is not None and str(candidate).strip() != "":
+                return str(candidate).strip()
+        return ""
+
+    async def _maybe_save_ledger_with_registry_perp(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        intent: AnyIntent,
+        result: Any,
+        success: bool,
+        entry: Any,
+        intent_type_str: str,
+    ) -> bool:
+        """Route a perp PERP_OPEN / PERP_CLOSE through ``save_ledger_and_registry``.
+
+        TD-02 (VIB-5460) — the perp sibling of
+        :meth:`_maybe_save_ledger_with_registry` /
+        :meth:`_maybe_save_ledger_with_registry_lending`. Persists the venue
+        position key (GMX V2 ``positionKey``) as the registry identity anchor,
+        with market / collateral / direction / size in the JSON payload, so a
+        wiped-state restart re-derives the open perp from the durable registry.
+        Returns ``True`` iff the row routed through the atomic primitive;
+        ``False`` on any path-miss (caller falls back to plain
+        ``save_ledger_entry``):
+
+        - the perp cutover boot-guard hasn't cleared ``(Primitive.PERP, 'perp')``;
+        - the protocol is not in :data:`_PERP_REGISTRY_PROTOCOLS` (GMX V2 first);
+        - the on-chain TX did not land (chain truth, NOT the framework verdict);
+        - a PERP_CLOSE that is only a PARTIAL reduce (position stays open — never
+          stranded);
+        - the result/intent carry no usable venue position key (Empty ≠ Zero).
+        """
+        from almanak.framework.migration.backfill import (
+            _PERP_REGISTRY_PROTOCOLS,
+            perp_direction_label,
+            physical_identity_hash_perp,
+            semantic_grouping_key_perp,
+        )
+        from almanak.framework.primitives.types import Primitive
+        from almanak.framework.runner.cutover import is_cutover_active
+
+        if result is None or not bool(getattr(result, "success", False)):
+            return False
+        # ``success`` is forwarded only for telemetry; do NOT gate on it (audit
+        # P1: slippage / reconciliation can flip it False post-confirmation, but
+        # the registry must still record the landed state).
+        _ = success
+        if not is_cutover_active(self, Primitive.PERP, "perp"):
+            return False
+        protocol = (getattr(intent, "protocol", "") or "").lower()
+        if protocol not in _PERP_REGISTRY_PROTOCOLS:
+            return False
+
+        is_open = intent_type_str == "PERP_OPEN"
+        if not is_open and not self._perp_close_is_full_exit(intent):
+            # Partial PERP_CLOSE — leave the OPEN row untouched (bias-to-open).
+            logger.info(
+                "Registry-mode skip: partial PERP_CLOSE leaves perp open; falling back to save_ledger_entry",
+            )
+            return False
+
+        chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
+        if not chain:
+            return False
+        position_key = self._perp_position_key(result, intent)
+        if not position_key:
+            logger.info(
+                "Registry-mode skip: perp %s has no venue position key; falling back to save_ledger_entry",
+                intent_type_str,
+            )
+            return False
+
+        pih = physical_identity_hash_perp(chain=chain, protocol=protocol, position_key=position_key)
+        sgk = semantic_grouping_key_perp(chain=chain, protocol=protocol, position_key=position_key)
+        # KNOWN LIMITATION (reused-identity primitive): a perp venue position key
+        # is reused across open→close→reopen cycles, but the registry UPSERT
+        # enforces a strict monotone status (open→closed only — blueprint 28
+        # §4.3). So a PERP_OPEN re-opening a market/side the strategy previously
+        # fully closed cannot flip the closed row back to open here. This never
+        # strands on a live run — the additive-union teardown enumeration also
+        # reads the strategy's own get_open_positions() — only on a
+        # full-close → reopen → total-state-wipe → teardown sequence. A
+        # first-class reopen path for reused-identity primitives is follow-up
+        # work (mirrors the lending TD-04 note); LP / Pendle-LP never hit this
+        # because each reopen mints a fresh physical identity.
+        status: Literal["open", "closed", "reorg_invalidated"] = "open" if is_open else "closed"
+        block = self._extract_block_number_from_result(result)
+        tx_hash = getattr(entry, "tx_hash", "") or None
+        size_usd = getattr(intent, "size_usd", None)
+        payload: dict[str, Any] = {
+            "protocol": protocol,
+            "position_id": position_key.lower(),
+            "market": (getattr(intent, "market", "") or None),
+            "collateral_token": (getattr(intent, "collateral_token", "") or None),
+            "direction": perp_direction_label(getattr(intent, "is_long", None)),
+            "size_usd": (str(size_usd) if size_usd is not None else None),
+            "source": "runtime",
+        }
+        if is_open:
+            collateral_amount = getattr(intent, "collateral_amount", None)
+            # "all" is a chained-amount sentinel, not a measured amount — skip it;
+            # skip empty / whitespace too (Empty ≠ Zero: never persist a sentinel
+            # or a blank as a number).
+            ca_str = "" if collateral_amount is None else str(collateral_amount).strip()
+            if ca_str and ca_str.lower() != "all":
+                payload["collateral_amount"] = ca_str
+        registry_row = self._build_perp_registry_row(
+            strategy=strategy,
+            physical_identity_hash=pih,
+            semantic_grouping_key=sgk,
+            payload=payload,
+            status=status,
+            # On a CLOSE the OPEN-side anchors are preserved by the ON CONFLICT
+            # UPSERT (it never overwrites opened_at_block / opened_tx), so we pass
+            # them only on the OPEN write.
+            opened_at_block=block if is_open else None,
+            opened_tx=tx_hash if is_open else None,
+            closed_at_block=None if is_open else block,
+            closed_tx=None if is_open else tx_hash,
+            handle=getattr(intent, "registry_handle", None),
+        )
+
+        from almanak.framework.accounting.commit import save_ledger_and_registry
+
+        await save_ledger_and_registry(
+            self.state_manager,
+            ledger=entry,
+            registry=registry_row,
+            mode="registry",
+        )
+        logger.info(
+            "Registry-mode perp write OK for %s on %s market=%s direction=%s status=%s pih=%s",
+            intent_type_str,
+            chain,
+            payload["market"],
+            payload["direction"],
+            status,
+            pih,
+        )
+        return True
+
+    def _build_perp_registry_row(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        physical_identity_hash: str,
+        semantic_grouping_key: str,
+        payload: dict,
+        status: Literal["open", "closed", "reorg_invalidated"],
+        opened_at_block: int | None,
+        opened_tx: str | None,
+        closed_at_block: int | None,
+        closed_tx: str | None,
+        handle: str | None,
+    ) -> Any:
+        """Construct a perp ``RegistryRow`` (TD-02 / VIB-5460).
+
+        The perp sibling of :meth:`_build_lending_registry_row` — separate
+        because :meth:`_build_registry_row` hardcodes the LP grouping-policy
+        version. Stamps ``Primitive.PERP`` / ``AccountingCategory.PERP`` /
+        ``perp@v1`` and the per-primitive ``matching_policy_version`` (never
+        hardcoded).
+        """
+        from almanak.framework.accounting.commit import RegistryRow
+        from almanak.framework.accounting.policy import MatchingPolicy
+        from almanak.framework.migration.backfill import _PERP_GROUPING_POLICY_VERSION
+        from almanak.framework.primitives.types import AccountingCategory, Primitive
+
+        chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
+        return RegistryRow(
+            deployment_id=strategy.deployment_id,
+            chain=chain,
+            primitive=Primitive.PERP,
+            accounting_category=AccountingCategory.PERP,
+            physical_identity_hash=physical_identity_hash,
+            semantic_grouping_key=semantic_grouping_key,
+            grouping_policy_version=_PERP_GROUPING_POLICY_VERSION,
+            handle=handle,
+            status=status,
+            payload=dict(payload),
+            opened_at_block=opened_at_block,
+            opened_tx=opened_tx,
+            closed_at_block=closed_at_block,
+            closed_tx=closed_tx,
+            last_reconciled_at_block=None,
+            matching_policy_version=MatchingPolicy.for_primitive(Primitive.PERP),
         )
 
     def _build_registry_row(

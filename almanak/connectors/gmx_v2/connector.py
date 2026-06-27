@@ -59,6 +59,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.gmx_v2.compiler",
         attribute="GMXV2Compiler",
     ),
+    protocol_family=ImportRef(
+        module="almanak.connectors.gmx_v2.protocol_family",
+        attribute="PROTOCOL_FAMILY",
+    ),
     capabilities=CapabilitiesSpec(
         keys=("gmx_v2",),
         module="almanak.connectors.gmx_v2.capabilities",

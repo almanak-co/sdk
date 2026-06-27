@@ -678,3 +678,122 @@ async def test_resolve_unions_lp_and_lending_and_keeps_strategy_positions() -> N
         (str(PositionType.LP), "99"),  # registry LP
         (str(PositionType.SUPPLY), "usdc"),  # registry lending collateral
     }
+
+
+# ---------------------------------------------------------------------------
+# Perp cutover enumeration (TD-02 / VIB-5460)
+# ---------------------------------------------------------------------------
+
+
+def _perp_row(
+    *,
+    position_id: str = "0xperpkey",
+    protocol: str = "gmx_v2",
+    chain: str = "arbitrum",
+    market: str = "ETH/USD",
+    collateral_token: str = "USDC",
+    direction: str = "long",
+    size_usd: str = "10",
+) -> dict[str, Any]:
+    return {
+        "chain": chain,
+        "primitive": "perp",
+        "accounting_category": "perp",
+        "status": "open",
+        "payload": {
+            "protocol": protocol,
+            "position_id": position_id,
+            "market": market,
+            "collateral_token": collateral_token,
+            "direction": direction,
+            "size_usd": size_usd,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_read_builds_perp_positions() -> None:
+    from almanak.framework.teardown.registry_enumeration import read_open_perp_positions_from_registry
+
+    sm = _FakeRegistrySM({"perp": [_perp_row(position_id="0xaaa", market="ETH/USD")]})
+    positions, available = await read_open_perp_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    assert available is True
+    assert len(positions) == 1
+    p = positions[0]
+    assert p.position_type == PositionType.PERP
+    assert p.position_id == "0xaaa"
+    assert p.protocol == "gmx_v2"
+    assert p.details["source"] == "position_registry"
+    assert p.details["market"] == "ETH/USD"
+    assert p.details["direction"] == "long"
+    # Registry is an identity surface — never a valuation/risk surface.
+    assert p.value_usd == Decimal("0")
+    assert p.liquidation_risk is False
+
+
+@pytest.mark.asyncio
+async def test_read_perp_skips_row_without_position_id() -> None:
+    from almanak.framework.teardown.registry_enumeration import read_open_perp_positions_from_registry
+
+    bad = _perp_row()
+    bad["payload"].pop("position_id")
+    sm = _FakeRegistrySM({"perp": [bad]})
+    positions, available = await read_open_perp_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    assert available is True  # the read answered
+    assert positions == []  # but the unusable row is not surfaced
+
+
+@pytest.mark.asyncio
+async def test_read_perp_unavailable_on_backend_without_cutover_storage() -> None:
+    from almanak.framework.teardown.registry_enumeration import read_open_perp_positions_from_registry
+
+    sm = _FakeRegistrySM({"perp": [_perp_row()]}, unsupported={"perp"})
+    positions, available = await read_open_perp_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    assert available is False  # degrade — never "nothing open"
+    assert positions == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_restart_rederives_perp_from_warm() -> None:
+    """Wiped-state restart re-derives the open perp from the durable registry —
+    the AC3 restart-safe read for perp."""
+    registry_rows = {"lp": [], "lp_v4": [], "lending": [], "perp": [_perp_row(position_id="0xkey1")]}
+
+    async def _resolve_after_restart() -> set[tuple[str, str]]:
+        sm = _FakeRegistrySM(registry_rows)  # WARM survives the restart
+        strategy = _FakeStrategy(summary=_empty_summary(), state_manager=sm)  # HOT wiped
+        summary = await resolve_open_positions_with_registry(strategy)
+        return {(str(p.position_type), p.position_id) for p in summary.positions}
+
+    first = await _resolve_after_restart()
+    second = await _resolve_after_restart()
+    assert first == {(str(PositionType.PERP), "0xkey1")}
+    assert first == second  # deterministic across restarts
+
+
+@pytest.mark.asyncio
+async def test_resolve_unions_lp_lending_perp_and_keeps_strategy_positions() -> None:
+    """The union spans ALL THREE cut-over primitive streams and never drops a
+    strategy-reported position (additive-union invariant)."""
+    sm = _FakeRegistrySM(
+        {
+            "lp": [_v3_row("99")],
+            "lp_v4": [],
+            "lending": [_lending_row(market_id="usdc")],
+            "perp": [_perp_row(position_id="0xpp")],
+        }
+    )
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[_lp("11")],
+    )
+    strategy = _FakeStrategy(summary=strat, state_manager=sm)
+    summary = await resolve_open_positions_with_registry(strategy)
+    keys = {(str(p.position_type), p.position_id) for p in summary.positions}
+    assert keys == {
+        (str(PositionType.LP), "11"),  # strategy-reported — never dropped
+        (str(PositionType.LP), "99"),  # registry LP
+        (str(PositionType.SUPPLY), "usdc"),  # registry lending collateral
+        (str(PositionType.PERP), "0xpp"),  # registry perp
+    }

@@ -64,6 +64,14 @@ class ProtocolFamily(StrEnum):
     #: The ``ax pool`` renderer switches to ``tick_spacing=<N>`` display for
     #: members of this family (Plan 027 Step 3).
     TICK_SPACING_FEE_DISPLAY = "tick_spacing_fee_display"
+    #: Perp connectors using the GMX V2 ``(market, collateralToken, isLong)``
+    #: position model -> ``GMX_COMPATIBLE_PROTOCOLS`` (TD-02 / VIB-5460). The
+    #: migration backfill / runner registry dispatch key their ``protocol in
+    #: _PERP_REGISTRY_PROTOCOLS`` branch on this registry-derived union so the
+    #: perp position_registry cutover (``Primitive.PERP`` / ``'perp'``) carries
+    #: no protocol-name string literal. GMX V2 is canonical; an Aster/Apollo-
+    #: shape venue joins with a one-line ``protocol_family.py`` declaration.
+    GMX_V2_PERP = "gmx_v2_perp"
 
 
 @dataclass(frozen=True)

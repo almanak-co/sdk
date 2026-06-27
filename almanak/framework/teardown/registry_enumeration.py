@@ -104,6 +104,15 @@ _LP_REGISTRY_SPECS: tuple[tuple[str, str], ...] = (
 _LENDING_REGISTRY_SPECS: tuple[tuple[str, str], ...] = (("lending", "lending"),)
 
 
+# (primitive, accounting_category) for the perp cutover (TD-02 / VIB-5460).
+# Mirrors the perp ``CutoverSpec`` in ``almanak/framework/runner/cutover.py``
+# (``Primitive.PERP`` / 'perp'). GMX V2 is canonical; the registry row shape
+# (venue position_key anchor + market/collateral/direction/size payload) is
+# protocol-agnostic, so the SAME enumeration surfaces every perp protocol the
+# cutover enables — no per-protocol code here.
+_PERP_REGISTRY_SPECS: tuple[tuple[str, str], ...] = (("perp", "perp"),)
+
+
 # A lending registry leg maps onto the teardown-lane risk-ordered position type:
 # a supply (collateral) leg is withdrawn (SUPPLY), a borrow (debt) leg is repaid
 # (BORROW). The teardown ``PositionType`` priorities already close BORROW before
@@ -371,6 +380,104 @@ async def read_open_lending_positions_from_registry(
     return positions, available
 
 
+def _position_info_from_perp_registry_row(row: Any) -> PositionInfo | None:
+    """Build a perp :class:`PositionInfo` from one OPEN ``position_registry`` row.
+
+    Returns ``None`` when the row carries no usable ``position_id`` (the venue
+    position key — the identity anchor) — a registry row without it cannot be
+    closed and must not be surfaced.
+
+    USD value is left at ``Decimal("0")``: the registry is the identity surface,
+    not a valuation surface (blueprint 28 §2). ``liquidation_risk`` is left at
+    the model default (``False``) — the registry knows the position's identity,
+    not its on-chain health factor; the teardown ``PositionType.PERP`` priority
+    already closes perps FIRST regardless of the flag, so the registry must not
+    fabricate a risk signal it cannot measure. Market / collateral / direction /
+    size ride in ``details`` (best-effort: the runtime write carries all four;
+    a backfill-synthesized row carries only what ``position_events`` persisted).
+    """
+    if not isinstance(row, dict):
+        return None
+    payload = row.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    position_id = payload.get("position_id")
+    if position_id is None or position_id == "":
+        return None
+    chain = str(row.get("chain") or "").lower()
+    # The protocol slug IS carried in the perp payload (unlike LP). Prefer it so
+    # teardown can route the closing intent to the right connector; fall back to
+    # the registry primitive.
+    protocol = str(payload.get("protocol") or row.get("primitive") or "perp").lower()
+    details: dict[str, Any] = {"source": "position_registry"}
+    for key in ("market", "collateral_token", "direction", "size_usd"):
+        value = payload.get(key)
+        if value is not None and value != "":
+            details[key] = value
+    return PositionInfo(
+        position_type=PositionType.PERP,
+        position_id=str(position_id),
+        chain=chain,
+        protocol=protocol,
+        value_usd=Decimal("0"),
+        details=details,
+    )
+
+
+async def read_open_perp_positions_from_registry(
+    *,
+    state_manager: Any,
+    deployment_id: str,
+    chain: str | None = None,
+) -> tuple[list[PositionInfo], bool]:
+    """Read this deployment's OPEN perp positions from WARM (TD-02 / VIB-5460).
+
+    The perp sibling of :func:`read_open_lending_positions_from_registry`: reads
+    ``position_registry`` rows for ``primitive='perp'`` and builds one
+    :class:`PositionInfo` per open position (venue position key → identity).
+    Same ``(positions, available)`` contract and same never-raise discipline —
+    ``available=False`` on a backend without cutover storage degrades to the
+    strategy's own enumeration; it never means "nothing open".
+    """
+    from almanak.framework.migration import CutoverStorageNotSupported
+
+    dep = str(deployment_id or "").strip()
+    if state_manager is None or not dep or not hasattr(state_manager, "get_position_registry_open_rows"):
+        return [], False
+
+    positions: list[PositionInfo] = []
+    available = False
+    for primitive, accounting_category in _PERP_REGISTRY_SPECS:
+        try:
+            rows = await state_manager.get_position_registry_open_rows(
+                dep,
+                chain=chain,
+                primitive=primitive,
+                accounting_category=accounting_category,
+            )
+        except (CutoverStorageNotSupported, NotImplementedError) as exc:
+            logger.debug(
+                "Teardown registry enumeration: perp read unavailable for %s (%s)",
+                dep,
+                exc,
+            )
+            continue
+        except Exception:  # noqa: BLE001 — enumeration must never raise into teardown
+            logger.warning(
+                "Teardown registry enumeration: perp read FAILED for %s — falling back "
+                "to strategy enumeration this teardown",
+                dep,
+                exc_info=True,
+            )
+            continue
+        available = True
+        for row in rows or []:
+            info = _position_info_from_perp_registry_row(row)
+            if info is not None:
+                positions.append(info)
+    return positions, available
+
+
 def reconcile_lp_with_registry(
     *,
     strategy_summary: TeardownPositionSummary | None,
@@ -473,10 +580,19 @@ async def resolve_open_positions_with_registry(strategy: Any) -> TeardownPositio
         deployment_id=deployment_id,
         chain=None,
     )
+    # TD-02 (VIB-5460): the perp cutover surfaces open perp positions through the
+    # SAME additive-union reconcile. Read the perp stream and union it so the
+    # restart-safe re-derivation is identical across LP / lending / perp;
+    # ``available`` is True if ANY stream answered.
+    perp_positions, perp_available = await read_open_perp_positions_from_registry(
+        state_manager=state_manager,
+        deployment_id=deployment_id,
+        chain=None,
+    )
     reconciled = reconcile_lp_with_registry(
         strategy_summary=summary,
-        registry_positions=read.positions + lending_positions,
-        registry_available=read.available or lending_available,
+        registry_positions=read.positions + lending_positions + perp_positions,
+        registry_available=read.available or lending_available or perp_available,
     )
     # TD-05 (VIB-5463): chain-verify the enumeration completeness. This NEVER
     # mutates the additive union (the union→authoritative flip is TD-06's job) —
@@ -603,6 +719,7 @@ __all__ = [
     "read_open_lending_positions_from_registry",
     "read_open_lp_positions_detailed",
     "read_open_lp_positions_from_registry",
+    "read_open_perp_positions_from_registry",
     "reconcile_lp_with_registry",
     "resolve_open_positions_with_registry",
 ]
