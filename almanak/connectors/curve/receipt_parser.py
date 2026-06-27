@@ -12,6 +12,12 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
+from almanak.framework.execution.extract_result import (
+    ExtractError,
+    ExtractMissing,
+    ExtractOk,
+    ExtractResult,
+)
 
 if TYPE_CHECKING:
     from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg, PrimitiveMoneyLegs
@@ -328,6 +334,27 @@ class CurveReceiptParser:
     EXTRA_EXTRACTIONS_BY_INTENT: dict[str, tuple[str, ...]] = {
         "LP_OPEN": ("primitive_money_legs",),
     }
+
+    # VIB-5432 — Capability surface for the ResultEnricher SUPPORTED_EXTRACTIONS
+    # check. Each entry maps to a present ``extract_<field>`` method on this class.
+    # Declaring the FULL set of currently-served fields is deliberately behaviour-
+    # preserving: before this attribute existed the enricher attempted every
+    # ``extract_<field>`` method that happened to be defined, so omitting one here
+    # would newly skip a field that is served today. Curve is a pool-based
+    # (non-NFT) multi-coin venue; ``primitive_money_legs`` is the LP_OPEN leg seam
+    # (declared per-intent above).
+    SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
+        {
+            "swap_amounts",
+            "position_id",  # LP-token semantics (pool-based, no NFT position id)
+            "liquidity",
+            "lp_tokens_received",
+            "lp_open_data",
+            "primitive_money_legs",
+            "lp_close_data",
+            "protocol_fees",  # UNAVAILABLE-with-reason per VIB-3495
+        }
+    )
 
     def __init__(self, chain: str = "ethereum", **kwargs: Any) -> None:
         """Initialize the parser.
@@ -1402,6 +1429,381 @@ class CurveReceiptParser:
             total_usd=None,
             unavailable_reason="protocol_fee_not_emitted_in_receipt",
         )
+
+    # ---- VIB-5432: tagged-variant wrappers (ExtractOk / ExtractMissing /
+    # ExtractError) ----------------------------------------------------------
+    #
+    # The raw ``extract_*`` methods above wrap their decode logic in
+    # ``try/except: return None`` and ALSO return ``None`` for a genuinely
+    # absent event. The ResultEnricher's legacy adapter cannot tell those two
+    # ``None``s apart, so a decode CRASH is booked as a benign "no event" —
+    # the ghost-position class (VIB-3159 / VIB-3368 / VIB-5368). These
+    # ``extract_<field>_result`` wrappers, which the enricher prefers over the
+    # raw method, restore the three-way signal: a crash becomes ``ExtractError``
+    # (accounting-critical, never silently dropped), a genuinely absent event
+    # stays ``ExtractMissing`` (benign), and a real value is ``ExtractOk``. The
+    # raw methods keep their legacy return types so direct callers are
+    # unchanged. See aerodrome / uniswap_v3 for the same pattern.
+    #
+    # CRITICAL (VIB-5432 field-level fix): Curve's raw extractors **swallow their
+    # own exceptions** (``try/except Exception: return None``), so a field-level
+    # decode CRASH on a PRESENT event returns ``None`` — indistinguishable from a
+    # genuinely-absent event by the wrapper's ``try/except`` alone. (The aerodrome
+    # reference shares this latent swallow but is out of scope here.) A bare
+    # ``value is None -> ExtractMissing`` therefore does NOT close the ghost class
+    # at the field level — only ``parse_receipt`` crashes are caught. To close it,
+    # each wrapper disambiguates the two ``None``s with a PRESENCE signal derived
+    # from the parsed ``ParseResult`` (or, for the LP-token mint extractors that
+    # scan raw logs, from the same mint-Transfer scan they use):
+    #   * relevant event/data PRESENT + extractor ``None``  -> ``ExtractError``
+    #     (the ghost-position case — a present event we failed to decode);
+    #   * relevant event/data ABSENT  + extractor ``None``  -> ``ExtractMissing``
+    #     (benign, unchanged);
+    #   * extractor returns a value                          -> ``ExtractOk``.
+
+    def _strict_parse(self, receipt: dict[str, Any]) -> "ParseResult | ExtractError":
+        """Run ``parse_receipt`` and return the parsed ``ParseResult`` on a clean
+        parse, or an ``ExtractError`` if it crashes / returns ``None`` / reports
+        failure. Returning the ``ParseResult`` lets each wrapper presence-check
+        its own event(s) against chain truth (VIB-5432).
+
+        Note: unlike the aerodrome equivalent, Curve's ``parse_receipt`` has
+        ``return None`` paths, so a ``None`` result is guarded explicitly (an
+        un-parseable receipt is an error, not a missing event)."""
+        try:
+            parsed = self.parse_receipt(receipt)
+        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if parsed is None:
+            return ExtractError(error="parse_receipt returned None")
+        if not parsed.success:
+            return ExtractError(error=parsed.error or "parse_receipt reported failure")
+        return parsed
+
+    @staticmethod
+    def _event_present(parsed: "ParseResult", *event_types: CurveEventType) -> bool:
+        """True when the parsed receipt carries at least one event of the given
+        type(s) — the per-field PRESENCE discriminator (VIB-5432). A present
+        event whose typed decode failed still counts as present (the event seam
+        existed), so a swap/LP whose values we could not extract surfaces as an
+        ``ExtractError`` rather than a benign ``ExtractMissing``."""
+        return any(e.event_type in event_types for e in parsed.events)
+
+    # VIB-5432 (round 2) — event types the parser STRUCTURALLY decodes into typed
+    # fields (``_decode_swap_data`` / ``_decode_add_liquidity_data`` /
+    # ``_decode_remove_liquidity_data``). On a clean decode each stamps its typed
+    # keys (``tokens_sold`` / ``token_amounts`` / …) and NEVER a ``raw_data`` key;
+    # only the ``except`` fallback returns ``{"raw_data": data}``. So ``raw_data``
+    # on an event of one of THESE types is an exact decode-failure sentinel. Every
+    # OTHER Curve event (incl. ``RemoveLiquidityOne`` / ``RemoveLiquidityImbalance``,
+    # which have no structured decoder) carries ``raw_data`` BY DESIGN via the
+    # ``_decode_log_data`` passthrough and must NOT be read as a decode failure.
+    _STRUCTURALLY_DECODED_EVENT_TYPES: frozenset[CurveEventType] = frozenset(
+        {
+            CurveEventType.TOKEN_EXCHANGE,
+            CurveEventType.TOKEN_EXCHANGE_UNDERLYING,
+            CurveEventType.ADD_LIQUIDITY,
+            CurveEventType.REMOVE_LIQUIDITY,
+        }
+    )
+
+    @classmethod
+    def _decode_fell_back(cls, parsed: "ParseResult", *event_types: CurveEventType) -> bool:
+        """True when a PRESENT event of a structurally-decoded type fell back to the
+        ``{"raw_data": ...}`` payload — i.e. ``_decode_*_data`` raised and the typed
+        fields were never populated (VIB-5432 round 2 — CodeRabbit fail-closed fix).
+
+        The presence + ``value is not None`` check in :meth:`_tag_presence` is NOT
+        enough on its own: a present-but-undecodable event does not yield ``None``,
+        it yields a FABRICATED DEFAULT downstream — a zero ``SwapEventData`` (every
+        field ``.get(..., 0)``), or an ``LPOpenData`` / ``LPCloseData`` built from an
+        empty ``token_amounts`` (``or []`` → ``amount0``/``amount1`` ``None``/``0``).
+        The legacy wrapper would then emit ``ExtractOk(fabricated)`` for it — a
+        silent ghost worse than ``ExtractError``. This sentinel reclassifies those.
+
+        Scope is deliberately narrow (``_STRUCTURALLY_DECODED_EVENT_TYPES`` ∩
+        ``event_types``): a present ``raw_data`` on those types CANNOT be a clean
+        decode, so this never over-rejects a legitimately-zero-but-decoded value
+        (decoded zero carries the typed key, not ``raw_data``). It also EXCLUDES
+        ``RemoveLiquidityOne`` / ``RemoveLiquidityImbalance``, whose ``raw_data`` is
+        the by-design passthrough — flagging them would convert real single-coin /
+        imbalanced withdrawals into fatal accounting halts."""
+        decodable = cls._STRUCTURALLY_DECODED_EVENT_TYPES.intersection(event_types)
+        return any(e.event_type in decodable and "raw_data" in e.data for e in parsed.events)
+
+    def _has_mint_transfer(self, receipt: dict[str, Any]) -> bool:
+        """True when the receipt carries an ERC-20 *mint* Transfer (from the zero
+        address) — the PRESENCE signal for the LP-token extractors
+        (``extract_position_id`` / ``extract_liquidity`` /
+        ``extract_lp_tokens_received``), which scan raw logs rather than the
+        parsed Curve events (ERC-20 Transfer is not a registered Curve event).
+        Mirrors their own scan so a present mint whose amount/address decode
+        fails is disambiguated from a genuinely mint-less receipt (VIB-5432).
+
+        Never raises: a malformed candidate log is skipped (the same log would
+        make the extractor return ``None`` under its own swallow, and structural
+        receipt corruption is already caught by ``_strict_parse``)."""
+        zero_addr = "0x0000000000000000000000000000000000000000"
+        transfer_topic = EVENT_TOPICS["Transfer"].lower()
+        logs = receipt.get("logs", [])
+        if not isinstance(logs, list | tuple):
+            return False
+        for log in logs:
+            # A malformed entry (non-mapping log, or non-sequence ``topics``) is
+            # skipped, never raised: ``parse_receipt`` can succeed while
+            # ``_parse_log`` swallows individual malformed logs, so this presence
+            # scan must tolerate the same shapes (e.g. ``{"logs": ["bad"]}``).
+            if not isinstance(log, dict):
+                continue
+            topics = log.get("topics", [])
+            if not isinstance(topics, list | tuple) or len(topics) < 3:
+                continue
+            first_topic = topics[0]
+            if isinstance(first_topic, bytes):
+                first_topic = "0x" + first_topic.hex()
+            if str(first_topic).lower() != transfer_topic:
+                continue
+            try:
+                from_addr = HexDecoder.topic_to_address(topics[1])
+            except Exception:  # noqa: BLE001 — degenerate topic word; treat as non-mint
+                continue
+            if from_addr.lower() == zero_addr:
+                return True
+        return False
+
+    @staticmethod
+    def _tag_presence(
+        value: Any,
+        *,
+        present: bool,
+        field: str,
+        missing_reason: str,
+    ) -> ExtractResult[Any]:
+        """Collapse a legacy ``value | None`` plus a PRESENCE flag into the
+        three-variant result (VIB-5432): a value is ``ExtractOk``; ``None`` with
+        the event present is the ghost-position ``ExtractError``; ``None`` with
+        the event absent is the benign ``ExtractMissing``."""
+        if value is not None:
+            return ExtractOk(value=value)
+        if present:
+            return ExtractError(
+                error=(
+                    f"{field}: event present in receipt but extractor returned None "
+                    "(field-level decode failure — would otherwise strand a ghost position)"
+                )
+            )
+        return ExtractMissing(reason=missing_reason)
+
+    def extract_swap_amounts_result(
+        self,
+        receipt: dict[str, Any],
+        *,
+        expected_out: Decimal | None = None,
+    ) -> ExtractResult["SwapAmounts"]:
+        """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-5432.
+
+        Presence = a ``TokenExchange`` / ``TokenExchangeUnderlying`` event in the
+        parsed receipt. A present swap whose amounts cannot be decoded (e.g.
+        unresolvable token decimals) is an ``ExtractError``, not a benign miss.
+
+        ``expected_out`` is forwarded for realized ``slippage_bps`` (VIB-3203).
+        It MUST stay in this signature: the ResultEnricher calls this wrapper,
+        and a missing kwarg would trip the enricher's TypeError fallback and
+        silently drop ``expected_out``."""
+        parsed = self._strict_parse(receipt)
+        if isinstance(parsed, ExtractError):
+            return parsed
+        try:
+            value = self.extract_swap_amounts(receipt, expected_out=expected_out)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        # Fail-closed on a present-but-undecodable TokenExchange (VIB-5432 round 2):
+        # ``_decode_swap_data`` swallows its decode crash to ``{"raw_data": ...}``,
+        # so ``_parse_swap_event`` manufactures a zero-default ``SwapEventData`` and
+        # ``extract_swap_amounts`` returns a FABRICATED zero ``SwapAmounts`` (non-None)
+        # — ``_tag_presence`` would mis-tag that ``ExtractOk``. Reclassify to error.
+        if self._decode_fell_back(parsed, CurveEventType.TOKEN_EXCHANGE, CurveEventType.TOKEN_EXCHANGE_UNDERLYING):
+            return ExtractError(
+                error=(
+                    "swap_amounts: TokenExchange event present but decode fell back to raw_data "
+                    "(fabricated zero-default SwapEventData would strand a ghost position)"
+                )
+            )
+        present = self._event_present(parsed, CurveEventType.TOKEN_EXCHANGE, CurveEventType.TOKEN_EXCHANGE_UNDERLYING)
+        return self._tag_presence(
+            value, present=present, field="swap_amounts", missing_reason="no TokenExchange event in receipt"
+        )
+
+    def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[Any]:
+        """Fail-closed variant of :meth:`extract_position_id` — see VIB-5432.
+
+        Presence = a mint Transfer (from the zero address). A present mint whose
+        LP-token address is malformed yields ``None`` from the extractor, which
+        is a decode failure -> ``ExtractError`` (not a missing event)."""
+        parsed = self._strict_parse(receipt)
+        if isinstance(parsed, ExtractError):
+            return parsed
+        try:
+            value = self.extract_position_id(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        return self._tag_presence(
+            value,
+            present=self._has_mint_transfer(receipt),
+            field="position_id",
+            missing_reason="no LP token mint Transfer in receipt",
+        )
+
+    def extract_liquidity_result(self, receipt: dict[str, Any]) -> ExtractResult["Decimal"]:
+        """Fail-closed variant of :meth:`extract_liquidity` — see VIB-5432.
+
+        Delegates to ``extract_lp_tokens_received``; presence = a mint Transfer
+        (from the zero address). A present mint whose amount cannot be decoded
+        is an ``ExtractError``."""
+        parsed = self._strict_parse(receipt)
+        if isinstance(parsed, ExtractError):
+            return parsed
+        try:
+            value = self.extract_liquidity(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        return self._tag_presence(
+            value,
+            present=self._has_mint_transfer(receipt),
+            field="liquidity",
+            missing_reason="no LP token mint Transfer in receipt",
+        )
+
+    def extract_lp_tokens_received_result(self, receipt: dict[str, Any]) -> ExtractResult["Decimal"]:
+        """Fail-closed variant of :meth:`extract_lp_tokens_received` — see VIB-5432.
+
+        Presence = a mint Transfer (from the zero address). A present mint whose
+        amount cannot be decoded is an ``ExtractError``."""
+        parsed = self._strict_parse(receipt)
+        if isinstance(parsed, ExtractError):
+            return parsed
+        try:
+            value = self.extract_lp_tokens_received(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        return self._tag_presence(
+            value,
+            present=self._has_mint_transfer(receipt),
+            field="lp_tokens_received",
+            missing_reason="no LP token mint Transfer in receipt",
+        )
+
+    def extract_lp_open_data_result(self, receipt: dict[str, Any]) -> ExtractResult["LPOpenData"]:
+        """Fail-closed variant of :meth:`extract_lp_open_data` — see VIB-5432.
+
+        Presence = an ``AddLiquidity`` event in the parsed receipt. A present
+        ``AddLiquidity`` we fail to assemble into ``LPOpenData`` is an
+        ``ExtractError`` (the LP_OPEN ghost-position case)."""
+        parsed = self._strict_parse(receipt)
+        if isinstance(parsed, ExtractError):
+            return parsed
+        try:
+            value = self.extract_lp_open_data(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        # Fail-closed on a present-but-undecodable AddLiquidity (VIB-5432 round 2):
+        # ``_decode_add_liquidity_data`` swallows its crash to ``{"raw_data": ...}``
+        # (no ``token_amounts``), so ``extract_lp_open_data`` builds a non-None
+        # ``LPOpenData`` with ``amount0``/``amount1`` ``None`` — a fabricated open
+        # ``_tag_presence`` would mis-tag ``ExtractOk``. Reclassify to error.
+        if self._decode_fell_back(parsed, CurveEventType.ADD_LIQUIDITY):
+            return ExtractError(
+                error=(
+                    "lp_open_data: AddLiquidity event present but decode fell back to raw_data "
+                    "(fabricated LPOpenData from missing token_amounts would strand a ghost position)"
+                )
+            )
+        return self._tag_presence(
+            value,
+            present=self._event_present(parsed, CurveEventType.ADD_LIQUIDITY),
+            field="lp_open_data",
+            missing_reason="no AddLiquidity event in receipt",
+        )
+
+    def extract_primitive_money_legs_result(self, receipt: dict[str, Any]) -> ExtractResult["PrimitiveMoneyLegs"]:
+        """Fail-closed variant of :meth:`extract_primitive_money_legs` — see VIB-5432.
+
+        DOCUMENTED PER-FIELD EXCEPTION to the presence rule: unlike the other
+        extractors, ``extract_primitive_money_legs`` returns ``None`` *by design*
+        as a legacy fallback even when an ``AddLiquidity`` event IS present — when
+        the pool's coin metadata is unknown, a funded amount cannot be bound to a
+        coin, or no coin is funded (see its docstring). That ``None`` routes the
+        LP_OPEN to the legacy two-slot path, which itself fail-closes via
+        :meth:`extract_lp_open_data_result` (AddLiquidity present + decode crash ->
+        ``ExtractError``). So the ghost-position guard for LP_OPEN lives on
+        ``lp_open_data``; mapping this field's ``None`` to ``ExtractError`` would
+        instead convert every unregistered-pool deposit — a common, benign
+        fallback — into a fatal accounting halt. ``None`` is therefore the benign
+        ``ExtractMissing`` here; only a genuine raise (caught below) is an error."""
+        parsed = self._strict_parse(receipt)
+        if isinstance(parsed, ExtractError):
+            return parsed
+        try:
+            value = self.extract_primitive_money_legs(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason="no declared money legs (legacy LP_OPEN fallback)")
+        return ExtractOk(value=value)
+
+    def extract_lp_close_data_result(self, receipt: dict[str, Any]) -> ExtractResult["LPCloseData"]:
+        """Fail-closed variant of :meth:`extract_lp_close_data` — see VIB-5432.
+
+        Presence = a ``RemoveLiquidity`` / ``RemoveLiquidityOne`` /
+        ``RemoveLiquidityImbalance`` event in the parsed receipt. A present
+        removal we fail to decode is an ``ExtractError`` (the LP_CLOSE
+        ghost-position case)."""
+        parsed = self._strict_parse(receipt)
+        if isinstance(parsed, ExtractError):
+            return parsed
+        try:
+            value = self.extract_lp_close_data(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        # Fail-closed on a present-but-undecodable RemoveLiquidity (VIB-5432 round 2):
+        # ``_decode_remove_liquidity_data`` swallows its crash to ``{"raw_data": ...}``
+        # (no ``token_amounts``), so ``extract_lp_close_data`` builds a non-None
+        # ``LPCloseData`` with zero collected amounts — a fabricated close
+        # ``_tag_presence`` would mis-tag ``ExtractOk``. Reclassify to error. Only
+        # ``REMOVE_LIQUIDITY`` is structurally decoded; ``RemoveLiquidityOne`` /
+        # ``RemoveLiquidityImbalance`` carry ``raw_data`` by design (see
+        # :meth:`_decode_fell_back`) and stay valid ``ExtractOk`` closes.
+        if self._decode_fell_back(parsed, CurveEventType.REMOVE_LIQUIDITY):
+            return ExtractError(
+                error=(
+                    "lp_close_data: RemoveLiquidity event present but decode fell back to raw_data "
+                    "(fabricated LPCloseData from missing token_amounts would strand a ghost position)"
+                )
+            )
+        present = self._event_present(
+            parsed,
+            CurveEventType.REMOVE_LIQUIDITY,
+            CurveEventType.REMOVE_LIQUIDITY_ONE,
+            CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,
+        )
+        return self._tag_presence(
+            value, present=present, field="lp_close_data", missing_reason="no RemoveLiquidity event in receipt"
+        )
+
+    def extract_protocol_fees_result(self, receipt: dict[str, Any]) -> ExtractResult["ProtocolFees"]:
+        """Fail-closed variant of :meth:`extract_protocol_fees` — see VIB-5432.
+
+        ``extract_protocol_fees`` always returns a ``ProtocolFees`` (with an
+        ``unavailable_reason`` when fees aren't recoverable, never ``None``), so
+        the only non-``ExtractOk`` outcome here is a genuine decode crash."""
+        parsed = self._strict_parse(receipt)
+        if isinstance(parsed, ExtractError):
+            return parsed
+        try:
+            value = self.extract_protocol_fees(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        return ExtractOk(value=value)
 
     # Backward compatibility methods
     def is_curve_event(self, topic: str | bytes) -> bool:
