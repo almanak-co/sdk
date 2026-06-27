@@ -154,9 +154,7 @@ def test_read_position_no_gateway_returns_none() -> None:
 def test_read_position_3pool_live_virtual_price() -> None:
     # 10 LP tokens, virtual_price 1.0196 -> value ~ 10.196
     reader = CurveLpPositionReader(
-        _StubGatewayClient(
-            _make_replies(lp_balance_wei=10 * 10**18, virtual_price_wei=1_019_566_780_337_011_070)
-        )
+        _StubGatewayClient(_make_replies(lp_balance_wei=10 * 10**18, virtual_price_wei=1_019_566_780_337_011_070))
     )
     pos = reader.read_position(
         protocol="curve",
@@ -202,9 +200,7 @@ def test_read_position_unmeasured_balance_returns_none() -> None:
 
 
 def test_read_position_unmeasured_virtual_price_returns_none() -> None:
-    reader = CurveLpPositionReader(
-        _StubGatewayClient(_make_replies(lp_balance_wei=10**18, virtual_price_wei=None))
-    )
+    reader = CurveLpPositionReader(_StubGatewayClient(_make_replies(lp_balance_wei=10**18, virtual_price_wei=None)))
     assert (
         reader.read_position(
             protocol="curve",
@@ -340,16 +336,48 @@ def _curve_position(details: dict[str, Any]) -> PositionInfo:
     )
 
 
+class _StubMarket:
+    """Minimal ``MarketDataSource`` stub for the depeg cross-check (VIB-5426).
+
+    Resolves ``price(token)`` by SYMBOL (upper-cased); an unknown key (e.g. a
+    coin ADDRESS, which the valuer tries first) raises, so the valuer's
+    address→symbol fallback resolves to the symbol price. A symbol mapped to
+    ``None`` raises too (simulates an oracle miss for that coin).
+    """
+
+    def __init__(self, prices: dict[str, Decimal | None]) -> None:
+        self._prices = {k.upper(): v for k, v in prices.items()}
+
+    def price(self, token: str) -> Decimal:
+        value = self._prices.get(str(token).upper())
+        if value is None:
+            raise KeyError(token)
+        return value
+
+
+def _usd_market(**overrides: str | None) -> _StubMarket:
+    """A healthy USD 3pool oracle (DAI/USDC/USDT ≈ $1), with per-coin overrides:
+    ``_usd_market(USDT="0.90")`` depegs USDT; ``_usd_market(USDT=None)`` makes it
+    unpriceable."""
+    prices: dict[str, Decimal | None] = {
+        "DAI": Decimal("1.0"),
+        "USDC": Decimal("1.0"),
+        "USDT": Decimal("1.0"),
+    }
+    for sym, val in overrides.items():
+        prices[sym.upper()] = None if val is None else Decimal(val)
+    return _StubMarket(prices)
+
+
 def test_valuer_curve_branch_values_with_virtual_price() -> None:
     valuer = PortfolioValuer(
-        _StubGatewayClient(
-            _make_replies(lp_balance_wei=10 * 10**18, virtual_price_wei=1_019_566_780_337_011_070)
-        )
+        _StubGatewayClient(_make_replies(lp_balance_wei=10 * 10**18, virtual_price_wei=1_019_566_780_337_011_070))
     )
-    pos = _curve_position(
-        {"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET}
-    )
-    value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(pos, "ethereum", market=None)  # type: ignore[arg-type]
+    pos = _curve_position({"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET})
+    # VIB-5426: a healthy USD pool (oracle confirms the $1 peg) marks at par as
+    # before. The cross-check now requires an independent oracle, so the test
+    # supplies one — the par-mark behaviour is unchanged on a confirmed peg.
+    value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(pos, "ethereum", market=_usd_market())  # type: ignore[arg-type]
     assert repriced is True
     # 10 * 1.019566... ~= 10.1957
     assert value_usd == Decimal("10") * (Decimal("1019566780337011070") / Decimal(10**18))
@@ -357,26 +385,26 @@ def test_valuer_curve_branch_values_with_virtual_price() -> None:
     assert details["virtual_price"] == str(Decimal("1019566780337011070") / Decimal(10**18))
     assert details["liquidity"] == str(10 * 10**18)
     assert details["peg_usd"] == "1"
+    # The peg was actively verified against the oracle, not assumed.
+    assert details["oracle_peg_usd"] == "1.0"
+    assert details["depeg_divergence_bps"] == "0"
+    assert "valuation_status" not in details  # HIGH confidence, no degradation
 
 
 def test_valuer_curve_branch_uses_strategy_wallet_fallback() -> None:
     # Details omit a wallet (the lp_curve fixture's get_open_positions shape);
     # the valuer falls back to the cached strategy wallet.
-    valuer = PortfolioValuer(
-        _StubGatewayClient(_make_replies(lp_balance_wei=10**18, virtual_price_wei=10**18))
-    )
+    valuer = PortfolioValuer(_StubGatewayClient(_make_replies(lp_balance_wei=10**18, virtual_price_wei=10**18)))
     valuer._strategy_wallet_address = WALLET
     pos = _curve_position({"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"]})
-    value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(pos, "ethereum", market=None)  # type: ignore[arg-type]
+    value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(pos, "ethereum", market=_usd_market())  # type: ignore[arg-type]
     assert repriced is True
     assert value_usd == Decimal("1")
 
 
 def test_valuer_curve_branch_no_wallet_fails_closed() -> None:
     # No wallet anywhere -> UNAVAILABLE (repriced False), never a stale estimate.
-    valuer = PortfolioValuer(
-        _StubGatewayClient(_make_replies(lp_balance_wei=10**18, virtual_price_wei=10**18))
-    )
+    valuer = PortfolioValuer(_StubGatewayClient(_make_replies(lp_balance_wei=10**18, virtual_price_wei=10**18)))
     pos = _curve_position({"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"]})
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(pos, "ethereum", market=None)  # type: ignore[arg-type]
     assert repriced is False
@@ -385,9 +413,7 @@ def test_valuer_curve_branch_no_wallet_fails_closed() -> None:
 
 def test_valuer_curve_branch_empty_position_measured_zero() -> None:
     valuer = PortfolioValuer(_StubGatewayClient(_make_replies(lp_balance_wei=0, virtual_price_wei=10**18)))
-    pos = _curve_position(
-        {"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET}
-    )
+    pos = _curve_position({"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET})
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(pos, "ethereum", market=None)  # type: ignore[arg-type]
     assert repriced is True
     assert value_usd == Decimal("0")
@@ -398,9 +424,7 @@ def test_valuer_curve_branch_unmeasured_fails_closed_not_zero() -> None:
     # virtual_price unreadable -> the position is NOT booked as $0; it is
     # UNAVAILABLE (repriced False). Empty != Zero.
     valuer = PortfolioValuer(_StubGatewayClient(_make_replies(lp_balance_wei=10**18, virtual_price_wei=None)))
-    pos = _curve_position(
-        {"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET}
-    )
+    pos = _curve_position({"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET})
     value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(pos, "ethereum", market=None)  # type: ignore[arg-type]
     assert repriced is False
     assert details == {}
@@ -414,6 +438,140 @@ def test_valuer_metapool_shape_usd_pegged_values() -> None:
 
     assert "CRVUSD" in _USD_STABLE_SYMBOLS
     assert "USDC" in _USD_STABLE_SYMBOLS
+
+
+# ── VIB-5426 / audit P0-2 — oracle-vs-pool depeg cross-check ──────────────────
+
+
+def _active_3pool_valuer() -> PortfolioValuer:
+    return PortfolioValuer(_StubGatewayClient(_make_replies(lp_balance_wei=10 * 10**18, virtual_price_wei=10**18)))
+
+
+def _3pool_pos() -> PositionInfo:
+    return _curve_position({"pool": "3pool", "lp_token": LP_3POOL, "coins": ["DAI", "USDC", "USDT"], "wallet": WALLET})
+
+
+def test_curve_depeg_fires_unavailable() -> None:
+    # USDT depegs to $0.90 (1000 bps off the $1 peg) — virtual_price is blind to
+    # it, but the oracle cross-check fires: the position degrades to a no_path
+    # marker (value 0, NOT par), never booking $10 of bleeding value at par.
+    valuer = _active_3pool_valuer()
+    value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(
+        _3pool_pos(),
+        "ethereum",
+        market=_usd_market(USDT="0.90"),  # type: ignore[arg-type]
+    )
+    assert repriced is True  # a marker tuple, not a None fall-through
+    assert value_usd == Decimal("0")  # kept OUT of the NAV sum (Empty ≠ Zero)
+    assert details["valuation_status"] == "no_path"
+    assert details["mark_unmeasured"] is True
+    assert details["unavailable_reason"] == "curve_oracle_depeg_divergence"
+    assert details["depeg_divergence_bps"] == "1000"
+    assert details["depeg_threshold_bps"] == "100"
+
+
+def test_curve_systemic_depeg_fires() -> None:
+    # ALL coins fall to $0.90 together — the inter-coin spread is 0 (median moves
+    # with them), so only the peg-LEVEL check vs the expected $1 numeraire catches
+    # it. Proves the systemic guard the median-relative check alone would miss.
+    valuer = _active_3pool_valuer()
+    value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(
+        _3pool_pos(),
+        "ethereum",
+        market=_usd_market(DAI="0.90", USDC="0.90", USDT="0.90"),  # type: ignore[arg-type]
+    )
+    assert repriced is True
+    assert value_usd == Decimal("0")
+    assert details["unavailable_reason"] == "curve_oracle_depeg_divergence"
+    assert details["depeg_divergence_bps"] == "1000"
+
+
+def test_curve_oracle_miss_distinct_from_depeg() -> None:
+    # One coin unpriceable (oracle outage) — degrade to UNAVAILABLE, but with the
+    # honest reason "price_unavailable", NEVER mis-blamed as a depeg.
+    valuer = _active_3pool_valuer()
+    value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(
+        _3pool_pos(),
+        "ethereum",
+        market=_usd_market(USDT=None),  # type: ignore[arg-type]
+    )
+    assert repriced is True
+    assert value_usd == Decimal("0")
+    assert details["valuation_status"] == "no_path"
+    assert details["unavailable_reason"] == "curve_oracle_price_unavailable"
+
+
+def test_curve_no_market_fails_closed() -> None:
+    # No oracle at all — the cross-check cannot run, so the position is unmeasured
+    # (UNAVAILABLE), never par-marked. A valuation path that trusts par without an
+    # oracle is exactly the P0-2 anti-pattern.
+    valuer = _active_3pool_valuer()
+    value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(
+        _3pool_pos(),
+        "ethereum",
+        market=None,  # type: ignore[arg-type]
+    )
+    assert repriced is True
+    assert value_usd == Decimal("0")
+    assert details["unavailable_reason"] == "curve_oracle_price_unavailable"
+
+
+def test_curve_intent_threshold_override() -> None:
+    # 150 bps divergence: fires under the 100-bps default, passes under a 200-bps
+    # per-intent override (a deployment that knowingly tolerates a wider band).
+    valuer = _active_3pool_valuer()
+    market = _usd_market(USDT="0.985")  # 150 bps off the $1 peg
+
+    _, default_details, _ = valuer._reprice_lp_enriched_dispatch(
+        _3pool_pos(),
+        "ethereum",
+        market=market,  # type: ignore[arg-type]
+    )
+    assert default_details["valuation_status"] == "no_path"
+    assert default_details["depeg_divergence_bps"] == "150"
+
+    pos = _curve_position(
+        {
+            "pool": "3pool",
+            "lp_token": LP_3POOL,
+            "coins": ["DAI", "USDC", "USDT"],
+            "wallet": WALLET,
+            "depeg_threshold_bps": "200",
+        }
+    )
+    value_usd, details, repriced = valuer._reprice_lp_enriched_dispatch(
+        pos,
+        "ethereum",
+        market=market,  # type: ignore[arg-type]
+    )
+    assert repriced is True
+    assert value_usd == Decimal("10")  # par mark — peg within the tolerated band
+    assert details["depeg_threshold_bps"] == "200"
+    assert "valuation_status" not in details
+
+
+def test_curve_depeg_marker_forces_snapshot_unavailable() -> None:
+    # The marker's job is to force the WHOLE snapshot to UNAVAILABLE so the
+    # drawdown fold sees "blind", not "safe at par". Confirm the confidence fold
+    # keys on the no_path the depeg path stamps.
+    from almanak.framework.valuation.portfolio_valuer import PositionValue, ValueConfidence
+
+    depegged = PositionValue(
+        position_type=PositionType.LP,
+        protocol="curve",
+        chain="ethereum",
+        value_usd=Decimal("0"),
+        label="curve LP",
+        tokens=[],
+        details={"valuation_status": "no_path", "unavailable_reason": "curve_oracle_depeg_divergence"},
+    )
+    conf = PortfolioValuer._determine_value_confidence(
+        positions=[depegged],
+        wallet_balances=[],
+        positions_unavailable=False,
+        wallet_data_incomplete=False,
+    )
+    assert conf == ValueConfidence.UNAVAILABLE
 
 
 if __name__ == "__main__":

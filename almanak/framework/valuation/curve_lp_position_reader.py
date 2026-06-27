@@ -100,6 +100,13 @@ class CurveLpPosition:
     # is exact regardless of the underlying coins' decimals.
     decimals: int = 18  # decimal-policy-exempt: Curve LP token is always 18-dec (VIB-5420)
     coins: list[str] = field(default_factory=list)
+    # Coin contract addresses (same order as ``coins``), resolved from the pool
+    # registry. Carried so the valuer can price each coin by ADDRESS against the
+    # independent oracle for the depeg cross-check (VIB-5426) — address-form
+    # pricing engages the oracle's by-address market sources a bare symbol skips,
+    # which is what makes a real depeg visible. Empty when the registry has no
+    # addresses for the pool; the valuer then falls back to symbol pricing.
+    coin_addresses: list[str] = field(default_factory=list)
 
     @property
     def is_active(self) -> bool:
@@ -223,6 +230,17 @@ class CurveLpPositionReader:
             )
             return None
 
+        # Coin addresses (registry, same order as ``meta["coins"]``) for the
+        # depeg cross-check's by-address oracle pricing (VIB-5426). Carry them
+        # ONLY when they align 1:1 with the resolved coins — a caller-supplied
+        # ``coins`` override that reorders/subsets the pool must not let an
+        # address map to the wrong coin; the valuer falls back to symbol pricing.
+        meta_coins = [str(c) for c in (meta.get("coins") or [])]
+        meta_coin_addresses = [str(a) for a in (meta.get("coin_addresses") or [])]
+        coin_addresses = (
+            meta_coin_addresses if (pool_coins == meta_coins and len(meta_coin_addresses) == len(pool_coins)) else []
+        )
+
         # LP-token balance for the wallet (live, gateway eth_call). None → fail
         # closed (unmeasured). A measured zero means an empty position.
         lp_balance_wei = self._lp_reader.read_erc20_balance(chain, lp_token_address, wallet_address)
@@ -235,6 +253,7 @@ class CurveLpPositionReader:
                 lp_balance_wei=0,
                 virtual_price=Decimal("0"),
                 coins=pool_coins,
+                coin_addresses=coin_addresses,
             )
 
         virtual_price = self._read_virtual_price(chain, pool_address)
@@ -249,6 +268,7 @@ class CurveLpPositionReader:
             lp_balance_wei=lp_balance_wei,
             virtual_price=virtual_price,
             coins=pool_coins,
+            coin_addresses=coin_addresses,
         )
 
     def _read_virtual_price(self, chain: str, pool_address: str) -> Decimal | None:
