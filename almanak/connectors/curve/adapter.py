@@ -28,6 +28,10 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.rpc import eth_call_uint256
+from almanak.connectors._strategy_base.swap_oracle_guard import (
+    DEFAULT_SWAP_ORACLE_DIVERGENCE_BPS,
+    check_swap_oracle_divergence,
+)
 from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
@@ -820,6 +824,72 @@ class CurveAdapter:
     # Swap Operations
     # =========================================================================
 
+    def _swap_oracle_guard_error(
+        self,
+        *,
+        pool_info: "PoolInfo",
+        token_in_symbol: str,
+        token_out_symbol: str,
+        amount_in: Decimal,
+        amount_out_estimate: int,
+        token_out_decimals: int,
+        price_ratio: Decimal | None,
+        oracle_guard_bps: int | None,
+        strict_oracle_guard: bool,
+        oracle_prices_real: bool,
+    ) -> str | None:
+        """Run the P0-8 oracle/MEV min-out guard; return an error to fail with, or
+        ``None`` to proceed.
+
+        **Scoped to StableSwap pools.** The check compares the pool's *execution*
+        rate (``get_dy``) to the oracle mid. On a StableSwap pool that gap is just
+        fee + a few bps of impact, so a material shortfall is a real depeg /
+        displacement signal (the audit's P0-8 priority). On a **CryptoSwap /
+        Tricrypto** pool the same gap legitimately includes genuine price impact
+        that scales with trade size and pool depth without bound — so the
+        execution-rate check cannot distinguish a bad fill from a large-but-fair
+        one and **false-blocks legitimate swaps** (CI surfaced a 637 bps fill on
+        arb-tricrypto). Volatile-pool min-out protection is the slippage floor; an
+        impact-immune spot-price-vs-oracle guard is the correct mechanism and is
+        tracked separately. So volatile pools skip this check entirely.
+        """
+        if pool_info.pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
+            logger.debug(
+                "Curve swap oracle guard skipped for volatile pool %s "
+                "(execution-rate vs oracle conflates real price impact with manipulation).",
+                pool_info.name,
+            )
+            return None
+        threshold_bps = oracle_guard_bps if oracle_guard_bps is not None else DEFAULT_SWAP_ORACLE_DIVERGENCE_BPS
+        guard = check_swap_oracle_divergence(
+            amount_in=amount_in,
+            pool_quoted_out=Decimal(amount_out_estimate) / Decimal(10**token_out_decimals),
+            price_ratio=price_ratio if oracle_prices_real else None,
+            threshold_bps=threshold_bps,
+            strict_when_unmeasured=strict_oracle_guard,
+        )
+        if not guard.ok:
+            if guard.reason == "oracle_unmeasured":
+                return (
+                    f"Curve swap oracle guard (strict): no oracle price for "
+                    f"{token_in_symbol}->{token_out_symbol} on {pool_info.name}; "
+                    f"refusing to trade without an independent oracle reference"
+                )
+            return (
+                f"Curve swap blocked: {pool_info.name} quote is {guard.shortfall_bps} bps "
+                f"below oracle-fair (threshold {threshold_bps} bps) — pre-moved / displaced "
+                f"(stale depeg / persistent imbalance) pool; refusing to build a bad-fill swap"
+            )
+        if guard.reason == "oracle_unmeasured":
+            logger.warning(
+                "Curve swap oracle guard unmeasured for %s->%s on %s (no oracle price_ratio); "
+                "proceeding with pool-self-referential min-out only (degrade-open).",
+                token_in_symbol,
+                token_out_symbol,
+                pool_info.name,
+            )
+        return None
+
     def swap(
         self,
         pool_address: str,
@@ -829,6 +899,9 @@ class CurveAdapter:
         slippage_bps: int | None = None,
         recipient: str | None = None,
         price_ratio: Decimal | None = None,
+        oracle_guard_bps: int | None = None,
+        strict_oracle_guard: bool = False,
+        oracle_prices_real: bool = True,
     ) -> SwapResult:
         """Build a swap transaction on a Curve pool.
 
@@ -843,7 +916,18 @@ class CurveAdapter:
                 swapping USDT at $1 for WETH at $2500, price_ratio = 1/2500 = 0.0004).
                 Required for CryptoSwap/Tricrypto pools; StableSwap pools ignore it.
                 When None and pool is CryptoSwap, the swap fails (fail-closed) rather
-                than executing with inaccurate slippage protection.
+                than executing with inaccurate slippage protection. Also the
+                independent oracle reference for the P0-8 min-out guard below.
+            oracle_guard_bps: max bps the pool quote may sit below oracle-fair
+                before the swap is blocked as pre-moved (VIB-5439). ``None`` uses
+                ``DEFAULT_SWAP_ORACLE_DIVERGENCE_BPS``. Separate from
+                ``slippage_bps`` (which buffers the floor below the pool quote).
+            strict_oracle_guard: when no oracle ``price_ratio`` is available, fail
+                closed instead of degrading open to pool-self-referential min-out.
+            oracle_prices_real: whether ``price_ratio`` is a real oracle reference.
+                ``False`` (placeholder / offline-price mode) makes the guard treat
+                the oracle as unmeasured so it never fires on a known-fake price,
+                while ``price_ratio`` still feeds the CryptoSwap slippage estimate.
 
         Returns:
             SwapResult with transaction data
@@ -915,6 +999,26 @@ class CurveAdapter:
                 )
             amount_out_minimum = max(1, int(amount_out_estimate * (10000 - slippage_bps) // 10000))
             token_out_decimals = self._get_token_decimals(pool_info.coins[j])
+
+            # P0-8 oracle/MEV min-out guard (VIB-5439): on a StableSwap pool,
+            # cross-check the quote against the independent oracle and fail closed
+            # on a displaced / depegged pool BEFORE building the tx. Volatile pools
+            # are skipped inside the helper (their execution rate legitimately
+            # diverges from oracle mid by real price impact).
+            guard_error = self._swap_oracle_guard_error(
+                pool_info=pool_info,
+                token_in_symbol=token_in_symbol,
+                token_out_symbol=pool_info.coins[j],
+                amount_in=amount_in,
+                amount_out_estimate=amount_out_estimate,
+                token_out_decimals=token_out_decimals,
+                price_ratio=price_ratio,
+                oracle_guard_bps=oracle_guard_bps,
+                strict_oracle_guard=strict_oracle_guard,
+                oracle_prices_real=oracle_prices_real,
+            )
+            if guard_error is not None:
+                return SwapResult(success=False, error=guard_error)
 
             # Build transactions
             transactions: list[TransactionData] = []
@@ -1257,6 +1361,10 @@ class CurveAdapter:
         amount_in: Decimal,
         slippage_bps: int | None = None,
         recipient: str | None = None,
+        price_ratio: Decimal | None = None,
+        oracle_guard_bps: int | None = None,
+        strict_oracle_guard: bool = False,
+        oracle_prices_real: bool = True,
     ) -> SwapResult:
         """Build a metapool underlying swap via ``exchange_underlying``.
 
@@ -1314,6 +1422,26 @@ class CurveAdapter:
             )
             amount_out_minimum = max(1, int(amount_out_estimate * (10000 - slippage_bps) // 10000))
             token_out_decimals = self._get_token_decimals(token_out_symbol)
+
+            # P0-8 oracle/MEV min-out guard (VIB-5439). The combined coin space is
+            # all USD stables and the underlying estimate (get_dy_underlying or a
+            # 1:1 decimal-adjust) is independent of the oracle either way, so the
+            # cross-check always applies — it flags a depegged underlying / moved
+            # metapool before the tx is built.
+            guard_error = self._swap_oracle_guard_error(
+                pool_info=pool_info,
+                token_in_symbol=token_in_symbol,
+                token_out_symbol=token_out_symbol,
+                amount_in=amount_in,
+                amount_out_estimate=amount_out_estimate,
+                token_out_decimals=token_out_decimals,
+                price_ratio=price_ratio,
+                oracle_guard_bps=oracle_guard_bps,
+                strict_oracle_guard=strict_oracle_guard,
+                oracle_prices_real=oracle_prices_real,
+            )
+            if guard_error is not None:
+                return SwapResult(success=False, error=guard_error)
 
             transactions: list[TransactionData] = []
             approve_tx = self._build_approve_tx(token_in_address, pool_address, amount_in_wei)

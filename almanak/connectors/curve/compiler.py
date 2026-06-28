@@ -6,7 +6,11 @@ import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any, ClassVar
 
-from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext, BaseProtocolCompiler
+from almanak.connectors._strategy_base.base.compiler import (
+    BaseCompilerContext,
+    BaseProtocolCompiler,
+    SwapCompilerContext,
+)
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPCloseIntent, LPOpenIntent, SwapIntent
 from almanak.framework.models.reproduction_bundle import ActionBundle
@@ -31,6 +35,35 @@ def _resolve_lp_slippage_bps(max_slippage: Decimal | None) -> int:
     if max_slippage is None:
         return _DEFAULT_LP_SLIPPAGE_BPS
     return int(max_slippage * Decimal("10000"))
+
+
+def _resolve_oracle_guard_bps(swap_params: dict[str, Any]) -> int | None:
+    """Resolve the per-intent oracle/MEV min-out guard threshold (VIB-5439).
+
+    A strategy widens the guard for a large or volatile-pool swap with real price
+    impact (``swap_params={"oracle_guard_bps": 300}``) or narrows it for a tight
+    stable desk. ``None`` (the common case) lets the adapter apply
+    ``DEFAULT_SWAP_ORACLE_DIVERGENCE_BPS``. A boolean / non-positive / non-integer
+    override is ignored (falls back to the default) rather than silently disabling
+    the guard on a money path.
+    """
+    raw = swap_params.get("oracle_guard_bps")
+    if raw is None:
+        return None
+    # ``bool`` is a subclass of ``int`` (``int(True) == 1``), so a boolean override
+    # would silently become a 1 bps threshold — reject it explicitly.
+    if isinstance(raw, bool):
+        logger.warning("Ignoring boolean oracle_guard_bps=%r; using connector default.", raw)
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring non-integer oracle_guard_bps=%r; using connector default.", raw)
+        return None
+    if value <= 0:
+        logger.warning("Ignoring non-positive oracle_guard_bps=%r; using connector default.", raw)
+        return None
+    return value
 
 
 def _normalize_asset_set_token(token: str, ctx: BaseCompilerContext) -> str:
@@ -297,6 +330,10 @@ def _resolve_lp_open_amounts(
 class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
     """Compiler for Curve pool-based swaps and fungible LP positions."""
 
+    # Curve compiles swaps, so it needs the swap-pipeline context — notably
+    # ``using_placeholders``, which the P0-8 oracle min-out guard (VIB-5439)
+    # reads to avoid firing on known-fake placeholder / offline prices.
+    context_type: ClassVar[type[BaseCompilerContext]] = SwapCompilerContext
     protocols: ClassVar[frozenset[str]] = frozenset({"curve"})
     intents: ClassVar[frozenset[IntentType]] = frozenset(
         {
@@ -439,17 +476,34 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                     to_token.symbol,
                 )
 
+            # P0-8 min-out guard knobs (VIB-5439): per-intent overrides for the
+            # oracle-vs-pool divergence threshold and the unmeasured-oracle policy.
+            # ``oracle_prices_real`` gates the guard off placeholder / offline
+            # prices: those are known-fake (the compiler logs a PLACEHOLDER PRICES
+            # warning), so they must not be trusted as an independent oracle —
+            # otherwise the guard would block every real swap in test / discovery
+            # mode. price_ratio still feeds the CryptoSwap slippage estimate.
+            oracle_guard_bps = _resolve_oracle_guard_bps(swap_params)
+            strict_oracle_guard = bool(swap_params.get("strict_oracle_guard", False))
+            oracle_prices_real = not getattr(ctx, "using_placeholders", False)
+
             if use_metapool_underlying:
                 # Metapool combined-space swap via exchange_underlying. The
-                # combined coins are all USD stables, so price_ratio is not
-                # needed (the adapter uses the on-chain get_dy_underlying quote
-                # or a 1:1 decimal-adjusted estimate).
+                # combined coins are all USD stables, so price_ratio is not needed
+                # for the slippage estimate (the adapter uses the on-chain
+                # get_dy_underlying quote or a 1:1 decimal-adjusted estimate) — but
+                # it IS the independent oracle reference for the min-out guard, so
+                # thread it through to flag a depegged underlying.
                 swap_result = adapter.swap_underlying(
                     pool_address=pool_address,
                     token_in=from_token.symbol,
                     token_out=to_token.symbol,
                     amount_in=amount_decimal,
                     slippage_bps=slippage_bps,
+                    price_ratio=price_ratio,
+                    oracle_guard_bps=oracle_guard_bps,
+                    strict_oracle_guard=strict_oracle_guard,
+                    oracle_prices_real=oracle_prices_real,
                 )
             else:
                 swap_result = adapter.swap(
@@ -459,6 +513,9 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                     amount_in=amount_decimal,
                     slippage_bps=slippage_bps,
                     price_ratio=price_ratio,
+                    oracle_guard_bps=oracle_guard_bps,
+                    strict_oracle_guard=strict_oracle_guard,
+                    oracle_prices_real=oracle_prices_real,
                 )
 
             if not swap_result.success:
