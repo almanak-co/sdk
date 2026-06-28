@@ -46,7 +46,13 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-def validate_teardown_options(no_gateway: bool, network: str | None) -> None:
+def validate_teardown_options(
+    no_gateway: bool,
+    network: str | None,
+    *,
+    discover: bool = False,
+    wallet_wide: bool = False,
+) -> None:
     """Fail fast on incompatible CLI option combinations.
 
     ``--network`` selects between ``mainnet`` and ``anvil`` for the
@@ -55,10 +61,22 @@ def validate_teardown_options(no_gateway: bool, network: str | None) -> None:
     conflict here — before the strategy-folder resolver runs — keeps the
     error message specific instead of falling through to a noisier failure
     later in strategy loading.
+
+    ``--wallet-wide`` (VIB-5476) is the Plan-B break-glass consent flag: it
+    authorises closing on-chain positions this deployment cannot *prove* it
+    owns (sibling assets on a shared wallet). It is meaningless — and
+    dangerous to allow silently — outside the explicit ``--discover`` emergency
+    lane, so it is rejected without it. This keeps Plan B strictly opt-in and
+    prevents any leakage into the default Plan-A enumeration path.
     """
     if no_gateway and network is not None:
         raise click.ClickException(
             "--network only applies when the managed gateway is auto-started. Remove --network or remove --no-gateway."
+        )
+    if wallet_wide and not discover:
+        raise click.ClickException(
+            "--wallet-wide is a Plan-B break-glass consent flag and only applies with --discover. "
+            "Add --discover to run the emergency wallet-wide teardown, or remove --wallet-wide."
         )
 
 
@@ -639,6 +657,175 @@ def get_resolver_for_cleanup() -> Any:
 # =============================================================================
 
 
+def _resolve_teardown_deployment_id(*, strategy: Any, wallet_address: str | None, chain: str | None) -> str:
+    """Resolve the deployment_id for a Plan-B ``--discover`` run (VIB-5476 / TD-18).
+
+    Prefers the strategy's already-resolved id; otherwise SELF-RESOLVES the
+    canonical ``deployment:{sha256(wallet:chain)[:12]}`` from the key. This is
+    what makes the break-glass lever work after a runner crash with NO prior
+    local state — the very case where ``strategy.deployment_id`` is empty and
+    the old code hard-failed with "requires a resolved deployment_id".
+    The id is deterministic, so the same wallet+chain always recovers the same
+    deployment (blueprint 29 §2; never the @strategy decorator name).
+    """
+    existing = (getattr(strategy, "deployment_id", "") or "").strip()
+    if existing:
+        return existing
+
+    from ..deployment import FatalBootError
+    from ..runner.identity import resolve_deployment_id
+
+    try:
+        resolved = resolve_deployment_id(wallet_address=wallet_address or "", chain=chain or "")
+    except FatalBootError as exc:
+        # Replace the old blanket error with an actionable, mode-agnostic one:
+        # discovery now CAN self-resolve, so the only remaining failures are a
+        # missing local key (wallet+chain) or a blank hosted ALMANAK_DEPLOYMENT_ID.
+        raise click.ClickException(
+            "Teardown --discover could not resolve a deployment_id. In local mode, "
+            "provide a resolved wallet and chain; in hosted mode, ensure the platform "
+            f"deployment id is configured ({exc})."
+        ) from exc
+
+    click.secho(
+        f"  No prior local state — self-resolved deployment_id={resolved} deterministically from wallet+chain.",
+        fg="cyan",
+    )
+    return resolved
+
+
+def _ensure_strategy_deployment_id(strategy: Any, deployment_id: str, gateway_client: Any) -> None:
+    """Stamp a self-resolved ``deployment_id`` onto the strategy when it has none.
+
+    Keeps the downstream CLI commit + lifecycle lanes (which read
+    ``strategy.deployment_id``) keyed on the SAME id the discovery + attribution
+    gate used. Uses the public ``set_state_manager`` hook (sets ``_deployment_id``
+    and wires a gateway-backed state manager). Non-fatal on failure.
+    """
+    existing = (getattr(strategy, "deployment_id", "") or "").strip()
+    if existing or not hasattr(strategy, "set_state_manager"):
+        return
+    try:
+        from ..state.gateway_state_manager import GatewayStateManager
+
+        strategy.set_state_manager(GatewayStateManager(gateway_client), deployment_id)
+    except Exception as exc:  # noqa: BLE001 — non-fatal; lifecycle log may show a blank id
+        logger.warning("Could not stamp self-resolved deployment_id onto strategy: %s", exc)
+
+
+async def _read_plan_b_ownership(*, gateway_client: Any, deployment_id: str, chain: str | None) -> Any:
+    """Read this deployment's provable LP ownership for the Plan-B gate (VIB-5476).
+
+    Reuses the SAME durable attribution sources (``position_registry`` OPEN +
+    ``position_events`` LP OPEN) the runner recovery lane uses (VIB-5138), via
+    the runner-free :func:`read_deployment_lp_ownership`. All reads go through
+    the gateway-backed state manager — no direct network (gateway boundary).
+    """
+    from ..state.gateway_state_manager import GatewayStateManager
+    from ..teardown.runner_helpers import read_deployment_lp_ownership
+
+    sm = GatewayStateManager(gateway_client)
+    await sm.initialize()
+    return await read_deployment_lp_ownership(sm, deployment_id, (chain or "").strip())
+
+
+def _apply_plan_b_attribution_gate(
+    *,
+    full: Any,
+    deployment_id: str,
+    chain: str | None,
+    gateway_client: Any,
+    wallet_wide: bool,
+) -> Any:
+    """Sharp Plan-B attribution boundary for ``--discover`` (VIB-5476 / TD-18).
+
+    Partitions the wallet-wide on-chain scan into positions this deployment can
+    PROVE it owns vs the ambiguous remainder (sibling assets on a shared wallet,
+    or — the wiped-state case — everything when attribution is unreadable):
+
+    * **Attribution exists** → close only the provably deployment-owned subset.
+    * **Ambiguous remainder** → refuse + report it for manual handling by
+      default; close it only under the explicit ``--wallet-wide`` break-glass
+      consent flag (operator acknowledges it may touch sibling assets).
+    * **Nothing provably owned** (and a remainder exists) → refuse entirely
+      (non-zero exit), pointing the operator at ``--wallet-wide``.
+
+    Never silently sweeps. This is the whole safety boundary the roadmap calls
+    "dangerous by design" — kept strictly opt-in.
+    """
+    import asyncio
+
+    from ..teardown.lp_recovery import scope_discovered_for_plan_b
+    from ..teardown.models import TeardownPositionSummary
+
+    try:
+        ownership = asyncio.run(
+            _read_plan_b_ownership(gateway_client=gateway_client, deployment_id=deployment_id, chain=chain)
+        )
+    except Exception as e:
+        # An attribution-read failure must NEVER silently widen scope to a
+        # wallet-wide sweep — fail closed.
+        logger.error("Plan-B ownership read failed", exc_info=True)
+        raise click.ClickException(
+            f"Could not read deployment ownership for the attribution gate: {e}. Refusing to proceed (fail-closed)."
+        ) from e
+
+    scope = scope_discovered_for_plan_b(discovered=full, ownership=ownership)
+
+    if wallet_wide:
+        click.secho(
+            f"  BREAK-GLASS: --wallet-wide consent given — closing ALL {len(full.positions)} "
+            f"discovered position(s), including {len(scope.unattributable)} this deployment "
+            "cannot prove it owns. On a shared wallet this MAY close sibling deployments' "
+            "positions.",
+            fg="red",
+            bold=True,
+        )
+        return full
+
+    # Default sharp boundary: close only provably-owned; refuse + report the rest.
+    if scope.unattributable:
+        if not scope.ownership_available:
+            click.secho(
+                "  Attribution UNPROVABLE — no durable accounting state is readable for "
+                f"{deployment_id} on {chain}; none of the {len(scope.unattributable)} discovered "
+                "position(s) can be confirmed as this deployment's.",
+                fg="yellow",
+            )
+        click.secho(
+            f"  Refusing {len(scope.unattributable)} position(s) NOT provably owned by this "
+            "deployment (possible sibling assets on a shared wallet):",
+            fg="yellow",
+        )
+        for pos in scope.unattributable:
+            click.echo(f"    - [{pos.position_type.value}] {pos.protocol} on {pos.chain} id={pos.position_id}")
+        click.echo(
+            "    To force-close these, re-run with --wallet-wide (break-glass consent: "
+            "acknowledges it may touch sibling deployments' assets)."
+        )
+
+    if not scope.owned:
+        if scope.unattributable:
+            raise click.ClickException(
+                f"Plan-B teardown refused: {len(scope.unattributable)} on-chain position(s) found "
+                "but NONE are provably owned by this deployment. Re-run with --wallet-wide to "
+                "force-close them (break-glass consent)."
+            )
+        # Genuinely nothing on-chain — return the empty summary; the caller's
+        # no-op path reports it and exits 0.
+        return full
+
+    click.secho(
+        f"  Closing {len(scope.owned)} provably deployment-owned position(s).",
+        fg="green",
+    )
+    return TeardownPositionSummary(
+        deployment_id=full.deployment_id,
+        timestamp=full.timestamp,
+        positions=list(scope.owned),
+    )
+
+
 def discover_positions(
     *,
     strategy: Any,
@@ -648,15 +835,20 @@ def discover_positions(
     gateway_client: Any,
     chain: str | None,
     wallet_address: str | None,
+    wallet_wide: bool = False,
 ) -> Any:
     """Get open positions via ``--discover`` (NPM scan via gateway) or via
     ``strategy.get_open_positions()`` (strategy's own tracking).
 
-    ``--discover`` bypasses the strategy's local state and reads NPM
-    contracts directly via the gateway, so orphaned positions (e.g.
-    after a gateway restart lost the in-memory tracking) remain
-    recoverable. Without ``--discover``, the strategy's own tracking is
-    authoritative — it knows ``value_usd``, health factors, and non-LP
+    ``--discover`` is the **Plan-B** break-glass lever (blueprint 14 §4.5,
+    roadmap Teardown §1.1): it bypasses the strategy's local state and reads NPM
+    contracts directly via the gateway, so orphaned positions (e.g. after a
+    crash that lost the in-memory tracking) remain recoverable even with NO
+    prior local state. It SELF-RESOLVES the ``deployment_id`` from the key and
+    applies a sharp attribution gate — close only provably deployment-owned
+    positions; the ambiguous remainder needs explicit ``--wallet-wide`` consent
+    (VIB-5476). Without ``--discover``, the strategy's own tracking is
+    authoritative (Plan A) — it knows ``value_usd``, health factors, and non-LP
     positions the on-chain scan wouldn't surface.
     """
     if discover:
@@ -688,16 +880,27 @@ def discover_positions(
             logger.error("On-chain discovery failed", exc_info=True)
             raise click.ClickException(f"On-chain discovery failed: {e}") from e
 
-        deployment_id = (getattr(strategy, "deployment_id", "") or "").strip()
-        if not deployment_id:
-            raise click.ClickException("Teardown discovery requires a resolved deployment_id")
-        positions = to_teardown_summary(
+        # VIB-5476 / TD-18: self-resolve the deployment_id from the key so the
+        # break-glass lever works after a crash with NO prior local state.
+        deployment_id = _resolve_teardown_deployment_id(strategy=strategy, wallet_address=wallet_address, chain=chain)
+        _ensure_strategy_deployment_id(strategy, deployment_id, gateway_client)
+
+        full = to_teardown_summary(
             deployment_id=deployment_id,
             chain=chain,  # type: ignore[arg-type]  # See note above on _do_discover
             positions=discovered,
         )
         click.echo(f"  Found {len(discovered)} on-chain LP position(s).")
-        return positions
+
+        # VIB-5476 / TD-18: sharp attribution gate — close only provably-owned
+        # positions by default; the ambiguous remainder requires --wallet-wide.
+        return _apply_plan_b_attribution_gate(
+            full=full,
+            deployment_id=deployment_id,
+            chain=chain,
+            gateway_client=gateway_client,
+            wallet_wide=wallet_wide,
+        )
 
     # VIB-5459 / TD-01: reconcile the strategy's own enumeration against the
     # ``position_registry`` WARM read path so the CLI teardown lane (preview +

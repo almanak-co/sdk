@@ -448,64 +448,116 @@ async def _read_registry_lp_token_ids(state_manager: Any, deployment_id: str, ch
     return token_ids, True
 
 
+def _extract_lp_open_token_ids(events: Any, chain: str) -> set[str]:
+    """Collect NFT token ids from ``position_events`` LP OPEN rows on ``chain``.
+
+    Pure (no IO). Shared by the sync (sqlite/runner) and async (gateway) read
+    paths so both apply identical chain-scoping and ``str(position_id)``
+    normalisation — ``position_id`` IS the NFT token id. Rows for other chains,
+    rows with a missing/empty ``chain``, and rows without a ``position_id`` are
+    skipped.
+
+    Chain attribution fails CLOSED (VIB-5476): a row whose ``chain`` is missing
+    or empty is AMBIGUOUS, not owned. In the Plan-B break-glass ``--discover``
+    lane the entire safety of wallet-wide teardown rests on this gate only
+    admitting provably-owned positions, so a row that does not carry the exact
+    requested chain must never count toward ``token_ids``.
+    """
+    token_ids: set[str] = set()
+    target_chain = str(chain or "").strip()
+    for ev in events or []:
+        if not isinstance(ev, dict):
+            continue
+        ev_chain = str(ev.get("chain") or "").strip()
+        pid = ev.get("position_id")
+        if pid is None:
+            continue
+        # Only count this chain's OPENs toward token_ids. Fail closed: a
+        # missing/empty chain is ambiguous, not owned, so it is skipped too.
+        if not ev_chain or ev_chain != target_chain:
+            continue
+        token_ids.add(str(pid))
+    return token_ids
+
+
 def _read_position_event_lp_token_ids(state_manager: Any, deployment_id: str, chain: str) -> tuple[set[str], bool]:
     """LP NFT token ids from this deployment's ``position_events`` LP OPEN rows.
 
-    Source 2 of :func:`_deployment_lp_ownership` (pre- and post-cutover
-    fallback — ``position_id`` IS the NFT token id). Sync read. Only this
-    chain's OPENs are counted. Owns its own try/except.
+    Source 2 of :func:`read_deployment_lp_ownership` (pre- and post-cutover
+    fallback — ``position_id`` IS the NFT token id). Sync read used by the
+    sqlite-backed runner lane. Only this chain's OPENs are counted. Owns its own
+    try/except.
 
     Returns ``(token_ids, ok)`` like :func:`_read_registry_lp_token_ids`.
     Never raises.
     """
     if state_manager is None or not hasattr(state_manager, "get_position_events_sync"):
         return set(), False
-    token_ids: set[str] = set()
     try:
         events = state_manager.get_position_events_sync(deployment_id, position_type="LP", event_type="OPEN")
     except Exception as exc:  # noqa: BLE001 — best-effort attribution read
         logger.debug("Teardown LP ownership: position_events read failed for %s (%s)", deployment_id, exc)
         return set(), False
-    for ev in events or []:
-        ev_chain = (ev.get("chain") or "") if isinstance(ev, dict) else ""
-        pid = ev.get("position_id") if isinstance(ev, dict) else None
-        if pid is None:
-            continue
-        # Only count this chain's OPENs toward token_ids.
-        if ev_chain and ev_chain != chain:
-            continue
-        token_ids.add(str(pid))
-    return token_ids, True
+    return _extract_lp_open_token_ids(events, chain), True
 
 
-async def _deployment_lp_ownership(runner: Any, strategy: Any, chain: str) -> Any:
-    """LP token ids attributable to THIS deployment on ``chain`` (VIB-5138).
+async def _read_position_event_lp_token_ids_any(
+    state_manager: Any, deployment_id: str, chain: str
+) -> tuple[set[str], bool]:
+    """Read ``position_events`` LP OPEN token ids via whichever accessor exists.
 
-    Fund-safety scoping (VIB-4976): the on-chain discovery scan is wallet-scoped
-    and a wallet may be shared across deployments. This reads the deployment's
-    OWN durable accounting state to learn which NFT token ids it opened, so
-    teardown recovery can never close a sibling strategy's live LP on the same
-    wallet.
+    The sqlite-backed runner state manager exposes the sync
+    ``get_position_events_sync``; the gateway-backed manager
+    (:class:`GatewayStateManager`, used by the CLI Plan-B ``--discover`` lane and
+    by hosted runners) exposes only the async ``get_position_events_filtered``.
+    Without this dispatch the ``position_events`` fallback source silently
+    vanishes on the gateway path, so a deployment whose LP attribution lives only
+    in ``position_events`` (pre-cutover) would have its OWN position refused —
+    pushing the operator toward the dangerous ``--wallet-wide`` flag (VIB-5476).
 
-    Thin coordinator over two complementary read sources (both have independent
-    survival in the desync the ticket targets) — see
-    :func:`_read_registry_lp_token_ids` (robust, post-cutover) and
-    :func:`_read_position_event_lp_token_ids` (pre-cutover fallback). The ids are
-    unioned; ``had_lp_open`` is True iff any source contributed an id;
-    ``available`` is True iff at least one read completed. When BOTH reads fail
-    ``available=False`` so the caller refuses to close anything (ownership
-    unprovable). Never raises.
+    Prefers the proven sync path; falls back to the gateway async filtered read
+    (filtering the OPEN rows client-side, since the filtered API streams every
+    event type). Never raises.
+    """
+    if state_manager is None:
+        return set(), False
+    if hasattr(state_manager, "get_position_events_sync"):
+        return _read_position_event_lp_token_ids(state_manager, deployment_id, chain)
+    if hasattr(state_manager, "get_position_events_filtered"):
+        try:
+            events = await state_manager.get_position_events_filtered(
+                deployment_id=deployment_id, position_types=frozenset({"LP"})
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort attribution read
+            logger.debug("Teardown LP ownership: gateway position_events read failed for %s (%s)", deployment_id, exc)
+            return set(), False
+        opens = [ev for ev in (events or []) if isinstance(ev, dict) and ev.get("event_type") == "OPEN"]
+        return _extract_lp_open_token_ids(opens, chain), True
+    return set(), False
 
-    Bound to the runner via :func:`functools.partial` so the consumer calls
-    ``(strategy, chain) -> DeploymentLpOwnership``.
+
+async def read_deployment_lp_ownership(state_manager: Any, deployment_id: str, chain: str) -> Any:
+    """LP token ids attributable to a deployment from its durable state (VIB-5138).
+
+    Runner-free coordinator so BOTH the runner recovery lane
+    (:func:`_deployment_lp_ownership`) and the CLI Plan-B ``--discover`` lane
+    (VIB-5476) share one attribution read. Unions two complementary,
+    independently-surviving sources — :func:`_read_registry_lp_token_ids`
+    (robust, post-cutover) and :func:`_read_position_event_lp_token_ids_any`
+    (pre-cutover fallback; sync sqlite OR gateway async accessor). ``had_lp_open``
+    is True iff any source contributed
+    an id; ``available`` is True iff at least one read completed. When BOTH
+    reads fail ``available=False`` so the caller refuses to close anything
+    (ownership unprovable). Never raises.
+
+    Reusable for VIB-5485 (registry-authoritative flip backfill): the returned
+    :class:`DeploymentLpOwnership` is the deployment's provable on-chain LP set.
     """
     from .lp_recovery import DeploymentLpOwnership
 
-    deployment_id = (getattr(strategy, "deployment_id", "") or "").strip()
-    sm = getattr(runner, "state_manager", None)
-
-    registry_ids, registry_ok = await _read_registry_lp_token_ids(sm, deployment_id, chain)
-    event_ids, events_ok = _read_position_event_lp_token_ids(sm, deployment_id, chain)
+    deployment_id = (deployment_id or "").strip()
+    registry_ids, registry_ok = await _read_registry_lp_token_ids(state_manager, deployment_id, chain)
+    event_ids, events_ok = await _read_position_event_lp_token_ids_any(state_manager, deployment_id, chain)
 
     token_ids = registry_ids | event_ids
     available = registry_ok or events_ok
@@ -521,6 +573,23 @@ async def _deployment_lp_ownership(runner: Any, strategy: Any, chain: str) -> An
         had_lp_open=bool(token_ids),
         available=available,
     )
+
+
+async def _deployment_lp_ownership(runner: Any, strategy: Any, chain: str) -> Any:
+    """LP token ids attributable to THIS deployment on ``chain`` (VIB-5138).
+
+    Fund-safety scoping (VIB-4976): the on-chain discovery scan is wallet-scoped
+    and a wallet may be shared across deployments. This reads the deployment's
+    OWN durable accounting state to learn which NFT token ids it opened, so
+    teardown recovery can never close a sibling strategy's live LP on the same
+    wallet. Delegates to :func:`read_deployment_lp_ownership`.
+
+    Bound to the runner via :func:`functools.partial` so the consumer calls
+    ``(strategy, chain) -> DeploymentLpOwnership``.
+    """
+    deployment_id = (getattr(strategy, "deployment_id", "") or "").strip()
+    sm = getattr(runner, "state_manager", None)
+    return await read_deployment_lp_ownership(sm, deployment_id, chain)
 
 
 async def _discover_lp_for_teardown(runner: Any, strategy: Any) -> Any:

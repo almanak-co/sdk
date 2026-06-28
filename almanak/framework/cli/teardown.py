@@ -590,6 +590,22 @@ def teardown():
     ),
 )
 @click.option(
+    "--wallet-wide",
+    "wallet_wide",
+    is_flag=True,
+    default=False,
+    help=(
+        "PLAN-B BREAK-GLASS (VIB-5476). Only valid with --discover. By default "
+        "--discover closes only positions this deployment can PROVE it owns; "
+        "ambiguous positions (e.g. a sibling strategy's LP on a shared wallet, "
+        "or any position when local attribution state is wiped) are refused and "
+        "reported for manual handling. Passing --wallet-wide consents to "
+        "force-close ALL discovered positions — acknowledging it MAY touch "
+        "sibling deployments' assets on a shared wallet. Dangerous by design; "
+        "never the default."
+    ),
+)
+@click.option(
     "--network",
     "-n",
     default=None,
@@ -622,6 +638,7 @@ def execute_teardown(  # noqa: C901
     no_gateway: bool,
     discover: bool,
     include_empty: bool,
+    wallet_wide: bool,
     network: str | None,
     no_accounting: bool,
 ):
@@ -659,7 +676,7 @@ def execute_teardown(  # noqa: C901
     # surfaces the option conflict, not the folder error.
     from .teardown_helpers import validate_teardown_options
 
-    validate_teardown_options(no_gateway, network)
+    validate_teardown_options(no_gateway, network, discover=discover, wallet_wide=wallet_wide)
 
     # VIB-3838: route -d through the same resolver as request/status/list/
     # cancel. Validates is_dir + _looks_like_strategy_folder, exports
@@ -799,6 +816,7 @@ def execute_teardown(  # noqa: C901
             gateway_client=gateway_client,
             chain=chain,
             wallet_address=wallet_address,
+            wallet_wide=wallet_wide,
         )
         if print_no_op_if_empty_and_signal_return(
             positions=positions,

@@ -119,6 +119,76 @@ class LpRecoveryOutcome:
     discovered_ids: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class PlanBDiscoveryScope:
+    """Attribution partition of a Plan-B (``--discover``) on-chain scan (VIB-5476).
+
+    The CLI emergency lane scans the (possibly shared) wallet for live LP NFTs,
+    then this partitions the discovered set into the assets teardown may close
+    by default vs the ambiguous remainder that requires explicit break-glass
+    consent. This is the SAME deployment-ownership gate the runner recovery
+    lane applies (:func:`merge_discovered_lp`), surfaced for the
+    no-prior-state CLI path.
+
+    Attributes:
+        owned: Discovered LP positions provably attributable to this deployment
+            (token id in ``ownership.token_ids``). Safe to close — they are this
+            deployment's own positions.
+        unattributable: Discovered positions NOT provably owned — a sibling
+            deployment's LP on a shared wallet, or (the wiped-state case) any
+            position when attribution itself is unreadable. NEVER closed without
+            explicit ``--wallet-wide`` break-glass consent.
+        ownership_available: False iff NO attribution source could be read
+            (``DeploymentLpOwnership.available`` False) — ownership is entirely
+            unprovable, so every discovered position lands in ``unattributable``.
+    """
+
+    owned: list[PositionInfo]
+    unattributable: list[PositionInfo]
+    ownership_available: bool
+
+
+def scope_discovered_for_plan_b(
+    *,
+    discovered: TeardownPositionSummary | None,
+    ownership: DeploymentLpOwnership,
+) -> PlanBDiscoveryScope:
+    """Partition a Plan-B discovery scan by provable deployment ownership (VIB-5476).
+
+    Pure (no IO). A discovered LP position is ``owned`` iff its token id is in
+    ``ownership.token_ids``; everything else (sibling LP, non-LP discoveries, or
+    — when ``ownership.available`` is False — the entire scan) is
+    ``unattributable``. The caller decides the gate: close ``owned`` by default,
+    and refuse/report ``unattributable`` unless the operator passes the explicit
+    ``--wallet-wide`` break-glass consent flag.
+
+    When attribution is unprovable (``available`` False) ``token_ids`` is empty,
+    so every position is unattributable — the safe, fail-closed default. This is
+    enforced explicitly here rather than relying on the ``available=False ⟹
+    token_ids empty`` invariant of :class:`DeploymentLpOwnership`: a stale or
+    partially-populated ownership object must NEVER let a position through the
+    break-glass gate while attribution is unreadable (defence-in-depth — the
+    whole point of this gate is to refuse when ownership cannot be proven).
+    """
+    positions = list(getattr(discovered, "positions", []) or []) if discovered is not None else []
+    if not ownership.available:
+        # Fail closed: ownership entirely unprovable → nothing is owned,
+        # independent of whatever token_ids the object happens to carry.
+        return PlanBDiscoveryScope(owned=[], unattributable=positions, ownership_available=False)
+    owned: list[PositionInfo] = []
+    unattributable: list[PositionInfo] = []
+    for p in positions:
+        if p.position_type == PositionType.LP and str(p.position_id) in ownership.token_ids:
+            owned.append(p)
+        else:
+            unattributable.append(p)
+    return PlanBDiscoveryScope(
+        owned=owned,
+        unattributable=unattributable,
+        ownership_available=ownership.available,
+    )
+
+
 def strategy_reports_lp(positions: TeardownPositionSummary | None) -> bool:
     """True iff the strategy-reported summary already contains an LP position.
 
@@ -276,6 +346,8 @@ __all__ = [
     "DeploymentLpOwnership",
     "LpDiscoveryResult",
     "LpRecoveryOutcome",
+    "PlanBDiscoveryScope",
     "merge_discovered_lp",
+    "scope_discovered_for_plan_b",
     "strategy_reports_lp",
 ]

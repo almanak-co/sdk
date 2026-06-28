@@ -47,6 +47,193 @@ class TestValidateTeardownOptions:
     def test_gateway_without_network_passes(self):
         th.validate_teardown_options(no_gateway=False, network=None)
 
+    # VIB-5476 / TD-18: --wallet-wide is the Plan-B break-glass consent flag and
+    # is meaningless (and dangerous to allow silently) outside --discover.
+    def test_wallet_wide_without_discover_raises(self):
+        with pytest.raises(click.ClickException) as exc:
+            th.validate_teardown_options(no_gateway=False, network=None, discover=False, wallet_wide=True)
+        assert "--wallet-wide is a Plan-B break-glass consent flag" in str(exc.value.message)
+
+    def test_wallet_wide_with_discover_passes(self):
+        th.validate_teardown_options(no_gateway=False, network=None, discover=True, wallet_wide=True)
+
+    def test_discover_without_wallet_wide_passes(self):
+        th.validate_teardown_options(no_gateway=False, network=None, discover=True, wallet_wide=False)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Plan-B --discover: self-resolved deployment_id + sharp attribution gate (VIB-5476)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _lp_pos(position_id: str, protocol: str = "uniswap_v3", chain: str = "ethereum"):
+    from almanak.framework.teardown.models import PositionInfo, PositionType
+
+    return PositionInfo(
+        position_type=PositionType.LP,
+        position_id=position_id,
+        chain=chain,
+        protocol=protocol,
+        value_usd=Decimal("0"),
+        details={"value_usd_unknown": True},
+    )
+
+
+def _summary(*positions):
+    from datetime import UTC, datetime
+
+    from almanak.framework.teardown.models import TeardownPositionSummary
+
+    return TeardownPositionSummary(
+        deployment_id="deployment:abc123",
+        timestamp=datetime.now(UTC),
+        positions=list(positions),
+    )
+
+
+def _ownership(token_ids, *, available=True):
+    from almanak.framework.teardown.lp_recovery import DeploymentLpOwnership
+
+    return DeploymentLpOwnership(
+        token_ids=frozenset(token_ids),
+        had_lp_open=bool(token_ids),
+        available=available,
+    )
+
+
+class TestResolveTeardownDeploymentId:
+    def test_prefers_existing_strategy_id(self):
+        strat = SimpleNamespace(deployment_id="deployment:existing")
+        out = th._resolve_teardown_deployment_id(strategy=strat, wallet_address="0xabc", chain="ethereum")
+        assert out == "deployment:existing"
+
+    def test_self_resolves_from_key_when_wiped(self, monkeypatch):
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+        strat = SimpleNamespace(deployment_id="")
+        runner = CliRunner()
+        with runner.isolation() as (out, _err):
+            resolved = th._resolve_teardown_deployment_id(
+                strategy=strat, wallet_address="0xWALLET", chain="ethereum"
+            )
+        # Deterministic: matches resolve_deployment_id over the same key.
+        from almanak.framework.runner.identity import resolve_deployment_id
+
+        assert resolved == resolve_deployment_id(wallet_address="0xWALLET", chain="ethereum")
+        assert resolved.startswith("deployment:")
+        assert "self-resolved deployment_id" in out.getvalue().decode()
+
+    def test_missing_key_raises_actionable_error(self, monkeypatch):
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+        strat = SimpleNamespace(deployment_id="")
+        with pytest.raises(click.ClickException) as exc:
+            th._resolve_teardown_deployment_id(strategy=strat, wallet_address="", chain="")
+        msg = str(exc.value.message)
+        assert "could not resolve a deployment_id" in msg
+        # Mode-agnostic remediation: must point local AND hosted operators at the
+        # right fix (CodeRabbit VIB-5476 audit) — never local-only.
+        assert "local mode" in msg.lower()
+        assert "hosted mode" in msg.lower()
+
+    def test_hosted_mode_uses_hosted_deployment_id(self, monkeypatch):
+        # Hosted: id comes verbatim from ALMANAK_DEPLOYMENT_ID, wallet/chain ignored.
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "1")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "deployment:hosted")
+        strat = SimpleNamespace(deployment_id="")
+        resolved = th._resolve_teardown_deployment_id(strategy=strat, wallet_address="", chain="")
+        assert resolved == "deployment:hosted"
+
+    def test_hosted_mode_blank_id_raises_mode_agnostic_error(self, monkeypatch):
+        # Hosted with a blank platform id → FatalBootError → actionable, NOT a
+        # "local mode needs wallet+chain" misdirection.
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "1")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "")
+        strat = SimpleNamespace(deployment_id="")
+        with pytest.raises(click.ClickException) as exc:
+            th._resolve_teardown_deployment_id(strategy=strat, wallet_address="", chain="")
+        assert "hosted mode" in str(exc.value.message).lower()
+
+
+class TestApplyPlanBAttributionGate:
+    """The crux: attribution-exists vs attribution-unprovable, with the
+    --wallet-wide consent gate. Never a silent wallet-wide sweep."""
+
+    def _patch_ownership(self, monkeypatch, ownership):
+        async def _fake(*, gateway_client, deployment_id, chain):
+            return ownership
+
+        monkeypatch.setattr(th, "_read_plan_b_ownership", _fake)
+
+    def test_closes_only_provably_owned(self, monkeypatch):
+        # Attribution EXISTS: lp1 owned, lp2 is a sibling's → only lp1 closes.
+        self._patch_ownership(monkeypatch, _ownership({"lp1"}))
+        full = _summary(_lp_pos("lp1"), _lp_pos("lp2"))
+        runner = CliRunner()
+        with runner.isolation() as (out, _err):
+            scoped = th._apply_plan_b_attribution_gate(
+                full=full, deployment_id="deployment:abc123", chain="ethereum",
+                gateway_client=object(), wallet_wide=False,
+            )
+        ids = {p.position_id for p in scoped.positions}
+        assert ids == {"lp1"}
+        text = out.getvalue().decode()
+        assert "Refusing 1 position(s)" in text
+        assert "Closing 1 provably deployment-owned" in text
+
+    def test_unprovable_attribution_refuses_entirely(self, monkeypatch):
+        # Wiped state: nothing readable → all unattributable, none owned → refuse.
+        self._patch_ownership(monkeypatch, _ownership(set(), available=False))
+        full = _summary(_lp_pos("lp1"), _lp_pos("lp2"))
+        runner = CliRunner()
+        with runner.isolation() as (out, _err):
+            with pytest.raises(click.ClickException) as exc:
+                th._apply_plan_b_attribution_gate(
+                    full=full, deployment_id="deployment:abc123", chain="ethereum",
+                    gateway_client=object(), wallet_wide=False,
+                )
+            assert "Attribution UNPROVABLE" in out.getvalue().decode()
+        assert "NONE are provably owned" in str(exc.value.message)
+        assert "--wallet-wide" in str(exc.value.message)
+
+    def test_wallet_wide_consent_closes_everything(self, monkeypatch):
+        # Break-glass: even with no attribution, --wallet-wide closes all.
+        self._patch_ownership(monkeypatch, _ownership(set(), available=False))
+        full = _summary(_lp_pos("lp1"), _lp_pos("lp2"))
+        runner = CliRunner()
+        with runner.isolation() as (out, _err):
+            scoped = th._apply_plan_b_attribution_gate(
+                full=full, deployment_id="deployment:abc123", chain="ethereum",
+                gateway_client=object(), wallet_wide=True,
+            )
+        assert {p.position_id for p in scoped.positions} == {"lp1", "lp2"}
+        assert "BREAK-GLASS" in out.getvalue().decode()
+
+    def test_partial_owned_closes_owned_and_reports_rest(self, monkeypatch):
+        self._patch_ownership(monkeypatch, _ownership({"lp1", "lp3"}))
+        full = _summary(_lp_pos("lp1"), _lp_pos("lp2"), _lp_pos("lp3"))
+        runner = CliRunner()
+        with runner.isolation() as (out, _err):
+            scoped = th._apply_plan_b_attribution_gate(
+                full=full, deployment_id="deployment:abc123", chain="ethereum",
+                gateway_client=object(), wallet_wide=False,
+            )
+        assert {p.position_id for p in scoped.positions} == {"lp1", "lp3"}
+        assert "Refusing 1 position(s)" in out.getvalue().decode()
+
+    def test_ownership_read_failure_fails_closed(self, monkeypatch):
+        async def _boom(*, gateway_client, deployment_id, chain):
+            raise RuntimeError("gateway down")
+
+        monkeypatch.setattr(th, "_read_plan_b_ownership", _boom)
+        full = _summary(_lp_pos("lp1"))
+        runner = CliRunner()
+        with runner.isolation():
+            with pytest.raises(click.ClickException) as exc:
+                th._apply_plan_b_attribution_gate(
+                    full=full, deployment_id="deployment:abc123", chain="ethereum",
+                    gateway_client=object(), wallet_wide=False,
+                )
+        assert "fail-closed" in str(exc.value.message).lower()
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # load_strategy_config_dict

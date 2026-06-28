@@ -33,6 +33,7 @@ from almanak.framework.teardown.lp_recovery import (
     DeploymentLpOwnership,
     LpDiscoveryResult,
     merge_discovered_lp,
+    scope_discovered_for_plan_b,
     strategy_reports_lp,
 )
 from almanak.framework.teardown.models import (
@@ -74,6 +75,54 @@ def _summary(positions: list[PositionInfo]) -> TeardownPositionSummary:
         timestamp=dt.datetime.now(dt.UTC),
         positions=positions,
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# scope_discovered_for_plan_b — Plan-B (--discover) attribution partition (VIB-5476)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestScopeDiscoveredForPlanB:
+    def test_partitions_owned_vs_unattributable(self):
+        discovered = _summary([_lp_position("1"), _lp_position("2"), _lp_position("3")])
+        ownership = DeploymentLpOwnership(token_ids=frozenset({"1", "3"}), had_lp_open=True, available=True)
+        scope = scope_discovered_for_plan_b(discovered=discovered, ownership=ownership)
+        assert {p.position_id for p in scope.owned} == {"1", "3"}
+        assert {p.position_id for p in scope.unattributable} == {"2"}
+        assert scope.ownership_available is True
+
+    def test_unprovable_attribution_marks_everything_unattributable(self):
+        discovered = _summary([_lp_position("1"), _lp_position("2")])
+        ownership = DeploymentLpOwnership(token_ids=frozenset(), had_lp_open=False, available=False)
+        scope = scope_discovered_for_plan_b(discovered=discovered, ownership=ownership)
+        assert scope.owned == []
+        assert {p.position_id for p in scope.unattributable} == {"1", "2"}
+        assert scope.ownership_available is False
+
+    def test_unavailable_fails_closed_even_with_stale_token_ids(self):
+        # Defence-in-depth: a stale/inconsistent ownership object carrying
+        # token_ids while available=False must NOT let any position through the
+        # break-glass gate. Everything is unattributable (CodeRabbit VIB-5476 audit).
+        discovered = _summary([_lp_position("1"), _lp_position("2")])
+        ownership = DeploymentLpOwnership(token_ids=frozenset({"1", "2"}), had_lp_open=True, available=False)
+        scope = scope_discovered_for_plan_b(discovered=discovered, ownership=ownership)
+        assert scope.owned == []
+        assert {p.position_id for p in scope.unattributable} == {"1", "2"}
+        assert scope.ownership_available is False
+
+    def test_non_lp_discovery_is_unattributable(self):
+        discovered = _summary([_lp_position("1"), _token_position()])
+        ownership = DeploymentLpOwnership(token_ids=frozenset({"1", "tok"}), had_lp_open=True, available=True)
+        scope = scope_discovered_for_plan_b(discovered=discovered, ownership=ownership)
+        # Only the LP token id matches as owned; the TOKEN position is never owned.
+        assert {p.position_id for p in scope.owned} == {"1"}
+        assert {p.position_id for p in scope.unattributable} == {"tok"}
+
+    def test_none_summary_is_empty(self):
+        ownership = DeploymentLpOwnership(token_ids=frozenset({"1"}), had_lp_open=True, available=True)
+        scope = scope_discovered_for_plan_b(discovered=None, ownership=ownership)
+        assert scope.owned == []
+        assert scope.unattributable == []
 
 
 def _owns(*token_ids: str, had_lp_open: bool | None = None, available: bool = True) -> DeploymentLpOwnership:
@@ -464,6 +513,28 @@ class _NoReadsStateManager:
     """State manager exposing neither read method (hasattr guards → both skip)."""
 
 
+class _GatewayLikeStateManager:
+    """Gateway-backed manager: async registry read + async filtered events read,
+    NO sync ``get_position_events_sync`` (mirrors :class:`GatewayStateManager`).
+
+    Pins the VIB-5476 audit fix — the Plan-B ``--discover`` lane (and hosted
+    runners) read ``position_events`` via the async filtered accessor; without
+    the dispatch the events fallback silently vanished on the gateway path.
+    """
+
+    def __init__(self, *, registry_rows: list | None = None, event_rows: list | None = None) -> None:
+        self._registry_rows = registry_rows or []
+        self._event_rows = event_rows or []
+
+    async def get_position_registry_open_rows(self, deployment_id, *, chain=None, primitive=None):
+        return self._registry_rows
+
+    async def get_position_events_filtered(self, *, deployment_id, position_types):
+        # Filtered API streams EVERY event type (OPEN + CLOSE); the reader must
+        # keep only OPEN rows for token-id attribution.
+        return self._event_rows
+
+
 def _registry_row(token_id: str) -> dict:
     return {"payload": {"token_id": token_id}, "chain": CHAIN, "primitive": "lp", "status": "open"}
 
@@ -567,6 +638,67 @@ async def test_ownership_event_other_chain_excluded() -> None:
     sm = _FakeStateManager(event_rows=[_event_row("999", chain="arbitrum"), _event_row("300", chain=CHAIN)])
     owned = await _ownership(sm)
     assert owned.token_ids == frozenset({"300"})
+
+
+@pytest.mark.asyncio
+async def test_ownership_event_missing_chain_fails_closed() -> None:
+    """VIB-5476: an OPEN event with a missing/empty chain is AMBIGUOUS, not owned.
+
+    The Plan-B break-glass ``--discover`` lane must never authorise touching a
+    position whose chain attribution is not provable. A row carrying the exact
+    requested chain still matches; a row missing ``chain`` (or carrying a blank
+    one) is excluded — fail closed.
+    """
+    sm = _FakeStateManager(
+        event_rows=[
+            {"position_id": "111", "position_type": "LP", "event_type": "OPEN"},  # chain key absent
+            {"position_id": "222", "chain": "", "position_type": "LP", "event_type": "OPEN"},  # empty chain
+            {"position_id": "333", "chain": "   ", "position_type": "LP", "event_type": "OPEN"},  # whitespace
+            _event_row("444", chain=CHAIN),  # explicit matching chain still counts
+        ]
+    )
+    owned = await _ownership(sm)
+    assert owned.token_ids == frozenset({"444"})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# read_deployment_lp_ownership — gateway-backed events fallback (VIB-5476 audit)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _closed_event_row(position_id: str, chain: str = CHAIN) -> dict:
+    return {"position_id": position_id, "chain": chain, "position_type": "LP", "event_type": "CLOSE"}
+
+
+@pytest.mark.asyncio
+async def test_gateway_lane_reads_events_via_async_filtered() -> None:
+    """Gateway-backed SM (no sync accessor) must still surface position_events
+    OPEN ids via the async filtered read — otherwise a pre-cutover deployment's
+    OWN LP gets refused and the operator is pushed to --wallet-wide."""
+    from almanak.framework.teardown.runner_helpers import read_deployment_lp_ownership
+
+    sm = _GatewayLikeStateManager(
+        registry_rows=[],  # pre-cutover: nothing in the registry
+        event_rows=[_event_row("700"), _closed_event_row("800")],  # CLOSE must be ignored
+    )
+    owned = await read_deployment_lp_ownership(sm, DEPLOYMENT, CHAIN)
+    assert owned.token_ids == frozenset({"700"})
+    assert owned.had_lp_open is True
+    assert owned.available is True
+
+
+@pytest.mark.asyncio
+async def test_gateway_lane_unions_registry_and_events() -> None:
+    """Gateway lane unions the async registry rows with the async filtered events."""
+    from almanak.framework.teardown.runner_helpers import read_deployment_lp_ownership
+
+    sm = _GatewayLikeStateManager(
+        registry_rows=[_registry_row("100")],
+        event_rows=[_event_row("200"), _event_row("999", chain="arbitrum")],  # other-chain excluded
+    )
+    owned = await read_deployment_lp_ownership(sm, DEPLOYMENT, CHAIN)
+    assert owned.token_ids == frozenset({"100", "200"})
+    assert owned.available is True
 
 
 @pytest.mark.asyncio
