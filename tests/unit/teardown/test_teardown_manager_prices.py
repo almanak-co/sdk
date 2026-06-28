@@ -98,6 +98,11 @@ async def test_execute_applies_prices_to_compiler():
 
     compiler.update_prices = _update_prices
     compiler.restore_prices = _restore_prices
+    # The real IntentCompiler exposes the VIB-2928 price hard-stop and the
+    # teardown SWAP lane fails closed without it; MagicMock auto-attrs cannot
+    # stand in (``assert*``-prefixed names are blocked), so model it as a no-op
+    # pass (this test supplies real prices, so the production gate would pass).
+    compiler.assert_prices_available = MagicMock(return_value=None)
 
     # Track prices during compile
     seen_prices = []
@@ -298,6 +303,206 @@ async def test_execute_typeerror_fallback_only_catches_market_keyword():
     assert "unsupported operand" in result.error
     # Should have been called only once (no silent retry without market)
     strategy.generate_teardown_intents.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_intents_swap_price_hardstop_is_non_retryable():
+    """VIB-2928: a teardown SWAP whose price gate raises HARD-STOPS the leg.
+
+    Directly exercises ``TeardownManager._execute_intents`` (the SWAP branch
+    that calls ``compiler.assert_prices_available`` before compiling). When the
+    gate raises ``ValueError`` (missing / placeholder / zero price), the leg
+    must:
+
+    - be classified **non-retryable** (``ExecutionAttempt.retryable is False``)
+      so the slippage manager does NOT escalate to the operator-approval gate
+      on a price gap that no slippage bump can fix;
+    - short-circuit BEFORE downstream execution — neither ``compiler.compile``
+      nor ``orchestrator.execute`` runs on a possibly-fake $1 price; and
+    - surface as a failed leg (blueprint 14 inverted semantics: this swap
+      fails, the rest of the teardown still proceeds).
+
+    Regression guard: a ``MagicMock`` compiler auto-creates ``assert*``-prefixed
+    attributes, which previously masked this gate — so the compiler here models
+    the real contract (the gate is a callable that RAISES).
+    """
+    from almanak.framework.teardown.slippage_manager import ExecutionAttempt
+
+    market = _make_market()
+    strategy = _make_strategy()
+
+    positions = MagicMock(spec=TeardownPositionSummary)
+    positions.total_value_usd = Decimal("10000")
+
+    state = TeardownState(
+        teardown_id="td_hardstop",
+        deployment_id="test_strat",
+        mode=TeardownMode.SOFT,
+        status=TeardownStatus.EXECUTING,
+        total_intents=1,
+        completed_intents=0,
+        current_intent_index=0,
+        started_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+        pending_intents_json="[]",
+        cancel_window_until=datetime.now(UTC),
+        config_json="{}",
+    )
+
+    # Concrete-amount SWAP (NOT amount='all') so neither the zero-balance skip
+    # nor the ALM-2766 clamp fires and the leg reaches the compile-time gate.
+    intent = MagicMock()
+    intent.intent_type = "SWAP"
+    intent.chain = "arbitrum"
+    intent.from_token = "WETH"
+    intent.to_token = "USDC"
+    intent.amount = "1.0"
+    intent.to_dict.return_value = {"type": "swap"}
+    del intent.max_slippage  # skip slippage cloning
+
+    compiler = MagicMock()
+    compiler.price_oracle = None
+    compiler._using_placeholders = True
+    compiler.update_prices = MagicMock()
+    compiler.restore_prices = MagicMock()
+    compiler.compile = MagicMock()
+
+    # The real IntentCompiler's VIB-2928 gate: raise when a token lacks a
+    # real USD price. assert*-prefixed attrs cannot be auto-mocked, so wire
+    # the contract explicitly — a callable that fails closed.
+    def _raise_missing(tokens):
+        raise ValueError(f"missing USD price for one of {tokens}")
+
+    compiler.assert_prices_available = MagicMock(side_effect=_raise_missing)
+
+    orchestrator = MagicMock()
+    orchestrator.execute = AsyncMock()
+
+    manager = TeardownManager(orchestrator=orchestrator, compiler=compiler)
+
+    # Capture the ExecutionAttempt the gate produces by invoking the real
+    # per-slippage closure once (what the slippage manager would do first).
+    # The production manager, seeing retryable=False, stops here without
+    # escalating slippage.
+    captured: dict[str, ExecutionAttempt] = {}
+
+    async def fake_escalation(*, intent, execute_func, **kwargs):
+        attempt = await execute_func(intent, Decimal("0.005"))
+        captured["attempt"] = attempt
+        return MagicMock(success=False, status="failed", final_slippage=Decimal("0"))
+
+    manager.slippage_manager.execute_with_escalation = fake_escalation
+
+    result = await manager._execute_intents(
+        teardown_id="td_hardstop",
+        strategy=strategy,
+        intents=[intent],
+        positions=positions,
+        mode=TeardownMode.SOFT,
+        teardown_state=state,
+        price_oracle={"WETH": Decimal("3000"), "USDC": Decimal("1")},
+        market=market,
+    )
+
+    # Gate fired: the price hard-stop produced a non-retryable failure.
+    attempt = captured["attempt"]
+    assert attempt.success is False
+    assert attempt.retryable is False
+    assert "VIB-2928" in (attempt.error or "")
+
+    # And it short-circuited BEFORE any downstream execution.
+    compiler.assert_prices_available.assert_called_once_with(["WETH", "USDC"])
+    compiler.compile.assert_not_called()
+    orchestrator.execute.assert_not_called()
+
+    # The whole leg is reported failed (teardown continues for other legs).
+    assert result.success is False
+    assert result.intents_failed == 1
+    assert result.intents_succeeded == 0
+
+
+@pytest.mark.asyncio
+async def test_execute_intents_swap_hardstops_when_gate_attr_missing():
+    """VIB-2928 fail-closed: a compiler that does NOT expose
+    ``assert_prices_available`` must NOT compile a teardown SWAP unguarded.
+
+    This pins the audit68 hardening: rather than silently skipping the gate
+    when the attribute is absent (the MagicMock masking failure mode), the
+    manager raises and marks the leg non-retryable — a swap that cannot be
+    price-gated must never reach ``compiler.compile`` on a possibly-fake price.
+    """
+    from almanak.framework.teardown.slippage_manager import ExecutionAttempt
+
+    market = _make_market()
+    strategy = _make_strategy()
+
+    positions = MagicMock(spec=TeardownPositionSummary)
+    positions.total_value_usd = Decimal("10000")
+
+    state = TeardownState(
+        teardown_id="td_nogate",
+        deployment_id="test_strat",
+        mode=TeardownMode.SOFT,
+        status=TeardownStatus.EXECUTING,
+        total_intents=1,
+        completed_intents=0,
+        current_intent_index=0,
+        started_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+        pending_intents_json="[]",
+        cancel_window_until=datetime.now(UTC),
+        config_json="{}",
+    )
+
+    intent = MagicMock()
+    intent.intent_type = "SWAP"
+    intent.chain = "arbitrum"
+    intent.from_token = "WETH"
+    intent.to_token = "USDC"
+    intent.amount = "1.0"
+    intent.to_dict.return_value = {"type": "swap"}
+    del intent.max_slippage
+
+    # Compiler WITHOUT the price-gate method (spec restricts the attr surface
+    # so getattr(...assert_prices_available) is None, not an auto-mock).
+    compiler = MagicMock(spec=["price_oracle", "_using_placeholders", "update_prices", "restore_prices", "compile"])
+    compiler.price_oracle = None
+    compiler._using_placeholders = True
+    compiler.compile = MagicMock()
+
+    orchestrator = MagicMock()
+    orchestrator.execute = AsyncMock()
+
+    manager = TeardownManager(orchestrator=orchestrator, compiler=compiler)
+
+    captured: dict[str, ExecutionAttempt] = {}
+
+    async def fake_escalation(*, intent, execute_func, **kwargs):
+        attempt = await execute_func(intent, Decimal("0.005"))
+        captured["attempt"] = attempt
+        return MagicMock(success=False, status="failed", final_slippage=Decimal("0"))
+
+    manager.slippage_manager.execute_with_escalation = fake_escalation
+
+    result = await manager._execute_intents(
+        teardown_id="td_nogate",
+        strategy=strategy,
+        intents=[intent],
+        positions=positions,
+        mode=TeardownMode.SOFT,
+        teardown_state=state,
+        price_oracle={"WETH": Decimal("3000"), "USDC": Decimal("1")},
+        market=market,
+    )
+
+    attempt = captured["attempt"]
+    assert attempt.success is False
+    assert attempt.retryable is False
+    assert "VIB-2928" in (attempt.error or "")
+    compiler.compile.assert_not_called()
+    orchestrator.execute.assert_not_called()
+    assert result.success is False
+    assert result.intents_failed == 1
 
 
 @pytest.mark.asyncio

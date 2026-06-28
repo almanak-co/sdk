@@ -10,8 +10,6 @@ Validates that:
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from almanak.framework.runner.strategy_runner import StrategyRunner
 
 
@@ -300,5 +298,79 @@ class TestBuildTeardownCompilerPriceOracle:
 
         has_prices = bool(price_oracle)
         assert has_prices is True
-        # This means allow_placeholder_prices=not has_prices == False
+        # has_prices True means build_teardown_compiler proceeds past the
+        # VIB-2928 no-price HARD STOP and builds the compiler with
+        # allow_placeholder_prices=False (placeholders are never enabled).
         assert (not has_prices) is False
+
+
+class TestBuildTeardownCompilerHardStop:
+    """VIB-2928: build_teardown_compiler never enables placeholder prices and
+    HARD STOPS (returns None) when no real prices are resolvable."""
+
+    _WALLET = "0x1111111111111111111111111111111111111111"
+
+    def _make_runner(self):
+        runner = MagicMock()
+        # Not a GatewayExecutionOrchestrator → the rpc_url branch is taken;
+        # spec=[] makes getattr(orch, "rpc_url", None) return None.
+        runner.execution_orchestrator = MagicMock(spec=[])
+        return runner
+
+    def _make_strategy(self):
+        strategy = MagicMock()
+        strategy.chain = "ethereum"
+        strategy.wallet_address = self._WALLET
+        strategy.deployment_id = "deployment:test"
+        strategy._chain_wallets = None
+        return strategy
+
+    def test_compiler_disables_placeholder_prices(self):
+        from almanak.framework.runner.runner_teardown import build_teardown_compiler
+
+        market = MagicMock()
+        market.get_price_oracle_dict.return_value = {
+            "WETH": Decimal("3000"),
+            "USDC": Decimal("1"),
+        }
+        with patch(
+            "almanak.framework.runner.runner_teardown.get_fallback_teardown_prices",
+            return_value={},
+        ):
+            compiler = build_teardown_compiler(self._make_runner(), self._make_strategy(), market)
+
+        assert compiler is not None
+        assert compiler._config.allow_placeholder_prices is False
+        assert compiler._using_placeholders is False
+
+    def test_compiler_built_from_fallback_prices_only(self):
+        """Fetched oracle empty but fallback prices present → compiler is built
+        with placeholders still disabled (covers the real fallback-only path,
+        not just the fetched-prices path)."""
+        from almanak.framework.runner.runner_teardown import build_teardown_compiler
+
+        market = MagicMock()
+        market.get_price_oracle_dict.return_value = {}
+        with patch(
+            "almanak.framework.runner.runner_teardown.get_fallback_teardown_prices",
+            return_value={"WETH": Decimal("3000"), "USDC": Decimal("1")},
+        ):
+            compiler = build_teardown_compiler(self._make_runner(), self._make_strategy(), market)
+
+        assert compiler is not None
+        assert compiler._config.allow_placeholder_prices is False
+        assert compiler._using_placeholders is False
+
+    def test_hard_stops_when_no_prices_available(self):
+        """No fetched prices AND no fallback → return None (loud abort upstream)."""
+        from almanak.framework.runner.runner_teardown import build_teardown_compiler
+
+        market = MagicMock()
+        market.get_price_oracle_dict.return_value = {}
+        with patch(
+            "almanak.framework.runner.runner_teardown.get_fallback_teardown_prices",
+            return_value=None,
+        ):
+            compiler = build_teardown_compiler(self._make_runner(), self._make_strategy(), market)
+
+        assert compiler is None

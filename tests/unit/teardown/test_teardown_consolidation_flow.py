@@ -143,6 +143,12 @@ def _fake_compiler() -> MagicMock:
         is_transient=False,
         retry_after_seconds=0,
     )
+    # The real IntentCompiler exposes the VIB-2928 price hard-stop, and the
+    # teardown SWAP lane fails closed if it is absent. MagicMock auto-attrs
+    # cannot stand in here because MagicMock blocks ``assert*``-prefixed names,
+    # so model the gate explicitly as a no-op pass (these tests provide real
+    # prices, so the production gate would pass).
+    comp.assert_prices_available = MagicMock(return_value=None)
     return comp
 
 

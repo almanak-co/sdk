@@ -2469,6 +2469,68 @@ class IntentCompiler:
         """Delegates to CompilerQueries.require_token_price (see compiler_queries.py)."""
         return self._queries.require_token_price(symbol)
 
+    def assert_prices_available(self, tokens: list[str | None]) -> None:
+        """Fail closed if any token lacks a real USD price (VIB-2928 HARD STOP).
+
+        Raises ``ValueError`` listing every token that cannot be resolved to a
+        present, non-zero USD price. The price oracle is keyed by *symbol*, so a
+        token that does not price directly is treated as a possible token
+        *address* and resolved to its symbol before a final retry — this covers
+        both EVM ``0x`` addresses and non-EVM (e.g. Solana base58) mints, so a
+        priceable token identified by address is never falsely rejected. Known
+        stablecoins and native/wrapped aliases resolve legitimately through
+        ``_require_token_price`` and therefore never trip the gate — a false
+        positive here would strand funds by blocking a safe unwind, so the gate
+        only fires on a genuinely unpriceable token.
+
+        A compiler in placeholder mode (``_using_placeholders``) cannot price
+        anything for real — every requested token is reported missing, because
+        ``_require_token_price`` would otherwise return a fake ``$1``.
+
+        The teardown lane uses this to refuse compiling a price-dependent leg
+        (e.g. a swap) on the ``$1`` value that swap adapters silently substitute
+        when a symbol is absent from the oracle.
+        """
+        missing: list[str] = []
+        for token in tokens:
+            if not token:
+                continue
+            # A placeholder-mode compiler cannot price anything for real —
+            # ``_require_token_price`` would return a fake $1 — so report the
+            # token as missing without trusting that value.
+            if self._using_placeholders:
+                missing.append(token)
+                continue
+            # Fast path: the token is already a symbol the oracle can price
+            # (incl. known-stablecoin / wrapped-native aliases).
+            try:
+                self._require_token_price(token)
+                continue
+            except ValueError:
+                pass
+            # Slow path: the token did not price directly — it may be a token
+            # *address/mint* (the oracle is keyed by symbol). Resolve it to a
+            # symbol and retry. ``_resolve_token`` handles EVM ``0x`` addresses
+            # and non-EVM base58 mints alike, so a priceable token identified by
+            # address is not falsely rejected.
+            symbol = token
+            info = self._resolve_token(token)
+            if info is not None and getattr(info, "symbol", None) and info.symbol != token:
+                symbol = info.symbol
+                try:
+                    self._require_token_price(symbol)
+                    continue
+                except ValueError:
+                    pass
+            missing.append(symbol)
+        if missing:
+            # dict.fromkeys dedupes while preserving first-seen order.
+            raise ValueError(
+                "no usable USD price for token(s): "
+                + ", ".join(dict.fromkeys(missing))
+                + " (refusing to proceed on a placeholder/missing/zero price)"
+            )
+
     def _resolve_dest_wallet(self, dest_chain: str) -> str:
         """Resolve destination wallet for cross-chain operations.
 

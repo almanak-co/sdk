@@ -1638,6 +1638,17 @@ class TeardownManager:
                     _is_repay = (
                         str(_intent_type_val).upper() in ("REPAY", "INTENTTYPE.REPAY") if _intent_type_val else False
                     )
+                    # VIB-2928: a SWAP leg needs a real USD price for both
+                    # tokens to size expected-out / slippage; the gate below
+                    # hard-stops it on a missing/placeholder/zero price.
+                    _is_swap = (
+                        str(_intent_type_val).upper() in ("SWAP", "INTENTTYPE.SWAP") if _intent_type_val else False
+                    )
+                    _to_token = (
+                        intent_with_slippage.get("to_token")
+                        if _is_dict
+                        else getattr(intent_with_slippage, "to_token", None)
+                    )
                     # Skip wallet-balance resolution for withdraw/repay intents —
                     # the compiler's amount resolver handles these via protocol balance queries.
                     if amount_value == "all" and not _withdraw_all and not _is_withdraw and not _is_repay:
@@ -1712,7 +1723,38 @@ class TeardownManager:
 
                     # Compile intent to ActionBundle
                     try:
+                        # VIB-2928 HARD STOP: refuse to compile a teardown SWAP
+                        # on a missing/placeholder/zero price. Swap adapters
+                        # silently fall back to $1 for expected-out / slippage
+                        # math, so a price gap would size the trade off a fake
+                        # number. This is PER-LEG (it fails only this swap) so a
+                        # different, priceable leg still reduces on-chain risk —
+                        # blueprint 14's inverted failure semantics: never block
+                        # the next risk-reducing intent.
+                        if _is_swap:
+                            _assert_prices = getattr(self.compiler, "assert_prices_available", None)
+                            if not callable(_assert_prices):
+                                # Fail closed: a SWAP that cannot be price-gated
+                                # must not compile on a possibly-fake price.
+                                raise ValueError(
+                                    "compiler does not support the teardown SWAP price hard-stop "
+                                    "(assert_prices_available) — refusing to compile a swap unguarded"
+                                )
+                            _assert_prices([from_token, _to_token])
                         compilation_result = self.compiler.compile(intent_with_slippage)
+                    except ValueError as price_err:
+                        logger.error(
+                            "🛑 Teardown SWAP price HARD STOP (VIB-2928) for %s: %s",
+                            getattr(strategy, "deployment_id", "?"),
+                            price_err,
+                        )
+                        return ExecutionAttempt(
+                            success=False,
+                            slippage_used=slippage,
+                            actual_slippage=Decimal("0"),
+                            error=f"Price HARD STOP (VIB-2928): {price_err}",
+                            retryable=False,
+                        )
                     finally:
                         if hasattr(self.compiler, "restore_prices"):
                             self.compiler.restore_prices(original_oracle, original_placeholders)

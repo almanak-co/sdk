@@ -1667,16 +1667,28 @@ def build_teardown_compiler(
 
     has_prices = bool(price_oracle)
     if not has_prices:
-        logger.warning(
-            "No token prices available for teardown compiler — "
-            "compilation will use placeholder prices ($1 for all tokens). "
-            "This is likely a gateway connectivity issue."
+        # VIB-2928 HARD STOP: refuse to compile a teardown on placeholder
+        # ($1-for-every-token) prices. Proceeding on a fake number mis-sizes
+        # every swap's expected-out / slippage and could dump funds at an
+        # arbitrary rate. Abort LOUD by returning None — the caller
+        # (``resolve_compiler_or_fallback``) turns a None compiler into
+        # ``mark_failed`` + a teardown-failure shutdown in production
+        # (``allow_unsafe_teardown_fallback=False``), so the operator retries
+        # once the gateway/oracle recovers instead of unwinding blind.
+        logger.error(
+            "🛑 Teardown HARD STOP (VIB-2928): no real token prices available "
+            "for %s — refusing to compile teardown on placeholder ($1) prices "
+            "(likely a gateway/oracle connectivity issue). Teardown fails "
+            "loudly and must be retried once prices resolve.",
+            strategy.deployment_id,
         )
+        return None
 
     try:
-        compiler_config = IntentCompilerConfig(
-            allow_placeholder_prices=not has_prices,
-        )
+        # ``allow_placeholder_prices`` stays False unconditionally (VIB-2928):
+        # the no-price case already hard-stopped above, so the compiler must
+        # never silently substitute $1 for an unpriced token.
+        compiler_config = IntentCompilerConfig(allow_placeholder_prices=False)
         return IntentCompiler(
             chain=strategy.chain,
             wallet_address=strategy.wallet_address,
