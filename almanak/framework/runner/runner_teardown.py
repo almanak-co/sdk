@@ -21,6 +21,7 @@ from almanak.core.chains._helpers import bridged_stablecoin_map
 
 from ..intents.compiler import IntentCompiler, IntentCompilerConfig
 from ..intents.vocabulary import Intent
+from ..teardown.decision_log import TeardownDecisionPhase, log_teardown_decision
 from ..teardown.sweep_warning import warn_if_sweep_non_strategy_balance
 
 if TYPE_CHECKING:
@@ -614,7 +615,11 @@ def _safe_mark(state_manager: Any, method_name: str, deployment_id: str, **kwarg
 
 
 def _apply_lending_unwind_guard(
-    teardown_intents: list, teardown_market: Any, deployment_id: str, mode: TeardownMode | None = None
+    teardown_intents: list,
+    teardown_market: Any,
+    deployment_id: str,
+    mode: TeardownMode | None = None,
+    teardown_id: str | None = None,
 ) -> list:
     """Sanitise strategy-emitted lending teardown intents against fresh state.
 
@@ -623,6 +628,13 @@ def _apply_lending_unwind_guard(
     Returns the guarded intent list. A guard failure must never block teardown
     (its first job is removing on-chain risk), so any unexpected error falls back
     to the original intents with a loud WARNING.
+
+    ``teardown_id`` is threaded through so the BLOCK / REPAIR decision-log
+    entries emitted here correlate under the canonical ``teardown-{id}`` cycle
+    id. This guard runs in ``execute_teardown`` BEFORE the runner swaps the
+    observability contextvar to the teardown cycle id, so without an explicit
+    ``teardown_id`` the decision-log entry would fall back to the ambient
+    iteration cycle id and break correlation (VIB-5478).
     """
     from ..teardown.lending_unwind_guard import sanitize_lending_teardown_intents
 
@@ -639,12 +651,33 @@ def _apply_lending_unwind_guard(
 
     for reason in guarded.dropped:
         logger.info("🛑 %s lending guard dropped intent — %s", deployment_id, reason)
+        # VIB-5478: structured BLOCK decision — a stale/no-op lending intent the
+        # fresh-state guard refused to dispatch (TD-10).
+        log_teardown_decision(
+            deployment_id=deployment_id,
+            teardown_id=teardown_id,
+            phase=TeardownDecisionPhase.BLOCK,
+            outcome="lending_intent_dropped",
+            description=f"lending guard dropped intent: {reason}",
+            reason=reason,
+        )
     if guarded.synthesized_positions:
         logger.info(
             "🛑 %s lending guard synthesised HF-safe unwind staircase (wallet cannot fully repay live "
             "debt — naive withdraw-all would revert) for: %s (VIB-4466)",
             deployment_id,
             ", ".join(guarded.synthesized_positions),
+        )
+        # VIB-5478: structured REPAIR decision — the naive REPAY/WITHDRAW pair was
+        # REPLACED with the HF-safe unwind staircase (TD-09 / VIB-4466).
+        log_teardown_decision(
+            deployment_id=deployment_id,
+            teardown_id=teardown_id,
+            phase=TeardownDecisionPhase.REPAIR,
+            outcome="hf_safe_unwind_synthesized",
+            description="lending guard synthesised HF-safe unwind staircase",
+            position_count=len(guarded.synthesized_positions),
+            reason=", ".join(guarded.synthesized_positions),
         )
     if guarded.no_op_positions:
         logger.info(
@@ -657,6 +690,17 @@ def _apply_lending_unwind_guard(
             "🛑 %s lending guard degraded: a fresh exposure read was unmeasured — "
             "kept risk-reducing intents only, suppressed any unconfirmed withdraw_all (VIB-5139)",
             deployment_id,
+        )
+        # VIB-5478: structured BLOCK decision — an unmeasured fresh-exposure read
+        # forced the guard to fail closed (Empty ≠ Zero; degraded but continuing).
+        log_teardown_decision(
+            deployment_id=deployment_id,
+            teardown_id=teardown_id,
+            phase=TeardownDecisionPhase.BLOCK,
+            outcome="lending_exposure_unmeasured",
+            description="lending guard degraded: fresh exposure read unmeasured",
+            reason="fresh_exposure_unmeasured",
+            degraded=True,
         )
     return guarded.intents
 
@@ -768,7 +812,13 @@ async def execute_teardown(  # noqa: C901
     # Zero — never acts on a None as if it were zero). Pure list transform: the
     # sanitised intents flow through the same dispatch funnel, so the per-intent
     # commit pairing / anti-bypass guards are untouched.
-    teardown_intents = _apply_lending_unwind_guard(teardown_intents, teardown_market, deployment_id, teardown_mode)
+    teardown_intents = _apply_lending_unwind_guard(
+        teardown_intents,
+        teardown_market,
+        deployment_id,
+        teardown_mode,
+        teardown_id=getattr(request, "teardown_id", None),
+    )
 
     if not teardown_intents:
         if recovery_incomplete:
@@ -813,6 +863,20 @@ async def execute_teardown(  # noqa: C901
     total_positions = open_positions_count if open_positions_count is not None else len(teardown_intents)
     if request:
         _safe_mark(manager, "mark_started", deployment_id, total_positions=total_positions)
+
+    # VIB-5478: structured ENUMERATE decision — the KNOWN open positions the
+    # teardown will close (registry / TD-01 enumeration) and the number of
+    # closing intents generated for them. ``position_count`` is omitted when the
+    # count is unreadable (Empty ≠ Zero — open_positions_count is None then).
+    log_teardown_decision(
+        deployment_id=deployment_id,
+        teardown_id=getattr(request, "teardown_id", None),
+        phase=TeardownDecisionPhase.ENUMERATE,
+        outcome="enumerated",
+        description=f"enumerated {total_positions} open position(s); {len(teardown_intents)} closing intent(s)",
+        position_count=open_positions_count,
+        intent_count=len(teardown_intents),
+    )
 
     # TD-08 (VIB-5466): Plan-A on-chain reconciliation CHECK. After ledger
     # enumeration, a protocol-scoped chain read confirms each KNOWN position's

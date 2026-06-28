@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
 from almanak.framework.teardown.cancel_window import CancelWindowManager
 from almanak.framework.teardown.config import TeardownConfig
+from almanak.framework.teardown.decision_log import TeardownDecisionPhase, log_teardown_decision
 from almanak.framework.teardown.error_taxonomy import Disposition, classify_teardown_failure
 from almanak.framework.teardown.models import (
     ApprovalRequest,
@@ -770,6 +771,24 @@ class TeardownManager:
                     positions_closed=verification.positions_closed,
                     has_position_breakdown=verification.has_position_breakdown,
                     verification_status=verification.verification_status,
+                )
+
+                # VIB-5478: structured VERIFY decision entry (CLI execute lane).
+                # Records the closure confidence (TD-14 count + TD-15 status) so
+                # an unverifiable closure is auditable, never silently optimistic.
+                log_teardown_decision(
+                    deployment_id=strategy.deployment_id,
+                    teardown_id=teardown_id,
+                    phase=TeardownDecisionPhase.VERIFY,
+                    outcome="verified" if verification.all_closed else "verify_failed",
+                    description=(
+                        f"closure verification: {verification.positions_closed}/"
+                        f"{verification.positions_total} closed "
+                        f"({verification.verification_status.value})"
+                    ),
+                    position_count=verification.positions_total,
+                    positions_closed=verification.positions_closed,
+                    verification_status=verification.verification_status.value,
                 )
 
                 if not verification.all_closed:
@@ -1511,6 +1530,20 @@ class TeardownManager:
                             decision.reason,
                             decision.degraded,
                         )
+                        # VIB-5478: structured BLOCK decision entry — a swap-back
+                        # the clamp REFUSED to sweep (untracked / unmeasured /
+                        # commingled). Audit trail only; never blocks the unwind.
+                        log_teardown_decision(
+                            deployment_id=strategy.deployment_id,
+                            teardown_id=teardown_id,
+                            phase=TeardownDecisionPhase.BLOCK,
+                            outcome="swap_clamp_skipped",
+                            description=f"swap-back clamp skipped {clamp_token} ({decision.reason})",
+                            token=clamp_token,
+                            reason=decision.reason,
+                            degraded=decision.degraded,
+                            intent_count=1,
+                        )
                         # No-op success (nothing of ours to swap) — preserves
                         # the ``intents_total = succeeded + failed`` invariant
                         # and does not mark the teardown failed. Persist the
@@ -1535,6 +1568,20 @@ class TeardownManager:
                         clamp_token,
                         decision.amount,
                         live_balance,
+                    )
+                    # VIB-5478: structured SIZE decision entry — the swap-back was
+                    # sized to the strategy's tracked inventory (TD-07). The
+                    # resolved amount itself is money-shaped, so it lands in the
+                    # ledger, not here; the decision records only token + reason.
+                    log_teardown_decision(
+                        deployment_id=strategy.deployment_id,
+                        teardown_id=teardown_id,
+                        phase=TeardownDecisionPhase.SIZE,
+                        outcome="swap_clamp_applied",
+                        description=f"swap-back {clamp_token} sized to tracked inventory",
+                        token=clamp_token,
+                        reason="clamped_to_tracked_quantity",
+                        intent_count=1,
                     )
 
             # Execute with escalating slippage

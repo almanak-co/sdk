@@ -37,6 +37,10 @@ from almanak.framework.teardown.config import (
     TeardownConfig,
     TokenConsolidationConfig,
 )
+from almanak.framework.teardown.decision_log import (
+    TeardownDecisionPhase,
+    log_teardown_decision,
+)
 from almanak.framework.teardown.full_close import full_close_intents
 from almanak.framework.teardown.lending_unwind import (
     LendingUnwindError,
@@ -136,6 +140,9 @@ __all__ = [
     "TeardownPostCondition",
     "get_teardown_post_condition",
     "has_teardown_post_condition",
+    # Decision log / observability audit trail (VIB-5478 / TD-20)
+    "TeardownDecisionPhase",
+    "log_teardown_decision",
 ]
 
 

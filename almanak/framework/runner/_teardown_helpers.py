@@ -30,6 +30,8 @@ from datetime import UTC, datetime
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING, Any
 
+from ..teardown.decision_log import TeardownDecisionPhase, log_teardown_decision
+
 if TYPE_CHECKING:
     from ..teardown import TeardownMode
     from ..teardown.models import TeardownResult, TeardownState
@@ -523,6 +525,24 @@ async def execute_and_verify(
             positions_closed=verification.positions_closed,
             has_position_breakdown=verification.has_position_breakdown,
             verification_status=verification.verification_status,
+        )
+
+        # VIB-5478: structured VERIFY decision entry (runner signal-driven lane).
+        # Mirrors the CLI lane's entry in TeardownManager.execute so both lanes
+        # produce the same auditable closure-confidence record (TD-14 + TD-15).
+        log_teardown_decision(
+            deployment_id=deployment_id,
+            teardown_id=teardown_state.teardown_id,
+            phase=TeardownDecisionPhase.VERIFY,
+            outcome="verified" if verification.all_closed else "verify_failed",
+            description=(
+                f"closure verification: {verification.positions_closed}/"
+                f"{verification.positions_total} closed "
+                f"({verification.verification_status.value})"
+            ),
+            position_count=verification.positions_total,
+            positions_closed=verification.positions_closed,
+            verification_status=verification.verification_status.value,
         )
 
         if not verification.all_closed:
