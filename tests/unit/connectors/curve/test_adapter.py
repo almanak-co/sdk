@@ -279,9 +279,10 @@ class TestSwap:
         )
 
         assert result.success is True
-        assert len(result.transactions) == 2  # approve + swap
-        assert result.transactions[0].tx_type == "approve"
-        assert result.transactions[1].tx_type == "swap"
+        # No cached/confirmed allowance → swap is last and every preceding tx is an
+        # approve (no-transport adapter resets-to-be-safe before the approve).
+        assert result.transactions[-1].tx_type == "swap"
+        assert result.transactions[:-1] and all(t.tx_type == "approve" for t in result.transactions[:-1])
 
     def test_swap_skips_approve_when_cached(self, adapter: CurveAdapter) -> None:
         """Test swap skips approve when allowance is cached."""
@@ -359,8 +360,9 @@ class TestSwap:
         )
 
         assert result.success is True
-        assert result.gas_estimate > 0
-        assert result.gas_estimate <= sum([CURVE_GAS_ESTIMATES["approve"], CURVE_GAS_ESTIMATES["exchange"]])
+        # The swap is always included; up to a reset + approve may precede it.
+        assert result.gas_estimate >= CURVE_GAS_ESTIMATES["exchange"]
+        assert result.gas_estimate <= sum([2 * CURVE_GAS_ESTIMATES["approve"], CURVE_GAS_ESTIMATES["exchange"]])
 
 
 # =============================================================================
@@ -1306,10 +1308,9 @@ class TestSwapUnderlying:
             amount_in=Decimal("50"),
         )
         assert result.success is True, result.error
-        assert len(result.transactions) == 2  # approve + swap
-        assert result.transactions[0].tx_type == "approve"
-        swap_tx = result.transactions[1]
+        swap_tx = result.transactions[-1]
         assert swap_tx.tx_type == "swap"
+        assert result.transactions[:-1] and all(t.tx_type == "approve" for t in result.transactions[:-1])
         assert swap_tx.to == _META_ADDR
         assert swap_tx.data.startswith(EXCHANGE_UNDERLYING_SELECTOR)
         # combined indices: i=0 (FRAX), j=3 (USDT)

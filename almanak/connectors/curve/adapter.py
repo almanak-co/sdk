@@ -376,6 +376,7 @@ GET_DY_SELECTOR = "0x5e0d443f"  # get_dy(int128,int128,uint256)
 GET_DY_UINT256_SELECTOR = "0x556d6e9f"  # get_dy(uint256,uint256,uint256)
 GET_DY_UNDERLYING_SELECTOR = "0x07211ef7"  # get_dy_underlying(int128,int128,uint256)
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
+ERC20_ALLOWANCE_SELECTOR = "0xdd62ed3e"  # allowance(address owner, address spender)
 
 # Metapool generic-zap selectors (VIB-5419 — Tier B underlying routing).
 # The generic 3CRV DepositZap takes the POOL address as the FIRST argument, so
@@ -1028,13 +1029,7 @@ class CurveAdapter:
 
             # Build approve transaction if needed (skip for native token)
             if not is_native_input:
-                approve_tx = self._build_approve_tx(
-                    token_in_address,
-                    pool_address,
-                    amount_in_wei,
-                )
-                if approve_tx is not None:
-                    transactions.append(approve_tx)
+                transactions.extend(self._build_approve_txs(token_in_address, pool_address, amount_in_wei))
 
             # Build swap transaction
             swap_tx = self._build_exchange_tx(
@@ -1135,9 +1130,7 @@ class CurveAdapter:
                     if self._is_native_token(coin_addr):
                         native_value = amount_wei
                     else:
-                        approve_tx = self._build_approve_tx(coin_addr, pool_address, amount_wei)
-                        if approve_tx is not None:
-                            transactions.append(approve_tx)
+                        transactions.extend(self._build_approve_txs(coin_addr, pool_address, amount_wei))
 
             # Build add_liquidity transaction
             add_liq_tx = self._build_add_liquidity_tx(
@@ -1227,9 +1220,7 @@ class CurveAdapter:
             transactions: list[TransactionData] = []
 
             # Approve LP token if needed
-            approve_tx = self._build_approve_tx(pool_info.lp_token, pool_address, lp_amount_wei)
-            if approve_tx is not None:
-                transactions.append(approve_tx)
+            transactions.extend(self._build_approve_txs(pool_info.lp_token, pool_address, lp_amount_wei))
 
             # Build remove_liquidity transaction
             remove_tx = self._build_remove_liquidity_tx(
@@ -1309,9 +1300,7 @@ class CurveAdapter:
             transactions: list[TransactionData] = []
 
             # Approve LP token if needed
-            approve_tx = self._build_approve_tx(pool_info.lp_token, pool_address, lp_amount_wei)
-            if approve_tx is not None:
-                transactions.append(approve_tx)
+            transactions.extend(self._build_approve_txs(pool_info.lp_token, pool_address, lp_amount_wei))
 
             # Build remove_liquidity_one_coin transaction
             remove_tx = self._build_remove_liquidity_one_tx(
@@ -1444,9 +1433,7 @@ class CurveAdapter:
                 return SwapResult(success=False, error=guard_error)
 
             transactions: list[TransactionData] = []
-            approve_tx = self._build_approve_tx(token_in_address, pool_address, amount_in_wei)
-            if approve_tx is not None:
-                transactions.append(approve_tx)
+            transactions.extend(self._build_approve_txs(token_in_address, pool_address, amount_in_wei))
 
             # exchange_underlying(int128 i, int128 j, uint256 dx, uint256 min_dy)
             calldata = (
@@ -1541,9 +1528,7 @@ class CurveAdapter:
             for idx, amount_wei in enumerate(amounts_wei):
                 if amount_wei > 0:
                     coin_addr = self._underlying_coin_address(pool_info, idx)
-                    approve_tx = self._build_approve_tx(coin_addr, zap, amount_wei)
-                    if approve_tx is not None:
-                        transactions.append(approve_tx)
+                    transactions.extend(self._build_approve_txs(coin_addr, zap, amount_wei))
 
             # add_liquidity(address _pool, uint256[4] _deposit_amounts, uint256 _min_mint_amount)
             calldata = ZAP_ADD_LIQUIDITY_4_SELECTOR + self._pad_address(pool_address)
@@ -1628,9 +1613,7 @@ class CurveAdapter:
             transactions: list[TransactionData] = []
             # The zap pulls the metapool LP from the caller, so approve the LP
             # token (== metapool address) to the zap.
-            approve_tx = self._build_approve_tx(pool_info.lp_token, zap, lp_amount_wei)
-            if approve_tx is not None:
-                transactions.append(approve_tx)
+            transactions.extend(self._build_approve_txs(pool_info.lp_token, zap, lp_amount_wei))
 
             # remove_liquidity(address _pool, uint256 _amount, uint256[4] _min_amounts)
             calldata = (
@@ -2007,44 +1990,103 @@ class CurveAdapter:
             tx_type="remove_liquidity",
         )
 
-    def _build_approve_tx(
+    def _build_approve_txs(
         self,
         token_address: str,
         spender: str,
         amount: int,
-    ) -> TransactionData | None:
-        """Build an ERC-20 approve transaction if needed.
+    ) -> list[TransactionData]:
+        """Build the ERC-20 approve transaction(s) needed to spend ``amount`` (VIB-5442).
+
+        Returns an empty list when the current allowance already covers ``amount``,
+        a single ``approve(MAX)`` when there is no existing allowance, or a
+        ``approve(0)`` + ``approve(MAX)`` pair when an existing NON-ZERO allowance
+        must be changed — USDT-class tokens revert on a non-zero → non-zero
+        ``approve`` (``require(value == 0 || allowance == 0)``), which silently
+        kills the whole bundle. The current allowance is **seeded from on-chain
+        ``allowance()``** (not assumed 0), so a token already approved in a prior
+        run is not needlessly (and, for USDT, revertingly) re-approved.
 
         Args:
             token_address: Token to approve
             spender: Address to approve
-            amount: Amount to approve
+            amount: Amount that must be spendable
 
         Returns:
-            TransactionData for approve, or None if sufficient allowance exists
+            Zero, one, or two ``TransactionData`` (reset + approve) in order.
         """
-        # Check cache for existing allowance
-        cache_key = f"{token_address}:{spender}"
-        cached = self._allowance_cache.get(cache_key, 0)
-        if cached >= amount:
-            logger.debug(f"Sufficient allowance exists for {token_address}")
-            return None
+        cache_key = self._allowance_cache_key(token_address, spender)
+        current = self._current_allowance(cache_key, token_address, spender)
+        if current is not None and current >= amount:
+            logger.debug("Sufficient allowance for %s (%d >= %d)", token_address, current, amount)
+            return []
 
-        # Build approve calldata
-        calldata = ERC20_APPROVE_SELECTOR + self._pad_address(spender) + self._pad_uint256(MAX_UINT256)
-
-        # Update cache
+        txs: list[TransactionData] = []
+        # Reset-to-zero before changing the allowance unless we have POSITIVELY
+        # confirmed it is zero (a successful on-chain read). Emitted when the
+        # allowance is non-zero, OR ``None`` (UNKNOWN — read failed, or no transport
+        # to read with): ``approve(0)`` never reverts on USDT (the ``value == 0``
+        # branch), so failing toward a reset is the always-safe default and costs
+        # only one extra tx — rather than a lone ``approve(MAX)`` that would revert
+        # on a USDT that turns out to still hold a non-zero allowance.
+        if current is None or current > 0:
+            txs.append(self._single_approve_tx(token_address, spender, 0))
+        txs.append(self._single_approve_tx(token_address, spender, MAX_UINT256))
         self._allowance_cache[cache_key] = MAX_UINT256
+        return txs
 
+    def _current_allowance(self, cache_key: str, token_address: str, spender: str) -> int | None:
+        """Return the current allowance, or ``None`` when it cannot be confirmed.
+
+        Returns the cached value when present (set by a prior approve in this bundle
+        or by ``set_allowance`` in tests). Otherwise queries ``allowance(wallet,
+        spender)`` via the gateway / RPC and returns the on-chain value. Returns
+        ``None`` whenever the allowance cannot be **positively confirmed** — the
+        read failed (RPC error / no result) OR no transport is configured to read
+        with — so the caller fails toward a safe reset rather than assuming zero
+        and emitting a lone ``approve(MAX)`` that could revert on a USDT-class token.
+        """
+        if cache_key in self._allowance_cache:
+            return self._allowance_cache[cache_key]
+        if self._gateway_client is not None or self._rpc_url:
+            try:
+                calldata = (
+                    ERC20_ALLOWANCE_SELECTOR + self._pad_address(self.wallet_address) + self._pad_address(spender)
+                )
+                onchain = eth_call_uint256(
+                    chain=self.chain,
+                    to=token_address,
+                    data=calldata,
+                    rpc_url=self._rpc_url,
+                    gateway_client=self._gateway_client,
+                    timeout=10.0,
+                )
+                if onchain is not None:
+                    self._allowance_cache[cache_key] = onchain
+                    return onchain
+            except Exception as exc:  # noqa: BLE001 — unknown allowance on any read failure
+                logger.debug("On-chain allowance read failed for %s: %s; treating as unknown", token_address, exc)
+        return None  # could not confirm allowance → caller resets to be safe
+
+    @staticmethod
+    def _allowance_cache_key(token_address: str, spender: str) -> str:
+        """Case-normalized allowance cache key (token:spender), lowercased so a
+        checksummed and a lowercase address hit the same cache entry — a casing
+        miss would otherwise re-approve a USDT and revert."""
+        return f"{token_address.lower()}:{spender.lower()}"
+
+    def _single_approve_tx(self, token_address: str, spender: str, value: int) -> TransactionData:
+        """Build one ERC-20 ``approve(spender, value)`` transaction."""
+        calldata = ERC20_APPROVE_SELECTOR + self._pad_address(spender) + self._pad_uint256(value)
         # _get_token_symbol falls back to truncated address for unresolved tokens (e.g., 3CRV)
         token_symbol = self._get_token_symbol(token_address)
-
+        action = "Reset approval for" if value == 0 else "Approve"
         return TransactionData(
             to=token_address,
             value=0,
             data=calldata,
             gas_estimate=CURVE_GAS_ESTIMATES["approve"],
-            description=f"Approve {token_symbol} for Curve",
+            description=f"{action} {token_symbol} for Curve",
             tx_type="approve",
         )
 
@@ -2579,8 +2621,7 @@ class CurveAdapter:
             spender: Spender address
             amount: Allowance amount
         """
-        cache_key = f"{token}:{spender}"
-        self._allowance_cache[cache_key] = amount
+        self._allowance_cache[self._allowance_cache_key(token, spender)] = amount
 
     def clear_allowance_cache(self) -> None:
         """Clear the allowance cache."""
