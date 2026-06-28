@@ -644,6 +644,15 @@ test-accounting-matrix-quick:
 		--output-dir docs/internal/notes/.tmp/accounting-matrix \
 		--rows-include lp-uniswap_v3-arbitrum,looping-aave_v3-arbitrum
 
+# Teardown seam x primitive regression matrix — the epic Done-when contract
+# (VIB-5479 / TD-21). GREEN cells assert the merged seams (TD-10/11/15 landed);
+# the only strict-xfails are S6 x {perp, pendle} (no on-chain closure verifier
+# yet — VIB-5116 / VIB-3808). A green cell regressing to red OR a strict-xfail
+# XPASSing fails this gate (and the normal unit suite, which also collects it).
+# See docs/internal/qa/teardown-regression-matrix.md.
+test-teardown-matrix: ## Teardown seam x primitive regression matrix (VIB-5479)
+	uv run pytest tests/unit/teardown/test_regression_matrix.py -q --import-mode=importlib
+
 # Check Pendle market expiry dates in demo and incubating strategy configs.
 # Fails if any demo strategy references a market expiring within 30 days.
 check-pendle-expiry:
