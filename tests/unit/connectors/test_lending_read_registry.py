@@ -380,3 +380,50 @@ class TestAcceptsIsCollateral:
         # Every lending venue that does NOT declare the flag -- and any unknown
         # key -- returns False (fail closed); the gate must never default open.
         assert LendingReadRegistry.accepts_is_collateral(protocol) is False
+
+
+class TestIsTokenKeyed:
+    """VIB-5493: the registry owns which lending venues are supply-only,
+    token-keyed surfaces (Fluid fTokens — one position per underlying token,
+    no ``market_id``). The teardown lending guard's ``_position_key`` splits
+    per token ONLY for these, so two distinct Fluid supplies on one chain are
+    two positions instead of collapsing to one ``(fluid, chain, "")`` key."""
+
+    def test_dispatch_populates_token_keyed_protocols_from_manifest(self) -> None:
+        # The manifest-derived dispatch map collects exactly the canonical keys
+        # whose ``LendingReadDecl`` declares ``token_keyed=True`` (Fluid fTokens).
+        token_keyed = LendingReadRegistry._dispatch().token_keyed_protocols
+        assert isinstance(token_keyed, frozenset)
+        assert "fluid" in token_keyed
+        # Account/vault-keyed venues must NOT leak into the token-keyed set.
+        assert token_keyed.isdisjoint({"aave_v3", "spark", "morpho_blue", "compound_v3", "fluid_vault"})
+
+    def test_canonical_key_is_token_keyed(self) -> None:
+        assert LendingReadRegistry.is_token_keyed("fluid") is True
+
+    def test_alias_resolves_to_token_keyed(self) -> None:
+        # The ``fluid_lending`` alias must resolve to the same canonical decl,
+        # so a loosely-spelled protocol identifier still splits per token.
+        assert LendingReadRegistry.is_token_keyed("fluid_lending") is True
+
+    @pytest.mark.parametrize("protocol", ["FLUID", "Fluid", "fluid-lending", "  fluid  "])
+    def test_case_hyphen_whitespace_folding_resolves(self, protocol: str) -> None:
+        # ``is_token_keyed`` normalises via ``normalize_protocol`` (fold + alias),
+        # so display-cased / hyphenated / padded spellings still resolve.
+        assert LendingReadRegistry.is_token_keyed(protocol) is True
+
+    @pytest.mark.parametrize(
+        "protocol",
+        ["aave_v3", "spark", "aave", "morpho_blue", "compound_v3", "fluid_vault", "definitely_not_a_protocol"],
+    )
+    def test_account_and_vault_keyed_protocols_fail_closed(self, protocol: str) -> None:
+        # Account-keyed (Aave family, market_id="") and vault/market-keyed
+        # (Morpho / Compound / fluid_vault) venues stay grouped per account;
+        # unknown keys fail closed onto the safe account-keyed grouping.
+        assert LendingReadRegistry.is_token_keyed(protocol) is False
+
+    @pytest.mark.parametrize("protocol", [None, "", 123, 3.14, b"fluid"])
+    def test_total_on_none_and_invalid_input(self, protocol) -> None:
+        # Loosely typed / missing strategy metadata must never crash; it
+        # normalises to a non-token-keyed (False) answer so callers fail closed.
+        assert LendingReadRegistry.is_token_keyed(protocol) is False

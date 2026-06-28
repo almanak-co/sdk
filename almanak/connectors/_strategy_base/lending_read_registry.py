@@ -142,6 +142,9 @@ class _LendingDispatchMaps:
     # Plan 027 Step 5: set of canonical protocol keys that declare
     # accepts_is_collateral=True on their LendingReadDecl.
     collateral_flag_protocols: frozenset[str]
+    # VIB-5493: set of canonical protocol keys that declare token_keyed=True
+    # (supply-only, one-position-per-underlying-token, carry no market_id).
+    token_keyed_protocols: frozenset[str]
 
 
 class LendingReadRegistry:
@@ -183,6 +186,7 @@ class LendingReadRegistry:
             market_table_loaders: dict[str, tuple[str, str]] = {}
             aliases: dict[str, str] = {}
             collateral_flag_protocols: set[str] = set()
+            token_keyed_protocols: set[str] = set()
             for connector_manifest in CONNECTOR_REGISTRY.with_lending_read():
                 decl = connector_manifest.lending_read
                 assert decl is not None
@@ -199,6 +203,8 @@ class LendingReadRegistry:
                     aliases[alias] = key
                 if decl.accepts_is_collateral:
                     collateral_flag_protocols.add(key)
+                if decl.token_keyed:
+                    token_keyed_protocols.add(key)
             cls._dispatch_maps = _LendingDispatchMaps(
                 spec_loaders=spec_loaders,
                 account_state_loaders=account_state_loaders,
@@ -206,6 +212,7 @@ class LendingReadRegistry:
                 market_table_loaders=market_table_loaders,
                 aliases=aliases,
                 collateral_flag_protocols=frozenset(collateral_flag_protocols),
+                token_keyed_protocols=frozenset(token_keyed_protocols),
             )
         return cls._dispatch_maps
 
@@ -811,6 +818,27 @@ class LendingReadRegistry:
         fold spaces -- pre-fold is the caller's responsibility).
         """
         return cls._normalize(protocol) in cls._dispatch().collateral_flag_protocols
+
+    @classmethod
+    def is_token_keyed(cls, protocol: str | None) -> bool:
+        """Return ``True`` when ``protocol`` is a supply-only token-keyed surface.
+
+        VIB-5493: a token-keyed lending protocol (Fluid fTokens) has one
+        supply-only position per underlying token and carries NO ``market_id``;
+        its position identity IS the token. The teardown lending guard
+        (``lending_unwind_guard._position_key``) uses this to split the position
+        key per token ONLY for these protocols, so two distinct Fluid supplies on
+        the same chain are treated as two positions instead of collapsing to one
+        ``(fluid, chain, "")`` key. Account/vault-keyed protocols (the Aave family
+        with ``market_id=""``; Morpho / Compound / fluid_vault with an explicit
+        per-market id) return ``False`` and stay grouped per account.
+
+        Total by design: ``None`` / non-``str`` / unknown input normalises to a
+        non-token-keyed (``False``) answer so callers fail closed onto the safe
+        account-keyed grouping.
+        """
+        canonical = cls.normalize_protocol(protocol)
+        return bool(canonical) and canonical in cls._dispatch().token_keyed_protocols
 
     @classmethod
     def reset_cache(cls) -> None:

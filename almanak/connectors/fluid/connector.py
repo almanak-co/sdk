@@ -74,6 +74,14 @@ CONNECTOR = Connector(
         # Without this alias the gate degrades fluid rows to ESTIMATED and
         # the keys diverge (``:fluid_lending:`` vs ``:fluid:``).
         aliases=("fluid_lending",),
+        # VIB-5493: fTokens are supply-only and carry NO market_id — one fToken
+        # per underlying token per chain, so the position identity IS the token.
+        # The teardown lending guard splits its position key per token for
+        # token-keyed protocols, so two distinct Fluid supplies (e.g. USDC + USDT)
+        # are two positions instead of collapsing to one ``(fluid, chain, "")``
+        # key (which silently dropped the second withdraw). The vault CDP surface
+        # (``fluid_vault``) stays account/vault-keyed — it REQUIRES a market_id.
+        token_keyed=True,
     ),
     # Fluid's lending compiler ships metadata amounts wei-encoded
     # (``supply_amount`` / ``withdraw_amount`` = ERC-4626 asset base units);

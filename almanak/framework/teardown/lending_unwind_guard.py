@@ -114,38 +114,33 @@ collateral / summed debt across reserves). A per-reserve stale ``withdraw_all``
 only the all-reserves-flat case registers as measured zero. Per-reserve
 validation is out of scope for this ticket.
 
-Limitation (honest) — token-keyed multi-position conflation (VIB-5493): the
-position key is ``(canonical_protocol, chain, market_id)`` with ``market_id``
-empty for whole-pool protocols. For an ACCOUNT-keyed protocol (Aave / Spark /
-Compound / Morpho) that empty ``market_id`` is correct — all reserves share one
-account and one exposure read. But a TOKEN-keyed protocol (Fluid) also carries no
-``market_id``, so two distinct Fluid reserves on the same chain (e.g. a USDC and a
-WETH supply) collapse to the SAME key ``(fluid, chain, "")``. The single exposure
-read is then taken for the FIRST token (``_position_tokens`` returns the first
-WITHDRAW leg) and REUSED for the others, and ``has_repay`` is shared across them.
-With no per-reserve balance reader for Fluid the un-conflation fallback can't
-rescue the second position, so the outcome is ORDER-DEPENDENT and worse than a
-loud degrade: if the first reserve reads measured-EMPTY, a LIVE second reserve
-inherits that measured-zero exposure and is dropped as "measured zero collateral"
-with ``degraded`` UNSET — i.e. the live position is dropped SILENTLY and even
-reported as a flat ``no_op`` position (the teardown never tries to close it). If
-the first reserve reads measured-LIVE, a genuinely-empty second withdraw is KEPT
-and reverts ``withdraw(MAX_UINT256)`` → ``INVALID_AMOUNT`` on the empty reserve
-(harmless under teardown's inverted semantics). Neither case loses funds (the
-position stays intact on-chain), but the silent-drop case is a loud→silent
-observability regression vs the pre-fix path (which read every Fluid reserve as
-unmeasured and dropped it with ``degraded=True``). The correct fix is an
-account-keyed-vs-token-keyed capability signal on the read registry so the key
-splits per token ONLY for token-keyed protocols (a naive per-token key split would
-regress Aave multi-collateral / looping, where all reserves share one account);
-tracked in VIB-5493. Until then this gap is LATENT — the shipping Fluid strategies
-are single-reserve, and the common single-position Fluid teardown (VIB-5452, this
-ticket's target) is handled correctly. Do not rely on a multi-reserve token-keyed
-teardown until VIB-5493 lands.
+Token-keyed vs account-keyed position keying (VIB-5493): the position key is
+``(canonical_protocol, chain, discriminator)``. The third element is
+``market_id``, but a token-keyed protocol (Fluid fTokens) carries none — it is
+supply-only with one fToken per underlying token, so its position identity IS the
+token. ``_position_key`` therefore uses the intent's token as the discriminator
+when (and only when) the intent carries no ``market_id`` AND the protocol declares
+``token_keyed=True`` on its ``LendingReadDecl`` (``LendingReadRegistry.is_token_keyed``).
+This makes two distinct Fluid supplies on the same chain (e.g. USDC + USDT) two
+distinct keys — each gets its OWN exposure read and keep/drop decision — instead of
+collapsing to one ``(fluid, chain, "")`` key (the old bug: the first token's
+exposure was reused for the rest, so a live second reserve could inherit a
+measured-zero exposure and be dropped SILENTLY, or a genuinely-empty one be KEPT
+and revert ``withdraw(MAX_UINT256)`` → ``INVALID_AMOUNT``).
+
+The distinction is deliberately a manifest signal, NOT a per-token key split for
+every empty-``market_id`` protocol: the Aave family (and Spark) also carry no
+``market_id`` but are ACCOUNT-keyed — a single position is a collateral WITHDRAW +
+a borrow REPAY on DIFFERENT tokens that MUST stay grouped (token-keying them would
+split the position and break repay-before-withdraw / strand detection). fluid_vault
+is a borrow CDP that REQUIRES an explicit ``market_id`` (the vault address), so it
+is already disambiguated and stays account/vault-keyed. Only supply-only token-keyed
+surfaces set ``token_keyed=True``.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -154,6 +149,8 @@ from almanak.framework.intents.vocabulary import Intent, IntentType
 
 if TYPE_CHECKING:  # pragma: no cover
     from almanak.framework.teardown.models import TeardownMode
+
+logger = logging.getLogger(__name__)
 
 # Exposure (collateral or debt) below this USD value is treated as measured-flat.
 # Deliberately matches ``leverage_loop._DUST_USD`` ($0.01) — both answer the same
@@ -278,6 +275,34 @@ def _normalize_protocol(protocol: Any) -> str:
         return protocol.strip().lower()
 
 
+def _is_token_keyed_protocol(protocol: str) -> bool:
+    """Whether ``protocol`` is a supply-only token-keyed lending surface (VIB-5493).
+
+    Delegates to the manifest-declared ``LendingReadRegistry.is_token_keyed``
+    (``LendingReadDecl.token_keyed``) so the account-keyed-vs-token-keyed
+    distinction stays owned by the connector, not hardcoded here. Fails closed to
+    ``False`` (account-keyed grouping) when the registry is unavailable — the safe
+    default, since over-grouping a token-keyed teardown is a loud revert / drop
+    while WRONGLY splitting an account-keyed position breaks its unwind grouping.
+    """
+    try:
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        return LendingReadRegistry.is_token_keyed(protocol)
+    except ImportError:
+        # Registry module unavailable (trimmed env) — expected; fail closed to account-keyed.
+        return False
+    except Exception:  # noqa: BLE001 — a registry fault must NEVER raise out of the guard
+        # Don't silently mask a programming error (typo/type mismatch): log it, then
+        # still fail closed to the safe account-keyed default.
+        logger.debug(
+            "token-keyed lookup failed for protocol=%s; defaulting to account-keyed",
+            protocol,
+            exc_info=True,
+        )
+        return False
+
+
 def _intent_type(intent: Any) -> IntentType | None:
     return getattr(intent, "intent_type", None)
 
@@ -296,15 +321,36 @@ def _is_lending_unwind(intent: Any) -> bool:
 
 
 def _position_key(intent: Any) -> tuple[str, str, str]:
-    """Group lending intents by ``(canonical_protocol, chain, market_id)``.
+    """Group lending intents by ``(canonical_protocol, chain, discriminator)``.
 
-    ``market_id`` stays the raw string ("" for Aave where the protocol treats it
-    as informational — one pool per chain; non-empty and required for Morpho /
-    Compound isolated markets), so the key type stays ``tuple[str, str, str]``.
+    The third element is the per-account / per-market discriminator:
+
+    * Account/market-keyed protocols (default) use the raw ``market_id`` ("" for
+      the Aave family, which treats it as informational — one pool per chain; the
+      bytes32 / symbol market id for Morpho / Compound isolated markets and for
+      fluid_vault, which REQUIRES it). All reserves of one account share this key
+      so a collateral WITHDRAW + a borrow REPAY on different tokens stay grouped.
+    * Token-keyed protocols (VIB-5493, ``LendingReadDecl.token_keyed`` — Fluid
+      fTokens) carry NO ``market_id`` and are supply-only: one position per
+      underlying token, so the position identity IS the token. For these the
+      discriminator is the intent's (lowercased) token, so two distinct Fluid
+      supplies on the same chain (e.g. USDC + USDT) become two distinct keys
+      instead of collapsing to one ``(fluid, chain, "")`` key — which previously
+      reused the first token's exposure for the second and silently dropped a live
+      second withdraw. This matches the read itself, whose Fluid market id is the
+      token (``_read_exposure`` already falls back to the position's token, and the
+      Fluid market table is keyed by underlying symbol).
+
+    Only applied when the intent carries no explicit ``market_id`` AND the
+    protocol is token-keyed; an explicit market id (or an account-keyed protocol)
+    keeps the existing grouping unchanged. The key type stays
+    ``tuple[str, str, str]``.
     """
     protocol = _normalize_protocol(getattr(intent, "protocol", ""))
     chain = (getattr(intent, "chain", "") or "").lower()
     market_id = getattr(intent, "market_id", "") or ""
+    if not market_id and _is_token_keyed_protocol(protocol):
+        market_id = (getattr(intent, "token", "") or "").lower()
     return (protocol, chain, market_id)
 
 

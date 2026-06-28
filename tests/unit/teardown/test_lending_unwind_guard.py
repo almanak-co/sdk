@@ -1017,3 +1017,107 @@ def test_vib5468_older_snapshot_without_balances_method_stays_conservative():
     result = sanitize_lending_teardown_intents([withdraw], _OlderMarket())
     assert result.intents == []
     assert any("unmeasured exposure and no repay-first" in d for d in result.dropped)
+
+
+# ---------------------------------------------------------------------------
+# VIB-5493: token-keyed (Fluid fToken) positions are keyed PER TOKEN, while
+# account/vault-keyed protocols (Aave family, fluid_vault) stay grouped.
+# ---------------------------------------------------------------------------
+
+
+class _FluidMarket:
+    """Market returning per-token Fluid fToken exposure (token-keyed protocol).
+
+    Fluid fTokens are supply-only (debt is always a MEASURED zero) and carry no
+    ``market_id`` on the intent — the guard's exposure read falls the ``market_id``
+    back to the position's token, so ``position_health`` is invoked once per token
+    with ``market_id == <token>``. This stub keys the collateral exposure by that
+    token so two distinct Fluid supplies read INDEPENDENT exposures (the VIB-5493
+    fix); a collapsed key would reuse the first token's reading for the second.
+
+    It intentionally exposes no ``lending_position_balances`` (Fluid has no
+    single-reserve reader) so the un-conflation fallback yields unmeasured —
+    matching production.
+    """
+
+    def __init__(self, collateral_by_token: dict[str, Decimal | None], *, chain: str = _CHAIN) -> None:
+        self._collateral = {k.lower(): v for k, v in collateral_by_token.items()}
+        self.chain = chain
+        self.reads: list[str] = []
+
+    def position_health(self, protocol: str, market_id: str, **kwargs: Any) -> _Health:
+        self.reads.append((market_id or "").lower())
+        collateral = self._collateral.get((market_id or "").lower())
+        # Supply-only: debt is a measured zero, never None.
+        return _Health(collateral_usd=collateral, debt_usd=Decimal("0"))
+
+
+def _fluid_withdraw(token: str) -> Any:
+    return Intent.withdraw(protocol="fluid", token=token, amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
+
+
+def test_vib5493_two_live_fluid_supplies_are_two_positions_both_kept():
+    """Two distinct Fluid supplies (USDC + USDT) both live → BOTH withdraws kept,
+    read INDEPENDENTLY (one read per token), not collapsed to one key."""
+    market = _FluidMarket({"USDC": Decimal("1000"), "USDT": Decimal("500")})
+    result = sanitize_lending_teardown_intents([_fluid_withdraw("USDC"), _fluid_withdraw("USDT")], market)
+    kept_tokens = [i.token for i in result.intents]
+    assert kept_tokens == ["USDC", "USDT"]
+    # One exposure read per distinct token-keyed position (not one shared read).
+    assert sorted(market.reads) == ["usdc", "usdt"]
+    assert not result.dropped
+
+
+def test_vib5493_fluid_empty_first_does_not_silently_drop_live_second():
+    """The core bug: with a COLLAPSED key the first (empty USDC) reserve's
+    measured-zero exposure was reused for the live USDT supply, silently dropping
+    USDT. Per-token keying reads each independently → only the empty USDC is
+    dropped, the live USDT is KEPT."""
+    market = _FluidMarket({"USDC": Decimal("0"), "USDT": Decimal("500")})
+    result = sanitize_lending_teardown_intents([_fluid_withdraw("USDC"), _fluid_withdraw("USDT")], market)
+    kept_tokens = [i.token for i in result.intents]
+    assert kept_tokens == ["USDT"]  # live second supply survives
+    # Only the genuinely-empty USDC supply is dropped (measured zero collateral).
+    assert any("measured zero collateral" in d for d in result.dropped)
+    # USDT must NOT appear in no_op_positions (it is live, not flat) — the old
+    # collapsed key reported it as a flat no_op and never closed it.
+    assert all("usdt" not in p for p in result.no_op_positions)
+
+
+def test_vib5493_fluid_order_independent_live_first_empty_second():
+    """Order-independence: live USDC first, empty USDT second → USDC kept, USDT
+    dropped (a collapsed key would instead KEEP the empty USDT and revert
+    on-chain)."""
+    market = _FluidMarket({"USDC": Decimal("1000"), "USDT": Decimal("0")})
+    result = sanitize_lending_teardown_intents([_fluid_withdraw("USDC"), _fluid_withdraw("USDT")], market)
+    assert [i.token for i in result.intents] == ["USDC"]
+
+
+def test_vib5493_aave_collateral_plus_borrow_stays_one_group():
+    """Account-keyed protocol (Aave): collateral WITHDRAW + borrow REPAY on
+    DIFFERENT tokens must stay ONE position (single read, repay-first), NOT split
+    per token. Guards against a naive token-key split regressing Aave."""
+    market = _FakeMarket(collateral_usd=Decimal("1000"), debt_usd=Decimal("500"))
+    withdraw = Intent.withdraw(protocol="aave_v3", token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
+    repay = Intent.repay(protocol="aave_v3", token="USDC", repay_full=True, chain=_CHAIN)
+    result = sanitize_lending_teardown_intents([withdraw, repay], market)
+    # One grouped position → exactly one exposure read.
+    assert market.reads == 1
+    # Repay-before-withdraw within the single group.
+    assert _types(result.intents) == ["REPAY", "WITHDRAW"]
+
+
+def test_vib5493_fluid_vault_collateral_plus_debt_stays_grouped_by_market_id():
+    """fluid_vault is a borrow CDP that REQUIRES an explicit market_id (the vault
+    address) — it is account/vault-keyed, not token-keyed. A collateral WITHDRAW +
+    a debt REPAY on different tokens but the SAME vault stay ONE group keyed by
+    market_id, never split per token."""
+    market = _FakeMarket(collateral_usd=Decimal("2000"), debt_usd=Decimal("900"))
+    vault = "0xVAULTADDRESS"
+    withdraw = Intent.withdraw(
+        protocol="fluid_vault", token="WETH", market_id=vault, amount=Decimal("0"), withdraw_all=True, chain=_CHAIN
+    )
+    repay = Intent.repay(protocol="fluid_vault", token="USDC", market_id=vault, repay_full=True, chain=_CHAIN)
+    result = sanitize_lending_teardown_intents([withdraw, repay], market)
+    assert market.reads == 1  # single vault-keyed position
+    assert _types(result.intents) == ["REPAY", "WITHDRAW"]

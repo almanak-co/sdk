@@ -1992,8 +1992,7 @@ def test_fluid_vault_runner_hook_resolves_to_operate_enrichment_capability() -> 
     manifest = next(
         m
         for m in CONNECTOR_REGISTRY.with_runner_hooks()
-        if m.runner_hook_connector is not None
-        and str(m.runner_hook_connector.instantiate().protocol) == "fluid_vault"
+        if m.runner_hook_connector is not None and str(m.runner_hook_connector.instantiate().protocol) == "fluid_vault"
     )
     connector = manifest.runner_hook_connector.instantiate()
     assert type(connector) is FluidVaultRunnerHookConnector
@@ -2941,3 +2940,19 @@ class TestLendingReadDeclRateLaneValidation:
     def test_rejects_non_decimal_default_apy(self, field):
         with pytest.raises(ValueError, match=f"{field} must parse as a Decimal"):
             self._decl(**{field: "three percent"})
+
+    def test_token_keyed_defaults_to_false(self):
+        # VIB-5493: account/vault-keyed is the safe default; a connector must
+        # opt in explicitly to per-token position splitting.
+        assert self._decl().token_keyed is False
+
+    def test_accepts_token_keyed_bool(self):
+        assert self._decl(token_keyed=True).token_keyed is True
+
+    @pytest.mark.parametrize("bad", [1, "true", None, 0])
+    def test_rejects_non_bool_token_keyed(self, bad):
+        # VIB-5493: token_keyed must be a real bool — a truthy/falsy non-bool
+        # (e.g. 1 / "true") must fail closed at declaration time, not silently
+        # flip the teardown guard's per-token split.
+        with pytest.raises(ValueError, match="token_keyed must be a bool"):
+            self._decl(token_keyed=bad)

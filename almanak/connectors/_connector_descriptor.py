@@ -175,6 +175,23 @@ class LendingReadDecl:
     is Morpho-specific and must not be forwarded to Aave-style adapters that
     would silently ignore it (CodeRabbit PR #1535 round 4). Plan 027 Step 5."""
 
+    token_keyed: bool = False
+    """When ``True``, this protocol is a supply-only TOKEN-KEYED lending surface:
+    one position per underlying token, carrying NO ``market_id`` (the position
+    identity IS the token — e.g. Fluid fTokens, one fToken per underlying per
+    chain). Defaults to ``False`` -- account/vault-keyed protocols (the Aave
+    family with ``market_id=""``; Morpho / Compound / fluid_vault with an explicit
+    per-market id) group ALL of an account's reserves under one position key so a
+    collateral WITHDRAW + a borrow REPAY on different tokens stay grouped.
+
+    The teardown lending guard (``lending_unwind_guard._position_key``) consults
+    this so it splits the position key PER TOKEN only for token-keyed protocols
+    (VIB-5493). Token-keying an account-keyed protocol would split one
+    collateral+debt position into two and break its unwind grouping; leaving a
+    token-keyed protocol account-keyed collapses two distinct same-shaped supplies
+    into one and silently drops the second. Set ``True`` exactly for supply-only
+    token-keyed surfaces."""
+
     def __post_init__(self) -> None:
         """Validate the declaration's import references and aliases."""
         for field_name in ("spec", "account_state", "market_table", "market_health"):
@@ -187,6 +204,8 @@ class LendingReadDecl:
             raise ValueError(
                 f"LendingReadDecl.accepts_is_collateral must be a bool, got {self.accepts_is_collateral!r}"
             )
+        if not isinstance(self.token_keyed, bool):
+            raise ValueError(f"LendingReadDecl.token_keyed must be a bool, got {self.token_keyed!r}")
         _validate_decl_aliases("LendingReadDecl", self.aliases)
         if not isinstance(self.rate_history_chains, tuple):
             raise ValueError(
