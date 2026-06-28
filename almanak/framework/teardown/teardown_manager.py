@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from almanak.framework.teardown.runner_helpers import TeardownRunnerHelpers
 
 from almanak.framework.teardown.cancel_window import CancelWindowManager
+from almanak.framework.teardown.completeness import check_intent_coverage
 from almanak.framework.teardown.config import TeardownConfig
 from almanak.framework.teardown.decision_log import TeardownDecisionPhase, log_teardown_decision
 from almanak.framework.teardown.error_taxonomy import Disposition, classify_teardown_failure
@@ -621,9 +622,35 @@ class TeardownManager:
                     else:
                         raise
 
+            # TD-11 (VIB-5469): completeness enforcement. Every KNOWN tracked-open
+            # position must have a closing intent targeting it; a position with
+            # none must FAIL the teardown LOUD, never be reported as a clean
+            # success (VIB-5417: spark teardown returned []; ALM-2900: repaid but
+            # never withdrew). This is a pre-execution INTENT-COVERAGE check,
+            # distinct from on-chain verification (TD-15). Computed here; for the
+            # intents-present path it is folded into the result AFTER execution so
+            # the risk-reducing intents still run first (inverted semantics).
+            completeness = check_intent_coverage(positions, intents)
+
             if not intents:
-                logger.info(f"No intents to execute for {strategy.deployment_id}")
-                return self._empty_result(strategy.deployment_id, mode, started_at)
+                if completeness.complete:
+                    logger.info(f"No intents to execute for {strategy.deployment_id}")
+                    return self._empty_result(strategy.deployment_id, mode, started_at)
+                # Tracked-open positions but no intents at all → nothing to
+                # execute and a known position would be stranded. Fail loud.
+                logger.error("🛑 %s", completeness.error_message())
+                return self._failed_result(
+                    strategy.deployment_id,
+                    mode,
+                    started_at,
+                    error=completeness.error_message(),
+                    verification_status=VerificationStatus.FAILED,
+                    # Stamp the breakdown so the lifecycle surface reports 0/N
+                    # closed (matching the error) rather than a misleading 0/0.
+                    positions_total=completeness.total_enforceable,
+                    positions_closed=0,
+                    has_position_breakdown=True,
+                )
 
             # Step 3: Validate safety
             validation = self.safety_guard.validate_teardown_request(positions, internal_mode)
@@ -756,6 +783,42 @@ class TeardownManager:
                     market=market,
                     pre_teardown_reconciliation=pre_teardown_reconciliation,
                 )
+
+                # TD-11 (VIB-5469): fold the pre-execution completeness check into
+                # the verification result. A tracked-open position with no closing
+                # intent must FAIL the teardown even when every emitted intent
+                # executed and on-chain verification of the COVERED positions
+                # passed — the gap is in coverage, not execution. Force the
+                # FAILED status so the existing fail-closed machinery (persist
+                # FAILED + success=False + recovery options) handles it. Applied
+                # AFTER the TD-15 chain re-read so the coverage gap is the final,
+                # loudest word.
+                if not completeness.complete:
+                    # The uncovered positions are definitively NOT closed (no
+                    # intent even targeted them), so cap positions_closed so the
+                    # persisted positions_failed = total - closed reflects them
+                    # rather than reading 0 failed on a FAILED teardown (VIB-5469).
+                    uncovered_count = len(completeness.uncovered)
+                    # Carry the uncovered positions into the denominator: if the
+                    # verifier had no position breakdown (positions_total=0),
+                    # mark_failed (positions_failed = total - closed) would
+                    # otherwise record 0 failed on a teardown that FAILED
+                    # specifically because known-open positions had no closing
+                    # intent — a self-contradicting failure record (VIB-5469).
+                    positions_total = max(verification.positions_total, completeness.total_enforceable)
+                    adjusted_closed = max(
+                        min(verification.positions_closed, positions_total - uncovered_count),
+                        0,
+                    )
+                    verification = replace(
+                        verification,
+                        all_closed=False,
+                        positions_total=positions_total,
+                        positions_closed=adjusted_closed,
+                        has_position_breakdown=True,
+                        verification_status=VerificationStatus.FAILED,
+                    )
+                    verify_error_msg = completeness.error_message()
 
                 # VIB-5085: stamp the position-level counts onto the result so
                 # the CLI lifecycle writer reports positions, not intents.
@@ -2781,8 +2844,23 @@ class TeardownManager:
         mode: str,
         started_at: datetime,
         error: str,
+        verification_status: VerificationStatus = VerificationStatus.NOT_RUN,
+        positions_total: int = 0,
+        positions_closed: int = 0,
+        has_position_breakdown: bool = False,
     ) -> TeardownResult:
-        """Create a result for failed teardown."""
+        """Create a result for failed teardown.
+
+        ``verification_status`` defaults to ``NOT_RUN`` (no closure verification
+        ran for an early failure); the completeness gate (TD-11) passes
+        ``FAILED`` so a coverage failure is recorded as a confidence-FAILED
+        closure, not merely "not run".
+
+        ``positions_total`` / ``positions_closed`` / ``has_position_breakdown``
+        let the no-intents coverage-failure path stamp an accurate position
+        breakdown (e.g. ``0/N`` closed) so the lifecycle surface does not read a
+        misleading ``0/0`` while the error names N stranded positions (VIB-5469).
+        """
         return TeardownResult(
             success=False,
             deployment_id=deployment_id,
@@ -2799,4 +2877,8 @@ class TeardownManager:
             final_balances={},
             error=error,
             recovery_options=["Retry", "Contact support"],
+            verification_status=verification_status,
+            positions_total=positions_total,
+            positions_closed=positions_closed,
+            has_position_breakdown=has_position_breakdown,
         )

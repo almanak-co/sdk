@@ -426,6 +426,7 @@ async def execute_and_verify(
     Returns the (possibly-replaced) ``TeardownResult``. Does NOT handle
     alerts or cleanup — those are pipelined after this helper.
     """
+    from ..teardown.completeness import check_intent_coverage
     from ..teardown.models import ClosureVerification, TeardownStatus, VerificationStatus
     from .runner_teardown import _make_approval_callback, _safe_mark
 
@@ -509,6 +510,42 @@ async def execute_and_verify(
             market=teardown_market,
             pre_teardown_reconciliation=getattr(runner, "_teardown_reconciliation", None),
         )
+
+        # TD-11 (VIB-5469): fold the pre-execution intent-coverage check into the
+        # verification result. A KNOWN tracked-open position with no closing
+        # intent must FAIL the teardown even when every emitted intent executed
+        # and on-chain verification of the COVERED positions passed — the gap is
+        # in coverage, not execution. Forcing FAILED routes it through the same
+        # fail-closed persistence below (mark_failed + status=FAILED). Applied
+        # AFTER the TD-15 chain re-read so the coverage gap is the final, loudest
+        # word — an uncovered KNOWN position FAILs regardless of what the chain
+        # says about the positions that DID get a closing intent.
+        completeness = check_intent_coverage(positions, teardown_intents)
+        if not completeness.complete:
+            # The uncovered positions are definitively NOT closed (no intent even
+            # targeted them), so cap positions_closed so the persisted
+            # positions_failed = total - closed reflects them rather than reading
+            # 0 failed on a FAILED teardown (VIB-5469).
+            uncovered_count = len(completeness.uncovered)
+            # Carry the uncovered positions into the denominator: if the
+            # verifier had no position breakdown (positions_total=0), the
+            # downstream mark_failed (positions_failed = total - closed) would
+            # otherwise record 0 failed on a teardown that FAILED specifically
+            # because known-open positions had no closing intent (VIB-5469).
+            positions_total = max(verification.positions_total, completeness.total_enforceable)
+            adjusted_closed = max(
+                min(verification.positions_closed, positions_total - uncovered_count),
+                0,
+            )
+            verification = replace(
+                verification,
+                all_closed=False,
+                positions_total=positions_total,
+                positions_closed=adjusted_closed,
+                has_position_breakdown=True,
+                verification_status=VerificationStatus.FAILED,
+            )
+            verify_error_msg = completeness.error_message()
 
         # VIB-5085: stamp the verified position counts onto the result so the
         # success result_json + the Phase-2 progress mark + any failure mark

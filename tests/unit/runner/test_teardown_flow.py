@@ -84,12 +84,21 @@ def _make_strategy(
     return strategy
 
 
-def _make_intent(intent_type: str = "SWAP", chain: str = "arbitrum") -> MagicMock:
-    """Build a mock intent."""
+def _make_intent(intent_type: str = "SWAP", chain: str = "arbitrum", from_token: str = "ETH") -> MagicMock:
+    """Build a mock intent.
+
+    ``from_token``/``token`` default to ``ETH`` so a SWAP intent covers the
+    TOKEN(ETH) position used by ``_make_strategy_for_manager`` — required by the
+    TD-11 completeness gate (a tracked-open position with no covering intent now
+    fails the teardown). Tests that need a non-covering intent pass a different
+    ``from_token``.
+    """
     intent = MagicMock()
     intent.intent_type = SimpleNamespace(value=intent_type)
     intent.chain = chain
     intent.is_chained_amount = False
+    intent.from_token = from_token
+    intent.token = from_token
     return intent
 
 

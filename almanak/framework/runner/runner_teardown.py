@@ -367,6 +367,36 @@ async def _count_open_positions(strategy: Any) -> int | None:
         return None
 
 
+async def _check_no_intent_completeness(strategy: Any) -> Any:
+    """Completeness report for the no-intents teardown gate (TD-11 / VIB-5469).
+
+    Reads the KNOWN open-position set (registry-reconciled enumeration, TD-01)
+    and checks it against an EMPTY intent list — so any enforceable tracked-open
+    position is reported as uncovered. Returns the
+    :class:`~almanak.framework.teardown.completeness.CompletenessReport`, or
+    ``None`` when the known set **could not be read** because strategy
+    enumeration raised. ``None`` is an UNREADABLE signal, not "no positions":
+    the caller MUST fail loud on it (VIB-5469), because an unreadable set cannot
+    certify a clean "no positions" exit and silently proceeding would strand any
+    open position. The registry-unavailable case is NOT this path — it degrades
+    cleanly inside ``resolve_open_positions_with_registry`` to a summary, so it
+    returns a real report rather than ``None``.
+    """
+    from ..teardown.completeness import check_intent_coverage
+    from ..teardown.registry_enumeration import resolve_open_positions_with_registry
+
+    try:
+        positions = await resolve_open_positions_with_registry(strategy)
+    except Exception:
+        logger.warning(
+            "Teardown completeness: could not read known positions for the no-intents gate "
+            "— failing loud rather than certifying a clean 'no positions' teardown",
+            exc_info=True,
+        )
+        return None
+    return check_intent_coverage(positions, [])
+
+
 async def reconcile_known_positions(runner: Any, strategy: Any, teardown_market: Any | None) -> Any:
     """Plan-A on-chain reconciliation CHECK over the KNOWN position set (TD-08 / VIB-5466).
 
@@ -821,6 +851,39 @@ async def execute_teardown(  # noqa: C901
     )
 
     if not teardown_intents:
+        # TD-11 (VIB-5469): completeness enforcement at the no-intents gate. The
+        # strategy produced NO closing intents — but if the KNOWN open-position
+        # set (registry-reconciled enumeration, TD-01) still reports tracked-open
+        # positions, those would be silently stranded by a clean "no positions"
+        # success (VIB-5417: spark teardown returned []; ALM-2900: repaid but
+        # never withdrew). Fail loud instead. Uses the durable known set, never a
+        # wallet-wide sweep.
+        completeness = await _check_no_intent_completeness(strategy)
+        if completeness is None:
+            # The KNOWN open-position set could not be read — strategy
+            # enumeration raised (``resolve_open_positions_with_registry``
+            # surfaces ``get_open_positions`` errors by design; the
+            # registry-unavailable case degrades cleanly to a summary, never to
+            # None). We CANNOT certify a clean "no positions" exit on an
+            # unreadable set, so fail loud rather than fall through to the
+            # success path and silently strand any open position (VIB-5469).
+            err = (
+                f"Teardown completeness: could not read the known open-position set for {deployment_id} "
+                "(strategy enumeration failed); refusing to certify a clean 'no positions' teardown. "
+                "Verify on-chain and re-run."
+            )
+            logger.error("🛑 %s teardown blocked: %s", deployment_id, err)
+            if request:
+                _safe_mark(manager, "mark_failed", deployment_id, error=err)
+            runner._request_teardown_failure_shutdown(err)
+            return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, err, start_time)
+        if not completeness.complete:
+            err = completeness.error_message()
+            logger.error("🛑 %s teardown blocked: %s", deployment_id, err)
+            if request:
+                _safe_mark(manager, "mark_failed", deployment_id, error=err)
+            runner._request_teardown_failure_shutdown(err)
+            return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, err, start_time)
         if recovery_incomplete:
             # Discovery could not confirm the wallet holds no LP — refusing to
             # report a clean "no positions" success that might strand an orphan.
