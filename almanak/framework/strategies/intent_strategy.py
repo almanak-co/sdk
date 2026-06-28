@@ -1926,6 +1926,31 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
         return tokens
 
+    def supports_teardown(self) -> bool:
+        """Authoritative teardown opt-in (VIB-5474 / TD-16).
+
+        Returns ``True`` by default: a concrete ``IntentStrategy`` holds tracked
+        positions (its ``get_open_positions()`` / ``generate_teardown_intents()``
+        are abstract), so the framework MUST be allowed to close them when an
+        operator sends a teardown signal. This default is intentionally **safe** —
+        a position-holding strategy is never silently dropped from teardown
+        eligibility.
+
+        Override to return ``False`` ONLY for a strategy that must NOT be
+        force-closed by the framework — e.g. one whose connector cannot yet
+        safely unwind its positions (a V3-DEX LP, see VIB-572). Unlike before
+        VIB-5474, this verdict is now **honoured** by the runner's teardown gate
+        (`strategy_supports_teardown`): it is no longer dead API. Returning
+        ``False`` while still holding closeable positions means the operator must
+        recover them manually (`almanak teardown --discover` / `ax`); the runner
+        logs that loudly rather than force-closing against your declaration.
+
+        Strategies that simply hold no positions should extend
+        ``StatelessStrategy`` (which keeps this ``True`` so the operator stop
+        signal still completes trivially) rather than returning ``False`` here.
+        """
+        return True
+
     @abstractmethod
     def get_open_positions(self) -> "TeardownPositionSummary":
         """Get all open positions for this strategy.

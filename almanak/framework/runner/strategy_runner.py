@@ -114,6 +114,13 @@ from .runner_models import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+# VIB-5474 (TD-16): deployments already warned that their explicit
+# ``supports_teardown() == False`` opt-out refused an auto-teardown. A refused
+# request stays PENDING (so ``should_teardown()`` keeps returning True), so the
+# warning would otherwise fire every iteration — throttle it to once per
+# deployment per process.
+_TEARDOWN_OPTOUT_WARNED: set[str] = set()
+
 # V4 native-ETH sentinel: a PoolKey's native currency leg is the EVM zero
 # address (address(0)), NOT a V4-specific magic value. Framework-owned so the
 # runner never imports a concrete connector (connector-boundary guard).
@@ -8111,6 +8118,30 @@ class StrategyRunner:
             return None
 
         if not should_teardown:
+            return None
+
+        # VIB-5474 (TD-16): honour the authoritative teardown opt-in. A strategy
+        # that explicitly declares ``supports_teardown() == False`` must NOT be
+        # force-closed by the framework signal lane — closing it may be unsafe
+        # (e.g. a V3-DEX LP the connector cannot unwind, VIB-572). This replaces
+        # the dead ``hasattr(get_open_positions)`` presence-sniff and closes the
+        # VIB-5370 trap where an author's opt-out was silently ignored. The
+        # default (IntentStrategy / StatelessStrategy) is True, so position
+        # holders stay eligible. The request is left pending and surfaced loudly
+        # rather than silently dropped, so the operator can recover manually.
+        from .runner_models import strategy_supports_teardown
+
+        if not strategy_supports_teardown(strategy):
+            # Throttle: the refused request stays PENDING, so this path is hit
+            # every iteration — warn loudly once per deployment, then stay quiet.
+            if deployment_id not in _TEARDOWN_OPTOUT_WARNED:
+                _TEARDOWN_OPTOUT_WARNED.add(deployment_id)
+                logger.warning(
+                    "Teardown requested for %s but the strategy declares "
+                    "supports_teardown() == False; refusing to auto-close. Recover "
+                    "manually (almanak teardown --discover / ax) if positions must be closed.",
+                    deployment_id,
+                )
             return None
 
         # Acknowledge teardown request

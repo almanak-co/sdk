@@ -215,7 +215,21 @@ def _position_value(value: Any) -> str:
 
 
 def _can_collect_position_snapshot(runner: Any, strategy: StrategyProtocol) -> bool:
-    return runner._get_gateway_client() is not None and hasattr(strategy, "get_open_positions")
+    # VIB-5474 (TD-16): position snapshotting is OBSERVABILITY, not teardown
+    # eligibility — keep the two decoupled. A strategy that opts OUT of framework
+    # teardown (``supports_teardown() == False``, e.g. a V3-DEX LP the connector
+    # cannot unwind, VIB-572) still holds positions the operator must monitor and
+    # recover manually, so the dashboard MUST keep reporting them. Gating the
+    # snapshot on the teardown opt-in would blind the operator to exactly the
+    # positions they need to see. Teardown *eligibility* is decided solely at the
+    # runner teardown trigger (``strategy_runner._check_teardown_requested``).
+    #
+    # The old ``hasattr(strategy, "get_open_positions")`` sniff is removed: it was
+    # always True (the method is abstract on ``IntentStrategy``) so it never gated
+    # anything, and ``collect_position_snapshot`` already degrades non-fatally if
+    # positions cannot be read. Gate only on gateway-client presence.
+    del strategy  # observability gate: intentionally independent of the strategy
+    return runner._get_gateway_client() is not None
 
 
 def _summary_positions(strategy: StrategyProtocol) -> Any | None:

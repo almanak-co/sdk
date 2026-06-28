@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Teardown eligibility is now an authoritative opt-in (VIB-5474 / TD-16,
+  resolves VIB-5370).** The runner gated teardown on
+  `hasattr(strategy, "get_open_positions")` — a presence-sniff that never gated
+  anything (the method is abstract on `IntentStrategy`, so it is always present)
+  while `supports_teardown()` was dead API: an author who returned `False` to
+  protect a strategy that must not be force-closed was torn down anyway. The
+  gate is now the authoritative `IntentStrategy.supports_teardown()` (single
+  source of truth: `runner_models.strategy_supports_teardown`). It defaults to
+  `True` (default-safe — a position-holding strategy is never silently made
+  ineligible; only a literal `supports_teardown() -> False` opts out, so a
+  forgotten `return` cannot strand funds). An explicit `False` is now honoured at
+  the runner teardown trigger (refused loudly once per deployment, request left
+  pending for manual recovery). Teardown eligibility and dashboard position
+  observability stay decoupled: an opted-out strategy's positions keep being
+  reported so the operator can monitor and recover them. Strategies with no
+  positions should extend `StatelessStrategy` rather than returning `False`.
+
 ## [2.20.0] - 2026-06-24
 
 ### Added

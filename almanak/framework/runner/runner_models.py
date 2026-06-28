@@ -515,12 +515,59 @@ class StrategyProtocol(Protocol):
         ...
 
     def generate_teardown_intents(self, mode: Any, market: Any = None) -> list:
-        """Generate intents to close all positions (optional, checked via hasattr)."""
+        """Generate intents to close all positions (abstract on IntentStrategy)."""
         ...
 
     def get_open_positions(self) -> Any:
-        """Return open positions for teardown safety validation (optional)."""
+        """Return open positions for teardown (abstract on IntentStrategy)."""
         ...
+
+    def supports_teardown(self) -> bool:
+        """Authoritative teardown opt-in (VIB-5474 / TD-16).
+
+        ``True`` (the ``IntentStrategy`` default) means the framework may
+        auto-close this strategy's positions when an operator sends a teardown
+        signal. An author returns ``False`` to declare a strategy that must NOT
+        be force-closed by the framework (e.g. positions the connector cannot
+        safely unwind). The runner honours this — it is no longer dead API.
+        """
+        ...
+
+
+def strategy_supports_teardown(strategy: Any) -> bool:
+    """Authoritative, default-safe answer to "is this strategy teardown-eligible?".
+
+    Single source of truth for the teardown opt-in gate (VIB-5474 / TD-16),
+    replacing the old ``hasattr(strategy, "get_open_positions")`` presence-sniff.
+
+    Resolution:
+
+    * The strategy declares ``supports_teardown()`` (the ``IntentStrategy``
+      default returns ``True``) → honour its verdict. The **only** way to become
+      ineligible is an explicit, literal ``supports_teardown() -> False``; this
+      closes the VIB-5370 trap where an author's opt-out was silently ignored.
+    * The method is missing, not callable, or raises → fall back to ``True``.
+    * Any non-``False`` return — ``None`` (a forgotten ``return``), ``0``, ``""``,
+      a non-bool — is treated as eligible (``True``), NOT as an opt-out. The
+      default is **safe**: a position-holding strategy must never be silently
+      dropped from teardown eligibility (which would strand on-chain risk) by a
+      malformed override. Only a deliberate, literal ``False`` opts out.
+    * The strategy itself is ``None`` (absent) → fall back to ``True``;
+      ``getattr(None, ...)`` would raise ``AttributeError`` rather than return
+      the default, so guard it explicitly.
+    """
+    if strategy is None:
+        return True
+    probe = getattr(strategy, "supports_teardown", None)
+    if not callable(probe):
+        return True
+    try:
+        verdict = probe()
+    except Exception:  # noqa: BLE001 - default-safe: never strand a position-holder
+        return True
+    # Default-safe: ONLY a literal ``False`` opts out. None/0/""/non-bool → eligible,
+    # so a forgotten ``return`` in an override can never silently strand funds.
+    return verdict is not False
 
 
 class StatefulActivityProviderProtocol(Protocol):
@@ -542,4 +589,5 @@ __all__ = [
     "StrategyProtocol",
     "_extract_tokens_from_intent",
     "_format_intent_for_log",
+    "strategy_supports_teardown",
 ]

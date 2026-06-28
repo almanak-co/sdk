@@ -4,15 +4,15 @@ Strategy base classes and the market snapshot interface.
 
 ## Implementing Teardown
 
-To support teardown, a strategy implements `get_open_positions()` and `generate_teardown_intents()` so operators can safely close positions. **Implementing `get_open_positions()` is what enables teardown** — the runner checks for that method. Without it, close-requests are silently ignored.
+To support teardown, a strategy implements `get_open_positions()` and `generate_teardown_intents()` so operators can safely close positions (both are abstract on `IntentStrategy`). Whether the framework **may** auto-close the strategy is decided by the authoritative `supports_teardown()` opt-in (defaults to `True`); an author returns `False` only for a strategy that must not be force-closed.
 
 ### Teardown Methods
 
 | Method | Required? | Purpose |
 |--------|-----------|---------|
-| `get_open_positions()` | **Yes** | Return a `TeardownPositionSummary` listing all open positions. The runner gates teardown on the presence of this method. |
+| `get_open_positions()` | **Yes** | Return a `TeardownPositionSummary` listing all open positions (queried from on-chain state). |
 | `generate_teardown_intents(mode, market)` | **Yes** | Return an ordered list of `Intent` objects that unwind positions |
-| `supports_teardown() -> bool` | Optional | Author-side convenience guard (return `False` to short-circuit your own teardown path). The runner does **not** gate on this flag — it is a convention many demos follow, not a framework requirement. |
+| `supports_teardown() -> bool` | Optional | **Authoritative** teardown opt-in. Defaults to `True` — the runner may auto-close your positions on an operator teardown signal. Override to `False` **only** for a strategy that must NOT be force-closed by the framework; the runner honours that and refuses the auto-teardown (logging loudly) rather than ignoring it. Strategies that hold no positions should extend `StatelessStrategy` instead of returning `False`. |
 
 ### Execution Order
 
