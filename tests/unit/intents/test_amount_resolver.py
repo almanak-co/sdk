@@ -485,22 +485,43 @@ class TestCompoundV3EthCall:
         )
         assert value is None
 
+    @staticmethod
+    def _calldata_aware_gw(base_addr: str, balance_byte: str):
+        """RPC mock that answers baseToken() with ``base_addr`` and balance reads
+        with ``balance_byte`` — the reader now calls baseToken() to guard the
+        base-asset-only balanceOf()/borrowBalanceOf() against collateral tokens."""
+        import json as _json
+
+        base_word = '"0x' + base_addr.replace("0x", "").zfill(64) + '"'
+        bal_word = '"0x' + ("00" * 31 + balance_byte) + '"'
+        rpc_stub = MagicMock()
+
+        def _call(request, timeout=7):
+            data = _json.loads(request.params)[0]["data"]
+            resp = MagicMock()
+            resp.success = True
+            resp.result = base_word if data == CompoundV3BalanceReader._BASE_TOKEN_SELECTOR else bal_word
+            return resp
+
+        rpc_stub.Call.side_effect = _call
+        gw = MagicMock()
+        gw._rpc_stub = rpc_stub
+        gw.config = SimpleNamespace(timeout=7)
+        return gw
+
     def test_get_supply_balance_end_to_end(self):
         reader = CompoundV3BalanceReader()
-        hex_value = '"' + "0x" + "00" * 31 + "01" + '"'
-        gw, _ = _make_gateway_with_rpc(response_result=hex_value)
-        value = reader.get_supply_balance(
-            "arbitrum", "0xToken", "0xWallet", market_id="usdc", gateway_client=gw
-        )
+        base = "0x0000000000000000000000000000000000000abc"
+        gw = self._calldata_aware_gw(base, "01")
+        # Querying the BASE token reads the real supply balance.
+        value = reader.get_supply_balance("arbitrum", base, "0xWallet", market_id="usdc", gateway_client=gw)
         assert value == 1
 
     def test_get_debt_balance_end_to_end(self):
         reader = CompoundV3BalanceReader()
-        hex_value = '"' + "0x" + "00" * 31 + "ff" + '"'
-        gw, _ = _make_gateway_with_rpc(response_result=hex_value)
-        value = reader.get_debt_balance(
-            "arbitrum", "0xToken", "0xWallet", market_id="usdc", gateway_client=gw
-        )
+        base = "0x0000000000000000000000000000000000000abc"
+        gw = self._calldata_aware_gw(base, "ff")
+        value = reader.get_debt_balance("arbitrum", base, "0xWallet", market_id="usdc", gateway_client=gw)
         assert value == 255
 
 

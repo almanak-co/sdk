@@ -3072,6 +3072,92 @@ class MarketSnapshot:
         # ``position_health`` call without overrides ALSO hits this entry.
         self._position_health_cache[(protocol, market_id, "", "", "")] = health
 
+    def lending_position_balances(
+        self,
+        protocol: str,
+        token: str,
+        *,
+        market_id: str | None = None,
+        chain: str | None = None,
+    ) -> tuple[int | None, int | None]:
+        """Per-reserve on-chain supply (aToken) and debt balances, in the reserve's native wei.
+
+        Reads the wallet's *actual* on-chain position for one lending reserve via
+        the connector-owned balance readers (``balance_readers.get_reader_for_protocol``,
+        gateway-routed ``eth_call`` — no direct network). This is the
+        un-conflated counterpart to :meth:`position_health`: ``position_health``
+        returns the account-level USD aggregate (``getUserAccountData.totalCollateralBase``
+        — the borrow-capacity figure, which is ``0`` for an LTV=0 / isolation /
+        non-collateral supply even when the deposit is fully withdrawable), whereas
+        this returns the literal aToken balance, so a teardown can tell an empty
+        supply (skip) from a non-collateral supply with a positive balance (keep)
+        without conflating the two (VIB-5468 / VIB-5484).
+
+        Args:
+            protocol: Lending protocol identifier (e.g. ``"aave_v3"``, ``"spark"``,
+                ``"compound_v3"``). Protocols whose supply is shares-based and not
+                readable as a flat balance (Morpho Blue) return ``None`` for both
+                legs — the caller must rely on the USD/health read for those.
+            token: Reserve asset symbol or address.
+            market_id: Optional protocol market id (e.g. the Compound Comet key);
+                ignored by whole-pool protocols (Aave family).
+            chain: Chain override; defaults to the snapshot's pinned chain.
+
+        Returns:
+            ``(supply_wei, debt_wei)`` — either element is ``None`` when that leg
+            is **unmeasured** (no gateway, unresolvable token, unsupported protocol,
+            or the read failed). Empty ≠ Zero: ``None`` is unmeasured, never a
+            fabricated ``0``.
+        """
+        # A present-but-DISCONNECTED client must not reach the on-chain readers
+        # (they would fault or return a stale/empty read that looks like measured
+        # zero). Treat it as unmeasured, same as no client. ``is_connected``
+        # absent (legacy/mock clients) defaults to True so existing reads proceed.
+        if self._gateway_client is None or not getattr(self._gateway_client, "is_connected", True):
+            return (None, None)
+        target_chain = chain or self._chain or ""
+        if not target_chain:
+            return (None, None)
+        asset = self._resolve_token_address(token, target_chain)
+        if asset is None:
+            return (None, None)
+        wallet = self._wallet_address
+        if not wallet:
+            return (None, None)
+
+        from almanak.framework.intents.balance_readers import get_reader_for_protocol
+
+        reader = get_reader_for_protocol(protocol)
+        if reader is None:
+            return (None, None)
+        try:
+            supply = reader.get_supply_balance(
+                target_chain,
+                asset,
+                wallet,
+                protocol=protocol,
+                market_id=market_id,
+                gateway_client=self._gateway_client,
+            )
+            debt = reader.get_debt_balance(
+                target_chain,
+                asset,
+                wallet,
+                protocol=protocol,
+                market_id=market_id,
+                gateway_client=self._gateway_client,
+            )
+        except Exception:  # noqa: BLE001 — an unavailable read is unmeasured, never a fabricated zero
+            logger.debug(
+                "lending_position_balances read failed for protocol=%s token=%s chain=%s — unmeasured (None, None)",
+                protocol,
+                token,
+                target_chain,
+                exc_info=True,
+            )
+            return (None, None)
+        return (supply, debt)
+
     def aave_health_factor(self, *, chain: str | None = None) -> Decimal | None:
         """Aave V3 account health factor for ``chain`` via the wired provider.
 

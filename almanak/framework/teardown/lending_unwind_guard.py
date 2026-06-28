@@ -46,6 +46,41 @@ Correctness contract (CLAUDE.md §Accounting — Empty ≠ Zero):
   bug itself; under ``None`` we degrade conservatively — keep risk-reducing
   REPAY, never emit a withdraw-all that we cannot confirm is safe.
 
+"Unmeasured ⇒ unsafe" is NOT the same as "no collateral" (VIB-5468 / VIB-5484).
+Two failures stranded a *legitimate* zero-debt ``withdraw_all`` by conflating
+those:
+
+* ``position_health`` returns the ACCOUNT-LEVEL USD aggregate
+  (``getUserAccountData.totalCollateralBase`` — the borrow-capacity figure),
+  which is ``0`` for an LTV=0 / isolation / non-collateral supply EVEN WHEN the
+  aToken balance is positive and fully withdrawable (DAI on Spark post-USDS
+  migration — VIB-5484). The old ``collateral_is_zero`` drop refused it.
+* A token-keyed protocol (Fluid) carries no ``market_id``, so the read RAISED
+  ("market_id required") → unmeasured (VIB-5452); a cross-asset per-market read
+  (Morpho Blue) with no price override or an empty snapshot came back unmeasured
+  (VIB-5418). The old "unmeasured + no repay" branch refused it.
+
+The fix: (1) ``_read_exposure`` falls back to the position's token for the
+``market_id`` and passes oracle price overrides (matching ``generate_lending_unwind``)
+so the read is MEASURED instead of spuriously unmeasured; (2) before refusing a
+WITHDRAW, ``_keep_withdraw`` consults the UN-CONFLATED per-reserve on-chain read
+(``MarketSnapshot.lending_position_balances`` → the literal aToken balance) to tell
+"no aToken to withdraw" (skip, avoids the ``withdraw(MAX_UINT256)`` →
+``INVALID_AMOUNT`` revert) from "aToken present but not counted as USD collateral"
+(MUST withdraw).
+
+Whole-position debt is the keep gate, NOT the withdraw token's reserve debt
+(VIB-5468). A WITHDRAW reads the COLLATERAL reserve, so its reserve debt is ``0``
+even while the ACCOUNT still owes another asset — withdrawing ALL collateral with
+outstanding account debt reverts ``0x6679996d``. So the aToken-present keep is gated
+on ACCOUNT-LEVEL ``debt_is_zero``: the ``position_health`` aggregate
+(``getUserAccountData.totalDebtBase`` for Aave/Spark) when the account read is
+measured, and — on the unmeasured fallback — only when the account-level debt leg
+itself read as a measured zero. The per-reserve debt is never used as a
+whole-position-debt proxy. VIB-5139's purpose is preserved: a withdraw with MEASURED
+active debt and no repay-first is STILL refused, and an unconfirmable
+(still-unmeasured) read STILL degrades conservatively.
+
 Ordering contract — DO NOT mangle an already-correct staircase (VIB-5139 P0):
 
   ``generate_lending_unwind`` emits an ORDER-SENSITIVE *interleaved*
@@ -78,6 +113,35 @@ collateral / summed debt across reserves). A per-reserve stale ``withdraw_all``
 (one reserve already emptied while another reserve is still live) is NOT caught —
 only the all-reserves-flat case registers as measured zero. Per-reserve
 validation is out of scope for this ticket.
+
+Limitation (honest) — token-keyed multi-position conflation (VIB-5493): the
+position key is ``(canonical_protocol, chain, market_id)`` with ``market_id``
+empty for whole-pool protocols. For an ACCOUNT-keyed protocol (Aave / Spark /
+Compound / Morpho) that empty ``market_id`` is correct — all reserves share one
+account and one exposure read. But a TOKEN-keyed protocol (Fluid) also carries no
+``market_id``, so two distinct Fluid reserves on the same chain (e.g. a USDC and a
+WETH supply) collapse to the SAME key ``(fluid, chain, "")``. The single exposure
+read is then taken for the FIRST token (``_position_tokens`` returns the first
+WITHDRAW leg) and REUSED for the others, and ``has_repay`` is shared across them.
+With no per-reserve balance reader for Fluid the un-conflation fallback can't
+rescue the second position, so the outcome is ORDER-DEPENDENT and worse than a
+loud degrade: if the first reserve reads measured-EMPTY, a LIVE second reserve
+inherits that measured-zero exposure and is dropped as "measured zero collateral"
+with ``degraded`` UNSET — i.e. the live position is dropped SILENTLY and even
+reported as a flat ``no_op`` position (the teardown never tries to close it). If
+the first reserve reads measured-LIVE, a genuinely-empty second withdraw is KEPT
+and reverts ``withdraw(MAX_UINT256)`` → ``INVALID_AMOUNT`` on the empty reserve
+(harmless under teardown's inverted semantics). Neither case loses funds (the
+position stays intact on-chain), but the silent-drop case is a loud→silent
+observability regression vs the pre-fix path (which read every Fluid reserve as
+unmeasured and dropped it with ``degraded=True``). The correct fix is an
+account-keyed-vs-token-keyed capability signal on the read registry so the key
+splits per token ONLY for token-keyed protocols (a naive per-token key split would
+regress Aave multi-collateral / looping, where all reserves share one account);
+tracked in VIB-5493. Until then this gap is LATENT — the shipping Fluid strategies
+are single-reserve, and the common single-position Fluid teardown (VIB-5452, this
+ticket's target) is handled correctly. Do not rely on a multi-reserve token-keyed
+teardown until VIB-5493 lands.
 """
 
 from __future__ import annotations
@@ -244,6 +308,32 @@ def _position_key(intent: Any) -> tuple[str, str, str]:
     return (protocol, chain, market_id)
 
 
+def _position_tokens(intents: list[Any], key: tuple[str, str, str]) -> tuple[str | None, str | None]:
+    """``(collateral_token, borrow_token)`` for a position from its WITHDRAW / REPAY legs.
+
+    The WITHDRAW intent's ``token`` is the collateral leg; the REPAY intent's
+    ``token`` is the borrow leg. Unlike :func:`_extract_position_legs` (which
+    requires BOTH legs and is used to size a synthesis staircase), this tolerates
+    a **collateral-only** position (a pure lender with no debt and so no REPAY) —
+    it returns ``(collateral, None)`` for it. Used to shape the exposure read
+    (market-id fallback + price overrides), where the collateral leg alone is
+    enough to make a Fluid / Morpho supply read MEASURED (VIB-5468).
+    """
+    collateral_token: str | None = None
+    borrow_token: str | None = None
+    for intent in intents:
+        if not _is_lending_unwind(intent) or _position_key(intent) != key:
+            continue
+        token = getattr(intent, "token", None)
+        if not token:
+            continue
+        if _is_withdraw(intent) and collateral_token is None:
+            collateral_token = token
+        elif _is_repay(intent) and borrow_token is None:
+            borrow_token = token
+    return (collateral_token, borrow_token)
+
+
 def _safe_decimal(value: Any) -> Decimal | None:
     """Coerce a measured value to Decimal; ``None`` stays unmeasured."""
     if value is None:
@@ -273,7 +363,13 @@ def _intent_chain_matches_snapshot(market: Any, intent: Any) -> bool:
     return intent_chain == snapshot_chain
 
 
-def _read_exposure(market: Any, intent: Any) -> _Exposure:
+def _read_exposure(
+    market: Any,
+    intent: Any,
+    *,
+    collateral_token: str | None = None,
+    borrow_token: str | None = None,
+) -> _Exposure:
     """Fresh on-chain exposure for the position ``intent`` targets.
 
     Empty ≠ Zero: any failure leaves the value ``None`` (unmeasured), never a
@@ -283,6 +379,20 @@ def _read_exposure(market: Any, intent: Any) -> _Exposure:
     Chain-scoped (P1): when the intent's chain differs from the snapshot's pinned
     chain (or cannot be confirmed equal), force unmeasured — the read would be for
     the wrong chain and must never drive a drop.
+
+    Two read-shaping inputs avoid a spurious *unmeasured* (VIB-5468), the exact
+    conflation this fix targets — an unmeasured read must mean "the chain could
+    not answer", not "the guard asked the wrong question":
+
+    * ``market_id`` falls back to the position's token when the intent carries
+      none. Token-keyed protocols (Fluid) attach no ``market_id``; without this
+      ``position_health`` raises "market_id is required" → unmeasured → a
+      legitimate zero-debt ``withdraw_all`` gets refused (VIB-5452).
+    * Oracle price overrides (collateral + borrow) are passed exactly as the
+      ``generate_lending_unwind`` primitive does, so a cross-asset per-market read
+      (Morpho Blue) computes USD instead of coming back unmeasured (VIB-5418).
+      ``_market_price`` is failure-safe (0 → no override), so a market without a
+      ``price`` method (or a missing oracle) simply omits the override.
     """
     if market is None or not hasattr(market, "position_health"):
         return _Exposure(collateral_usd=None, debt_usd=None)
@@ -290,9 +400,17 @@ def _read_exposure(market: Any, intent: Any) -> _Exposure:
         return _Exposure(collateral_usd=None, debt_usd=None)
 
     protocol = _normalize_protocol(getattr(intent, "protocol", ""))
-    market_id = getattr(intent, "market_id", "") or ""
+    raw_market_id = getattr(intent, "market_id", "") or ""
+    read_market_id = raw_market_id or collateral_token or borrow_token or ""
+    collateral_price = _market_price(market, collateral_token) if collateral_token else Decimal("0")
+    borrow_price = _market_price(market, borrow_token) if borrow_token else Decimal("0")
     try:
-        health = market.position_health(protocol=protocol, market_id=market_id)
+        health = market.position_health(
+            protocol=protocol,
+            market_id=read_market_id,
+            collateral_price_usd=collateral_price if collateral_price > 0 else None,
+            debt_price_usd=borrow_price if borrow_price > 0 else None,
+        )
     except Exception:
         return _Exposure(collateral_usd=None, debt_usd=None)
 
@@ -309,7 +427,10 @@ def _exposures_by_position(market: Any, intents: list[Any]) -> dict[tuple[str, s
             continue
         key = _position_key(intent)
         if key not in exposures:
-            exposures[key] = _read_exposure(market, intent)
+            collateral_token, borrow_token = _position_tokens(intents, key)
+            exposures[key] = _read_exposure(
+                market, intent, collateral_token=collateral_token, borrow_token=borrow_token
+            )
     return exposures
 
 
@@ -323,6 +444,8 @@ def _keep_repay(exposure: _Exposure, key: tuple[str, str, str], result: LendingG
 
 
 def _keep_withdraw(
+    market: Any,
+    intent: Any,
     exposure: _Exposure,
     key: tuple[str, str, str],
     has_repay: bool,
@@ -334,8 +457,27 @@ def _keep_withdraw(
     position ⇒ True), so an interleaved staircase — whose first WITHDRAW precedes
     its repays in execution order but whose plan DOES contain repays — is never
     dropped by the active-debt / unmeasured guards below.
+
+    Two refuse branches first consult the un-conflated per-reserve on-chain read
+    (:func:`_read_reserve_balances`) before stranding a legitimate withdraw
+    (VIB-5468 / VIB-5484); see the inline notes.
     """
+    token = getattr(intent, "token", None)
     if exposure.collateral_is_zero:
+        # VIB-5484: the account-level USD collateral aggregate
+        # (``getUserAccountData.totalCollateralBase``) is ``0`` for an LTV=0 /
+        # isolation / non-collateral supply EVEN WHEN the aToken balance is positive
+        # and fully withdrawable (e.g. DAI on Spark post-USDS migration). When debt
+        # is a measured zero the withdraw carries no health-factor risk, so confirm
+        # via the literal aToken balance instead of the conflated aggregate.
+        if exposure.debt_is_zero:
+            supply, _debt = _read_reserve_balances(market, key, token)
+            if supply is not None and supply > 0:
+                return True  # real withdrawable supply not counted as USD collateral
+            if supply is not None and supply == 0:
+                result.dropped.append(f"WITHDRAW {key}: zero on-chain aToken balance (nothing to withdraw)")
+                return False
+            # supply unmeasured (shares-based / no reader) → keep the conservative drop.
         result.dropped.append(f"WITHDRAW {key}: measured zero collateral (nothing to withdraw)")
         return False
     if exposure.measured and not exposure.debt_is_zero and not has_repay:
@@ -345,14 +487,37 @@ def _keep_withdraw(
         result.dropped.append(f"WITHDRAW {key}: active debt and no repay-first — refusing unsafe withdraw")
         return False
     if not exposure.measured and not has_repay:
-        # Unmeasured exposure and no repay-first to clear debt before the
-        # withdraw runs — refusing a withdraw_all from stale assumptions.
+        # VIB-5468: the account read came back unmeasured (gateway blip, empty
+        # snapshot prices, an unsupported account-state read). Consult a fresh
+        # on-chain per-reserve read to avoid stranding a genuinely-safe withdraw —
+        # but the per-reserve read only sees the WITHDRAW token's OWN reserve, so
+        # it can prove "nothing to withdraw" (a no-op drop) and confirm the aToken
+        # is present, yet it CANNOT prove the ACCOUNT carries no debt.
+        supply, _reserve_debt = _read_reserve_balances(market, key, token)
+        if supply is not None and supply == 0:
+            # Genuine no-op: no aToken to withdraw. Safe to drop regardless of debt
+            # (avoids the ``withdraw(MAX_UINT256)`` → ``INVALID_AMOUNT`` revert).
+            result.dropped.append(f"WITHDRAW {key}: zero on-chain aToken balance (nothing to withdraw)")
+            return False
+        # VIB-5468 (whole-position debt): KEEP a withdraw_all only when ACCOUNT-LEVEL
+        # debt is CONFIRMED zero. ``_reserve_debt`` is the withdraw TOKEN's reserve
+        # debt, NOT the account aggregate — on Aave/Spark a ``WETH`` withdraw_all
+        # reads WETH-reserve debt == 0 while the account still owes ``USDC`` on
+        # another reserve, and withdrawing ALL collateral with outstanding account
+        # debt reverts ``0x6679996d``. So the keep is gated on ``exposure.debt_is_zero``
+        # (the account aggregate, reachable here when collateral was the unmeasured
+        # leg but debt read as a measured zero) — NEVER on ``_reserve_debt``. When the
+        # account debt is itself unmeasured we cannot confirm whole-position safety,
+        # so we fall through to the conservative refusal (VIB-5139's purpose).
+        if supply is not None and supply > 0 and exposure.debt_is_zero:
+            return True
         result.dropped.append(f"WITHDRAW {key}: unmeasured exposure and no repay-first — refusing unsafe withdraw_all")
         return False
     return True
 
 
 def _decide_keeps(
+    market: Any,
     intents: list[Any],
     exposures: dict[tuple[str, str, str], _Exposure],
     positions_with_repay: set[tuple[str, str, str]],
@@ -377,7 +542,7 @@ def _decide_keeps(
         if _is_repay(intent):
             if _keep_repay(exposure, key, result):
                 kept.append(intent)
-        elif _keep_withdraw(exposure, key, key in positions_with_repay, result):
+        elif _keep_withdraw(market, intent, exposure, key, key in positions_with_repay, result):
             kept.append(intent)
     return kept
 
@@ -461,6 +626,35 @@ def _market_wallet_balance(market: Any, token: str) -> Decimal | None:
         return Decimal(str(amount))
     except Exception:
         return None
+
+
+def _read_reserve_balances(
+    market: Any,
+    key: tuple[str, str, str],
+    token: str | None,
+) -> tuple[int | None, int | None]:
+    """Fresh per-reserve on-chain ``(supply_wei, debt_wei)`` for the withdraw token.
+
+    The un-conflated counterpart to :func:`_read_exposure`: it reads the literal
+    aToken balance (and reserve debt) via the gateway-backed
+    ``MarketSnapshot.lending_position_balances`` instead of the account-level USD
+    collateral aggregate. This is the on-chain ``position(market, wallet)`` fallback
+    VIB-5468 calls for — it distinguishes "no aToken to withdraw" (a genuine no-op
+    that must be skipped to avoid the ``withdraw(MAX_UINT256)`` → ``INVALID_AMOUNT``
+    revert) from "aToken present but not counted as USD collateral" (an LTV=0 /
+    isolation / non-collateral supply that MUST be withdrawn; VIB-5484).
+
+    Empty ≠ Zero: each leg is ``None`` when unmeasured (no market method, no
+    gateway, unresolvable token, a shares-based protocol such as Morpho Blue whose
+    flat balance is not readable, or a read failure) — never a fabricated ``0``.
+    """
+    if market is None or not token or not hasattr(market, "lending_position_balances"):
+        return (None, None)
+    protocol, chain, market_id = key
+    try:
+        return market.lending_position_balances(protocol, token, market_id=market_id or None, chain=chain or None)
+    except Exception:
+        return (None, None)
 
 
 def _extract_position_legs(intents: list[Any], key: tuple[str, str, str]) -> tuple[str, str] | None:
@@ -773,7 +967,7 @@ def sanitize_lending_teardown_intents(
     # position-local drops in place. An interleaved staircase keeps its exact order;
     # only a simple single-round plan is reordered repay-first.
     order_locked = _is_order_locked(intents)
-    kept = _decide_keeps(intents, exposures, positions_with_repay, result)
+    kept = _decide_keeps(market, intents, exposures, positions_with_repay, result)
 
     # No-op positions: fully flat on the fresh read (measured zero debt AND
     # collateral). Their intents were already dropped above — record for the caller.

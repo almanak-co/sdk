@@ -19,8 +19,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-import pytest
-
 from almanak.framework.intents.vocabulary import Intent
 from almanak.framework.teardown.lending_unwind_guard import (
     sanitize_lending_teardown_intents,
@@ -457,9 +455,7 @@ def test_high1_protocol_aliases_group_as_one_position():
     share ONE fresh read and are treated as one position."""
     market = _FakeMarket(collateral_usd=Decimal("1000"), debt_usd=Decimal("500"))
     repay = Intent.repay(protocol="Aave_V3", token="USDC", repay_full=True, chain=_CHAIN)
-    withdraw = Intent.withdraw(
-        protocol="aave_v3", token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN
-    )
+    withdraw = Intent.withdraw(protocol="aave_v3", token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
     result = sanitize_lending_teardown_intents([repay, withdraw], market)
 
     # One distinct position → exactly one fresh read; repay-first kept together.
@@ -745,3 +741,279 @@ def test_vib4466_mode_soft_vs_hard_changes_synthesized_slippage():
     assert soft and hard, "both modes should emit collateral->debt swaps with a slippage cap"
     # HARD widens the slippage cap relative to SOFT (emergency unwind makes progress).
     assert max(hard) > max(soft)
+
+
+# ---------------------------------------------------------------------------
+# VIB-5468 / VIB-5484: "unmeasured ⇒ unsafe" + USD-aggregate vs aToken-balance
+# conflation. A zero-debt withdraw must not be stranded when the account-level
+# USD collateral aggregate is zero (LTV=0 / isolation supply) or the account read
+# came back spuriously unmeasured, as long as a fresh per-reserve on-chain read
+# confirms a withdrawable aToken balance with no debt.
+# ---------------------------------------------------------------------------
+
+
+class _ReserveMarket:
+    """Market exposing position_health, price, and the per-reserve balance read.
+
+    Models the un-conflated on-chain ``getUserReserveData`` read the guard now
+    consults (``lending_position_balances``) alongside the (possibly conflated /
+    unmeasured) account-level ``position_health``.
+
+    Args:
+        collateral_usd / debt_usd: account-level USD aggregate the
+            ``position_health`` read returns (or ``raise_on_health`` to force the
+            account read unmeasured). For an LTV=0 / isolation supply the aggregate
+            is ``0`` even though the reserve holds a balance.
+        reserve_supply_wei / reserve_debt_wei: the literal per-reserve aToken /
+            debt balances the on-chain fallback returns. ``None`` for a leg means
+            UNMEASURED (shares-based protocol / no reader).
+    """
+
+    def __init__(
+        self,
+        *,
+        collateral_usd: Decimal | None,
+        debt_usd: Decimal | None,
+        reserve_supply_wei: int | None,
+        reserve_debt_wei: int | None,
+        raise_on_health: bool = False,
+        health_needs_price: bool = False,
+        health_needs_market_id: bool = False,
+        chain: str = _CHAIN,
+    ) -> None:
+        self._health = _Health(collateral_usd, debt_usd)
+        self._reserve_supply = reserve_supply_wei
+        self._reserve_debt = reserve_debt_wei
+        self._raise_on_health = raise_on_health
+        self._health_needs_price = health_needs_price
+        self._health_needs_market_id = health_needs_market_id
+        self.chain = chain
+        self.balance_reads = 0
+        self.last_market_id: str | None = None
+
+    def position_health(
+        self,
+        protocol: str,
+        market_id: str,
+        collateral_price_usd: Decimal | None = None,
+        debt_price_usd: Decimal | None = None,
+        **kwargs: Any,
+    ) -> _Health:
+        self.last_market_id = market_id
+        if self._raise_on_health:
+            raise RuntimeError("position health unavailable (RPC failed)")
+        if self._health_needs_market_id and not market_id:
+            # Fluid flavour: token-keyed protocol raises without a market_id.
+            raise ValueError("market_id is required to value a fluid position; none was provided.")
+        if self._health_needs_price and collateral_price_usd is None:
+            # Morpho cross-asset flavour: no USD without a price override.
+            raise RuntimeError("cannot value cross-asset market without price override")
+        return self._health
+
+    def price(self, token: str) -> Decimal:
+        return Decimal("1000") if token == "WETH" else Decimal("1")
+
+    def lending_position_balances(
+        self, protocol: str, token: str, *, market_id: str | None = None, chain: str | None = None
+    ) -> tuple[int | None, int | None]:
+        self.balance_reads += 1
+        return (self._reserve_supply, self._reserve_debt)
+
+
+def test_vib5484_ltv0_supply_zero_aggregate_but_atoken_balance_keeps_withdraw():
+    """Spark DAI (LTV=0): account USD collateral aggregate is 0, but the per-reserve
+    aToken balance is positive and fully withdrawable. The guard must KEEP the
+    zero-debt withdraw (previously dropped as 'measured zero collateral')."""
+    market = _ReserveMarket(
+        collateral_usd=Decimal("0"),  # totalCollateralBase == 0 for an LTV=0 reserve
+        debt_usd=Decimal("0"),
+        reserve_supply_wei=15_550_000_000_000_000_000,  # 15.55 spDAI
+        reserve_debt_wei=0,
+    )
+    result = sanitize_lending_teardown_intents([_withdraw_all()], market)
+    assert _types(result.intents) == ["WITHDRAW"]
+    assert market.balance_reads == 1  # the un-conflated on-chain fallback ran
+    assert not result.dropped
+
+
+def test_vib5484_genuinely_empty_supply_drops_withdraw():
+    """Same zero-aggregate read, but the per-reserve aToken balance is a MEASURED
+    zero — a genuine no-op. The guard drops it (avoids the withdraw(MAX) →
+    INVALID_AMOUNT revert) with the aToken-specific reason."""
+    market = _ReserveMarket(
+        collateral_usd=Decimal("0"),
+        debt_usd=Decimal("0"),
+        reserve_supply_wei=0,
+        reserve_debt_wei=0,
+    )
+    result = sanitize_lending_teardown_intents([_withdraw_all()], market)
+    assert result.intents == []
+    assert any("zero on-chain aToken balance" in d for d in result.dropped)
+
+
+def test_vib5484_zero_aggregate_with_active_debt_does_not_keep_via_atoken():
+    """When the account read is MEASURED with active debt, the aggregate-zero
+    collateral branch must NOT use the aToken rescue (the rescue is gated on
+    debt_is_zero) — a withdraw with active debt and no repay stays refused."""
+    market = _ReserveMarket(
+        collateral_usd=Decimal("0"),
+        debt_usd=Decimal("500"),  # active debt
+        reserve_supply_wei=15_550_000_000_000_000_000,
+        reserve_debt_wei=0,
+    )
+    result = sanitize_lending_teardown_intents([_withdraw_all()], market)
+    assert result.intents == []
+    assert market.balance_reads == 0  # rescue not attempted under active debt
+
+
+def test_vib5452_fluid_market_id_resolved_from_token_makes_read_measured():
+    """Fluid keys on intent.token and carries no market_id, so position_health used
+    to RAISE → unmeasured → the collateral-only withdraw_all was dropped. The guard
+    now falls back to the token for the market_id, the read is MEASURED, and the
+    withdraw is kept — no on-chain fallback needed."""
+    market = _ReserveMarket(
+        collateral_usd=Decimal("30"),
+        debt_usd=Decimal("0"),
+        reserve_supply_wei=None,
+        reserve_debt_wei=None,
+        health_needs_market_id=True,
+        chain="base",
+    )
+    fluid_withdraw = Intent.withdraw(
+        protocol="fluid", token="USDC", amount=Decimal("30"), withdraw_all=True, chain="base"
+    )
+    result = sanitize_lending_teardown_intents([fluid_withdraw], market)
+    assert _types(result.intents) == ["WITHDRAW"]
+    assert market.last_market_id == "USDC"  # resolved from intent.token
+    assert not result.degraded
+
+
+def test_vib5418_morpho_price_override_makes_cross_asset_read_measured():
+    """Morpho cross-asset collateral read returns unmeasured WITHOUT a price
+    override (the empty-snapshot strand). The guard now passes the collateral price
+    override (as the unwind primitive does), the read is MEASURED, and the
+    collateral-only withdraw_all is kept."""
+    mid = "0x" + "ab" * 32
+    market = _ReserveMarket(
+        collateral_usd=Decimal("100"),
+        debt_usd=Decimal("0"),
+        reserve_supply_wei=None,
+        reserve_debt_wei=None,
+        health_needs_price=True,
+    )
+    morpho_withdraw = Intent.withdraw(
+        protocol="morpho_blue", token="WETH", amount=Decimal("0"), withdraw_all=True, market_id=mid, chain=_CHAIN
+    )
+    result = sanitize_lending_teardown_intents([morpho_withdraw], market)
+    assert _types(result.intents) == ["WITHDRAW"]
+    assert not result.degraded
+
+
+def test_vib5468_unmeasured_collateral_but_measured_zero_account_debt_keeps_withdraw():
+    """The collateral USD leg is unmeasured but the ACCOUNT-LEVEL debt aggregate read
+    as a MEASURED zero, and a fresh per-reserve read confirms a positive aToken
+    balance — a whole-position-safe zero-debt withdraw_all. The guard keeps it.
+
+    The keep is gated on the account aggregate (``exposure.debt_is_zero``), NOT on the
+    withdraw token's reserve debt (VIB-5468) — see the cross-asset regression below."""
+    market = _ReserveMarket(
+        collateral_usd=None,  # collateral USD valuation failed (unmeasured leg)
+        debt_usd=Decimal("0"),  # account-level total debt is a MEASURED zero
+        reserve_supply_wei=50_000_000,
+        reserve_debt_wei=0,
+    )
+    withdraw = Intent.withdraw(protocol=_PROTOCOL, token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
+    result = sanitize_lending_teardown_intents([withdraw], market)
+    assert _types(result.intents) == ["WITHDRAW"]
+    assert result.degraded  # partial (unmeasured collateral) account read -> flagged
+    assert market.balance_reads == 1
+
+
+def test_vib5468_cross_asset_account_debt_not_proxied_by_withdraw_reserve_debt():
+    """Finding 1 regression (whole-position debt): the account read is unmeasured, and
+    the per-reserve read of the WITHDRAW token (WETH) shows a positive aToken balance
+    with ZERO reserve debt — but the account still owes a DIFFERENT asset (USDC), which
+    the WETH reserve read cannot see. Withdrawing ALL collateral with outstanding
+    account debt reverts ``0x6679996d``, so the guard must NOT treat the withdraw
+    token's ``reserve_debt == 0`` as "no position debt". The withdraw_all is REFUSED."""
+    market = _ReserveMarket(
+        collateral_usd=None,
+        debt_usd=None,  # account-level debt UNMEASURED — cannot confirm whole-position safety
+        reserve_supply_wei=2_000_000_000_000_000_000,  # 2 WETH aToken present
+        reserve_debt_wei=0,  # WETH reserve carries no debt; the USDC debt is on another reserve
+        raise_on_health=True,
+    )
+    withdraw = Intent.withdraw(protocol=_PROTOCOL, token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
+    result = sanitize_lending_teardown_intents([withdraw], market)
+    assert result.intents == []  # NOT kept — per-reserve zero-debt is not whole-position proof
+    assert any("unmeasured exposure and no repay-first" in d for d in result.dropped)
+    assert result.degraded
+
+
+def test_vib5468_unmeasured_account_read_empty_atoken_drops_withdraw():
+    """Unmeasured account read AND a measured-zero per-reserve balance → genuine
+    no-op, dropped with the aToken reason (not the generic 'unmeasured' refusal)."""
+    market = _ReserveMarket(
+        collateral_usd=None,
+        debt_usd=None,
+        reserve_supply_wei=0,
+        reserve_debt_wei=0,
+        raise_on_health=True,
+    )
+    withdraw = Intent.withdraw(protocol=_PROTOCOL, token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
+    result = sanitize_lending_teardown_intents([withdraw], market)
+    assert result.intents == []
+    assert any("zero on-chain aToken balance" in d for d in result.dropped)
+
+
+def test_vib5468_unmeasured_account_read_atoken_with_debt_still_refused():
+    """VIB-5139 preserved: unmeasured account read, no repay-first, and the
+    per-reserve read shows the reserve itself carries debt → NOT a confirmed
+    zero-debt position → the withdraw_all is still refused (debt must be repaid
+    first)."""
+    market = _ReserveMarket(
+        collateral_usd=None,
+        debt_usd=None,
+        reserve_supply_wei=50_000_000,
+        reserve_debt_wei=10_000_000,  # reserve has debt
+        raise_on_health=True,
+    )
+    withdraw = Intent.withdraw(protocol=_PROTOCOL, token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
+    result = sanitize_lending_teardown_intents([withdraw], market)
+    assert result.intents == []
+    assert any("unmeasured exposure and no repay-first" in d for d in result.dropped)
+
+
+def test_vib5468_unmeasured_account_and_unmeasured_reserve_stays_conservative():
+    """When BOTH the account read and the per-reserve fallback are unmeasured
+    (e.g. Morpho shares-based supply returns None), the guard preserves VIB-5139's
+    conservative refusal — never a withdraw_all from an unconfirmable state."""
+    market = _ReserveMarket(
+        collateral_usd=None,
+        debt_usd=None,
+        reserve_supply_wei=None,  # unmeasured fallback
+        reserve_debt_wei=None,
+        raise_on_health=True,
+    )
+    withdraw = Intent.withdraw(protocol=_PROTOCOL, token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
+    result = sanitize_lending_teardown_intents([withdraw], market)
+    assert result.intents == []
+    assert any("unmeasured exposure and no repay-first" in d for d in result.dropped)
+    assert result.degraded
+
+
+def test_vib5468_older_snapshot_without_balances_method_stays_conservative():
+    """A market that predates ``lending_position_balances`` (no method) must not
+    crash and must keep the conservative refusal — the fallback simply yields
+    unmeasured."""
+
+    class _OlderMarket:
+        chain = _CHAIN
+
+        def position_health(self, protocol: str, market_id: str, **kwargs: Any) -> _Health:
+            raise RuntimeError("position health unavailable (RPC failed)")
+
+    withdraw = Intent.withdraw(protocol=_PROTOCOL, token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
+    result = sanitize_lending_teardown_intents([withdraw], _OlderMarket())
+    assert result.intents == []
+    assert any("unmeasured exposure and no repay-first" in d for d in result.dropped)
