@@ -16,6 +16,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.core.constants import STABLECOINS  # noqa: F401 - used by SimulatedPortfolio._STABLECOIN_SYMBOLS
 from almanak.framework.backtesting.models import (
     BacktestMetrics,
@@ -34,7 +35,16 @@ from almanak.framework.backtesting.paper.token_registry import (
     is_token_known,
     resolve_to_canonical_symbol,
 )
-from almanak.framework.backtesting.pnl.data_provider import MarketState
+from almanak.framework.backtesting.pnl.data_provider import (
+    MarketState,
+    TokenKey,
+    TokenRef,
+    is_address_like,
+    is_token_key,
+    normalize_token_key,
+    normalize_token_ref,
+    token_ref_display,
+)
 
 # Position models extracted to position_models.py for module size management
 from almanak.framework.backtesting.pnl.position_models import (  # noqa: F401
@@ -42,6 +52,7 @@ from almanak.framework.backtesting.pnl.position_models import (  # noqa: F401
     SimulatedFill,
     SimulatedPosition,
 )
+from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.adapters.base import StrategyBacktestAdapter
@@ -57,7 +68,8 @@ logger = logging.getLogger(__name__)
 #: Deliberately narrower than :data:`almanak.core.constants.STABLECOINS`,
 #: which also lists yield-bearing tokens (sDAI, sUSDe, ...) whose price is
 #: not $1 -- treating those as cash would itself violate conservation.
-CASH_EQUIVALENT_STABLECOINS: frozenset[str] = frozenset({"USDC", "USDT", "DAI"})
+CASH_EQUIVALENT_STABLECOIN_SYMBOLS: frozenset[str] = frozenset({"USDC", "USDT", "DAI"})
+CASH_EQUIVALENT_STABLECOINS: frozenset[str] = CASH_EQUIVALENT_STABLECOIN_SYMBOLS
 
 #: Relative shortfall below which a debit is treated as spend-all instead of
 #: failing the fill. Absorbs Decimal round-trip error from flow computations
@@ -135,9 +147,9 @@ class PositionMetricsAggregate:
 
 @dataclass(frozen=True)
 class _DebitPlan:
-    token_debits: dict[str, Decimal]
+    token_debits: dict[TokenRef, Decimal]
     cash_debit: Decimal
-    conversions: dict[str, Decimal]
+    conversions: dict[TokenRef, Decimal]
 
 
 @dataclass(frozen=True)
@@ -155,7 +167,7 @@ class _TradePnlComponents:
 
 @dataclass(frozen=True)
 class _ReductionFlow:
-    amounts: dict[str, Decimal]
+    amounts: dict[TokenRef, Decimal]
     label: str
     verb: str
 
@@ -198,7 +210,7 @@ class SimulatedPortfolio:
 
     Attributes:
         cash_usd: Available cash in USD
-        tokens: Dict of token symbol -> amount held (spot holdings)
+        tokens: Dict of token identity -> amount held (spot holdings)
         positions: List of open positions (LP, perp, lending)
         equity_curve: List of (timestamp, value) equity points
         trades: List of trade records for this portfolio
@@ -218,7 +230,8 @@ class SimulatedPortfolio:
 
     initial_capital_usd: Decimal = Decimal("10000")
     cash_usd: Decimal = field(default=Decimal("0"))
-    tokens: dict[str, Decimal] = field(default_factory=dict)
+    chain: str = DEFAULT_CHAIN
+    tokens: dict[TokenRef, Decimal] = field(default_factory=dict)
     positions: list[SimulatedPosition] = field(default_factory=list)
     equity_curve: list[EquityPoint] = field(default_factory=list)
     trades: list[TradeRecord] = field(default_factory=list)
@@ -244,9 +257,9 @@ class SimulatedPortfolio:
     #: Weighted-average USD cost basis per unit of each spot token currently
     #: held (VIB-5083). A SWAP that acquires a token raises its average cost;
     #: a SWAP that disposes of a token realizes proceeds - units x avg_cost.
-    #: Keyed by the same symbols as ``tokens`` (cash-equivalent stablecoins are
+    #: Keyed by the same token identities as ``tokens`` (cash-equivalent stablecoins are
     #: never tracked here -- they live in ``cash_usd`` at $1 by definition).
-    _cost_basis: dict[str, Decimal] = field(default_factory=dict)
+    _cost_basis: dict[TokenRef, Decimal] = field(default_factory=dict)
     #: UPPERCASE symbol of the strategy's declared numeraire token (VIB-5127),
     #: or ``None`` for the USD default. Set by the engine at boot
     #: (``initialize_backtest``). When set, ``mark_to_market`` captures the
@@ -255,15 +268,64 @@ class SimulatedPortfolio:
     _numeraire_symbol: str | None = field(default=None)
 
     _STABLECOIN_SYMBOLS: frozenset[str] = STABLECOINS
+    _cash_equivalent_token_keys: frozenset[TokenKey] = field(default_factory=frozenset, init=False)
 
     def __post_init__(self) -> None:
         """Initialize cash from initial capital if not set."""
-        if self.cash_usd == Decimal("0") and self.initial_capital_usd > 0:
+        self.chain = str(self.chain).lower()
+        self._cash_equivalent_token_keys = self._resolve_cash_equivalent_token_keys(self.chain)
+        self.tokens = self._normalize_amounts(self.tokens)
+        self._cost_basis = self._normalize_amounts(self._cost_basis)
+        for position in [*self.positions, *self._closed_positions]:
+            self._normalize_position_token_refs(position)
+        has_existing_state = bool(
+            self.tokens or self.positions or self._closed_positions or self.trades or self.equity_curve
+        )
+        if self.cash_usd == Decimal("0") and self.initial_capital_usd > 0 and not has_existing_state:
             self.cash_usd = self.initial_capital_usd
 
-    def _stablecoin_fallback(self, token: str, context: str) -> Decimal:
+    @staticmethod
+    def _resolve_cash_equivalent_token_keys(chain: str) -> frozenset[TokenKey]:
+        keys: set[TokenKey] = set()
+        resolver = get_token_resolver()
+        for symbol in CASH_EQUIVALENT_STABLECOIN_SYMBOLS:
+            try:
+                resolved = resolver.resolve(symbol, chain, log_errors=False, skip_gateway=True)
+            except TokenResolutionError:
+                continue
+            if resolved and resolved.address:
+                keys.add(normalize_token_key(chain, resolved.address))
+        return frozenset(keys)
+
+    def _normalize_token_ref(self, token: TokenRef) -> TokenRef:
+        return normalize_token_ref(token, self.chain)
+
+    def _normalize_amounts(self, amounts: dict[TokenRef, Decimal]) -> dict[TokenRef, Decimal]:
+        normalized: dict[TokenRef, Decimal] = {}
+        for token, amount in amounts.items():
+            key = self._normalize_token_ref(token)
+            normalized[key] = normalized.get(key, Decimal("0")) + amount
+        return normalized
+
+    def _normalize_position_token_refs(self, position: SimulatedPosition) -> None:
+        position.tokens = [self._normalize_token_ref(token) for token in position.tokens]
+        position.amounts = self._normalize_amounts(position.amounts)
+
+    def _normalize_fill_token_refs(self, fill: SimulatedFill) -> None:
+        fill.tokens = [self._normalize_token_ref(token) for token in fill.tokens]
+        fill.tokens_in = self._normalize_amounts(fill.tokens_in)
+        fill.tokens_out = self._normalize_amounts(fill.tokens_out)
+        fill.position_reduce_amounts = self._normalize_amounts(fill.position_reduce_amounts)
+        if fill.position_delta is not None:
+            self._normalize_position_token_refs(fill.position_delta)
+
+    def _stablecoin_fallback(self, token: TokenRef, context: str) -> Decimal:
         """Return $1 fallback for token, raising in strict mode for non-stablecoins."""
-        if self.strict_reproducibility and token.upper() not in self._STABLECOIN_SYMBOLS:
+        if (
+            self.strict_reproducibility
+            and not self._is_cash_equivalent(token)
+            and not (isinstance(token, str) and token.upper() in self._STABLECOIN_SYMBOLS)
+        ):
             raise ValueError(
                 f"Price unavailable for non-stablecoin {token} in {context} and strict_reproducibility=True. "
                 "Cannot assume $1 price."
@@ -353,6 +415,7 @@ class SimulatedPortfolio:
                 fill.metadata.get("failure_reason", "fill marked failed by producer"),
             )
 
+        self._normalize_fill_token_refs(fill)
         debit_plan, failure_reason = self._build_debit_plan(fill, market_state)
         if failure_reason is not None:
             return self._reject_fill(fill, failure_reason)
@@ -400,9 +463,11 @@ class SimulatedPortfolio:
         return _DebitPlan(token_debits, cash_debit, conversions), None
 
     @staticmethod
-    def _annotate_implicit_conversions(fill: SimulatedFill, conversions: dict[str, Decimal]) -> None:
+    def _annotate_implicit_conversions(fill: SimulatedFill, conversions: dict[TokenRef, Decimal]) -> None:
         if conversions:
-            fill.metadata["implicit_conversions"] = {token: str(amount) for token, amount in conversions.items()}
+            fill.metadata["implicit_conversions"] = {
+                token_ref_display(token): str(amount) for token, amount in conversions.items()
+            }
 
     def _apply_position_effects(
         self,
@@ -486,7 +551,7 @@ class SimulatedPortfolio:
     def _apply_token_flows(
         self,
         fill: SimulatedFill,
-        token_debits: dict[str, Decimal],
+        token_debits: dict[TokenRef, Decimal],
         cash_debit: Decimal,
         market_state: MarketState | None = None,
     ) -> None:
@@ -522,21 +587,21 @@ class SimulatedPortfolio:
             current = self.tokens.get(token, Decimal("0"))
             self.tokens[token] = current + amount
 
-        # Handle cash-equivalent stablecoins as cash
-        for stable in CASH_EQUIVALENT_STABLECOINS:
-            if stable in self.tokens:
-                self.cash_usd += self.tokens.pop(stable)
+        # Handle cash-equivalent stablecoins as cash.
+        for token in list(self.tokens):
+            if self._is_cash_equivalent(token):
+                self.cash_usd += self.tokens.pop(token)
                 # Swept to cash at $1: no spot basis to carry.
-                self._cost_basis.pop(stable, None)
+                self._cost_basis.pop(token, None)
 
         # Deduct gas and non-embedded venue costs (fee/slippage) from cash
         self.cash_usd -= fill.gas_cost_usd + self._venue_cash_costs(fill)
 
     def _swap_disposed_tokens(
         self,
-        token_debits: dict[str, Decimal],
+        token_debits: dict[TokenRef, Decimal],
         proceeds_unpriceable: bool,
-    ) -> dict[str, Decimal]:
+    ) -> dict[TokenRef, Decimal]:
         if proceeds_unpriceable:
             return {}
         return {
@@ -547,7 +612,7 @@ class SimulatedPortfolio:
 
     def _swap_realized_pnl(
         self,
-        disposed: dict[str, Decimal],
+        disposed: dict[TokenRef, Decimal],
         in_value: Decimal,
         market_state: MarketState | None,
     ) -> Decimal | None:
@@ -617,7 +682,7 @@ class SimulatedPortfolio:
     def _record_swap_cost_basis(
         self,
         fill: SimulatedFill,
-        token_debits: dict[str, Decimal],
+        token_debits: dict[TokenRef, Decimal],
         market_state: MarketState | None,
     ) -> None:
         """Update average cost basis for a SWAP and stash its realized PnL.
@@ -677,7 +742,7 @@ class SimulatedPortfolio:
         if realized is not None:
             fill.metadata["realized_pnl_usd"] = str(realized)
 
-    def _add_to_cost_basis(self, token: str, units: Decimal, cost_usd: Decimal) -> None:
+    def _add_to_cost_basis(self, token: TokenRef, units: Decimal, cost_usd: Decimal) -> None:
         """Fold ``units`` acquired for ``cost_usd`` into ``token``'s avg cost."""
         if units <= Decimal("0"):
             return
@@ -688,7 +753,7 @@ class SimulatedPortfolio:
             return
         self._cost_basis[token] = (prior_cost + cost_usd) / new_units
 
-    def _token_price(self, token: str, market_state: MarketState | None) -> Decimal | None:
+    def _token_price(self, token: TokenRef, market_state: MarketState | None) -> Decimal | None:
         """Market price for ``token``, or None when unavailable (no $1 guess)."""
         if market_state is None:
             return None
@@ -698,7 +763,7 @@ class SimulatedPortfolio:
             return None
         return price if price > Decimal("0") else None
 
-    def _leg_usd_value(self, leg: dict[str, Decimal], market_state: MarketState | None) -> Decimal:
+    def _leg_usd_value(self, leg: dict[TokenRef, Decimal], market_state: MarketState | None) -> Decimal:
         """USD value of a token leg: cash-equivalents at $1, others at market.
 
         Missing prices contribute zero (the conservation guards already
@@ -719,10 +784,10 @@ class SimulatedPortfolio:
 
     def _plan_token_debits(
         self,
-        tokens_out: dict[str, Decimal],
+        tokens_out: dict[TokenRef, Decimal],
         intent_type: IntentType,
         market_state: MarketState | None,
-    ) -> tuple[dict[str, Decimal], Decimal, dict[str, Decimal], str | None]:
+    ) -> tuple[dict[TokenRef, Decimal], Decimal, dict[TokenRef, Decimal], str | None]:
         """Validate ``tokens_out`` against held balances without mutating state.
 
         Cash-equivalent stablecoins draw from the token balance first and
@@ -740,9 +805,9 @@ class SimulatedPortfolio:
             amount. When ``failure_reason`` is not None the fill must be
             rejected and the other values ignored.
         """
-        no_plan: tuple[dict[str, Decimal], Decimal, dict[str, Decimal]] = ({}, Decimal("0"), {})
-        token_debits: dict[str, Decimal] = {}
-        conversions: dict[str, Decimal] = {}
+        no_plan: tuple[dict[TokenRef, Decimal], Decimal, dict[TokenRef, Decimal]] = ({}, Decimal("0"), {})
+        token_debits: dict[TokenRef, Decimal] = {}
+        conversions: dict[TokenRef, Decimal] = {}
         cash_needed = Decimal("0")
 
         for token, amount in tokens_out.items():
@@ -785,7 +850,7 @@ class SimulatedPortfolio:
         return token_debits, cash_needed, conversions, None
 
     @staticmethod
-    def _conversion_price(token: str, market_state: MarketState | None) -> Decimal | None:
+    def _conversion_price(token: TokenRef, market_state: MarketState | None) -> Decimal | None:
         """Market price for an implicit cash conversion, or None if unavailable.
 
         No $1 fallback here: under-pricing a non-stablecoin leg would mint
@@ -803,7 +868,13 @@ class SimulatedPortfolio:
 
     def _is_cash_equivalent(self, token: Any) -> bool:
         """True if ``token`` is a stablecoin the portfolio holds as ``cash_usd``."""
-        return isinstance(token, str) and token.upper() in CASH_EQUIVALENT_STABLECOINS
+        if is_token_key(token):
+            return normalize_token_key(token[0], token[1]) in self._cash_equivalent_token_keys
+        if isinstance(token, str):
+            if is_address_like(token):
+                return normalize_token_key(self.chain, token) in self._cash_equivalent_token_keys
+            return token.upper() in CASH_EQUIVALENT_STABLECOIN_SYMBOLS
+        return False
 
     def _venue_cash_costs(self, fill: SimulatedFill) -> Decimal:
         """Fee and slippage payable from cash for this fill (VIB-5079).
@@ -952,7 +1023,7 @@ class SimulatedPortfolio:
         return None
 
     @staticmethod
-    def _positive_amounts(amounts: dict[str, Decimal]) -> dict[str, Decimal]:
+    def _positive_amounts(amounts: dict[TokenRef, Decimal]) -> dict[TokenRef, Decimal]:
         return {token: amount for token, amount in amounts.items() if amount > Decimal("0")}
 
     @staticmethod
@@ -964,23 +1035,24 @@ class SimulatedPortfolio:
     @staticmethod
     def _reduction_key_failure(
         position_id: str,
-        tied: dict[str, Decimal],
-        reduced: dict[str, Decimal],
+        tied: dict[TokenRef, Decimal],
+        reduced: dict[TokenRef, Decimal],
         flow_label: str,
     ) -> str | None:
         if not reduced:
             return f"position {position_id} missing positive partial-reduction amounts"
         if tied.keys() != reduced.keys():
             return (
-                f"position {position_id} partial reduction tokens {sorted(reduced)} "
-                f"do not match {flow_label} tokens {sorted(tied)}"
+                f"position {position_id} partial reduction tokens "
+                f"{sorted(token_ref_display(token) for token in reduced)} "
+                f"do not match {flow_label} tokens {sorted(token_ref_display(token) for token in tied)}"
             )
         return None
 
     def _reduction_interest_tokens(
         self,
         fill: SimulatedFill,
-        tied: dict[str, Decimal],
+        tied: dict[TokenRef, Decimal],
         realized_interest_usd: Decimal,
     ) -> Decimal:
         if len(tied) == 1 and realized_interest_usd > Decimal("0") and fill.executed_price > Decimal("0"):
@@ -996,8 +1068,8 @@ class SimulatedPortfolio:
     def _reduction_amount_tie_failure(
         self,
         fill: SimulatedFill,
-        tied: dict[str, Decimal],
-        reduced: dict[str, Decimal],
+        tied: dict[TokenRef, Decimal],
+        reduced: dict[TokenRef, Decimal],
         flow_verb: str,
     ) -> str | None:
         realized_interest_usd = abs(self._fill_realized_interest_usd(fill))
@@ -1017,7 +1089,7 @@ class SimulatedPortfolio:
     @staticmethod
     def _reduction_holdings_failure(
         position: SimulatedPosition,
-        reduced: dict[str, Decimal],
+        reduced: dict[TokenRef, Decimal],
         position_id: str,
     ) -> str | None:
         for token, amount in reduced.items():
@@ -1120,7 +1192,7 @@ class SimulatedPortfolio:
                 exc_info=True,
             )
 
-    def _reduce_position(self, position_id: str, reduce_amounts: dict[str, Decimal]) -> None:
+    def _reduce_position(self, position_id: str, reduce_amounts: dict[TokenRef, Decimal]) -> None:
         """Commit a validated partial reduction of a position's principal.
 
         Runs only after :meth:`_position_reduce_failure` validated coverage,
@@ -1600,7 +1672,7 @@ class SimulatedPortfolio:
     def _lp_close_prices(
         self,
         fill: SimulatedFill,
-        token1: str,
+        token1: TokenRef,
     ) -> tuple[Decimal, Decimal]:
         token0_price = self._metadata_decimal(fill.metadata.get("token0_price_usd", fill.executed_price))
         token1_price = fill.metadata.get("token1_price_usd")
@@ -1612,8 +1684,8 @@ class SimulatedPortfolio:
     def _lp_close_value(
         position: SimulatedPosition,
         fill: SimulatedFill,
-        token0: str,
-        token1: str,
+        token0: TokenRef,
+        token1: TokenRef,
         token0_price: Decimal,
         token1_price: Decimal,
     ) -> Decimal:
@@ -1710,15 +1782,16 @@ class SimulatedPortfolio:
 
     def _resolve_token_symbol(
         self,
-        token: str,
+        token: TokenRef,
         chain_id: int | None,
         require_symbol_mapping: bool,
         data_tracker: "DataQualityTracker | None",
-    ) -> str:
-        """Resolve a token key to its canonical symbol.
+    ) -> TokenRef:
+        """Resolve a token key for valuation.
 
-        This method enforces symbol resolution when require_symbol_mapping is enabled.
-        It uses the token registry to map addresses to symbols.
+        Address-native portfolio keys price directly through MarketState.
+        Legacy bare address strings fall through the old registry bridge only
+        when the caller explicitly requires symbol mapping.
 
         Args:
             token: Token address or symbol to resolve
@@ -1732,8 +1805,11 @@ class SimulatedPortfolio:
         Raises:
             ValueError: If require_symbol_mapping is True and token cannot be resolved
         """
+        if is_token_key(token):
+            return normalize_token_key(token[0], token[1])
+
         # If token looks like an address (starts with 0x), try to resolve it
-        if token.startswith("0x") and len(token) == 42:
+        if isinstance(token, str) and token.startswith("0x") and len(token) == 42:
             if chain_id is not None:
                 # Check if token is known in registry
                 if not is_token_known(chain_id, token):
@@ -1771,7 +1847,7 @@ class SimulatedPortfolio:
 
     def _handle_missing_price(
         self,
-        token: str,
+        token: TokenRef,
         chain_id: int | None,
         data_tracker: "DataQualityTracker | None",
         simulation_timestamp: datetime | None,
@@ -1797,7 +1873,7 @@ class SimulatedPortfolio:
         # Record missing price in tracker
         if data_tracker is not None:
             data_tracker.record_missing_price(
-                token=token,
+                token=token_ref_display(token),
                 timestamp=simulation_timestamp,
                 chain_id=chain_id,
             )
@@ -1806,7 +1882,7 @@ class SimulatedPortfolio:
         timestamp_str = simulation_timestamp.isoformat() if simulation_timestamp else "unknown"
         logger.warning(
             "Missing price for token %s at timestamp %s (chain_id=%s, context=%s). Using fallback value.",
-            token,
+            token_ref_display(token),
             timestamp_str,
             chain_id or "unknown",
             context,
@@ -1815,7 +1891,7 @@ class SimulatedPortfolio:
         # In strict mode, fail instead of using fallback
         if strict_price_mode:
             raise ValueError(
-                f"Missing price for token {token} at timestamp {timestamp_str} "
+                f"Missing price for token {token_ref_display(token)} at timestamp {timestamp_str} "
                 f"(chain_id={chain_id}, context={context}) and strict_price_mode is enabled. "
                 "Ensure price data is available or disable strict_price_mode."
             )
@@ -1868,7 +1944,7 @@ class SimulatedPortfolio:
                 # Record missing price in tracker
                 if data_tracker is not None:
                     data_tracker.record_missing_price(
-                        token=token,
+                        token=token_ref_display(token),
                         timestamp=simulation_timestamp,
                         chain_id=chain_id,
                     )
@@ -1883,7 +1959,7 @@ class SimulatedPortfolio:
                 # In strict mode, fail instead of skipping
                 if strict_price_mode:
                     raise ValueError(
-                        f"Missing price for token {token} at timestamp {timestamp_str} "
+                        f"Missing price for token {token_ref_display(token)} at timestamp {timestamp_str} "
                         f"(chain_id={chain_id}) and strict_price_mode is enabled. "
                         "Ensure price data is available or disable strict_price_mode."
                     ) from None
@@ -2784,7 +2860,7 @@ class SimulatedPortfolio:
         return ((volume_based_fees + apr_based_fees) * days_elapsed) / Decimal("2")
 
     @staticmethod
-    def _lp_fee_tokens(position: SimulatedPosition) -> tuple[str, str]:
+    def _lp_fee_tokens(position: SimulatedPosition) -> tuple[TokenRef, TokenRef]:
         token0 = position.tokens[0] if len(position.tokens) > 0 else ""
         token1 = position.tokens[1] if len(position.tokens) > 1 else ""
         return token0, token1
@@ -2793,8 +2869,8 @@ class SimulatedPortfolio:
     def _lp_fee_attribution_ratios(
         position: SimulatedPosition,
         position_value_usd: Decimal,
-        token0: str,
-        token1: str,
+        token0: TokenRef,
+        token1: TokenRef,
     ) -> tuple[Decimal, Decimal]:
         if position_value_usd <= 0 or position.entry_price <= 0:
             return Decimal("0.5"), Decimal("0.5")
@@ -3152,16 +3228,16 @@ class SimulatedPortfolio:
         """
         return [p for p in self.positions if p.position_type == position_type]
 
-    def get_token_balance(self, token: str) -> Decimal:
+    def get_token_balance(self, token: TokenRef) -> Decimal:
         """Get balance of a specific token.
 
         Args:
-            token: Token symbol
+            token: Token identity
 
         Returns:
             Amount held, or 0 if not held
         """
-        return self.tokens.get(token.upper(), Decimal("0"))
+        return self.tokens.get(self._normalize_token_ref(token), Decimal("0"))
 
     def get_lending_liquidations(self) -> list[LendingLiquidationEvent]:
         """Get all lending liquidation events that occurred during the backtest.
@@ -3192,7 +3268,8 @@ class SimulatedPortfolio:
         return {
             "initial_capital_usd": str(self.initial_capital_usd),
             "cash_usd": str(self.cash_usd),
-            "tokens": {k: str(v) for k, v in self.tokens.items()},
+            "chain": self.chain,
+            "tokens": {token_ref_display(k): str(v) for k, v in self.tokens.items()},
             "positions": [p.to_dict() for p in self.positions],
             "equity_curve": [e.to_dict() for e in self.equity_curve],
             "trades": [t.to_dict() for t in self.trades],
@@ -3214,7 +3291,7 @@ class SimulatedPortfolio:
             # Per-token average cost basis is live attribution state: without it
             # a resumed portfolio forgets its average costs, so a later
             # disposing sell would realize no PnL (VIB-5083, CodeRabbit).
-            "cost_basis": {k: str(v) for k, v in self._cost_basis.items()},
+            "cost_basis": {token_ref_display(k): str(v) for k, v in self._cost_basis.items()},
             # Numeraire reporting context (VIB-5127): a resumed non-USD run must
             # keep capturing/reporting against the same numeraire. None for USD.
             "numeraire_symbol": self._numeraire_symbol,
@@ -3284,6 +3361,7 @@ class SimulatedPortfolio:
         return cls(
             initial_capital_usd=Decimal(data.get("initial_capital_usd", "10000")),
             cash_usd=Decimal(data.get("cash_usd", "0")),
+            chain=data.get("chain", DEFAULT_CHAIN),
             tokens={k: Decimal(v) for k, v in data.get("tokens", {}).items()},
             positions=[SimulatedPosition.from_dict(p) for p in data.get("positions", [])],
             equity_curve=[cls._equity_point_from_dict(e) for e in data.get("equity_curve", [])],
@@ -3312,7 +3390,9 @@ class SimulatedPortfolio:
         portfolio._perp_liquidations = [LiquidationEvent.from_dict(pl) for pl in data.get("perp_liquidations", [])]
         # Restore per-token average cost basis so a resumed portfolio still
         # realizes PnL on later disposing sells (VIB-5083, CodeRabbit).
-        portfolio._cost_basis = {k: Decimal(str(v)) for k, v in data.get("cost_basis", {}).items()}
+        portfolio._cost_basis = portfolio._normalize_amounts(
+            {k: Decimal(str(v)) for k, v in data.get("cost_basis", {}).items()}
+        )
         # Restore the numeraire reporting context (VIB-5127); absent -> None (USD).
         portfolio._numeraire_symbol = data.get("numeraire_symbol")
         # Older artifacts predate realized_pnl; fall back to summing successful

@@ -63,6 +63,7 @@ from almanak.framework.backtesting.pnl.calculators.interest import (
     InterestCalculator,
     InterestRateSource,
 )
+from almanak.framework.backtesting.pnl.data_provider import TokenRef, token_ref_display, token_ref_provider_symbol
 from almanak.framework.backtesting.pnl.portfolio import PositionType
 from almanak.framework.backtesting.pnl.types import DataConfidence
 
@@ -1253,7 +1254,7 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         protocol = position.protocol or self._config.protocol
         primary_token = position.primary_token
         apy_timestamp = self._resolve_lending_timestamp(position, market_state, timestamp, "APY lookup")
-        apy_resolution = self._resolve_lending_apy(position, protocol, primary_token, apy_timestamp)
+        apy_resolution = self._resolve_lending_apy(position, protocol, primary_token, apy_timestamp, market_state)
         position.apy_confidence = apy_resolution.confidence
         position.apy_data_source = apy_resolution.data_source
 
@@ -1320,8 +1321,9 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         self,
         position: "SimulatedPosition",
         protocol: str,
-        primary_token: str,
+        primary_token: TokenRef,
         apy_timestamp: datetime,
+        market_state: "MarketState",
     ) -> _LendingAPYResolution:
         if position.apy_at_entry:
             return _LendingAPYResolution(
@@ -1330,21 +1332,30 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
                 data_source="position_entry",
             )
         if self._use_historical_apy():
-            return self._historical_lending_apy(position, protocol, primary_token, apy_timestamp)
+            return self._historical_lending_apy(position, protocol, primary_token, apy_timestamp, market_state)
         if self._config.interest_rate_source == "historical":
-            return self._legacy_historical_lending_apy(position, protocol, primary_token, apy_timestamp)
+            return self._legacy_historical_lending_apy(position, protocol, primary_token, apy_timestamp, market_state)
         return self._fixed_lending_apy(position, protocol)
+
+    @staticmethod
+    def _lending_provider_market(primary_token: TokenRef, market_state: "MarketState") -> str:
+        aliases = getattr(market_state, "token_aliases", {})
+        if not isinstance(aliases, dict):
+            aliases = {}
+        chain = getattr(market_state, "chain", None)
+        return token_ref_provider_symbol(primary_token, aliases, str(chain) if chain else None)
 
     def _historical_lending_apy(
         self,
         position: "SimulatedPosition",
         protocol: str,
-        primary_token: str,
+        primary_token: TokenRef,
         apy_timestamp: datetime,
+        market_state: "MarketState",
     ) -> _LendingAPYResolution:
         supply_apy, borrow_apy, confidence, source = self._get_historical_apy(
             protocol=protocol,
-            market=primary_token,
+            market=self._lending_provider_market(primary_token, market_state),
             timestamp=apy_timestamp,
         )
         return _LendingAPYResolution(
@@ -1357,19 +1368,21 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         self,
         position: "SimulatedPosition",
         protocol: str,
-        primary_token: str,
+        primary_token: TokenRef,
         apy_timestamp: datetime,
+        market_state: "MarketState",
     ) -> _LendingAPYResolution:
+        primary_label = self._lending_provider_market(primary_token, market_state)
         if position.position_type == PositionType.SUPPLY:
             apy = self._interest_calculator.get_historical_supply_apy_sync(
                 protocol=protocol,
-                market=primary_token,
+                market=primary_label,
                 timestamp=apy_timestamp,
             )
         else:
             apy = self._interest_calculator.get_historical_borrow_apy_sync(
                 protocol=protocol,
-                market=primary_token,
+                market=primary_label,
                 timestamp=apy_timestamp,
             )
         return _LendingAPYResolution(
@@ -1403,10 +1416,11 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         self,
         position: "SimulatedPosition",
         market_state: "MarketState",
-        primary_token: str,
+        primary_token: TokenRef,
         timestamp: datetime,
         context: str,
     ) -> Decimal:
+        primary_label = token_ref_display(primary_token)
         try:
             token_price = market_state.get_price(primary_token)
         except KeyError:
@@ -1418,9 +1432,9 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         if self._config.strict_reproducibility:
             raise HistoricalDataUnavailableError(
                 data_type="price",
-                identifier=primary_token,
+                identifier=primary_label,
                 timestamp=timestamp,
-                message=f"Price unavailable for {primary_token} in {context}",
+                message=f"Price unavailable for {primary_label} in {context}",
                 protocol=position.protocol,
             )
 

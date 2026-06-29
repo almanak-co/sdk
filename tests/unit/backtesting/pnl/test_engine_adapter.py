@@ -19,6 +19,7 @@ from almanak.framework.backtesting.adapters import (
     AdapterRegistry,
     StrategyBacktestAdapter,
 )
+from almanak.framework.backtesting.pnl import _engine_helpers
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
     DefaultSlippageModel,
@@ -224,6 +225,23 @@ def test_detect_strategy_type_from_intents(backtester, registered_adapters):
 
     assert hint.strategy_type == "perp"
     assert hint.source == "intents"
+
+
+def test_get_intent_tokens_normalizes_address_without_alias_map(backtester):
+    """Raw address intent tokens normalize to TokenRef keys when chain is known."""
+    address = "0x4200000000000000000000000000000000000006"
+    intent = type("MockIntent", (), {"from_token": address})()
+
+    tokens = backtester._get_intent_tokens(intent, aliases=None, chain="base")
+
+    assert tokens == [("base", address)]
+
+
+def test_normalize_token_canonicalizes_tuple_token_refs():
+    """Tuple TokenRefs collapse to one canonical address key."""
+    address = "0x4200000000000000000000000000000000000006"
+
+    assert _engine_helpers._normalize_token(("Base", address.upper())) == ("base", address)
 
 
 def test_detect_strategy_type_explicit_override(registered_adapters):
@@ -543,6 +561,7 @@ class MockMarketState:
     """Mock market state for testing."""
 
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+    chain: str = "arbitrum"
     _prices: dict[str, Decimal] = field(default_factory=dict)
     gas_price_gwei: Decimal | None = None
 

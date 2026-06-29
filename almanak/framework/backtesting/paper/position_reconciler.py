@@ -44,6 +44,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
+from almanak.framework.backtesting.pnl.data_provider import token_ref_display
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.models import ReconciliationEvent
@@ -1116,11 +1117,23 @@ def _ordered_amount_tokens(
     ordered_tokens: list[str] = []
     seen: set[str] = set()
     for token in [*tracked_pos.tokens, *actual_pos.tokens, *tracked_pos.amounts, *actual_pos.amounts]:
-        if token in seen:
+        token_label = token_ref_display(token)
+        if token_label in seen:
             continue
-        seen.add(token)
-        ordered_tokens.append(token)
+        seen.add(token_label)
+        ordered_tokens.append(token_label)
     return ordered_tokens
+
+
+def _position_token_for_label(position: "SimulatedPosition", token_label: str) -> Any:
+    for token in [*position.tokens, *position.amounts]:
+        if token_ref_display(token) == token_label:
+            return token
+    return token_label
+
+
+def _position_amount_for_label(position: "SimulatedPosition", token_label: str) -> Decimal:
+    return position.get_amount(_position_token_for_label(position, token_label))
 
 
 def _discrepancy_pct(expected: Decimal, actual: Decimal) -> Decimal:
@@ -1194,8 +1207,8 @@ def _amount_mismatch_events(
             timestamp,
             tracked_pos.position_id,
             f"amount_{token}",
-            tracked_pos.get_amount(token),
-            actual_pos.get_amount(token),
+            _position_amount_for_label(tracked_pos, token),
+            _position_amount_for_label(actual_pos, token),
             tolerance_pct,
         )
         if event is not None:
@@ -1425,7 +1438,9 @@ def _update_tracked_field(
 
     if field_name.startswith("amount_"):
         token = field_name.replace("amount_", "")
-        tracked_pos.amounts[token] = actual_pos.get_amount(token)
+        tracked_token = _position_token_for_label(tracked_pos, token)
+        actual_token = _position_token_for_label(actual_pos, token)
+        tracked_pos.amounts[tracked_token] = actual_pos.get_amount(actual_token)
         logger.info(
             "Auto-correct: Updated %s amount_%s from %s to %s",
             position_id,

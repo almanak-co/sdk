@@ -112,11 +112,13 @@ class TestZeroBalanceForTrackedTokens:
         assert bal.balance_usd == Decimal("0")
 
     def test_multiple_tracked_tokens_all_zero(self):
-        state = _make_market_state({
-            "WETH": Decimal("3000"),
-            "WBTC": Decimal("60000"),
-            "ARB": Decimal("1.5"),
-        })
+        state = _make_market_state(
+            {
+                "WETH": Decimal("3000"),
+                "WBTC": Decimal("60000"),
+                "ARB": Decimal("1.5"),
+            }
+        )
         portfolio = _make_portfolio(cash_usd=Decimal("10000"))
         snapshot = create_market_snapshot_from_state(state, portfolio=portfolio)
 
@@ -184,6 +186,49 @@ class TestAddressAliasResolution:
         assert snapshot.price(self.CB_ADDR) == snapshot.price("CBBTC") == Decimal("60000")
         assert snapshot.balance(self.CB_ADDR).balance == Decimal("0.05")
 
+    def test_snapshot_uses_market_state_aliases_when_explicit_aliases_omitted(self):
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        state = self._real_state()
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+        portfolio.tokens["CBBTC"] = Decimal("0.05")
+        snapshot = create_market_snapshot_from_state(state, chain="base", portfolio=portfolio)
+
+        assert snapshot.price(self.CB_ADDR) == Decimal("60000")
+        assert snapshot.balance(self.CB_ADDR).balance == Decimal("0.05")
+
+    def test_snapshot_respects_explicit_empty_aliases(self):
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        state = self._real_state()
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+        portfolio.tokens["CBBTC"] = Decimal("0.05")
+        snapshot = create_market_snapshot_from_state(
+            state,
+            chain="base",
+            portfolio=portfolio,
+            token_aliases={},
+        )
+
+        with pytest.raises(ValueError):
+            snapshot.price(self.CB_ADDR)
+        with pytest.raises(ValueError):
+            snapshot.balance(self.CB_ADDR)
+
+    def test_snapshot_balance_exposes_address_keyed_portfolio_token(self):
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        state = self._real_state()
+        token_key = ("base", self.CB_ADDR)
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"), chain="base")
+        portfolio.tokens[token_key] = Decimal("0.05")
+        snapshot = create_market_snapshot_from_state(
+            state, chain="base", portfolio=portfolio, token_aliases=self.ALIASES
+        )
+
+        assert snapshot.balance(self.CB_ADDR).balance == Decimal("0.05")
+        assert snapshot.balance("CBBTC").balance == Decimal("0.05")
+
     def test_snapshot_indicator_resolves_by_address(self):
         from almanak.framework.market import RSIData
 
@@ -234,11 +279,29 @@ class TestAddressKeyedMarketState:
         state = self._state()
         assert state.get_price("WSTETH") == Decimal("3400")
 
+    def test_cross_chain_key_does_not_fall_back_to_current_chain_alias(self):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        state = MarketState(
+            timestamp=datetime(2026, 3, 23, tzinfo=UTC),
+            chain="base",
+            prices={"WSTETH": Decimal("3400")},
+            token_aliases={self.WSTETH_ADDR: "WSTETH"},
+        )
+
+        with pytest.raises(KeyError):
+            state.get_price(("arbitrum", self.WSTETH_ADDR))
+        with pytest.raises(KeyError):
+            state.get_price(f"arbitrum:{self.WSTETH_ADDR}")
+
     def test_available_tokens_displays_addresses_for_address_keys(self):
         state = self._state()
         display_key = f"arbitrum:{self.WSTETH_ADDR}"
         assert state.available_tokens == [display_key]
         assert state.to_dict()["prices"] == {display_key: "3400"}
+        assert state.get_price(display_key) == Decimal("3400")
+        assert state.get_ohlcv(display_key).close == Decimal("3405")
+        assert state.has_token(display_key) is True
 
 
 class TestAddressAliasResolutionAllReads:
@@ -279,11 +342,12 @@ class TestAddressAliasResolutionAllReads:
 
 
 class TestAliasAwareFlows:
-    """Address-keyed intents must produce SYMBOL-keyed portfolio flows / position
-    labels so the cash sweep, cost-basis, and close/reporting stay symbol-keyed."""
+    """Address-keyed intents preserve token identity in flows and positions."""
 
     CB_ADDR = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
     USDC_ADDR = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    CB_KEY = ("base", CB_ADDR)
+    USDC_KEY = ("base", USDC_ADDR)
     ALIASES = {CB_ADDR: "CBBTC", USDC_ADDR: "USDC"}
 
     def _state(self):
@@ -296,7 +360,7 @@ class TestAliasAwareFlows:
             token_aliases=self.ALIASES,
         )
 
-    def test_swap_flows_keyed_by_symbol(self):
+    def test_swap_flows_keyed_by_address(self):
         from types import SimpleNamespace
 
         from almanak.framework.backtesting.models import IntentType
@@ -306,10 +370,10 @@ class TestAliasAwareFlows:
         tokens_in, tokens_out = calculate_token_flows(
             intent, IntentType.SWAP, Decimal("60"), Decimal("0"), Decimal("0"), self._state()
         )
-        assert set(tokens_out) == {"USDC"}  # not "0X8335..."
-        assert set(tokens_in) == {"CBBTC"}  # not "0XCBB7..."
+        assert set(tokens_out) == {self.USDC_KEY}
+        assert set(tokens_in) == {self.CB_KEY}
 
-    def test_supply_flow_keyed_by_symbol(self):
+    def test_supply_flow_keyed_by_address(self):
         from types import SimpleNamespace
 
         from almanak.framework.backtesting.models import IntentType
@@ -319,9 +383,9 @@ class TestAliasAwareFlows:
         _tokens_in, tokens_out = calculate_token_flows(
             intent, IntentType.SUPPLY, Decimal("60"), Decimal("0"), Decimal("0"), self._state()
         )
-        assert set(tokens_out) == {"CBBTC"}
+        assert set(tokens_out) == {self.CB_KEY}
 
-    def test_vault_deposit_position_labelled_by_symbol(self):
+    def test_vault_deposit_position_keyed_by_address(self):
         from types import SimpleNamespace
         from unittest.mock import MagicMock
 
@@ -338,4 +402,4 @@ class TestAliasAwareFlows:
             market_state=self._state(),
             strict_reproducibility=False,
         )
-        assert "CBBTC" in position.tokens  # not "0XCBB7..."
+        assert self.CB_KEY in position.tokens

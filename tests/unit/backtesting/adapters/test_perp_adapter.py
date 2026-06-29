@@ -18,6 +18,7 @@ from almanak.framework.backtesting.adapters.perp_adapter import (
     PerpBacktestAdapter,
     PerpBacktestConfig,
 )
+from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.backtesting.pnl.portfolio import (
     PositionType,
     SimulatedPosition,
@@ -259,12 +260,8 @@ class TestFundingAccumulationOverTime:
 
         # Long pays funding (accumulated_funding is negative for paid funding)
         assert position.accumulated_funding < Decimal("0")
-        assert abs(position.accumulated_funding) == pytest.approx(
-            expected_funding_paid, rel=Decimal("0.01")
-        )
-        assert position.cumulative_funding_paid == pytest.approx(
-            expected_funding_paid, rel=Decimal("0.01")
-        )
+        assert abs(position.accumulated_funding) == pytest.approx(expected_funding_paid, rel=Decimal("0.01"))
+        assert position.cumulative_funding_paid == pytest.approx(expected_funding_paid, rel=Decimal("0.01"))
         assert position.cumulative_funding_received == Decimal("0")
 
     def test_funding_accumulates_continuous_short(self) -> None:
@@ -301,12 +298,8 @@ class TestFundingAccumulationOverTime:
 
         # Short receives funding (accumulated_funding is positive)
         assert position.accumulated_funding > Decimal("0")
-        assert position.accumulated_funding == pytest.approx(
-            expected_funding_received, rel=Decimal("0.01")
-        )
-        assert position.cumulative_funding_received == pytest.approx(
-            expected_funding_received, rel=Decimal("0.01")
-        )
+        assert position.accumulated_funding == pytest.approx(expected_funding_received, rel=Decimal("0.01"))
+        assert position.cumulative_funding_received == pytest.approx(expected_funding_received, rel=Decimal("0.01"))
         assert position.cumulative_funding_paid == Decimal("0")
 
     def test_funding_accumulates_hourly_frequency(self) -> None:
@@ -335,9 +328,7 @@ class TestFundingAccumulationOverTime:
         # Expected: $200,000 * 0.0001 * 12 hours = $240
         expected_funding = Decimal("200000") * Decimal("0.0001") * Decimal("12")
 
-        assert position.cumulative_funding_paid == pytest.approx(
-            expected_funding, rel=Decimal("0.01")
-        )
+        assert position.cumulative_funding_paid == pytest.approx(expected_funding, rel=Decimal("0.01"))
 
     def test_funding_accumulates_8h_frequency(self) -> None:
         """Test funding accumulation with 8-hour frequency setting."""
@@ -365,9 +356,7 @@ class TestFundingAccumulationOverTime:
         # Expected: $20,000 * 0.0001 * 24 = $48
         expected_funding = Decimal("20000") * Decimal("0.0001") * Decimal("24")
 
-        assert position.cumulative_funding_received == pytest.approx(
-            expected_funding, rel=Decimal("0.01")
-        )
+        assert position.cumulative_funding_received == pytest.approx(expected_funding, rel=Decimal("0.01"))
 
     def test_funding_over_7_days(self) -> None:
         """Test funding accumulation over a 7-day period."""
@@ -396,9 +385,7 @@ class TestFundingAccumulationOverTime:
         # Expected: $100,000 * 0.0001 * 168 hours = $1,680
         expected_funding = Decimal("100000") * Decimal("0.0001") * Decimal("168")
 
-        assert position.cumulative_funding_paid == pytest.approx(
-            expected_funding, rel=Decimal("0.01")
-        )
+        assert position.cumulative_funding_paid == pytest.approx(expected_funding, rel=Decimal("0.01"))
 
     def test_funding_with_custom_rate(self) -> None:
         """Test funding accumulation with custom funding rate."""
@@ -426,9 +413,7 @@ class TestFundingAccumulationOverTime:
         # Expected: $50,000 * 0.0002 * 12 = $120
         expected_funding = Decimal("50000") * Decimal("0.0002") * Decimal("12")
 
-        assert position.cumulative_funding_paid == pytest.approx(
-            expected_funding, rel=Decimal("0.01")
-        )
+        assert position.cumulative_funding_paid == pytest.approx(expected_funding, rel=Decimal("0.01"))
 
     def test_no_funding_for_non_perp_position(self) -> None:
         """Test that non-perp positions are not affected by funding."""
@@ -479,6 +464,57 @@ class TestFundingAccumulationOverTime:
 
         with pytest.raises(HistoricalDataUnavailableError, match="ETH"):
             adapter.update_position(position, market, elapsed_seconds=3600, timestamp=entry_time + timedelta(hours=1))
+
+    def test_address_keyed_historical_funding_uses_provider_market_symbol(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        arbitrum_weth = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+        token_key = ("arbitrum", arbitrum_weth)
+        config = PerpBacktestConfig(
+            strategy_type="perp",
+            protocol="gmx",
+            chain="arbitrum",
+        )
+        adapter = PerpBacktestAdapter(
+            config,
+            data_config=BacktestDataConfig(
+                use_historical_funding=True,
+                funding_fallback_rate=Decimal("0.0002"),
+            ),
+        )
+        position = create_perp_long_position(
+            token=token_key,
+            collateral_usd=Decimal("1000"),
+            leverage=Decimal("2"),
+            entry_price=Decimal("2000"),
+            protocol="gmx",
+        )
+        captured: dict[str, str] = {}
+
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda protocol: object())
+
+        def fake_fetch_historical_funding_rates(provider, lookup, position):
+            captured["market"] = lookup.market
+            return []
+
+        monkeypatch.setattr(
+            adapter,
+            "_fetch_historical_funding_rates",
+            fake_fetch_historical_funding_rates,
+        )
+
+        rate, confidence, source = adapter._get_historical_funding_rate_v2(
+            position=position,
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            token_aliases={arbitrum_weth: "ETH"},
+            chain="arbitrum",
+        )
+
+        assert captured["market"] == "ETH-USD"
+        assert rate == Decimal("0.0002")
+        assert confidence == "low"
+        assert source == "fallback:no_data"
 
 
 # =============================================================================
@@ -1045,7 +1081,7 @@ class TestMarginValidation:
 
         is_valid, message = adapter.validate_margin(
             position_size=Decimal("50000"),  # $50,000 position
-            collateral=Decimal("10000"),      # $10,000 collateral (20%)
+            collateral=Decimal("10000"),  # $10,000 collateral (20%)
         )
 
         # Default initial margin is 10%, so 20% should pass
@@ -1057,7 +1093,7 @@ class TestMarginValidation:
 
         is_valid, message = adapter.validate_margin(
             position_size=Decimal("100000"),  # $100,000 position
-            collateral=Decimal("5000"),       # $5,000 collateral (5%)
+            collateral=Decimal("5000"),  # $5,000 collateral (5%)
         )
 
         # Default initial margin is 10%, so 5% should fail
@@ -1369,9 +1405,7 @@ class TestHistoricalFundingRateIntegration:
 
             # Long pays funding (negative accumulated)
             assert position.accumulated_funding < Decimal("0")
-            assert abs(position.accumulated_funding) == pytest.approx(
-                expected_funding, rel=Decimal("0.01")
-            )
+            assert abs(position.accumulated_funding) == pytest.approx(expected_funding, rel=Decimal("0.01"))
 
             # Verify position tracks funding confidence
             assert position.funding_confidence == "high"
@@ -1657,9 +1691,7 @@ class TestExecuteIntentUsesRealPortfolioCash:
         adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
 
-        fill = adapter.execute_intent(
-            self._open_intent(Decimal("1000")), portfolio, self._market_state()
-        )
+        fill = adapter.execute_intent(self._open_intent(Decimal("1000")), portfolio, self._market_state())
 
         # None means validation passed and default execution proceeds.
         assert fill is None
@@ -1671,9 +1703,7 @@ class TestExecuteIntentUsesRealPortfolioCash:
         adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
 
-        fill = adapter.execute_intent(
-            self._open_intent(Decimal("1000")), portfolio, self._market_state()
-        )
+        fill = adapter.execute_intent(self._open_intent(Decimal("1000")), portfolio, self._market_state())
 
         assert fill is not None
         assert fill.success is False
@@ -1688,9 +1718,7 @@ class TestExecuteIntentUsesRealPortfolioCash:
         from almanak.framework.backtesting.pnl.data_provider import MarketState
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 
-        adapter = PerpBacktestAdapter(
-            PerpBacktestConfig(strategy_type="perp", strict_reproducibility=True)
-        )
+        adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp", strict_reproducibility=True))
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
         market = MarketState(
             timestamp=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
@@ -1713,9 +1741,7 @@ class TestExecuteIntentUsesRealPortfolioCash:
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
 
         # size 5000 at 5x needs 1000 collateral; "all" cash is only 100.
-        fill = adapter.execute_intent(
-            self._open_intent("all"), portfolio, self._market_state()
-        )
+        fill = adapter.execute_intent(self._open_intent("all"), portfolio, self._market_state())
 
         assert fill is not None
         assert fill.success is False
@@ -1735,9 +1761,7 @@ class TestExecuteIntentUsesRealPortfolioCash:
         adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
 
-        fill = adapter.execute_intent(
-            self._open_intent("all"), portfolio, self._market_state()
-        )
+        fill = adapter.execute_intent(self._open_intent("all"), portfolio, self._market_state())
 
         assert fill is not None
         assert fill.success is False

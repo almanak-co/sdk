@@ -1,10 +1,8 @@
 """Tests for managed gateway (background thread gateway for strat run)."""
 
-import asyncio
 import os
 import socket
 import threading
-import time
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,10 +34,11 @@ class TestIsPortInUse:
         """A port with a listening socket returns True."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("127.0.0.1", 59998))
+        sock.bind(("127.0.0.1", 0))
+        occupied_port = sock.getsockname()[1]
         sock.listen(1)
         try:
-            assert is_port_in_use("127.0.0.1", 59998) is True
+            assert is_port_in_use("127.0.0.1", occupied_port) is True
         finally:
             sock.close()
 
@@ -719,7 +718,7 @@ class TestAnvilFundingNativeTokenWarning:
         settings = GatewaySettings(
             host="127.0.0.1",
             port=59990,
-            rpc_url=f"http://localhost:8545",
+            rpc_url="http://localhost:8545",
             chain=chain,
         )
         gw = ManagedGateway(settings, anvil_chains=[chain], anvil_funding=anvil_funding)

@@ -59,9 +59,7 @@ class TestPositionDriftDetection:
 
         # Should detect the discrepancy
         assert len(events) >= 1
-        amount_event = next(
-            (e for e in events if e.field_name.startswith("amount_")), None
-        )
+        amount_event = next((e for e in events if e.field_name.startswith("amount_")), None)
         assert amount_event is not None
         assert amount_event.expected == Decimal("1.0")
         assert amount_event.actual == Decimal("0.9")
@@ -230,6 +228,37 @@ class TestPositionDriftDetection:
         amount_events = [e for e in events if e.field_name.startswith("amount_")]
         assert len(amount_events) == 0
 
+    def test_address_keyed_amount_mismatch_uses_actual_token_key(self):
+        """Tuple TokenRefs should compare under their display label without losing amounts."""
+        now = datetime.now(UTC)
+        base_weth = "0x4200000000000000000000000000000000000006"
+        token_key = ("base", base_weth)
+
+        tracked = [
+            SimulatedPosition.spot(
+                token=token_key,
+                amount=Decimal("1.0"),
+                entry_price=Decimal("2000"),
+                entry_time=now,
+            )
+        ]
+        actual = [
+            SimulatedPosition.spot(
+                token=token_key,
+                amount=Decimal("0.8"),
+                entry_price=Decimal("2000"),
+                entry_time=now,
+            )
+        ]
+        tracked[0].position_id = actual[0].position_id = "pos_1"
+
+        events = compare_positions(tracked, actual, tolerance_pct=Decimal("0.01"))
+
+        assert len(events) == 1
+        assert events[0].field_name == f"amount_base:{base_weth}"
+        assert events[0].expected == Decimal("1.0")
+        assert events[0].actual == Decimal("0.8")
+
     def test_amount_mismatch_event_order_is_hash_seed_stable(self):
         """LP amount events should follow position token order, not set iteration."""
         script = """
@@ -309,6 +338,42 @@ class TestAutoCorrectPositions:
         # Verify events marked as auto-corrected
         corrected_events = [e for e in updated_events if e.auto_corrected]
         assert len(corrected_events) >= 1
+
+    def test_auto_correct_updates_address_keyed_tracked_amount(self):
+        """Auto-correction should update the tuple key, not a display-string shadow key."""
+        now = datetime.now(UTC)
+        base_weth = "0x4200000000000000000000000000000000000006"
+        token_key = ("base", base_weth)
+
+        tracked = [
+            SimulatedPosition.spot(
+                token=token_key,
+                amount=Decimal("1.0"),
+                entry_price=Decimal("2000"),
+                entry_time=now,
+            )
+        ]
+        actual = [
+            SimulatedPosition.spot(
+                token=token_key,
+                amount=Decimal("0.8"),
+                entry_price=Decimal("2000"),
+                entry_time=now,
+            )
+        ]
+        tracked[0].position_id = actual[0].position_id = "pos_1"
+
+        events = compare_positions(tracked, actual, tolerance_pct=Decimal("0.01"))
+        corrected_tracked, updated_events = auto_correct_positions(
+            tracked,
+            actual,
+            events,
+            alert_threshold_pct=Decimal("0.05"),
+        )
+
+        assert corrected_tracked[0].amounts[token_key] == Decimal("0.8")
+        assert f"base:{base_weth}" not in corrected_tracked[0].amounts
+        assert [event.auto_corrected for event in updated_events] == [True]
 
     def test_auto_correct_adds_missing_position(self):
         """Test that auto-correct adds position missing from tracked."""

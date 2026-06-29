@@ -20,6 +20,8 @@ from almanak.framework.backtesting.adapters.lending_adapter import (
     LendingBacktestAdapter,
     LendingBacktestConfig,
 )
+from almanak.framework.backtesting.config import BacktestDataConfig
+from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.portfolio import (
     PositionType,
     SimulatedPortfolio,
@@ -265,9 +267,7 @@ class TestBorrowExecutionValidation:
     def test_execute_borrow_rejects_low_health_factor_with_missing_price_fallback(self) -> None:
         adapter = LendingBacktestAdapter(LendingBacktestConfig(strategy_type="lending", protocol="aave_v3"))
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
-        portfolio.positions = [
-            create_supply_position(token="WETH", amount=Decimal("10"), entry_price=Decimal("2000"))
-        ]
+        portfolio.positions = [create_supply_position(token="WETH", amount=Decimal("10"), entry_price=Decimal("2000"))]
         intent = BorrowIntent(
             protocol="aave_v3",
             collateral_token="WETH",
@@ -295,6 +295,108 @@ class TestBorrowExecutionValidation:
         market = MockMarketState(prices={"WETH": Decimal("2000")})
 
         assert adapter._execute_borrow(Intent.hold(), portfolio, market) is None
+
+
+class TestLendingHistoricalApyLookup:
+    """Tests for address-keyed TokenRef APY provider lookups."""
+
+    def test_address_keyed_historical_apy_uses_provider_symbol(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        base_usdc = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        token_key = ("base", base_usdc)
+        adapter = LendingBacktestAdapter(data_config=BacktestDataConfig(use_historical_apy=True))
+        position = create_supply_position(
+            token=token_key,
+            amount=Decimal("1000"),
+            entry_price=Decimal("1"),
+            apy=Decimal("0"),
+        )
+        market = MarketState(
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            chain="base",
+            prices={token_key: Decimal("1")},
+            token_aliases={base_usdc: "USDC"},
+        )
+        captured: dict[str, str] = {}
+
+        def fake_get_historical_apy(
+            protocol: str,
+            market: str,
+            timestamp: datetime,
+        ) -> tuple[Decimal, Decimal, str, str]:
+            captured["protocol"] = protocol
+            captured["market"] = market
+            captured["timestamp"] = timestamp.isoformat()
+            return Decimal("0.011"), Decimal("0.022"), "high", "provider"
+
+        monkeypatch.setattr(adapter, "_get_historical_apy", fake_get_historical_apy)
+
+        resolution = adapter._resolve_lending_apy(
+            position=position,
+            protocol="aave_v3",
+            primary_token=token_key,
+            apy_timestamp=market.timestamp,
+            market_state=market,
+        )
+
+        assert captured["protocol"] == "aave_v3"
+        assert captured["market"] == "USDC"
+        assert resolution.apy == Decimal("0.011")
+        assert resolution.confidence == "high"
+        assert resolution.data_source == "provider"
+
+    def test_address_keyed_legacy_apy_uses_provider_symbol(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        base_usdc = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        token_key = ("base", base_usdc)
+        adapter = LendingBacktestAdapter(
+            config=LendingBacktestConfig(
+                strategy_type="lending",
+                interest_rate_source="historical",
+            )
+        )
+        position = create_borrow_position(
+            token=token_key,
+            amount=Decimal("1000"),
+            entry_price=Decimal("1"),
+            apy=Decimal("0"),
+        )
+        market = MarketState(
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            chain="base",
+            prices={token_key: Decimal("1")},
+            token_aliases={base_usdc: "USDC"},
+        )
+        captured: dict[str, str] = {}
+
+        def fake_get_borrow_apy(protocol: str, market: str, timestamp: datetime) -> Decimal:
+            captured["protocol"] = protocol
+            captured["market"] = market
+            captured["timestamp"] = timestamp.isoformat()
+            return Decimal("0.044")
+
+        monkeypatch.setattr(
+            adapter._interest_calculator,
+            "get_historical_borrow_apy_sync",
+            fake_get_borrow_apy,
+        )
+
+        resolution = adapter._resolve_lending_apy(
+            position=position,
+            protocol="aave_v3",
+            primary_token=token_key,
+            apy_timestamp=market.timestamp,
+            market_state=market,
+        )
+
+        assert captured["protocol"] == "aave_v3"
+        assert captured["market"] == "USDC"
+        assert resolution.apy == Decimal("0.044")
+        assert resolution.data_source == "legacy_historical"
 
 
 # =============================================================================
@@ -341,9 +443,7 @@ class TestInterestAccrualAccuracy:
         expected_daily_interest = Decimal("20000") * Decimal("0.03") / Decimal("365")
 
         # Allow 5% tolerance due to compound vs simple differences
-        assert position.interest_accrued == pytest.approx(
-            expected_daily_interest, rel=Decimal("0.05")
-        )
+        assert position.interest_accrued == pytest.approx(expected_daily_interest, rel=Decimal("0.05"))
 
     def test_compound_interest_borrow_24_hours(self) -> None:
         """Test compound interest accrual for borrow position over 24 hours.
@@ -379,9 +479,7 @@ class TestInterestAccrualAccuracy:
         # Expected interest: $10,000 * 0.05 / 365 = ~$1.37 per day
         expected_daily_interest = Decimal("10000") * Decimal("0.05") / Decimal("365")
 
-        assert position.interest_accrued == pytest.approx(
-            expected_daily_interest, rel=Decimal("0.05")
-        )
+        assert position.interest_accrued == pytest.approx(expected_daily_interest, rel=Decimal("0.05"))
 
     def test_simple_interest_supply_24_hours(self) -> None:
         """Test simple interest accrual for supply position over 24 hours."""
@@ -410,9 +508,7 @@ class TestInterestAccrualAccuracy:
         # Expected: $15,000 * 0.04 / 365 = ~$1.64 per day
         expected_daily_interest = Decimal("15000") * Decimal("0.04") / Decimal("365")
 
-        assert position.interest_accrued == pytest.approx(
-            expected_daily_interest, rel=Decimal("0.05")
-        )
+        assert position.interest_accrued == pytest.approx(expected_daily_interest, rel=Decimal("0.05"))
 
     def test_interest_accrual_over_7_days(self) -> None:
         """Test interest accumulation over a 7-day period."""
@@ -441,9 +537,7 @@ class TestInterestAccrualAccuracy:
         # Expected: $50,000 * 0.05 / 365 * 7 = ~$47.95 over 7 days
         expected_weekly_interest = Decimal("50000") * Decimal("0.05") / Decimal("365") * Decimal("7")
 
-        assert position.interest_accrued == pytest.approx(
-            expected_weekly_interest, rel=Decimal("0.05")
-        )
+        assert position.interest_accrued == pytest.approx(expected_weekly_interest, rel=Decimal("0.05"))
 
     def test_interest_accrual_over_30_days(self) -> None:
         """Test interest accumulation over a 30-day period."""
@@ -472,9 +566,7 @@ class TestInterestAccrualAccuracy:
         # Expected: $100,000 * 0.08 / 365 * 30 = ~$657.53 over 30 days
         expected_monthly_interest = Decimal("100000") * Decimal("0.08") / Decimal("365") * Decimal("30")
 
-        assert position.interest_accrued == pytest.approx(
-            expected_monthly_interest, rel=Decimal("0.05")
-        )
+        assert position.interest_accrued == pytest.approx(expected_monthly_interest, rel=Decimal("0.05"))
 
     def test_no_interest_for_non_lending_position(self) -> None:
         """Test that non-lending positions are not affected by interest."""
@@ -657,8 +749,7 @@ class TestHealthFactorTracking:
 
         assert borrow_position.health_factor == Decimal("0")
         assert any(
-            "CRITICAL" in record.getMessage() and "Health factor" in record.getMessage()
-            for record in caplog.records
+            "CRITICAL" in record.getMessage() and "Health factor" in record.getMessage() for record in caplog.records
         )
 
 
@@ -865,9 +956,7 @@ class TestLiquidationSimulation:
 
         market = MockMarketState(prices={"USDC": Decimal("1")})
 
-        event = adapter.check_and_simulate_liquidation(
-            borrow_position, market, entry_time + timedelta(hours=1)
-        )
+        event = adapter.check_and_simulate_liquidation(borrow_position, market, entry_time + timedelta(hours=1))
 
         assert event is None
 
@@ -1150,12 +1239,14 @@ class TestIntegrationScenarios:
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("20000"))
         portfolio.positions = [supply1, supply2, borrow1, borrow2]
 
-        market = MockMarketState(prices={
-            "WETH": Decimal("2000"),
-            "WBTC": Decimal("40000"),
-            "USDC": Decimal("1"),
-            "DAI": Decimal("1"),
-        })
+        market = MockMarketState(
+            prices={
+                "WETH": Decimal("2000"),
+                "WBTC": Decimal("40000"),
+                "USDC": Decimal("1"),
+                "DAI": Decimal("1"),
+            }
+        )
 
         # Sync collateral for all borrow positions
         collateral_map = adapter.sync_collateral_from_portfolio(portfolio, market)
@@ -1337,7 +1428,9 @@ class TestHistoricalAPYIntegration:
         result = await adapter._get_historical_apy_async("unknown_protocol", "USDC", timestamp)
 
         assert result == (Decimal("0.012"), Decimal("0.034"), "low", "fallback:default_rate")
-        assert adapter._apy_cache[("unknown_protocol", "USDC", adapter._normalize_timestamp_to_day(timestamp))] == result
+        assert (
+            adapter._apy_cache[("unknown_protocol", "USDC", adapter._normalize_timestamp_to_day(timestamp))] == result
+        )
 
     @pytest.mark.asyncio
     async def test_historical_apy_async_unknown_protocol_strict_raises(self) -> None:

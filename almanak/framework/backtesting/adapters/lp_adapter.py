@@ -69,6 +69,7 @@ from almanak.framework.backtesting.models import FeeAccrualResult
 from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
     ImpermanentLossCalculator,
 )
+from almanak.framework.backtesting.pnl.data_provider import TokenRef, token_ref_display
 from almanak.framework.backtesting.pnl.types import DataConfidence
 
 FeeConfidence = Literal["high", "medium", "low"]
@@ -392,8 +393,8 @@ class _VolumeResolution:
 
 @dataclass(frozen=True)
 class _LPUpdatePrices:
-    token0: str
-    token1: str
+    token0: TokenRef
+    token1: TokenRef
     token0_price: Decimal
     token1_price: Decimal
     current_price: Decimal
@@ -430,7 +431,7 @@ class _LPUpdatePlan:
 
 @dataclass(frozen=True)
 class _LPCloseResult:
-    tokens_in: dict[str, Decimal]
+    tokens_in: dict[TokenRef, Decimal]
     total_value_received: Decimal
     fees_earned_usd: Decimal
     il_pct: Decimal
@@ -749,31 +750,32 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
 
     _STABLECOIN_SYMBOLS: frozenset[str] = STABLECOINS
 
-    def _price_fallback(self, token: str, fallback: Decimal, context: str) -> Decimal:
+    def _price_fallback(self, token: TokenRef, fallback: Decimal, context: str) -> Decimal:
         """Return *fallback* price for *token* while logging a warning.
 
         In ``strict_reproducibility`` mode an error is raised instead.
         When the fallback is $1, a stronger warning is emitted for non-stablecoin tokens.
         """
+        token_label = token_ref_display(token)
         if self._config.strict_reproducibility:
             raise HistoricalDataUnavailableError(
                 data_type="price",
-                identifier=token,
+                identifier=token_label,
                 timestamp=datetime.now(),
-                message=f"Price unavailable for {token} in {context} and strict_reproducibility=True",
+                message=f"Price unavailable for {token_label} in {context} and strict_reproducibility=True",
             )
-        is_stablecoin = token.upper() in self._STABLECOIN_SYMBOLS
+        is_stablecoin = token_label.upper() in self._STABLECOIN_SYMBOLS
         if fallback == Decimal("1") and not is_stablecoin:
             logger.warning(
                 "Price unavailable for NON-STABLECOIN %s in %s, falling back to $1 assumption -- "
                 "this may produce inaccurate results. Consider enabling strict_reproducibility.",
-                token,
+                token_label,
                 context,
             )
         else:
             logger.warning(
                 "Price unavailable for %s in %s, falling back to $%s assumption",
-                token,
+                token_label,
                 context,
                 fallback,
             )
@@ -1765,7 +1767,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         self,
         market_state: "MarketState",
         protocol: str,
-        tokens: list[str],
+        tokens: list[TokenRef],
         reason: str,
         position_close_id: str | None = None,
     ) -> "SimulatedFill":
@@ -1814,7 +1816,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         prices: _LPUpdatePrices,
         amounts: _LPUpdateAmounts,
         fees_earned_usd: Decimal,
-    ) -> tuple[dict[str, Decimal], Decimal]:
+    ) -> tuple[dict[TokenRef, Decimal], Decimal]:
         tokens_in = {
             prices.token0: amounts.token0_amount,
             prices.token1: amounts.token1_amount,
@@ -1934,7 +1936,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             position_close_id=position.position_id,
             metadata={
                 "position_id": intent.position_id,
-                "pool": intent.pool or f"{prices.token0}/{prices.token1}",
+                "pool": intent.pool or f"{token_ref_display(prices.token0)}/{token_ref_display(prices.token1)}",
                 "collect_fees": intent.collect_fees,
                 "current_price_ratio": str(prices.current_price),
                 "il_percentage": str(amounts.il_pct),
@@ -2333,14 +2335,14 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         position: "SimulatedPosition",
         position_value_usd: Decimal,
         elapsed_seconds: float,
-        token0: str,
-        token1: str,
+        token0: TokenRef,
+        token1: TokenRef,
         token0_price: Decimal,
         token1_price: Decimal,
         timestamp: datetime | None = None,
         pool_address: str | None = None,
         protocol: str | None = None,
-        amounts: dict[str, Decimal] | None = None,
+        amounts: dict[TokenRef, Decimal] | None = None,
     ) -> FeeAccrualResult:
         """Calculate fee accrual for an LP position.
 
@@ -2518,9 +2520,9 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
     @staticmethod
     def _attribute_lp_fees(
         fees_usd: Decimal,
-        amounts: dict[str, Decimal],
-        token0: str,
-        token1: str,
+        amounts: dict[TokenRef, Decimal],
+        token0: TokenRef,
+        token1: TokenRef,
         token0_price: Decimal,
         token1_price: Decimal,
     ) -> _FeeTokenAttribution:
@@ -2769,7 +2771,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         return total_value
 
     @staticmethod
-    def _lp_position_tokens(position: "SimulatedPosition") -> tuple[str, str] | None:
+    def _lp_position_tokens(position: "SimulatedPosition") -> tuple[TokenRef, TokenRef] | None:
         if len(position.tokens) < 2:
             return None
         return position.tokens[0], position.tokens[1]
@@ -2786,7 +2788,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         return total_value
 
     @staticmethod
-    def _market_price_or_none(market_state: "MarketState", token: str) -> Decimal | None:
+    def _market_price_or_none(market_state: "MarketState", token: TokenRef) -> Decimal | None:
         try:
             return market_state.get_price(token)
         except KeyError:
@@ -2794,7 +2796,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
 
     def _price_or_fallback(
         self,
-        token: str,
+        token: TokenRef,
         price: Decimal | None,
         fallback: Decimal,
         context: str,
@@ -2807,7 +2809,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         self,
         position: "SimulatedPosition",
         market_state: "MarketState",
-        tokens: tuple[str, str],
+        tokens: tuple[TokenRef, TokenRef],
     ) -> _LPUpdatePrices:
         token0, token1 = tokens
         token0_price = self._price_or_fallback(
@@ -3036,7 +3038,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         self,
         position: "SimulatedPosition",
         market_state: "MarketState",
-        token0: str,
+        token0: TokenRef,
     ) -> Decimal | None:
         price = self._market_price_or_none(market_state, token0)
         if price is not None and price > 0:

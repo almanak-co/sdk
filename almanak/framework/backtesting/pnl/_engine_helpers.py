@@ -42,7 +42,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.core.chains import ChainRegistry
+from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.backtesting.models import (
     BacktestEngine,
@@ -63,6 +63,10 @@ from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataConfig,
     MarketState,
     TokenRef,
+    is_address_like,
+    normalize_token_key,
+    normalize_token_ref,
+    token_ref_display,
 )
 from almanak.framework.backtesting.pnl.data_quality import DataQualityTracker
 from almanak.framework.backtesting.pnl.error_handling import (
@@ -239,6 +243,7 @@ def initialize_backtest(
         # Initialize portfolio
         portfolio = SimulatedPortfolio(
             initial_capital_usd=config.initial_capital_usd,
+            chain=config.chain,
         )
         # The portfolio captures the numeraire price per equity point; value_usd
         # stays USD (the conservation core is untouched).
@@ -248,8 +253,8 @@ def initialize_backtest(
         # if the strategy never trades it. Use a local copy -- never mutate
         # config.tokens (it feeds config_hash / the reproducibility audit trail).
         data_tokens: list[TokenRef] = list(config.tokens)
-        data_token_symbols = {t.upper() for t in data_tokens if isinstance(t, str)}
-        if numeraire_symbol is not None and numeraire_symbol not in data_token_symbols:
+        data_token_labels = {token_ref_display(token).upper() for token in data_tokens}
+        if numeraire_symbol is not None and numeraire_symbol not in data_token_labels:
             data_tokens.append(numeraire_symbol)
             bt_logger.debug(f"Added numeraire token {numeraire_symbol} to the data-fetch token set")
         if config.include_gas_costs and config.gas_eth_price_override is None:
@@ -378,13 +383,13 @@ def _gas_prefetch_symbol(chain: str, data_tokens: list[TokenRef], data_provider:
         seen.add(normalized)
         gas_symbols.append(normalized)
 
-    token_set = {token.upper() for token in data_tokens if isinstance(token, str)}
+    token_set = {token_ref_display(token).upper() for token in data_tokens}
     if token_set.intersection(gas_symbols):
         return None
 
     supported_tokens = getattr(data_provider, "supported_tokens", None)
     if supported_tokens is not None:
-        supported = {str(token).upper() for token in supported_tokens}
+        supported = {token_ref_display(token).upper() for token in supported_tokens}
         for symbol in gas_symbols:
             if symbol in supported:
                 return symbol
@@ -470,7 +475,7 @@ async def execute_iteration_loop(
 
             # Record successful lookups for each available token
             for token in expected_tokens:
-                if token.upper() in available_tokens_upper:
+                if token_ref_display(token).upper() in available_tokens_upper:
                     state.data_quality_tracker.record_lookup(
                         success=True,
                         source=provider_name,
@@ -963,21 +968,31 @@ def finalize_backtest_result(
 # is the only handler that consumes ``fee_usd`` / ``slippage_usd``).
 
 
-def _normalize_token(token: Any, aliases: dict[str, str] | None = None) -> Any:
-    """Canonicalize a token to its UPPERCASE symbol if it is a string.
+def _market_state_chain(market_state: MarketState) -> str:
+    return str(getattr(market_state, "chain", DEFAULT_CHAIN))
 
-    Centralizes the ``if isinstance(token, str): token = token.upper()``
-    idiom used by every flow branch. When ``aliases`` (an
-    ``{address_lower: SYMBOL}`` map) is supplied, a contract address resolves
-    to its symbol FIRST so the portfolio holds the leg under its symbol --
-    keeping the stablecoin->cash sweep and cost-basis symbol-keyed. Non-string
-    inputs pass through unchanged (e.g. an object used as a token key by a
-    custom intent survives untouched).
+
+def _normalize_token(token: Any, aliases: dict[str, str] | None = None, chain: str | None = None) -> Any:
+    """Canonicalize a token for address-native flow maps.
+
+    Fully specified contract addresses become ``(chain, address)`` keys. When
+    the engine supplies the transitional ``{address_lower: SYMBOL}`` alias map,
+    symbols reverse-map to their known address on the run chain. Symbol-only
+    callers keep the legacy uppercase key until Phase 3 deletes the alias
+    bridge.
     """
     if isinstance(token, str):
-        if aliases:
-            token = aliases.get(token.lower(), token)
+        if is_address_like(token):
+            return normalize_token_ref(token, chain)
+        if aliases and chain:
+            token_upper = token.upper()
+            for address, symbol in aliases.items():
+                if symbol.upper() == token_upper:
+                    return normalize_token_key(chain, address)
         return token.upper()
+    if isinstance(token, tuple) and len(token) == 2:
+        token_chain, address = token
+        return normalize_token_key(str(token_chain), str(address))
     return token
 
 
@@ -987,19 +1002,20 @@ def _calculate_swap_flows(
     fee_usd: Decimal,
     slippage_usd: Decimal,
     market_state: MarketState,
-) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
     """SWAP: one token leaves (``from_token``), another arrives (``to_token``).
 
     Outflow uses ``amount_usd`` at ``from_token`` price. Inflow uses
     ``amount_usd - fee_usd - slippage_usd`` at ``to_token`` price. Unknown
     prices fall back to the raw USD amount as a unit count.
     """
-    tokens_in: dict[str, Decimal] = {}
-    tokens_out: dict[str, Decimal] = {}
+    tokens_in: dict[TokenRef, Decimal] = {}
+    tokens_out: dict[TokenRef, Decimal] = {}
 
     aliases = getattr(market_state, "token_aliases", None)
-    from_token = _normalize_token(getattr(intent, "from_token", "USDC"), aliases)
-    to_token = _normalize_token(getattr(intent, "to_token", "WETH"), aliases)
+    chain = _market_state_chain(market_state)
+    from_token = _normalize_token(getattr(intent, "from_token", "USDC"), aliases, chain)
+    to_token = _normalize_token(getattr(intent, "to_token", "WETH"), aliases, chain)
 
     # Amount out is the trade amount
     amount_out = amount_usd
@@ -1022,26 +1038,33 @@ def _calculate_swap_flows(
     return tokens_in, tokens_out
 
 
-def _resolve_single_token(intent: Any, default: str, aliases: dict[str, str] | None = None) -> Any:
+def _resolve_single_token(
+    intent: Any,
+    default: str,
+    aliases: dict[str, str] | None = None,
+    chain: str | None = None,
+) -> Any:
     """Look up ``intent.token`` or ``intent.asset`` (first wins), normalized.
 
     Mirrors ``getattr(intent, "token", getattr(intent, "asset", default))``
     with canonicalization via :func:`_normalize_token` (address->symbol when
     ``aliases`` is supplied, then uppercase) for string symbols.
     """
-    return _normalize_token(getattr(intent, "token", getattr(intent, "asset", default)), aliases)
+    return _normalize_token(getattr(intent, "token", getattr(intent, "asset", default)), aliases, chain)
 
 
 def _calculate_supply_flows(
     intent: Any,
     amount_usd: Decimal,
     market_state: MarketState,
-) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
     """SUPPLY: token leaves the wallet into the protocol."""
-    tokens_in: dict[str, Decimal] = {}
-    tokens_out: dict[str, Decimal] = {}
+    tokens_in: dict[TokenRef, Decimal] = {}
+    tokens_out: dict[TokenRef, Decimal] = {}
 
-    token = _resolve_single_token(intent, "WETH", getattr(market_state, "token_aliases", None))
+    token = _resolve_single_token(
+        intent, "WETH", getattr(market_state, "token_aliases", None), _market_state_chain(market_state)
+    )
 
     try:
         price = market_state.get_price(token)
@@ -1057,12 +1080,14 @@ def _calculate_withdraw_flows(
     intent: Any,
     amount_usd: Decimal,
     market_state: MarketState,
-) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
     """WITHDRAW: token arrives back from the protocol."""
-    tokens_in: dict[str, Decimal] = {}
-    tokens_out: dict[str, Decimal] = {}
+    tokens_in: dict[TokenRef, Decimal] = {}
+    tokens_out: dict[TokenRef, Decimal] = {}
 
-    token = _resolve_single_token(intent, "WETH", getattr(market_state, "token_aliases", None))
+    token = _resolve_single_token(
+        intent, "WETH", getattr(market_state, "token_aliases", None), _market_state_chain(market_state)
+    )
 
     try:
         price = market_state.get_price(token)
@@ -1078,21 +1103,22 @@ def _calculate_borrow_flows(
     intent: Any,
     amount_usd: Decimal,
     market_state: MarketState,
-) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
     """BORROW: borrowed token arrives in the wallet.
 
     BORROW vocabulary intents (``BorrowIntent``) name the received token as
     ``borrow_token`` -- it must win over the generic token/asset scan,
     which would otherwise credit the default symbol (VIB-5098).
     """
-    tokens_in: dict[str, Decimal] = {}
-    tokens_out: dict[str, Decimal] = {}
+    tokens_in: dict[TokenRef, Decimal] = {}
+    tokens_out: dict[TokenRef, Decimal] = {}
 
     borrow_token = getattr(intent, "borrow_token", None)
+    chain = _market_state_chain(market_state)
     if isinstance(borrow_token, str) and borrow_token:
-        token: Any = _normalize_token(borrow_token, getattr(market_state, "token_aliases", None))
+        token: Any = _normalize_token(borrow_token, getattr(market_state, "token_aliases", None), chain)
     else:
-        token = _resolve_single_token(intent, "USDC", getattr(market_state, "token_aliases", None))
+        token = _resolve_single_token(intent, "USDC", getattr(market_state, "token_aliases", None), chain)
 
     try:
         price = market_state.get_price(token)
@@ -1108,12 +1134,14 @@ def _calculate_repay_flows(
     intent: Any,
     amount_usd: Decimal,
     market_state: MarketState,
-) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
     """REPAY: token leaves the wallet to pay down debt."""
-    tokens_in: dict[str, Decimal] = {}
-    tokens_out: dict[str, Decimal] = {}
+    tokens_in: dict[TokenRef, Decimal] = {}
+    tokens_out: dict[TokenRef, Decimal] = {}
 
-    token = _resolve_single_token(intent, "USDC", getattr(market_state, "token_aliases", None))
+    token = _resolve_single_token(
+        intent, "USDC", getattr(market_state, "token_aliases", None), _market_state_chain(market_state)
+    )
 
     try:
         price = market_state.get_price(token)
@@ -1125,7 +1153,7 @@ def _calculate_repay_flows(
     return tokens_in, tokens_out
 
 
-def _resolve_lp_tokens(intent: Any, aliases: dict[str, str] | None = None) -> tuple[Any, Any]:
+def _resolve_lp_tokens(intent: Any, aliases: dict[str, str] | None = None, chain: str | None = None) -> tuple[Any, Any]:
     """Resolve ``(token0, token1)`` for LP intents, uppercased if strings.
 
     A fully explicit pair (token0/token1, or the token_a/token_b aliases,
@@ -1138,14 +1166,14 @@ def _resolve_lp_tokens(intent: Any, aliases: dict[str, str] | None = None) -> tu
     """
     token0, token1 = lp_explicit_pair(intent)
     if token0 is not None and token1 is not None:
-        return _normalize_token(token0, aliases), _normalize_token(token1, aliases)
+        return _normalize_token(token0, aliases, chain), _normalize_token(token1, aliases, chain)
 
     pool_pair = lp_pool_tokens(getattr(intent, "pool", None))
     if pool_pair is not None:
-        return pool_pair
+        return _normalize_token(pool_pair[0], aliases, chain), _normalize_token(pool_pair[1], aliases, chain)
 
-    return _normalize_token(token0 if token0 is not None else "WETH", aliases), _normalize_token(
-        token1 if token1 is not None else "USDC", aliases
+    return _normalize_token(token0 if token0 is not None else "WETH", aliases, chain), _normalize_token(
+        token1 if token1 is not None else "USDC", aliases, chain
     )
 
 
@@ -1153,12 +1181,14 @@ def _calculate_lp_open_flows(
     intent: Any,
     amount_usd: Decimal,
     market_state: MarketState,
-) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
     """LP_OPEN: both tokens leave the wallet, USD split 50/50."""
-    tokens_in: dict[str, Decimal] = {}
-    tokens_out: dict[str, Decimal] = {}
+    tokens_in: dict[TokenRef, Decimal] = {}
+    tokens_out: dict[TokenRef, Decimal] = {}
 
-    token0, token1 = _resolve_lp_tokens(intent, getattr(market_state, "token_aliases", None))
+    token0, token1 = _resolve_lp_tokens(
+        intent, getattr(market_state, "token_aliases", None), _market_state_chain(market_state)
+    )
 
     # Split the USD amount roughly 50/50
     half_amount = amount_usd / Decimal("2")
@@ -1182,15 +1212,17 @@ def _calculate_lp_close_flows(
     intent: Any,
     amount_usd: Decimal,
     market_state: MarketState,
-) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
     """LP_CLOSE: both tokens return to the wallet, USD split 50/50.
 
     Approximate tokens received (actual depends on impermanent loss).
     """
-    tokens_in: dict[str, Decimal] = {}
-    tokens_out: dict[str, Decimal] = {}
+    tokens_in: dict[TokenRef, Decimal] = {}
+    tokens_out: dict[TokenRef, Decimal] = {}
 
-    token0, token1 = _resolve_lp_tokens(intent, getattr(market_state, "token_aliases", None))
+    token0, token1 = _resolve_lp_tokens(
+        intent, getattr(market_state, "token_aliases", None), _market_state_chain(market_state)
+    )
 
     # Approximate tokens received (actual depends on IL)
     half_amount = amount_usd / Decimal("2")
@@ -1210,7 +1242,7 @@ def _calculate_lp_close_flows(
     return tokens_in, tokens_out
 
 
-def _resolve_vault_token(intent: Any, aliases: dict[str, str] | None = None) -> Any:
+def _resolve_vault_token(intent: Any, aliases: dict[str, str] | None = None, chain: str | None = None) -> Any:
     """Resolve ``intent.deposit_token`` for vault intents, warning on fallback."""
     token = getattr(intent, "deposit_token", None)
     if not token:
@@ -1218,21 +1250,23 @@ def _resolve_vault_token(intent: Any, aliases: dict[str, str] | None = None) -> 
         logger.warning(
             "Vault intent missing deposit_token, defaulting to USDC — set deposit_token for accurate backtesting"
         )
-    return _normalize_token(token, aliases)
+    return _normalize_token(token, aliases, chain)
 
 
 def _calculate_vault_token_amount(
     intent: Any,
     amount_usd: Decimal,
     market_state: MarketState,
-) -> tuple[Any, Decimal]:
+) -> tuple[TokenRef, Decimal]:
     """Resolve vault token and convert ``amount_usd`` to token units.
 
     Mirrors the shared preamble of ``_calculate_vault_deposit_flows`` and
     ``_calculate_vault_redeem_flows``: the only per-branch difference is
     whether the resulting amount lands in ``tokens_in`` or ``tokens_out``.
     """
-    token = _resolve_vault_token(intent, getattr(market_state, "token_aliases", None))
+    token = _resolve_vault_token(
+        intent, getattr(market_state, "token_aliases", None), _market_state_chain(market_state)
+    )
 
     try:
         price = market_state.get_price(token)
@@ -1247,7 +1281,7 @@ def _calculate_vault_deposit_flows(
     intent: Any,
     amount_usd: Decimal,
     market_state: MarketState,
-) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
     """VAULT_DEPOSIT: deposit token flows out of the wallet into the vault."""
     token, amount = _calculate_vault_token_amount(intent, amount_usd, market_state)
     return {}, {token: amount}
@@ -1257,7 +1291,7 @@ def _calculate_vault_redeem_flows(
     intent: Any,
     amount_usd: Decimal,
     market_state: MarketState,
-) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
     """VAULT_REDEEM: deposit token flows back from the vault into the wallet."""
     token, amount = _calculate_vault_token_amount(intent, amount_usd, market_state)
     return {token: amount}, {}
@@ -1291,7 +1325,7 @@ def calculate_token_flows(
     fee_usd: Decimal,
     slippage_usd: Decimal,
     market_state: MarketState,
-) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
     """Dispatch ``intent_type`` to the matching per-intent-type flow helper.
 
     Returns ``({}, {})`` for any intent type not covered by a dedicated

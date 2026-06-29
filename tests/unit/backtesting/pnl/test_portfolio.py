@@ -195,6 +195,23 @@ class TestSimulatedPosition:
         assert restored.amounts == position.amounts
         assert restored.entry_price == position.entry_price
 
+    def test_address_keyed_position_serialization(self, base_timestamp: datetime) -> None:
+        """Address-keyed positions survive display-string serialization."""
+        token_key = ("base", "0x4200000000000000000000000000000000000006")
+        position = SimulatedPosition.spot(
+            token=token_key,
+            amount=Decimal("1.5"),
+            entry_price=Decimal("3000"),
+            entry_time=base_timestamp,
+        )
+
+        data = position.to_dict()
+        restored = SimulatedPosition.from_dict(data)
+
+        assert data["tokens"] == ["base:0x4200000000000000000000000000000000000006"]
+        assert restored.tokens == [token_key]
+        assert restored.amounts == {token_key: Decimal("1.5")}
+
     def test_position_id_generation(self, base_timestamp: datetime) -> None:
         """Test that position IDs are auto-generated."""
         position = SimulatedPosition.spot(
@@ -333,6 +350,9 @@ class TestSimulatedFill:
 class TestPortfolioApplyFill:
     """Tests for SimulatedPortfolio.apply_fill() method."""
 
+    BASE_USDC = ("base", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
+    BASE_WETH = ("base", "0x4200000000000000000000000000000000000006")
+
     def test_apply_fill_swap_updates_tokens(self, portfolio: SimulatedPortfolio, base_timestamp: datetime) -> None:
         """Test that a swap fill correctly updates token balances."""
         # Start with USDC
@@ -393,6 +413,60 @@ class TestPortfolioApplyFill:
         # Cash should increase by USDC received minus gas
         expected_cash = initial_cash + Decimal("2987") - Decimal("1")
         assert portfolio.cash_usd == expected_cash
+
+    def test_address_keyed_stable_spend_debits_cash(self, base_timestamp: datetime) -> None:
+        """Address-keyed stablecoin outflows draw from cash at $1 face value."""
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"), chain="base")
+        fill = SimulatedFill(
+            timestamp=base_timestamp,
+            intent_type=IntentType.SWAP,
+            protocol="uniswap_v3",
+            tokens=[self.BASE_USDC, self.BASE_WETH],
+            executed_price=Decimal("3000"),
+            amount_usd=Decimal("50"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={self.BASE_WETH: Decimal("0.01666666666666666666666666667")},
+            tokens_out={self.BASE_USDC: Decimal("50")},
+        )
+        market = MarketState(
+            timestamp=base_timestamp,
+            chain="base",
+            prices={self.BASE_USDC: Decimal("1"), self.BASE_WETH: Decimal("3000")},
+        )
+
+        applied = portfolio.apply_fill(fill, market_state=market)
+
+        assert applied is True
+        assert portfolio.cash_usd == Decimal("9950")
+        assert portfolio.get_token_balance(self.BASE_WETH) == Decimal("0.01666666666666666666666666667")
+        assert portfolio.get_total_value_usd(market) == Decimal("10000.00000000000000000000000")
+
+    def test_address_keyed_stable_inflow_sweeps_to_cash(self, base_timestamp: datetime) -> None:
+        """Address-keyed stablecoin inflows are swept out of token balances."""
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"), chain="base")
+        portfolio.tokens[self.BASE_WETH] = Decimal("1")
+        fill = SimulatedFill(
+            timestamp=base_timestamp,
+            intent_type=IntentType.SWAP,
+            protocol="uniswap_v3",
+            tokens=[self.BASE_WETH, self.BASE_USDC],
+            executed_price=Decimal("3000"),
+            amount_usd=Decimal("3000"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("1"),
+            tokens_in={self.BASE_USDC: Decimal("3000")},
+            tokens_out={self.BASE_WETH: Decimal("1")},
+        )
+
+        applied = portfolio.apply_fill(fill)
+
+        assert applied is True
+        assert self.BASE_USDC not in portfolio.tokens
+        assert self.BASE_WETH not in portfolio.tokens
+        assert portfolio.cash_usd == Decimal("12999")
 
     def test_apply_fill_opens_position(self, portfolio: SimulatedPortfolio, base_timestamp: datetime) -> None:
         """Test that fill with position_delta adds position."""
@@ -1223,6 +1297,62 @@ class TestPortfolioHelperMethods:
         assert restored_trade.estimated_mev_cost_usd == Decimal("0.2")
         assert restored_trade.delayed_at_end is True
         assert restored_trade.position_id == "pos-1"
+
+    def test_address_keyed_portfolio_serialization(
+        self,
+        base_timestamp: datetime,
+    ) -> None:
+        """Address-keyed portfolio state restores to priceable token keys."""
+        usdc_key = ("base", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
+        weth_key = ("base", "0x4200000000000000000000000000000000000006")
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"), chain="base")
+        portfolio.tokens[usdc_key] = Decimal("12")
+        portfolio.tokens[weth_key] = Decimal("1.5")
+        portfolio._cost_basis[weth_key] = Decimal("3000")
+        portfolio.positions.append(
+            SimulatedPosition.spot(
+                token=weth_key,
+                amount=Decimal("1.5"),
+                entry_price=Decimal("3000"),
+                entry_time=base_timestamp,
+            )
+        )
+
+        data = portfolio.to_dict()
+        restored = SimulatedPortfolio.from_dict(data)
+
+        assert data["tokens"] == {
+            "base:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "12",
+            "base:0x4200000000000000000000000000000000000006": "1.5",
+        }
+        assert restored.tokens == portfolio.tokens
+        assert restored._cost_basis == portfolio._cost_basis
+        assert restored.positions[0].tokens == [weth_key]
+        assert restored.positions[0].amounts == {weth_key: Decimal("1.5")}
+        assert restored._is_cash_equivalent(usdc_key) is True
+
+    def test_address_keyed_restore_preserves_explicit_zero_cash(self, base_timestamp: datetime) -> None:
+        """Restoring a fully deployed portfolio must not mint initial cash."""
+        weth_key = ("base", "0x4200000000000000000000000000000000000006")
+        data = {
+            "initial_capital_usd": "10000",
+            "cash_usd": "0",
+            "chain": "base",
+            "tokens": {"base:0x4200000000000000000000000000000000000006": "1.5"},
+            "positions": [
+                SimulatedPosition.spot(
+                    token=weth_key,
+                    amount=Decimal("1.5"),
+                    entry_price=Decimal("3000"),
+                    entry_time=base_timestamp,
+                ).to_dict()
+            ],
+        }
+
+        restored = SimulatedPortfolio.from_dict(data)
+
+        assert restored.cash_usd == Decimal("0")
+        assert restored.tokens == {weth_key: Decimal("1.5")}
 
     def test_annualized_return_for_wiped_out_portfolio_is_zero(self, base_timestamp: datetime) -> None:
         timestamps = [base_timestamp, base_timestamp + timedelta(days=30)]

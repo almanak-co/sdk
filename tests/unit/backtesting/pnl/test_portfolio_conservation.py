@@ -15,13 +15,13 @@ Tests 1.1 / 1.2) describes these invariants; this file makes them
 CI-enforced.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
 from almanak.framework.backtesting.models import IntentType
-from almanak.framework.backtesting.pnl.data_provider import MarketState
+from almanak.framework.backtesting.pnl.data_provider import MarketState, TokenRef
 from almanak.framework.backtesting.pnl.portfolio import (
     CASH_EQUIVALENT_STABLECOINS,
     SimulatedFill,
@@ -29,7 +29,7 @@ from almanak.framework.backtesting.pnl.portfolio import (
 )
 
 WETH_PRICE = Decimal("3000")
-TS = datetime(2025, 11, 1, tzinfo=timezone.utc)
+TS = datetime(2025, 11, 1, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -49,8 +49,8 @@ def market_state() -> MarketState:
 
 
 def make_swap_fill(
-    tokens_out: dict[str, Decimal],
-    tokens_in: dict[str, Decimal],
+    tokens_out: dict[TokenRef, Decimal],
+    tokens_in: dict[TokenRef, Decimal],
     *,
     amount_usd: Decimal = Decimal("0"),
     fee_usd: Decimal = Decimal("0"),
@@ -85,6 +85,9 @@ class TestNoTradeConservation:
 
 class TestSingleTradeClosedForm:
     """TrustTest 1.2: a single trade changes value by exactly its costs."""
+
+    BASE_USDC = ("base", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
+    BASE_WETH = ("base", "0x4200000000000000000000000000000000000006")
 
     def test_stable_quoted_buy_debits_cash(self, portfolio: SimulatedPortfolio, market_state: MarketState) -> None:
         """The 2026-06 clamp-bug repro: a $50 USDC->WETH buy with $20 gas.
@@ -133,6 +136,31 @@ class TestSingleTradeClosedForm:
 
         expected = Decimal("10000") - fee - slippage - gas
         assert portfolio.get_total_value_usd(market_state) == expected
+
+    def test_address_keyed_stable_buy_conserves_value(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"), chain="base")
+        market_state = MarketState(
+            timestamp=TS,
+            prices={self.BASE_USDC: Decimal("1"), self.BASE_WETH: WETH_PRICE},
+            chain="base",
+        )
+        fee = Decimal("9")
+        slippage = Decimal("3")
+        gas = Decimal("1")
+        amount = Decimal("3000")
+
+        portfolio.apply_fill(
+            make_swap_fill(
+                tokens_out={self.BASE_USDC: amount},
+                tokens_in={self.BASE_WETH: (amount - fee - slippage) / WETH_PRICE},
+                amount_usd=amount,
+                fee_usd=fee,
+                slippage_usd=slippage,
+                gas_cost_usd=gas,
+            )
+        )
+
+        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - fee - slippage - gas
 
 
 class TestRoundTripConservation:

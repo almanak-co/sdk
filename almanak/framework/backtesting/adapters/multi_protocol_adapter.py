@@ -52,6 +52,7 @@ from almanak.framework.backtesting.adapters.base import (
     get_adapter,
     register_adapter,
 )
+from almanak.framework.backtesting.pnl.data_provider import TokenRef, token_ref_display
 from almanak.framework.backtesting.pnl.position_models import PositionType
 
 if TYPE_CHECKING:
@@ -698,7 +699,7 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         self,
         position: "SimulatedPosition",
         market_state: "MarketState",
-        token: str,
+        token: TokenRef,
         amount: Decimal,
     ) -> Decimal:
         price = self._market_price_or_none(market_state, token)
@@ -709,7 +710,7 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         return Decimal("0")
 
     @staticmethod
-    def _market_price_or_none(market_state: "MarketState", token: str) -> Decimal | None:
+    def _market_price_or_none(market_state: "MarketState", token: TokenRef) -> Decimal | None:
         try:
             return market_state.get_price(token)
         except KeyError:
@@ -1117,7 +1118,7 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         for token in position.tokens:
             price = self._market_price_or_none(market_state, token)
             if price is not None:
-                prices[token] = price
+                prices[token_ref_display(token)] = price
 
     def _record_unified_risk_score(self, risk_score: UnifiedRiskScore) -> None:
         self._unified_risk_scores.append(risk_score)
@@ -1173,7 +1174,7 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
                 try:
                     price = market_state.get_price(token)
                     if price:
-                        prices[token] = price
+                        prices[token_ref_display(token)] = price
                 except KeyError:
                     pass
 
@@ -1207,7 +1208,7 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
                 try:
                     price = market_state.get_price(token)
                     if price:
-                        prices[token] = price
+                        prices[token_ref_display(token)] = price
                 except KeyError:
                     pass
 
@@ -1248,7 +1249,7 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
                 try:
                     price = market_state.get_price(token)
                     if price:
-                        prices[token] = price
+                        prices[token_ref_display(token)] = price
                 except KeyError:
                     pass
 

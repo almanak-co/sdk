@@ -102,6 +102,10 @@ from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataCapability,
     HistoricalDataProvider,
     MarketState,
+    TokenRef,
+    is_token_key,
+    normalize_token_key,
+    token_ref_display,
 )
 from almanak.framework.backtesting.pnl.data_quality import DataQualityTracker
 from almanak.framework.backtesting.pnl.error_handling import (
@@ -454,11 +458,15 @@ def create_market_snapshot_from_state(
         wallet_address=wallet_address,
         timestamp=market_state.timestamp,
     )
-    if token_aliases:
-        snapshot.set_token_aliases(token_aliases)
+    state_aliases = getattr(market_state, "token_aliases", {})
+    if not isinstance(state_aliases, dict):
+        state_aliases = {}
+    effective_aliases = state_aliases if token_aliases is None else token_aliases
+    if effective_aliases:
+        snapshot.set_token_aliases(effective_aliases)
     _seed_snapshot_prices(snapshot, market_state)
     if portfolio:
-        _seed_snapshot_balances(snapshot, market_state, portfolio)
+        _seed_snapshot_balances(snapshot, market_state, portfolio, effective_aliases)
     return snapshot
 
 
@@ -474,27 +482,48 @@ def _seed_snapshot_balances(
     snapshot: MarketSnapshot,
     market_state: MarketState,
     portfolio: SimulatedPortfolio,
+    token_aliases: dict[str, str] | None = None,
 ) -> None:
-    _seed_portfolio_token_balances(snapshot, market_state, portfolio)
+    _seed_portfolio_token_balances(snapshot, market_state, portfolio, token_aliases or {})
     _seed_cash_balances(snapshot, portfolio)
-    _seed_zero_balances_for_unheld_tokens(snapshot, market_state, portfolio)
+    _seed_zero_balances_for_unheld_tokens(snapshot, market_state, portfolio, token_aliases or {})
 
 
 def _seed_portfolio_token_balances(
     snapshot: MarketSnapshot,
     market_state: MarketState,
     portfolio: SimulatedPortfolio,
+    token_aliases: dict[str, str],
 ) -> None:
     for token, amount in portfolio.tokens.items():
-        snapshot.set_balance(token, _token_balance_from_market_state(token, amount, market_state))
+        display_token = token_ref_display(token)
+        balance = _token_balance_from_market_state(token, amount, market_state, display_token)
+        snapshot.set_balance(display_token, balance)
+        alias_lookup_key = display_token.lower()
+        if is_token_key(token):
+            _chain, address = normalize_token_key(token[0], token[1])
+            snapshot.set_balance(address, _copy_balance_with_symbol(balance, address))
+            alias_lookup_key = address
+        alias = token_aliases.get(alias_lookup_key)
+        if alias and alias != display_token:
+            snapshot.set_balance(alias, _copy_balance_with_symbol(balance, alias))
 
 
-def _token_balance_from_market_state(token: str, amount: Decimal, market_state: MarketState) -> TokenBalance:
+def _token_balance_from_market_state(
+    token: TokenRef,
+    amount: Decimal,
+    market_state: MarketState,
+    symbol: str,
+) -> TokenBalance:
     try:
         balance_usd = amount * market_state.get_price(token)
     except KeyError:
         balance_usd = Decimal("0")
-    return TokenBalance(symbol=token, balance=amount, balance_usd=balance_usd)
+    return TokenBalance(symbol=symbol, balance=amount, balance_usd=balance_usd)
+
+
+def _copy_balance_with_symbol(balance: TokenBalance, symbol: str) -> TokenBalance:
+    return TokenBalance(symbol=symbol, balance=balance.balance, balance_usd=balance.balance_usd)
 
 
 def _seed_cash_balances(snapshot: MarketSnapshot, portfolio: SimulatedPortfolio) -> None:
@@ -512,19 +541,44 @@ def _seed_zero_balances_for_unheld_tokens(
     snapshot: MarketSnapshot,
     market_state: MarketState,
     portfolio: SimulatedPortfolio,
+    token_aliases: dict[str, str],
 ) -> None:
     for token in market_state.available_tokens:
-        if _should_seed_zero_balance(token, portfolio):
+        if _should_seed_zero_balance(token, portfolio, token_aliases):
             snapshot.set_balance(token, TokenBalance(symbol=token, balance=Decimal("0"), balance_usd=Decimal("0")))
 
 
-def _should_seed_zero_balance(token: str, portfolio: SimulatedPortfolio) -> bool:
-    return token not in portfolio.tokens and token not in CASH_EQUIVALENT_STABLECOINS and token != "USD"
+def _should_seed_zero_balance(
+    token: str,
+    portfolio: SimulatedPortfolio,
+    token_aliases: dict[str, str] | None = None,
+) -> bool:
+    if token in portfolio.tokens or token in CASH_EQUIVALENT_STABLECOINS or token == "USD":
+        return False
+    aliases = token_aliases or {}
+    portfolio_chain = str(getattr(portfolio, "chain", "")).lower()
+    for address, symbol in aliases.items():
+        if symbol.upper() != token.upper():
+            continue
+        if address in portfolio.tokens or (portfolio_chain, address.lower()) in portfolio.tokens:
+            return False
+    get_token_balance = getattr(portfolio, "get_token_balance", None)
+    if callable(get_token_balance):
+        try:
+            balance = get_token_balance(token)
+        except Exception:  # noqa: BLE001
+            balance = None
+        if balance is not None:
+            try:
+                return Decimal(str(balance)) == Decimal("0")
+            except Exception:  # noqa: BLE001
+                return True
+    return True
 
 
 async def classify_token_availability(
     data_provider: Any,
-    tokens: list[str],
+    tokens: list[TokenRef],
     start_time: datetime,
 ) -> tuple[list[str], list[str]]:
     """Classify each tracked token as available / unavailable for ``data_provider``.
@@ -563,7 +617,8 @@ async def classify_token_availability(
     tokens_unavailable: list[str] = []
 
     for token in tokens:
-        token_upper = token.upper()
+        token_label = token_ref_display(token)
+        token_upper = token_label.upper()
         target = (
             tokens_available
             if await _is_token_available(data_provider, token, start_time, availability_config)
@@ -578,7 +633,9 @@ def _token_availability_config(data_provider: Any) -> _TokenAvailabilityConfig:
     supported_tokens = getattr(data_provider, "supported_tokens", [])
     resolution_based = getattr(data_provider, "resolution_based_availability", False)
     use_membership = bool(supported_tokens) and not resolution_based
-    membership_upper = frozenset(t.upper() for t in supported_tokens) if use_membership else frozenset()
+    membership_upper = (
+        frozenset(token_ref_display(t).upper() for t in supported_tokens) if use_membership else frozenset()
+    )
     return _TokenAvailabilityConfig(
         use_membership=use_membership,
         resolution_based=resolution_based,
@@ -588,11 +645,11 @@ def _token_availability_config(data_provider: Any) -> _TokenAvailabilityConfig:
 
 async def _is_token_available(
     data_provider: Any,
-    token: str,
+    token: TokenRef,
     start_time: datetime,
     availability_config: _TokenAvailabilityConfig,
 ) -> bool:
-    token_upper = token.upper()
+    token_upper = token_ref_display(token).upper()
     if token_upper in CASH_EQUIVALENT_STABLECOINS:
         return True
     if availability_config.use_membership:
@@ -602,7 +659,7 @@ async def _is_token_available(
     return await _best_effort_probe_succeeded(data_provider, token, start_time)
 
 
-async def _resolution_probe_succeeded(data_provider: Any, token: str, start_time: datetime) -> bool:
+async def _resolution_probe_succeeded(data_provider: Any, token: TokenRef, start_time: datetime) -> bool:
     try:
         await data_provider.get_price(token, start_time)
     except ValueError as exc:
@@ -611,7 +668,7 @@ async def _resolution_probe_succeeded(data_provider: Any, token: str, start_time
     return True
 
 
-async def _best_effort_probe_succeeded(data_provider: Any, token: str, start_time: datetime) -> bool:
+async def _best_effort_probe_succeeded(data_provider: Any, token: TokenRef, start_time: datetime) -> bool:
     try:
         await data_provider.get_price(token, start_time)
     except Exception as exc:
@@ -771,7 +828,7 @@ class _CloseResolution:
     position_close_id: str | None = None
     position_reduce_id: str | None = None
     interest_usd: Decimal = Decimal("0")
-    reduce_amounts: dict[str, Decimal] | None = None
+    reduce_amounts: dict[TokenRef, Decimal] | None = None
     failure_reason: str | None = None
 
 
@@ -791,7 +848,7 @@ class _GasGweiResolution:
 class _GenericIntentDetails:
     intent_type: IntentType
     protocol: str
-    tokens: list[str]
+    tokens: list[TokenRef]
     amount_usd: Decimal
     close_resolution: _CloseResolution
 
@@ -2304,7 +2361,8 @@ class PnLBacktester:
     ) -> _GenericIntentDetails:
         intent_type = self._get_intent_type(intent)
         protocol = self._get_intent_protocol(intent)
-        tokens = self._get_intent_tokens(intent, getattr(market_state, "token_aliases", None))
+        chain = str(getattr(market_state, "chain", config.chain))
+        tokens = self._get_intent_tokens(intent, getattr(market_state, "token_aliases", None), chain)
         amount_usd = self._get_intent_amount_usd(
             intent,
             market_state,
@@ -2387,8 +2445,8 @@ class PnLBacktester:
         costs: _GenericExecutionCosts,
         timestamp: datetime,
         executed_price: Decimal,
-        tokens_in: dict[str, Decimal],
-        tokens_out: dict[str, Decimal],
+        tokens_in: dict[TokenRef, Decimal],
+        tokens_out: dict[TokenRef, Decimal],
         position_delta: SimulatedPosition | None,
         delayed_at_end: bool,
     ) -> SimulatedFill:
@@ -2425,9 +2483,9 @@ class PnLBacktester:
     def _generic_position_reduce_amounts(
         intent_type: IntentType,
         close_resolution: _CloseResolution,
-        tokens_in: dict[str, Decimal],
-        tokens_out: dict[str, Decimal],
-    ) -> dict[str, Decimal]:
+        tokens_in: dict[TokenRef, Decimal],
+        tokens_out: dict[TokenRef, Decimal],
+    ) -> dict[TokenRef, Decimal]:
         # Ordinary partial lending reductions debit the position by the fill's
         # flow on the position side. Boundary reductions carry an explicit
         # principal map because the flow also realizes accrued interest.
@@ -2482,7 +2540,7 @@ class PnLBacktester:
             timestamp=timestamp,
             intent_type=fill.intent_type.value,
             protocol=fill.protocol,
-            tokens=fill.tokens,
+            tokens=[token_ref_display(token) for token in fill.tokens],
             amount_usd=fill.amount_usd,
             fee_usd=fill.fee_usd,
             slippage_usd=fill.slippage_usd,
@@ -2494,7 +2552,7 @@ class PnLBacktester:
     def _simulate_mev_impact(
         self,
         intent_type: IntentType,
-        tokens: list[str],
+        tokens: list[TokenRef],
         amount_usd: Decimal,
         slippage_pct: Decimal,
         config: PnLBacktestConfig,
@@ -2517,8 +2575,8 @@ class PnLBacktester:
             return None, slippage_pct
 
         # Get token symbols for MEV simulation
-        token_in = tokens[0] if tokens else ""
-        token_out = tokens[1] if len(tokens) > 1 else ""
+        token_in = token_ref_display(tokens[0]) if tokens else ""
+        token_out = token_ref_display(tokens[1]) if len(tokens) > 1 else ""
 
         # Get gas price for inclusion delay simulation
         mev_gas_price = config.gas_price_gwei if config.include_gas_costs else None
@@ -2855,19 +2913,28 @@ class PnLBacktester:
 
         return get_intent_protocol(intent)
 
-    def _get_intent_tokens(self, intent: Any, aliases: dict[str, str] | None = None) -> list[str]:
+    def _get_intent_tokens(
+        self,
+        intent: Any,
+        aliases: dict[str, str] | None = None,
+        chain: str | None = None,
+    ) -> list[TokenRef]:
         """Extract the tokens involved in an intent. Delegates to intent_extraction module.
 
         When ``aliases`` (an ``{address_lower: SYMBOL}`` map) is supplied, each
-        resolved token is canonicalized address->symbol so simulated position
-        labels (LP token0/token1, perp/lending asset) stay symbol-keyed and the
-        valuation / close-matching paths price them via the seeded symbol.
+        resolved symbol reverse-maps to its address-native ``(chain, address)``
+        identity. Legacy symbol-only backtests keep their symbol labels until
+        the alias bridge is removed in Phase 3.
         """
         from .intent_extraction import get_intent_tokens
 
-        tokens = get_intent_tokens(intent)
-        if aliases:
-            return [aliases.get(token.lower(), token) if isinstance(token, str) else token for token in tokens]
+        tokens: list[TokenRef] = []
+        tokens.extend(get_intent_tokens(intent))
+        if aliases or chain:
+            return [
+                _engine_helpers._normalize_token(token, aliases, chain) if isinstance(token, str) else token
+                for token in tokens
+            ]
         return tokens
 
     def _get_intent_amount_usd(
@@ -2913,7 +2980,7 @@ class PnLBacktester:
         fee_usd: Decimal,
         slippage_usd: Decimal,
         market_state: MarketState,
-    ) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    ) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
         """Calculate the token inflows and outflows for an intent.
 
         Dispatches to per-intent-type helpers in
@@ -2949,7 +3016,7 @@ class PnLBacktester:
         intent: Any,
         intent_type: IntentType,
         protocol: str,
-        tokens: list[str],
+        tokens: list[TokenRef],
         executed_price: Decimal,
         timestamp: datetime,
         market_state: MarketState,
@@ -2986,7 +3053,7 @@ class PnLBacktester:
         self,
         intent: Any,
         protocol: str,
-        tokens: list[str],
+        tokens: list[TokenRef],
         executed_price: Decimal,
         timestamp: datetime,
         market_state: MarketState,
@@ -3031,7 +3098,7 @@ class PnLBacktester:
             # V3 range and non-zero value (same handling as the adapter lane).
             tick_upper = tick_lower + 1
 
-        def price_or_fallback(token: str) -> Decimal:
+        def price_or_fallback(token: TokenRef) -> Decimal:
             try:
                 price: Decimal | None = market_state.get_price(token)
             except KeyError:
@@ -3040,7 +3107,8 @@ class PnLBacktester:
                 return price
             if strict_reproducibility:
                 msg = (
-                    f"Cannot determine the LP entry price ratio: no positive price available for '{token}'. "
+                    f"Cannot determine the LP entry price ratio: no positive price available for "
+                    f"'{token_ref_display(token)}'. "
                     "Set strict_reproducibility=False to fall back to $1."
                 )
                 raise ValueError(msg)
@@ -3084,8 +3152,8 @@ class PnLBacktester:
         # Entry amounts anchor the IL hold-value baseline (same contract as
         # the adapter lane's _execute_lp_open).
         position.metadata["entry_amounts"] = {
-            token0: str(amount0),
-            token1: str(amount1),
+            token_ref_display(token0): str(amount0),
+            token_ref_display(token1): str(amount1),
         }
         position.metadata["entry_price_ratio"] = str(entry_price_ratio)
         return position
@@ -3094,7 +3162,7 @@ class PnLBacktester:
         self,
         intent: Any,
         protocol: str,
-        tokens: list[str],
+        tokens: list[TokenRef],
         executed_price: Decimal,
         timestamp: datetime,
         market_state: MarketState,
@@ -3130,7 +3198,7 @@ class PnLBacktester:
         self,
         intent: Any,
         protocol: str,
-        tokens: list[str],
+        tokens: list[TokenRef],
         executed_price: Decimal,
         timestamp: datetime,
         market_state: MarketState,
@@ -3140,22 +3208,16 @@ class PnLBacktester:
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
 
         deposit_tok = getattr(intent, "deposit_token", None)
+        aliases = getattr(market_state, "token_aliases", None)
+        chain = str(getattr(market_state, "chain", DEFAULT_CHAIN))
         if deposit_tok:
-            token = str(deposit_tok)
+            token = _engine_helpers._normalize_token(deposit_tok, aliases, chain)
         else:
-            token = tokens[0] if tokens else "USDC"
+            token = tokens[0] if tokens else _engine_helpers._normalize_token("USDC", aliases, chain)
             logger.warning(
                 "Vault deposit missing deposit_token, defaulting to %s — set deposit_token for accurate backtesting",
-                token,
+                token_ref_display(token),
             )
-        if isinstance(token, str):
-            # Canonicalize address->symbol so the supply position is created
-            # under the same symbol key as the flows (keeps close/reporting and
-            # valuation alias-consistent); no-op for symbols / symbol-only runs.
-            aliases = getattr(market_state, "token_aliases", None)
-            if aliases:
-                token = aliases.get(token.lower(), token)
-            token = token.upper()
         amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
 
         try:
@@ -3185,7 +3247,7 @@ class PnLBacktester:
         self,
         intent: Any,
         protocol: str,
-        tokens: list[str],
+        tokens: list[TokenRef],
         executed_price: Decimal,
         timestamp: datetime,
         market_state: MarketState,
@@ -3221,7 +3283,7 @@ class PnLBacktester:
         self,
         intent: Any,
         protocol: str,
-        tokens: list[str],
+        tokens: list[TokenRef],
         executed_price: Decimal,
         timestamp: datetime,
         market_state: MarketState,
@@ -3502,7 +3564,7 @@ class PnLBacktester:
         )
 
     @staticmethod
-    def _positive_position_amounts(position: SimulatedPosition) -> dict[str, Decimal]:
+    def _positive_position_amounts(position: SimulatedPosition) -> dict[TokenRef, Decimal]:
         return {token: amount for token, amount in position.amounts.items() if amount > Decimal("0")}
 
     def _resolve_perp_close(

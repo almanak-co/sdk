@@ -71,6 +71,51 @@ def token_ref_display(token: TokenRef) -> str:
     return token.lower() if is_address_like(token) else token
 
 
+def token_ref_provider_symbol(
+    token: TokenRef,
+    token_aliases: dict[str, str] | None = None,
+    chain: str | None = None,
+) -> str:
+    """Resolve a TokenRef to the symbol expected by historical data providers."""
+    normalized = normalize_token_ref(token, chain)
+    aliases = token_aliases or {}
+    normalized_chain = str(chain).lower() if chain else None
+
+    if is_token_key(normalized):
+        token_chain, address = normalize_token_key(normalized[0], normalized[1])
+        if (normalized_chain is None or token_chain == normalized_chain) and address in aliases:
+            return aliases[address].upper()
+        return token_ref_display((token_chain, address))
+
+    assert isinstance(normalized, str)
+    if is_address_like(normalized):
+        alias = aliases.get(normalized.lower())
+        if alias:
+            return alias.upper()
+    return normalized
+
+
+def _parse_token_ref_display(token: str) -> TokenKey | None:
+    """Parse ``token_ref_display((chain, address))`` back to a token key."""
+    chain, separator, address = token.strip().partition(":")
+    if separator and chain and is_address_like(address):
+        return normalize_token_key(chain, address)
+    return None
+
+
+def normalize_token_ref(token: TokenRef, default_chain: str | None = None) -> TokenRef:
+    """Canonicalize a token ref for in-memory backtest lookups."""
+    if is_token_key(token):
+        return normalize_token_key(token[0], token[1])
+    assert isinstance(token, str)
+    parsed = _parse_token_ref_display(token)
+    if parsed is not None:
+        return parsed
+    if is_address_like(token):
+        return normalize_token_key(default_chain, token) if default_chain else token.lower()
+    return token.upper()
+
+
 class HistoricalDataCapability(StrEnum):
     """Declares the historical data capability of a data provider.
 
@@ -210,6 +255,8 @@ class MarketState:
         if is_token_key(token):
             chain, address = normalize_token_key(token[0], token[1])
             add((chain, address))
+            if chain != str(self.chain).lower():
+                return keys
             add(address)
             alias = self.token_aliases.get(address)
             if alias:
@@ -219,9 +266,12 @@ class MarketState:
 
         assert isinstance(token, str)
         add(token)
-        if is_address_like(token):
-            address = token.lower()
-            add(normalize_token_key(self.chain, address))
+        normalized = normalize_token_ref(token, self.chain)
+        if is_token_key(normalized):
+            chain, address = normalize_token_key(normalized[0], normalized[1])
+            add((chain, address))
+            if chain != str(self.chain).lower():
+                return keys
             add(address)
             alias = self.token_aliases.get(address)
             if alias:

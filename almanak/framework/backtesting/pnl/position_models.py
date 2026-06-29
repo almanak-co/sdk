@@ -23,6 +23,7 @@ from almanak.framework.backtesting.models import (
     IntentType,
     TradeRecord,
 )
+from almanak.framework.backtesting.pnl.data_provider import TokenRef, normalize_token_ref, token_ref_display
 
 
 class PositionType(StrEnum):
@@ -55,8 +56,9 @@ class SimulatedPosition:
     Core fields (all positions):
         position_type: Type of this position (SPOT, LP, etc.)
         protocol: Protocol name (uniswap_v3, gmx, aave_v3, etc.)
-        tokens: List of token symbols involved (e.g., ["ETH", "USDC"])
-        amounts: Dict of token -> amount held (e.g., {"ETH": Decimal("1.5")})
+        tokens: List of token identities involved (e.g., ["ETH", "USDC"] or
+            [("base", "0x...")])
+        amounts: Dict of token identity -> amount held
         entry_price: Price at position entry (for base token in pair)
         entry_time: Timestamp when position was opened
 
@@ -92,8 +94,8 @@ class SimulatedPosition:
     # Core fields - required for all positions
     position_type: PositionType
     protocol: str
-    tokens: list[str]
-    amounts: dict[str, Decimal]
+    tokens: list[TokenRef]
+    amounts: dict[TokenRef, Decimal]
     entry_price: Decimal
     entry_time: datetime
 
@@ -176,7 +178,7 @@ class SimulatedPosition:
     def __post_init__(self) -> None:
         """Generate position_id if not provided."""
         if not self.position_id:
-            token_str = "_".join(self.tokens)
+            token_str = "_".join(token_ref_display(token) for token in self.tokens)
             self.position_id = (
                 f"{self.position_type.value}_{self.protocol}_{token_str}_{self.entry_time.timestamp():.0f}"
             )
@@ -216,7 +218,7 @@ class SimulatedPosition:
         return self.position_type in (PositionType.PERP_SHORT, PositionType.BORROW)
 
     @property
-    def primary_token(self) -> str:
+    def primary_token(self) -> TokenRef:
         """Get the primary token for this position."""
         return self.tokens[0] if self.tokens else ""
 
@@ -225,11 +227,11 @@ class SimulatedPosition:
         """Get total amount across all tokens (for single-token positions)."""
         return sum(self.amounts.values(), Decimal("0"))
 
-    def get_amount(self, token: str) -> Decimal:
+    def get_amount(self, token: TokenRef) -> Decimal:
         """Get amount for a specific token.
 
         Args:
-            token: Token symbol to get amount for
+            token: Token identity to get amount for
 
         Returns:
             Amount held, or 0 if token not in position
@@ -246,8 +248,8 @@ class SimulatedPosition:
             "position_id": self.position_id,
             "position_type": self.position_type.value,
             "protocol": self.protocol,
-            "tokens": self.tokens,
-            "amounts": {k: str(v) for k, v in self.amounts.items()},
+            "tokens": [token_ref_display(token) for token in self.tokens],
+            "amounts": {token_ref_display(k): str(v) for k, v in self.amounts.items()},
             "entry_price": str(self.entry_price),
             "entry_time": self.entry_time.isoformat(),
         }
@@ -307,8 +309,8 @@ class SimulatedPosition:
             position_id=data.get("position_id", ""),
             position_type=PositionType(data["position_type"]),
             protocol=data["protocol"],
-            tokens=data["tokens"],
-            amounts={k: Decimal(v) for k, v in data["amounts"].items()},
+            tokens=[normalize_token_ref(token) for token in data["tokens"]],
+            amounts={normalize_token_ref(k): Decimal(v) for k, v in data["amounts"].items()},
             entry_price=Decimal(data["entry_price"]),
             entry_time=datetime.fromisoformat(data["entry_time"]),
             # LP fields
@@ -348,7 +350,7 @@ class SimulatedPosition:
     @classmethod
     def spot(
         cls,
-        token: str,
+        token: TokenRef,
         amount: Decimal,
         entry_price: Decimal,
         entry_time: datetime,
@@ -378,8 +380,8 @@ class SimulatedPosition:
     @classmethod
     def lp(
         cls,
-        token0: str,
-        token1: str,
+        token0: TokenRef,
+        token1: TokenRef,
         amount0: Decimal,
         amount1: Decimal,
         liquidity: Decimal,
@@ -426,7 +428,7 @@ class SimulatedPosition:
     @classmethod
     def perp_long(
         cls,
-        token: str,
+        token: TokenRef,
         collateral_usd: Decimal,
         leverage: Decimal,
         entry_price: Decimal,
@@ -486,7 +488,7 @@ class SimulatedPosition:
     @classmethod
     def perp_short(
         cls,
-        token: str,
+        token: TokenRef,
         collateral_usd: Decimal,
         leverage: Decimal,
         entry_price: Decimal,
@@ -546,7 +548,7 @@ class SimulatedPosition:
     @classmethod
     def supply(
         cls,
-        token: str,
+        token: TokenRef,
         amount: Decimal,
         apy: Decimal,
         entry_price: Decimal,
@@ -579,7 +581,7 @@ class SimulatedPosition:
     @classmethod
     def borrow(
         cls,
-        token: str,
+        token: TokenRef,
         amount: Decimal,
         apy: Decimal,
         entry_price: Decimal,
@@ -650,19 +652,19 @@ class SimulatedFill:
     timestamp: datetime
     intent_type: IntentType
     protocol: str
-    tokens: list[str]
+    tokens: list[TokenRef]
     executed_price: Decimal
     amount_usd: Decimal
     fee_usd: Decimal
     slippage_usd: Decimal
     gas_cost_usd: Decimal
-    tokens_in: dict[str, Decimal]  # Tokens received
-    tokens_out: dict[str, Decimal]  # Tokens paid/sent
+    tokens_in: dict[TokenRef, Decimal]  # Tokens received
+    tokens_out: dict[TokenRef, Decimal]  # Tokens paid/sent
     success: bool = True
     position_delta: SimulatedPosition | None = None
     position_close_id: str | None = None
     position_reduce_id: str | None = None
-    position_reduce_amounts: dict[str, Decimal] = field(default_factory=dict)
+    position_reduce_amounts: dict[TokenRef, Decimal] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     gas_price_gwei: Decimal | None = None
     estimated_mev_cost_usd: Decimal | None = None
@@ -736,7 +738,7 @@ class SimulatedFill:
             success=self.success,
             amount_usd=self.amount_usd,
             protocol=self.protocol,
-            tokens=self.tokens,
+            tokens=[token_ref_display(token) for token in self.tokens],
             metadata=self.metadata,
             actual_amount_in=actual_amount_in,
             actual_amount_out=actual_amount_out,
@@ -755,19 +757,19 @@ class SimulatedFill:
             "timestamp": self.timestamp.isoformat(),
             "intent_type": self.intent_type.value,
             "protocol": self.protocol,
-            "tokens": self.tokens,
+            "tokens": [token_ref_display(token) for token in self.tokens],
             "executed_price": str(self.executed_price),
             "amount_usd": str(self.amount_usd),
             "fee_usd": str(self.fee_usd),
             "slippage_usd": str(self.slippage_usd),
             "gas_cost_usd": str(self.gas_cost_usd),
-            "tokens_in": {k: str(v) for k, v in self.tokens_in.items()},
-            "tokens_out": {k: str(v) for k, v in self.tokens_out.items()},
+            "tokens_in": {token_ref_display(k): str(v) for k, v in self.tokens_in.items()},
+            "tokens_out": {token_ref_display(k): str(v) for k, v in self.tokens_out.items()},
             "success": self.success,
             "position_delta": self.position_delta.to_dict() if self.position_delta else None,
             "position_close_id": self.position_close_id,
             "position_reduce_id": self.position_reduce_id,
-            "position_reduce_amounts": {k: str(v) for k, v in self.position_reduce_amounts.items()},
+            "position_reduce_amounts": {token_ref_display(k): str(v) for k, v in self.position_reduce_amounts.items()},
             "metadata": self.metadata,
             "gas_price_gwei": str(self.gas_price_gwei) if self.gas_price_gwei is not None else None,
             "estimated_mev_cost_usd": str(self.estimated_mev_cost_usd)

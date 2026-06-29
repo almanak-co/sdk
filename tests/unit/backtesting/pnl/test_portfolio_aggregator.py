@@ -118,24 +118,16 @@ class TestMultiProtocolAggregation:
 
     def test_type_filtering(self, multi_protocol_portfolio: PortfolioAggregator):
         """Test filtering positions by type."""
-        lp_positions = multi_protocol_portfolio.get_positions(
-            position_type=PositionType.LP
-        )
+        lp_positions = multi_protocol_portfolio.get_positions(position_type=PositionType.LP)
         assert len(lp_positions) == 1
 
-        perp_longs = multi_protocol_portfolio.get_positions(
-            position_type=PositionType.PERP_LONG
-        )
+        perp_longs = multi_protocol_portfolio.get_positions(position_type=PositionType.PERP_LONG)
         assert len(perp_longs) == 1
 
-        perp_shorts = multi_protocol_portfolio.get_positions(
-            position_type=PositionType.PERP_SHORT
-        )
+        perp_shorts = multi_protocol_portfolio.get_positions(position_type=PositionType.PERP_SHORT)
         assert len(perp_shorts) == 1
 
-        borrow_positions = multi_protocol_portfolio.get_positions(
-            position_type=PositionType.BORROW
-        )
+        borrow_positions = multi_protocol_portfolio.get_positions(position_type=PositionType.BORROW)
         assert len(borrow_positions) == 1
 
     def test_token_filtering(self, multi_protocol_portfolio: PortfolioAggregator):
@@ -261,6 +253,37 @@ class TestNetExposureCalculation:
         assert "USDC" in exposures
         assert exposures["ETH"] == Decimal("2")
         assert exposures["USDC"] == Decimal("5000")
+
+    def test_address_keyed_net_exposure_uses_display_asset(self):
+        """Tuple TokenRefs should match the display asset emitted by get_all_assets."""
+        entry_time = datetime(2024, 1, 1, tzinfo=UTC)
+        base_weth = "0x4200000000000000000000000000000000000006"
+        token_key = ("base", base_weth)
+        asset = f"base:{base_weth}"
+        aggregator = PortfolioAggregator()
+
+        spot = SimulatedPosition.spot(
+            token=token_key,
+            amount=Decimal("3"),
+            entry_price=Decimal("1000"),
+            entry_time=entry_time,
+        )
+        aggregator.add_position(spot)
+
+        perp_short = SimulatedPosition.perp_short(
+            token=token_key,
+            collateral_usd=Decimal("500"),
+            leverage=Decimal("2"),
+            entry_price=Decimal("1000"),
+            entry_time=entry_time,
+            protocol="gmx",
+        )
+        aggregator.add_position(perp_short)
+
+        exposures = aggregator.calculate_all_net_exposures({asset: Decimal("1000")})
+
+        assert exposures[asset] == Decimal("2")
+        assert aggregator.calculate_net_exposure(asset, {asset: Decimal("1000")}) == Decimal("2")
 
     def test_net_exposure_usd(self, hedged_portfolio: PortfolioAggregator):
         """Test USD-denominated exposure calculation."""
@@ -672,12 +695,10 @@ class TestCascadeRiskWarnings:
             aggregator._emit_cascade_risk_warnings(risk_score, [warning])
 
         assert any(
-            record.levelno == expected_level and expected_text in record.getMessage()
-            for record in caplog.records
+            record.levelno == expected_level and expected_text in record.getMessage() for record in caplog.records
         )
         assert any(
-            record.levelno == logging.ERROR and "cascade warning" in record.getMessage()
-            for record in caplog.records
+            record.levelno == logging.ERROR and "cascade warning" in record.getMessage() for record in caplog.records
         )
 
     def test_emit_cascade_risk_warnings_below_threshold_is_silent(self, caplog: pytest.LogCaptureFixture):

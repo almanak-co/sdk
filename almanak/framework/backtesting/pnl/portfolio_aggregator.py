@@ -18,6 +18,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from almanak.framework.backtesting.pnl.data_provider import token_ref_display
 from almanak.framework.backtesting.pnl.portfolio import (
     PositionType,
     SimulatedPosition,
@@ -614,7 +615,7 @@ class PortfolioAggregator:
         """
         assets: set[str] = set()
         for position in self.positions:
-            assets.update(position.tokens)
+            assets.update(token_ref_display(token) for token in position.tokens)
         return assets
 
     def calculate_all_net_exposures(self, prices: dict[str, Decimal] | None = None) -> dict[str, Decimal]:
@@ -882,7 +883,7 @@ class PortfolioAggregator:
     def _perp_liquidation_distance(position: SimulatedPosition, prices: dict[str, Decimal]) -> Decimal | None:
         if position.liquidation_price is None:
             return None
-        current_price = prices.get(position.primary_token)
+        current_price = prices.get(token_ref_display(position.primary_token))
         if current_price is None or current_price <= Decimal("0"):
             return None
         if position.position_type == PositionType.PERP_LONG:
@@ -1052,7 +1053,7 @@ class PortfolioAggregator:
         for token in position.tokens:
             amount = position.get_amount(token)
             # Use provided price if available, otherwise fall back to entry_price
-            price = prices.get(token, position.entry_price)
+            price = prices.get(token_ref_display(token), position.entry_price)
             total_value += amount * price
 
         # Fall back to entry price calculation if no specific prices available
@@ -1101,30 +1102,39 @@ class PortfolioAggregator:
         prices: dict[str, Decimal] | None,
         lp_multiplier: Decimal,
     ) -> Decimal:
+        matched_token = self._position_token_for_asset(position, asset)
         if position.position_type in (PositionType.SPOT, PositionType.SUPPLY):
-            return position.get_amount(asset)
+            return position.get_amount(matched_token) if matched_token is not None else Decimal("0")
         if position.position_type == PositionType.BORROW:
-            return -position.get_amount(asset)
+            return -position.get_amount(matched_token) if matched_token is not None else Decimal("0")
         if position.position_type == PositionType.PERP_LONG:
-            return self._perp_asset_units(position, asset, prices)
+            return self._perp_asset_units(position, asset, prices, matched_token)
         if position.position_type == PositionType.PERP_SHORT:
-            return -self._perp_asset_units(position, asset, prices)
+            return -self._perp_asset_units(position, asset, prices, matched_token)
         if position.position_type == PositionType.LP:
-            return position.get_amount(asset) * lp_multiplier
+            return position.get_amount(matched_token) * lp_multiplier if matched_token is not None else Decimal("0")
         return Decimal("0")
+
+    @staticmethod
+    def _position_token_for_asset(position: SimulatedPosition, asset: str) -> Any | None:
+        for token in position.tokens:
+            if token == asset or token_ref_display(token) == asset:
+                return token
+        return None
 
     @staticmethod
     def _perp_asset_units(
         position: SimulatedPosition,
         asset: str,
         prices: dict[str, Decimal] | None,
+        matched_token: Any | None = None,
     ) -> Decimal:
-        if asset not in position.tokens:
+        if matched_token is None:
             return Decimal("0")
         price = prices.get(asset) if prices else None
         if position.notional_usd > Decimal("0") and price is not None and price > Decimal("0"):
             return position.notional_usd / price
-        return position.get_amount(asset)
+        return position.get_amount(matched_token)
 
     def calculate_all_net_deltas(self, prices: dict[str, Decimal] | None = None) -> dict[str, Decimal]:
         """Calculate net delta for all assets in the portfolio.
