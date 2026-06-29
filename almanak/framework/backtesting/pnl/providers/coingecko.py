@@ -874,14 +874,16 @@ class CoinGeckoDataProvider:
         """Return the token-bucket burst size for a CoinGecko rate limit."""
         return max(1, rate_limit // 5)
 
-    @staticmethod
-    def _market_cache_key(token: TokenRef, default_chain: str | None = None) -> TokenRef:
+    def _market_cache_key(self, token: TokenRef, default_chain: str | None = None) -> TokenRef:
         """Return the key used by per-run market-state / OHLCV caches."""
         if is_token_key(token):
             return normalize_token_key(token[0], token[1])
         assert isinstance(token, str)
         if is_address_like(token) and default_chain:
             return normalize_token_key(default_chain, token)
+        entry = self._token_addresses.get(token.upper())
+        if entry is not None:
+            return normalize_token_key(entry[0], entry[1])
         return token.upper()
 
     @staticmethod

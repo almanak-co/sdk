@@ -584,6 +584,25 @@ class TestPortfolioMarkToMarket:
         # = 5000 + 4500 + 150 = 9650
         assert value == Decimal("9650")
 
+    def test_mark_to_market_prices_address_numeraire_without_symbol(
+        self,
+        base_timestamp: datetime,
+    ) -> None:
+        token_key = ("base", "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf")
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"), chain="base")
+        portfolio._numeraire_token = token_key
+        portfolio._numeraire_symbol = None
+        market_state = MarketState(
+            timestamp=base_timestamp,
+            chain="base",
+            prices={token_key: Decimal("50000")},
+        )
+
+        value = portfolio.mark_to_market(market_state, market_state.timestamp)
+
+        assert value == Decimal("10000")
+        assert portfolio.equity_curve[-1].numeraire_price_usd == Decimal("50000")
+
     def test_mark_to_market_perp_position_profit(
         self,
         portfolio: SimulatedPortfolio,

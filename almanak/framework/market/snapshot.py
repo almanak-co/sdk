@@ -84,6 +84,8 @@ DEFAULT_TIMEFRAME = "4h"
 # stall the decide cycle indefinitely.
 _GATEWAY_RPC_TIMEOUT_SECONDS = 30.0
 
+_EVM_ADDRESS_RE = re.compile(r"^0[xX][a-fA-F0-9]{40}$")
+
 
 # Strips "Data source '<name>' unavailable: " boilerplate from str(DataSourceUnavailable)
 # before hint-matching so the word "unavailable" in the wrapper doesn't trigger a
@@ -118,6 +120,26 @@ _MAX_VOL_CANDLE_LIMIT = 10_000
 # ``il_exposure`` (VIB-5153 / ALM-2814). A dedicated object — rather than
 # ``None`` — is required because ``None`` is itself a valid default value.
 _NO_DEFAULT: Any = object()
+
+
+def _is_evm_address(token: Any) -> bool:
+    if not isinstance(token, str):
+        return False
+    return bool(_EVM_ADDRESS_RE.fullmatch(token.strip()))
+
+
+def _token_cache_key(token: str, chain: str) -> str:
+    """Return the native snapshot cache key for address-shaped tokens."""
+    if not isinstance(token, str):
+        return token
+    stripped = token.strip()
+    prefix, separator, address = stripped.partition(":")
+    if separator and prefix and _is_evm_address(address):
+        return f"{prefix.lower()}:{address.lower()}"
+    if _is_evm_address(stripped):
+        return f"{chain.lower()}:{stripped.lower()}"
+    return token
+
 
 # Preserves the precise type of a caller-supplied ``default`` in soft-fallback
 # return annotations (e.g. ``il_exposure(..., default=None) -> ILExposure | None``)
@@ -550,13 +572,6 @@ class MarketSnapshot:
         self._balances: dict[str, TokenBalance] = {}
         self._rsi_values: dict[str, tuple[RSIData, str | None]] = {}
 
-        # Optional ``{address_lower: SYMBOL}`` map used only by the PnL backtest
-        # to let a strategy that references tokens by contract address resolve to
-        # the symbol-keyed data the engine seeds. Empty for live snapshots and
-        # symbol-only backtests, so ``_canonicalize_token`` is an identity no-op
-        # there and pre-existing behaviour is byte-identical.
-        self._token_aliases: dict[str, str] = {}
-
         # Pre-populated indicator data (for all TA indicators)
         # Stored as (data, timeframe) tuples; timeframe=None matches any query
         self._macd_values: dict[str, tuple[MACDData, str | None]] = {}
@@ -700,12 +715,10 @@ class MarketSnapshot:
                 configured chains AND the oracle cannot route by chain.
             ValueError: If price cannot be determined.
         """
-        # Backtest address-keyed strategies resolve to the seeded symbol; a
-        # symbol or a live snapshot (no alias map) passes through unchanged.
-        token = self._canonicalize_token(token)
         # Chain resolution: oracle-aware. When the oracle supports chain=,
         # let the caller's explicit chain pass through even if it's not in
         # ``self.chains`` — the oracle will handle (or reject) it.
+        oracle_token = token
         oracle_supports_chain = self._price_oracle is not None and _price_oracle_supports_chain_arg(self._price_oracle)
         if chain is None or (chain in self.chains):
             requested_chain = self._resolve_chain(chain)
@@ -713,6 +726,7 @@ class MarketSnapshot:
             requested_chain = chain
         else:
             requested_chain = self._resolve_chain(chain)
+        token = self._token_cache_key(token, requested_chain)
         cache_key = f"{token}/{quote}@{requested_chain}"
 
         # Check pre-populated prices first. Case-insensitive, matching the
@@ -756,7 +770,11 @@ class MarketSnapshot:
                         )
                     except (TypeError, ValueError):
                         accepts_chain = False
-                    coro = method(token, quote, chain=requested_chain) if accepts_chain else method(token, quote)
+                    coro = (
+                        method(oracle_token, quote, chain=requested_chain)
+                        if accepts_chain
+                        else method(oracle_token, quote)
+                    )
                     if asyncio.iscoroutine(coro):
                         result = self._run_async_bridged(coro)
                     else:
@@ -764,9 +782,9 @@ class MarketSnapshot:
                     price_value = getattr(result, "price", result)
                 else:
                     price_value = (
-                        self._price_oracle(token, quote, requested_chain)
+                        self._price_oracle(oracle_token, quote, requested_chain)
                         if _price_oracle_supports_chain_arg(self._price_oracle)
-                        else self._price_oracle(token, quote)
+                        else self._price_oracle(oracle_token, quote)
                     )
                 # VIB-3889: stamp the inferred source on the cached entry
                 # so ``get_price_oracle_dict(with_sources=True)`` carries
@@ -784,9 +802,9 @@ class MarketSnapshot:
         self._record_critical_data_failure(
             "price",
             cache_key,
-            f"Cannot determine price for {token}/{quote} on {requested_chain}",
+            f"Cannot determine price for {oracle_token}/{quote} on {requested_chain}",
         )
-        raise ValueError(f"Cannot determine price for {token}/{quote} on {requested_chain}")
+        raise ValueError(f"Cannot determine price for {oracle_token}/{quote} on {requested_chain}")
 
     @property
     def prices(self) -> _PricesAccessor:
@@ -823,15 +841,16 @@ class MarketSnapshot:
         Raises:
             ChainNotConfiguredError / AmbiguousChainError: same rules as :meth:`price`.
         """
-        token = self._canonicalize_token(token)
+        raw_token = token
         requested_chain = self._resolve_chain(chain)
+        token = self._token_cache_key(token, requested_chain)
         cache_key = f"{token}/{quote}@{requested_chain}"
 
         if cache_key in self._price_cache:
             return self._price_cache[cache_key]
 
         # Get basic price and create PriceData
-        current_price = self.price(token, quote, chain=requested_chain)
+        current_price = self.price(raw_token, quote, chain=requested_chain)
         return self._price_cache.get(cache_key, PriceData(price=current_price))
 
     def pt_price(
@@ -1049,7 +1068,7 @@ class MarketSnapshot:
         Raises:
             ValueError: If RSI cannot be calculated
         """
-        token = self._canonicalize_token(token)
+        token = self._token_cache_key(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
@@ -1222,7 +1241,7 @@ class MarketSnapshot:
             if macd.is_bullish_crossover:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._canonicalize_token(token)
+        token = self._token_cache_key(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, fast_period, slow_period, signal_period)
 
@@ -1292,7 +1311,7 @@ class MarketSnapshot:
             if bb.is_oversold:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._canonicalize_token(token)
+        token = self._token_cache_key(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period, std_dev)
 
@@ -1357,7 +1376,7 @@ class MarketSnapshot:
             if stoch.is_oversold and stoch.k_value > stoch.d_value:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._canonicalize_token(token)
+        token = self._token_cache_key(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, k_period, d_period)
 
@@ -1418,7 +1437,7 @@ class MarketSnapshot:
                 # Safe to trade
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._canonicalize_token(token)
+        token = self._token_cache_key(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
@@ -1478,7 +1497,7 @@ class MarketSnapshot:
             if sma.is_price_above:
                 print("Bullish - price above 50 SMA")
         """
-        token = self._canonicalize_token(token)
+        token = self._token_cache_key(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, "SMA", period)
 
@@ -1534,7 +1553,7 @@ class MarketSnapshot:
             if ema_12.value > ema_26.value:
                 print("Golden cross - bullish")
         """
-        token = self._canonicalize_token(token)
+        token = self._token_cache_key(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, "EMA", period)
 
@@ -1589,7 +1608,7 @@ class MarketSnapshot:
             if adx.is_uptrend:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._canonicalize_token(token)
+        token = self._token_cache_key(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
@@ -1638,7 +1657,7 @@ class MarketSnapshot:
             if obv.is_bullish:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._canonicalize_token(token)
+        token = self._token_cache_key(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, signal_period)
 
@@ -1687,7 +1706,7 @@ class MarketSnapshot:
             if cci.is_oversold:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._canonicalize_token(token)
+        token = self._token_cache_key(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
@@ -1745,7 +1764,7 @@ class MarketSnapshot:
             if ich.is_bullish_crossover and ich.is_above_cloud:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._canonicalize_token(token)
+        token = self._token_cache_key(token)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, tenkan_period, kijun_period, senkou_b_period)
 
@@ -1850,11 +1869,9 @@ class MarketSnapshot:
             ValueError: If balance cannot be determined.
         """
         requested_chain = self._resolve_chain(chain)
-        # Backtest address-keyed reads resolve to the seeded symbol first; live
-        # snapshots (no alias map) pass through unchanged.
-        token = self._canonicalize_token(token)
         # VIB-3138: translate generic symbol to protocol-preferred variant.
-        resolved = self._resolve_protocol_variant(token, protocol)
+        provider_token = self._resolve_protocol_variant(token, protocol)
+        resolved = self._resolve_protocol_variant(self._token_cache_key(token, requested_chain), protocol)
         cache_key = f"{resolved}@{requested_chain}"
 
         # Check the per-chain cache FIRST when an explicit chain was given —
@@ -1916,17 +1933,17 @@ class MarketSnapshot:
                     # ``get_balance(token, *, force_refresh=...)``.
                     get_balance = bp.get_balance  # type: ignore[attr-defined]
                     if _balance_provider_supports_chain_arg(get_balance):
-                        coro = get_balance(resolved, chain=requested_chain)
+                        coro = get_balance(provider_token, chain=requested_chain)
                     else:
-                        coro = get_balance(resolved)
+                        coro = get_balance(provider_token)
                     if asyncio.iscoroutine(coro):
                         result = self._run_async_bridged(coro)
                     else:
                         result = coro
                 elif _balance_provider_supports_chain_arg(bp):
-                    result = bp(resolved, chain=requested_chain)  # type: ignore[call-arg]
+                    result = bp(provider_token, chain=requested_chain)  # type: ignore[call-arg]
                 else:
-                    result = bp(resolved)
+                    result = bp(provider_token)
                 # Classify provider provenance uniformly: a provider-supplied
                 # ``TokenBalance`` MEASURED ``balance_usd`` (Empty≠Zero — even a
                 # measured ``Decimal("0")`` is authoritative); legacy / bare
@@ -1939,13 +1956,13 @@ class MarketSnapshot:
                 # warning so unregistered LST addresses are visible without
                 # crashing the strategy. Matches legacy behaviour.
                 bal = getattr(balance_data, "balance", None)
-                if bal == Decimal("0") and resolved.startswith("0x") and len(resolved) == 42:
+                if bal == Decimal("0") and _is_evm_address(provider_token):
                     try:
                         from almanak.framework.data.tokens import get_token_resolver
                         from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
                         get_token_resolver().resolve(
-                            resolved,
+                            provider_token,
                             self._chain,
                             skip_gateway=True,
                             log_errors=False,
@@ -1955,14 +1972,14 @@ class MarketSnapshot:
                             "balance_zero_unregistered_token: token %s on %s returned 0 and is "
                             "not in the SDK registry. If you expect a non-zero balance, add the "
                             "token to almanak/framework/data/tokens/defaults.py or use the symbol.",
-                            resolved,
+                            provider_token,
                             self._chain,
                         )
                     except Exception:  # noqa: BLE001
                         logger.warning(
                             "balance_zero_unregistered_token: token %s on %s returned 0; "
                             "registry lookup itself failed.",
-                            resolved,
+                            provider_token,
                             self._chain,
                         )
                 balance_data = self._fill_balance_usd(
@@ -2190,26 +2207,9 @@ class MarketSnapshot:
             self._balance_usd_unmeasured.discard(cache_key)
         return filled
 
-    def set_token_aliases(self, aliases: dict[str, str]) -> None:
-        """Register a ``{address_lower: SYMBOL}`` map for address-keyed reads.
-
-        Used only by the PnL backtest engine: a strategy that calls
-        ``market.price(addr)`` / ``market.rsi(addr)`` etc. with a contract
-        address resolves to the symbol the engine seeded. Live snapshots never
-        call this, so :meth:`_canonicalize_token` stays an identity no-op there.
-        """
-        self._token_aliases = aliases or {}
-
-    def _canonicalize_token(self, token: str) -> str:
-        """Resolve a contract address to its seeded symbol, else return as-is.
-
-        Address keys are lowercased (Blueprint 17 cache-key convention), so a
-        query in any case resolves; a symbol (not present as an address key)
-        passes through unchanged. No-op when no alias map is registered.
-        """
-        if not self._token_aliases or not isinstance(token, str):
-            return token
-        return self._token_aliases.get(token.lower(), token)
+    def _token_cache_key(self, token: str, chain: str | None = None) -> str:
+        """Return the seeded/cache lookup key for ``token`` on ``chain``."""
+        return _token_cache_key(token, chain or self._chain)
 
     def _seeded_price_for_symbol(self, token: str) -> Decimal | None:
         """Case-insensitive lookup in the ``set_price()``-seeded ``_prices`` map.
@@ -2395,6 +2395,7 @@ class MarketSnapshot:
             token: Token symbol
             price_value: Price value in USD
         """
+        token = self._token_cache_key(token)
         self._prices[token] = price_value
 
     def set_price_data(
@@ -2452,6 +2453,7 @@ class MarketSnapshot:
             chain: Optional chain override. Defaults to this snapshot's chain.
         """
         target_chain = chain or self._chain
+        token = self._token_cache_key(token, target_chain)
         # Auto-extend ``self._chains`` so a subsequent ``price(token, chain=X)``
         # on the same chain doesn't raise ``ChainNotConfiguredError``. The
         # legacy multichain class allowed seed-then-query for arbitrary chains;
@@ -2483,6 +2485,7 @@ class MarketSnapshot:
         stay distinct.
         """
         if isinstance(balance_data_or_chain, TokenBalance):
+            token = self._token_cache_key(token, self._chain)
             tb = balance_data_or_chain
             self._balances[token] = tb
             self._balance_cache[f"{token}@{self._chain}"] = tb
@@ -2502,7 +2505,8 @@ class MarketSnapshot:
                 f"got chain={chain!r} but balance_data is not a TokenBalance",
             )
         if chain == self._chain:
-            self._balances[token] = balance_data
+            self._balances[self._token_cache_key(token, chain)] = balance_data
+        token = self._token_cache_key(token, chain)
         self._balance_cache[f"{token}@{chain}"] = balance_data
         # VIB-4843 (Codex re-audit): clear any stale unmeasured marker for the
         # key we just overwrote with a MEASURED value (see canonical path).
@@ -2517,6 +2521,7 @@ class MarketSnapshot:
             rsi_data: RSI data
             timeframe: OHLCV timeframe this data was computed from (None matches any)
         """
+        token = self._token_cache_key(token)
         self._rsi_values[token] = (rsi_data, timeframe)
 
     def set_macd(self, token: str, macd_data: MACDData, timeframe: str | None = None) -> None:
@@ -2534,6 +2539,7 @@ class MarketSnapshot:
                 histogram=Decimal("0.2"),
             ))
         """
+        token = self._token_cache_key(token)
         self._macd_values[token] = (macd_data, timeframe)
 
     def set_bollinger_bands(self, token: str, bb_data: BollingerBandsData, timeframe: str | None = None) -> None:
@@ -2552,6 +2558,7 @@ class MarketSnapshot:
                 percent_b=Decimal("0.5"),
             ))
         """
+        token = self._token_cache_key(token)
         self._bollinger_values[token] = (bb_data, timeframe)
 
     def set_stochastic(self, token: str, stoch_data: StochasticData, timeframe: str | None = None) -> None:
@@ -2568,6 +2575,7 @@ class MarketSnapshot:
                 d_value=Decimal("30"),
             ))
         """
+        token = self._token_cache_key(token)
         self._stochastic_values[token] = (stoch_data, timeframe)
 
     def set_atr(self, token: str, atr_data: ATRData, timeframe: str | None = None) -> None:
@@ -2584,6 +2592,7 @@ class MarketSnapshot:
                 value_percent=Decimal("2.5"),
             ))
         """
+        token = self._token_cache_key(token)
         self._atr_values[token] = (atr_data, timeframe)
 
     def set_ma(
@@ -2606,6 +2615,7 @@ class MarketSnapshot:
                 current_price=Decimal("3050"),
             ), ma_type="SMA", period=20)
         """
+        token = self._token_cache_key(token)
         cache_key = f"{token}:{ma_type}:{period}"
         entry = (ma_data, timeframe)
         self._ma_values[cache_key] = entry
@@ -2627,6 +2637,7 @@ class MarketSnapshot:
                 minus_di=Decimal("15"),
             ))
         """
+        token = self._token_cache_key(token)
         self._adx_values[token] = (adx_data, timeframe)
 
     def set_obv(self, token: str, obv_data: OBVData, timeframe: str | None = None) -> None:
@@ -2643,6 +2654,7 @@ class MarketSnapshot:
                 signal_line=Decimal("950000"),
             ))
         """
+        token = self._token_cache_key(token)
         self._obv_values[token] = (obv_data, timeframe)
 
     def set_cci(self, token: str, cci_data: CCIData, timeframe: str | None = None) -> None:
@@ -2658,6 +2670,7 @@ class MarketSnapshot:
                 value=Decimal("-120"),
             ))
         """
+        token = self._token_cache_key(token)
         self._cci_values[token] = (cci_data, timeframe)
 
     def set_ichimoku(self, token: str, ichimoku_data: IchimokuData, timeframe: str | None = None) -> None:
@@ -2677,6 +2690,7 @@ class MarketSnapshot:
                 current_price=Decimal("3100"),
             ))
         """
+        token = self._token_cache_key(token)
         self._ichimoku_values[token] = (ichimoku_data, timeframe)
 
     @staticmethod
@@ -4847,9 +4861,6 @@ class MarketSnapshot:
             OHLCVUnavailableError: If OHLCV data cannot be retrieved.
         """
         token_str = token if isinstance(token, str) else token.pair
-        # Resolve an address-keyed token to its seeded symbol (no-op for a
-        # "BASE/QUOTE" pair string, an Instrument, or a live snapshot).
-        token_str = self._canonicalize_token(token_str)
 
         if self._ohlcv_router is not None:
             envelope = self._fetch_ohlcv_via_router(token, timeframe, limit, pool_address, quote, token_str)

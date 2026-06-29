@@ -5,6 +5,9 @@ from decimal import Decimal
 
 from almanak.framework.data.interfaces import PriceResult
 from almanak.framework.market import MarketSnapshot
+from almanak.framework.market.snapshot import _is_evm_address
+
+
 def _price_result(price: str) -> PriceResult:
     return PriceResult(
         price=Decimal(price),
@@ -78,3 +81,7 @@ def test_prices_and_price_work_with_legacy_oracle_signature() -> None:
     assert snapshot.prices(["ETH"]) == {"ETH": Decimal("3000")}
     assert snapshot.price("ETH") == Decimal("3000")
     assert oracle.calls == [("ETH", "USD")]
+
+
+def test_is_evm_address_rejects_non_string_tokens() -> None:
+    assert _is_evm_address(("base", "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf")) is False

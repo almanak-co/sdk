@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from almanak.services.backtest.services.backtest_runner import (
     build_backtest_token_address_map,
     build_quick_timeframe,
     collect_backtest_token_refs,
+    create_backtester,
     normalize_backtest_token_refs,
     run_backtest_job,
     serialize_result,
@@ -310,6 +312,14 @@ class TestBacktestTokenRefs:
         assert token_addresses["WETH"] == ("base", BASE_WETH)
         assert token_addresses["USDC"] == ("base", BASE_USDC)
         assert token_addresses["CBBTC"] == ("base", BASE_CBBTC)
+
+    def test_create_backtester_threads_token_addresses_into_provider_cache_keys(self):
+        backtester = create_backtester(token_addresses={"CBBTC": ("base", BASE_CBBTC)})
+        try:
+            cache_key = backtester.data_provider._market_cache_key("CBBTC", "base")
+            assert cache_key == ("base", BASE_CBBTC)
+        finally:
+            asyncio.run(backtester.close())
 
     @pytest.mark.asyncio
     async def test_run_backtest_job_threads_strategy_token_addresses(self):

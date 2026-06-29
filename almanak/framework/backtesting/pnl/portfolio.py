@@ -266,6 +266,10 @@ class SimulatedPortfolio:
     #: numeraire token's USD price onto each equity point for the reporting
     #: projection; it never affects ``value_usd`` or the conservation core.
     _numeraire_symbol: str | None = field(default=None)
+    #: Address-native token identity for the declared numeraire, when known.
+    #: Non-USD provider states may be keyed by ``(chain, address)`` rather than
+    #: by symbol; this key is the authoritative lookup path for those runs.
+    _numeraire_token: TokenRef | None = field(default=None)
 
     _STABLECOIN_SYMBOLS: frozenset[str] = STABLECOINS
     _cash_equivalent_token_keys: frozenset[TokenKey] = field(default_factory=frozenset, init=False)
@@ -276,6 +280,8 @@ class SimulatedPortfolio:
         self._cash_equivalent_token_keys = self._resolve_cash_equivalent_token_keys(self.chain)
         self.tokens = self._normalize_amounts(self.tokens)
         self._cost_basis = self._normalize_amounts(self._cost_basis)
+        if self._numeraire_token is not None:
+            self._numeraire_token = normalize_token_ref(self._numeraire_token, self.chain)
         for position in [*self.positions, *self._closed_positions]:
             self._normalize_position_token_refs(position)
         has_existing_state = bool(
@@ -2592,6 +2598,11 @@ class SimulatedPortfolio:
         return self._value_position_fallback(position, market_state, timestamp)
 
     def _numeraire_price_usd(self, market_state: MarketState) -> Decimal | None:
+        if self._numeraire_token is not None:
+            try:
+                return market_state.get_price(self._numeraire_token)
+            except KeyError:
+                pass
         if self._numeraire_symbol is None:
             return None
         try:
@@ -3295,6 +3306,7 @@ class SimulatedPortfolio:
             # Numeraire reporting context (VIB-5127): a resumed non-USD run must
             # keep capturing/reporting against the same numeraire. None for USD.
             "numeraire_symbol": self._numeraire_symbol,
+            "numeraire_token": token_ref_display(self._numeraire_token) if self._numeraire_token is not None else None,
         }
 
     @staticmethod
@@ -3395,6 +3407,10 @@ class SimulatedPortfolio:
         )
         # Restore the numeraire reporting context (VIB-5127); absent -> None (USD).
         portfolio._numeraire_symbol = data.get("numeraire_symbol")
+        numeraire_token = data.get("numeraire_token")
+        portfolio._numeraire_token = (
+            normalize_token_ref(numeraire_token, portfolio.chain) if isinstance(numeraire_token, str) else None
+        )
         # Older artifacts predate realized_pnl; fall back to summing successful
         # realized trades so resumed portfolios stay consistent.
         portfolio._realized_pnl = cls._restored_realized_pnl(portfolio, data)

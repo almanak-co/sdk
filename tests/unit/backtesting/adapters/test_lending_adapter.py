@@ -317,7 +317,6 @@ class TestLendingHistoricalApyLookup:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             chain="base",
             prices={token_key: Decimal("1")},
-            token_aliases={base_usdc: "USDC"},
         )
         captured: dict[str, str] = {}
 
@@ -369,7 +368,6 @@ class TestLendingHistoricalApyLookup:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             chain="base",
             prices={token_key: Decimal("1")},
-            token_aliases={base_usdc: "USDC"},
         )
         captured: dict[str, str] = {}
 

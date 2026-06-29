@@ -464,6 +464,82 @@ class TestCoinGeckoIteration:
         assert data_points[0][1].available_tokens == [f"{normalized_key[0]}:{normalized_key[1]}"]
 
     @pytest.mark.asyncio
+    async def test_iterate_emits_address_keyed_market_state_for_symbol_with_token_address(self):
+        """Platform-style symbol tokens resolve to address-keyed MarketState entries."""
+        cbbtc_base = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+        normalized_key = ("base", cbbtc_base)
+        candle = OHLCV(
+            timestamp=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            open=Decimal("43000"),
+            high=Decimal("43100"),
+            low=Decimal("42900"),
+            close=Decimal("43050"),
+            volume=None,
+        )
+        provider = CoinGeckoDataProvider(
+            retry_config=RetryConfig(max_retries=0),
+            token_addresses={"CBBTC": normalized_key},
+        )
+        provider._prefetch_ohlcv_data = AsyncMock(  # type: ignore[method-assign]
+            return_value=OHLCVCache(
+                data={normalized_key: [candle]},
+                fetched_at=datetime(2024, 1, 1, tzinfo=UTC),
+                default_chain="base",
+            )
+        )
+        config = HistoricalDataConfig(
+            start_time=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            interval_seconds=3600,
+            tokens=["CBBTC"],
+            chains=["base"],
+            include_ohlcv=True,
+        )
+
+        data_points = [(timestamp, state) async for timestamp, state in provider.iterate(config)]
+
+        assert data_points[0][1].prices == {normalized_key: Decimal("43050")}
+        assert data_points[0][1].ohlcv == {normalized_key: candle}
+        assert data_points[0][1].available_tokens == [f"{normalized_key[0]}:{normalized_key[1]}"]
+
+    @pytest.mark.asyncio
+    async def test_prefetch_uses_address_key_for_symbol_with_token_address(self):
+        """Symbol-fed platform configs fetch and store under the registered address key."""
+        cbbtc_base = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+        normalized_key = ("base", cbbtc_base)
+        candle = OHLCV(
+            timestamp=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            open=Decimal("43000"),
+            high=Decimal("43100"),
+            low=Decimal("42900"),
+            close=Decimal("43050"),
+            volume=None,
+        )
+        provider = CoinGeckoDataProvider(
+            retry_config=RetryConfig(max_retries=0),
+            token_addresses={"CBBTC": normalized_key},
+        )
+        provider.get_ohlcv = AsyncMock(return_value=[candle])  # type: ignore[method-assign]
+        config = HistoricalDataConfig(
+            start_time=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            interval_seconds=3600,
+            tokens=["CBBTC"],
+            chains=["base"],
+            include_ohlcv=True,
+        )
+
+        cache = await provider._prefetch_ohlcv_data(config)
+
+        assert cache.data == {normalized_key: [candle]}
+        provider.get_ohlcv.assert_awaited_once_with(
+            normalized_key,
+            config.start_time,
+            config.end_time,
+            config.interval_seconds,
+        )
+
+    @pytest.mark.asyncio
     async def test_get_price_hits_prefetched_cache_for_bare_address(self):
         """After iterate-style prefetch, bare address get_price hits the OHLCV cache."""
         address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"

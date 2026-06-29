@@ -936,11 +936,8 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             funding_timestamp,
             "perp position update",
         )
-        token_aliases = getattr(market_state, "token_aliases", {})
-        if not isinstance(token_aliases, dict):
-            token_aliases = {}
         funding_chain = str(getattr(market_state, "chain", self._config.chain))
-        self._apply_funding_if_due(position, elapsed_seconds, funding_timestamp, token_aliases, funding_chain)
+        self._apply_funding_if_due(position, elapsed_seconds, funding_timestamp, funding_chain)
 
         self._liquidation_calculator.update_position_liquidation_price(position, self._config.maintenance_margin_ratio)
         self._check_perp_liquidation_proximity(position, current_price)
@@ -1044,7 +1041,6 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         position: "SimulatedPosition",
         elapsed_seconds: float,
         timestamp: datetime | None = None,
-        token_aliases: dict[str, str] | None = None,
         chain: str | None = None,
     ) -> None:
         """Apply funding payments if due based on configured frequency.
@@ -1098,26 +1094,25 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
                 current_time = datetime.now()
             self._last_funding_time[position_id] = current_time
             # Apply funding for the elapsed time
-            self._apply_funding_payment(position, elapsed_hours, timestamp, token_aliases, chain)
+            self._apply_funding_payment(position, elapsed_hours, timestamp, chain)
             return
 
         # For continuous mode, always apply
         if min_hours == Decimal("0"):
-            self._apply_funding_payment(position, elapsed_hours, timestamp, token_aliases, chain)
+            self._apply_funding_payment(position, elapsed_hours, timestamp, chain)
             return
 
         # For hourly/8h mode, accumulate and apply when threshold reached
         # Note: In a real implementation, we'd track actual time since last funding
         # For simplicity, we apply proportionally based on elapsed time
         if elapsed_hours > Decimal("0"):
-            self._apply_funding_payment(position, elapsed_hours, timestamp, token_aliases, chain)
+            self._apply_funding_payment(position, elapsed_hours, timestamp, chain)
 
     def _apply_funding_payment(
         self,
         position: "SimulatedPosition",
         time_hours: Decimal,
         timestamp: datetime | None = None,
-        token_aliases: dict[str, str] | None = None,
         chain: str | None = None,
     ) -> None:
         """Apply funding payment to position.
@@ -1140,7 +1135,6 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             funding_rate, confidence, rate_source = self._get_historical_funding_rate_v2(
                 position=position,
                 timestamp=timestamp,
-                token_aliases=token_aliases,
                 chain=chain,
             )
         elif self._config.funding_rate_source == "historical" and self._funding_rate_provider is not None:
@@ -1148,7 +1142,6 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             funding_rate, rate_source = self._get_historical_funding_rate(
                 position=position,
                 timestamp=timestamp,
-                token_aliases=token_aliases,
                 chain=chain,
             )
             confidence = "medium"  # Legacy provider confidence
@@ -1189,7 +1182,6 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         self,
         position: "SimulatedPosition",
         timestamp: datetime | None = None,
-        token_aliases: dict[str, str] | None = None,
         chain: str | None = None,
     ) -> tuple[Decimal, str, str]:
         """Get historical funding rate from GMX or Hyperliquid providers.
@@ -1209,7 +1201,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             HistoricalDataUnavailableError: If strict_historical_mode is True and
                 historical funding rate data cannot be fetched.
         """
-        lookup = self._funding_lookup(position, timestamp, token_aliases, chain)
+        lookup = self._funding_lookup(position, timestamp, chain)
         if lookup.timestamp is None:
             return self._funding_no_timestamp_result(position, lookup)
 
@@ -1238,10 +1230,13 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         self,
         position: "SimulatedPosition",
         timestamp: datetime | None,
-        token_aliases: dict[str, str] | None = None,
         chain: str | None = None,
     ) -> _FundingLookup:
-        primary_token = token_ref_provider_symbol(self._perp_primary_token(position), token_aliases, chain)
+        primary_token = token_ref_provider_symbol(
+            self._perp_primary_token(position),
+            chain,
+            unwrap_wrapped_native=True,
+        )
         return _FundingLookup(
             primary_token=primary_token,
             market=f"{primary_token}-USD",
@@ -1467,7 +1462,6 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         self,
         position: "SimulatedPosition",
         timestamp: datetime | None = None,
-        token_aliases: dict[str, str] | None = None,
         chain: str | None = None,
     ) -> tuple[Decimal, str]:
         """Get historical funding rate from legacy provider with fallback to default.
@@ -1500,7 +1494,9 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
 
         # Build market identifier (e.g., "ETH-USD")
         primary_token = token_ref_provider_symbol(
-            position.tokens[0] if position.tokens else "ETH", token_aliases, chain
+            position.tokens[0] if position.tokens else "ETH",
+            chain,
+            unwrap_wrapped_native=True,
         )
         market = f"{primary_token}-USD"
 

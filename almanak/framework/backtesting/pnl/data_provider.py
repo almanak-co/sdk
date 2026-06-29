@@ -73,26 +73,61 @@ def token_ref_display(token: TokenRef) -> str:
 
 def token_ref_provider_symbol(
     token: TokenRef,
-    token_aliases: dict[str, str] | None = None,
     chain: str | None = None,
+    *,
+    unwrap_wrapped_native: bool = False,
 ) -> str:
     """Resolve a TokenRef to the symbol expected by historical data providers."""
     normalized = normalize_token_ref(token, chain)
-    aliases = token_aliases or {}
-    normalized_chain = str(chain).lower() if chain else None
 
     if is_token_key(normalized):
         token_chain, address = normalize_token_key(normalized[0], normalized[1])
-        if (normalized_chain is None or token_chain == normalized_chain) and address in aliases:
-            return aliases[address].upper()
+        registry_symbol = _token_ref_registry_symbol(
+            token_chain,
+            address,
+            unwrap_wrapped_native=unwrap_wrapped_native,
+        )
+        if registry_symbol is not None:
+            return registry_symbol
         return token_ref_display((token_chain, address))
 
     assert isinstance(normalized, str)
     if is_address_like(normalized):
-        alias = aliases.get(normalized.lower())
-        if alias:
-            return alias.upper()
+        registry_symbol = _token_ref_registry_symbol(
+            chain,
+            normalized,
+            unwrap_wrapped_native=unwrap_wrapped_native,
+        )
+        if registry_symbol is not None:
+            return registry_symbol
     return normalized
+
+
+def _token_ref_registry_symbol(
+    chain: str | None,
+    address: str,
+    *,
+    unwrap_wrapped_native: bool,
+) -> str | None:
+    """Resolve an address TokenRef to a provider symbol without gateway I/O."""
+    if not chain:
+        return None
+
+    try:
+        from almanak.framework.data.tokens import get_token_resolver
+        from almanak.framework.data.tokens.exceptions import TokenResolutionError
+
+        resolved = get_token_resolver().resolve(address, chain, log_errors=False, skip_gateway=True)
+    except TokenResolutionError:
+        return None
+
+    symbol = resolved.symbol.upper()
+    if not unwrap_wrapped_native:
+        return symbol
+
+    from almanak.framework.data.models import OHLCV_PROXY_MAP
+
+    return OHLCV_PROXY_MAP.get(symbol, symbol).upper()
 
 
 def _parse_token_ref_display(token: str) -> TokenKey | None:
@@ -226,26 +261,9 @@ class MarketState:
     block_number: int | None = None
     gas_price_gwei: Decimal | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    #: Optional ``{address_lower: SYMBOL_UPPER}`` map letting a
-    #: strategy that references tokens by contract address resolve to the
-    #: symbol-keyed price/OHLCV space the backtest seeds. Stamped per tick by
-    #: the engine loop; empty for symbol-only runs and every non-backtest
-    #: caller, so resolution is a no-op there.
-    token_aliases: dict[str, str] = field(default_factory=dict)
-
-    def _canonical_token(self, token: str) -> str:
-        """Map a contract address to its transitional symbol, else return as-is.
-
-        Address keys are lowercased (Blueprint 17 cache-key convention), so a
-        query in any case (a lowercase ``decide`` read or an UPPERCASE
-        fill-pricing key) resolves. A symbol passes through unchanged.
-        """
-        if not self.token_aliases:
-            return token
-        return self.token_aliases.get(token.lower(), token)
 
     def _lookup_keys(self, token: TokenRef) -> list[TokenRef]:
-        """Return direct, address, and transitional-symbol candidates for ``token``."""
+        """Return direct and address-native lookup candidates for ``token``."""
         keys: list[TokenRef] = []
 
         def add(key: TokenRef) -> None:
@@ -258,10 +276,6 @@ class MarketState:
             if chain != str(self.chain).lower():
                 return keys
             add(address)
-            alias = self.token_aliases.get(address)
-            if alias:
-                add(alias)
-                add(alias.upper())
             return keys
 
         assert isinstance(token, str)
@@ -273,21 +287,11 @@ class MarketState:
             if chain != str(self.chain).lower():
                 return keys
             add(address)
-            alias = self.token_aliases.get(address)
-            if alias:
-                add(alias)
-                add(alias.upper())
             return keys
 
-        canonical = self._canonical_token(token)
-        add(canonical)
-        add(canonical.upper())
-
-        token_upper = token.upper()
-        for address, symbol in self.token_aliases.items():
-            if symbol.upper() == token_upper:
-                add(normalize_token_key(self.chain, address))
-                add(address)
+        if isinstance(normalized, str):
+            add(normalized)
+            add(normalized.upper())
 
         return keys
 

@@ -2,16 +2,98 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
+from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from almanak.core.models.quote_asset import QuoteAsset
+from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig, MarketState
+from almanak.framework.intents.vocabulary import SwapIntent
 from scripts import platform_backtest_runner as runner
 
 BASE_CBBTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
 BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+_BASE_CHAIN_ID = 8453
+
+
+class _AddressKeyedProvider:
+    """Network-free provider that emits only address-native price keys."""
+
+    provider_name = "address-keyed-platform-test"
+
+    def __init__(self, token_addresses: dict[str, tuple[str, str]]) -> None:
+        self._token_addresses = {
+            symbol.upper(): (chain.lower(), address.lower())
+            for symbol, (chain, address) in token_addresses.items()
+        }
+        self.registered: list[dict[str, tuple[str, str]]] = []
+
+    def register_token_addresses(self, token_addresses: dict[str, tuple[str, str]]) -> None:
+        normalized = {
+            symbol.upper(): (chain.lower(), address.lower())
+            for symbol, (chain, address) in token_addresses.items()
+        }
+        self._token_addresses.update(normalized)
+        self.registered.append(normalized)
+
+    async def close(self) -> None:
+        return None
+
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
+        current = config.start_time
+        index = 0
+        while current <= config.end_time:
+            yield (
+                current,
+                MarketState(
+                    timestamp=current,
+                    prices={
+                        ("base", BASE_CBBTC): Decimal("60000") - Decimal(index * 100),
+                        ("base", BASE_USDC): Decimal("1"),
+                    },
+                    chain="base",
+                    block_number=10_000_000 + index,
+                    gas_price_gwei=Decimal("0"),
+                ),
+            )
+            current += timedelta(seconds=config.interval_seconds)
+            index += 1
+
+
+class _CbBtcPlatformStrategy:
+    STRATEGY_METADATA = type(
+        "Meta",
+        (),
+        {
+            "default_chain": "base",
+            "supported_chains": ["base"],
+            "supported_protocols": ["uniswap_v3"],
+            "intent_types": ["SWAP"],
+            "tags": ["swap", "trading"],
+            "quote_asset": QuoteAsset.token(_BASE_CHAIN_ID, BASE_CBBTC),
+        },
+    )()
+    quote_asset = QuoteAsset.token(_BASE_CHAIN_ID, BASE_CBBTC)
+    deployment_id = "cbbtc-platform-address-keyed-test"
+
+    def __init__(self) -> None:
+        self._sent_swap = False
+
+    def decide(self, market: Any) -> Any:
+        if self._sent_swap:
+            return None
+        self._sent_swap = True
+        return SwapIntent(
+            from_token=BASE_USDC,
+            to_token=BASE_CBBTC,
+            amount_usd=Decimal("100"),
+            protocol="uniswap_v3",
+            chain="base",
+        )
 
 
 def _env(**overrides: str) -> runner.PlatformRunnerEnv:
@@ -121,6 +203,49 @@ def test_build_platform_backtest_config_adds_decorator_quote_asset() -> None:
     )
 
     assert config.tokens == ["USDC", "WETH", "CBBTC"]
+
+
+def test_platform_numeraire_backtest_prices_address_keyed_data_and_coverage() -> None:
+    strategy_config = {"base_token_address": BASE_CBBTC, "quote_token_address": BASE_USDC}
+    config = runner.build_platform_backtest_config(
+        json.dumps(
+            {
+                "start_time": "2024-01-01",
+                "end_time": "2024-01-01T03:00:00Z",
+                "initial_capital_usd": "10000",
+                "include_gas_costs": False,
+                "institutional_mode": True,
+            }
+        ),
+        strategy_config,
+        _CbBtcPlatformStrategy,
+    )
+    strategy = _CbBtcPlatformStrategy()
+    token_addresses = runner.build_backtest_token_address_map(
+        config,
+        strategy=strategy,
+        strategy_config=strategy_config,
+    )
+    provider = _AddressKeyedProvider(token_addresses)
+    backtester = runner.create_backtester(token_addresses=token_addresses)
+    original_provider = backtester.data_provider
+    asyncio.run(original_provider.close())
+    backtester.data_provider = provider
+
+    result = asyncio.run(backtester.backtest(strategy, config))
+
+    assert config.tokens == ["CBBTC", "USDC"]
+    assert token_addresses == {
+        "CBBTC": ("base", BASE_CBBTC),
+        "USDC": ("base", BASE_USDC),
+    }
+    assert {"CBBTC": ("base", BASE_CBBTC)} in provider.registered
+    assert result.error is None
+    assert len(result.trades) > 0
+    assert result.metrics.numeraire_metrics is not None
+    assert result.data_quality is not None
+    assert result.data_quality.coverage_ratio == Decimal("1")
+    assert result.institutional_compliance is True
 
 
 def test_build_platform_backtest_config_rejects_non_increasing_time_range() -> None:

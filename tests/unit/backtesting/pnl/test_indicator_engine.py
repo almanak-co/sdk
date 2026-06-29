@@ -433,6 +433,22 @@ class TestAllIndicators:
         with pytest.raises(ValueError):
             snapshot.rsi("USDC")
 
+    def test_address_key_populates_snapshot_indicators(self) -> None:
+        """Address-keyed buffers should be readable through bare address queries."""
+        addr = "0x5979d7b546e38e414f7e9822514be443a4800529"
+        token = f"arbitrum:{addr}"
+        engine = BacktestIndicatorEngine(required_indicators={"rsi", "bollinger_bands", "ema"})
+
+        for price in _generate_prices(3500.0, 50):
+            engine.append_price(token, price)
+
+        snapshot = _make_snapshot()
+        engine.populate_snapshot(snapshot, config={"ema_period": 12}, active_tokens={token})
+
+        assert isinstance(snapshot.rsi(addr), RSIData)
+        assert isinstance(snapshot.bollinger_bands(addr), BollingerBandsData)
+        assert snapshot.ema(addr, period=12).period == 12
+
 
 # =============================================================================
 # ATR Calculator from_prices Tests

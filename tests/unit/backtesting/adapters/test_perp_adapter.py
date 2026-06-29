@@ -507,7 +507,6 @@ class TestFundingAccumulationOverTime:
         rate, confidence, source = adapter._get_historical_funding_rate_v2(
             position=position,
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-            token_aliases={arbitrum_weth: "ETH"},
             chain="arbitrum",
         )
 

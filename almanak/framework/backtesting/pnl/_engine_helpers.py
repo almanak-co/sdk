@@ -64,6 +64,7 @@ from almanak.framework.backtesting.pnl.data_provider import (
     MarketState,
     TokenRef,
     is_address_like,
+    is_token_key,
     normalize_token_key,
     normalize_token_ref,
     token_ref_display,
@@ -93,6 +94,37 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _registered_token_addresses(backtester: PnLBacktester) -> dict[str, tuple[str, str]]:
+    """Return the known provider token-address map, normalized for lookup."""
+    token_addresses: dict[str, tuple[str, str]] = {}
+    provider_addresses = getattr(backtester.data_provider, "_token_addresses", None)
+    if isinstance(provider_addresses, dict):
+        for symbol, entry in provider_addresses.items():
+            if is_token_key(entry):
+                token_addresses[str(symbol).upper()] = normalize_token_key(entry[0], entry[1])
+    for symbol, entry in (backtester.token_addresses or {}).items():
+        if is_token_key(entry):
+            token_addresses[str(symbol).upper()] = normalize_token_key(entry[0], entry[1])
+    return token_addresses
+
+
+def _expected_price_lookup_label(
+    token: TokenRef,
+    *,
+    token_addresses: dict[str, tuple[str, str]],
+    chain: str,
+) -> str:
+    """Return the display key used to compare expected config tokens to MarketState keys."""
+    normalized = normalize_token_ref(token, chain)
+    if is_token_key(normalized):
+        return token_ref_display(normalized).upper()
+    assert isinstance(normalized, str)
+    registered_address = token_addresses.get(normalized.upper())
+    if registered_address is not None:
+        return token_ref_display(registered_address).upper()
+    return token_ref_display(normalized).upper()
+
+
 # =============================================================================
 # Shared mutable state container
 # =============================================================================
@@ -118,11 +150,6 @@ class BacktestState:
     strategy_config: dict[str, Any]
     parameter_sources: ParameterSourceTracker
     total_ticks: int
-    #: ``{address_lower: SYMBOL_UPPER}`` for the run chain, letting an
-    #: address-keyed strategy resolve to the symbol-keyed backtest data. Empty
-    #: for symbol-only runs.
-    token_aliases: dict[str, str] = field(default_factory=dict)
-
     # Mutated during execute_iteration_loop
     pending_intents: list[tuple[Any, datetime, int]] = field(default_factory=list)
     last_market_state: MarketState | None = None
@@ -239,6 +266,7 @@ def initialize_backtest(
         # Resolve the strategy's declared numeraire (VIB-5127). None for the USD
         # default; a chain mismatch raises here, before the simulation loop.
         numeraire_symbol = resolve_numeraire_symbol(strategy, config.chain)
+        numeraire_address = numeraire_token_address(strategy, config.chain) if numeraire_symbol is not None else None
 
         # Initialize portfolio
         portfolio = SimulatedPortfolio(
@@ -248,6 +276,9 @@ def initialize_backtest(
         # The portfolio captures the numeraire price per equity point; value_usd
         # stays USD (the conservation core is untouched).
         portfolio._numeraire_symbol = numeraire_symbol
+        portfolio._numeraire_token = (
+            normalize_token_key(numeraire_address[0], numeraire_address[1]) if numeraire_address is not None else None
+        )
 
         # Ensure the numeraire token is always priced by the data provider, even
         # if the strategy never trades it. Use a local copy -- never mutate
@@ -272,37 +303,14 @@ def initialize_backtest(
         # that fails loud at metrics time (VIB-5127). Duck-typed: providers
         # without the hook (custom HistoricalDataProvider impls) are unaffected.
         if numeraire_symbol is not None:
-            numeraire_address = numeraire_token_address(strategy, config.chain)
             register_addresses = getattr(backtester.data_provider, "register_token_addresses", None)
             if numeraire_address is not None and callable(register_addresses):
-                register_addresses({numeraire_symbol: numeraire_address})
+                normalized_numeraire = normalize_token_key(numeraire_address[0], numeraire_address[1])
+                register_addresses({numeraire_symbol: normalized_numeraire})
                 bt_logger.debug(
-                    f"Registered numeraire {numeraire_symbol} address {numeraire_address[1]} "
-                    f"on {numeraire_address[0]} with the data provider for coin-id resolution"
+                    f"Registered numeraire {numeraire_symbol} address {normalized_numeraire[1]} "
+                    f"on {normalized_numeraire[0]} with the data provider for coin-id resolution"
                 )
-
-        # Build the address->symbol alias map (run chain only) so a strategy that
-        # references tokens by contract address resolves to the same symbol-keyed
-        # data the engine seeds (prices, indicators, balances) AND its swap legs
-        # land in the portfolio under their symbol -- keeping the cash sweep /
-        # cost-basis symbol-keyed. Source: the CLI's tracked-token address map
-        # (the same one handed to the provider) plus the declared numeraire,
-        # which the strategy may never trade.
-        token_aliases: dict[str, str] = {}
-        for symbol, (entry_chain, address) in (backtester.token_addresses or {}).items():
-            if entry_chain.lower() != config.chain.lower():
-                continue
-            if isinstance(address, str) and address.startswith("0x"):
-                token_aliases[address.lower()] = symbol.upper()
-        if numeraire_symbol is not None:
-            numeraire_addr = numeraire_token_address(strategy, config.chain)
-            if numeraire_addr is not None:
-                # Upper-case for parity with the tracked-token entries above and
-                # the uppercase symbol-keyed price space (an unknown numeraire
-                # stays an honest unpriceable miss regardless of casing).
-                token_aliases[numeraire_addr[1].lower()] = numeraire_symbol.upper()
-        if token_aliases:
-            bt_logger.debug(f"Built {len(token_aliases)} address->symbol token alias(es) for address-keyed reads")
 
         # Create historical data config
         data_config = HistoricalDataConfig(
@@ -356,7 +364,6 @@ def initialize_backtest(
         strategy_config=strategy_config,
         parameter_sources=parameter_sources,
         total_ticks=total_ticks,
-        token_aliases=token_aliases,
     )
 
 
@@ -428,12 +435,6 @@ async def execute_iteration_loop(
         async for timestamp, market_state in backtester.data_provider.iterate(state.data_config):
             state.tick_count += 1
 
-            # Stamp the address->symbol alias map so address-keyed strategy reads
-            # and fill pricing (market_state.get_price) resolve. No-op for
-            # symbol-only runs (empty map).
-            if state.token_aliases:
-                market_state.token_aliases = state.token_aliases
-
             # Log progress periodically
             if state.tick_count % 100 == 0 or state.tick_count == 1:
                 bt_logger.info(
@@ -446,7 +447,6 @@ async def execute_iteration_loop(
                 market_state=market_state,
                 chain=config.chain,
                 portfolio=state.portfolio,
-                token_aliases=state.token_aliases,
             )
 
             # Cache available_tokens once per tick: the property returns a
@@ -471,11 +471,17 @@ async def execute_iteration_loop(
             # Track data quality: record successful price lookups
             # Count tokens with available prices in this tick
             expected_tokens = config.tokens
+            expected_token_addresses = _registered_token_addresses(backtester)
             provider_name = getattr(backtester.data_provider, "provider_name", "unknown")
 
             # Record successful lookups for each available token
             for token in expected_tokens:
-                if token_ref_display(token).upper() in available_tokens_upper:
+                expected_token_label = _expected_price_lookup_label(
+                    token,
+                    token_addresses=expected_token_addresses,
+                    chain=config.chain,
+                )
+                if expected_token_label in available_tokens_upper:
                     state.data_quality_tracker.record_lookup(
                         success=True,
                         source=provider_name,
@@ -972,23 +978,15 @@ def _market_state_chain(market_state: MarketState) -> str:
     return str(getattr(market_state, "chain", DEFAULT_CHAIN))
 
 
-def _normalize_token(token: Any, aliases: dict[str, str] | None = None, chain: str | None = None) -> Any:
+def _normalize_token(token: Any, chain: str | None = None) -> Any:
     """Canonicalize a token for address-native flow maps.
 
-    Fully specified contract addresses become ``(chain, address)`` keys. When
-    the engine supplies the transitional ``{address_lower: SYMBOL}`` alias map,
-    symbols reverse-map to their known address on the run chain. Symbol-only
-    callers keep the legacy uppercase key until Phase 3 deletes the alias
-    bridge.
+    Fully specified contract addresses become ``(chain, address)`` keys.
+    Symbol-only callers keep their legacy uppercase keys.
     """
     if isinstance(token, str):
         if is_address_like(token):
             return normalize_token_ref(token, chain)
-        if aliases and chain:
-            token_upper = token.upper()
-            for address, symbol in aliases.items():
-                if symbol.upper() == token_upper:
-                    return normalize_token_key(chain, address)
         return token.upper()
     if isinstance(token, tuple) and len(token) == 2:
         token_chain, address = token
@@ -1012,10 +1010,9 @@ def _calculate_swap_flows(
     tokens_in: dict[TokenRef, Decimal] = {}
     tokens_out: dict[TokenRef, Decimal] = {}
 
-    aliases = getattr(market_state, "token_aliases", None)
     chain = _market_state_chain(market_state)
-    from_token = _normalize_token(getattr(intent, "from_token", "USDC"), aliases, chain)
-    to_token = _normalize_token(getattr(intent, "to_token", "WETH"), aliases, chain)
+    from_token = _normalize_token(getattr(intent, "from_token", "USDC"), chain)
+    to_token = _normalize_token(getattr(intent, "to_token", "WETH"), chain)
 
     # Amount out is the trade amount
     amount_out = amount_usd
@@ -1041,16 +1038,14 @@ def _calculate_swap_flows(
 def _resolve_single_token(
     intent: Any,
     default: str,
-    aliases: dict[str, str] | None = None,
     chain: str | None = None,
 ) -> Any:
     """Look up ``intent.token`` or ``intent.asset`` (first wins), normalized.
 
     Mirrors ``getattr(intent, "token", getattr(intent, "asset", default))``
-    with canonicalization via :func:`_normalize_token` (address->symbol when
-    ``aliases`` is supplied, then uppercase) for string symbols.
+    with canonicalization via :func:`_normalize_token`.
     """
-    return _normalize_token(getattr(intent, "token", getattr(intent, "asset", default)), aliases, chain)
+    return _normalize_token(getattr(intent, "token", getattr(intent, "asset", default)), chain)
 
 
 def _calculate_supply_flows(
@@ -1062,9 +1057,7 @@ def _calculate_supply_flows(
     tokens_in: dict[TokenRef, Decimal] = {}
     tokens_out: dict[TokenRef, Decimal] = {}
 
-    token = _resolve_single_token(
-        intent, "WETH", getattr(market_state, "token_aliases", None), _market_state_chain(market_state)
-    )
+    token = _resolve_single_token(intent, "WETH", _market_state_chain(market_state))
 
     try:
         price = market_state.get_price(token)
@@ -1085,9 +1078,7 @@ def _calculate_withdraw_flows(
     tokens_in: dict[TokenRef, Decimal] = {}
     tokens_out: dict[TokenRef, Decimal] = {}
 
-    token = _resolve_single_token(
-        intent, "WETH", getattr(market_state, "token_aliases", None), _market_state_chain(market_state)
-    )
+    token = _resolve_single_token(intent, "WETH", _market_state_chain(market_state))
 
     try:
         price = market_state.get_price(token)
@@ -1116,9 +1107,9 @@ def _calculate_borrow_flows(
     borrow_token = getattr(intent, "borrow_token", None)
     chain = _market_state_chain(market_state)
     if isinstance(borrow_token, str) and borrow_token:
-        token: Any = _normalize_token(borrow_token, getattr(market_state, "token_aliases", None), chain)
+        token: Any = _normalize_token(borrow_token, chain)
     else:
-        token = _resolve_single_token(intent, "USDC", getattr(market_state, "token_aliases", None), chain)
+        token = _resolve_single_token(intent, "USDC", chain)
 
     try:
         price = market_state.get_price(token)
@@ -1139,9 +1130,7 @@ def _calculate_repay_flows(
     tokens_in: dict[TokenRef, Decimal] = {}
     tokens_out: dict[TokenRef, Decimal] = {}
 
-    token = _resolve_single_token(
-        intent, "USDC", getattr(market_state, "token_aliases", None), _market_state_chain(market_state)
-    )
+    token = _resolve_single_token(intent, "USDC", _market_state_chain(market_state))
 
     try:
         price = market_state.get_price(token)
@@ -1153,7 +1142,7 @@ def _calculate_repay_flows(
     return tokens_in, tokens_out
 
 
-def _resolve_lp_tokens(intent: Any, aliases: dict[str, str] | None = None, chain: str | None = None) -> tuple[Any, Any]:
+def _resolve_lp_tokens(intent: Any, chain: str | None = None) -> tuple[Any, Any]:
     """Resolve ``(token0, token1)`` for LP intents, uppercased if strings.
 
     A fully explicit pair (token0/token1, or the token_a/token_b aliases,
@@ -1166,14 +1155,14 @@ def _resolve_lp_tokens(intent: Any, aliases: dict[str, str] | None = None, chain
     """
     token0, token1 = lp_explicit_pair(intent)
     if token0 is not None and token1 is not None:
-        return _normalize_token(token0, aliases, chain), _normalize_token(token1, aliases, chain)
+        return _normalize_token(token0, chain), _normalize_token(token1, chain)
 
     pool_pair = lp_pool_tokens(getattr(intent, "pool", None))
     if pool_pair is not None:
-        return _normalize_token(pool_pair[0], aliases, chain), _normalize_token(pool_pair[1], aliases, chain)
+        return _normalize_token(pool_pair[0], chain), _normalize_token(pool_pair[1], chain)
 
-    return _normalize_token(token0 if token0 is not None else "WETH", aliases, chain), _normalize_token(
-        token1 if token1 is not None else "USDC", aliases, chain
+    return _normalize_token(token0 if token0 is not None else "WETH", chain), _normalize_token(
+        token1 if token1 is not None else "USDC", chain
     )
 
 
@@ -1186,9 +1175,7 @@ def _calculate_lp_open_flows(
     tokens_in: dict[TokenRef, Decimal] = {}
     tokens_out: dict[TokenRef, Decimal] = {}
 
-    token0, token1 = _resolve_lp_tokens(
-        intent, getattr(market_state, "token_aliases", None), _market_state_chain(market_state)
-    )
+    token0, token1 = _resolve_lp_tokens(intent, _market_state_chain(market_state))
 
     # Split the USD amount roughly 50/50
     half_amount = amount_usd / Decimal("2")
@@ -1220,9 +1207,7 @@ def _calculate_lp_close_flows(
     tokens_in: dict[TokenRef, Decimal] = {}
     tokens_out: dict[TokenRef, Decimal] = {}
 
-    token0, token1 = _resolve_lp_tokens(
-        intent, getattr(market_state, "token_aliases", None), _market_state_chain(market_state)
-    )
+    token0, token1 = _resolve_lp_tokens(intent, _market_state_chain(market_state))
 
     # Approximate tokens received (actual depends on IL)
     half_amount = amount_usd / Decimal("2")
@@ -1242,7 +1227,7 @@ def _calculate_lp_close_flows(
     return tokens_in, tokens_out
 
 
-def _resolve_vault_token(intent: Any, aliases: dict[str, str] | None = None, chain: str | None = None) -> Any:
+def _resolve_vault_token(intent: Any, chain: str | None = None) -> Any:
     """Resolve ``intent.deposit_token`` for vault intents, warning on fallback."""
     token = getattr(intent, "deposit_token", None)
     if not token:
@@ -1250,7 +1235,7 @@ def _resolve_vault_token(intent: Any, aliases: dict[str, str] | None = None, cha
         logger.warning(
             "Vault intent missing deposit_token, defaulting to USDC — set deposit_token for accurate backtesting"
         )
-    return _normalize_token(token, aliases, chain)
+    return _normalize_token(token, chain)
 
 
 def _calculate_vault_token_amount(
@@ -1264,9 +1249,7 @@ def _calculate_vault_token_amount(
     ``_calculate_vault_redeem_flows``: the only per-branch difference is
     whether the resulting amount lands in ``tokens_in`` or ``tokens_out``.
     """
-    token = _resolve_vault_token(
-        intent, getattr(market_state, "token_aliases", None), _market_state_chain(market_state)
-    )
+    token = _resolve_vault_token(intent, _market_state_chain(market_state))
 
     try:
         price = market_state.get_price(token)

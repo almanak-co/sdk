@@ -103,8 +103,8 @@ from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataProvider,
     MarketState,
     TokenRef,
-    is_token_key,
-    normalize_token_key,
+    is_address_like,
+    normalize_token_ref,
     token_ref_display,
 )
 from almanak.framework.backtesting.pnl.data_quality import DataQualityTracker
@@ -458,55 +458,77 @@ def create_market_snapshot_from_state(
         wallet_address=wallet_address,
         timestamp=market_state.timestamp,
     )
-    state_aliases = getattr(market_state, "token_aliases", {})
-    if not isinstance(state_aliases, dict):
-        state_aliases = {}
-    effective_aliases = state_aliases if token_aliases is None else token_aliases
-    if effective_aliases:
-        snapshot.set_token_aliases(effective_aliases)
+    _ = token_aliases
     _seed_snapshot_prices(snapshot, market_state)
     if portfolio:
-        _seed_snapshot_balances(snapshot, market_state, portfolio, effective_aliases)
+        _seed_snapshot_balances(snapshot, market_state, portfolio)
     return snapshot
 
 
 def _seed_snapshot_prices(snapshot: MarketSnapshot, market_state: MarketState) -> None:
-    for token in market_state.available_tokens:
+    chain = _market_state_chain(market_state)
+    for token in _market_state_price_tokens(market_state):
+        snapshot_token = _snapshot_token_key(token, chain)
         try:
-            snapshot.set_price(token, market_state.get_price(token))
+            price = market_state.get_price(token)
         except KeyError:
+            try:
+                price = market_state.get_price(snapshot_token)
+            except KeyError:
+                continue
+        snapshot.set_price(snapshot_token, price)
+
+
+def _market_state_chain(market_state: MarketState) -> str:
+    chain = getattr(market_state, "chain", None)
+    return chain if isinstance(chain, str) and chain else DEFAULT_CHAIN
+
+
+def _market_state_price_tokens(market_state: MarketState) -> list[TokenRef]:
+    tokens: list[TokenRef] = []
+    seen: set[TokenRef] = set()
+    for attr in ("prices", "ohlcv"):
+        mapping = getattr(market_state, attr, None)
+        if not isinstance(mapping, dict):
             continue
+        for token in mapping:
+            if token not in seen:
+                tokens.append(token)
+                seen.add(token)
+    if tokens:
+        return tokens
+
+    available = getattr(market_state, "available_tokens", [])
+    try:
+        return list(available)
+    except TypeError:
+        return []
+
+
+def _snapshot_token_key(token: TokenRef, chain: str) -> str:
+    return token_ref_display(normalize_token_ref(token, chain))
 
 
 def _seed_snapshot_balances(
     snapshot: MarketSnapshot,
     market_state: MarketState,
     portfolio: SimulatedPortfolio,
-    token_aliases: dict[str, str] | None = None,
 ) -> None:
-    _seed_portfolio_token_balances(snapshot, market_state, portfolio, token_aliases or {})
+    _seed_portfolio_token_balances(snapshot, market_state, portfolio)
     _seed_cash_balances(snapshot, portfolio)
-    _seed_zero_balances_for_unheld_tokens(snapshot, market_state, portfolio, token_aliases or {})
+    _seed_zero_balances_for_unheld_tokens(snapshot, market_state, portfolio)
 
 
 def _seed_portfolio_token_balances(
     snapshot: MarketSnapshot,
     market_state: MarketState,
     portfolio: SimulatedPortfolio,
-    token_aliases: dict[str, str],
 ) -> None:
+    chain = _portfolio_chain(portfolio, _market_state_chain(market_state))
     for token, amount in portfolio.tokens.items():
-        display_token = token_ref_display(token)
+        display_token = _snapshot_token_key(token, chain)
         balance = _token_balance_from_market_state(token, amount, market_state, display_token)
         snapshot.set_balance(display_token, balance)
-        alias_lookup_key = display_token.lower()
-        if is_token_key(token):
-            _chain, address = normalize_token_key(token[0], token[1])
-            snapshot.set_balance(address, _copy_balance_with_symbol(balance, address))
-            alias_lookup_key = address
-        alias = token_aliases.get(alias_lookup_key)
-        if alias and alias != display_token:
-            snapshot.set_balance(alias, _copy_balance_with_symbol(balance, alias))
 
 
 def _token_balance_from_market_state(
@@ -522,15 +544,29 @@ def _token_balance_from_market_state(
     return TokenBalance(symbol=symbol, balance=amount, balance_usd=balance_usd)
 
 
-def _copy_balance_with_symbol(balance: TokenBalance, symbol: str) -> TokenBalance:
-    return TokenBalance(symbol=symbol, balance=balance.balance, balance_usd=balance.balance_usd)
-
-
 def _seed_cash_balances(snapshot: MarketSnapshot, portfolio: SimulatedPortfolio) -> None:
     snapshot.set_balance("USD", _face_value_balance("USD", portfolio.cash_usd))
     for stable in CASH_EQUIVALENT_STABLECOINS:
         if stable not in portfolio.tokens:
             snapshot.set_balance(stable, _face_value_balance(stable, portfolio.cash_usd))
+    for stable_key in _portfolio_cash_equivalent_keys(portfolio):
+        display_token = token_ref_display(stable_key)
+        if stable_key in portfolio.tokens or display_token in portfolio.tokens:
+            continue
+        snapshot.set_price(display_token, Decimal("1"))
+        snapshot.set_balance(display_token, _face_value_balance(display_token, portfolio.cash_usd))
+
+
+def _portfolio_chain(portfolio: SimulatedPortfolio, fallback: str) -> str:
+    chain = getattr(portfolio, "chain", None)
+    return chain if isinstance(chain, str) and chain else fallback
+
+
+def _portfolio_cash_equivalent_keys(portfolio: SimulatedPortfolio) -> tuple[TokenRef, ...]:
+    keys = getattr(portfolio, "_cash_equivalent_token_keys", ())
+    if not isinstance(keys, set | frozenset | list | tuple):
+        return ()
+    return tuple(keys)
 
 
 def _face_value_balance(symbol: str, amount: Decimal) -> TokenBalance:
@@ -541,27 +577,28 @@ def _seed_zero_balances_for_unheld_tokens(
     snapshot: MarketSnapshot,
     market_state: MarketState,
     portfolio: SimulatedPortfolio,
-    token_aliases: dict[str, str],
 ) -> None:
+    chain = _market_state_chain(market_state)
     for token in market_state.available_tokens:
-        if _should_seed_zero_balance(token, portfolio, token_aliases):
-            snapshot.set_balance(token, TokenBalance(symbol=token, balance=Decimal("0"), balance_usd=Decimal("0")))
+        if _should_seed_zero_balance(token, portfolio):
+            display_token = _snapshot_token_key(token, chain)
+            snapshot.set_balance(
+                display_token,
+                TokenBalance(symbol=display_token, balance=Decimal("0"), balance_usd=Decimal("0")),
+            )
 
 
 def _should_seed_zero_balance(
-    token: str,
+    token: TokenRef,
     portfolio: SimulatedPortfolio,
-    token_aliases: dict[str, str] | None = None,
 ) -> bool:
     if token in portfolio.tokens or token in CASH_EQUIVALENT_STABLECOINS or token == "USD":
         return False
-    aliases = token_aliases or {}
-    portfolio_chain = str(getattr(portfolio, "chain", "")).lower()
-    for address, symbol in aliases.items():
-        if symbol.upper() != token.upper():
-            continue
-        if address in portfolio.tokens or (portfolio_chain, address.lower()) in portfolio.tokens:
-            return False
+    normalized = normalize_token_ref(token, _portfolio_chain(portfolio, DEFAULT_CHAIN))
+    if normalized in portfolio.tokens:
+        return False
+    if normalized in _portfolio_cash_equivalent_keys(portfolio):
+        return False
     get_token_balance = getattr(portfolio, "get_token_balance", None)
     if callable(get_token_balance):
         try:
@@ -984,10 +1021,8 @@ class PnLBacktester:
     """Optional ``{SYMBOL_UPPER: (chain, address)}`` map of tracked tokens.
 
     Supplied by the CLI (``build_token_address_map``) — the same map handed to
-    the CoinGecko provider for coin-id resolution. The engine reverses it (per
-    run chain) into an ``{address_lower: SYMBOL}`` alias map so a strategy that
-    references tokens by contract address resolves to the symbol-keyed data the
-    backtest seeds. ``None`` keeps the historical symbol-only behaviour.
+    providers that can resolve historical data by contract address. ``None``
+    keeps the historical symbol-only behaviour.
     """
     _mev_simulator: MEVSimulator | None = None
     _current_backtest_id: str = ""
@@ -2362,7 +2397,7 @@ class PnLBacktester:
         intent_type = self._get_intent_type(intent)
         protocol = self._get_intent_protocol(intent)
         chain = str(getattr(market_state, "chain", config.chain))
-        tokens = self._get_intent_tokens(intent, getattr(market_state, "token_aliases", None), chain)
+        tokens = self._get_intent_tokens(intent, chain=chain)
         amount_usd = self._get_intent_amount_usd(
             intent,
             market_state,
@@ -2921,21 +2956,20 @@ class PnLBacktester:
     ) -> list[TokenRef]:
         """Extract the tokens involved in an intent. Delegates to intent_extraction module.
 
-        When ``aliases`` (an ``{address_lower: SYMBOL}`` map) is supplied, each
-        resolved symbol reverse-maps to its address-native ``(chain, address)``
-        identity. Legacy symbol-only backtests keep their symbol labels until
-        the alias bridge is removed in Phase 3.
+        Address string tokens are normalized to their ``(chain, address)``
+        identity; legacy symbol-only backtests keep their symbol labels.
         """
         from .intent_extraction import get_intent_tokens
 
         tokens: list[TokenRef] = []
         tokens.extend(get_intent_tokens(intent))
-        if aliases or chain:
-            return [
-                _engine_helpers._normalize_token(token, aliases, chain) if isinstance(token, str) else token
-                for token in tokens
-            ]
-        return tokens
+        _ = aliases
+        return [
+            _engine_helpers._normalize_token(token, chain)
+            if isinstance(token, str) and is_address_like(token)
+            else token
+            for token in tokens
+        ]
 
     def _get_intent_amount_usd(
         self,
@@ -3208,12 +3242,11 @@ class PnLBacktester:
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
 
         deposit_tok = getattr(intent, "deposit_token", None)
-        aliases = getattr(market_state, "token_aliases", None)
         chain = str(getattr(market_state, "chain", DEFAULT_CHAIN))
         if deposit_tok:
-            token = _engine_helpers._normalize_token(deposit_tok, aliases, chain)
+            token = _engine_helpers._normalize_token(deposit_tok, chain)
         else:
-            token = tokens[0] if tokens else _engine_helpers._normalize_token("USDC", aliases, chain)
+            token = tokens[0] if tokens else _engine_helpers._normalize_token("USDC", chain)
             logger.warning(
                 "Vault deposit missing deposit_token, defaulting to %s — set deposit_token for accurate backtesting",
                 token_ref_display(token),

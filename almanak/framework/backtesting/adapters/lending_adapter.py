@@ -1339,11 +1339,8 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
 
     @staticmethod
     def _lending_provider_market(primary_token: TokenRef, market_state: "MarketState") -> str:
-        aliases = getattr(market_state, "token_aliases", {})
-        if not isinstance(aliases, dict):
-            aliases = {}
         chain = getattr(market_state, "chain", None)
-        return token_ref_provider_symbol(primary_token, aliases, str(chain) if chain else None)
+        return token_ref_provider_symbol(primary_token, str(chain) if chain else None)
 
     def _historical_lending_apy(
         self,
