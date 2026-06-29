@@ -201,6 +201,46 @@ class TestAddressAliasResolution:
             snapshot.price(self.CB_ADDR)
 
 
+class TestAddressKeyedMarketState:
+    """MarketState accepts address-native provider keys while preserving the symbol shim."""
+
+    WSTETH_ADDR = "0x5979d7b546e38e414f7e9822514be443a4800529"
+    WSTETH_KEY = ("arbitrum", WSTETH_ADDR)
+
+    def _state(self):
+        from almanak.framework.backtesting.pnl.data_provider import OHLCV, MarketState
+
+        candle = OHLCV(
+            timestamp=datetime(2026, 3, 23, tzinfo=UTC),
+            open=Decimal("3400"),
+            high=Decimal("3410"),
+            low=Decimal("3390"),
+            close=Decimal("3405"),
+        )
+        return MarketState(
+            timestamp=datetime(2026, 3, 23, tzinfo=UTC),
+            chain="arbitrum",
+            prices={self.WSTETH_KEY: Decimal("3400")},
+            ohlcv={self.WSTETH_KEY: candle},
+            token_aliases={self.WSTETH_ADDR: "WSTETH"},
+        )
+
+    def test_get_price_reads_address_tuple_key(self):
+        state = self._state()
+        assert state.get_price(self.WSTETH_KEY) == Decimal("3400")
+        assert state.get_price(self.WSTETH_ADDR.upper()) == Decimal("3400")
+
+    def test_get_price_resolves_symbol_to_address_key_during_transition(self):
+        state = self._state()
+        assert state.get_price("WSTETH") == Decimal("3400")
+
+    def test_available_tokens_displays_addresses_for_address_keys(self):
+        state = self._state()
+        display_key = f"arbitrum:{self.WSTETH_ADDR}"
+        assert state.available_tokens == [display_key]
+        assert state.to_dict()["prices"] == {display_key: "3400"}
+
+
 class TestAddressAliasResolutionAllReads:
     """`_canonicalize_token` must be wired through every token-keyed snapshot read,
     not just price/balance/rsi/bb/ema."""

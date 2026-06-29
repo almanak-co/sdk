@@ -883,6 +883,54 @@ class TestIterateEmptyOrUnavailableFallback:
         assert len(rows) == 3
         assert all(row[1].prices["ETH"] == Decimal("2500") for row in rows)
 
+    @pytest.mark.asyncio
+    async def test_manual_fallback_forwards_token_refs(self):
+        """Manual iteration must not drop address-keyed TokenRef entries."""
+        address = "0x5979D7b546E38E414F7E9822514be443A4800529"
+        token_key = ("arbitrum", address)
+        provider = MockProvider("manual", price=Decimal("1234"))
+        aggregated = AggregatedDataProvider(providers=[provider], provider_names=["manual"], chain="arbitrum")
+        config = HistoricalDataConfig(
+            start_time=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+            interval_seconds=3600,
+            tokens=[token_key],
+            chains=["arbitrum"],
+        )
+
+        rows = [item async for item in aggregated.iterate(config)]
+
+        normalized_key = ("arbitrum", address.lower())
+        assert [row[1].prices for row in rows] == [{normalized_key: Decimal("1234")}] * 2
+        assert provider.get_price_calls == [
+            (token_key, datetime(2024, 1, 1, 0, 0, tzinfo=UTC)),
+            (token_key, datetime(2024, 1, 1, 1, 0, tzinfo=UTC)),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_manual_fallback_rejects_partial_market_states(self):
+        """Manual iteration raises instead of yielding rows missing requested tokens."""
+
+        class SymbolOnlyProvider(MockProvider):
+            async def get_price(self, token, timestamp):
+                self.get_price_calls.append((token, timestamp))
+                if not isinstance(token, str):
+                    raise ValueError("address-keyed tokens unsupported")
+                return Decimal("2500")
+
+        provider = SymbolOnlyProvider("manual")
+        aggregated = AggregatedDataProvider(providers=[provider], provider_names=["manual"], chain="arbitrum")
+        config = HistoricalDataConfig(
+            start_time=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+            interval_seconds=3600,
+            tokens=["ETH", ("arbitrum", "0x5979D7b546E38E414F7E9822514be443A4800529")],
+            chains=["arbitrum"],
+        )
+
+        with pytest.raises(DataSourceUnavailable, match="Manual iteration could not price all requested tokens"):
+            _ = [item async for item in aggregated.iterate(config)]
+
 
 class TestCreateWithDataConfigThreadsTokenAddresses:
     """The token_addresses map must reach the CoinGecko leg via the factory.
@@ -902,7 +950,9 @@ class TestCreateWithDataConfigThreadsTokenAddresses:
             token_addresses=addr_map,
         )
         cg = agg.providers[0]
-        assert cg._token_addresses == addr_map
+        assert cg._token_addresses == {
+            "WSTETH": ("arbitrum", "0x5979d7b546e38e414f7e9822514be443a4800529")
+        }
 
 
 class TestCreateWithDataConfig:

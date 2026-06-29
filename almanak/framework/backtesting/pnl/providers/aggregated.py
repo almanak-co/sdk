@@ -47,8 +47,18 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.config.backtest import backtest_config_from_env
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
+from almanak.framework.data.interfaces import DataSourceUnavailable
 
-from ..data_provider import OHLCV, HistoricalDataConfig, MarketState
+from ..data_provider import (
+    OHLCV,
+    HistoricalDataConfig,
+    MarketState,
+    TokenRef,
+    is_address_like,
+    is_token_key,
+    normalize_token_key,
+    token_ref_display,
+)
 from ..types import DataConfidence, DataSourceInfo
 
 if TYPE_CHECKING:
@@ -792,7 +802,16 @@ class AggregatedDataProvider:
         """Reset fallback statistics."""
         self._stats = FallbackStats()
 
-    async def get_price(self, token: str, timestamp: datetime) -> Decimal:
+    def _market_state_key(self, token: TokenRef, default_chain: str | None = None) -> TokenRef:
+        """Return the MarketState key used by manual iteration."""
+        if is_token_key(token):
+            return normalize_token_key(token[0], token[1])
+        assert isinstance(token, str)
+        if is_address_like(token):
+            return normalize_token_key(default_chain or self._chain, token)
+        return token.upper()
+
+    async def get_price(self, token: TokenRef, timestamp: datetime) -> Decimal:
         """Get the price of a token at a specific timestamp.
 
         Tries each provider in priority order until one succeeds.
@@ -810,7 +829,7 @@ class AggregatedDataProvider:
         result = await self.get_price_with_source(token, timestamp)
         return result.price
 
-    async def get_price_with_source(self, token: str, timestamp: datetime) -> PriceWithSource:
+    async def get_price_with_source(self, token: TokenRef, timestamp: datetime) -> PriceWithSource:
         """Get the price of a token with source attribution and confidence tracking.
 
         Tries each provider in priority order until one succeeds.
@@ -915,7 +934,7 @@ class AggregatedDataProvider:
         error_details = "; ".join(errors)
         raise ValueError(f"All providers failed to get price for {token} at {timestamp}: {error_details}")
 
-    async def get_price_data(self, token: str, timestamp: datetime) -> PriceData:
+    async def get_price_data(self, token: TokenRef, timestamp: datetime) -> PriceData:
         """Get price data with data_source field for tracking.
 
         This method is similar to get_price_with_source() but returns a
@@ -1060,21 +1079,33 @@ class AggregatedDataProvider:
             end_time = end_time.replace(tzinfo=UTC)
 
         interval = timedelta(seconds=config.interval_seconds)
+        default_chain = config.chains[0] if config.chains else self._chain
 
         while current_time <= end_time:
-            prices: dict[str, Decimal] = {}
+            prices: dict[TokenRef, Decimal] = {}
+            missing: list[str] = []
 
             for token in config.tokens:
                 try:
                     price = await self.get_price(token, current_time)
-                    prices[token.upper()] = price
+                    prices[self._market_state_key(token, default_chain)] = price
                 except Exception as e:
+                    missing.append(f"{token_ref_display(token)} ({e})")
                     logger.warning(
                         "Failed to get price for %s at %s: %s",
-                        token,
+                        token_ref_display(token),
                         current_time,
                         e,
                     )
+
+            if missing:
+                raise DataSourceUnavailable(
+                    source="aggregated",
+                    reason=(
+                        f"Manual iteration could not price all requested tokens at {current_time.isoformat()}: "
+                        + "; ".join(missing)
+                    ),
+                )
 
             market_state = MarketState(
                 timestamp=current_time,

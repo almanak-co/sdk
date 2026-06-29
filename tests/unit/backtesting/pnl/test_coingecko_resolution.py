@@ -37,6 +37,7 @@ from almanak.framework.backtesting.pnl.providers.coingecko import (
 _WSTETH_ARB_ADDRESS = "0x5979D7b546E38E414F7E9822514be443A4800529"
 _WSTETH_ARB_BRIDGED_ID = "arbitrum-bridged-wsteth-arbitrum"
 _USDC_ARB_ADDRESS = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+_USDC_BASE_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 _TS = datetime(2024, 1, 15, tzinfo=UTC)
 
 
@@ -86,7 +87,22 @@ class TestAddressBackedResolution:
         req.assert_awaited_once()
         # Hit the chain-scoped contract endpoint (arbitrum-one platform id).
         endpoint = req.await_args.args[0]
-        assert endpoint == f"/coins/arbitrum-one/contract/{_WSTETH_ARB_ADDRESS}"
+        assert endpoint == f"/coins/arbitrum-one/contract/{_WSTETH_ARB_ADDRESS.lower()}"
+
+    @pytest.mark.asyncio
+    async def test_address_tuple_resolves_without_symbol_map(self) -> None:
+        """A resolved ``(chain, address)`` key is the primary resolution path."""
+        provider = CoinGeckoDataProvider(retry_config=_fast_retry())
+        with patch.object(
+            provider,
+            "_make_request",
+            new_callable=AsyncMock,
+            return_value={"id": _WSTETH_ARB_BRIDGED_ID},
+        ) as req:
+            coin_id = await provider._resolve_token_id(("arbitrum", _WSTETH_ARB_ADDRESS))
+
+        assert coin_id == _WSTETH_ARB_BRIDGED_ID
+        assert req.await_args.args[0] == f"/coins/arbitrum-one/contract/{_WSTETH_ARB_ADDRESS.lower()}"
 
     @pytest.mark.asyncio
     async def test_resolution_is_cached_no_extra_http(self) -> None:
@@ -123,7 +139,7 @@ class TestAddressBackedResolution:
             coin_id = await provider._resolve_token_id("USDC")
 
         assert coin_id == "usd-coin"
-        assert req.await_args.args[0] == f"/coins/arbitrum-one/contract/{_USDC_ARB_ADDRESS}"
+        assert req.await_args.args[0] == f"/coins/arbitrum-one/contract/{_USDC_ARB_ADDRESS.lower()}"
 
 
 class TestHonestMisses:
@@ -364,6 +380,39 @@ class TestHistoricalCacheKeyedByCoinId:
         assert provider._historical_cache.get("WSTETH", _TS) is None
 
 
+class TestStablecoinAddressFallback:
+    @pytest.mark.asyncio
+    async def test_address_keyed_stablecoin_falls_back_to_one_when_contract_lookup_misses(self) -> None:
+        """Known stablecoin addresses remain priceable when CoinGecko has no contract row."""
+        provider = CoinGeckoDataProvider(retry_config=_fast_retry())
+        with patch.object(
+            provider,
+            "_make_request",
+            new_callable=AsyncMock,
+            side_effect=ValueError("CoinGecko API error 404: contract not found"),
+        ):
+            price = await provider.get_price(("base", _USDC_BASE_ADDRESS), _TS)
+
+        assert price == Decimal("1")
+        assert provider._historical_cache.get(f"base:{_USDC_BASE_ADDRESS.lower()}", _TS) == Decimal("1")
+
+    def test_stablecoin_fallback_treats_resolver_none_as_miss(self) -> None:
+        """A resolver miss should not dereference attributes on None."""
+        provider = CoinGeckoDataProvider(retry_config=_fast_retry())
+
+        with patch("almanak.framework.backtesting.pnl.providers.coingecko.get_token_resolver") as resolver_factory:
+            resolver_factory.return_value.resolve.return_value = None
+
+            assert provider._stablecoin_fallback_cache_id(("base", _USDC_BASE_ADDRESS)) is None
+
+    def test_flat_stablecoin_ohlcv_rejects_non_positive_interval(self) -> None:
+        """Stablecoin fallback candles must not enter a non-advancing loop."""
+        provider = CoinGeckoDataProvider(retry_config=_fast_retry())
+
+        with pytest.raises(ValueError, match="interval_seconds must be positive"):
+            provider._flat_stablecoin_ohlcv(_TS, _TS, 0)
+
+
 class TestSupportedTokens:
     def test_supported_tokens_is_membership_union(self) -> None:
         """supported_tokens = natives ∪ address-map keys, synchronous, no I/O."""
@@ -434,6 +483,17 @@ class TestPersistentResolutionCache:
         assert cache.get_coin_id("arbitrum", _WSTETH_ARB_ADDRESS) is None
         cache.close()
 
+    def test_persisted_resolution_preserves_case_sensitive_non_evm_address(self, tmp_path) -> None:
+        """Non-EVM identifiers keep the exact post-normalizer address casing."""
+        from almanak.framework.backtesting.pnl.providers.coingecko import HistoricalPriceCache
+
+        cache = HistoricalPriceCache(ttl_seconds=0, persistent=True, db_path=str(tmp_path / "hist.db"))
+        cache.set_coin_id("solana", "AbCdEf123", "case-sensitive-token")
+
+        assert cache.get_coin_id("solana", "AbCdEf123") == "case-sensitive-token"
+        assert cache.get_coin_id("solana", "abcdef123") is None
+        cache.close()
+
 
 # cbBTC on Base -- a non-native ERC20 absent from the native projection, so it
 # is an honest miss until its address is registered (the reported numeraire bug).
@@ -489,7 +549,7 @@ class TestRegisterTokenAddresses:
         provider.register_token_addresses({"CBBTC": ("base", _CBBTC_BASE_ADDRESS)})
 
         def _fake_request(endpoint: str, _params: dict) -> dict:
-            if _WSTETH_ARB_ADDRESS in endpoint:
+            if _WSTETH_ARB_ADDRESS.lower() in endpoint:
                 return {"id": _WSTETH_ARB_BRIDGED_ID}
             return {"id": _CBBTC_BASE_BRIDGED_ID}
 

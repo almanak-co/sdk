@@ -62,6 +62,7 @@ from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataCapability,
     HistoricalDataConfig,
     MarketState,
+    TokenRef,
 )
 from almanak.framework.backtesting.pnl.data_quality import DataQualityTracker
 from almanak.framework.backtesting.pnl.error_handling import (
@@ -246,8 +247,9 @@ def initialize_backtest(
         # Ensure the numeraire token is always priced by the data provider, even
         # if the strategy never trades it. Use a local copy -- never mutate
         # config.tokens (it feeds config_hash / the reproducibility audit trail).
-        data_tokens = list(config.tokens)
-        if numeraire_symbol is not None and numeraire_symbol not in {t.upper() for t in data_tokens}:
+        data_tokens: list[TokenRef] = list(config.tokens)
+        data_token_symbols = {t.upper() for t in data_tokens if isinstance(t, str)}
+        if numeraire_symbol is not None and numeraire_symbol not in data_token_symbols:
             data_tokens.append(numeraire_symbol)
             bt_logger.debug(f"Added numeraire token {numeraire_symbol} to the data-fetch token set")
         if config.include_gas_costs and config.gas_eth_price_override is None:
@@ -353,7 +355,7 @@ def initialize_backtest(
     )
 
 
-def _gas_prefetch_symbol(chain: str, data_tokens: list[str], data_provider: Any) -> str | None:
+def _gas_prefetch_symbol(chain: str, data_tokens: list[TokenRef], data_provider: Any) -> str | None:
     """Return a gas price symbol to fetch only when no accepted alias is already present."""
     descriptor = ChainRegistry.try_resolve(chain)
     if descriptor is None:
@@ -376,7 +378,7 @@ def _gas_prefetch_symbol(chain: str, data_tokens: list[str], data_provider: Any)
         seen.add(normalized)
         gas_symbols.append(normalized)
 
-    token_set = {token.upper() for token in data_tokens}
+    token_set = {token.upper() for token in data_tokens if isinstance(token, str)}
     if token_set.intersection(gas_symbols):
         return None
 

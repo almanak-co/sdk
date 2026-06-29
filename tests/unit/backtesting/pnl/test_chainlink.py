@@ -1716,6 +1716,23 @@ class TestHistoricalDataIteration:
         with pytest.raises(DataSourceUnavailable):
             _ = [(timestamp, state) async for timestamp, state in provider.iterate(config)]
 
+    @pytest.mark.asyncio
+    async def test_iterate_rejects_address_keyed_tokens(self):
+        """Chainlink iteration rejects TokenRef inputs before yielding partial rows."""
+        from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig
+
+        provider = ChainlinkDataProvider()
+        config = HistoricalDataConfig(
+            start_time=datetime(2024, 6, 15, 12, 0, tzinfo=UTC),
+            end_time=datetime(2024, 6, 15, 13, 0, tzinfo=UTC),
+            interval_seconds=3600,
+            tokens=[("arbitrum", "0x5979D7b546E38E414F7E9822514be443A4800529")],
+            include_ohlcv=False,
+        )
+
+        with pytest.raises(DataSourceUnavailable, match="only supports symbol tokens"):
+            _ = [(timestamp, state) async for timestamp, state in provider.iterate(config)]
+
 
 class TestGetPrice:
     """Tests for get_price method."""

@@ -39,11 +39,23 @@ from tests.intents.conftest import (
 
 CHAIN_NAME = "arbitrum"
 
-# Pendle market addresses on Arbitrum
-# PT-wstETH-25JUN2026 market
+# Pendle market addresses on Arbitrum. PT-wstETH-25JUN2026 matured on
+# 2026-06-25, but remains the only Anvil-fundable Arbitrum Pendle PT market
+# documented in docs/internal/pendle-anvil-fundability-matrix-vib5324.md.
 PENDLE_WSTETH_MARKET = "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b"
 # PT-wstETH-25JUN2026 token address
 PT_WSTETH_ADDRESS = "0x71fbf40651e9d4278a74586afc99f307f369ce9a"
+
+_ARBITRUM_WSTETH_MARKET_MATURED_XFAIL = pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "VIB-5324: Arbitrum PT-wstETH-25JUN2026 matured on 2026-06-25; "
+        "docs/internal/pendle-anvil-fundability-matrix-vib5324.md records no "
+        "longer-dated Anvil-fundable Arbitrum Pendle PT market. strict=False "
+        "because older fork pins can still xpass until the CI fork pin is moved "
+        "backward or a new fundable Arbitrum market exists (as of 2026-06-29)."
+    ),
+)
 
 
 def _enrich_oracle_with_wsteth(price_oracle: dict[str, Decimal]) -> dict[str, Decimal]:
@@ -80,6 +92,7 @@ class TestPendleSwapIntent:
     """
 
     @pytest.mark.intent(IntentType.SWAP)
+    @_ARBITRUM_WSTETH_MARKET_MATURED_XFAIL
     @pytest.mark.asyncio
     async def test_swap_weth_to_pt_wsteth_using_intent(
         self,

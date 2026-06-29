@@ -29,14 +29,46 @@ Example:
         # ... process market state
 """
 
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeGuard, runtime_checkable
 
 from almanak.core.chains import DEFAULT_CHAIN
+
+TokenKey = tuple[str, str]
+TokenRef = str | TokenKey
+
+_EVM_ADDRESS_RE = re.compile(r"^0[xX][a-fA-F0-9]{40}$")
+_MISSING = object()
+
+
+def normalize_token_key(chain: str, address: str) -> TokenKey:
+    """Return the canonical market-data key for an address on a chain."""
+    normalized_address = address.lower() if is_address_like(address) else address
+    return chain.lower(), normalized_address
+
+
+def is_token_key(token: object) -> TypeGuard[TokenKey]:
+    """Return True for the ``(chain, address)`` token identity shape."""
+    return isinstance(token, tuple) and len(token) == 2 and isinstance(token[0], str) and isinstance(token[1], str)
+
+
+def is_address_like(token: str) -> bool:
+    """Return True for EVM contract-address-shaped strings."""
+    return bool(_EVM_ADDRESS_RE.fullmatch(token.strip()))
+
+
+def token_ref_display(token: TokenRef) -> str:
+    """Return a stable display/cache string for token refs."""
+    if is_token_key(token):
+        chain, address = normalize_token_key(token[0], token[1])
+        return f"{chain}:{address}"
+    assert isinstance(token, str)
+    return token.lower() if is_address_like(token) else token
 
 
 class HistoricalDataCapability(StrEnum):
@@ -132,8 +164,10 @@ class MarketState:
 
     Attributes:
         timestamp: The point in time this state represents
-        prices: Dictionary mapping token symbols to USD prices
-        ohlcv: Dictionary mapping token symbols to OHLCV data (optional)
+        prices: Dictionary mapping token identity to USD prices. Address-native
+            providers use ``(chain, address)`` keys; legacy/test providers may
+            still use symbols during the migration.
+        ohlcv: Dictionary mapping token identity to OHLCV data (optional)
         chain: The blockchain this data is from
         block_number: Approximate block number at this timestamp (optional)
         gas_price_gwei: Gas price in gwei at this timestamp (optional)
@@ -141,8 +175,8 @@ class MarketState:
     """
 
     timestamp: datetime
-    prices: dict[str, Decimal] = field(default_factory=dict)
-    ohlcv: dict[str, OHLCV] = field(default_factory=dict)
+    prices: dict[TokenRef, Decimal] = field(default_factory=dict)
+    ohlcv: dict[TokenRef, OHLCV] = field(default_factory=dict)
     chain: str = DEFAULT_CHAIN
     block_number: int | None = None
     gas_price_gwei: Decimal | None = None
@@ -155,7 +189,7 @@ class MarketState:
     token_aliases: dict[str, str] = field(default_factory=dict)
 
     def _canonical_token(self, token: str) -> str:
-        """Map a contract address to its canonical symbol, else return as-is.
+        """Map a contract address to its transitional symbol, else return as-is.
 
         Address keys are lowercased (Blueprint 17 cache-key convention), so a
         query in any case (a lowercase ``decide`` read or an UPPERCASE
@@ -165,12 +199,65 @@ class MarketState:
             return token
         return self.token_aliases.get(token.lower(), token)
 
-    def get_price(self, token: str) -> Decimal:
+    def _lookup_keys(self, token: TokenRef) -> list[TokenRef]:
+        """Return direct, address, and transitional-symbol candidates for ``token``."""
+        keys: list[TokenRef] = []
+
+        def add(key: TokenRef) -> None:
+            if key not in keys:
+                keys.append(key)
+
+        if is_token_key(token):
+            chain, address = normalize_token_key(token[0], token[1])
+            add((chain, address))
+            add(address)
+            alias = self.token_aliases.get(address)
+            if alias:
+                add(alias)
+                add(alias.upper())
+            return keys
+
+        assert isinstance(token, str)
+        add(token)
+        if is_address_like(token):
+            address = token.lower()
+            add(normalize_token_key(self.chain, address))
+            add(address)
+            alias = self.token_aliases.get(address)
+            if alias:
+                add(alias)
+                add(alias.upper())
+            return keys
+
+        canonical = self._canonical_token(token)
+        add(canonical)
+        add(canonical.upper())
+
+        token_upper = token.upper()
+        for address, symbol in self.token_aliases.items():
+            if symbol.upper() == token_upper:
+                add(normalize_token_key(self.chain, address))
+                add(address)
+
+        return keys
+
+    @staticmethod
+    def _lookup(mapping: dict[TokenRef, Any], key: TokenRef) -> Any:
+        if key in mapping:
+            return mapping[key]
+        if isinstance(key, str):
+            key_upper = key.upper()
+            for stored_key, value in mapping.items():
+                if isinstance(stored_key, str) and stored_key.upper() == key_upper:
+                    return value
+        return _MISSING
+
+    def get_price(self, token: TokenRef) -> Decimal:
         """Get the price of a token at this market state.
 
         Args:
-            token: Token symbol (e.g., "WETH", "USDC") or, when a
-                ``token_aliases`` map is present, a contract address.
+            token: Token identity as a ``(chain, address)`` key, a contract
+                address on ``self.chain``, or a legacy symbol.
 
         Returns:
             Price in USD
@@ -178,52 +265,62 @@ class MarketState:
         Raises:
             KeyError: If token price is not available
         """
-        token_upper = self._canonical_token(token).upper()
-        if token_upper in self.prices:
-            return self.prices[token_upper]
+        for key in self._lookup_keys(token):
+            price = self._lookup(self.prices, key)
+            if price is not _MISSING:
+                return price
 
-        # Try to get price from OHLCV close
-        if token_upper in self.ohlcv:
-            return self.ohlcv[token_upper].close
+            # Try to get price from OHLCV close
+            candle = self._lookup(self.ohlcv, key)
+            if candle is not _MISSING:
+                return candle.close
 
         raise KeyError(f"Price not available for token: {token}")
 
-    def get_ohlcv(self, token: str) -> OHLCV | None:
+    def get_ohlcv(self, token: TokenRef) -> OHLCV | None:
         """Get OHLCV data for a token at this market state.
 
         Args:
-            token: Token symbol (e.g., "WETH", "USDC")
+            token: Token identity as a ``(chain, address)`` key, a contract
+                address on ``self.chain``, or a legacy symbol.
 
         Returns:
             OHLCV data if available, None otherwise
         """
-        return self.ohlcv.get(self._canonical_token(token).upper())
+        for key in self._lookup_keys(token):
+            candle = self._lookup(self.ohlcv, key)
+            if candle is not _MISSING:
+                return candle
+        return None
 
-    def has_token(self, token: str) -> bool:
+    def has_token(self, token: TokenRef) -> bool:
         """Check if price data is available for a token.
 
         Args:
-            token: Token symbol
+            token: Token identity as a ``(chain, address)`` key, a contract
+                address on ``self.chain``, or a legacy symbol.
 
         Returns:
             True if price data exists
         """
-        token_upper = self._canonical_token(token).upper()
-        return token_upper in self.prices or token_upper in self.ohlcv
+        for key in self._lookup_keys(token):
+            if self._lookup(self.prices, key) is not _MISSING or self._lookup(self.ohlcv, key) is not _MISSING:
+                return True
+        return False
 
     @property
     def available_tokens(self) -> list[str]:
         """Get list of tokens with available price data."""
-        tokens = set(self.prices.keys())
-        tokens.update(self.ohlcv.keys())
+        tokens = {token_ref_display(key) for key in self.prices}
+        tokens.update(token_ref_display(key) for key in self.ohlcv)
         return sorted(tokens)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
         return {
             "timestamp": self.timestamp.isoformat(),
-            "prices": {k: str(v) for k, v in self.prices.items()},
-            "ohlcv": {k: v.to_dict() for k, v in self.ohlcv.items()},
+            "prices": {token_ref_display(k): str(v) for k, v in self.prices.items()},
+            "ohlcv": {token_ref_display(k): v.to_dict() for k, v in self.ohlcv.items()},
             "chain": self.chain,
             "block_number": self.block_number,
             "gas_price_gwei": str(self.gas_price_gwei) if self.gas_price_gwei is not None else None,
@@ -242,7 +339,8 @@ class HistoricalDataConfig:
         start_time: Start of the historical period (inclusive)
         end_time: End of the historical period (inclusive)
         interval_seconds: Time between data points in seconds (default: 3600 = 1 hour)
-        tokens: List of token symbols to fetch prices for
+        tokens: List of resolved ``(chain, address)`` token identities or
+            legacy token symbols to fetch prices for.
         chains: List of chain identifiers to fetch data for (default: [DEFAULT_CHAIN])
         include_ohlcv: Whether to fetch OHLCV data (default: True)
         include_gas_prices: Whether to fetch historical gas prices (default: False)
@@ -251,7 +349,7 @@ class HistoricalDataConfig:
     start_time: datetime
     end_time: datetime
     interval_seconds: int = 3600  # 1 hour default
-    tokens: list[str] = field(default_factory=lambda: ["WETH", "USDC"])
+    tokens: list[TokenRef] = field(default_factory=lambda: ["WETH", "USDC"])
     chains: list[str] = field(default_factory=lambda: [DEFAULT_CHAIN])
     include_ohlcv: bool = True
     include_gas_prices: bool = False
@@ -289,7 +387,7 @@ class HistoricalDataConfig:
             "start_time": self.start_time.isoformat(),
             "end_time": self.end_time.isoformat(),
             "interval_seconds": self.interval_seconds,
-            "tokens": self.tokens,
+            "tokens": [token_ref_display(token) for token in self.tokens],
             "chains": self.chains,
             "include_ohlcv": self.include_ohlcv,
             "include_gas_prices": self.include_gas_prices,
@@ -333,11 +431,11 @@ class HistoricalDataProvider(Protocol):
                 ...
     """
 
-    async def get_price(self, token: str, timestamp: datetime) -> Decimal:
+    async def get_price(self, token: TokenRef, timestamp: datetime) -> Decimal:
         """Get the price of a token at a specific timestamp.
 
         Args:
-            token: Token symbol (e.g., "WETH", "USDC", "ARB")
+            token: Token identity as a ``(chain, address)`` key, or legacy symbol.
             timestamp: The historical point in time
 
         Returns:
@@ -351,7 +449,7 @@ class HistoricalDataProvider(Protocol):
 
     async def get_ohlcv(
         self,
-        token: str,
+        token: TokenRef,
         start: datetime,
         end: datetime,
         interval_seconds: int = 3600,
@@ -359,7 +457,7 @@ class HistoricalDataProvider(Protocol):
         """Get OHLCV data for a token over a time range.
 
         Args:
-            token: Token symbol (e.g., "WETH", "USDC", "ARB")
+            token: Token identity as a ``(chain, address)`` key, or legacy symbol.
             start: Start of the time range (inclusive)
             end: End of the time range (inclusive)
             interval_seconds: Candle interval in seconds (default: 3600 = 1 hour)
@@ -427,7 +525,13 @@ class HistoricalDataProvider(Protocol):
 __all__ = [
     "HistoricalDataCapability",
     "OHLCV",
+    "TokenKey",
+    "TokenRef",
     "MarketState",
     "HistoricalDataConfig",
     "HistoricalDataProvider",
+    "is_address_like",
+    "is_token_key",
+    "normalize_token_key",
+    "token_ref_display",
 ]

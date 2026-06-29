@@ -55,6 +55,7 @@ if TYPE_CHECKING:
         OHLCV,
         HistoricalDataConfig,
         MarketState,
+        TokenRef,
     )
 
 logger = logging.getLogger(__name__)
@@ -1125,12 +1126,23 @@ class DEXTWAPDataProvider:
         Yields:
             Tuples of (timestamp, MarketState) for each time point
         """
-        from almanak.framework.backtesting.pnl.data_provider import OHLCV, MarketState
+        from almanak.framework.backtesting.pnl.data_provider import OHLCV, MarketState, token_ref_display
+        from almanak.framework.data.interfaces import DataSourceUnavailable
 
         logger.info(
             f"Starting DEX TWAP iteration from {config.start_time} to {config.end_time} "
             f"with {config.interval_seconds}s interval for tokens: {config.tokens}"
         )
+
+        unsupported = [token_ref_display(token) for token in config.tokens if not isinstance(token, str)]
+        if unsupported:
+            raise DataSourceUnavailable(
+                source="dex_twap",
+                reason=(
+                    "DEX TWAP iteration only supports symbol tokens; unsupported TokenRef entries: "
+                    + ", ".join(unsupported)
+                ),
+            )
 
         # Initialize cache if needed
         if self._cache is None:
@@ -1148,10 +1160,11 @@ class DEXTWAPDataProvider:
         data_points = 0
 
         while current_time <= end_time:
-            prices: dict[str, Decimal] = {}
-            ohlcv_data: dict[str, OHLCV] = {}
+            prices: dict[TokenRef, Decimal] = {}
+            ohlcv_data: dict[TokenRef, OHLCV] = {}
 
             for token in config.tokens:
+                assert isinstance(token, str)
                 token_upper = token.upper()
 
                 # Try to get from cache first

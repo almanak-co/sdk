@@ -17,6 +17,7 @@ from decimal import Decimal
 
 import pytest
 
+from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.price.dex_twap import (
     LIQUIDITY_SELECTOR,
     MIN_LIQUIDITY_USD,
@@ -1095,6 +1096,22 @@ class TestIterateMethod:
             break
 
         assert provider._cache is not None
+
+    @pytest.mark.asyncio
+    async def test_iterate_rejects_address_keyed_tokens(self):
+        """TWAP iteration rejects TokenRef inputs before yielding partial rows."""
+        from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig
+
+        provider = DEXTWAPDataProvider()
+        config = HistoricalDataConfig(
+            start_time=datetime(2024, 1, 1, 12, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 1, 13, 0, tzinfo=UTC),
+            interval_seconds=3600,
+            tokens=[("arbitrum", "0x5979D7b546E38E414F7E9822514be443A4800529")],
+        )
+
+        with pytest.raises(DataSourceUnavailable, match="only supports symbol tokens"):
+            _ = [item async for item in provider.iterate(config)]
 
 
 class TestLowLiquidityLogging:

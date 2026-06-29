@@ -50,9 +50,21 @@ from almanak.core.chains._helpers import (
     vendor_chain_map,
 )
 from almanak.core.chains._registry import ChainRegistry
+from almanak.core.constants import STABLECOINS
 from almanak.framework.backtesting.config import BacktestDataConfig
+from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
 
-from ..data_provider import OHLCV, HistoricalDataConfig, MarketState
+from ..data_provider import (
+    OHLCV,
+    HistoricalDataConfig,
+    MarketState,
+    TokenKey,
+    TokenRef,
+    is_address_like,
+    is_token_key,
+    normalize_token_key,
+    token_ref_display,
+)
 from .rate_limiter import TokenBucketRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -383,6 +395,14 @@ class HistoricalPriceCache:
             self._db = None
             self._persistent = False
 
+    @staticmethod
+    def _normalize_cache_token(token: str) -> str:
+        """Normalize a cache token without erasing address / coin-id identity."""
+        token = token.strip()
+        if token.lower().startswith("0x") or ":" in token or "-" in token:
+            return token.lower()
+        return token.upper()
+
     def _make_key(self, token: str, timestamp: datetime) -> str:
         """Create cache key from token and timestamp.
 
@@ -396,7 +416,7 @@ class HistoricalPriceCache:
             Cache key string
         """
         date_str = timestamp.strftime("%Y-%m-%d")
-        return f"{token.upper()}:{date_str}"
+        return f"{self._normalize_cache_token(token)}:{date_str}"
 
     def get(self, token: str, timestamp: datetime) -> Decimal | None:
         """Get cached price for a token at a timestamp.
@@ -430,11 +450,11 @@ class HistoricalPriceCache:
 
         # Check persistent store
         if self._persistent and self._db is not None:
-            token_upper = token.upper()
+            token_key = self._normalize_cache_token(token)
             date_str = timestamp.strftime("%Y-%m-%d")
             row = self._db.execute(
                 "SELECT price, cached_at FROM historical_prices WHERE token = ? AND date_str = ?",
-                (token_upper, date_str),
+                (token_key, date_str),
             ).fetchone()
             if row is not None:
                 price = Decimal(row[0])
@@ -467,12 +487,12 @@ class HistoricalPriceCache:
         self._stats.cache_entries = len(self._cache)
 
         if self._persistent and self._db is not None:
-            token_upper = token.upper()
+            token_key = self._normalize_cache_token(token)
             date_str = timestamp.strftime("%Y-%m-%d")
             self._db.execute(
                 """INSERT OR REPLACE INTO historical_prices (token, date_str, price, cached_at)
                    VALUES (?, ?, ?, ?)""",
-                (token_upper, date_str, str(price), now.isoformat()),
+                (token_key, date_str, str(price), now.isoformat()),
             )
             self._db.commit()
 
@@ -495,7 +515,7 @@ class HistoricalPriceCache:
             return None
         row = self._db.execute(
             "SELECT coin_id FROM coin_id_resolutions WHERE chain = ? AND address = ?",
-            (chain.lower(), address.lower()),
+            normalize_token_key(chain, address),
         ).fetchone()
         return row[0] if row is not None else None
 
@@ -515,7 +535,7 @@ class HistoricalPriceCache:
         self._db.execute(
             """INSERT OR REPLACE INTO coin_id_resolutions (chain, address, coin_id, resolved_at)
                VALUES (?, ?, ?, ?)""",
-            (chain.lower(), address.lower(), coin_id, datetime.now(UTC).isoformat()),
+            (*normalize_token_key(chain, address), coin_id, datetime.now(UTC).isoformat()),
         )
         self._db.commit()
 
@@ -570,16 +590,28 @@ class HistoricalPriceCache:
 class OHLCVCache:
     """Cache for OHLCV data to minimize API calls."""
 
-    data: dict[str, list[OHLCV]]  # token -> list of OHLCV
+    data: dict[TokenRef, list[OHLCV]]  # token identity -> list of OHLCV
     fetched_at: datetime
+    default_chain: str | None = None
 
-    def get_price_at(self, token: str, timestamp: datetime) -> Decimal | None:
+    @staticmethod
+    def _key(token: TokenRef, default_chain: str | None = None) -> TokenRef:
+        if is_token_key(token):
+            return normalize_token_key(token[0], token[1])
+        assert isinstance(token, str)
+        if is_address_like(token):
+            if default_chain:
+                return normalize_token_key(default_chain, token)
+            return token.lower()
+        return token.upper()
+
+    def get_price_at(self, token: TokenRef, timestamp: datetime) -> Decimal | None:
         """Get interpolated price at a specific timestamp."""
-        token_upper = token.upper()
-        if token_upper not in self.data:
+        token_key = self._key(token, self.default_chain)
+        if token_key not in self.data:
             return None
 
-        ohlcv_list = self.data[token_upper]
+        ohlcv_list = self.data[token_key]
         if not ohlcv_list:
             return None
 
@@ -598,13 +630,13 @@ class OHLCVCache:
 
         return None
 
-    def get_ohlcv_at(self, token: str, timestamp: datetime) -> OHLCV | None:
+    def get_ohlcv_at(self, token: TokenRef, timestamp: datetime) -> OHLCV | None:
         """Get OHLCV data at or just before a specific timestamp."""
-        token_upper = token.upper()
-        if token_upper not in self.data:
+        token_key = self._key(token, self.default_chain)
+        if token_key not in self.data:
             return None
 
-        ohlcv_list = self.data[token_upper]
+        ohlcv_list = self.data[token_key]
         if not ohlcv_list:
             return None
 
@@ -732,7 +764,7 @@ class CoinGeckoDataProvider:
         self._retry_config = retry_config or RetryConfig()
         self._data_config = data_config
 
-        # Address-backed resolution map: SYMBOL_UPPER -> (chain, address).
+        # Address-backed resolution map: SYMBOL_UPPER -> (chain, normalized address).
         # Non-native ERC20s resolve their coin id through the contract endpoint
         # keyed off this map; symbols absent from it (and not native) are
         # honest misses.
@@ -805,7 +837,10 @@ class CoinGeckoDataProvider:
         token_addresses: dict[str, tuple[str, str]] | None,
     ) -> dict[str, tuple[str, str]]:
         """Return a case-insensitive token-address map keyed by uppercase symbol."""
-        return {symbol.upper(): value for symbol, value in (token_addresses or {}).items()}
+        return {
+            symbol.upper(): normalize_token_key(chain, address)
+            for symbol, (chain, address) in (token_addresses or {}).items()
+        }
 
     @staticmethod
     def _normalize_native_ids() -> dict[str, str]:
@@ -838,6 +873,48 @@ class CoinGeckoDataProvider:
     def _rate_limiter_burst_size(rate_limit: int) -> int:
         """Return the token-bucket burst size for a CoinGecko rate limit."""
         return max(1, rate_limit // 5)
+
+    @staticmethod
+    def _market_cache_key(token: TokenRef, default_chain: str | None = None) -> TokenRef:
+        """Return the key used by per-run market-state / OHLCV caches."""
+        if is_token_key(token):
+            return normalize_token_key(token[0], token[1])
+        assert isinstance(token, str)
+        if is_address_like(token) and default_chain:
+            return normalize_token_key(default_chain, token)
+        return token.upper()
+
+    @staticmethod
+    def _address_cache_id(token_key: TokenKey) -> str:
+        """Return a stable scalar cache id for address-keyed fallback prices."""
+        chain, address = normalize_token_key(token_key[0], token_key[1])
+        return f"{chain}:{address}"
+
+    @staticmethod
+    def _token_key_from_ref(token: TokenRef, default_chain: str | None = None) -> TokenKey | None:
+        """Return ``(chain, address)`` for address token refs, if fully specified."""
+        if is_token_key(token):
+            return normalize_token_key(token[0], token[1])
+        assert isinstance(token, str)
+        if default_chain and is_address_like(token):
+            return normalize_token_key(default_chain, token)
+        return None
+
+    @staticmethod
+    def _flat_stablecoin_ohlcv(start: datetime, end: datetime, interval_seconds: int) -> list[OHLCV]:
+        """Return deterministic $1 candles for statically-known stablecoins."""
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be positive")
+
+        candles: list[OHLCV] = []
+        current = _as_utc(start)
+        end_utc = _as_utc(end)
+        interval = timedelta(seconds=interval_seconds)
+        one = Decimal("1")
+        while current <= end_utc:
+            candles.append(OHLCV(timestamp=current, open=one, high=one, low=one, close=one, volume=None))
+            current += interval
+        return candles
 
     def __repr__(self) -> str:
         """Return a safe representation without exposing the API key."""
@@ -885,28 +962,30 @@ class CoinGeckoDataProvider:
         # left verbatim. Mirrors the cache key, which already lower-cases.
         self._token_addresses.update(
             {
-                symbol.upper(): (chain, address.lower() if address.startswith("0x") else address)
+                symbol.upper(): normalize_token_key(chain, address)
                 for symbol, (chain, address) in token_addresses.items()
             }
         )
 
-    async def _resolve_token_id(self, token: str) -> str | None:
-        """Resolve a token symbol to its CoinGecko coin id.
+    async def _resolve_token_id(self, token: TokenRef) -> str | None:
+        """Resolve a token reference to its CoinGecko coin id.
 
         Three steps, in order:
 
-        1. **Native** (case-insensitive): a native gas / wrapped-native symbol
+        1. **Address-keyed**: a ``(chain, address)`` token resolves directly
+           via :meth:`_resolve_coin_id_by_address`.
+        2. **Native** (case-insensitive): a native gas / wrapped-native symbol
            resolves to its registry-derived coin id with zero I/O.
-        2. **Address-backed**: a symbol present in ``token_addresses`` resolves
+        3. **Address-backed symbol**: a symbol present in ``token_addresses`` resolves
            via :meth:`_resolve_coin_id_by_address`, which hits the CoinGecko
            contract endpoint (cache-fronted). The chain-specific (bridged) coin
            id the contract resolves to is returned deliberately — it is the
            asset actually traded.
-        3. **Honest miss**: any other symbol returns ``None`` (no fabricated
+        4. **Honest miss**: any other symbol returns ``None`` (no fabricated
            price). The caller raises ``ValueError`` on ``None``.
 
         Args:
-            token: Token symbol.
+            token: ``(chain, address)`` token identity or token symbol.
 
         Returns:
             CoinGecko coin id, or ``None`` on an honest miss.
@@ -915,11 +994,21 @@ class CoinGeckoDataProvider:
             CoinGeckoRateLimitError: A transient 429 during address resolution
                 propagates (it is not a miss).
         """
-        native_id = self._native_ids_by_upper.get(token.upper())
+        token_key = self._token_key_from_ref(token)
+        if token_key is not None:
+            chain, address = token_key
+            return await self._resolve_coin_id_by_address(chain, address)
+
+        if not isinstance(token, str) or is_address_like(token):
+            return None
+
+        token_upper = token.upper()
+
+        native_id = self._native_ids_by_upper.get(token_upper)
         if native_id is not None:
             return native_id
 
-        entry = self._token_addresses.get(token.upper())
+        entry = self._token_addresses.get(token_upper)
         if entry is not None:
             chain, address = entry
             return await self._resolve_coin_id_by_address(chain, address)
@@ -950,7 +1039,8 @@ class CoinGeckoDataProvider:
         Raises:
             CoinGeckoRateLimitError: A transient 429 propagates (not a miss).
         """
-        cache_key = (chain.lower(), address.lower())
+        chain, address = normalize_token_key(chain, address)
+        cache_key = (chain, address)
 
         cached = self._coin_id_cache.get(cache_key)
         if cached is not None:
@@ -995,6 +1085,25 @@ class CoinGeckoDataProvider:
         self._coin_id_cache[cache_key] = coin_id
         self._historical_cache.set_coin_id(chain, address, coin_id)
         return coin_id
+
+    def _stablecoin_fallback_cache_id(self, token: TokenRef) -> str | None:
+        """Return an address cache id when ``token`` is a known stablecoin address."""
+        token_key = self._token_key_from_ref(token)
+        if token_key is None:
+            return None
+
+        chain, address = token_key
+        try:
+            resolved = get_token_resolver().resolve(address, chain, log_errors=False, skip_gateway=True)
+        except TokenResolutionError:
+            return None
+
+        if resolved is None:
+            return None
+
+        if resolved.is_stablecoin or resolved.symbol.upper() in STABLECOINS:
+            return self._address_cache_id((chain, address))
+        return None
 
     async def _wait_for_rate_limit(self) -> None:
         """Wait if needed to respect rate limits.
@@ -1146,7 +1255,7 @@ class CoinGeckoDataProvider:
             last_backoff=last_backoff,
         )
 
-    async def get_price(self, token: str, timestamp: datetime) -> Decimal:
+    async def get_price(self, token: TokenRef, timestamp: datetime) -> Decimal:
         """Get the price of a token at a specific timestamp.
 
         Uses the CoinGecko /coins/{id}/history endpoint for historical prices.
@@ -1155,7 +1264,7 @@ class CoinGeckoDataProvider:
         chain-specific ids cannot collide across runs.
 
         Args:
-            token: Token symbol (e.g., "WETH", "USDC", "ARB")
+            token: ``(chain, address)`` token identity or token symbol.
             timestamp: The historical point in time
 
         Returns:
@@ -1164,9 +1273,23 @@ class CoinGeckoDataProvider:
         Raises:
             ValueError: If price data is not available for the token/timestamp
         """
+        ohlcv_cached_price: Decimal | None = None
+        if self._cache is not None:
+            ohlcv_cached_price = self._cache.get_price_at(token, timestamp)
+
         token_id = await self._resolve_token_id(token)
         if token_id is None:
-            raise ValueError(f"Unknown token: {token}")
+            if ohlcv_cached_price is not None:
+                return ohlcv_cached_price
+            stablecoin_cache_id = self._stablecoin_fallback_cache_id(token)
+            if stablecoin_cache_id is None:
+                raise ValueError(f"Unknown token: {token_ref_display(token)}")
+            cached_price = self._historical_cache.get(stablecoin_cache_id, timestamp)
+            if cached_price is not None:
+                return cached_price
+            price = Decimal("1")
+            self._historical_cache.set(stablecoin_cache_id, timestamp, price)
+            return price
 
         # Persistent cache is keyed by the resolved coin id, NOT the symbol: the
         # same symbol resolves to different chain-specific (bridged) coin ids
@@ -1178,13 +1301,11 @@ class CoinGeckoDataProvider:
             return cached_price
 
         # Check OHLCV cache (if iterate() was called). The OHLCV cache is a
-        # per-run DataCache (single chain), so symbol keying is unambiguous there.
-        if self._cache is not None:
-            ohlcv_cached_price = self._cache.get_price_at(token, timestamp)
-            if ohlcv_cached_price is not None:
-                # Also store in the persistent cache (coin-id-keyed) for reuse.
-                self._historical_cache.set(token_id, timestamp, ohlcv_cached_price)
-                return ohlcv_cached_price
+        # per-run DataCache keyed by the same identity emitted in MarketState.
+        if ohlcv_cached_price is not None:
+            # Also store in the persistent cache (coin-id-keyed) for reuse.
+            self._historical_cache.set(token_id, timestamp, ohlcv_cached_price)
+            return ohlcv_cached_price
 
         # Format date for CoinGecko API (dd-mm-yyyy)
         date_str = timestamp.strftime("%d-%m-%Y")
@@ -1194,11 +1315,11 @@ class CoinGeckoDataProvider:
         data = await self._make_request(f"/coins/{token_id}/history", params)
 
         if "market_data" not in data:
-            raise ValueError(f"No market data available for {token} on {date_str}")
+            raise ValueError(f"No market data available for {token_ref_display(token)} on {date_str}")
 
         price_usd = data["market_data"]["current_price"].get("usd")
         if price_usd is None:
-            raise ValueError(f"No USD price available for {token} on {date_str}")
+            raise ValueError(f"No USD price available for {token_ref_display(token)} on {date_str}")
 
         price = Decimal(str(price_usd))
 
@@ -1210,7 +1331,7 @@ class CoinGeckoDataProvider:
 
     async def get_ohlcv(
         self,
-        token: str,
+        token: TokenRef,
         start: datetime,
         end: datetime,
         interval_seconds: int = 3600,
@@ -1225,7 +1346,7 @@ class CoinGeckoDataProvider:
         - >90 days: daily intervals
 
         Args:
-            token: Token symbol (e.g., "WETH", "USDC", "ARB")
+            token: ``(chain, address)`` token identity or token symbol.
             start: Start of the time range (inclusive)
             end: End of the time range (inclusive)
             interval_seconds: Candle interval in seconds (default: 3600 = 1 hour)
@@ -1240,7 +1361,9 @@ class CoinGeckoDataProvider:
         """
         token_id = await self._resolve_token_id(token)
         if token_id is None:
-            raise ValueError(f"Unknown token: {token}")
+            if self._stablecoin_fallback_cache_id(token) is not None:
+                return self._flat_stablecoin_ohlcv(start, end, interval_seconds)
+            raise ValueError(f"Unknown token: {token_ref_display(token)}")
 
         # Convert to Unix timestamps
         start_ts = int(start.timestamp())
@@ -1256,7 +1379,7 @@ class CoinGeckoDataProvider:
 
         prices = data.get("prices", [])
         if not prices:
-            raise ValueError(f"No price data available for {token} in range")
+            raise ValueError(f"No price data available for {token_ref_display(token)} in range")
 
         # CoinGecko returns [timestamp_ms, price] pairs
         # Convert to OHLCV (using same price for O/H/L/C since we only get close prices)
@@ -1305,21 +1428,24 @@ class CoinGeckoDataProvider:
         Returns:
             OHLCVCache with all prefetched data
         """
-        data: dict[str, list[OHLCV]] = {}
+        data: dict[TokenRef, list[OHLCV]] = {}
         start_time = _as_utc(config.start_time)
         end_time = _as_utc(config.end_time)
+        default_chain = config.chains[0] if config.chains else DEFAULT_CHAIN
 
         for token in config.tokens:
+            cache_key = self._market_cache_key(token, default_chain)
+            fetch_token = cache_key
             try:
                 ohlcv = await self.get_ohlcv(
-                    token,
+                    fetch_token,
                     start_time,
                     end_time,
                     config.interval_seconds,
                 )
             except ValueError as e:
-                logger.warning(f"Failed to prefetch data for {token}: {e}")
-                data[token.upper()] = []
+                logger.warning(f"Failed to prefetch data for {token_ref_display(fetch_token)}: {e}")
+                data[cache_key] = []
                 continue
 
             # Seed a prior candle when the first in-window candle is misaligned
@@ -1327,21 +1453,21 @@ class CoinGeckoDataProvider:
             # candle to forward-fill from (a real past close, never a future one).
             if ohlcv and ohlcv[0].timestamp > start_time:
                 seed = await self._fetch_prior_candle(
-                    token,
+                    fetch_token,
                     start_time,
                     config.interval_seconds,
                 )
                 if seed is not None and seed.timestamp < ohlcv[0].timestamp:
                     ohlcv = [seed, *ohlcv]
 
-            data[token.upper()] = ohlcv
-            logger.info(f"Prefetched {len(ohlcv)} data points for {token}")
+            data[cache_key] = ohlcv
+            logger.info(f"Prefetched {len(ohlcv)} data points for {token_ref_display(fetch_token)}")
 
-        return OHLCVCache(data=data, fetched_at=datetime.now(UTC))
+        return OHLCVCache(data=data, fetched_at=datetime.now(UTC), default_chain=default_chain)
 
     async def _fetch_prior_candle(
         self,
-        token: str,
+        token: TokenRef,
         start: datetime,
         interval_seconds: int,
     ) -> OHLCV | None:
@@ -1404,24 +1530,25 @@ class CoinGeckoDataProvider:
 
         while current_time <= end_time:
             # Build prices dict from cache
-            prices: dict[str, Decimal] = {}
-            ohlcv_data: dict[str, OHLCV] = {}
+            prices: dict[TokenRef, Decimal] = {}
+            ohlcv_data: dict[TokenRef, OHLCV] = {}
+            default_chain = config.chains[0] if config.chains else DEFAULT_CHAIN
 
             for token in config.tokens:
-                token_upper = token.upper()
+                cache_key = self._market_cache_key(token, default_chain)
 
                 # Get OHLCV data if requested
                 if config.include_ohlcv:
-                    candle = self._cache.get_ohlcv_at(token_upper, current_time)
+                    candle = self._cache.get_ohlcv_at(cache_key, current_time)
                     if candle is not None:
-                        ohlcv_data[token_upper] = candle
-                        prices[token_upper] = candle.close
+                        ohlcv_data[cache_key] = candle
+                        prices[cache_key] = candle.close
 
                 # If no OHLCV, try to get price directly from cache
-                if token_upper not in prices:
-                    price = self._cache.get_price_at(token_upper, current_time)
+                if cache_key not in prices:
+                    price = self._cache.get_price_at(cache_key, current_time)
                     if price is not None:
-                        prices[token_upper] = price
+                        prices[cache_key] = price
 
             # Create MarketState for this timestamp
             market_state = MarketState(
@@ -1452,15 +1579,16 @@ class CoinGeckoDataProvider:
 
     @property
     def supported_tokens(self) -> list[str]:
-        """Return the symbols that have a resolution route, sorted.
+        """Return identities that have a resolution route, sorted.
 
-        A symbol has a route when it is either a native gas / wrapped-native
-        symbol (registry-derived) or carries an entry in ``token_addresses``
-        (address-backed dynamic resolution). This is membership only — it does
-        NOT perform the contract lookup, so it stays synchronous and I/O-free.
-        Symbols outside this set are honest misses at price-fetch time.
+        Native gas / wrapped-native symbols keep their symbol display. ERC20s
+        registered through ``token_addresses`` expose both the transitional
+        symbol and their address so membership consumers can move gradually
+        from symbol to address identity. This is membership only — it does NOT
+        perform the contract lookup, so it stays synchronous and I/O-free.
         """
-        return sorted(set(self._native_ids_by_upper) | set(self._token_addresses))
+        address_keys = {address for _chain, address in self._token_addresses.values()}
+        return sorted(set(self._native_ids_by_upper) | set(self._token_addresses) | address_keys)
 
     @property
     def supported_chains(self) -> list[str]:
@@ -1556,7 +1684,7 @@ class CoinGeckoDataProvider:
 
     async def warm_cache(
         self,
-        tokens: list[str],
+        tokens: list[TokenRef],
         start_date: datetime,
         end_date: datetime,
     ) -> dict[str, int]:
@@ -1567,7 +1695,7 @@ class CoinGeckoDataProvider:
         calls during subsequent backtests over the same period.
 
         Args:
-            tokens: List of token symbols to warm cache for
+            tokens: List of token identities or symbols to warm cache for
             start_date: Start of date range (inclusive)
             end_date: End of date range (inclusive)
 
@@ -1600,20 +1728,22 @@ class CoinGeckoDataProvider:
         cached_counts: dict[str, int] = {}
 
         for token in tokens:
-            token_upper = token.upper()
-            cached_counts[token_upper] = 0
+            token_label = token_ref_display(token)
+            cached_counts[token_label] = 0
 
             # Resolve the coin id once so the "already cached" pre-check uses the
             # same coin-id key get_price() writes under (symbol keying would
             # always miss and silently re-probe every day).
             try:
-                cache_id = await self._resolve_token_id(token_upper)
+                cache_id = await self._resolve_token_id(token)
             except CoinGeckoRateLimitError as e:
-                logger.warning(f"Rate limited resolving {token_upper} for warm cache: {e}")
+                logger.warning(f"Rate limited resolving {token_label} for warm cache: {e}")
                 continue
             if cache_id is None:
-                logger.warning(f"No CoinGecko id for {token_upper}; skipping warm cache")
-                continue
+                cache_id = self._stablecoin_fallback_cache_id(token)
+                if cache_id is None:
+                    logger.warning(f"No CoinGecko id for {token_label}; skipping warm cache")
+                    continue
 
             # Iterate through each day in the range
             current_date = start_date
@@ -1621,29 +1751,29 @@ class CoinGeckoDataProvider:
                 # Check if already in cache (coin-id keyed, matching get_price)
                 if self._historical_cache.get(cache_id, current_date) is not None:
                     # Already cached, increment count but don't fetch
-                    cached_counts[token_upper] += 1
+                    cached_counts[token_label] += 1
                     current_date += timedelta(days=1)
                     continue
 
                 try:
                     # Fetch and cache the price
-                    price = await self.get_price(token_upper, current_date)
-                    cached_counts[token_upper] += 1
-                    logger.debug(f"Warmed cache: {token_upper} on {current_date.strftime('%Y-%m-%d')}: ${price}")
+                    price = await self.get_price(token, current_date)
+                    cached_counts[token_label] += 1
+                    logger.debug(f"Warmed cache: {token_label} on {current_date.strftime('%Y-%m-%d')}: ${price}")
                 except ValueError as e:
                     logger.warning(
-                        f"Failed to warm cache for {token_upper} on {current_date.strftime('%Y-%m-%d')}: {e}"
+                        f"Failed to warm cache for {token_label} on {current_date.strftime('%Y-%m-%d')}: {e}"
                     )
                 except CoinGeckoRateLimitError as e:
                     logger.warning(
-                        f"Rate limited while warming cache for {token_upper}: {e}. "
-                        f"Cached {cached_counts[token_upper]} prices so far."
+                        f"Rate limited while warming cache for {token_label}: {e}. "
+                        f"Cached {cached_counts[token_label]} prices so far."
                     )
                     break  # Stop warming this token to avoid excessive rate limiting
 
                 current_date += timedelta(days=1)
 
-            logger.info(f"Warmed {cached_counts[token_upper]} prices for {token_upper}")
+            logger.info(f"Warmed {cached_counts[token_label]} prices for {token_label}")
 
         total_cached = sum(cached_counts.values())
         cache_stats = self._historical_cache.get_stats()

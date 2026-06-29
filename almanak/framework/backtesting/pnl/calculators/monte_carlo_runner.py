@@ -60,6 +60,7 @@ from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataConfig,
     MarketState,
+    TokenRef,
 )
 
 logger = logging.getLogger(__name__)
@@ -398,7 +399,7 @@ class SimulatedPricePathProvider:
             price = self.price_path[step]
 
             # Build prices dict
-            prices: dict[str, Decimal] = {
+            prices: dict[TokenRef, Decimal] = {
                 self.base_token: price,
                 self.quote_token: Decimal("1"),
             }

@@ -49,7 +49,14 @@ from typing import Any
 from almanak.config.backtest import backtest_config_from_env
 from almanak.framework.data.interfaces import DataSourceUnavailable
 
-from ..data_provider import OHLCV, HistoricalDataCapability, HistoricalDataConfig, MarketState
+from ..data_provider import (
+    OHLCV,
+    HistoricalDataCapability,
+    HistoricalDataConfig,
+    MarketState,
+    TokenRef,
+    token_ref_display,
+)
 from ..types import DataConfidence, DataSourceInfo
 
 logger = logging.getLogger(__name__)
@@ -2124,6 +2131,16 @@ class ChainlinkDataProvider:
 
     async def _prepare_iteration(self, config: HistoricalDataConfig) -> _IterationStats:
         """Prepare cache and source metadata for a Chainlink iteration."""
+        unsupported = [token_ref_display(token) for token in config.tokens if not isinstance(token, str)]
+        if unsupported:
+            raise DataSourceUnavailable(
+                source="chainlink",
+                reason=(
+                    "Chainlink iteration only supports symbol tokens; unsupported TokenRef entries: "
+                    + ", ".join(unsupported)
+                ),
+            )
+
         self._ensure_price_cache()
         has_archive = await self._verify_archive_access()
         stats = _IterationStats(
@@ -2158,6 +2175,7 @@ class ChainlinkDataProvider:
         cache = self._ensure_price_cache()
 
         for token in config.tokens:
+            assert isinstance(token, str)
             token_upper = token.upper()
             if cache.data.get(token_upper):
                 logger.debug(f"Using existing cache for {token_upper}")
@@ -2213,12 +2231,13 @@ class ChainlinkDataProvider:
         config: HistoricalDataConfig,
         current_time: datetime,
         stats: _IterationStats,
-    ) -> tuple[dict[str, Decimal], dict[str, OHLCV]]:
+    ) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, OHLCV]]:
         """Return price and optional pseudo-OHLCV data for one iteration timestamp."""
-        prices: dict[str, Decimal] = {}
-        ohlcv_data: dict[str, OHLCV] = {}
+        prices: dict[TokenRef, Decimal] = {}
+        ohlcv_data: dict[TokenRef, OHLCV] = {}
 
         for token in config.tokens:
+            assert isinstance(token, str)
             token_upper = token.upper()
             price = await self._iteration_token_price(token_upper, current_time)
             if price is None:

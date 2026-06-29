@@ -101,14 +101,14 @@ class TestCoinGeckoProviderInitialization:
 
         assert provider._min_request_interval == 0.75
 
-    def test_token_addresses_are_stored_with_uppercase_symbols(self):
-        """Address-backed token resolution should be case-insensitive by symbol."""
+    def test_token_addresses_are_stored_with_uppercase_symbols_and_normalized_addresses(self):
+        """Address-backed token resolution should be case-insensitive by symbol and address."""
         provider = CoinGeckoDataProvider(
             token_addresses={"wstETH": ("arbitrum", "0x5979D7b546E38E414F7E9822514be443A4800529")}
         )
 
         assert provider._token_addresses == {
-            "WSTETH": ("arbitrum", "0x5979D7b546E38E414F7E9822514be443A4800529")
+            "WSTETH": ("arbitrum", "0x5979d7b546e38e414f7e9822514be443a4800529")
         }
 
 
@@ -187,6 +187,16 @@ class TestHistoricalPriceCache:
 
         assert cache.get("WETH", timestamp) == price
         assert cache.get("Weth", timestamp) == price
+
+    def test_uppercase_0x_address_cache_keys_are_address_normalized(self):
+        """Address cache tokens normalize even when the hex prefix is uppercase."""
+        timestamp = datetime(2024, 1, 15, tzinfo=UTC)
+        price = Decimal("1.00")
+        cache = HistoricalPriceCache()
+
+        cache.set("0X833589FCD6EDB6E08F4C7C32D4F71B54BDA02913", timestamp, price)
+
+        assert cache.get("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", timestamp) == price
 
     def test_cache_miss_returns_none(self):
         """Test cache miss returns None."""
@@ -339,6 +349,47 @@ class TestOHLCVCache:
 
         assert price is None
 
+    def test_get_price_at_accepts_address_tuple_key(self):
+        """The per-run OHLCV cache can be keyed by resolved token identity."""
+        token_key = ("arbitrum", "0x5979D7b546E38E414F7E9822514be443A4800529")
+        candle = OHLCV(
+            timestamp=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+            open=Decimal("100"),
+            high=Decimal("110"),
+            low=Decimal("95"),
+            close=Decimal("105"),
+            volume=None,
+        )
+        cache = OHLCVCache(
+            data={("arbitrum", "0x5979d7b546e38e414f7e9822514be443a4800529"): [candle]},
+            fetched_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+
+        price = cache.get_price_at(token_key, datetime(2024, 1, 1, 2, 0, tzinfo=UTC))
+
+        assert price == Decimal("105")
+
+    def test_get_price_at_normalizes_bare_address_with_default_chain(self):
+        """Bare address lookups use the same chain-qualified key as prefetch."""
+        address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        candle = OHLCV(
+            timestamp=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+            open=Decimal("1"),
+            high=Decimal("1"),
+            low=Decimal("1"),
+            close=Decimal("1"),
+            volume=None,
+        )
+        cache = OHLCVCache(
+            data={("base", address.lower()): [candle]},
+            fetched_at=datetime(2024, 1, 1, tzinfo=UTC),
+            default_chain="base",
+        )
+
+        price = cache.get_price_at(address, datetime(2024, 1, 1, 2, 0, tzinfo=UTC))
+
+        assert price == Decimal("1")
+
 
 class TestCoinGeckoIteration:
     """Tests for CoinGecko historical market-state iteration."""
@@ -376,6 +427,64 @@ class TestCoinGeckoIteration:
         assert data_points[0][1].ohlcv == {}
         assert data_points[1][1].prices == {"ETH": Decimal("105")}
         assert data_points[1][1].ohlcv == {"ETH": first_candle}
+
+    @pytest.mark.asyncio
+    async def test_iterate_emits_address_keyed_market_state_for_address_tokens(self):
+        """Resolved config tokens become address-keyed prices/OHLCV in MarketState."""
+        token_key = ("arbitrum", "0x5979D7b546E38E414F7E9822514be443A4800529")
+        normalized_key = ("arbitrum", "0x5979d7b546e38e414f7e9822514be443a4800529")
+        candle = OHLCV(
+            timestamp=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            open=Decimal("100"),
+            high=Decimal("110"),
+            low=Decimal("95"),
+            close=Decimal("105"),
+            volume=None,
+        )
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider._prefetch_ohlcv_data = AsyncMock(  # type: ignore[method-assign]
+            return_value=OHLCVCache(
+                data={normalized_key: [candle]},
+                fetched_at=datetime(2024, 1, 1, tzinfo=UTC),
+            )
+        )
+        config = HistoricalDataConfig(
+            start_time=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            interval_seconds=3600,
+            tokens=[token_key],
+            chains=["arbitrum"],
+            include_ohlcv=True,
+        )
+
+        data_points = [(timestamp, state) async for timestamp, state in provider.iterate(config)]
+
+        assert data_points[0][1].prices == {normalized_key: Decimal("105")}
+        assert data_points[0][1].ohlcv == {normalized_key: candle}
+        assert data_points[0][1].available_tokens == [f"{normalized_key[0]}:{normalized_key[1]}"]
+
+    @pytest.mark.asyncio
+    async def test_get_price_hits_prefetched_cache_for_bare_address(self):
+        """After iterate-style prefetch, bare address get_price hits the OHLCV cache."""
+        address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        candle = OHLCV(
+            timestamp=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+            open=Decimal("1"),
+            high=Decimal("1"),
+            low=Decimal("1"),
+            close=Decimal("1"),
+            volume=None,
+        )
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider._cache = OHLCVCache(
+            data={("base", address.lower()): [candle]},
+            fetched_at=datetime(2024, 1, 1, tzinfo=UTC),
+            default_chain="base",
+        )
+
+        price = await provider.get_price(address, datetime(2024, 1, 1, 2, 0, tzinfo=UTC))
+
+        assert price == Decimal("1")
 
 
 class TestPrefetchSeedPriorCandle:
@@ -522,6 +631,30 @@ class TestPrefetchSeedPriorCandle:
         assert cache.data["ETH"][0] is aligned_first
         assert cache.get_price_at("ETH", start) == Decimal("100")
         assert provider.get_ohlcv.await_count == 1  # main fetch only, no seed
+
+    @pytest.mark.asyncio
+    async def test_prefetch_fetches_bare_address_with_default_chain(self):
+        """Bare address configs are fetched through the chain-qualified TokenRef."""
+        start = datetime(2026, 2, 1, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 2, 1, 1, 0, tzinfo=UTC)
+        address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        fetch_token = ("base", address.lower())
+        candle = self._candle(start, "1")
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider.get_ohlcv = AsyncMock(return_value=[candle])  # type: ignore[method-assign]
+
+        config = HistoricalDataConfig(
+            start_time=start,
+            end_time=end,
+            interval_seconds=3600,
+            tokens=[address],
+            chains=["base"],
+            include_ohlcv=True,
+        )
+        cache = await provider._prefetch_ohlcv_data(config)
+
+        assert cache.data == {fetch_token: [candle]}
+        provider.get_ohlcv.assert_awaited_once_with(fetch_token, start, end, 3600)
 
 
 class TestCoinGeckoProviderCaching:

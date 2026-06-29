@@ -60,7 +60,9 @@ from tests.intents.conftest import (
 
 CHAIN_NAME = "arbitrum"
 
-# PT-wstETH-25JUN2026 market on Arbitrum — most liquid Pendle market on this chain.
+# PT-wstETH-25JUN2026 market on Arbitrum. This market matured on 2026-06-25,
+# but remains the only Anvil-fundable Arbitrum Pendle PT market documented in
+# docs/internal/pendle-anvil-fundability-matrix-vib5324.md.
 # The market contract address is also the LP token address for Pendle positions.
 PENDLE_WSTETH_MARKET = "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b"
 
@@ -79,6 +81,17 @@ _DUMMY_RANGE_UPPER = Decimal("999999")
 # Pendle scales SY/PT amounts by an assumed 18-decimal precision
 # (handle_pendle_lp: ``Decimal(str(raw)) / 10**18``).
 _PENDLE_SCALE_18 = Decimal(10**18)
+
+_ARBITRUM_WSTETH_MARKET_MATURED_XFAIL = pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "VIB-5324: Arbitrum PT-wstETH-25JUN2026 matured on 2026-06-25; "
+        "docs/internal/pendle-anvil-fundability-matrix-vib5324.md records no "
+        "longer-dated Anvil-fundable Arbitrum Pendle PT market. strict=False "
+        "because older fork pins can still xpass until the CI fork pin is moved "
+        "backward or a new fundable Arbitrum market exists (as of 2026-06-29)."
+    ),
+)
 
 
 # =============================================================================
@@ -185,6 +198,7 @@ class TestPendleLPOpenIntent:
     """
 
     @pytest.mark.intent(IntentType.LP_OPEN)
+    @_ARBITRUM_WSTETH_MARKET_MATURED_XFAIL
     @pytest.mark.asyncio
     async def test_lp_open_wsteth_into_pendle_market(
         self,
@@ -470,6 +484,7 @@ class TestPendleLPCloseIntent:
         return lp_balance
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
+    @_ARBITRUM_WSTETH_MARKET_MATURED_XFAIL
     @pytest.mark.asyncio
     async def test_lp_close_returns_wsteth(
         self,
