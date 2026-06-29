@@ -42,6 +42,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.chains import ChainRegistry
+from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.backtesting.models import (
     BacktestEngine,
     BacktestMetrics,
@@ -248,6 +250,11 @@ def initialize_backtest(
         if numeraire_symbol is not None and numeraire_symbol not in {t.upper() for t in data_tokens}:
             data_tokens.append(numeraire_symbol)
             bt_logger.debug(f"Added numeraire token {numeraire_symbol} to the data-fetch token set")
+        if config.include_gas_costs and config.gas_eth_price_override is None:
+            gas_asset_symbol = _gas_prefetch_symbol(config.chain, data_tokens, backtester.data_provider)
+            if gas_asset_symbol is not None:
+                data_tokens.append(gas_asset_symbol)
+                bt_logger.debug(f"Added gas asset token {gas_asset_symbol} to the data-fetch token set")
 
         # Register the numeraire's contract address with the data provider so its
         # CoinGecko coin id resolves by address. The numeraire is identified by
@@ -344,6 +351,43 @@ def initialize_backtest(
         total_ticks=total_ticks,
         token_aliases=token_aliases,
     )
+
+
+def _gas_prefetch_symbol(chain: str, data_tokens: list[str], data_provider: Any) -> str | None:
+    """Return a gas price symbol to fetch only when no accepted alias is already present."""
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None:
+        return None
+
+    ordered_symbols = [
+        descriptor.native.symbol,
+        *descriptor.native.accepted_symbols,
+        descriptor.native.wrapped_symbol,
+        *native_symbols_for(chain),
+    ]
+    gas_symbols: list[str] = []
+    seen: set[str] = set()
+    for symbol in ordered_symbols:
+        if not symbol:
+            continue
+        normalized = str(symbol).upper()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        gas_symbols.append(normalized)
+
+    token_set = {token.upper() for token in data_tokens}
+    if token_set.intersection(gas_symbols):
+        return None
+
+    supported_tokens = getattr(data_provider, "supported_tokens", None)
+    if supported_tokens is not None:
+        supported = {str(token).upper() for token in supported_tokens}
+        for symbol in gas_symbols:
+            if symbol in supported:
+                return symbol
+
+    return gas_symbols[0] if gas_symbols else None
 
 
 # =============================================================================

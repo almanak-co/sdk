@@ -7,7 +7,11 @@ from typing import Any
 
 import pytest
 
+from almanak.core.models.quote_asset import QuoteAsset
 from scripts import platform_backtest_runner as runner
+
+BASE_CBBTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 
 
 def _env(**overrides: str) -> runner.PlatformRunnerEnv:
@@ -50,6 +54,73 @@ def test_build_platform_backtest_config_parses_platform_payload() -> None:
     assert config.include_gas_costs is False
     assert config.preflight_validation is False
     assert config.allow_hardcoded_fallback is True
+
+
+def test_build_platform_backtest_config_resolves_address_token_fields() -> None:
+    class Strategy:
+        STRATEGY_METADATA = type("Meta", (), {"default_chain": "base", "supported_chains": ["base"]})()
+
+    config = runner.build_platform_backtest_config(
+        json.dumps(
+            {
+                "start_time": "2024-01-01",
+                "end_time": "2024-03-01",
+                "initial_capital_usd": "10000",
+            }
+        ),
+        {"base_token_address": BASE_CBBTC, "quote_token_address": BASE_USDC},
+        Strategy,
+    )
+
+    assert config.chain == "base"
+    assert config.tokens == ["CBBTC", "USDC"]
+
+
+def test_build_platform_backtest_config_uses_generic_token_address_field_without_defaults() -> None:
+    class Strategy:
+        STRATEGY_METADATA = type("Meta", (), {"default_chain": "base", "supported_chains": ["base"]})()
+
+    config = runner.build_platform_backtest_config(
+        json.dumps(
+            {
+                "start_time": "2024-01-01",
+                "end_time": "2024-03-01",
+                "initial_capital_usd": "10000",
+            }
+        ),
+        {"entry_token_address": BASE_CBBTC},
+        Strategy,
+    )
+
+    assert config.chain == "base"
+    assert config.tokens == ["CBBTC"]
+
+
+def test_build_platform_backtest_config_adds_decorator_quote_asset() -> None:
+    class Strategy:
+        STRATEGY_METADATA = type(
+            "Meta",
+            (),
+            {
+                "default_chain": "base",
+                "supported_chains": ["base"],
+                "quote_asset": QuoteAsset.token(8453, BASE_CBBTC),
+            },
+        )()
+
+    config = runner.build_platform_backtest_config(
+        json.dumps(
+            {
+                "start_time": "2024-01-01",
+                "end_time": "2024-03-01",
+                "initial_capital_usd": "10000",
+            }
+        ),
+        {"from_token": "USDC", "to_token": "WETH"},
+        Strategy,
+    )
+
+    assert config.tokens == ["USDC", "WETH", "CBBTC"]
 
 
 def test_build_platform_backtest_config_rejects_non_increasing_time_range() -> None:
@@ -338,6 +409,7 @@ def test_run_platform_backtest_posts_start_before_clone(monkeypatch: pytest.Monk
 
     class BacktestConfig:
         chain = "base"
+        tokens = ["WETH", "USDC"]
 
         def to_dict(self) -> dict[str, str]:
             return {"chain": self.chain}
@@ -358,7 +430,7 @@ def test_run_platform_backtest_posts_start_before_clone(monkeypatch: pytest.Monk
     monkeypatch.setattr(runner, "discover_strategy_class", lambda repo_root, strategy_config: Strategy)
     monkeypatch.setattr(runner, "build_platform_backtest_config", lambda raw_config, strategy_config, strategy_class: BacktestConfig())
     monkeypatch.setattr(runner, "instantiate_strategy", lambda strategy_class, strategy_config, chain: object())
-    monkeypatch.setattr(runner, "create_backtester", lambda: Backtester())
+    monkeypatch.setattr(runner, "create_backtester", lambda **kwargs: Backtester())
     monkeypatch.setattr(runner, "serialize_result", lambda result: {"metrics": {}, "trades": []})
     monkeypatch.setattr(runner, "upload_result_to_gcs", lambda bucket, object_path, payload: order.append("upload"))
     monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: order.append(payload["status"]))
@@ -367,6 +439,56 @@ def test_run_platform_backtest_posts_start_before_clone(monkeypatch: pytest.Monk
 
     assert order[:2] == ["start", "clone"]
     assert order[-2:] == ["upload", "COMPLETED"]
+
+
+def test_run_platform_backtest_threads_token_addresses(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env = _env(STRATEGY_WORKDIR=str(tmp_path / "strategy"))
+    captured: list[dict[str, tuple[str, str]] | None] = []
+
+    class Strategy:
+        __name__ = "Strategy"
+
+    class BacktestConfig:
+        chain = "base"
+        tokens = ["CBBTC", "USDC"]
+
+        def to_dict(self) -> dict[str, object]:
+            return {"chain": self.chain, "tokens": self.tokens}
+
+    class Backtester:
+        async def backtest(self, strategy: object, config: BacktestConfig) -> object:
+            return object()
+
+        async def close(self) -> None:
+            return None
+
+    def fake_create_backtester(*, token_addresses: dict[str, tuple[str, str]] | None = None) -> Backtester:
+        captured.append(token_addresses)
+        return Backtester()
+
+    strategy_config = {"base_token_address": BASE_CBBTC, "quote_token_address": BASE_USDC}
+
+    monkeypatch.setattr(runner, "post_start_callback", lambda current_env: None)
+    monkeypatch.setattr(runner, "clone_strategy_repo", lambda current_env: tmp_path)
+    monkeypatch.setattr(runner, "load_effective_strategy_config", lambda repo_root, raw_config: strategy_config)
+    monkeypatch.setattr(runner, "prime_strategy_registry", lambda: None)
+    monkeypatch.setattr(runner.os, "chdir", lambda path: None)
+    monkeypatch.setattr(runner, "discover_strategy_class", lambda repo_root, current_config: Strategy)
+    monkeypatch.setattr(runner, "build_platform_backtest_config", lambda raw_config, current_config, strategy_class: BacktestConfig())
+    monkeypatch.setattr(runner, "instantiate_strategy", lambda strategy_class, current_config, chain: object())
+    monkeypatch.setattr(runner, "create_backtester", fake_create_backtester)
+    monkeypatch.setattr(runner, "serialize_result", lambda result: {"metrics": {}, "trades": []})
+    monkeypatch.setattr(runner, "upload_result_to_gcs", lambda bucket, object_path, payload: None)
+    monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: None)
+
+    asyncio.run(runner.run_platform_backtest(env))
+
+    assert captured == [
+        {
+            "CBBTC": ("base", BASE_CBBTC),
+            "USDC": ("base", BASE_USDC),
+        }
+    ]
 
 
 def test_from_env_rejects_non_sha_commit() -> None:
@@ -455,6 +577,7 @@ def _patch_successful_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> li
 
     class BacktestConfig:
         chain = "base"
+        tokens = ["WETH", "USDC"]
 
         def to_dict(self) -> dict[str, str]:
             return {"chain": self.chain}
@@ -474,7 +597,7 @@ def _patch_successful_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> li
     monkeypatch.setattr(runner, "discover_strategy_class", lambda repo_root, strategy_config: Strategy)
     monkeypatch.setattr(runner, "build_platform_backtest_config", lambda raw_config, strategy_config, strategy_class: BacktestConfig())
     monkeypatch.setattr(runner, "instantiate_strategy", lambda strategy_class, strategy_config, chain: object())
-    monkeypatch.setattr(runner, "create_backtester", lambda: Backtester())
+    monkeypatch.setattr(runner, "create_backtester", lambda **kwargs: Backtester())
     monkeypatch.setattr(runner, "serialize_result", lambda result: {"metrics": {}, "trades": []})
     monkeypatch.setattr(runner, "upload_result_to_gcs", lambda bucket, object_path, payload: order.append("upload"))
     return order

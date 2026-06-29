@@ -291,6 +291,35 @@ def test_swap_fee_accounting_is_exact() -> None:
     assert result.final_capital_usd == INITIAL_CAPITAL - Decimal("32")
 
 
+@pytest.mark.trust_cell("swap:gas_native_asset_pricing")
+def test_swap_gas_cost_uses_chain_native_asset_price() -> None:
+    """Polygon gas prices from MATIC, not tracked ETH/WETH.
+
+    The synthetic provider only receives WETH/USDC as the configured token
+    set. The engine must auto-add the Polygon native gas asset to the data
+    fetch set, then value gas from that MATIC price. If the legacy ETH/WETH
+    lookup returns, this cell overcharges the trade by 3000x and fails.
+    """
+    result = run_backtest(
+        ScriptedStrategy([SwapDuck(amount_usd=Decimal("1000"))]),
+        flat_series(8),
+        hours=4,
+        chain="polygon",
+        include_gas_costs=True,
+    )
+
+    assert result.success
+    assert result.metrics.total_trades == 1
+    trade = result.trades[0]
+    assert trade.success
+    assert trade.gas_price_gwei == Decimal("30")
+    # SyntheticPriceProvider assigns $1 to auto-added tokens without a
+    # fixture series and supplies 30 gwei in MarketState. SWAP gas = 180,000;
+    # 180000 * 30 gwei * $1 / 1e9.
+    assert trade.gas_cost_usd == Decimal("0.005400000")
+    assert result.metrics.total_gas_usd == Decimal("0.005400000")
+
+
 @pytest.mark.trust_cell("swap:trade_pnl_attribution")
 def test_swap_profitable_close_records_positive_pnl() -> None:
     """A profitable closing swap must record positive per-trade pnl_usd.

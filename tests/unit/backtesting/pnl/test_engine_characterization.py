@@ -1054,7 +1054,7 @@ class TestExecuteIntentGasEthPriceChain:
 
         with pytest.raises(ValueError, match="Historical price requested") as excinfo:
             await _execute_swap(engine, config, market_state)
-        assert "Set gas_eth_price_override to provide an explicit ETH price" in str(excinfo.value)
+        assert "Set gas_eth_price_override to provide an explicit gas asset price" in str(excinfo.value)
 
     @pytest.mark.asyncio
     async def test_market_mode_uses_weth_then_eth(self):
@@ -1089,7 +1089,7 @@ class TestExecuteIntentGasEthPriceChain:
 
         with pytest.raises(ValueError, match="not available in market state") as excinfo:
             await _execute_swap(engine, config, market_state)
-        assert "Set gas_eth_price_override to provide an explicit ETH price" in str(excinfo.value)
+        assert "Set gas_eth_price_override to provide an explicit gas asset price" in str(excinfo.value)
 
 
 class TestExecuteIntentGasGweiChain:

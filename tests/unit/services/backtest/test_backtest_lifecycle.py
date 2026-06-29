@@ -2,19 +2,33 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
+from almanak.core.models.quote_asset import QuoteAsset
+from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+from almanak.services.backtest.models import BacktestRequest, StrategySpec, TimeframeSpec
 from almanak.services.backtest.services.backtest_runner import (
     SpecBacktestStrategy,
     _extract_tokens,
     build_backtest_config,
+    build_backtest_token_address_map,
     build_quick_timeframe,
+    collect_backtest_token_refs,
+    normalize_backtest_token_refs,
+    run_backtest_job,
     serialize_result,
 )
 from almanak.services.backtest.services.job_manager import JobManager
+
+BASE_CBBTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+BASE_WETH = "0x4200000000000000000000000000000000000006"
+UNKNOWN_MIXED_CASE_ADDRESS = "0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa"
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +247,123 @@ class TestBuildBacktestConfigNamedStrategy:
         assert config.tokens == ["WETH", "USDC"]
         assert config.initial_capital_usd == Decimal("5000")
         assert config.fee_model == "realistic"
+
+
+class TestBacktestTokenRefs:
+    """Tests for address-native token coverage in backtest runners."""
+
+    def test_collect_backtest_token_refs_recurses_and_threads_all_sources(self):
+        class Metadata:
+            quote_asset = QuoteAsset.token(8453, BASE_CBBTC)
+
+        class Strategy:
+            STRATEGY_METADATA = Metadata()
+            quote_asset = QuoteAsset.token(8453, BASE_USDC)
+            _spec = SimpleNamespace(parameters={"legs": [{"borrow_token": "WETH"}]})
+
+        refs = collect_backtest_token_refs(
+            chain="base",
+            strategy_config={
+                "tokens": ["USDC"],
+                "routes": [
+                    {
+                        "base_token_address": BASE_CBBTC,
+                        "legs": [{"quote_token": "cbBTC"}],
+                    }
+                ],
+                "risk": {"entry_token_address": BASE_WETH},
+            },
+            strategy=Strategy(),
+            strategy_class=Strategy,
+            extra_refs=["DAI"],
+        )
+
+        assert "USDC" in refs
+        assert "WETH" in refs
+        assert "cbBTC" in refs
+        assert "DAI" in refs
+        assert BASE_CBBTC in refs
+        assert BASE_USDC in refs
+        assert BASE_WETH in refs
+
+    def test_normalize_backtest_token_refs_dedupes_unresolved_address_case(self):
+        assert normalize_backtest_token_refs(
+            [UNKNOWN_MIXED_CASE_ADDRESS, UNKNOWN_MIXED_CASE_ADDRESS.lower(), BASE_CBBTC],
+            "base",
+        ) == [UNKNOWN_MIXED_CASE_ADDRESS.lower(), "CBBTC"]
+
+    def test_build_backtest_token_address_map_skips_native_but_keeps_wrapped_native(self):
+        config = PnLBacktestConfig(
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            end_time=datetime(2024, 1, 2, tzinfo=UTC),
+            initial_capital_usd=Decimal("10000"),
+            chain="base",
+            tokens=["ETH", "WETH", "USDC"],
+        )
+
+        token_addresses = build_backtest_token_address_map(
+            config,
+            extra_refs=[BASE_CBBTC, BASE_WETH],
+        )
+
+        assert "ETH" not in token_addresses
+        assert token_addresses["WETH"] == ("base", BASE_WETH)
+        assert token_addresses["USDC"] == ("base", BASE_USDC)
+        assert token_addresses["CBBTC"] == ("base", BASE_CBBTC)
+
+    @pytest.mark.asyncio
+    async def test_run_backtest_job_threads_strategy_token_addresses(self):
+        captured: list[dict[str, tuple[str, str]] | None] = []
+
+        class Backtester:
+            async def backtest(self, strategy: object, config: PnLBacktestConfig) -> object:
+                return object()
+
+            async def close(self) -> None:
+                return None
+
+        def fake_create_backtester(*, token_addresses: dict[str, tuple[str, str]] | None = None) -> Backtester:
+            captured.append(token_addresses)
+            return Backtester()
+
+        request = BacktestRequest(
+            strategy_spec=StrategySpec(
+                protocol="uniswap_v3",
+                chain="base",
+                action="swap",
+                parameters={
+                    "from_token": "USDC",
+                    "to_token_address": BASE_WETH,
+                    "routes": [{"base_token_address": BASE_CBBTC}],
+                },
+            ),
+            timeframe=TimeframeSpec(start="2024-01-01", end="2024-01-02"),
+        )
+        job_manager = JobManager()
+        job_id = job_manager.create_job()
+
+        with (
+            patch(
+                "almanak.services.backtest.services.backtest_runner.create_backtester",
+                side_effect=fake_create_backtester,
+            ),
+            patch(
+                "almanak.services.backtest.services.backtest_runner.serialize_result",
+                return_value={"metrics": {}, "trades": []},
+            ),
+        ):
+            await run_backtest_job(job_id, request, job_manager)
+
+        assert captured == [
+            {
+                "CBBTC": ("base", BASE_CBBTC),
+                "USDC": ("base", BASE_USDC),
+                "WETH": ("base", BASE_WETH),
+            }
+        ]
+        job = job_manager.get_job(job_id)
+        assert job is not None
+        assert job.status.value == "complete"
 
 
 class TestBuildQuickTimeframe:

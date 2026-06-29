@@ -65,6 +65,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "generic_lane_entry",
     "rejection_no_state_change",
     "cost_accounting",
+    "gas_native_asset_pricing",
     "yield_tie_out",
     "fee_share_scaling",
     "fungible_close_by_pool_id",
@@ -136,6 +137,11 @@ CELLS: tuple[TrustCell, ...] = (
         "cost_accounting",
         "swap",
         "N trades x fee model == total fees (and slippage), exact; equity delta equals the cost sum.",
+    ),
+    _cell(
+        "gas_native_asset_pricing",
+        "swap",
+        "Gas cost uses the chain's native gas asset price, not an ETH/WETH price that happens to be tracked.",
     ),
     _cell(
         "trade_pnl_attribution",

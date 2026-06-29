@@ -13,10 +13,13 @@ The runner wires the **full** backtesting engine:
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from almanak.core.chains import ChainRegistry
+from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.backtesting.models import BacktestResult
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
@@ -26,6 +29,9 @@ from almanak.framework.backtesting.pnl.engine import (
     PnLBacktester,
 )
 from almanak.framework.backtesting.pnl.providers.coingecko import CoinGeckoDataProvider
+from almanak.framework.data.tokens import get_token_resolver
+from almanak.framework.data.tokens.exceptions import TokenResolutionError
+from almanak.framework.data.tokens.models import ResolvedToken
 from almanak.framework.intents.vocabulary import (
     BorrowIntent,
     HoldIntent,
@@ -47,6 +53,35 @@ logger = logging.getLogger(__name__)
 # Sentinel wallet address for backtesting (not used on-chain)
 _BACKTEST_WALLET = "0x0000000000000000000000000000000000000000"
 
+TokenAddressMap = dict[str, tuple[str, str]]
+
+_TOKEN_REF_KEYS = frozenset(
+    {
+        "from_token",
+        "to_token",
+        "base_token",
+        "quote_token",
+        "token0",
+        "token1",
+        "token",
+        "collateral_token",
+        "borrow_token",
+    }
+)
+
+_TOKEN_ADDRESS_KEYS = frozenset(
+    {
+        "from_token_address",
+        "to_token_address",
+        "base_token_address",
+        "quote_token_address",
+        "token0_address",
+        "token1_address",
+        "collateral_token_address",
+        "borrow_token_address",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # Supported actions and their required/optional parameters
 # ---------------------------------------------------------------------------
@@ -63,6 +98,176 @@ SUPPORTED_ACTIONS = {
         "optional": ["collateral_token", "collateral_amount", "borrow_token", "borrow_amount"],
     },
 }
+
+
+def _string_token_values(value: Any) -> list[str]:
+    """Return non-empty token strings from a scalar/list-ish config value."""
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, Iterable) and not isinstance(value, bytes | bytearray | str | Mapping):
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    return []
+
+
+def _mapping_token_refs(mapping: Mapping[str, Any] | None) -> list[str]:
+    """Extract symbol/address token references from strategy config-like mappings."""
+    if mapping is None:
+        return []
+
+    refs: list[str] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, Mapping):
+            refs.extend(_string_token_values(value.get("tokens")))
+            for key, nested in value.items():
+                if isinstance(key, str) and (
+                    key in _TOKEN_REF_KEYS or key in _TOKEN_ADDRESS_KEYS or key.endswith("_token_address")
+                ):
+                    refs.extend(_string_token_values(nested))
+                visit(nested)
+            return
+        if isinstance(value, Iterable) and not isinstance(value, bytes | bytearray | str):
+            for item in value:
+                if isinstance(item, Mapping) or (
+                    isinstance(item, Iterable) and not isinstance(item, bytes | bytearray | str)
+                ):
+                    visit(item)
+
+    visit(mapping)
+    return refs
+
+
+def _quote_asset_refs(raw_quote_asset: Any, chain: str) -> list[str]:
+    if raw_quote_asset is None:
+        return []
+    try:
+        quote_asset = QuoteAsset.parse(raw_quote_asset)
+    except (TypeError, ValueError):
+        logger.debug("Ignoring invalid quote_asset while building backtest token refs", exc_info=True)
+        return []
+    if quote_asset.is_usd or quote_asset.address is None:
+        return []
+
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is not None and quote_asset.chain_id != descriptor.chain_id:
+        return []
+    return [quote_asset.address]
+
+
+def _strategy_quote_asset_refs(strategy: object | None, chain: str) -> list[str]:
+    if strategy is None:
+        return []
+    refs = _quote_asset_refs(getattr(strategy, "quote_asset", None), chain)
+    metadata = getattr(strategy.__class__, "STRATEGY_METADATA", None)
+    return refs + _quote_asset_refs(getattr(metadata, "quote_asset", None), chain)
+
+
+def _strategy_class_quote_asset_refs(strategy_class: type[Any] | None, chain: str) -> list[str]:
+    if strategy_class is None:
+        return []
+    metadata = getattr(strategy_class, "STRATEGY_METADATA", None)
+    return _quote_asset_refs(getattr(metadata, "quote_asset", None), chain)
+
+
+def collect_backtest_token_refs(
+    *,
+    chain: str,
+    strategy_config: Mapping[str, Any] | None = None,
+    strategy: object | None = None,
+    strategy_class: type[Any] | None = None,
+    extra_refs: Iterable[str] | None = None,
+) -> list[str]:
+    """Collect token refs that may need historical price coverage.
+
+    Phase 0 keeps the existing symbol-keyed engine path, but platform-triggered
+    runs can supply address-native strategy config fields. Gather both symbol
+    refs and address refs here so callers can normalize display symbols for
+    ``config.tokens`` and build the existing provider ``token_addresses`` map.
+    """
+    refs: list[str] = []
+    refs.extend(_mapping_token_refs(strategy_config))
+    if strategy_config is not None:
+        refs.extend(_quote_asset_refs(strategy_config.get("quote_asset"), chain))
+
+    spec = getattr(strategy, "_spec", None)
+    refs.extend(_mapping_token_refs(getattr(spec, "parameters", None)))
+    refs.extend(_strategy_quote_asset_refs(strategy, chain))
+    refs.extend(_strategy_class_quote_asset_refs(strategy_class, chain))
+
+    if extra_refs is not None:
+        refs.extend(_string_token_values(list(extra_refs)))
+
+    return refs
+
+
+def _resolve_backtest_token(ref: str, chain: str) -> ResolvedToken | None:
+    try:
+        return get_token_resolver().resolve(ref, chain, log_errors=False, skip_gateway=True)
+    except TokenResolutionError:
+        logger.debug("No static token metadata for backtest token ref %s on %s", ref, chain)
+        return None
+
+
+def _display_symbol_for_ref(ref: str, chain: str) -> str:
+    resolved = _resolve_backtest_token(ref, chain)
+    if resolved is not None:
+        return resolved.symbol.upper()
+    cleaned = ref.strip()
+    return cleaned.lower() if cleaned.lower().startswith("0x") else cleaned
+
+
+def normalize_backtest_token_refs(token_refs: Iterable[str], chain: str) -> list[str]:
+    """Normalize token refs into the symbol-keyed token list expected today."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in token_refs:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        display = _display_symbol_for_ref(raw.strip(), chain)
+        if display not in seen:
+            seen.add(display)
+            normalized.append(display)
+    return normalized
+
+
+def _should_register_provider_address(token: ResolvedToken) -> bool:
+    return not token.is_native
+
+
+def build_backtest_token_address_map(
+    config: PnLBacktestConfig,
+    *,
+    strategy: object | None = None,
+    strategy_config: Mapping[str, Any] | None = None,
+    extra_refs: Iterable[str] | None = None,
+) -> TokenAddressMap:
+    """Build the provider/engine ``SYMBOL -> (chain, address)`` map.
+
+    This mirrors the CLI's Phase-0 bridge shape while deriving coverage from
+    both display tokens and address-native strategy config fields. Native
+    assets are intentionally skipped because CoinGecko resolves those through
+    the chain registry fast path; wrapped-native aliases stay registered for
+    engine symbol/address parity.
+    """
+    refs = list(config.tokens)
+    refs.extend(
+        collect_backtest_token_refs(
+            chain=config.chain,
+            strategy_config=strategy_config,
+            strategy=strategy,
+            extra_refs=extra_refs,
+        )
+    )
+
+    token_addresses: TokenAddressMap = {}
+    for raw in refs:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        resolved = _resolve_backtest_token(raw.strip(), config.chain)
+        if resolved is None or not _should_register_provider_address(resolved):
+            continue
+        token_addresses[resolved.symbol.upper()] = (config.chain, resolved.address)
+    return token_addresses
 
 
 class SpecBacktestStrategy:
@@ -228,7 +433,7 @@ class SpecBacktestStrategy:
         )
 
 
-def create_backtester() -> PnLBacktester:
+def create_backtester(token_addresses: TokenAddressMap | None = None) -> PnLBacktester:
     """Create a PnLBacktester wired with the full engine capabilities.
 
     Wires:
@@ -249,7 +454,7 @@ def create_backtester() -> PnLBacktester:
     COINGECKO_API_KEY from the environment for the pro tier; falls back to the
     free tier when the key is absent.
     """
-    data_provider = CoinGeckoDataProvider()
+    data_provider = CoinGeckoDataProvider(token_addresses=token_addresses)
 
     # Default models for the generic execution path. Protocol-specific fee
     # calculation happens inside the adapters (LP, lending, perp).
@@ -275,6 +480,7 @@ def create_backtester() -> PnLBacktester:
         slippage_models=slippage_models,
         strategy_type="auto",
         data_config=data_config,
+        token_addresses=token_addresses,
     )
 
 
@@ -380,8 +586,10 @@ def build_backtest_config(
     if spec is not None:
         params = spec.parameters
         capital = initial_capital_usd or Decimal(str(params.get("amount_usd", "10000")))
-        resolved_tokens = tokens or _extract_tokens(spec)
         resolved_chain = chain or spec.chain
+        raw_tokens = tokens or _extract_tokens(spec)
+        raw_tokens.extend(collect_backtest_token_refs(chain=resolved_chain, strategy_config=params))
+        resolved_tokens = normalize_backtest_token_refs(raw_tokens, resolved_chain)
         fee_model = spec.protocol.replace("-", "_")
     else:
         if not chain:
@@ -389,8 +597,8 @@ def build_backtest_config(
         if not tokens:
             raise ValueError("tokens is required when using strategy_name (no strategy_spec to infer it from)")
         capital = initial_capital_usd or Decimal("10000")
-        resolved_tokens = tokens
         resolved_chain = chain
+        resolved_tokens = normalize_backtest_token_refs(tokens, resolved_chain)
         fee_model = "realistic"
 
     # Quick mode: shorter interval, simplified
@@ -518,7 +726,8 @@ async def run_backtest_job(
 
         job_manager.update_progress(job_id, 10.0, "Running simulation...")
 
-        backtester = create_backtester()
+        token_addresses = build_backtest_token_address_map(config, strategy=strategy)
+        backtester = create_backtester(token_addresses=token_addresses)
         try:
             result = await backtester.backtest(strategy, config)
         finally:

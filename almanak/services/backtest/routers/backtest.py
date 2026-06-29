@@ -19,6 +19,7 @@ from almanak.services.backtest.models import (
     StrategyListResponse,
 )
 from almanak.services.backtest.services.backtest_runner import (
+    build_backtest_token_address_map,
     create_backtester,
     list_available_strategies,
     resolve_strategy,
@@ -125,7 +126,8 @@ async def quick_backtest(request: QuickBacktestRequest) -> QuickBacktestResponse
     try:
         strategy, config = resolve_strategy(request, quick=True)
 
-        backtester = create_backtester()
+        token_addresses = build_backtest_token_address_map(config, strategy=strategy)
+        backtester = create_backtester(token_addresses=token_addresses)
         try:
             result = await backtester.backtest(strategy, config)
         finally:

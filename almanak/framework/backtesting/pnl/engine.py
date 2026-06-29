@@ -70,7 +70,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 
-from almanak.core.chains import DEFAULT_CHAIN
+from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
+from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.backtesting.adapters.base import StrategyBacktestAdapter
 
 # Import adapter registry for strategy type detection
@@ -2276,7 +2277,7 @@ class PnLBacktester:
         adapter_fill.delayed_at_end = delayed_at_end
         # Gas is engine-owned: adapters own protocol math but not the gas lane.
         # Failed fills skip gas because apply_fill zeroes their execution costs,
-        # and gas resolution can raise when no ETH/WETH price exists.
+        # and gas resolution can raise when no chain-native gas asset price exists.
         if not adapter_fill.success:
             return
         (
@@ -2552,8 +2553,8 @@ class PnLBacktester:
     ) -> tuple[Decimal, Decimal | None, str | None]:
         """Resolve the simulated gas cost for an intent.
 
-        Estimates gas units for the intent type, resolves the ETH price
-        (:meth:`_resolve_gas_eth_price`) and the gas price in gwei
+        Estimates gas units for the intent type, resolves the native gas
+        asset price (:meth:`_resolve_gas_eth_price`) and the gas price in gwei
         (:meth:`_resolve_gas_price_gwei`), records tracking side effects
         (data-quality source, fallback usage, gas price records), and
         computes the final USD cost.
@@ -2576,7 +2577,7 @@ class PnLBacktester:
         # Estimate gas used based on intent type
         gas_used = self._estimate_gas_for_intent(intent_type)
 
-        eth_price, gas_price_source = self._resolve_gas_eth_price(config, market_state, timestamp)
+        gas_asset_price, gas_price_source = self._resolve_gas_eth_price(config, market_state, timestamp)
 
         # Track gas price source in data quality metrics
         if data_quality_tracker is not None:
@@ -2592,17 +2593,17 @@ class PnLBacktester:
         if gas_gwei_source in ("config", "chain_default"):
             self._track_fallback("default_gas_price")
 
-        # Calculate gas cost: gas_used * gas_price_gwei * ETH_price / 1e9
-        gas_cost_eth = Decimal(gas_used) * gas_price_gwei / Decimal("1000000000")
-        gas_cost_usd = gas_cost_eth * eth_price
+        # Calculate gas cost: gas_used * gas_price_gwei * native_gas_asset_price / 1e9
+        gas_cost_native = Decimal(gas_used) * gas_price_gwei / Decimal("1000000000")
+        gas_cost_usd = gas_cost_native * gas_asset_price
 
         # Log gas cost details at debug level for troubleshooting
         logger.debug(
-            "Gas cost: %d gas used × %.1f gwei (%s) × $%.2f ETH (%s) = $%.4f",
+            "Gas cost: %d gas used × %.1f gwei (%s) × $%.2f gas asset (%s) = $%.4f",
             gas_used,
             gas_price_gwei,
             gas_gwei_source,
-            eth_price,
+            gas_asset_price,
             gas_price_source,
             gas_cost_usd,
         )
@@ -2615,7 +2616,9 @@ class PnLBacktester:
                     gwei=gas_price_gwei,
                     source=gas_gwei_source or "unknown",
                     usd_cost=gas_cost_usd,
-                    eth_price_usd=eth_price,
+                    # Back-compat field name; the value is the chain's
+                    # native gas asset price after VIB-5509.
+                    eth_price_usd=gas_asset_price,
                 )
             )
 
@@ -2627,12 +2630,12 @@ class PnLBacktester:
         market_state: MarketState,
         timestamp: datetime,
     ) -> tuple[Decimal, str]:
-        """Resolve the ETH price used for gas-cost conversion.
+        """Resolve the native gas asset price used for gas-cost conversion.
 
         Priority order:
         1. gas_eth_price_override (takes precedence for reproducibility/testing)
-        2. Historical ETH price (if use_historical_gas_prices enabled)
-        3. Current market price (WETH or ETH from market_state)
+        2. Historical native gas asset price (if use_historical_gas_prices enabled)
+        3. Current market price (native or wrapped-native from market_state)
         No silent fallback - fail if price unavailable.
 
         Args:
@@ -2641,78 +2644,79 @@ class PnLBacktester:
             timestamp: Time of execution
 
         Returns:
-            Tuple of (eth_price, gas_price_source)
+            Tuple of (gas_asset_price, gas_price_source)
 
         Raises:
-            ValueError: If no ETH/WETH price is available from the selected
+            ValueError: If no native gas asset price is available from the selected
                 source and no gas_eth_price_override is set.
         """
         if config.gas_eth_price_override is not None:
-            # Priority 1: Use explicit override
-            eth_price = config.gas_eth_price_override
-            gas_price_source = "override"
+            gas_asset_price = config.gas_eth_price_override
             logger.debug(
-                "Gas ETH price: Using override value $%.2f",
-                eth_price,
+                "Gas asset price: Using override value $%.2f",
+                gas_asset_price,
             )
-        elif config.use_historical_gas_prices:
-            # Priority 2: Try to get historical price from data provider
-            try:
-                eth_price = market_state.get_price("WETH")
-                gas_price_source = "historical"
-                logger.debug(
-                    "Gas ETH price: Using historical WETH price $%.2f at %s",
-                    eth_price,
-                    timestamp.isoformat(),
-                )
-            except KeyError:
-                try:
-                    eth_price = market_state.get_price("ETH")
-                    gas_price_source = "historical"
-                    logger.debug(
-                        "Gas ETH price: Using historical ETH price $%.2f at %s",
-                        eth_price,
-                        timestamp.isoformat(),
-                    )
-                except KeyError:
-                    # Historical mode but no price available
-                    if config.strict_reproducibility:
-                        raise ValueError(
-                            f"Gas ETH price: Historical price requested but ETH/WETH not "
-                            f"available at {timestamp.isoformat()}. In strict_reproducibility mode, "
-                            f"ETH price must be available. Set gas_eth_price_override for reproducibility."
-                        ) from None
-                    else:
-                        raise ValueError(
-                            f"Gas ETH price: Historical price requested but ETH/WETH not "
-                            f"available at {timestamp.isoformat()}. Set gas_eth_price_override "
-                            f"to provide an explicit ETH price for gas calculations."
-                        ) from None
-        else:
-            # Priority 3: Use current market price (default behavior)
-            try:
-                eth_price = market_state.get_price("WETH")
-                gas_price_source = "market"
-            except KeyError:
-                try:
-                    eth_price = market_state.get_price("ETH")
-                    gas_price_source = "market"
-                except KeyError:
-                    # No fallback allowed - fail with clear error
-                    if config.strict_reproducibility:
-                        raise ValueError(
-                            f"Gas ETH price: ETH/WETH not available in market state at "
-                            f"{timestamp.isoformat()}. In strict_reproducibility mode, "
-                            f"ETH price must be available. Set gas_eth_price_override for reproducibility."
-                        ) from None
-                    else:
-                        raise ValueError(
-                            f"Gas ETH price: ETH/WETH not available in market state at "
-                            f"{timestamp.isoformat()}. Set gas_eth_price_override to provide "
-                            f"an explicit ETH price for gas calculations."
-                        ) from None
+            return gas_asset_price, "override"
 
-        return eth_price, gas_price_source
+        gas_symbols = self._gas_asset_price_symbols(config.chain)
+        if not gas_symbols:
+            raise ValueError(
+                f"Gas asset price: no registered native gas asset for chain {config.chain!r}. "
+                "Set gas_eth_price_override to provide an explicit gas asset price."
+            )
+
+        gas_price_source = "historical" if config.use_historical_gas_prices else "market"
+        for symbol in gas_symbols:
+            try:
+                gas_asset_price = market_state.get_price(symbol)
+            except KeyError:
+                continue
+            logger.debug(
+                "Gas asset price: Using %s %s price $%.2f at %s",
+                gas_price_source,
+                symbol,
+                gas_asset_price,
+                timestamp.isoformat(),
+            )
+            return gas_asset_price, gas_price_source
+
+        joined_symbols = "/".join(gas_symbols)
+        if config.use_historical_gas_prices:
+            prefix = "Historical price requested but "
+        else:
+            prefix = ""
+        strict_detail = (
+            " In strict_reproducibility mode, gas asset price must be available."
+            if config.strict_reproducibility
+            else ""
+        )
+        raise ValueError(
+            f"Gas asset price: {prefix}{joined_symbols} not available in market state at "
+            f"{timestamp.isoformat()}.{strict_detail} Set gas_eth_price_override to provide "
+            "an explicit gas asset price for gas calculations."
+        ) from None
+
+    def _gas_asset_price_symbols(self, chain: str) -> tuple[str, ...]:
+        """Return ordered symbols that can price ``chain``'s native gas asset."""
+        descriptor = ChainRegistry.try_resolve(chain)
+        if descriptor is None:
+            return ()
+
+        symbols: list[str] = [descriptor.native.symbol, *descriptor.native.accepted_symbols]
+        if descriptor.native.wrapped_symbol:
+            symbols.append(descriptor.native.wrapped_symbol)
+        accepted = native_symbols_for(chain)
+        symbols.extend(accepted)
+
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for symbol in symbols:
+            upper = symbol.upper()
+            if upper in seen:
+                continue
+            seen.add(upper)
+            ordered.append(upper)
+        return tuple(ordered)
 
     async def _resolve_gas_price_gwei(
         self,

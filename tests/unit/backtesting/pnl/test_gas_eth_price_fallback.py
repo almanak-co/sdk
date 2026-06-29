@@ -1,9 +1,8 @@
-"""Tests for gas ETH price fallback removal (US-084b).
+"""Tests for gas asset price fallback removal (US-084b, VIB-5509).
 
-This module tests that the PnL backtester no longer uses hardcoded $3000 ETH
-fallback for gas cost calculations. Instead, it should:
-1. In strict mode: raise ValueError if ETH price unavailable
-2. In non-strict mode: raise ValueError requiring gas_eth_price_override
+The PnL backtester no longer uses hardcoded $3000 ETH fallback for gas cost
+calculations. Gas valuation now resolves the chain's native gas asset price;
+``gas_eth_price_override`` remains the back-compatible explicit override.
 
 The gas_price_source should be tracked in DataQualityReport.
 """
@@ -13,10 +12,31 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.backtesting.models import DataQualityReport
+from almanak.framework.backtesting.models import DataQualityReport, IntentType
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import MarketState
-from almanak.framework.backtesting.pnl.engine import DataQualityTracker
+from almanak.framework.backtesting.pnl.engine import (
+    DataQualityTracker,
+    DefaultFeeModel,
+    DefaultSlippageModel,
+    PnLBacktester,
+)
+
+
+class _EmptyDataProvider:
+    provider_name = "mock_empty"
+
+    async def iterate(self, config):  # pragma: no cover - direct engine helper tests only
+        if False:
+            yield
+
+
+def _backtester() -> PnLBacktester:
+    return PnLBacktester(
+        data_provider=_EmptyDataProvider(),
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+    )
 
 
 class TestDataQualityTrackerGasPriceSource:
@@ -199,6 +219,76 @@ class TestGasEthPriceFallbackRemoval:
             use_historical_gas_prices=True,
         )
         assert config.use_historical_gas_prices is True
+
+    @pytest.mark.asyncio
+    async def test_base_gas_uses_native_eth_without_weth_tracked(self, base_config):
+        """Base gas prices from ETH even when the token set excludes WETH."""
+        engine = _backtester()
+        config = PnLBacktestConfig(
+            start_time=base_config.start_time,
+            end_time=base_config.end_time,
+            initial_capital_usd=base_config.initial_capital_usd,
+            chain="base",
+            tokens=["CBBTC", "USDC"],
+            include_gas_costs=True,
+        )
+        market_state = MarketState(
+            timestamp=datetime(2024, 1, 1, 12, 0, 0),
+            chain="base",
+            prices={
+                "CBBTC": Decimal("100000"),
+                "USDC": Decimal("1"),
+                "ETH": Decimal("3000"),
+            },
+        )
+
+        gas_cost_usd, gas_price_gwei, source = await engine._resolve_gas_cost(
+            IntentType.SWAP,
+            market_state,
+            market_state.timestamp,
+            config,
+            data_quality_tracker=None,
+        )
+
+        assert gas_price_gwei == Decimal("0.002")
+        assert source == "chain_default"
+        assert gas_cost_usd == Decimal("0.001080000")
+
+    @pytest.mark.asyncio
+    async def test_polygon_gas_uses_matic_not_tracked_eth(self, base_config):
+        """Non-ETH chains must price gas from their native asset, not ETH/WETH."""
+        engine = _backtester()
+        config = PnLBacktestConfig(
+            start_time=base_config.start_time,
+            end_time=base_config.end_time,
+            initial_capital_usd=base_config.initial_capital_usd,
+            chain="polygon",
+            tokens=["WETH", "USDC"],
+            include_gas_costs=True,
+            gas_price_gwei=Decimal("50"),
+        )
+        market_state = MarketState(
+            timestamp=datetime(2024, 1, 1, 12, 0, 0),
+            chain="polygon",
+            prices={
+                "WETH": Decimal("3000"),
+                "ETH": Decimal("3000"),
+                "MATIC": Decimal("1"),
+                "USDC": Decimal("1"),
+            },
+        )
+
+        gas_cost_usd, gas_price_gwei, source = await engine._resolve_gas_cost(
+            IntentType.SWAP,
+            market_state,
+            market_state.timestamp,
+            config,
+            data_quality_tracker=None,
+        )
+
+        assert gas_price_gwei == Decimal("50")
+        assert source == "config"
+        assert gas_cost_usd == Decimal("0.009000000")
 
 
 class TestGasCostCalculationWithTracker:
