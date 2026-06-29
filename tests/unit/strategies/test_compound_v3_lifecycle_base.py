@@ -31,15 +31,15 @@ import pytest
 @pytest.fixture
 def strategy():
     """Instantiate the strategy with mock internals (no runner / gateway)."""
-    from strategies.incubating.compound_v3_lifecycle_base.strategy import (
-        CompoundV3LifecycleBaseStrategy,
+    from strategies.incubating.compound_v3_lifecycle.strategy import (
+        CompoundV3LifecycleStrategy,
     )
 
-    strat = CompoundV3LifecycleBaseStrategy.__new__(CompoundV3LifecycleBaseStrategy)
+    strat = CompoundV3LifecycleStrategy.__new__(CompoundV3LifecycleStrategy)
     strat._chain = "base"
     strat._wallet_address = "0x" + "0" * 40
     strat._deployment_id = "test-compound-lifecycle-base"
-    strat.STRATEGY_NAME = "compound_v3_lifecycle_base"
+    strat.STRATEGY_NAME = "compound_v3_lifecycle"
 
     # Config (mirrors config.json)
     strat.collateral_token = "WETH"
@@ -134,6 +134,10 @@ class TestCompoundV3LifecycleStateMachine:
     def test_price_unavailable_returns_hold(self, strategy):
         market = MagicMock()
         market.price = MagicMock(side_effect=ValueError("no price"))
+        # IDLE does not need prices -> SUPPLY proceeds even during a price outage.
+        assert strategy.decide(market).intent_type.value == "SUPPLY"
+        # Only the BORROW step needs prices -> HOLD on outage in the SUPPLIED state.
+        strategy._loop_state = "supplied"
         intent = strategy.decide(market)
         assert intent.intent_type.value == "HOLD"
         assert "unavailable" in intent.reason.lower()

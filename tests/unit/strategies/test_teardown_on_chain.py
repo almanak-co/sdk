@@ -48,9 +48,11 @@ KNOWN_VIOLATIONS: set[str] = {
     "strategies/incubating/aave_supply_base/strategy.py",
     "strategies/incubating/aave_uniswap_leverage_polygon/strategy.py",
     "strategies/incubating/aave_v3_pancakeswap_teardown_bsc/strategy.py",
-    "strategies/incubating/aave_v3_lending_bsc/strategy.py",
+    # aave_v3_lending_{bsc,mantle} folded into the consolidated
+    # strategies/incubating/aave_v3_lending (config-driven, 10 clones -> 1); the
+    # consolidated strategy passes the cached-state scan, so these grandfathered
+    # entries are removed rather than re-pointed (net fix, VIB-219).
     "strategies/incubating/aave_v3_sushiswap_carry_bsc/strategy.py",
-    "strategies/incubating/aave_v3_lending_mantle/strategy.py",
     "strategies/incubating/aerodrome_aave_carry_base/strategy.py",
     "strategies/incubating/aerodrome_swap_aave_supply_base/strategy.py",
     "strategies/incubating/agni_swap_aave_supply_mantle/strategy.py",

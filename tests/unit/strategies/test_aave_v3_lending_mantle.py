@@ -31,16 +31,19 @@ from almanak.framework.intents.vocabulary import (
     SupplyIntent,
     WithdrawIntent,
 )
-from strategies.incubating.aave_v3_lending_mantle.strategy import (
-    AaveV3LendingMantleStrategy,
+from strategies.incubating.aave_v3_lending.strategy import (
+    AaveV3LendingStrategy,
     _looks_like_freeze_revert,
 )
 
-_MANTLE_MOD = "strategies.incubating.aave_v3_lending_mantle.strategy"
+# The frozen-reserve guard the Mantle config drives lives in the chain-generic
+# aave_v3_lending strategy now (gated by check_frozen_reserve). This suite drives
+# it with the Mantle config to preserve the VIB-3813 frozen-guard coverage.
+_MANTLE_MOD = "strategies.incubating.aave_v3_lending.strategy"
 _WETH_MANTLE = "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111"
 
 
-def _build_freeze_aware_strategy() -> AaveV3LendingMantleStrategy:
+def _build_freeze_aware_strategy() -> AaveV3LendingStrategy:
     """Construct a strategy with the deps stubbed (no live gateway)."""
     cfg = {
         "chain": "mantle",
@@ -50,8 +53,9 @@ def _build_freeze_aware_strategy() -> AaveV3LendingMantleStrategy:
         "borrow_token": "USDC",
         "ltv_target": "0.25",
         "force_action": "",
+        "check_frozen_reserve": True,
     }
-    s = AaveV3LendingMantleStrategy(
+    s = AaveV3LendingStrategy(
         config=cfg,
         chain="mantle",
         wallet_address="0x" + "aa" * 20,

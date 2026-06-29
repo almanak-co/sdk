@@ -1,7 +1,11 @@
-"""Tests for Enso swap strategies on BSC, Avalanche, and Ethereum.
+"""Tests for the chain-generic Enso swap strategy across BNB, Avalanche, Ethereum.
 
 Parametrized tests validating the Enso aggregator swap lifecycle (BUY + SELL)
-across 3 untested chains. All strategies share the same decision logic pattern.
+across chains. A single chain-generic strategy class (``EnsoSwapStrategy``,
+``strategies/incubating/enso_swap``) is driven by per-chain config — this test
+proves one class behaves correctly for every chain, which is exactly the
+consolidation contract (it replaced the eight per-chain ``enso_swap_<chain>``
+folders).
 
 Kitchen Loop iteration 120, VIB-1682.
 """
@@ -13,33 +17,36 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# Chain-specific strategy configurations
+# One chain-generic strategy class, driven by per-chain config.
+_ENSO_MODULE = "strategies.incubating.enso_swap.strategy"
+_ENSO_CLASS = "EnsoSwapStrategy"
+
 CHAIN_CONFIGS = [
     {
         "chain": "bnb",
-        "module": "strategies.incubating.enso_swap_bsc.strategy",
-        "class_name": "EnsoSwapBscStrategy",
+        "module": _ENSO_MODULE,
+        "class_name": _ENSO_CLASS,
         "base_token": "WBNB",
         "quote_token": "USDC",
-        "strategy_name": "enso_swap_bsc",
-        "position_id": "enso_bsc_wbnb",
+        "strategy_name": "enso_swap",
+        "position_id": "enso_bnb_wbnb",
     },
     {
         "chain": "avalanche",
-        "module": "strategies.incubating.enso_swap_avalanche.strategy",
-        "class_name": "EnsoSwapAvalancheStrategy",
+        "module": _ENSO_MODULE,
+        "class_name": _ENSO_CLASS,
         "base_token": "WAVAX",
         "quote_token": "USDC",
-        "strategy_name": "enso_swap_avalanche",
+        "strategy_name": "enso_swap",
         "position_id": "enso_avalanche_wavax",
     },
     {
         "chain": "ethereum",
-        "module": "strategies.incubating.enso_swap_ethereum.strategy",
-        "class_name": "EnsoSwapEthereumStrategy",
+        "module": _ENSO_MODULE,
+        "class_name": _ENSO_CLASS,
         "base_token": "WETH",
         "quote_token": "USDC",
-        "strategy_name": "enso_swap_ethereum",
+        "strategy_name": "enso_swap",
         "position_id": "enso_ethereum_weth",
     },
 ]
@@ -139,6 +146,25 @@ class TestOnIntentExecuted:
         mock_result = MagicMock()
         mock_result.error = "test error"
         strategy.on_intent_executed(mock_intent, False, mock_result)
+
+    def test_failed_buy_reverts_buy_flag(self, strategy, strategy_config):
+        """A failed BUY (quote->base) reverts _buy_executed so it retries, not advances."""
+        strategy._buy_executed = True
+        intent = MagicMock()
+        intent.from_token = strategy_config["quote_token"]
+        strategy.on_intent_executed(intent, False, MagicMock(error="boom"))
+        assert strategy._buy_executed is False
+        assert strategy._sell_executed is False
+
+    def test_failed_sell_reverts_sell_flag(self, strategy, strategy_config):
+        """A failed SELL (base->quote) reverts only _sell_executed."""
+        strategy._buy_executed = True
+        strategy._sell_executed = True
+        intent = MagicMock()
+        intent.from_token = strategy_config["base_token"]
+        strategy.on_intent_executed(intent, False, MagicMock(error="boom"))
+        assert strategy._buy_executed is True
+        assert strategy._sell_executed is False
 
 
 class TestStatePersistence:

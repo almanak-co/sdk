@@ -19,13 +19,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from strategies.incubating.aave_v3_lending_linea.strategy import (
-    AaveV3LendingLineaStrategy,
+from strategies.incubating.aave_v3_lending.strategy import (
+    AaveV3LendingStrategy,
 )
 
 
-def _make_strategy() -> AaveV3LendingLineaStrategy:
-    return AaveV3LendingLineaStrategy(
+def _make_strategy() -> AaveV3LendingStrategy:
+    return AaveV3LendingStrategy(
         config={
             "chain": "linea",
             "wallet_address": "0x" + "aa" * 20,
@@ -117,11 +117,11 @@ from almanak.framework.intents.vocabulary import (  # noqa: E402
     SupplyIntent,
     WithdrawIntent,
 )
-from strategies.incubating.aave_v3_lending_linea.strategy import (  # noqa: E402
+from strategies.incubating.aave_v3_lending.strategy import (  # noqa: E402
     _looks_like_freeze_revert,
 )
 
-_LINEA_MOD = "strategies.incubating.aave_v3_lending_linea.strategy"
+_LINEA_MOD = "strategies.incubating.aave_v3_lending.strategy"
 _WETH_LINEA = "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f"
 
 
@@ -135,8 +135,9 @@ def _build_freeze_aware_strategy():
         "borrow_token": "USDC",
         "ltv_target": "0.3",
         "force_action": "",
+        "check_frozen_reserve": True,
     }
-    s = AaveV3LendingLineaStrategy(
+    s = AaveV3LendingStrategy(
         config=cfg,
         chain="linea",
         wallet_address="0x" + "aa" * 20,
