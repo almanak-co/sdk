@@ -40,7 +40,7 @@ CHAIN_ADDRESSES: dict[str, dict[str, str]] = {
     },
     # Core addresses from euler-xyz/euler-interfaces EulerChains.json (status:production),
     # cross-checked against the ethereum/avalanche values above. Verified 2026-06-26.
-    # See docs/internal/euler-v2-chain-extension-research-20260626.md.
+    # See docs/internal/archive/reports/euler-v2-chain-extension-research-20260626.md.
     "base": {
         "evc": "0x5301c7dD20bD945D2013b48ed0DEE3A284ca8989",
         "evault_factory": "0x7F321498A801A191a93C840750ed637149dDf8D0",
@@ -158,7 +158,7 @@ _AVALANCHE_VAULTS: dict[str, dict] = {
     # (LTVBorrow != 0), verified on-chain 2026-06-26 — this is the collateral leg
     # the avalanche borrow/repay path needs (the "no registered collateral vault"
     # gap documented in tests/intents/avalanche/test_euler_v2_borrow.py since
-    # 2026-04-10). See docs/internal/euler-v2-chain-extension-research-20260626.md.
+    # 2026-04-10). See docs/internal/archive/reports/euler-v2-chain-extension-research-20260626.md.
     "esAVAX-32": {
         "vault_address": "0xf3aCc3Fc22E376fa3dD21CF883B60DDE9cf4E34f",
         "underlying_symbol": "sAVAX",

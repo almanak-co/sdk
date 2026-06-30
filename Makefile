@@ -612,7 +612,7 @@ test-backtest-service:
 # Demo strategy smoke test (run on Anvil forks via the product CLI path).
 # Drives `almanak strat run --network anvil --fresh --once` for every
 # discoverable demo. Each demo's funding comes from its own config.json
-# anvil_funding (no global dict) — see docs/internal/DemoFixing.md.
+# anvil_funding (no global dict) — see docs/internal/reference/DemoFixing.md.
 # Uses public RPCs by default; set ALCHEMY_API_KEY for better rate limits.
 test-demo-strategies:
 	uv run --env-file .env python scripts/run_demo.py --all

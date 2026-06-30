@@ -9,7 +9,7 @@ math checks, columns are strategy types (swap/TA, LP, lending, perp).
 Every cell exercises the REAL engine, portfolio, and adapter code. Nothing
 under test is mocked; synthetic price providers replace only the data feed.
 This exists because the 9-phase manual trust protocol
-(`docs/internal/notes/backtesting/Backtesting-TrustTest.md`) was executed
+(`docs/internal/reference/backtesting/Backtesting-TrustTest.md`) was executed
 once in February 2026 and never automated - which is how the VIB-5082
 conservation bug survived under an "L3 certified" banner.
 

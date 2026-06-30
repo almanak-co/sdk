@@ -1,7 +1,7 @@
 """VIB-3350: block-anchored balance reads on Web3BalanceProvider.
 
 The regression gate for the production false-positive reconciliation incident
-(see docs/internal/Reconcil.md): a swap that succeeded on-chain was flagged
+(see docs/internal/accounting/Reconcil.md): a swap that succeeded on-chain was flagged
 because the post-execution read returned pre-tx "latest" state from a lagging
 RPC/replica, so every token delta computed to 0. Block-anchored reads pin the
 post-read to the confirmed receipt block, so the delta is correct.

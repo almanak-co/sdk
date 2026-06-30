@@ -15,7 +15,7 @@ All callers — the CLI ``almanak strat demo`` command, sidecar matrix
 picker, smoke runner, CI gates, mkdocs demo pages — should import
 ``DemoSpec`` / ``DemoCatalog`` from this package rather than re-walk the
 demo tree or hand-maintain parallel registries. See
-``docs/internal/DemoFixing.md`` for the rationale (v2, 2026-05-02).
+``docs/internal/reference/DemoFixing.md`` for the rationale (v2, 2026-05-02).
 """
 
 from __future__ import annotations

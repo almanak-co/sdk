@@ -10,7 +10,7 @@ the old clamp silently popped the absent token key), so every stable-quoted
 buy minted portfolio value equal to the trade size, and selling more of a
 token than held minted the full proceeds (short-from-nothing).
 
-The TrustTest plan (docs/internal/notes/backtesting/Backtesting-TrustTest.md
+The TrustTest plan (docs/internal/reference/backtesting/Backtesting-TrustTest.md
 Tests 1.1 / 1.2) describes these invariants; this file makes them
 CI-enforced.
 """

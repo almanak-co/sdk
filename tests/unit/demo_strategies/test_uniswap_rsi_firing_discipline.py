@@ -1,6 +1,6 @@
 """Firing-discipline tests for the RSI demo strategy.
 
-Covers the D2 deliverable from ``docs/internal/AccountingStrats.md``:
+Covers the D2 deliverable from ``docs/internal/accounting/AccountingStrats.md``:
 
 * Re-arm hysteresis band: a bare tick past the threshold does NOT re-arm the
   latch — the documented buy-spree repro (RSI 29.9 / 30.1 / 29.8 firing a buy

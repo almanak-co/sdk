@@ -7,7 +7,7 @@ it.
 
 The metadata helpers in this module delegate to
 ``almanak.framework.demos.DemoCatalog`` — the single source of truth
-for demo discovery (see ``docs/internal/DemoFixing.md``).
+for demo discovery (see ``docs/internal/reference/DemoFixing.md``).
 """
 
 from __future__ import annotations

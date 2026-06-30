@@ -30,7 +30,7 @@ _FLUID_VAULT: dict[str, Any] = {
     # here exempts ``fluid_vault`` from that guard; the supply/borrow accounting
     # split for the atomic operate() is owned by the Fluid receipt-parser /
     # accounting path, not by intent-level decomposition. See
-    # ``lending_intents.BorrowIntent`` and ``docs/internal/bundled-collateral-borrow-migration.md``.
+    # ``lending_intents.BorrowIntent`` and ``docs/internal/archive/reports/bundled-collateral-borrow-migration.md``.
     "supports_bundled_collateral_borrow": True,
 }
 

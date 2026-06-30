@@ -269,7 +269,7 @@ class BundledCollateralBorrowError(ValueError):
     behaviour is to fail closed (loud reject) and steer callers to the
     accounting-correct two-intent form.
 
-    See ``docs/internal/bundled-collateral-borrow-migration.md`` for the guard,
+    See ``docs/internal/archive/reports/bundled-collateral-borrow-migration.md`` for the guard,
     carve-outs, and migration tracker (and ``docs/internal/FollowUp-13June15.md``
     §D1 / VIB-3586 ``9d982cadf`` for the original root cause).
 
@@ -309,7 +309,7 @@ class BundledCollateralBorrowError(ValueError):
             f"amount=<collateral_amount>, use_as_collateral=True) first, then "
             f"Intent.borrow(protocol={protocol!r}, collateral_token={collateral_token!r}, "
             f'collateral_amount=Decimal("0"), borrow_token={borrow_token!r}, borrow_amount=<amount>). '
-            f"(See docs/internal/bundled-collateral-borrow-migration.md.)"
+            f"(See docs/internal/archive/reports/bundled-collateral-borrow-migration.md.)"
         )
 
 

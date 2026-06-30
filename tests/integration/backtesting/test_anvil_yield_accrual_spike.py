@@ -18,7 +18,7 @@ Tests:
        accrueInterest(marketParams) and verify position value increases.
 
 Measured findings (2026-06-13, see
-docs/internal/notes/backtesting/spike-vib-2630-anvil-interest-accrual.md):
+docs/internal/archive/reports/spike-vib-2630-anvil-interest-accrual.md):
     - Aave V3 and Compound V3 accrue WITHOUT any poke: their balanceOf
       implementations project the interest index lazily from block.timestamp,
       so evm_increaseTime + evm_mine alone moves the balance.

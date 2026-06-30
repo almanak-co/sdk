@@ -186,7 +186,7 @@ class PredictionMarketDataProvider:
 
         TODO: Extract a PredictionMarketProtocol interface and create
         protocol-specific implementations (PolymarketProvider, AugurProvider,
-        etc.). See docs/internal/notes/tech-debt/prediction-provider-coupling.md for
+        etc.). See docs/internal/tech-debt/prediction-provider-coupling.md for
         detailed refactoring plan.
 
     Attributes:

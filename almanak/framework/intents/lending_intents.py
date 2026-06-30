@@ -97,7 +97,7 @@ class BorrowIntent(BaseIntent):
         # one action, but accounting writes one event per intent -- the SUPPLY
         # event and supply FIFO lot are silently dropped. Only the standalone
         # form (collateral_amount == Decimal("0")) is accounting-correct.
-        # See docs/internal/bundled-collateral-borrow-migration.md (and
+        # See docs/internal/archive/reports/bundled-collateral-borrow-migration.md (and
         # docs/internal/FollowUp-13June15.md §D1 for the original root cause).
         self._reject_bundled_collateral()
         # Validate interest_rate_mode against protocol capabilities

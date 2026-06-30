@@ -28,7 +28,7 @@ Plus the two ratified reference shapes from blueprint 27 §7.11 / VIB-5201:
     shape that silently double-subtracts debt → NAV −$24,000 vs true $8,000).
 
 The three enumerated discrepancy classes (see report
-``docs/internal/shadow-parity-vib-5217.md``):
+``docs/internal/accounting/shadow-parity-vib-5217.md``):
 
   1. ``cost_basis_gross_vs_net``  — valuer ``deployed_capital_usd`` (GROSS) minus
      aggregation ``net_cost`` (net equity) = 2×debt_cost when a debt leg exists.
@@ -319,11 +319,11 @@ def test_no_debt_primitives_have_no_gaps_but_debt_primitives_do():
 
 
 # --------------------------------------------------------------------------- #
-# Report rendering (used to (re)generate docs/internal/shadow-parity-vib-5217.md).
+# Report rendering (used to (re)generate docs/internal/accounting/shadow-parity-vib-5217.md).
 # --------------------------------------------------------------------------- #
 def render_markdown_report() -> str:
     """Render the enumerated discrepancy table. Used to (re)generate the
-    checked-in report doc (``docs/internal/shadow-parity-vib-5217.md``);
+    checked-in report doc (``docs/internal/accounting/shadow-parity-vib-5217.md``);
     :func:`test_report_renders` exercises the renderer."""
     results = _all_results()
     lines = [

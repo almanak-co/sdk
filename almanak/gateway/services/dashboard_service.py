@@ -79,7 +79,7 @@ _QUANT_INPUTS_CACHE_TTL_SECONDS = 5.0
 # ~6× vs. the 5 s default; between full scans the checkpoint is advanced by a cheap
 # incremental "fetch since cursor" so current-drawdown stays render-fresh AND
 # correct (a new high-water mark after the last scan is folded before the
-# current-drawdown is computed). See docs/internal/PRD-DashboardJune15.md §4.A.
+# current-drawdown is computed). See docs/internal/dashboard/PRD-DashboardJune15.md §4.A.
 _LIFETIME_DRAWDOWN_TTL_SECONDS = 30.0
 
 # VIB-5134: after a full-scan FAILURE the checkpoint retries on this short backoff

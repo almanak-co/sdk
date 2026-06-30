@@ -51,7 +51,7 @@ class TestBundledBorrowRejected:
         assert "Intent.supply" in msg
         assert "use_as_collateral=True" in msg
         assert 'collateral_amount=Decimal("0")' in msg
-        assert "docs/internal/bundled-collateral-borrow-migration.md" in msg
+        assert "docs/internal/archive/reports/bundled-collateral-borrow-migration.md" in msg
 
     def test_morpho_blue_positive_collateral_rejected(self) -> None:
         with pytest.raises(ValidationError) as exc_info:

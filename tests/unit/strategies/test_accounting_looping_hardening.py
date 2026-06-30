@@ -1,6 +1,6 @@
 """Tier-1 hardening tests for the accounting looping fixture.
 
-Covers the D1 deliverable from ``docs/internal/AccountingStrats.md``:
+Covers the D1 deliverable from ``docs/internal/accounting/AccountingStrats.md``:
 
 * ``generate_teardown_intents`` delegates to the framework's HF-aware lending
   unwind primitive (``generate_lending_unwind``) with ``consolidate_to`` = the

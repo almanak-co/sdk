@@ -244,7 +244,7 @@ class TestKnownCometAddressesPinned:
     USDC.e entries were swapped, so historical APY queries for Arbitrum USDC
     silently read the bridged USDC.e market. Addresses verified via
     baseToken() on 2026-06-13; see
-    docs/internal/notes/backtesting/spike-vib-2630-anvil-interest-accrual.md.
+    docs/internal/archive/reports/spike-vib-2630-anvil-interest-accrual.md.
     """
 
     def test_arbitrum_usdc_is_native_usdc_comet(self):

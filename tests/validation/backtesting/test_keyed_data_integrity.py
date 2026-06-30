@@ -10,7 +10,7 @@ These tests hit the live CoinGecko API and therefore belong to the keyed
 ``COINGECKO_API_KEY`` is absent, so the keyless PR tier
 (``-m "not validation"``) never touches the network.
 
-Protocol source: docs/internal/notes/backtesting/Backtesting-TrustTest.md
+Protocol source: docs/internal/reference/backtesting/Backtesting-TrustTest.md
 (Tests 3.1 and 4.1).
 """
 

@@ -1111,7 +1111,7 @@ class TestFillTokenFlowSemantics:
     tokens PAID (position_models.py). SimulatedPortfolio.apply_fill credits
     tokens_in and debits tokens_out, so an inverted fill mints the spent
     token and erases the received one - violating the Conservation of Value
-    invariant (docs/internal/notes/backtesting/Backtesting-TrustTest.md).
+    invariant (docs/internal/reference/backtesting/Backtesting-TrustTest.md).
     """
 
     def _zero_cost_adapter(self) -> ArbitrageBacktestAdapter:
