@@ -63,6 +63,13 @@ CONNECTOR = Connector(
         module="almanak.connectors.pendle.compiler",
         attribute="PendleCompiler",
     ),
+    # On-chain teardown closure verifier (VIB-3808 / VIB-5487): re-reads the
+    # residual PT / LP-token balance via the gateway so a still-funded Pendle
+    # holding fails the teardown closed instead of being reported optimistically.
+    teardown_post_condition=ImportRef(
+        module="almanak.connectors.pendle.teardown_post_condition",
+        attribute="pendle_teardown_post_condition",
+    ),
     capabilities=CapabilitiesSpec(
         keys=("pendle",),
         module="almanak.connectors.pendle.capabilities",

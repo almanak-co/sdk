@@ -663,6 +663,7 @@ EXPECTED_SWAP_ROUTE_INFERENCE_MODULES = {
 }
 
 EXPECTED_TEARDOWN_POST_CONDITION_MODULES = {
+    "pendle": "almanak.connectors.pendle.teardown_post_condition",
     "traderjoe_v2": "almanak.connectors.traderjoe_v2.teardown_post_condition",
 }
 

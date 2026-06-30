@@ -28,12 +28,14 @@ FINAL RATCHET (wired)
 ---------------------
 The epic's Done-when contract — "all merged-seam cells GREEN + fail-CI-on-
 regression" — is now satisfied. TD-10 (#3070), TD-11 (#3071) and TD-15 (#3066)
-all landed, so their cells assert the shipped behaviour as GREEN. The only
-remaining strict-xfails are **S6 × {perp, pendle}**: TD-15 delivered fail-closed
-residual detection for LP (post-condition) + lending (Plan-A chain read), but
-perp/pendle have no per-position on-chain closure verifier yet (``_reconcile_one``
-returns UNVERIFIABLE) — tracked by VIB-5116 (GMX) / VIB-3808 (Pendle TOKEN). When
-either lands, its cell XPASSes (strict ⇒ CI red) and is flipped GREEN.
+all landed, so their cells assert the shipped behaviour as GREEN. VIB-3808 then
+added the Pendle on-chain closure post-condition (residual PT / LP-token
+``balanceOf`` via the gateway), flipping S6 × pendle GREEN. The only remaining
+strict-xfail is **S6 × perp**: TD-15 delivered fail-closed residual detection for
+LP (post-condition) + lending (Plan-A chain read) and VIB-3808 for Pendle, but
+perp has no per-position on-chain closure verifier yet (``_reconcile_one``
+returns UNVERIFIABLE) — tracked by VIB-5116 (GMX). When it lands, its cell
+XPASSes (strict ⇒ CI red) and is flipped GREEN.
 
 This file is wired as a hard CI gate via ``make test-teardown-matrix`` (run in
 the teardown CI job). A GREEN cell regressing to red, or a strict-xfail XPASSing,
@@ -75,7 +77,10 @@ from almanak.framework.teardown.plan_a_reconciliation import (
     ReconciliationReport,
     ReconciliationVerdict,
 )
-from almanak.framework.teardown.post_conditions import has_teardown_post_condition
+from almanak.framework.teardown.post_conditions import (
+    get_teardown_post_condition,
+    has_teardown_post_condition,
+)
 from almanak.framework.teardown.revert_hints import (
     annotate_teardown_error,
     operator_hint_for_selector,
@@ -637,7 +642,44 @@ def check_s6_failclosed_onchain_verify(primitive: str) -> None:
         assert out.verification_status is VerificationStatus.FAILED, "residual on-chain risk must report FAILED"
         return
 
-    # perp / pendle (xfail target): assert the primitive HAS a fail-closed on-chain
+    if primitive == PENDLE:
+        # Pendle's closure authority is the on-chain post-condition (VIB-3808):
+        # it re-reads the residual PT / LP-token balance via the gateway. Drive
+        # the REAL registered hook with a fake gateway client and assert a
+        # residual PT/LP balance flips closed→False (stronger than membership),
+        # and a zero balance reads closed=True.
+        assert has_teardown_post_condition("pendle"), (
+            "pendle must register an on-chain teardown post-condition (PT/LP closure authority)"
+        )
+        hook = get_teardown_post_condition("pendle")
+        market = "0x1234567890abcdef1234567890abcdef12345678"  # Pendle market == LP token
+        lp_pos = PositionInfo(
+            position_type=PositionType.LP,
+            position_id=market,
+            chain=_CHAIN,
+            protocol="pendle",
+            value_usd=Decimal("0"),
+            details={"kind": "lp", "market_id": market},
+        )
+
+        class _PendleGateway:
+            def __init__(self, balance: int) -> None:
+                self._balance = balance
+
+            def query_erc20_balance(
+                self, chain: str, token_address: str, wallet_address: str, block: Any = None
+            ) -> int:  # noqa: ARG002
+                return self._balance
+
+        wallet = "0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF"
+        residual = hook(lp_pos, wallet, gateway_client=_PendleGateway(7777))
+        assert residual.closed is False, "a residual Pendle LP balance must fail the teardown closed"
+        assert residual.residual.get("balance") == 7777
+        closed = hook(lp_pos, wallet, gateway_client=_PendleGateway(0))
+        assert closed.closed is True, "a zero Pendle LP balance reads closed on-chain"
+        return
+
+    # perp (xfail target): assert the primitive HAS a fail-closed on-chain
     # closure verifier. It does not yet, so this fails → strict xfail.
     proto = _POSTCOND_PROTO[primitive]
     assert has_teardown_post_condition(proto), (
@@ -825,22 +867,19 @@ SEAMS: tuple[Seam, ...] = (
             LP: "green",
             LENDING: "green",
             # TD-15 (#3066) delivered fail-closed residual detection for LP (post-
-            # condition) + lending (Plan-A chain read). Perp/pendle have NO per-
-            # position on-chain closure verifier yet — _reconcile_one returns
-            # UNVERIFIABLE and no post-condition is registered, so a residual is not
-            # fail-closed. Their on-chain closure read is owned by separate tickets.
+            # condition) + lending (Plan-A chain read). VIB-3808 added the Pendle
+            # on-chain closure post-condition (residual PT / LP-token balanceOf via
+            # the gateway), so a residual Pendle holding is now fail-closed. Perp
+            # still has NO per-position on-chain closure verifier — _reconcile_one
+            # returns UNVERIFIABLE and no post-condition is registered, so a residual
+            # perp is not fail-closed; its on-chain closure read is owned by VIB-5116.
             PERP: (
                 "xfail",
                 "VIB-5116",
                 "no on-chain closure verifier for GMX perp — reconciliation returns UNVERIFIABLE "
                 "and no post-condition is registered, so a residual perp is not fail-closed",
             ),
-            PENDLE: (
-                "xfail",
-                "VIB-3808",
-                "no on-chain closure post-condition for Pendle TOKEN positions — reconciliation "
-                "returns UNVERIFIABLE, so a residual PT/LP is not fail-closed",
-            ),
+            PENDLE: "green",
             STAKE: _NA_REGISTRY_STAKE,
         },
     ),
@@ -932,6 +971,7 @@ def test_matrix_shape_is_complete() -> None:
             key = status if isinstance(status, str) else status[0]
             counts[key] += 1
     assert sum(counts.values()) == len(SEAMS) * len(PRIMITIVES) == 45
-    # 25 GREEN (all merged seams proven) / 2 XFAIL (perp+pendle on-chain closure
-    # verifier still unbuilt — VIB-5116 / VIB-3808) / 18 N/A.
-    assert counts == {"green": 25, "xfail": 2, "na": 18}, counts
+    # 26 GREEN (all merged seams proven, incl. the Pendle on-chain closure
+    # verifier VIB-3808) / 1 XFAIL (perp on-chain closure verifier still unbuilt
+    # — VIB-5116 is now the only remaining xfail) / 18 N/A.
+    assert counts == {"green": 26, "xfail": 1, "na": 18}, counts
