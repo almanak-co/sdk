@@ -157,6 +157,7 @@ class BacktestMetricsResponse(BaseModel):
     # --- Portfolio risk ---
     total_leverage: str = "0"
     max_net_delta: dict[str, str] = Field(default_factory=dict)
+    max_net_delta_display_labels: dict[str, str] = Field(default_factory=dict)
     correlation_risk: str | None = None
     liquidation_cascade_risk: str = "0"
 
@@ -164,6 +165,7 @@ class BacktestMetricsResponse(BaseModel):
     pnl_by_protocol: dict[str, str] = Field(default_factory=dict)
     pnl_by_intent_type: dict[str, str] = Field(default_factory=dict)
     pnl_by_asset: dict[str, str] = Field(default_factory=dict)
+    pnl_by_asset_display_labels: dict[str, str] = Field(default_factory=dict)
 
 
 class BacktestResultResponse(BaseModel):

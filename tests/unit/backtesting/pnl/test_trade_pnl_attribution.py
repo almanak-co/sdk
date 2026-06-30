@@ -31,6 +31,8 @@ from almanak.framework.backtesting.pnl.portfolio import (
 )
 
 TS = datetime(2025, 11, 1, tzinfo=UTC)
+BASE_USDC_KEY = "base:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+BASE_WETH_KEY = "base:0x4200000000000000000000000000000000000006"
 
 
 def _market(weth: str) -> MarketState:
@@ -358,6 +360,75 @@ class TestAttributionResult:
 
         with pytest.raises(ValueError, match="Unknown attribution_type"):
             AttributionCalculator().get_attribution_result([], "venue")
+
+
+class TestAddressKeyedAssetAttribution:
+    def test_address_keys_are_preserved_and_symbols_are_display_labels(self) -> None:
+        from almanak.framework.backtesting.pnl.calculators.attribution import (
+            attribute_pnl_by_asset,
+            attribute_pnl_by_asset_display_labels,
+        )
+
+        trades = [
+            _trade_record(
+                pnl_usd=Decimal("100"),
+                tokens=[BASE_USDC_KEY, BASE_WETH_KEY],
+            )
+        ]
+
+        by_asset = attribute_pnl_by_asset(trades)
+        display_labels = attribute_pnl_by_asset_display_labels(trades)
+
+        assert by_asset == {
+            BASE_USDC_KEY: Decimal("50"),
+            BASE_WETH_KEY: Decimal("50"),
+        }
+        assert display_labels == {
+            BASE_USDC_KEY: "USDC",
+            BASE_WETH_KEY: "WETH",
+        }
+
+    def test_metrics_serialize_address_attribution_with_display_labels(self) -> None:
+        from almanak.framework.backtesting.models import BacktestMetrics, BacktestResult
+
+        metrics = BacktestMetrics(
+            pnl_by_asset={BASE_USDC_KEY: Decimal("12.34")},
+            max_net_delta={BASE_WETH_KEY: Decimal("0.5")},
+        )
+
+        serialized = metrics.to_dict()
+        restored = BacktestResult._parse_metrics(serialized)
+
+        assert serialized["pnl_by_asset"] == {BASE_USDC_KEY: "12.34"}
+        assert serialized["pnl_by_asset_display_labels"] == {BASE_USDC_KEY: "USDC"}
+        assert serialized["max_net_delta"] == {BASE_WETH_KEY: "0.5"}
+        assert serialized["max_net_delta_display_labels"] == {BASE_WETH_KEY: "WETH"}
+        assert restored.pnl_by_asset == {BASE_USDC_KEY: Decimal("12.34")}
+        assert restored.pnl_by_asset_display_labels == {BASE_USDC_KEY: "USDC"}
+        assert restored.max_net_delta == {BASE_WETH_KEY: Decimal("0.5")}
+        assert restored.max_net_delta_display_labels == {BASE_WETH_KEY: "WETH"}
+
+    def test_legacy_symbols_are_uppercased_for_keys_and_labels(self) -> None:
+        from almanak.framework.backtesting.pnl.calculators.attribution import (
+            attribute_pnl_by_asset,
+            attribute_pnl_by_asset_display_labels,
+        )
+
+        trades = [
+            _trade_record(
+                pnl_usd=Decimal("100"),
+                tokens=["weth", "usdc"],
+            )
+        ]
+
+        assert attribute_pnl_by_asset(trades) == {
+            "WETH": Decimal("50"),
+            "USDC": Decimal("50"),
+        }
+        assert attribute_pnl_by_asset_display_labels(trades) == {
+            "WETH": "WETH",
+            "USDC": "USDC",
+        }
 
 
 class TestGeminiReviewRegressions:

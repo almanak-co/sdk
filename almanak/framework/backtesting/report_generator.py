@@ -31,6 +31,7 @@ try:
 except ImportError as e:
     raise ImportError("Jinja2 is required for report generation. Install it with: pip install jinja2") from e
 
+from almanak.framework.backtesting.pnl.calculators import collision_safe_display_labels
 from almanak.framework.backtesting.templates import TEMPLATE_DIR
 
 if TYPE_CHECKING:
@@ -112,11 +113,13 @@ def _prepare_metrics_dict(result: "BacktestResult") -> dict[str, Any]:
         "total_mev_cost_usd": str(metrics.total_mev_cost_usd),
         "total_leverage": str(metrics.total_leverage),
         "max_net_delta": {k: str(v) for k, v in metrics.max_net_delta.items()},
+        "max_net_delta_display_labels": dict(metrics.max_net_delta_display_labels),
         "correlation_risk": str(metrics.correlation_risk) if metrics.correlation_risk is not None else None,
         "liquidation_cascade_risk": str(metrics.liquidation_cascade_risk),
         "pnl_by_protocol": {k: str(v) for k, v in metrics.pnl_by_protocol.items()},
         "pnl_by_intent_type": {k: str(v) for k, v in metrics.pnl_by_intent_type.items()},
         "pnl_by_asset": {k: str(v) for k, v in metrics.pnl_by_asset.items()},
+        "pnl_by_asset_display_labels": dict(metrics.pnl_by_asset_display_labels),
         "realized_pnl": str(metrics.realized_pnl),
         "unrealized_pnl": str(metrics.unrealized_pnl),
     }
@@ -252,6 +255,8 @@ def generate_report(
 
         # Prepare template variables
         metrics_dict = _prepare_metrics_dict(result)
+        pnl_by_asset = metrics_dict.get("pnl_by_asset", {})
+        pnl_by_asset_display_labels = metrics_dict.get("pnl_by_asset_display_labels", {})
 
         # Extract attribution charts (default to empty dict if None)
         attr_charts = attribution_charts or {}
@@ -270,7 +275,12 @@ def generate_report(
             # Attribution data for tables
             "pnl_by_protocol": metrics_dict.get("pnl_by_protocol", {}),
             "pnl_by_intent_type": metrics_dict.get("pnl_by_intent_type", {}),
-            "pnl_by_asset": metrics_dict.get("pnl_by_asset", {}),
+            "pnl_by_asset": pnl_by_asset,
+            "pnl_by_asset_display_labels": pnl_by_asset_display_labels,
+            "pnl_by_asset_table_labels": collision_safe_display_labels(
+                pnl_by_asset.keys(),
+                pnl_by_asset_display_labels,
+            ),
             "generated_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
         }
 

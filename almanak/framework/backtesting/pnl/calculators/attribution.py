@@ -43,12 +43,67 @@ Example:
     )
 """
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from almanak.core.chains import ChainRegistry
+from almanak.framework.backtesting.paper.token_registry import resolve_to_canonical_symbol
+from almanak.framework.backtesting.pnl.data_provider import (
+    is_address_like,
+    is_token_key,
+    normalize_token_ref,
+    token_ref_display,
+)
+
 if TYPE_CHECKING:
     from almanak.framework.backtesting.models import TradeRecord
+
+
+def _asset_attribution_key(token: str | None) -> str:
+    """Return the stable key used for asset-level PnL attribution."""
+    if not token:
+        return "UNKNOWN"
+
+    normalized = normalize_token_ref(token)
+    if is_token_key(normalized):
+        return token_ref_display(normalized)
+
+    assert isinstance(normalized, str)
+    return token_ref_display(normalized) if is_address_like(normalized) else normalized.upper()
+
+
+def asset_display_label(asset_key: str) -> str:
+    """Return a human label for an attribution key without changing the key."""
+    normalized = normalize_token_ref(asset_key)
+    if is_token_key(normalized):
+        chain, address = normalized
+        descriptor = ChainRegistry.try_resolve(chain)
+        if descriptor is not None and descriptor.chain_id != 0:
+            return resolve_to_canonical_symbol(descriptor.chain_id, address)
+        return address
+
+    assert isinstance(normalized, str)
+    return token_ref_display(normalized) if is_address_like(normalized) else normalized.upper()
+
+
+def collision_safe_display_labels(
+    keys: Iterable[str],
+    display_labels: Mapping[str, str],
+) -> dict[str, str]:
+    """Return display labels that keep distinct raw keys visible on collisions."""
+    key_list = list(keys)
+    label_counts: dict[str, int] = {}
+    for key in key_list:
+        label = display_labels.get(key, key)
+        label_counts[label] = label_counts.get(label, 0) + 1
+
+    labels: dict[str, str] = {}
+    for key in key_list:
+        label = display_labels.get(key, key)
+        labels[key] = label if label_counts[label] == 1 else f"{label} ({key})"
+    return labels
 
 
 @dataclass
@@ -207,13 +262,16 @@ class AttributionCalculator:
             trades: List of TradeRecord objects from the backtest
 
         Returns:
-            Dictionary mapping asset symbol to total attributed PnL.
-            Example: {"ETH": Decimal("80"), "USDC": Decimal("20")}
+            Dictionary mapping asset attribution key to total attributed PnL.
+            Address-keyed trades use ``"chain:address"`` keys; legacy
+            symbol-keyed trades keep uppercase symbol keys.
+            Example: {"base:0x8335...": Decimal("80"), "USDC": Decimal("20")}
 
         Note:
             - For trades with multiple tokens, PnL is split equally
-            - Trades with no tokens are grouped under "unknown"
-            - Token symbols are normalized to uppercase
+            - Trades with no tokens are grouped under "UNKNOWN"
+            - Address identity keys are preserved as ``chain:address``
+            - Legacy token symbols are normalized to uppercase
         """
         attribution: dict[str, Decimal] = {}
 
@@ -233,8 +291,7 @@ class AttributionCalculator:
             pnl_per_token = pnl / Decimal(str(len(tokens)))
 
             for token in tokens:
-                # Normalize token symbol to uppercase
-                token_normalized = token.upper() if token else "UNKNOWN"
+                token_normalized = _asset_attribution_key(token)
 
                 if token_normalized in attribution:
                     attribution[token_normalized] += pnl_per_token
@@ -242,6 +299,30 @@ class AttributionCalculator:
                     attribution[token_normalized] = pnl_per_token
 
         return attribution
+
+    def asset_display_labels(
+        self,
+        trades: list["TradeRecord"],
+    ) -> dict[str, str]:
+        """Return display labels for asset-level attribution keys.
+
+        The returned dictionary is keyed exactly like :meth:`attribute_pnl_by_asset`.
+        Address identities resolve to deterministic canonical symbols when the
+        registry knows them; unknown addresses fall back to the checksummed
+        address from ``resolve_to_canonical_symbol``.
+        """
+        labels: dict[str, str] = {}
+
+        for trade in trades:
+            if not trade.success:
+                continue
+
+            tokens = trade.tokens or ["unknown"]
+            for token in tokens:
+                key = _asset_attribution_key(token)
+                labels.setdefault(key, asset_display_label(key))
+
+        return labels
 
     def get_attribution_result(
         self,
@@ -339,6 +420,15 @@ def attribute_pnl_by_asset(
     return calc.attribute_pnl_by_asset(trades)
 
 
+def attribute_pnl_by_asset_display_labels(
+    trades: list["TradeRecord"],
+    use_net_pnl: bool = True,
+) -> dict[str, str]:
+    """Return display labels for asset-level PnL attribution keys."""
+    calc = AttributionCalculator(use_net_pnl=use_net_pnl)
+    return calc.asset_display_labels(trades)
+
+
 def verify_attribution_totals(
     trades: list["TradeRecord"],
     pnl_by_protocol: dict[str, Decimal],
@@ -427,9 +517,11 @@ def calculate_all_attributions(
 __all__ = [
     "AttributionCalculator",
     "AttributionResult",
+    "asset_display_label",
     "attribute_pnl_by_protocol",
     "attribute_pnl_by_intent_type",
     "attribute_pnl_by_asset",
+    "attribute_pnl_by_asset_display_labels",
     "verify_attribution_totals",
     "calculate_all_attributions",
 ]

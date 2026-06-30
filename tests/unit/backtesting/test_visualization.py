@@ -2491,6 +2491,78 @@ class TestAttributionCharts:
 
         assert html == ""
 
+    def test_display_labeled_attribution_passthrough_without_labels(self) -> None:
+        """Attribution labels are left untouched when no display labels exist."""
+        from almanak.framework.backtesting.visualization import _display_labeled_attribution
+
+        data = {"base:0x1111111111111111111111111111111111111111": Decimal("1")}
+
+        assert _display_labeled_attribution(data, {}) == data
+
+    def test_display_labeled_attribution_projects_unique_labels(self) -> None:
+        """Unique labels replace raw keys for display-only chart data."""
+        from almanak.framework.backtesting.visualization import _display_labeled_attribution
+
+        usdc_key = "base:0x1111111111111111111111111111111111111111"
+        weth_key = "base:0x2222222222222222222222222222222222222222"
+
+        assert _display_labeled_attribution(
+            {usdc_key: Decimal("1"), weth_key: Decimal("2")},
+            {usdc_key: "USDC", weth_key: "WETH"},
+        ) == {"USDC": Decimal("1"), "WETH": Decimal("2")}
+
+    def test_display_labeled_attribution_disambiguates_duplicate_labels(self) -> None:
+        """Duplicate labels keep raw keys visible so values are not merged."""
+        from almanak.framework.backtesting.visualization import _display_labeled_attribution
+
+        base_usdc_key = "base:0x1111111111111111111111111111111111111111"
+        arb_usdc_key = "arbitrum:0x2222222222222222222222222222222222222222"
+
+        assert _display_labeled_attribution(
+            {base_usdc_key: Decimal("1"), arb_usdc_key: Decimal("2")},
+            {base_usdc_key: "USDC", arb_usdc_key: "USDC"},
+        ) == {
+            f"USDC ({base_usdc_key})": Decimal("1"),
+            f"USDC ({arb_usdc_key})": Decimal("2"),
+        }
+
+    def test_generate_attribution_charts_html_projects_asset_labels(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The by-asset chart path receives display labels, not raw keys."""
+        import almanak.framework.backtesting.visualization as visualization
+
+        base_usdc_key = "base:0x1111111111111111111111111111111111111111"
+        arb_usdc_key = "arbitrum:0x2222222222222222222222222222222222222222"
+        captured: dict[str, dict[str, Decimal]] = {}
+
+        def fake_bar_chart(data: dict[str, Decimal], *, title: str, height: int) -> str:
+            captured[title] = data
+            return f"{title}:{height}"
+
+        monkeypatch.setattr(visualization, "generate_attribution_bar_chart_html", fake_bar_chart)
+        result = BacktestResult(
+            engine="pnl",
+            deployment_id="asset-labels",
+            start_time=datetime(2024, 1, 1),
+            end_time=datetime(2024, 1, 5),
+            metrics=BacktestMetrics(
+                pnl_by_asset={base_usdc_key: Decimal("1"), arb_usdc_key: Decimal("2")},
+                pnl_by_asset_display_labels={base_usdc_key: "USDC", arb_usdc_key: "USDC"},
+            ),
+            equity_curve=[],
+            initial_capital_usd=Decimal("10000"),
+            final_capital_usd=Decimal("10000"),
+        )
+
+        charts = visualization.generate_attribution_charts_html(result, height=222)
+
+        assert charts["by_asset"] == "PnL by Asset:222"
+        assert captured["PnL by Asset"] == {
+            f"USDC ({base_usdc_key})": Decimal("1"),
+            f"USDC ({arb_usdc_key})": Decimal("2"),
+        }
+
     def test_generate_attribution_charts_html_all(
         self, result_with_attribution: BacktestResult
     ) -> None:

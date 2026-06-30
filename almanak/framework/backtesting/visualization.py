@@ -2437,6 +2437,20 @@ def generate_attribution_bar_chart_html(
         return ""
 
 
+def _display_labeled_attribution(
+    attribution_data: dict[str, Decimal],
+    display_labels: dict[str, str],
+) -> dict[str, Decimal]:
+    """Project attribution keys to display labels without merging collisions."""
+    if not display_labels:
+        return attribution_data
+
+    from almanak.framework.backtesting.pnl.calculators import collision_safe_display_labels
+
+    label_by_key = collision_safe_display_labels(attribution_data.keys(), display_labels)
+    return {label_by_key[key]: value for key, value in attribution_data.items()}
+
+
 def generate_attribution_charts_html(
     result: "BacktestResult",
     chart_type: str = "bar",
@@ -2489,7 +2503,10 @@ def generate_attribution_charts_html(
 
         if hasattr(metrics, "pnl_by_asset") and metrics.pnl_by_asset:
             charts["by_asset"] = generator(
-                metrics.pnl_by_asset,
+                _display_labeled_attribution(
+                    metrics.pnl_by_asset,
+                    getattr(metrics, "pnl_by_asset_display_labels", {}),
+                ),
                 title="PnL by Asset",
                 height=height,
             )

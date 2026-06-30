@@ -2269,9 +2269,11 @@ class SimulatedPortfolio:
         # Trade statistics (VIB-5083): shared with calculate_metrics so the
         # win/loss / realized-PnL discipline lives in one place. Lazy import
         # avoids the metrics_calculator <-> portfolio import cycle.
+        from almanak.framework.backtesting.pnl.calculators.attribution import calculate_all_attributions
         from almanak.framework.backtesting.pnl.metrics_calculator import _compute_trade_statistics
 
         stats = _compute_trade_statistics(self.trades)
+        pnl_by_protocol, pnl_by_intent_type, pnl_by_asset = calculate_all_attributions(self.trades)
 
         # Position-derived metrics (LP fees, perp funding, lending interest,
         # health/margin extrema, realized/unrealized PnL). Sourced from the same
@@ -2324,6 +2326,9 @@ class SimulatedPortfolio:
             unrealized_pnl=pos.unrealized_pnl,
             liquidations_count=pos.liquidations_count,
             liquidation_losses_usd=pos.liquidation_losses_usd,
+            pnl_by_protocol=pnl_by_protocol,
+            pnl_by_intent_type=pnl_by_intent_type,
+            pnl_by_asset=pnl_by_asset,
         )
 
     @staticmethod

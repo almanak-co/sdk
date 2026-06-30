@@ -1771,7 +1771,8 @@ class BacktestMetrics:
         total_gas_cost_usd: Total gas costs in USD (same as total_gas_usd, kept for API consistency)
         total_mev_cost_usd: Total estimated MEV (sandwich attack) costs in USD across all trades
         total_leverage: Total portfolio leverage ratio (sum of all position notionals / equity)
-        max_net_delta: Maximum net delta exposure observed per asset (token symbol -> max delta)
+        max_net_delta: Maximum net delta exposure observed per asset (token attribution key -> max delta)
+        max_net_delta_display_labels: Display labels keyed by max_net_delta attribution key
         correlation_risk: Portfolio correlation risk score (0-1, higher = more correlated positions)
         liquidation_cascade_risk: Risk of cascading liquidations across protocols (0-1, higher = more risk)
         information_ratio: Information ratio measuring risk-adjusted excess return vs benchmark (None if not calculated)
@@ -1780,7 +1781,9 @@ class BacktestMetrics:
         benchmark_return: Total return of the benchmark over the backtest period as decimal (None if not calculated)
         pnl_by_protocol: PnL breakdown by protocol (e.g., {"uniswap_v3": Decimal("100"), "aave_v3": Decimal("-50")})
         pnl_by_intent_type: PnL breakdown by intent type (e.g., {"SWAP": Decimal("75"), "LP_OPEN": Decimal("25")})
-        pnl_by_asset: PnL breakdown by asset (e.g., {"ETH": Decimal("80"), "USDC": Decimal("20")})
+        pnl_by_asset: PnL breakdown by asset attribution key (e.g.,
+            {"base:0x8335...": Decimal("80"), "USDC": Decimal("20")})
+        pnl_by_asset_display_labels: Display labels keyed by pnl_by_asset attribution key
         realized_pnl: Total realized PnL from closed positions in USD
         unrealized_pnl: Total unrealized PnL from open positions in USD
     """
@@ -1839,6 +1842,7 @@ class BacktestMetrics:
     total_mev_cost_usd: Decimal = Decimal("0")
     total_leverage: Decimal = Decimal("0")
     max_net_delta: dict[str, Decimal] = field(default_factory=dict)
+    max_net_delta_display_labels: dict[str, str] = field(default_factory=dict)
     correlation_risk: Decimal | None = None
     liquidation_cascade_risk: Decimal = Decimal("0")
     information_ratio: Decimal | None = None
@@ -1848,6 +1852,7 @@ class BacktestMetrics:
     pnl_by_protocol: dict[str, Decimal] = field(default_factory=dict)
     pnl_by_intent_type: dict[str, Decimal] = field(default_factory=dict)
     pnl_by_asset: dict[str, Decimal] = field(default_factory=dict)
+    pnl_by_asset_display_labels: dict[str, str] = field(default_factory=dict)
     realized_pnl: Decimal = Decimal("0")
     unrealized_pnl: Decimal = Decimal("0")
     #: Equity-curve-derived metrics denominated in the strategy's numeraire token
@@ -1857,6 +1862,20 @@ class BacktestMetrics:
     numeraire_metrics: "NumeraireMetrics | None" = None
 
     SCHEMA_VERSION: ClassVar[int] = 2
+
+    def __post_init__(self) -> None:
+        """Populate token display labels from attribution keys when omitted."""
+        from almanak.framework.backtesting.pnl.calculators.attribution import asset_display_label
+
+        if self.max_net_delta:
+            labels = {key: asset_display_label(key) for key in self.max_net_delta}
+            labels.update(self.max_net_delta_display_labels)
+            self.max_net_delta_display_labels = labels
+
+        if self.pnl_by_asset:
+            labels = {key: asset_display_label(key) for key in self.pnl_by_asset}
+            labels.update(self.pnl_by_asset_display_labels)
+            self.pnl_by_asset_display_labels = labels
 
     @property
     def total_execution_cost_usd(self) -> Decimal:
@@ -1920,6 +1939,7 @@ class BacktestMetrics:
             "total_mev_cost_usd": _decimal_str(self.total_mev_cost_usd),
             "total_leverage": _decimal_str(self.total_leverage),
             "max_net_delta": {k: _decimal_str(v) for k, v in self.max_net_delta.items()},
+            "max_net_delta_display_labels": dict(self.max_net_delta_display_labels),
             "correlation_risk": _decimal_str_or_none(self.correlation_risk),
             "liquidation_cascade_risk": _decimal_str(self.liquidation_cascade_risk),
             "information_ratio": _decimal_str_or_none(self.information_ratio),
@@ -1929,6 +1949,7 @@ class BacktestMetrics:
             "pnl_by_protocol": {k: _decimal_str(v) for k, v in self.pnl_by_protocol.items()},
             "pnl_by_intent_type": {k: _decimal_str(v) for k, v in self.pnl_by_intent_type.items()},
             "pnl_by_asset": {k: _decimal_str(v) for k, v in self.pnl_by_asset.items()},
+            "pnl_by_asset_display_labels": dict(self.pnl_by_asset_display_labels),
             "realized_pnl": _decimal_str(self.realized_pnl),
             "unrealized_pnl": _decimal_str(self.unrealized_pnl),
         }
@@ -2608,6 +2629,9 @@ class BacktestResult:
             total_mev_cost_usd=Decimal(metrics_data.get("total_mev_cost_usd", "0")),
             total_leverage=Decimal(metrics_data.get("total_leverage", "0")),
             max_net_delta={k: Decimal(v) for k, v in metrics_data.get("max_net_delta", {}).items()},
+            max_net_delta_display_labels={
+                str(k): str(v) for k, v in metrics_data.get("max_net_delta_display_labels", {}).items()
+            },
             correlation_risk=opt_dec(metrics_data, "correlation_risk"),
             liquidation_cascade_risk=Decimal(metrics_data.get("liquidation_cascade_risk", "0")),
             information_ratio=opt_dec(metrics_data, "information_ratio"),
@@ -2617,6 +2641,9 @@ class BacktestResult:
             pnl_by_protocol={k: Decimal(v) for k, v in metrics_data.get("pnl_by_protocol", {}).items()},
             pnl_by_intent_type={k: Decimal(v) for k, v in metrics_data.get("pnl_by_intent_type", {}).items()},
             pnl_by_asset={k: Decimal(v) for k, v in metrics_data.get("pnl_by_asset", {}).items()},
+            pnl_by_asset_display_labels={
+                str(k): str(v) for k, v in metrics_data.get("pnl_by_asset_display_labels", {}).items()
+            },
             realized_pnl=Decimal(metrics_data.get("realized_pnl", "0")),
             unrealized_pnl=Decimal(metrics_data.get("unrealized_pnl", "0")),
             # Optional (VIB-5127): absent key -> None -> a USD artifact.

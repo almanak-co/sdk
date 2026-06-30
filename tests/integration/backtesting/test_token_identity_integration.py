@@ -86,14 +86,15 @@ class MockMarketState:
 
 
 # =============================================================================
-# Test Class 1: Receipt Parsing Outputs Symbols (Not Addresses)
+# Test Class 1: Receipt Parsing Outputs Symbols, Attribution Uses Addresses
 # =============================================================================
 
 
 class TestReceiptParsingOutputsSymbols:
-    """Tests validating that receipt parsing outputs symbols, not addresses.
+    """Receipt parsing remains human-readable while attribution uses identity keys.
 
-    Acceptance Criterion #1: Test receipt parsing outputs symbols (not addresses)
+    Acceptance Criterion #1: Test receipt parsing outputs symbols for display,
+    and Phase 4 attribution serializes address keys with symbol labels.
     """
 
     def test_known_token_resolved_to_symbol(self):
@@ -191,6 +192,38 @@ class TestReceiptParsingOutputsSymbols:
         # Verify addresses are NOT used as keys
         assert ETH_WETH_ADDRESS not in tokens_in, f"Address should not be key: {tokens_in}"
         assert ETH_USDC_ADDRESS not in tokens_out, f"Address should not be key: {tokens_out}"
+
+    def test_attribution_keys_addresses_and_projects_symbols(self):
+        """Portfolio attribution keys by address and carries symbols as labels."""
+        from almanak.framework.backtesting.models import IntentType, TradeRecord
+        from almanak.framework.backtesting.pnl.calculators.attribution import (
+            attribute_pnl_by_asset,
+            attribute_pnl_by_asset_display_labels,
+        )
+
+        usdc_key = f"ethereum:{ETH_USDC_ADDRESS}"
+        weth_key = f"ethereum:{ETH_WETH_ADDRESS}"
+        trade = TradeRecord(
+            timestamp=TEST_TIME,
+            intent_type=IntentType.SWAP,
+            executed_price=Decimal("2000"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            pnl_usd=Decimal("20"),
+            success=True,
+            protocol="uniswap_v3",
+            tokens=[usdc_key, weth_key],
+        )
+
+        assert attribute_pnl_by_asset([trade]) == {
+            usdc_key: Decimal("10"),
+            weth_key: Decimal("10"),
+        }
+        assert attribute_pnl_by_asset_display_labels([trade]) == {
+            usdc_key: "USDC",
+            weth_key: "WETH",
+        }
 
 
 # =============================================================================

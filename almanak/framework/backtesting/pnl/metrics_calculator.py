@@ -19,6 +19,7 @@ from almanak.framework.backtesting.models import (
     GasPriceSummary,
     TradeRecord,
 )
+from almanak.framework.backtesting.pnl.calculators.attribution import calculate_all_attributions
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 
@@ -505,6 +506,7 @@ def calculate_metrics(
     gas_prices = _compute_gas_price_metrics(trades)
     risk = _compute_risk_metrics(equity, config)
     stats = _compute_trade_statistics(trades)
+    pnl_by_protocol, pnl_by_intent_type, pnl_by_asset = calculate_all_attributions(trades)
 
     # Position-derived metrics (LP fee accrual, perp funding, lending interest,
     # health/margin extrema, realized/unrealized PnL). The engine result is
@@ -569,4 +571,7 @@ def calculate_metrics(
         unrealized_pnl=pos.unrealized_pnl,
         liquidations_count=pos.liquidations_count,
         liquidation_losses_usd=pos.liquidation_losses_usd,
+        pnl_by_protocol=pnl_by_protocol,
+        pnl_by_intent_type=pnl_by_intent_type,
+        pnl_by_asset=pnl_by_asset,
     )

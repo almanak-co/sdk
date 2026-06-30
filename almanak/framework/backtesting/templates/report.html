@@ -354,6 +354,13 @@
             margin-bottom: 20px;
         }
 
+        .attribution-note {
+            display: block;
+            margin-top: 6px;
+            color: var(--text-secondary);
+            font-size: 0.82rem;
+        }
+
         .attribution-summary .positive {
             color: var(--accent-green);
             font-weight: bold;
@@ -1011,6 +1018,7 @@
             <h2>PnL Attribution</h2>
             <p class="attribution-summary">
                 Breakdown of PnL contribution by different categories. Green bars indicate profit, red bars indicate loss.
+                <span class="attribution-note">Asset attribution splits each trade's realized PnL equally across recorded trade tokens.</span>
                 {% if metrics.realized_pnl and metrics.unrealized_pnl %}
                 <br>Realized PnL: <span class="{% if metrics.realized_pnl|float >= 0 %}positive{% else %}negative{% endif %}">${{ "{:,.2f}".format(metrics.realized_pnl|float) }}</span> |
                 Unrealized PnL: <span class="{% if metrics.unrealized_pnl|float >= 0 %}positive{% else %}negative{% endif %}">${{ "{:,.2f}".format(metrics.unrealized_pnl|float) }}</span>
@@ -1116,8 +1124,9 @@
                         </thead>
                         <tbody>
                             {% for asset, pnl in pnl_by_asset.items() %}
+                            {% set asset_label = pnl_by_asset_table_labels.get(asset, asset) %}
                             <tr>
-                                <td>{{ asset }}</td>
+                                <td title="{{ asset_label }} | {{ asset }}">{{ asset_label }}</td>
                                 <td class="{% if pnl|float >= 0 %}pnl-positive{% else %}pnl-negative{% endif %}">
                                     ${{ "{:,.2f}".format(pnl|float) }}
                                 </td>

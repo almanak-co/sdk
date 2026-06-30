@@ -23,6 +23,8 @@ from almanak.framework.backtesting.models import (
     TradeRecord,
 )
 
+WETH_ATTRIBUTION_KEY = "arbitrum:0x123400000000000000000000000000000000abcd"
+
 
 def _make_backtest_result(
     *,
@@ -63,7 +65,8 @@ def _make_backtest_result(
         unrealized_pnl=Decimal("0"),
         pnl_by_protocol={"uniswap_v3": Decimal("234.56")},
         pnl_by_intent_type={"SWAP": Decimal("234.56")},
-        pnl_by_asset={"WETH": Decimal("234.56")},
+        pnl_by_asset={WETH_ATTRIBUTION_KEY: Decimal("234.56")},
+        pnl_by_asset_display_labels={WETH_ATTRIBUTION_KEY: "WETH"},
     )
     trades = [
         TradeRecord(
@@ -203,7 +206,8 @@ async def test_full_lifecycle_swap(client):
         assert m["realized_pnl"] == "234.56"
         assert m["pnl_by_protocol"] == {"uniswap_v3": "234.56"}
         assert m["pnl_by_intent_type"] == {"SWAP": "234.56"}
-        assert m["pnl_by_asset"] == {"WETH": "234.56"}
+        assert m["pnl_by_asset"] == {WETH_ATTRIBUTION_KEY: "234.56"}
+        assert m["pnl_by_asset_display_labels"] == {WETH_ATTRIBUTION_KEY: "WETH"}
 
         # Verify equity curve
         assert len(data["result"]["equity_curve"]) == 2

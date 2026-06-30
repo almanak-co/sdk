@@ -18,6 +18,8 @@ from almanak.framework.backtesting.report_generator import (
     generate_report,
 )
 
+ETH_ATTRIBUTION_KEY = "arbitrum:0x123400000000000000000000000000000000abcd"
+
 
 def _result_with_trades() -> BacktestResult:
     metrics = BacktestMetrics(
@@ -59,12 +61,14 @@ def _result_with_trades() -> BacktestResult:
         total_gas_cost_usd=Decimal("3"),
         total_mev_cost_usd=Decimal("0.5"),
         total_leverage=Decimal("1.4"),
-        max_net_delta={"ETH": Decimal("0.75")},
+        max_net_delta={ETH_ATTRIBUTION_KEY: Decimal("0.75")},
+        max_net_delta_display_labels={ETH_ATTRIBUTION_KEY: "ETH"},
         correlation_risk=None,
         liquidation_cascade_risk=Decimal("0.2"),
         pnl_by_protocol={"uniswap_v3": Decimal("1500.25")},
         pnl_by_intent_type={"SWAP": Decimal("1500.25")},
-        pnl_by_asset={"ETH": Decimal("1500.25")},
+        pnl_by_asset={ETH_ATTRIBUTION_KEY: Decimal("1500.25")},
+        pnl_by_asset_display_labels={ETH_ATTRIBUTION_KEY: "ETH"},
         realized_pnl=Decimal("1000"),
         unrealized_pnl=Decimal("500.25"),
     )
@@ -120,9 +124,12 @@ class TestPrepareMetricsDict:
         assert metrics["net_pnl_usd"] == "1234.56"
         assert metrics["total_execution_cost_usd"] == "15"
         assert metrics["fees_by_pool"] == {"ETH/USDC": "42"}
-        assert metrics["max_net_delta"] == {"ETH": "0.75"}
+        assert metrics["max_net_delta"] == {ETH_ATTRIBUTION_KEY: "0.75"}
+        assert metrics["max_net_delta_display_labels"] == {ETH_ATTRIBUTION_KEY: "ETH"}
         assert metrics["correlation_risk"] is None
         assert metrics["pnl_by_protocol"] == {"uniswap_v3": "1500.25"}
+        assert metrics["pnl_by_asset"] == {ETH_ATTRIBUTION_KEY: "1500.25"}
+        assert metrics["pnl_by_asset_display_labels"] == {ETH_ATTRIBUTION_KEY: "ETH"}
 
 
 class TestGenerateReport:
@@ -145,6 +152,29 @@ class TestGenerateReport:
         assert "demo-report" in report.html_content
         assert "<div id='equity-chart'>equity</div>" in report.html_content
         assert "<div id='protocol-chart'>protocol</div>" in report.html_content
+
+    def test_asset_table_disambiguates_duplicate_display_labels(self) -> None:
+        result = _result_with_trades()
+        base_usdc_key = "base:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        arb_usdc_key = "arbitrum:0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        result.metrics.pnl_by_asset = {
+            base_usdc_key: Decimal("12.34"),
+            arb_usdc_key: Decimal("56.78"),
+        }
+        result.metrics.pnl_by_asset_display_labels = {
+            base_usdc_key: "USDC",
+            arb_usdc_key: "USDC",
+        }
+
+        report = generate_report(
+            result,
+            attribution_charts={"by_asset": "<div>asset-chart</div>"},
+            auto_generate_charts=False,
+        )
+
+        assert report.success is True
+        assert f">USDC ({base_usdc_key})</td>" in report.html_content
+        assert f">USDC ({arb_usdc_key})</td>" in report.html_content
 
     def test_unrealized_trade_pnl_renders_dash_not_zero(self) -> None:
         report = generate_report(

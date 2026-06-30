@@ -96,10 +96,13 @@ Example:
 from almanak.framework.backtesting.pnl.calculators.attribution import (
     AttributionCalculator,
     AttributionResult,
+    asset_display_label,
     attribute_pnl_by_asset,
+    attribute_pnl_by_asset_display_labels,
     attribute_pnl_by_intent_type,
     attribute_pnl_by_protocol,
     calculate_all_attributions,
+    collision_safe_display_labels,
     verify_attribution_totals,
 )
 from almanak.framework.backtesting.pnl.calculators.benchmark import (
@@ -198,9 +201,11 @@ __all__ = [
     # Attribution
     "AttributionCalculator",
     "AttributionResult",
+    "asset_display_label",
     "attribute_pnl_by_protocol",
     "attribute_pnl_by_intent_type",
     "attribute_pnl_by_asset",
+    "attribute_pnl_by_asset_display_labels",
     "verify_attribution_totals",
     "calculate_all_attributions",
 ]
