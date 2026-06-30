@@ -46,6 +46,11 @@ EVENT_TOPICS: dict[str, str] = {
     # AddLiquidity for old-style Twocrypto (pre-NG, no fees array):
     # AddLiquidity(address,uint256[2],uint256,uint256) — provider, amounts, invariant, supply
     "AddLiquidityV2Crypto2": "0x540ab385f9b5d450a27404172caade516b3ba3f4be88239ac56a2ad1de2a1f5a",
+    # AddLiquidity for old-style 3-coin CryptoSwap (Tricrypto2, Tricrypto): single
+    # fee scalar, no fees array — AddLiquidity(address,uint256[3],uint256,uint256).
+    # provider(indexed), amounts[3], fee, token_supply. Verified on-chain 2026-06-27
+    # against tricrypto2 (0xD51a44…). VIB-5441 (CryptoSwap LP-open was a ghost).
+    "AddLiquidityV2Crypto3": "0x96b486485420b963edd3fdec0b0195730035600feb7de6f544383d7950fa97ee",
     # AddLiquidity for StableSwap NG pools that emit a dynamic-array event
     # (e.g. Optimism crvUSD/USDC at 0x03771e24…). Signature:
     # AddLiquidity(address,uint256[],uint256[],uint256,uint256) — VIB-4836.
@@ -107,6 +112,7 @@ EVENT_NAME_TO_TYPE: dict[str, CurveEventType] = {
     "AddLiquidity3": CurveEventType.ADD_LIQUIDITY,
     "AddLiquidity4": CurveEventType.ADD_LIQUIDITY,
     "AddLiquidityV2Crypto2": CurveEventType.ADD_LIQUIDITY,  # old-style Twocrypto (pre-NG)
+    "AddLiquidityV2Crypto3": CurveEventType.ADD_LIQUIDITY,  # old-style 3-coin CryptoSwap (Tricrypto2)
     "AddLiquidityDyn": CurveEventType.ADD_LIQUIDITY,  # StableSwap NG dynamic-array (VIB-4836)
     "RemoveLiquidity2": CurveEventType.REMOVE_LIQUIDITY,
     "RemoveLiquidity3": CurveEventType.REMOVE_LIQUIDITY,
@@ -629,6 +635,40 @@ class CurveReceiptParser:
                     "provider": provider,
                     "token_amounts": token_amounts,
                     "fees": [],  # Old-style pools don't emit fees in this event
+                    "invariant": invariant,
+                    "token_supply": token_supply,
+                    "pool_address": pool_address,
+                }
+
+            # Old-style 3-coin CryptoSwap (Tricrypto2/Tricrypto): provider(indexed),
+            # amounts[3], single pool-level scalar, token_supply — 5 data words.
+            # Mirror the 2-coin V2Crypto2 shape exactly (``fees=[]``, scalar under
+            # ``invariant``) so no downstream consumer misreads a per-coin fees
+            # array; accounting reads token_amounts + token_supply.
+            if event_name == "AddLiquidityV2Crypto3":
+                # Fail closed on a truncated payload: decode_uint256 returns 0 for a
+                # missing word, so without this guard a short log would decode as a
+                # "successful" LP_OPEN with fabricated zero amounts/supply (a ghost)
+                # instead of tripping the raw_data path. 5 data words (amounts[3] +
+                # invariant + token_supply) = 320 hex chars.
+                if len(HexDecoder.normalize_hex(data)) < 5 * 64:
+                    logger.warning(
+                        "AddLiquidityV2Crypto3 payload too short (%d hex chars, need >=320); "
+                        "failing closed to raw_data",
+                        len(HexDecoder.normalize_hex(data)),
+                    )
+                    return {"raw_data": data}
+                token_amounts = [
+                    HexDecoder.decode_uint256(data, 0),
+                    HexDecoder.decode_uint256(data, 32),
+                    HexDecoder.decode_uint256(data, 64),
+                ]
+                invariant = HexDecoder.decode_uint256(data, 96)
+                token_supply = HexDecoder.decode_uint256(data, 128)
+                return {
+                    "provider": provider,
+                    "token_amounts": token_amounts,
+                    "fees": [],  # single pool-level scalar, not a per-coin fees array
                     "invariant": invariant,
                     "token_supply": token_supply,
                     "pool_address": pool_address,

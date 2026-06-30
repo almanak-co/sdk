@@ -42,7 +42,13 @@ def _build_swap_receipt(
     """Build a synthetic Curve swap receipt with TokenExchange + Transfer events."""
     # TokenExchange event: buyer (indexed), sold_id, tokens_sold, bought_id, tokens_bought
     buyer_topic = "0x" + "00" * 12 + wallet[2:]
-    exchange_data = "0x" + _pad_hex(sold_id, signed=True) + _pad_hex(tokens_sold) + _pad_hex(bought_id, signed=True) + _pad_hex(tokens_bought)
+    exchange_data = (
+        "0x"
+        + _pad_hex(sold_id, signed=True)
+        + _pad_hex(tokens_sold)
+        + _pad_hex(bought_id, signed=True)
+        + _pad_hex(tokens_bought)
+    )
 
     # ERC-20 Transfer: from wallet to pool (token_in)
     transfer_topic = _make_topic(EVENT_TOPICS["Transfer"])
@@ -115,10 +121,12 @@ class TestExtractSwapAmountsDecimals:
             tokens_sold=100_000_000,  # 100 USDC
             tokens_bought=99_984_871_483_550_784_213,  # ~99.98 DAI
         )
-        resolver = _mock_resolver({
-            self.USDC: 6,
-            self.DAI: 18,
-        })
+        resolver = _mock_resolver(
+            {
+                self.USDC: 6,
+                self.DAI: 18,
+            }
+        )
 
         parser = CurveReceiptParser(chain="ethereum")
         with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
@@ -145,10 +153,12 @@ class TestExtractSwapAmountsDecimals:
             tokens_sold=500_000_000_000_000_000_000,  # 500 DAI
             tokens_bought=499_750_000,  # 499.75 USDT
         )
-        resolver = _mock_resolver({
-            self.DAI: 18,
-            self.USDT: 6,
-        })
+        resolver = _mock_resolver(
+            {
+                self.DAI: 18,
+                self.USDT: 6,
+            }
+        )
 
         parser = CurveReceiptParser(chain="ethereum")
         with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
@@ -169,10 +179,12 @@ class TestExtractSwapAmountsDecimals:
             tokens_sold=100_000_000,  # 1 WBTC (8 decimals)
             tokens_bought=60_000_000_000_000_000_000_000,  # 60000 DAI
         )
-        resolver = _mock_resolver({
-            self.WBTC: 8,
-            self.DAI: 18,
-        })
+        resolver = _mock_resolver(
+            {
+                self.WBTC: 8,
+                self.DAI: 18,
+            }
+        )
 
         parser = CurveReceiptParser(chain="ethereum")
         with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
@@ -213,10 +225,12 @@ class TestExtractSwapAmountsDecimals:
             tokens_bought=1_000_000_000_000_000_000,  # 1 WETH
         )
         weth = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-        resolver = _mock_resolver({
-            self.DAI: 18,
-            weth: 18,
-        })
+        resolver = _mock_resolver(
+            {
+                self.DAI: 18,
+                weth: 18,
+            }
+        )
 
         parser = CurveReceiptParser(chain="ethereum")
         with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
@@ -512,7 +526,8 @@ class TestExtractLPCloseData:
             91_000_000_000_000_000_000,  # 91 crvUSD (18 dec)
         ]
         receipt = _build_remove_liquidity_4coin_receipt(
-            pool=pool, token_amounts=amounts,
+            pool=pool,
+            token_amounts=amounts,
         )
         parser = CurveReceiptParser(chain="base")
         result = parser.extract_lp_close_data(receipt)
@@ -737,9 +752,7 @@ class TestNG4CoinPool:
 # =============================================================================
 
 
-def _build_add_liquidity_dyn_data(
-    amounts: list[int], fees: list[int], invariant: int, token_supply: int
-) -> str:
+def _build_add_liquidity_dyn_data(amounts: list[int], fees: list[int], invariant: int, token_supply: int) -> str:
     """Encode `AddLiquidity(address,uint256[],uint256[],uint256,uint256)` data.
 
     Layout (with `provider` indexed):
@@ -755,20 +768,13 @@ def _build_add_liquidity_dyn_data(
     offset_to_amounts = head_len  # = 0x80
     offset_to_fees = head_len + amounts_tail_len
 
-    head = (
-        _pad_hex(offset_to_amounts)
-        + _pad_hex(offset_to_fees)
-        + _pad_hex(invariant)
-        + _pad_hex(token_supply)
-    )
+    head = _pad_hex(offset_to_amounts) + _pad_hex(offset_to_fees) + _pad_hex(invariant) + _pad_hex(token_supply)
     amounts_tail = _pad_hex(n) + "".join(_pad_hex(a) for a in amounts)
     fees_tail = _pad_hex(n) + "".join(_pad_hex(f) for f in fees)
     return "0x" + head + amounts_tail + fees_tail
 
 
-def _build_remove_liquidity_dyn_data(
-    amounts: list[int], fees: list[int], token_supply: int
-) -> str:
+def _build_remove_liquidity_dyn_data(amounts: list[int], fees: list[int], token_supply: int) -> str:
     """Encode `RemoveLiquidity(address,uint256[],uint256[],uint256)` data.
 
     Layout (with `provider` indexed):
@@ -782,11 +788,7 @@ def _build_remove_liquidity_dyn_data(
     offset_to_amounts = head_len
     offset_to_fees = head_len + amounts_tail_len
 
-    head = (
-        _pad_hex(offset_to_amounts)
-        + _pad_hex(offset_to_fees)
-        + _pad_hex(token_supply)
-    )
+    head = _pad_hex(offset_to_amounts) + _pad_hex(offset_to_fees) + _pad_hex(token_supply)
     amounts_tail = _pad_hex(n) + "".join(_pad_hex(a) for a in amounts)
     fees_tail = _pad_hex(n) + "".join(_pad_hex(f) for f in fees)
     return "0x" + head + amounts_tail + fees_tail
@@ -960,9 +962,7 @@ class TestNGDynamicArrayDecoding:
         amounts = [9 * 10**18, 11 * 10**6]
         fees = [7, 8]
         supply = 900_000_000_000_000_000_000
-        receipt = _build_remove_liquidity_dyn_receipt(
-            token_amounts=amounts, fees=fees, token_supply=supply
-        )
+        receipt = _build_remove_liquidity_dyn_receipt(token_amounts=amounts, fees=fees, token_supply=supply)
         parser = CurveReceiptParser(chain="optimism")
         result = parser.parse_receipt(receipt)
         rm = next(e for e in result.events if e.event_type == CurveEventType.REMOVE_LIQUIDITY)
@@ -1063,10 +1063,12 @@ class TestCryptoSwapReceiptParsing:
             tokens_sold=500_000_000,  # 500 USDT
             tokens_bought=215_700_000_000_000_000,  # ~0.2157 WETH
         )
-        resolver = _mock_resolver({
-            self.USDT: 6,
-            self.WETH: 18,
-        })
+        resolver = _mock_resolver(
+            {
+                self.USDT: 6,
+                self.WETH: 18,
+            }
+        )
 
         parser = CurveReceiptParser(chain="ethereum")
         with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
@@ -1088,7 +1090,9 @@ class TestCryptoSwapReceiptParsing:
             "StableSwap and CryptoSwap TokenExchange events have different keccak256 topics"
         )
         assert EVENT_TOPICS["TokenExchange"] == "0x8b3e96f2b889fa771c53c981b40daf005f63f637f1869f707052d15a3dd97140"
-        assert EVENT_TOPICS["TokenExchangeCrypto"] == "0xb2e76ae99761dc136e598d4a629bb347eccb9532a5f8bbd72e18467c3c34cc98"
+        assert (
+            EVENT_TOPICS["TokenExchangeCrypto"] == "0xb2e76ae99761dc136e598d4a629bb347eccb9532a5f8bbd72e18467c3c34cc98"
+        )
 
     def test_stableswap_receipt_still_works_after_cryptoswap_addition(self):
         """Adding TokenExchangeCrypto must not break StableSwap parsing."""
@@ -1109,3 +1113,85 @@ class TestCryptoSwapReceiptParsing:
         assert result is not None
         assert result.amount_in_decimal == Decimal("100")
         assert Decimal("99") < result.amount_out_decimal < Decimal("100")
+
+
+# =============================================================================
+# Old-style 3-coin CryptoSwap AddLiquidity (Tricrypto2) — VIB-5441
+# =============================================================================
+
+TRICRYPTO2_POOL = "0xd51a44d3fae010294c616388b506acda1bfaae46"
+
+
+def _build_add_liquidity_v2crypto3_receipt(
+    token_amounts: list[int],
+    fee: int = 232_489_209_237,
+    token_supply: int = 6_282_725_994_016_461_367_439,
+    lp_minted: int = 1_084_907_444_686_091,
+    wallet: str = WALLET,
+) -> dict:
+    """Build a Tricrypto2 AddLiquidity receipt: amounts[3] + fee + supply (no fees array)."""
+    add_topic = _make_topic(EVENT_TOPICS["AddLiquidityV2Crypto3"])
+    provider_topic = "0x" + "00" * 12 + wallet[2:]
+    data = "0x" + "".join(_pad_hex(v) for v in (*token_amounts, fee, token_supply))
+    transfer_topic = _make_topic(EVENT_TOPICS["Transfer"])
+    zero_topic = "0x" + "00" * 12 + ZERO_ADDR[2:]
+    wallet_topic = "0x" + "00" * 12 + wallet[2:]
+    return {
+        "status": 1,
+        "from": wallet,
+        "transactionHash": "0x" + "c3" * 32,
+        "blockNumber": 25_000_200,
+        "gasUsed": 300_000,
+        "logs": [
+            {"address": TRICRYPTO2_POOL, "topics": [add_topic, provider_topic], "data": data, "logIndex": 0},
+            {
+                "address": "0xc4ad29ba4b3c580e6d59105fff484999997675ff",  # crv3crypto LP token
+                "topics": [transfer_topic, zero_topic, wallet_topic],
+                "data": "0x" + _pad_hex(lp_minted),
+                "logIndex": 1,
+            },
+        ],
+    }
+
+
+class TestAddLiquidityV2Crypto3:
+    """Tricrypto2 (old-style 3-coin CryptoSwap) AddLiquidity must decode (was a ghost)."""
+
+    def test_event_recognised_as_add_liquidity(self):
+        receipt = _build_add_liquidity_v2crypto3_receipt([10_122_800, 16_238, 6_004_489_832_657_005])
+        result = CurveReceiptParser(chain="ethereum").parse_receipt(receipt)
+        assert result.success
+        adds = [e for e in result.events if e.event_type == CurveEventType.ADD_LIQUIDITY]
+        assert len(adds) == 1
+        assert adds[0].event_name == "AddLiquidityV2Crypto3"
+
+    def test_amounts_and_supply_decoded(self):
+        amounts = [10_122_800, 16_238, 6_004_489_832_657_005]  # USDT/WBTC/WETH (real on-chain)
+        receipt = _build_add_liquidity_v2crypto3_receipt(amounts)
+        result = CurveReceiptParser(chain="ethereum").parse_receipt(receipt)
+        add = next(e for e in result.events if e.event_type == CurveEventType.ADD_LIQUIDITY)
+        assert add.data["token_amounts"] == amounts
+        assert add.data["token_supply"] == 6_282_725_994_016_461_367_439
+        # Mirrors the 2-coin V2Crypto2 shape: pool-level scalar under invariant,
+        # fees empty (no per-coin fees array for a consumer to misread).
+        assert add.data["fees"] == []
+        assert add.data["invariant"] == 232_489_209_237
+        assert add.data["provider"].lower() == WALLET.lower()
+
+    def test_truncated_payload_fails_closed(self):
+        """A short (3-word) payload must fail closed to raw_data, not decode as a
+        ghost LP_OPEN with fabricated zero invariant/supply (decode_uint256 returns 0
+        for a missing word)."""
+        add_topic = _make_topic(EVENT_TOPICS["AddLiquidityV2Crypto3"])
+        provider_topic = "0x" + "00" * 12 + WALLET[2:]
+        short_data = "0x" + "".join(_pad_hex(v) for v in (10_122_800, 16_238, 6_004_489_832_657_005))  # 3 words
+        receipt = {
+            "status": 1,
+            "from": WALLET,
+            "transactionHash": "0x" + "c4" * 32,
+            "logs": [{"address": TRICRYPTO2_POOL, "topics": [add_topic, provider_topic], "data": short_data, "logIndex": 0}],
+        }
+        result = CurveReceiptParser(chain="ethereum").parse_receipt(receipt)
+        add = next(e for e in result.events if e.event_type == CurveEventType.ADD_LIQUIDITY)
+        assert "raw_data" in add.data
+        assert "token_amounts" not in add.data  # no fabricated amounts

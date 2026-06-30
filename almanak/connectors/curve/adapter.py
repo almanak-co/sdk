@@ -389,6 +389,20 @@ ZAP_REMOVE_LIQUIDITY_4_SELECTOR = "0xad5cc918"  # remove_liquidity(address,uint2
 ZAP_CALC_TOKEN_AMOUNT_4_SELECTOR = "0x861cdef0"  # calc_token_amount(address,uint256[4],bool)
 ZAP_GET_DY_UNDERLYING_SELECTOR = "0x07211ef7"  # exchange_underlying lives on the metapool itself
 
+# CryptoSwap / Tricrypto ``calc_token_amount`` selectors, keyed by coin count.
+# Crypto pools split on version: crypto-NG / Tricrypto-2 carry the ``bool deposit``
+# flag, while the older twocrypto pools (e.g. Base WETH/cbETH) are deposit-only and
+# omit it. The deposit array is a FIXED-size ``uint256[N]`` (encoded inline, no
+# offset/length — unlike the StableSwap-NG dynamic ``uint256[]``). We probe
+# bool-first then no-bool at call time rather than hard-code a per-pool version
+# flag (cf. M0 dynamic resolution, VIB-5424). Selectors + encoding verified
+# on-chain 2026-06-27: tricrypto2 (eth) + tricrypto (arb) answer ``[3],bool``;
+# weth_cbeth (base) answers ``[2]`` (no bool).
+CRYPTO_CALC_TOKEN_AMOUNT_SELECTORS: dict[int, tuple[str, str]] = {
+    2: ("0xed8e84f3", "0x8d8ea727"),  # calc_token_amount(uint256[2],bool) | (uint256[2])
+    3: ("0x3883e119", "0x5b6f1b5a"),  # calc_token_amount(uint256[3],bool) | (uint256[3])
+}
+
 # Max uint256 for unlimited approvals
 MAX_UINT256 = 2**256 - 1
 
@@ -1086,7 +1100,14 @@ class CurveAdapter:
         Args:
             pool_address: Pool contract address
             amounts: List of token amounts to deposit (in token units)
-            slippage_bps: Slippage tolerance for min LP tokens (default from config)
+            slippage_bps: Slippage tolerance for min LP tokens (default from config).
+                For CryptoSwap/Tricrypto (volatile) pools the min_lp floor is the
+                build-time on-chain quote × (1 − slippage); if the pool price drifts
+                between build and execution by more than ``slippage_bps`` the
+                add_liquidity reverts with "Slippage". A revert is fail-safe (no
+                loss, vs the old min_lp=0 which could be sandwiched), but a volatile
+                or large deposit may need a wider ``slippage_bps`` than the stable
+                default to avoid a benign revert (VIB-5441).
             recipient: Address to receive LP tokens (default: wallet_address)
 
         Returns:
@@ -1117,8 +1138,21 @@ class CurveAdapter:
                 amounts_wei.append(int(amt * Decimal(10**decimals)))
 
             # Estimate LP tokens (simplified)
-            min_lp_tokens = self._estimate_add_liquidity(pool_info, amounts_wei)
-            min_lp_tokens = int(min_lp_tokens * (10000 - slippage_bps) // 10000)
+            lp_quote = self._estimate_add_liquidity(pool_info, amounts_wei)
+            min_lp_tokens = int(lp_quote * (10000 - slippage_bps) // 10000)
+            # Fail closed (VIB-5441): a positive on-chain quote that rounds to <=0
+            # after integer slippage math (a tiny quote or a very wide slippage_bps)
+            # would re-introduce the unprotected min_lp=0 path this PR removes — an
+            # MEV/sandwich theft vector on volatile pools. Refuse rather than ship 0.
+            if pool_info.pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO) and lp_quote > 0 and min_lp_tokens <= 0:
+                return LiquidityResult(
+                    success=False,
+                    error=(
+                        f"CryptoSwap/Tricrypto pool {pool_info.name}: slippage-adjusted min_lp "
+                        f"rounded to {min_lp_tokens} from quote {lp_quote} (slippage_bps={slippage_bps}); "
+                        f"refusing to ship min_lp=0"
+                    ),
+                )
 
             # Build transactions
             transactions: list[TransactionData] = []
@@ -2223,23 +2257,25 @@ class CurveAdapter:
         single-asset-heavy deposits, and the configured ``virtual_price``
         drifts as fees accrue (VIB-4836).
 
-        For CryptoSwap/Tricrypto pools: returns 0 (no LP slippage protection).
-        Volatile-asset pools track LP tokens as a share of D-invariant, not deposit
-        value. Accurate estimation requires querying calc_token_amount() on-chain
-        (which depends on pool reserves, A, gamma, and current prices). Without that
-        data, any static estimate risks setting min_lp higher than actual minted
-        tokens, causing the add_liquidity to revert with "Slippage".
-        TECH_DEBT(VIB-581): Add on-chain calc_token_amount query for production use.
+        For CryptoSwap/Tricrypto pools (VIB-5441 / audit P1-7): query
+        ``calc_token_amount`` on-chain and return the real LP-mint quote. A
+        volatile-asset pool tracks LP tokens as a share of the D-invariant (it
+        depends on reserves, A, gamma, and current prices), so there is no safe
+        static estimate — the previous behaviour returned ``min_lp=0`` (accept any
+        output), an MEV/sandwich theft vector. This method now **fails closed**:
+        with no gateway/rpc, or if the on-chain quote cannot be obtained, it
+        raises rather than returning 0, so ``add_liquidity`` rejects the deposit
+        instead of shipping an unprotected ``min_lp=0``.
         """
         if pool_info.pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
-            # Cannot accurately estimate LP tokens for volatile pools without on-chain query.
-            # Return 0 to accept any minted amount — production strategies should use
-            # calc_token_amount() on-chain for proper slippage protection.
-            logger.debug(
-                f"CryptoSwap/Tricrypto pool {pool_info.name}: returning min_lp=0 "
-                "(no slippage protection — use calc_token_amount on-chain for production)"
-            )
-            return 0
+            if self._gateway_client is None and not self._rpc_url:
+                raise ValueError(
+                    f"CryptoSwap/Tricrypto pool {pool_info.name}: cannot compute min_lp without a "
+                    "gateway client or rpc_url; refusing to ship min_lp=0 (MEV theft vector). "
+                    "Configure CurveConfig.gateway_client to enable the on-chain calc_token_amount quote."
+                )
+            # Propagates on query failure — the caller (add_liquidity) fails closed.
+            return self._query_calc_token_amount_crypto_onchain(pool_info, amounts)
 
         if pool_info.is_ng and (self._gateway_client is not None or self._rpc_url):
             try:
@@ -2262,6 +2298,55 @@ class CurveAdapter:
         total = int(Decimal(total) / pool_info.virtual_price)
 
         return total
+
+    def _query_calc_token_amount_crypto_onchain(self, pool_info: PoolInfo, amounts: list[int]) -> int:
+        """Query ``calc_token_amount`` on a CryptoSwap/Tricrypto pool (VIB-5441).
+
+        Returns the real LP-mint quote so ``_estimate_add_liquidity`` can derive a
+        non-zero ``min_lp`` for a volatile deposit. The deposit array is a fixed
+        ``uint256[N]`` encoded inline; we probe the bool-carrying selector first
+        then the deposit-only one (see ``CRYPTO_CALC_TOKEN_AMOUNT_SELECTORS``),
+        using whichever returns a positive quote. Raises when no selector yields a
+        quote so the caller fails closed (never ships ``min_lp=0``).
+        """
+        selectors = CRYPTO_CALC_TOKEN_AMOUNT_SELECTORS.get(pool_info.n_coins)
+        if selectors is None:
+            raise ValueError(
+                f"No CryptoSwap calc_token_amount selector for {pool_info.n_coins}-coin pool {pool_info.name}"
+            )
+        # Fail fast on a present-but-disconnected gateway: it would otherwise reach
+        # eth_call and surface a low-level RPC error instead of the clear fail-closed
+        # min_lp message. Drop to rpc_url when available, else refuse (never min_lp=0).
+        gateway_client = self._gateway_client
+        if gateway_client is not None and not getattr(gateway_client, "is_connected", False):
+            if not self._rpc_url:
+                raise ValueError(
+                    f"CryptoSwap/Tricrypto pool {pool_info.name}: gateway client present but "
+                    "disconnected and no rpc_url; cannot compute min_lp, refusing to ship min_lp=0."
+                )
+            gateway_client = None
+        inline_amounts = "".join(self._pad_uint256(a) for a in amounts)
+        last_error: Exception | None = None
+        for selector, has_deposit_flag in ((selectors[0], True), (selectors[1], False)):
+            calldata = selector + inline_amounts + (self._pad_uint256(1) if has_deposit_flag else "")
+            try:
+                minted = eth_call_uint256(
+                    chain=self.chain,
+                    to=pool_info.address,
+                    data=calldata,
+                    rpc_url=self._rpc_url,
+                    gateway_client=gateway_client,
+                    timeout=10.0,
+                )
+            except Exception as exc:  # noqa: BLE001 — wrong selector may revert; try the next
+                last_error = exc
+                continue
+            if minted is not None and minted > 0:
+                return minted
+        raise ValueError(
+            f"CryptoSwap calc_token_amount returned no quote for {pool_info.name} "
+            f"({pool_info.n_coins}-coin); cannot derive min_lp (last error: {last_error})"
+        )
 
     def _estimate_remove_liquidity(self, pool_info: PoolInfo, lp_amount: int) -> list[int]:
         """Estimate expected per-coin amounts for proportional remove_liquidity.
