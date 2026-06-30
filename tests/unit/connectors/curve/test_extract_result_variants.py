@@ -266,19 +266,22 @@ def test_lp_close_present_but_decode_fallback_is_error(parser: CurveReceiptParse
     assert "raw_data" in out.error
 
 
-def test_remove_liquidity_one_raw_data_stays_ok(parser: CurveReceiptParser) -> None:
-    """OVER-REJECTION GUARD: ``RemoveLiquidityOne`` / ``RemoveLiquidityImbalance``
-    have NO structured decoder, so their event data is the ``{"raw_data": ...}``
-    passthrough BY DESIGN — not a decode failure. ``extract_lp_close_data`` returns a
-    valid (pool-address-stamped) ``LPCloseData`` for them, and the decode-failure
-    sentinel (scoped to ``REMOVE_LIQUIDITY`` only) must leave them ``ExtractOk``.
-    Flagging them would convert real single-coin withdrawals into accounting halts."""
+def test_remove_liquidity_one_unattributable_fails_loud(parser: CurveReceiptParser) -> None:
+    """VIB-5433 — a ``RemoveLiquidityOne`` whose single-coin proceeds CANNOT be
+    attributed (unknown pool → no coin map, no coin Transfer, no event coin_index)
+    must fail loud (``ExtractError``), NOT silently return a zero-proceeds
+    ``LPCloseData``. This is the exact ghost the ticket removes: pre-VIB-5433 the
+    event was undecoded and the wrapper tagged the fabricated empty close
+    ``ExtractOk``, booking zero realized proceeds for a real withdrawal. The
+    ``raw_data`` passthrough is still by-design (so ``_decode_fell_back`` excludes
+    ONE), but the unresolved-proceeds case routes through ``extract_lp_close_data``
+    returning ``None`` (present + None → ExtractError). A RESOLVABLE single-coin
+    close (coin Transfer present) is covered by ``TestRemoveLiquidityOneDecode``."""
     one = _curve_event(CurveEventType.REMOVE_LIQUIDITY_ONE, {"raw_data": "00" * 32})
     parsed = ParseResult(success=True, events=[one])
     parser.parse_receipt = lambda _r: parsed  # type: ignore[assignment, return-value]
     out = parser.extract_lp_close_data_result({"logs": []})
-    assert isinstance(out, ExtractOk)
-    assert out.value.pool_address  # canonical pool address still stamped
+    assert isinstance(out, ExtractError)
 
 
 def test_primitive_money_legs_unknown_pool_is_missing(parser: CurveReceiptParser) -> None:

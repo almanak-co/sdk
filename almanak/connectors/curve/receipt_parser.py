@@ -72,8 +72,40 @@ EVENT_TOPICS: dict[str, str] = {
     # token_supply (NO fees array). Verified on-chain 2026-06-27 against tricrypto2
     # (0xD51a44…). VIB-5491 (proportional CryptoSwap LP_CLOSE was a teardown ghost).
     "RemoveLiquidityV2Crypto3": "0xd6cc314a0b1e3b2579f8e64248e82434072e8271290eef8ad0886709304195f5",
+    # --- Single-coin withdrawal (VIB-5433) -----------------------------------
+    # Curve emits THREE distinct RemoveLiquidityOne ABIs across pool generations;
+    # the array-free signature still varies by arg count, so each is its own
+    # topic0. Verified on-chain 2026-06-29 (Etherscan getabi + real logs):
+    #   * Legacy StableSwap — 3pool (0xbEbc44…), stETH (0xDC2431…), frxETH:
+    #     RemoveLiquidityOne(address provider, uint256 token_amount,
+    #     uint256 coin_amount) — 2 data words, NO coin_index. tx
+    #     0xcdb08cd6…0665f6 (3pool).
+    "RemoveLiquidityOneLegacy": "0x9e96dd3b997a2a257eec4df9bb6eaf626e206df5f543bd963682d143300be310",
+    #   * 3-word variant — topic0 SHARED by two INCOMPATIBLE layouts that cannot
+    #     be told apart by topic alone (disambiguated by pool family in
+    #     ``_decode_remove_liquidity_one_data``; the authoritative proceeds come
+    #     from the coin Transfer in ``_resolve_one_coin_proceeds``):
+    #       - CryptoSwap/Tricrypto (tricrypto2 0xD51a44…): (token_amount,
+    #         coin_index, coin_amount). tx 0x04cfdfaf…d8c26d.
+    #       - StableSwap-NG (crvUSD/USDC 0x4DEcE6…): (token_amount, coin_amount,
+    #         token_supply). tx 0xf14fc49a…b888d2.
     "RemoveLiquidityOne": "0x5ad056f2e28a8cec232015406b843668c1e36cda598127ec3b8c59b8c72773a0",
-    "RemoveLiquidityImbalance": "0x2b5508378d7e19e0d5fa338419034731416c4f5b219a10379956f764317fd47e",
+    #   * Twocrypto-NG / Tricrypto-NG (tricryptoUSDC 0x7F86Bf…): (token_amount,
+    #     coin_index, coin_amount, approx_fee, packed_price_scale) — 5 data words.
+    "RemoveLiquidityOneNG": "0xe200e24d4a4c7cd367dd9befe394dc8a14e6d58c88ff5e2f512d65a9e0aa9c5c",
+    # --- Imbalanced withdrawal (VIB-5433) ------------------------------------
+    # StableSwap-family only (CryptoSwap pools have no remove_liquidity_imbalance).
+    # RemoveLiquidityImbalance(address provider, uint256[N] token_amounts,
+    # uint256[N] fees, uint256 invariant, uint256 token_supply) — one topic0 per
+    # coin-count (the array size is in the signature). Verified on-chain
+    # 2026-06-29 against 3pool (0xbEbc44…) tx 0x348c89c8…b21c833 ([3] variant).
+    # ``token_amounts`` is positional by pool-coin index.
+    "RemoveLiquidityImbalance": "0x2b5508378d7e19e0d5fa338419034731416c4f5b219a10379956f764317fd47e",  # [2]
+    "RemoveLiquidityImbalance3": "0x173599dbf9c6ca6f7c3b590df07ae98a45d74ff54065505141e7de6c46a624c2",
+    "RemoveLiquidityImbalance4": "0xb964b72f73f5ef5bf0fdc559b2fab9a7b12a39e47817a547f1f0aee47febd602",
+    # StableSwap-NG dynamic-array variant (mirrors RemoveLiquidityDyn):
+    # RemoveLiquidityImbalance(address, uint256[], uint256[], uint256, uint256).
+    "RemoveLiquidityImbalanceDyn": "0x3631c28b1f9dd213e0319fb167b554d76b6c283a41143eb400a0d1adb1af1755",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
 }
 
@@ -89,6 +121,35 @@ TOKEN_EXCHANGE_UNDERLYING_TOPIC = EVENT_TOPICS["TokenExchangeUnderlying"]
 # confirm the LP token's decimals, this invariant is the correct value (vs the
 # VIB-3164 anti-pattern of silently defaulting an *arbitrary* token to 18).
 CURVE_LP_TOKEN_DECIMALS = 18  # decimal-policy-exempt: Curve LP tokens are 18 by protocol invariant (VIB-3164)
+
+# Curve's native-ETH placeholder coin address (used in coin_addresses for pools
+# that hold raw ETH, e.g. the stETH pool). A single-sided withdrawal of this coin
+# emits NO ERC-20 Transfer, so it is resolved from the event scalar + the pool's
+# single native slot rather than from a Transfer log (VIB-5433). Stored EIP-55
+# checksummed (the test_eip55_checksum production gate forbids lowercase address
+# literals); ``_NATIVE_ETH_PLACEHOLDER_LC`` is the lowercased form used for the
+# case-insensitive comparison against lowercased pool-coin addresses.
+CURVE_NATIVE_ETH_PLACEHOLDER = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+_NATIVE_ETH_PLACEHOLDER_LC = CURVE_NATIVE_ETH_PLACEHOLDER.lower()
+
+# Pool families that emit the CryptoSwap RemoveLiquidityOne layout
+# ``(token_amount, coin_index, coin_amount)`` vs the StableSwap-NG layout
+# ``(token_amount, coin_amount, token_supply)`` — both share topic0 0x5ad056…,
+# so the 3-word decode is disambiguated by the pool's registry ``pool_type``
+# (VIB-5433). CryptoSwap pools carry an explicit ``coin_index``; StableSwap
+# pools do not.
+_CRYPTO_POOL_TYPES: frozenset[str] = frozenset({"tricrypto", "cryptoswap", "twocrypto"})
+_STABLE_POOL_TYPES: frozenset[str] = frozenset({"stableswap", "metapool"})
+
+# Coin-count each fixed-array RemoveLiquidityImbalance topic0 bijectively encodes
+# (the array size is in the signature). Used to cross-check the length-derived
+# arity in the fixed-array decoder and fail closed on a corrupt/truncated payload
+# whose length disagrees with its topic (VIB-5433 hardening).
+_IMBALANCE_TOPIC_ARITY: dict[str, int] = {
+    "RemoveLiquidityImbalance": 2,
+    "RemoveLiquidityImbalance3": 3,
+    "RemoveLiquidityImbalance4": 4,
+}
 
 
 # =============================================================================
@@ -125,8 +186,15 @@ EVENT_NAME_TO_TYPE: dict[str, CurveEventType] = {
     "RemoveLiquidityV2Crypto2": CurveEventType.REMOVE_LIQUIDITY,  # old-style Twocrypto (pre-NG)
     "RemoveLiquidityV2Crypto3": CurveEventType.REMOVE_LIQUIDITY,  # old-style 3-coin CryptoSwap (Tricrypto2)
     "RemoveLiquidityDyn": CurveEventType.REMOVE_LIQUIDITY,  # StableSwap NG dynamic-array (VIB-4836)
-    "RemoveLiquidityOne": CurveEventType.REMOVE_LIQUIDITY_ONE,
-    "RemoveLiquidityImbalance": CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,
+    # Single-coin withdrawal variants (VIB-5433) — all map to REMOVE_LIQUIDITY_ONE
+    "RemoveLiquidityOneLegacy": CurveEventType.REMOVE_LIQUIDITY_ONE,  # old StableSwap (no coin_index)
+    "RemoveLiquidityOne": CurveEventType.REMOVE_LIQUIDITY_ONE,  # CryptoSwap / StableSwap-NG (3-word)
+    "RemoveLiquidityOneNG": CurveEventType.REMOVE_LIQUIDITY_ONE,  # Twocrypto/Tricrypto-NG (5-word)
+    # Imbalanced withdrawal variants (VIB-5433) — all map to REMOVE_LIQUIDITY_IMBALANCE
+    "RemoveLiquidityImbalance": CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,  # [2]
+    "RemoveLiquidityImbalance3": CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,
+    "RemoveLiquidityImbalance4": CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,
+    "RemoveLiquidityImbalanceDyn": CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,  # StableSwap-NG dynamic-array
     "Transfer": CurveEventType.TRANSFER,
 }
 
@@ -311,6 +379,28 @@ def _pool_coin_addresses(pool_address: str, chain: str) -> list[str]:
     except Exception as exc:  # noqa: BLE001 — accounting path: degrade to legacy, never raise
         logger.debug("Curve money-legs: pool-coin lookup failed for %s on %s: %s", pool_address, chain, exc)
     return []
+
+
+def _pool_type(pool_address: str, chain: str) -> str:
+    """Return the static ``CURVE_POOLS`` ``pool_type`` for a pool, or ``""``.
+
+    Used to disambiguate the two incompatible 3-word ``RemoveLiquidityOne``
+    layouts that share topic0 (CryptoSwap carries a ``coin_index``; StableSwap-NG
+    does not — VIB-5433). Returns ``""`` (→ caller defers to the Transfer-based
+    proceeds resolver) when the pool is unknown; never raises.
+    """
+    if not pool_address:
+        return ""
+    try:
+        from almanak.connectors.curve.adapter import CURVE_POOLS
+
+        target = pool_address.lower()
+        for data in CURVE_POOLS.get(chain, {}).values():
+            if str(data.get("address", "")).lower() == target:
+                return str(data.get("pool_type", "")).lower()
+    except Exception as exc:  # noqa: BLE001 — accounting path: degrade, never raise
+        logger.debug("Curve pool-type lookup failed for %s on %s: %s", pool_address, chain, exc)
+    return ""
 
 
 # =============================================================================
@@ -563,6 +653,10 @@ class CurveReceiptParser:
             return self._decode_add_liquidity_data(topics, data, address, event_name=event_name)
         elif event_type == CurveEventType.REMOVE_LIQUIDITY:
             return self._decode_remove_liquidity_data(topics, data, address, event_name=event_name)
+        elif event_type == CurveEventType.REMOVE_LIQUIDITY_ONE:
+            return self._decode_remove_liquidity_one_data(topics, data, address, event_name=event_name)
+        elif event_type == CurveEventType.REMOVE_LIQUIDITY_IMBALANCE:
+            return self._decode_remove_liquidity_imbalance_data(topics, data, address, event_name=event_name)
         else:
             return {"raw_data": data}
 
@@ -868,6 +962,339 @@ class CurveReceiptParser:
         except Exception as e:
             logger.warning(f"Failed to decode RemoveLiquidity data: {e}")
             return {"raw_data": data}
+
+    def _decode_remove_liquidity_one_data(
+        self,
+        topics: list[Any],
+        data: str,
+        address: str,
+        event_name: str = "",
+    ) -> dict[str, Any]:
+        """Decode a RemoveLiquidityOne (single-coin withdrawal) event (VIB-5433).
+
+        Curve emits three incompatible ABIs (see ``EVENT_TOPICS``). This decoder
+        surfaces the LP ``token_amount`` burned and the BEST-EFFORT event
+        ``coin_index`` / ``coin_amount`` — used only as the fallback in
+        :meth:`_resolve_one_coin_proceeds` for a native-ETH leg that emits no
+        ERC-20 Transfer. It deliberately emits NO ``token_amounts`` key (and keeps
+        ``raw_data``) so the generic close path defers single-coin proceeds to the
+        Transfer-based resolver, which is authoritative for the amount and the
+        coin index. The 3-word topic-collision (CryptoSwap ``coin_index, coin_amount``
+        vs StableSwap-NG ``coin_amount, token_supply``) is disambiguated by the
+        pool's registry ``pool_type``; an unknown pool leaves both scalars ``None``
+        (Empty ≠ Zero) so a wrong word is never read as proceeds.
+        """
+        try:
+            provider = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
+            pool_address = address.lower() if isinstance(address, str) else ""
+            nwords = len(HexDecoder.normalize_hex(data)) // 64
+            token_amount = HexDecoder.decode_uint256(data, 0) if nwords >= 1 else None
+
+            # Each variant decodes its event scalars ONLY when the payload carries
+            # the minimum word count; a truncated payload leaves them ``None`` so the
+            # downstream Transfer resolver — not a fabricated ``0`` from
+            # ``decode_uint256``'s missing-word default — supplies the proceeds
+            # (CodeRabbit fail-closed: a short NG/legacy log must not become a
+            # zero-proceeds close).
+            coin_index: int | None = None
+            coin_amount: int | None = None
+            if event_name == "RemoveLiquidityOneNG":
+                # Twocrypto/Tricrypto-NG: (token_amount, coin_index, coin_amount, ...).
+                if nwords >= 5:
+                    coin_index = HexDecoder.decode_uint256(data, 32)
+                    coin_amount = HexDecoder.decode_uint256(data, 64)
+            elif event_name == "RemoveLiquidityOneLegacy":
+                # Legacy StableSwap: (token_amount, coin_amount) — no coin_index.
+                if nwords >= 2:
+                    coin_amount = HexDecoder.decode_uint256(data, 32)
+            elif nwords >= 5:
+                # Unnamed 5+-word payload → NG layout.
+                coin_index = HexDecoder.decode_uint256(data, 32)
+                coin_amount = HexDecoder.decode_uint256(data, 64)
+            elif nwords == 3:
+                # Topic-collision (0x5ad056…): disambiguate by pool family.
+                ptype = _pool_type(pool_address, self.chain)
+                if ptype in _CRYPTO_POOL_TYPES:
+                    # CryptoSwap: (token_amount, coin_index, coin_amount).
+                    coin_index = HexDecoder.decode_uint256(data, 32)
+                    coin_amount = HexDecoder.decode_uint256(data, 64)
+                elif ptype in _STABLE_POOL_TYPES:
+                    # StableSwap-NG: (token_amount, coin_amount, token_supply).
+                    coin_amount = HexDecoder.decode_uint256(data, 32)
+                # Unknown pool → leave both None; the Transfer resolver decides.
+            elif nwords == 2:
+                # A 2-word payload under any name is the legacy shape.
+                coin_amount = HexDecoder.decode_uint256(data, 32)
+            # else (nwords < 2 / unexpected): leave both None → Transfer must resolve.
+
+            return {
+                "provider": provider,
+                "pool_address": pool_address,
+                "one_coin": True,
+                "token_amount": token_amount,
+                "one_coin_index": coin_index,
+                "one_coin_amount": coin_amount,
+                "fees": [],
+                # No structured token_amounts: single-coin proceeds are resolved
+                # from the coin Transfer in extract_lp_close_data. Keep raw_data
+                # for diagnostics (this event is NOT in _STRUCTURALLY_DECODED_*,
+                # so raw_data here is by-design, not a decode-failure sentinel).
+                "raw_data": data,
+            }
+        except Exception as e:
+            logger.warning(f"Failed to decode RemoveLiquidityOne data: {e}")
+            return {"raw_data": data}
+
+    def _decode_remove_liquidity_imbalance_data(
+        self,
+        topics: list[Any],
+        data: str,
+        address: str,
+        event_name: str = "",
+    ) -> dict[str, Any]:
+        """Decode a RemoveLiquidityImbalance event (VIB-5433).
+
+        StableSwap-family only. Two shapes are supported:
+
+        - Fixed-array: ``amounts[N], fees[N], invariant, token_supply`` — ``2N+2``
+          data words. ``N`` is derived from the payload length (each arity has its
+          own topic0, but the length is the structural source of truth, mirroring
+          ``_decode_remove_liquidity_data``).
+        - StableSwap-NG dynamic-array (``RemoveLiquidityImbalanceDyn``):
+          ``offset_amounts, offset_fees, invariant, token_supply`` head followed by
+          ``[len, *elems]`` tails (mirrors ``RemoveLiquidityDyn``).
+
+        ``token_amounts`` is positional by pool-coin index — the imbalanced
+        withdrawal vector maps directly onto ``LPCloseData.amount{0,1}_collected``
+        / ``additional_amounts``. Fails closed to ``{"raw_data": data}`` on a
+        truncated / unexpected payload rather than fabricating zero proceeds.
+        """
+        try:
+            provider = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
+            pool_address = address.lower() if isinstance(address, str) else ""
+
+            if event_name == "RemoveLiquidityImbalanceDyn":
+                # Head: offset_amounts, offset_fees, invariant, token_supply.
+                # Validate the full ABI envelope before decoding any array (a short
+                # payload must fail closed to raw_data, and a malicious array length
+                # must never drive an unbounded loop — CodeRabbit/gemini DoS guard).
+                total_bytes = len(HexDecoder.normalize_hex(data)) // 2
+                if total_bytes < 4 * 32:  # 4-word head required
+                    logger.warning("RemoveLiquidityImbalanceDyn head truncated (%d bytes); raw_data", total_bytes)
+                    return {"raw_data": data}
+                offset_amounts = HexDecoder.decode_uint256(data, 0)
+                offset_fees = HexDecoder.decode_uint256(data, 32)
+
+                def _decode_dyn_array(offset: int) -> list[int] | None:
+                    # length word must be inside the payload
+                    if offset < 0 or offset + 32 > total_bytes:
+                        return None
+                    length = HexDecoder.decode_uint256(data, offset)
+                    # Curve pools hold at most 8 coins; reject absurd/empty lengths
+                    # and any length whose elements would run past the payload.
+                    if not (1 <= length <= 8) or offset + 32 + length * 32 > total_bytes:
+                        return None
+                    return [HexDecoder.decode_uint256(data, offset + 32 + i * 32) for i in range(length)]
+
+                token_amounts = _decode_dyn_array(offset_amounts)
+                fees = _decode_dyn_array(offset_fees)
+                if token_amounts is None or fees is None or len(token_amounts) != len(fees):
+                    logger.warning("RemoveLiquidityImbalanceDyn payload failed bounds/symmetry validation; raw_data")
+                    return {"raw_data": data}
+                return {
+                    "provider": provider,
+                    "token_amounts": token_amounts,
+                    "fees": fees,
+                    "pool_address": pool_address,
+                }
+
+            # Fixed-array: 2N+2 words. Fail closed on a truncated / unexpected
+            # payload so a short log never decodes as a zero-proceeds ghost.
+            nwords = len(HexDecoder.normalize_hex(data)) // 64
+            if nwords < 6 or (nwords - 2) % 2 != 0 or (nwords - 2) // 2 > 8:
+                logger.warning(
+                    "RemoveLiquidityImbalance payload unexpected (%d words; need 2N+2, 2<=N<=8); "
+                    "failing closed to raw_data",
+                    nwords,
+                )
+                return {"raw_data": data}
+            n_coins = (nwords - 2) // 2
+            # Cross-check the length-derived arity against the topic-implied arity:
+            # each fixed RemoveLiquidityImbalance{,3,4} topic0 bijectively encodes N,
+            # so a payload whose length disagrees (e.g. a truncated [3] log that
+            # looks like a valid [2]) is corrupt — fail closed rather than mis-read a
+            # real amount as a fee. (Unnamed-event defensive path keeps length-only.)
+            topic_arity = _IMBALANCE_TOPIC_ARITY.get(event_name)
+            if topic_arity is not None and n_coins != topic_arity:
+                logger.warning(
+                    "RemoveLiquidityImbalance %s implies %d coins but payload has %d; failing closed to raw_data",
+                    event_name,
+                    topic_arity,
+                    n_coins,
+                )
+                return {"raw_data": data}
+            token_amounts = [HexDecoder.decode_uint256(data, i * 32) for i in range(n_coins)]
+            fees = [HexDecoder.decode_uint256(data, (n_coins + i) * 32) for i in range(n_coins)]
+            # invariant = word 2N, token_supply = word 2N+1 (not needed for proceeds).
+            return {
+                "provider": provider,
+                "token_amounts": token_amounts,
+                "fees": fees,
+                "pool_address": pool_address,
+            }
+        except Exception as e:
+            logger.warning(f"Failed to decode RemoveLiquidityImbalance data: {e}")
+            return {"raw_data": data}
+
+    def _find_pool_coin_outflows(
+        self,
+        receipt: dict[str, Any],
+        pool_address: str,
+        coin_addresses_lower: list[str],
+    ) -> list[tuple[int, int]]:
+        """Return ALL ERC-20 Transfers that move a pool coin OUT of the pool.
+
+        Each entry is ``(coin_index, raw_amount)`` for a ``Transfer`` whose token
+        is one of the pool's coins and whose ``from`` is the pool. A single-coin
+        removal emits exactly one such outflow (the withdrawn coin); the LP-token
+        burn is a Transfer FROM the provider (not the pool), so it never matches.
+        The caller treats >1 outflow as AMBIGUOUS and fails closed (a batched /
+        zap transaction touching the same pool could otherwise mis-attribute the
+        close to an unrelated transfer — CodeRabbit). Never raises: any malformed
+        log is skipped (mirrors ``_has_mint_transfer``).
+        """
+        pool = (pool_address or "").lower()
+        if not pool or not coin_addresses_lower:
+            return []
+        transfer_topic = EVENT_TOPICS["Transfer"].lower()
+        logs = receipt.get("logs", [])
+        if not isinstance(logs, list | tuple):
+            return []
+        outflows: list[tuple[int, int]] = []
+        for log in logs:
+            if not isinstance(log, dict):
+                continue
+            topics = log.get("topics", [])
+            if not isinstance(topics, list | tuple) or len(topics) < 3:
+                continue
+            first_topic = topics[0]
+            if isinstance(first_topic, bytes):
+                first_topic = "0x" + first_topic.hex()
+            if str(first_topic).lower() != transfer_topic:
+                continue
+            token_addr = log.get("address", "")
+            if isinstance(token_addr, bytes):
+                token_addr = "0x" + token_addr.hex()
+            token_addr = str(token_addr).lower()
+            if token_addr not in coin_addresses_lower:
+                continue
+            try:
+                from_addr = HexDecoder.topic_to_address(topics[1]).lower()
+                if from_addr != pool:
+                    continue
+                amount_data = HexDecoder.normalize_hex(log.get("data", ""))
+                amount = HexDecoder.decode_uint256(amount_data, 0)
+            except Exception:  # noqa: BLE001 — degenerate topic/data word; skip
+                continue
+            outflows.append((coin_addresses_lower.index(token_addr), amount))
+        return outflows
+
+    def _resolve_one_coin_proceeds(
+        self,
+        event: "CurveEvent",
+        receipt: dict[str, Any],
+    ) -> tuple[list[int] | None, list[int]]:
+        """Resolve a RemoveLiquidityOne close into a pool-coin-ordered amounts list.
+
+        Single-coin proceeds (VIB-5433). The single withdrawn coin's amount lands
+        at its pool-coin index; the other coins are a measured ``0`` (a single-coin
+        withdrawal genuinely returns nothing of them — a measured fact, not a
+        fabricated Empty-as-Zero). Resolution order:
+
+        1. **Authoritative** — the ERC-20 Transfer of a pool coin OUT of the pool
+           gives the exact tokens received AND the coin index by address, immune to
+           the 3-word topic collision. EXACTLY ONE such outflow is expected for a
+           single-coin close; >1 is an ambiguous batch/zap and fails closed.
+        2. **Native-ETH fallback** — a pool with a single native-ETH placeholder
+           coin and no ERC-20 coin outflow withdrew the native coin; its amount is
+           the event ``coin_amount`` scalar.
+        3. **Event-scalar fallback** — a variant that carries an explicit
+           ``coin_index`` + ``coin_amount`` (CryptoSwap / NG) when the pool's coin
+           map is unavailable.
+
+        Returns ``(token_amounts, [])`` on success, or ``(None, [])`` when the
+        proceeds cannot be attributed to a single coin index — the caller then
+        returns ``None`` so the ``*_result`` wrapper fails loud (ExtractError)
+        instead of booking a zero-proceeds ghost.
+        """
+        pool_address = _canonical_pool_address(event)
+        coin_addresses = _pool_coin_addresses(pool_address, self.chain)
+        n_coins = len(coin_addresses)
+        coin_addresses_lower = [a.lower() for a in coin_addresses]
+
+        coin_index: int | None = None
+        raw_amount: int | None = None
+
+        # (1) Authoritative: pool-coin Transfer out of the pool. A single-coin
+        # close has exactly one; multiple outflows touching this pool's coins in
+        # the same receipt (a batched / zap tx) are ambiguous → fail closed rather
+        # than guess which one is this close's proceeds (or silently fall through
+        # to the weaker fallbacks).
+        if coin_addresses_lower:
+            outflows = self._find_pool_coin_outflows(receipt, pool_address, coin_addresses_lower)
+            if len(outflows) > 1:
+                logger.warning(
+                    "Curve LP_CLOSE: %d pool-coin outflows for single-coin close on %s; ambiguous, failing closed",
+                    len(outflows),
+                    pool_address,
+                )
+                return None, []
+            if len(outflows) == 1:
+                coin_index, raw_amount = outflows[0]
+
+        ev_idx = event.data.get("one_coin_index")
+        ev_amt = event.data.get("one_coin_amount")
+
+        # (2) Native-ETH fallback: exactly one native placeholder coin, no ERC-20
+        # outflow matched → the withdrawn coin must be the native one. Only assume
+        # native when the event carries NO explicit coin_index, or its coin_index
+        # actually points at the native slot — otherwise a non-native withdrawal
+        # whose Transfer was missed (e.g. stale registry coin address) must NOT be
+        # mis-booked against the native coin; defer to the explicit index (path 3).
+        if coin_index is None and ev_amt is not None and coin_addresses_lower:
+            native_slots = [i for i, a in enumerate(coin_addresses_lower) if a == _NATIVE_ETH_PLACEHOLDER_LC]
+            if len(native_slots) == 1 and (ev_idx is None or int(ev_idx) == native_slots[0]):
+                coin_index, raw_amount = native_slots[0], int(ev_amt)
+
+        # (3) Event-scalar fallback: explicit coin_index from a CryptoSwap / NG event
+        # (used when the pool's coin map is unavailable).
+        if coin_index is None and ev_idx is not None and ev_amt is not None:
+            coin_index, raw_amount = int(ev_idx), int(ev_amt)
+
+        if coin_index is None or raw_amount is None:
+            return None, []
+
+        # Defensive bound: a coin index beyond the pool's coin count (or beyond
+        # Curve's 8-coin protocol max when the coin map is unavailable) is not
+        # attributable — fail loud rather than allocate an unbounded list. A
+        # mis-decoded 3-word event on a mislabeled pool could read a token-quantity
+        # word (~1e18) as ``coin_index``; ``[0] * 1e18`` raises ``MemoryError``,
+        # which is NOT an ``Exception`` subclass and would escape the enricher's
+        # ``except Exception`` guard and crash the writer instead of degrading.
+        max_coins = n_coins if n_coins else 8
+        if coin_index < 0 or coin_index >= max_coins:
+            logger.warning(
+                "Curve LP_CLOSE: coin_index %s out of range (max %d) for pool %s; failing closed",
+                coin_index,
+                max_coins,
+                pool_address,
+            )
+            return None, []
+
+        size = max(n_coins, coin_index + 1)
+        token_amounts = [0] * size
+        token_amounts[coin_index] = raw_amount
+        return token_amounts, []
 
     def _parse_swap_event(self, event: CurveEvent) -> SwapEventData | None:
         """Parse a swap event into typed data."""
@@ -1427,56 +1854,70 @@ class CurveReceiptParser:
 
             # Look for removal events
             for event in result.events:
-                if event.event_type in (
+                if event.event_type not in (
                     CurveEventType.REMOVE_LIQUIDITY,
                     CurveEventType.REMOVE_LIQUIDITY_ONE,
                     CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,
                 ):
+                    continue
+
+                if event.event_type == CurveEventType.REMOVE_LIQUIDITY_ONE:
+                    # VIB-5433 — single-coin withdrawal: proceeds are resolved from
+                    # the coin Transfer (authoritative amount + index), since the
+                    # event word layout is ambiguous (shared topic0) and old pools
+                    # omit the coin_index entirely. A close we cannot attribute to a
+                    # coin returns ``None`` here so the ``*_result`` wrapper fails
+                    # loud (ExtractError) rather than booking a zero-proceeds ghost.
+                    token_amounts, fees = self._resolve_one_coin_proceeds(event, receipt)
+                    if token_amounts is None:
+                        return None
+                else:
                     # ``or []`` guards the decode ``else`` branch which carries
                     # no ``token_amounts`` key (and a defensive None).
                     token_amounts = event.data.get("token_amounts") or []
-
-                    # Get amounts for token0 and token1. Empty ≠ Zero (matching the
-                    # fees below): a leg the event did not carry — e.g. a fail-closed
-                    # ``raw_data`` decode — is ``None`` (unmeasured), never a
-                    # fabricated measured ``0`` that would book a ghost LP_CLOSE.
-                    amount0 = token_amounts[0] if len(token_amounts) > 0 else None
-                    amount1 = token_amounts[1] if len(token_amounts) > 1 else None
-
                     # Get fees if available. VIB-4470 — Empty ≠ Zero: emit
                     # ``None`` when the Curve event did not carry a fee for
                     # the leg (an unmeasured field is not a measured zero).
                     fees = event.data.get("fees") or []
-                    fees0: int | None = fees[0] if len(fees) > 0 else None
-                    fees1: int | None = fees[1] if len(fees) > 1 else None
 
-                    # Capture additional amounts for 3/4-coin pools
-                    additional_amounts = None
-                    additional_fees = None
-                    if len(token_amounts) > 2:
-                        additional_amounts = {i: token_amounts[i] for i in range(2, len(token_amounts))}
-                    if len(fees) > 2:
-                        additional_fees = {i: fees[i] for i in range(2, len(fees))}
+                # Get amounts for token0 and token1. Empty ≠ Zero (matching the
+                # fees below): a leg the event did not carry — e.g. a fail-closed
+                # ``raw_data`` decode — is ``None`` (unmeasured), never a
+                # fabricated measured ``0`` that would book a ghost LP_CLOSE. For a
+                # single-coin close the non-withdrawn coins are a measured ``0``
+                # (the withdrawal genuinely returned none of them — VIB-5433).
+                amount0 = token_amounts[0] if len(token_amounts) > 0 else None
+                amount1 = token_amounts[1] if len(token_amounts) > 1 else None
+                fees0: int | None = fees[0] if len(fees) > 0 else None
+                fees1: int | None = fees[1] if len(fees) > 1 else None
 
-                    return LPCloseData(
-                        amount0_collected=amount0,
-                        amount1_collected=amount1,
-                        fees0=fees0,
-                        fees1=fees1,
-                        liquidity_removed=None,  # LP tokens burned
-                        additional_amounts=additional_amounts,
-                        additional_fees=additional_fees,
-                        # VIB-4968 — stamp the canonical Curve pool address (the
-                        # RemoveLiquidity* event emitter IS the pool contract).
-                        # This is the chain-data-first source the LP accounting
-                        # handler (`_resolve_lp_pool_address` step 1) needs to
-                        # book the LP_CLOSE event; without it `handle_lp` could
-                        # not resolve a pool and dropped the event entirely.
-                        # ``RemoveLiquidityOne`` / ``RemoveLiquidityImbalance``
-                        # take the decode ``else`` branch (no ``pool_address``
-                        # key), so fall back to the event's contract address.
-                        pool_address=_canonical_pool_address(event),
-                    )
+                # Capture additional amounts for 3/4-coin pools
+                additional_amounts = None
+                additional_fees = None
+                if len(token_amounts) > 2:
+                    additional_amounts = {i: token_amounts[i] for i in range(2, len(token_amounts))}
+                if len(fees) > 2:
+                    additional_fees = {i: fees[i] for i in range(2, len(fees))}
+
+                return LPCloseData(
+                    amount0_collected=amount0,
+                    amount1_collected=amount1,
+                    fees0=fees0,
+                    fees1=fees1,
+                    liquidity_removed=None,  # LP tokens burned
+                    additional_amounts=additional_amounts,
+                    additional_fees=additional_fees,
+                    # VIB-4968 — stamp the canonical Curve pool address (the
+                    # RemoveLiquidity* event emitter IS the pool contract).
+                    # This is the chain-data-first source the LP accounting
+                    # handler (`_resolve_lp_pool_address` step 1) needs to
+                    # book the LP_CLOSE event; without it `handle_lp` could
+                    # not resolve a pool and dropped the event entirely.
+                    # ``_canonical_pool_address`` reads the decoder's stamped
+                    # ``pool_address`` (RemoveLiquidity / Imbalance) and falls
+                    # back to the event emitter for RemoveLiquidityOne.
+                    pool_address=_canonical_pool_address(event),
+                )
 
             return None
 
@@ -1568,20 +2009,30 @@ class CurveReceiptParser:
         return any(e.event_type in event_types for e in parsed.events)
 
     # VIB-5432 (round 2) — event types the parser STRUCTURALLY decodes into typed
-    # fields (``_decode_swap_data`` / ``_decode_add_liquidity_data`` /
-    # ``_decode_remove_liquidity_data``). On a clean decode each stamps its typed
-    # keys (``tokens_sold`` / ``token_amounts`` / …) and NEVER a ``raw_data`` key;
-    # only the ``except`` fallback returns ``{"raw_data": data}``. So ``raw_data``
-    # on an event of one of THESE types is an exact decode-failure sentinel. Every
-    # OTHER Curve event (incl. ``RemoveLiquidityOne`` / ``RemoveLiquidityImbalance``,
-    # which have no structured decoder) carries ``raw_data`` BY DESIGN via the
-    # ``_decode_log_data`` passthrough and must NOT be read as a decode failure.
+    # ``token_amounts`` fields (``_decode_swap_data`` / ``_decode_add_liquidity_data``
+    # / ``_decode_remove_liquidity_data`` / ``_decode_remove_liquidity_imbalance_data``).
+    # On a clean decode each stamps its typed keys (``tokens_sold`` /
+    # ``token_amounts`` / …) and NEVER a ``raw_data`` key; only the ``except`` (or
+    # fail-closed truncation) fallback returns ``{"raw_data": data}``. So
+    # ``raw_data`` on an event of one of THESE types is an exact decode-failure
+    # sentinel.
+    #
+    # ``RemoveLiquidityImbalance`` JOINS this set (VIB-5433) — it now has a
+    # structured decoder, so a present-but-undecodable imbalanced close must fail
+    # loud rather than book a zero-proceeds ghost. ``RemoveLiquidityOne`` is
+    # DELIBERATELY EXCLUDED: its decoder keeps ``raw_data`` BY DESIGN (single-coin
+    # proceeds are resolved from the coin Transfer in ``_resolve_one_coin_proceeds``,
+    # not from a structured ``token_amounts``), so flagging its ``raw_data`` would
+    # convert every real single-coin withdrawal into a fatal accounting halt. Its
+    # fail-loud path instead runs through ``extract_lp_close_data`` returning
+    # ``None`` (present + None → ExtractError) when proceeds cannot be attributed.
     _STRUCTURALLY_DECODED_EVENT_TYPES: frozenset[CurveEventType] = frozenset(
         {
             CurveEventType.TOKEN_EXCHANGE,
             CurveEventType.TOKEN_EXCHANGE_UNDERLYING,
             CurveEventType.ADD_LIQUIDITY,
             CurveEventType.REMOVE_LIQUIDITY,
+            CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,
         }
     )
 
@@ -1602,10 +2053,13 @@ class CurveReceiptParser:
         Scope is deliberately narrow (``_STRUCTURALLY_DECODED_EVENT_TYPES`` ∩
         ``event_types``): a present ``raw_data`` on those types CANNOT be a clean
         decode, so this never over-rejects a legitimately-zero-but-decoded value
-        (decoded zero carries the typed key, not ``raw_data``). It also EXCLUDES
-        ``RemoveLiquidityOne`` / ``RemoveLiquidityImbalance``, whose ``raw_data`` is
-        the by-design passthrough — flagging them would convert real single-coin /
-        imbalanced withdrawals into fatal accounting halts."""
+        (decoded zero carries the typed key, not ``raw_data``). ``RemoveLiquidity``
+        and ``RemoveLiquidityImbalance`` ARE in scope (structured ``token_amounts``
+        decoders). It EXCLUDES ``RemoveLiquidityOne`` (VIB-5433), whose ``raw_data``
+        is the by-design passthrough — its single-coin proceeds are resolved from
+        the coin Transfer, so flagging its ``raw_data`` would convert every real
+        single-coin withdrawal into a fatal accounting halt; its fail-loud path is
+        ``extract_lp_close_data`` returning ``None`` (present + None → ExtractError)."""
         decodable = cls._STRUCTURALLY_DECODED_EVENT_TYPES.intersection(event_types)
         return any(e.event_type in decodable and "raw_data" in e.data for e in parsed.events)
 
@@ -1843,15 +2297,17 @@ class CurveReceiptParser:
             value = self.extract_lp_close_data(receipt)
         except Exception as exc:  # noqa: BLE001
             return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        # Fail-closed on a present-but-undecodable RemoveLiquidity (VIB-5432 round 2):
-        # ``_decode_remove_liquidity_data`` swallows its crash to ``{"raw_data": ...}``
-        # (no ``token_amounts``), so ``extract_lp_close_data`` builds a non-None
+        # Fail-closed on a present-but-undecodable RemoveLiquidity /
+        # RemoveLiquidityImbalance (VIB-5432 round 2, extended for VIB-5433):
+        # those decoders swallow a crash to ``{"raw_data": ...}`` (no
+        # ``token_amounts``), so ``extract_lp_close_data`` builds a non-None
         # ``LPCloseData`` with zero collected amounts — a fabricated close
-        # ``_tag_presence`` would mis-tag ``ExtractOk``. Reclassify to error. Only
-        # ``REMOVE_LIQUIDITY`` is structurally decoded; ``RemoveLiquidityOne`` /
-        # ``RemoveLiquidityImbalance`` carry ``raw_data`` by design (see
-        # :meth:`_decode_fell_back`) and stay valid ``ExtractOk`` closes.
-        if self._decode_fell_back(parsed, CurveEventType.REMOVE_LIQUIDITY):
+        # ``_tag_presence`` would mis-tag ``ExtractOk``. Reclassify to error.
+        # ``RemoveLiquidityOne`` is EXCLUDED here (its ``raw_data`` is by-design,
+        # see :meth:`_decode_fell_back`); its fail-loud path is
+        # ``extract_lp_close_data`` returning ``None`` (present + None →
+        # ExtractError below) when single-coin proceeds cannot be attributed.
+        if self._decode_fell_back(parsed, CurveEventType.REMOVE_LIQUIDITY, CurveEventType.REMOVE_LIQUIDITY_IMBALANCE):
             return ExtractError(
                 error=(
                     "lp_close_data: RemoveLiquidity event present but decode fell back to raw_data "

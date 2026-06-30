@@ -1293,3 +1293,475 @@ class TestAddLiquidityV2Crypto3:
         add = next(e for e in result.events if e.event_type == CurveEventType.ADD_LIQUIDITY)
         assert "raw_data" in add.data
         assert "token_amounts" not in add.data  # no fabricated amounts
+
+
+# =============================================================================
+# VIB-5433 — RemoveLiquidityOne / RemoveLiquidityImbalance decode
+# =============================================================================
+
+# Registered Curve pools used as fixtures (must exist in CURVE_POOLS so the
+# Transfer-based proceeds resolver can map a coin address -> coin index).
+FRAX_USDC_POOL = "0xdcef968d416a41cdac0ed8702fac8128a64241a2"  # stableswap, [FRAX, USDC]
+FRAX = "0x853d955acef822db058eb8505911ed77f175b99e"
+USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+STETH_POOL = "0xdc24316b9ae028f1497c275eb9192a3ea0f67022"  # stableswap, [ETH(placeholder), stETH]
+TRICRYPTO2_COINS = [
+    "0xdac17f958d2ee523a2206206994597c13d831ec7",  # USDT (idx 0)
+    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",  # WBTC (idx 1)
+    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",  # WETH (idx 2)
+]
+
+
+def _build_remove_liquidity_one_receipt(
+    pool: str,
+    coin_token: str,
+    coin_amount: int,
+    *,
+    wallet: str = WALLET,
+    topic_name: str = "RemoveLiquidityOne",
+    coin_index: int | None = None,
+    token_amount: int = 100_000_000_000_000_000_000,  # LP burned
+    token_supply: int = 1_000_000_000_000_000_000_000,
+    include_transfer: bool = True,
+    event_coin_amount: int | None = None,
+    extra_outflows: list[tuple[str, int]] | None = None,
+) -> dict:
+    """Build a synthetic Curve RemoveLiquidityOne receipt (VIB-5433).
+
+    ``topic_name`` selects the on-chain ABI variant:
+      * ``RemoveLiquidityOneLegacy`` -> (token_amount, coin_amount)            [2 words]
+      * ``RemoveLiquidityOne`` (3 words) -> CryptoSwap (token_amount, coin_index,
+        coin_amount) when ``coin_index`` is given; StableSwap-NG (token_amount,
+        coin_amount, token_supply) otherwise.
+      * ``RemoveLiquidityOneNG`` -> (token_amount, coin_index, coin_amount,
+        approx_fee, packed_price_scale)                                        [5 words]
+    ``include_transfer`` adds the pool -> wallet coin Transfer (the authoritative
+    proceeds source); set False to exercise the event-scalar / native fallbacks.
+    ``event_coin_amount`` overrides the amount ENCODED IN THE EVENT (defaults to
+    ``coin_amount``) so a test can prove the Transfer — not the event word — is the
+    source of truth. ``extra_outflows`` adds extra ``(token, amount)`` pool->wallet
+    transfers to exercise the ambiguous-batch fail-closed path.
+    """
+    ev_coin_amount = coin_amount if event_coin_amount is None else event_coin_amount
+    topic = _make_topic(EVENT_TOPICS[topic_name])
+    provider_topic = "0x" + "00" * 12 + wallet[2:]
+    if topic_name == "RemoveLiquidityOneLegacy":
+        words = [token_amount, ev_coin_amount]
+    elif topic_name == "RemoveLiquidityOneNG":
+        words = [token_amount, coin_index or 0, ev_coin_amount, 0, 0]
+    else:  # 3-word RemoveLiquidityOne
+        words = (
+            [token_amount, coin_index, ev_coin_amount]
+            if coin_index is not None
+            else [token_amount, ev_coin_amount, token_supply]
+        )
+    data = "0x" + "".join(_pad_hex(w) for w in words)
+
+    transfer_topic = _make_topic(EVENT_TOPICS["Transfer"])
+    pool_topic = "0x" + "00" * 12 + pool[2:]
+    wallet_topic = "0x" + "00" * 12 + wallet[2:]
+    logs = [{"address": pool, "topics": [topic, provider_topic], "data": data, "logIndex": 1}]
+    if include_transfer:
+        logs.insert(
+            0,
+            {
+                "address": coin_token,
+                "topics": [transfer_topic, pool_topic, wallet_topic],
+                "data": "0x" + _pad_hex(coin_amount),
+                "logIndex": 0,
+            },
+        )
+    for j, (tok, amt) in enumerate(extra_outflows or []):
+        logs.append(
+            {
+                "address": tok,
+                "topics": [transfer_topic, pool_topic, wallet_topic],
+                "data": "0x" + _pad_hex(amt),
+                "logIndex": 2 + j,
+            }
+        )
+    return {
+        "status": 1,
+        "from": wallet,
+        "transactionHash": "0x" + "ee" * 32,
+        "blockNumber": 19_000_002,
+        "gasUsed": 180_000,
+        "logs": logs,
+    }
+
+
+def _build_remove_liquidity_imbalance_receipt(
+    pool: str,
+    token_amounts: list[int],
+    *,
+    wallet: str = WALLET,
+    fees: list[int] | None = None,
+    invariant: int = 100_000_000_000_000_000_000,
+    token_supply: int = 1_000_000_000_000_000_000_000,
+    dynamic: bool = False,
+) -> dict:
+    """Build a synthetic Curve RemoveLiquidityImbalance receipt (VIB-5433).
+
+    Fixed-array form: ``amounts[N], fees[N], invariant, token_supply``. Dynamic
+    form mirrors ``RemoveLiquidityDyn`` with a 4-word head.
+    """
+    n = len(token_amounts)
+    if fees is None:
+        fees = [0] * n
+    provider_topic = "0x" + "00" * 12 + wallet[2:]
+    if dynamic:
+        topic = _make_topic(EVENT_TOPICS["RemoveLiquidityImbalanceDyn"])
+        head_len = 4 * 32
+        amounts_tail_len = 32 + n * 32
+        off_a = head_len
+        off_f = head_len + amounts_tail_len
+        head = _pad_hex(off_a) + _pad_hex(off_f) + _pad_hex(invariant) + _pad_hex(token_supply)
+        amounts_tail = _pad_hex(n) + "".join(_pad_hex(a) for a in token_amounts)
+        fees_tail = _pad_hex(n) + "".join(_pad_hex(f) for f in fees)
+        data = "0x" + head + amounts_tail + fees_tail
+    else:
+        name = {2: "RemoveLiquidityImbalance", 3: "RemoveLiquidityImbalance3", 4: "RemoveLiquidityImbalance4"}[n]
+        topic = _make_topic(EVENT_TOPICS[name])
+        words = list(token_amounts) + list(fees) + [invariant, token_supply]
+        data = "0x" + "".join(_pad_hex(w) for w in words)
+    return {
+        "status": 1,
+        "from": wallet,
+        "transactionHash": "0x" + "ef" * 32,
+        "blockNumber": 19_000_003,
+        "gasUsed": 190_000,
+        "logs": [{"address": pool, "topics": [topic, provider_topic], "data": data, "logIndex": 0}],
+    }
+
+
+class TestRemoveLiquidityOneDecode:
+    """VIB-5433 — single-coin withdrawal closes must emit real proceeds, not a ghost."""
+
+    def test_topics_recognised(self):
+        parser = CurveReceiptParser(chain="ethereum")
+        for name in ("RemoveLiquidityOneLegacy", "RemoveLiquidityOne", "RemoveLiquidityOneNG"):
+            assert parser.is_curve_event(EVENT_TOPICS[name])
+            assert parser.get_event_type(EVENT_TOPICS[name]) == CurveEventType.REMOVE_LIQUIDITY_ONE
+
+    def test_legacy_stableswap_coin0(self):
+        """Legacy StableSwap (no coin_index): proceeds resolved from the coin Transfer."""
+        amt = 25_000_000_000_000_000_000  # 25 FRAX (18 dec)
+        receipt = _build_remove_liquidity_one_receipt(FRAX_USDC_POOL, FRAX, amt, topic_name="RemoveLiquidityOneLegacy")
+        result = CurveReceiptParser(chain="ethereum").extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == amt  # FRAX is coin 0 -> reaches the trade tape
+        assert result.amount1_collected == 0  # measured zero (single-coin close)
+        assert result.pool_address == FRAX_USDC_POOL
+
+    def test_legacy_stableswap_coin1(self):
+        """Withdraw coin index 1 (USDC): proceeds land on amount1_collected."""
+        amt = 30_000_000  # 30 USDC (6 dec)
+        receipt = _build_remove_liquidity_one_receipt(FRAX_USDC_POOL, USDC, amt, topic_name="RemoveLiquidityOneLegacy")
+        result = CurveReceiptParser(chain="ethereum").extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == 0
+        assert result.amount1_collected == amt
+
+    def test_cryptoswap_coin2_additional(self):
+        """CryptoSwap (tricrypto2) WETH (coin 2) -> additional_amounts (VIB-5420 tape limit)."""
+        amt = 40_777_242_616_513_817  # ~0.0408 WETH, from real tx 0x04cfdfaf...
+        receipt = _build_remove_liquidity_one_receipt(
+            TRICRYPTO2_POOL, TRICRYPTO2_COINS[2], amt, topic_name="RemoveLiquidityOne", coin_index=2
+        )
+        result = CurveReceiptParser(chain="ethereum").extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == 0
+        assert result.amount1_collected == 0
+        assert result.additional_amounts == {2: amt}
+
+    def test_transfer_is_authoritative_over_event_words(self):
+        """The coin Transfer (not the event word) sets the amount: encode a WRONG
+        amount in the event and assert the Transfer amount wins."""
+        transfer_amt = 12_345_678_000_000_000_000
+        wrong_event_amt = 999_999_999_999_999_999  # deliberately != transfer
+        receipt = _build_remove_liquidity_one_receipt(
+            TRICRYPTO2_POOL,
+            TRICRYPTO2_COINS[1],  # WBTC (coin 1)
+            transfer_amt,
+            topic_name="RemoveLiquidityOne",
+            coin_index=1,
+            event_coin_amount=wrong_event_amt,
+        )
+        result = CurveReceiptParser(chain="ethereum").extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount1_collected == transfer_amt  # Transfer, not the event word
+
+    def test_ambiguous_batched_outflows_fail_loud(self):
+        """>1 pool-coin outflow in one receipt (batch/zap) is ambiguous → fail loud."""
+        from almanak.framework.execution.extract_result import ExtractError
+
+        receipt = _build_remove_liquidity_one_receipt(
+            TRICRYPTO2_POOL,
+            TRICRYPTO2_COINS[0],  # USDT outflow (the close)
+            7_000_000,
+            topic_name="RemoveLiquidityOne",
+            coin_index=0,
+            extra_outflows=[(TRICRYPTO2_COINS[2], 5_000_000_000_000_000_000)],  # stray WETH outflow
+        )
+        parser = CurveReceiptParser(chain="ethereum")
+        assert parser.extract_lp_close_data(receipt) is None
+        assert isinstance(parser.extract_lp_close_data_result(receipt), ExtractError)
+
+    def test_out_of_range_coin_index_fails_loud(self):
+        """A mis-decoded event scalar carrying a token-quantity-sized coin_index
+        must fail loud, not allocate an unbounded list (MemoryError escapes the
+        enricher's except-Exception guard). Unknown pool + no Transfer + 5-word NG
+        event whose coin_index word is huge."""
+        from almanak.framework.execution.extract_result import ExtractError
+
+        unknown_pool = "0x2222222222222222222222222222222222222222"
+        topic = _make_topic(EVENT_TOPICS["RemoveLiquidityOneNG"])
+        provider_topic = "0x" + "00" * 12 + WALLET[2:]
+        huge_index = 10**18
+        words = [10**20, huge_index, 5_000_000, 0, 0]  # NG: (token_amount, coin_index, coin_amount, ...)
+        data = "0x" + "".join(_pad_hex(w) for w in words)
+        receipt = {
+            "status": 1,
+            "from": WALLET,
+            "transactionHash": "0x" + "e2" * 32,
+            "logs": [{"address": unknown_pool, "topics": [topic, provider_topic], "data": data, "logIndex": 0}],
+        }
+        parser = CurveReceiptParser(chain="ethereum")
+        assert parser.extract_lp_close_data(receipt) is None  # no unbounded alloc
+        assert isinstance(parser.extract_lp_close_data_result(receipt), ExtractError)
+
+    def test_native_fallback_deferred_when_event_index_is_nonnative(self):
+        """stETH pool: event explicitly says coin_index=1 (stETH, non-native) but
+        its Transfer is absent. Native fallback must NOT mis-book against the ETH
+        slot (index 0); the explicit index wins (proceeds at index 1)."""
+        amt = 4_000_000_000_000_000_000
+        receipt = _build_remove_liquidity_one_receipt(
+            STETH_POOL,
+            "0x0000000000000000000000000000000000000000",  # unused (no transfer)
+            amt,
+            topic_name="RemoveLiquidityOneNG",
+            coin_index=1,  # stETH (non-native)
+            include_transfer=False,
+        )
+        result = CurveReceiptParser(chain="ethereum").extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == 0  # ETH slot NOT mis-booked
+        assert result.amount1_collected == amt  # explicit non-native index wins
+
+    def test_truncated_ng_event_without_transfer_fails_loud(self):
+        """A truncated RemoveLiquidityOneNG (3 words) with no Transfer must NOT
+        fabricate coin_index=0/coin_amount=0 → unresolvable → ExtractError."""
+        from almanak.framework.execution.extract_result import ExtractError
+
+        topic = _make_topic(EVENT_TOPICS["RemoveLiquidityOneNG"])
+        provider_topic = "0x" + "00" * 12 + WALLET[2:]
+        short_data = "0x" + "".join(_pad_hex(v) for v in (10**20, 0, 0))  # 3 words, NG needs 5
+        receipt = {
+            "status": 1,
+            "from": WALLET,
+            "transactionHash": "0x" + "e1" * 32,
+            "logs": [
+                {"address": TRICRYPTO2_POOL, "topics": [topic, provider_topic], "data": short_data, "logIndex": 0}
+            ],
+        }
+        parser = CurveReceiptParser(chain="ethereum")
+        one = next(
+            e for e in parser.parse_receipt(receipt).events if e.event_type == CurveEventType.REMOVE_LIQUIDITY_ONE
+        )
+        assert one.data.get("one_coin_index") is None  # not fabricated to 0
+        assert one.data.get("one_coin_amount") is None
+        assert isinstance(parser.extract_lp_close_data_result(receipt), ExtractError)
+
+    def test_event_scalar_fallback_when_no_transfer_cryptoswap(self):
+        """CryptoSwap event carries coin_index+coin_amount: resolvable without a Transfer."""
+        amt = 7_000_000  # 7 USDT (coin 0)
+        receipt = _build_remove_liquidity_one_receipt(
+            TRICRYPTO2_POOL,
+            TRICRYPTO2_COINS[0],
+            amt,
+            topic_name="RemoveLiquidityOne",
+            coin_index=0,
+            include_transfer=False,
+        )
+        result = CurveReceiptParser(chain="ethereum").extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == amt
+
+    def test_ng_5word_variant_resolves(self):
+        """Twocrypto/Tricrypto-NG 5-word event resolves via Transfer."""
+        amt = 5_000_000  # 5 USDT
+        receipt = _build_remove_liquidity_one_receipt(
+            TRICRYPTO2_POOL, TRICRYPTO2_COINS[0], amt, topic_name="RemoveLiquidityOneNG", coin_index=0
+        )
+        result = CurveReceiptParser(chain="ethereum").extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == amt
+
+    def test_native_eth_fallback(self):
+        """stETH pool ETH withdrawal emits no ERC-20 Transfer -> native-slot fallback."""
+        amt = 500_000_000_000_000_000  # 0.5 ETH
+        # Legacy StableSwap variant, ETH (placeholder coin index 0), no Transfer.
+        receipt = _build_remove_liquidity_one_receipt(
+            STETH_POOL,
+            "0x0000000000000000000000000000000000000000",  # unused (no transfer)
+            amt,
+            topic_name="RemoveLiquidityOneLegacy",
+            include_transfer=False,
+        )
+        result = CurveReceiptParser(chain="ethereum").extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == amt  # ETH is the single native slot (index 0)
+
+    def test_unresolvable_close_fails_loud(self):
+        """Unknown pool + no coin_index + no Transfer -> None -> wrapper ExtractError (no ghost)."""
+        from almanak.framework.execution.extract_result import ExtractError
+
+        unknown_pool = "0x1111111111111111111111111111111111111111"
+        receipt = _build_remove_liquidity_one_receipt(
+            unknown_pool,
+            "0x0000000000000000000000000000000000000000",
+            123,
+            topic_name="RemoveLiquidityOneLegacy",
+            include_transfer=False,
+        )
+        parser = CurveReceiptParser(chain="ethereum")
+        assert parser.extract_lp_close_data(receipt) is None
+        assert isinstance(parser.extract_lp_close_data_result(receipt), ExtractError)
+
+    def test_good_close_wrapper_is_ok(self):
+        from almanak.framework.execution.extract_result import ExtractOk
+
+        receipt = _build_remove_liquidity_one_receipt(
+            FRAX_USDC_POOL, FRAX, 25_000_000_000_000_000_000, topic_name="RemoveLiquidityOneLegacy"
+        )
+        assert isinstance(CurveReceiptParser(chain="ethereum").extract_lp_close_data_result(receipt), ExtractOk)
+
+
+class TestRemoveLiquidityImbalanceDecode:
+    """VIB-5433 — imbalanced withdrawal closes must emit per-coin proceeds."""
+
+    def test_topics_recognised(self):
+        parser = CurveReceiptParser(chain="ethereum")
+        for name in (
+            "RemoveLiquidityImbalance",
+            "RemoveLiquidityImbalance3",
+            "RemoveLiquidityImbalance4",
+            "RemoveLiquidityImbalanceDyn",
+        ):
+            assert parser.is_curve_event(EVENT_TOPICS[name])
+            assert parser.get_event_type(EVENT_TOPICS[name]) == CurveEventType.REMOVE_LIQUIDITY_IMBALANCE
+
+    def test_imbalance_2coin(self):
+        amounts = [12_000_000_000_000_000_000, 8_000_000]  # 12 FRAX, 8 USDC
+        receipt = _build_remove_liquidity_imbalance_receipt(FRAX_USDC_POOL, amounts)
+        result = CurveReceiptParser(chain="ethereum").extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == amounts[0]
+        assert result.amount1_collected == amounts[1]
+        assert result.pool_address == FRAX_USDC_POOL
+
+    def test_imbalance_3coin_additional(self):
+        amounts = [10_000_000_000_000_000_000, 0, 5_000_000]  # 10 DAI, 0 USDC, 5 USDT
+        receipt = _build_remove_liquidity_imbalance_receipt(POOL_3POOL, amounts)
+        result = CurveReceiptParser(chain="ethereum").extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == amounts[0]
+        assert result.amount1_collected == 0  # measured zero
+        assert result.additional_amounts == {2: amounts[2]}
+
+    def test_imbalance_4coin_extraction(self):
+        """4-coin fixed-array imbalance must project amounts onto amount0/1 + additional."""
+        pool = "0xf6c5f01c7f3148891ad0e19df78743d31e390d1f"  # Base 4pool
+        amounts = [50_000_000, 0, 25_000_000, 91_000_000_000_000_000_000]
+        receipt = _build_remove_liquidity_imbalance_receipt(pool, amounts)
+        result = CurveReceiptParser(chain="base").extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == amounts[0]
+        assert result.amount1_collected == amounts[1]
+        assert result.additional_amounts == {2: amounts[2], 3: amounts[3]}
+        assert result.all_amounts == amounts
+
+    def test_imbalance_dynamic(self):
+        amounts = [7_000_000_000_000_000_000, 3_000_000]
+        receipt = _build_remove_liquidity_imbalance_receipt(FRAX_USDC_POOL, amounts, dynamic=True)
+        result = CurveReceiptParser(chain="ethereum").extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == amounts[0]
+        assert result.amount1_collected == amounts[1]
+
+    def test_fixed_imbalance_topic_arity_mismatch_fails_loud(self):
+        """A RemoveLiquidityImbalance3 topic whose payload length implies N=2
+        (a truncated [3] log) must fail closed, not mis-read an amount as a fee."""
+        from almanak.framework.execution.extract_result import ExtractError
+
+        topic = _make_topic(EVENT_TOPICS["RemoveLiquidityImbalance3"])  # implies N=3
+        provider_topic = "0x" + "00" * 12 + WALLET[2:]
+        # Only 6 words (length implies N=2) — disagrees with the [3] topic.
+        words = [10**18, 0, 0, 0, 10**20, 10**21]
+        data = "0x" + "".join(_pad_hex(w) for w in words)
+        receipt = {
+            "status": 1,
+            "from": WALLET,
+            "transactionHash": "0x" + "f2" * 32,
+            "logs": [{"address": POOL_3POOL, "topics": [topic, provider_topic], "data": data, "logIndex": 0}],
+        }
+        parser = CurveReceiptParser(chain="ethereum")
+        imb = next(
+            e for e in parser.parse_receipt(receipt).events if e.event_type == CurveEventType.REMOVE_LIQUIDITY_IMBALANCE
+        )
+        assert "raw_data" in imb.data
+        assert "token_amounts" not in imb.data
+        assert isinstance(parser.extract_lp_close_data_result(receipt), ExtractError)
+
+    def test_dynamic_imbalance_oversized_length_fails_loud(self):
+        """A dynamic imbalance whose array length exceeds 8 coins must fail closed
+        (DoS guard) — raw_data, not an unbounded decode loop."""
+        from almanak.framework.execution.extract_result import ExtractError
+
+        topic = _make_topic(EVENT_TOPICS["RemoveLiquidityImbalanceDyn"])
+        provider_topic = "0x" + "00" * 12 + WALLET[2:]
+        # head: offset_amounts=0x80, offset_fees=0x80, invariant, supply;
+        # amounts tail claims length 2**64 (absurd) -> must reject.
+        head = _pad_hex(4 * 32) + _pad_hex(4 * 32) + _pad_hex(0) + _pad_hex(0)
+        tail = _pad_hex(2**64) + _pad_hex(1) + _pad_hex(2)
+        receipt = {
+            "status": 1,
+            "from": WALLET,
+            "transactionHash": "0x" + "f1" * 32,
+            "logs": [
+                {
+                    "address": FRAX_USDC_POOL,
+                    "topics": [topic, provider_topic],
+                    "data": "0x" + head + tail,
+                    "logIndex": 0,
+                }
+            ],
+        }
+        parser = CurveReceiptParser(chain="ethereum")
+        imb = next(
+            e for e in parser.parse_receipt(receipt).events if e.event_type == CurveEventType.REMOVE_LIQUIDITY_IMBALANCE
+        )
+        assert "raw_data" in imb.data
+        assert "token_amounts" not in imb.data
+        assert isinstance(parser.extract_lp_close_data_result(receipt), ExtractError)
+
+    def test_malformed_imbalance_fails_loud(self):
+        """A truncated imbalance payload -> raw_data -> wrapper ExtractError (no ghost)."""
+        from almanak.framework.execution.extract_result import ExtractError
+
+        topic = _make_topic(EVENT_TOPICS["RemoveLiquidityImbalance"])
+        provider_topic = "0x" + "00" * 12 + WALLET[2:]
+        short_data = "0x" + "".join(_pad_hex(v) for v in (1, 2, 3))  # 3 words, expected 6 for [2]
+        receipt = {
+            "status": 1,
+            "from": WALLET,
+            "transactionHash": "0x" + "f0" * 32,
+            "logs": [{"address": FRAX_USDC_POOL, "topics": [topic, provider_topic], "data": short_data, "logIndex": 0}],
+        }
+        parser = CurveReceiptParser(chain="ethereum")
+        imb = next(
+            e for e in parser.parse_receipt(receipt).events if e.event_type == CurveEventType.REMOVE_LIQUIDITY_IMBALANCE
+        )
+        assert "raw_data" in imb.data
+        assert "token_amounts" not in imb.data
+        assert isinstance(parser.extract_lp_close_data_result(receipt), ExtractError)
