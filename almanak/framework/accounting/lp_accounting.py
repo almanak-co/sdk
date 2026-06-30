@@ -112,6 +112,15 @@ class LPAccountingEvent:
         # co-leg to disambiguate). String form so it is JSON-stable across the
         # V3 integer-tokenId and any future address/handle discriminators.
         position_id: str | None = None,
+        # VIB-5429 — pool-coin-ordered token symbols for N-coin fungible pools
+        # (Curve StableSwap). A proportional ``remove_liquidity`` close returns
+        # ALL N coins, so there is no swap-style ``token0``/``token1`` direction
+        # (both stay empty); ``coin_symbols`` carries the position's true coin
+        # identity instead, and lets downstream consumers see WHICH coins back a
+        # measured ``cost_basis_usd``/``realized_pnl_usd`` (resolved via the
+        # static pool registry, not the empty 2-token labels). ``None`` for 2-coin
+        # / concentrated-liquidity venues that already populate ``token0``/``token1``.
+        coin_symbols: list[str] | None = None,
     ) -> None:
         self.identity = identity
         self.event_type = event_type.value
@@ -138,6 +147,7 @@ class LPAccountingEvent:
         self.hodl_value_usd = hodl_value_usd
         self.position_hash = position_hash
         self.position_id = position_id
+        self.coin_symbols = coin_symbols
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -216,6 +226,9 @@ class LPAccountingEvent:
                 # co-pool close attributes to its OWN open. Always emitted
                 # (None for fungible-LP venues) for a stable key shape.
                 "position_id": self.position_id,
+                # VIB-5429 — N-coin pool-coin identity (Curve). ``None`` for 2-coin
+                # venues; round-trips as a JSON list of upper-case symbols.
+                "coin_symbols": self.coin_symbols,
                 "schema_version": self.schema_version,
                 "primitive_version": self.primitive_version,
             }

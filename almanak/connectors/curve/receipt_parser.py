@@ -381,6 +381,36 @@ def _pool_coin_addresses(pool_address: str, chain: str) -> list[str]:
     return []
 
 
+def _pool_coin_symbols(pool_address: str, chain: str) -> list[str]:
+    """Return the pool-coin-ordered token SYMBOLS for a Curve pool, or ``[]``.
+
+    Sibling of :func:`_pool_coin_addresses` reading the static ``CURVE_POOLS``
+    ``coins`` list (e.g. ``["DAI", "USDC", "USDT"]`` for 3pool) in pool-coin
+    index order — the SAME order the AddLiquidity / RemoveLiquidity events emit
+    their ``token_amounts`` / ``fees`` arrays. VIB-5429: the LP accounting
+    handler needs these symbols to map each decoded fee/amount leg to a coin it
+    can resolve decimals + a USD price for; a Curve LP_CLOSE ledger row carries
+    no ``token_in`` / ``token_out`` and the fungible position_key has no token
+    descriptor, so without this lookup the close legs collapse to NULLs.
+
+    Returns ``[]`` (→ caller degrades, never fabricates) when the pool is
+    unknown or carries no ``coins`` (Empty ≠ Zero).
+    """
+    if not pool_address:
+        return []
+    try:
+        from almanak.connectors.curve.adapter import CURVE_POOLS
+
+        target = pool_address.lower()
+        for data in CURVE_POOLS.get(chain, {}).values():
+            if str(data.get("address", "")).lower() == target:
+                coins = data.get("coins") or []
+                return [str(c) for c in coins]
+    except Exception as exc:  # noqa: BLE001 — accounting path: degrade to legacy, never raise
+        logger.debug("Curve coin-symbol lookup failed for %s on %s: %s", pool_address, chain, exc)
+    return []
+
+
 def _pool_type(pool_address: str, chain: str) -> str:
     """Return the static ``CURVE_POOLS`` ``pool_type`` for a pool, or ``""``.
 
@@ -1650,6 +1680,22 @@ class CurveReceiptParser:
                 # carry is ``None`` (unmeasured), never a fabricated ``0``.
                 amount0 = token_amounts[0] if len(token_amounts) > 0 else None
                 amount1 = token_amounts[1] if len(token_amounts) > 1 else None
+                # VIB-5429 — capture coins beyond the first two (Curve 3/4-coin
+                # pools). A single-sided deposit's unfunded coins are emitted as a
+                # MEASURED ``0`` in the AddLiquidity ``token_amounts`` vector, so
+                # carrying them lets the basis valuation see every coin instead of
+                # silently dropping coin 2+ (symmetric with LPCloseData).
+                additional_amounts = (
+                    {i: token_amounts[i] for i in range(2, len(token_amounts))} if len(token_amounts) > 2 else None
+                )
+
+                # VIB-5429 — pool-coin-ordered symbols (same index order as the
+                # ``token_amounts`` / ``amount0``/``amount1`` above), so the LP
+                # accounting handler can value the per-coin deposit basis. A
+                # Curve LP_OPEN carries no token0/token1 on the ledger row. ``[]``
+                # for an unknown pool ⇒ ``None`` (handler keeps its legacy path).
+                open_pool_address = _canonical_pool_address(event)
+                coin_symbols = _pool_coin_symbols(open_pool_address, self.chain) or None
 
                 return LPOpenData(
                     # Fungible LP: no NFT id. ``0`` is the canonical
@@ -1658,6 +1704,7 @@ class CurveReceiptParser:
                     position_id=0,
                     amount0=amount0,
                     amount1=amount1,
+                    additional_amounts=additional_amounts,
                     tick_lower=None,
                     tick_upper=None,
                     liquidity=None,
@@ -1665,8 +1712,9 @@ class CurveReceiptParser:
                     # VIB-4968 — canonical Curve pool address (the AddLiquidity
                     # event emitter IS the pool contract). Lets the LP
                     # accounting handler resolve a pool and book the event.
-                    pool_address=_canonical_pool_address(event),
+                    pool_address=open_pool_address,
                     position_hash=None,  # Curve has no V4 position-key hash.
+                    coin_symbols=coin_symbols,
                 )
 
             return None
@@ -1899,6 +1947,16 @@ class CurveReceiptParser:
                 if len(fees) > 2:
                     additional_fees = {i: fees[i] for i in range(2, len(fees))}
 
+                # VIB-5429 — stamp the pool-coin-ordered symbols so the LP
+                # accounting handler can price each fee/amount leg in USD. A
+                # Curve close returns ALL N coins (no swap-style token_in/out)
+                # and the fungible position_key carries no token descriptor, so
+                # without this the handler cannot resolve decimals/prices and the
+                # close payload (fees AND principal) collapses to NULLs. ``[]``
+                # for an unknown pool ⇒ ``None`` (handler keeps its legacy path).
+                close_pool_address = _canonical_pool_address(event)
+                coin_symbols = _pool_coin_symbols(close_pool_address, self.chain) or None
+
                 return LPCloseData(
                     amount0_collected=amount0,
                     amount1_collected=amount1,
@@ -1907,6 +1965,7 @@ class CurveReceiptParser:
                     liquidity_removed=None,  # LP tokens burned
                     additional_amounts=additional_amounts,
                     additional_fees=additional_fees,
+                    coin_symbols=coin_symbols,
                     # VIB-4968 — stamp the canonical Curve pool address (the
                     # RemoveLiquidity* event emitter IS the pool contract).
                     # This is the chain-data-first source the LP accounting
@@ -1916,7 +1975,7 @@ class CurveReceiptParser:
                     # ``_canonical_pool_address`` reads the decoder's stamped
                     # ``pool_address`` (RemoveLiquidity / Imbalance) and falls
                     # back to the event emitter for RemoveLiquidityOne.
-                    pool_address=_canonical_pool_address(event),
+                    pool_address=close_pool_address,
                 )
 
             return None

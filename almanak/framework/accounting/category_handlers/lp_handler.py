@@ -926,6 +926,280 @@ def _compute_lp_realized_pnl_and_fees(
     return realized_pnl_usd, fees_total_usd
 
 
+def _coin_decimals(symbol: str, chain: str) -> int | None:
+    """Resolve a token's on-chain decimals from the STATIC registry, or ``None``.
+
+    Scales an N-coin Curve leg's raw amount to a human amount. ``skip_gateway=True``
+    forces static-registry-only resolution: framework/accounting code MUST NOT make
+    a gateway/network call (CLAUDE.md §Gateway boundary), and a deterministic
+    accounting valuation must not depend on a live on-chain lookup. A symbol the
+    static registry can't resolve raises / returns ``None`` here ⇒ the caller fails
+    closed on that leg per Empty ≠ Zero rather than assuming 18 (the static
+    registry already carries every coin of the supported USD-stable Curve pools —
+    USDC/USDT=6, DAI=18, FRAX/crvUSD=18, USDbC/axlUSDC=6, …).
+    """
+    if not symbol:
+        return None
+    try:
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        info = get_token_resolver().resolve(symbol, chain=chain, skip_gateway=True)
+        return info.decimals if info is not None else None
+    except Exception:  # noqa: BLE001 — accounting path: degrade, never raise
+        logger.debug("LP handler: static decimals resolve failed for %s on %s", symbol, chain)
+        return None
+
+
+def _is_usd_stable_pool(coin_symbols: list[str]) -> bool:
+    """True when EVERY coin in the pool is a recognized ~$1 USD stablecoin.
+
+    VIB-5429 — single source of truth for "is this a USD-stable pool": imports
+    the canonical ``_USD_STABLE_SYMBOLS`` frozenset READ-ONLY from the valuation
+    layer (``curve_lp_position_reader``), which already owns it for the NAV
+    repricer. Do NOT fork/duplicate the list — that drifts. The import is lazy so
+    it pays no module-load cost and cannot form an import cycle
+    (``curve_lp_position_reader`` imports nothing from accounting at module
+    scope). vib542728 is restructuring that file and may relocate the frozenset —
+    if this import target moves, it is a rename to reconcile at merge.
+
+    A pool with ANY non-stable coin (tricrypto WBTC/WETH, a metapool's base-LP
+    token) is NOT a USD-numeraire pool: its principal legs stay UNAVAILABLE
+    (``None``) so G6 correctly FAILs for it — that valuation is the NAV repricer's
+    scope, never pegged to $1 here to force a green cell.
+    """
+    if not coin_symbols:
+        return False
+    try:
+        from almanak.framework.valuation.curve_lp_position_reader import _USD_STABLE_SYMBOLS
+    except Exception:  # noqa: BLE001 — degrade to "not stable" (fail closed), never raise
+        logger.debug("LP handler: could not import _USD_STABLE_SYMBOLS; treating pool as non-stable")
+        return False
+    return all((c or "").upper() in _USD_STABLE_SYMBOLS for c in coin_symbols)
+
+
+def _value_curve_legs_usd(
+    legs: list[tuple[str, Decimal | None]],
+    price_oracle: dict[str, Decimal],
+    is_usd_stable: bool,
+) -> tuple[Decimal | None, bool]:
+    """Sum ``(symbol, human_amount)`` legs to USD. Returns ``(usd, used_peg)``.
+
+    VIB-5429 — the shared pricing primitive for both Curve fee and principal
+    legs. Empty ≠ Zero (CLAUDE.md §Accounting):
+
+      * ANY leg whose amount is UNMEASURED (``None``) ⇒ ``(None, False)``
+        (whole-hook unmeasured — never fold an unmeasured leg in as zero).
+      * A measured-zero leg contributes exactly ``$0`` and needs no price.
+      * A NON-ZERO leg with an oracle price ⇒ ``amount × price``.
+      * A NON-ZERO leg with NO oracle price: priced at the ``$1`` USD-stable peg
+        ONLY when ``is_usd_stable`` (and ``used_peg`` becomes ``True`` so the
+        caller can stamp provenance); otherwise ⇒ ``(None, False)`` (fail closed —
+        a non-stable coin is not assumed to be $1).
+
+    Returns ``(None, False)`` when there are no legs at all (nothing measured).
+    """
+    total = Decimal(0)
+    has_any = False
+    used_peg = False
+    for symbol, amount in legs:
+        if amount is None:
+            return None, False  # unmeasured leg ⇒ whole-hook None
+        has_any = True
+        if amount == 0:
+            continue  # measured-zero leg: $0, no price needed
+        price = price_oracle.get((symbol or "").upper())
+        if price is None:
+            if is_usd_stable:
+                price = Decimal("1")  # USD-stable peg (provenance-stamped by caller)
+                used_peg = True
+            else:
+                return None, False  # non-stable, unpriceable ⇒ fail closed
+        total += amount * price
+    return (total if has_any else None), used_peg
+
+
+def _curve_legs(
+    raw_amounts: list[Any],
+    coin_symbols: list[str],
+    chain: str,
+) -> list[tuple[str, Decimal | None]] | None:
+    """Build one ``(symbol, human_amount)`` leg per pool coin, scaled from wei.
+
+    VIB-5429 — iterates ``coin_symbols`` (the authoritative per-coin universe),
+    NOT ``raw_amounts``: every pool coin MUST be accounted for. A coin with no
+    corresponding measured amount (index beyond ``raw_amounts``, or a ``None``
+    slot) is UNMEASURED ⇒ ``(symbol, None)`` so the pricing primitive fails the
+    whole hook (Empty ≠ Zero — a missing close leg is not a fabricated zero). The
+    N-coin ``all_amounts`` / ``all_fees`` carriers stamp a measured ``0`` for an
+    unfunded coin, which scales to ``Decimal(0)`` here (a measured zero, valued at
+    $0). Returns ``None`` only when a present leg's token decimals cannot be
+    resolved (cannot scale ⇒ fail closed).
+    """
+    legs: list[tuple[str, Decimal | None]] = []
+    for i, symbol in enumerate(coin_symbols):
+        raw = raw_amounts[i] if i < len(raw_amounts) else None
+        coerced = _as_int(raw)
+        if coerced is None:
+            legs.append((symbol, None))  # unmeasured coin ⇒ propagate
+            continue
+        if coerced == 0:
+            # A measured-zero leg scales to ``Decimal(0)`` for ANY decimals, so it
+            # needs no decimals resolution — short-circuit BEFORE ``_coin_decimals``.
+            # Otherwise a balanced removal's zero leg whose symbol the static
+            # registry can't resolve would fail-close the WHOLE Curve valuation
+            # (e.g. fees_total_usd → None) over a coin that contributes exactly $0.
+            legs.append((symbol, Decimal(0)))
+            continue
+        decimals = _coin_decimals(symbol, chain)
+        if decimals is None:
+            return None  # NON-ZERO leg we cannot scale ⇒ fail closed
+        legs.append((symbol, Decimal(coerced) / (Decimal(10) ** decimals)))
+    return legs
+
+
+def _curve_close_fees_usd(
+    lp_close_data: Any,
+    chain: str,
+    price_oracle: dict[str, Decimal],
+) -> Decimal | None:
+    """USD-price a Curve LP_CLOSE's per-coin protocol/imbalance fees (VIB-5429).
+
+    A Curve fungible close returns ALL N pool coins, so the ledger row carries no
+    swap-style ``token_in`` / ``token_out`` and the position_key has no token
+    descriptor — the generic 2-leg path leaves ``fees_total_usd`` NULL (the
+    Accountant Test G6 ``Σ_lp_fees_null_count`` gap this ticket closes). The
+    parser stamps the pool-coin-ordered symbols on ``LPCloseData.coin_symbols``
+    (same index order as ``all_fees``); we price each fee leg via the shared
+    primitive. A balanced proportional ``remove_liquidity`` charges no imbalance
+    fee ⇒ every leg is a measured zero ⇒ ``Decimal(0)`` (no price needed).
+
+    Returns ``None`` (handler keeps its legacy 2-leg result) when the parser
+    stamped no ``coin_symbols`` (non-Curve / unknown pool) or a leg is unmeasured.
+    """
+    coin_symbols = getattr(lp_close_data, "coin_symbols", None)
+    if not coin_symbols:
+        return None
+    legs = _curve_legs(lp_close_data.all_fees, coin_symbols, chain)
+    if legs is None:
+        return None
+    fees_usd, _used_peg = _value_curve_legs_usd(legs, price_oracle, _is_usd_stable_pool(coin_symbols))
+    return fees_usd
+
+
+def _curve_lp_principal_usd(
+    lp_data: Any,
+    intent_type_str: str,
+    chain: str,
+    price_oracle: dict[str, Decimal],
+) -> tuple[Decimal | None, bool]:
+    """USD-value a Curve LP event's per-coin PRINCIPAL legs (VIB-5429).
+
+    The realized-PnL / cost-basis sibling of :func:`_curve_close_fees_usd`. The
+    generic 2-leg path leaves ``cost_basis_usd`` NULL for a fungible Curve event
+    (no token0/token1 on the ledger row) → the LP_CLOSE ``realized_pnl_usd`` is
+    NULL → Accountant Test G6 ``Σ_lp_usd_null_count``. Values every coin leg the
+    parser measured against the price oracle, with a ``$1`` USD-stable peg for
+    unpriced legs ONLY when the pool's coins are ALL recognized USD-stables
+    (``_is_usd_stable_pool``) — a non-stable/crypto/metapool pool stays
+    UNAVAILABLE (``None``), correctly leaving G6 FAIL for it (the NAV repricer's
+    scope).
+
+    Per-coin amount source is ``lp_data.all_amounts`` (pool-coin order, same
+    order as ``coin_symbols``) for both events: ``LPOpenData`` (deposits) and
+    ``LPCloseData`` (proceeds) each expose the N-coin vector, so a single-sided
+    deposit's unfunded coins surface as measured zeros rather than being dropped.
+
+    ``intent_type_str`` is accepted for call-site symmetry / future per-direction
+    handling; the valuation itself is direction-agnostic.
+
+    Returns ``(usd, used_peg)``; ``(None, False)`` when no ``coin_symbols`` are
+    stamped or any coin leg is unmeasured / unscalable (Empty ≠ Zero).
+    """
+    del intent_type_str  # accepted for symmetry; valuation is direction-agnostic
+    coin_symbols = getattr(lp_data, "coin_symbols", None)
+    if not coin_symbols:
+        return None, False
+    all_amounts = getattr(lp_data, "all_amounts", None)
+    if all_amounts is None:
+        return None, False
+    legs = _curve_legs(all_amounts, coin_symbols, chain)
+    if legs is None:
+        return None, False
+    return _value_curve_legs_usd(legs, price_oracle, _is_usd_stable_pool(coin_symbols))
+
+
+def _resolve_curve_lp_basis_and_confidence(
+    *,
+    lp_data: Any,
+    intent_type_str: str,
+    chain: str,
+    price_oracle: dict[str, Decimal],
+    cost_basis_usd: Decimal | None,
+    assumed_decimals: bool,
+    pricing_unavailable_reason: str,
+) -> tuple[Decimal | None, AccountingConfidence, str]:
+    """Override ``(cost_basis_usd, confidence, unavailable_reason)`` for a Curve LP event (VIB-5429).
+
+    The generic 2-leg path leaves ``cost_basis_usd`` NULL for a fungible Curve LP
+    event (no token0/token1 on the ledger row) → LP_CLOSE ``realized_pnl_usd`` is
+    NULL → Accountant Test G6 ``Σ_lp_usd_null_count``. When the parser stamped
+    pool-coin symbols, value the per-coin principal legs ($1-peg for unpriced legs
+    of an all-USD-stable pool only) and override the basis. The Curve valuation
+    resolved per-coin decimals + prices itself, so its provenance is authoritative
+    and supersedes the legacy 2-token "assumed decimals" confidence: per blueprint
+    27 §7.10 a $1 USD-stable-peg basis is an explicit approximation, stamped
+    ESTIMATED + a self-describing reason, never re-marked HIGH; an all-oracle-priced
+    basis (incl. measured-zero legs) is HIGH.
+
+    No-op (returns the inputs + the legacy ``_determine_lp_confidence`` result) for
+    non-Curve events / when the parser stamped no ``coin_symbols`` or the valuation
+    is unmeasurable (Empty ≠ Zero — the legacy NULL basis is preserved). Extracted
+    from ``handle_lp`` to keep it within the CRAP budget.
+    """
+    curve_basis_applied = False
+    curve_basis_used_peg = False
+    if lp_data is not None and getattr(lp_data, "coin_symbols", None):
+        curve_basis_usd, curve_basis_used_peg = _curve_lp_principal_usd(lp_data, intent_type_str, chain, price_oracle)
+        if curve_basis_usd is not None:
+            cost_basis_usd = curve_basis_usd
+            curve_basis_applied = True
+
+    confidence, unavailable_reason = _determine_lp_confidence(
+        assumed_decimals, cost_basis_usd, pricing_unavailable_reason
+    )
+
+    if curve_basis_applied:
+        if curve_basis_used_peg:
+            confidence = AccountingConfidence.ESTIMATED
+            unavailable_reason = "usd_stable_peg: unpriced USD-stable Curve coin(s) valued at $1 (VIB-5429)"
+        else:
+            confidence = AccountingConfidence.HIGH
+            unavailable_reason = ""
+    return cost_basis_usd, confidence, unavailable_reason
+
+
+def _override_curve_close_fees(
+    intent_type_str: str,
+    lp_data: Any,
+    chain: str,
+    price_oracle: dict[str, Decimal],
+    fees_total_usd: Decimal | None,
+) -> Decimal | None:
+    """Return the Curve N-coin close fee USD when measurable, else ``fees_total_usd`` (VIB-5429).
+
+    A Curve fungible close has no token0/token1 on the ledger row, so the generic
+    2-leg path leaves ``fees_total_usd`` NULL (G6 ``Σ_lp_fees_null_count``). When
+    the parser stamped pool-coin symbols on the close data, price every fee leg
+    from them instead. Strictly additive: a measured result (incl. a balanced
+    removal's ``Decimal(0)``) wins; ``None`` (unmeasured / unpriced leg, or a
+    non-close intent) keeps the legacy value — never overwrites measured with NULL.
+    """
+    if intent_type_str not in _LP_CLOSE_LIKE or lp_data is None:
+        return fees_total_usd
+    curve_fees_usd = _curve_close_fees_usd(lp_data, chain, price_oracle)
+    return curve_fees_usd if curve_fees_usd is not None else fees_total_usd
+
+
 def _value_weighted_leg_basis(
     active_legs: list[tuple[str, Decimal]],
     total_val_usd: Decimal | None,
@@ -1226,8 +1500,17 @@ def handle_lp(
         assumed_decimals=assumed_decimals,
     )
 
-    confidence, unavailable_reason = _determine_lp_confidence(
-        assumed_decimals, cost_basis_usd, pricing_unavailable_reason
+    # VIB-5429 — override cost_basis + confidence with the N-coin Curve valuation
+    # (no-op for non-Curve / no coin_symbols). Must run BEFORE realized_pnl so it
+    # sees the measured basis. Extracted to keep handle_lp within the CRAP budget.
+    cost_basis_usd, confidence, unavailable_reason = _resolve_curve_lp_basis_and_confidence(
+        lp_data=lp_data,
+        intent_type_str=intent_type_str,
+        chain=chain,
+        price_oracle=price_oracle,
+        cost_basis_usd=cost_basis_usd,
+        assumed_decimals=assumed_decimals,
+        pricing_unavailable_reason=pricing_unavailable_reason,
     )
 
     # ── Identity ─────────────────────────────────────────────────────────────
@@ -1296,6 +1579,11 @@ def handle_lp(
         prior_open_payload=prior_open_payload,
         cost_basis_usd=cost_basis_usd,
     )
+
+    # VIB-5429 — override fees_total_usd with the N-coin Curve fee valuation on a
+    # close (no-op otherwise / when no coin_symbols). Extracted to keep handle_lp
+    # within the CRAP budget; strictly additive (never overwrites measured w/ NULL).
+    fees_total_usd = _override_curve_close_fees(intent_type_str, lp_data, chain, price_oracle, fees_total_usd)
 
     # VIB-4319 — IL diagnostic on ``LP_CLOSE`` ONLY (Codex review on
     # PR #2259: ``LP_COLLECT_FEES`` leaves principal on-chain so the IL
@@ -1370,6 +1658,10 @@ def handle_lp(
         hodl_value_usd=hodl_value_usd,
         position_id=position_id_v,
         position_hash=position_hash_v,
+        # VIB-5429 — forward the N-coin pool-coin identity (Curve) onto the event
+        # so a proportional close's measured USD basis self-documents WHICH coins
+        # back it, even though token0/token1 are empty (no 2-token direction).
+        coin_symbols=getattr(lp_data, "coin_symbols", None),
     )
 
 

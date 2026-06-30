@@ -239,6 +239,18 @@ class LPCloseData:
     # the handler falls back to user-intent order in that case.
     currency0: str | None = None
     currency1: str | None = None
+    # VIB-5429 — pool-coin-ordered token SYMBOLS for N-coin fungible pools whose
+    # close leaves the ledger row's token_in/token_out empty (Curve StableSwap:
+    # the close returns ALL N coins, so there is no swap-style direction, and the
+    # fungible position_key carries no token descriptor). Populated by the
+    # connector parser from its static pool registry, in the SAME index order as
+    # ``all_amounts`` / ``all_fees`` (coin 0 = ``amount0_collected`` / ``fees0``,
+    # coin 1 = ``amount1_collected`` / ``fees1``, coin 2+ = ``additional_*``).
+    # This lets the LP accounting handler map each decoded fee/amount leg to a
+    # coin it can resolve decimals + a USD price for, instead of collapsing the
+    # close payload to NULLs. ``None`` (concentrated-liquidity / two-coin venues
+    # that already carry token0/token1) ⇒ handler keeps its existing 2-leg path.
+    coin_symbols: list[str] | None = None
     # VIB-4275 — per-position discriminator (closing leg's NFT token id). The
     # close RECEIPT does not re-emit the token id (a Burn carries no NFT id),
     # so parsers leave this ``None``; the runner stamps it from the close
@@ -328,6 +340,8 @@ class LPCloseData:
             # VIB-4426 P1 #4
             "currency0": self.currency0,
             "currency1": self.currency1,
+            # VIB-5429 — pool-coin-ordered symbols (round-trips as a JSON list).
+            "coin_symbols": self.coin_symbols,
             # VIB-4275 — per-position discriminator (closing leg's token id).
             "position_id": self.position_id,
             # VIB-4848 (T8) — fee separation taxonomy.
@@ -384,16 +398,43 @@ class LPOpenData:
     liquidity: int | None = None
     amount0: int | None = None
     amount1: int | None = None
+    # VIB-5429 — deposits for coins beyond token0/token1 (Curve 3/4-coin pools),
+    # mapping coin index → raw amount: {2: 0, 3: ...}. Mirrors
+    # ``LPCloseData.additional_amounts`` so a single-sided N-coin deposit carries
+    # a MEASURED ``0`` for each unfunded coin (the AddLiquidity event emits the
+    # full per-coin vector) instead of silently dropping it — the basis valuation
+    # then sees every coin. ``None`` for 2-coin / concentrated-liquidity venues.
+    additional_amounts: dict[int, int] | None = None
     current_tick: int | None = None  # VIB-3887
     pool_address: str = ""  # VIB-3893 — for framework slot0 fallback
     position_hash: str | None = None  # VIB-4473 — V4 lot-matching anchor
     # VIB-4426 P1 #4 — V4 canonical currency addresses (see LPCloseData).
     currency0: str | None = None
     currency1: str | None = None
+    # VIB-5429 — pool-coin-ordered token SYMBOLS for N-coin fungible pools (see
+    # LPCloseData.coin_symbols). Index-aligned with ``amount0`` (coin 0) /
+    # ``amount1`` (coin 1). Lets the LP accounting handler value the deposit
+    # basis per coin (Curve fungible LP_OPEN carries no token0/token1 on the
+    # ledger row). ``None`` for concentrated-liquidity / 2-coin venues.
+    coin_symbols: list[str] | None = None
+
+    @property
+    def all_amounts(self) -> list[int | None]:
+        """Return all coin deposit amounts in pool-coin index order (VIB-5429).
+
+        Mirrors :attr:`LPCloseData.all_amounts`. Per Empty ≠ Zero, a ``None`` slot
+        is "unmeasured by this parser"; a numeric ``0`` is a measured zero (an
+        unfunded coin of a single-sided deposit).
+        """
+        result: list[int | None] = [self.amount0, self.amount1]
+        if self.additional_amounts:
+            for i in sorted(self.additional_amounts):
+                result.append(self.additional_amounts[i])
+        return result
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        d: dict[str, Any] = {
             "position_id": self.position_id,
             "tick_lower": self.tick_lower,
             "tick_upper": self.tick_upper,
@@ -411,7 +452,12 @@ class LPOpenData:
             # VIB-4426 P1 #4
             "currency0": self.currency0,
             "currency1": self.currency1,
+            # VIB-5429 — pool-coin-ordered symbols (round-trips as a JSON list).
+            "coin_symbols": self.coin_symbols,
         }
+        if self.additional_amounts:
+            d["additional_amounts"] = {str(k): str(v) for k, v in self.additional_amounts.items()}
+        return d
 
 
 @dataclass(frozen=True)

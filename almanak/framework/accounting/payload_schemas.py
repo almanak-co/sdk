@@ -440,6 +440,10 @@ class LPOpenEventPayload(_Versioned):
     # because non-Uniswap-V3 LP venues may not expose a tick-bracket model.
     current_tick: int | None = None
     in_range: bool | None = None
+    # VIB-5429 — pool-coin-ordered symbols for N-coin fungible pools (Curve). The
+    # 2-token token0/token1 model doesn't apply to a proportional N-coin close, so
+    # this carries the position's true coin identity. ``None`` for 2-coin venues.
+    coin_symbols: list[str] | None = None
     confidence: ConfidenceLiteral
     unavailable_reason: str | None = None
 
@@ -478,6 +482,12 @@ class LPCloseEventPayload(_Versioned):
     realized_pnl_usd: Decimal | None = None
     il_usd: Decimal | None = None  # diagnostic only — see G6 / LP4 / LP5
     hodl_value_usd: Decimal | None = None
+    # VIB-5429 — pool-coin-ordered symbols for N-coin fungible pools (Curve). A
+    # proportional remove_liquidity close returns ALL N coins (no token0/token1
+    # direction → both empty); this carries the position's true coin identity so a
+    # measured cost_basis/realized_pnl self-documents which coins back it. ``None``
+    # for 2-coin venues that already populate token0/token1.
+    coin_symbols: list[str] | None = None
     confidence: ConfidenceLiteral
     unavailable_reason: str | None = None
 
