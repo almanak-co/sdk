@@ -59,6 +59,7 @@ import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+import click
 import uvicorn
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
@@ -371,6 +372,24 @@ async def start_gateway(req: StartGatewayRequest) -> StartGatewayResponse:
     global _current
 
     workspace = _validate_workspace(req.workspace_path)
+
+    # Validate config.json up front, scoped to this one parse call. A schema /
+    # parse failure here is user-actionable and structurally secret-free (the
+    # message is just the config path + the pydantic/JSON error), so we surface
+    # it as a 400 instead of letting it fall into the generic "gateway startup
+    # failed" 500 below — which previously masked fixable config bugs as opaque
+    # infra failures. We deliberately do NOT widen the catch to all of
+    # ``_spawn_gateway``: gateway-startup ClickExceptions can carry host/RPC
+    # detail, so those must stay on the redacted 500 path. ``_spawn_gateway``
+    # re-parses via the same shared loader, so a config that passes here won't
+    # re-raise there for config reasons.
+    from almanak.framework.cli.run import parse_strategy_config_file
+
+    try:
+        parse_strategy_config_file(workspace / "config.json", warn_unknown_keys=False)
+    except click.ClickException as e:
+        logger.warning("gateway startup rejected: invalid strategy config: %s", e)
+        raise HTTPException(400, f"invalid strategy config: {e}") from e
 
     async with _lifecycle_lock:
         live = _reap_stale_current()

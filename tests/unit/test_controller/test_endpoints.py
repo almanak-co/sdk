@@ -166,6 +166,32 @@ def test_start_gateway_returns_500_with_sanitized_message_on_spawn_failure(
     assert "secret" not in detail.lower()
 
 
+def test_start_gateway_returns_400_with_real_message_on_invalid_config(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """A config.json that fails StrategyConfig schema validation must surface the
+    actual error as a 400 — NOT get masked as the opaque 500 "gateway startup
+    failed", which made the test ladder misreport fixable config bugs as
+    terminal infra failures. ``pool`` is typed ``str``; a nested object trips
+    pydantic. ``_spawn_gateway`` is mocked to assert it is NEVER reached — the
+    400 must come from the pre-spawn config validation, and the unit test must
+    not start a real Anvil/gateway even if ``StrategyConfig`` later loosens."""
+    (tmp_path / "strategy.py").write_text("# stub\n")
+    (tmp_path / "config.json").write_text(json.dumps({"chain": "base", "pool": {"fee_tier_bps": 30}}))
+
+    with patch(
+        "almanak.test_controller.__main__._spawn_gateway",
+        new=AsyncMock(side_effect=AssertionError("_spawn_gateway must not run for invalid config")),
+    ):
+        resp = client.post("/start_gateway", json={"workspace_path": str(tmp_path)})
+
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "invalid strategy config" in detail
+    assert "schema validation" in detail
+    assert detail != "gateway startup failed"
+
+
 def test_start_gateway_after_stale_subprocess_clears_state_and_succeeds(
     client: TestClient, workspace: Path
 ) -> None:
