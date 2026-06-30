@@ -1,4 +1,4 @@
-.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline
+.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-demos check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline
 
 # Load .env file if it exists
 -include .env
@@ -107,6 +107,15 @@ check-deployment-id-proto-surface:
 # scripts/ci/connector-chain-allowlist.yml.
 check-connector-chains:
 	uv run python scripts/ci/check_connector_chains.py
+
+# Demo catalog gates (blueprint 21). Runs scripts/ci/check_demos.py — the six
+# original gates plus Gate 7 "Chain truth" (VIB-5327 / VIB-5349), which asserts
+# every demo's @almanak_strategy(supported_chains=[...]) literal is a subset of
+# its covering connector manifest's strategy_chains (the SSOT, blueprint 05).
+# Over-advertising a chain no connector supports is a hard FAIL; the documented
+# waiver path is scripts/ci/demo-chain-exceptions.yml.
+check-demos:
+	uv run python scripts/ci/check_demos.py
 
 # Decimal-policy ratchet gate (VIB-3164). Fails on any NET-NEW silent
 # token-decimal fallback (``decimals = 18`` / ``... or 18`` / ``.get(...,18)``)
