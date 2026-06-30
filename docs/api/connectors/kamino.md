@@ -1,6 +1,18 @@
 # Kamino
 
-Connector for Kamino lending protocol on Solana.
+| Field | Value |
+|-------|-------|
+| Module | ``almanak.connectors.kamino`` |
+| Protocol kind | Lending |
+| Aliases | ``kamino_klend`` |
+
+## Supported Chains And Intents
+
+| Chain | Family | Supported Intents |
+|-------|--------|-------------------|
+| [Solana](../../chains/solana.md) | SVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
+
+## API Reference
 
 ::: almanak.connectors.kamino
     options:

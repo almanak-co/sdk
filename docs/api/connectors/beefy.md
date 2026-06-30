@@ -1,6 +1,18 @@
 # Beefy
 
-Connector for Beefy yield vaults (gateway-side vault-token lookup only).
+| Field | Value |
+|-------|-------|
+| Module | ``almanak.connectors.beefy`` |
+| Protocol kind | Vault |
+| Aliases | N/A |
+
+## Supported Chains And Intents
+
+| Chain | Family | Supported Intents |
+|-------|--------|-------------------|
+| No strategy chains registered | N/A | No strategy intents registered |
+
+## API Reference
 
 ::: almanak.connectors.beefy
     options:

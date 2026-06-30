@@ -1,6 +1,18 @@
 # BenQi
 
-Connector for BenQi lending protocol (Compound V2 fork on Avalanche).
+| Field | Value |
+|-------|-------|
+| Module | ``almanak.connectors.benqi`` |
+| Protocol kind | Lending |
+| Aliases | N/A |
+
+## Supported Chains And Intents
+
+| Chain | Family | Supported Intents |
+|-------|--------|-------------------|
+| [Avalanche](../../chains/avalanche.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
+
+## API Reference
 
 ::: almanak.connectors.benqi
     options:

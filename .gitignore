@@ -53,7 +53,10 @@ almanak/llms/llms-full.txt
 # See scripts/docs/generate_connector_matrix.py,
 # scripts/docs/generate_chain_table.py, and the ``docs-cli`` Makefile target.
 docs/api/connectors/index.md
+docs/api/connectors/*.md
+!docs/api/connectors/base.md
 docs/chains.md
+docs/chains/*.md
 docs/cli/*.md
 
 # Build script temp dirs

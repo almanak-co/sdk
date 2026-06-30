@@ -1,6 +1,18 @@
-# Gimo Finance
+# Gimo
 
-Connector for Gimo Finance liquid staking on 0G Chain.
+| Field | Value |
+|-------|-------|
+| Module | ``almanak.connectors.gimo`` |
+| Protocol kind | Lending |
+| Aliases | N/A |
+
+## Supported Chains And Intents
+
+| Chain | Family | Supported Intents |
+|-------|--------|-------------------|
+| [0G](../../chains/zerog.md) | EVM | ``STAKE``, ``UNSTAKE`` |
+
+## API Reference
 
 ::: almanak.connectors.gimo
     options:

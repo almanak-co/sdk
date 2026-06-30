@@ -1,8 +1,21 @@
-# Fluid DEX
+# Fluid
 
-Connector for the Fluid DEX (swap) and fToken (ERC-4626 lending) surfaces.
-The vault borrow surface (NFT-CDP, `protocol="fluid_vault"`) is documented
-under [Fluid Vault](fluid_vault.md).
+| Field | Value |
+|-------|-------|
+| Module | ``almanak.connectors.fluid`` |
+| Protocol kind | Swap |
+| Aliases | ``fluid_lending`` |
+
+## Supported Chains And Intents
+
+| Chain | Family | Supported Intents |
+|-------|--------|-------------------|
+| [Arbitrum](../../chains/arbitrum.md) | EVM | ``SUPPLY``, ``SWAP``, ``WITHDRAW`` |
+| [Base](../../chains/base.md) | EVM | ``SUPPLY``, ``SWAP``, ``WITHDRAW`` |
+| [Ethereum](../../chains/ethereum.md) | EVM | ``SUPPLY``, ``SWAP``, ``WITHDRAW`` |
+| [Polygon](../../chains/polygon.md) | EVM | ``SUPPLY``, ``SWAP``, ``WITHDRAW`` |
+
+## API Reference
 
 ::: almanak.connectors.fluid
     options:

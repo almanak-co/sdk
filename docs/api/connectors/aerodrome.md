@@ -1,6 +1,19 @@
 # Aerodrome
 
-Connector for Aerodrome (Solidly-based) DEX on Base, and on Optimism via the Velodrome V2 alias. Some capabilities are Base-only: pool-history and volume data endpoints, and the concentrated-liquidity (Slipstream) router/factory — Optimism uses classic Solidly routing.
+| Field | Value |
+|-------|-------|
+| Module | ``almanak.connectors.aerodrome`` |
+| Protocol kind | LP |
+| Aliases | ``aerodrome_slipstream`` |
+
+## Supported Chains And Intents
+
+| Chain | Family | Supported Intents |
+|-------|--------|-------------------|
+| [Base](../../chains/base.md) | EVM | ``LP_CLOSE``, ``LP_OPEN``, ``SWAP`` |
+| [Optimism](../../chains/optimism.md) | EVM | ``LP_CLOSE``, ``LP_OPEN``, ``SWAP`` |
+
+## API Reference
 
 ::: almanak.connectors.aerodrome
     options:
