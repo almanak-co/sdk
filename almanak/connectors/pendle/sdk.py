@@ -82,14 +82,25 @@ MARKET_BY_PT_TOKEN: dict[str, dict[str, str]] = {
         "PT-fUSDT0": "0x0cb289E9df2d0dCFe13732638C89655fb80C2bE2",  # Case-insensitive support
     },
     "arbitrum": {
-        # PT-wstETH-25JUN2026 (active, wstETH PT on Arbitrum)
-        "PT-WSTETH-25JUN2026": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",  # Fully uppercase for compiler lookup
+        # NOTE ON ORDER: permission_hints._market_grid() walks this dict in
+        # insertion order and picks the FIRST fully-supported market (one with
+        # SY-mint + PT + YT registry entries) as the canonical Pendle synthetic
+        # for Arbitrum — the market the Zodiac permission manifest authorises for
+        # SWAP / LP_OPEN / LP_CLOSE. The LIVE PT-sUSDai-15OCT2026 market MUST stay
+        # first: the former PT-wstETH-25JUN2026 market expired 2026-06-25
+        # (expiry() = 1782345600) and now reverts every LP/swap into it, so it is
+        # kept below ONLY for historical receipt parsing — never as the canonical
+        # synthetic. This is the documented expired-market rotation (see this
+        # module's _market_grid docstring): add the replacement ABOVE the expired
+        # entry and it auto-propagates to the manifest.
+        # PT-sUSDai-15OCT2026 (LIVE — canonical Arbitrum Pendle market)
+        "PT-SUSDAI-15OCT2026": "0xcbf629c8d396b1261f81f55175afa010e94787d8",  # Fully uppercase for compiler lookup
+        "PT-sUSDai-15OCT2026": "0xcbf629c8d396b1261f81f55175afa010e94787d8",
+        # PT-wstETH-25JUN2026 (EXPIRED 2026-06-25 — retained for receipt parsing only)
+        "PT-WSTETH-25JUN2026": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",
         "PT-wstETH-25JUN2026": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",
         "PT-WSTETH": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",
         "PT-wstETH": "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B",  # Case-insensitive support
-        # PT-sUSDai-15OCT2026 (Pendle PT dislocation, Exp8)
-        "PT-SUSDAI-15OCT2026": "0xcbf629c8d396b1261f81f55175afa010e94787d8",
-        "PT-sUSDai-15OCT2026": "0xcbf629c8d396b1261f81f55175afa010e94787d8",
     },
     "ethereum": {
         # NOTE ON ORDER: permission_hints._market_grid() picks the FIRST
@@ -209,7 +220,14 @@ YT_TOKEN_INFO: dict[str, dict[str, tuple[str, int]]] = {
         "YT-sUSDe-5FEB2026": ("0xe36c6c271779C080Ba2e68E1E68410291a1b3F7A", 18),
     },
     "arbitrum": {
+        # YT-sUSDai-15OCT2026: verified via readTokens() on the live market
+        # 0xcbf629c8... (SY=0x30Ccf4Bb..., PT=0xB459dB10..., YT=0x1145684...).
+        # Registering the YT is what lets permission_hints._market_grid() treat
+        # the live sUSDai market as fully-supported and pick it as canonical.
+        "YT-SUSDAI-15OCT2026": ("0x11456849c38Ea4AF212Ab8d4324b39983716516A", 18),
+        "YT-sUSDai-15OCT2026": ("0x11456849c38Ea4AF212Ab8d4324b39983716516A", 18),
         # YT-wstETH-25JUN2026: verified via readTokens() on market 0xf78452e...
+        # (EXPIRED 2026-06-25 — retained for historical receipt parsing only)
         "YT-WSTETH-25JUN2026": ("0x25bda1edd6af17c61399aa0eb84b93daa3069764", 18),
         "YT-wstETH-25JUN2026": ("0x25bda1edd6af17c61399aa0eb84b93daa3069764", 18),
         "YT-WSTETH": ("0x25bda1edd6af17c61399aa0eb84b93daa3069764", 18),
@@ -225,7 +243,11 @@ MARKET_BY_YT_TOKEN: dict[str, dict[str, str]] = {
         "YT-fUSDT0": "0x0cb289E9df2d0dCFe13732638C89655fb80C2bE2",
     },
     "arbitrum": {
-        # YT-wstETH-25JUN2026 shares the same market as PT-wstETH-25JUN2026
+        # YT-sUSDai-15OCT2026 shares the live market with PT-sUSDai-15OCT2026
+        "YT-SUSDAI-15OCT2026": "0xcbf629c8d396b1261f81f55175afa010e94787d8",
+        "YT-sUSDai-15OCT2026": "0xcbf629c8d396b1261f81f55175afa010e94787d8",
+        # YT-wstETH-25JUN2026 shares the EXPIRED market with PT-wstETH-25JUN2026
+        # (retained for historical receipt parsing only)
         "YT-WSTETH-25JUN2026": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
         "YT-wstETH-25JUN2026": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
         "YT-WSTETH": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
@@ -281,14 +303,33 @@ MARKET_TOKEN_MINT_SY: dict[str, dict[str, str]] = {
 }
 
 
-# Gas estimates for Pendle operations
+# Gas estimates for Pendle operations.
+#
+# These are the per-op gas FLOORS the compiler seeds onto each transaction. The
+# orchestrator's clamp (orchestrator.py::_update_gas_estimate, VIB-4915) only
+# RAISES the gas limit above this floor — it never lowers below it — so when gas
+# estimation is unavailable (e.g. the intent-test submission path runs without a
+# simulator), this floor IS the gas limit (× the chain buffer multiplier).
+#
+# The single-token swap / add / remove ops mint or redeem SY through the market's
+# SY-mint token. For a lightweight token (e.g. wstETH) that SY mint is cheap, but
+# for a yield-bearing STAKING-VAULT token (e.g. sUSDai — the only live Pendle
+# market underlying on Arbitrum after the wstETH markets expired) the SY mint /
+# redeem runs the vault's deposit/withdraw logic and is far heavier. Measured on
+# an Arbitrum fork (2026-06-29) against the live PT-sUSDai-15OCT2026 market via
+# eth_estimateGas: token->PT swap ≈ 711k, add_liquidity_single ≈ 920k,
+# remove_liquidity_single ≈ 606k. The previous floors (400k / 500k / 400k) left
+# the buffered limit below those needs, so the router ran out of gas and reverted
+# with empty revert data (0x). Floors below cover the heavy vault-SY path with
+# comfortable headroom; raising a floor only prevents OOG and costs nothing extra
+# (callers pay for gas USED, not the limit).
 PENDLE_GAS_ESTIMATES: dict[str, int] = {
-    "swap_exact_token_for_pt": 400_000,
-    "swap_exact_pt_for_token": 400_000,
-    "swap_exact_token_for_yt": 450_000,
-    "swap_exact_yt_for_token": 450_000,
-    "add_liquidity_single": 500_000,
-    "remove_liquidity_single": 400_000,
+    "swap_exact_token_for_pt": 700_000,
+    "swap_exact_pt_for_token": 700_000,
+    "swap_exact_token_for_yt": 800_000,
+    "swap_exact_yt_for_token": 800_000,
+    "add_liquidity_single": 1_000_000,
+    "remove_liquidity_single": 700_000,
     "add_liquidity_dual": 600_000,
     "mint_sy": 200_000,
     "redeem_sy": 200_000,

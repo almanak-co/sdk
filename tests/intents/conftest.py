@@ -1410,6 +1410,44 @@ def fund_erc20_token(
     _retry_rpc_call(w3, "evm_mine", [])
 
 
+# Arbitrum sUSDai (Staked USDai) — funds the live Pendle sUSDai-market intent
+# tests after the Arbitrum wstETH Pendle market expired 2026-06-25. sUSDai is
+# deliberately NOT a CHAIN_CONFIGS["arbitrum"]["tokens"] entry because the
+# session price-oracle fixture requires every token there to carry a CoinGecko
+# id and sUSDai has none — so it is seeded via this dedicated helper instead,
+# from BOTH the EOA seed (arbitrum/conftest.py) and the Zodiac Safe seed
+# (_build_zodiac_context), keeping a single source of truth for its address/slot.
+#
+# sUSDai is an OpenZeppelin v5 upgradeable ERC20 using ERC-7201 namespaced
+# storage, so its ``_balances`` mapping does NOT live at a small integer slot.
+# The base slot below is the OZ ERC20 namespaced location; verified 2026-06-29
+# by computing keccak256(abi.encode(holder, base)) against the SY contract
+# holder (0x30Ccf4Bb...) and confirming it matched balanceOf().
+# ``_calculate_mapping_slot`` accepts this big int as the slot argument.
+ARBITRUM_SUSDAI_ADDRESS = "0x0B2b2B2076d95dda7817e785989fE353fe955ef9"
+ARBITRUM_SUSDAI_BALANCES_SLOT = 0x52C63247E1F47DB19D5CE0460030C497F067CA4CEBF71BA98EEADABE20BACE00
+
+
+def seed_arbitrum_susdai(wallet: str, web3: Web3, rpc_url: str) -> None:
+    """Fund ``wallet`` with sUSDai on an Arbitrum fork (best-effort).
+
+    Used for the live Pendle sUSDai-market intent tests. No-op-on-error so a
+    seeding failure surfaces as a clear ERC20InsufficientBalance at execute
+    rather than crashing fixture setup.
+    """
+    try:
+        decimals = get_token_decimals(web3, ARBITRUM_SUSDAI_ADDRESS)
+        fund_erc20_token(
+            wallet,
+            ARBITRUM_SUSDAI_ADDRESS,
+            100_000 * (10**decimals),
+            ARBITRUM_SUSDAI_BALANCES_SLOT,
+            rpc_url,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort seeding
+        print(f"Warning: could not fund sUSDai for {wallet}: {exc}")
+
+
 def get_token_balance(web3: Web3, token_address: str, wallet: str) -> int:
     """Get ERC20 token balance for a wallet.
 
@@ -2525,6 +2563,11 @@ def _build_zodiac_context(
             fund_erc20_token(safe, token_address, amount, balance_slot, anvil_rpc_url)
         except Exception as exc:  # noqa: BLE001 — token-seeding failures shouldn't hide authz errors
             print(f"  [zodiac_safe] warning: could not fund Safe with {token_symbol}: {exc}")
+
+    # sUSDai is not in CHAIN_CONFIGS["arbitrum"]["tokens"] (see seed_arbitrum_susdai)
+    # so the loop above skips it; mirror the EOA seed onto the Safe explicitly.
+    if chain == "arbitrum":
+        seed_arbitrum_susdai(safe, web3, anvil_rpc_url)
 
     return ZodiacContext(
         safe_address=safe,

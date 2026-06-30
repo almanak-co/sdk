@@ -39,35 +39,31 @@ from tests.intents.conftest import (
 
 CHAIN_NAME = "arbitrum"
 
-# Pendle market addresses on Arbitrum. PT-wstETH-25JUN2026 matured on
-# 2026-06-25, but remains the only Anvil-fundable Arbitrum Pendle PT market
-# documented in docs/internal/pendle-anvil-fundability-matrix-vib5324.md.
-PENDLE_WSTETH_MARKET = "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b"
-# PT-wstETH-25JUN2026 token address
-PT_WSTETH_ADDRESS = "0x71fbf40651e9d4278a74586afc99f307f369ce9a"
-
-_ARBITRUM_WSTETH_MARKET_MATURED_XFAIL = pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "VIB-5324: Arbitrum PT-wstETH-25JUN2026 matured on 2026-06-25; "
-        "docs/internal/pendle-anvil-fundability-matrix-vib5324.md records no "
-        "longer-dated Anvil-fundable Arbitrum Pendle PT market. strict=False "
-        "because older fork pins can still xpass until the CI fork pin is moved "
-        "backward or a new fundable Arbitrum market exists (as of 2026-06-29)."
-    ),
-)
+# Pendle market addresses on Arbitrum.
+# PT-sUSDai-15OCT2026 market — a live, deeply-liquid Pendle market (~$13M TVL;
+# expiry() = 1792022400 = 2026-10-15 UTC). It replaced the former
+# PT-wstETH-25JUN2026 market, which expired 2026-06-25 and now reverts every
+# swap into it (all wstETH Pendle markets on Arbitrum have matured).
+PENDLE_SUSDAI_MARKET = "0xcbf629c8d396b1261f81f55175afa010e94787d8"
+# PT-sUSDai-15OCT2026 token address.
+PT_SUSDAI_ADDRESS = "0xb459db106f645d698e74027eef6019a26a0675cc"
+# sUSDai is the market's SY-mint token (verified via SY.getTokensIn()), so a
+# sUSDai -> PT buy needs no pre-swap.
+SUSDAI_ADDRESS = "0x0B2b2B2076d95dda7817e785989fE353fe955ef9"
+SUSDAI_SYMBOL = "sUSDai"
 
 
-def _enrich_oracle_with_wsteth(price_oracle: dict[str, Decimal]) -> dict[str, Decimal]:
-    """Add WSTETH price to oracle if missing (needed for pre-swap estimation).
+def _enrich_oracle_with_susdai(price_oracle: dict[str, Decimal]) -> dict[str, Decimal]:
+    """Add a SUSDAI price to the oracle if missing (needed for compile estimation).
 
-    wstETH trades at ~1.17x ETH due to accumulated staking rewards.
-    The compiler needs WSTETH price to estimate the pre-swap output
-    when the input token differs from the SY-minting token (wstETH).
+    sUSDai has no CoinGecko id, so the session price-oracle fixture never carries
+    it. sUSDai is staked USDai and trades near $1; anchor it to USDC. When the
+    input token IS sUSDai (== SY-mint token) no pre-swap is inserted, so the
+    exact figure only affects the loose compile-time min-out estimate.
     """
     enriched = dict(price_oracle)
-    if "WSTETH" not in enriched and "WETH" in enriched:
-        enriched["WSTETH"] = enriched["WETH"] * Decimal("1.17")
+    if "SUSDAI" not in enriched:
+        enriched["SUSDAI"] = enriched.get("USDC", Decimal("1"))
     return enriched
 
 
@@ -92,9 +88,8 @@ class TestPendleSwapIntent:
     """
 
     @pytest.mark.intent(IntentType.SWAP)
-    @_ARBITRUM_WSTETH_MARKET_MATURED_XFAIL
     @pytest.mark.asyncio
-    async def test_swap_weth_to_pt_wsteth_using_intent(
+    async def test_swap_susdai_to_pt_susdai_using_intent(
         self,
         web3: Web3,
         anvil_rpc_url: str,
@@ -102,44 +97,43 @@ class TestPendleSwapIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
     ):
-        """Test WETH -> PT-wstETH-25JUN2026 swap using SwapIntent.
+        """Test sUSDai -> PT-sUSDai-15OCT2026 swap using SwapIntent.
 
         This tests the token -> PT (buy PT) path in PendleCompiler.compile_swap.
-        The compiler may insert a pre-swap step to convert WETH to wstETH (SY underlying)
-        before executing the Pendle swap.
+        sUSDai IS the market's SY-mint token, so the compiler mints SY directly
+        and swaps SY -> PT with NO V3 pre-swap leg.
 
         Flow:
-        1. Create SwapIntent for WETH -> PT-WSTETH-25JUN2026
+        1. Create SwapIntent for sUSDai -> PT-SUSDAI-15OCT2026
         2. Compile to ActionBundle using IntentCompiler
         3. Execute via ExecutionOrchestrator
         4. Parse receipt for Pendle Swap event
-        5. Verify WETH decreased and PT tokens received
+        5. Verify sUSDai decreased and PT tokens received
         """
-        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
-        weth = tokens["WETH"]
-        weth_decimals = get_token_decimals(web3, weth)
+        susdai = SUSDAI_ADDRESS
+        susdai_decimals = get_token_decimals(web3, susdai)
 
-        # Swap a small amount of WETH to PT
-        swap_amount = Decimal("0.1")  # 0.1 WETH
+        # Swap a small amount of sUSDai to PT
+        swap_amount = Decimal("100")  # 100 sUSDai (~$105)
 
-        print(f"\n{'='*80}")
-        print("Test: WETH -> PT-wstETH-25JUN2026 Swap via SwapIntent (Pendle)")
-        print(f"{'='*80}")
-        print(f"Swap amount: {swap_amount} WETH")
+        print(f"\n{'=' * 80}")
+        print("Test: sUSDai -> PT-sUSDai-15OCT2026 Swap via SwapIntent (Pendle)")
+        print(f"{'=' * 80}")
+        print(f"Swap amount: {swap_amount} sUSDai")
 
         # Record balances BEFORE
-        weth_before = get_token_balance(web3, weth, funded_wallet)
-        pt_before = get_token_balance(web3, PT_WSTETH_ADDRESS, funded_wallet)
+        susdai_before = get_token_balance(web3, susdai, funded_wallet)
+        pt_before = get_token_balance(web3, PT_SUSDAI_ADDRESS, funded_wallet)
 
-        print(f"WETH before: {format_token_amount(weth_before, weth_decimals)}")
+        print(f"sUSDai before: {format_token_amount(susdai_before, susdai_decimals)}")
         print(f"PT before: {format_token_amount(pt_before, 18)}")  # PT has 18 decimals
 
         # Create SwapIntent
         intent = SwapIntent(
-            from_token="WETH",
-            to_token="PT-WSTETH-25JUN2026",
+            from_token="sUSDai",
+            to_token="PT-SUSDAI-15OCT2026",
             amount=swap_amount,
-            max_slippage=Decimal("0.20"),  # 20% slippage for oracle-based quoting + pre-swap
+            max_slippage=Decimal("0.20"),  # 20% slippage for oracle-based min-out quoting
             protocol="pendle",
             chain=CHAIN_NAME,
         )
@@ -150,16 +144,14 @@ class TestPendleSwapIntent:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=_enrich_oracle_with_wsteth(price_oracle),
+            price_oracle=_enrich_oracle_with_susdai(price_oracle),
             rpc_url=anvil_rpc_url,
         )
 
         print("Compiling intent to ActionBundle...")
         compilation_result = compiler.compile(intent)
 
-        assert compilation_result.status.value == "SUCCESS", (
-            f"Compilation failed: {compilation_result.error}"
-        )
+        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None, "ActionBundle must be created"
 
         print(f"ActionBundle created with {len(compilation_result.action_bundle.transactions)} transactions")
@@ -171,21 +163,25 @@ class TestPendleSwapIntent:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
-        # Parse receipts
+        # Parse receipts — Layer 3 must fail closed: assert a swap was actually
+        # parsed, otherwise a PendleReceiptParser regression (no swap_result) would
+        # silently pass on the balance-delta layer alone.
+        saw_swap = False
         for i, tx_result in enumerate(execution_result.transaction_results):
-            print(f"\nTransaction {i+1}:")
+            print(f"\nTransaction {i + 1}:")
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
             print(f"  Gas used: {tx_result.gas_used}")
 
             if tx_result.receipt:
                 parser = PendleReceiptParser(
                     chain=CHAIN_NAME,
-                    token_in_decimals=18,  # wstETH (SY underlying after WETH->wstETH pre-swap)
+                    token_in_decimals=18,  # sUSDai (SY-mint token; no pre-swap)
                     token_out_decimals=18,  # PT decimals
                 )
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
 
                 if parse_result.success and parse_result.swap_result:
+                    saw_swap = True
                     print(f"  Swap type: {parse_result.swap_result.swap_type}")
                     print(f"  Amount in:  {parse_result.swap_result.amount_in_decimal}")
                     print(f"  Amount out: {parse_result.swap_result.amount_out_decimal}")
@@ -193,23 +189,23 @@ class TestPendleSwapIntent:
                     assert parse_result.swap_result.amount_in_decimal > 0
                     assert parse_result.swap_result.amount_out_decimal > 0
                     assert parse_result.swap_result.effective_price > 0
+        assert saw_swap, "PendleReceiptParser must parse a swap_result from the PT-buy receipt (Layer 3)"
 
         # Verify balance changes
-        weth_after = get_token_balance(web3, weth, funded_wallet)
-        pt_after = get_token_balance(web3, PT_WSTETH_ADDRESS, funded_wallet)
+        susdai_after = get_token_balance(web3, susdai, funded_wallet)
+        pt_after = get_token_balance(web3, PT_SUSDAI_ADDRESS, funded_wallet)
 
-        weth_spent = weth_before - weth_after
+        susdai_spent = susdai_before - susdai_after
         pt_received = pt_after - pt_before
 
         print("\n--- Results ---")
-        print(f"WETH spent:    {format_token_amount(weth_spent, weth_decimals)}")
+        print(f"sUSDai spent:  {format_token_amount(susdai_spent, susdai_decimals)}")
         print(f"PT received:   {format_token_amount(pt_received, 18)}")
 
-        # Verify WETH was spent
-        expected_weth_spent = int(swap_amount * Decimal(10**weth_decimals))
-        assert weth_spent == expected_weth_spent, (
-            f"WETH spent must EXACTLY equal swap amount. "
-            f"Expected: {expected_weth_spent}, Got: {weth_spent}"
+        # Verify sUSDai was spent
+        expected_susdai_spent = int(swap_amount * Decimal(10**susdai_decimals))
+        assert susdai_spent == expected_susdai_spent, (
+            f"sUSDai spent must EXACTLY equal swap amount. Expected: {expected_susdai_spent}, Got: {susdai_spent}"
         )
 
         # Verify PT tokens were received
@@ -221,16 +217,16 @@ class TestPendleSwapIntent:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         reason=(
-            "#2635: Arbitrum Pendle USDC->PT-wstETH route reverts on the CI "
-            "pinned Anvil fork with ModuleTransactionFailed selector 0xd27b44a9, "
-            "while the WETH->PT-wstETH sibling passes on the same run. This is "
-            "fork-state-specific: latest local forks can xpass, so keep "
-            "strict=False until the CI fork pin has a stable USDC-input path "
-            "(as of 2026-06-05)."
+            "#2635: the USDC-input Pendle PT buy needs a pre-swap from USDC to "
+            "the SY-mint token (sUSDai), and Arbitrum has no reliable on-fork "
+            "USDC->sUSDai route, so compile/execute can fail on the CI pinned "
+            "fork while the sUSDai->PT sibling (== SY-mint token, no pre-swap) "
+            "passes. Kept strict=False: latest local forks may xpass when a "
+            "route exists (as of 2026-06-29, updated for the sUSDai market roll)."
         ),
         strict=False,
     )
-    async def test_swap_usdc_to_pt_wsteth_using_intent(
+    async def test_swap_usdc_to_pt_susdai_using_intent(
         self,
         web3: Web3,
         anvil_rpc_url: str,
@@ -238,14 +234,14 @@ class TestPendleSwapIntent:
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
     ):
-        """Test USDC -> PT-wstETH-25JUN2026 swap using SwapIntent.
+        """Test USDC -> PT-sUSDai-15OCT2026 swap using SwapIntent.
 
         This tests the token_mint_sy pre-swap path in PendleCompiler.compile_swap.
-        USDC is not the SY underlying (wstETH), so the compiler must insert
-        a pre-swap from USDC -> wstETH before the Pendle swap.
+        USDC is not the SY-mint token (sUSDai), so the compiler must insert a
+        pre-swap from USDC -> sUSDai before the Pendle swap.
 
         Flow:
-        1. Create SwapIntent for USDC -> PT-WSTETH-25JUN2026
+        1. Create SwapIntent for USDC -> PT-SUSDAI-15OCT2026
         2. Compile to ActionBundle (includes pre-swap)
         3. Execute via ExecutionOrchestrator
         4. Parse receipt for Pendle Swap event
@@ -258,14 +254,14 @@ class TestPendleSwapIntent:
         # Swap 100 USDC to PT
         swap_amount = Decimal("100")  # 100 USDC
 
-        print(f"\n{'='*80}")
-        print("Test: USDC -> PT-wstETH-25JUN2026 Swap via SwapIntent (Pendle with pre-swap)")
-        print(f"{'='*80}")
+        print(f"\n{'=' * 80}")
+        print("Test: USDC -> PT-sUSDai-15OCT2026 Swap via SwapIntent (Pendle with pre-swap)")
+        print(f"{'=' * 80}")
         print(f"Swap amount: {swap_amount} USDC")
 
         # Record balances BEFORE
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
-        pt_before = get_token_balance(web3, PT_WSTETH_ADDRESS, funded_wallet)
+        pt_before = get_token_balance(web3, PT_SUSDAI_ADDRESS, funded_wallet)
 
         print(f"USDC before: {format_token_amount(usdc_before, usdc_decimals)}")
         print(f"PT before: {format_token_amount(pt_before, 18)}")
@@ -273,7 +269,7 @@ class TestPendleSwapIntent:
         # Create SwapIntent
         intent = SwapIntent(
             from_token="USDC",
-            to_token="PT-WSTETH-25JUN2026",
+            to_token="PT-SUSDAI-15OCT2026",
             amount=swap_amount,
             max_slippage=Decimal("0.20"),  # 20% slippage for multi-hop (pre-swap + Pendle swap)
             protocol="pendle",
@@ -286,16 +282,14 @@ class TestPendleSwapIntent:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=_enrich_oracle_with_wsteth(price_oracle),
+            price_oracle=_enrich_oracle_with_susdai(price_oracle),
             rpc_url=anvil_rpc_url,
         )
 
         print("Compiling intent to ActionBundle...")
         compilation_result = compiler.compile(intent)
 
-        assert compilation_result.status.value == "SUCCESS", (
-            f"Compilation failed: {compilation_result.error}"
-        )
+        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None, "ActionBundle must be created"
 
         print(f"ActionBundle created with {len(compilation_result.action_bundle.transactions)} transactions")
@@ -309,14 +303,14 @@ class TestPendleSwapIntent:
 
         # Parse receipts
         for i, tx_result in enumerate(execution_result.transaction_results):
-            print(f"\nTransaction {i+1}:")
+            print(f"\nTransaction {i + 1}:")
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
             print(f"  Gas used: {tx_result.gas_used}")
 
             if tx_result.receipt:
                 parser = PendleReceiptParser(
                     chain=CHAIN_NAME,
-                    token_in_decimals=18,  # wstETH (the actual Pendle swap input after pre-swap)
+                    token_in_decimals=18,  # sUSDai (the actual Pendle swap input after pre-swap)
                     token_out_decimals=18,  # PT decimals
                 )
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
@@ -332,7 +326,7 @@ class TestPendleSwapIntent:
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
-        pt_after = get_token_balance(web3, PT_WSTETH_ADDRESS, funded_wallet)
+        pt_after = get_token_balance(web3, PT_SUSDAI_ADDRESS, funded_wallet)
 
         usdc_spent = usdc_before - usdc_after
         pt_received = pt_after - pt_before
@@ -344,8 +338,7 @@ class TestPendleSwapIntent:
         # Verify USDC was spent
         expected_usdc_spent = int(swap_amount * Decimal(10**usdc_decimals))
         assert usdc_spent == expected_usdc_spent, (
-            f"USDC spent must EXACTLY equal swap amount. "
-            f"Expected: {expected_usdc_spent}, Got: {usdc_spent}"
+            f"USDC spent must EXACTLY equal swap amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
         )
 
         # Verify PT tokens were received
@@ -364,28 +357,27 @@ class TestPendleSwapIntent:
         price_oracle: dict[str, Decimal],
     ):
         """Test that SwapIntent with insufficient balance fails gracefully."""
-        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
-        weth = tokens["WETH"]
+        susdai = SUSDAI_ADDRESS
 
         # Get current balance and guard against zero
-        weth_balance = get_token_balance(web3, weth, funded_wallet)
-        pt_before = get_token_balance(web3, PT_WSTETH_ADDRESS, funded_wallet)
-        assert weth_balance > 0, "Funded wallet must have positive WETH balance for this test"
-        weth_decimals = get_token_decimals(web3, weth)
-        balance_decimal = Decimal(weth_balance) / Decimal(10**weth_decimals)
+        susdai_balance = get_token_balance(web3, susdai, funded_wallet)
+        pt_before = get_token_balance(web3, PT_SUSDAI_ADDRESS, funded_wallet)
+        assert susdai_balance > 0, "Funded wallet must have positive sUSDai balance for this test"
+        susdai_decimals = get_token_decimals(web3, susdai)
+        balance_decimal = Decimal(susdai_balance) / Decimal(10**susdai_decimals)
 
         # Try to swap more than we have
         excessive_amount = balance_decimal * Decimal("100")
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Test: SwapIntent with Insufficient Balance (Pendle)")
-        print(f"{'='*80}")
-        print(f"Balance:   {balance_decimal} WETH")
-        print(f"Trying:    {excessive_amount} WETH")
+        print(f"{'=' * 80}")
+        print(f"Balance:   {balance_decimal} sUSDai")
+        print(f"Trying:    {excessive_amount} sUSDai")
 
         intent = SwapIntent(
-            from_token="WETH",
-            to_token="PT-WSTETH-25JUN2026",
+            from_token="sUSDai",
+            to_token="PT-SUSDAI-15OCT2026",
             amount=excessive_amount,
             max_slippage=Decimal("0.20"),
             protocol="pendle",
@@ -395,7 +387,7 @@ class TestPendleSwapIntent:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=_enrich_oracle_with_wsteth(price_oracle),
+            price_oracle=_enrich_oracle_with_susdai(price_oracle),
             rpc_url=anvil_rpc_url,
         )
 
@@ -410,9 +402,9 @@ class TestPendleSwapIntent:
         print(f"Execution failed as expected: {execution_result.error}")
 
         # Verify balances unchanged (bilateral conservation check)
-        weth_after = get_token_balance(web3, weth, funded_wallet)
-        pt_after = get_token_balance(web3, PT_WSTETH_ADDRESS, funded_wallet)
-        assert weth_after == weth_balance, "Input token balance must be unchanged after failed swap"
+        susdai_after = get_token_balance(web3, susdai, funded_wallet)
+        pt_after = get_token_balance(web3, PT_SUSDAI_ADDRESS, funded_wallet)
+        assert susdai_after == susdai_balance, "Input token balance must be unchanged after failed swap"
         assert pt_after == pt_before, "Output token balance must be unchanged after failed swap"
 
         print("\nALL CHECKS PASSED")

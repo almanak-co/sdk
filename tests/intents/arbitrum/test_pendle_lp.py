@@ -60,18 +60,38 @@ from tests.intents.conftest import (
 
 CHAIN_NAME = "arbitrum"
 
-# PT-wstETH-25JUN2026 market on Arbitrum. This market matured on 2026-06-25,
-# but remains the only Anvil-fundable Arbitrum Pendle PT market documented in
-# docs/internal/pendle-anvil-fundability-matrix-vib5324.md.
-# The market contract address is also the LP token address for Pendle positions.
-PENDLE_WSTETH_MARKET = "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b"
+# PT-sUSDai-15OCT2026 market on Arbitrum — a live, deeply-liquid Pendle market
+# (~$13M TVL on-chain as of 2026-06-29; expiry() = 1792022400 = 2026-10-15 UTC).
+# This replaced the former PT-wstETH-25JUN2026 market, which expired 2026-06-25
+# (expiry() = 1782345600) and now reverts every LP/swap into it — the wstETH
+# Pendle markets on Arbitrum are all gone (Pendle's active-markets API lists only
+# sUSDai / USDai markets here now). The market contract address is also the LP
+# token address for Pendle positions.
+PENDLE_SUSDAI_MARKET = "0xcbf629c8d396b1261f81f55175afa010e94787d8"
 
-# Input token: wstETH mints SY directly — no pre-swap routing needed.
-WSTETH_ADDRESS = "0x5979D7b546E38E414F7E9822514be443A4800529"
-WSTETH_SYMBOL = "wstETH"
+# Input token: sUSDai mints SY directly (it is the market's tokenMintSy, verified
+# via SY.getTokensIn()), so no pre-swap routing is needed.
+SUSDAI_ADDRESS = "0x0B2b2B2076d95dda7817e785989fE353fe955ef9"
+SUSDAI_SYMBOL = "sUSDai"
 
-# Small LP deposit: 0.005 wstETH (~$12 at ~$2400/wstETH).
-LP_DEPOSIT_AMOUNT = Decimal("0.005")
+# Small LP deposit: 10 sUSDai (~$10.5 at ~$1.05/sUSDai). The market's SY reserve
+# is ~10.8M, so this is a negligible-impact deposit.
+LP_DEPOSIT_AMOUNT = Decimal("10")
+
+
+def _enrich_oracle_with_susdai(price_oracle: dict[str, Decimal]) -> dict[str, Decimal]:
+    """Add a SUSDAI price to the oracle if missing (needed for compile estimation).
+
+    sUSDai has no CoinGecko id, so the session price-oracle fixture never carries
+    it. sUSDai is staked USDai and trades near $1; we anchor it to USDC (the
+    market's compile-time slippage/min-out math is loose enough that the exact
+    figure is immaterial — the on-chain SDK computes the binding min-out).
+    """
+    enriched = dict(price_oracle)
+    if "SUSDAI" not in enriched:
+        enriched["SUSDAI"] = enriched.get("USDC", Decimal("1"))
+    return enriched
+
 
 # range_lower/upper are required by LPOpenIntent validation but ignored by the
 # Pendle compiler (Pendle uses single-sided liquidity with no tick range).
@@ -81,17 +101,6 @@ _DUMMY_RANGE_UPPER = Decimal("999999")
 # Pendle scales SY/PT amounts by an assumed 18-decimal precision
 # (handle_pendle_lp: ``Decimal(str(raw)) / 10**18``).
 _PENDLE_SCALE_18 = Decimal(10**18)
-
-_ARBITRUM_WSTETH_MARKET_MATURED_XFAIL = pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "VIB-5324: Arbitrum PT-wstETH-25JUN2026 matured on 2026-06-25; "
-        "docs/internal/pendle-anvil-fundability-matrix-vib5324.md records no "
-        "longer-dated Anvil-fundable Arbitrum Pendle PT market. strict=False "
-        "because older fork pins can still xpass until the CI fork pin is moved "
-        "backward or a new fundable Arbitrum market exists (as of 2026-06-29)."
-    ),
-)
 
 
 # =============================================================================
@@ -190,17 +199,16 @@ def _assert_pendle_lp_payload(
 class TestPendleLPOpenIntent:
     """4-layer tests for Pendle LP_OPEN on Arbitrum.
 
-    Deposits wstETH into the PT-wstETH-25JUN2026 market and verifies:
+    Deposits sUSDai into the PT-sUSDai-15OCT2026 market and verifies:
     1. Compilation succeeds
     2. Execution lands on-chain
     3. PendleReceiptParser finds a Mint event with net_lp_minted > 0
-    4. wstETH balance decreased, LP token balance increased
+    4. sUSDai balance decreased, LP token balance increased
     """
 
     @pytest.mark.intent(IntentType.LP_OPEN)
-    @_ARBITRUM_WSTETH_MARKET_MATURED_XFAIL
     @pytest.mark.asyncio
-    async def test_lp_open_wsteth_into_pendle_market(
+    async def test_lp_open_susdai_into_pendle_market(
         self,
         web3: Web3,
         anvil_rpc_url: str,
@@ -210,23 +218,23 @@ class TestPendleLPOpenIntent:
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ):
-        """Open a wstETH LP position in the PT-wstETH-25JUN2026 Pendle market."""
-        wsteth_decimals = get_token_decimals(web3, WSTETH_ADDRESS)
+        """Open a sUSDai LP position in the PT-sUSDai-15OCT2026 Pendle market."""
+        susdai_decimals = get_token_decimals(web3, SUSDAI_ADDRESS)
 
         print(f"\n{'=' * 80}")
-        print("Test: LP_OPEN wstETH -> PT-wstETH-25JUN2026 (Pendle)")
+        print("Test: LP_OPEN sUSDai -> PT-sUSDai-15OCT2026 (Pendle)")
         print(f"{'=' * 80}")
-        print(f"Deposit: {LP_DEPOSIT_AMOUNT} {WSTETH_SYMBOL}")
+        print(f"Deposit: {LP_DEPOSIT_AMOUNT} {SUSDAI_SYMBOL}")
 
         # Layer 4 setup: record balances BEFORE
-        wsteth_before = get_token_balance(web3, WSTETH_ADDRESS, funded_wallet)
-        lp_before = get_token_balance(web3, PENDLE_WSTETH_MARKET, funded_wallet)
-        print(f"wstETH before:  {format_token_amount(wsteth_before, wsteth_decimals)}")
+        susdai_before = get_token_balance(web3, SUSDAI_ADDRESS, funded_wallet)
+        lp_before = get_token_balance(web3, PENDLE_SUSDAI_MARKET, funded_wallet)
+        print(f"sUSDai before:  {format_token_amount(susdai_before, susdai_decimals)}")
         print(f"LP before:      {format_token_amount(lp_before, 18)}")
 
         # Layer 1: Compile
         intent = LPOpenIntent(
-            pool=f"{WSTETH_SYMBOL}/{PENDLE_WSTETH_MARKET}",
+            pool=f"{SUSDAI_SYMBOL}/{PENDLE_SUSDAI_MARKET}",
             amount0=LP_DEPOSIT_AMOUNT,
             amount1=Decimal("0"),
             range_lower=_DUMMY_RANGE_LOWER,
@@ -237,7 +245,7 @@ class TestPendleLPOpenIntent:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=price_oracle,
+            price_oracle=_enrich_oracle_with_susdai(price_oracle),
             rpc_url=anvil_rpc_url,
         )
         compilation_result = compiler.compile(intent)
@@ -292,24 +300,24 @@ class TestPendleLPOpenIntent:
                 continue
             parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
             for mint in parse_result.mint_events:
-                assert mint.market_address.lower() == PENDLE_WSTETH_MARKET.lower(), (
+                assert mint.market_address.lower() == PENDLE_SUSDAI_MARKET.lower(), (
                     f"Mint market_address mismatch: got {mint.market_address}"
                 )
 
         # Layer 4: Balance deltas
-        wsteth_after = get_token_balance(web3, WSTETH_ADDRESS, funded_wallet)
-        lp_after = get_token_balance(web3, PENDLE_WSTETH_MARKET, funded_wallet)
+        susdai_after = get_token_balance(web3, SUSDAI_ADDRESS, funded_wallet)
+        lp_after = get_token_balance(web3, PENDLE_SUSDAI_MARKET, funded_wallet)
 
-        wsteth_spent = wsteth_before - wsteth_after
+        susdai_spent = susdai_before - susdai_after
         lp_received = lp_after - lp_before
 
         print("\n--- Results ---")
-        print(f"wstETH spent:   {format_token_amount(wsteth_spent, wsteth_decimals)}")
+        print(f"sUSDai spent:   {format_token_amount(susdai_spent, susdai_decimals)}")
         print(f"LP received:    {format_token_amount(lp_received, 18)}")
 
-        expected_wsteth_wei = int(LP_DEPOSIT_AMOUNT * Decimal(10**wsteth_decimals))
-        assert wsteth_spent == expected_wsteth_wei, (
-            f"wstETH spent must EXACTLY equal deposit amount. Expected: {expected_wsteth_wei}, Got: {wsteth_spent}"
+        expected_susdai_wei = int(LP_DEPOSIT_AMOUNT * Decimal(10**susdai_decimals))
+        assert susdai_spent == expected_susdai_wei, (
+            f"sUSDai spent must EXACTLY equal deposit amount. Expected: {expected_susdai_wei}, Got: {susdai_spent}"
         )
         assert lp_received > 0, "LP token balance must increase after LP_OPEN"
         assert lp_received == lp_minted_raw, (
@@ -326,7 +334,7 @@ class TestPendleLPOpenIntent:
                 continue
             position_id = parser.extract_position_id(receipt_dict)
             assert position_id is not None, "extract_position_id must return a value for LP_OPEN"
-            assert position_id.lower() == PENDLE_WSTETH_MARKET.lower(), (
+            assert position_id.lower() == PENDLE_SUSDAI_MARKET.lower(), (
                 f"position_id must equal the market address, got {position_id}"
             )
             lp_open_data = parser.extract_lp_open_data(receipt_dict)
@@ -371,21 +379,22 @@ class TestPendleLPOpenIntent:
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ):
-        """LP_OPEN with more wstETH than the wallet holds must fail gracefully."""
-        wsteth_balance = get_token_balance(web3, WSTETH_ADDRESS, funded_wallet)
-        lp_before = get_token_balance(web3, PENDLE_WSTETH_MARKET, funded_wallet)
-        wsteth_decimals = get_token_decimals(web3, WSTETH_ADDRESS)
-        balance_decimal = Decimal(wsteth_balance) / Decimal(10**wsteth_decimals)
+        """LP_OPEN with more sUSDai than the wallet holds must fail gracefully."""
+        susdai_balance = get_token_balance(web3, SUSDAI_ADDRESS, funded_wallet)
+        lp_before = get_token_balance(web3, PENDLE_SUSDAI_MARKET, funded_wallet)
+        assert susdai_balance > 0, "Funded wallet must have positive sUSDai balance for this test"
+        susdai_decimals = get_token_decimals(web3, SUSDAI_ADDRESS)
+        balance_decimal = Decimal(susdai_balance) / Decimal(10**susdai_decimals)
         excessive_amount = balance_decimal * Decimal("100")
 
         print(f"\n{'=' * 80}")
         print("Test: LP_OPEN Insufficient Balance (Pendle)")
         print(f"{'=' * 80}")
-        print(f"wstETH balance: {balance_decimal}")
+        print(f"sUSDai balance: {balance_decimal}")
         print(f"Trying:         {excessive_amount}")
 
         intent = LPOpenIntent(
-            pool=f"{WSTETH_SYMBOL}/{PENDLE_WSTETH_MARKET}",
+            pool=f"{SUSDAI_SYMBOL}/{PENDLE_SUSDAI_MARKET}",
             amount0=excessive_amount,
             amount1=Decimal("0"),
             range_lower=_DUMMY_RANGE_LOWER,
@@ -396,7 +405,7 @@ class TestPendleLPOpenIntent:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=price_oracle,
+            price_oracle=_enrich_oracle_with_susdai(price_oracle),
             rpc_url=anvil_rpc_url,
         )
         compilation_result = compiler.compile(intent)
@@ -407,10 +416,10 @@ class TestPendleLPOpenIntent:
         assert not execution_result.success, "Execution should fail with insufficient balance"
         print(f"Execution failed as expected: {execution_result.error}")
 
-        # Bilateral conservation: both wstETH and LP token unchanged after failure
-        wsteth_after = get_token_balance(web3, WSTETH_ADDRESS, funded_wallet)
-        lp_after = get_token_balance(web3, PENDLE_WSTETH_MARKET, funded_wallet)
-        assert wsteth_after == wsteth_balance, "wstETH balance must be unchanged after failed LP_OPEN"
+        # Bilateral conservation: both sUSDai and LP token unchanged after failure
+        susdai_after = get_token_balance(web3, SUSDAI_ADDRESS, funded_wallet)
+        lp_after = get_token_balance(web3, PENDLE_SUSDAI_MARKET, funded_wallet)
+        assert susdai_after == susdai_balance, "sUSDai balance must be unchanged after failed LP_OPEN"
         assert lp_after == lp_before, "LP token balance must be unchanged after failed LP_OPEN"
 
         # Layer 5: a failed LP_OPEN must write NO typed PendleAccountingEvent.
@@ -447,7 +456,7 @@ class TestPendleLPCloseIntent:
     1. Compilation succeeds
     2. Execution lands on-chain
     3. PendleReceiptParser finds a Burn event with net_sy_out > 0
-    4. LP token balance returns to zero, wstETH balance increases
+    4. LP token balance returns to zero, sUSDai balance increases
     """
 
     async def _open_lp_position(
@@ -458,9 +467,9 @@ class TestPendleLPCloseIntent:
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
     ) -> int:
-        """Open a wstETH LP position and return the LP token amount received."""
+        """Open a sUSDai LP position and return the LP token amount received."""
         intent = LPOpenIntent(
-            pool=f"{WSTETH_SYMBOL}/{PENDLE_WSTETH_MARKET}",
+            pool=f"{SUSDAI_SYMBOL}/{PENDLE_SUSDAI_MARKET}",
             amount0=LP_DEPOSIT_AMOUNT,
             amount1=Decimal("0"),
             range_lower=_DUMMY_RANGE_LOWER,
@@ -471,7 +480,7 @@ class TestPendleLPCloseIntent:
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=price_oracle,
+            price_oracle=_enrich_oracle_with_susdai(price_oracle),
             rpc_url=anvil_rpc_url,
         )
         result = compiler.compile(intent)
@@ -479,14 +488,13 @@ class TestPendleLPCloseIntent:
         exec_result = await orchestrator.execute(result.action_bundle)
         assert exec_result.success, f"LP_OPEN execution failed: {exec_result.error}"
 
-        lp_balance = get_token_balance(web3, PENDLE_WSTETH_MARKET, funded_wallet)
+        lp_balance = get_token_balance(web3, PENDLE_SUSDAI_MARKET, funded_wallet)
         assert lp_balance > 0, "Expected LP tokens after LP_OPEN"
         return lp_balance
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
-    @_ARBITRUM_WSTETH_MARKET_MATURED_XFAIL
     @pytest.mark.asyncio
-    async def test_lp_close_returns_wsteth(
+    async def test_lp_close_returns_susdai(
         self,
         web3: Web3,
         anvil_rpc_url: str,
@@ -496,36 +504,36 @@ class TestPendleLPCloseIntent:
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ):
-        """Close an open wstETH Pendle LP position and verify wstETH is returned."""
-        wsteth_decimals = get_token_decimals(web3, WSTETH_ADDRESS)
+        """Close an open sUSDai Pendle LP position and verify sUSDai is returned."""
+        susdai_decimals = get_token_decimals(web3, SUSDAI_ADDRESS)
 
         # Setup: open an LP position to close
         lp_amount = await self._open_lp_position(web3, funded_wallet, orchestrator, price_oracle, anvil_rpc_url)
 
         print(f"\n{'=' * 80}")
-        print("Test: LP_CLOSE PT-wstETH-25JUN2026 -> wstETH (Pendle)")
+        print("Test: LP_CLOSE PT-sUSDai-15OCT2026 -> sUSDai (Pendle)")
         print(f"{'=' * 80}")
         print(f"LP to burn: {format_token_amount(lp_amount, 18)}")
 
         # Layer 4 setup: record balances BEFORE close
-        wsteth_before = get_token_balance(web3, WSTETH_ADDRESS, funded_wallet)
-        lp_before = get_token_balance(web3, PENDLE_WSTETH_MARKET, funded_wallet)
-        print(f"wstETH before: {format_token_amount(wsteth_before, wsteth_decimals)}")
+        susdai_before = get_token_balance(web3, SUSDAI_ADDRESS, funded_wallet)
+        lp_before = get_token_balance(web3, PENDLE_SUSDAI_MARKET, funded_wallet)
+        print(f"sUSDai before: {format_token_amount(susdai_before, susdai_decimals)}")
         print(f"LP before:     {format_token_amount(lp_before, 18)}")
 
         # Layer 1: Compile
         # Output token is passed via protocol_params since LPCloseIntent has no token field.
         intent = LPCloseIntent(
             position_id=str(lp_amount),
-            pool=PENDLE_WSTETH_MARKET,
+            pool=PENDLE_SUSDAI_MARKET,
             protocol="pendle",
             chain=CHAIN_NAME,
-            protocol_params={"token": WSTETH_SYMBOL},
+            protocol_params={"token": SUSDAI_SYMBOL},
         )
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
-            price_oracle=price_oracle,
+            price_oracle=_enrich_oracle_with_susdai(price_oracle),
             rpc_url=anvil_rpc_url,
         )
         compilation_result = compiler.compile(intent)
@@ -576,21 +584,21 @@ class TestPendleLPCloseIntent:
         assert sy_out_raw is not None and sy_out_raw > 0, f"net_sy_out must be positive, got {sy_out_raw}"
 
         # Layer 4: Balance deltas
-        wsteth_after = get_token_balance(web3, WSTETH_ADDRESS, funded_wallet)
-        lp_after = get_token_balance(web3, PENDLE_WSTETH_MARKET, funded_wallet)
+        susdai_after = get_token_balance(web3, SUSDAI_ADDRESS, funded_wallet)
+        lp_after = get_token_balance(web3, PENDLE_SUSDAI_MARKET, funded_wallet)
 
-        wsteth_received = wsteth_after - wsteth_before
+        susdai_received = susdai_after - susdai_before
         lp_spent = lp_before - lp_after
 
         print("\n--- Results ---")
-        print(f"wstETH received: {format_token_amount(wsteth_received, wsteth_decimals)}")
+        print(f"sUSDai received: {format_token_amount(susdai_received, susdai_decimals)}")
         print(f"LP burned:       {format_token_amount(lp_spent, 18)}")
 
         assert lp_spent == lp_amount, (
             f"LP tokens burned must equal position_id amount. Expected: {lp_amount}, Got: {lp_spent}"
         )
         assert lp_after == 0, f"LP token balance must be zero after full close, got {lp_after}"
-        assert wsteth_received > 0, "Must receive positive wstETH after LP_CLOSE"
+        assert susdai_received > 0, "Must receive positive sUSDai after LP_CLOSE"
 
         # Verify extraction methods (position-key / enrichment path)
         for tx_result in execution_result.transaction_results:
@@ -601,7 +609,7 @@ class TestPendleLPCloseIntent:
                 continue
             position_id = parser.extract_position_id(receipt_dict)
             assert position_id is not None, "extract_position_id must return a value for LP_CLOSE"
-            assert position_id.lower() == PENDLE_WSTETH_MARKET.lower(), (
+            assert position_id.lower() == PENDLE_SUSDAI_MARKET.lower(), (
                 f"position_id must equal the market address, got {position_id}"
             )
             lp_close_data = parser.extract_lp_close_data(receipt_dict)
@@ -613,8 +621,8 @@ class TestPendleLPCloseIntent:
 
         # VIB-5302: LP_CLOSE must emit the RECEIVED-UNDERLYING amount (the realized
         # proceeds the wallet gets back), not just the intermediate SY/PT from the
-        # Burn event. The single-sided removal redeems SY -> wstETH; the SY Redeem
-        # event's amount_token_out is the wstETH the wallet received. Cross-check
+        # Burn event. The single-sided removal redeems SY -> sUSDai; the SY Redeem
+        # event's amount_token_out is the sUSDai the wallet received. Cross-check
         # Layer 3 (parser) against Layer 4 (on-chain balance delta): byte-identical
         # (no MEV on Anvil), and the declared OUTPUT money-leg must carry that same
         # measured amount in human units. amount="all" LP_CLOSE chaining off this
@@ -633,24 +641,24 @@ class TestPendleLPCloseIntent:
                 "the underlying paid to the wallet (received-underlying source)"
             )
             underlying_out_raw = pr.redeem_sy_events[0].amount_token_out
-            assert underlying_out_raw == wsteth_received, (
-                f"SY Redeem amount_token_out must equal the on-chain wstETH balance delta. "
-                f"Receipt: {underlying_out_raw}, balance delta: {wsteth_received}"
+            assert underlying_out_raw == susdai_received, (
+                f"SY Redeem amount_token_out must equal the on-chain sUSDai balance delta. "
+                f"Receipt: {underlying_out_raw}, balance delta: {susdai_received}"
             )
             # Declared money-leg surface (US-009): the received underlying is the
             # OUTPUT leg the ledger dispatcher records — measured, in human units.
             legs = parser.extract_primitive_money_legs(
                 receipt_dict,
-                out_token_symbol=WSTETH_SYMBOL,
-                out_token_address=WSTETH_ADDRESS,
-                out_token_decimals=wsteth_decimals,
+                out_token_symbol=SUSDAI_SYMBOL,
+                out_token_address=SUSDAI_ADDRESS,
+                out_token_decimals=susdai_decimals,
             )
             assert legs is not None, "LP_CLOSE must declare its received-underlying OUTPUT leg"
             assert len(legs.output_legs) == 1
             out_leg = legs.output_legs[0]
-            assert out_leg.token == WSTETH_SYMBOL
+            assert out_leg.token == SUSDAI_SYMBOL
             assert out_leg.amount.is_measured
-            expected_human = Decimal(wsteth_received) / Decimal(10**wsteth_decimals)
+            expected_human = Decimal(susdai_received) / Decimal(10**susdai_decimals)
             assert out_leg.amount.value == expected_human, (
                 f"OUTPUT leg must carry the received underlying in human units. "
                 f"Expected: {expected_human}, Got: {out_leg.amount.value}"

@@ -31,6 +31,7 @@ from tests.intents.conftest import (
     get_token_decimals,
     make_intent_test_web3,
     reset_fork_to_pristine,
+    seed_arbitrum_susdai,
     seed_wallet_state_with_recovery,
     web3_request_timeout,
 )
@@ -61,6 +62,13 @@ def _seed_wallet_state(web3: Web3, rpc_url: str) -> str:
                     fund_erc20_token(TEST_WALLET, token_address, amount, balance_slot, rpc_url)
             except Exception as e:
                 print(f"Warning: Could not fund {token_symbol}: {e}")
+
+    # Fund sUSDai for the live Pendle sUSDai-market intent tests (the Arbitrum
+    # wstETH Pendle market expired 2026-06-25). sUSDai is intentionally NOT in
+    # CHAIN_CONFIGS["arbitrum"]["tokens"] (the price-oracle fixture requires a
+    # CoinGecko id per token there, and sUSDai has none) — it is seeded via the
+    # shared helper, from both this EOA seed and the Zodiac Safe seed.
+    seed_arbitrum_susdai(TEST_WALLET, web3, rpc_url)
 
     return TEST_WALLET
 
