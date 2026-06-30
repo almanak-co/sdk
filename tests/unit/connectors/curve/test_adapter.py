@@ -517,17 +517,36 @@ class TestRemoveLiquidity:
         remove_tx = next(tx for tx in result.transactions if tx.tx_type == "remove_liquidity")
         assert remove_tx.data.startswith(REMOVE_LIQUIDITY_3_SELECTOR)
 
-    def test_remove_liquidity_one_coin(self, adapter: CurveAdapter) -> None:
-        """Test remove_liquidity_one_coin transaction building."""
-        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
-        result = adapter.remove_liquidity_one_coin(
-            pool_address=pool_address,
-            lp_amount=Decimal("1000"),
-            coin_index=1,  # USDC
+    @staticmethod
+    def _rpc_adapter() -> CurveAdapter:
+        """Adapter with an rpc_url so the on-chain calc_withdraw_one_coin read
+        (mocked at eth_call_uint256) is reached instead of the fail-closed guard."""
+        return CurveAdapter(
+            CurveConfig(
+                chain="ethereum",
+                wallet_address="0x1234567890123456789012345678901234567890",
+                default_slippage_bps=50,
+                rpc_url="http://localhost:8545",
+            )
         )
+
+    def test_remove_liquidity_one_coin(self) -> None:
+        """Test remove_liquidity_one_coin transaction building."""
+        adapter = self._rpc_adapter()
+        pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
+        # min-out is now sourced from on-chain calc_withdraw_one_coin (VIB-5437);
+        # mock a sane positive quote (USDC has 6 decimals).
+        with patch("almanak.connectors.curve.adapter.eth_call_uint256", return_value=1000 * 10**6):
+            result = adapter.remove_liquidity_one_coin(
+                pool_address=pool_address,
+                lp_amount=Decimal("1000"),
+                coin_index=1,  # USDC
+            )
 
         assert result.success is True
         assert result.operation == "remove_liquidity_one_coin"
+        # Floor must be non-zero and below the gross quote (slippage applied).
+        assert 0 < result.amounts[1] < 1000 * 10**6
 
     def test_remove_liquidity_one_coin_invalid_index(self, adapter: CurveAdapter) -> None:
         """Test remove_liquidity_one_coin with invalid index."""
@@ -541,17 +560,20 @@ class TestRemoveLiquidity:
         assert result.success is False
         assert "Invalid coin index" in (result.error or "")
 
-    def test_remove_liquidity_one_calldata_format(self, adapter: CurveAdapter) -> None:
+    def test_remove_liquidity_one_calldata_format(self) -> None:
         """Test remove_liquidity_one_coin calldata has correct format."""
+        adapter = self._rpc_adapter()
         pool_address = CURVE_POOLS["ethereum"]["3pool"]["address"]
-        result = adapter.remove_liquidity_one_coin(
-            pool_address=pool_address,
-            lp_amount=Decimal("1000"),
-            coin_index=0,
-        )
+        with patch("almanak.connectors.curve.adapter.eth_call_uint256", return_value=1000 * 10**18):
+            result = adapter.remove_liquidity_one_coin(
+                pool_address=pool_address,
+                lp_amount=Decimal("1000"),
+                coin_index=0,
+            )
 
         assert result.success is True
         remove_tx = next(tx for tx in result.transactions if tx.tx_type == "remove_liquidity")
+        # 3pool is StableSwap → int128-form selector.
         assert remove_tx.data.startswith(REMOVE_LIQUIDITY_ONE_SELECTOR)
 
 

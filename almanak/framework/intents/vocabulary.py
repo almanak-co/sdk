@@ -490,6 +490,14 @@ class LPCloseIntent(BaseIntent):
             When ``None`` (the default), the connector falls back to its built-in
             default (Curve: 50 bps), so existing callers are byte-for-byte
             unchanged. Connectors that do not consume it ignore it entirely.
+        coin_index: Optional single-sided exit selector (VIB-5437). When set to a
+            non-negative pool-coin index, the close withdraws the ENTIRE position
+            into that one coin via Curve's ``remove_liquidity_one_coin`` (min-out
+            sized from the pool's on-chain ``calc_withdraw_one_coin``). When
+            ``None`` (the default), the close is proportional
+            (``remove_liquidity`` across all coins) — byte-for-byte unchanged for
+            existing callers. Consumed only by the Curve compiler; other LP
+            connectors ignore it.
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
     """
@@ -502,6 +510,7 @@ class LPCloseIntent(BaseIntent):
     protocol_params: dict[str, Any] | None = None
     amount: OptionalChainedAmount = None
     max_slippage: OptionalSafeDecimal = None
+    coin_index: int | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
@@ -525,6 +534,12 @@ class LPCloseIntent(BaseIntent):
             raise ValueError("position_id must be a non-empty string when amount is None")
         if self.max_slippage is not None and (self.max_slippage < 0 or self.max_slippage > 1):
             raise ValueError("max_slippage must be between 0 and 1")
+        # coin_index opts into a single-sided close. Reject bool (a bool is an int
+        # subclass in Python, but `True`/`False` are never a valid coin index) and
+        # negatives. The connector validates the upper bound against the resolved
+        # pool's coin count, where n_coins is known.
+        if self.coin_index is not None and (isinstance(self.coin_index, bool) or self.coin_index < 0):
+            raise ValueError("coin_index must be a non-negative integer when set")
         return self
 
     @property
@@ -1018,6 +1033,7 @@ class Intent:
         protocol_params: dict[str, Any] | None = None,
         amount: ChainedAmount | None = None,
         max_slippage: Decimal | None = None,
+        coin_index: int | None = None,
         registry_handle: str | None = None,
     ) -> LPCloseIntent:
         """Create an LP close intent.
@@ -1044,6 +1060,10 @@ class Intent:
                 min-amounts floor (e.g. 0.005 = 0.5%). When None (the default), the
                 connector uses its built-in default (Curve: 50 bps). Consumed only by
                 the Curve compiler.
+            coin_index: Optional single-sided exit selector (Curve only, VIB-5437).
+                A non-negative pool-coin index withdraws the whole position into
+                that one coin via ``remove_liquidity_one_coin``; ``None`` (default)
+                keeps the proportional all-coin close.
 
         Returns:
             LPCloseIntent: The created LP close intent
@@ -1068,6 +1088,7 @@ class Intent:
             protocol_params=protocol_params,
             amount=amount,
             max_slippage=max_slippage,
+            coin_index=coin_index,
             registry_handle=registry_handle,
         )
 

@@ -372,7 +372,20 @@ REMOVE_LIQUIDITY_2_SELECTOR = "0x5b36389c"  # remove_liquidity(uint256,uint256[2
 REMOVE_LIQUIDITY_3_SELECTOR = "0xecb586a5"  # remove_liquidity(uint256,uint256[3])
 REMOVE_LIQUIDITY_4_SELECTOR = "0x7d49d875"  # remove_liquidity(uint256,uint256[4])
 REMOVE_LIQUIDITY_DYN_SELECTOR = "0xd40ddb8c"  # remove_liquidity(uint256,uint256[]) — StableSwap NG
-REMOVE_LIQUIDITY_ONE_SELECTOR = "0x1a4d01d2"  # remove_liquidity_one_coin(uint256,int128,uint256)
+REMOVE_LIQUIDITY_ONE_SELECTOR = "0x1a4d01d2"  # remove_liquidity_one_coin(uint256,int128,uint256) — StableSwap
+# CryptoSwap/Tricrypto encode the coin index as ``uint256`` (not ``int128``), so
+# their single-sided exit has a DISTINCT selector. Dispatched by pool family in
+# ``_build_remove_liquidity_one_tx`` (VIB-5437). Verified on-chain 2026-06-29:
+# tricrypto2 (eth) answers 0xf1dc3cc9 and reverts the int128 form, while 3pool
+# answers the int128 form and not this one.
+REMOVE_LIQUIDITY_ONE_CRYPTO_SELECTOR = "0xf1dc3cc9"  # remove_liquidity_one_coin(uint256,uint256,uint256) — CryptoSwap
+# ``calc_withdraw_one_coin`` single-sided-withdraw quote, used to derive a real
+# (non-flat) min-out floor for single-sided LP_CLOSE (VIB-5437, audit P0-4/P2-3).
+# Same int128-vs-uint256 split as the remove selectors above; verified on-chain
+# 2026-06-29 against 3pool (StableSwap, 0xcc2b27d7) and tricrypto2 (CryptoSwap,
+# 0x4fb08c5e) — each pool reverts/empties the other family's selector.
+CALC_WITHDRAW_ONE_COIN_STABLE_SELECTOR = "0xcc2b27d7"  # calc_withdraw_one_coin(uint256,int128) — StableSwap
+CALC_WITHDRAW_ONE_COIN_CRYPTO_SELECTOR = "0x4fb08c5e"  # calc_withdraw_one_coin(uint256,uint256) — CryptoSwap
 GET_DY_SELECTOR = "0x5e0d443f"  # get_dy(int128,int128,uint256)
 GET_DY_UINT256_SELECTOR = "0x556d6e9f"  # get_dy(uint256,uint256,uint256)
 GET_DY_UNDERLYING_SELECTOR = "0x07211ef7"  # get_dy_underlying(int128,int128,uint256)
@@ -1614,7 +1627,11 @@ class CurveAdapter:
             LiquidityResult with transaction data
         """
         try:
-            slippage_bps = slippage_bps or self.config.default_slippage_bps
+            # Honor an explicit slippage_bps=0 (exact-quote request); only fall back
+            # to the config default when the caller passed None. `... or default`
+            # would silently re-introduce the default haircut for a 0 request.
+            if slippage_bps is None:
+                slippage_bps = self.config.default_slippage_bps
             recipient = recipient or self.wallet_address
 
             # Get pool info
@@ -1634,9 +1651,32 @@ class CurveAdapter:
             # Convert LP amount to wei
             lp_amount_wei = int(lp_amount * Decimal(10**18))
 
-            # Estimate output (simplified)
-            min_amount = self._estimate_remove_liquidity_one(pool_info, lp_amount_wei, coin_index)
-            min_amount = int(min_amount * (10000 - slippage_bps) // 10000)
+            # Derive the min-out floor from the pool's on-chain calc_withdraw_one_coin
+            # (fail-closed: raises if unavailable, caught below as a failed result).
+            # ``used_cryptoswap`` is the family whose selector actually answered the
+            # quote — the remove tx MUST be built with the same family (a static
+            # mislabel would otherwise emit a valid quote but revert on execution).
+            expected_out, used_cryptoswap = self._query_calc_withdraw_one_coin_onchain(
+                pool_info, lp_amount_wei, coin_index
+            )
+            min_amount = int(expected_out * (10000 - slippage_bps) // 10000)
+
+            # Guard: fail closed when the floor is non-positive — proceeding with
+            # min_amount<=0 would expose the entire single-sided withdrawal to a
+            # sandwich attack. min_amount==0 happens when the LP amount and/or
+            # slippage are so small the (10000 - slippage_bps) scaling floors to 0;
+            # min_amount<0 only via a direct adapter caller passing slippage_bps>10000
+            # (the intent path validates max_slippage∈[0,1]), which would otherwise
+            # reach _pad_uint256 with a negative int and emit malformed calldata.
+            if min_amount <= 0:
+                return LiquidityResult(
+                    success=False,
+                    error=(
+                        f"remove_liquidity_one_coin: computed min_amount is {min_amount} (must be > 0) "
+                        f"(expected_out={expected_out}, slippage_bps={slippage_bps}). "
+                        f"Refusing to ship a non-positive floor (sandwich/theft vector)."
+                    ),
+                )
 
             # Build transactions
             transactions: list[TransactionData] = []
@@ -1652,6 +1692,7 @@ class CurveAdapter:
                 min_amount=min_amount,
                 coin_symbol=pool_info.coins[coin_index],
                 pool_name=pool_info.name,
+                is_cryptoswap=used_cryptoswap,
             )
             transactions.append(remove_tx)
 
@@ -2311,16 +2352,20 @@ class CurveAdapter:
         min_amount: int,
         coin_symbol: str = "",
         pool_name: str = "",
+        is_cryptoswap: bool = False,
     ) -> TransactionData:
         """Build remove_liquidity_one_coin transaction.
 
-        remove_liquidity_one_coin(uint256 _token_amount, int128 i, uint256 _min_amount)
+        StableSwap: remove_liquidity_one_coin(uint256 _token_amount, int128 i, uint256 _min_amount)
+        CryptoSwap: remove_liquidity_one_coin(uint256 _token_amount, uint256 i, uint256 _min_amount)
+
+        The coin index is non-negative, so ``int128`` and ``uint256`` pad to the
+        same bytes — only the 4-byte selector differs between the two families
+        (VIB-5437, verified on-chain 2026-06-29).
         """
+        selector = REMOVE_LIQUIDITY_ONE_CRYPTO_SELECTOR if is_cryptoswap else REMOVE_LIQUIDITY_ONE_SELECTOR
         calldata = (
-            REMOVE_LIQUIDITY_ONE_SELECTOR
-            + self._pad_uint256(lp_amount)
-            + self._pad_int128(coin_index)
-            + self._pad_uint256(min_amount)
+            selector + self._pad_uint256(lp_amount) + self._pad_int128(coin_index) + self._pad_uint256(min_amount)
         )
 
         return TransactionData(
@@ -2938,22 +2983,83 @@ class CurveAdapter:
             return int(body or "0", 16)
         return int(body[:64], 16)
 
-    def _estimate_remove_liquidity_one(self, pool_info: PoolInfo, lp_amount: int, coin_index: int) -> int:
-        """Estimate tokens from remove_liquidity_one_coin.
+    @staticmethod
+    def _is_cryptoswap(pool_info: PoolInfo) -> bool:
+        """True for volatile-asset pool families (CryptoSwap / Tricrypto).
 
-        Multiplies by virtual_price because LP tokens are worth virtual_price
-        underlying value. This is different from _estimate_remove_liquidity
-        (proportional): single-sided withdrawal doesn't have balance-ratio issues,
-        so virtual_price adjustment is both safe and necessary.
-
-        Applies 1% penalty for single-sided removal (pool charges a fee for
-        imbalanced withdrawals).
+        These encode the coin index as ``uint256`` (not ``int128``), so their
+        single-sided ``calc_withdraw_one_coin`` / ``remove_liquidity_one_coin``
+        selectors differ from the StableSwap forms.
         """
-        # Adjust LP amount by virtual_price to get underlying value
-        adjusted_lp = int(Decimal(lp_amount) * pool_info.virtual_price)
-        decimals = self._coin_decimals(pool_info, coin_index)
-        # Convert from 18 decimals, apply small penalty for single-sided
-        return (adjusted_lp // (10 ** (18 - decimals))) * 99 // 100
+        return pool_info.pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO)
+
+    def _query_calc_withdraw_one_coin_onchain(
+        self, pool_info: PoolInfo, lp_amount: int, coin_index: int
+    ) -> tuple[int, bool]:
+        """Query ``calc_withdraw_one_coin`` on-chain for single-sided min-out (VIB-5437).
+
+        Returns ``(expected_out, used_cryptoswap)`` — the pool's exact expected
+        output (in the target coin's native decimals) for burning ``lp_amount`` LP
+        wei to ``coin_index``, plus whether the CryptoSwap-family selector is the
+        one that actually answered. Mirrors the fail-closed shape of
+        ``_query_calc_token_amount_crypto_onchain``: with no gateway/rpc, or if
+        neither selector yields a positive quote, it RAISES rather than returning 0
+        (never ships an unprotected ``min_amount=0``).
+
+        StableSwap pools expose ``calc_withdraw_one_coin(uint256,int128)`` while
+        CryptoSwap/Tricrypto pools expose ``calc_withdraw_one_coin(uint256,uint256)``
+        (verified on-chain 2026-06-29). The coin index is non-negative, so the
+        padded argument bytes are identical for both ABI types — only the 4-byte
+        selector differs. We dispatch by pool family and fall back to the other
+        selector defensively. Returning which family answered lets the caller build
+        the matching ``remove_liquidity_one_coin`` selector, so a pool mislabelled
+        in the static config does not get a valid quote paired with a wrong-family
+        remove tx that would revert on execution.
+        """
+        if self._gateway_client is None and not self._rpc_url:
+            raise ValueError(
+                f"Curve pool {pool_info.name}: cannot compute single-sided min-out without a "
+                "gateway client or rpc_url; refusing to ship min_amount=0 (MEV theft vector). "
+                "Configure CurveConfig.gateway_client to enable the on-chain calc_withdraw_one_coin quote."
+            )
+        # Fail fast on a present-but-disconnected gateway (it would otherwise reach
+        # eth_call and surface a low-level RPC error instead of the clear fail-closed
+        # message). Drop to rpc_url when available, else refuse (never min_amount=0).
+        gateway_client = self._gateway_client
+        if gateway_client is not None and not getattr(gateway_client, "is_connected", False):
+            if not self._rpc_url:
+                raise ValueError(
+                    f"Curve pool {pool_info.name}: gateway client present but disconnected and no "
+                    "rpc_url; cannot compute single-sided min-out, refusing to ship min_amount=0."
+                )
+            gateway_client = None
+
+        if self._is_cryptoswap(pool_info):
+            selectors = (CALC_WITHDRAW_ONE_COIN_CRYPTO_SELECTOR, CALC_WITHDRAW_ONE_COIN_STABLE_SELECTOR)
+        else:
+            selectors = (CALC_WITHDRAW_ONE_COIN_STABLE_SELECTOR, CALC_WITHDRAW_ONE_COIN_CRYPTO_SELECTOR)
+        # int128(i>=0) and uint256(i) pad to identical bytes; only the selector differs.
+        args = self._pad_uint256(lp_amount) + self._pad_uint256(coin_index)
+        last_error: Exception | None = None
+        for selector in selectors:
+            try:
+                expected = eth_call_uint256(
+                    chain=self.chain,
+                    to=pool_info.address,
+                    data=selector + args,
+                    rpc_url=self._rpc_url,
+                    gateway_client=gateway_client,
+                    timeout=10.0,
+                )
+            except Exception as exc:  # noqa: BLE001 — wrong selector may revert; try the next
+                last_error = exc
+                continue
+            if expected is not None and expected > 0:
+                return expected, selector == CALC_WITHDRAW_ONE_COIN_CRYPTO_SELECTOR
+        raise ValueError(
+            f"Curve calc_withdraw_one_coin returned no quote for {pool_info.name} "
+            f"(coin {coin_index}); cannot derive single-sided min-out (last error: {last_error})"
+        )
 
     # =========================================================================
     # Helper Methods

@@ -886,11 +886,25 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             )
             adapter = CurveAdapter(config)
 
-            liq_result = adapter.remove_liquidity(
-                pool_address=pool_address,
-                lp_amount=lp_amount,
-                slippage_bps=slippage_bps,
-            )
+            # Single-sided exit (VIB-5437, audit P0-4): when the intent names a
+            # target coin, withdraw the whole position into that one coin via
+            # remove_liquidity_one_coin. The adapter sizes the min-out floor from
+            # the pool's on-chain calc_withdraw_one_coin and FAILS CLOSED (never
+            # min_amount=0) if that read is unavailable. Default (coin_index=None)
+            # keeps the proportional all-coin remove_liquidity — unchanged.
+            if intent.coin_index is not None:
+                liq_result = adapter.remove_liquidity_one_coin(
+                    pool_address=pool_address,
+                    lp_amount=lp_amount,
+                    coin_index=intent.coin_index,
+                    slippage_bps=slippage_bps,
+                )
+            else:
+                liq_result = adapter.remove_liquidity(
+                    pool_address=pool_address,
+                    lp_amount=lp_amount,
+                    slippage_bps=slippage_bps,
+                )
 
             if not liq_result.success:
                 return CompilationResult(
@@ -911,6 +925,8 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                     "lp_amount": str(lp_amount),
                     "lp_token": pool_data["lp_token"],
                     "protocol": "curve",
+                    "operation": liq_result.operation,
+                    "coin_index": intent.coin_index,
                 },
             )
 
