@@ -644,8 +644,43 @@ def reconcile_lp_with_registry(
     # §"For multi-chain strategies"). Keying on token_id alone would let a
     # strategy-reported LP token_id=N on chain A suppress a registry-open LP
     # token_id=N on chain B → under-report → strand chain B's position.
-    def _dedupe_key(position: PositionInfo) -> tuple[str, str, str]:
-        return (str(position.chain or "").lower(), str(position.position_type), str(position.position_id))
+    #
+    # Lending legs (SUPPLY/BORROW) are the exception (VIB-5523): the strategy and
+    # the registry name the SAME leg with DIFFERENT ``position_id`` formats — the
+    # strategy emits e.g. ``aave-supply-wstETH-arbitrum`` while the registry row
+    # stores the ``market_id`` (``wsteth``). Keying lending on ``position_id``
+    # double-counts the leg (4 union entries for 2 real positions), and the two
+    # registry duplicates then get flagged uncovered by the completeness check.
+    # Key lending instead on the shared semantic identity
+    # ``(chain, type, protocol, market_or_asset)``: the registry row's
+    # ``market_id`` equals the strategy's asset symbol for one-pool-per-chain
+    # protocols (Aave / Spark / Compound), and an isolated-market protocol
+    # (Morpho) carries its bytes32 ``market_id`` on BOTH sides, so the key
+    # matches the same leg without ever merging two genuinely-distinct markets.
+    def _dedupe_key(position: PositionInfo) -> tuple[str, ...]:
+        chain = str(position.chain or "").lower()
+        ptype = str(position.position_type)
+        if position.position_type in (PositionType.SUPPLY, PositionType.BORROW):
+            details = position.details if isinstance(position.details, dict) else {}
+            asset = ""
+            for key in ("asset", "asset_symbol", "collateral_token", "supply_token", "borrow_token", "debt_token"):
+                value = details.get(key)
+                if value:
+                    asset = str(value).lower()
+                    break
+            # Prefer market_id when present; otherwise the asset symbol. For Aave
+            # the registry's market_id IS the asset symbol, so a market_id-bearing
+            # registry row and an asset-only strategy row resolve to the same
+            # discriminator and dedup correctly.
+            #
+            # Use an explicit ``is None`` check — ``market_id or ""`` would turn a
+            # legitimate ``market_id == 0`` (int) into ``""`` and silently fall
+            # back to ``asset``, mis-keying the leg.
+            market_id_val = details.get("market_id")
+            market_id_str = "" if market_id_val is None else str(market_id_val).lower()
+            discriminator = market_id_str or asset
+            return (chain, ptype, str(position.protocol or "").lower(), discriminator)
+        return (chain, ptype, str(position.position_id))
 
     seen = {_dedupe_key(p) for p in strategy_summary.positions}
     net_new: list[PositionInfo] = []

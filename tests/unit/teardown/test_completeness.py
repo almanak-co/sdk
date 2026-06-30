@@ -65,6 +65,37 @@ def test_supply_and_borrow_fully_covered_is_complete():
     assert report.total_enforceable == 2
 
 
+def test_registry_lending_position_covered_via_asset_symbol_VIB_5523():
+    """A registry-sourced lending position stores its reserve under
+    ``details['asset_symbol']`` (not ``details['asset']``). The completeness
+    check must token-match it against its WITHDRAW/REPAY closing intent — else a
+    restart-only registry enumeration falsely reports the leg uncovered
+    (VIB-5523, Bug A)."""
+    registry_supply = PositionInfo(
+        position_type=PositionType.SUPPLY,
+        position_id="wsteth",  # registry stores the market_id
+        chain="arbitrum",
+        protocol="aave_v3",
+        value_usd=Decimal("0"),
+        details={"source": "position_registry", "leg": "collateral", "market_id": "wsteth", "asset_symbol": "wstETH"},
+    )
+    registry_borrow = PositionInfo(
+        position_type=PositionType.BORROW,
+        position_id="usdc",
+        chain="arbitrum",
+        protocol="aave_v3",
+        value_usd=Decimal("0"),
+        details={"source": "position_registry", "leg": "debt", "market_id": "usdc", "asset_symbol": "USDC"},
+    )
+    intents = [
+        Intent.repay(protocol="aave_v3", token="USDC", repay_full=True, chain="arbitrum"),
+        Intent.withdraw(protocol="aave_v3", token="wstETH", amount=Decimal("0"), withdraw_all=True, chain="arbitrum"),
+    ]
+    report = check_intent_coverage(_summary([registry_supply, registry_borrow]), intents)
+    assert report.complete
+    assert report.uncovered == ()
+
+
 def test_repay_without_withdraw_strands_collateral_ALM_2900():
     """Repay the borrow but never withdraw the collateral → SUPPLY uncovered."""
     summary = _summary([_supply(), _borrow()])

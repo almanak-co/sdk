@@ -150,3 +150,75 @@ class TestPositionHealthProviderInvocation:
         # second call we return early — provider is built once, get_health runs once.
         assert mock_cls.call_count == 1
         assert mock_cls.return_value.get_health.call_count == 1
+
+
+class TestInvalidatePositionHealth:
+    """VIB-5523: teardown verification reuses a snapshot to confirm post-closure
+    state; the per-(protocol, market_id, …) memo must be evictable so the post
+    read re-queries the chain instead of serving the pre-unwind value."""
+
+    def test_invalidate_all_clears_memo(self):
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xabc")
+        market.set_position_health("aave_v3", "wsteth", _sample_health())
+        market.set_position_health("aave_v3", "usdc", _sample_health())
+        assert market._position_health_cache
+
+        market.invalidate_position_health()
+        assert market._position_health_cache == {}
+
+    def test_invalidate_targeted_protocol_market(self):
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xabc")
+        market.set_position_health("aave_v3", "wsteth", _sample_health())
+        market.set_position_health("aave_v3", "usdc", _sample_health())
+
+        market.invalidate_position_health("aave_v3", "wsteth")
+
+        remaining = list(market._position_health_cache)
+        assert ("aave_v3", "wsteth", "", "", "") not in remaining
+        assert ("aave_v3", "usdc", "", "", "") in remaining
+
+    def test_invalidate_is_case_insensitive(self):
+        # Gemini MEDIUM (PR #3102): the cache is seeded with the raw casing the
+        # caller passed; an invalidation arg whose casing differs (mixed-case
+        # protocol slug, checksummed vs lowercase hex market_id) must still hit,
+        # else the stale memo survives and defeats the VIB-5523 fix.
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xabc")
+        market.set_position_health("Aave_V3", "0xAbCdEf", _sample_health())
+        market.set_position_health("aave_v3", "usdc", _sample_health())
+
+        # Invalidate with lowercase args though the key was seeded mixed-case.
+        market.invalidate_position_health("aave_v3", "0xabcdef")
+
+        remaining = list(market._position_health_cache)
+        assert ("Aave_V3", "0xAbCdEf", "", "", "") not in remaining
+        assert ("aave_v3", "usdc", "", "", "") in remaining
+
+    def test_invalidate_non_string_market_id_does_not_raise(self):
+        # CodeRabbit MAJOR (PR #3102): non-string identifiers — an int ``0`` or a
+        # bytes32/int Morpho market id — must not raise AttributeError in
+        # invalidate_position_health. A bare ``market_id.lower()`` crashed for
+        # exactly the falsy non-string edge case this PR targets, so eviction
+        # never reached the matching entry. Seed with an int market_id and
+        # evict with the same int; the matching key must be removed and the
+        # sibling preserved.
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xabc")
+        market._position_health_cache[("morpho_blue", 0, "", "", "")] = _sample_health()
+        market._position_health_cache[("morpho_blue", 1, "", "", "")] = _sample_health()
+
+        # Pre-fix this raised AttributeError: 'int' object has no attribute 'lower'.
+        market.invalidate_position_health("morpho_blue", 0)
+
+        remaining = list(market._position_health_cache)
+        assert ("morpho_blue", 0, "", "", "") not in remaining
+        assert ("morpho_blue", 1, "", "", "") in remaining
+
+    def test_invalidate_then_get_re_reads_provider(self):
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xabc")
+        with patch("almanak.framework.data.position_health.PositionHealthProvider") as mock_cls:
+            mock_cls.return_value.get_health.return_value = _sample_health()
+            market.position_health(protocol="aave_v3", market_id="aave_v3")
+            market.invalidate_position_health()
+            market.position_health(protocol="aave_v3", market_id="aave_v3")
+
+        # Eviction forces a second provider read (vs the cache-hit test above).
+        assert mock_cls.return_value.get_health.call_count == 2

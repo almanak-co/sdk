@@ -1827,6 +1827,30 @@ class MarketSnapshot:
             self._balance_usd_unmeasured.discard(key)
         self._balances.pop(resolved, None)
 
+    def invalidate_balances(self) -> None:
+        """Evict ALL memoized wallet balances so the next :meth:`balance` call
+        re-queries the provider. Plural, whole-snapshot sibling of
+        :meth:`invalidate_balance`.
+
+        Used by post-teardown verification (VIB-5523): when a fresh snapshot
+        cannot be built and the pre-execution snapshot is reused for the
+        post-closure chain re-read, the position-health memo is evicted but the
+        memoized wallet balances would otherwise still serve pre-unwind values.
+        Clearing them forces every subsequent balance read to reflect live
+        on-chain state.
+
+        No-op on provider-less snapshots (paper / dry-run inject simulated
+        balances directly into the memo maps): with no provider there is no
+        fresher source to re-query, so clearing would turn every subsequent
+        read into a ValueError instead of serving the (correct, simulated) memo
+        — same rationale as :meth:`invalidate_balance`.
+        """
+        if self._balance_provider is None:
+            return
+        self._balance_cache.clear()
+        self._balances.clear()
+        self._balance_usd_unmeasured.clear()
+
     def balance(
         self,
         token: str,
@@ -3070,6 +3094,52 @@ class MarketSnapshot:
 
         self._position_health_cache[cache_key] = health
         return health
+
+    def invalidate_position_health(self, protocol: str | None = None, market_id: str | None = None) -> None:
+        """Evict memoized ``position_health`` results so the next call re-reads on-chain.
+
+        ``position_health`` memoizes per ``(protocol, market_id, rpc_url,
+        collateral_price, debt_price)`` for the snapshot's lifetime. Teardown
+        verification reuses the pre-execution snapshot to confirm POST-closure
+        state; without eviction the post-WITHDRAW read serves the PRE-WITHDRAW
+        health and falsely reports a zeroed lending position still open
+        (VIB-5523). Mirrors :meth:`invalidate_balance`.
+
+        Cache keys are populated from the raw ``protocol`` / ``market_id`` a
+        caller passes to :meth:`position_health` (no normalization at seed
+        time), so an invalidation argument whose casing differs from the
+        seeded key — mixed-case protocol slugs, checksummed vs lowercase hex
+        ``market_id`` — would otherwise miss and leave the stale memo in place
+        (defeating the VIB-5523 fix). Compare both sides case-insensitively so
+        eviction always hits regardless of casing on either side.
+
+        Args:
+            protocol: When given, evict only entries for this protocol.
+            market_id: When given (with ``protocol``), evict only that market's
+                entry. ``protocol=None`` clears the entire health memo.
+        """
+        if protocol is None:
+            self._position_health_cache.clear()
+            return
+        # Coerce both sides to str before lowercasing: cache keys are seeded
+        # from the raw ``protocol`` / ``market_id`` a caller passes (no
+        # normalization at seed time — see ``set_position_health``), and those
+        # identifiers are not guaranteed to be strings (e.g. an int ``0`` or a
+        # bytes32/int Morpho market id). A bare ``.lower()`` would raise
+        # AttributeError and skip eviction for exactly the non-string falsy
+        # edge case this fix targets (VIB-5523). The key side already coerces
+        # with ``str(...).lower()``; mirror it here.
+        protocol_norm = str(protocol).lower()
+        market_id_norm = str(market_id).lower() if market_id is not None else None
+        stale_keys = [
+            key
+            for key in self._position_health_cache
+            if key
+            and str(key[0]).lower() == protocol_norm
+            and (market_id_norm is None or (len(key) > 1 and str(key[1]).lower() == market_id_norm))
+        ]
+        for key in stale_keys:
+            self._position_health_cache.pop(key, None)
 
     def set_position_health(self, protocol: str, market_id: str, health: Any) -> None:
         """Pre-populate position health for tests and backtesting.

@@ -249,6 +249,138 @@ def test_reconcile_never_drops_strategy_positions() -> None:
     assert {p.position_id for p in out.positions} == {"100", "WETH", "200"}
 
 
+def _strat_lending(leg: PositionType, asset: str, chain: str = "arbitrum", protocol: str = "aave_v3") -> PositionInfo:
+    """A strategy-emitted lending leg: position_id encodes the asset, details['asset']."""
+    verb = "supply" if leg == PositionType.SUPPLY else "borrow"
+    return PositionInfo(
+        position_type=leg,
+        position_id=f"aave-{verb}-{asset}-{chain}",
+        chain=chain,
+        protocol=protocol,
+        value_usd=Decimal("100"),
+        details={"asset": asset},
+    )
+
+
+def _registry_lending(
+    leg: PositionType, market_id: str, asset: str, chain: str = "arbitrum", protocol: str = "aave_v3"
+) -> PositionInfo:
+    """A registry-sourced lending leg: position_id is the market_id, details['asset_symbol']."""
+    return PositionInfo(
+        position_type=leg,
+        position_id=market_id,
+        chain=chain,
+        protocol=protocol,
+        value_usd=Decimal("0"),
+        details={"source": "position_registry", "leg": "collateral", "market_id": market_id, "asset_symbol": asset},
+    )
+
+
+def test_reconcile_dedupes_lending_strategy_vs_registry_copies_VIB_5523() -> None:
+    """Strategy + registry name the SAME lending leg with DIFFERENT position_id
+    formats (strategy ``aave-supply-wstETH-arbitrum`` vs registry market_id
+    ``wsteth``). The union must dedup to 2 (the strategy's richer copies), NOT 4
+    — else the registry duplicates get flagged uncovered by completeness."""
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[
+            _strat_lending(PositionType.SUPPLY, "wstETH"),
+            _strat_lending(PositionType.BORROW, "USDC"),
+        ],
+    )
+    out = reconcile_lp_with_registry(
+        strategy_summary=strat,
+        registry_positions=[
+            _registry_lending(PositionType.SUPPLY, "wsteth", "wstETH"),
+            _registry_lending(PositionType.BORROW, "usdc", "USDC"),
+        ],
+        registry_available=True,
+    )
+    assert len(out.positions) == 2  # deduped, not 4
+    # The strategy's richer (valued, asset-keyed) copies are the retained ones.
+    assert {p.position_id for p in out.positions} == {
+        "aave-supply-wstETH-arbitrum",
+        "aave-borrow-USDC-arbitrum",
+    }
+
+
+def test_reconcile_lending_keeps_distinct_isolated_markets_VIB_5523() -> None:
+    """Two Morpho markets supplying the SAME asset are distinct positions — the
+    bytes32 market_id (carried on both sides) must keep them separate, never
+    merge them (under-counting = stranding a real position)."""
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[
+            PositionInfo(
+                position_type=PositionType.SUPPLY,
+                position_id="m-A",
+                chain="ethereum",
+                protocol="morpho_blue",
+                value_usd=Decimal("100"),
+                details={"asset": "wstETH", "market_id": "0xAAA"},
+            )
+        ],
+    )
+    out = reconcile_lp_with_registry(
+        strategy_summary=strat,
+        registry_positions=[
+            _registry_lending(PositionType.SUPPLY, "0xBBB", "wstETH", chain="ethereum", protocol="morpho_blue"),
+        ],
+        registry_available=True,
+    )
+    # Distinct markets (0xAAA vs 0xBBB) → BOTH kept.
+    assert len(out.positions) == 2
+
+
+def test_reconcile_lending_market_id_zero_is_not_falsy_collapsed_VIB_5523() -> None:
+    """Gemini MEDIUM (PR #3102): a legitimate integer ``market_id == 0`` must
+    key on ``"0"``, not silently fall back to ``asset`` via ``market_id or ""``.
+    A market-0 position is a DISTINCT identity from an asset-only position on the
+    same asset/protocol/chain — collapsing them would strand a real position."""
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[
+            PositionInfo(
+                position_type=PositionType.SUPPLY,
+                position_id="market-zero",
+                chain="ethereum",
+                protocol="morpho_blue",
+                value_usd=Decimal("100"),
+                details={"asset": "wstETH", "market_id": 0},
+            )
+        ],
+    )
+    out = reconcile_lp_with_registry(
+        strategy_summary=strat,
+        registry_positions=[
+            # Registry leg on the SAME asset but with NO market_id (asset-only).
+            PositionInfo(
+                position_type=PositionType.SUPPLY,
+                position_id="asset-only",
+                chain="ethereum",
+                protocol="morpho_blue",
+                value_usd=Decimal("50"),
+                details={"asset": "wstETH"},
+            ),
+        ],
+        registry_available=True,
+    )
+    # market_id=0 → discriminator "0"; asset-only → discriminator "wstETH".
+    # Distinct identities → BOTH kept (the bug collapsed them to 1). Assert the
+    # actual identities, not just the count: a count-only check would pass even
+    # if reconciliation returned the wrong two positions (CodeRabbit MINOR).
+    position_ids = {p.position_id for p in out.positions}
+    assert position_ids == {"market-zero", "asset-only"}
+    # And the discriminating detail survives: the market-0 leg keeps market_id 0.
+    market_zero = next(p for p in out.positions if p.position_id == "market-zero")
+    assert market_zero.details.get("market_id") == 0
+    asset_only = next(p for p in out.positions if p.position_id == "asset-only")
+    assert "market_id" not in asset_only.details
+
+
 # ---------------------------------------------------------------------------
 # Restart determinism — the headline acceptance criterion
 # ---------------------------------------------------------------------------
@@ -428,7 +560,9 @@ async def test_dedup_is_chain_scoped_cross_chain_token_id_not_suppressed() -> No
 class _RaisingRegistrySM:
     """Registry SM whose read RAISES a transient (non-cutover) fault."""
 
-    async def get_position_registry_open_rows(self, deployment_id, *, chain=None, primitive=None, accounting_category=None):
+    async def get_position_registry_open_rows(
+        self, deployment_id, *, chain=None, primitive=None, accounting_category=None
+    ):
         raise RuntimeError("transient gateway fault")
 
 
@@ -466,9 +600,7 @@ async def test_resolve_chain_verifies_known_lp_when_registry_read_failed(monkeyp
         verified.append(str(position.position_id))
         return True
 
-    monkeypatch.setattr(
-        "almanak.framework.teardown.live_position_reads.chain_verify_lp_open", _verify
-    )
+    monkeypatch.setattr("almanak.framework.teardown.live_position_reads.chain_verify_lp_open", _verify)
     strat = TeardownPositionSummary(deployment_id=DEPLOYMENT_ID, timestamp=datetime.now(UTC), positions=[_lp("77")])
     strategy = _VerifyStrategy(summary=strat, state_manager=_RaisingRegistrySM(), gateway_client=object())
     out = await resolve_open_positions_with_registry(strategy)
@@ -488,9 +620,7 @@ async def test_resolve_flags_strategy_lp_absent_from_registry(monkeypatch) -> No
         seen.append(str(position.position_id))
         return True
 
-    monkeypatch.setattr(
-        "almanak.framework.teardown.live_position_reads.chain_verify_lp_open", _verify
-    )
+    monkeypatch.setattr("almanak.framework.teardown.live_position_reads.chain_verify_lp_open", _verify)
     sm = _FakeRegistrySM({"lp": [_v3_row("22")], "lp_v4": []})
     strat = TeardownPositionSummary(deployment_id=DEPLOYMENT_ID, timestamp=datetime.now(UTC), positions=[_lp("11")])
     strategy = _VerifyStrategy(summary=strat, state_manager=sm, gateway_client=object())
@@ -509,9 +639,7 @@ async def test_resolve_skips_chain_verify_for_matched_positions(monkeypatch) -> 
         calls.append(str(position.position_id))
         return True
 
-    monkeypatch.setattr(
-        "almanak.framework.teardown.live_position_reads.chain_verify_lp_open", _verify
-    )
+    monkeypatch.setattr("almanak.framework.teardown.live_position_reads.chain_verify_lp_open", _verify)
     sm = _FakeRegistrySM({"lp": [_v3_row("22")], "lp_v4": []})
     strat = TeardownPositionSummary(
         deployment_id=DEPLOYMENT_ID, timestamp=datetime.now(UTC), positions=[_lp("22", chain="arbitrum")]
@@ -587,7 +715,9 @@ async def test_read_builds_lending_collateral_and_debt_positions() -> None:
     sm = _FakeRegistrySM(
         {"lending": [_lending_row(market_id="usdc", leg="collateral"), _lending_row(market_id="dai", leg="debt")]}
     )
-    positions, available = await read_open_lending_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    positions, available = await read_open_lending_positions_from_registry(
+        state_manager=sm, deployment_id=DEPLOYMENT_ID
+    )
     assert available is True
     by_id = {p.position_id: p for p in positions}
     assert set(by_id) == {"usdc", "dai"}
@@ -606,7 +736,9 @@ async def test_read_lending_skips_row_without_market_id() -> None:
     bad = _lending_row()
     bad["payload"].pop("market_id")
     sm = _FakeRegistrySM({"lending": [bad]})
-    positions, available = await read_open_lending_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    positions, available = await read_open_lending_positions_from_registry(
+        state_manager=sm, deployment_id=DEPLOYMENT_ID
+    )
     assert available is True  # the read answered
     assert positions == []  # but the unusable row is not surfaced
 
@@ -616,7 +748,9 @@ async def test_read_lending_unavailable_on_backend_without_cutover_storage() -> 
     from almanak.framework.teardown.registry_enumeration import read_open_lending_positions_from_registry
 
     sm = _FakeRegistrySM({"lending": [_lending_row()]}, unsupported={"lending"})
-    positions, available = await read_open_lending_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    positions, available = await read_open_lending_positions_from_registry(
+        state_manager=sm, deployment_id=DEPLOYMENT_ID
+    )
     assert available is False  # degrade — never "nothing open"
     assert positions == []
 
@@ -630,7 +764,9 @@ async def test_read_lending_generalises_to_spark() -> None:
     sm = _FakeRegistrySM(
         {"lending": [_lending_row(protocol="spark", market_id="dai", leg="debt", chain="ethereum", asset="DAI")]}
     )
-    positions, available = await read_open_lending_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+    positions, available = await read_open_lending_positions_from_registry(
+        state_manager=sm, deployment_id=DEPLOYMENT_ID
+    )
     assert available is True
     assert len(positions) == 1
     assert positions[0].protocol == "spark"
@@ -708,7 +844,12 @@ async def test_read_builds_pendle_pt_and_lp_positions() -> None:
     from almanak.framework.teardown.registry_enumeration import read_open_pendle_positions_from_registry
 
     sm = _FakeRegistrySM(
-        {"swap": [_pendle_row(kind="pt", market_id="pt-wsteth-25jun2026"), _pendle_row(kind="lp", market_id="0xmarket")]}
+        {
+            "swap": [
+                _pendle_row(kind="pt", market_id="pt-wsteth-25jun2026"),
+                _pendle_row(kind="lp", market_id="0xmarket"),
+            ]
+        }
     )
     positions, available = await read_open_pendle_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
     assert available is True
@@ -801,7 +942,6 @@ async def test_resolve_unions_pendle_with_lp_and_keeps_strategy_positions() -> N
         (str(PositionType.LP), "99"),  # registry UniV3 LP
         (str(PositionType.TOKEN), "pt-x"),  # registry Pendle PT
     }
-
 
 
 # ---------------------------------------------------------------------------

@@ -2610,10 +2610,18 @@ class TeardownManager:
         try:
             gateway_client = self._teardown_gateway_client()
             network = str(getattr(strategy, "_gateway_network", "") or "")
+            # VIB-5523 (Bug B): the POST-teardown reconciliation MUST read LIVE
+            # on-chain state. ``market`` was built at teardown START and memoizes
+            # ``position_health`` per (protocol, market_id, …); reusing it here
+            # serves the PRE-WITHDRAW health and falsely reports a zeroed lending
+            # position CONFIRMED_OPEN (every stranded leg shows the identical
+            # pre-teardown value). Read fresh — one extra gateway round-trip at
+            # teardown end is acceptable for correctness.
+            post_market = self._fresh_post_execution_market(strategy, market)
             post_report = await reconcile_known_positions_against_chain(
                 summary=pre_execution_positions,
                 gateway_client=gateway_client,
-                market=market,
+                market=post_market,
                 network=network,
             )
         except Exception:  # noqa: BLE001 — the CHECK must never fault the teardown lane
@@ -2671,6 +2679,51 @@ class TeardownManager:
             )
             return replace(verification, verification_status=status)
         return verification
+
+    @staticmethod
+    def _fresh_post_execution_market(strategy: Any, fallback: Any | None) -> Any | None:
+        """Return a FRESH market snapshot for the POST-teardown chain re-read (VIB-5523).
+
+        The pre-execution snapshot memoizes ``position_health`` AND wallet
+        ``balance``, so reusing it to verify post-closure state returns stale
+        (pre-unwind) values and falsely reports a zeroed position still open.
+        Build a fresh snapshot from the strategy so the read reflects live
+        on-chain state. When a fresh snapshot cannot be built, fall back to
+        EVICTING the stale memos on the reused snapshot — BOTH the health memo
+        and the wallet-balance memos — so the post read still re-queries the
+        chain rather than serving any pre-execution value. Never raises —
+        verification must never fault the teardown lane.
+        """
+        creator = getattr(strategy, "create_market_snapshot", None)
+        if callable(creator):
+            try:
+                fresh = creator()
+                if fresh is not None:
+                    return fresh
+            except Exception:  # noqa: BLE001 — fall back to cache eviction below
+                logger.warning(
+                    "TD-15: could not build a fresh post-execution market snapshot for %s — "
+                    "evicting the stale health cache on the reused snapshot instead",
+                    getattr(strategy, "deployment_id", ""),
+                    exc_info=True,
+                )
+        if fallback is not None:
+            invalidate = getattr(fallback, "invalidate_position_health", None)
+            if callable(invalidate):
+                try:
+                    invalidate()
+                except Exception:  # noqa: BLE001 — best-effort; degrade to cached read
+                    logger.debug("TD-15: invalidate_position_health failed; using cached health", exc_info=True)
+            # The reused snapshot also memoizes wallet balances; evict them too so
+            # a post-execution balance read reflects live (post-unwind) state
+            # rather than the pre-execution memo (VIB-5523).
+            invalidate_balances = getattr(fallback, "invalidate_balances", None)
+            if callable(invalidate_balances):
+                try:
+                    invalidate_balances()
+                except Exception:  # noqa: BLE001 — best-effort; degrade to cached read
+                    logger.debug("TD-15: invalidate_balances failed; using cached balances", exc_info=True)
+        return fallback
 
     # ------------------------------------------------------------------
     # Helpers used by _verify_closure to plumb gateway / RPC / wallet to

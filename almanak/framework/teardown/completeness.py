@@ -74,8 +74,20 @@ _ENFORCEABLE_TYPES: frozenset[PositionType] = frozenset(
 # ``_first(details, "asset", "token", "address")`` — an address-keyed held token
 # yields a valid ``SWAP(from_token=<address>)``, so the coverage check must see
 # that same address or it would falsely fail a legitimate close (VIB-5469).
+# ``asset_symbol`` is included because a registry-sourced lending position
+# (``registry_enumeration._position_info_from_lending_registry_row`` /
+# ``_position_info_from_pendle_registry_row``) deliberately stores its reserve
+# symbol under ``details["asset_symbol"]`` (NOT ``details["asset"]``, to avoid
+# the PortfolioValuer wallet-overlap special-casing). Without it the coverage
+# check reads ``{}`` tokens for those positions and falsely fails a legitimate
+# WITHDRAW/REPAY/SWAP close on a restart-only registry enumeration (VIB-5523).
+# This is safe: completeness and PortfolioValuer are different consumers — the
+# valuer keys on ``details["asset"]`` and is untouched by adding the symbol key
+# here, so the deliberate separation that keeps the valuer from double-counting
+# these legs as wallet tokens is preserved.
 _TOKEN_DETAIL_KEYS: tuple[str, ...] = (
     "asset",
+    "asset_symbol",
     "token",
     "collateral_token",
     "borrow_token",

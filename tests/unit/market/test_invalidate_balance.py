@@ -79,3 +79,36 @@ def test_invalidate_balance_noop_without_provider() -> None:
 
     snapshot.invalidate_balance("USDC")
     assert snapshot.balance("USDC").balance == Decimal("100")
+
+
+def test_invalidate_balances_clears_all_tokens() -> None:
+    # Gemini MEDIUM (PR #3102): post-teardown verification falling back to the
+    # reused snapshot must evict ALL memoized balances, not just position health,
+    # so a post-execution balance read reflects live (post-unwind) state.
+    provider = _Provider(Decimal("50"))
+    snapshot = _snapshot(provider)
+
+    # Prime the memo for both tokens.
+    assert snapshot.balance("USDT").balance == Decimal("50")
+    assert snapshot.balance("WETH").balance == Decimal("50")
+
+    # Underlying changes; the memo still serves the primed value (proves it WAS
+    # cached — without memoization this would already read 0)...
+    provider.value = Decimal("0")
+    assert snapshot.balance("USDT").balance == Decimal("50")
+
+    # ...until invalidate_balances() evicts ALL memoized balances (not just
+    # position health), so both tokens re-query the provider and see live state.
+    snapshot.invalidate_balances()
+    assert snapshot.balance("USDT").balance == Decimal("0")
+    assert snapshot.balance("WETH").balance == Decimal("0")
+
+
+def test_invalidate_balances_noop_without_provider() -> None:
+    """No provider → simulated balances ARE the memo; clearing all would turn
+    later reads into ValueErrors. Must no-op (mirrors the singular variant)."""
+    snapshot = MarketSnapshot(chain="arbitrum", wallet_address="0x" + "11" * 20)
+    snapshot.set_balance("USDC", TokenBalance(symbol="USDC", balance=Decimal("100"), balance_usd=Decimal("100")))
+
+    snapshot.invalidate_balances()
+    assert snapshot.balance("USDC").balance == Decimal("100")

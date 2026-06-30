@@ -171,6 +171,84 @@ async def test_residual_open_dominates_partial_clean(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# VIB-5523 Bug B — POST-teardown read must be FRESH, not the cached pre-exec snapshot
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_post_exec_reads_fresh_snapshot_not_stale_market_VIB_5523():
+    """The pre-execution snapshot memoizes ``position_health``. The POST-teardown
+    reconciliation must read a FRESH snapshot — a debt leg zeroed on-chain after
+    REPAY must NOT be reported CONFIRMED_OPEN off the stale pre-WITHDRAW value
+    (the false-FAILED bug)."""
+    stale_market = _Market(_Health(Decimal("500"), Decimal("500")))  # pre-teardown: OPEN
+    fresh_market = _Market(_Health(Decimal("0"), Decimal("0")))  # post-teardown: CLOSED
+
+    class _StrategyFresh(_Strategy):
+        def create_market_snapshot(self):
+            return fresh_market
+
+    out = await _mgr().verify_closure_against_chain(
+        _StrategyFresh(),
+        verification=_verified(VerificationStatus.UNVERIFIED),
+        pre_execution_positions=_summary(_lending_position(PositionType.BORROW)),
+        market=stale_market,  # reusing this would falsely report CONFIRMED_OPEN → FAILED
+    )
+    assert out.all_closed is True  # read fresh (closed) state, not the stale cache
+    assert out.verification_status is VerificationStatus.UNVERIFIED  # NOT flipped to FAILED
+
+
+@pytest.mark.asyncio
+async def test_post_exec_falls_back_to_cache_eviction_when_no_fresh_snapshot_VIB_5523():
+    """With no ``create_market_snapshot``, the verifier evicts the stale health
+    memo on the reused snapshot so the post read still re-queries the chain."""
+    evicted = {"called": False}
+
+    class _CachingMarket(_Market):
+        def invalidate_position_health(self, protocol=None, market_id=None):
+            evicted["called"] = True
+            self._health = _Health(Decimal("0"), Decimal("0"))  # live (closed) after eviction
+
+    market = _CachingMarket(_Health(Decimal("0"), Decimal("500")))  # stale: debt still open
+    out = await _mgr().verify_closure_against_chain(
+        _Strategy(),  # no create_market_snapshot → fallback path
+        verification=_verified(VerificationStatus.UNVERIFIED),
+        pre_execution_positions=_summary(_lending_position(PositionType.BORROW)),
+        market=market,
+    )
+    assert evicted["called"] is True
+    assert out.all_closed is True  # post-eviction read is closed → no residual
+
+
+@pytest.mark.asyncio
+async def test_post_exec_fallback_also_evicts_balances_VIB_5523():
+    """Gemini MEDIUM (PR #3102): the reused snapshot memoizes wallet balances as
+    well as position health. The no-fresh-snapshot fallback must evict BOTH so a
+    post-execution balance read reflects live (post-unwind) state, not the
+    pre-unwind memo."""
+    evicted = {"health": False, "balances": False}
+
+    class _CachingMarket(_Market):
+        def invalidate_position_health(self, protocol=None, market_id=None):
+            evicted["health"] = True
+            self._health = _Health(Decimal("0"), Decimal("0"))
+
+        def invalidate_balances(self):
+            evicted["balances"] = True
+
+    market = _CachingMarket(_Health(Decimal("0"), Decimal("500")))
+    out = await _mgr().verify_closure_against_chain(
+        _Strategy(),  # no create_market_snapshot → fallback path
+        verification=_verified(VerificationStatus.UNVERIFIED),
+        pre_execution_positions=_summary(_lending_position(PositionType.BORROW)),
+        market=market,
+    )
+    assert evicted["health"] is True
+    assert evicted["balances"] is True
+    assert out.all_closed is True
+
+
+# ---------------------------------------------------------------------------
 # Clean close + confidence composition
 # ---------------------------------------------------------------------------
 
