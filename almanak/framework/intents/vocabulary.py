@@ -28,6 +28,7 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
+from almanak.core.enums import Protocol
 from almanak.framework.models.base import (
     AlmanakImmutableModel,  # noqa: F401  -- re-exported for backward compatibility
     OptionalChainedAmount,
@@ -85,6 +86,20 @@ ChainedAmount = Decimal | Literal["all"]
 # - 'variable': Interest rate fluctuates based on supply/demand
 # Note: 'stable' rate was deprecated on Aave V3 and Spark (most assets disabled)
 InterestRateMode = Literal["variable"]
+
+
+def _is_curve_protocol(protocol: str | None) -> bool:
+    """Return True if ``protocol`` names the Curve connector (case-insensitive).
+
+    Compares against the canonical ``Protocol.CURVE`` enum rather than a bare
+    ``"curve"`` string literal so the curve-only LP_CLOSE field guards
+    (``coin_index`` / ``imbalanced_amounts``) do NOT each register as a new
+    protocol-literal dispatch site under
+    ``tests/static/test_protocol_chain_literal_ratchet.py``. One shared,
+    enum-backed predicate is also the single source of truth for "is this a
+    Curve intent" across those guards.
+    """
+    return (protocol or "").lower() == Protocol.CURVE.value.lower()
 
 
 # =============================================================================
@@ -498,6 +513,26 @@ class LPCloseIntent(BaseIntent):
             (``remove_liquidity`` across all coins) — byte-for-byte unchanged for
             existing callers. Consumed only by the Curve compiler; other LP
             connectors ignore it.
+        imbalanced_amounts: Optional imbalanced exit selector (VIB-5438). When set
+            to a per-coin vector of EXACT amounts to withdraw (positional by
+            pool-coin index, human units), the close uses Curve's
+            ``remove_liquidity_imbalance``: the pool burns however much LP is needed
+            to deliver those exact amounts, capped at a MAX-BURN ceiling the adapter
+            sizes from the pool's on-chain ``calc_token_amount(amounts,
+            is_deposit=False)`` (fail-closed; never an unbounded cap). Mutually
+            exclusive with ``coin_index`` and with ``amount`` (the close-all chaining
+            marker — an exact-amounts withdrawal is not a close-all). When ``None``
+            (the default), the close is proportional — byte-for-byte unchanged.
+            StableSwap-family only; consumed only by the Curve compiler.
+
+            NOTE on slippage: on a LEGACY (non-NG) StableSwap pool,
+            ``calc_token_amount(is_deposit=False)`` EXCLUDES the imbalance fee, so a
+            ``max_slippage`` of exactly ``0`` makes the derived max-burn ceiling too
+            tight and the on-chain ``remove_liquidity_imbalance`` ALWAYS reverts
+            ("Slippage screwed you"). This is fail-closed — no funds are lost — but
+            it wastes gas. Leave ``max_slippage`` unset (50 bps default) or give it
+            enough headroom to cover the fee. StableSwap-NG pools fold the fee into
+            the quote, so ``0`` is fine there.
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
     """
@@ -511,6 +546,7 @@ class LPCloseIntent(BaseIntent):
     amount: OptionalChainedAmount = None
     max_slippage: OptionalSafeDecimal = None
     coin_index: int | None = None
+    imbalanced_amounts: list[SafeDecimal] | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
@@ -538,8 +574,49 @@ class LPCloseIntent(BaseIntent):
         # subclass in Python, but `True`/`False` are never a valid coin index) and
         # negatives. The connector validates the upper bound against the resolved
         # pool's coin count, where n_coins is known.
-        if self.coin_index is not None and (isinstance(self.coin_index, bool) or self.coin_index < 0):
-            raise ValueError("coin_index must be a non-negative integer when set")
+        if self.coin_index is not None:
+            if isinstance(self.coin_index, bool) or self.coin_index < 0:
+                raise ValueError("coin_index must be a non-negative integer when set")
+            # coin_index, like imbalanced_amounts, is consumed ONLY by the Curve
+            # compiler; any other LP connector would silently ignore it. Fail fast
+            # rather than let a caller think a single-sided exit will happen on,
+            # e.g., the default uniswap_v3 protocol (CodeRabbit — applied to both
+            # Curve-only exit selectors for a consistent contract).
+            if not _is_curve_protocol(self.protocol):
+                raise ValueError(
+                    f"coin_index is only supported by the Curve connector, not protocol "
+                    f"'{self.protocol}'. Set protocol='curve' for a single-sided LP close."
+                )
+        # imbalanced_amounts opts into an imbalanced close (exact per-coin amounts
+        # OUT, capped by a derived max-burn). Mutually exclusive with the
+        # single-sided coin_index path AND with the close-all `amount` chaining
+        # marker (an exact-amounts withdrawal is not a close-all). Require a
+        # non-empty, non-negative vector with at least one positive entry (an
+        # all-zero withdrawal is a no-op). NaN/Infinity are already rejected by the
+        # SafeDecimal field schema (Pydantic's finite-number constraint). The
+        # connector validates the vector length against the resolved pool's coin
+        # count, where n_coins is known.
+        if self.imbalanced_amounts is not None:
+            # imbalanced_amounts is consumed ONLY by the Curve compiler; every other
+            # LP connector would silently ignore it. Fail fast rather than let a
+            # caller think an exact-amounts withdrawal will happen on, e.g., the
+            # default uniswap_v3 protocol (CodeRabbit). ``protocol`` is compared
+            # case-insensitively to match the connector-registry normalization.
+            if not _is_curve_protocol(self.protocol):
+                raise ValueError(
+                    f"imbalanced_amounts is only supported by the Curve connector, not protocol "
+                    f"'{self.protocol}'. Set protocol='curve' for an imbalanced LP close."
+                )
+            if self.coin_index is not None:
+                raise ValueError("imbalanced_amounts and coin_index are mutually exclusive")
+            if self.amount is not None:
+                raise ValueError("imbalanced_amounts and amount (close-all) are mutually exclusive")
+            if len(self.imbalanced_amounts) == 0:
+                raise ValueError("imbalanced_amounts must be a non-empty list when set")
+            if any(a < 0 for a in self.imbalanced_amounts):
+                raise ValueError("imbalanced_amounts must all be non-negative")
+            if not any(a > 0 for a in self.imbalanced_amounts):
+                raise ValueError("imbalanced_amounts must have at least one positive amount")
         return self
 
     @property
@@ -1034,6 +1111,7 @@ class Intent:
         amount: ChainedAmount | None = None,
         max_slippage: Decimal | None = None,
         coin_index: int | None = None,
+        imbalanced_amounts: list[Decimal] | None = None,
         registry_handle: str | None = None,
     ) -> LPCloseIntent:
         """Create an LP close intent.
@@ -1064,6 +1142,11 @@ class Intent:
                 A non-negative pool-coin index withdraws the whole position into
                 that one coin via ``remove_liquidity_one_coin``; ``None`` (default)
                 keeps the proportional all-coin close.
+            imbalanced_amounts: Optional imbalanced exit (Curve StableSwap only,
+                VIB-5438). A per-coin vector of EXACT amounts to withdraw (positional
+                by pool-coin index) routed via ``remove_liquidity_imbalance`` with a
+                fail-closed max-burn ceiling. Mutually exclusive with ``coin_index``;
+                ``None`` (default) keeps the proportional all-coin close.
 
         Returns:
             LPCloseIntent: The created LP close intent
@@ -1089,6 +1172,7 @@ class Intent:
             amount=amount,
             max_slippage=max_slippage,
             coin_index=coin_index,
+            imbalanced_amounts=imbalanced_amounts,
             registry_handle=registry_handle,
         )
 

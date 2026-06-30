@@ -33,6 +33,7 @@ from almanak.connectors._strategy_base.swap_oracle_guard import (
     DEFAULT_SWAP_ORACLE_DIVERGENCE_BPS,
     check_swap_oracle_divergence,
 )
+from almanak.connectors.curve.receipt_parser import CURVE_LP_TOKEN_DECIMALS
 from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
@@ -386,6 +387,32 @@ REMOVE_LIQUIDITY_ONE_CRYPTO_SELECTOR = "0xf1dc3cc9"  # remove_liquidity_one_coin
 # 0x4fb08c5e) — each pool reverts/empties the other family's selector.
 CALC_WITHDRAW_ONE_COIN_STABLE_SELECTOR = "0xcc2b27d7"  # calc_withdraw_one_coin(uint256,int128) — StableSwap
 CALC_WITHDRAW_ONE_COIN_CRYPTO_SELECTOR = "0x4fb08c5e"  # calc_withdraw_one_coin(uint256,uint256) — CryptoSwap
+# Imbalanced withdrawal: remove_liquidity_imbalance(uint256[N] amounts, uint256
+# max_burn_amount) — StableSwap-family ONLY (CryptoSwap/Tricrypto pools have no
+# imbalanced exit). You name the EXACT per-coin amounts OUT and the pool burns
+# however much LP is needed, capped at ``max_burn_amount`` (the inverse of a
+# min-out: the floor here is a MAX-BURN CEILING — VIB-5438, audit P0-4). Keyed
+# by coin count for the fixed-array ABI; the NG variant is a dynamic ``uint256[]``.
+# Verified on-chain 2026-06-29 against 3pool (0xbEbc44…): the [3] selector
+# executes the withdrawal body (a too-tight max_burn reverts "Slippage screwed
+# you"), and an adequate max_burn returns success.
+REMOVE_LIQUIDITY_IMBALANCE_SELECTORS: dict[int, str] = {
+    2: "0xe3103273",  # remove_liquidity_imbalance(uint256[2],uint256)
+    3: "0x9fdaea0c",  # remove_liquidity_imbalance(uint256[3],uint256)
+    4: "0x18a7bd76",  # remove_liquidity_imbalance(uint256[4],uint256)
+}
+REMOVE_LIQUIDITY_IMBALANCE_DYN_SELECTOR = "0x7706db75"  # remove_liquidity_imbalance(uint256[],uint256) — StableSwap NG
+# ``calc_token_amount(uint256[N], bool is_deposit)`` for the StableSwap fixed-array
+# ABI, keyed by coin count. Called with ``is_deposit=False`` to quote the LP that
+# the requested imbalanced withdrawal would BURN, which seeds the max-burn ceiling
+# fail-closed (VIB-5438). Signature-derived, so identical to the CryptoSwap
+# bool-carrying selectors — but the imbalanced path is StableSwap-only. The NG
+# dynamic-array variant reuses ``NG_CALC_TOKEN_AMOUNT_SELECTOR`` (uint256[],bool).
+STABLE_CALC_TOKEN_AMOUNT_SELECTORS: dict[int, str] = {
+    2: "0xed8e84f3",  # calc_token_amount(uint256[2],bool)
+    3: "0x3883e119",  # calc_token_amount(uint256[3],bool)
+    4: "0xcf701ff7",  # calc_token_amount(uint256[4],bool)
+}
 GET_DY_SELECTOR = "0x5e0d443f"  # get_dy(int128,int128,uint256)
 GET_DY_UINT256_SELECTOR = "0x556d6e9f"  # get_dy(uint256,uint256,uint256)
 GET_DY_UNDERLYING_SELECTOR = "0x07211ef7"  # get_dy_underlying(int128,int128,uint256)
@@ -401,6 +428,8 @@ ERC20_DECIMALS_SELECTOR = "0x313ce567"  # decimals() -> uint8
 # coin order breaks approve/exchange; a frozen ``virtual_price`` drifts NAV.
 COINS_UINT256_SELECTOR = "0xc6610657"  # coins(uint256) -> address (factory/NG/newer pools)
 COINS_INT128_SELECTOR = "0x23746eb8"  # coins(int128) -> address (older Vyper pools, e.g. 3pool)
+BALANCES_UINT256_SELECTOR = "0x4903b0d1"  # balances(uint256) -> uint256 (factory/NG/newer pools)
+BALANCES_INT128_SELECTOR = "0x065a80d8"  # balances(int128) -> uint256 (older Vyper pools, e.g. 3pool)
 GET_VIRTUAL_PRICE_SELECTOR = "0xbb7b8b80"  # get_virtual_price() -> uint256 (1e18-scaled)
 # calc_token_amount(uint256[],bool) — present ONLY on StableSwap-NG pools (dynamic
 # array ABI). A clean (non-None) return is an NG-ABI fingerprint; a revert / empty
@@ -1721,6 +1750,203 @@ class CurveAdapter:
             logger.exception(f"Failed to build remove_liquidity_one_coin: {e}")
             return LiquidityResult(success=False, error=str(e))
 
+    def remove_liquidity_imbalance(
+        self,
+        pool_address: str,
+        amounts: list[Decimal],
+        lp_amount: Decimal,
+        slippage_bps: int | None = None,
+        recipient: str | None = None,
+    ) -> LiquidityResult:
+        """Build a remove_liquidity_imbalance transaction (LP_CLOSE, imbalanced).
+
+        ``remove_liquidity_imbalance(uint256[N] amounts, uint256 max_burn_amount)``
+        works the OPPOSITE way to single-sided removal: the caller names the EXACT
+        per-coin amounts to receive, and the pool burns however much LP is needed,
+        capped at ``max_burn_amount``. So the safety floor here is a MAX-BURN
+        CEILING (the most LP we will spend), NOT a min-out (VIB-5438, audit P0-4).
+
+        The ceiling is derived from the pool's on-chain ``calc_token_amount(amounts,
+        is_deposit=False)`` LP-burn quote, padded UP by ``slippage_bps`` (the
+        inverse of the single-sided min-out, which pads DOWN). The slippage buffer
+        absorbs the imbalance fee the legacy ``calc_token_amount`` excludes; if it
+        is too tight the pool reverts on-chain ("Slippage screwed you") — safe.
+
+        Fail-closed: this NEVER emits ``max_burn_amount = MAX_UINT256`` or any
+        unbounded cap (that would let the pool burn the entire LP balance for a
+        tiny withdrawal — a theft/sandwich vector). If the on-chain quote is
+        unavailable/reverts, or the requested withdrawal would need more LP than
+        the position holds, the compile fails loudly (mirrors the #3092 min-out and
+        #3073 min_lp logic).
+
+        Args:
+            pool_address: Pool contract address
+            amounts: EXACT per-coin amounts to withdraw, in human units, positional
+                by pool-coin index (length MUST equal the pool's coin count).
+            lp_amount: LP tokens HELD by the position (human units), the upper
+                bound on what may be burned. The derived ``max_burn`` is capped at
+                this; a request needing more fails closed.
+            slippage_bps: Max-burn buffer over the on-chain quote (default config).
+            recipient: Address to receive tokens (default: wallet_address).
+
+        Returns:
+            LiquidityResult with transaction data (operation
+            ``remove_liquidity_imbalance``), or ``success=False`` on any guard.
+        """
+        try:
+            # Honor an explicit slippage_bps=0 (exact-quote request); only fall back
+            # to the config default when the caller passed None (cf. single-sided).
+            if slippage_bps is None:
+                slippage_bps = self.config.default_slippage_bps
+            # Bound slippage at the adapter boundary (CodeRabbit, defense-in-depth):
+            # this is a public method reachable by direct callers / config defaults,
+            # not only the intent path. An out-of-range slippage_bps would inflate
+            # max_burn until it is capped at the FULL held LP — weakening the
+            # fail-closed ceiling — or (if negative) make the ceiling too tight.
+            if slippage_bps < 0 or slippage_bps > 10_000:
+                return LiquidityResult(
+                    success=False,
+                    error=(
+                        f"remove_liquidity_imbalance: slippage_bps must be in [0, 10000] (got {slippage_bps}); "
+                        f"refusing to build an unsafe max_burn ceiling."
+                    ),
+                )
+            recipient = recipient or self.wallet_address
+
+            pool_info = self.get_pool_info(pool_address)
+            if not pool_info:
+                return LiquidityResult(success=False, error=f"Unknown pool: {pool_address}")
+
+            # Imbalanced exit is a StableSwap-family primitive only — CryptoSwap /
+            # Tricrypto pools do not expose remove_liquidity_imbalance. Fail loud
+            # rather than emit calldata the pool will revert on.
+            if self._is_cryptoswap(pool_info):
+                return LiquidityResult(
+                    success=False,
+                    error=(
+                        f"remove_liquidity_imbalance is not supported on CryptoSwap/Tricrypto pool "
+                        f"{pool_info.name}; use a single-sided (coin_index) or proportional close."
+                    ),
+                )
+
+            # N must match the pool's coin count — the amounts vector is positional.
+            if len(amounts) != pool_info.n_coins:
+                return LiquidityResult(
+                    success=False,
+                    error=(
+                        f"remove_liquidity_imbalance: amounts length {len(amounts)} != pool coin count "
+                        f"{pool_info.n_coins} for {pool_info.name}."
+                    ),
+                )
+
+            # Convert each requested amount to native wei; require at least one
+            # positive coin (an all-zero withdrawal is a no-op / nonsense request).
+            amounts_wei: list[int] = []
+            for i, amt in enumerate(amounts):
+                if amt < 0:
+                    return LiquidityResult(
+                        success=False,
+                        error=f"remove_liquidity_imbalance: negative amount for coin {i} ({amt}).",
+                    )
+                decimals = self._coin_decimals(pool_info, i)
+                amounts_wei.append(int(amt * Decimal(10**decimals)))
+            if not any(a > 0 for a in amounts_wei):
+                return LiquidityResult(
+                    success=False,
+                    error="remove_liquidity_imbalance: all requested amounts are zero (nothing to withdraw).",
+                )
+
+            # Guard: requested amounts must not exceed the pool's on-chain balances
+            # (fail-closed; raises if the read is unavailable — never silently skip).
+            pool_balances = self._query_pool_balances_onchain(pool_info)
+            for i, want in enumerate(amounts_wei):
+                if want > pool_balances[i]:
+                    return LiquidityResult(
+                        success=False,
+                        error=(
+                            f"remove_liquidity_imbalance: requested {want} of coin {i} "
+                            f"({pool_info.coins[i]}) exceeds pool balance {pool_balances[i]} for {pool_info.name}."
+                        ),
+                    )
+
+            # Derive the MAX-BURN ceiling from the on-chain calc_token_amount LP-burn
+            # quote (fail-closed: raises if unavailable, caught below). Pad UP by
+            # slippage (ceiling), the inverse of the single-sided min-out floor.
+            # NOTE: on a LEGACY (non-NG) StableSwap pool, calc_token_amount excludes
+            # the imbalance fee, so a slippage_bps of 0 yields a ceiling below the
+            # real burn and the on-chain tx ALWAYS reverts ("Slippage screwed you").
+            # That is fail-closed (no loss) but wastes gas — callers should leave
+            # max_slippage at the default or give it fee headroom. NG pools fold the
+            # fee into the quote, so 0 is exact there.
+            lp_burn_quote = self._query_calc_token_amount_withdraw_onchain(pool_info, amounts_wei)
+            max_burn = int(lp_burn_quote * (10000 + slippage_bps) // 10000)
+
+            # Fail closed on a non-positive ceiling — an unbounded / zero max_burn
+            # would let the pool burn the entire LP balance (theft/sandwich vector).
+            if max_burn <= 0:
+                return LiquidityResult(
+                    success=False,
+                    error=(
+                        f"remove_liquidity_imbalance: computed max_burn is {max_burn} (must be > 0) "
+                        f"(lp_burn_quote={lp_burn_quote}, slippage_bps={slippage_bps}). "
+                        f"Refusing to ship a non-positive/unbounded ceiling (theft vector)."
+                    ),
+                )
+
+            # Cap the ceiling at the LP actually held: a max_burn above the position
+            # is meaningless (the pool can only burn what msg.sender holds) and a
+            # request whose quote already exceeds the position is under-funded — fail
+            # loud rather than emit a tx that reverts after spending gas.
+            lp_held_wei = int(lp_amount * Decimal(10**CURVE_LP_TOKEN_DECIMALS))
+            if lp_burn_quote > lp_held_wei:
+                return LiquidityResult(
+                    success=False,
+                    error=(
+                        f"remove_liquidity_imbalance: requested withdrawal needs ~{lp_burn_quote} LP wei but the "
+                        f"position holds only {lp_held_wei} for {pool_info.name}; reduce the requested amounts."
+                    ),
+                )
+            # Never approve / authorize burning more than the position holds.
+            max_burn = min(max_burn, lp_held_wei)
+
+            transactions: list[TransactionData] = []
+            # Approve the LP token (the pool burns msg.sender's LP) up to max_burn.
+            transactions.extend(self._build_approve_txs(pool_info.lp_token, pool_address, max_burn))
+
+            remove_tx = self._build_remove_liquidity_imbalance_tx(
+                pool_address=pool_address,
+                amounts=amounts_wei,
+                max_burn=max_burn,
+                n_coins=pool_info.n_coins,
+                pool_name=pool_info.name,
+                is_ng=pool_info.is_ng,
+            )
+            transactions.append(remove_tx)
+
+            total_gas = sum(tx.gas_estimate for tx in transactions)
+
+            logger.info(
+                "Built Curve remove_liquidity_imbalance: pool=%s, amounts=%s, max_burn=%s (quote=%s)",
+                pool_info.name,
+                amounts_wei,
+                max_burn,
+                lp_burn_quote,
+            )
+
+            return LiquidityResult(
+                success=True,
+                transactions=transactions,
+                pool_address=pool_address,
+                operation="remove_liquidity_imbalance",
+                amounts=amounts_wei,
+                lp_amount=max_burn,
+                gas_estimate=total_gas,
+            )
+
+        except Exception as e:
+            logger.exception(f"Failed to build remove_liquidity_imbalance: {e}")
+            return LiquidityResult(success=False, error=str(e))
+
     # =========================================================================
     # Metapool Underlying (Zap) Operations — Tier B (VIB-5419)
     # =========================================================================
@@ -2344,6 +2570,52 @@ class CurveAdapter:
             tx_type="remove_liquidity",
         )
 
+    def _build_remove_liquidity_imbalance_tx(
+        self,
+        pool_address: str,
+        amounts: list[int],
+        max_burn: int,
+        n_coins: int,
+        pool_name: str = "",
+        is_ng: bool = False,
+    ) -> TransactionData:
+        """Build remove_liquidity_imbalance transaction (VIB-5438).
+
+        Legacy:        remove_liquidity_imbalance(uint256[N] amounts, uint256 max_burn_amount)
+        StableSwap NG: remove_liquidity_imbalance(uint256[] amounts, uint256 max_burn_amount)
+
+        The ``amounts`` vector is the EXACT per-coin withdrawal target (positional
+        by pool-coin index); ``max_burn_amount`` is the LP-burn ceiling. StableSwap
+        family only — the caller guards against CryptoSwap/Tricrypto pools.
+        """
+        if is_ng:
+            # Dynamic-array ABI: head = [offset_to_amounts, max_burn]; tail = [length, *amounts].
+            # The array is the FIRST arg, so its data lives after the 2-word head:
+            # offset = 0x40 (two head slots × 32 bytes).
+            calldata = REMOVE_LIQUIDITY_IMBALANCE_DYN_SELECTOR
+            calldata += self._pad_uint256(0x40)
+            calldata += self._pad_uint256(max_burn)
+            calldata += self._pad_uint256(n_coins)
+            for amount in amounts:
+                calldata += self._pad_uint256(amount)
+        else:
+            selector = REMOVE_LIQUIDITY_IMBALANCE_SELECTORS.get(n_coins)
+            if selector is None:
+                raise ValueError(f"Unsupported n_coins={n_coins} for remove_liquidity_imbalance (expected 2, 3, or 4)")
+            calldata = selector
+            for amount in amounts:
+                calldata += self._pad_uint256(amount)
+            calldata += self._pad_uint256(max_burn)
+
+        return TransactionData(
+            to=pool_address,
+            value=0,
+            data=calldata,
+            gas_estimate=CURVE_GAS_ESTIMATES["remove_liquidity_imbalance"],
+            description=f"Remove liquidity (imbalanced) from Curve {pool_name}",
+            tx_type="remove_liquidity_imbalance",
+        )
+
     def _build_remove_liquidity_one_tx(
         self,
         pool_address: str,
@@ -2736,6 +3008,114 @@ class CurveAdapter:
             f"CryptoSwap calc_token_amount returned no quote for {pool_info.name} "
             f"({pool_info.n_coins}-coin); cannot derive min_lp (last error: {last_error})"
         )
+
+    def _resolve_onchain_gateway_client(self, pool_info: PoolInfo, what: str) -> "GatewayClient | None":
+        """Return the gateway client to use for an on-chain read, fail-closed (VIB-5438).
+
+        Mirrors the connect/transport handling in
+        ``_query_calc_token_amount_crypto_onchain``: raises when neither a gateway
+        client nor an rpc_url is available, and drops a present-but-disconnected
+        gateway to rpc_url (else refuses). ``what`` names the read for the error.
+        """
+        if self._gateway_client is None and not self._rpc_url:
+            raise ValueError(
+                f"Curve pool {pool_info.name}: cannot compute {what} without a gateway client or rpc_url; "
+                "refusing to ship an unbounded max_burn (theft vector). "
+                "Configure CurveConfig.gateway_client to enable the on-chain quote."
+            )
+        gateway_client = self._gateway_client
+        if gateway_client is not None and not getattr(gateway_client, "is_connected", False):
+            if not self._rpc_url:
+                raise ValueError(
+                    f"Curve pool {pool_info.name}: gateway client present but disconnected and no rpc_url; "
+                    f"cannot compute {what}, refusing to ship an unbounded max_burn."
+                )
+            return None
+        return gateway_client
+
+    def _query_calc_token_amount_withdraw_onchain(self, pool_info: PoolInfo, amounts: list[int]) -> int:
+        """Quote the LP that an imbalanced withdrawal would BURN (VIB-5438).
+
+        Calls ``calc_token_amount(amounts, is_deposit=False)`` on a StableSwap pool
+        and returns the LP-burn estimate that seeds the max-burn ceiling. NG pools
+        speak the dynamic-array ABI (``calc_token_amount(uint256[],bool)``); legacy
+        pools speak the fixed-array ABI keyed by coin count. Verified on-chain
+        2026-06-29 against 3pool (fixed-array, 0x3883e119).
+
+        Fail-closed, exactly like ``_query_calc_token_amount_crypto_onchain``: with
+        no gateway/rpc, or if no selector yields a positive quote, it RAISES rather
+        than returning 0 (never ships an unbounded/zero ``max_burn``).
+        """
+        gateway_client = self._resolve_onchain_gateway_client(pool_info, "imbalanced max_burn")
+
+        if pool_info.is_ng:
+            # Dynamic-array: head = [offset_to_amounts, is_deposit]; tail = [length, *amounts].
+            calldata = (
+                NG_CALC_TOKEN_AMOUNT_SELECTOR
+                + self._pad_uint256(0x40)
+                + self._pad_uint256(0)  # is_deposit = False
+                + self._pad_uint256(len(amounts))
+                + "".join(self._pad_uint256(a) for a in amounts)
+            )
+        else:
+            selector = STABLE_CALC_TOKEN_AMOUNT_SELECTORS.get(pool_info.n_coins)
+            if selector is None:
+                raise ValueError(
+                    f"No StableSwap calc_token_amount selector for {pool_info.n_coins}-coin pool {pool_info.name}"
+                )
+            # Fixed-array: inline uint256[N] then bool is_deposit=False.
+            calldata = selector + "".join(self._pad_uint256(a) for a in amounts) + self._pad_uint256(0)
+
+        burned = eth_call_uint256(
+            chain=self.chain,
+            to=pool_info.address,
+            data=calldata,
+            rpc_url=self._rpc_url,
+            gateway_client=gateway_client,
+            timeout=10.0,
+        )
+        if burned is None or burned <= 0:
+            raise ValueError(
+                f"Curve calc_token_amount(is_deposit=False) returned no quote for {pool_info.name}; "
+                f"cannot derive imbalanced max_burn (got {burned})"
+            )
+        return burned
+
+    def _query_pool_balances_onchain(self, pool_info: PoolInfo) -> list[int]:
+        """Read each coin's on-chain ``balances(i)`` reserve, fail-closed (VIB-5438).
+
+        Used to reject an imbalanced withdrawal that requests more of a coin than
+        the pool holds. Probes the ``uint256`` selector first then the legacy
+        ``int128`` form (3pool-era pools). Raises if any coin cannot be read so the
+        caller fails closed rather than skipping the bound check.
+        """
+        gateway_client = self._resolve_onchain_gateway_client(pool_info, "pool balances")
+        balances: list[int] = []
+        for i in range(pool_info.n_coins):
+            arg = self._pad_uint256(i)
+            value: int | None = None
+            for selector in (BALANCES_UINT256_SELECTOR, BALANCES_INT128_SELECTOR):
+                try:
+                    value = eth_call_uint256(
+                        chain=self.chain,
+                        to=pool_info.address,
+                        data=selector + arg,
+                        rpc_url=self._rpc_url,
+                        gateway_client=gateway_client,
+                        timeout=10.0,
+                    )
+                except Exception:  # noqa: BLE001 — wrong selector may revert; try the next
+                    value = None
+                    continue
+                if value is not None:
+                    break
+            if value is None:
+                raise ValueError(
+                    f"Curve pool {pool_info.name}: could not read balances({i}); "
+                    "cannot bound imbalanced withdrawal against pool reserves."
+                )
+            balances.append(value)
+        return balances
 
     def _estimate_remove_liquidity(self, pool_info: PoolInfo, lp_amount: int) -> list[int]:
         """Estimate expected per-coin amounts for proportional remove_liquidity.

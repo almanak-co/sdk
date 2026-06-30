@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal, InvalidOperation
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
+
+if TYPE_CHECKING:
+    from almanak.connectors.curve.adapter import CurveAdapter, LiquidityResult
 
 from almanak.connectors._strategy_base.base.compiler import (
     BaseCompilerContext,
@@ -325,6 +328,22 @@ def _resolve_lp_open_amounts(
     while len(amounts) < n_coins:
         amounts.append(Decimal("0"))
     return (amounts, False)
+
+
+class _ClosePool(NamedTuple):
+    """Resolved Curve pool for an LP_CLOSE compile (VIB-5438 decomposition).
+
+    Carries the registry-resolved pool identity through the
+    ``compile_lp_close`` helper chain so the dispatcher reads a single typed
+    value instead of four loose locals (``name``/``address``/``data``/
+    ``lp_token``). ``data`` is the raw ``CURVE_POOLS`` entry; ``lp_token`` is the
+    already-validated non-empty LP token address.
+    """
+
+    name: str
+    address: str
+    data: dict[str, Any]
+    lp_token: str
 
 
 class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
@@ -724,14 +743,222 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
 
         return result
 
-    def compile_lp_close(self, ctx: BaseCompilerContext, intent: LPCloseIntent) -> CompilationResult:  # noqa: C901
-        """Compile LP_CLOSE intent for Curve Finance."""
-        from almanak.connectors.curve.adapter import (
-            CURVE_ADDRESSES,
-            CURVE_POOLS,
-            CurveAdapter,
-            CurveConfig,
+    def _resolve_close_pool(self, ctx: BaseCompilerContext, intent: LPCloseIntent) -> _ClosePool | CompilationResult:
+        """Resolve the LP_CLOSE target pool from the registry (VIB-5438 decomposition).
+
+        Returns a ``_ClosePool`` on success, or the existing FAILED
+        ``CompilationResult`` (unchanged error text) when the chain is
+        unsupported, ``intent.pool`` is unset, the pool is unknown, or the
+        registry entry is missing an ``lp_token``. Behaviour-preserving extract
+        of the original ``compile_lp_close`` resolution block.
+        """
+        from almanak.connectors.curve.adapter import CURVE_ADDRESSES, CURVE_POOLS
+
+        if ctx.chain not in CURVE_ADDRESSES:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Curve is not supported on {ctx.chain}. Supported chains: {list(CURVE_ADDRESSES.keys())}",
+                intent_id=intent.intent_id,
+            )
+
+        if not intent.pool:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error="intent.pool must be set to the Curve pool address for LP_CLOSE",
+                intent_id=intent.intent_id,
+            )
+
+        chain_pools = CURVE_POOLS.get(ctx.chain, {})
+
+        pool_name: str = ""
+        pool_address: str = intent.pool
+        pool_data: dict[str, Any] | None = None
+
+        if intent.pool in chain_pools:
+            pool_name = intent.pool
+            pool_data = chain_pools[intent.pool]
+            pool_address = pool_data["address"]
+        else:
+            for name, data in chain_pools.items():
+                if data["address"].lower() == intent.pool.lower():
+                    pool_name = name
+                    pool_data = data
+                    pool_address = data["address"]
+                    break
+
+        if pool_data is None and "/" in intent.pool:
+            # Asset-set fallback (e.g. "USDT/USDC", "USDT/USDC/DAI") — the LP
+            # analogue of the SWAP pool resolver. VIB-3946.
+            asset_match = _resolve_pool_by_asset_set(intent.pool, chain_pools, ctx)
+            if asset_match is not None:
+                pool_name, pool_data = asset_match
+                pool_address = pool_data["address"]
+
+        if pool_data is None:
+            available = {name: d["address"] for name, d in chain_pools.items()}
+            coins_by_pool = {name: d.get("coins") for name, d in chain_pools.items()}
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Unknown Curve pool: {intent.pool} on {ctx.chain}. "
+                    f"Available pools: {available}. "
+                    f"Pool asset sets (pass as e.g. 'USDT/USDC'): {coins_by_pool}"
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        lp_token_for_pool = pool_data.get("lp_token", "")
+        if not lp_token_for_pool:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Pool config for '{pool_name or pool_address}' is missing 'lp_token' field. "
+                    f"Cannot compile Curve LP_CLOSE safely."
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        return _ClosePool(name=pool_name, address=pool_address, data=pool_data, lp_token=lp_token_for_pool)
+
+    def _resolve_close_lp_amount(
+        self, ctx: BaseCompilerContext, intent: LPCloseIntent, pool: _ClosePool
+    ) -> Decimal | CompilationResult:
+        """Resolve the LP amount to close (VIB-5438 decomposition).
+
+        Returns the ``Decimal`` LP amount on success, or a ``CompilationResult``
+        for BOTH the zero-balance no_op SUCCESS and every FAILED case (LP-token
+        mismatch, unreadable balance, unresolved decimals, malformed decimal
+        string). Behaviour-preserving extract of the original block; error text
+        references ``pool.name``/``pool.address``/``pool.lp_token`` byte-for-byte.
+        """
+        position_id_str = str(intent.position_id).strip()
+        if position_id_str.startswith("0x") and len(position_id_str) == 42:
+            lp_token_address = position_id_str
+            if lp_token_address.lower() != pool.lp_token.lower():
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"position_id LP token {lp_token_address} does not match "
+                        f"pool '{pool.name}' LP token {pool.lp_token}. "
+                        f"Refusing to proceed — this would close the wrong position."
+                    ),
+                    intent_id=intent.intent_id,
+                )
+            raw_balance = ctx.services.query_erc20_balance(pool.lp_token, ctx.wallet_address)
+            if raw_balance is None:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Failed to query LP token balance for {pool.name or pool.address} "
+                        f"({pool.lp_token}). Ensure gateway_client or rpc_url is configured."
+                    ),
+                    intent_id=intent.intent_id,
+                )
+            if raw_balance == 0:
+                logger.info("Curve LP_CLOSE: zero LP balance for %s — no_op", pool.name)
+                return CompilationResult(
+                    status=CompilationStatus.SUCCESS,
+                    action_bundle=ActionBundle(
+                        intent_type=IntentType.LP_CLOSE.value,
+                        transactions=[],
+                        metadata={
+                            "no_op": True,
+                            "reason": f"zero LP token balance for {pool.name} ({pool.lp_token})",
+                        },
+                    ),
+                    intent_id=intent.intent_id,
+                )
+            lp_token_info = ctx.services.resolve_token(pool.lp_token)
+            if not lp_token_info:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Could not resolve decimals for Curve LP token {pool.lp_token}. "
+                        f"Cannot safely compute withdrawal amount without known decimals."
+                    ),
+                    intent_id=intent.intent_id,
+                )
+            lp_amount = Decimal(raw_balance) / Decimal(10**lp_token_info.decimals)
+            logger.info("Queried on-chain LP balance for %s: %s", pool.name, lp_amount)
+            return lp_amount
+
+        try:
+            lp_amount = Decimal(position_id_str)
+        except (InvalidOperation, TypeError, ValueError):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Invalid position_id for Curve LP_CLOSE: '{intent.position_id}'. "
+                    f"Must be an LP token address (0x...) or LP token amount as decimal string (e.g., '100.5')."
+                ),
+                intent_id=intent.intent_id,
+            )
+        # ``Decimal`` parses "0", "-1", "NaN", "Infinity" without error — reject them
+        # before they reach wei conversion / calldata padding (CodeRabbit). A
+        # non-positive or non-finite LP amount is never a valid withdrawal size.
+        if not lp_amount.is_finite() or lp_amount <= 0:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Invalid position_id for Curve LP_CLOSE: '{intent.position_id}'. "
+                    f"LP token amount must be a positive finite decimal."
+                ),
+                intent_id=intent.intent_id,
+            )
+        return lp_amount
+
+    def _dispatch_remove_liquidity(
+        self,
+        adapter: CurveAdapter,
+        intent: LPCloseIntent,
+        pool_address: str,
+        lp_amount: Decimal,
+        slippage_bps: int,
+    ) -> LiquidityResult:
+        """Dispatch the exit-shape to the right adapter call (VIB-5438 decomposition).
+
+        Exit-shape dispatch (audit P0-4). Three mutually-exclusive paths:
+          * imbalanced_amounts (VIB-5438): withdraw EXACT per-coin amounts via
+            remove_liquidity_imbalance. The adapter sizes a fail-closed
+            MAX-BURN ceiling (the inverse of a min-out) from the pool's
+            on-chain calc_token_amount(amounts, is_deposit=False) — never an
+            unbounded cap. StableSwap-family only.
+          * coin_index (VIB-5437): withdraw the whole position into one coin
+            via remove_liquidity_one_coin (min-out from calc_withdraw_one_coin).
+          * neither (default): proportional remove_liquidity — unchanged.
+        The vocabulary validator enforces coin_index/imbalanced_amounts mutual
+        exclusivity, so the branch order does not mask a conflicting request.
+        """
+        if intent.imbalanced_amounts is not None:
+            return adapter.remove_liquidity_imbalance(
+                pool_address=pool_address,
+                amounts=intent.imbalanced_amounts,
+                lp_amount=lp_amount,
+                slippage_bps=slippage_bps,
+            )
+        if intent.coin_index is not None:
+            return adapter.remove_liquidity_one_coin(
+                pool_address=pool_address,
+                lp_amount=lp_amount,
+                coin_index=intent.coin_index,
+                slippage_bps=slippage_bps,
+            )
+        return adapter.remove_liquidity(
+            pool_address=pool_address,
+            lp_amount=lp_amount,
+            slippage_bps=slippage_bps,
         )
+
+    def compile_lp_close(self, ctx: BaseCompilerContext, intent: LPCloseIntent) -> CompilationResult:
+        """Compile LP_CLOSE intent for Curve Finance.
+
+        Thin dispatcher (VIB-5438 decomposition): resolves the pool and LP amount
+        via ``_resolve_close_pool`` / ``_resolve_close_lp_amount`` (both UNION-RETURN
+        a ``CompilationResult`` for their no_op / FAILED cases, so the outer
+        ``except`` can never rewrite an early-return's error text), then dispatches
+        the exit-shape via ``_dispatch_remove_liquidity`` and builds the bundle.
+        """
+        from almanak.connectors.curve.adapter import CurveAdapter, CurveConfig
 
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -740,131 +967,13 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         transactions: list[Any] = []
 
         try:
-            if ctx.chain not in CURVE_ADDRESSES:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Curve is not supported on {ctx.chain}. Supported chains: {list(CURVE_ADDRESSES.keys())}",
-                    intent_id=intent.intent_id,
-                )
+            pool = self._resolve_close_pool(ctx, intent)
+            if isinstance(pool, CompilationResult):
+                return pool
 
-            if not intent.pool:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error="intent.pool must be set to the Curve pool address for LP_CLOSE",
-                    intent_id=intent.intent_id,
-                )
-
-            chain_pools = CURVE_POOLS.get(ctx.chain, {})
-
-            pool_name: str = ""
-            pool_address: str = intent.pool
-            pool_data: dict[str, Any] | None = None
-
-            if intent.pool in chain_pools:
-                pool_name = intent.pool
-                pool_data = chain_pools[intent.pool]
-                pool_address = pool_data["address"]
-            else:
-                for name, data in chain_pools.items():
-                    if data["address"].lower() == intent.pool.lower():
-                        pool_name = name
-                        pool_data = data
-                        pool_address = data["address"]
-                        break
-
-            if pool_data is None and "/" in intent.pool:
-                # Asset-set fallback (e.g. "USDT/USDC", "USDT/USDC/DAI") — the LP
-                # analogue of the SWAP pool resolver. VIB-3946.
-                asset_match = _resolve_pool_by_asset_set(intent.pool, chain_pools, ctx)
-                if asset_match is not None:
-                    pool_name, pool_data = asset_match
-                    pool_address = pool_data["address"]
-
-            if pool_data is None:
-                available = {name: d["address"] for name, d in chain_pools.items()}
-                coins_by_pool = {name: d.get("coins") for name, d in chain_pools.items()}
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"Unknown Curve pool: {intent.pool} on {ctx.chain}. "
-                        f"Available pools: {available}. "
-                        f"Pool asset sets (pass as e.g. 'USDT/USDC'): {coins_by_pool}"
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
-            lp_token_for_pool = pool_data.get("lp_token", "")
-            if not lp_token_for_pool:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"Pool config for '{pool_name or pool_address}' is missing 'lp_token' field. "
-                        f"Cannot compile Curve LP_CLOSE safely."
-                    ),
-                    intent_id=intent.intent_id,
-                )
-
-            position_id_str = str(intent.position_id).strip()
-            if position_id_str.startswith("0x") and len(position_id_str) == 42:
-                lp_token_address = position_id_str
-                if lp_token_address.lower() != lp_token_for_pool.lower():
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            f"position_id LP token {lp_token_address} does not match "
-                            f"pool '{pool_name}' LP token {lp_token_for_pool}. "
-                            f"Refusing to proceed — this would close the wrong position."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-                raw_balance = ctx.services.query_erc20_balance(lp_token_for_pool, ctx.wallet_address)
-                if raw_balance is None:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            f"Failed to query LP token balance for {pool_name or pool_address} "
-                            f"({lp_token_for_pool}). Ensure gateway_client or rpc_url is configured."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-                if raw_balance == 0:
-                    logger.info("Curve LP_CLOSE: zero LP balance for %s — no_op", pool_name)
-                    return CompilationResult(
-                        status=CompilationStatus.SUCCESS,
-                        action_bundle=ActionBundle(
-                            intent_type=IntentType.LP_CLOSE.value,
-                            transactions=[],
-                            metadata={
-                                "no_op": True,
-                                "reason": f"zero LP token balance for {pool_name} ({lp_token_for_pool})",
-                            },
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-                lp_token_info = ctx.services.resolve_token(lp_token_for_pool)
-                if not lp_token_info:
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            f"Could not resolve decimals for Curve LP token {lp_token_for_pool}. "
-                            f"Cannot safely compute withdrawal amount without known decimals."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
-                lp_amount = Decimal(raw_balance) / Decimal(10**lp_token_info.decimals)
-                logger.info("Queried on-chain LP balance for %s: %s", pool_name, lp_amount)
-            else:
-                try:
-                    lp_amount = Decimal(position_id_str)
-                except (InvalidOperation, TypeError, ValueError):
-                    return CompilationResult(
-                        status=CompilationStatus.FAILED,
-                        error=(
-                            f"Invalid position_id for Curve LP_CLOSE: '{intent.position_id}'. "
-                            f"Must be an LP token address (0x...) or LP token amount as decimal string (e.g., '100.5')."
-                        ),
-                        intent_id=intent.intent_id,
-                    )
+            lp_amount = self._resolve_close_lp_amount(ctx, intent, pool)
+            if isinstance(lp_amount, CompilationResult):
+                return lp_amount
 
             # Honor the intent's requested LP slippage (audit P0-7); fall back to
             # the built-in 50 bps default when the caller didn't set one.
@@ -872,7 +981,7 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
 
             logger.info(
                 "Compiling Curve LP_CLOSE: pool=%s (%s), lp_amount=%s",
-                pool_name,
+                pool.name,
                 ctx.chain,
                 lp_amount,
             )
@@ -886,25 +995,7 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             )
             adapter = CurveAdapter(config)
 
-            # Single-sided exit (VIB-5437, audit P0-4): when the intent names a
-            # target coin, withdraw the whole position into that one coin via
-            # remove_liquidity_one_coin. The adapter sizes the min-out floor from
-            # the pool's on-chain calc_withdraw_one_coin and FAILS CLOSED (never
-            # min_amount=0) if that read is unavailable. Default (coin_index=None)
-            # keeps the proportional all-coin remove_liquidity — unchanged.
-            if intent.coin_index is not None:
-                liq_result = adapter.remove_liquidity_one_coin(
-                    pool_address=pool_address,
-                    lp_amount=lp_amount,
-                    coin_index=intent.coin_index,
-                    slippage_bps=slippage_bps,
-                )
-            else:
-                liq_result = adapter.remove_liquidity(
-                    pool_address=pool_address,
-                    lp_amount=lp_amount,
-                    slippage_bps=slippage_bps,
-                )
+            liq_result = self._dispatch_remove_liquidity(adapter, intent, pool.address, lp_amount, slippage_bps)
 
             if not liq_result.success:
                 return CompilationResult(
@@ -920,13 +1011,16 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 intent_type=IntentType.LP_CLOSE.value,
                 transactions=[tx.to_dict() for tx in transactions],
                 metadata={
-                    "pool_address": pool_address,
-                    "pool_name": pool_name,
+                    "pool_address": pool.address,
+                    "pool_name": pool.name,
                     "lp_amount": str(lp_amount),
-                    "lp_token": pool_data["lp_token"],
+                    "lp_token": pool.data["lp_token"],
                     "protocol": "curve",
                     "operation": liq_result.operation,
                     "coin_index": intent.coin_index,
+                    "imbalanced_amounts": (
+                        [str(a) for a in intent.imbalanced_amounts] if intent.imbalanced_amounts is not None else None
+                    ),
                 },
             )
 
@@ -936,7 +1030,7 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
 
             logger.info(
                 "Compiled Curve LP_CLOSE intent: pool=%s, %d txs, %d gas",
-                pool_name,
+                pool.name,
                 len(transactions),
                 total_gas,
             )

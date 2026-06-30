@@ -395,6 +395,12 @@ class TestLpCloseCoinIndexField:
         with pytest.raises(ValueError):  # noqa: PT011 — bool rejected at field or model layer
             LPCloseIntent(position_id="100", pool="3pool", protocol="curve", coin_index=True)
 
+    def test_non_curve_protocol_rejected(self) -> None:
+        """coin_index is Curve-only; a non-Curve protocol (default uniswap_v3)
+        would silently ignore it — fail fast (CodeRabbit, VIB-5438 consistency)."""
+        with pytest.raises(ValueError, match="only supported by the Curve connector"):
+            LPCloseIntent(position_id="100", pool="3pool", protocol="uniswap_v3", coin_index=1)
+
     def test_serialize_round_trip_preserves_coin_index(self) -> None:
         intent = LPCloseIntent(position_id="100", pool="3pool", protocol="curve", coin_index=1)
         restored = LPCloseIntent.deserialize(intent.serialize())
