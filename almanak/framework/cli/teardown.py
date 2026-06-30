@@ -483,7 +483,7 @@ def _inject_balance_provider(
 
     try:
         from ..data.balance.gateway_provider import GatewayBalanceProvider
-        from .run import create_sync_balance_func
+        from .run import create_sync_balance_func, create_sync_price_oracle_func
 
         balance_provider = GatewayBalanceProvider(
             client=gateway_client,
@@ -502,7 +502,22 @@ def _inject_balance_provider(
 
         if price_oracle:
             strategy._balance_provider = create_sync_balance_func(balance_provider, price_oracle)
-            logger.info("Injected gateway balance provider for teardown (chain=%s)", chain)
+            # VIB-5520: wire the SAME gateway price oracle onto the strategy so the
+            # teardown market snapshot (``MarketSnapshotBuilder.for_strategy_runner``
+            # reads ``strategy._price_oracle``) can resolve token prices. Without
+            # this, ``market.price()`` has no oracle and TD-17's
+            # ``warm_and_validate_oracle`` raises ``TeardownPriceOracleError`` —
+            # blocking Plan-B break-glass before any closing intent compiles. The
+            # sync wrapper mirrors the runner's ``_wire_core_providers``; the
+            # validation hard-stop is untouched (a genuinely unpriceable token
+            # still raises). Set unconditionally (mirroring ``_balance_provider``
+            # just above): ``IntentStrategy.__init__`` always assigns
+            # ``self._price_oracle``, so a ``hasattr`` gate is always True for
+            # real strategies — but gating on it would silently skip the oracle
+            # for any future strategy type that doesn't pre-declare the attr,
+            # which is the exact VIB-5520 failure class. Wire it unconditionally.
+            strategy._price_oracle = create_sync_price_oracle_func(price_oracle)
+            logger.info("Injected gateway balance provider and price oracle for teardown (chain=%s)", chain)
         else:
             logger.debug("Skipped balance provider injection -- no price oracle available")
     except Exception as e:

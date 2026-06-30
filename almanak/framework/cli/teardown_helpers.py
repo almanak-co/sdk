@@ -618,10 +618,21 @@ def instantiate_strategy_with_state(
             "Could not determine wallet address. Set config.wallet_address or ALMANAK_PRIVATE_KEY."
         )
 
-    # Deferred import to avoid heavy run.py import cascade (VIB-522).
-    from .run import DictConfigWrapper
+    # Coerce the raw config dict the same way the runner does. The runner
+    # routes through ``coerce_strategy_config`` (``_strategy_config.py`` — the
+    # single dict->config path, "extracted so the two surfaces cannot drift"),
+    # which resolves the strategy's declared config dataclass from
+    # ``__orig_bases__`` and instantiates it WITH dataclass defaults applied.
+    # Teardown previously wrapped the raw dict in ``DictConfigWrapper``, which
+    # raises ``AttributeError`` on any field absent from ``config.json`` (e.g.
+    # ``uniswap_lp`` omits the optional ``force_action`` / ``position_id``).
+    # Using the canonical coercion fixes missing optional fields for ALL
+    # strategies (VIB-5520). Strategies without a dataclass generic still get a
+    # ``DictConfigWrapper`` from ``coerce_strategy_config`` — same behaviour as
+    # before for those.
+    from ._strategy_config import coerce_strategy_config
 
-    config_obj = DictConfigWrapper(config_dict)
+    config_obj = coerce_strategy_config(strategy_class, config_dict)
 
     try:
         strategy = strategy_class(
@@ -632,6 +643,17 @@ def instantiate_strategy_with_state(
     except Exception as e:
         logger.error("Failed to instantiate strategy", exc_info=True)
         raise click.ClickException(f"Failed to instantiate strategy: {e}") from e
+
+    # VIB-5520: wire the gateway client onto the strategy so the teardown market
+    # snapshot can build gateway-routed providers (price aggregator, position
+    # health, pool analytics, twap/lwap). ``MarketSnapshotBuilder.for_strategy_runner``
+    # reads ``strategy._gateway_client``; without it the snapshot has no gateway
+    # and ``warm_and_validate_oracle`` (TD-17) cannot price required tokens, so
+    # Plan-B break-glass teardown can never compile closing intents. Mirrors the
+    # runner, which sets this unconditionally (``_run_components.py``): methods
+    # that need it null-check at call time. The price oracle itself is wired by
+    # ``inject_balance_provider`` below (mirrors the runner's ``_wire_core_providers``).
+    strategy._gateway_client = gateway_client
 
     inject_balance_provider(strategy, gateway_client, chain, wallet_address)
     restore_strategy_state(
