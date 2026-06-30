@@ -121,6 +121,10 @@ logger = logging.getLogger(__name__)
 # deployment per process.
 _TEARDOWN_OPTOUT_WARNED: set[str] = set()
 
+# Maximum sleep slice for the interruptible inter-iteration wait (VIB-5528).
+# A queued STOP is honored within this many seconds regardless of --interval.
+_WAIT_POLL_SLICE_SECONDS = 15
+
 # V4 native-ETH sentinel: a PoolKey's native currency leg is the EVM zero
 # address (address(0)), NOT a V4-specific magic value. Framework-owned so the
 # runner never imports a concrete connector (connector-boundary guard).
@@ -1035,6 +1039,83 @@ class StrategyRunner:
         from .runner_gateway import lifecycle_handle_stop
 
         lifecycle_handle_stop(self, deployment_id, strategy)
+
+    async def _interruptible_wait(
+        self,
+        deployment_id: str,
+        interval: float,
+        strategy: Any,
+    ) -> None:
+        """Sleep for ``interval`` in short slices, polling for stop signals.
+
+        Worst-case pickup latency for a queued stop is _WAIT_POLL_SLICE_SECONDS
+        regardless of the configured --interval value. Two stop lanes are
+        polled each slice, so both get the same ~15s SLA:
+
+        * the dashboard / hosted lifecycle ``STOP`` command (via
+          ``_lifecycle_poll_command``), and
+        * a direct teardown request (``almanak strat teardown request``, a
+          config-driven teardown, or an auto-protect trigger) via a
+          side-effect-free ``should_teardown`` probe.
+
+        Only those two stop signals return early; the next iteration's Step 0a
+        owns the authoritative detect -> ack -> execute, exactly as before —
+        returning early just lets that happen one slice later instead of after
+        the full ``--interval``. A retired ``PAUSE`` / ``RESUME`` or any unknown
+        lifecycle command is processed-and-ignored by ``handle_lifecycle_command``
+        but does NOT end the wait (breaking on it would prematurely skip the
+        remaining sleep).
+
+        Both polls are synchronous gateway I/O (gRPC / SQLite read); they run via
+        ``asyncio.to_thread`` so the inter-iteration wait never blocks the event
+        loop and starves co-scheduled gateway tasks.
+
+        ``interval <= 0`` means "no inter-iteration delay": preserve the single
+        cooperative ``await`` the previous bare ``asyncio.sleep(interval)``
+        provided so a tight loop never starves the event loop.
+        """
+        if interval <= 0:
+            await asyncio.sleep(0)
+            return
+        remaining = interval
+        while remaining > 0 and not self._shutdown_requested:
+            slice_time = min(_WAIT_POLL_SLICE_SECONDS, remaining)
+            await asyncio.sleep(slice_time)
+            remaining -= slice_time
+            # Lane 1: dashboard / hosted lifecycle command. Synchronous gRPC —
+            # poll off the event loop so concurrent gateway tasks keep running.
+            command = await asyncio.to_thread(self._lifecycle_poll_command, deployment_id)
+            if command is not None:
+                await _run_loop_helpers.handle_lifecycle_command(self, strategy, deployment_id, command)
+                # Only STOP (or a shutdown the handler raised) ends the wait.
+                # Retired PAUSE/RESUME and unknown commands are handled-and-ignored;
+                # breaking on them would prematurely skip the remaining wait.
+                if command == "STOP" or self._shutdown_requested:
+                    return
+            # Lane 2: direct teardown request. should_teardown() is synchronous
+            # gateway/SQLite I/O too — same off-loop treatment.
+            if await asyncio.to_thread(self._pending_teardown_signal, strategy):
+                return
+
+    def _pending_teardown_signal(self, strategy: Any) -> bool:
+        """Side-effect-free probe: is a teardown pending for this strategy?
+
+        Used ONLY to shorten inter-iteration wait latency for the direct
+        teardown-request lane. It never acknowledges, generates intents, or
+        mutates state — ``_check_teardown_requested`` (Step 0a of the next
+        iteration) owns detect -> ack -> execute. Any error is swallowed
+        because that authoritative check runs regardless; surfacing the error
+        here (and crashing the wait) would be strictly worse than waiting one
+        more slice.
+        """
+        check = getattr(strategy, "should_teardown", None)
+        if check is None:
+            return False
+        try:
+            return bool(check())
+        except Exception as e:  # noqa: BLE001 — probe is best-effort; Step 0a is authoritative
+            logger.debug("Teardown probe failed during inter-iteration wait (non-fatal): %s", e)
+            return False
 
     def set_gateway_client(self, client: Any) -> None:
         from .runner_gateway import set_gateway_client
@@ -2512,7 +2593,7 @@ class StrategyRunner:
                 # Sleep until next iteration (unless shutdown requested)
                 if not self._shutdown_requested:
                     logger.debug(f"Sleeping for {interval}s before next iteration")
-                    await asyncio.sleep(interval)
+                    await self._interruptible_wait(deployment_id, interval, strategy)
 
             except asyncio.CancelledError:
                 logger.info(f"Run loop cancelled for {deployment_id}")
@@ -2524,7 +2605,7 @@ class StrategyRunner:
                 logger.exception(f"Unexpected error in run loop: {e}")
                 self._consecutive_errors += 1
                 if not self._shutdown_requested:
-                    await asyncio.sleep(interval)
+                    await self._interruptible_wait(deployment_id, interval, strategy)
 
         # Phase 12: shutdown drain (final lifecycle write, deregister,
         # STRATEGY_STOPPED event, flush, state manager close).
