@@ -692,6 +692,43 @@ def _drain_incomplete_marker_row(chain: str, *, source: str) -> PositionValue:
     )
 
 
+def _lending_unmeasured_details(reason: str) -> dict[str, Any]:
+    """Empty ≠ Zero marker for a lending leg the on-chain repricer COULD NOT
+    measure (VIB-5417).
+
+    A connector that declares a lending read (it is in ``LendingReadRegistry``)
+    is EXPECTED to value its SUPPLY / BORROW legs on-chain. When that read cannot
+    produce a value — inputs missing (no resolvable asset address, or no wallet,
+    not even the strategy's own), the read returned no data, or price / decimals
+    were unmeasurable — AND the strategy-reported ``value_usd`` carries no signal,
+    the leg is UNMEASURED, not a measured zero.
+
+    Returning the strategy-reported ``$0`` here at ``repriced=True`` would book an
+    *unmeasured* leg as a *measured* on-chain mark at HIGH confidence — the
+    ``spark_lender`` ``$0-at-HIGH`` bug. Instead we return a placeholder
+    ``value_usd=0`` PAIRED WITH ``repriced=False`` + ``valuation_status="no_path"``
+    + ``*_unmeasured`` flags, so the whole snapshot confidence drops to
+    ``UNAVAILABLE`` (``_determine_value_confidence``) and the runner substitutes
+    the strategy's own snapshot honestly rather than trusting a fabricated mark
+    (mirrors the :func:`_pt_unmeasured_row` / :func:`_drain_incomplete_marker_row`
+    contract).
+
+    This does NOT supersede the VIB-4584 strategy-value fallback: when the
+    strategy reports a signal-carrying value (SUPPLY ``> 0`` / BORROW ``!= 0``)
+    the caller still trusts it. The marker fires only for a read-declaring
+    protocol whose leg has NO on-chain measurement AND no strategy signal.
+    """
+    return {
+        "valuation_source": "on_chain",
+        "valuation_status": "no_path",
+        "mark_unmeasured": True,
+        "supply_value_usd_unmeasured": True,
+        "debt_value_usd_unmeasured": True,
+        "net_value_usd_unmeasured": True,
+        "unavailable_reason": reason,
+    }
+
+
 def _classify_pt_inventory(
     lot_totals: dict[str, tuple[Decimal, Decimal | None, Decimal | None, str]],
     market: "MarketDataSource",
@@ -2470,8 +2507,11 @@ class PortfolioValuer:
             result = self._reprice_lending_on_chain_enriched(position, chain, market)
             if result is not None:
                 return result[0], result[1], True
-            # No on-chain path matched — fall back to the strategy-reported
-            # value when it carries signal.
+            # No on-chain measurement was produced. Fall back to the
+            # strategy-reported value WHEN IT CARRIES SIGNAL (VIB-4584); when it
+            # does NOT, stamp the VIB-5417 unmeasured marker so the snapshot drops
+            # to UNAVAILABLE instead of booking a fabricated ``$0`` at HIGH
+            # confidence (the ``spark_lender`` ``$0-at-HIGH`` bug — Empty ≠ Zero).
             #
             # BORROW debt is semantically negative; strategies may report
             # either the *gross* debt as positive (framework negates) or an
@@ -2482,14 +2522,13 @@ class PortfolioValuer:
                     return -position.value_usd, {}, True
                 if position.value_usd < 0:
                     return position.value_usd, {}, True
-                # value_usd == 0 — no signal → flag as no_path so confidence
-                # drops to UNAVAILABLE rather than masquerade as measured zero.
-                return position.value_usd, {}, False
+                # value_usd == 0 — no signal → unmeasured marker → UNAVAILABLE.
+                return Decimal("0"), self._lending_no_signal_details(position), False
             # SUPPLY — long-only; a positive value is the strategy's fallback
             # assertion, zero means we have nothing to say.
             if position.value_usd > 0:
                 return position.value_usd, {}, True
-            return position.value_usd, {}, False
+            return Decimal("0"), self._lending_no_signal_details(position), False
 
         if position.position_type == PositionType.PERP:
             result = self._reprice_perps_on_chain_enriched(position, chain, market)
@@ -3370,13 +3409,48 @@ class PortfolioValuer:
         except (ValueError, TypeError):
             return None
 
+    def _lending_no_signal_details(self, position: "PositionInfo") -> dict[str, Any]:
+        """Details for a lending leg with NO measurable value (VIB-5417).
+
+        Reached when the on-chain repricer produced nothing AND the
+        strategy-reported ``value_usd`` carries no signal (SUPPLY ``<= 0`` /
+        BORROW ``== 0``). For a protocol that DECLARES a lending read an on-chain
+        mark was EXPECTED, so this is an UNMEASURED valuation, not a measured
+        zero: stamp the explicit Empty ≠ Zero marker (``*_unmeasured`` +
+        ``unavailable_reason``) so the snapshot drops to UNAVAILABLE with a typed
+        reason rather than a bare ``$0`` at HIGH. A protocol with no declared read
+        has no on-chain authority — return ``{}`` and let the caller's ``no_path``
+        stamp carry the UNAVAILABLE signal (unchanged behaviour).
+        """
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        # ``position.protocol`` is typed ``str``, but guard against a None / blank
+        # / non-str value reaching ``LendingReadRegistry.has`` ->  ``_normalize``
+        # -> ``protocol.strip()`` (AttributeError). A position with no usable
+        # protocol declares no on-chain read, so there is no marker to stamp —
+        # fall through to ``{}`` (the caller's ``no_path`` still drops it to
+        # UNAVAILABLE).
+        protocol = position.protocol
+        if isinstance(protocol, str) and protocol.strip() and LendingReadRegistry.has(protocol):
+            return _lending_unmeasured_details("unmeasured_on_chain_read")
+        return {}
+
     def _reprice_lending_on_chain_enriched(
         self,
         position: "PositionInfo",
         chain: str,
         market: MarketDataSource,
     ) -> tuple[Decimal, dict[str, Any]] | None:
-        """Re-price lending position and return enriched details."""
+        """Re-price a lending position and return enriched details.
+
+        Returns ``(value_usd, enriched_details)`` on a successful on-chain read
+        (or a read-confirmed inactive reserve → a MEASURED ``0``), or ``None``
+        when no on-chain valuation could be produced (inputs missing, read
+        returned no data, or price/decimals unmeasurable). The ``None`` case is
+        handled by the caller (:meth:`_reprice_position_enriched`), which either
+        falls back to a signal-carrying strategy value (VIB-4584) or stamps the
+        VIB-5417 unmeasured marker when there is no signal (Empty ≠ Zero).
+        """
         from almanak.framework.teardown.models import PositionType
 
         try:
@@ -3393,12 +3467,22 @@ class PortfolioValuer:
                     except Exception:
                         pass
 
+            # VIB-5417: a lending position belongs to the strategy's own wallet,
+            # but ``details`` may omit it (e.g. Spark does not plumb a ``wallet``
+            # key). Fall back to the wallet the valuer already resolved for this
+            # snapshot so the on-chain read can actually run. Protocol-agnostic —
+            # every lending leg is owned by the strategy wallet.
             wallet_address = (
                 position.details.get("wallet")
                 or position.details.get("wallet_address")
                 or position.details.get("owner")
+                or self._strategy_wallet_address
             )
             if not asset_address or not wallet_address:
+                # Inputs for the on-chain read are missing even after the wallet
+                # fallback. The caller decides between the VIB-4584 strategy-value
+                # fallback (signal present) and the VIB-5417 unmeasured marker
+                # (no signal) — Empty ≠ Zero.
                 return None
 
             on_chain = self._lending_reader.read_position(
@@ -3462,6 +3546,12 @@ class PortfolioValuer:
                 "net_value_usd": valued.net_value_usd.to_payload(),
                 "collateral_enabled": valued.collateral_enabled,
                 "valuation_source": "on_chain",
+                # VIB-5417: record the wallet the on-chain read actually used —
+                # which may be the strategy-wallet fallback resolved above when
+                # ``details`` omitted it (Spark). Persisting it keeps the snapshot
+                # self-describing: a downstream consumer can see which owner the
+                # leg was priced for instead of an absent wallet.
+                "wallet_address": wallet_address,
             }
 
             # VIB-5006: stamp the Track-C lending observability fields the

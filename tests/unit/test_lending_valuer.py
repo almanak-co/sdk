@@ -1361,3 +1361,190 @@ class TestCompoundV3LendingTrackCEnrichment:
         assert out_s["health_factor"] == "2.4"
         assert out_b["health_factor"] == "2.4"
         assert read_count["n"] == 1  # cached per (protocol, chain, wallet, market_id)
+
+
+# =============================================================================
+# TestVib5417SparkRepricerUnmeasured — wallet plumbing + Empty≠Zero marker
+# =============================================================================
+
+
+class TestVib5417SparkRepricerUnmeasured:
+    """VIB-5417: a lending leg that declares an on-chain read (e.g. ``spark``)
+    must (1) reprice via the strategy wallet when ``details`` omits it, and
+    (2) when it CANNOT be measured and the strategy reports no signal, mark the
+    leg UNMEASURED (snapshot → UNAVAILABLE) instead of booking ``$0`` at HIGH.
+    """
+
+    def _make_position(self, position_type, *, protocol="spark", **kwargs):
+        from almanak.framework.teardown.models import PositionInfo, PositionType
+
+        defaults = {
+            "position_type": getattr(PositionType, position_type),
+            "position_id": "vib5417-pos",
+            "chain": "ethereum",
+            "protocol": protocol,
+            "value_usd": Decimal("0"),
+            "details": {},
+        }
+        defaults.update(kwargs)
+        return PositionInfo(**defaults)
+
+    def _valuer(self, on_chain):
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        valuer = PortfolioValuer(gateway_client=MagicMock())
+        valuer._lending_reader = MagicMock()
+        valuer._lending_reader.read_position.return_value = on_chain
+        return valuer
+
+    def test_spark_reprices_via_strategy_wallet_fallback(self):
+        """(a) Details omit the wallet, but the valuer knows the strategy wallet:
+        the read runs with that wallet and the leg reprices to a real NAV."""
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        on_chain = LendingPositionOnChain(
+            asset_address="0x6B175474E89094C44Da98b954EedeAC495271d0F",  # DAI
+            current_atoken_balance=4_000_000_000_000_000_000_000,  # 4000 DAI (18 dp)
+            current_stable_debt=0,
+            current_variable_debt=0,
+            liquidity_rate=0,
+            usage_as_collateral_enabled=True,
+        )
+        valuer = self._valuer(on_chain)
+        valuer._strategy_wallet_address = "0x" + "9" * 40  # resolved at snapshot time
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+
+        # No ``wallet`` key in details — only the asset (Spark's real shape).
+        position = self._make_position(
+            "SUPPLY",
+            details={"asset_address": "0x6B175474E89094C44Da98b954EedeAC495271d0F", "asset": "DAI"},
+        )
+
+        with patch.object(PortfolioValuer, "_get_token_decimals", return_value=18):
+            value_usd, _details, repriced = valuer._reprice_position_enriched(position, "ethereum", market)
+
+        assert repriced is True
+        assert value_usd == Decimal("4000")  # measured on-chain, NOT the strategy's $0
+        # The read used the strategy wallet supplied via the fallback.
+        _args, kwargs = valuer._lending_reader.read_position.call_args
+        assert kwargs["wallet_address"] == "0x" + "9" * 40
+
+    def test_missing_inputs_no_signal_marks_unmeasured_not_zero_at_high(self):
+        """(b) A read-declaring protocol whose inputs are missing AND whose
+        strategy value carries no signal → unmeasured marker + repriced=False
+        (snapshot drops to UNAVAILABLE), never a measured ``$0`` at HIGH."""
+        valuer = self._valuer(on_chain=None)
+        valuer._strategy_wallet_address = ""  # genuinely no wallet anywhere
+        market = MagicMock()
+
+        # details={} → no asset address resolvable; value_usd=0 → no signal.
+        position = self._make_position("SUPPLY", value_usd=Decimal("0"), details={})
+
+        value_usd, details, repriced = valuer._reprice_position_enriched(position, "ethereum", market)
+
+        assert repriced is False, "no measurement + no signal must NOT be repriced=True"
+        assert value_usd == Decimal("0")
+        assert details.get("mark_unmeasured") is True
+        assert details.get("valuation_status") == "no_path"
+        assert details.get("unavailable_reason") == "unmeasured_on_chain_read"
+
+    def test_borrow_missing_inputs_no_signal_marks_unmeasured(self):
+        """BORROW companion to the above: value_usd==0 + no measurement → marker."""
+        valuer = self._valuer(on_chain=None)
+        valuer._strategy_wallet_address = ""
+        market = MagicMock()
+
+        position = self._make_position("BORROW", value_usd=Decimal("0"), details={})
+        value_usd, details, repriced = valuer._reprice_position_enriched(position, "ethereum", market)
+
+        assert (value_usd, repriced) == (Decimal("0"), False)
+        assert details.get("mark_unmeasured") is True
+
+    def test_nonzero_strategy_value_still_trusted_no_marker(self):
+        """VIB-4584 preserved: a read-declaring lending leg with a signal-carrying
+        strategy value (no on-chain measurement available) is STILL trusted at
+        repriced=True — the VIB-5417 marker must not over-reach onto it."""
+        valuer = self._valuer(on_chain=None)
+        valuer._strategy_wallet_address = ""
+        market = MagicMock()
+
+        supply = self._make_position("SUPPLY", value_usd=Decimal("5000"), details={})
+        v_s, d_s, r_s = valuer._reprice_position_enriched(supply, "ethereum", market)
+        assert (v_s, r_s) == (Decimal("5000"), True)
+        assert "mark_unmeasured" not in d_s
+
+        borrow = self._make_position("BORROW", value_usd=Decimal("300"), details={})
+        v_b, d_b, r_b = valuer._reprice_position_enriched(borrow, "ethereum", market)
+        assert (v_b, r_b) == (Decimal("-300"), True)  # gross positive → negated
+        assert "mark_unmeasured" not in d_b
+
+    def test_none_protocol_does_not_crash_no_signal_marker(self):
+        """Guard: a lending leg whose ``protocol`` is None must not raise from
+        ``LendingReadRegistry.has`` (``_normalize`` -> ``.strip()``). It declares
+        no on-chain read, so no marker is stamped — repriced=False carries the
+        UNAVAILABLE signal."""
+        valuer = self._valuer(on_chain=None)
+        valuer._strategy_wallet_address = ""
+        market = MagicMock()
+
+        position = self._make_position("SUPPLY", protocol=None, value_usd=Decimal("0"), details={})
+        value_usd, details, repriced = valuer._reprice_position_enriched(position, "ethereum", market)
+
+        assert (value_usd, repriced) == (Decimal("0"), False)
+        assert "mark_unmeasured" not in details  # no declared read -> no marker
+
+    def test_value_snapshot_unavailable_for_unmeasured_spark_leg(self):
+        """End-to-end: a value() snapshot over an unmeasurable Spark SUPPLY leg
+        reports UNAVAILABLE confidence, not HIGH with a fabricated $0.
+
+        Drives ``value()``'s REAL discovery path: positions arrive via
+        ``get_open_positions()`` (a ``TeardownPositionSummary``) — NOT a bare
+        ``get_positions`` the valuer never calls — and ``_get_tracked_tokens()``
+        is present, so the snapshot does not bail early on an ``AttributeError``
+        and actually reaches the Spark repricer. A spy on the repricer asserts the
+        unmeasured leg was genuinely exercised (guards against the test passing
+        UNAVAILABLE for the wrong reason)."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.portfolio.models import ValueConfidence
+        from almanak.framework.teardown.models import TeardownPositionSummary
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        valuer = PortfolioValuer(gateway_client=MagicMock())
+        valuer._lending_reader = MagicMock()
+        valuer._lending_reader.read_position.return_value = None  # read produced nothing
+
+        # Spy on the lending repricer to PROVE the Spark leg was actually reached.
+        reprice_calls = {"n": 0}
+        original_reprice = valuer._reprice_lending_on_chain_enriched
+
+        def _spy_reprice(*args, **kwargs):
+            reprice_calls["n"] += 1
+            return original_reprice(*args, **kwargs)
+
+        valuer._reprice_lending_on_chain_enriched = _spy_reprice
+
+        position = self._make_position("SUPPLY", value_usd=Decimal("0"), details={})
+        summary = TeardownPositionSummary(
+            deployment_id="vib5417-strat",
+            timestamp=datetime.now(UTC),
+            positions=[position],
+        )
+        strategy = SimpleNamespace(
+            chain="ethereum",
+            wallet_address="",
+            deployment_id="vib5417-strat",
+            get_portfolio_snapshot=lambda *a, **k: None,
+            get_open_positions=lambda *a, **k: summary,
+            _get_tracked_tokens=lambda *a, **k: [],
+        )
+        # Balances/prices succeed (measured) so the ONLY driver of UNAVAILABLE is
+        # the unmeasured Spark leg's ``no_path`` marker — not a failed wallet read.
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+        market.balance.return_value = Decimal("0")
+
+        snapshot = valuer.value(strategy, market)
+        assert reprice_calls["n"] >= 1, "value() must actually reach the Spark repricer"
+        assert snapshot.value_confidence == ValueConfidence.UNAVAILABLE
