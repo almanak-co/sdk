@@ -34,6 +34,7 @@ from almanak.framework.portfolio.models import (
 )
 from almanak.framework.teardown.models import PositionInfo, PositionType
 from almanak.framework.valuation.curve_lp_position_reader import (
+    _NATIVE_ETH_ADDRESSES,
     CurveLpPosition,
     CurveLpPositionReader,
 )
@@ -63,6 +64,16 @@ logger = logging.getLogger(__name__)
 
 FRAMEWORK_EXTERNAL_AGREEMENT_THRESHOLD = Decimal("0.10")
 FRAMEWORK_EXTERNAL_DIVERGENCE_THRESHOLD = Decimal("0.20")
+
+# Per-pool-family ``valuation_source`` provenance tag (VIB-5427 / VIB-5428). The
+# pegged families mark off ``virtual_price``; the crypto family marks off spot
+# reserves. Downstream readers key trust on the source, so it must name the
+# actual mechanism that produced the mark.
+_CURVE_VALUATION_SOURCE = {
+    "usd_stable": "curve_virtual_price",
+    "metapool_usd": "curve_virtual_price",
+    "crypto": "curve_spot_reserves",
+}
 
 # VIB-5018 / VIB-4586 — Uniswap V4 LP positions do NOT live on the V3
 # NonfungiblePositionManager. Routing a V4 tokenId through the V3-shaped
@@ -4631,98 +4642,222 @@ class PortfolioValuer:
                     "lp_token": on_chain.lp_token,
                     "pool_address": on_chain.pool_address,
                     "liquidity": "0",
-                    "valuation_source": "curve_virtual_price",
+                    "valuation_source": _CURVE_VALUATION_SOURCE.get(on_chain.family, "curve_virtual_price"),
                 }
 
-            lp_balance = Decimal(on_chain.lp_balance_wei) / Decimal(10**on_chain.decimals)
-
-            # VIB-5426 / audit P0-2 — oracle-vs-pool DEPEG cross-check. The mark
-            # below is lp × virtual_price × $1, but virtual_price is
-            # depeg-INSENSITIVE, so a USD-pegged pool whose coin has lost its peg
-            # still marks at par while value bleeds — exactly when risk controls
-            # must fire. Price each coin against the INDEPENDENT gateway oracle and
-            # degrade to UNAVAILABLE on divergence (or any unpriceable coin), never
-            # mark at par. The reader admits only USD-pegged pools, so the expected
-            # numeraire is $1; passing it also catches a systemic all-coins depeg
-            # the inter-coin check alone cannot see.
-            threshold_bps = self._resolve_curve_depeg_threshold_bps(position)
-            coin_prices = self._price_curve_coins(on_chain, market)
-            peg = check_peg_divergence(coin_prices, threshold_bps=threshold_bps, expected_peg_usd=Decimal("1"))
-            if not peg.ok:
-                reason = (
-                    "curve_oracle_depeg_divergence"
-                    if peg.reason == "depeg_divergence"
-                    else "curve_oracle_price_unavailable"
-                )
-                logger.warning(
-                    "Curve-LP depeg cross-check degraded position=%s pool=%s reason=%s "
-                    "divergence=%sbps threshold=%sbps — marking UNAVAILABLE, not at par",
-                    position.position_id,
-                    on_chain.pool_address,
-                    reason,
-                    peg.max_divergence_bps,
-                    threshold_bps,
-                )
-                # Empty ≠ Zero: Decimal("0") PAIRED WITH valuation_status="no_path"
-                # is a marker — kept OUT of the NAV sum AND forcing the snapshot to
-                # UNAVAILABLE (so the drawdown fold sees "blind", not "safe at
-                # par"). Carries the measured divergence so the operator card shows
-                # WHY. NOT bare None, which would discard the reason/bps and leave
-                # the stale par estimate in the NAV total.
-                return Decimal("0"), {
-                    "position_id": position.position_id,
-                    "lp_token": on_chain.lp_token,
-                    "pool_address": on_chain.pool_address,
-                    "liquidity": str(on_chain.lp_balance_wei),
-                    "coins": on_chain.coins,
-                    "valuation_source": "curve_virtual_price",
-                    "valuation_status": "no_path",
-                    "mark_unmeasured": True,
-                    "unavailable_reason": reason,
-                    "depeg_divergence_bps": str(peg.max_divergence_bps),
-                    "depeg_threshold_bps": str(threshold_bps),
-                    "oracle_peg_usd": str(peg.peg_usd) if peg.peg_usd is not None else "",
-                }
-
-            # Peg confirmed within tolerance — the USD numeraire holds, mark at par
-            # (peg = $1). The independent oracle agreed, so this $ value is trusted.
-            value_usd = lp_balance * on_chain.virtual_price
-            if value_usd <= 0:
-                return None
-
-            details: dict[str, Any] = {
-                "position_id": position.position_id,
-                "lp_token": on_chain.lp_token,
-                "pool_address": on_chain.pool_address,
-                # The LP-token balance IS the liquidity measure (no tick-bracketed
-                # concentrated liquidity), so Accountant LP6 reads a real value.
-                "liquidity": str(on_chain.lp_balance_wei),
-                "lp_balance": str(lp_balance),
-                "virtual_price": str(on_chain.virtual_price),
-                "peg_usd": "1",
-                # Depeg cross-check diagnostics (VIB-5426): the oracle-discovered
-                # peg (median coin price) and the measured divergence the mark
-                # passed. Lets the dashboard show the peg was actively verified,
-                # not assumed.
-                "oracle_peg_usd": str(peg.peg_usd),
-                "depeg_divergence_bps": str(peg.max_divergence_bps),
-                "depeg_threshold_bps": str(threshold_bps),
-                "coins": on_chain.coins,
-                "value_usd": str(value_usd),
-                "valuation_source": "curve_virtual_price",
-            }
-            logger.debug(
-                "Curve-LP re-priced: position=%s pool=%s value=$%s (lp=%s × vp=%s)",
-                position.position_id,
-                on_chain.pool_address,
-                value_usd,
-                lp_balance,
-                on_chain.virtual_price,
-            )
-            return value_usd, details
+            # Per-pool-family dispatch (VIB-5427 / VIB-5428). USD-stable and USD
+            # metapool both mark off virtual_price × $1 (depeg-checked); crypto /
+            # non-USD pools mark from spot reserves × independent oracle prices.
+            if on_chain.family == "crypto":
+                return self._value_curve_crypto(position, on_chain, market)
+            return self._value_curve_pegged(position, on_chain, market)
         except Exception:
             logger.debug("Curve-LP on-chain re-pricing failed for %s", position.position_id, exc_info=True)
             return None
+
+    def _value_curve_pegged(
+        self,
+        position: "PositionInfo",
+        on_chain: CurveLpPosition,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any]] | None:
+        """Mark a USD-pegged Curve pool (USD-stable or USD metapool) at par.
+
+        Mark = ``lp_balance × virtual_price × $1``. For a USD metapool the
+        metapool's own ``virtual_price`` already rate-incorporates the base pool
+        (the base-LP coin enters its invariant scaled by the base pool's
+        ``virtual_price``), so the same ``× $1`` mark holds end to end (VIB-5427).
+
+        **Depeg cross-check (VIB-5426 / audit P0-2).** ``virtual_price`` is
+        depeg-INSENSITIVE, so before marking, each underlying coin is priced
+        against the INDEPENDENT gateway oracle and the position degrades to
+        UNAVAILABLE on divergence (or any unpriceable coin) rather than mark at
+        par. For a metapool the check runs over the EXPANDED underlying set
+        ([meta coins] + [base-pool coins]) — the base-LP coin itself is not an
+        oracle-priceable symbol, so its underlying stables stand in for it.
+        """
+        lp_balance = Decimal(on_chain.lp_balance_wei) / Decimal(10**on_chain.decimals)
+
+        if on_chain.family == "metapool_usd" and on_chain.underlying_coins:
+            check_coins = on_chain.underlying_coins
+            check_addresses = on_chain.underlying_coin_addresses
+        else:
+            check_coins = on_chain.coins
+            check_addresses = on_chain.coin_addresses
+
+        threshold_bps = self._resolve_curve_depeg_threshold_bps(position)
+        coin_prices = self._price_curve_coins(check_coins, check_addresses, market)
+        peg = check_peg_divergence(coin_prices, threshold_bps=threshold_bps, expected_peg_usd=Decimal("1"))
+        if not peg.ok:
+            reason = (
+                "curve_oracle_depeg_divergence"
+                if peg.reason == "depeg_divergence"
+                else "curve_oracle_price_unavailable"
+            )
+            logger.warning(
+                "Curve-LP depeg cross-check degraded position=%s pool=%s family=%s reason=%s "
+                "divergence=%sbps threshold=%sbps — marking UNAVAILABLE, not at par",
+                position.position_id,
+                on_chain.pool_address,
+                on_chain.family,
+                reason,
+                peg.max_divergence_bps,
+                threshold_bps,
+            )
+            # Empty ≠ Zero: Decimal("0") PAIRED WITH valuation_status="no_path"
+            # is a marker — kept OUT of the NAV sum AND forcing the snapshot to
+            # UNAVAILABLE (so the drawdown fold sees "blind", not "safe at par").
+            return Decimal("0"), {
+                "position_id": position.position_id,
+                "lp_token": on_chain.lp_token,
+                "pool_address": on_chain.pool_address,
+                "liquidity": str(on_chain.lp_balance_wei),
+                "coins": on_chain.coins,
+                "valuation_source": _CURVE_VALUATION_SOURCE[on_chain.family],
+                "valuation_status": "no_path",
+                "mark_unmeasured": True,
+                "unavailable_reason": reason,
+                "depeg_divergence_bps": str(peg.max_divergence_bps),
+                "depeg_threshold_bps": str(threshold_bps),
+                "oracle_peg_usd": str(peg.peg_usd) if peg.peg_usd is not None else "",
+            }
+
+        # Peg confirmed within tolerance — the USD numeraire holds, mark at par
+        # (peg = $1). The independent oracle agreed, so this $ value is trusted.
+        value_usd = lp_balance * on_chain.virtual_price
+        if value_usd <= 0:
+            return None
+
+        details: dict[str, Any] = {
+            "position_id": position.position_id,
+            "lp_token": on_chain.lp_token,
+            "pool_address": on_chain.pool_address,
+            # The LP-token balance IS the liquidity measure (no tick-bracketed
+            # concentrated liquidity), so Accountant LP6 reads a real value.
+            "liquidity": str(on_chain.lp_balance_wei),
+            "lp_balance": str(lp_balance),
+            "virtual_price": str(on_chain.virtual_price),
+            "peg_usd": "1",
+            # Depeg cross-check diagnostics (VIB-5426).
+            "oracle_peg_usd": str(peg.peg_usd),
+            "depeg_divergence_bps": str(peg.max_divergence_bps),
+            "depeg_threshold_bps": str(threshold_bps),
+            "coins": on_chain.coins,
+            "value_usd": str(value_usd),
+            "valuation_source": _CURVE_VALUATION_SOURCE[on_chain.family],
+        }
+        if on_chain.family == "metapool_usd":
+            details["base_pool_virtual_price"] = (
+                str(on_chain.base_pool_virtual_price) if on_chain.base_pool_virtual_price is not None else ""
+            )
+            details["underlying_coins"] = on_chain.underlying_coins
+        logger.debug(
+            "Curve-LP re-priced (%s): position=%s pool=%s value=$%s (lp=%s × vp=%s)",
+            on_chain.family,
+            position.position_id,
+            on_chain.pool_address,
+            value_usd,
+            lp_balance,
+            on_chain.virtual_price,
+        )
+        return value_usd, details
+
+    def _value_curve_crypto(
+        self,
+        position: "PositionInfo",
+        on_chain: CurveLpPosition,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any]] | None:
+        """Mark a crypto / non-USD Curve pool from spot reserves (VIB-5428).
+
+        ``virtual_price × $1`` is meaningless for a pool whose coins are not all
+        ~$1 (tricrypto, cryptoswap, steth), so the LP token is valued as its
+        proportional claim on the pool's CURRENT reserves, each priced in USD by
+        the INDEPENDENT gateway oracle::
+
+            value = (lp_balance / total_supply) × Σ (reserve_i / 10^dec_i) × price_i
+
+        Using the EXTERNAL oracle (not the pool's manipulable internal oracle)
+        on the real reserves is exact at the block and robust to internal-oracle
+        displacement; the internal-vs-external spot guard is VIB-5490 (separate).
+        There is no $1 peg to cross-check (volatile pool), so the position fails
+        closed (Empty ≠ Zero) only when a coin is unpriceable or a read missed.
+        """
+        # Every fail path returns the no_path marker (Decimal("0") + repriced=True),
+        # NOT a bare None — a bare None makes the dispatch fall back to the STALE
+        # strategy estimate (position.value_usd) and book it into the NAV sum at
+        # repriced=False. Fail closed to UNAVAILABLE so no stale value can leak.
+        if market is None or on_chain.total_supply_wei is None or on_chain.total_supply_wei <= 0:
+            return self._curve_crypto_unavailable(position, on_chain, "curve_oracle_price_unavailable")
+        if len(on_chain.reserves_wei) != len(on_chain.coins) or len(on_chain.coin_decimals) != len(on_chain.coins):
+            return self._curve_crypto_unavailable(position, on_chain, "curve_spot_reserves_read_incomplete")
+
+        prices = self._price_curve_coins(on_chain.coins, on_chain.coin_addresses, market)
+        if any(p is None for p in prices):
+            return self._curve_crypto_unavailable(position, on_chain, "curve_oracle_price_unavailable")
+
+        ownership = Decimal(on_chain.lp_balance_wei) / Decimal(on_chain.total_supply_wei)
+        gross_value = Decimal("0")
+        priced_reserves: list[str] = []
+        for reserve_wei, decimals, price in zip(on_chain.reserves_wei, on_chain.coin_decimals, prices, strict=True):
+            amount = Decimal(reserve_wei) / Decimal(10**decimals)
+            gross_value += amount * price  # type: ignore[operator]  # prices are non-None here
+            priced_reserves.append(str(amount))
+        value_usd = ownership * gross_value
+        if value_usd <= 0:
+            return self._curve_crypto_unavailable(position, on_chain, "curve_spot_reserves_nonpositive")
+
+        details: dict[str, Any] = {
+            "position_id": position.position_id,
+            "lp_token": on_chain.lp_token,
+            "pool_address": on_chain.pool_address,
+            "liquidity": str(on_chain.lp_balance_wei),
+            "total_supply": str(on_chain.total_supply_wei),
+            "coins": on_chain.coins,
+            "reserves": priced_reserves,
+            "coin_prices_usd": [str(p) for p in prices],
+            "value_usd": str(value_usd),
+            "valuation_source": "curve_spot_reserves",
+        }
+        logger.debug(
+            "Curve-LP re-priced (crypto): position=%s pool=%s value=$%s (ownership=%s × reserves=$%s)",
+            position.position_id,
+            on_chain.pool_address,
+            value_usd,
+            ownership,
+            gross_value,
+        )
+        return value_usd, details
+
+    @staticmethod
+    def _curve_crypto_unavailable(
+        position: "PositionInfo",
+        on_chain: CurveLpPosition,
+        reason: str,
+    ) -> tuple[Decimal, dict[str, Any]]:
+        """Degrade a crypto Curve position to a no_path UNAVAILABLE marker.
+
+        Mirrors the pegged-path marker: Decimal("0") + ``valuation_status``
+        forces the snapshot to UNAVAILABLE (drawdown fold sees "blind", not "safe
+        at zero"), never a fabricated value (Empty ≠ Zero).
+        """
+        logger.warning(
+            "Curve-LP crypto mark unavailable position=%s pool=%s reason=%s — marking UNAVAILABLE, not fabricated",
+            position.position_id,
+            on_chain.pool_address,
+            reason,
+        )
+        return Decimal("0"), {
+            "position_id": position.position_id,
+            "lp_token": on_chain.lp_token,
+            "pool_address": on_chain.pool_address,
+            "liquidity": str(on_chain.lp_balance_wei),
+            "coins": on_chain.coins,
+            "valuation_source": "curve_spot_reserves",
+            "valuation_status": "no_path",
+            "mark_unmeasured": True,
+            "unavailable_reason": reason,
+        }
 
     def _resolve_curve_depeg_threshold_bps(self, position: "PositionInfo") -> int:
         """Resolve the depeg divergence threshold (bps) for a Curve LP position.
@@ -4751,8 +4886,13 @@ class PortfolioValuer:
             )
         return DEFAULT_DEPEG_THRESHOLD_BPS
 
-    def _price_curve_coins(self, on_chain: CurveLpPosition, market: MarketDataSource) -> list[Decimal | None]:
-        """Price each pool coin in USD via the INDEPENDENT gateway oracle.
+    def _price_curve_coins(
+        self,
+        coins: list[str],
+        coin_addresses: list[str],
+        market: MarketDataSource,
+    ) -> list[Decimal | None]:
+        """Price each given coin in USD via the INDEPENDENT gateway oracle.
 
         Prices by ADDRESS first (engages the oracle's by-address market sources —
         CoinGecko / DexScreener — which a bare symbol skips, and which is what
@@ -4761,15 +4901,34 @@ class PortfolioValuer:
         UNAVAILABLE, never a fabricated value). ``market`` absent → all ``None`` →
         fail closed: the cross-check cannot run without an oracle, so the position
         is unmeasured, not par-marked. Mirrors the fungible-LP ``_price_leg`` seam.
+
+        ``coins`` / ``coin_addresses`` are passed explicitly so the metapool path
+        can price the EXPANDED underlying set, not just the native [meta, base-LP]
+        coins (VIB-5427).
+
+        **Native ETH (VIB-5428).** A crypto pool's native-ETH leg (the steth
+        pool's coin 0) carries the sentinel address ``0xEeee…`` and symbol
+        ``ETH`` — neither is an ERC-20 the oracle prices by address. The pricing
+        candidates therefore include ``WETH`` so the leg resolves to the WETH
+        oracle price (ETH ≈ WETH 1:1). If even that misses, the coin is unpriced
+        → ``None`` → the caller fails closed; the leg is NEVER silently dropped
+        (a dropped leg would UNDER-value the LP — a wrong mark, worse than no mark).
         """
         if market is None:
-            return [None for _ in on_chain.coins]
-        addresses = on_chain.coin_addresses
+            return [None for _ in coins]
+        addresses = coin_addresses
         prices: list[Decimal | None] = []
-        for i, symbol in enumerate(on_chain.coins):
+        for i, symbol in enumerate(coins):
             address = addresses[i] if i < len(addresses) else ""
+            # Native ETH has no real ERC-20 address → add WETH as a price proxy.
+            # Gate STRICTLY on the address being a native sentinel (or genuinely
+            # absent), NOT on the symbol: a real ERC-20 that happens to be named
+            # "ETH" carries a real address and must price by THAT address, never
+            # via the WETH proxy (which would mis-price it).
+            is_native_eth = (not address) or address.lower() in _NATIVE_ETH_ADDRESSES
+            keys = [address, symbol, "WETH"] if is_native_eth else [address, symbol]
             priced: Decimal | None = None
-            for key in (address, symbol):
+            for key in keys:
                 if not key:
                     continue
                 try:

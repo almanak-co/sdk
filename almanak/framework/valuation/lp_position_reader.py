@@ -38,6 +38,33 @@ POSITIONS_SELECTOR = "0x99fbab88"  # positions(uint256)
 SLOT0_SELECTOR = "0x3850c7bd"  # slot0()
 ERC20_BALANCE_OF_SELECTOR = "0x70a08231"  # balanceOf(address)
 
+# A uint256 return value is the FIRST 32-byte (64-hex) ABI word; trailing bytes
+# must be ignored. Some old Vyper contracts (e.g. the FRAX/3CRV metapool, which
+# is its own integrated-ERC20 LP token) return MORE than 32 bytes from a uint256
+# getter — the real value is in word 0 and the tail is leftover memory. Decoding
+# ``int(whole_hex, 16)`` would read megabyte-wide garbage; every ABI decoder
+# (cast, web3) takes word 0. VIB-5428.
+_UINT256_WORD_HEX_LEN = 64
+
+
+def _decode_uint256_word(result_hex: str | None) -> int | None:
+    """Decode a uint256 from an eth_call result's FIRST 32-byte word.
+
+    Returns ``None`` (Empty ≠ Zero) on an empty / unparseable result. A normal
+    32-byte return is unchanged; an over-long return (extra trailing bytes) is
+    correctly truncated to word 0 rather than int-parsed whole.
+    """
+    if not result_hex:
+        return None
+    body = result_hex[2:] if result_hex.startswith(("0x", "0X")) else result_hex
+    if not body:
+        return None
+    word = body[:_UINT256_WORD_HEX_LEN] if len(body) >= _UINT256_WORD_HEX_LEN else body
+    try:
+        return int(word, 16)
+    except (ValueError, TypeError):
+        return None
+
 
 @dataclass
 class LPPositionOnChain:
@@ -197,12 +224,7 @@ class LPPositionReader:
         wallet_hex = wallet_address.lower().removeprefix("0x").zfill(64)
         calldata = ERC20_BALANCE_OF_SELECTOR + wallet_hex
         result_hex = self._eth_call(chain, token_address, calldata)
-        if not result_hex:
-            return None
-        try:
-            return int(result_hex, 16)
-        except (ValueError, TypeError):
-            return None
+        return _decode_uint256_word(result_hex)
 
     def read_uint256_call(
         self,
@@ -224,12 +246,7 @@ class LPPositionReader:
         if not contract_address or not selector:
             return None
         result_hex = self._eth_call(chain, contract_address, selector)
-        if not result_hex:
-            return None
-        try:
-            return int(result_hex, 16)
-        except (ValueError, TypeError):
-            return None
+        return _decode_uint256_word(result_hex)
 
     def _eth_call(self, chain: str, to: str, data: str) -> str | None:
         """Make an eth_call via gateway generic RPC."""

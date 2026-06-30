@@ -52,6 +52,31 @@ logger = logging.getLogger(__name__)
 _VIRTUAL_PRICE_SELECTORS = ("0xbb7b8b80", "0x0c46b72a")  # get_virtual_price(), virtual_price()
 _VIRTUAL_PRICE_SCALE = Decimal(10**18)
 
+# Crypto / non-USD pool spot-reserves reads (VIB-5428). A pool's tracked balance
+# of coin ``i`` is read from its ``balances(i)`` getter — NOT an ERC-20
+# ``balanceOf`` on the coin (which would miss native ETH that the pool holds
+# directly, e.g. the steth pool's coin 0). Old pools (steth, tricrypto2) declare
+# ``balances(int128)``; NG pools declare ``balances(uint256)`` — same ABI word
+# layout for index 0..N, so we probe ``uint256`` first then ``int128``.
+_BALANCES_SELECTORS = ("0x4903b0d1", "0x065a80d8")  # balances(uint256), balances(int128)
+_TOTAL_SUPPLY_SELECTOR = "0x18160ddd"  # totalSupply()
+_DECIMALS_SELECTOR = "0x313ce567"  # decimals()
+
+# Native-ETH placeholder addresses a Curve pool's coin list uses for raw ETH
+# (the steth pool holds native ETH as coin 0). These have no ``decimals()``
+# getter — ETH is 18-decimal by definition. Source literals are kept in
+# EIP-55-checksummed form (the static checksum scanner reads source literals)
+# but lowercased INTO the frozenset, because every membership test lowercases
+# the candidate address first — a checksummed set member would never match.
+_NATIVE_ETH_ADDRESSES = frozenset(
+    a.lower()
+    for a in (
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",  # Curve native-ETH sentinel
+        "0x0000000000000000000000000000000000000000",
+    )
+)
+_NATIVE_ETH_DECIMALS = 18  # decimal-policy-exempt: native ETH is always 18-dec (VIB-5428)
+
 # USD-pegged StableSwap numeraire: every coin in the pool tracks ~$1, so the LP
 # token's underlying-invariant unit IS a USD unit (peg = $1). A pool whose coins
 # are NOT all in this set is non-USD-numeraire (peg != 1) and out of v1 scope.
@@ -107,6 +132,36 @@ class CurveLpPosition:
     # which is what makes a real depeg visible. Empty when the registry has no
     # addresses for the pool; the valuer then falls back to symbol pricing.
     coin_addresses: list[str] = field(default_factory=list)
+
+    # ── Per-pool-family valuation dispatch (VIB-5427 / VIB-5428) ──────────────
+    # Which valuation family the valuer marks this position with:
+    #   "usd_stable"    — lp × virtual_price × $1, depeg-checked vs $1 (existing).
+    #   "metapool_usd"  — USD metapool (meta coin + base-pool coins all USD);
+    #                     lp × metapool virtual_price × $1, depeg-checked over the
+    #                     EXPANDED underlying set (VIB-5427).
+    #   "crypto"        — non-USD / volatile pool (tricrypto, cryptoswap, steth);
+    #                     valued from spot reserves × independent oracle prices
+    #                     (VIB-5428). No $1 peg check (no peg to hold).
+    family: str = "usd_stable"
+
+    # Metapool (VIB-5427). The base pool's live ``get_virtual_price()`` (USD per
+    # base-LP unit) — read as a diagnostic / model anchor; ``None`` when
+    # unreadable. ``underlying_*`` are the EXPANDED underlying coin set
+    # ([meta coins] + [base-pool coins]) the valuer prices for the depeg
+    # cross-check, since the base-LP coin itself (e.g. 3CRV) is not an
+    # oracle-priceable symbol.
+    base_pool_virtual_price: Decimal | None = None
+    underlying_coins: list[str] = field(default_factory=list)
+    underlying_coin_addresses: list[str] = field(default_factory=list)
+
+    # Crypto / non-USD pool (VIB-5428) spot-reserves inputs. ``reserves_wei`` is
+    # the pool's tracked balance of each coin (same order as ``coins``),
+    # ``coin_decimals`` each coin's decimals, ``total_supply_wei`` the LP token's
+    # total supply. The valuer marks
+    #   value = (lp_balance / total_supply) × Σ (reserve_i / 10^dec_i) × oracle_price_i.
+    total_supply_wei: int | None = None
+    reserves_wei: list[int] = field(default_factory=list)
+    coin_decimals: list[int] = field(default_factory=list)
 
     @property
     def is_active(self) -> bool:
@@ -199,12 +254,16 @@ class CurveLpPositionReader:
         wallet_address: str,
         coins: list[str] | None = None,
     ) -> CurveLpPosition | None:
-        """Read LP-token balance + live virtual_price for a Curve LP position.
+        """Read LP-token balance + the family-specific on-chain inputs needed to
+        mark a Curve LP position.
 
         Returns ``None`` on any failure (Empty ≠ Zero), a measured
         ``lp_balance_wei = 0`` position for a genuinely empty wallet, or the full
-        :class:`CurveLpPosition` otherwise. Pools whose coins are not all
-        USD-pegged stablecoins return ``None`` (v1 scope — peg must be $1).
+        :class:`CurveLpPosition` otherwise. The pool is classified into a
+        valuation FAMILY (:meth:`_classify_family`) — USD-stable, USD metapool,
+        or crypto/non-USD — and the inputs that family needs are read live; a
+        pool that fits no safely-valuable family returns ``None`` (fail closed,
+        never mis-marked).
         """
         if self._gateway is None or not self.supports(protocol):
             return None
@@ -220,11 +279,10 @@ class CurveLpPositionReader:
         if not pool_address or not lp_token_address:
             return None
 
-        # v1 scope: only USD-pegged StableSwap pools (peg = $1). A pool with any
-        # non-USD-stable coin (steth, tricrypto, …) is fail-closed, not mis-marked.
-        if not pool_coins or not all(c.upper() in _USD_STABLE_SYMBOLS for c in pool_coins):
+        family = self._classify_family(meta, pool_coins, coins_overridden=coins is not None)
+        if family is None:
             logger.debug(
-                "Curve pool %s coins %s not all USD-pegged — out of v1 valuation scope",
+                "Curve pool %s coins %s fits no safely-valuable family — fail closed (not mis-marked)",
                 pool_address,
                 pool_coins,
             )
@@ -254,13 +312,37 @@ class CurveLpPositionReader:
                 virtual_price=Decimal("0"),
                 coins=pool_coins,
                 coin_addresses=coin_addresses,
+                family=family,
             )
 
+        if family == "crypto":
+            return self._read_crypto_position(
+                chain=chain,
+                pool_address=pool_address,
+                lp_token_address=lp_token_address,
+                lp_balance_wei=lp_balance_wei,
+                coins=pool_coins,
+                coin_addresses=coin_addresses,
+            )
+
+        # USD-stable + USD-metapool both mark off the pool's own virtual_price.
         virtual_price = self._read_virtual_price(chain, pool_address)
         if virtual_price is None or virtual_price <= 0:
             # Empty ≠ Zero: an unreadable / non-positive virtual_price is
             # unmeasured, never a fabricated mark.
             return None
+
+        if family == "metapool_usd":
+            return self._build_metapool_position(
+                chain=chain,
+                meta=meta,
+                pool_address=pool_address,
+                lp_token_address=lp_token_address,
+                lp_balance_wei=lp_balance_wei,
+                virtual_price=virtual_price,
+                pool_coins=pool_coins,
+                coin_addresses=coin_addresses,
+            )
 
         return CurveLpPosition(
             lp_token=lp_token_address,
@@ -269,7 +351,203 @@ class CurveLpPositionReader:
             virtual_price=virtual_price,
             coins=pool_coins,
             coin_addresses=coin_addresses,
+            family="usd_stable",
         )
+
+    @staticmethod
+    def _classify_family(meta: dict[str, Any], pool_coins: list[str], *, coins_overridden: bool) -> str | None:
+        """Classify a pool into its valuation family, or ``None`` (fail closed).
+
+        * ``"metapool_usd"`` — a USD metapool: ``is_metapool`` with a resolvable
+          ``base_pool``, every non-base (meta) coin AND every ``base_pool_coins``
+          entry a USD stable. Valued at ``lp × metapool virtual_price × $1`` (the
+          metapool's own ``get_virtual_price`` already rate-incorporates the base
+          pool), with the depeg cross-check run over the expanded underlying set.
+        * ``"usd_stable"`` — a plain pool whose coins are all USD stables.
+        * ``"crypto"`` — a non-USD / volatile pool (steth, tricrypto, cryptoswap)
+          with a registry address for every coin, so the valuer can price each by
+          address against the independent oracle and mark from spot reserves.
+        * ``None`` — fits none safely (e.g. a metapool with a non-USD base, or a
+          non-USD pool missing coin addresses). Fail closed, never mis-marked.
+
+        A caller-supplied ``coins`` override is honoured ONLY for the all-USD
+        check (it cannot reclassify the pool's structure): metapool / crypto
+        structure is read from the registry ``meta``, never from the override.
+        """
+        if not pool_coins:
+            return None
+
+        if bool(meta.get("is_metapool")):
+            base_pool = str(meta.get("base_pool") or "")
+            base_coins = [str(c).upper() for c in (meta.get("base_pool_coins") or [])]
+            meta_native_coins = [str(c).upper() for c in (meta.get("coins") or [])]
+            if len(meta_native_coins) < 2 or not base_pool or not base_coins:
+                return None
+            # Standard Curve metapool layout: coins = [meta coin(s)…, base-LP].
+            # Every meta coin and every base-pool coin must be a USD stable for
+            # the $1 numeraire to hold end to end.
+            meta_coins = meta_native_coins[:-1]
+            if not meta_coins or not all(c in _USD_STABLE_SYMBOLS for c in meta_coins):
+                return None
+            if not all(c in _USD_STABLE_SYMBOLS for c in base_coins):
+                return None
+            return "metapool_usd"
+
+        if all(c.upper() in _USD_STABLE_SYMBOLS for c in pool_coins):
+            return "usd_stable"
+
+        # Non-USD / volatile: valuable from spot reserves × oracle prices only
+        # when every coin has a registry address to price by. A coins override
+        # that breaks the 1:1 address alignment forfeits this family (the valuer
+        # would mis-map an address to the wrong coin).
+        meta_addresses = [str(a) for a in (meta.get("coin_addresses") or [])]
+        meta_coins_canon = [str(c) for c in (meta.get("coins") or [])]
+        if coins_overridden and pool_coins != meta_coins_canon:
+            return None
+        if len(meta_addresses) == len(pool_coins) and all(meta_addresses):
+            return "crypto"
+        return None
+
+    def _build_metapool_position(
+        self,
+        *,
+        chain: str,
+        meta: dict[str, Any],
+        pool_address: str,
+        lp_token_address: str,
+        lp_balance_wei: int,
+        virtual_price: Decimal,
+        pool_coins: list[str],
+        coin_addresses: list[str],
+    ) -> CurveLpPosition:
+        """Assemble a USD-metapool position (VIB-5427).
+
+        Marked at ``lp × virtual_price × $1`` like a plain USD pool, but the depeg
+        cross-check must run over the EXPANDED underlying set — [meta coins] +
+        [base-pool coins] — because the base-LP coin (e.g. 3CRV) is itself not an
+        oracle-priceable symbol. The base pool's live ``get_virtual_price()`` is
+        read as a diagnostic / model anchor (a miss does not fail the position —
+        the mark uses the metapool's own vp, not the base vp).
+        """
+        meta_native_coins = [str(c) for c in (meta.get("coins") or [])]
+        meta_native_addresses = [str(a) for a in (meta.get("coin_addresses") or [])]
+        base_coins = [str(c) for c in (meta.get("base_pool_coins") or [])]
+        base_addresses = [str(a) for a in (meta.get("base_pool_coin_addresses") or [])]
+        # Meta coins are all but the trailing base-LP coin; expand the base-LP
+        # leg into the base pool's underlying coins for the depeg cross-check.
+        underlying_coins = meta_native_coins[:-1] + base_coins
+        underlying_addresses = (
+            meta_native_addresses[:-1] + base_addresses
+            if len(meta_native_addresses) == len(meta_native_coins) and len(base_addresses) == len(base_coins)
+            else []
+        )
+        base_pool_address = str(meta.get("base_pool") or "")
+        base_vp = self._read_virtual_price(chain, base_pool_address) if base_pool_address else None
+
+        return CurveLpPosition(
+            lp_token=lp_token_address,
+            pool_address=pool_address,
+            lp_balance_wei=lp_balance_wei,
+            virtual_price=virtual_price,
+            coins=pool_coins,
+            coin_addresses=coin_addresses,
+            family="metapool_usd",
+            base_pool_virtual_price=base_vp,
+            underlying_coins=underlying_coins,
+            underlying_coin_addresses=underlying_addresses,
+        )
+
+    def _read_crypto_position(
+        self,
+        *,
+        chain: str,
+        pool_address: str,
+        lp_token_address: str,
+        lp_balance_wei: int,
+        coins: list[str],
+        coin_addresses: list[str],
+    ) -> CurveLpPosition | None:
+        """Read spot-reserves inputs for a crypto / non-USD pool (VIB-5428).
+
+        Reads the LP token ``totalSupply()``, each coin's pool ``balances(i)``,
+        and each coin's ``decimals()`` (native ETH → 18 without a call). Returns
+        ``None`` (fail closed, Empty ≠ Zero) if any read misses or the total
+        supply is non-positive — the valuer then flags UNAVAILABLE rather than
+        mark from a partial read.
+
+        ⚠️ COIN-ORDER INVARIANT (VIB-5539). The crypto mark pairs ``balances(i)``
+        (read by on-chain index ``i``) with ``coin_addresses[i]`` / ``coins[i]``
+        from the static registry, and the valuer prices reserve ``i`` with the
+        oracle price of ``coin_addresses[i]``. This TRUSTS the registry
+        ``coin_addresses`` order to match the pool's on-chain ``coins(i)`` order.
+        It is hand-verified for the in-scope pools (steth, tricrypto2, base
+        WETH/cbETH) but is NOT yet validated on-chain. A wrong order pairs a
+        reserve with the wrong coin's price → a ~10^10 mis-mark (e.g. WBTC reserve
+        priced as USDT). **VIB-5539 (on-chain ``coins(i)`` validation, sibling of
+        VIB-5424) MUST land before any new crypto pool is added to the registry.**
+        """
+        if not coin_addresses or len(coin_addresses) != len(coins):
+            # Crypto pricing is by address; without a full address set we cannot
+            # safely map reserves to oracle prices.
+            return None
+
+        total_supply = self._lp_reader.read_uint256_call(chain, lp_token_address, _TOTAL_SUPPLY_SELECTOR)
+        if total_supply is None or total_supply <= 0:
+            return None
+
+        reserves: list[int] = []
+        for i in range(len(coins)):
+            reserve = self._read_pool_balance(chain, pool_address, i)
+            if reserve is None:
+                return None
+            reserves.append(reserve)
+
+        decimals: list[int] = []
+        for address in coin_addresses:
+            dec = self._read_coin_decimals(chain, address)
+            if dec is None:
+                return None
+            decimals.append(dec)
+
+        return CurveLpPosition(
+            lp_token=lp_token_address,
+            pool_address=pool_address,
+            lp_balance_wei=lp_balance_wei,
+            virtual_price=Decimal("0"),  # unused for crypto (spot-reserves mark)
+            coins=coins,
+            coin_addresses=coin_addresses,
+            family="crypto",
+            total_supply_wei=total_supply,
+            reserves_wei=reserves,
+            coin_decimals=decimals,
+        )
+
+    def _read_pool_balance(self, chain: str, pool_address: str, index: int) -> int | None:
+        """Read a pool's tracked ``balances(index)`` (probes uint256 then int128).
+
+        Returns the raw wei reserve, or ``None`` if neither getter resolves
+        (Empty ≠ Zero — the caller fails closed). A measured ``0`` reserve is a
+        valid empty-leg reading and is returned as ``0``.
+        """
+        index_word = hex(index)[2:].zfill(64)
+        for selector in _BALANCES_SELECTORS:
+            raw = self._lp_reader.read_uint256_call(chain, pool_address, selector + index_word)
+            if raw is not None:
+                return raw
+        return None
+
+    def _read_coin_decimals(self, chain: str, coin_address: str) -> int | None:
+        """Read a coin's ERC-20 ``decimals()`` (native ETH → 18, no call).
+
+        Returns ``None`` (fail closed) on an unreadable / implausible value so the
+        valuer never scales a reserve by a fabricated decimals count.
+        """
+        if coin_address.lower() in _NATIVE_ETH_ADDRESSES:
+            return _NATIVE_ETH_DECIMALS
+        raw = self._lp_reader.read_uint256_call(chain, coin_address, _DECIMALS_SELECTOR)
+        if raw is None or raw < 0 or raw > 36:
+            return None
+        return raw
 
     def _read_virtual_price(self, chain: str, pool_address: str) -> Decimal | None:
         """Read the pool's live ``get_virtual_price()`` (1e18-scaled) via gateway.
