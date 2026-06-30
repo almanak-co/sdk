@@ -106,9 +106,7 @@ class TestGetPoolAddressFromFactory:
 class TestGetPoolInfo:
     def test_returns_none_when_pool_not_found(self, sdk: AerodromeSDK) -> None:
         contract = MagicMock()
-        contract.functions.getPool.return_value.call.return_value = (
-            "0x0000000000000000000000000000000000000000"
-        )
+        contract.functions.getPool.return_value.call.return_value = "0x0000000000000000000000000000000000000000"
         web3 = _make_web3_with_contract(contract)
         out = sdk.get_pool_info(USDC_ADDRESS, WETH_ADDRESS, False, web3)
         assert out is None
@@ -125,13 +123,13 @@ class TestGetPoolInfo:
         pool_contract = MagicMock()
         # metadata returns (decimals0, decimals1, reserve0, reserve1, stable, token0, token1)
         pool_contract.functions.metadata.return_value.call.return_value = (
-            6,                  # decimals0
-            18,                 # decimals1
-            1_000_000_000,      # reserve0
-            5 * 10**17,         # reserve1
-            False,              # stable
-            USDC_ADDRESS,       # token0
-            WETH_ADDRESS,       # token1
+            6,  # decimals0
+            18,  # decimals1
+            1_000_000_000,  # reserve0
+            5 * 10**17,  # reserve1
+            False,  # stable
+            USDC_ADDRESS,  # token0
+            WETH_ADDRESS,  # token1
         )
 
         contracts = [factory_contract, pool_contract]
@@ -149,9 +147,7 @@ class TestGetPoolInfo:
 class TestGetAmountOut:
     def test_returns_none_when_pool_not_found(self, sdk: AerodromeSDK) -> None:
         contract = MagicMock()
-        contract.functions.getPool.return_value.call.return_value = (
-            "0x0000000000000000000000000000000000000000"
-        )
+        contract.functions.getPool.return_value.call.return_value = "0x0000000000000000000000000000000000000000"
         web3 = _make_web3_with_contract(contract)
         out = sdk.get_amount_out(1_000_000, USDC_ADDRESS, WETH_ADDRESS, False, web3)
         assert out is None
@@ -210,7 +206,8 @@ class TestSDKBuildTxs:
     def test_build_approve_tx(self, sdk: AerodromeSDK) -> None:
         contract = MagicMock()
         contract.functions.approve.return_value.build_transaction.return_value = {
-            "to": USDC_ADDRESS, "gas": 50000,
+            "to": USDC_ADDRESS,
+            "gas": 50000,
         }
         web3 = _make_web3_with_contract(contract)
         tx = sdk.build_approve_tx(USDC_ADDRESS, "0xspender", MAX_UINT256, TEST_WALLET, web3)
@@ -325,9 +322,7 @@ class TestCLPoolQueries:
 
     def test_get_cl_pool_address_zero_returns_none(self, sdk: AerodromeSDK) -> None:
         contract = MagicMock()
-        contract.functions.getPool.return_value.call.return_value = (
-            "0x0000000000000000000000000000000000000000"
-        )
+        contract.functions.getPool.return_value.call.return_value = "0x0000000000000000000000000000000000000000"
         web3 = _make_web3_with_contract(contract)
         out = sdk.get_cl_pool_address(USDC_ADDRESS, WETH_ADDRESS, 100, web3)
         assert out is None
@@ -349,7 +344,12 @@ class TestCLPoolQueries:
     def test_get_cl_pool_slot0_returns_tuple(self, sdk: AerodromeSDK) -> None:
         contract = MagicMock()
         contract.functions.slot0.return_value.call.return_value = (
-            2**96, 100, 0, 1, 1, True,
+            2**96,
+            100,
+            0,
+            1,
+            1,
+            True,
         )
         web3 = _make_web3_with_contract(contract)
         out = sdk.get_cl_pool_slot0("0xcDAC0d6c6C59727a65F871236188350531885C43", web3)
@@ -374,17 +374,18 @@ class TestCLPositionQueries:
     def test_get_cl_position_returns_info(self, sdk: AerodromeSDK) -> None:
         contract = MagicMock()
         contract.functions.positions.return_value.call.return_value = (
-            0,                # nonce
-            "0x0",            # operator
-            USDC_ADDRESS,     # token0
-            WETH_ADDRESS,     # token1
-            100,              # tickSpacing
-            -1000,            # tickLower
-            1000,             # tickUpper
-            10**18,           # liquidity
-            0, 0,             # feeGrowth0/1
-            500,              # tokensOwed0
-            600,              # tokensOwed1
+            0,  # nonce
+            "0x0",  # operator
+            USDC_ADDRESS,  # token0
+            WETH_ADDRESS,  # token1
+            100,  # tickSpacing
+            -1000,  # tickLower
+            1000,  # tickUpper
+            10**18,  # liquidity
+            0,
+            0,  # feeGrowth0/1
+            500,  # tokensOwed0
+            600,  # tokensOwed1
         )
         web3 = _make_web3_with_contract(contract)
         out = sdk.get_cl_position(42, web3)
@@ -401,11 +402,132 @@ class TestCLPositionQueries:
         assert out is None
 
 
+class TestCLPositionTransientRetry:
+    """ALM-2892: bounded retry/backoff so a single transient RPC error on the CL
+    position read does not abort a teardown LP_CLOSE, while a genuine revert is
+    still surfaced as ``None`` immediately (not masked by a retry)."""
+
+    @staticmethod
+    def _position_tuple() -> tuple:
+        return (
+            0,
+            "0x0",
+            USDC_ADDRESS,
+            WETH_ADDRESS,
+            100,
+            -1000,
+            1000,
+            10**18,
+            0,
+            0,
+            500,
+            600,
+        )
+
+    def test_retries_transient_then_succeeds(self, sdk: AerodromeSDK, monkeypatch: pytest.MonkeyPatch) -> None:
+        sleeps: list[float] = []
+        monkeypatch.setattr("almanak.connectors.aerodrome.sdk.time.sleep", lambda s: sleeps.append(s))
+        contract = MagicMock()
+        # First call rate-limited, retry succeeds — the exact RESOURCE_EXHAUSTED
+        # shape from the ALM-2892 log (re-wrapped, not a typed grpc.RpcError).
+        contract.functions.positions.return_value.call.side_effect = [
+            RuntimeError('RESOURCE_EXHAUSTED "Rate limited, retry after 0.05s"'),
+            self._position_tuple(),
+        ]
+        web3 = _make_web3_with_contract(contract)
+
+        out = sdk.get_cl_position(72457473, web3)
+
+        assert out is not None
+        assert out.liquidity == 10**18
+        # Honored the retry-after hint (0.05s), exactly one backoff sleep.
+        assert sleeps == [0.05]
+
+    def test_raises_after_exhausting_transient_retries(
+        self, sdk: AerodromeSDK, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sleeps: list[float] = []
+        monkeypatch.setattr("almanak.connectors.aerodrome.sdk.time.sleep", lambda s: sleeps.append(s))
+        contract = MagicMock()
+        contract.functions.positions.return_value.call.side_effect = RuntimeError("RESOURCE_EXHAUSTED rate limited")
+        web3 = _make_web3_with_contract(contract)
+
+        # Exhaustion re-raises (does NOT return None) so the caller cannot mistake
+        # a flapping RPC for a missing position.
+        with pytest.raises(RuntimeError, match="RESOURCE_EXHAUSTED"):
+            sdk.get_cl_position(42, web3)
+        # 3 attempts -> 2 backoff sleeps between them.
+        assert len(sleeps) == 2
+
+    def test_genuine_revert_returns_none_without_retry(
+        self, sdk: AerodromeSDK, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sleeps: list[float] = []
+        monkeypatch.setattr("almanak.connectors.aerodrome.sdk.time.sleep", lambda s: sleeps.append(s))
+        contract = MagicMock()
+        # A burned/invalid tokenId reverts — this is a real "no position", not transient.
+        contract.functions.positions.return_value.call.side_effect = ValueError("execution reverted: Invalid token ID")
+        web3 = _make_web3_with_contract(contract)
+
+        out = sdk.get_cl_position(999, web3)
+
+        assert out is None
+        assert sleeps == []  # never retried a non-transient error
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Connection refused",
+            "Connection aborted by peer",
+            "Failed to establish a new connection",
+            "Name or service not known",
+            "502 Bad Gateway",
+            "Gateway Timeout while contacting upstream",
+        ],
+    )
+    def test_network_errors_classified_transient(
+        self, sdk: AerodromeSDK, monkeypatch: pytest.MonkeyPatch, message: str
+    ) -> None:
+        """ALM-2892 (Gemini follow-up): common network/transport failures are
+        transient and must drive a retry, not an immediate ``None``."""
+        sleeps: list[float] = []
+        monkeypatch.setattr("almanak.connectors.aerodrome.sdk.time.sleep", lambda s: sleeps.append(s))
+        contract = MagicMock()
+        contract.functions.positions.return_value.call.side_effect = [
+            ConnectionError(message),
+            self._position_tuple(),
+        ]
+        web3 = _make_web3_with_contract(contract)
+
+        out = sdk.get_cl_position(72457473, web3)
+
+        assert out is not None  # recovered on retry
+        assert len(sleeps) == 1  # exactly one backoff between the two attempts
+
+    def test_revert_with_numeric_code_not_retried(self, sdk: AerodromeSDK, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A genuine revert whose reason text happens to contain a 5xx-looking
+        number (e.g. an amount) must NOT be misclassified as a transient HTTP
+        error — bare numeric codes are deliberately excluded from the regex."""
+        sleeps: list[float] = []
+        monkeypatch.setattr("almanak.connectors.aerodrome.sdk.time.sleep", lambda s: sleeps.append(s))
+        contract = MagicMock()
+        contract.functions.positions.return_value.call.side_effect = ValueError(
+            "execution reverted: amount 500 exceeds balance 1502"
+        )
+        web3 = _make_web3_with_contract(contract)
+
+        out = sdk.get_cl_position(999, web3)
+
+        assert out is None  # treated as a real "no position", returned immediately
+        assert sleeps == []  # never retried
+
+
 class TestCLBuilders:
     def test_build_cl_mint_tx(self, sdk: AerodromeSDK) -> None:
         contract = MagicMock()
         contract.functions.mint.return_value.build_transaction.return_value = {
-            "to": sdk.addresses["cl_nft"], "data": b"\x00" * 4,
+            "to": sdk.addresses["cl_nft"],
+            "data": b"\x00" * 4,
         }
         web3 = _make_web3_with_contract(contract)
         tx = sdk.build_cl_mint_tx(
@@ -448,7 +570,8 @@ class TestCLBuilders:
     def test_build_cl_decrease_liquidity_tx(self, sdk: AerodromeSDK) -> None:
         contract = MagicMock()
         contract.functions.decreaseLiquidity.return_value.build_transaction.return_value = {
-            "to": sdk.addresses["cl_nft"], "data": b"",
+            "to": sdk.addresses["cl_nft"],
+            "data": b"",
         }
         web3 = _make_web3_with_contract(contract)
         tx = sdk.build_cl_decrease_liquidity_tx(
@@ -479,7 +602,8 @@ class TestCLBuilders:
     def test_build_cl_collect_tx(self, sdk: AerodromeSDK) -> None:
         contract = MagicMock()
         contract.functions.collect.return_value.build_transaction.return_value = {
-            "to": sdk.addresses["cl_nft"], "data": b"",
+            "to": sdk.addresses["cl_nft"],
+            "data": b"",
         }
         web3 = _make_web3_with_contract(contract)
         tx = sdk.build_cl_collect_tx(
@@ -543,8 +667,14 @@ class TestSDKHelpers:
 class TestSDKDataClasses:
     def test_pool_info_to_dict(self) -> None:
         p = PoolInfo(
-            address="0xa", token0="0xb", token1="0xc", stable=False,
-            reserve0=100, reserve1=200, decimals0=6, decimals1=18,
+            address="0xa",
+            token0="0xb",
+            token1="0xc",
+            stable=False,
+            reserve0=100,
+            reserve1=200,
+            decimals0=6,
+            decimals1=18,
         )
         d = p.to_dict()
         assert d["reserve0"] == "100"
@@ -552,9 +682,15 @@ class TestSDKDataClasses:
 
     def test_cl_position_info_to_dict(self) -> None:
         p = CLPositionInfo(
-            token_id=1, token0="0xa", token1="0xb",
-            tick_spacing=100, tick_lower=-100, tick_upper=100,
-            liquidity=10**18, tokens_owed0=10, tokens_owed1=20,
+            token_id=1,
+            token0="0xa",
+            token1="0xb",
+            tick_spacing=100,
+            tick_lower=-100,
+            tick_upper=100,
+            liquidity=10**18,
+            tokens_owed0=10,
+            tokens_owed1=20,
         )
         d = p.to_dict()
         assert d["liquidity"] == str(10**18)
@@ -568,7 +704,8 @@ class TestSDKDataClasses:
 
     def test_swap_quote_to_dict(self) -> None:
         q = SwapQuote(
-            amount_in=10, amount_out=20,
+            amount_in=10,
+            amount_out=20,
             routes=[SwapRoute(from_token=USDC_ADDRESS, to_token=WETH_ADDRESS, stable=False)],
         )
         d = q.to_dict()

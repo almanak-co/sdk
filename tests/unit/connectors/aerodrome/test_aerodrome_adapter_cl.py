@@ -285,6 +285,53 @@ class TestRemoveCLLiquidity:
         assert result.success is False
         assert "rpc fail" in (result.error or "")
 
+    def test_lp_close_survives_single_transient_rpc_error(
+        self, adapter: AerodromeAdapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ALM-2892: a single transient RESOURCE_EXHAUSTED on the CL position read
+        no longer aborts the LP_CLOSE build — it retries and succeeds.
+
+        Drives the REAL ``sdk.get_cl_position`` retry loop (not a mock) through the
+        adapter's remove-liquidity (LP_CLOSE) build path.
+        """
+        monkeypatch.setattr("almanak.connectors.aerodrome.sdk.time.sleep", lambda _s: None)
+        position_tuple = (
+            0,
+            "0x0",
+            USDC_ADDRESS,
+            WETH_ADDRESS,
+            200,
+            -100,
+            100,
+            10**18,
+            0,
+            0,
+            0,
+            0,
+        )
+        contract = MagicMock()
+        contract.functions.positions.return_value.call.side_effect = [
+            RuntimeError('RESOURCE_EXHAUSTED "Rate limited, retry after 0.01s"'),
+            position_tuple,
+        ]
+        web3 = MagicMock()
+        web3.eth.contract.return_value = contract
+        web3.to_checksum_address.side_effect = lambda a: a
+        adapter._get_web3 = MagicMock(return_value=web3)  # type: ignore[method-assign]
+        adapter.sdk.build_cl_decrease_liquidity_tx = MagicMock(  # type: ignore[method-assign]
+            return_value={"to": adapter.addresses["cl_nft"], "data": b"\xde\xad"},
+        )
+        adapter.sdk.build_cl_collect_tx = MagicMock(  # type: ignore[method-assign]
+            return_value={"to": adapter.addresses["cl_nft"], "data": "0xcafe"},
+        )
+
+        result = adapter.remove_cl_liquidity(token_id=72457473)
+
+        assert result.success is True
+        assert len(result.transactions) == 2  # decrease + collect
+        # The position read was retried exactly once (1 failure + 1 success).
+        assert contract.functions.positions.return_value.call.call_count == 2
+
 
 # =============================================================================
 # _get_web3

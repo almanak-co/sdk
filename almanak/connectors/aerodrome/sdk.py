@@ -30,6 +30,8 @@ Example:
 import json
 import logging
 import os
+import re
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -42,6 +44,99 @@ if TYPE_CHECKING:
 from .addresses import AERODROME as AERODROME_ADDRESSES
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Transient RPC retry (ALM-2892)
+# =============================================================================
+#
+# A teardown LP_CLOSE reads the CL position via ``get_cl_position`` before
+# building the decreaseLiquidity/collect bundle. When that read hits a momentary
+# rate-limit (gRPC ``RESOURCE_EXHAUSTED "... retry after 19.23s"``), the old code
+# swallowed the error and returned ``None`` — which the caller cannot distinguish
+# from "position does not exist", so it aborted the exit. A single transient blip
+# should not block a risk-reducing teardown; a bounded retry with backoff (honoring
+# the gateway's retry-after hint) recovers, while a genuine "no position" (a
+# contract revert) still returns ``None`` immediately and is never masked.
+
+# Bounded so a teardown compile cannot stall indefinitely on a flapping RPC.
+_CL_POSITION_MAX_ATTEMPTS = 3
+# Exponential backoff used only when the error carries no retry-after hint.
+_CL_POSITION_BACKOFF_BASE_SECONDS = 0.5
+# Hard cap on any single backoff sleep so an adversarial/buggy retry-after hint
+# cannot park a teardown for minutes.
+_CL_POSITION_BACKOFF_CAP_SECONDS = 30.0
+
+# Message fragments that mark an RPC/gateway failure as transient (retryable)
+# when the concrete exception is not a typed ``grpc.RpcError`` — the gateway
+# transport frequently re-wraps the gRPC status in a web3/ValueError whose
+# ``str()`` preserves the original text. Genuine contract reverts ("execution
+# reverted", "Invalid token ID") intentionally do NOT match.
+#
+# Only unambiguous network/transport phrases are listed. Bare HTTP status codes
+# (``500``/``502``/``503``/``504``) are deliberately NOT matched: a genuine
+# contract revert can carry such a number in its reason text (e.g. "amount 500
+# exceeds balance"), which would misclassify a real "no position" as transient
+# and break the must-not-retry-a-revert safety contract. The textual gateway
+# phrases ("bad gateway", "gateway timeout", "unavailable") cover the 5xx cases
+# without that false-positive risk.
+_TRANSIENT_RPC_MESSAGE_RE = re.compile(
+    r"resource_exhausted|rate.?limit|retry after|too many requests|\b429\b"
+    r"|unavailable|deadline_exceeded|timed out|timeout|connection reset"
+    r"|temporarily unavailable|connection refused|connection aborted"
+    r"|connection failed|failed to establish a new connection"
+    r"|name or service not known|bad gateway|gateway timeout",
+    re.IGNORECASE,
+)
+_RETRY_AFTER_MESSAGE_RE = re.compile(r"retry after\s+([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+
+
+def _is_transient_rpc_error(exc: Exception) -> bool:
+    """Classify an exception as a transient (retryable) RPC failure.
+
+    Prefers structured gRPC status classification (``grpc_utils``) when the
+    exception is a typed ``grpc.RpcError``; otherwise falls back to inspecting
+    the message text, since the gateway transport often re-wraps the gRPC status
+    in a non-gRPC exception. Genuine contract reverts are not transient.
+    """
+    try:
+        import grpc
+
+        from almanak.framework.utils.grpc_utils import is_transient_grpc_error
+
+        if isinstance(exc, grpc.RpcError):
+            return is_transient_grpc_error(exc)
+    except Exception:  # noqa: BLE001 — grpc import/classification must never mask the original error
+        pass
+    return bool(_TRANSIENT_RPC_MESSAGE_RE.search(str(exc)))
+
+
+def _cl_position_backoff_seconds(attempt: int, exc: Exception) -> float:
+    """Backoff for retry ``attempt`` (1-based): honor a retry-after hint, else exponential.
+
+    The result is capped at ``_CL_POSITION_BACKOFF_CAP_SECONDS``.
+    """
+    hint: float | None = None
+    try:
+        import grpc
+
+        from almanak.framework.utils.grpc_utils import get_grpc_retry_after_seconds
+
+        if isinstance(exc, grpc.RpcError):
+            hint = get_grpc_retry_after_seconds(exc)
+    except Exception:  # noqa: BLE001 — fall through to message parsing
+        hint = None
+    if hint is None:
+        match = _RETRY_AFTER_MESSAGE_RE.search(str(exc))
+        if match:
+            try:
+                hint = float(match.group(1))
+            except ValueError:
+                hint = None
+    if hint is not None:
+        return min(hint, _CL_POSITION_BACKOFF_CAP_SECONDS)
+    backoff = _CL_POSITION_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+    return min(backoff, _CL_POSITION_BACKOFF_CAP_SECONDS)
 
 
 # =============================================================================
@@ -923,32 +1018,79 @@ class AerodromeSDK:
             web3: Web3 instance
 
         Returns:
-            CLPositionInfo if found, None otherwise
+            CLPositionInfo if found, ``None`` when the position genuinely cannot be
+            read (no ``cl_nft`` on this chain, or a contract revert — e.g. an
+            invalid/burned tokenId).
+
+        Raises:
+            Exception: Re-raises the last transient RPC error after
+                ``_CL_POSITION_MAX_ATTEMPTS`` retries have been exhausted, so the
+                caller surfaces a genuine "could not query" failure (fail-closed)
+                rather than mistaking a flapping RPC for a missing position
+                (ALM-2892). The caller (``AerodromeAdapter.remove_cl_liquidity``)
+                converts this into a clear ``LiquidityResult`` failure.
         """
         if "cl_nft" not in self.addresses:
             logger.warning(f"No cl_nft address for chain {self.chain}")
             return None
-        try:
-            nft = web3.eth.contract(
-                address=web3.to_checksum_address(self.addresses["cl_nft"]),
-                abi=self._cl_nft_abi,
-            )
-            pos = nft.functions.positions(token_id).call()
-            # positions returns: (nonce, operator, token0, token1, tickSpacing, tickLower, tickUpper, liquidity, feeGrowth0, feeGrowth1, tokensOwed0, tokensOwed1)
-            return CLPositionInfo(
-                token_id=token_id,
-                token0=pos[2].lower(),
-                token1=pos[3].lower(),
-                tick_spacing=int(pos[4]),
-                tick_lower=int(pos[5]),
-                tick_upper=int(pos[6]),
-                liquidity=int(pos[7]),
-                tokens_owed0=int(pos[10]),
-                tokens_owed1=int(pos[11]),
-            )
-        except Exception as e:
-            logger.warning(f"Failed to query CL position {token_id}: {e}")
-            return None
+
+        last_transient: Exception | None = None
+        for attempt in range(1, _CL_POSITION_MAX_ATTEMPTS + 1):
+            try:
+                nft = web3.eth.contract(
+                    address=web3.to_checksum_address(self.addresses["cl_nft"]),
+                    abi=self._cl_nft_abi,
+                )
+                pos = nft.functions.positions(token_id).call()
+                # positions returns: (nonce, operator, token0, token1, tickSpacing, tickLower, tickUpper, liquidity, feeGrowth0, feeGrowth1, tokensOwed0, tokensOwed1)
+                return CLPositionInfo(
+                    token_id=token_id,
+                    token0=pos[2].lower(),
+                    token1=pos[3].lower(),
+                    tick_spacing=int(pos[4]),
+                    tick_lower=int(pos[5]),
+                    tick_upper=int(pos[6]),
+                    liquidity=int(pos[7]),
+                    tokens_owed0=int(pos[10]),
+                    tokens_owed1=int(pos[11]),
+                )
+            except Exception as e:  # noqa: BLE001 — classify, then retry-or-surface
+                if not _is_transient_rpc_error(e):
+                    # Genuine "no position" / contract revert / config error.
+                    # Returning None here is correct and must not be masked by a
+                    # retry — only transient RPC failures are retryable.
+                    logger.warning(f"Failed to query CL position {token_id}: {e}")
+                    return None
+                last_transient = e
+                if attempt >= _CL_POSITION_MAX_ATTEMPTS:
+                    break
+                delay = _cl_position_backoff_seconds(attempt, e)
+                logger.warning(
+                    "Transient RPC error querying CL position %s (attempt %d/%d), retrying in %.2fs: %s",
+                    token_id,
+                    attempt,
+                    _CL_POSITION_MAX_ATTEMPTS,
+                    delay,
+                    e,
+                )
+                time.sleep(delay)
+
+        logger.error(
+            "CL position %s unavailable after %d attempts due to transient RPC errors; "
+            "surfacing failure so the LP_CLOSE is not mistaken for a missing position: %s",
+            token_id,
+            _CL_POSITION_MAX_ATTEMPTS,
+            last_transient,
+        )
+        # last_transient is set whenever the loop reaches here (only transient
+        # errors fall through; non-transient ones return above). The fallback
+        # RuntimeError is unreachable in practice but keeps the re-raise total —
+        # `assert` would be stripped under `python -O`.
+        if last_transient is not None:
+            raise last_transient
+        raise RuntimeError(  # pragma: no cover - defensive; loop guarantees last_transient is set
+            f"CL position {token_id} unavailable after {_CL_POSITION_MAX_ATTEMPTS} transient RPC errors"
+        )
 
     def build_cl_mint_tx(
         self,
