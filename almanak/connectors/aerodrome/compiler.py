@@ -117,6 +117,11 @@ class _AerodromeCompileImpl:
             fixed_swap_fee_tier=ctx.fixed_swap_fee_tier,
             max_price_impact_pct=ctx.max_price_impact_pct,
             allow_placeholder_prices=ctx.allow_placeholder_prices,
+            # Runtime placeholder flag (distinct from the allow_placeholder_prices
+            # config option): True when the compiler was built without a real
+            # price oracle. The price-impact guard skips the IMPACT branch in
+            # this mode, matching the uniswap_v3 / camelot / fluid pipelines.
+            using_placeholders=ctx.using_placeholders,
             permission_discovery=ctx.permission_discovery,
         )
 
@@ -175,6 +180,198 @@ def _looks_like_evm_address(value: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _aerodrome_swap_price_impact_guard(
+    compiler,
+    intent: SwapIntent,
+    from_token: Any,
+    to_token: Any,
+    amount_decimal: Decimal,
+    swap_result: Any,
+) -> CompilationResult | None:
+    """Pre-trade price-impact guard for Aerodrome/Velodrome swaps (ALM-2890).
+
+    Mirrors the guard applied by the uniswap_v3 / camelot / fluid swap compilers
+    (``almanak.framework.intents._compiler_helpers.check_price_impact``): compare
+    the on-chain quoter amount against an independent oracle estimate and fail
+    closed when the realized impact exceeds ``intent.max_price_impact`` (or the
+    compiler config default ``max_price_impact_pct``). Blueprint 05 §"Pool
+    Selection Policy (UX First, Safety Always)".
+
+    Returns a FAILED ``CompilationResult`` to abort compilation, or ``None`` when
+    the swap is within the cap (or the check is legitimately skipped — offline /
+    placeholder mode, or no oracle to compare against).
+    """
+    from almanak.framework.intents._compiler_helpers import (
+        PriceImpactDecision,
+        check_price_impact,
+    )
+
+    cfg = getattr(compiler, "_config", None)
+    # Empty != Zero: a configured cap of Decimal("0") is a deliberate "any
+    # nonzero impact fails closed" setting and must NOT be coerced to the 5%
+    # default; only an unset (None) cap falls back to the default.
+    configured_max_impact = getattr(cfg, "max_price_impact_pct", None)
+    config_max_impact = Decimal("0.05") if configured_max_impact is None else configured_max_impact
+    using_placeholders = bool(getattr(cfg, "using_placeholders", False))
+    offline_mode = using_placeholders or bool(getattr(cfg, "permission_discovery", False))
+
+    # Oracle-derived expected output (wei), independent of the pool quote.
+    # Degrade to 0 (== "no oracle to compare against") if any price is missing;
+    # the guard then skips rather than hard-failing on a data gap.
+    oracle_estimate_wei = 0
+    try:
+        from_price = compiler._require_token_price(from_token.symbol)
+        to_price = compiler._require_token_price(to_token.symbol)
+        if to_price > 0:
+            oracle_out_human = (amount_decimal * from_price) / to_price
+            oracle_estimate_wei = int(oracle_out_human * Decimal(10**to_token.decimals))
+    except Exception:  # noqa: BLE001 — oracle gap degrades to "no comparison", never a hard error
+        oracle_estimate_wei = 0
+
+    # Only a genuine ON-CHAIN quote counts as the quoter amount. The Aerodrome
+    # adapter silently falls back to an oracle-derived amount when the on-chain
+    # quote is unavailable (RPC/gateway failure, thin pool with no route); that
+    # fallback amount is NOT independent of the oracle estimate, so comparing
+    # the two would always show ~0 impact and defeat the guard (ALM-2890).
+    # Treat an oracle-fallback quote as "quoter missing" so check_price_impact
+    # fails closed in live mode (and is relaxed only in offline/placeholder
+    # mode, where oracle-only pricing is expected).
+    quote = getattr(swap_result, "quote", None)
+    quote_is_onchain = bool(getattr(quote, "is_onchain", False)) if quote is not None else False
+    quoter_raw = getattr(quote, "amount_out", None) if (quote is not None and quote_is_onchain) else None
+    quoter_amount = int(quoter_raw) if quoter_raw is not None else None
+
+    impact = check_price_impact(
+        oracle_estimate=oracle_estimate_wei,
+        quoter_amount=quoter_amount,
+        intent_max_impact=intent.max_price_impact,
+        config_max_impact=config_max_impact,
+        offline_mode=offline_mode,
+        using_placeholders=using_placeholders,
+    )
+    if impact.decision is PriceImpactDecision.IMPACT_TOO_HIGH:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Price impact too high: quoter amount implies "
+                f"{impact.price_impact:.1%} price impact "
+                f"(oracle estimate: {oracle_estimate_wei}, quoter: {quoter_amount}). "
+                f"Maximum allowed: {impact.effective_max_impact:.2%}. "
+                f"Likely cause: pool has insufficient liquidity for "
+                f"{intent.from_token}->{intent.to_token} on Aerodrome."
+            ),
+            intent_id=intent.intent_id,
+        )
+    if impact.decision is PriceImpactDecision.QUOTER_MISSING_FAIL_CLOSED:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Price impact guard: Aerodrome quoter returned no amount for "
+                f"{intent.from_token}->{intent.to_token}. Cannot verify pool liquidity "
+                f"or price impact. Refusing to compile a swap backed only by the oracle price."
+            ),
+            intent_id=intent.intent_id,
+        )
+    if impact.decision is PriceImpactDecision.SKIPPED_NO_ORACLE:
+        # No oracle price to compare against — the swap proceeds with
+        # slippage-only protection. Surface it so an operator can see the
+        # impact guard was skipped rather than silently passed.
+        logger.warning(
+            "Aerodrome price-impact guard skipped for %s->%s: no oracle price available "
+            "to compare against the quoter; slippage-only protection applies.",
+            intent.from_token,
+            intent.to_token,
+        )
+    return None
+
+
+def _validate_slipstream_tick_bounds(
+    intent: LPOpenIntent,
+    tick_spacing: int,
+) -> tuple[int, int] | CompilationResult:
+    """Validate Slipstream tick bounds: integer, ordered, aligned to tick_spacing.
+
+    Returns ``(tick_lower, tick_upper)`` on success or a FAILED
+    ``CompilationResult``. Extracted from ``compile_lp_open_aerodrome_slipstream``
+    so the main path stays under the mccabe limit; behaviour is byte-identical to
+    the previous inline guards.
+    """
+    if int(intent.range_lower) != intent.range_lower or int(intent.range_upper) != intent.range_upper:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Aerodrome Slipstream tick bounds must be integers, "
+                f"got range_lower={intent.range_lower}, range_upper={intent.range_upper}"
+            ),
+            intent_id=intent.intent_id,
+        )
+    tick_lower = int(intent.range_lower)
+    tick_upper = int(intent.range_upper)
+    if tick_lower >= tick_upper:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Aerodrome Slipstream tick_lower ({tick_lower}) must be less than tick_upper ({tick_upper})",
+            intent_id=intent.intent_id,
+        )
+    if tick_lower % tick_spacing != 0 or tick_upper % tick_spacing != 0:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Aerodrome Slipstream tick bounds must be aligned to tick_spacing={tick_spacing}: "
+                f"tick_lower={tick_lower} (rem={tick_lower % tick_spacing}), "
+                f"tick_upper={tick_upper} (rem={tick_upper % tick_spacing})"
+            ),
+            intent_id=intent.intent_id,
+        )
+    return tick_lower, tick_upper
+
+
+def _slipstream_tick_straddle_failure(
+    intent: LPOpenIntent,
+    slot0: Any,
+    tick_lower: int,
+    tick_upper: int,
+) -> CompilationResult | None:
+    """Reject a Slipstream LP_OPEN whose range does not straddle the current tick (ALM-2891).
+
+    A V3-style position is two-sided only when ``tick_lower <= current_tick <
+    tick_upper``; a range entirely on one side mints a silent one-sided /
+    out-of-range position (e.g. all-token0 with amount1 stranded). Without this
+    check a decimals footgun in price->tick conversion (see
+    :func:`almanak.framework.intents.tick_utils.price_to_tick`) produced exactly
+    that with no error.
+
+    Returns a FAILED ``CompilationResult`` to abort, or ``None`` when the range
+    straddles the current tick, the live tick is unavailable (``slot0 is None``),
+    or the caller opted in via ``protocol_params={'allow_out_of_range': True}``
+    for a deliberate single-sided / limit-order range.
+    """
+    protocol_params = getattr(intent, "protocol_params", None) or {}
+    if slot0 is None or bool(protocol_params.get("allow_out_of_range", False)):
+        return None
+
+    current_tick = slot0[1]
+    if tick_lower <= current_tick < tick_upper:
+        return None
+
+    # Describe the RANGE relative to the current tick: if the current tick sits
+    # below tick_lower the whole range is above it, and vice-versa.
+    side = "above" if current_tick < tick_lower else "below"
+    return CompilationResult(
+        status=CompilationStatus.FAILED,
+        error=(
+            f"Aerodrome Slipstream tick range [{tick_lower}, {tick_upper}) does not "
+            f"straddle the pool's current tick {current_tick} (range is entirely "
+            f"{side} it). This mints a one-sided / out-of-range position, leaving one "
+            f"token stranded — likely a price->tick decimals error (use "
+            f"price_to_tick with explicit decimals0/decimals1). Pass "
+            f"protocol_params={{'allow_out_of_range': True}} if a single-sided range "
+            f"is intended."
+        ),
+        intent_id=intent.intent_id,
+    )
 
 
 # crap-allowlist: VIB-4853 — import-path swap only (pool-validation moved into connectors, #2527); function body unchanged, anvil-only coverage. Refactor + coverage backfill tracked in VIB-4139.
@@ -755,6 +952,16 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
                 intent_id=intent.intent_id,
             )
 
+        # ALM-2890: pre-trade price-impact guard (fail-closed). Aerodrome
+        # previously enforced only slippage on the quoter amount; a thin pool
+        # would still compile a swap that moved the price arbitrarily far from
+        # the oracle. Mirror the uniswap_v3 / camelot / fluid guard.
+        impact_failure = _aerodrome_swap_price_impact_guard(
+            compiler, intent, from_token, to_token, amount_decimal, swap_result
+        )
+        if impact_failure is not None:
+            return impact_failure
+
         # Convert adapter transactions to compiler format
         for tx_data in swap_result.transactions:
             transactions.append(tx_data)
@@ -913,38 +1120,23 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
             return failed
 
         # Validate tick bounds: must be integers, ordered, and aligned to tick_spacing.
-        if int(intent.range_lower) != intent.range_lower or int(intent.range_upper) != intent.range_upper:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=(
-                    f"Aerodrome Slipstream tick bounds must be integers, "
-                    f"got range_lower={intent.range_lower}, range_upper={intent.range_upper}"
-                ),
-                intent_id=intent.intent_id,
-            )
-        tick_lower = int(intent.range_lower)
-        tick_upper = int(intent.range_upper)
-        if tick_lower >= tick_upper:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Aerodrome Slipstream tick_lower ({tick_lower}) must be less than tick_upper ({tick_upper})",
-                intent_id=intent.intent_id,
-            )
-        if tick_lower % tick_spacing != 0 or tick_upper % tick_spacing != 0:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=(
-                    f"Aerodrome Slipstream tick bounds must be aligned to tick_spacing={tick_spacing}: "
-                    f"tick_lower={tick_lower} (rem={tick_lower % tick_spacing}), "
-                    f"tick_upper={tick_upper} (rem={tick_upper % tick_spacing})"
-                ),
-                intent_id=intent.intent_id,
-            )
+        tick_bounds = _validate_slipstream_tick_bounds(intent, tick_spacing)
+        if isinstance(tick_bounds, CompilationResult):
+            return tick_bounds
+        tick_lower, tick_upper = tick_bounds
 
         # Convert oracle-derived amounts to wei. Token order is canonical here
         # (token0 < token1 enforced above), so amount0 corresponds to token0.
         amount0_desired = int(intent.amount0 * Decimal(10**token0_info.decimals))
         amount1_desired = int(intent.amount1 * Decimal(10**token1_info.decimals))
+
+        # Read the pool's live slot0 once (sqrtPriceX96, current tick). Used for
+        # BOTH the straddle assertion (ALM-2891) and the amount recompute below.
+        slot0 = compiler._fetch_lp_pool_slot0(pool_check)
+
+        straddle_failure = _slipstream_tick_straddle_failure(intent, slot0, tick_lower, tick_upper)
+        if straddle_failure is not None:
+            return straddle_failure
 
         # Align desired amounts to the pool's current sqrtPriceX96 (slot0).
         # Slipstream pools are V3-shaped, so the V3 recompute helper applies
@@ -959,6 +1151,7 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
             amount0_desired=amount0_desired,
             amount1_desired=amount1_desired,
             intent_id=intent.intent_id,
+            slot0=slot0,
         )
         if isinstance(recomputed_or_fail, CompilationResult):
             return recomputed_or_fail

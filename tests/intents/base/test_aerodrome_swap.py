@@ -137,33 +137,67 @@ class TestAerodromeSwapIntent:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
-        # Parse receipts
+        # Layer 3: parse receipts — enforce that at least one swap event was
+        # successfully parsed with positive amounts. The for-loop walks every tx
+        # in the bundle (approve + swap); only the swap tx carries a Swap event,
+        # so we require >= 1 parsed swap result across the bundle rather than per
+        # tx. A conditional parse that silently passes on zero parsed events
+        # would leave the 4-layer receipt verification uncovered.
+        swap_results_parsed = 0
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i+1}:")
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
             print(f"  Gas used: {tx_result.gas_used}")
 
-            # Parse swap receipt
-            if tx_result.receipt:
-                from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
+            if tx_result.receipt is None:
+                continue
 
-                parser = AerodromeReceiptParser(chain=CHAIN_NAME)
-                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+            from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
 
-                if parse_result.success and parse_result.swap_result:
-                    print(f"  Amount in:  {parse_result.swap_result.amount_in_decimal}")
-                    print(f"  Amount out: {parse_result.swap_result.amount_out_decimal}")
-                    print(f"  Price:      {parse_result.swap_result.effective_price}")
+            # Pass token0/token1 (sorted ascending by address) so the parser can
+            # resolve decimals and build a high-level swap_result for the CL
+            # (SwapCL) event — base Aerodrome routes USDC/WETH through a
+            # Slipstream CL pool, whose Swap event carries signed amount0/amount1
+            # that need the token mapping to decode. Mirrors production wiring
+            # and the optimism test.
+            token0_addr, token1_addr = sorted([token_in.lower(), token_out.lower()])
+            parser = AerodromeReceiptParser(
+                chain=CHAIN_NAME,
+                token0_address=token0_addr,
+                token1_address=token1_addr,
+            )
+            parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
 
-                    # L3 semantic verification
-                    assert_swap_semantic_match(
-                        intent_amount=swap_amount,
-                        intent_from_token="USDC",
-                        intent_to_token="WETH",
-                        swap_result=parse_result.swap_result,
-                        chain=CHAIN_NAME,
-                    )
-                    print("  L3 semantic check: PASSED")
+            if parse_result.success and parse_result.swap_result:
+                swap_results_parsed += 1
+                print(f"  Amount in:  {parse_result.swap_result.amount_in_decimal}")
+                print(f"  Amount out: {parse_result.swap_result.amount_out_decimal}")
+                print(f"  Price:      {parse_result.swap_result.effective_price}")
+
+                assert parse_result.swap_result.amount_in_decimal > 0, (
+                    "Receipt parser: amount_in_decimal must be positive"
+                )
+                assert parse_result.swap_result.amount_out_decimal > 0, (
+                    "Receipt parser: amount_out_decimal must be positive"
+                )
+                assert parse_result.swap_result.effective_price > 0, (
+                    "Receipt parser: effective_price must be positive"
+                )
+
+                # L3 semantic verification
+                assert_swap_semantic_match(
+                    intent_amount=swap_amount,
+                    intent_from_token="USDC",
+                    intent_to_token="WETH",
+                    swap_result=parse_result.swap_result,
+                    chain=CHAIN_NAME,
+                )
+                print("  L3 semantic check: PASSED")
+
+        assert swap_results_parsed >= 1, (
+            "Layer 3 (receipt parsing) must parse at least one swap event across "
+            f"the executed bundle. Got {swap_results_parsed} parsed swap results."
+        )
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, token_in, funded_wallet)
@@ -280,8 +314,8 @@ class TestAerodromeSwapIntent:
         in_decimals = get_token_decimals(web3, token_in)
         balance_decimal = Decimal(usdc_balance) / Decimal(10**in_decimals)
 
-        # Try to swap more than we have
-        excessive_amount = balance_decimal * Decimal("100")
+        # Try to swap more than we have.
+        excessive_amount = balance_decimal * Decimal("2")
 
         print(f"\n{'='*80}")
         print("Test: SwapIntent with Insufficient Balance")
@@ -294,6 +328,12 @@ class TestAerodromeSwapIntent:
             to_token="WETH",
             amount=excessive_amount,
             max_slippage=Decimal("0.01"),
+            # This test exercises execution-level balance failure, not the
+            # ALM-2890 price-impact guard. An oversized swap (here, larger than
+            # the funded balance) would otherwise be rejected at compile time by
+            # the guard; allow any impact (1 = 100%) so compilation succeeds and
+            # the swap fails at execution on insufficient balance instead.
+            max_price_impact=Decimal("1"),
             protocol="aerodrome",
             chain=CHAIN_NAME,
         )

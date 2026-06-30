@@ -44,8 +44,8 @@ logger = logging.getLogger(__name__)
 
 def price_to_tick(
     price: Decimal | float,
-    decimals0: int = 18,
-    decimals1: int = 18,
+    decimals0: int | None = None,
+    decimals1: int | None = None,
 ) -> int:
     """Convert a human-readable price to the nearest Uniswap V3 tick.
 
@@ -53,18 +53,32 @@ def price_to_tick(
     rather than silently mapping them to ``MIN_TICK``, which could cause an
     unintended full-range LP position.
 
+    **Decimals are mandatory (ALM-2891).** A token's decimals shift the tick by
+    ``log_1.0001(10 ** (decimals0 - decimals1))`` — for a USDC(6)/WETH(18) pair
+    that is a ~276k-tick error. The previous default of ``decimals0=decimals1=18``
+    silently produced wildly wrong ticks (hence out-of-range, one-sided LP opens)
+    for any decimal-asymmetric pair. Both decimals must now be passed explicitly;
+    omitting either raises ``ValueError``.
+
     Args:
         price: Price of token0 in terms of token1 (must be > 0).
-        decimals0: Decimals of token0.
-        decimals1: Decimals of token1.
+        decimals0: Decimals of token0 (required — read from token metadata).
+        decimals1: Decimals of token1 (required — read from token metadata).
 
     Returns:
         Tick value (may not be on a valid tick spacing boundary — use
         :func:`snap_to_tick_spacing` to align it).
 
     Raises:
-        ValueError: If *price* is zero or negative.
+        ValueError: If *price* is zero or negative, or if either ``decimals0``
+            or ``decimals1`` is not supplied.
     """
+    if decimals0 is None or decimals1 is None:
+        raise ValueError(
+            "price_to_tick requires explicit decimals0 and decimals1 — token decimals "
+            "shift the tick (e.g. USDC=6 vs WETH=18 is a ~276k-tick difference). "
+            f"Pass both from token metadata (got decimals0={decimals0}, decimals1={decimals1})."
+        )
     try:
         return _price_to_tick(price, decimals0=decimals0, decimals1=decimals1)
     except ValueError as exc:

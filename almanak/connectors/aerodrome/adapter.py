@@ -172,6 +172,11 @@ class SwapQuote:
         price_impact_bps: Price impact in basis points
         effective_price: Effective price of the swap
         quoted_at: Timestamp when quote was fetched
+        is_onchain: True when ``amount_out`` came from a genuine on-chain
+            quoter call; False when it is an oracle-derived fallback estimate
+            (on-chain quote unavailable). Consumers that need on-chain truth
+            for a safety check (e.g. the price-impact guard, ALM-2890) must
+            treat a fallback quote as "no quoter amount".
     """
 
     token_in: str
@@ -183,6 +188,7 @@ class SwapQuote:
     price_impact_bps: int = 0
     effective_price: Decimal = Decimal("0")
     quoted_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    is_onchain: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -196,6 +202,7 @@ class SwapQuote:
             "price_impact_bps": self.price_impact_bps,
             "effective_price": str(self.effective_price),
             "quoted_at": self.quoted_at.isoformat(),
+            "is_onchain": self.is_onchain,
         }
 
 
@@ -1665,6 +1672,7 @@ class AerodromeAdapter:
                 stable=stable,
                 effective_price=effective_price,
                 gas_estimate=AERODROME_GAS_ESTIMATES["swap"],
+                is_onchain=True,
             )
 
         prices = self._get_default_price_oracle()
@@ -1692,6 +1700,7 @@ class AerodromeAdapter:
             stable=stable,
             effective_price=effective_price,
             gas_estimate=AERODROME_GAS_ESTIMATES["swap"],
+            is_onchain=False,
         )
 
     def _try_get_amount_out_onchain(

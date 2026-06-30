@@ -23,6 +23,15 @@ from tests.conftest_gateway import AnvilFixture
 # Import fixtures for pytest discovery
 pytest_plugins = ["tests.conftest_gateway"]
 
+# These are on-chain integration tests (Anvil fork + ALCHEMY_API_KEY). They pull
+# in session-scoped Anvil/gateway fixtures that mutate process-global state, so
+# they must NOT run in the unit shard (`-m "not integration"`). Without this
+# marker the unit shard executed them and their leaked global state caused
+# unrelated unit compiler tests to fail when co-located on the same pytest-xdist
+# worker (VIB-5526 follow-up). Mirrors the marker already on the lifi / morpho /
+# polymarket integration suites.
+pytestmark = pytest.mark.integration
+
 # =============================================================================
 # Constants
 # =============================================================================

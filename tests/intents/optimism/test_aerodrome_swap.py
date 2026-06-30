@@ -376,8 +376,8 @@ class TestAerodromeSwapIntentOnOptimism:
         in_decimals = get_token_decimals(web3, token_in)
         balance_decimal = Decimal(usdc_balance) / Decimal(10**in_decimals)
 
-        # Try to swap 100x the available balance
-        excessive_amount = balance_decimal * Decimal("100")
+        # Try to swap more than we have.
+        excessive_amount = balance_decimal * Decimal("2")
 
         print(f"\n{'='*80}")
         print("Test: SwapIntent with Insufficient Balance (Aerodrome/Velodrome V2 on Optimism)")
@@ -391,6 +391,12 @@ class TestAerodromeSwapIntentOnOptimism:
             to_token="WETH",
             amount=excessive_amount,
             max_slippage=Decimal("0.01"),
+            # This test exercises execution-level balance failure, not the
+            # ALM-2890 price-impact guard. An oversized swap (here, larger than
+            # the funded balance) would otherwise be rejected at compile time by
+            # the guard; allow any impact (1 = 100%) so compilation succeeds and
+            # the swap fails at execution on insufficient balance instead.
+            max_price_impact=Decimal("1"),
             protocol="aerodrome",
             chain=CHAIN_NAME,
         )
