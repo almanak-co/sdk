@@ -18,6 +18,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.connectors._strategy_base.pool_validation_base import (
+    PoolValidationReason,
+    PoolValidationResult,
+)
 from almanak.connectors.aerodrome.compiler import (
     compile_lp_open_aerodrome_slipstream,
     compile_swap_aerodrome,
@@ -29,6 +33,16 @@ from almanak.framework.intents.vocabulary import Intent
 # Canonical token order: token0 address < token1 address (EVM convention).
 _T0_ADDR = "0x" + "aa" * 20
 _T1_ADDR = "0x" + "bb" * 20
+
+
+def _confirmed_cl_pool() -> PoolValidationResult:
+    """A confirmed-existing CL pool so the per-pair resolver (VIB-5548) routes to
+    CL at the first candidate tick spacing instead of probing a fallback."""
+    return PoolValidationResult(
+        exists=True,
+        reason=PoolValidationReason.CONFIRMED,
+        pool_address="0x" + "cc" * 20,
+    )
 
 
 def _token(symbol: str, address: str, decimals: int) -> MagicMock:
@@ -107,7 +121,9 @@ def test_aerodrome_swap_blocks_when_impact_exceeds_cap() -> None:
     intent = _make_swap_intent(max_price_impact=Decimal("0.01"))
     # Oracle expects 5,000,000 / 1500 = 3333.33 WETH; quote only 2000 WETH => 40% impact.
     with (
-        patch("almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=MagicMock()),
+        patch(
+            "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=_confirmed_cl_pool()
+        ),
         patch("almanak.connectors.aerodrome.AerodromeConfig"),
         patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
@@ -125,7 +141,9 @@ def test_aerodrome_swap_compiles_when_impact_within_cap() -> None:
     intent = _make_swap_intent(max_price_impact=Decimal("0.01"))
     # Oracle expects 3333.33 WETH; quote 3320 WETH => ~0.4% impact, under the 1% cap.
     with (
-        patch("almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=MagicMock()),
+        patch(
+            "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=_confirmed_cl_pool()
+        ),
         patch("almanak.connectors.aerodrome.AerodromeConfig"),
         patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
@@ -141,7 +159,9 @@ def test_aerodrome_swap_uses_config_default_cap_when_intent_unset() -> None:
     intent = _make_swap_intent(max_price_impact=None)
     # ~40% impact >> 5% default cap.
     with (
-        patch("almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=MagicMock()),
+        patch(
+            "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=_confirmed_cl_pool()
+        ),
         patch("almanak.connectors.aerodrome.AerodromeConfig"),
         patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
@@ -162,7 +182,9 @@ def test_aerodrome_swap_fails_closed_on_oracle_fallback_quote() -> None:
     # Quote numerically matches the oracle estimate (~0% impact) but is an oracle
     # fallback, not a real on-chain quote — must still be refused.
     with (
-        patch("almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=MagicMock()),
+        patch(
+            "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=_confirmed_cl_pool()
+        ),
         patch("almanak.connectors.aerodrome.AerodromeConfig"),
         patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
@@ -184,7 +206,9 @@ def test_aerodrome_swap_zero_cap_blocks_any_nonzero_impact() -> None:
     intent = _make_swap_intent(max_price_impact=None)
     # Oracle expects 3333.33 WETH; quote 3320 WETH => ~0.4% impact > 0 cap.
     with (
-        patch("almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=MagicMock()),
+        patch(
+            "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=_confirmed_cl_pool()
+        ),
         patch("almanak.connectors.aerodrome.AerodromeConfig"),
         patch("almanak.connectors.aerodrome.AerodromeAdapter") as mock_adapter_cls,
     ):
@@ -269,7 +293,9 @@ def _make_lp_open_intent(lower: int, upper: int, *, allow_oor: bool = False) -> 
 
 def _patches():
     return (
-        patch("almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=MagicMock()),
+        patch(
+            "almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool", return_value=_confirmed_cl_pool()
+        ),
         patch("almanak.framework.intents.lp_math.recompute_lp_amounts", return_value=(100, 200)),
         patch("almanak.connectors.aerodrome.AerodromeConfig"),
         patch("almanak.connectors.aerodrome.AerodromeAdapter"),

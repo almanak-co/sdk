@@ -40,4 +40,15 @@ AERODROME_TOKENS: dict[str, dict[str, str]] = {
         "rETH": "0xB6fe221Fe9EeF5aBa221c348bA20A1Bf5e73624c",
     },
 }
-__all__ = ["AERODROME", "AERODROME_TOKENS"]
+
+# Symbols (UPPER-CASED) treated as USD stablecoins when choosing the auto
+# Classic-pool probe order (VIB-5548 / ALM-2889, design O4). When BOTH legs of
+# a swap are in this set the resolver probes the Classic *stable* pool first
+# (Solidly stable pools are the canonical venue for stable/stable pairs such as
+# DAI/USDbC); otherwise it probes the *volatile* pool first. Deliberately small
+# and symbol-based — it only orders two read-only probes, never gates execution
+# (the on-chain pool-existence check + price-impact guard remain authoritative).
+AERODROME_STABLE_SYMBOLS: frozenset[str] = frozenset(
+    {"USDC", "USDBC", "USDC.E", "DAI", "USDT", "USD+", "DOLA", "EURC", "GHO"}
+)
+__all__ = ["AERODROME", "AERODROME_STABLE_SYMBOLS", "AERODROME_TOKENS"]

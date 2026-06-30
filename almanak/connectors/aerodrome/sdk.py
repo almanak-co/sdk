@@ -148,6 +148,15 @@ def _cl_position_backoff_seconds(attempt: int, exc: Exception) -> float:
 AERODROME_GAS_ESTIMATES: dict[str, int] = {
     "approve": 46000,
     "swap": 180000,
+    # Classic (Solidly) single-hop swaps cost materially more gas than the CL
+    # exactInputSingle path: the volatile invariant is ~222k and the stable
+    # invariant's Newton-iteration math is ~231k on Base (measured 2026-06-30).
+    # The shared 180k "swap" estimate (sized for CL) under-provisions the gas
+    # LIMIT for the Classic router and makes Classic swaps revert out-of-gas —
+    # only reachable since VIB-5548 made Classic routing selectable / the
+    # auto-fallback target. 300k covers both Classic pool types with headroom
+    # (a limit, not a cost: unused gas is refunded). VIB-5548 / ALM-2889.
+    "swap_classic": 300000,
     "swap_multi_hop": 250000,
     "add_liquidity": 220000,
     "remove_liquidity": 200000,

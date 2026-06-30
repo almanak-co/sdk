@@ -267,8 +267,27 @@ class SwapIntent(BaseIntent):
         default=None,
         description="Maximum priority fee in lamports for Jupiter swaps. Defaults to 1_000_000 when None.",
     )
+    swap_params: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional connector-specific routing/escape-hatch parameters, mirroring the "
+        "blessed ``protocol_params`` precedent on LP/stake intents (VIB-5548 / ALM-2889). "
+        "Additive and optional: connectors that do not consume it ignore it entirely. "
+        "Reachable keys today: Aerodrome — ``classic`` (bool: force Classic vs CL routing), "
+        "``tick_spacing`` (positive int: pin a CL pool's tick spacing), ``stable`` (bool: "
+        "Classic stable vs volatile pool type); Curve — ``pool`` (str address for "
+        "disambiguation), ``oracle_guard_bps`` (int), ``strict_oracle_guard`` (bool). "
+        "Only the shape is validated centrally; deeper per-key validation lives in each "
+        "connector compiler.",
+    )
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
+
+    # Centrally shape-validated ``swap_params`` keys (VIB-5548). Per-connector
+    # compilers own deeper semantics; this map only rejects structurally
+    # malformed values early so a typo'd escape hatch fails loudly at
+    # construction rather than being silently ignored downstream.
+    _SWAP_PARAMS_BOOL_KEYS: frozenset[str] = frozenset({"classic", "stable", "strict_oracle_guard"})
+    _SWAP_PARAMS_POSITIVE_INT_KEYS: frozenset[str] = frozenset({"tick_spacing", "oracle_guard_bps"})
 
     @model_validator(mode="after")
     def validate_swap_intent(self) -> "SwapIntent":
@@ -292,7 +311,33 @@ class SwapIntent(BaseIntent):
         # Cross-chain swaps require an aggregator protocol (Enso or LiFi)
         if self.is_cross_chain and self.protocol and self.protocol.lower() not in ("enso", "lifi"):
             raise ValueError("Cross-chain swaps require protocol='enso' or protocol='lifi'")
+        self._validate_swap_params()
         return self
+
+    def _validate_swap_params(self) -> None:
+        """Shape-only validation of the optional ``swap_params`` escape hatch.
+
+        Only invoked when ``swap_params`` is not None. Mirrors the
+        ``protocol_params`` precedent on :class:`LPOpenIntent`: the central
+        validator rejects structurally malformed values (wrong container type,
+        non-bool booleans, non-positive ints) so a typo fails loudly at
+        construction; the *meaning* of each key stays owned by the connector
+        compiler that reads it.
+        """
+        if self.swap_params is None:
+            return
+        if not isinstance(self.swap_params, dict):
+            raise ValueError("swap_params must be a dict")
+        for key in self._SWAP_PARAMS_BOOL_KEYS:
+            if key in self.swap_params and not isinstance(self.swap_params[key], bool):
+                raise ValueError(f"swap_params.{key} must be a bool, got {type(self.swap_params[key]).__name__}")
+        for key in self._SWAP_PARAMS_POSITIVE_INT_KEYS:
+            if key in self.swap_params:
+                val = self.swap_params[key]
+                # bool is a subclass of int; reject it explicitly so
+                # swap_params={"tick_spacing": True} is not silently coerced.
+                if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
+                    raise ValueError(f"swap_params.{key} must be a positive integer, got {val!r}")
 
     @property
     def is_chained_amount(self) -> bool:
@@ -978,6 +1023,7 @@ class Intent:
         chain: str | None = None,
         destination_chain: str | None = None,
         registry_handle: str | None = None,
+        swap_params: dict[str, Any] | None = None,
     ) -> SwapIntent:
         """Create a swap intent.
 
@@ -993,6 +1039,9 @@ class Intent:
             protocol: Preferred protocol for the swap
             chain: Source chain for execution (defaults to strategy's primary chain)
             destination_chain: Destination chain for cross-chain swaps (None for same-chain)
+            swap_params: Optional connector-specific routing/escape-hatch params
+                (e.g. Aerodrome ``{"classic": True}`` / ``{"tick_spacing": 200}``;
+                Curve ``{"pool": "0x..."}``). See :class:`SwapIntent.swap_params`.
 
         Returns:
             SwapIntent: The created swap intent
@@ -1022,6 +1071,7 @@ class Intent:
             chain=chain,
             destination_chain=destination_chain,
             registry_handle=registry_handle,
+            swap_params=swap_params,
         )
 
     @staticmethod

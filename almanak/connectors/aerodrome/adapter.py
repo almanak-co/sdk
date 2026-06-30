@@ -1419,7 +1419,10 @@ class AerodromeAdapter:
             to=self.addresses["router"],
             value=value,
             data=calldata,
-            gas_estimate=AERODROME_GAS_ESTIMATES["swap"],
+            # Classic (Solidly) swaps need a larger gas LIMIT than the CL path
+            # (volatile ~222k, stable ~231k vs CL's ~150k); the shared 180k
+            # estimate would revert these out-of-gas. VIB-5548 / ALM-2889.
+            gas_estimate=AERODROME_GAS_ESTIMATES["swap_classic"],
             description=(
                 f"Aerodrome {pool_type} swap {amount_in_formatted:.6f} {token_in_symbol} -> "
                 f"{token_out_symbol} (min: {amount_out_formatted:.6f})"

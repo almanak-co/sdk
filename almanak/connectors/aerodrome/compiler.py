@@ -8,6 +8,7 @@ LP close, swap, pool address query).
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -799,16 +800,302 @@ def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationRe
 # apart from a .pool_validation -> absolute import-path change. Split into
 # per-route helpers (Slipstream / Aerodrome Classic / Velodrome Classic) under
 # the four-step CRAP refactor protocol.
+# Ordered CL tick-spacing candidates probed in the pure-auto routing case
+# (VIB-5548 / ALM-2889, design O3). 100 first preserves the historical default;
+# 200/50/1/2000 cover the remaining live Slipstream spacings. Probes are
+# read-only ``getPool`` eth_calls, memoized per compile cycle, and the loop
+# stops at the first existing pool — so at most five reads, usually one.
+_CL_CANDIDATE_TICK_SPACINGS: tuple[int, ...] = (100, 200, 50, 1, 2000)
+
+
+@dataclass(frozen=True)
+class _AerodromeRoute:
+    """Resolved Aerodrome swap route (VIB-5548).
+
+    Carries the chosen venue (CL vs Classic), the parameters needed to build the
+    swap, the on-chain pool-existence probe that selected it (still passed through
+    the compiler's ``_validate_pool`` fail-closed gate), and provenance flags for
+    bundle metadata / logging.
+    """
+
+    use_classic: bool
+    tick_spacing: int | None
+    stable: bool
+    pool_check: Any
+    fallback_used: bool
+    routing: str  # "cl" | "classic"
+    degraded: bool = False
+
+
+def _aerodrome_chain_has_cl(chain_addrs: dict[str, str]) -> bool:
+    """Hard capability gate: True iff this chain has Slipstream CL contracts.
+
+    Optimism/Velodrome has no CL factory/router, so it is Classic-only.
+    """
+    return bool(chain_addrs.get("cl_router") and chain_addrs.get("cl_factory"))
+
+
+def _aerodrome_is_offline(compiler) -> bool:
+    """True in placeholder-price or permission-discovery mode.
+
+    In these modes pool-existence probes cannot be trusted (they run against
+    unreachable RPC / only need calldata shapes), so auto-routing degrades to the
+    legacy default rather than fail-closing on an unverifiable probe.
+    """
+    cfg = getattr(compiler, "_config", None)
+    return bool(getattr(cfg, "using_placeholders", False) or getattr(cfg, "permission_discovery", False))
+
+
+def _aerodrome_stable_pair(from_symbol: str, to_symbol: str) -> bool:
+    """True when BOTH legs are known USD stablecoins (design O4)."""
+    from .addresses import AERODROME_STABLE_SYMBOLS
+
+    return from_symbol.upper() in AERODROME_STABLE_SYMBOLS and to_symbol.upper() in AERODROME_STABLE_SYMBOLS
+
+
+def _aerodrome_cached_probe(compiler, kind: str, from_addr: str, to_addr: str, variant):
+    """Memoized (per compile cycle) read-only pool-existence probe.
+
+    ``kind`` is ``"cl"`` (``variant`` = tick spacing) or ``"classic"``
+    (``variant`` = ``stable`` bool). Calls are routed through the
+    ``pool_validation`` module attribute so test patches are honoured.
+    """
+    from . import pool_validation
+
+    cache = getattr(compiler, "_aerodrome_pool_probe_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            compiler._aerodrome_pool_probe_cache = cache
+        except (AttributeError, TypeError):  # pragma: no cover - defensive (slotted impls)
+            cache = None
+    key = (kind, from_addr.lower(), to_addr.lower(), variant, compiler.chain)
+    if cache is not None and key in cache:
+        return cache[key]
+
+    rpc_url = compiler._get_chain_rpc_url()
+    gateway_client = compiler._gateway_client
+    if kind == "cl":
+        result = pool_validation.validate_aerodrome_cl_pool(
+            compiler.chain, from_addr, to_addr, variant, rpc_url, gateway_client=gateway_client
+        )
+    else:
+        result = pool_validation.validate_aerodrome_pool(
+            compiler.chain, from_addr, to_addr, bool(variant), rpc_url, gateway_client=gateway_client
+        )
+    if cache is not None:
+        cache[key] = result
+    return result
+
+
+def _resolve_aerodrome_classic_route(
+    compiler, from_token: Any, to_token: Any, *, stable_req: bool | None, fallback: bool, probed: list[str]
+) -> _AerodromeRoute:
+    """Resolve a Classic (Solidly) route, probing pool type(s) in order.
+
+    Order (design O4): an explicit ``stable`` honoured as the only type; else
+    stable-first when both legs are known stablecoins, else volatile-first. The
+    first existing pool wins; an unverifiable probe (``exists is None``) degrades
+    to that type (``_validate_pool`` then warns-and-proceeds); if every probed
+    type is confirmed absent the last (absent) probe is returned so the caller
+    can compose a fail-closed result.
+    """
+    if stable_req is not None:
+        order: tuple[bool, ...] = (bool(stable_req),)
+    elif _aerodrome_stable_pair(from_token.symbol, to_token.symbol):
+        order = (True, False)
+    else:
+        order = (False, True)
+
+    last_check = None
+    for stable in order:
+        pool_check = _aerodrome_cached_probe(compiler, "classic", from_token.address, to_token.address, stable)
+        probed.append(f"classic(stable={stable})")
+        last_check = pool_check
+        if pool_check.exists is True:
+            return _AerodromeRoute(True, None, stable, pool_check, fallback, "classic")
+        if pool_check.exists is None:
+            return _AerodromeRoute(True, None, stable, pool_check, fallback, "classic", degraded=True)
+        # exists is False -> try the next pool type
+    return _AerodromeRoute(True, None, order[-1], last_check, fallback, "classic")
+
+
+def _resolve_aerodrome_cl_route(
+    compiler, from_token: Any, to_token: Any, *, probed: list[str]
+) -> _AerodromeRoute | None:
+    """Probe CL (Slipstream) pools across the candidate tick spacings (VIB-5548).
+
+    First *confirmed* pool wins. If a probe is unverifiable (``exists is None`` —
+    e.g. a missing factory entry or malformed response), degrade to the legacy
+    CL@100 default **carrying that unverifiable probe** so the caller's
+    ``_validate_pool`` gate warns-and-proceeds instead of fail-closing on a
+    previously-cached absent CL@100 probe. Returns ``None`` only when every
+    candidate spacing is *confirmed absent*, leaving the caller to either fall
+    back to Classic (auto) or fail closed (explicit ``classic=False``).
+    """
+    for ts in _CL_CANDIDATE_TICK_SPACINGS:
+        pool_check = _aerodrome_cached_probe(compiler, "cl", from_token.address, to_token.address, ts)
+        probed.append(f"cl(tick_spacing={ts})")
+        if pool_check.exists is True:
+            return _AerodromeRoute(False, ts, False, pool_check, False, "cl")
+        if pool_check.exists is None:
+            # Unverifiable while online (missing factory entry / malformed
+            # response). Degrade to the legacy default and warn-and-proceed,
+            # carrying THIS probe (exists=None) so _validate_pool does not
+            # fail-close on the earlier confirmed-absent CL@100 probe.
+            logger.info(
+                "Aerodrome routing could not verify CL pool for %s->%s at tick_spacing=%s (reason=%s); "
+                "defaulting to CL@100 (warn-and-proceed).",
+                from_token.symbol,
+                to_token.symbol,
+                ts,
+                getattr(pool_check, "reason", None),
+            )
+            return _AerodromeRoute(False, 100, False, pool_check, False, "cl", degraded=True)
+        # exists is False -> probe the next candidate tick spacing
+    return None
+
+
+def _resolve_aerodrome_route(  # noqa: C901 - explicit, flat routing-priority ladder (design O2/O3)
+    compiler, intent: SwapIntent, from_token: Any, to_token: Any, swap_params: dict[str, Any]
+) -> _AerodromeRoute | CompilationResult:
+    """Resolve the per-pair Aerodrome/Velodrome swap route (VIB-5548 / ALM-2889).
+
+    Routing priority (design §b):
+
+    1. ``chain_has_cl`` — hard capability gate (Velodrome/Optimism is Classic-only).
+    2. Explicit ``classic=True`` -> Classic only.
+    3. Explicit ``classic=False`` -> CL only; fail closed if absent (never silently
+       route to Classic against an explicit choice).
+    4. Explicit ``tick_spacing`` -> CL at that exact spacing, probe once, no fallback.
+    5. Auto -> probe CL across :data:`_CL_CANDIDATE_TICK_SPACINGS`; first hit wins.
+       No CL pool -> probe Classic and use it with ``fallback_used=True``. Neither
+       -> fail closed listing what was probed.
+
+    Returns a :class:`_AerodromeRoute` (whose ``pool_check`` the caller still
+    feeds through ``_validate_pool``), or a FAILED ``CompilationResult`` for the
+    fail-closed cases the single-result gate cannot express.
+    """
+    from .addresses import AERODROME as AERODROME_ADDRESSES
+
+    chain = compiler.chain
+    intent_id = intent.intent_id
+    if chain not in AERODROME_ADDRESSES:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"Aerodrome/Velodrome is not supported on {chain}. Supported: {list(AERODROME_ADDRESSES.keys())}",
+            intent_id=intent_id,
+        )
+
+    chain_addrs = AERODROME_ADDRESSES[chain]
+    has_cl = _aerodrome_chain_has_cl(chain_addrs)
+    classic_req = swap_params.get("classic")
+    ts_req = swap_params.get("tick_spacing")
+    stable_req = swap_params.get("stable")
+    probed: list[str] = []
+
+    # (2) Explicit Classic.
+    if classic_req is True:
+        return _resolve_aerodrome_classic_route(
+            compiler, from_token, to_token, stable_req=stable_req, fallback=False, probed=probed
+        )
+
+    # (1) CL not available on this chain.
+    if not has_cl:
+        if classic_req is False or ts_req is not None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"CL (Slipstream) routing is not available on {chain}; use classic routing instead.",
+                intent_id=intent_id,
+            )
+        return _resolve_aerodrome_classic_route(
+            compiler, from_token, to_token, stable_req=stable_req, fallback=False, probed=probed
+        )
+
+    # --- chain has CL from here ---
+
+    # Offline/placeholder cannot verify pools -> legacy default CL@100 for every
+    # CL-eligible path (auto, classic=False, pinned tick_spacing). Permission
+    # discovery only needs calldata shapes, so degrade rather than fail-close.
+    if _aerodrome_is_offline(compiler):
+        ts = ts_req if ts_req is not None else 100
+        pool_check = _aerodrome_cached_probe(compiler, "cl", from_token.address, to_token.address, ts)
+        logger.info(
+            "Aerodrome routing offline/placeholder for %s->%s: defaulting to CL@%s (warn-and-proceed).",
+            from_token.symbol,
+            to_token.symbol,
+            ts,
+        )
+        return _AerodromeRoute(False, ts, False, pool_check, False, "cl", degraded=True)
+
+    # (3) Explicit CL-only (classic=False): never fall back to Classic. A pinned
+    #     tick_spacing probes that exact pool once; otherwise probe CL across the
+    #     candidate spacings (first hit wins) and fail closed if none exists.
+    if classic_req is False:
+        if ts_req is not None:
+            pool_check = _aerodrome_cached_probe(compiler, "cl", from_token.address, to_token.address, ts_req)
+            return _AerodromeRoute(False, ts_req, False, pool_check, False, "cl")
+        cl_route = _resolve_aerodrome_cl_route(compiler, from_token, to_token, probed=probed)
+        if cl_route is not None:
+            return cl_route
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"No Aerodrome CL pool found for {from_token.symbol}->{to_token.symbol} on {chain}; "
+                f"swap_params={{'classic': False}} forbids Classic fallback. Probed: {', '.join(probed)}."
+            ),
+            intent_id=intent_id,
+        )
+
+    # (4) Explicit tick_spacing (classic unset): CL at that spacing, no fallback.
+    if ts_req is not None:
+        pool_check = _aerodrome_cached_probe(compiler, "cl", from_token.address, to_token.address, ts_req)
+        return _AerodromeRoute(False, ts_req, False, pool_check, False, "cl")
+
+    # (5) Auto. Probe CL across the candidate spacings; first hit wins, an
+    #     unverifiable probe degrades to legacy CL@100 (warn-and-proceed).
+    cl_route = _resolve_aerodrome_cl_route(compiler, from_token, to_token, probed=probed)
+    if cl_route is not None:
+        return cl_route
+
+    # No CL pool at any candidate spacing -> bounded auto fallback to Classic.
+    classic_route = _resolve_aerodrome_classic_route(
+        compiler, from_token, to_token, stable_req=stable_req, fallback=True, probed=probed
+    )
+    if classic_route.pool_check.exists is True:
+        logger.info(
+            "Aerodrome auto-routing: no CL pool for %s->%s at tick spacings %s; "
+            "falling back to Classic (stable=%s). swap_params={'classic': False} forbids this.",
+            from_token.symbol,
+            to_token.symbol,
+            _CL_CANDIDATE_TICK_SPACINGS,
+            classic_route.stable,
+        )
+        return classic_route
+    if classic_route.degraded:
+        return classic_route
+    # Neither a CL pool nor a Classic pool exists -> fail closed.
+    return CompilationResult(
+        status=CompilationStatus.FAILED,
+        error=(
+            f"No Aerodrome pool found for {from_token.symbol}->{to_token.symbol} on {chain}. "
+            f"Probed: {', '.join(probed)}."
+        ),
+        intent_id=intent_id,
+    )
+
+
 def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  # noqa: C901
     """Compile SWAP intent for Aerodrome/Velodrome (Solidly forks).
 
-    On Base (Aerodrome): defaults to Slipstream CL pools; classic via swap_params={"classic": True}.
-    On Optimism (Velodrome): defaults to classic routing (no CL/Slipstream contracts).
+    Routing is resolved per-pair by :func:`_resolve_aerodrome_route` (VIB-5548):
+    on Base (Aerodrome) it auto-routes to a Slipstream CL pool and falls back to
+    a Classic pool when no CL pool exists; on Optimism (Velodrome) it is
+    Classic-only. The ``swap_params`` escape hatch overrides routing:
 
-    swap_params options:
-    - tick_spacing (int): CL pool tick spacing, default 100
-    - classic (bool): If True, use Classic volatile/stable routing
-    - stable (bool): Pool type for Classic routing (default False)
+    - ``classic`` (bool): force Classic (True) / CL-only, no fallback (False).
+    - ``tick_spacing`` (positive int): pin a CL pool's tick spacing, no fallback.
+    - ``stable`` (bool): Classic stable vs volatile pool type.
 
     Args:
         compiler: IntentCompiler instance
@@ -864,63 +1151,33 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
                 intent_id=intent.intent_id,
             )
 
-        # Extract routing params from swap_params
-        swap_params = intent.swap_params if hasattr(intent, "swap_params") and intent.swap_params else {}
-        tick_spacing = swap_params.get("tick_spacing", 100)
-        stable = swap_params.get("stable", False)
+        # Extract routing params from the (now-reachable, VIB-5548) swap_params
+        # escape hatch and resolve the per-pair route.
+        swap_params: dict[str, Any] = intent.swap_params or {}
+        route = _resolve_aerodrome_route(compiler, intent, from_token, to_token, swap_params)
+        if isinstance(route, CompilationResult):
+            return route
 
-        # Check chain support dynamically from contract addresses
-        from .addresses import AERODROME as AERODROME_ADDRESSES
+        use_classic = route.use_classic
+        stable = route.stable
+        # Adapter needs a concrete tick spacing even for Classic routing (unused
+        # there); default to 100 when the route did not pin one.
+        tick_spacing = route.tick_spacing if route.tick_spacing is not None else 100
+        routing = route.routing
 
-        if compiler.chain not in AERODROME_ADDRESSES:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"Aerodrome/Velodrome is not supported on {compiler.chain}. Supported: {list(AERODROME_ADDRESSES.keys())}",
-                intent_id=intent.intent_id,
+        if route.fallback_used:
+            logger.info(
+                "Aerodrome SWAP %s->%s: routing fallback engaged (CL->%s).",
+                from_token.symbol,
+                to_token.symbol,
+                routing,
             )
-
-        # Auto-detect CL (Slipstream) availability from contract addresses.
-        # Only Base has cl_router/cl_factory; Optimism (Velodrome) uses classic only.
-        chain_addrs = AERODROME_ADDRESSES[compiler.chain]
-        has_cl = bool(chain_addrs.get("cl_router") and chain_addrs.get("cl_factory"))
-        requested_classic = swap_params.get("classic")
-        if requested_classic is False and not has_cl:
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=f"CL (Slipstream) routing is not available on {compiler.chain}; use classic routing instead.",
-                intent_id=intent.intent_id,
-            )
-        use_classic = requested_classic if requested_classic is not None else not has_cl
-
-        routing = "classic" if use_classic else "cl"
         logger.info(
             f"Compiling Aerodrome SWAP ({routing}): {from_token.symbol} -> {to_token.symbol}, amount={amount_decimal}"
         )
 
-        # Validate pool existence
-        if use_classic:
-            from almanak.connectors.aerodrome.pool_validation import validate_aerodrome_pool
-
-            pool_check = validate_aerodrome_pool(
-                compiler.chain,
-                from_token.address,
-                to_token.address,
-                stable,
-                compiler._get_chain_rpc_url(),
-                gateway_client=compiler._gateway_client,
-            )
-        else:
-            from almanak.connectors.aerodrome.pool_validation import validate_aerodrome_cl_pool
-
-            pool_check = validate_aerodrome_cl_pool(
-                compiler.chain,
-                from_token.address,
-                to_token.address,
-                tick_spacing,
-                compiler._get_chain_rpc_url(),
-                gateway_client=compiler._gateway_client,
-            )
-        failed = compiler._validate_pool(pool_check, intent.intent_id)
+        # The resolved pool still passes the fail-closed _validate_pool gate.
+        failed = compiler._validate_pool(route.pool_check, intent.intent_id)
         if failed is not None:
             return failed
 
@@ -983,8 +1240,13 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
             "to_token": to_token.to_dict(),
             "amount_in": str(amount_decimal),
             "routing": routing,
+            "routing_fallback": route.fallback_used,
+            "stable": stable,
             "protocol": "aerodrome",
         }
+        # tick_spacing is only meaningful for CL routing; omit for Classic.
+        if not use_classic:
+            metadata["tick_spacing"] = tick_spacing
         if expected_output_human is not None:
             metadata["expected_output_human"] = str(expected_output_human)
 
