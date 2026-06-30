@@ -46,6 +46,7 @@ from enum import IntEnum
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
+from almanak.framework.deployment.mode import is_hosted
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
@@ -447,12 +448,25 @@ class MorphoBlueAdapter:
         self._sdk: Any = None  # Lazy initialization
         self._sdk_enabled = config.enable_sdk
 
-        # Price oracle setup
+        # Price oracle setup.
+        # `_using_placeholder_prices`: the placeholder oracle (1.0 fallback) is wired.
+        # `_placeholder_prices_authorized`: the placeholder was an EXPLICIT opt-in
+        #   (`allow_placeholder_prices=True`). When False, the placeholder is an
+        #   *unauthorized silent fallback* and MUST fail loud if a price is actually
+        #   consumed on the hosted perimeter — returning a fabricated 1.0 for a real
+        #   valuation silently mis-values positions (VIB-5527 / ALM-2895 Defect C).
+        # The guard lives at the point of use (`_default_price_oracle`), NOT in the
+        # constructor: the lending intent compilers construct this adapter purely to
+        # build transactions (no pricing), so a constructor raise would break all
+        # hosted morpho_blue SUPPLY/BORROW/REPAY/WITHDRAW compilation for no safety gain.
         self._using_placeholder_prices = False
+        self._placeholder_prices_authorized = False
         if price_oracle is not None:
             self._price_oracle = price_oracle
-        elif config.price_provider is not None:
-            # Create oracle from price_provider dict
+        elif config.price_provider:
+            # Create oracle from price_provider dict. An EMPTY dict is treated as
+            # "no provider" — it would otherwise price every asset at 0 (see
+            # `_create_price_oracle_from_dict`), another silent mis-valuation.
             self._price_oracle = self._create_price_oracle_from_dict(config.price_provider)
         elif config.allow_placeholder_prices:
             logger.warning(
@@ -462,8 +476,11 @@ class MorphoBlueAdapter:
             )
             self._price_oracle = self._default_price_oracle
             self._using_placeholder_prices = True
+            self._placeholder_prices_authorized = True
         else:
-            # Default to placeholder with warning for backwards compatibility
+            # allow_placeholder_prices=False AND no real price source supplied.
+            # Wire the placeholder oracle but mark it unauthorized: the point-of-use
+            # guard fails loud in hosted mode if a price is ever actually consumed.
             logger.warning(
                 "MorphoBlueAdapter: No price_oracle or price_provider provided. "
                 "Using placeholder prices. For production, use create_adapter_with_prices()."
@@ -1545,7 +1562,23 @@ class MorphoBlueAdapter:
             ) from e
 
     def _default_price_oracle(self, token: str) -> Decimal:
-        """Default price oracle (returns 1.0)."""
+        """Placeholder price oracle (returns 1.0).
+
+        Fails loud on the hosted perimeter when the placeholder was an unauthorized
+        silent fallback (no real price source supplied and allow_placeholder_prices
+        was not set). Returning a fabricated 1.0 for a real valuation in production
+        silently mis-values positions (VIB-5527 / ALM-2895 Defect C). Local mode and
+        explicit `allow_placeholder_prices=True` opt-ins keep the legacy behavior.
+        """
+        if is_hosted() and not self._placeholder_prices_authorized:
+            raise ValueError(
+                f"MorphoBlueAdapter: placeholder price requested for token={token!r} "
+                "but no real price source was supplied and allow_placeholder_prices=False. "
+                "Production deployments must supply real prices via "
+                "create_adapter_with_prices() or config.price_provider. Placeholder prices "
+                "silently mis-value positions and are not permitted on the hosted platform "
+                "(VIB-5527 / ALM-2895)."
+            )
         return Decimal("1.0")
 
     # =========================================================================
