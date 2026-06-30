@@ -12,8 +12,14 @@ from almanak.framework.execution.gas.constants import (
     DEFAULT_GAS_BUFFER,
     DEFAULT_SIMULATION_BUFFER,
 )
+from almanak.framework.execution.gas.fees import (
+    build_eip1559_fees,
+    priority_fee_floor_wei,
+)
 
 __all__ = [
     "DEFAULT_GAS_BUFFER",
     "DEFAULT_SIMULATION_BUFFER",
+    "build_eip1559_fees",
+    "priority_fee_floor_wei",
 ]

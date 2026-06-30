@@ -199,6 +199,16 @@ class GasProfile:
         fallback_priority_fee_gwei: Typical priority fee (tip) in gwei for
             backtesting fallback estimation — mirrors
             ``DEFAULT_GAS_PRICES[chain]["priority_fee"]``.  VIB-4857 (W5).
+        min_priority_fee_gwei: **Live-submit** priority-fee (tip) floor in
+            gwei. Distinct from ``fallback_priority_fee_gwei`` (a backtest
+            *estimate*): this is the hard minimum the live EIP-1559 fee
+            builder floors the RPC's ``eth_maxPriorityFeePerGas`` suggestion
+            to, so a node that legitimately returns ``0`` (common on L1) does
+            not produce a tip≈0 tx that stalls when the base fee rises
+            (VIB-5419). ``None`` / ``0.0`` means "no live floor" — correct
+            for L2s whose near-zero base fees let even a zero tip land. L1
+            (ethereum) carries a real floor (~2 gwei); validator-gated chains
+            (polygon ~30 gwei) and avalanche (~1 gwei) carry their own.
         l1_fee_oracle_kind: L1 fee-oracle mechanism this chain uses for L2
             data-cost estimation. One of ``KNOWN_L1_FEE_ORACLE_KINDS``
             (``"arbitrum_nodeinterface"`` or ``"op_gaspriceoracle"``).
@@ -221,6 +231,7 @@ class GasProfile:
     operation_overrides: Mapping[str, int] | None = None
     fallback_base_fee_gwei: float | None = None
     fallback_priority_fee_gwei: float | None = None
+    min_priority_fee_gwei: float | None = None
     l1_fee_oracle_kind: str | None = None
     l1_fee_oracle_address: str | None = None
 
@@ -240,6 +251,11 @@ class GasProfile:
                 "operation_overrides",
                 MappingProxyType(dict(self.operation_overrides)),
             )
+        # ``min_priority_fee_gwei`` feeds ``priority_fee_floor_wei()`` whose
+        # contract is ``>= 0``; reject negative descriptors at construction so a
+        # bad value can never propagate into live EIP-1559 fee params.
+        if self.min_priority_fee_gwei is not None and self.min_priority_fee_gwei < 0:
+            raise ValueError(f"GasProfile min_priority_fee_gwei must be non-negative, got {self.min_priority_fee_gwei}")
         # Validate l1_fee_oracle_kind / l1_fee_oracle_address pairing (Plan 026).
         # Kind must be in KNOWN_L1_FEE_ORACLE_KINDS; address must be set iff kind
         # is set and must be a 0x-prefixed 40-hex-char string. Idiom mirrors the

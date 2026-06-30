@@ -49,6 +49,7 @@ from almanak.core.chains._helpers import (
 )
 from almanak.framework.execution.config import ConfigurationError
 from almanak.framework.execution.gas.constants import DEFAULT_GAS_BUFFER
+from almanak.framework.execution.gas.fees import build_eip1559_fees
 from almanak.framework.execution.interfaces import (
     ExecutionError,
     GasEstimationError,
@@ -523,6 +524,12 @@ class ChainExecutor:
     async def get_gas_params(self) -> dict[str, int]:
         """Get current gas parameters for EIP-1559 transactions.
 
+        The floor + max-fee math is delegated to the shared
+        :func:`build_eip1559_fees` helper (VIB-5419) so the priority fee is
+        floored to the per-chain descriptor value when the node returns ``0``
+        or the RPC raises — not only on exception. The post-build cap (with
+        operator WARNING) stays here because it is call-site-specific.
+
         Returns:
             Dict with max_fee_per_gas, max_priority_fee_per_gas, and base_fee_per_gas
         """
@@ -531,17 +538,22 @@ class ChainExecutor:
         # Get latest block for base fee
         latest_block = await web3.eth.get_block("latest")
         base_fee = latest_block.get("baseFeePerGas", 0)
-        base_fee_int = int(base_fee) if base_fee else 0
 
-        # Get max priority fee suggestion
+        # Get max priority fee suggestion; None means the node raised / does
+        # not support eth_maxPriorityFeePerGas → the helper floors it.
         try:
-            max_priority_fee = int(await web3.eth.max_priority_fee)
+            rpc_priority_fee = int(await web3.eth.max_priority_fee)
         except Exception:
-            # Fallback to 1 gwei if RPC doesn't support this
-            max_priority_fee = 1_000_000_000
+            rpc_priority_fee = None
 
-        # Calculate max fee (2x base fee + priority fee is common heuristic)
-        max_fee = base_fee_int * 2 + max_priority_fee
+        fees = build_eip1559_fees(
+            base_fee_wei=base_fee,
+            rpc_priority_fee_wei=rpc_priority_fee,
+            chain=self._chain,
+        )
+        max_fee = fees["max_fee_per_gas"]
+        max_priority_fee = fees["max_priority_fee_per_gas"]
+        base_fee_int = fees["base_fee_per_gas"]
 
         # Cap at configured maximum
         if max_fee > self.max_gas_price_wei:

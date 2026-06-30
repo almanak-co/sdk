@@ -50,6 +50,7 @@ from almanak.framework.execution.gas.constants import (
     DEFAULT_GAS_BUFFER,
     DEFAULT_GAS_PRICE_CAP_GWEI,
 )
+from almanak.framework.execution.gas.fees import build_eip1559_fees
 from almanak.framework.execution.signer.safe.base import SafeSigner
 
 from ..api.timeline import TimelineEvent, TimelineEventType, add_event
@@ -3081,6 +3082,11 @@ class ExecutionOrchestrator:
     async def get_gas_price(self) -> dict[str, int]:
         """Get current gas prices from the network.
 
+        Delegates the EIP-1559 floor + max-fee math to the shared
+        :func:`build_eip1559_fees` helper (VIB-5419) so the priority fee is
+        floored to the per-chain descriptor value when the node returns ``0``
+        or the RPC raises — not only on exception.
+
         Returns:
             Dict with max_fee_per_gas and max_priority_fee_per_gas
         """
@@ -3090,26 +3096,18 @@ class ExecutionOrchestrator:
         latest_block = await web3.eth.get_block("latest")
         base_fee = latest_block.get("baseFeePerGas", 0)
 
-        # Get max priority fee suggestion
+        # Get max priority fee suggestion; None means the node raised / does
+        # not support eth_maxPriorityFeePerGas → the helper floors it.
         try:
-            max_priority_fee = int(await web3.eth.max_priority_fee)
+            rpc_priority_fee = int(await web3.eth.max_priority_fee)
         except Exception:
-            max_priority_fee = 1_000_000_000  # 1 gwei fallback
+            rpc_priority_fee = None
 
-        # Get base_fee as int
-        base_fee_int = int(base_fee) if base_fee else 0
-
-        # EIP-1559 recommendation: 2x base fee ensures inclusion even if base fee
-        # doubles in the next block (each block can increase base fee by up to 12.5%,
-        # so 2x covers ~6 consecutive full blocks of increases). Priority fee is added
-        # on top as the miner tip.
-        max_fee = base_fee_int * 2 + max_priority_fee
-
-        return {
-            "max_fee_per_gas": max_fee,
-            "max_priority_fee_per_gas": max_priority_fee,
-            "base_fee_per_gas": base_fee_int,
-        }
+        return build_eip1559_fees(
+            base_fee_wei=base_fee,
+            rpc_priority_fee_wei=rpc_priority_fee,
+            chain=self.chain,
+        )
 
     async def _update_gas_prices(
         self,

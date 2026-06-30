@@ -48,6 +48,7 @@ from almanak.framework.execution.extract_result import (
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
 
 if TYPE_CHECKING:
+    from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
     from almanak.framework.execution.extracted_data import ProtocolFees
 
 logger = logging.getLogger(__name__)
@@ -599,13 +600,34 @@ class MorphoBlueReceiptParser:
                 print(f"{event.event_name}: {event.data}")
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    # VIB-5218 — declare the loan-side lending money legs (one PRINCIPAL leg) as a
+    # typed ``PrimitiveMoneyLegs`` via ``extract_primitive_money_legs``, surfaced
+    # under ``extracted_data["primitive_money_legs"]`` by the enricher's
+    # connector-owned ``EXTRA_EXTRACTIONS_BY_INTENT`` merge. The US-009 ledger
+    # dispatcher prefers that typed fact over its legacy guesser, so a Morpho Blue
+    # loan-side SUPPLY/WITHDRAW/BORROW/REPAY ledger row carries a real ``token_in``
+    # (the loan token symbol) instead of the empty string that made the lending
+    # handler resolve ``UNKNOWN`` → ``deployed_capital_usd = 0``. The collateral
+    # legs already flow through the ``supply_collateral_amount`` /
+    # ``withdraw_collateral_amount`` overlays — this closes the loan-side gap.
+    EXTRA_EXTRACTIONS_BY_INTENT: dict[str, tuple[str, ...]] = {
+        "SUPPLY": ("primitive_money_legs",),
+        "WITHDRAW": ("primitive_money_legs",),
+        "BORROW": ("primitive_money_legs",),
+        "REPAY": ("primitive_money_legs",),
+    }
+
+    def __init__(self, chain: str | None = None, **kwargs: Any) -> None:
         """Initialize the parser.
 
         Args:
+            chain: Blockchain network (threaded by the ResultEnricher) — used to
+                   resolve the loan token address to its ERC-20 symbol/decimals for
+                   the declared money legs (VIB-5218).
             **kwargs: Additional arguments (ignored for compatibility)
         """
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
+        self.chain = (chain or "").lower()
         logger.info("MorphoBlueReceiptParser initialized")
 
     def parse_receipt(
@@ -1416,4 +1438,84 @@ class MorphoBlueReceiptParser:
             )
         except Exception as e:
             logger.warning(f"Failed to extract protocol_fees: {e}")
+            return None
+
+    def extract_primitive_money_legs(self, receipt: dict[str, Any]) -> "PrimitiveMoneyLegs | None":
+        """VIB-5218 — declare the loan-side lending money legs as a typed
+        ``PrimitiveMoneyLegs`` the ledger dispatcher consumes directly (the Lido /
+        Curve / Pendle pattern).
+
+        Inverts the legacy control flow (blueprint 27 §6.6): instead of the ledger
+        reverse-engineering a SUPPLY / WITHDRAW / BORROW / REPAY's ``token_in`` from
+        the intent (which it never matched for lending — landing an empty
+        ``token_in`` → ``asset = "UNKNOWN"`` → no FIFO lot → ``deployed_capital_usd =
+        0``), the connector DECLARES the loan asset it actually moved on-chain.
+
+        Morpho Blue's market events carry the market ``Id`` and ``assets`` / ``shares``
+        but NOT the loan token. The loan token is recovered from the matching ERC-20
+        ``Transfer`` in the same receipt — the single transfer whose value equals the
+        event's ``assets`` and whose emitter is NOT the Morpho singleton (which emits
+        the market event). Emits ONE PRINCIPAL leg (token = the loan token symbol,
+        amount = a human-unit ``MeasuredMoney``), projected onto ``token_in`` /
+        ``amount_in``.
+
+        Scope is the **loan-side** lending events; the collateral legs
+        (``SupplyCollateral`` / ``WithdrawCollateral``) already flow through the
+        ``supply_collateral_amount`` / ``withdraw_collateral_amount`` overlays and are
+        intentionally not handled here.
+
+        Returns ``None`` (→ legacy fallback, byte-identical rows) when the receipt
+        carries no loan-side event or the loan token cannot be matched/resolved — so
+        unresolvable receipts degrade unchanged (Empty ≠ Zero). Never raises.
+        """
+        from almanak.connectors._strategy_base.lending_money_legs import (
+            lending_principal_legs,
+            resolve_symbol_decimals,
+        )
+
+        _LOAN_SIDE = {
+            MorphoBlueEventType.SUPPLY,
+            MorphoBlueEventType.WITHDRAW,
+            MorphoBlueEventType.BORROW,
+            MorphoBlueEventType.REPAY,
+        }
+        try:
+            result = self.parse_receipt(receipt)
+            event = next((e for e in result.events if e.event_type in _LOAN_SIDE), None)
+            if event is None:
+                return None
+            try:
+                assets = int(Decimal(str(event.data.get("assets"))))
+            except (TypeError, ValueError, ArithmeticError):
+                return None
+
+            morpho_contract = (event.contract_address or "").lower()
+            # Identify the loan token by the non-Morpho ERC-20 whose Transfer
+            # value equals the loan-side ``assets``. A receipt can carry an
+            # UNRELATED ERC-20 transfer with the same value, so refuse to guess
+            # when more than one DISTINCT emitter matches — return ``None`` →
+            # conservative legacy fallback, never book a wrong principal token.
+            matching_emitters: set[str] = set()
+            for other in result.events:
+                if other.event_type is not MorphoBlueEventType.TRANSFER:
+                    continue
+                emitter = (other.contract_address or "").lower()
+                if not emitter or emitter == morpho_contract:
+                    continue
+                try:
+                    value = int(Decimal(str(other.data.get("amount"))))
+                except (TypeError, ValueError, ArithmeticError):
+                    continue
+                if value == assets:
+                    matching_emitters.add(emitter)
+            if len(matching_emitters) != 1:
+                # Zero matches → unresolvable; multiple distinct matches →
+                # ambiguous. Both degrade to the byte-identical legacy row.
+                return None
+            loan_token = next(iter(matching_emitters))
+
+            symbol, decimals = resolve_symbol_decimals(loan_token, self.chain)
+            return lending_principal_legs(token_symbol=symbol, raw_amount=assets, decimals=decimals)
+        except Exception as exc:  # noqa: BLE001 — never halt the accounting writer
+            logger.warning("Failed to extract primitive_money_legs: %s", exc)
             return None

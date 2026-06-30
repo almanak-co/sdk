@@ -50,6 +50,10 @@ DESCRIPTOR = register_chain(
             },
             fallback_base_fee_gwei=20.0,
             fallback_priority_fee_gwei=2.0,
+            # VIB-5419: live-submit tip floor. L1 nodes legitimately return
+            # eth_maxPriorityFeePerGas=0; without a floor the tx ships with
+            # tip≈0 and stalls/drops when the base fee rises.
+            min_priority_fee_gwei=2.0,
         ),
         timeouts=Timeouts(
             tx_confirmation=300,

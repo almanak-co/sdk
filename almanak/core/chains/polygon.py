@@ -59,6 +59,11 @@ DESCRIPTOR = register_chain(
             cost_cap_native=50.0,
             fallback_base_fee_gwei=30.0,
             fallback_priority_fee_gwei=30.0,
+            # VIB-5419: live-submit tip floor. Polygon PoS validators enforce
+            # a ~30 gwei minimum priority fee (mirrors the polymarket gateway's
+            # POLYGON_MIN_PRIORITY_FEE_WEI); a node returning a lower estimate
+            # would otherwise have its tx dropped.
+            min_priority_fee_gwei=30.0,
         ),
         timeouts=Timeouts(
             tx_confirmation=180,

@@ -44,6 +44,9 @@ DESCRIPTOR = register_chain(
             },
             fallback_base_fee_gwei=25.0,
             fallback_priority_fee_gwei=1.0,
+            # VIB-5419: live-submit tip floor (~1 gwei is the typical C-Chain
+            # tip; floors a node that returns 0 from shipping a tip≈0 tx).
+            min_priority_fee_gwei=1.0,
         ),
         timeouts=Timeouts(
             tx_confirmation=120,

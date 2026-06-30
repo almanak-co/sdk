@@ -220,6 +220,26 @@ def _provider_dispatch_keys(conn: Any) -> tuple[str, ...]:
     return tuple(dict.fromkeys(keys))
 
 
+def _lending_dispatch_keys(conn: Any) -> tuple[str, ...]:
+    """Capability dispatch keys for a lending-rate provider.
+
+    Returns the provider's ``protocol`` plus any ``lending_aliases()`` it
+    declares, normalized and de-duplicated. Aliases let a single connector
+    answer to more than one routing slug — e.g. the morpho_vault connector
+    (``protocol="morpho_vault"``) also serving the ``metamorpho`` slug that
+    strategies and demos actually pass to ``lending_rate(...)``. This mirrors
+    ``_provider_dispatch_keys`` for the DEX capabilities; ``lending_aliases``
+    is duck-typed (``getattr``) so connectors that don't declare it — aave_v3,
+    compound_v3, morpho_blue — are unaffected.
+    """
+    keys = [_normalize_key(str(conn.protocol))]
+    aliases_fn = getattr(conn, "lending_aliases", None)
+    if callable(aliases_fn):
+        aliases: Any = aliases_fn() or ()
+        keys.extend(_normalize_key(str(alias)) for alias in aliases)
+    return tuple(dict.fromkeys(keys))
+
+
 def _invalid_argument(context: grpc.aio.ServicerContext, message: str) -> None:
     context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
     context.set_details(message)
@@ -353,16 +373,19 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         # the type per loop body.
         for lending_conn in GATEWAY_REGISTRY.capability_providers(GatewayLendingRateHistoryCapability):  # type: ignore[type-abstract]
             # ``connector.protocol`` is declared on ``GatewayConnector``;
-            # mypy narrows to the Protocol type which doesn't list it.
-            key = str(lending_conn.protocol).lower()  # type: ignore[attr-defined]
-            existing_lending = self._lending_providers.get(key)
-            if existing_lending is not None and existing_lending is not lending_conn:
-                raise RuntimeError(
-                    f"Duplicate lending-rate provider for protocol {key!r}: "
-                    f"{type(existing_lending).__qualname__} vs "
-                    f"{type(lending_conn).__qualname__}"
-                )
-            self._lending_providers[key] = lending_conn
+            # mypy narrows to the Protocol type which doesn't list it. A
+            # connector may also declare ``lending_aliases()`` (e.g.
+            # morpho_vault answering to the ``metamorpho`` slug strategies
+            # actually pass).
+            for key in _lending_dispatch_keys(lending_conn):
+                existing_lending = self._lending_providers.get(key)
+                if existing_lending is not None and existing_lending is not lending_conn:
+                    raise RuntimeError(
+                        f"Duplicate lending-rate provider for protocol {key!r}: "
+                        f"{type(existing_lending).__qualname__} vs "
+                        f"{type(lending_conn).__qualname__}"
+                    )
+                self._lending_providers[key] = lending_conn
 
         self._funding_providers: dict[str, GatewayFundingHistoryCapability] = {}
         for funding_conn in GATEWAY_REGISTRY.capability_providers(GatewayFundingHistoryCapability):  # type: ignore[type-abstract]

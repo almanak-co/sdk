@@ -11,11 +11,45 @@ Euler V2 uses ERC-4626 standard events for deposit/withdraw, plus custom events 
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base import HexDecoder
 
+if TYPE_CHECKING:
+    from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
+
 logger = logging.getLogger(__name__)
+
+# VIB-5218 — vault_address (lower) -> (underlying_symbol, underlying_decimals),
+# derived once from the connector's static vault registry. Euler V2's ERC-4626
+# Deposit / Withdraw events carry only ``assets`` / ``shares`` — NOT the
+# underlying token — so the principal token identity is recovered from the
+# emitting *vault* address (the event's emitter) via this map. Lazily built
+# (the adapter import is heavy and must not run at parser-module import time)
+# and cached.
+_VAULT_UNDERLYING_CACHE: dict[str, tuple[str, int]] | None = None
+
+
+def _vault_underlying_map() -> dict[str, tuple[str, int]]:
+    """Return the cached ``vault_address(lower) -> (underlying_symbol, decimals)`` map."""
+    global _VAULT_UNDERLYING_CACHE
+    if _VAULT_UNDERLYING_CACHE is None:
+        built: dict[str, tuple[str, int]] = {}
+        try:
+            from almanak.connectors.euler_v2.adapter import EULER_V2_VAULTS_BY_CHAIN
+
+            for chain_vaults in EULER_V2_VAULTS_BY_CHAIN.values():
+                for info in chain_vaults.values():
+                    addr = str(info.get("vault_address", "")).lower()
+                    symbol = info.get("underlying_symbol") or ""
+                    decimals = info.get("decimals")
+                    if addr and symbol and isinstance(decimals, int):
+                        built[addr] = (symbol, decimals)
+        except Exception as exc:  # noqa: BLE001 — degrade to legacy (no legs) on the accounting path
+            logger.debug("euler_v2: could not build vault->underlying map: %s", exc)
+        _VAULT_UNDERLYING_CACHE = built
+    return _VAULT_UNDERLYING_CACHE
+
 
 # =============================================================================
 # Event Topics (keccak256 of event signatures)
@@ -73,8 +107,27 @@ class EulerV2ReceiptParser:
     Extracts deposit, withdraw, borrow, and repay data from on-chain events.
     """
 
-    def __init__(self, underlying_decimals: int = 6, **kwargs: Any) -> None:
+    # VIB-5218 — declare the lending money legs (one PRINCIPAL leg) as a typed
+    # ``PrimitiveMoneyLegs`` via ``extract_primitive_money_legs``, surfaced under
+    # ``extracted_data["primitive_money_legs"]`` by the enricher's connector-owned
+    # ``EXTRA_EXTRACTIONS_BY_INTENT`` merge. The US-009 ledger dispatcher prefers
+    # that typed fact over its legacy guesser, so the Euler V2
+    # SUPPLY/WITHDRAW/BORROW/REPAY ledger row carries a real ``token_in`` (the
+    # vault's underlying symbol) instead of the empty string that made the lending
+    # handler resolve ``UNKNOWN`` → ``deployed_capital_usd = 0``.
+    EXTRA_EXTRACTIONS_BY_INTENT: dict[str, tuple[str, ...]] = {
+        "SUPPLY": ("primitive_money_legs",),
+        "WITHDRAW": ("primitive_money_legs",),
+        "BORROW": ("primitive_money_legs",),
+        "REPAY": ("primitive_money_legs",),
+    }
+
+    def __init__(self, underlying_decimals: int = 6, chain: str | None = None, **kwargs: Any) -> None:
         self.underlying_decimals = underlying_decimals
+        # Threaded by the ResultEnricher; retained for parity with the other
+        # lending parsers (the vault->underlying map already carries decimals, so
+        # Euler does not need a token-resolver round-trip).
+        self.chain = (chain or "").lower()
 
     def parse_receipt(
         self,
@@ -299,6 +352,89 @@ class EulerV2ReceiptParser:
         if result.repay_amount > 0:
             return result.repay_amount
         return None
+
+    def extract_primitive_money_legs(self, receipt: dict) -> "PrimitiveMoneyLegs | None":
+        """VIB-5218 — declare the lending money legs as a typed ``PrimitiveMoneyLegs``
+        the ledger dispatcher consumes directly (the Lido / Curve / Pendle pattern).
+
+        Inverts the legacy control flow (blueprint 27 §6.6): instead of the ledger
+        reverse-engineering a SUPPLY / WITHDRAW / BORROW / REPAY's ``token_in`` from
+        the intent (which it never matched for lending — landing an empty
+        ``token_in`` → ``asset = "UNKNOWN"`` → no FIFO lot → ``deployed_capital_usd =
+        0``), the connector DECLARES the principal asset it actually moved on-chain.
+
+        Euler V2's ERC-4626 ``Deposit`` / ``Withdraw`` events (and the Euler-specific
+        ``Borrow`` / ``Repay``) carry only ``assets`` / ``shares`` — NOT the
+        underlying token. The underlying is recovered from the *emitting vault*
+        address (the event's emitter) via the connector's static vault registry,
+        which also carries the underlying's decimals — so no token-resolver round-trip
+        is needed. Emits ONE PRINCIPAL leg (token = the underlying symbol, amount = a
+        human-unit ``MeasuredMoney``), which the dispatcher projects onto ``token_in``
+        / ``amount_in``.
+
+        Returns ``None`` (→ legacy fallback, byte-identical rows) when the receipt
+        carries no Euler V2 lending event or the emitting vault is not in the static
+        registry — so unknown-vault receipts degrade unchanged (Empty ≠ Zero). Never
+        raises: any failure degrades to ``None`` rather than halting the live
+        accounting writer.
+        """
+        from almanak.connectors._strategy_base.lending_money_legs import lending_principal_legs
+
+        # A BORROW / REPAY action compiles to a SINGLE EVC-batch tx that emits BOTH
+        # a collateral event (ERC-4626 ``Deposit`` / ``Withdraw`` on the collateral
+        # vault) AND a loan event (Euler ``Borrow`` / ``Repay`` on the borrow vault).
+        # The principal of a BORROW / REPAY is the LOAN token, never the collateral,
+        # so the loan event wins when both are present. A pure SUPPLY / WITHDRAW has
+        # no loan event and books the deposit / withdraw vault as before (VIB-5218).
+        _LOAN_TOPICS = {BORROW_TOPIC.lower(), REPAY_TOPIC.lower()}
+        _COLLATERAL_TOPICS = {DEPOSIT_TOPIC.lower(), WITHDRAW_TOPIC.lower()}
+        try:
+            logs = receipt.get("logs", [])
+            loan_log: dict | None = None
+            collateral_log: dict | None = None
+            for log in logs:
+                topics = log.get("topics", [])
+                if not topics:
+                    continue
+                topic0 = topics[0]
+                if isinstance(topic0, bytes):
+                    topic0 = "0x" + topic0.hex()
+                topic0 = str(topic0).lower()
+                if topic0 in _LOAN_TOPICS and loan_log is None:
+                    loan_log = log
+                elif topic0 in _COLLATERAL_TOPICS and collateral_log is None:
+                    collateral_log = log
+
+            # Loan event (BORROW / REPAY) is the principal; collateral is the
+            # fallback for a pure SUPPLY / WITHDRAW with no loan event.
+            chosen = loan_log if loan_log is not None else collateral_log
+            if chosen is None:
+                return None
+
+            # Emitter of the chosen lending event IS the vault — recover its underlying.
+            vault_addr = chosen.get("address", "")
+            if isinstance(vault_addr, bytes):
+                vault_addr = "0x" + vault_addr.hex()
+            vault_addr = str(vault_addr).lower()
+            underlying = _vault_underlying_map().get(vault_addr)
+            if underlying is None:
+                # Vault not in the static registry — fall back to legacy rather
+                # than declare a token-less leg.
+                return None
+            symbol, decimals = underlying
+
+            # ``assets`` is the first 32-byte word of data for all four events.
+            data = chosen.get("data", "0x")
+            if isinstance(data, bytes):
+                data = "0x" + data.hex()
+            data_hex = data[2:] if str(data).startswith("0x") else str(data)
+            if len(data_hex) < 64:
+                return None
+            assets = HexDecoder.decode_uint256(data_hex[:64])
+            return lending_principal_legs(token_symbol=symbol, raw_amount=assets, decimals=decimals)
+        except Exception as exc:  # noqa: BLE001 — never halt the accounting writer
+            logger.warning("Failed to extract primitive_money_legs: %s", exc)
+            return None
 
     # Legacy methods kept for backward compatibility
     def extract_supply_data(self, receipt: dict, vault_address: str | None = None) -> dict | None:

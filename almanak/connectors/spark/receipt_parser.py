@@ -8,9 +8,12 @@ import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
+
+if TYPE_CHECKING:
+    from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
 
 logger = logging.getLogger(__name__)
 
@@ -200,9 +203,26 @@ class SparkReceiptParser:
     to avoid false positives with Aave V3 events.
     """
 
+    # VIB-5218 — declare the lending money legs (one PRINCIPAL leg) as a typed
+    # ``PrimitiveMoneyLegs`` via ``extract_primitive_money_legs``, surfaced under
+    # ``extracted_data["primitive_money_legs"]`` by the enricher's connector-owned
+    # ``EXTRA_EXTRACTIONS_BY_INTENT`` merge. The US-009 ledger dispatcher prefers
+    # that typed fact over its legacy intent-attribute guesser, so the Spark
+    # SUPPLY/WITHDRAW/BORROW/REPAY ledger row carries a real ``token_in`` (the
+    # ``reserve`` symbol) instead of the empty string that made the lending handler
+    # resolve ``UNKNOWN`` → ``deployed_capital_usd = 0``. Mirrors the
+    # Lido / Curve / Pendle ``primitive_money_legs`` declaration.
+    EXTRA_EXTRACTIONS_BY_INTENT: dict[str, tuple[str, ...]] = {
+        "SUPPLY": ("primitive_money_legs",),
+        "WITHDRAW": ("primitive_money_legs",),
+        "BORROW": ("primitive_money_legs",),
+        "REPAY": ("primitive_money_legs",),
+    }
+
     def __init__(
         self,
         pool_addresses: set[str] | None = None,
+        chain: str | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the parser.
@@ -211,10 +231,14 @@ class SparkReceiptParser:
             pool_addresses: Optional set of known Spark pool addresses to filter by.
                            If not provided, uses the default SPARK_POOL_ADDRESSES.
                            Addresses should be lowercase.
+            chain: Blockchain network (threaded by the ResultEnricher) — used to
+                   resolve the ``reserve`` address to its ERC-20 symbol/decimals for
+                   the declared money legs (VIB-5218).
             **kwargs: Additional arguments (ignored for compatibility)
         """
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
         self._pool_addresses = pool_addresses if pool_addresses is not None else SPARK_POOL_ADDRESSES
+        self.chain = (chain or "").lower()
 
     def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:  # noqa: C901
         """Parse a transaction receipt.
@@ -650,6 +674,56 @@ class SparkReceiptParser:
             return result.borrows[0].borrow_rate
         except Exception as e:
             logger.warning(f"Failed to extract borrow rate: {e}")
+            return None
+
+    def extract_primitive_money_legs(self, receipt: dict[str, Any]) -> "PrimitiveMoneyLegs | None":
+        """VIB-5218 — declare the lending money legs as a typed ``PrimitiveMoneyLegs``
+        the ledger dispatcher consumes directly (the Lido / Curve / Pendle pattern).
+
+        Inverts the legacy control flow (blueprint 27 §6.6): instead of the ledger
+        reverse-engineering a SUPPLY / WITHDRAW / BORROW / REPAY's ``token_in`` from
+        the intent's loosely-typed attributes (which it never matched for lending,
+        landing an empty ``token_in`` → ``asset = "UNKNOWN"`` → no FIFO lot →
+        ``deployed_capital_usd = 0``), the connector DECLARES the principal asset it
+        actually moved on-chain. Spark is an Aave V3 fork: every Supply / Withdraw /
+        Borrow / Repay event carries the ``reserve`` token address directly, so the
+        principal token is self-describing from chain truth.
+
+        Emits ONE PRINCIPAL leg (the dispatcher projects it onto ``token_in`` /
+        ``amount_in``). Token identity is the ``reserve``'s resolved ERC-20 symbol so
+        the lending handler's symbol-keyed price oracle can value the principal into
+        ``deployed_capital_usd``; the amount is a human-unit ``MeasuredMoney`` carrying
+        Empty ≠ Zero (§10.10) via :func:`lending_principal_legs`.
+
+        Returns ``None`` (→ legacy fallback, byte-identical rows) when the receipt
+        carries no Spark lending event or the ``reserve`` symbol cannot be resolved —
+        so non-Spark-resolvable receipts degrade unchanged. Never raises: any failure
+        degrades to ``None`` rather than halting the live accounting writer.
+        """
+        from almanak.connectors._strategy_base.lending_money_legs import (
+            lending_principal_legs,
+            resolve_symbol_decimals,
+        )
+
+        try:
+            result = self.parse_receipt(receipt)
+            # First present lending event in precedence order. A single lending tx
+            # carries exactly one of these (a SUPPLY receipt has only ``supplies``,
+            # etc.), so first-present is the action's principal leg.
+            event = next(
+                (
+                    e
+                    for events in (result.supplies, result.withdraws, result.borrows, result.repays)
+                    for e in events[:1]
+                ),
+                None,
+            )
+            if event is None:
+                return None
+            symbol, decimals = resolve_symbol_decimals(event.reserve, self.chain)
+            return lending_principal_legs(token_symbol=symbol, raw_amount=int(event.amount), decimals=decimals)
+        except Exception as exc:  # noqa: BLE001 — never halt the accounting writer
+            logger.warning(f"Failed to extract primitive_money_legs: {exc}")
             return None
 
 
