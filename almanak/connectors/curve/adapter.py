@@ -22,12 +22,13 @@ Function Selectors:
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from almanak.connectors._strategy_base.rpc import eth_call_uint256
+from almanak.connectors._strategy_base.pool_validation_base import ZERO_ADDRESS, decode_address
+from almanak.connectors._strategy_base.rpc import eth_call, eth_call_uint256
 from almanak.connectors._strategy_base.swap_oracle_guard import (
     DEFAULT_SWAP_ORACLE_DIVERGENCE_BPS,
     check_swap_oracle_divergence,
@@ -377,6 +378,22 @@ GET_DY_UINT256_SELECTOR = "0x556d6e9f"  # get_dy(uint256,uint256,uint256)
 GET_DY_UNDERLYING_SELECTOR = "0x07211ef7"  # get_dy_underlying(int128,int128,uint256)
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
 ERC20_ALLOWANCE_SELECTOR = "0xdd62ed3e"  # allowance(address owner, address spender)
+ERC20_DECIMALS_SELECTOR = "0x313ce567"  # decimals() -> uint8
+
+# Pool-state read selectors for the refresh-on-read registry (VIB-5423 / VIB-5424).
+# These let ``get_pool_info`` reconcile the hand-typed CURVE_POOLS literals against
+# live chain truth — discharging the TECH_DEBT(VIB-581) note above — using the
+# gateway-first ``eth_call`` seam already wired in this file. A wrong ``is_ng`` picks
+# the wrong add/remove ABI encoder (malformed calldata / silent revert); a reversed
+# coin order breaks approve/exchange; a frozen ``virtual_price`` drifts NAV.
+COINS_UINT256_SELECTOR = "0xc6610657"  # coins(uint256) -> address (factory/NG/newer pools)
+COINS_INT128_SELECTOR = "0x23746eb8"  # coins(int128) -> address (older Vyper pools, e.g. 3pool)
+GET_VIRTUAL_PRICE_SELECTOR = "0xbb7b8b80"  # get_virtual_price() -> uint256 (1e18-scaled)
+# calc_token_amount(uint256[],bool) — present ONLY on StableSwap-NG pools (dynamic
+# array ABI). A clean (non-None) return is an NG-ABI fingerprint; a revert / empty
+# return means the pool speaks the legacy fixed-size ABI. Same selector the NG
+# add-liquidity quote path already uses (see _query_calc_token_amount_ng_onchain).
+NG_CALC_TOKEN_AMOUNT_SELECTOR = "0x3db06dd8"
 
 # Metapool generic-zap selectors (VIB-5419 — Tier B underlying routing).
 # The generic 3CRV DepositZap takes the POOL address as the FIRST argument, so
@@ -500,6 +517,11 @@ class PoolInfo:
     # Optimism crvUSD/USDC pool (0x03771e24…) on 2026-05-26 confirmed only the
     # dynamic-array selectors are present.
     is_ng: bool = False
+    # Per-coin decimals, positionally aligned with ``coins`` / ``coin_addresses``.
+    # ``None`` (cold-start) means "not chain-read" — callers resolve decimals via
+    # the TokenResolver. The refresh-on-read path (VIB-5423) populates this from a
+    # live ``decimals()`` read so calldata math uses chain truth, not a literal.
+    coin_decimals: list[int] | None = None
     # Metapool support (VIB-5419). A Curve metapool is NATIVELY a 2-coin pool
     # `[meta coin, base-pool LP token]` (coins[1] is itself an LP token like
     # 3CRV). All native operations (`add_liquidity([meta, baseLP])`,
@@ -587,6 +609,7 @@ class PoolInfo:
             "virtual_price": str(self.virtual_price),
             "use_underlying": self.use_underlying,
             "is_ng": self.is_ng,
+            "coin_decimals": self.coin_decimals,
             "is_metapool": self.is_metapool,
             "base_pool": self.base_pool,
             "base_pool_coins": self.base_pool_coins,
@@ -769,71 +792,354 @@ class CurveAdapter:
         # Allowance cache (token -> amount approved)
         self._allowance_cache: dict[str, int] = {}
 
+        # Refresh-on-read cache (VIB-5423): lowercased pool address -> PoolInfo
+        # reconciled against live chain state. A pool is read once per adapter
+        # lifetime so repeated resolves in one compile don't re-pay the RPC cost.
+        self._pool_refresh_cache: dict[str, PoolInfo] = {}
+
         logger.info(f"CurveAdapter initialized for chain={self.chain}, wallet={self.wallet_address[:10]}...")
 
     # =========================================================================
     # Pool Information
     # =========================================================================
 
-    def get_pool_info(self, pool_address: str) -> PoolInfo | None:
+    @staticmethod
+    def _build_cold_start_pool_info(name: str, pool_data: dict[str, Any]) -> PoolInfo:
+        """Build a ``PoolInfo`` from a static ``CURVE_POOLS`` entry (cold-start).
+
+        This is the hand-typed registry value — the safe fallback used verbatim
+        when no transport is available to reconcile it against the chain. The
+        refresh-on-read path (``_refresh_pool_info_from_chain``) overrides the
+        safety-critical fields (coins / coin_addresses / decimals / virtual_price
+        / is_ng) with live chain truth when a gateway / RPC is wired.
+        """
+        return PoolInfo(
+            address=pool_data["address"],
+            lp_token=pool_data["lp_token"],
+            coins=pool_data["coins"],
+            coin_addresses=pool_data["coin_addresses"],
+            pool_type=PoolType(pool_data["pool_type"]),
+            n_coins=pool_data["n_coins"],
+            name=name,
+            virtual_price=pool_data.get("virtual_price", Decimal("1.0")),
+            use_underlying=pool_data.get("use_underlying", False),
+            is_ng=pool_data.get("is_ng", False),
+            is_metapool=pool_data.get("is_metapool", False),
+            base_pool=pool_data.get("base_pool"),
+            base_pool_coins=pool_data.get("base_pool_coins"),
+            base_pool_coin_addresses=pool_data.get("base_pool_coin_addresses"),
+            zap_address=pool_data.get("zap_address"),
+        )
+
+    def get_pool_info(self, pool_address: str, *, refresh: bool = True) -> PoolInfo | None:
         """Get information about a pool.
+
+        The static ``CURVE_POOLS`` entry is the cold-start value; when a gateway
+        or RPC is wired the registry is reconciled against live chain state
+        (coins / coin_addresses / decimals / virtual_price / is_ng) before being
+        returned — see ``_refresh_pool_info_from_chain`` (VIB-5423 / VIB-5424).
 
         Args:
             pool_address: Pool contract address
+            refresh: When ``True`` (default, calldata-producing paths) the static
+                literal is reconciled against chain truth. When ``False`` the
+                read-only quote / pair-resolution path opts out of the network
+                reconcile (VIB-5423) — a warm cache entry is still reused, but no
+                new RPC reads are issued. ``is_ng`` / ``virtual_price`` are
+                irrelevant to a ``get_dy`` quote, so paying for them on every
+                slippage estimate (with a fresh per-quote adapter) is wasteful.
 
         Returns:
             PoolInfo if known, None otherwise
         """
         for name, pool_data in self.pools.items():
             if pool_data["address"].lower() == pool_address.lower():
-                return PoolInfo(
-                    address=pool_data["address"],
-                    lp_token=pool_data["lp_token"],
-                    coins=pool_data["coins"],
-                    coin_addresses=pool_data["coin_addresses"],
-                    pool_type=PoolType(pool_data["pool_type"]),
-                    n_coins=pool_data["n_coins"],
-                    name=name,
-                    virtual_price=pool_data.get("virtual_price", Decimal("1.0")),
-                    use_underlying=pool_data.get("use_underlying", False),
-                    is_ng=pool_data.get("is_ng", False),
-                    is_metapool=pool_data.get("is_metapool", False),
-                    base_pool=pool_data.get("base_pool"),
-                    base_pool_coins=pool_data.get("base_pool_coins"),
-                    base_pool_coin_addresses=pool_data.get("base_pool_coin_addresses"),
-                    zap_address=pool_data.get("zap_address"),
-                )
+                return self._resolve_pool_info(self._build_cold_start_pool_info(name, pool_data), refresh=refresh)
         return None
 
-    def get_pool_by_name(self, name: str) -> PoolInfo | None:
+    def get_pool_by_name(self, name: str, *, refresh: bool = True) -> PoolInfo | None:
         """Get pool info by name.
+
+        Same refresh-on-read reconciliation as ``get_pool_info`` (VIB-5423);
+        ``refresh=False`` opts the read-only quote path out of the reconcile.
 
         Args:
             name: Pool name (e.g., "3pool", "frax_usdc")
+            refresh: See ``get_pool_info``.
 
         Returns:
             PoolInfo if found, None otherwise
         """
         pool_data = self.pools.get(name)
         if pool_data:
-            return PoolInfo(
-                address=pool_data["address"],
-                lp_token=pool_data["lp_token"],
-                coins=pool_data["coins"],
-                coin_addresses=pool_data["coin_addresses"],
-                pool_type=PoolType(pool_data["pool_type"]),
-                n_coins=pool_data["n_coins"],
-                name=name,
-                virtual_price=pool_data.get("virtual_price", Decimal("1.0")),
-                use_underlying=pool_data.get("use_underlying", False),
-                is_ng=pool_data.get("is_ng", False),
-                is_metapool=pool_data.get("is_metapool", False),
-                base_pool=pool_data.get("base_pool"),
-                base_pool_coins=pool_data.get("base_pool_coins"),
-                base_pool_coin_addresses=pool_data.get("base_pool_coin_addresses"),
-                zap_address=pool_data.get("zap_address"),
-            )
+            return self._resolve_pool_info(self._build_cold_start_pool_info(name, pool_data), refresh=refresh)
         return None
+
+    def _resolve_pool_info(self, cold_start: PoolInfo, *, refresh: bool) -> PoolInfo:
+        """Resolve a cold-start ``PoolInfo`` to the value callers receive.
+
+        A warm refresh-cache entry is always reused (returned as a defensive
+        copy — including fresh list objects, since ``dataclasses.replace`` is
+        shallow — so a caller mutating the returned coins/addresses/decimals
+        can't poison later resolves). With no warm entry: ``refresh=True``
+        reconciles against chain truth; ``refresh=False`` returns the cold-start
+        static verbatim without issuing any RPC reads.
+        """
+        cached = self._pool_refresh_cache.get(cold_start.address.lower())
+        if cached is not None:
+            return replace(
+                cached,
+                coins=list(cached.coins),
+                coin_addresses=list(cached.coin_addresses),
+                coin_decimals=list(cached.coin_decimals) if cached.coin_decimals is not None else None,
+            )
+        if not refresh:
+            return cold_start
+        return self._refresh_pool_info_from_chain(cold_start)
+
+    # =========================================================================
+    # Refresh-on-read: reconcile the static registry against live chain truth
+    # (VIB-5423 / VIB-5424) — discharges the TECH_DEBT(VIB-581) frozen-snapshot
+    # note. All reads route through the gateway-first ``eth_call`` seam already
+    # used in this file; no new egress path is introduced.
+    # =========================================================================
+
+    def _has_read_transport(self) -> bool:
+        """True when a connected gateway client or a direct RPC URL can serve reads."""
+        gateway_client = self._gateway_client
+        if gateway_client is not None and getattr(gateway_client, "is_connected", False):
+            return True
+        return bool(self._rpc_url)
+
+    def _refresh_pool_info_from_chain(self, pool_info: PoolInfo) -> PoolInfo:
+        """Return ``pool_info`` with safety-critical fields refreshed from chain.
+
+        Reads live ``coins(i)`` / ``decimals()`` / ``get_virtual_price()`` and
+        probes the NG ABI to override the hand-typed ``coins`` / ``coin_addresses``
+        / ``coin_decimals`` / ``virtual_price`` / ``is_ng`` with chain truth. Drift
+        between the static literal and the live value is logged loudly.
+
+        Fail-safe: when no transport is available, every live read fails, or any
+        unexpected error escapes a helper, the cold-start ``pool_info`` is
+        returned unchanged (so a correctly-typed pool resolves to exactly today's
+        values, and a transient RPC outage never downgrades the registry).
+        ``is_ng`` is only overridden once transport health is independently
+        confirmed by a sibling read AND the probe returns positive evidence —
+        a transient probe failure keeps the static value, never "legacy ABI".
+        """
+        if not self._has_read_transport():
+            logger.debug(
+                "Curve registry refresh skipped for %s: no gateway/RPC transport; using cold-start static values",
+                pool_info.name,
+            )
+            return pool_info
+
+        try:
+            refreshed = replace(pool_info)
+            transport_healthy = False
+
+            # ``use_underlying`` (aave-type) pools intentionally track the
+            # UNDERLYING tokens (e.g. DAI/USDC.e/USDT) in the static registry,
+            # while on-chain ``coins(i)`` returns the pool's internal wrapped
+            # aTokens. Overwriting coin_addresses with the live aTokens would
+            # break approve / exchange_underlying / coin-index resolution, so the
+            # coin set is NOT refreshed for these pools — only virtual_price /
+            # is_ng (which are pool-level and unaffected). Decimals stay None so
+            # ``_coin_decimals`` resolves the underlying symbols via the resolver.
+            if not pool_info.use_underlying:
+                live_addresses = self._read_pool_coins(pool_info)
+                if live_addresses is not None:
+                    transport_healthy = True
+                    if [a.lower() for a in live_addresses] != [a.lower() for a in pool_info.coin_addresses]:
+                        logger.warning(
+                            "Curve coin drift for %s: static=%s live=%s; trusting live chain order",
+                            pool_info.name,
+                            pool_info.coin_addresses,
+                            live_addresses,
+                        )
+                    refreshed.coin_addresses = live_addresses
+                    refreshed.coins = self._realign_coin_symbols(pool_info, live_addresses)
+                    refreshed.coin_decimals = self._read_coin_decimals(live_addresses)
+
+            live_vp = self._read_virtual_price(pool_info)
+            if live_vp is not None:
+                transport_healthy = True
+                refreshed.virtual_price = live_vp
+
+            if transport_healthy:
+                try:
+                    live_is_ng = self._probe_is_ng(pool_info)
+                except Exception as exc:  # noqa: BLE001
+                    # Transport error and contract revert are indistinguishable at
+                    # this seam (both raise). An ambiguous probe failure must NOT
+                    # downgrade a correctly-typed NG pool to legacy ABI — that would
+                    # pick the wrong add/remove encoder on real funds. Keep the
+                    # cold-start value; only a clean (non-raising) probe overrides it.
+                    logger.warning(
+                        "Curve is_ng probe inconclusive for %s (%s); keeping static is_ng=%s",
+                        pool_info.name,
+                        exc,
+                        pool_info.is_ng,
+                    )
+                    live_is_ng = pool_info.is_ng
+                if live_is_ng != pool_info.is_ng:
+                    logger.warning(
+                        "Curve is_ng drift for %s: static=%s live=%s; trusting live ABI fingerprint",
+                        pool_info.name,
+                        pool_info.is_ng,
+                        live_is_ng,
+                    )
+                refreshed.is_ng = live_is_ng
+        except Exception as exc:  # noqa: BLE001 — fail-safe: any unexpected error keeps cold-start static
+            logger.warning(
+                "Curve registry refresh raised unexpectedly for %s (%s); using cold-start static values",
+                pool_info.name,
+                exc,
+            )
+            return pool_info
+
+        if not transport_healthy:
+            logger.warning(
+                "Curve registry refresh: no live read succeeded for %s; using cold-start static values",
+                pool_info.name,
+            )
+            return pool_info
+
+        self._pool_refresh_cache[pool_info.address.lower()] = refreshed
+        return refreshed
+
+    def _read_pool_coins(self, pool_info: PoolInfo) -> list[str] | None:
+        """Read live ``coins(i)`` addresses, or ``None`` if any read fails.
+
+        Probes ``coins(uint256)`` first (factory / NG / newer pools) then
+        ``coins(int128)`` (older Vyper pools like Ethereum 3pool), mirroring the
+        ``balances`` selector probe used elsewhere in this adapter. Returns the
+        full set of ``n_coins`` addresses only when every read succeeds with a
+        non-zero address — a partial read is treated as a failure so the caller
+        keeps the static set rather than splicing chain + literal coins.
+        """
+        for selector in (COINS_UINT256_SELECTOR, COINS_INT128_SELECTOR):
+            addresses: list[str] = []
+            for i in range(pool_info.n_coins):
+                try:
+                    raw = eth_call(
+                        chain=self.chain,
+                        to=pool_info.address,
+                        data=selector + self._pad_uint256(i),
+                        rpc_url=self._rpc_url,
+                        gateway_client=self._gateway_client,
+                        timeout=10.0,
+                    )
+                except Exception:  # noqa: BLE001 — wrong selector reverts; try the next candidate
+                    break
+                if raw is None:
+                    break
+                addr = decode_address(raw)
+                if addr == ZERO_ADDRESS:
+                    break
+                addresses.append(addr)
+            if len(addresses) == pool_info.n_coins:
+                return addresses
+        return None
+
+    def _realign_coin_symbols(self, pool_info: PoolInfo, live_addresses: list[str]) -> list[str]:
+        """Symbols positionally aligned to ``live_addresses``.
+
+        Reuses the static symbol for any address already known in the literal
+        (so a mere coin-order reversal re-orders the symbols correctly and keeps
+        them TokenResolver-valid); for a genuinely new address, resolves the
+        symbol on-chain, falling back to a truncated address for display.
+        """
+        static_by_addr = {
+            addr.lower(): sym for addr, sym in zip(pool_info.coin_addresses, pool_info.coins, strict=False)
+        }
+        symbols: list[str] = []
+        for addr in live_addresses:
+            sym = static_by_addr.get(addr.lower())
+            symbols.append(sym if sym is not None else self._get_token_symbol(addr))
+        return symbols
+
+    def _read_coin_decimals(self, coin_addresses: list[str]) -> list[int] | None:
+        """Read live ``decimals()`` for each coin, or ``None`` if any read fails.
+
+        Curve's native-coin placeholder (0xEeee…) is not an ERC-20 and has no
+        ``decimals()`` — it is the chain's 18-decimal native coin, handled
+        directly. ``None`` on any failure so the caller falls back to the
+        TokenResolver (Empty≠Zero: an unread decimal is unknown, not zero).
+        """
+        decimals: list[int] = []
+        for addr in coin_addresses:
+            if self._is_native_token(addr):
+                decimals.append(18)
+                continue
+            try:
+                value = eth_call_uint256(
+                    chain=self.chain,
+                    to=addr,
+                    data=ERC20_DECIMALS_SELECTOR,
+                    rpc_url=self._rpc_url,
+                    gateway_client=self._gateway_client,
+                    timeout=10.0,
+                )
+            except Exception:  # noqa: BLE001 — unread decimals → resolver fallback
+                return None
+            if value is None:
+                return None
+            decimals.append(int(value))
+        return decimals
+
+    def _read_virtual_price(self, pool_info: PoolInfo) -> Decimal | None:
+        """Read live ``get_virtual_price()`` (1e18-scaled) as a Decimal, or ``None``.
+
+        ``None`` on failure or a zero read so the caller keeps the static
+        snapshot — a real virtual_price is ``>= ~1e18``.
+        """
+        try:
+            raw = eth_call_uint256(
+                chain=self.chain,
+                to=pool_info.address,
+                data=GET_VIRTUAL_PRICE_SELECTOR,
+                rpc_url=self._rpc_url,
+                gateway_client=self._gateway_client,
+                timeout=10.0,
+            )
+        except Exception as exc:  # noqa: BLE001 — keep static snapshot on any read failure
+            logger.debug("Curve get_virtual_price read failed for %s (%s); keeping static", pool_info.name, exc)
+            return None
+        if not raw:
+            return None
+        return Decimal(raw) / Decimal(10**18)
+
+    def _probe_is_ng(self, pool_info: PoolInfo) -> bool:
+        """Whether the live pool exposes the StableSwap-NG dynamic-array ABI.
+
+        Probes ``calc_token_amount(uint256[],bool)`` — implemented only by NG
+        pools — with a zero-amount deposit. A clean (non-None) return means the
+        NG selector is present (dynamic ``uint256[]`` add/remove ABI); a revert /
+        empty return (raises / ``None``) means the pool only speaks the legacy
+        fixed-size ABI. Crypto / Tricrypto pools are a different ABI family and
+        are never NG — short-circuit without a call. Callers MUST only trust the
+        result once transport health is independently confirmed, so a transient
+        RPC failure can't be misread as "legacy".
+        """
+        if pool_info.pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
+            return False
+        calldata = (
+            NG_CALC_TOKEN_AMOUNT_SELECTOR
+            + self._pad_uint256(0x40)
+            + self._pad_uint256(1)  # is_deposit
+            + self._pad_uint256(pool_info.n_coins)
+            + "".join(self._pad_uint256(0) for _ in range(pool_info.n_coins))
+        )
+        result = eth_call_uint256(
+            chain=self.chain,
+            to=pool_info.address,
+            data=calldata,
+            rpc_url=self._rpc_url,
+            gateway_client=self._gateway_client,
+            timeout=10.0,
+        )
+        return result is not None
 
     # =========================================================================
     # Swap Operations
@@ -973,9 +1279,11 @@ class CurveAdapter:
             token_in_address = pool_info.coin_addresses[i]
             token_out_address = pool_info.coin_addresses[j]
 
-            # Get token decimals
+            # Get token decimals — prefer the live ``decimals()`` captured by the
+            # refresh-on-read path so ``amount_in_wei`` (which feeds approvals and
+            # the quote) uses chain truth, symmetric with the output side below.
             token_in_symbol = pool_info.coins[i]
-            token_in_decimals = self._get_token_decimals(token_in_symbol)
+            token_in_decimals = self._coin_decimals(pool_info, i)
 
             # Convert amount to wei
             amount_in_wei = int(amount_in * Decimal(10**token_in_decimals))
@@ -1013,7 +1321,7 @@ class CurveAdapter:
                     pool_info, i, j, amount_in_wei, price_ratio=price_ratio
                 )
             amount_out_minimum = max(1, int(amount_out_estimate * (10000 - slippage_bps) // 10000))
-            token_out_decimals = self._get_token_decimals(pool_info.coins[j])
+            token_out_decimals = self._coin_decimals(pool_info, j)
 
             # P0-8 oracle/MEV min-out guard (VIB-5439): on a StableSwap pool,
             # cross-check the quote against the independent oracle and fail closed
@@ -1134,7 +1442,7 @@ class CurveAdapter:
             # Convert amounts to wei
             amounts_wei: list[int] = []
             for idx, amt in enumerate(amounts):
-                decimals = self._get_token_decimals(pool_info.coins[idx])
+                decimals = self._coin_decimals(pool_info, idx)
                 amounts_wei.append(int(amt * Decimal(10**decimals)))
 
             # Estimate LP tokens (simplified)
@@ -2156,8 +2464,8 @@ class CurveAdapter:
         Returns:
             Estimated output amount in wei (output token decimals)
         """
-        in_decimals = self._get_token_decimals(pool_info.coins[i])
-        out_decimals = self._get_token_decimals(pool_info.coins[j])
+        in_decimals = self._coin_decimals(pool_info, i)
+        out_decimals = self._coin_decimals(pool_info, j)
         decimal_diff = out_decimals - in_decimals
 
         if pool_info.pool_type == PoolType.STABLESWAP:
@@ -2207,12 +2515,48 @@ class CurveAdapter:
         if amount_in_wei <= 0:
             raise ValueError(f"amount_in_wei must be positive, got {amount_in_wei}")
 
-        pool_info = self.get_pool_info(pool_address)
+        # Read-only quote: opt out of the heavy reconcile (VIB-5423). ``get_dy``
+        # needs the live coin ORDER (for get_coin_index) but NOT is_ng /
+        # virtual_price / decimals. When called inside ``swap()`` the cache is
+        # already warm (its own ``refresh=True`` resolve); standalone slippage
+        # quotes resolve cold-start static then refresh the coin order only, so
+        # the quote stays lean (one ``get_dy`` eth_call_uint256) without the
+        # per-pool vp/is_ng amplification.
+        pool_info = self.get_pool_info(pool_address, refresh=False)
         if not pool_info:
             raise ValueError(f"Unknown Curve pool: {pool_address}")
+        pool_info = self._ensure_live_coin_order(pool_info)
         i = pool_info.get_coin_index(token_in)
         j = pool_info.get_coin_index(token_out)
         return self._query_swap_output_onchain(pool_info, i, j, amount_in_wei)
+
+    def _ensure_live_coin_order(self, pool_info: PoolInfo) -> PoolInfo:
+        """Refresh ONLY the live coin order for an accurate standalone ``get_dy`` quote.
+
+        The read-only quote path opts out of the full reconcile (``is_ng`` /
+        ``virtual_price`` / decimals are irrelevant to a ``get_dy`` quote), but
+        ``get_coin_index`` still needs the live coin ORDER to pick the right
+        ``(i, j)`` before quoting. This issues the minimal coins-only read (via
+        ``eth_call`` — no ``eth_call_uint256``, so the lean single-quote contract
+        holds) only when the pool was resolved cold; a warm refresh-cache entry
+        already carries live coins and is returned untouched, and ``use_underlying``
+        pools keep their static underlying set (chain ``coins()`` are internal
+        aTokens). Any read failure leaves the static order in place (fail-safe).
+        """
+        if pool_info.use_underlying:
+            return pool_info
+        if self._pool_refresh_cache.get(pool_info.address.lower()) is not None:
+            return pool_info
+        if not self._has_read_transport():
+            return pool_info
+        live_addresses = self._read_pool_coins(pool_info)
+        if live_addresses is None:
+            return pool_info
+        return replace(
+            pool_info,
+            coin_addresses=list(live_addresses),
+            coins=self._realign_coin_symbols(pool_info, live_addresses),
+        )
 
     def _query_swap_output_onchain(self, pool_info: PoolInfo, i: int, j: int, amount_in: int) -> int:
         """Query Curve get_dy for a swap output quote."""
@@ -2289,7 +2633,7 @@ class CurveAdapter:
 
         total = 0
         for i, amount in enumerate(amounts):
-            decimals = self._get_token_decimals(pool_info.coins[i])
+            decimals = self._coin_decimals(pool_info, i)
             # Normalize to 18 decimals
             normalized = amount * (10 ** (18 - decimals))
             total += normalized
@@ -2607,7 +2951,7 @@ class CurveAdapter:
         """
         # Adjust LP amount by virtual_price to get underlying value
         adjusted_lp = int(Decimal(lp_amount) * pool_info.virtual_price)
-        decimals = self._get_token_decimals(pool_info.coins[coin_index])
+        decimals = self._coin_decimals(pool_info, coin_index)
         # Convert from 18 decimals, apply small penalty for single-sided
         return (adjusted_lp // (10 ** (18 - decimals))) * 99 // 100
 
@@ -2648,6 +2992,20 @@ class CurveAdapter:
         except TokenResolutionError:
             logger.debug(f"Cannot resolve symbol for {address}, using truncated address")
             return f"{address[:10]}..."
+
+    def _coin_decimals(self, pool_info: PoolInfo, index: int) -> int:
+        """Decimals for pool coin ``index`` — chain-read when available, else resolved.
+
+        Prefers the live ``decimals()`` captured by the refresh-on-read path
+        (``pool_info.coin_decimals``); falls back to resolving the coin symbol via
+        the TokenResolver when the registry was not refreshed (cold-start) or the
+        decimal read was unavailable. Behaviour is identical to the prior
+        symbol-only path whenever ``coin_decimals`` is ``None``.
+        """
+        live = pool_info.coin_decimals
+        if live is not None and 0 <= index < len(live):
+            return live[index]
+        return self._get_token_decimals(pool_info.coins[index])
 
     def _get_token_decimals(self, symbol: str) -> int:
         """Get token decimals from symbol using TokenResolver."""

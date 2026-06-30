@@ -76,7 +76,10 @@ class CurveSwapQuoteConnector(SwapQuoteConnector, SwapQuoteCapability):
             pool_address = pool_data.get("address")
             if not pool_address:
                 continue
-            info = adapter.get_pool_info(pool_address)
+            # Pair resolution only needs the (static) coin set to test membership;
+            # opt out of the per-pool network reconcile (VIB-5423) so scanning the
+            # registry for a pair doesn't amplify into O(pools) chain reads.
+            info = adapter.get_pool_info(pool_address, refresh=False)
             if info is None:
                 continue
             try:
