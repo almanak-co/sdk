@@ -5,7 +5,7 @@ Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for:
 - LPCloseIntent: Removing liquidity proportionally
 
 Pool: Curve am3pool on Polygon (aave-type StableSwap variant)
-- Address: 0x445Fe580eF8d70FF569aB36e898ed8631406Db5f
+- Address: 0x445FE580eF8d70FF569aB36e80c647af338db351
 - LP token: 0xE7a24EF0C5e95Ffb0f6684b813A78F2a3AD7D171 (am3CRV)
 - Coins[0]: DAI (0x8f3Cf7ad...)
 - Coins[1]: USDC.e (0x2791Bca1..., bridged USDC)
@@ -53,7 +53,9 @@ CHAIN_NAME = "polygon"
 
 # Curve am3pool on Polygon (aave-type StableSwap)
 POOL = "3pool"
-POOL_ADDRESS = "0x445Fe580Ef8d70Ff569ab36e898ed8631406dB5f"
+# VIB-5434: corrected from the dead 0x445Fe580…898ed8631406dB5f literal (no code on
+# Polygon) to the real am3pool. Verified on-fork 2026-06-30.
+POOL_ADDRESS = "0x445FE580eF8d70FF569aB36e80c647af338db351"
 LP_TOKEN = "0xE7a24EF0C5e95Ffb0f6684b813A78F2a3AD7D171"  # am3CRV LP token
 
 # Token addresses (coin order: DAI=0, USDC.e=1, USDT=2)
@@ -66,7 +68,7 @@ DAI_BALANCE_SLOT = 0
 USDC_E_BALANCE_SLOT = 0
 
 # LP deposit amounts (small to keep slippage low)
-LP_AMOUNT_DAI = Decimal("10")     # 10 DAI (18 decimals)
+LP_AMOUNT_DAI = Decimal("10")  # 10 DAI (18 decimals)
 LP_AMOUNT_USDC_E = Decimal("10")  # 10 USDC.e (6 decimals)
 
 
@@ -127,7 +129,15 @@ class TestCurveAm3poolLPOpenPolygon:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=True,
-        reason="VIB-4307: CurveReceiptParser missing am3pool (aave-type) AddLiquidity/TokenExchange event signatures on polygon (as of 2026-05-12)",
+        reason=(
+            "VIB-5551: am3pool LP_OPEN reverts on a current Polygon fork — the aave-type "
+            "underlying deposit routes through the FROZEN Aave V2 Polygon LendingPool "
+            "(VL_RESERVE_FROZEN), and the compiler emits the non-aave "
+            "add_liquidity(uint256[3],uint256) selector. The receipt-parser decode itself "
+            "is PROVEN by tests/unit/connectors/curve/test_am3pool_real_logs.py against real "
+            "on-fork AddLiquidity3/RemoveLiquidity3 logs (the VIB-4307 'missing signatures' "
+            "claim was stale). as of 2026-06-30."
+        ),
     )
     async def test_lp_open_dai_usdc_e(
         self,
@@ -181,8 +191,8 @@ class TestCurveAm3poolLPOpenPolygon:
             pool=POOL,
             amount0=LP_AMOUNT_DAI,
             amount1=LP_AMOUNT_USDC_E,
-            range_lower=Decimal("1"),         # Dummy — Curve uses pool-based positions
-            range_upper=Decimal("1000000"),    # Dummy — required by LPOpenIntent validation
+            range_lower=Decimal("1"),  # Dummy — Curve uses pool-based positions
+            range_upper=Decimal("1000000"),  # Dummy — required by LPOpenIntent validation
             protocol="curve",
             chain=CHAIN_NAME,
         )
@@ -201,9 +211,7 @@ class TestCurveAm3poolLPOpenPolygon:
 
         # --- Layer 2: Execute ---
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
-        assert execution_result.success, (
-            f"Curve LP_OPEN execution failed on Polygon: {execution_result.error}"
-        )
+        assert execution_result.success, f"Curve LP_OPEN execution failed on Polygon: {execution_result.error}"
         execution_result = enrich_for_accounting(
             execution_result,
             intent,
@@ -257,20 +265,17 @@ class TestCurveAm3poolLPOpenPolygon:
         expected_usdc_e_spent = int(LP_AMOUNT_USDC_E * Decimal(10**6))
 
         assert dai_spent == expected_dai_spent, (
-            f"DAI spent must EXACTLY equal LP_OPEN amount. "
-            f"Expected: {expected_dai_spent}, Got: {dai_spent}"
+            f"DAI spent must EXACTLY equal LP_OPEN amount. Expected: {expected_dai_spent}, Got: {dai_spent}"
         )
         assert usdc_e_spent == expected_usdc_e_spent, (
-            f"USDC.e spent must EXACTLY equal LP_OPEN amount. "
-            f"Expected: {expected_usdc_e_spent}, Got: {usdc_e_spent}"
+            f"USDC.e spent must EXACTLY equal LP_OPEN amount. Expected: {expected_usdc_e_spent}, Got: {usdc_e_spent}"
         )
         assert lp_received > 0, f"LP tokens received must be > 0, got {lp_received}"
 
         # LP token receipt extraction cross-check
         lp_received_decimal = Decimal(lp_received) / Decimal(10**18)
         assert lp_received_decimal == lp_tokens_from_receipt, (
-            f"LP tokens from balance delta ({lp_received_decimal}) "
-            f"must match receipt ({lp_tokens_from_receipt})"
+            f"LP tokens from balance delta ({lp_received_decimal}) must match receipt ({lp_tokens_from_receipt})"
         )
 
         logger.info(
@@ -282,9 +287,12 @@ class TestCurveAm3poolLPOpenPolygon:
         # --- Layer 5: real accounting pipeline (VIB-4968) ---
         # Post-VIB-4968 the parser stamps a canonical 0x pool address so
         # lp_handler books a typed LP_OPEN event. NOTE: this test is still
-        # xfail-marked for the SEPARATE VIB-4307 am3pool (aave-type) parser
-        # gap — Polygon's AddLiquidity/TokenExchange signatures are not yet
-        # decoded, so the Layer-3 receipt parse fails before this runs.
+        # xfail-marked, but for VIB-5551 (the aave-type underlying deposit reverts
+        # at the FROZEN Aave V2 Polygon LendingPool — the test fails at Layer-2
+        # EXECUTION, never reaching here). The receipt parser DOES decode am3pool's
+        # AddLiquidity3/RemoveLiquidity3 events (VIB-4307's "missing signatures"
+        # claim was stale) — proven by
+        # tests/unit/connectors/curve/test_am3pool_real_logs.py.
         await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=intent,
@@ -319,7 +327,15 @@ class TestCurveAm3poolLPLifecyclePolygon:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=True,
-        reason="VIB-4307: CurveReceiptParser missing am3pool (aave-type) AddLiquidity/TokenExchange event signatures on polygon (as of 2026-05-12)",
+        reason=(
+            "VIB-5551: am3pool LP_OPEN→CLOSE reverts on a current Polygon fork — the aave-type "
+            "underlying deposit routes through the FROZEN Aave V2 Polygon LendingPool "
+            "(VL_RESERVE_FROZEN), and the compiler emits the non-aave "
+            "add_liquidity(uint256[3],uint256) selector. The receipt-parser decode itself "
+            "is PROVEN by tests/unit/connectors/curve/test_am3pool_real_logs.py against real "
+            "on-fork AddLiquidity3/RemoveLiquidity3 logs (the VIB-4307 'missing signatures' "
+            "claim was stale). as of 2026-06-30."
+        ),
     )
     async def test_lp_open_then_close(
         self,
@@ -378,9 +394,7 @@ class TestCurveAm3poolLPLifecyclePolygon:
 
         # Layer 1: Compile LP_OPEN
         open_result = compiler.compile(open_intent)
-        assert open_result.status.value == "SUCCESS", (
-            f"LP_OPEN compile failed: {open_result.error}"
-        )
+        assert open_result.status.value == "SUCCESS", f"LP_OPEN compile failed: {open_result.error}"
         assert open_result.action_bundle is not None
 
         # Layer 2: Execute LP_OPEN
@@ -452,9 +466,7 @@ class TestCurveAm3poolLPLifecyclePolygon:
 
         # Layer 1: Compile LP_CLOSE
         close_result = compiler.compile(close_intent)
-        assert close_result.status.value == "SUCCESS", (
-            f"LP_CLOSE compile failed: {close_result.error}"
-        )
+        assert close_result.status.value == "SUCCESS", f"LP_CLOSE compile failed: {close_result.error}"
         assert close_result.action_bundle is not None
 
         # Layer 2: Execute LP_CLOSE
@@ -486,20 +498,15 @@ class TestCurveAm3poolLPLifecyclePolygon:
                     remove_liquidity_found = True
                     raw_amounts = event.data.get("token_amounts") or []
                     parsed_token_amounts = [int(x) for x in raw_amounts]
-                    logger.info(
-                        f"RemoveLiquidity event: token_amounts={parsed_token_amounts}"
-                    )
+                    logger.info(f"RemoveLiquidity event: token_amounts={parsed_token_amounts}")
 
             extracted = parser.extract_lp_close_data(receipt_dict)
             if extracted is not None:
                 lp_close_data = extracted
 
-        assert remove_liquidity_found, (
-            "RemoveLiquidity event must be found in LP_CLOSE receipt."
-        )
+        assert remove_liquidity_found, "RemoveLiquidity event must be found in LP_CLOSE receipt."
         assert len(parsed_token_amounts) == 3, (
-            f"am3pool RemoveLiquidity must emit token_amounts for 3 coins; "
-            f"got {parsed_token_amounts}"
+            f"am3pool RemoveLiquidity must emit token_amounts for 3 coins; got {parsed_token_amounts}"
         )
 
         # Layer 4 AFTER close: balance deltas reconciled to parsed amounts.
@@ -515,8 +522,7 @@ class TestCurveAm3poolLPLifecyclePolygon:
         usdt_returned = usdt_after_close - usdt_before_close
 
         assert lp_burned == lp_tokens_received, (
-            f"LP burned must exactly equal requested close amount. "
-            f"requested={lp_tokens_received}, burned={lp_burned}"
+            f"LP burned must exactly equal requested close amount. requested={lp_tokens_received}, burned={lp_burned}"
         )
         assert dai_returned == parsed_token_amounts[0], (
             f"DAI delta must exactly equal parsed RemoveLiquidity amount. "

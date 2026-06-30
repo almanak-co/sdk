@@ -4,7 +4,7 @@ Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for
 Curve Finance swaps on Polygon via am3pool (aave-type StableSwap).
 
 Pool: Curve am3pool (DAI/USDC.e/USDT) on Polygon
-- Address: 0x445Fe580eF8d70FF569aB36e898ed8631406Db5f
+- Address: 0x445FE580eF8d70FF569aB36e80c647af338db351
 - Coin order: DAI (index 0), USDC.e (index 1), USDT (index 2)
 - Type: stableswap with use_underlying=True (aave-type)
 - Swap path: exchange_underlying() with underlying tokens (DAI/USDC.e/USDT)
@@ -46,7 +46,9 @@ CHAIN_NAME = "polygon"
 POOL_KEY = "3pool"
 
 # Curve am3pool on Polygon
-EXPECTED_POOL_ADDRESS = "0x445Fe580Ef8d70Ff569ab36e898ed8631406dB5f"
+# VIB-5434: corrected from the dead 0x445Fe580…898ed8631406dB5f literal (no code on
+# Polygon) to the real am3pool. Verified on-fork 2026-06-30.
+EXPECTED_POOL_ADDRESS = "0x445FE580eF8d70FF569aB36e80c647af338db351"
 
 # Token addresses (coin order: DAI=0, USDC.e=1, USDT=2)
 DAI_ADDRESS = "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063"
@@ -88,8 +90,7 @@ class TestCurvePolygonPoolConfig:
     def test_3pool_present(self):
         """3pool (am3pool) must be in CURVE_POOLS['polygon']."""
         assert POOL_KEY in CURVE_POOLS.get("polygon", {}), (
-            f"'{POOL_KEY}' not found in CURVE_POOLS['polygon']. "
-            f"Found: {list(CURVE_POOLS.get('polygon', {}).keys())}"
+            f"'{POOL_KEY}' not found in CURVE_POOLS['polygon']. Found: {list(CURVE_POOLS.get('polygon', {}).keys())}"
         )
 
     @pytest.mark.intent(IntentType.SWAP)
@@ -164,9 +165,7 @@ class TestCurvePolygonSwapCompilation:
 
         result = compiler.compile(intent)
 
-        assert result.status == CompilationStatus.SUCCESS, (
-            f"DAI -> USDT Curve swap compilation failed: {result.error}"
-        )
+        assert result.status == CompilationStatus.SUCCESS, f"DAI -> USDT Curve swap compilation failed: {result.error}"
         assert result.action_bundle is not None
 
     @pytest.mark.intent(IntentType.SWAP)
@@ -185,10 +184,7 @@ class TestCurvePolygonSwapCompilation:
         result = compiler.compile(intent)
         assert result.status == CompilationStatus.SUCCESS
 
-        swap_txs = [
-            tx for tx in result.transactions
-            if tx.to.lower() == EXPECTED_POOL_ADDRESS.lower()
-        ]
+        swap_txs = [tx for tx in result.transactions if tx.to.lower() == EXPECTED_POOL_ADDRESS.lower()]
         assert len(swap_txs) > 0, (
             f"No transaction targeting am3pool {EXPECTED_POOL_ADDRESS}. "
             f"Transactions: {[(tx.to, tx.description) for tx in result.transactions]}"
@@ -215,7 +211,13 @@ class TestCurvePolygonSwapExecution:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=True,
-        reason="VIB-4307: CurveReceiptParser missing am3pool (aave-type) AddLiquidity/TokenExchange event signatures on polygon (as of 2026-05-12)",
+        reason=(
+            "VIB-5551: am3pool exchange_underlying reverts on a current Polygon fork — the "
+            "aave-type swap deposits the underlying into the FROZEN Aave V2 Polygon "
+            "LendingPool (VL_RESERVE_FROZEN). The TokenExchangeUnderlying signature itself "
+            "IS decoded by CurveReceiptParser (the VIB-4307 'missing signatures' claim was "
+            "stale; see tests/unit/connectors/curve/test_am3pool_real_logs.py). as of 2026-06-30."
+        ),
     )
     async def test_usdc_e_to_usdt_full_lifecycle(
         self,
@@ -238,8 +240,7 @@ class TestCurvePolygonSwapExecution:
         usdc_e_funded = get_token_balance(web3, USDC_E_ADDRESS, funded_wallet)
         if usdc_e_funded == 0:
             pytest.skip(
-                f"USDC.e funding failed at slot {USDC_E_BALANCE_SLOT}. "
-                "Polygon USDC.e may use different storage layout."
+                f"USDC.e funding failed at slot {USDC_E_BALANCE_SLOT}. Polygon USDC.e may use different storage layout."
             )
 
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
@@ -298,10 +299,7 @@ class TestCurvePolygonSwapExecution:
         for tx_result in execution_result.transaction_results:
             if not tx_result.receipt:
                 continue
-            receipt_dict = (
-                tx_result.receipt if isinstance(tx_result.receipt, dict)
-                else tx_result.receipt.to_dict()
-            )
+            receipt_dict = tx_result.receipt if isinstance(tx_result.receipt, dict) else tx_result.receipt.to_dict()
             parse_result = parser.parse_receipt(receipt_dict)
             assert parse_result is not None, "CurveReceiptParser returned None"
 
@@ -341,11 +339,13 @@ class TestCurvePolygonSwapExecution:
 
         logger.info(
             "USDC.e after: %.2f (spent: %.2f)",
-            usdc_e_after / 10**6, usdc_e_spent / 10**6,
+            usdc_e_after / 10**6,
+            usdc_e_spent / 10**6,
         )
         logger.info(
             "USDT after: %.2f (received: %.2f)",
-            usdt_after / 10**6, usdt_received / 10**6,
+            usdt_after / 10**6,
+            usdt_received / 10**6,
         )
 
         assert usdc_e_spent == expected_usdc_e_spent, (
@@ -353,8 +353,7 @@ class TestCurvePolygonSwapExecution:
             f"Expected: {expected_usdc_e_spent} ({swap_amount} USDC.e), Got: {usdc_e_spent}"
         )
         assert usdt_received > 0, (
-            "USDT balance did not increase after Curve swap! "
-            "Check coin indices in am3pool config."
+            "USDT balance did not increase after Curve swap! Check coin indices in am3pool config."
         )
 
         logger.info(

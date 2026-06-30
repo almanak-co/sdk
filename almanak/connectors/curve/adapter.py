@@ -324,16 +324,25 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
     },
     "polygon": {
         # Curve am3pool on Polygon (aave lending pool variant)
-        # Pool address: 0x445FE580eF8d70FF569aB36e898ed8631406Db5f
+        # Pool address: 0x445FE580eF8d70FF569aB36e80c647af338db351
+        # (VIB-5434: the prior literal 0x445Fe580…898ed8631406dB5f had NO code on
+        # Polygon — a transcription error that nulled accounting coin-symbol
+        # resolution and would revert execution. Verified on-fork 2026-06-30:
+        # coins(0)=amDAI, underlying_coins(0)=DAI, lp_token()=am3CRV,
+        # get_virtual_price()≈1.145e18.)
         # LP token (am3CRV): 0xE7a24EF0C5e95Ffb0f6684b813A78F2a3AD7D171
-        # This is an aave-type pool: internally holds aDAI/aUSDC/aUSDT (interest-bearing tokens).
-        # Users swap UNDERLYING tokens (DAI/USDC.e/USDT) via exchange_underlying().
-        # coin_addresses are the UNDERLYING token addresses (not aTokens) since users
-        # approve/receive the underlying tokens.
-        # Coin order: coins(0)=DAI, coins(1)=USDC.e, coins(2)=USDT
+        # This is an aave-type pool: coins() are the aTokens (amDAI/amUSDC/amUSDT),
+        # underlying_coins() are DAI/USDC.e/USDT. Users approve/receive the UNDERLYING
+        # and swap them via exchange_underlying(); coin_addresses below are therefore
+        # the UNDERLYING token addresses (not the aTokens).
+        # Underlying coin order: underlying_coins(0)=DAI, (1)=USDC.e, (2)=USDT.
+        # NOTE (VIB-5551): add_liquidity/exchange_underlying deposit the underlying into
+        # the (now FROZEN) Aave V2 Polygon LendingPool, so the underlying-deposit flow
+        # reverts (VL_RESERVE_FROZEN) on current forks — the Polygon Curve intent tests
+        # are strict-xfail'd for that reason, not a parser gap.
         # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime.
         "3pool": {
-            "address": "0x445Fe580Ef8d70Ff569ab36e898ed8631406dB5f",
+            "address": "0x445FE580eF8d70FF569aB36e80c647af338db351",
             "lp_token": "0xE7a24EF0C5e95Ffb0f6684b813A78F2a3AD7D171",  # am3CRV LP token
             "coins": ["DAI", "USDC.e", "USDT"],
             "coin_addresses": [
