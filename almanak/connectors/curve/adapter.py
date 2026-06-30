@@ -84,6 +84,18 @@ CURVE_ADDRESSES: dict[str, dict[str, str]] = {
 }
 
 # Popular Curve pools per chain
+#
+# COIN-ORDER INVARIANT (VIB-5539). For non-USD / crypto-family pools (steth,
+# tricrypto*, weth_cbeth) the LP NAV is marked from spot reserves: reserve i
+# (read by on-chain index ``balances(i)``) is priced with the oracle price of
+# ``coin_addresses[i]``. The valuation reader
+# (``framework/valuation/curve_lp_position_reader.py``) now reads each pool
+# ``coins(i)`` live and FAILS CLOSED if it does not match ``coin_addresses[i]``,
+# so a transposed registry entry yields UNAVAILABLE rather than a ~10^10
+# confident mis-mark. Order is enforced against on-chain truth on every crypto
+# valuation — but still hand-verify ``coin_addresses`` order against on-chain
+# ``cast call <pool> 'coins(uint256)(address)' <i>`` when adding a pool, so a new
+# crypto pool is not silently marked UNAVAILABLE by a wrong-order entry.
 # TECH_DEBT(VIB-581): virtual_price values are approximate snapshots. Curve virtual_price
 # increases monotonically as fees accumulate, so these will drift over time. The safe direction
 # is under-estimating (lower min_lp = worse slippage protection but no reverts). A future

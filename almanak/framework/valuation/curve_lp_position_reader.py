@@ -62,6 +62,17 @@ _BALANCES_SELECTORS = ("0x4903b0d1", "0x065a80d8")  # balances(uint256), balance
 _TOTAL_SUPPLY_SELECTOR = "0x18160ddd"  # totalSupply()
 _DECIMALS_SELECTOR = "0x313ce567"  # decimals()
 
+# Curve ``coins(i)`` token-address getter (VIB-5539). NG pools declare
+# ``coins(uint256)``; pre-NG pools declare ``coins(int128)`` — both return the
+# coin's address in a single 32-byte word (address in the low 20 bytes), so we
+# probe ``uint256`` first then ``int128`` (mirroring ``_BALANCES_SELECTORS``).
+# Both selectors AND the probe order were verified on a real mainnet fork:
+# steth / tricrypto2 (ethereum) and WETH-cbETH (base) all resolve on
+# ``coins(uint256)``; the ``int128`` overload reverts on those pools.
+#   cast sig 'coins(uint256)' -> 0xc6610657 ; cast sig 'coins(int128)' -> 0x23746eb8
+_COINS_SELECTORS = ("0xc6610657", "0x23746eb8")  # coins(uint256), coins(int128)
+_ADDRESS_HEX_LEN = 40  # 20-byte EVM address as zero-padded hex (no 0x)
+
 # Native-ETH placeholder addresses a Curve pool's coin list uses for raw ETH
 # (the steth pool holds native ETH as coin 0). These have no ``decimals()``
 # getter — ETH is 18-decimal by definition. Source literals are kept in
@@ -234,6 +245,17 @@ class CurveLpPositionReader:
         from almanak.framework.valuation.lp_position_reader import LPPositionReader
 
         self._lp_reader = LPPositionReader(gateway_client)
+        # Cache of (chain, pool) whose on-chain ``coins(i)`` order has been
+        # SUCCESSFULLY validated against the registry (VIB-5539). A Curve pool's
+        # coin order is immutable after deployment, so once validated it cannot
+        # drift — re-reading ``coins(i)`` on every valuation would add N sequential
+        # gateway RPCs per crypto position per snapshot for zero new information.
+        # Only successes are cached: a read miss / mismatch is NOT cached, so it
+        # stays fail-closed AND is re-checked next valuation (a transient gateway
+        # read failure must not be remembered as a pass). Instance-scoped — the
+        # reader is held long-lived on the valuer and ``set_gateway_client`` is a
+        # once-at-boot call, so the cache spans the deployment's snapshot stream.
+        self._validated_coin_order: set[tuple[str, str]] = set()
 
     def set_gateway_client(self, gateway_client: object | None) -> None:
         self._gateway = gateway_client
@@ -475,20 +497,31 @@ class CurveLpPositionReader:
         supply is non-positive — the valuer then flags UNAVAILABLE rather than
         mark from a partial read.
 
-        ⚠️ COIN-ORDER INVARIANT (VIB-5539). The crypto mark pairs ``balances(i)``
-        (read by on-chain index ``i``) with ``coin_addresses[i]`` / ``coins[i]``
-        from the static registry, and the valuer prices reserve ``i`` with the
-        oracle price of ``coin_addresses[i]``. This TRUSTS the registry
-        ``coin_addresses`` order to match the pool's on-chain ``coins(i)`` order.
-        It is hand-verified for the in-scope pools (steth, tricrypto2, base
-        WETH/cbETH) but is NOT yet validated on-chain. A wrong order pairs a
-        reserve with the wrong coin's price → a ~10^10 mis-mark (e.g. WBTC reserve
-        priced as USDT). **VIB-5539 (on-chain ``coins(i)`` validation, sibling of
-        VIB-5424) MUST land before any new crypto pool is added to the registry.**
+        ⚠️ COIN-ORDER INVARIANT (VIB-5539 — now VALIDATED on-chain, fail-closed).
+        The crypto mark pairs ``balances(i)`` (read by on-chain index ``i``) with
+        ``coin_addresses[i]`` / ``coins[i]`` from the static registry, and the
+        valuer prices reserve ``i`` with the oracle price of
+        ``coin_addresses[i]``. This is sound ONLY if the registry
+        ``coin_addresses`` order matches the pool's on-chain ``coins(i)`` order; a
+        transposed entry pairs a reserve with the wrong coin's price → a ~10^10
+        confident mis-mark (e.g. an 8-dec WBTC reserve priced as an 18-dec coin),
+        strictly worse than UNAVAILABLE. :meth:`_validate_coin_order` now reads
+        each pool ``coins(i)`` live and requires it to equal the registry
+        ``coin_addresses[i]``; ANY read miss or mismatch fails closed (returns
+        ``None`` → the valuer flags UNAVAILABLE). The order is therefore no longer
+        merely hand-verified — it is enforced against on-chain truth on every
+        valuation.
         """
         if not coin_addresses or len(coin_addresses) != len(coins):
             # Crypto pricing is by address; without a full address set we cannot
             # safely map reserves to oracle prices.
+            return None
+
+        # VIB-5539: the positional reserve→price pairing below TRUSTS the registry
+        # coin order. Validate it against the pool's on-chain ``coins(i)`` BEFORE
+        # any reserve read — a confident wrong mark is the worst outcome, so a
+        # mismatch OR a read miss fails closed (Empty ≠ Zero).
+        if not self._validate_coin_order(chain, pool_address, coin_addresses):
             return None
 
         total_supply = self._lp_reader.read_uint256_call(chain, lp_token_address, _TOTAL_SUPPLY_SELECTOR)
@@ -535,6 +568,66 @@ class CurveLpPositionReader:
             if raw is not None:
                 return raw
         return None
+
+    def _read_pool_coin_address(self, chain: str, pool_address: str, index: int) -> str | None:
+        """Read a pool's ``coins(index)`` token address (probes uint256 then int128).
+
+        Curve NG pools expose ``coins(uint256)``; pre-NG pools expose
+        ``coins(int128)`` — both return the coin's address in a single 32-byte
+        word (low 20 bytes), so we probe ``uint256`` first then ``int128`` through
+        the SAME gateway ``eth_call`` seam ``_read_pool_balance`` uses (VIB-5539).
+
+        Returns the ``0x``-prefixed, lowercase-safe address, or ``None`` if
+        neither getter resolves (Empty ≠ Zero — the caller fails closed). The
+        word is decoded as a uint256 and re-rendered as a zero-padded 20-byte
+        address; a garbage / over-long word (high bits set) yields a >20-byte
+        string that matches no registry address, so it too fails closed.
+        """
+        index_word = hex(index)[2:].zfill(64)
+        for selector in _COINS_SELECTORS:
+            raw = self._lp_reader.read_uint256_call(chain, pool_address, selector + index_word)
+            if raw is not None:
+                return "0x" + format(raw, f"0{_ADDRESS_HEX_LEN}x")
+        return None
+
+    def _validate_coin_order(self, chain: str, pool_address: str, coin_addresses: list[str]) -> bool:
+        """Validate the registry coin order against the pool's on-chain ``coins(i)``.
+
+        The crypto spot-reserves mark pairs ``balances(i)`` (read by on-chain
+        index) with the registry ``coin_addresses[i]`` and prices reserve ``i``
+        with the oracle price of that address — sound ONLY if the registry order
+        matches the pool's actual ``coins(i)`` order (VIB-5539). Reads each
+        ``coins(i)`` live and requires it to equal (case-insensitively) the
+        registry ``coin_addresses[i]``.
+
+        Returns ``True`` only when every index matches. ANY read miss OR mismatch
+        returns ``False`` → the caller fails closed (Empty ≠ Zero: a genuine read
+        failure also fails closed — a confident wrong mark is worse than
+        UNAVAILABLE). The steth pool's ``coins(0)`` is the native-ETH placeholder
+        ``0xEeee…EEeE``, which the registry already carries verbatim, so the
+        lowercased compare matches with no special case (verified on a real fork).
+
+        Coin order is immutable post-deployment, so a successful validation is
+        memoised per (chain, pool) to avoid re-reading ``coins(i)`` on every
+        snapshot; a miss / mismatch is never cached (stays fail-closed and is
+        re-checked next valuation).
+        """
+        cache_key = (chain.lower(), pool_address.lower())
+        if cache_key in self._validated_coin_order:
+            return True
+        for index, expected in enumerate(coin_addresses):
+            on_chain = self._read_pool_coin_address(chain, pool_address, index)
+            if on_chain is None or on_chain.lower() != expected.lower():
+                logger.debug(
+                    "Curve coin-order validation FAILED for pool %s index %d: on-chain=%s registry=%s — fail closed",
+                    pool_address,
+                    index,
+                    on_chain,
+                    expected,
+                )
+                return False
+        self._validated_coin_order.add(cache_key)
+        return True
 
     def _read_coin_decimals(self, chain: str, coin_address: str) -> int | None:
         """Read a coin's ERC-20 ``decimals()`` (native ETH → 18, no call).

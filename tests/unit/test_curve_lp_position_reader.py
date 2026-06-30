@@ -40,8 +40,22 @@ VIRTUAL_PRICE_ALIAS = "0x0c46b72a"
 BALANCE_OF = "0x70a08231"
 BALANCES_UINT256 = "0x4903b0d1"
 BALANCES_INT128 = "0x065a80d8"
+COINS_UINT256 = "0xc6610657"  # coins(uint256) — verified on real fork (VIB-5539)
+COINS_INT128 = "0x23746eb8"  # coins(int128)
 TOTAL_SUPPLY = "0x18160ddd"
 DECIMALS = "0x313ce567"
+
+
+def _addr_word(address: str) -> int:
+    """Encode an address as the uint256 the stub returns from a ``coins(i)`` read.
+
+    The reader decodes the eth_call word with ``read_uint256_call`` and re-renders
+    it as a 20-byte address; the stub builds the word from this int via
+    ``_hex_word`` (right-aligned in 32 bytes), exactly as a real ``coins(i)``
+    return is laid out.
+    """
+    return int(address, 16)
+
 
 # steth (ethereum) — ETH / stETH crypto-family pool
 POOL_STETH = "0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"
@@ -336,15 +350,24 @@ def _steth_crypto_replies(
     reserve_eth_wei: int | None = 100 * 10**18,
     reserve_steth_wei: int | None = 110 * 10**18,
     steth_decimals: int | None = 18,
+    coin0_addr: str | None = ETH_NATIVE,
+    coin1_addr: str | None = STETH_ADDR,
 ) -> dict[tuple[str, str], int | None]:
-    # Real steth resolves on balances(uint256); the balances(int128) overload
-    # reverts (None) on this pool — matches the real-fork report. ETH (coin 0) is
-    # the native sentinel, so its decimals are NOT read (18 by definition).
-    # (The int128-overload selector fallback is covered separately by
-    # test_crypto_balances_int128_selector_fallback below.)
+    # Real steth resolves on balances(uint256) AND coins(uint256); the int128
+    # overloads revert (None) on this pool — matches the real-fork report. ETH
+    # (coin 0) is the native sentinel, so its decimals are NOT read (18 by
+    # definition) and coins(0) returns the native-ETH placeholder. The coins(i)
+    # replies feed the VIB-5539 on-chain coin-order validation; ``coin0_addr`` /
+    # ``coin1_addr`` let a test transpose or drop a coin read to exercise the
+    # fail-closed path. (The coins(int128) selector fallback is covered separately
+    # by test_crypto_coins_int128_selector_fallback below.)
     return {
         (LP_STETH, BALANCE_OF + WALLET.lower().removeprefix("0x").zfill(64)): lp_balance_wei,
         (LP_STETH, TOTAL_SUPPLY): total_supply_wei,
+        (POOL_STETH, _balances_call(COINS_UINT256, 0)): None if coin0_addr is None else _addr_word(coin0_addr),
+        (POOL_STETH, _balances_call(COINS_INT128, 0)): None,
+        (POOL_STETH, _balances_call(COINS_UINT256, 1)): None if coin1_addr is None else _addr_word(coin1_addr),
+        (POOL_STETH, _balances_call(COINS_INT128, 1)): None,
         (POOL_STETH, _balances_call(BALANCES_UINT256, 0)): reserve_eth_wei,
         (POOL_STETH, _balances_call(BALANCES_INT128, 0)): None,
         (POOL_STETH, _balances_call(BALANCES_UINT256, 1)): reserve_steth_wei,
@@ -384,6 +407,10 @@ def _int128_fallback_replies() -> dict[tuple[str, str], int | None]:
     return {
         (LP_STETH, BALANCE_OF + WALLET.lower().removeprefix("0x").zfill(64)): 2 * 10**18,
         (LP_STETH, TOTAL_SUPPLY): 200 * 10**18,
+        # coins resolve on uint256 (the int128-balances overload is the variable
+        # under test here, not the coins selector).
+        (POOL_STETH, _balances_call(COINS_UINT256, 0)): _addr_word(ETH_NATIVE),
+        (POOL_STETH, _balances_call(COINS_UINT256, 1)): _addr_word(STETH_ADDR),
         (POOL_STETH, _balances_call(BALANCES_UINT256, 0)): None,
         (POOL_STETH, _balances_call(BALANCES_INT128, 0)): 100 * 10**18,
         (POOL_STETH, _balances_call(BALANCES_UINT256, 1)): None,
@@ -433,6 +460,143 @@ def test_read_position_crypto_fails_closed_on_unreadable_input(override: dict[st
         )
         is None
     )
+
+
+# ── VIB-5539 — on-chain coins(i) order validation (fail-closed) ───────────────
+
+
+def test_crypto_coin_order_match_returns_position_unchanged() -> None:
+    # (a) When on-chain coins(i) match the registry coin_addresses order, the
+    # position is returned exactly as before this gate existed — the reserves,
+    # decimals, supply and coin set are untouched. Validation is a pure
+    # safety gate, a no-op on the happy path.
+    reader = CurveLpPositionReader(_FullCalldataGatewayClient(_steth_crypto_replies()))
+    pos = reader.read_position(
+        protocol="curve", chain="ethereum", pool="steth", lp_token=LP_STETH, wallet_address=WALLET
+    )
+    assert pos is not None
+    assert pos.family == "crypto"
+    assert pos.coin_addresses == [ETH_NATIVE, STETH_ADDR]
+    assert pos.reserves_wei == [100 * 10**18, 110 * 10**18]
+    assert pos.coin_decimals == [18, 18]
+    assert pos.total_supply_wei == 200 * 10**18
+
+
+def test_crypto_native_eth_placeholder_coin0_validates() -> None:
+    # (d) The steth pool's coins(0) is the native-ETH sentinel 0xEeee…EEeE, which
+    # the registry carries verbatim; a lowercased compare matches with no special
+    # case. (The reply uses the checksummed literal — the reader lowercases both
+    # sides — so this proves the case-insensitive compare, not a same-case fluke.)
+    reader = CurveLpPositionReader(_FullCalldataGatewayClient(_steth_crypto_replies(coin0_addr=ETH_NATIVE.lower())))
+    pos = reader.read_position(
+        protocol="curve", chain="ethereum", pool="steth", lp_token=LP_STETH, wallet_address=WALLET
+    )
+    assert pos is not None
+    assert pos.coin_addresses[0].lower() == ETH_NATIVE.lower()
+
+
+def test_crypto_coin_order_transposed_fails_closed() -> None:
+    # (b) On-chain coins(i) transposed vs the registry (coins(0)=stETH while the
+    # registry says coins(0)=ETH) → None. A confident wrong mark (an 18-dec stETH
+    # reserve priced as ETH and vice-versa) is worse than UNAVAILABLE.
+    replies = _steth_crypto_replies(coin0_addr=STETH_ADDR, coin1_addr=ETH_NATIVE)
+    reader = CurveLpPositionReader(_FullCalldataGatewayClient(replies))
+    assert (
+        reader.read_position(protocol="curve", chain="ethereum", pool="steth", lp_token=LP_STETH, wallet_address=WALLET)
+        is None
+    )
+
+
+def test_crypto_coin_read_miss_fails_closed() -> None:
+    # (c) A coins(i) read miss (gateway blip — neither uint256 nor int128 resolves)
+    # → None. Empty ≠ Zero: an unmeasured coin address cannot confirm the order,
+    # so the mark must not be produced.
+    replies = _steth_crypto_replies(coin1_addr=None)
+    reader = CurveLpPositionReader(_FullCalldataGatewayClient(replies))
+    assert (
+        reader.read_position(protocol="curve", chain="ethereum", pool="steth", lp_token=LP_STETH, wallet_address=WALLET)
+        is None
+    )
+
+
+def _coins_int128_fallback_replies() -> dict[tuple[str, str], int | None]:
+    # SYNTHETIC selector scenario: a hypothetical pre-NG pool that exposes ONLY
+    # coins(int128) (coins(uint256) reverts → None), so the reader's coins
+    # selector-probe must fall back to the int128 overload. Reserves resolve on
+    # uint256 (orthogonal to the coins selector under test).
+    return {
+        (LP_STETH, BALANCE_OF + WALLET.lower().removeprefix("0x").zfill(64)): 2 * 10**18,
+        (LP_STETH, TOTAL_SUPPLY): 200 * 10**18,
+        (POOL_STETH, _balances_call(COINS_UINT256, 0)): None,
+        (POOL_STETH, _balances_call(COINS_INT128, 0)): _addr_word(ETH_NATIVE),
+        (POOL_STETH, _balances_call(COINS_UINT256, 1)): None,
+        (POOL_STETH, _balances_call(COINS_INT128, 1)): _addr_word(STETH_ADDR),
+        (POOL_STETH, _balances_call(BALANCES_UINT256, 0)): 100 * 10**18,
+        (POOL_STETH, _balances_call(BALANCES_UINT256, 1)): 110 * 10**18,
+        (STETH_ADDR, DECIMALS): 18,
+    }
+
+
+def test_crypto_coins_int128_selector_fallback() -> None:
+    # (e) Exercises the coins(uint256)→coins(int128) selector-probe fallback for a
+    # hypothetical pre-NG pool. Validation must pass identically regardless of
+    # which coins overload the pool exposes.
+    reader = CurveLpPositionReader(_FullCalldataGatewayClient(_coins_int128_fallback_replies()))
+    pos = reader.read_position(
+        protocol="curve", chain="ethereum", pool="steth", lp_token=LP_STETH, wallet_address=WALLET
+    )
+    assert pos is not None
+    assert pos.family == "crypto"
+    assert pos.coin_addresses == [ETH_NATIVE, STETH_ADDR]
+    assert pos.reserves_wei == [100 * 10**18, 110 * 10**18]
+
+
+def test_crypto_coin_order_validated_once_then_cached() -> None:
+    # Coin order is immutable post-deployment, so a SUCCESSFUL validation is
+    # memoised per (chain, pool): the second valuation must NOT re-read coins(i)
+    # (zero new information, N gateway RPCs saved per snapshot). steth has 2 coins
+    # → 2 coins(i) reads on the first valuation, 0 on the second.
+    reader = CurveLpPositionReader(_FullCalldataGatewayClient(_steth_crypto_replies()))
+    calls = {"n": 0}
+    orig = reader._read_pool_coin_address
+
+    def _counting(chain: str, pool_address: str, index: int) -> str | None:
+        calls["n"] += 1
+        return orig(chain, pool_address, index)
+
+    reader._read_pool_coin_address = _counting  # type: ignore[method-assign]
+
+    kw = {"protocol": "curve", "chain": "ethereum", "pool": "steth", "lp_token": LP_STETH, "wallet_address": WALLET}
+    assert reader.read_position(**kw) is not None
+    first = calls["n"]
+    assert first == 2  # coins(0), coins(1)
+    assert ("ethereum", POOL_STETH.lower()) in reader._validated_coin_order
+    assert reader.read_position(**kw) is not None
+    assert calls["n"] == first  # cache hit — no further coins(i) reads
+
+
+def test_crypto_coin_order_failure_not_cached() -> None:
+    # A mismatch must NOT be memoised: it stays fail-closed AND is re-validated on
+    # the next valuation (a transient gateway blip / a wrong order must never be
+    # remembered as a pass). Transposed coins → fails at index 0 each time.
+    replies = _steth_crypto_replies(coin0_addr=STETH_ADDR, coin1_addr=ETH_NATIVE)
+    reader = CurveLpPositionReader(_FullCalldataGatewayClient(replies))
+    calls = {"n": 0}
+    orig = reader._read_pool_coin_address
+
+    def _counting(chain: str, pool_address: str, index: int) -> str | None:
+        calls["n"] += 1
+        return orig(chain, pool_address, index)
+
+    reader._read_pool_coin_address = _counting  # type: ignore[method-assign]
+
+    kw = {"protocol": "curve", "chain": "ethereum", "pool": "steth", "lp_token": LP_STETH, "wallet_address": WALLET}
+    assert reader.read_position(**kw) is None
+    after_first = calls["n"]
+    assert after_first >= 1
+    assert ("ethereum", POOL_STETH.lower()) not in reader._validated_coin_order
+    assert reader.read_position(**kw) is None  # still fail-closed
+    assert calls["n"] > after_first  # re-validated, NOT cached
 
 
 # ---------------------------------------------------------------------------
