@@ -19,23 +19,25 @@ Intent class provides factory methods for creating them ergonomically.
 """
 
 import uuid
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
 from almanak.core.enums import Protocol
 from almanak.framework.models.base import (
-    AlmanakImmutableModel,  # noqa: F401  -- re-exported for backward compatibility
+    AlmanakImmutableModel,
     OptionalChainedAmount,
     OptionalSafeDecimal,
     SafeDecimal,
     default_intent_id,
     default_timestamp,
+    validate_decimal_safe,
 )
 
 # PredictionExitConditions is bound at runtime so ``typing.get_type_hints``
@@ -382,6 +384,132 @@ class SwapIntent(BaseIntent):
         return cls.model_validate(clean_data)
 
 
+# =============================================================================
+# RangeSpec — typed concentrated-liquidity range (VIB-5555 / FOUND-1)
+# =============================================================================
+
+# Protocols where the legacy ``range_lower``/``range_upper`` fields historically
+# carried raw tick values (signed integers) rather than price bounds (always
+# positive). Module-level so the backward-compat bridge below and the
+# ``LPOpenIntent`` validator share one source of truth. Mirrored onto the class
+# (``LPOpenIntent._TICK_BASED_LP_PROTOCOLS``) for callers / the backtest
+# extractor that read it off an intent instance.
+_TICK_BASED_LP_PROTOCOLS: frozenset[str] = frozenset({"aerodrome_slipstream"})
+
+_RANGE_SPEC_TICK_DEPRECATION = (
+    "Passing raw integer/negative ticks via range_lower/range_upper for "
+    "'aerodrome_slipstream' is deprecated; pass a TickBand (or set the range via a "
+    "RangeSpec). Legacy tick interpretation will be removed in a future release."
+)
+
+
+class PriceBand(AlmanakImmutableModel):
+    """Concentrated-liquidity range expressed as a human-readable price band.
+
+    This is the canonical, protocol-agnostic LP-range form (the default UX).
+    ``lower``/``upper`` are prices in the same denomination as the legacy
+    :attr:`LPOpenIntent.range_lower`/:attr:`~LPOpenIntent.range_upper` (token1
+    per token0); every concentrated-liquidity connector converts the band to
+    ticks internally. Use this to express "open a ±band around the current
+    price" portably across Uniswap V3/V4, Aerodrome Slipstream, etc.
+    """
+
+    kind: Literal["price"] = "price"
+    lower: SafeDecimal
+    upper: SafeDecimal
+
+    @model_validator(mode="after")
+    def _validate_price_band(self) -> "PriceBand":
+        if self.lower <= 0:
+            raise ValueError("PriceBand.lower must be positive")
+        if self.lower >= self.upper:
+            raise ValueError("PriceBand.lower must be less than PriceBand.upper")
+        return self
+
+
+class TickBand(AlmanakImmutableModel):
+    """Concentrated-liquidity range expressed as raw protocol ticks (escape hatch).
+
+    ``lower``/``upper`` are signed integer ticks in the connector's native tick
+    space (e.g. Uniswap V3 / Aerodrome Slipstream, where the current-price tick
+    is frequently negative). Use this only when you deliberately want to bypass
+    the price->tick conversion and address ticks directly.
+    """
+
+    kind: Literal["tick"] = "tick"
+    lower: int
+    upper: int
+
+    @model_validator(mode="after")
+    def _validate_tick_band(self) -> "TickBand":
+        if self.lower >= self.upper:
+            raise ValueError("TickBand.lower must be less than TickBand.upper")
+        return self
+
+
+# Discriminated union: ``kind`` selects the variant on (de)serialization.
+RangeSpec = Annotated[PriceBand | TickBand, Field(discriminator="kind")]
+
+
+def _range_spec_bounds(spec: Any) -> tuple[Decimal, Decimal]:
+    """Return ``(lower, upper)`` as ``Decimal`` from a RangeSpec instance or dict.
+
+    Accepts a :class:`PriceBand`/:class:`TickBand` instance or its serialized
+    ``{"kind": ..., "lower": ..., "upper": ...}`` form (the deserialize path).
+    """
+    if isinstance(spec, PriceBand):
+        return spec.lower, spec.upper
+    if isinstance(spec, TickBand):
+        return Decimal(spec.lower), Decimal(spec.upper)
+    if isinstance(spec, dict):
+        kind = spec.get("kind")
+        try:
+            lower = spec["lower"]
+            upper = spec["upper"]
+        except KeyError as exc:
+            raise ValueError("range_spec must include 'kind', 'lower', and 'upper'") from exc
+        if kind == "price":
+            return validate_decimal_safe(lower), validate_decimal_safe(upper)
+        if kind == "tick":
+            return Decimal(int(lower)), Decimal(int(upper))
+    raise ValueError(f"Unrecognized range_spec (expected PriceBand/TickBand): {spec!r}")
+
+
+def _is_tick_shaped(lower: Decimal, upper: Decimal) -> bool:
+    """Heuristic bridge (design §Migration Step 1).
+
+    Integer-valued or non-positive bounds are treated as raw ticks; positive
+    fractional bounds are treated as prices. Only consulted for legacy
+    ``range_lower``/``range_upper`` on tick-based protocols (Slipstream) so the
+    bridge never silently reinterprets a deployed intent.
+    """
+    if lower <= 0 or upper <= 0:
+        return True
+    return lower == lower.to_integral_value() and upper == upper.to_integral_value()
+
+
+def _bridge_legacy_range(protocol: str, lower: Decimal, upper: Decimal) -> PriceBand | TickBand:
+    """Map legacy ``range_lower``/``range_upper`` onto a typed :data:`RangeSpec`.
+
+    Preserves on-chain semantics exactly: price-based protocols get a
+    :class:`PriceBand`; a tick-based protocol (Slipstream) with tick-shaped
+    bounds gets a :class:`TickBand` plus a :class:`DeprecationWarning`. Built via
+    ``model_construct`` (unvalidated) so the :class:`LPOpenIntent` validator stays
+    the single source of the legacy error messages.
+    """
+    if protocol in _TICK_BASED_LP_PROTOCOLS and _is_tick_shaped(lower, upper):
+        # Ticks are integers. A non-integral tick-shaped bound (e.g. -1800.5)
+        # would be silently truncated by int() below, so the synthesised TickBand
+        # would no longer agree with the preserved legacy range_lower/range_upper
+        # and a later serialize()->deserialize() would trip the conflict check and
+        # fail to rehydrate. Reject fail-closed rather than truncate.
+        if lower != lower.to_integral_value() or upper != upper.to_integral_value():
+            raise ValueError(f"tick-based legacy bounds for '{protocol}' must be integer-valued (got {lower}, {upper})")
+        warnings.warn(_RANGE_SPEC_TICK_DEPRECATION, DeprecationWarning, stacklevel=3)
+        return TickBand.model_construct(kind="tick", lower=int(lower), upper=int(upper))
+    return PriceBand.model_construct(kind="price", lower=lower, upper=upper)
+
+
 class LPOpenIntent(BaseIntent):
     """Intent to open a liquidity position.
 
@@ -389,8 +517,18 @@ class LPOpenIntent(BaseIntent):
         pool: Pool address or identifier
         amount0: Amount of token0 to provide
         amount1: Amount of token1 to provide
-        range_lower: Lower price bound for concentrated liquidity
-        range_upper: Upper price bound for concentrated liquidity
+        range_spec: Canonical typed concentrated-liquidity range — a
+            :class:`PriceBand` (prices, the default UX) or :class:`TickBand` (raw
+            ticks, native escape hatch). When supplied it is the source of truth
+            and the legacy ``range_lower``/``range_upper`` are derived from it.
+            When omitted, a ``range_spec`` is synthesised from
+            ``range_lower``/``range_upper`` via the backward-compat bridge so the
+            field always round-trips. Connectors still read
+            ``range_lower``/``range_upper`` (unchanged).
+        range_lower: Lower price bound for concentrated liquidity (legacy field;
+            kept for backward compatibility — see ``range_spec``)
+        range_upper: Upper price bound for concentrated liquidity (legacy field;
+            kept for backward compatibility — see ``range_spec``)
         protocol: LP protocol (e.g., "uniswap_v3", "camelot")
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         protocol_params: Optional protocol-specific parameters (e.g., {"bin_range": 10} for TraderJoe V2)
@@ -419,6 +557,7 @@ class LPOpenIntent(BaseIntent):
     amount1: SafeDecimal
     range_lower: SafeDecimal
     range_upper: SafeDecimal
+    range_spec: RangeSpec | None = None
     protocol: str = "uniswap_v3"
     chain: str | None = None
     protocol_params: dict[str, Any] | None = None
@@ -429,8 +568,41 @@ class LPOpenIntent(BaseIntent):
 
     # Protocols where range_lower/range_upper carry raw tick values (integers that may be
     # negative) rather than price bounds (which are always positive).  The positivity
-    # guard below is skipped for these protocols.
-    _TICK_BASED_LP_PROTOCOLS: frozenset[str] = frozenset({"aerodrome_slipstream"})
+    # guard below is skipped for these protocols. Sourced from the module-level
+    # constant so the backward-compat bridge and this class agree.
+    _TICK_BASED_LP_PROTOCOLS: frozenset[str] = _TICK_BASED_LP_PROTOCOLS
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_range_spec(cls, data: Any) -> Any:
+        """Reconcile the typed ``range_spec`` with legacy ``range_lower``/``range_upper``.
+
+        Backward-compat bridge (VIB-5555, design §Migration Step 1), **canonical
+        path only** — when ``range_spec`` is supplied, derive the legacy
+        ``range_lower``/``range_upper`` from it so connectors that still read
+        those fields keep working unchanged. If a caller also supplies legacy
+        bounds (e.g. a serialize round-trip), they must agree with the spec — a
+        conflicting hand-built pair is rejected rather than silently resolved.
+
+        The reverse direction (legacy bounds -> synthesised ``range_spec``) is
+        handled in the after-validator: doing it here would route the
+        ``model_construct``-bridged spec back through discriminated-union field
+        validation, surfacing the variant's own error message instead of the
+        legacy ``range_lower``/``range_upper`` messages callers depend on.
+        """
+        if not isinstance(data, dict):
+            return data
+        spec = data.get("range_spec")
+        if spec is None:
+            return data
+        spec_lower, spec_upper = _range_spec_bounds(spec)
+        if data.get("range_lower") is not None and validate_decimal_safe(data["range_lower"]) != spec_lower:
+            raise ValueError("range_spec conflicts with range_lower")
+        if data.get("range_upper") is not None and validate_decimal_safe(data["range_upper"]) != spec_upper:
+            raise ValueError("range_spec conflicts with range_upper")
+        data.setdefault("range_lower", spec_lower)
+        data.setdefault("range_upper", spec_upper)
+        return data
 
     @model_validator(mode="after")
     def validate_lp_open_intent(self) -> "LPOpenIntent":
@@ -447,10 +619,30 @@ class LPOpenIntent(BaseIntent):
             raise ValueError("max_slippage must be between 0 and 1")
         if self.range_lower >= self.range_upper:
             raise ValueError("range_lower must be less than range_upper")
-        # Skip positivity check for tick-based protocols: their range values are raw
-        # Uniswap V3-style ticks (integers) which are legitimately negative for pools
+        # Fail-closed gate (VIB-5555): a ``TickBand`` addresses raw protocol ticks
+        # directly, so it is only meaningful on a protocol whose compiler consumes
+        # ticks. On a price-based protocol the compilers read
+        # ``range_lower``/``range_upper`` as PRICES (e.g. ``uniswap_v3`` computes
+        # ``Decimal(1) / range_upper`` in its price->tick path), so a raw TickBand
+        # would be silently misexecuted as a price AND would bypass the
+        # price-positivity guard below. Reject until the compiler seam (VIB-5556)
+        # wires ``range_spec.kind`` into the price->tick conversion; that ticket
+        # relaxes this gate per protocol as each compiler learns to honor a
+        # TickBand. Legacy callers never reach here with a TickBand — the bridge
+        # only synthesises one for tick-based protocols, and after this check.
+        if isinstance(self.range_spec, TickBand) and self.protocol not in self._TICK_BASED_LP_PROTOCOLS:
+            raise ValueError(
+                "TickBand range_spec is only valid for tick-based protocols "
+                f"({sorted(self._TICK_BASED_LP_PROTOCOLS)}); protocol "
+                f"'{self.protocol}' interprets range bounds as prices"
+            )
+        # Skip positivity check for raw-tick ranges: their values are Uniswap
+        # V3-style ticks (integers) which are legitimately negative for pools
         # where the current price tick is below zero (e.g. WETH/USDC on Base).
-        if self.protocol not in self._TICK_BASED_LP_PROTOCOLS and self.range_lower <= 0:
+        # A ``TickBand`` range_spec is authoritative; the legacy protocol set is
+        # retained for the ``model_construct`` path where the bridge did not run.
+        is_tick_range = isinstance(self.range_spec, TickBand) or self.protocol in self._TICK_BASED_LP_PROTOCOLS
+        if not is_tick_range and self.range_lower <= 0:
             raise ValueError("range_lower must be positive")
         if self.protocol_params is not None:
             if not isinstance(self.protocol_params, dict):
@@ -459,6 +651,18 @@ class LPOpenIntent(BaseIntent):
                 br = self.protocol_params["bin_range"]
                 if isinstance(br, bool) or not isinstance(br, int) or br < 1 or br > 100:
                     raise ValueError(f"protocol_params.bin_range must be an integer between 1 and 100, got {br}")
+        # Backward-compat bridge (VIB-5555): synthesise the canonical typed
+        # range_spec from the now-validated legacy range_lower/range_upper so the
+        # field always round-trips. Runs after the legacy checks above so their
+        # error messages take precedence; ``object.__setattr__`` is used because
+        # the model is frozen. A model_construct'd instance is stored directly
+        # (not re-validated) so the legacy values pass through unchanged.
+        if self.range_spec is None:
+            object.__setattr__(
+                self,
+                "range_spec",
+                _bridge_legacy_range(self.protocol, self.range_lower, self.range_upper),
+            )
         return self
 
     def _validate_coin_amounts(self) -> None:
@@ -1079,8 +1283,9 @@ class Intent:
         pool: str,
         amount0: Decimal = Decimal("0"),
         amount1: Decimal = Decimal("0"),
-        range_lower: Decimal = Decimal("1"),
-        range_upper: Decimal = Decimal("2"),
+        range_lower: Decimal | None = None,
+        range_upper: Decimal | None = None,
+        range_spec: RangeSpec | None = None,
         protocol: str = "uniswap_v3",
         chain: str | None = None,
         protocol_params: dict[str, Any] | None = None,
@@ -1096,11 +1301,16 @@ class Intent:
                 ``coin_amounts`` is supplied for a multi-coin pool)
             amount1: Amount of token1 to provide (default 0; ignored when
                 ``coin_amounts`` is supplied for a multi-coin pool)
-            range_lower: Lower price bound for concentrated liquidity. Unused by
-                fungible-LP protocols (Curve); defaults exist so multi-coin Curve
-                callers need not pass dummy bounds.
-            range_upper: Upper price bound for concentrated liquidity. Unused by
-                fungible-LP protocols (Curve); see ``range_lower``.
+            range_lower: Lower price bound for concentrated liquidity (legacy).
+                When neither ``range_spec`` nor an explicit bound is given it
+                defaults to ``Decimal("1")`` so fungible-LP (Curve) callers need
+                not pass dummy bounds. Mutually exclusive with ``range_spec``
+                unless the two agree.
+            range_upper: Upper price bound for concentrated liquidity (legacy).
+                Defaults to ``Decimal("2")``; see ``range_lower``.
+            range_spec: Canonical typed range — :class:`PriceBand` or
+                :class:`TickBand`. When supplied, ``range_lower``/``range_upper``
+                are derived from it (do not pass conflicting legacy bounds).
             protocol: LP protocol (default "uniswap_v3")
             chain: Target chain for execution (defaults to strategy's primary chain)
             protocol_params: Optional protocol-specific parameters (e.g., {"bin_range": 10} for TraderJoe V2)
@@ -1136,19 +1346,33 @@ class Intent:
                 chain="polygon",
             )
         """
-        return LPOpenIntent(
-            pool=pool,
-            amount0=amount0,
-            amount1=amount1,
-            range_lower=range_lower,
-            range_upper=range_upper,
-            protocol=protocol,
-            chain=chain,
-            protocol_params=protocol_params,
-            coin_amounts=coin_amounts,
-            max_slippage=max_slippage,
-            registry_handle=registry_handle,
-        )
+        # When no typed range_spec is supplied, fall back to the historical
+        # legacy-bound defaults (1 / 2). When a range_spec IS supplied, leave
+        # unsupplied bounds as None so the model derives them from the spec
+        # (rather than tripping the conflict check against the old defaults).
+        if range_spec is None:
+            if range_lower is None:
+                range_lower = Decimal("1")
+            if range_upper is None:
+                range_upper = Decimal("2")
+
+        kwargs: dict[str, Any] = {
+            "pool": pool,
+            "amount0": amount0,
+            "amount1": amount1,
+            "range_spec": range_spec,
+            "protocol": protocol,
+            "chain": chain,
+            "protocol_params": protocol_params,
+            "coin_amounts": coin_amounts,
+            "max_slippage": max_slippage,
+            "registry_handle": registry_handle,
+        }
+        if range_lower is not None:
+            kwargs["range_lower"] = range_lower
+        if range_upper is not None:
+            kwargs["range_upper"] = range_upper
+        return LPOpenIntent(**kwargs)
 
     @staticmethod
     def lp_close(
