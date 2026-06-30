@@ -427,6 +427,33 @@ def _start_managed_gateway(
     is_test_network = resolved_network in ("anvil", "sepolia")
     session_auth_token = None if is_test_network else uuid.uuid4().hex
 
+    # VIB-5542: ``ax`` is an operator / AI-agent utility surface, not a
+    # strategy-scoped runner — it must be runnable from any cwd. Two cases:
+    #
+    #   (1) Run from INSIDE a strategy folder: pin that folder so the managed
+    #       gateway uses the strategy's own DB (preserving the prior
+    #       strict-resolver behavior — e.g. ``ax positions reconcile`` must
+    #       target the strategy it is standing in, not the shared utility DB).
+    #       ``auto_detect_strategy_folder`` exports ``ALMANAK_STRATEGY_FOLDER``,
+    #       which the lenient resolver below then honors.
+    #   (2) Run from anywhere ELSE: request ``standalone`` so the local SQLite
+    #       path falls back to the per-user utility DB instead of raising
+    #       ``LocalPathError``. Without ``standalone`` the strict resolver
+    #       (``local_strategy_db_path``) hard-fails outside a strategy folder —
+    #       the bug that broke ``ax`` for AI-agent / operator use from arbitrary
+    #       directories.
+    #
+    # This does NOT weaken the VIB-3835 invariant: an explicit strategy context
+    # (cwd strategy folder, ``ALMANAK_STRATEGY_FOLDER``, or ``ALMANAK_STATE_DB``)
+    # still wins — ``standalone`` only governs the no-strategy-context fallback.
+    # The strict default stays in force for ``almanak gateway`` and the strategy
+    # runner (separate ``_start_managed_gateway_and_connect``). ``standalone`` is
+    # inert in hosted mode (Postgres; ``resolve_gateway_local_db_path`` is never
+    # reached). See ``GatewaySettings.standalone``.
+    from almanak.framework.local_paths import auto_detect_strategy_folder
+
+    auto_detect_strategy_folder(export_env=True)
+
     gateway_kwargs: dict = {
         "grpc_host": host,
         "grpc_port": gw_port,
@@ -435,6 +462,7 @@ def _start_managed_gateway(
         "chains": [chain],
         "metrics_enabled": False,
         "audit_enabled": False,
+        "standalone": True,
     }
     if session_auth_token:
         gateway_kwargs["auth_token"] = session_auth_token
