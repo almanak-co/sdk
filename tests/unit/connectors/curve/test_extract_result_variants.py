@@ -252,13 +252,15 @@ def test_lp_open_present_but_decode_fallback_is_error(parser: CurveReceiptParser
 def test_lp_close_present_but_decode_fallback_is_error(parser: CurveReceiptParser) -> None:
     """A RemoveLiquidity whose data fails to decode falls back to ``{"raw_data": ...}``
     (no ``token_amounts``); ``extract_lp_close_data`` then builds a NON-None
-    ``LPCloseData`` with zero collected amounts — a fabricated close the legacy check
-    mis-tagged ``ExtractOk``. Round-2 sentinel -> ``ExtractError``."""
+    ``LPCloseData`` with ``None`` (unmeasured — Empty ≠ Zero, VIB-5491) collected
+    amounts — still a non-None close the legacy presence-check mis-tagged
+    ``ExtractOk``. The Round-2 raw_data sentinel -> ``ExtractError`` regardless."""
     receipt = _build_remove_liquidity_receipt()
     # logs[0] is the RemoveLiquidity3 event; corrupt its data to force the fallback.
     receipt["logs"][0]["data"] = "0x" + "zz" * 64
     raw = parser.extract_lp_close_data(receipt)
-    assert raw is not None and raw.amount0_collected == 0 and raw.amount1_collected == 0
+    # Empty ≠ Zero: unmeasured legs are None, never a fabricated measured 0.
+    assert raw is not None and raw.amount0_collected is None and raw.amount1_collected is None
     out = parser.extract_lp_close_data_result(receipt)
     assert isinstance(out, ExtractError)
     assert "raw_data" in out.error

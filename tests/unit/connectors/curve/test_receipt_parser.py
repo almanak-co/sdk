@@ -1116,6 +1116,102 @@ class TestCryptoSwapReceiptParsing:
 
 
 # =============================================================================
+# Old-style 3-coin CryptoSwap RemoveLiquidity (Tricrypto2) — VIB-5491
+# =============================================================================
+
+_TRICRYPTO2 = "0xd51a44d3fae010294c616388b506acda1bfaae46"
+_TRICRYPTO2_LP = "0xc4ad29ba4b3c580e6d59105fff484999997675ff"
+
+
+def _build_remove_liquidity_v2crypto3_receipt(
+    token_amounts: list[int],
+    token_supply: int = 6_274_344_285_069_545_554_166,
+    lp_burned: int = 1_000_000_000_000_000,
+    wallet: str = WALLET,
+) -> dict:
+    """Tricrypto2 RemoveLiquidity receipt: provider(indexed) + amounts[3] + supply."""
+    topic = _make_topic(EVENT_TOPICS["RemoveLiquidityV2Crypto3"])
+    provider_topic = "0x" + "00" * 12 + wallet[2:]
+    data = "0x" + "".join(_pad_hex(v) for v in (*token_amounts, token_supply))
+    transfer_topic = _make_topic(EVENT_TOPICS["Transfer"])
+    wallet_topic = "0x" + "00" * 12 + wallet[2:]
+    zero_topic = "0x" + "00" * 12 + ZERO_ADDR[2:]
+    return {
+        "status": 1,
+        "from": wallet,
+        "transactionHash": "0x" + "d3" * 32,
+        "blockNumber": 25_000_300,
+        "gasUsed": 280_000,
+        "logs": [
+            # LP burn (Transfer to zero) then the RemoveLiquidity event.
+            {
+                "address": _TRICRYPTO2_LP,
+                "topics": [transfer_topic, wallet_topic, zero_topic],
+                "data": "0x" + _pad_hex(lp_burned),
+                "logIndex": 0,
+            },
+            {"address": _TRICRYPTO2, "topics": [topic, provider_topic], "data": data, "logIndex": 1},
+        ],
+    }
+
+
+class TestRemoveLiquidityV2Crypto3:
+    """Tricrypto2 (old-style 3-coin CryptoSwap) RemoveLiquidity must decode (was a ghost)."""
+
+    def test_event_recognised_as_remove_liquidity(self):
+        receipt = _build_remove_liquidity_v2crypto3_receipt([147_735_751, 228_642, 84_520_182_346_515_188])
+        result = CurveReceiptParser(chain="ethereum").parse_receipt(receipt)
+        assert result.success
+        removes = [e for e in result.events if e.event_type == CurveEventType.REMOVE_LIQUIDITY]
+        assert len(removes) == 1
+        assert removes[0].event_name == "RemoveLiquidityV2Crypto3"
+
+    def test_amounts_and_supply_decoded(self):
+        amounts = [147_735_751, 228_642, 84_520_182_346_515_188]  # USDT/WBTC/WETH (real on-chain)
+        receipt = _build_remove_liquidity_v2crypto3_receipt(amounts)
+        result = CurveReceiptParser(chain="ethereum").parse_receipt(receipt)
+        rm = next(e for e in result.events if e.event_type == CurveEventType.REMOVE_LIQUIDITY)
+        assert rm.data["token_amounts"] == amounts
+        assert rm.data["token_supply"] == 6_274_344_285_069_545_554_166
+        assert rm.data["fees"] == []
+        assert rm.data["provider"].lower() == WALLET.lower()
+
+    def test_extract_lp_close_data_carries_all_three_legs(self):
+        """Accounting contract: the 3rd coin reaches LPCloseData.additional_amounts."""
+        amounts = [147_735_751, 228_642, 84_520_182_346_515_188]  # USDT/WBTC/WETH
+        receipt = _build_remove_liquidity_v2crypto3_receipt(amounts)
+        close = CurveReceiptParser(chain="ethereum").extract_lp_close_data(receipt)
+        assert close is not None
+        assert close.amount0_collected == amounts[0]  # USDT
+        assert close.amount1_collected == amounts[1]  # WBTC
+        assert close.additional_amounts == {2: amounts[2]}  # WETH — 3rd leg, not dropped
+
+    def test_truncated_payload_fails_closed(self):
+        """A short (3-word) payload fails closed to raw_data, not a ghost LP_CLOSE
+        with a fabricated zero token_supply (decode_uint256 returns 0 for a missing
+        word)."""
+        topic = _make_topic(EVENT_TOPICS["RemoveLiquidityV2Crypto3"])
+        provider_topic = "0x" + "00" * 12 + WALLET[2:]
+        short_data = "0x" + "".join(_pad_hex(v) for v in (147_735_751, 228_642, 84_520_182_346_515_188))
+        receipt = {
+            "status": 1,
+            "from": WALLET,
+            "transactionHash": "0x" + "d4" * 32,
+            "logs": [{"address": _TRICRYPTO2, "topics": [topic, provider_topic], "data": short_data, "logIndex": 0}],
+        }
+        result = CurveReceiptParser(chain="ethereum").parse_receipt(receipt)
+        rm = next(e for e in result.events if e.event_type == CurveEventType.REMOVE_LIQUIDITY)
+        assert "raw_data" in rm.data
+        assert "token_amounts" not in rm.data  # no fabricated amounts at the event level
+        # Empty ≠ Zero: the extractor must not fabricate measured-zero proceeds —
+        # the legs are None (unmeasured), never 0.
+        close = CurveReceiptParser(chain="ethereum").extract_lp_close_data(receipt)
+        assert close is None or (
+            close.amount0_collected is None and close.amount1_collected is None and close.additional_amounts is None
+        )
+
+
+# =============================================================================
 # Old-style 3-coin CryptoSwap AddLiquidity (Tricrypto2) — VIB-5441
 # =============================================================================
 
@@ -1189,7 +1285,9 @@ class TestAddLiquidityV2Crypto3:
             "status": 1,
             "from": WALLET,
             "transactionHash": "0x" + "c4" * 32,
-            "logs": [{"address": TRICRYPTO2_POOL, "topics": [add_topic, provider_topic], "data": short_data, "logIndex": 0}],
+            "logs": [
+                {"address": TRICRYPTO2_POOL, "topics": [add_topic, provider_topic], "data": short_data, "logIndex": 0}
+            ],
         }
         result = CurveReceiptParser(chain="ethereum").parse_receipt(receipt)
         add = next(e for e in result.events if e.event_type == CurveEventType.ADD_LIQUIDITY)

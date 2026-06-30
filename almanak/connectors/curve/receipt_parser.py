@@ -67,6 +67,11 @@ EVENT_TOPICS: dict[str, str] = {
     # RemoveLiquidity for old-style Twocrypto (no fees array):
     # RemoveLiquidity(address,uint256[2],uint256)
     "RemoveLiquidityV2Crypto2": "0xdd3c0336a16f1b64f172b7bb0dad5b2b3c7c76f91e8c4aafd6aae60dce800153",
+    # RemoveLiquidity for old-style 3-coin CryptoSwap (Tricrypto2/Tricrypto):
+    # RemoveLiquidity(address,uint256[3],uint256) — provider(indexed), amounts[3],
+    # token_supply (NO fees array). Verified on-chain 2026-06-27 against tricrypto2
+    # (0xD51a44…). VIB-5491 (proportional CryptoSwap LP_CLOSE was a teardown ghost).
+    "RemoveLiquidityV2Crypto3": "0xd6cc314a0b1e3b2579f8e64248e82434072e8271290eef8ad0886709304195f5",
     "RemoveLiquidityOne": "0x5ad056f2e28a8cec232015406b843668c1e36cda598127ec3b8c59b8c72773a0",
     "RemoveLiquidityImbalance": "0x2b5508378d7e19e0d5fa338419034731416c4f5b219a10379956f764317fd47e",
     "Transfer": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
@@ -118,6 +123,7 @@ EVENT_NAME_TO_TYPE: dict[str, CurveEventType] = {
     "RemoveLiquidity3": CurveEventType.REMOVE_LIQUIDITY,
     "RemoveLiquidity4": CurveEventType.REMOVE_LIQUIDITY,
     "RemoveLiquidityV2Crypto2": CurveEventType.REMOVE_LIQUIDITY,  # old-style Twocrypto (pre-NG)
+    "RemoveLiquidityV2Crypto3": CurveEventType.REMOVE_LIQUIDITY,  # old-style 3-coin CryptoSwap (Tricrypto2)
     "RemoveLiquidityDyn": CurveEventType.REMOVE_LIQUIDITY,  # StableSwap NG dynamic-array (VIB-4836)
     "RemoveLiquidityOne": CurveEventType.REMOVE_LIQUIDITY_ONE,
     "RemoveLiquidityImbalance": CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,
@@ -774,6 +780,35 @@ class CurveReceiptParser:
                     "pool_address": pool_address,
                 }
 
+            # Old-style 3-coin CryptoSwap (Tricrypto2/Tricrypto): provider(indexed),
+            # amounts[3], token_supply — 4 data words, no fees array.
+            if event_name == "RemoveLiquidityV2Crypto3":
+                # Fail closed on a truncated payload: decode_uint256 returns 0 for a
+                # missing word, so without this guard a short log would decode as a
+                # "successful" LP_CLOSE with fabricated zero amounts/supply (a ghost)
+                # instead of tripping the raw_data path. 4 data words (amounts[3] +
+                # token_supply) = 256 hex chars.
+                if len(HexDecoder.normalize_hex(data)) < 4 * 64:
+                    logger.warning(
+                        "RemoveLiquidityV2Crypto3 payload too short (%d hex chars, need >=256); "
+                        "failing closed to raw_data",
+                        len(HexDecoder.normalize_hex(data)),
+                    )
+                    return {"raw_data": data}
+                token_amounts = [
+                    HexDecoder.decode_uint256(data, 0),
+                    HexDecoder.decode_uint256(data, 32),
+                    HexDecoder.decode_uint256(data, 64),
+                ]
+                token_supply = HexDecoder.decode_uint256(data, 96)
+                return {
+                    "provider": provider,
+                    "token_amounts": token_amounts,
+                    "fees": [],  # Old-style pools don't emit fees in this event
+                    "token_supply": token_supply,
+                    "pool_address": pool_address,
+                }
+
             # StableSwap NG pools that emit a dynamic-array event:
             # RemoveLiquidity(address provider, uint256[] amounts, uint256[] fees,
             #                 uint256 token_supply)
@@ -1401,9 +1436,12 @@ class CurveReceiptParser:
                     # no ``token_amounts`` key (and a defensive None).
                     token_amounts = event.data.get("token_amounts") or []
 
-                    # Get amounts for token0 and token1
-                    amount0 = token_amounts[0] if len(token_amounts) > 0 else 0
-                    amount1 = token_amounts[1] if len(token_amounts) > 1 else 0
+                    # Get amounts for token0 and token1. Empty ≠ Zero (matching the
+                    # fees below): a leg the event did not carry — e.g. a fail-closed
+                    # ``raw_data`` decode — is ``None`` (unmeasured), never a
+                    # fabricated measured ``0`` that would book a ghost LP_CLOSE.
+                    amount0 = token_amounts[0] if len(token_amounts) > 0 else None
+                    amount1 = token_amounts[1] if len(token_amounts) > 1 else None
 
                     # Get fees if available. VIB-4470 — Empty ≠ Zero: emit
                     # ``None`` when the Curve event did not carry a fee for
