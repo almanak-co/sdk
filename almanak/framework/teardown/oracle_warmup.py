@@ -30,6 +30,15 @@ Design notes:
   (case-insensitive, wrapped<->native alias, known-stablecoin $1 fallback) so
   we only fail loud when a token is *genuinely* unpriceable — not when the
   compiler would have resolved it anyway.
+- Pendle PT/YT symbols are not carried by the generic ``GetPrice`` oracle the
+  ``market.price()`` warming loop fills. They are priced by a separate canonical
+  gateway RPC (``MarketSnapshot.pt_price`` -> ``GetPtPrice``, VIB-5311). Without
+  a dedicated warm step, a teardown closing a Pendle PT position hard-stops at
+  the VIB-2928 price guard (TD-17) because the PT never received a price. We warm
+  any still-unresolved PT/YT via ``market.pt_price()`` and merge a MEASURED price
+  into the oracle dict the compiler reads (VIB-5537). Empty != Zero: an
+  UNAVAILABLE / ``None`` / zero PT price is never fabricated — it stays absent so
+  the guard still hard-stops on a genuinely unpriceable PT.
 """
 
 from __future__ import annotations
@@ -68,6 +77,14 @@ _TOKEN_SYMBOL_FIELDS: tuple[str, ...] = (
 )
 
 
+# Canonical Pendle PT/YT symbol prefixes. Kept in sync with the connector's own
+# ``_PENDLE_SWAP_TOKEN_PREFIXES`` (``almanak/connectors/pendle/swap_route_inference.py``)
+# — a local copy avoids importing a connector-private constant into framework
+# teardown code (layering). PT/YT symbols are not priced by the generic GetPrice
+# oracle; they need the dedicated ``market.pt_price()`` warm path below (VIB-5537).
+_PENDLE_PT_YT_PREFIXES: tuple[str, ...] = ("PT-", "YT-")
+
+
 class TeardownPriceOracleError(RuntimeError):
     """Raised when the teardown price oracle cannot be made complete.
 
@@ -88,6 +105,11 @@ def _looks_like_symbol(value: Any) -> bool:
     if candidate.startswith("0x"):
         return False
     return True
+
+
+def _is_pt_yt_symbol(symbol: str) -> bool:
+    """True for a Pendle PT/YT token symbol (case-insensitive prefix match)."""
+    return symbol.strip().upper().startswith(_PENDLE_PT_YT_PREFIXES)
 
 
 def _symbols_from_pool_string(pool: Any) -> list[str]:
@@ -234,6 +256,79 @@ def _can_resolve_price(symbol: str, oracle: dict[str, Any]) -> bool:
     return False
 
 
+def _warm_pt_yt_prices(
+    market: Any,
+    required: set[str],
+    token_chains: dict[str, str | None],
+    oracle: dict[str, Any],
+    priced_ok: set[str],
+    warm_errors: dict[str, str],
+) -> None:
+    """Warm Pendle PT/YT prices via the dedicated ``market.pt_price()`` RPC.
+
+    PT/YT symbols are not carried by the generic GetPrice oracle the
+    ``market.price()`` loop fills, so a teardown closing a Pendle PT position
+    would hard-stop at the VIB-2928 price guard (TD-17). The gateway exposes the
+    PT/USD mark separately as ``MarketSnapshot.pt_price`` (``GetPtPrice``,
+    VIB-5311) — a strategy-safe, gateway-routed read. We warm any still-
+    unresolved PT/YT through it and merge MEASURED prices into ``oracle`` (the
+    dict the compiler reads) and ``priced_ok`` (the authoritative priceable set).
+
+    Mutates ``oracle`` / ``priced_ok`` / ``warm_errors`` in place.
+
+    Empty != Zero: ``pt_price`` returns ``price=None`` + ``UNAVAILABLE`` for a
+    genuinely unpriceable PT and never raises for that case. We only merge a real
+    MEASURED price — the SAME bar the compiler's ``require_token_price`` applies
+    to every other token (``compiler_queries.py`` ``require_token_price``:
+    present + non-zero, with NO confidence-band gate). A ``None`` / zero / errored
+    PT is left absent so the guard still hard-stops correctly. We mirror the
+    existing warming-loop bar exactly (``_is_usable_price``) rather than inventing
+    a new threshold: any non-None positive price qualifies, regardless of the
+    PtPriceData confidence band (HIGH / ESTIMATED / STALE) — consistent with the
+    generic ``market.price()`` path, which carries no band into this layer either.
+    """
+    if not hasattr(market, "pt_price"):
+        # No PT/YT price source on this market. PT/YT were skipped by the generic
+        # market.price() loop, so without a reason here the final
+        # TeardownPriceOracleError would misreport the generic "market.price()
+        # returned no usable price" fallback. Record a PT/YT-specific source so the
+        # loud failure names the dedicated warm path (Empty != Zero: still absent →
+        # the guard hard-stops).
+        for token in sorted(required):
+            if _is_pt_yt_symbol(token) and token.upper() not in priced_ok and not _can_resolve_price(token, oracle):
+                warm_errors.setdefault(token, "market.pt_price() is unavailable on this market snapshot")
+        return
+    for token in sorted(required):
+        if not _is_pt_yt_symbol(token):
+            continue
+        # Already resolvable (e.g. via the lenient lookup) — no RPC needed.
+        if token.upper() in priced_ok or _can_resolve_price(token, oracle):
+            continue
+        token_chain = token_chains.get(token)
+        try:
+            pt_data = market.pt_price(token, chain=token_chain) if token_chain else market.pt_price(token)
+        except Exception as exc:  # noqa: BLE001 — validation re-checks below
+            warm_errors[token] = str(exc)
+            logger.warning(
+                "Teardown oracle warm: pt_price(%s, chain=%s) failed: %s",
+                token,
+                token_chain,
+                exc,
+            )
+            continue
+        pt_value = getattr(pt_data, "price", None)
+        if _is_usable_price(pt_value):
+            oracle[token.upper()] = pt_value
+            priced_ok.add(token.upper())
+        else:
+            # Empty != Zero: do NOT fabricate. Leave the PT absent (the guard
+            # still hard-stops) and record why for the loud error message.
+            warm_errors.setdefault(
+                token,
+                "market.pt_price() returned no usable price (UNAVAILABLE / None / zero — Empty != Zero)",
+            )
+
+
 def warm_and_validate_oracle(
     market: Any,
     intents: list[Any],
@@ -246,9 +341,13 @@ def warm_and_validate_oracle(
     Pre-flight check run *before* any closing intent executes:
 
     1. Extract the required token set from ``intents`` (+ native gas token).
-    2. Synchronously call ``market.price(token)`` for each (the teardown setup
-       path is not on the async strategy loop), populating ``_price_cache``.
-    3. Fetch the oracle dict and validate every required token resolves; raise
+    2. Synchronously call ``market.price(token)`` for each non-PT/YT token (the
+       teardown setup path is not on the async strategy loop), populating
+       ``_price_cache``.
+    3. Warm any Pendle PT/YT symbol via the dedicated ``market.pt_price()`` RPC
+       (the generic GetPrice oracle does not carry PT/YT prices) and merge a
+       MEASURED price into the oracle dict — never a fabricated one (VIB-5537).
+    4. Fetch the oracle dict and validate every required token resolves; raise
        :class:`TeardownPriceOracleError` naming the first unpriceable token if
        not.
 
@@ -293,6 +392,12 @@ def warm_and_validate_oracle(
     for token in sorted(required):
         if not can_price:
             break
+        # PT/YT symbols are not carried by the generic GetPrice oracle — they are
+        # warmed via the dedicated ``market.pt_price()`` path below (VIB-5537).
+        # Skip them here so a teardown of a Pendle PT does not log a spurious
+        # ``price() failed`` warning for every PT on every run.
+        if _is_pt_yt_symbol(token):
+            continue
         # VIB-4842 Codex review P1: warm each token on ITS OWN intent's chain so
         # a multi-chain teardown prices every token on the correct chain. Pass
         # ``chain=`` only when known — ``chain=None`` lets MarketSnapshot apply
@@ -315,6 +420,13 @@ def warm_and_validate_oracle(
 
     fetched = market.get_price_oracle_dict()
     oracle: dict[str, Any] = fetched if fetched is not None else {}
+
+    # Pendle PT/YT symbols are not carried by the generic GetPrice oracle — warm
+    # any still-unresolved PT/YT via the dedicated ``market.pt_price()`` RPC and
+    # merge MEASURED prices into ``oracle`` / ``priced_ok`` (VIB-5537). Empty !=
+    # Zero is preserved: an UNAVAILABLE / None / zero PT is left absent so the
+    # guard still hard-stops on a genuinely unpriceable PT.
+    _warm_pt_yt_prices(market, required, token_chains, oracle, priced_ok, warm_errors)
 
     # A token is genuinely missing only when it neither returned a usable
     # ``price()`` value NOR resolves through the compiler's lenient lookup

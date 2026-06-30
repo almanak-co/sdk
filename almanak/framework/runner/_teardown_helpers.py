@@ -397,6 +397,70 @@ def resolve_price_oracle(teardown_market: Any | None) -> dict | None:
 # =============================================================================
 
 
+def _warm_teardown_pt_yt_prices(
+    strategy: Any,
+    teardown_market: Any | None,
+    teardown_intents: list,
+    price_oracle: dict | None,
+) -> None:
+    """Warm Pendle PT/YT prices into the runner-supplied price oracle in place.
+
+    VIB-5537: warm PT/YT prices into the runner-supplied price oracle before
+    ``_execute_intents`` calls ``update_prices()`` + ``assert_prices_available()``
+    (the VIB-2928 guard). The runner's Phase 6 oracle is populated by
+    ``get_price_oracle_dict()`` which does NOT carry Pendle PT/YT prices — those
+    require the dedicated GetPtPrice RPC (``market.pt_price``). Without this
+    warmup the VIB-2928 guard always hard-stops a Pendle PT teardown SWAP.
+
+    Placement: this runs at the runner teardown execution seam (Phase 6) rather
+    than in ``resolve_price_oracle()`` (the synchronous Phase 6 helper) because
+    that helper has no access to the teardown intent list. This is best-effort:
+    a failure to warm only warns and lets ``_execute_intents`` handle the missing
+    price (the guard fires loud) rather than silently discarding a recoverable
+    teardown.
+
+    Empty != Zero: ``_warm_pt_yt_prices`` only merges a real MEASURED price; an
+    UNAVAILABLE / ``None`` / zero PT price is left absent so the guard still
+    hard-stops on a genuinely unpriceable PT. Mutates ``price_oracle`` in place.
+    No-op when ``teardown_market`` or ``price_oracle`` is ``None``.
+    """
+    if teardown_market is None or price_oracle is None:
+        return
+    try:
+        from ..teardown.oracle_warmup import (
+            _warm_pt_yt_prices,
+            extract_required_token_chains,
+        )
+
+        chain: str | None = getattr(strategy, "chain", None) or getattr(teardown_market, "chain", None)
+        token_chains = extract_required_token_chains(teardown_intents, chain)
+        pt_priced_ok: set[str] = set()
+        pt_warm_errors: dict[str, str] = {}
+        _warm_pt_yt_prices(
+            teardown_market,
+            set(token_chains.keys()),
+            token_chains,
+            price_oracle,
+            pt_priced_ok,
+            pt_warm_errors,
+        )
+        if pt_priced_ok:
+            logger.info(
+                "Teardown runner: PT/YT prices warmed into oracle: %s",
+                sorted(pt_priced_ok),
+            )
+        if pt_warm_errors:
+            logger.warning(
+                "Teardown runner: PT/YT price warm errors (best-effort): %s",
+                pt_warm_errors,
+            )
+    except Exception as _pt_warm_exc:  # noqa: BLE001
+        logger.warning(
+            "Teardown runner: PT/YT oracle warmup failed (best-effort, continuing): %s",
+            _pt_warm_exc,
+        )
+
+
 async def execute_and_verify(
     runner: Any,
     teardown_mgr: Any,
@@ -451,6 +515,11 @@ async def execute_and_verify(
                 "is resolvable in local mode."
             )
         approval_callback = _make_approval_callback(runner, teardown_state_adapter)
+
+    # VIB-5537: warm PT/YT prices into the runner-supplied price oracle before
+    # _execute_intents fires the VIB-2928 price guard. See
+    # _warm_teardown_pt_yt_prices for the rationale (best-effort, Empty != Zero).
+    _warm_teardown_pt_yt_prices(strategy, teardown_market, teardown_intents, price_oracle)
 
     # Execute intents with escalating slippage
     teardown_result = await teardown_mgr._execute_intents(

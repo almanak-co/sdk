@@ -20,6 +20,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from almanak.framework.intents.vocabulary import Intent
+from almanak.framework.market.models import PtPriceData
+from almanak.framework.portfolio.models import ValueConfidence
 from almanak.framework.teardown.config import TeardownConfig
 from almanak.framework.teardown.models import (
     TeardownMode,
@@ -293,6 +295,182 @@ def test_warm_best_effort_does_not_raise_on_missing():
     assert oracle is not None
     # USDC still got warmed (cache populated for the rest of the plan).
     assert oracle["USDC"] == Decimal("1")
+
+
+# ---------------------------------------------------------------------------
+# warm_and_validate_oracle — Pendle PT/YT warming (VIB-5537)
+# ---------------------------------------------------------------------------
+
+
+class _FakeMarketWithPt(_FakeMarket):
+    """A _FakeMarket that also exposes ``pt_price`` (the gateway PT/USD RPC).
+
+    ``pt_results`` maps an upper-cased PT/YT symbol to the ``PtPriceData`` the
+    gateway would return. An absent symbol yields the canonical fail-closed
+    Empty != Zero result (``price=None`` + ``UNAVAILABLE``), exactly as
+    ``MarketSnapshot.pt_price`` does for an unmeasured PT.
+    """
+
+    def __init__(self, priceable: dict[str, Decimal], pt_results: dict[str, PtPriceData]):
+        super().__init__(priceable)
+        self._pt_results = pt_results
+        self.pt_price_calls: list[tuple[str, str | None]] = []
+
+    def pt_price(self, symbol: str, chain=None, maturity=None, *, quote: str = "USD") -> PtPriceData:
+        self.pt_price_calls.append((symbol, chain))
+        existing = self._pt_results.get(symbol.upper())
+        if existing is not None:
+            return existing
+        return PtPriceData(symbol=symbol, chain=chain or "", price=None, confidence=ValueConfidence.UNAVAILABLE)
+
+
+_PT_SYMBOL = "PT-SUSDAI-15OCT2026"
+_YT_SYMBOL = "YT-SUSDAI-15OCT2026"
+
+
+def test_warm_yt_token_merges_measured_high_price():
+    """VIB-5537: the YT- prefix (second warmed prefix) is also priced via pt_price,
+    not the generic GetPrice path — guards against accidentally dropping it."""
+    market = _FakeMarketWithPt(
+        {"USDC": Decimal("1"), "ETH": Decimal("3400")},
+        {
+            _YT_SYMBOL: PtPriceData(
+                symbol=_YT_SYMBOL, chain="arbitrum", price=Decimal("0.03"), confidence=ValueConfidence.HIGH
+            )
+        },
+    )
+    intent = Intent.swap(from_token=_YT_SYMBOL, to_token="USDC", amount=Decimal("100"), chain="arbitrum")
+
+    oracle = warm_and_validate_oracle(market, [intent], "arbitrum")
+
+    assert oracle is not None
+    assert oracle[_YT_SYMBOL] == Decimal("0.03")
+    assert (_YT_SYMBOL, "arbitrum") in market.pt_price_calls
+    assert _YT_SYMBOL not in [t.upper() for t in market.price_calls]
+
+
+def test_warm_pt_token_merges_measured_high_price():
+    """VIB-5537 (a): a PT priced HIGH via pt_price lands in the oracle, no raise."""
+    market = _FakeMarketWithPt(
+        {"USDC": Decimal("1"), "ETH": Decimal("3400")},
+        {
+            _PT_SYMBOL: PtPriceData(
+                symbol=_PT_SYMBOL, chain="arbitrum", price=Decimal("0.97"), confidence=ValueConfidence.HIGH
+            )
+        },
+    )
+    intent = Intent.swap(from_token=_PT_SYMBOL, to_token="USDC", amount=Decimal("100"), chain="arbitrum")
+
+    oracle = warm_and_validate_oracle(market, [intent], "arbitrum")
+
+    assert oracle is not None
+    # The measured PT price is merged under the upper-cased symbol key.
+    assert oracle[_PT_SYMBOL] == Decimal("0.97")
+    # Warmed via the dedicated pt_price RPC on the intent's chain...
+    assert (_PT_SYMBOL, "arbitrum") in market.pt_price_calls
+    # ...and NOT via the generic GetPrice path (no spurious price() call for it).
+    assert _PT_SYMBOL not in [t.upper() for t in market.price_calls]
+
+
+def test_warm_pt_token_stale_but_measured_is_accepted():
+    """VIB-5537: a STALE-but-measured PT price still resolves (matches the
+    require_token_price bar: present + non-zero, no confidence-band gate)."""
+    market = _FakeMarketWithPt(
+        {"USDC": Decimal("1"), "ETH": Decimal("3400")},
+        {
+            _PT_SYMBOL: PtPriceData(
+                symbol=_PT_SYMBOL, chain="arbitrum", price=Decimal("0.95"), confidence=ValueConfidence.STALE, stale=True
+            )
+        },
+    )
+    intent = Intent.swap(from_token=_PT_SYMBOL, to_token="USDC", amount=Decimal("100"), chain="arbitrum")
+
+    oracle = warm_and_validate_oracle(market, [intent], "arbitrum")
+    assert oracle is not None
+    assert oracle[_PT_SYMBOL] == Decimal("0.95")
+
+
+def test_warm_pt_token_unavailable_still_hard_stops():
+    """VIB-5537 (b): an UNAVAILABLE / None PT price is NOT merged (Empty != Zero)
+    and the loud pre-flight guard still fires naming the PT."""
+    # pt_results omits the symbol -> the fake returns price=None + UNAVAILABLE.
+    market = _FakeMarketWithPt({"USDC": Decimal("1"), "ETH": Decimal("3400")}, {})
+    intent = Intent.swap(from_token=_PT_SYMBOL, to_token="USDC", amount=Decimal("100"), chain="arbitrum")
+
+    with pytest.raises(TeardownPriceOracleError) as exc:
+        warm_and_validate_oracle(market, [intent], "arbitrum")
+
+    msg = str(exc.value)
+    assert _PT_SYMBOL in msg  # names the unpriceable PT
+    assert "missing" in msg.lower()
+    # The fail-closed source string names the pt_price attempt (Empty != Zero).
+    assert "pt_price" in msg.lower()
+    # No fabricated price ever entered the oracle.
+    market_oracle = market.get_price_oracle_dict()
+    assert _PT_SYMBOL not in market_oracle
+
+
+def test_warm_pt_token_zero_price_not_merged():
+    """VIB-5537: a zero PT price is treated as unpriceable (Empty != Zero), never
+    merged, and the guard hard-stops — matching require_token_price's non-zero bar."""
+    market = _FakeMarketWithPt(
+        {"USDC": Decimal("1"), "ETH": Decimal("3400")},
+        {
+            _PT_SYMBOL: PtPriceData(
+                symbol=_PT_SYMBOL, chain="arbitrum", price=Decimal("0"), confidence=ValueConfidence.HIGH
+            )
+        },
+    )
+    intent = Intent.swap(from_token=_PT_SYMBOL, to_token="USDC", amount=Decimal("100"), chain="arbitrum")
+
+    with pytest.raises(TeardownPriceOracleError) as exc:
+        warm_and_validate_oracle(market, [intent], "arbitrum")
+    assert _PT_SYMBOL in str(exc.value)
+
+
+def test_warm_pt_best_effort_does_not_raise_on_unavailable():
+    """VIB-5537: resume-past-progress (raise_on_missing=False) never blocks the
+    unwind even when a PT is genuinely unpriceable."""
+    market = _FakeMarketWithPt({"USDC": Decimal("1"), "ETH": Decimal("3400")}, {})
+    intent = Intent.swap(from_token=_PT_SYMBOL, to_token="USDC", amount=Decimal("100"), chain="arbitrum")
+
+    oracle = warm_and_validate_oracle(market, [intent], "arbitrum", raise_on_missing=False)
+    assert oracle is not None
+    # USDC still warmed for the rest of the plan; PT remains absent (not fabricated).
+    assert oracle["USDC"] == Decimal("1")
+    assert _PT_SYMBOL not in oracle
+
+
+def test_warm_regular_plan_does_not_call_pt_price():
+    """VIB-5537 (c): a regular (non-PT) plan is unchanged — pt_price is never
+    invoked, so the new path is a no-op for the common case."""
+    market = _FakeMarketWithPt(
+        {"WETH": Decimal("3400"), "USDC": Decimal("1"), "ETH": Decimal("3400")},
+        {},
+    )
+    intent = Intent.swap(from_token="WETH", to_token="USDC", amount="all", chain="arbitrum")
+
+    oracle = warm_and_validate_oracle(market, [intent], "arbitrum")
+    assert oracle is not None
+    assert oracle["WETH"] == Decimal("3400")
+    # No PT/YT token in the plan -> pt_price never called.
+    assert market.pt_price_calls == []
+
+
+def test_warm_pt_market_without_pt_price_still_hard_stops():
+    """A market that does not expose pt_price (older snapshot) leaves the PT
+    unpriceable and the guard hard-stops — no crash on the missing attribute."""
+    # Plain _FakeMarket has no pt_price attribute.
+    market = _FakeMarket({"USDC": Decimal("1"), "ETH": Decimal("3400")})
+    intent = Intent.swap(from_token=_PT_SYMBOL, to_token="USDC", amount=Decimal("100"), chain="arbitrum")
+
+    with pytest.raises(TeardownPriceOracleError) as exc:
+        warm_and_validate_oracle(market, [intent], "arbitrum")
+    msg = str(exc.value)
+    assert _PT_SYMBOL in msg
+    # The failure must name the dedicated PT/YT warm path, not the misleading
+    # generic "market.price() returned no usable price" fallback (CodeRabbit #3116).
+    assert "pt_price" in msg
 
 
 # ---------------------------------------------------------------------------
