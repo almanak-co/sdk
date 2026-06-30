@@ -108,6 +108,19 @@ def _registered_token_addresses(backtester: PnLBacktester) -> dict[str, tuple[st
     return token_addresses
 
 
+def _token_address_registrations(
+    backtester: PnLBacktester,
+    *,
+    numeraire_symbol: str | None,
+    numeraire_address: tuple[str, str] | None,
+) -> dict[str, tuple[str, str]]:
+    """Return every token-address mapping the provider registration hook should see."""
+    token_addresses = _registered_token_addresses(backtester)
+    if numeraire_symbol is not None and numeraire_address is not None:
+        token_addresses[numeraire_symbol.upper()] = normalize_token_key(numeraire_address[0], numeraire_address[1])
+    return token_addresses
+
+
 def _expected_price_lookup_label(
     token: TokenRef,
     *,
@@ -294,23 +307,24 @@ def initialize_backtest(
                 data_tokens.append(gas_asset_symbol)
                 bt_logger.debug(f"Added gas asset token {gas_asset_symbol} to the data-fetch token set")
 
-        # Register the numeraire's contract address with the data provider so its
-        # CoinGecko coin id resolves by address. The numeraire is identified by
-        # (chain_id, address) on the strategy's QuoteAsset, but the CLI's
-        # token-address map (build_token_address_map) only covers traded tokens
-        # -- a numeraire the strategy never trades (e.g. a cbBTC-quoted strategy
-        # holding only WETH/USDC) would otherwise be an unpriceable honest miss
-        # that fails loud at metrics time (VIB-5127). Duck-typed: providers
+        # Register the authoritative contract-address map with the data provider
+        # so CoinGecko coin ids resolve by address. CLI / service callers thread
+        # traded-token mappings through ``backtester.token_addresses``; the
+        # strategy QuoteAsset contributes the numeraire mapping, including
+        # numeraires the strategy never trades (VIB-5127). Duck-typed: providers
         # without the hook (custom HistoricalDataProvider impls) are unaffected.
-        if numeraire_symbol is not None:
-            register_addresses = getattr(backtester.data_provider, "register_token_addresses", None)
-            if numeraire_address is not None and callable(register_addresses):
-                normalized_numeraire = normalize_token_key(numeraire_address[0], numeraire_address[1])
-                register_addresses({numeraire_symbol: normalized_numeraire})
-                bt_logger.debug(
-                    f"Registered numeraire {numeraire_symbol} address {normalized_numeraire[1]} "
-                    f"on {normalized_numeraire[0]} with the data provider for coin-id resolution"
-                )
+        register_addresses = getattr(backtester.data_provider, "register_token_addresses", None)
+        token_address_registrations = _token_address_registrations(
+            backtester,
+            numeraire_symbol=numeraire_symbol,
+            numeraire_address=numeraire_address,
+        )
+        if token_address_registrations and callable(register_addresses):
+            register_addresses(token_address_registrations)
+            bt_logger.debug(
+                f"Registered {len(token_address_registrations)} token address(es) "
+                "with the data provider for coin-id resolution"
+            )
 
         # Create historical data config
         data_config = HistoricalDataConfig(

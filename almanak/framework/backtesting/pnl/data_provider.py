@@ -245,8 +245,8 @@ class MarketState:
     Attributes:
         timestamp: The point in time this state represents
         prices: Dictionary mapping token identity to USD prices. Address-native
-            providers use ``(chain, address)`` keys; legacy/test providers may
-            still use symbols during the migration.
+            providers use ``(chain, address)`` keys; custom test providers may
+            still use symbols for minimal fixtures.
         ohlcv: Dictionary mapping token identity to OHLCV data (optional)
         chain: The blockchain this data is from
         block_number: Approximate block number at this timestamp (optional)

@@ -946,15 +946,15 @@ class CoinGeckoDataProvider:
         """Augment the ``SYMBOL -> (chain, address)`` coin-id resolution map post-construction.
 
         ``__init__``'s ``token_addresses`` covers the tokens known when the
-        provider is built (the CLI resolves the strategy's tracked / funded
-        symbols via ``build_token_address_map``). Tokens discovered later --
-        notably the declared numeraire, which the PnL engine auto-adds to the
-        data-fetch set even when the strategy never trades it (VIB-5127) -- are
-        registered here so their CoinGecko coin id resolves via the contract
-        endpoint instead of an honest miss. Keys are upper-cased to match
-        ``__init__``; a later registration wins on conflict (the caller's
-        address is authoritative). The native fast path is unaffected: a native
-        symbol still resolves registry-side before this map is consulted.
+        provider is built (the CLI / hosted service resolve strategy token refs
+        via ``build_backtest_token_address_map``). The PnL engine repeats the
+        full map through this hook at initialization time, adding the declared
+        numeraire when the strategy never trades it (VIB-5127), so every ERC20
+        coin id resolves via the contract endpoint instead of an honest miss.
+        Keys are upper-cased to match ``__init__``; a later registration wins
+        on conflict (the caller's address is authoritative). The native fast
+        path is unaffected: a native symbol still resolves registry-side before
+        this map is consulted.
         """
         if not token_addresses:
             return
@@ -1584,10 +1584,10 @@ class CoinGeckoDataProvider:
         """Return identities that have a resolution route, sorted.
 
         Native gas / wrapped-native symbols keep their symbol display. ERC20s
-        registered through ``token_addresses`` expose both the transitional
-        symbol and their address so membership consumers can move gradually
-        from symbol to address identity. This is membership only — it does NOT
-        perform the contract lookup, so it stays synchronous and I/O-free.
+        registered through ``token_addresses`` expose the configured symbol and
+        their address so callers can discover both the human label and the
+        address-native identity. This is membership only — it does NOT perform
+        the contract lookup, so it stays synchronous and I/O-free.
         """
         address_keys = {address for _chain, address in self._token_addresses.values()}
         return sorted(set(self._native_ids_by_upper) | set(self._token_addresses) | address_keys)

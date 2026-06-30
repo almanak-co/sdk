@@ -1020,9 +1020,10 @@ class PnLBacktester:
     token_addresses: dict[str, tuple[str, str]] | None = None
     """Optional ``{SYMBOL_UPPER: (chain, address)}`` map of tracked tokens.
 
-    Supplied by the CLI (``build_token_address_map``) — the same map handed to
-    providers that can resolve historical data by contract address. ``None``
-    keeps the historical symbol-only behaviour.
+    Supplied by the CLI / hosted service (``build_backtest_token_address_map``)
+    - the same map handed to providers that can resolve historical data by
+    contract address. ``None`` is reserved for custom fixtures and unresolved
+    token labels.
     """
     _mev_simulator: MEVSimulator | None = None
     _current_backtest_id: str = ""

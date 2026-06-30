@@ -774,9 +774,9 @@ class AggregatedDataProvider:
 
         Only the CoinGecko leg consumes ``token_addresses``; the on-chain legs
         (Chainlink / TWAP) have no such map and are skipped. Lets the PnL engine
-        register the numeraire's contract address on the ``auto`` / ``coingecko``
-        fallback chains so a numeraire the strategy never trades is still priced
-        via CoinGecko's contract endpoint (VIB-5127).
+        register CLI/service token mappings plus the strategy numeraire on the
+        ``auto`` / ``coingecko`` fallback chains so ERC20s are priced via
+        CoinGecko's contract endpoint.
         """
         for provider in self._providers:
             register = getattr(provider, "register_token_addresses", None)

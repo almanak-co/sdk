@@ -16,7 +16,8 @@ Tests:
 # Add project root to path (works with exec and direct execution)
 import os
 import sys
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -33,8 +34,8 @@ project_root = Path(current_file).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from almanak import HoldIntent, IntentStrategy, MarketSnapshot
-from almanak.framework.backtesting.pnl import PnLBacktestConfig, PnLBacktester
-from almanak.framework.backtesting.pnl.providers import CoinGeckoDataProvider
+from almanak.framework.backtesting.pnl import HistoricalDataConfig, MarketState, PnLBacktestConfig, PnLBacktester
+from almanak.framework.backtesting.pnl.data_provider import TokenRef
 from almanak.framework.models.hot_reload_config import HotReloadableConfig
 
 DUMMY_WALLET = "0x" + "0" * 40
@@ -52,10 +53,46 @@ class SimpleStrategy(IntentStrategy):
 
     def get_open_positions(self):
         from almanak.framework.teardown.models import TeardownPositionSummary
+
         return TeardownPositionSummary.empty(self.deployment_id)
 
     def generate_teardown_intents(self, mode=None, market=None):
         return []
+
+
+class DeterministicProvider:
+    """Network-free historical provider for reproducibility certification."""
+
+    provider_name = "deterministic-reproducibility"
+
+    @property
+    def supported_tokens(self) -> list[str]:
+        return ["ETH", "USDC"]
+
+    @property
+    def supported_chains(self) -> list[str]:
+        return ["ethereum"]
+
+    async def get_price(self, token: TokenRef, timestamp: datetime) -> Decimal:  # noqa: ARG002
+        token_id = token if isinstance(token, str) else token[1]
+        return Decimal("2000") if token_id.upper() == "ETH" else Decimal("1")
+
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
+        current = config.start_time
+        tick = 0
+        while current <= config.end_time:
+            yield (
+                current,
+                MarketState(
+                    timestamp=current,
+                    prices={"ETH": Decimal("2000"), "USDC": Decimal("1")},
+                    chain=config.chains[0] if config.chains else "ethereum",
+                    block_number=19_000_000 + tick,
+                    gas_price_gwei=Decimal("20"),
+                ),
+            )
+            tick += 1
+            current += timedelta(seconds=config.interval_seconds)
 
 
 @pytest.mark.asyncio
@@ -82,7 +119,7 @@ async def test_bit_for_bit_reproducibility():
     config2 = PnLBacktestConfig(**config_base)
 
     backtester = PnLBacktester(
-        data_provider=CoinGeckoDataProvider(),
+        data_provider=DeterministicProvider(),
         fee_models={},
         slippage_models={},
     )

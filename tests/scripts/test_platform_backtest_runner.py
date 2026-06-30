@@ -239,7 +239,12 @@ def test_platform_numeraire_backtest_prices_address_keyed_data_and_coverage() ->
         "CBBTC": ("base", BASE_CBBTC),
         "USDC": ("base", BASE_USDC),
     }
-    assert {"CBBTC": ("base", BASE_CBBTC)} in provider.registered
+    assert provider.registered == [
+        {
+            "CBBTC": ("base", BASE_CBBTC),
+            "USDC": ("base", BASE_USDC),
+        }
+    ]
     assert result.error is None
     assert len(result.trades) > 0
     assert result.metrics.numeraire_metrics is not None

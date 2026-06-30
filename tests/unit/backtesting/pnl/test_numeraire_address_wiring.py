@@ -1,4 +1,4 @@
-"""End-to-end wiring: the PnL engine registers the numeraire's contract address.
+"""End-to-end wiring: the PnL engine registers contract-address identities.
 
 The unpriceable-numeraire bug was a non-native ERC20 numeraire (e.g. cbBTC on
 Base) declared via ``@almanak_strategy(quote_asset=...)`` that the strategy never
@@ -6,11 +6,12 @@ trades. The CLI's ``build_token_address_map`` only covers *traded* tokens, so th
 numeraire was auto-added to the data-fetch set with no address entry, hit an
 honest miss in the CoinGecko leg, and failed loud at metrics time.
 
-The fix: the engine reads the numeraire's authoritative ``(chain_id, address)``
-off the strategy's ``QuoteAsset`` and registers it with the data provider before
-the iteration loop. These tests drive the REAL :class:`PnLBacktester` over
+The fix: the engine registers every authoritative ``(chain, address)`` mapping
+with the data provider before the iteration loop. CLI / service callers provide
+the traded-token map, and the strategy's ``QuoteAsset`` contributes any
+numeraire mapping. These tests drive the REAL :class:`PnLBacktester` over
 network-free synthetic data and assert the registration actually reaches the
-provider (the per-provider resolution behaviour is pinned in
+provider (the per-provider resolution behavior is pinned in
 ``test_coingecko_resolution.py::TestRegisterTokenAddresses``).
 """
 
@@ -35,6 +36,7 @@ _START = datetime(2024, 1, 1, tzinfo=UTC)
 _TICK_SECONDS = 3600
 # Canonical WETH on Arbitrum (chain_id 42161, the config default chain).
 _WETH_ARBITRUM = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+_USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 
 
 class _RecordingProvider:
@@ -43,7 +45,7 @@ class _RecordingProvider:
     Mirrors the trust-matrix synthetic provider's surface (the same protocol
     production providers implement) and additionally captures every
     ``register_token_addresses`` call so the test can assert the engine pushes
-    the numeraire address through.
+    address identity through.
     """
 
     provider_name = "recording-numeraire-test"
@@ -102,7 +104,12 @@ class _HoldStrategy:
         return None
 
 
-def _run(strategy: Any, provider: _RecordingProvider) -> Any:
+def _run(
+    strategy: Any,
+    provider: _RecordingProvider,
+    *,
+    token_addresses: dict[str, tuple[str, str]] | None = None,
+) -> Any:
     config = PnLBacktestConfig(
         start_time=_START,
         end_time=_START + timedelta(hours=2),
@@ -117,6 +124,7 @@ def _run(strategy: Any, provider: _RecordingProvider) -> Any:
         data_provider=provider,
         fee_models={"default": DefaultFeeModel(fee_pct=Decimal("0"))},
         slippage_models={"default": DefaultSlippageModel(slippage_pct=Decimal("0"))},
+        token_addresses=token_addresses,
     )
     return asyncio.run(backtester.backtest(strategy, config))
 
@@ -134,6 +142,27 @@ def test_engine_registers_numeraire_address_on_provider() -> None:
 
     assert {"WETH": ("arbitrum", _WETH_ARBITRUM.lower())} in provider.registered
     assert result.numeraire == "WETH"
+
+
+def test_engine_registers_all_known_token_addresses_on_provider() -> None:
+    """Configured token addresses reach providers that need post-construction registration."""
+    provider = _RecordingProvider({"WETH": [Decimal("2000")] * 3, "USDC": [Decimal("1")] * 3})
+    result = _run(
+        _HoldStrategy(QuoteAsset.usd()),
+        provider,
+        token_addresses={
+            "weth": ("arbitrum", _WETH_ARBITRUM),
+            "USDC": ("arbitrum", _USDC_ARBITRUM),
+        },
+    )
+
+    assert provider.registered == [
+        {
+            "WETH": ("arbitrum", _WETH_ARBITRUM.lower()),
+            "USDC": ("arbitrum", _USDC_ARBITRUM.lower()),
+        }
+    ]
+    assert result.numeraire is None
 
 
 def test_usd_numeraire_registers_nothing() -> None:
