@@ -509,6 +509,30 @@ async def initialize_run_loop(  # noqa: C901
         set_event_gateway_client(gateway_client)
         logger.debug("Enabled gateway dual-write for timeline events")
 
+    # VIB-5419 / A2a — boot-time on-chain strand detection. A runner killed in
+    # the window [tx confirmed on-chain -> ledger row written] leaves funds in a
+    # protocol with zero DB trace; --fresh/restart only checks wallet balance,
+    # not on-chain positions. This phase reads on-chain lending/perp positions
+    # for the connectors the strategy uses and diffs them against the DB; on
+    # drift it HALTS loudly (live mode) / logs ERROR + continues (paper/dry_run).
+    # Detect-and-halt ONLY -- no auto-writes (that is A2b). Runs after the
+    # gateway client is wired (needed for eth_call) and before the first
+    # iteration.
+    if state_manager_ready and gateway_client is not None:
+        from .boot_strand_detection import OnChainStrandError, enforce_no_boot_strands
+
+        try:
+            await enforce_no_boot_strands(runner, strategy, deployment_id)
+        except OnChainStrandError:
+            # Live-mode halt: propagate so the runner aborts boot before it can
+            # trade on top of an unaccounted on-chain position.
+            raise
+        except Exception as e:  # noqa: BLE001 - detection must never crash boot itself
+            # The detector is documented never-raise; this is belt-and-braces so
+            # an unforeseen fault in the scan degrades to "no detection this
+            # boot" rather than bricking an otherwise-healthy strategy.
+            logger.warning("Boot strand detection skipped (unexpected error): %s", e)
+
     # Register this strategy instance with the gateway
     runner._register_with_gateway(strategy)
 
