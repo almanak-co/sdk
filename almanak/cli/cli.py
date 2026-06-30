@@ -1304,6 +1304,17 @@ def _strat_test_skip_reason(working_dir: str, config_file: str | None) -> str | 
     "open positions via the strategy's generate_teardown_intents().",
 )
 @click.option(
+    "--inject",
+    "inject",
+    type=str,
+    default=None,
+    help="Seed synthetic market conditions into the MarketSnapshot decide() consumes, "
+    "so condition-triggered logic runs (VIB-5529). Inline JSON or a path to a .json file: "
+    '\'{"prices": {"USDC": "0.95"}, "balances": {"USDC": "10000"}, "indicators": {"rsi": {"WETH": 25}}}\'. '
+    "Without --actions, this exercises the real condition branches (depeg = off-peg price; "
+    "drawdown = lowered price/balance). Overrides win over live provider reads.",
+)
+@click.option(
     "--json",
     "json_output",
     is_flag=True,
@@ -1350,6 +1361,7 @@ def strategy_test(
     config_file,
     actions,
     teardown,
+    inject,
     json_output,
     anvil_ports,
     gateway_host,
@@ -1370,6 +1382,12 @@ def strategy_test(
     gateway's token. Without --no-gateway, ManagedGateway boots a fresh Anvil per
     invocation.
 
+    Pass --inject to seed synthetic market conditions (prices / balances /
+    indicators) into the MarketSnapshot decide() consumes, so condition-triggered
+    decision logic runs instead of being force-action short-circuited (VIB-5529).
+    Used alone (no --actions), --inject runs one natural decide() iteration so the
+    real condition branch executes.
+
     Examples:
 
         almanak strat test --actions supply --teardown --json
@@ -1377,10 +1395,30 @@ def strategy_test(
         almanak strat test --actions supply,withdraw    # no teardown
         almanak strat test --teardown                   # teardown only (no force_actions)
         almanak strat test --no-gateway --actions open --teardown    # reuse sidecar gateway
+        almanak strat test --inject '{"indicators": {"rsi": {"WETH": 25}}}'   # RSI oversold
+        almanak strat test --inject '{"prices": {"USDC": "0.95"}}'            # stablecoin depeg
+        almanak strat test --inject scenario.json --json                     # from a file
     """
     parsed_actions = [a.strip() for a in (actions or "").split(",") if a.strip()]
-    if not parsed_actions and not teardown:
-        raise click.ClickException("strat test needs at least one of: --actions <csv> or --teardown")
+
+    parsed_inject = None
+    if inject:
+        from almanak.framework.cli._scenario import ScenarioParseError, parse_scenario
+
+        try:
+            parsed_inject = parse_scenario(inject)
+        except ScenarioParseError as e:
+            raise click.ClickException(str(e)) from e
+
+    if not parsed_actions and not teardown and parsed_inject is None:
+        raise click.ClickException("strat test needs at least one of: --actions <csv>, --inject <json>, or --teardown")
+
+    # With --inject and no explicit --actions, run a single natural
+    # (force_action="") iteration so decide() executes its real condition
+    # branches against the injected snapshot (VIB-5529). "" is the established
+    # sentinel for "no forced action — run real decide()".
+    if parsed_inject is not None and not parsed_actions:
+        parsed_actions = [""]
 
     # Match strategy_run() — load strategy-local .env through the boundary
     # helper so test runs see the same environment overrides the production
@@ -1478,6 +1516,7 @@ def strategy_test(
             anvil_ports=anvil_ports,
             test_actions=parsed_actions,
             test_json=json_output,
+            test_inject=parsed_inject,
             fresh=True,
         )
     except click.Abort:

@@ -1401,6 +1401,7 @@ def run(  # noqa: C901
     # without duplicating it. Do not set from the CLI.
     test_actions: list[str] | None = None,
     test_json: bool = False,
+    test_inject: Any | None = None,
 ) -> None:
     """
     Run a strategy from its working directory.
@@ -1601,6 +1602,7 @@ def run(  # noqa: C901
         once=once,
         teardown_after=teardown_after,
         test_json=test_json,
+        test_inject=test_inject,
         runner=runner,
         strategy_instance=strategy_instance,
         state_manager=state_manager,

@@ -822,6 +822,14 @@ class StrategyRunner:
         self._decide_in_progress = False  # Guard against overlapping decide() calls after timeout
         self._decide_timed_out_at: float | None = None  # Monotonic timestamp of last timeout
 
+        # VIB-5529: optional, opt-in post-build snapshot hook. When set (only by
+        # the ``almanak strat test --inject`` lifecycle), it is invoked with the
+        # freshly-built ``MarketSnapshot`` each iteration AFTER price pre-warm, so
+        # synthetic market conditions can be seeded and the strategy's real
+        # condition branches (indicator / price / depeg / drawdown) run instead of
+        # being force-action short-circuited. Production runs never set it.
+        self._snapshot_override_hook: Callable[[Any], None] | None = None
+
         # Detect if we're in multi-chain mode
         self._is_multi_chain = isinstance(execution_orchestrator, MultiChainOrchestrator)
 
@@ -1579,6 +1587,23 @@ class StrategyRunner:
         # only meaningful for failures that occurred during decide() itself.
         if hasattr(market, "clear_critical_data_failures"):
             market.clear_critical_data_failures()
+
+        # Step 1d: Apply opt-in synthetic market conditions (VIB-5529). Runs
+        # LAST so injected prices/balances/indicators win over pre-warmed cache
+        # and provider reads, letting the strategy's real condition branches run
+        # under `almanak strat test --inject`. Only set by the test lifecycle —
+        # `None` (the production default) is a no-op.
+        if self._snapshot_override_hook is not None:
+            try:
+                self._snapshot_override_hook(market)
+            except Exception as e:
+                logger.error(f"Snapshot override hook failed for {deployment_id}: {e}")
+                return self._create_error_result(
+                    deployment_id,
+                    IterationStatus.DATA_ERROR,
+                    f"Snapshot override hook failed: {e}",
+                    state.start_time,
+                )
 
         return None
 

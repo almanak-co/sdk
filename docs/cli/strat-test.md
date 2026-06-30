@@ -15,6 +15,12 @@ Run a force-action lifecycle test for a strategy on a managed Anvil fork.
     gateway's token. Without --no-gateway, ManagedGateway boots a fresh Anvil per
     invocation.
 
+    Pass --inject to seed synthetic market conditions (prices / balances /
+    indicators) into the MarketSnapshot decide() consumes, so condition-triggered
+    decision logic runs instead of being force-action short-circuited (VIB-5529).
+    Used alone (no --actions), --inject runs one natural decide() iteration so the
+    real condition branch executes.
+
     Examples:
 
         almanak strat test --actions supply --teardown --json
@@ -22,6 +28,9 @@ Run a force-action lifecycle test for a strategy on a managed Anvil fork.
         almanak strat test --actions supply,withdraw    # no teardown
         almanak strat test --teardown                   # teardown only (no force_actions)
         almanak strat test --no-gateway --actions open --teardown    # reuse sidecar gateway
+        almanak strat test --inject '{"indicators": {"rsi": {"WETH": 25}}}'   # RSI oversold
+        almanak strat test --inject '{"prices": {"USDC": "0.95"}}'            # stablecoin depeg
+        almanak strat test --inject scenario.json --json                     # from a file
     
 
 ## Usage
@@ -63,6 +72,13 @@ Usage: almanak strat test [OPTIONS]
     * Default: `False`
     * Usage: `--teardown`
     After the action sequence completes, run a teardown iteration that closes any open positions via the strategy's generate_teardown_intents().
+
+
+* `inject`:
+    * Type: STRING
+    * Default: `None`
+    * Usage: `--inject`
+    Seed synthetic market conditions into the MarketSnapshot decide() consumes, so condition-triggered logic runs (VIB-5529). Inline JSON or a path to a .json file: '{"prices": {"USDC": "0.95"}, "balances": {"USDC": "10000"}, "indicators": {"rsi": {"WETH": 25}}}'. Without --actions, this exercises the real condition branches (depeg = off-peg price; drawdown = lowered price/balance). Overrides win over live provider reads.
 
 
 * `json_output`:
@@ -126,13 +142,23 @@ Usage: almanak strat test [OPTIONS]
   match the gateway's token. Without --no-gateway, ManagedGateway boots a
   fresh Anvil per invocation.
 
+  Pass --inject to seed synthetic market conditions (prices / balances /
+  indicators) into the MarketSnapshot decide() consumes, so condition-
+  triggered decision logic runs instead of being force-action short-circuited
+  (VIB-5529). Used alone (no --actions), --inject runs one natural decide()
+  iteration so the real condition branch executes.
+
   Examples:
 
       almanak strat test --actions supply --teardown --json     almanak strat
       test --actions open,collect --teardown     almanak strat test --actions
       supply,withdraw    # no teardown     almanak strat test --teardown
       # teardown only (no force_actions)     almanak strat test --no-gateway
-      --actions open --teardown    # reuse sidecar gateway
+      --actions open --teardown    # reuse sidecar gateway     almanak strat
+      test --inject '{"indicators": {"rsi": {"WETH": 25}}}'   # RSI oversold
+      almanak strat test --inject '{"prices": {"USDC": "0.95"}}'            #
+      stablecoin depeg     almanak strat test --inject scenario.json --json
+      # from a file
 
 Options:
   -d, --working-dir PATH  Working directory containing the strategy files.
@@ -149,6 +175,15 @@ Options:
   --teardown              After the action sequence completes, run a teardown
                           iteration that closes any open positions via the
                           strategy's generate_teardown_intents().
+  --inject TEXT           Seed synthetic market conditions into the
+                          MarketSnapshot decide() consumes, so condition-
+                          triggered logic runs (VIB-5529). Inline JSON or a
+                          path to a .json file: '{"prices": {"USDC": "0.95"},
+                          "balances": {"USDC": "10000"}, "indicators": {"rsi":
+                          {"WETH": 25}}}'. Without --actions, this exercises
+                          the real condition branches (depeg = off-peg price;
+                          drawdown = lowered price/balance). Overrides win
+                          over live provider reads.
   --json                  Emit a structured JSON result on stdout. The
                           structured payload is the LAST top-level JSON object
                           in stdout — startup/setup diagnostics from the

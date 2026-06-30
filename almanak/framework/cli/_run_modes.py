@@ -425,6 +425,7 @@ def _execute_run_mode(
     max_iterations: int | None,
     reset_fork: bool,
     managed_gateway: Any,
+    test_inject: Any | None = None,
 ) -> int:
     """Dispatch to the lifecycle, once, or continuous execution lane."""
     if test_actions is not None:
@@ -436,6 +437,7 @@ def _execute_run_mode(
             actions=test_actions,
             teardown=teardown_after,
             json_output=test_json,
+            inject=test_inject,
         )
 
     if once:
@@ -695,6 +697,7 @@ def _run_test_lifecycle(  # noqa: C901
     actions: list[str],
     teardown: bool,
     json_output: bool,
+    inject: Any | None = None,
 ) -> int:
     """Execute a force-action lifecycle test.
 
@@ -703,6 +706,11 @@ def _run_test_lifecycle(  # noqa: C901
     followed by a teardown iteration. State (position id, on-chain side
     effects, runner cycle counter) flows through naturally because all
     iterations share one strategy instance.
+
+    When ``inject`` (a :class:`ScenarioOverrides`) is supplied, a post-build
+    snapshot hook seeds the synthetic market conditions into every iteration's
+    ``MarketSnapshot`` (VIB-5529), so condition-triggered ``decide()`` branches
+    run instead of being force-action short-circuited.
 
     Stops on the first failed iteration (fail-fast). Always runs cleanup.
 
@@ -762,6 +770,21 @@ def _run_test_lifecycle(  # noqa: C901
         try:
             runner.setup_gateway_integration(strategy_instance)
             gateway_integration_ready = True
+
+            # VIB-5529: register the synthetic market-condition injector so each
+            # iteration's MarketSnapshot is seeded before decide() runs. Done
+            # after gateway integration so the snapshot the runner builds carries
+            # live providers; the injected overrides win because the snapshot's
+            # read caches are consulted before any provider call.
+            if inject is not None:
+                from ._scenario import apply_scenario
+
+                def _override_hook(market: Any) -> None:
+                    applied = apply_scenario(market, inject)
+                    if applied and not json_output:
+                        click.echo(f"  injected: {', '.join(applied)}")
+
+                runner._snapshot_override_hook = _override_hook
 
             # Mirror _run_once state hooks: restore persisted strategy state and
             # copy-trading cursor before any iteration, so test runs see the same
