@@ -15,6 +15,7 @@ real control flow inside ``_run_backtest`` while staying fast and deterministic.
 """
 
 from __future__ import annotations
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -25,6 +26,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from almanak.framework.backtesting.models import (
+
+
     BacktestEngine,
     IntentType,
     ParameterSourceTracker,
@@ -43,6 +46,8 @@ from almanak.framework.backtesting.pnl.mev_simulator import MEVSimulationResult
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 from almanak.framework.backtesting.pnl.position_models import PositionType
 from almanak.framework.backtesting.pnl.providers.gas import GasPrice
+
+USDC_ARBITRUM_REF = ("arbitrum", "0xaf88d065e77c8cc2239327c5edb3a432268e5831")
 
 # =============================================================================
 # Mock data providers & strategies
@@ -72,6 +77,7 @@ class TickingDataProvider:
                     "WETH": eth_price,
                     "ETH": eth_price,
                     "USDC": Decimal("1"),
+                    USDC_ARBITRUM_REF: Decimal("1"),
                 },
                 chain="arbitrum",
                 block_number=1000 + i,
@@ -116,6 +122,7 @@ class PartialCoverageDataProvider:
             prices: dict[str, Decimal] = {}
             if "USDC" in self.supplied_tokens:
                 prices["USDC"] = Decimal("1")
+                prices[USDC_ARBITRUM_REF] = Decimal("1")
             if "WETH" in self.supplied_tokens:
                 prices["WETH"] = Decimal("3000")
             yield (
@@ -155,6 +162,7 @@ class RaisingDataProvider:
                 "WETH": Decimal("3000"),
                 "ETH": Decimal("3000"),
                 "USDC": Decimal("1"),
+                USDC_ARBITRUM_REF: Decimal("1"),
             },
             chain="arbitrum",
             block_number=1000,
@@ -230,7 +238,7 @@ def make_config(start_end_times):
         kwargs: dict[str, Any] = {
             "start_time": start,
             "end_time": end,
-            "initial_capital_usd": Decimal("10000"),
+            "token_funding": _pnl_token_funding(Decimal("10000"), chain=overrides.get("chain", "arbitrum")),
             "tokens": ["WETH", "USDC"],
             "preflight_validation": False,  # Most tests opt out; targeted tests opt in.
             "fail_on_preflight_error": True,
@@ -274,7 +282,7 @@ class TestRunBacktestHappyPath:
         assert result.deployment_id == "hold_strategy"
         assert result.start_time == config.start_time
         assert result.end_time == config.end_time
-        assert result.initial_capital_usd == Decimal("10000")
+        assert result.initial_portfolio_value_usd == Decimal("10000")
         assert result.chain == config.chain
         assert result.backtest_id is not None
         assert result.config_hash is not None
@@ -498,8 +506,8 @@ class TestRunBacktestErrorHandling:
         assert result.error is None
         assert len(result.trades) == 0
         assert len(result.equity_curve) == 0
-        # With no equity points, final value falls back to initial capital.
-        assert result.final_capital_usd == config.initial_capital_usd
+        # With no first tick, the token-funded startup value cannot be derived.
+        assert result.final_capital_usd == Decimal("0")
 
 
 # =============================================================================
@@ -954,7 +962,7 @@ def _gas_config(**overrides: Any) -> PnLBacktestConfig:
     base: dict[str, Any] = {
         "start_time": datetime(2024, 1, 1, tzinfo=UTC),
         "end_time": datetime(2024, 1, 2, tzinfo=UTC),
-        "initial_capital_usd": Decimal("10000"),
+        "token_funding": _pnl_token_funding(Decimal("10000"), chain=overrides.get("chain", "arbitrum")),
     }
     base.update(overrides)
     return PnLBacktestConfig(**base)

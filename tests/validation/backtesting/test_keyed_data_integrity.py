@@ -15,6 +15,7 @@ Protocol source: docs/internal/reference/backtesting/Backtesting-TrustTest.md
 """
 
 from __future__ import annotations
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 import asyncio
 import os
@@ -25,6 +26,8 @@ import pytest
 
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.engine import (
+
+
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktester,
@@ -86,7 +89,7 @@ def _run_seeded_backtest() -> object:
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 3, tzinfo=UTC),
         interval_seconds=3600,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         include_gas_costs=False,
         random_seed=42,

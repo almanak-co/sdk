@@ -42,6 +42,7 @@ from almanak.framework.cli.backtest.pnl import (
     _emit_missing_volume_hint_for_result,
     _run_backtest,
 )
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -53,7 +54,7 @@ def _make_pnl_config() -> PnLBacktestConfig:
         start_time=datetime(2025, 11, 1, tzinfo=UTC),
         end_time=datetime(2025, 11, 15, tzinfo=UTC),
         interval_seconds=3600,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000"), chain="arbitrum"),
         chain="arbitrum",
         tokens=["WETH", "USDC"],
     )
@@ -95,6 +96,13 @@ class _DummyStrategy:
 
     def decide(self, market: Any) -> None:
         return None
+
+
+def _strategy_config(deployment_id: str = "dummy_lp_strategy") -> dict[str, Any]:
+    return {
+        "deployment_id": deployment_id,
+        "token_funding": _pnl_token_funding(Decimal("10000"), chain="arbitrum"),
+    }
 
 
 @pytest.fixture
@@ -347,7 +355,7 @@ class TestEmitMissingVolumeHintForResult:
             ),
             patch(
                 "almanak.framework.cli.backtest.pnl.load_strategy_config",
-                return_value={"deployment_id": "dummy_lp_strategy"},
+                return_value=_strategy_config(),
             ),
             patch("almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"),
             patch("almanak.framework.cli.backtest.pnl._print_benchmark_comparison"),
@@ -384,10 +392,10 @@ def _invoke_pnl(cli_runner: CliRunner, extra_args: list[str]) -> tuple[Any, Magi
             "almanak.framework.cli.backtest.pnl.get_strategy",
             return_value=_DummyStrategy,
         ),
-        patch(
-            "almanak.framework.cli.backtest.pnl.load_strategy_config",
-            return_value={"deployment_id": "dummy_lp_strategy"},
-        ),
+            patch(
+                "almanak.framework.cli.backtest.pnl.load_strategy_config",
+                return_value=_strategy_config(),
+            ),
         patch("almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"),
         patch("almanak.framework.cli.backtest.pnl._print_benchmark_comparison"),
         patch("almanak.framework.cli.backtest.pnl.PnLBacktester") as mock_backtester,

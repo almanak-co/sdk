@@ -30,6 +30,7 @@ from almanak.framework.backtesting.pnl.data_provider import (
 )
 from almanak.framework.backtesting.pnl.engine import PnLBacktester
 from almanak.framework.intents import HoldIntent
+from tests.backtesting_funding import pnl_token_funding, provider_symbol
 
 # =============================================================================
 # Mock Data Providers with Different Capabilities
@@ -61,9 +62,7 @@ class CurrentOnlyDataProvider:
         """Return CURRENT_ONLY capability - no historical data access."""
         return HistoricalDataCapability.CURRENT_ONLY
 
-    async def iterate(
-        self, config: HistoricalDataConfig
-    ) -> AsyncIterator[tuple[datetime, MarketState]]:
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         """Generate market states for the backtest period."""
         current_time = config.start_time
         while current_time <= config.end_time:
@@ -81,7 +80,7 @@ class CurrentOnlyDataProvider:
 
     async def get_latest_price(self, token: str) -> Decimal | None:
         """Get latest price for a token."""
-        return self._prices.get(token.upper())
+        return self._prices.get(provider_symbol(token))
 
     async def get_historical_ohlcv(
         self,
@@ -123,19 +122,14 @@ class FullHistoryDataProvider:
         """Return FULL capability - has historical data access."""
         return HistoricalDataCapability.FULL
 
-    async def iterate(
-        self, config: HistoricalDataConfig
-    ) -> AsyncIterator[tuple[datetime, MarketState]]:
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         """Generate market states for the backtest period."""
         current_time = config.start_time
         while current_time <= config.end_time:
-            # Simulate missing/failed lookups for coverage testing
-            if self._fail_lookups:
-                # Return empty prices to simulate lookup failures
-                prices: dict[str, Decimal] = {}
-            else:
-                # Filter out explicitly missing tokens
-                prices = {k: v for k, v in self._prices.items() if k not in self._missing_tokens}
+            # Filter out explicitly missing tokens. Coverage failures are modeled
+            # through historical lookups so token-funded startup can still value
+            # the first tick.
+            prices = {k: v for k, v in self._prices.items() if k not in self._missing_tokens}
 
             # Use first chain from config, default to arbitrum
             chain = config.chains[0] if config.chains else "arbitrum"
@@ -151,9 +145,10 @@ class FullHistoryDataProvider:
 
     async def get_latest_price(self, token: str) -> Decimal | None:
         """Get latest price for a token."""
-        if token.upper() in self._missing_tokens:
+        symbol = provider_symbol(token)
+        if symbol in self._missing_tokens:
             return None
-        return self._prices.get(token.upper())
+        return self._prices.get(symbol)
 
     async def get_historical_ohlcv(
         self,
@@ -163,16 +158,17 @@ class FullHistoryDataProvider:
         interval: str = "1h",
     ) -> list[OHLCV]:
         """Return historical data for a token."""
-        if token.upper() in self._missing_tokens or self._fail_lookups:
+        symbol = provider_symbol(token)
+        if symbol in self._missing_tokens or self._fail_lookups:
             return []
         # Return mock historical data
         return [
             OHLCV(
                 timestamp=start_time,
-                open=self._prices.get(token.upper(), Decimal("1")),
-                high=self._prices.get(token.upper(), Decimal("1")),
-                low=self._prices.get(token.upper(), Decimal("1")),
-                close=self._prices.get(token.upper(), Decimal("1")),
+                open=self._prices.get(symbol, Decimal("1")),
+                high=self._prices.get(symbol, Decimal("1")),
+                low=self._prices.get(symbol, Decimal("1")),
+                close=self._prices.get(symbol, Decimal("1")),
                 volume=Decimal("1000000"),
             )
         ]
@@ -209,7 +205,7 @@ def base_config() -> PnLBacktestConfig:
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 2, tzinfo=UTC),  # 1 day backtest
         interval_seconds=3600,  # 1 hour intervals
-        initial_capital_usd=Decimal("10000"),
+        token_funding=pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         chain="arbitrum",
         institutional_mode=False,  # Default to non-institutional
@@ -223,7 +219,7 @@ def institutional_config() -> PnLBacktestConfig:
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 2, tzinfo=UTC),  # 1 day backtest
         interval_seconds=3600,  # 1 hour intervals
-        initial_capital_usd=Decimal("10000"),
+        token_funding=pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         chain="arbitrum",
         institutional_mode=True,  # Enable institutional mode
@@ -261,7 +257,7 @@ class TestInstitutionalModeConfigEnforcement:
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 2, tzinfo=UTC),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             institutional_mode=True,
             strict_reproducibility=False,  # Should be overridden
         )
@@ -272,7 +268,7 @@ class TestInstitutionalModeConfigEnforcement:
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 2, tzinfo=UTC),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             institutional_mode=True,
             allow_degraded_data=True,  # Should be overridden
         )
@@ -283,7 +279,7 @@ class TestInstitutionalModeConfigEnforcement:
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 2, tzinfo=UTC),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             institutional_mode=True,
             allow_hardcoded_fallback=True,  # Should be overridden
         )
@@ -294,7 +290,7 @@ class TestInstitutionalModeConfigEnforcement:
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 2, tzinfo=UTC),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             institutional_mode=True,
             require_symbol_mapping=False,  # Should be overridden
         )
@@ -305,7 +301,7 @@ class TestInstitutionalModeConfigEnforcement:
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 2, tzinfo=UTC),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             institutional_mode=True,
             min_data_coverage=Decimal("0.50"),  # Should be overridden to 0.98
         )
@@ -327,7 +323,7 @@ class TestInstitutionalModeCurrentOnlyProvider:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 6, tzinfo=UTC),  # 6 hours
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             institutional_mode=False,  # Don't fail, just track violations
         )
@@ -360,7 +356,7 @@ class TestInstitutionalModeCurrentOnlyProvider:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 6, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             institutional_mode=False,
         )
@@ -395,7 +391,7 @@ class TestInstitutionalModeDataCoverage:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 6, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             institutional_mode=False,  # Non-institutional for simple test
         )
@@ -419,16 +415,16 @@ class TestInstitutionalModeDataCoverage:
         mock_strategy: MockHoldStrategy,
     ) -> None:
         """Verify low data coverage triggers compliance violation."""
-        # Create provider that fails lookups to simulate low coverage
+        # Include WBTC as an expected token without provider prices to simulate
+        # low coverage without blocking token-funded startup valuation.
         provider = FullHistoryDataProvider()
-        provider._fail_lookups = True
 
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 6, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
-            tokens=["WETH", "USDC"],
+            token_funding=pnl_token_funding(Decimal("10000")),
+            tokens=["WETH", "USDC", "WBTC"],
             institutional_mode=False,  # Don't fail, just track violations
             min_data_coverage=Decimal("0.98"),
         )
@@ -455,16 +451,16 @@ class TestInstitutionalModeDataCoverage:
         mock_strategy: MockHoldStrategy,
     ) -> None:
         """Verify institutional_mode=True raises error on low coverage."""
-        # Create provider that fails lookups
+        # Include WBTC as an expected token without provider prices to simulate
+        # low coverage without blocking token-funded startup valuation.
         provider = FullHistoryDataProvider()
-        provider._fail_lookups = True
 
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 6, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
-            tokens=["WETH", "USDC"],
+            token_funding=pnl_token_funding(Decimal("10000")),
+            tokens=["WETH", "USDC", "WBTC"],
             institutional_mode=True,  # Should raise error
         )
 
@@ -496,7 +492,7 @@ class TestComplianceViolationTracking:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 6, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             institutional_mode=False,
         )
@@ -529,7 +525,7 @@ class TestComplianceViolationTracking:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 6, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             institutional_mode=False,
         )
@@ -566,7 +562,7 @@ class TestDataSourceCapabilities:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 6, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             institutional_mode=False,
         )
@@ -595,7 +591,7 @@ class TestDataSourceCapabilities:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 6, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             institutional_mode=False,
         )
@@ -628,7 +624,7 @@ class TestDataQualityReport:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 6, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             institutional_mode=False,
         )
@@ -657,7 +653,7 @@ class TestDataQualityReport:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 6, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             institutional_mode=False,
         )

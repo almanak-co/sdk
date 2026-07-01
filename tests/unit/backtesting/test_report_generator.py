@@ -107,7 +107,7 @@ def _result_with_trades() -> BacktestResult:
         end_time=datetime(2024, 1, 2, tzinfo=UTC),
         metrics=metrics,
         trades=trades,
-        initial_capital_usd=Decimal("10000"),
+        initial_portfolio_value_usd=Decimal("10000"),
         final_capital_usd=Decimal("11500.25"),
         chain="arbitrum",
         run_started_at=datetime(2024, 1, 2, 1, 0, tzinfo=UTC),

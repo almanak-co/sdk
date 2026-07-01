@@ -21,6 +21,7 @@ from almanak.framework.backtesting.pnl.data_provider import (
     OHLCV,
     HistoricalDataConfig,
     MarketState,
+    token_ref_provider_symbol,
 )
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
@@ -45,6 +46,12 @@ from almanak.framework.backtesting.scenarios.crisis_runner import (
 # =============================================================================
 # Deterministic data provider for Base crisis periods
 # =============================================================================
+
+
+def _provider_symbol(token: Any, chain: str) -> str:
+    if isinstance(token, tuple):
+        return token_ref_provider_symbol(token, chain, unwrap_wrapped_native=False) or token[1].upper()
+    return str(token).upper()
 
 
 class BaseCrisisDataProvider:
@@ -102,7 +109,7 @@ class BaseCrisisDataProvider:
         return prices
 
     async def get_price(self, token: str, timestamp: datetime) -> Decimal:
-        token = token.upper()
+        token = _provider_symbol(token, "base")
         if token in ("USDC", "USDT", "DAI", "USDBC"):
             return Decimal("1")
         delta = timestamp - self._start_time
@@ -141,10 +148,11 @@ class BaseCrisisDataProvider:
         while current <= config.end_time:
             prices = {}
             for token in config.tokens:
+                symbol = _provider_symbol(token, "base")
                 try:
-                    prices[token.upper()] = await self.get_price(token, current)
+                    prices[symbol] = await self.get_price(token, current)
                 except ValueError:
-                    prices[token.upper()] = Decimal("1")
+                    prices[symbol] = Decimal("1")
             market_state = MarketState(
                 timestamp=current,
                 prices=prices,
@@ -301,6 +309,18 @@ def _make_backtester(
     )
 
 
+def _crisis_token_funding(amount: Decimal) -> list[dict[str, str]]:
+    return [
+        {
+            "symbol": "USDC",
+            "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "chain": "base",
+            "amount": str(amount),
+            "amount_type": "token",
+        }
+    ]
+
+
 # =============================================================================
 # Tests: Hold baseline on Base
 # =============================================================================
@@ -320,7 +340,7 @@ class TestCrisisSwapBaseHoldBaseline:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="base",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -344,7 +364,7 @@ class TestCrisisSwapBaseHoldBaseline:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="base",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -382,7 +402,7 @@ class TestCrisisAerodromeTrading:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="base",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -411,7 +431,7 @@ class TestCrisisAerodromeTrading:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="base",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -439,7 +459,7 @@ class TestCrisisAerodromeTrading:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="base",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -472,7 +492,7 @@ class TestCrisisAerodromeTrading:
                 strategy=strategy,
                 scenario=scenario,
                 backtester=backtester,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=_crisis_token_funding(Decimal("10000")),
                 chain="base",
                 tokens=["WETH", "USDC"],
                 include_gas_costs=False,
@@ -507,7 +527,7 @@ class TestCrisisMetricsBase:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="base",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -543,7 +563,7 @@ class TestCrisisMetricsBase:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="base",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -567,7 +587,7 @@ class TestCrisisMetricsBase:
                 strategy=strategy,
                 scenario=scenario,
                 backtester=backtester,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=_crisis_token_funding(Decimal("10000")),
                 chain="base",
                 tokens=["WETH", "USDC"],
                 include_gas_costs=False,
@@ -603,7 +623,7 @@ class TestCrisisComparisonBase:
             strategy=crisis_strategy,
             scenario=scenario,
             backtester=crisis_backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="base",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -626,7 +646,7 @@ class TestCrisisComparisonBase:
             strategy=normal_strategy,
             scenario=normal_scenario,
             backtester=normal_backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="base",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -651,7 +671,7 @@ class TestCrisisConfigBase:
         """CrisisBacktestConfig should accept base as chain."""
         config = CrisisBacktestConfig(
             scenario=BLACK_THURSDAY,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="base",
             tokens=["WETH", "USDC"],
             gas_price_gwei=Decimal("0.05"),  # Base L2 gas price
@@ -668,7 +688,7 @@ class TestCrisisConfigBase:
         """Config round-trips through serialization with Base settings."""
         config = CrisisBacktestConfig(
             scenario=FTX_COLLAPSE,
-            initial_capital_usd=Decimal("50000"),
+            token_funding=_crisis_token_funding(Decimal("50000")),
             chain="base",
             tokens=["WETH", "USDC"],
             gas_price_gwei=Decimal("0.05"),
@@ -700,7 +720,7 @@ class TestCrisisMultipleScenariosBase:
                 strategy=strategy,
                 scenario=scenario,
                 backtester=backtester,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=_crisis_token_funding(Decimal("10000")),
                 chain="base",
                 tokens=["WETH", "USDC"],
                 include_gas_costs=False,
@@ -725,7 +745,7 @@ class TestCrisisMultipleScenariosBase:
             strategy=strategy,
             scenarios=scenarios,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="base",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -751,7 +771,7 @@ class TestCrisisResultBase:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="base",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -785,7 +805,7 @@ class TestCrisisResultBase:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="base",
             tokens=["WETH", "USDC"],
             include_gas_costs=True,

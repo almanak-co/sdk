@@ -16,7 +16,7 @@ Example:
     config = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1),
         end_time=datetime(2024, 6, 1),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=[...],
     )
 
     backtester = PnLBacktester(data_provider, fee_models, slippage_models)

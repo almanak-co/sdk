@@ -41,6 +41,9 @@ from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataConfig,
     MarketState,
+    TokenRef,
+    normalize_token_ref,
+    token_ref_display,
 )
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
@@ -398,6 +401,12 @@ START = datetime(2024, 1, 1, tzinfo=UTC)
 
 #: Default initial capital for matrix runs.
 INITIAL_CAPITAL = Decimal("10000")
+USDC_ARBITRUM = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+USDC_POLYGON = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
+USDC_BY_CHAIN = {
+    "arbitrum": USDC_ARBITRUM,
+    "polygon": USDC_POLYGON,
+}
 
 TICK_SECONDS = 3600
 
@@ -410,26 +419,32 @@ class SyntheticPriceProvider:
     implement), not a mock of engine behaviour.
     """
 
-    def __init__(self, price_series: dict[str, list[Decimal]]) -> None:
-        self._series = {token.upper(): list(series) for token, series in price_series.items()}
+    def __init__(self, price_series: dict[TokenRef, list[Decimal]]) -> None:
+        self._series = {
+            token_ref_display(normalize_token_ref(token, "arbitrum")).upper(): list(series)
+            for token, series in price_series.items()
+        }
 
     async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         current = config.start_time
         index = 0
         while current <= config.end_time:
-            prices: dict[str, Decimal] = {}
+            chain = config.chains[0] if config.chains else "arbitrum"
+            prices: dict[TokenRef, Decimal] = {}
             for token in config.tokens:
-                series = self._series.get(token.upper())
+                normalized_token = normalize_token_ref(token, chain)
+                series_key = token_ref_display(normalized_token).upper()
+                series = self._series.get(series_key)
                 if series:
-                    prices[token.upper()] = series[min(index, len(series) - 1)]
+                    prices[normalized_token] = series[min(index, len(series) - 1)]
                 else:
-                    prices[token.upper()] = Decimal("1")
+                    prices[normalized_token] = Decimal("1")
             yield (
                 current,
                 MarketState(
                     timestamp=current,
                     prices=prices,
-                    chain=config.chains[0] if config.chains else "arbitrum",
+                    chain=chain,
                     block_number=1_000_000 + index,
                     gas_price_gwei=Decimal("30"),
                 ),
@@ -447,7 +462,7 @@ class SyntheticPriceProvider:
 
     @property
     def supported_chains(self) -> list[str]:
-        return ["arbitrum"]
+        return ["arbitrum", "polygon"]
 
     @property
     def min_timestamp(self) -> datetime:
@@ -544,17 +559,18 @@ class PerpCloseDuck:
     protocol: str = "gmx"
 
 
-def flat_series(n_ticks: int, weth: str = "2000") -> dict[str, list[Decimal]]:
+def flat_series(n_ticks: int, weth: str = "2000") -> dict[TokenRef, list[Decimal]]:
     """Flat WETH/USDC price series: the conservation baseline."""
     return {
         "WETH": [Decimal(weth)] * n_ticks,
         "USDC": [Decimal("1")] * n_ticks,
+        ("arbitrum", USDC_ARBITRUM): [Decimal("1")] * n_ticks,
     }
 
 
 def run_backtest(
     strategy: Any,
-    price_series: dict[str, list[Decimal]],
+    price_series: dict[TokenRef, list[Decimal]],
     hours: int,
     *,
     fee_pct: Decimal = Decimal("0"),
@@ -567,19 +583,34 @@ def run_backtest(
     Defaults isolate conservation: zero fees/slippage/gas and immediate
     (next-tick) execution. Cells that test cost accounting override them.
     """
+    funding_chain = str(config_overrides.get("chain", "arbitrum")).lower()
+    funding_address = USDC_BY_CHAIN[funding_chain]
+    provider_series = dict(price_series)
+    provider_series.setdefault(
+        (funding_chain, funding_address),
+        list(provider_series.get("USDC", [Decimal("1")] * (hours + 1))),
+    )
     config_kwargs: dict[str, Any] = {
         "start_time": START,
         "end_time": START + timedelta(hours=hours),
         "interval_seconds": TICK_SECONDS,
-        "initial_capital_usd": INITIAL_CAPITAL,
-        "tokens": sorted(price_series),
+        "token_funding": [
+            {
+                "symbol": "USDC",
+                "address": funding_address,
+                "chain": funding_chain,
+                "amount": str(INITIAL_CAPITAL),
+                "amount_type": "token",
+            }
+        ],
+        "tokens": list(provider_series),
         "include_gas_costs": False,
         "inclusion_delay_blocks": 0,
     }
     config_kwargs.update(config_overrides)
     config = PnLBacktestConfig(**config_kwargs)
     backtester = PnLBacktester(
-        data_provider=SyntheticPriceProvider(price_series),
+        data_provider=SyntheticPriceProvider(provider_series),
         fee_models={"default": DefaultFeeModel(fee_pct=fee_pct)},
         slippage_models={"default": DefaultSlippageModel(slippage_pct=slippage_pct)},
         strategy_type=strategy_type,

@@ -29,6 +29,7 @@ from almanak.framework.backtesting.pnl.engine import (
     DefaultSlippageModel,
     PnLBacktester,
 )
+from tests.backtesting_funding import pnl_token_funding, provider_symbol
 
 # =============================================================================
 # Deterministic helpers (same pattern as test_pnl_backtester_integration.py)
@@ -48,20 +49,18 @@ class DeterministicDataProvider:
         self._start_time = start_time
         self._interval_seconds = interval_seconds
 
-    async def get_price(self, token: str, timestamp: datetime) -> Decimal:
-        token = token.upper()
-        if token not in self._price_series:
-            raise ValueError(f"No price series for {token}")
+    async def get_price(self, token: Any, timestamp: datetime) -> Decimal:
+        symbol = provider_symbol(token, "base")
+        if symbol not in self._price_series:
+            raise ValueError(f"No price series for {symbol}")
         delta = timestamp - self._start_time
         index = int(delta.total_seconds() / self._interval_seconds)
-        series = self._price_series[token]
+        series = self._price_series[symbol]
         if 0 <= index < len(series):
             return series[index]
         return series[-1] if index >= len(series) else series[0]
 
-    async def get_ohlcv(
-        self, token: str, start: datetime, end: datetime, interval_seconds: int = 3600
-    ) -> list[OHLCV]:
+    async def get_ohlcv(self, token: str, start: datetime, end: datetime, interval_seconds: int = 3600) -> list[OHLCV]:
         result = []
         current = start
         while current <= end:
@@ -85,7 +84,7 @@ class DeterministicDataProvider:
         while current <= config.end_time:
             prices = {}
             for token in config.tokens:
-                token_upper = token.upper()
+                token_upper = provider_symbol(token, config.chains[0] if config.chains else "base")
                 if token_upper in self._price_series:
                     series = self._price_series[token_upper]
                     prices[token_upper] = series[index] if index < len(series) else series[-1]
@@ -250,8 +249,9 @@ class TestLPPnLBacktestBase:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000"), chain="base"),
             tokens=["WETH", "USDC"],
+            chain="base",
             include_gas_costs=False,
             inclusion_delay_blocks=0,
         )
@@ -297,8 +297,9 @@ class TestLPPnLBacktestBase:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000"), chain="base"),
             tokens=["WETH", "USDC"],
+            chain="base",
             include_gas_costs=False,
             inclusion_delay_blocks=0,
         )
@@ -322,7 +323,7 @@ class TestLPPnLBacktestBase:
         assert len(result.equity_curve) == 25
         # With ETH rising ~20%, capital should increase (token appreciation)
         # but LP should underperform vs pure HODL due to IL
-        assert result.final_capital_usd > config.initial_capital_usd
+        assert result.final_capital_usd > result.initial_portfolio_value_usd
 
     @pytest.mark.asyncio
     async def test_lp_only_strategy_no_swaps(
@@ -345,8 +346,9 @@ class TestLPPnLBacktestBase:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=10),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("5000"),
+            token_funding=pnl_token_funding(Decimal("5000"), chain="base"),
             tokens=["WETH", "USDC"],
+            chain="base",
             include_gas_costs=False,
             inclusion_delay_blocks=0,
         )
@@ -388,8 +390,9 @@ class TestLPPnLBacktestBase:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000"), chain="base"),
             tokens=["WETH", "USDC"],
+            chain="base",
             include_gas_costs=True,
             gas_price_gwei=Decimal("0.01"),  # Base gas prices
             inclusion_delay_blocks=0,
@@ -441,8 +444,9 @@ class TestLPPnLBacktestBase:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=10),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("20000"),
+            token_funding=pnl_token_funding(Decimal("20000"), chain="base"),
             tokens=["WETH", "USDC"],
+            chain="base",
             include_gas_costs=False,
             inclusion_delay_blocks=0,
         )

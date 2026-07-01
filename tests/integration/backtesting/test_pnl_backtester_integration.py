@@ -32,6 +32,7 @@ from almanak.framework.backtesting.pnl.engine import (
     DefaultSlippageModel,
     PnLBacktester,
 )
+from tests.backtesting_funding import pnl_token_funding, provider_symbol
 
 # =============================================================================
 # Mock Data Provider for Deterministic Results
@@ -63,16 +64,16 @@ class DeterministicDataProvider:
         self._start_time = start_time
         self._interval_seconds = interval_seconds
 
-    async def get_price(self, token: str, timestamp: datetime) -> Decimal:
+    async def get_price(self, token: Any, timestamp: datetime) -> Decimal:
         """Get price for token at specific timestamp."""
-        token = token.upper()
-        if token not in self._price_series:
-            raise ValueError(f"No price series for {token}")
+        symbol = provider_symbol(token)
+        if symbol not in self._price_series:
+            raise ValueError(f"No price series for {symbol}")
 
         # Calculate index from timestamp
         delta = timestamp - self._start_time
         index = int(delta.total_seconds() / self._interval_seconds)
-        series = self._price_series[token]
+        series = self._price_series[symbol]
 
         if 0 <= index < len(series):
             return series[index]
@@ -114,16 +115,16 @@ class DeterministicDataProvider:
         while current <= config.end_time:
             prices = {}
             for token in config.tokens:
-                token = token.upper()
-                if token in self._price_series:
-                    series = self._price_series[token]
+                symbol = provider_symbol(token, config.chains[0] if config.chains else "arbitrum")
+                if symbol in self._price_series:
+                    series = self._price_series[symbol]
                     if index < len(series):
-                        prices[token] = series[index]
+                        prices[symbol] = series[index]
                     else:
-                        prices[token] = series[-1]
+                        prices[symbol] = series[-1]
                 else:
                     # Default stablecoin price
-                    prices[token] = Decimal("1")
+                    prices[symbol] = Decimal("1")
 
             market_state = MarketState(
                 timestamp=current,
@@ -324,7 +325,7 @@ class TestFullBacktestFlow:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,  # Immediate execution for simplicity
@@ -346,7 +347,7 @@ class TestFullBacktestFlow:
         assert result.engine == BacktestEngine.PNL
         assert result.error is None
         assert result.metrics.total_trades == 0
-        assert result.final_capital_usd == config.initial_capital_usd
+        assert result.final_capital_usd == result.initial_portfolio_value_usd
         assert result.metrics.total_return_pct == Decimal("0")
         assert len(result.equity_curve) == 25
 
@@ -371,7 +372,7 @@ class TestFullBacktestFlow:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
             gas_price_gwei=Decimal("30"),
@@ -428,7 +429,7 @@ class TestFullBacktestFlow:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=10),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
             gas_price_gwei=Decimal("30"),
@@ -494,7 +495,7 @@ class TestMetricsCalculation:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,
@@ -519,7 +520,7 @@ class TestMetricsCalculation:
         # Verify positive return from ETH appreciation
         assert result.success
         assert result.metrics.total_return_pct > Decimal("0")
-        assert result.final_capital_usd > config.initial_capital_usd
+        assert result.final_capital_usd > result.initial_portfolio_value_usd
 
     @pytest.mark.asyncio
     async def test_max_drawdown_calculation(
@@ -552,7 +553,7 @@ class TestMetricsCalculation:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,
@@ -613,7 +614,7 @@ class TestMetricsCalculation:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,
@@ -666,7 +667,7 @@ class TestMetricsCalculation:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,
@@ -706,7 +707,7 @@ class TestMetricsCalculation:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,
@@ -780,7 +781,7 @@ class TestEquityCurve:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
         )
 
@@ -817,7 +818,7 @@ class TestEquityCurve:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=10),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
         )
 
@@ -855,7 +856,7 @@ class TestEquityCurve:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,
@@ -905,7 +906,7 @@ class TestBacktestResultSerialization:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=5),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
             inclusion_delay_blocks=0,
@@ -960,7 +961,7 @@ class TestBacktestResultSerialization:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
         )
 
@@ -1004,7 +1005,7 @@ class TestGasCostTracking:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=10),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
             gas_price_gwei=Decimal("30"),
@@ -1058,7 +1059,7 @@ class TestGasCostTracking:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=5),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,  # Disabled
             inclusion_delay_blocks=0,
@@ -1102,7 +1103,7 @@ class TestInclusionDelay:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=10),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,  # No delay
@@ -1112,7 +1113,7 @@ class TestInclusionDelay:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=10),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=2,  # 2 block delay
@@ -1168,7 +1169,7 @@ class TestConfigHash:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
         )
 
@@ -1176,7 +1177,7 @@ class TestConfigHash:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
         )
 
@@ -1192,7 +1193,7 @@ class TestConfigHash:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
         )
 
@@ -1200,7 +1201,7 @@ class TestConfigHash:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("20000"),  # Different capital
+            token_funding=pnl_token_funding(Decimal("20000")),  # Different capital
             tokens=["WETH", "USDC"],
         )
 
@@ -1226,7 +1227,7 @@ class TestConfigHash:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=5),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
         )
 
@@ -1352,7 +1353,7 @@ class TestAdapterIntegration:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=5),  # 6 ticks (0-5)
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,
@@ -1469,7 +1470,7 @@ class TestAdapterIntegration:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=5),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,
@@ -1497,4 +1498,4 @@ class TestAdapterIntegration:
         # With a hold strategy and no positions, value_position is not called
         # (only called for non-spot positions when adapter is set)
         # The initial capital should be preserved
-        assert result.final_capital_usd == config.initial_capital_usd
+        assert result.final_capital_usd == result.initial_portfolio_value_usd

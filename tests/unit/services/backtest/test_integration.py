@@ -22,6 +22,7 @@ from almanak.framework.backtesting.models import (
     EquityPoint,
     TradeRecord,
 )
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 WETH_ATTRIBUTION_KEY = "arbitrum:0x123400000000000000000000000000000000abcd"
 
@@ -97,7 +98,7 @@ def _make_backtest_result(
         metrics=metrics,
         trades=trades,
         equity_curve=equity_curve,
-        initial_capital_usd=Decimal("10000"),
+        initial_portfolio_value_usd=Decimal("10000"),
         final_capital_usd=Decimal("10234.56"),
         chain="arbitrum",
         config={},
@@ -122,6 +123,7 @@ VALID_SWAP_REQUEST = {
         "parameters": {"from_token": "USDC", "to_token": "WETH", "amount_usd": "1000"},
     },
     "timeframe": {"start": "2025-01-01", "end": "2025-01-08"},
+    "token_funding": _pnl_token_funding("10000", chain="arbitrum"),
 }
 
 VALID_LP_REQUEST = {
@@ -138,6 +140,7 @@ VALID_LP_REQUEST = {
         },
     },
     "timeframe": {"start": "2025-01-01", "end": "2025-02-01"},
+    "token_funding": _pnl_token_funding("10000", chain="arbitrum"),
 }
 
 VALID_LEND_REQUEST = {
@@ -148,6 +151,7 @@ VALID_LEND_REQUEST = {
         "parameters": {"token": "USDC", "amount": "5000"},
     },
     "timeframe": {"start": "2025-01-01", "end": "2025-03-01"},
+    "token_funding": _pnl_token_funding("10000", chain="ethereum"),
 }
 
 
@@ -290,6 +294,7 @@ async def test_quick_backtest_eligible(client):
                     "action": "swap",
                     "parameters": {"from_token": "USDC", "to_token": "WETH"},
                 },
+                "token_funding": _pnl_token_funding("10000", chain="arbitrum"),
             },
         )
         assert resp.status_code == 200
@@ -317,6 +322,7 @@ async def test_quick_backtest_not_eligible(client):
                     "action": "swap",
                     "parameters": {},
                 },
+                "token_funding": _pnl_token_funding("10000", chain="arbitrum"),
             },
         )
         assert resp.status_code == 200
@@ -343,6 +349,7 @@ async def test_quick_backtest_with_custom_timeframe(client):
                     "parameters": {"token": "DAI"},
                 },
                 "timeframe": {"start": "2025-02-01", "end": "2025-02-08"},
+                "token_funding": _pnl_token_funding("10000", chain="ethereum"),
             },
         )
         assert resp.status_code == 200

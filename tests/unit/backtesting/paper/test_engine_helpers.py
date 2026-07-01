@@ -871,7 +871,7 @@ class TestAssembleBacktestResult:
 
         assert result.engine == BacktestEngine.PAPER
         assert result.deployment_id == "s1"
-        assert result.initial_capital_usd == Decimal("10000")
+        assert result.initial_portfolio_value_usd == Decimal("10000")
         assert result.final_capital_usd == Decimal("10500")
         assert result.run_duration_seconds == 30.0
         assert result.error is None

@@ -16,6 +16,7 @@ exercise the behavioural contracts we must preserve:
 
 from __future__ import annotations
 
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -54,7 +55,7 @@ def _make_pnl_config(tokens: list[str] | None = None) -> PnLBacktestConfig:
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 2, 1, tzinfo=UTC),
         interval_seconds=3600,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000"), chain="arbitrum"),
         chain="arbitrum",
         tokens=tokens if tokens is not None else ["WETH", "USDC"],
         gas_price_gwei=Decimal("30"),
@@ -999,7 +1000,6 @@ class TestValidateAndBuildContext:
                 start=datetime(2024, 1, 1, tzinfo=UTC),
                 end=datetime(2024, 2, 1, tzinfo=UTC),
                 interval=3600,
-                initial_capital=10000.0,
                 chain="arbitrum",
                 tokens="WETH",
                 gas_price=30.0,
@@ -1018,7 +1018,6 @@ class TestValidateAndBuildContext:
                     start=None,
                     end=datetime(2024, 2, 1, tzinfo=UTC),
                     interval=3600,
-                    initial_capital=10000.0,
                     chain="arbitrum",
                     tokens="WETH",
                     gas_price=30.0,
@@ -1037,7 +1036,6 @@ class TestValidateAndBuildContext:
                     start=datetime(2024, 1, 1, tzinfo=UTC),
                     end=None,
                     interval=3600,
-                    initial_capital=10000.0,
                     chain="arbitrum",
                     tokens="WETH",
                     gas_price=30.0,
@@ -1054,7 +1052,6 @@ class TestValidateAndBuildContext:
                 start=None,
                 end=None,
                 interval=3600,
-                initial_capital=10000.0,
                 chain="arbitrum",
                 tokens="IGNORED",  # should be ignored since loaded_from_result
                 gas_price=30.0,
@@ -1076,16 +1073,15 @@ class TestValidateAndBuildContext:
                 start=datetime(2024, 1, 1, tzinfo=UTC),
                 end=datetime(2024, 2, 1, tzinfo=UTC),
                 interval=3600,
-                initial_capital=5000.0,
                 chain="base",
                 tokens="weth, usdc",
                 gas_price=25.0,
                 output=None,
                 loaded_from_result=False,
                 pnl_config=None,
-            )
+        )
         assert ctx.pnl_config.chain == "base"
-        assert ctx.pnl_config.initial_capital_usd == Decimal("5000.0")
+        assert ctx.pnl_config.token_funding is None
         assert ctx.pnl_config.gas_price_gwei == Decimal("25.0")
         assert ctx.token_list == ["WETH", "USDC"]
         assert ctx.output_path is None
@@ -1101,7 +1097,6 @@ class TestValidateAndBuildContext:
                     start=datetime(2024, 1, 1, tzinfo=UTC),
                     end=datetime(2024, 2, 1, tzinfo=UTC),
                     interval=3600,
-                    initial_capital=10000.0,
                     chain="arbitrum",
                     tokens="WETH",
                     gas_price=30.0,
@@ -1121,7 +1116,6 @@ class TestValidateAndBuildContext:
                 start=None,
                 end=None,
                 interval=3600,
-                initial_capital=10000.0,
                 chain="arbitrum",
                 tokens="WETH",
                 gas_price=30.0,

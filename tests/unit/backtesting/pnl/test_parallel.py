@@ -1,6 +1,7 @@
 """Unit tests for parallel PnL backtest orchestration helpers."""
 
 from __future__ import annotations
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from concurrent.futures import Future
 from datetime import UTC, datetime
@@ -10,6 +11,8 @@ from typing import Any
 import pytest
 
 from almanak.framework.backtesting.models import (
+
+
     BacktestEngine,
     BacktestMetrics,
     BacktestResult,
@@ -40,7 +43,7 @@ def _config(
     return PnLBacktestConfig(
         start_time=START,
         end_time=END,
-        initial_capital_usd=initial_capital_usd,
+        token_funding=_pnl_token_funding(initial_capital_usd),
         interval_seconds=interval_seconds,
         fee_model=fee_model,
         include_gas_costs=False,
@@ -166,19 +169,21 @@ def reset_fakes() -> None:
 
 class TestConfigGeneration:
     def test_generate_grid_configs_cartesian_product(self) -> None:
+        funding_100 = _pnl_token_funding(Decimal("100"))
+        funding_200 = _pnl_token_funding(Decimal("200"))
         configs = generate_grid_configs(
             _config(),
             {
-                "initial_capital_usd": [Decimal("100"), Decimal("200")],
+                "token_funding": [funding_100, funding_200],
                 "interval_seconds": [60, 120],
             },
         )
 
-        assert [(c.initial_capital_usd, c.interval_seconds) for c in configs] == [
-            (Decimal("100"), 60),
-            (Decimal("100"), 120),
-            (Decimal("200"), 60),
-            (Decimal("200"), 120),
+        assert [(c.token_funding, c.interval_seconds) for c in configs] == [
+            (funding_100, 60),
+            (funding_100, 120),
+            (funding_200, 60),
+            (funding_200, 120),
         ]
 
     @pytest.mark.parametrize(
@@ -199,10 +204,11 @@ class TestConfigGeneration:
             generate_grid_configs(_config(), param_ranges)
 
     def test_generate_random_configs_seeded_sampling(self) -> None:
+        funding_values = [_pnl_token_funding(Decimal("100")), _pnl_token_funding(Decimal("200"))]
         configs = generate_random_configs(
             _config(),
             {
-                "initial_capital_usd": (Decimal("100"), Decimal("200")),
+                "token_funding": funding_values,
                 "interval_seconds": (60, 120),
                 "fee_model": ["zero", "realistic"],
             },
@@ -212,7 +218,7 @@ class TestConfigGeneration:
         repeated = generate_random_configs(
             _config(),
             {
-                "initial_capital_usd": (Decimal("100"), Decimal("200")),
+                "token_funding": funding_values,
                 "interval_seconds": (60, 120),
                 "fee_model": ["zero", "realistic"],
             },
@@ -222,7 +228,7 @@ class TestConfigGeneration:
 
         assert [config.to_dict() for config in configs] == [config.to_dict() for config in repeated]
         assert len(configs) == 3
-        assert all(Decimal("100") <= config.initial_capital_usd <= Decimal("200") for config in configs)
+        assert all(config.token_funding in funding_values for config in configs)
         assert all(60 <= config.interval_seconds <= 120 for config in configs)
         assert {config.fee_model for config in configs} <= {"zero", "realistic"}
 

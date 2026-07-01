@@ -13,7 +13,7 @@ recording) and asserts:
 * tick-limit vs duration-limit exit paths
 * CancelledError + generic Exception handling including error-handler wiring
 * final-value fallback chain (rich -> last equity point -> simple)
-* final BacktestResult shape: initial_capital_usd, final_capital_usd,
+* final BacktestResult shape: initial_portfolio_value_usd, final_capital_usd,
   trade_records mapping, equity_curve passthrough, compliance_violations,
   config dict (including error_summary), institutional_compliance,
   fallback_usage dict
@@ -597,7 +597,7 @@ class TestResultAssembly:
         assert result.engine == BacktestEngine.PAPER
         assert result.deployment_id == "char_strategy"
         assert result.chain == "arbitrum"
-        assert result.initial_capital_usd == Decimal("10000")
+        assert result.initial_portfolio_value_usd == Decimal("10000")
         assert result.run_started_at is not None
         assert result.run_ended_at is not None
         assert result.run_duration_seconds >= 0.0

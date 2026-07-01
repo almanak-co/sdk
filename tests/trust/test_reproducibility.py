@@ -37,6 +37,7 @@ from almanak import HoldIntent, IntentStrategy, MarketSnapshot
 from almanak.framework.backtesting.pnl import HistoricalDataConfig, MarketState, PnLBacktestConfig, PnLBacktester
 from almanak.framework.backtesting.pnl.data_provider import TokenRef
 from almanak.framework.models.hot_reload_config import HotReloadableConfig
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 DUMMY_WALLET = "0x" + "0" * 40
 
@@ -109,7 +110,8 @@ async def test_bit_for_bit_reproducibility():
     config_base = {
         "start_time": datetime(2024, 1, 1, tzinfo=UTC),
         "end_time": datetime(2024, 1, 7, tzinfo=UTC),  # Short period for quick test
-        "initial_capital_usd": Decimal("10000"),
+        "token_funding": _pnl_token_funding(Decimal("10000"), chain="ethereum"),
+        "chain": "ethereum",
         "tokens": ["ETH", "USDC"],
         "random_seed": 42,  # Fixed seed
         "strict_reproducibility": True,
@@ -172,7 +174,8 @@ def test_config_hash():
     config1 = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 31, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000"), chain="ethereum"),
+        chain="ethereum",
         tokens=["ETH", "USDC"],
         random_seed=42,
     )
@@ -180,7 +183,8 @@ def test_config_hash():
     config2 = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 31, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000"), chain="ethereum"),
+        chain="ethereum",
         tokens=["ETH", "USDC"],
         random_seed=42,
     )
@@ -189,7 +193,8 @@ def test_config_hash():
     config3 = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 31, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000"), chain="ethereum"),
+        chain="ethereum",
         tokens=["ETH", "USDC"],
         random_seed=43,  # Different seed
     )

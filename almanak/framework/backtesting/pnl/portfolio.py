@@ -454,7 +454,7 @@ class SimulatedPortfolio:
         # perp-open collateral draw from the same cash_usd, so they must be
         # validated as one sum (each passing individually could still
         # overdraw) before any state mutation.
-        funding_failure = self._cash_funding_failure(fill, cash_debit)
+        funding_failure = self._cash_funding_failure(fill, cash_debit, token_debits)
         if funding_failure is not None:
             return None, funding_failure
 
@@ -508,7 +508,7 @@ class SimulatedPortfolio:
             # unrealized PnL + funding); without this debit the open would
             # mint the collateral amount.
             if fill.position_delta.is_perp and fill.success:
-                self.cash_usd -= fill.position_delta.collateral_usd
+                self._debit_cash_like(fill.position_delta.collateral_usd)
             self.positions.append(fill.position_delta)
 
         return _PositionEffects(closed_position=closed_position)
@@ -586,7 +586,7 @@ class SimulatedPortfolio:
                 self._cost_basis.pop(token, None)
             else:
                 self.tokens[token] = new_amount
-        self.cash_usd -= cash_debit
+        self._debit_cash_like(cash_debit)
 
         # Update token balances - add tokens_in
         for token, amount in fill.tokens_in.items():
@@ -600,8 +600,8 @@ class SimulatedPortfolio:
                 # Swept to cash at $1: no spot basis to carry.
                 self._cost_basis.pop(token, None)
 
-        # Deduct gas and non-embedded venue costs (fee/slippage) from cash
-        self.cash_usd -= fill.gas_cost_usd + self._venue_cash_costs(fill)
+        # Deduct gas and non-embedded venue costs (fee/slippage) from cash-like assets.
+        self._debit_cash_like(fill.gas_cost_usd + self._venue_cash_costs(fill))
 
     def _swap_disposed_tokens(
         self,
@@ -819,13 +819,14 @@ class SimulatedPortfolio:
         for token, amount in tokens_out.items():
             if amount <= Decimal("0"):
                 continue
-            held = self.tokens.get(token, Decimal("0"))
+            debit_token = self._held_debit_source(token)
+            held = self.tokens.get(debit_token, Decimal("0"))
             from_tokens = min(held, amount)
             shortfall = amount - from_tokens
-            token_debits[token] = from_tokens
+            token_debits[debit_token] = token_debits.get(debit_token, Decimal("0")) + from_tokens
             if shortfall <= amount * _DEBIT_DUST_RELATIVE_TOLERANCE:
                 continue  # Fully covered (spend-all within dust tolerance)
-            if self._is_cash_equivalent(token):
+            if self._is_cash_equivalent(token) or self._is_cash_equivalent(debit_token):
                 cash_needed += shortfall
             elif intent_type == IntentType.SWAP:
                 # Selling a token the portfolio does not hold is
@@ -842,16 +843,17 @@ class SimulatedPortfolio:
                 cash_needed += shortfall * price
                 conversions[token] = shortfall
 
-        cash_shortfall = cash_needed - self.cash_usd
+        cash_available = self._cash_like_available(token_debits)
+        cash_shortfall = cash_needed - cash_available
         if cash_shortfall > Decimal("0"):
             if cash_shortfall > cash_needed * _DEBIT_DUST_RELATIVE_TOLERANCE:
                 return (
                     *no_plan,
                     "insufficient cash for stablecoin outflow and implicit conversions: "
-                    f"required {cash_needed}, cash {self.cash_usd}",
+                    f"required {cash_needed}, cash-like {cash_available}",
                 )
             # Spend-all within dust tolerance
-            cash_needed = self.cash_usd
+            cash_needed = cash_available
 
         return token_debits, cash_needed, conversions, None
 
@@ -882,6 +884,67 @@ class SimulatedPortfolio:
             return token.upper() in CASH_EQUIVALENT_STABLECOIN_SYMBOLS
         return False
 
+    def _held_debit_source(self, token: TokenRef) -> TokenRef:
+        """Return the held token identity to debit for ``token`` when possible."""
+        normalized = self._normalize_token_ref(token)
+        if normalized in self.tokens:
+            return normalized
+        if not isinstance(normalized, str) or is_address_like(normalized):
+            return normalized
+
+        try:
+            resolved = get_token_resolver().resolve(
+                normalized,
+                self.chain,
+                log_errors=False,
+                skip_gateway=True,
+            )
+        except TokenResolutionError:
+            return normalized
+        if resolved and resolved.address:
+            key = normalize_token_key(self.chain, resolved.address)
+            if key in self.tokens:
+                return key
+        return normalized
+
+    def _cash_like_available(self, planned_token_debits: dict[TokenRef, Decimal] | None = None) -> Decimal:
+        """Cash plus explicit cash-equivalent token balances not already debited."""
+        planned_token_debits = planned_token_debits or {}
+        total = self.cash_usd
+        for token, amount in self.tokens.items():
+            if not self._is_cash_equivalent(token):
+                continue
+            remaining = amount - planned_token_debits.get(token, Decimal("0"))
+            if remaining > Decimal("0"):
+                total += remaining
+        return total
+
+    def _debit_cash_like(self, amount: Decimal) -> None:
+        """Debit explicit cash-equivalent token balances first, then cash_usd."""
+        remaining = amount
+        if remaining <= Decimal("0"):
+            return
+
+        for token in sorted(
+            (token for token in self.tokens if self._is_cash_equivalent(token)),
+            key=token_ref_display,
+        ):
+            balance = self.tokens.get(token, Decimal("0"))
+            debit = min(balance, remaining)
+            if debit <= Decimal("0"):
+                continue
+            new_amount = balance - debit
+            if new_amount <= Decimal("0"):
+                self.tokens.pop(token, None)
+                self._cost_basis.pop(token, None)
+            else:
+                self.tokens[token] = new_amount
+            remaining -= debit
+            if remaining <= Decimal("0"):
+                return
+
+        self.cash_usd -= remaining
+
     def _venue_cash_costs(self, fill: SimulatedFill) -> Decimal:
         """Fee and slippage payable from cash for this fill (VIB-5079).
 
@@ -900,7 +963,12 @@ class SimulatedPortfolio:
             costs += fill.slippage_usd
         return costs
 
-    def _cash_funding_failure(self, fill: SimulatedFill, cash_debit: Decimal) -> str | None:
+    def _cash_funding_failure(
+        self,
+        fill: SimulatedFill,
+        cash_debit: Decimal,
+        token_debits: dict[TokenRef, Decimal],
+    ) -> str | None:
         """Reason this fill cannot fund its cash legs, or None if it can.
 
         Aggregates every cash draw the fill will make -- the planned
@@ -923,11 +991,12 @@ class SimulatedPortfolio:
             return None
         venue_costs = self._venue_cash_costs(fill)
         required_with_costs = required_cash + fill.gas_cost_usd + venue_costs
-        if required_with_costs > self.cash_usd:
+        cash_like_available = self._cash_like_available(token_debits)
+        if required_with_costs > cash_like_available:
             return (
                 f"insufficient cash for fill: required {required_with_costs} "
                 f"(cash legs {required_cash} + gas {fill.gas_cost_usd} + venue costs {venue_costs}), "
-                f"cash {self.cash_usd}"
+                f"cash-like {cash_like_available}"
             )
         return None
 

@@ -5,6 +5,7 @@ Tests verify that with strict_reproducibility=True and identical config+seed:
 2. Config hash remains consistent across runs
 3. All timestamps come from simulation, not wall clock
 """
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 import json
 from dataclasses import dataclass, field
@@ -18,6 +19,8 @@ from almanak.framework.backtesting.models import BacktestResult
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
+
+
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktester,
@@ -167,7 +170,7 @@ async def test_identical_config_produces_identical_results():
     config1 = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=1,
         random_seed=42,
@@ -177,7 +180,7 @@ async def test_identical_config_produces_identical_results():
     config2 = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=1,
         random_seed=42,
@@ -217,7 +220,7 @@ async def test_config_hash_consistency():
     config1 = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         random_seed=42,
         strict_reproducibility=True,
@@ -226,7 +229,7 @@ async def test_config_hash_consistency():
     config2 = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         random_seed=42,
         strict_reproducibility=True,
@@ -248,7 +251,7 @@ async def test_different_seed_produces_different_hash():
     config1 = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         random_seed=42,
         strict_reproducibility=True,
@@ -257,7 +260,7 @@ async def test_different_seed_produces_different_hash():
     config2 = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         random_seed=123,  # Different seed
         strict_reproducibility=True,
@@ -278,7 +281,7 @@ async def test_trade_records_deterministic():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=1,
         random_seed=42,
@@ -320,7 +323,7 @@ async def test_metrics_deterministic():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         random_seed=42,
         strict_reproducibility=True,
@@ -348,7 +351,7 @@ async def test_equity_curve_deterministic():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         random_seed=42,
         strict_reproducibility=True,
@@ -384,7 +387,7 @@ async def test_final_capital_deterministic():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         random_seed=42,
         strict_reproducibility=True,

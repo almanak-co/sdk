@@ -5,6 +5,7 @@ percentages (e.g. 10 for 10%) rather than decimal ratios (0.1). Before this fix,
 a 4882% actual return was being reported as 48.82% — the raw ratio stored in the
 `_pct` field and formatted with a literal `%` sign.
 """
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -13,6 +14,8 @@ from almanak.framework.backtesting.models import IntentType, LendingLiquidationE
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.metrics_calculator import calculate_metrics
 from almanak.framework.backtesting.pnl.portfolio import EquityPoint, SimulatedPortfolio
+
+
 
 
 def _make_portfolio(points: list[tuple[datetime, Decimal]]) -> SimulatedPortfolio:
@@ -25,7 +28,7 @@ def _make_config(initial_capital: Decimal = Decimal("10000")) -> PnLBacktestConf
     return PnLBacktestConfig(
         start_time=datetime(2024, 1, 1),
         end_time=datetime(2024, 12, 31),
-        initial_capital_usd=initial_capital,
+        token_funding=_pnl_token_funding(initial_capital),
     )
 
 
@@ -126,7 +129,7 @@ class TestVIB2915SchemaMigration:
             "deployment_id": "legacy",
             "start_time": "2024-01-01T00:00:00+00:00",
             "end_time": "2024-12-31T00:00:00+00:00",
-            "initial_capital_usd": "10000",
+            "initial_portfolio_value_usd": "10000",
             "final_capital_usd": "11000",
             "chain": "arbitrum",
             "config": {},

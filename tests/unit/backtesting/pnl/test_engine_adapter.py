@@ -7,6 +7,7 @@ Tests verify that the PnLBacktester correctly:
 4. Handles explicit strategy_type configuration
 5. Calls adapter's execute_intent when adapter exists
 """
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -16,6 +17,8 @@ from typing import Any
 import pytest
 
 from almanak.framework.backtesting.adapters import (
+
+
     AdapterRegistry,
     StrategyBacktestAdapter,
 )
@@ -597,7 +600,7 @@ async def test_execute_intent_calls_adapter_when_available(backtester):
     config = PnLBacktestConfig(
         start_time=datetime.now(UTC),
         end_time=datetime.now(UTC) + timedelta(days=1),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
     )
 
     # Execute intent
@@ -640,7 +643,7 @@ async def test_execute_intent_uses_adapter_fill(backtester):
     config = PnLBacktestConfig(
         start_time=datetime.now(UTC),
         end_time=datetime.now(UTC) + timedelta(days=1),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         gas_price_gwei=Decimal("30"),
     )
 
@@ -683,7 +686,7 @@ async def test_adapter_fill_gas_zeroed_when_gas_costs_disabled(backtester):
     config = PnLBacktestConfig(
         start_time=datetime.now(UTC),
         end_time=datetime.now(UTC) + timedelta(days=1),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         include_gas_costs=False,
     )
 
@@ -727,7 +730,7 @@ async def test_failed_adapter_fill_skips_gas_resolution(backtester):
     config = PnLBacktestConfig(
         start_time=datetime.now(UTC),
         end_time=datetime.now(UTC) + timedelta(days=1),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         gas_price_gwei=Decimal("30"),
     )
 
@@ -763,7 +766,7 @@ async def test_execute_intent_falls_back_when_adapter_returns_none(backtester):
     config = PnLBacktestConfig(
         start_time=datetime.now(UTC),
         end_time=datetime.now(UTC) + timedelta(days=1),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
     )
 
     # Execute intent
@@ -801,7 +804,7 @@ async def test_execute_intent_no_adapter(backtester):
     config = PnLBacktestConfig(
         start_time=datetime.now(UTC),
         end_time=datetime.now(UTC) + timedelta(days=1),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
     )
 
     # Execute intent - should work without adapter

@@ -29,6 +29,7 @@ from almanak.framework.backtesting.pnl.engine import (
     DefaultSlippageModel,
     PnLBacktester,
 )
+from tests.backtesting_funding import pnl_token_funding, provider_symbol
 
 # =============================================================================
 # Mock Data Provider for Performance Testing
@@ -63,7 +64,7 @@ class FastMockDataProvider:
         self._volatility = volatility
         self._seed = seed
 
-    def _get_price_at_index(self, token: str, index: int) -> Decimal:
+    def _get_price_at_index(self, token: Any, index: int) -> Decimal:
         """Generate deterministic price at index.
 
         Uses a simple sine wave pattern for price movement to ensure
@@ -71,20 +72,21 @@ class FastMockDataProvider:
         """
         import math
 
-        base = self._base_prices.get(token.upper(), Decimal("1"))
+        symbol = provider_symbol(token)
+        base = self._base_prices.get(symbol, Decimal("1"))
 
         # Simple deterministic price movement using sine wave
         # This creates realistic-looking price action without randomness
-        wave = Decimal(str(math.sin(index * 0.1 + hash(token) % 100)))
+        wave = Decimal(str(math.sin(index * 0.1 + hash(symbol) % 100)))
         trend = Decimal(str(index * 0.00001))  # Slight upward trend
         change = wave * self._volatility + trend
 
         return base * (Decimal("1") + change)
 
-    async def get_price(self, token: str, timestamp: datetime) -> Decimal:
+    async def get_price(self, token: Any, timestamp: datetime) -> Decimal:
         """Get price for token at specific timestamp."""
-        token = token.upper()
-        if token not in self._base_prices:
+        symbol = provider_symbol(token)
+        if symbol not in self._base_prices:
             # Return $1 for unknown tokens (stablecoins)
             return Decimal("1")
 
@@ -92,7 +94,7 @@ class FastMockDataProvider:
         delta = timestamp - self._start_time
         index = int(delta.total_seconds() / 3600)
 
-        return self._get_price_at_index(token, index)
+        return self._get_price_at_index(symbol, index)
 
     async def get_ohlcv(
         self,
@@ -119,9 +121,7 @@ class FastMockDataProvider:
             current += timedelta(seconds=interval_seconds)
         return result
 
-    async def iterate(
-        self, config: HistoricalDataConfig
-    ) -> AsyncIterator[tuple[datetime, MarketState]]:
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         """Iterate through historical data with mock prices."""
         current = config.start_time
         index = 0
@@ -130,12 +130,12 @@ class FastMockDataProvider:
         while current <= config.end_time:
             prices = {}
             for token in config.tokens:
-                token = token.upper()
-                if token in self._base_prices:
-                    prices[token] = self._get_price_at_index(token, index)
+                symbol = provider_symbol(token, config.chains[0] if config.chains else "arbitrum")
+                if symbol in self._base_prices:
+                    prices[symbol] = self._get_price_at_index(symbol, index)
                 else:
                     # Stablecoin default
-                    prices[token] = Decimal("1")
+                    prices[symbol] = Decimal("1")
 
             market_state = MarketState(
                 timestamp=current,
@@ -279,7 +279,7 @@ class TestPnLBacktesterPerformance:
             start_time=start_time,
             end_time=end_time,
             interval_seconds=3600,  # 1 hour intervals
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
             inclusion_delay_blocks=0,  # Immediate execution
@@ -366,7 +366,7 @@ class TestPnLBacktesterPerformance:
             start_time=start_time,
             end_time=end_time,
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,  # Skip gas for baseline
         )
@@ -401,8 +401,7 @@ class TestPnLBacktesterPerformance:
         # Baseline should be faster than trading scenario
         max_allowed_seconds = 30
         assert elapsed < max_allowed_seconds, (
-            f"Hold-only backtest took {elapsed:.2f}s, exceeds {max_allowed_seconds}s. "
-            f"Core loop optimization needed."
+            f"Hold-only backtest took {elapsed:.2f}s, exceeds {max_allowed_seconds}s. Core loop optimization needed."
         )
 
         print("\n=== Hold-Only Baseline Benchmark ===")
@@ -437,7 +436,7 @@ class TestPnLBacktesterPerformance:
             start_time=start_time,
             end_time=end_time,
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
         )
@@ -507,7 +506,7 @@ class TestPnLBacktesterPerformance:
             start_time=start_time,
             end_time=end_time,
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
         )
@@ -531,15 +530,12 @@ class TestPnLBacktesterPerformance:
         expected_ticks = 169
         actual_ticks = len(result.equity_curve)
 
-        assert abs(actual_ticks - expected_ticks) <= 5, (
-            f"Expected ~{expected_ticks} ticks, got {actual_ticks}"
-        )
+        assert abs(actual_ticks - expected_ticks) <= 5, f"Expected ~{expected_ticks} ticks, got {actual_ticks}"
 
         # Short backtest should be very fast
         max_allowed_seconds = 2
         assert elapsed < max_allowed_seconds, (
-            f"1-week backtest took {elapsed:.3f}s, exceeds {max_allowed_seconds}s. "
-            f"Initialization overhead is too high."
+            f"1-week backtest took {elapsed:.3f}s, exceeds {max_allowed_seconds}s. Initialization overhead is too high."
         )
 
         print("\n=== Short Backtest Latency Benchmark ===")
@@ -625,24 +621,26 @@ class TestParameterSweepPerformance:
             start_time=_BENCHMARK_START_TIME,
             end_time=end_time,
             interval_seconds=3600,  # 1 hour intervals
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
             inclusion_delay_blocks=0,
         )
 
         # Generate 100 configs via grid search (10 x 10 = 100)
-        # Vary initial_capital_usd across 10 values
+        # Vary token_funding across 10 values
         capital_values = [
-            Decimal(str(5000 + i * 1000)) for i in range(10)  # 5000 to 14000
+            pnl_token_funding(Decimal(str(5000 + i * 1000)))
+            for i in range(10)  # 5000 to 14000
         ]
         # Vary interval_seconds across 10 values
         interval_values = [
-            900 + i * 300 for i in range(10)  # 900s (15min) to 3600s (1hr)
+            900 + i * 300
+            for i in range(10)  # 900s (15min) to 3600s (1hr)
         ]
 
         param_ranges = {
-            "initial_capital_usd": capital_values,
+            "token_funding": capital_values,
             "interval_seconds": interval_values,
         }
 
@@ -672,8 +670,7 @@ class TestParameterSweepPerformance:
         # At least 95% should succeed (allow for some edge cases)
         success_rate = aggregated.success_count / aggregated.total_count
         assert success_rate >= 0.95, (
-            f"Success rate {success_rate:.1%} below 95% threshold. "
-            f"{aggregated.failure_count} failures."
+            f"Success rate {success_rate:.1%} below 95% threshold. {aggregated.failure_count} failures."
         )
 
         # Verify we have valid metrics
@@ -686,8 +683,8 @@ class TestParameterSweepPerformance:
         # CRITICAL: Performance assertion
         max_allowed_seconds = 1800  # 30 minutes
         assert elapsed < max_allowed_seconds, (
-            f"100-parameter sweep took {elapsed:.1f}s ({elapsed/60:.1f} minutes), "
-            f"exceeds {max_allowed_seconds}s ({max_allowed_seconds/60:.0f} minute) limit. "
+            f"100-parameter sweep took {elapsed:.1f}s ({elapsed / 60:.1f} minutes), "
+            f"exceeds {max_allowed_seconds}s ({max_allowed_seconds / 60:.0f} minute) limit. "
             f"Performance optimization required."
         )
 
@@ -701,7 +698,7 @@ class TestParameterSweepPerformance:
         print("  - Workers: 4")
         print("  - Duration per backtest: 1 month at 1-hour intervals")
         print("\nResults:")
-        print(f"  - Total elapsed time: {elapsed:.1f}s ({elapsed/60:.1f} minutes)")
+        print(f"  - Total elapsed time: {elapsed:.1f}s ({elapsed / 60:.1f} minutes)")
         print(f"  - Average time per config: {avg_time_per_config:.2f}s")
         print(f"  - Throughput: {throughput:.1f} configs/minute")
         print(f"  - Success rate: {success_rate:.1%}")

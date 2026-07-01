@@ -7,6 +7,7 @@ Covers regression tests for:
 
 from __future__ import annotations
 
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import patch
@@ -23,7 +24,7 @@ def _make_pnl_config() -> PnLBacktestConfig:
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 2, 1, tzinfo=UTC),
         interval_seconds=3600,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000"), chain="arbitrum"),
         chain="arbitrum",
         tokens=["WETH", "USDC"],
         gas_price_gwei=Decimal("30"),
@@ -44,7 +45,6 @@ class TestValidateAndBuildContextConfigGuard:
                 start=datetime(2024, 1, 1, tzinfo=UTC),
                 end=datetime(2024, 2, 1, tzinfo=UTC),
                 interval=3600,
-                initial_capital=10000.0,
                 chain="arbitrum",
                 tokens="WETH,USDC",
                 gas_price=30.0,
@@ -66,7 +66,6 @@ class TestValidateAndBuildContextConfigGuard:
                 start=None,
                 end=None,
                 interval=3600,
-                initial_capital=10000.0,
                 chain="arbitrum",
                 tokens="WETH,USDC",
                 gas_price=30.0,
@@ -94,7 +93,6 @@ class TestValidateAndBuildContextConfigGuard:
                     start=None,
                     end=None,
                     interval=3600,
-                    initial_capital=10000.0,
                     chain="arbitrum",
                     tokens="WETH,USDC",
                     gas_price=30.0,

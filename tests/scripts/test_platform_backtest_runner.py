@@ -18,6 +18,15 @@ from scripts import platform_backtest_runner as runner
 BASE_CBBTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
 BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 _BASE_CHAIN_ID = 8453
+_TOKEN_FUNDING = [
+    {
+        "symbol": "USDC",
+        "address": BASE_USDC,
+        "chain": "base",
+        "amount": "10000",
+        "amount_type": "token",
+    }
+]
 
 
 class _AddressKeyedProvider:
@@ -27,15 +36,13 @@ class _AddressKeyedProvider:
 
     def __init__(self, token_addresses: dict[str, tuple[str, str]]) -> None:
         self._token_addresses = {
-            symbol.upper(): (chain.lower(), address.lower())
-            for symbol, (chain, address) in token_addresses.items()
+            symbol.upper(): (chain.lower(), address.lower()) for symbol, (chain, address) in token_addresses.items()
         }
         self.registered: list[dict[str, tuple[str, str]]] = []
 
     def register_token_addresses(self, token_addresses: dict[str, tuple[str, str]]) -> None:
         normalized = {
-            symbol.upper(): (chain.lower(), address.lower())
-            for symbol, (chain, address) in token_addresses.items()
+            symbol.upper(): (chain.lower(), address.lower()) for symbol, (chain, address) in token_addresses.items()
         }
         self._token_addresses.update(normalized)
         self.registered.append(normalized)
@@ -101,8 +108,8 @@ def _env(**overrides: str) -> runner.PlatformRunnerEnv:
         "BACKTEST_ID": "test-123",
         "COMMIT_SHA": "a" * 40,
         "GITHUB_CLONE_URL": "https://x-access-token:token@example/repo.git",
-        "STRATEGY_CONFIG": "{}",
-        "BACKTEST_CONFIG": '{"start_time":"2024-01-01","end_time":"2024-03-01","initial_capital_usd":"10000"}',
+        "STRATEGY_CONFIG": json.dumps({"token_funding": _TOKEN_FUNDING}),
+        "BACKTEST_CONFIG": '{"start_time":"2024-01-01","end_time":"2024-03-01"}',
         "GCS_BUCKET": "bucket",
         "PLATFORM_CALLBACK_URL": "https://api.example",
         "PLATFORM_CALLBACK_SECRET": "secret",
@@ -120,17 +127,16 @@ def test_build_platform_backtest_config_parses_platform_payload() -> None:
             {
                 "start_time": "2024-01-01",
                 "end_time": "2024-03-01",
-                "initial_capital_usd": "10000",
                 "include_gas_costs": "false",
             }
         ),
-        {"base_token": "WETH", "quote_token": "USDC"},
+        {"base_token": "WETH", "quote_token": "USDC", "token_funding": _TOKEN_FUNDING},
         Strategy,
     )
 
     assert config.start_time.tzinfo is not None
     assert config.end_time.tzinfo is not None
-    assert config.initial_capital_usd == runner.Decimal("10000")
+    assert config.token_funding == _TOKEN_FUNDING
     assert config.chain == "base"
     assert config.tokens == ["WETH", "USDC"]
     assert config.include_gas_costs is False
@@ -147,10 +153,9 @@ def test_build_platform_backtest_config_resolves_address_token_fields() -> None:
             {
                 "start_time": "2024-01-01",
                 "end_time": "2024-03-01",
-                "initial_capital_usd": "10000",
             }
         ),
-        {"base_token_address": BASE_CBBTC, "quote_token_address": BASE_USDC},
+        {"base_token_address": BASE_CBBTC, "quote_token_address": BASE_USDC, "token_funding": _TOKEN_FUNDING},
         Strategy,
     )
 
@@ -167,10 +172,9 @@ def test_build_platform_backtest_config_uses_generic_token_address_field_without
             {
                 "start_time": "2024-01-01",
                 "end_time": "2024-03-01",
-                "initial_capital_usd": "10000",
             }
         ),
-        {"entry_token_address": BASE_CBBTC},
+        {"entry_token_address": BASE_CBBTC, "token_funding": _TOKEN_FUNDING},
         Strategy,
     )
 
@@ -195,10 +199,9 @@ def test_build_platform_backtest_config_adds_decorator_quote_asset() -> None:
             {
                 "start_time": "2024-01-01",
                 "end_time": "2024-03-01",
-                "initial_capital_usd": "10000",
             }
         ),
-        {"from_token": "USDC", "to_token": "WETH"},
+        {"from_token": "USDC", "to_token": "WETH", "token_funding": _TOKEN_FUNDING},
         Strategy,
     )
 
@@ -206,13 +209,16 @@ def test_build_platform_backtest_config_adds_decorator_quote_asset() -> None:
 
 
 def test_platform_numeraire_backtest_prices_address_keyed_data_and_coverage() -> None:
-    strategy_config = {"base_token_address": BASE_CBBTC, "quote_token_address": BASE_USDC}
+    strategy_config = {
+        "base_token_address": BASE_CBBTC,
+        "quote_token_address": BASE_USDC,
+        "token_funding": _TOKEN_FUNDING,
+    }
     config = runner.build_platform_backtest_config(
         json.dumps(
             {
                 "start_time": "2024-01-01",
                 "end_time": "2024-01-01T03:00:00Z",
-                "initial_capital_usd": "10000",
                 "include_gas_costs": False,
                 "institutional_mode": True,
             }
@@ -253,6 +259,41 @@ def test_platform_numeraire_backtest_prices_address_keyed_data_and_coverage() ->
     assert result.institutional_compliance is True
 
 
+def test_build_platform_backtest_config_requires_token_funding() -> None:
+    class Strategy:
+        STRATEGY_METADATA = type("Meta", (), {"default_chain": "base", "supported_chains": ["base"]})()
+
+    with pytest.raises(runner.PlatformRunnerError, match="token_funding"):
+        runner.build_platform_backtest_config(
+            json.dumps(
+                {
+                    "start_time": "2024-01-01",
+                    "end_time": "2024-03-01",
+                }
+            ),
+            {},
+            Strategy,
+        )
+
+
+def test_build_platform_backtest_config_wraps_invalid_token_funding_shape() -> None:
+    class Strategy:
+        STRATEGY_METADATA = type("Meta", (), {"default_chain": "base", "supported_chains": ["base"]})()
+
+    with pytest.raises(runner.PlatformRunnerError, match="BACKTEST_CONFIG is invalid: token_funding must be a list"):
+        runner.build_platform_backtest_config(
+            json.dumps(
+                {
+                    "start_time": "2024-01-01",
+                    "end_time": "2024-03-01",
+                    "token_funding": {"symbol": "USDC"},
+                }
+            ),
+            {},
+            Strategy,
+        )
+
+
 def test_build_platform_backtest_config_rejects_non_increasing_time_range() -> None:
     class Strategy:
         STRATEGY_METADATA = type("Meta", (), {"default_chain": "base", "supported_chains": ["base"]})()
@@ -263,10 +304,9 @@ def test_build_platform_backtest_config_rejects_non_increasing_time_range() -> N
                 {
                     "start_time": "2024-03-01",
                     "end_time": "2024-03-01",
-                    "initial_capital_usd": "10000",
                 }
             ),
-            {},
+            {"token_funding": _TOKEN_FUNDING},
             Strategy,
         )
 
@@ -450,8 +490,7 @@ def test_redact_masks_general_url_credentials() -> None:
     )
 
     redacted = runner._redact(
-        "clone https://oauth2:token@example/repo.git failed; fallback https://user:pass@host/repo.git "
-        "callback-secret",
+        "clone https://oauth2:token@example/repo.git failed; fallback https://user:pass@host/repo.git callback-secret",
         env,
     )
 
@@ -558,7 +597,9 @@ def test_run_platform_backtest_posts_start_before_clone(monkeypatch: pytest.Monk
     monkeypatch.setattr(runner, "prime_strategy_registry", lambda: None)
     monkeypatch.setattr(runner.os, "chdir", lambda path: order.append("chdir"))
     monkeypatch.setattr(runner, "discover_strategy_class", lambda repo_root, strategy_config: Strategy)
-    monkeypatch.setattr(runner, "build_platform_backtest_config", lambda raw_config, strategy_config, strategy_class: BacktestConfig())
+    monkeypatch.setattr(
+        runner, "build_platform_backtest_config", lambda raw_config, strategy_config, strategy_class: BacktestConfig()
+    )
     monkeypatch.setattr(runner, "instantiate_strategy", lambda strategy_class, strategy_config, chain: object())
     monkeypatch.setattr(runner, "create_backtester", lambda **kwargs: Backtester())
     monkeypatch.setattr(runner, "serialize_result", lambda result: {"metrics": {}, "trades": []})
@@ -604,7 +645,9 @@ def test_run_platform_backtest_threads_token_addresses(monkeypatch: pytest.Monke
     monkeypatch.setattr(runner, "prime_strategy_registry", lambda: None)
     monkeypatch.setattr(runner.os, "chdir", lambda path: None)
     monkeypatch.setattr(runner, "discover_strategy_class", lambda repo_root, current_config: Strategy)
-    monkeypatch.setattr(runner, "build_platform_backtest_config", lambda raw_config, current_config, strategy_class: BacktestConfig())
+    monkeypatch.setattr(
+        runner, "build_platform_backtest_config", lambda raw_config, current_config, strategy_class: BacktestConfig()
+    )
     monkeypatch.setattr(runner, "instantiate_strategy", lambda strategy_class, current_config, chain: object())
     monkeypatch.setattr(runner, "create_backtester", fake_create_backtester)
     monkeypatch.setattr(runner, "serialize_result", lambda result: {"metrics": {}, "trades": []})
@@ -725,7 +768,9 @@ def _patch_successful_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> li
     monkeypatch.setattr(runner, "prime_strategy_registry", lambda: None)
     monkeypatch.setattr(runner.os, "chdir", lambda path: None)
     monkeypatch.setattr(runner, "discover_strategy_class", lambda repo_root, strategy_config: Strategy)
-    monkeypatch.setattr(runner, "build_platform_backtest_config", lambda raw_config, strategy_config, strategy_class: BacktestConfig())
+    monkeypatch.setattr(
+        runner, "build_platform_backtest_config", lambda raw_config, strategy_config, strategy_class: BacktestConfig()
+    )
     monkeypatch.setattr(runner, "instantiate_strategy", lambda strategy_class, strategy_config, chain: object())
     monkeypatch.setattr(runner, "create_backtester", lambda **kwargs: Backtester())
     monkeypatch.setattr(runner, "serialize_result", lambda result: {"metrics": {}, "trades": []})

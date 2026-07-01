@@ -88,6 +88,7 @@ class TestSingleTradeClosedForm:
 
     BASE_USDC = ("base", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
     BASE_WETH = ("base", "0x4200000000000000000000000000000000000006")
+    POLYGON_USDC_E = ("polygon", "0x2791bca1f2de4661ed88a30c99a7a9449aa84174")
 
     def test_stable_quoted_buy_debits_cash(self, portfolio: SimulatedPortfolio, market_state: MarketState) -> None:
         """The 2026-06 clamp-bug repro: a $50 USDC->WETH buy with $20 gas.
@@ -111,6 +112,34 @@ class TestSingleTradeClosedForm:
         assert portfolio.tokens["WETH"] == Decimal("0.0165")
         # 9930 cash + 0.0165 * 3000 = 9979.50
         assert portfolio.get_total_value_usd(market_state) == Decimal("9979.50")
+
+    def test_symbol_debit_uses_exact_address_native_funding_without_cash_sweep(self) -> None:
+        portfolio = SimulatedPortfolio(
+            initial_capital_usd=Decimal("0"),
+            cash_usd=Decimal("0"),
+            tokens={self.POLYGON_USDC_E: Decimal("10000")},
+            chain="polygon",
+        )
+        fill = SimulatedFill(
+            timestamp=TS,
+            intent_type=IntentType.SUPPLY,
+            protocol="compound_v3",
+            tokens=["USDC.e"],
+            executed_price=Decimal("1"),
+            amount_usd=Decimal("9000"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={},
+            tokens_out={"USDC.e": Decimal("9000")},
+        )
+        state = MarketState(timestamp=TS, prices={self.POLYGON_USDC_E: Decimal("1")}, chain="polygon")
+
+        applied = portfolio.apply_fill(fill, market_state=state)
+
+        assert applied is True
+        assert portfolio.cash_usd == Decimal("0")
+        assert portfolio.tokens == {self.POLYGON_USDC_E: Decimal("1000")}
 
     def test_buy_value_change_equals_embedded_costs(
         self, portfolio: SimulatedPortfolio, market_state: MarketState

@@ -59,7 +59,7 @@ def sample_backtest_result() -> BacktestResult:
         end_time=datetime(2024, 1, 3),
         metrics=metrics,
         equity_curve=equity_curve,
-        initial_capital_usd=Decimal("10000"),
+        initial_portfolio_value_usd=Decimal("10000"),
         final_capital_usd=Decimal("10400"),
         trades=[],
     )
@@ -183,7 +183,7 @@ class TestSaveChartIntegration:
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
             equity_curve=equity_curve,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10600"),
         )
 
@@ -227,7 +227,7 @@ class TestSaveChartIntegration:
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
             equity_curve=[],  # Empty
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10000"),
         )
 

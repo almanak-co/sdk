@@ -42,6 +42,8 @@ from almanak.framework.backtesting.pnl.data_provider import (
     OHLCV,
     HistoricalDataConfig,
     MarketState,
+    TokenRef,
+    token_ref_provider_symbol,
 )
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
@@ -49,11 +51,37 @@ from almanak.framework.backtesting.pnl.engine import (
     PnLBacktester,
 )
 
+ARB_WETH = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+ARB_USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+
 # =============================================================================
 # Output Configuration
 # =============================================================================
 
 OUTPUT_DIR = Path(__file__).parent / "output"
+
+
+def _lp_token_funding() -> list[dict[str, str]]:
+    return [
+        {
+            "symbol": "WETH",
+            "address": ARB_WETH,
+            "chain": "arbitrum",
+            "amount": "1",
+            "amount_type": "token",
+        },
+        {
+            "symbol": "USDC",
+            "address": ARB_USDC,
+            "chain": "arbitrum",
+            "amount": "7000",
+            "amount_type": "token",
+        },
+    ]
+
+
+def _provider_symbol(token: TokenRef, chain: str = "arbitrum") -> str:
+    return token_ref_provider_symbol(token, chain, unwrap_wrapped_native=False).upper()
 
 
 # =============================================================================
@@ -171,10 +199,10 @@ class LPTestDataProvider:
         """Get the upper bound of the LP range."""
         return self._range_upper
 
-    async def get_price(self, token: str, timestamp: datetime) -> Decimal:
+    async def get_price(self, token: TokenRef, timestamp: datetime) -> Decimal:
         """Get price for token at specific timestamp."""
-        token = token.upper()
-        if token in ("USDC", "USDT"):
+        symbol = _provider_symbol(token)
+        if symbol in ("USDC", "USDT"):
             return Decimal("1")
 
         delta = timestamp - self._start_time
@@ -206,9 +234,7 @@ class LPTestDataProvider:
             current += timedelta(seconds=interval_seconds)
         return result
 
-    async def iterate(
-        self, config: HistoricalDataConfig
-    ) -> AsyncIterator[tuple[datetime, MarketState]]:
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         """Iterate through historical data with mock prices."""
         current = config.start_time
         index = 0
@@ -216,11 +242,12 @@ class LPTestDataProvider:
 
         while current <= config.end_time:
             prices = {}
+            chain = config.chains[0] if config.chains else "arbitrum"
             for token in config.tokens:
-                token = token.upper()
-                if token in ("USDC", "USDT"):
+                symbol = _provider_symbol(token, chain)
+                if symbol in ("USDC", "USDT"):
                     prices[token] = Decimal("1")
-                elif token in ("WETH", "ETH"):
+                elif symbol in ("WETH", "ETH"):
                     prices[token] = self.get_price_at_index(index)
                 else:
                     prices[token] = Decimal("1")
@@ -228,7 +255,7 @@ class LPTestDataProvider:
             market_state = MarketState(
                 timestamp=current,
                 prices=prices,
-                chain=config.chains[0] if config.chains else "arbitrum",
+                chain=chain,
                 block_number=15000000 + index * 100,
                 gas_price_gwei=Decimal("30"),
             )
@@ -368,9 +395,7 @@ class LPStrategy:
             except (ValueError, AttributeError):
                 return MockHoldIntent(reason="No ETH price available")
 
-        self._current_timestamp = getattr(market, "timestamp", None) or getattr(
-            market, "_timestamp", None
-        )
+        self._current_timestamp = getattr(market, "timestamp", None) or getattr(market, "_timestamp", None)
         if self._current_timestamp is None:
             return MockHoldIntent(reason="No timestamp")
 
@@ -604,11 +629,7 @@ def generate_lp_backtest_chart(
         )
 
     # Calculate in-range percentage
-    in_range_hours = sum(
-        period.end_idx - period.start_idx + 1
-        for period in range_periods
-        if period.is_in_range
-    )
+    in_range_hours = sum(period.end_idx - period.start_idx + 1 for period in range_periods if period.is_in_range)
     in_range_pct = (in_range_hours / num_hours) * 100
 
     # Add statistics annotation
@@ -814,9 +835,7 @@ def generate_lp_complete_chart(
     range_periods = identify_range_periods(prices, strategy.range_lower, strategy.range_upper)
 
     # Create figure with 3 subplots
-    fig, (ax1, ax2, ax3) = plt.subplots(
-        3, 1, figsize=(16, 14), height_ratios=[2, 1.5, 1], sharex=True
-    )
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 14), height_ratios=[2, 1.5, 1], sharex=True)
     fig.suptitle(
         "LP Position Backtest - ETH/USDC (30 Days) - Complete Analysis",
         fontsize=14,
@@ -901,18 +920,11 @@ def generate_lp_complete_chart(
         )
 
     # Calculate in-range percentage
-    in_range_hours = sum(
-        period.end_idx - period.start_idx + 1
-        for period in range_periods
-        if period.is_in_range
-    )
+    in_range_hours = sum(period.end_idx - period.start_idx + 1 for period in range_periods if period.is_in_range)
     in_range_pct = (in_range_hours / num_hours) * 100
 
     # Add statistics annotation
-    stats_text = (
-        f"In-Range: {in_range_pct:.1f}%\n"
-        f"Range Events: {len(strategy.range_events)}"
-    )
+    stats_text = f"In-Range: {in_range_pct:.1f}%\nRange Events: {len(strategy.range_events)}"
     ax1.text(
         0.02,
         0.98,
@@ -968,10 +980,7 @@ def generate_lp_complete_chart(
     # Final values annotation
     final_fees = fees_usd[-1]
     final_il = il_usd[-1]
-    metrics_text = (
-        f"Final Fees: ${final_fees:,.2f}\n"
-        f"Final IL: ${final_il:,.2f}"
-    )
+    metrics_text = f"Final Fees: ${final_fees:,.2f}\nFinal IL: ${final_il:,.2f}"
     ax2.text(
         0.02,
         0.98,
@@ -1106,7 +1115,7 @@ class TestLPBacktestVisual:
             start_time=start_time,
             end_time=end_time,
             interval_seconds=3600,  # 1 hour intervals
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_lp_token_funding(),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
         )
@@ -1172,17 +1181,11 @@ class TestLPBacktestVisual:
         # Verify range events are correctly classified
         for event in strategy.range_events:
             if event.event_type == "ENTER_RANGE":
-                assert range_lower <= event.price <= range_upper, (
-                    f"Enter event price {event.price} should be in range"
-                )
+                assert range_lower <= event.price <= range_upper, f"Enter event price {event.price} should be in range"
             elif event.event_type == "EXIT_ABOVE":
-                assert event.price > range_upper, (
-                    f"Exit above event price {event.price} should be above {range_upper}"
-                )
+                assert event.price > range_upper, f"Exit above event price {event.price} should be above {range_upper}"
             elif event.event_type == "EXIT_BELOW":
-                assert event.price < range_lower, (
-                    f"Exit below event price {event.price} should be below {range_lower}"
-                )
+                assert event.price < range_lower, f"Exit below event price {event.price} should be below {range_lower}"
 
     @pytest.mark.asyncio
     async def test_lp_strategy_complete_visualization(self) -> None:
@@ -1218,7 +1221,7 @@ class TestLPBacktestVisual:
             start_time=start_time,
             end_time=end_time,
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_lp_token_funding(),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
         )
@@ -1301,22 +1304,17 @@ class TestLPBacktestVisual:
         for m in lp_metrics:
             if m.is_in_range:
                 # Fees should increase or stay same
-                assert m.cumulative_fees_usd >= prev_fees, (
-                    "Cumulative fees should not decrease"
-                )
+                assert m.cumulative_fees_usd >= prev_fees, "Cumulative fees should not decrease"
             else:
                 # When out of range, fees should stay the same
                 assert m.cumulative_fees_usd == prev_fees, (
-                    f"Fees should not accumulate out of range: "
-                    f"prev={prev_fees}, current={m.cumulative_fees_usd}"
+                    f"Fees should not accumulate out of range: prev={prev_fees}, current={m.cumulative_fees_usd}"
                 )
             prev_fees = m.cumulative_fees_usd
 
         # Verify IL is always non-negative
         for m in lp_metrics:
-            assert m.impermanent_loss_usd >= Decimal("0"), (
-                f"IL should be non-negative: {m.impermanent_loss_usd}"
-            )
+            assert m.impermanent_loss_usd >= Decimal("0"), f"IL should be non-negative: {m.impermanent_loss_usd}"
 
         # Verify net PnL calculation
         for m in lp_metrics:

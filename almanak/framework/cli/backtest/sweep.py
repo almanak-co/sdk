@@ -713,10 +713,10 @@ def _run_parallel_sweep(
                     # Correct pattern: set `error=str(e)` and let `success` derive from it.
                     # Required BacktestResult fields (engine, deployment_id, start_time,
                     # end_time, metrics) are populated explicitly, and the metadata
-                    # fields (chain, initial/final capital) are propagated from
-                    # pnl_config so failed results carry the same run metadata as
+                    # fields (chain and period) are propagated from pnl_config
+                    # so failed results carry the same run metadata as
                     # successful ones rather than silently falling back to the
-                    # dataclass defaults (arbitrum / 10k USD).
+                    # dataclass defaults.
                     click.echo(f"  Error in worker for params {task.params}: {e}", err=True)
                     results.append(
                         SweepResult(
@@ -728,8 +728,8 @@ def _run_parallel_sweep(
                                 end_time=pnl_config.end_time,
                                 metrics=BacktestMetrics(),
                                 trades=[],
-                                initial_capital_usd=pnl_config.initial_capital_usd,
-                                final_capital_usd=pnl_config.initial_capital_usd,
+                                initial_portfolio_value_usd=Decimal("0"),
+                                final_capital_usd=Decimal("0"),
                                 chain=pnl_config.chain,
                                 error=str(e),
                             ),
@@ -1153,7 +1153,6 @@ class _SweepRunContext:
     chain: str
     token_list: list[str]
     interval: int
-    initial_capital: float
     output_path: Path | None
     multi_period_mode: bool
     backtest_periods: list[Any]
@@ -1191,7 +1190,6 @@ def _print_sweep_configuration(
     else:
         click.echo(f"Period: {ctx.backtest_periods[0].start.date()} -> {ctx.backtest_periods[0].end.date()}")
     click.echo(f"Interval: {ctx.interval}s ({ctx.interval / 3600:.1f} hours)")
-    click.echo(f"Initial Capital: ${ctx.initial_capital:,.2f}")
     click.echo(f"Tokens: {', '.join(ctx.token_list)}")
     click.echo()
     click.echo("Parameters to sweep:")
@@ -1272,7 +1270,6 @@ def _build_sweep_run_context(
     params: tuple[str, ...],
     numeric_params: tuple[str, ...],
     interval: int,
-    initial_capital: float,
     chain: str,
     tokens: str,
     output: str | None,
@@ -1294,7 +1291,6 @@ def _build_sweep_run_context(
         chain=chain,
         token_list=parse_token_list(tokens),
         interval=interval,
-        initial_capital=initial_capital,
         output_path=Path(output) if output else None,
         multi_period_mode=multi_period_mode,
         backtest_periods=backtest_periods,
@@ -1377,9 +1373,9 @@ def _run_sweep_over_periods(
                 start_time=bp.start,
                 end_time=bp.end,
                 interval_seconds=ctx.interval,
-                initial_capital=ctx.initial_capital,
                 chain=ctx.chain,
                 tokens=ctx.token_list,
+                token_funding=base_config.get("token_funding"),
                 # gas_price_gwei omitted: chain-aware default (VIB-5088)
                 include_gas_costs=True,
                 allow_degraded_data=True,
@@ -1469,7 +1465,6 @@ def _write_sweep_json(
                 for bp in ctx.backtest_periods
             ],
             "interval_seconds": ctx.interval,
-            "initial_capital_usd": str(ctx.initial_capital),
             "chain": ctx.chain,
             "tokens": ctx.token_list,
             "parameters": [{"name": p.name, "values": p.values} for p in ctx.sweep_params],
@@ -1642,12 +1637,6 @@ def _generate_sweep_report(
     help="Interval between ticks in seconds (default: 3600 = 1 hour)",
 )
 @click.option(
-    "--initial-capital",
-    type=float,
-    default=10000.0,
-    help="Initial portfolio balance in USD (default: 10000)",
-)
-@click.option(
     "--chain",
     "-c",
     type=str,
@@ -1689,7 +1678,6 @@ def sweep_backtest(
     parallel: bool,
     workers: int | None,
     interval: int,
-    initial_capital: float,
     chain: str,
     tokens: str,
     output: str | None,
@@ -1761,7 +1749,6 @@ def sweep_backtest(
         params=params,
         numeric_params=numeric_params,
         interval=interval,
-        initial_capital=initial_capital,
         chain=chain,
         tokens=tokens,
         output=output,
@@ -1825,7 +1812,6 @@ class _OptimizationRunContext:
     chain: str
     token_list: list[str]
     interval: int
-    initial_capital: float
     output_label: str | None
     output_path: Path | None
     periods_spec: str | None
@@ -1896,7 +1882,6 @@ def _build_optimization_context(
     n_trials: int | None,
     patience: int | None,
     interval: int,
-    initial_capital: float,
     chain: str,
     tokens: str,
     output: str | None,
@@ -1917,7 +1902,6 @@ def _build_optimization_context(
         chain=chain,
         token_list=[t.strip().upper() for t in tokens.split(",")],
         interval=interval,
-        initial_capital=initial_capital,
         output_label=output,
         output_path=Path(output) if output else None,
         periods_spec=periods,
@@ -1957,7 +1941,6 @@ def _print_optimization_configuration(ctx: _OptimizationRunContext) -> None:
         bp = ctx.backtest_periods[0]
         click.echo(f"Period: {bp.start.date()} -> {bp.end.date()}")
     click.echo(f"Interval: {ctx.interval}s ({ctx.interval / 3600:.1f} hours)")
-    click.echo(f"Initial Capital: ${ctx.initial_capital:,.2f}")
     click.echo(f"Tokens: {', '.join(ctx.token_list)}")
     click.echo()
     click.echo(f"Objective: {ctx.settings.objective}")
@@ -1999,7 +1982,11 @@ def _resolve_optimization_strategy_class(strategy: str) -> Any:
         return make_mock_strategy_class("mock-optimize")
 
 
-def _build_optimization_pnl_configs(ctx: _OptimizationRunContext) -> list[PnLBacktestConfig]:
+def _build_optimization_pnl_configs(
+    ctx: _OptimizationRunContext,
+    *,
+    token_funding: list[dict[str, Any]] | None,
+) -> list[PnLBacktestConfig]:
     pnl_configs: list[PnLBacktestConfig] = []
     for bp in ctx.backtest_periods:
         pnl_configs.append(
@@ -2007,7 +1994,7 @@ def _build_optimization_pnl_configs(ctx: _OptimizationRunContext) -> list[PnLBac
                 start_time=bp.start,
                 end_time=bp.end,
                 interval_seconds=ctx.interval,
-                initial_capital_usd=Decimal(str(ctx.initial_capital)),
+                token_funding=token_funding,
                 chain=ctx.chain,
                 tokens=ctx.token_list,
                 # gas_price_gwei omitted: chain-aware default (VIB-5088)
@@ -2191,12 +2178,6 @@ def _write_optimization_history(output_path: Path | None, tuner: Any) -> None:
     help="Interval between ticks in seconds (default: 3600 = 1 hour)",
 )
 @click.option(
-    "--initial-capital",
-    type=float,
-    default=10000.0,
-    help="Initial portfolio balance in USD (default: 10000)",
-)
-@click.option(
     "--chain",
     "-c",
     type=str,
@@ -2245,7 +2226,6 @@ def optimize_backtest(
     n_trials: int | None,
     patience: int | None,
     interval: int,
-    initial_capital: float,
     chain: str,
     tokens: str,
     output: str | None,
@@ -2338,7 +2318,6 @@ def optimize_backtest(
         n_trials=n_trials,
         patience=patience,
         interval=interval,
-        initial_capital=initial_capital,
         chain=chain,
         tokens=tokens,
         output=output,
@@ -2353,7 +2332,7 @@ def optimize_backtest(
 
     strategy_class = _resolve_optimization_strategy_class(strategy)
     base_config = load_strategy_config(strategy, chain)
-    pnl_configs = _build_optimization_pnl_configs(ctx)
+    pnl_configs = _build_optimization_pnl_configs(ctx, token_funding=base_config.get("token_funding"))
 
     # Resolve the SYMBOL -> (chain, address) map once; reused by every provider
     # the factory builds (Refinement R1). Natives resolve via the chain registry.

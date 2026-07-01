@@ -23,6 +23,7 @@ from almanak.framework.backtesting.pnl.config_loader import (
     load_config_from_result,
     validate_loaded_config,
 )
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 # =============================================================================
 # Test Fixtures
@@ -36,7 +37,7 @@ def valid_config_dict() -> dict:
         "start_time": "2024-01-01T00:00:00+00:00",
         "end_time": "2024-06-01T00:00:00+00:00",
         "interval_seconds": 3600,
-        "initial_capital_usd": "10000",
+        "token_funding": _pnl_token_funding("10000"),
         "fee_model": "realistic",
         "slippage_model": "realistic",
         "include_gas_costs": True,
@@ -74,7 +75,7 @@ def valid_result_dict(valid_config_dict: dict) -> dict:
         },
         "trades": [],
         "equity_curve": [],
-        "initial_capital_usd": "10000",
+        "initial_portfolio_value_usd": "10000",
         "final_capital_usd": "11000",
         "chain": "arbitrum",
         "config": valid_config_dict,
@@ -117,7 +118,7 @@ class TestLoadConfigFromResult:
         assert isinstance(result, ConfigLoadResult)
         assert isinstance(result.config, PnLBacktestConfig)
         assert result.config.chain == "arbitrum"
-        assert result.config.initial_capital_usd == Decimal("10000")
+        assert result.config.token_funding == _pnl_token_funding("10000")
         assert result.source_path == temp_result_file
 
     def test_loads_start_end_time(self, temp_result_file: Path) -> None:
@@ -230,15 +231,15 @@ class TestLoadConfigFromResult:
     def test_non_finite_numeric_value_raises_config_load_error(
         self, valid_result_dict: dict, tmp_path: Path
     ) -> None:
-        """Non-finite capital must fail validation before Decimal internals leak."""
-        valid_result_dict["config"]["initial_capital_usd"] = "NaN"
-        result_file = tmp_path / "nan_capital.json"
+        """Non-finite numeric config values fail validation before Decimal internals leak."""
+        valid_result_dict["config"]["gas_price_gwei"] = "NaN"
+        result_file = tmp_path / "nan_gas_price.json"
         result_file.write_text(json.dumps(valid_result_dict))
 
         with pytest.raises(ConfigLoadError) as exc_info:
             load_config_from_result(result_file)
 
-        assert "initial_capital_usd" in str(exc_info.value)
+        assert "gas_price_gwei" in str(exc_info.value)
 
     def test_accepts_string_path(self, temp_result_file: Path) -> None:
         """Test that string path works."""
@@ -287,8 +288,8 @@ class TestValidateLoadedConfig:
         assert not result.is_valid
         assert any("end_time" in e for e in result.errors)
 
-    def test_missing_initial_capital(self) -> None:
-        """Test error for missing initial capital before construction."""
+    def test_missing_token_funding(self) -> None:
+        """Test error for missing token funding before construction."""
         config = {
             "start_time": "2024-01-01T00:00:00+00:00",
             "end_time": "2024-06-01T00:00:00+00:00",
@@ -296,7 +297,25 @@ class TestValidateLoadedConfig:
         result = validate_loaded_config(config)
 
         assert not result.is_valid
-        assert any("initial_capital_usd" in e for e in result.errors)
+        assert any("token_funding" in e for e in result.errors)
+
+    @pytest.mark.parametrize("amount", ["0", "-1"])
+    def test_invalid_token_funding_amount(self, valid_config_dict: dict, amount: str) -> None:
+        """Loaded configs require positive token_funding amounts."""
+        config = dict(valid_config_dict)
+        funding_entry = dict(config["token_funding"][0])
+        funding_entry["amount"] = amount
+        config["token_funding"] = [funding_entry]
+
+        result = validate_loaded_config(config)
+
+        assert not result.is_valid
+        assert any("token_funding" in error and "amount" in error for error in result.errors)
+
+    def test_unknown_helper_chain_fails_loud(self) -> None:
+        """Shared token_funding fixtures should not silently pair mismatched chains and addresses."""
+        with pytest.raises(ValueError, match="no USDC address configured"):
+            _pnl_token_funding("10000", chain="typo-chain")
 
     def test_invalid_datetime_format(self) -> None:
         """Test error for invalid datetime format."""
@@ -498,7 +517,7 @@ class TestRoundTrip:
         original = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 6, 1),
-            initial_capital_usd=Decimal("50000"),
+            token_funding=_pnl_token_funding(Decimal("50000"), chain="base"),
             chain="base",
             tokens=["WETH", "USDC", "AAVE"],
         )
@@ -516,7 +535,7 @@ class TestRoundTrip:
         # Verify
         assert loaded.start_time.year == original.start_time.year
         assert loaded.end_time.year == original.end_time.year
-        assert loaded.initial_capital_usd == original.initial_capital_usd
+        assert loaded.token_funding == original.token_funding
         assert loaded.chain == original.chain
         assert loaded.tokens == original.tokens
 
@@ -525,7 +544,7 @@ class TestRoundTrip:
         original = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 6, 1),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_pnl_token_funding(Decimal("10000")),
             random_seed=42,
         )
 
@@ -551,7 +570,7 @@ class TestRoundTrip:
             start_time=datetime(2024, 3, 15),
             end_time=datetime(2024, 9, 15),
             interval_seconds=7200,
-            initial_capital_usd=Decimal("25000"),
+            token_funding=_pnl_token_funding(Decimal("25000"), chain="optimism"),
             chain="optimism",
             tokens=["WETH", "USDC", "OP"],
             gas_price_gwei=Decimal("0.001"),
@@ -579,7 +598,7 @@ class TestRoundTrip:
         assert loaded.start_time.date() == original.start_time.date()
         assert loaded.end_time.date() == original.end_time.date()
         assert loaded.interval_seconds == original.interval_seconds
-        assert loaded.initial_capital_usd == original.initial_capital_usd
+        assert loaded.token_funding == original.token_funding
         assert loaded.chain == original.chain
         assert loaded.tokens == original.tokens
         assert loaded.gas_price_gwei == original.gas_price_gwei

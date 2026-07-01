@@ -1,7 +1,7 @@
 """Configuration for PnL backtesting.
 
 This module defines the configuration dataclass for PnL backtests,
-which controls simulation parameters like time range, initial capital,
+which controls simulation parameters like time range, token funding,
 fee/slippage models, gas costs, and inclusion delay.
 
 Key Components:
@@ -18,7 +18,15 @@ Examples:
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 6, 1),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=[
+                {
+                    "symbol": "USDC",
+                    "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                    "chain": "arbitrum",
+                    "amount": "10000",
+                    "amount_type": "usd",
+                }
+            ],
         )
 
     Custom configuration with fee/slippage models:
@@ -26,7 +34,7 @@ Examples:
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 6, 1),
-            initial_capital_usd=Decimal("100000"),
+            token_funding=[...],
             fee_model="uniswap_v3",
             slippage_model="liquidity_aware",
             include_gas_costs=True,
@@ -45,7 +53,7 @@ Examples:
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 6, 1),
-            initial_capital_usd=Decimal("1000000"),
+            token_funding=[...],
             institutional_mode=True,  # Enable strict requirements
             random_seed=42,  # For reproducibility
         )
@@ -99,18 +107,47 @@ def default_gas_price_gwei_for_chain(chain: str) -> Decimal:
     return Decimal(str(gas.fallback_base_fee_gwei)) + Decimal(str(gas.fallback_priority_fee_gwei))
 
 
+def _token_funding_for_hash(token_funding: list[Any] | None) -> list[Any] | None:
+    """Return a stable token_funding representation for config hashing."""
+    if not token_funding:
+        return token_funding
+
+    normalized: list[Any] = []
+    for entry in token_funding:
+        model_dump = getattr(entry, "model_dump", None)
+        normalized_entry = model_dump(mode="json") if callable(model_dump) else entry
+        normalized.append(_stable_json_value(normalized_entry))
+    return sorted(normalized, key=lambda entry: json.dumps(entry, sort_keys=True))
+
+
+def _stable_json_value(value: Any) -> Any:
+    """Convert config fragments into deterministic JSON-safe values."""
+    return json.loads(json.dumps(value, sort_keys=True, default=str))
+
+
+def _tokens_for_hash(tokens: list[Any]) -> list[Any]:
+    """Return a stable, JSON-safe token list for config hashing."""
+    normalized = [_stable_json_value(token) for token in tokens]
+    return sorted(normalized, key=lambda token: json.dumps(token, sort_keys=True))
+
+
+def _tokens_for_serialization(tokens: list[Any]) -> list[Any]:
+    """Return a JSON-safe token list while preserving user-provided order."""
+    return [_stable_json_value(token) for token in tokens]
+
+
 @dataclass
 class PnLBacktestConfig:
     """Configuration for a PnL backtest simulation.
 
-    Controls all parameters of the backtest including time range, initial
-    capital, fee/slippage models, gas costs, and execution delay simulation.
+    Controls all parameters of the backtest including time range, token
+    funding, fee/slippage models, gas costs, and execution delay simulation.
 
     Attributes:
         start_time: Start of the backtest period (inclusive)
         end_time: End of the backtest period (inclusive)
         interval_seconds: Time between simulation ticks in seconds (default: 3600 = 1 hour)
-        initial_capital_usd: Starting capital in USD
+        token_funding: Strategy funding basket used to seed the starting wallet
         fee_model: Fee model to use - 'realistic', 'zero', or protocol-specific
             (e.g., 'uniswap_v3', 'aave_v3', 'gmx')
         slippage_model: Slippage model to use - 'realistic', 'zero', or protocol-specific
@@ -137,7 +174,7 @@ class PnLBacktestConfig:
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 6, 1),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=[...],
         )
         print(f"Duration: {config.duration_days:.1f} days")
         print(f"Estimated ticks: {config.estimated_ticks}")
@@ -148,8 +185,9 @@ class PnLBacktestConfig:
     end_time: datetime
     interval_seconds: int = 3600  # 1 hour default
 
-    # Capital configuration
-    initial_capital_usd: Decimal = Decimal("10000")
+    # Startup wallet configuration. Historical PnL backtests seed the wallet
+    # exclusively from token_funding.
+    token_funding: list[dict[str, Any]] | None = None
 
     # Fee and slippage model configuration
     fee_model: str = "realistic"
@@ -454,7 +492,7 @@ class PnLBacktestConfig:
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
         self._validate_time_config()
-        self._validate_capital_config()
+        self._validate_token_funding_config()
         self._resolve_and_validate_gas_price()
         self._validate_execution_config()
         self._validate_tokens_config()
@@ -469,9 +507,9 @@ class PnLBacktestConfig:
         if self.interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
 
-    def _validate_capital_config(self) -> None:
-        if self.initial_capital_usd <= Decimal("0"):
-            raise ValueError("initial_capital_usd must be positive")
+    def _validate_token_funding_config(self) -> None:
+        if self.token_funding is not None and not isinstance(self.token_funding, list):
+            raise ValueError("token_funding must be a list")
 
     def _validate_execution_config(self) -> None:
         if self.inclusion_delay_blocks < 0:
@@ -581,7 +619,7 @@ class PnLBacktestConfig:
             "start_time": self.start_time.isoformat(),
             "end_time": self.end_time.isoformat(),
             "interval_seconds": self.interval_seconds,
-            "initial_capital_usd": str(self.initial_capital_usd),
+            "token_funding": _token_funding_for_hash(self.token_funding),
             "fee_model": self.fee_model,
             "slippage_model": self.slippage_model,
             "include_gas_costs": self.include_gas_costs,
@@ -589,7 +627,7 @@ class PnLBacktestConfig:
             "gas_price_gwei_is_default": self.gas_price_gwei_is_default,
             "inclusion_delay_blocks": self.inclusion_delay_blocks,
             "chain": self.chain,
-            "tokens": self.tokens,
+            "tokens": _tokens_for_serialization(self.tokens),
             "benchmark_token": self.benchmark_token,
             "risk_free_rate": str(self.risk_free_rate),
             "trading_days_per_year": self.trading_days_per_year,
@@ -666,7 +704,7 @@ class PnLBacktestConfig:
 
         The hash uses SHA-256 and includes:
         - Time range (start_time, end_time, interval_seconds)
-        - Capital settings (initial_capital_usd)
+        - Startup funding settings (token_funding)
         - Model settings (fee_model, slippage_model)
         - Gas settings (include_gas_costs, gas_price_gwei)
         - Execution settings (inclusion_delay_blocks)
@@ -692,7 +730,7 @@ class PnLBacktestConfig:
             "start_time": self.start_time.isoformat(),
             "end_time": self.end_time.isoformat(),
             "interval_seconds": self.interval_seconds,
-            "initial_capital_usd": str(self.initial_capital_usd),
+            "token_funding": _token_funding_for_hash(self.token_funding),
             "fee_model": self.fee_model,
             "slippage_model": self.slippage_model,
             "include_gas_costs": self.include_gas_costs,
@@ -703,7 +741,7 @@ class PnLBacktestConfig:
             "gas_price_gwei": str(self.gas_price_gwei),
             "inclusion_delay_blocks": self.inclusion_delay_blocks,
             "chain": self.chain,
-            "tokens": sorted(self.tokens),  # Sort for consistency
+            "tokens": _tokens_for_hash(self.tokens),
             "benchmark_token": self.benchmark_token,
             "risk_free_rate": str(self.risk_free_rate),
             "trading_days_per_year": self.trading_days_per_year,
@@ -765,12 +803,8 @@ class PnLBacktestConfig:
         )
         end_time = datetime.fromisoformat(data["end_time"]) if isinstance(data["end_time"], str) else data["end_time"]
 
-        # Parse Decimal fields
-        initial_capital = (
-            Decimal(data["initial_capital_usd"])
-            if isinstance(data["initial_capital_usd"], str)
-            else data["initial_capital_usd"]
-        )
+        if "initial_capital_usd" in data:
+            raise ValueError("initial_capital_usd is no longer a valid PnL backtest config field; use token_funding")
         # VIB-5088: a missing gas_price_gwei deserializes as None so the
         # chain-aware default resolves in __post_init__. A present value is
         # preserved byte-for-byte (legacy artifacts always wrote the key, so
@@ -814,7 +848,7 @@ class PnLBacktestConfig:
             start_time=start_time,
             end_time=end_time,
             interval_seconds=data.get("interval_seconds", 3600),
-            initial_capital_usd=initial_capital,
+            token_funding=data.get("token_funding"),
             fee_model=data.get("fee_model", "realistic"),
             slippage_model=data.get("slippage_model", "realistic"),
             include_gas_costs=data.get("include_gas_costs", True),
@@ -857,7 +891,7 @@ class PnLBacktestConfig:
             f"PnLBacktestConfig("
             f"start={self.start_time.date()}, "
             f"end={self.end_time.date()}, "
-            f"capital=${self.initial_capital_usd:,.0f}, "
+            f"funded_tokens={len(self.token_funding or [])}, "
             f"interval={self.interval_hours:.1f}h, "
             f"ticks={self.estimated_ticks})"
         )

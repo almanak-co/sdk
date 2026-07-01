@@ -360,7 +360,6 @@ class _WalkForwardRunContext:
     chain: str
     token_list: list[str]
     interval: int
-    initial_capital: float
     output_label: str | None
     output_path: Path | None
     train_days: int
@@ -458,7 +457,6 @@ def _build_walk_forward_context(
     n_trials: int | None,
     patience: int | None,
     interval: int,
-    initial_capital: float,
     chain: str,
     tokens: str,
     output: str | None,
@@ -488,7 +486,6 @@ def _build_walk_forward_context(
         chain=chain,
         token_list=_parse_cli_tokens(tokens),
         interval=interval,
-        initial_capital=initial_capital,
         output_label=output,
         output_path=Path(output) if output else None,
         train_days=train_days,
@@ -532,7 +529,6 @@ def _print_walk_forward_configuration(ctx: _WalkForwardRunContext) -> None:
     click.echo(f"Chain: {ctx.chain}")
     click.echo(f"Period: {ctx.start.date()} -> {ctx.end.date()} ({ctx.window_summary.total_duration_days} days)")
     click.echo(f"Interval: {ctx.interval}s ({ctx.interval / 3600:.1f} hours)")
-    click.echo(f"Initial Capital: ${ctx.initial_capital:,.2f}")
     click.echo(f"Tokens: {', '.join(ctx.token_list)}")
     click.echo()
     click.echo("Window Configuration:")
@@ -579,12 +575,16 @@ def _resolve_walk_forward_strategy_class(strategy: str) -> Any:
         return make_mock_strategy_class("mock-walk-forward")
 
 
-def _build_walk_forward_pnl_config(ctx: _WalkForwardRunContext) -> PnLBacktestConfig:
+def _build_walk_forward_pnl_config(
+    ctx: _WalkForwardRunContext,
+    *,
+    token_funding: list[dict[str, Any]] | None,
+) -> PnLBacktestConfig:
     return PnLBacktestConfig(
         start_time=ctx.start,
         end_time=ctx.end,
         interval_seconds=ctx.interval,
-        initial_capital_usd=Decimal(str(ctx.initial_capital)),
+        token_funding=token_funding,
         chain=ctx.chain,
         tokens=ctx.token_list,
         # gas_price_gwei omitted: chain-aware default (VIB-5088)
@@ -744,9 +744,6 @@ def _write_json_output(output: str | Path | None, result: Any, label: str) -> No
 )
 @click.option("--patience", type=int, default=None, help="Early stopping patience per window (default: from config)")
 @click.option("--interval", type=int, default=3600, help="Interval between ticks in seconds (default: 3600 = 1 hour)")
-@click.option(
-    "--initial-capital", type=float, default=10000.0, help="Initial portfolio balance in USD (default: 10000)"
-)
 @click.option("--chain", "-c", type=str, default=DEFAULT_CHAIN, help=f"Target blockchain (default: {DEFAULT_CHAIN})")
 @click.option(
     "--tokens", type=str, default="WETH,USDC", help="Comma-separated list of tokens to track (default: WETH,USDC)"
@@ -772,7 +769,6 @@ def walk_forward_backtest(
     n_trials: int | None,
     patience: int | None,
     interval: int,
-    initial_capital: float,
     chain: str,
     tokens: str,
     output: str | None,
@@ -861,7 +857,6 @@ def walk_forward_backtest(
         n_trials=n_trials,
         patience=patience,
         interval=interval,
-        initial_capital=initial_capital,
         chain=chain,
         tokens=tokens,
         output=output,
@@ -875,7 +870,7 @@ def walk_forward_backtest(
 
     strategy_class = _resolve_walk_forward_strategy_class(ctx.strategy)
     base_config = load_strategy_config(ctx.strategy, ctx.chain)
-    pnl_config = _build_walk_forward_pnl_config(ctx)
+    pnl_config = _build_walk_forward_pnl_config(ctx, token_funding=base_config.get("token_funding"))
 
     # Resolve the SYMBOL -> (chain, address) map once for every provider the
     # factory builds (Refinement R1). Natives resolve via the chain registry.
@@ -915,7 +910,6 @@ class _MonteCarloRunContext:
     method: str
     path_method: Any
     interval: int
-    initial_capital: float
     chain: str
     token_list: list[str]
     base_token: str
@@ -937,7 +931,6 @@ def _build_monte_carlo_context(
     n_paths: int,
     method: str,
     interval: int,
-    initial_capital: float,
     chain: str,
     tokens: str,
     base_token: str,
@@ -957,7 +950,6 @@ def _build_monte_carlo_context(
         method=method,
         path_method=PathGenerationMethod.BOOTSTRAP if method == "bootstrap" else PathGenerationMethod.GBM,
         interval=interval,
-        initial_capital=initial_capital,
         chain=chain,
         token_list=_parse_cli_tokens(tokens),
         base_token=base_token.strip().upper(),
@@ -976,7 +968,6 @@ def _print_monte_carlo_configuration(ctx: _MonteCarloRunContext) -> None:
     click.echo(f"Chain: {ctx.chain}")
     click.echo(f"Historical Period: {ctx.start.date()} -> {ctx.end.date()} ({ctx.duration_days} days)")
     click.echo(f"Interval: {ctx.interval}s ({ctx.interval / 3600:.1f} hours)")
-    click.echo(f"Initial Capital: ${ctx.initial_capital:,.2f}")
     click.echo(f"Tokens: {', '.join(ctx.token_list)}")
     click.echo(f"Base Token (simulated): {ctx.base_token}")
     click.echo()
@@ -1009,12 +1000,16 @@ def _resolve_demo_strategy_class(strategy: str, deployment_id: str) -> Any:
         return make_mock_strategy_class(deployment_id)
 
 
-def _build_monte_carlo_pnl_config(ctx: _MonteCarloRunContext) -> PnLBacktestConfig:
+def _build_monte_carlo_pnl_config(
+    ctx: _MonteCarloRunContext,
+    *,
+    token_funding: list[dict[str, Any]] | None,
+) -> PnLBacktestConfig:
     return PnLBacktestConfig(
         start_time=ctx.start,
         end_time=ctx.end,
         interval_seconds=ctx.interval,
-        initial_capital_usd=Decimal(str(ctx.initial_capital)),
+        token_funding=token_funding,
         chain=ctx.chain,
         tokens=ctx.token_list,
         # gas_price_gwei omitted: chain-aware default (VIB-5088)
@@ -1141,9 +1136,6 @@ def _run_monte_carlo_simulation(
     help="Price path generation method (default: gbm - Geometric Brownian Motion)",
 )
 @click.option("--interval", type=int, default=3600, help="Interval between ticks in seconds (default: 3600 = 1 hour)")
-@click.option(
-    "--initial-capital", type=float, default=10000.0, help="Initial portfolio balance in USD (default: 10000)"
-)
 @click.option("--chain", "-c", type=str, default=DEFAULT_CHAIN, help=f"Target blockchain (default: {DEFAULT_CHAIN})")
 @click.option(
     "--tokens", type=str, default="WETH,USDC", help="Comma-separated list of tokens to track (default: WETH,USDC)"
@@ -1165,7 +1157,6 @@ def monte_carlo_backtest(  # noqa: C901
     n_paths: int,
     method: str,
     interval: int,
-    initial_capital: float,
     chain: str,
     tokens: str,
     base_token: str,
@@ -1227,7 +1218,6 @@ def monte_carlo_backtest(  # noqa: C901
         n_paths=n_paths,
         method=method,
         interval=interval,
-        initial_capital=initial_capital,
         chain=chain,
         tokens=tokens,
         base_token=base_token,
@@ -1245,7 +1235,7 @@ def monte_carlo_backtest(  # noqa: C901
     strategy_class = _resolve_demo_strategy_class(ctx.strategy, "mock-monte-carlo")
     base_config = load_strategy_config(ctx.strategy, ctx.chain)
     strategy_instance = _create_backtest_strategy(strategy_class, base_config, ctx.chain)
-    pnl_config = _build_monte_carlo_pnl_config(ctx)
+    pnl_config = _build_monte_carlo_pnl_config(ctx, token_funding=base_config.get("token_funding"))
     token_addresses = build_token_address_map(
         strategy_config=base_config,
         tracked_tokens=ctx.token_list,
@@ -1282,7 +1272,6 @@ class _ScenarioRunContext:
     strategy: str
     crisis_scenario: CrisisScenario
     interval: int
-    initial_capital: float
     chain: str
     token_list: list[str]
     gas_price: float
@@ -1390,7 +1379,6 @@ def _build_scenario_context(
     name: str | None,
     description: str | None,
     interval: int,
-    initial_capital: float,
     chain: str,
     tokens: str,
     gas_price: float,
@@ -1414,7 +1402,6 @@ def _build_scenario_context(
         strategy=strategy_name,
         crisis_scenario=crisis_scenario,
         interval=interval,
-        initial_capital=initial_capital,
         chain=chain,
         token_list=_parse_cli_tokens(tokens),
         gas_price=gas_price,
@@ -1447,7 +1434,6 @@ def _print_scenario_configuration(ctx: _ScenarioRunContext) -> None:
     click.echo()
     click.echo("Configuration:")
     click.echo(f"  Interval: {ctx.interval}s ({ctx.interval / 3600:.1f} hours)")
-    click.echo(f"  Initial Capital: ${ctx.initial_capital:,.2f}")
     click.echo(f"  Tokens: {', '.join(ctx.token_list)}")
     click.echo(f"  Gas Price: {ctx.gas_price:.0f} gwei")
     click.echo(f"  MEV Simulation: {'Enabled' if ctx.mev else 'Disabled'}")
@@ -1474,10 +1460,14 @@ def _build_crisis_backtester(base_config: dict[str, Any], ctx: _ScenarioRunConte
     return PnLBacktester(data_provider=data_provider, fee_models={}, slippage_models={})
 
 
-def _build_crisis_config(ctx: _ScenarioRunContext) -> CrisisBacktestConfig:
+def _build_crisis_config(
+    ctx: _ScenarioRunContext,
+    *,
+    token_funding: list[dict[str, Any]] | None,
+) -> CrisisBacktestConfig:
     return CrisisBacktestConfig(
         scenario=ctx.crisis_scenario,
-        initial_capital_usd=Decimal(str(ctx.initial_capital)),
+        token_funding=token_funding,
         interval_seconds=ctx.interval,
         chain=ctx.chain,
         tokens=ctx.token_list,
@@ -1519,6 +1509,7 @@ def _maybe_add_normal_period_comparison(
     strategy_instance: Any,
     backtester: PnLBacktester,
     ctx: _ScenarioRunContext,
+    token_funding: list[dict[str, Any]] | None,
 ) -> None:
     if not ctx.compare_normal or ctx.normal_start is None or ctx.normal_end is None:
         return
@@ -1529,7 +1520,7 @@ def _maybe_add_normal_period_comparison(
         start_time=ctx.normal_start,
         end_time=ctx.normal_end,
         interval_seconds=ctx.interval,
-        initial_capital_usd=Decimal(str(ctx.initial_capital)),
+        token_funding=token_funding,
         chain=ctx.chain,
         tokens=ctx.token_list,
         gas_price_gwei=Decimal(str(ctx.gas_price)),
@@ -1575,9 +1566,6 @@ def _maybe_add_normal_period_comparison(
     "--description", required=False, default=None, help="Custom scenario description (used with --scenario=custom)"
 )
 @click.option("--interval", type=int, default=3600, help="Interval between ticks in seconds (default: 3600 = 1 hour)")
-@click.option(
-    "--initial-capital", type=float, default=10000.0, help="Initial portfolio balance in USD (default: 10000)"
-)
 @click.option("--chain", "-c", type=str, default=DEFAULT_CHAIN, help=f"Target blockchain (default: {DEFAULT_CHAIN})")
 @click.option(
     "--tokens", type=str, default="WETH,USDC", help="Comma-separated list of tokens to track (default: WETH,USDC)"
@@ -1611,7 +1599,6 @@ def scenario_backtest(  # noqa: C901
     name: str | None,
     description: str | None,
     interval: int,
-    initial_capital: float,
     chain: str,
     tokens: str,
     gas_price: float,
@@ -1680,7 +1667,6 @@ def scenario_backtest(  # noqa: C901
         name=name,
         description=description,
         interval=interval,
-        initial_capital=initial_capital,
         chain=chain,
         tokens=tokens,
         gas_price=gas_price,
@@ -1700,7 +1686,7 @@ def scenario_backtest(  # noqa: C901
     base_config = load_strategy_config(ctx.strategy, ctx.chain)
     strategy_instance = _create_backtest_strategy(strategy_class, base_config, ctx.chain)
     backtester = _build_crisis_backtester(base_config, ctx)
-    crisis_config = _build_crisis_config(ctx)
+    crisis_config = _build_crisis_config(ctx, token_funding=base_config.get("token_funding"))
     result = _run_crisis_scenario(
         strategy_instance=strategy_instance,
         backtester=backtester,
@@ -1712,6 +1698,7 @@ def scenario_backtest(  # noqa: C901
         strategy_instance=strategy_instance,
         backtester=backtester,
         ctx=ctx,
+        token_funding=base_config.get("token_funding"),
     )
     print_crisis_backtest_results(result)
     _write_json_output(ctx.output, result, "Crisis backtest")

@@ -2049,7 +2049,7 @@ class BacktestResult:
         metrics: Calculated performance metrics
         trades: List of all trade records
         equity_curve: Portfolio value over time
-        initial_capital_usd: Starting capital in USD
+        initial_portfolio_value_usd: Starting portfolio value in USD
         final_capital_usd: Ending capital in USD
         chain: Target blockchain (arbitrum, base, etc.)
         run_started_at: When the backtest run actually started (wall time)
@@ -2124,7 +2124,7 @@ class BacktestResult:
     metrics: BacktestMetrics
     trades: list[TradeRecord] = field(default_factory=list)
     equity_curve: list[EquityPoint] = field(default_factory=list)
-    initial_capital_usd: Decimal = Decimal("10000")
+    initial_portfolio_value_usd: Decimal = Decimal("0")
     final_capital_usd: Decimal = Decimal("10000")
     #: Strategy numeraire descriptor (VIB-5127): the canonical UPPERCASE token
     #: symbol (e.g. "WETH") when the strategy declares a non-USD quote_asset,
@@ -2232,9 +2232,13 @@ class BacktestResult:
     @property
     def total_return_pct(self) -> Decimal:
         """Get total return as an actual percentage (e.g. 10 for 10%). (VIB-2915)"""
-        if self.initial_capital_usd == 0:
+        if self.initial_portfolio_value_usd == 0:
             return Decimal("0")
-        return (self.final_capital_usd - self.initial_capital_usd) / self.initial_capital_usd * Decimal("100")
+        return (
+            (self.final_capital_usd - self.initial_portfolio_value_usd)
+            / self.initial_portfolio_value_usd
+            * Decimal("100")
+        )
 
     @property
     def used_any_fallback(self) -> bool:
@@ -2295,7 +2299,7 @@ class BacktestResult:
             f"Chain:              {self.chain}",
             f"Period:             {self.start_time.strftime('%Y-%m-%d')} to {self.end_time.strftime('%Y-%m-%d')}",
             f"Duration:           {self.simulation_duration_days:.1f} days",
-            f"Initial Capital:    ${self.initial_capital_usd:,.2f}",
+            f"Initial Portfolio:  ${self.initial_portfolio_value_usd:,.2f}",
             "",
             "PERFORMANCE",
             "-" * 70,
@@ -2478,7 +2482,7 @@ class BacktestResult:
             "metrics": self.metrics.to_dict(),
             "trades": [t.to_dict() for t in self.trades],
             "equity_curve": [p.to_dict() for p in self.equity_curve],
-            "initial_capital_usd": str(self.initial_capital_usd),
+            "initial_portfolio_value_usd": str(self.initial_portfolio_value_usd),
             "final_capital_usd": str(self.final_capital_usd),
             "chain": self.chain,
             "run_started_at": self.run_started_at.isoformat() if self.run_started_at else None,
@@ -2773,6 +2777,9 @@ class BacktestResult:
             ValueError: when a required field is present but malformed
                 (e.g. an unknown BacktestEngine value or a bad datetime).
         """
+        if "initial_capital_usd" in data:
+            raise ValueError("initial_capital_usd is no longer supported in BacktestResult artifacts")
+
         return cls(
             engine=BacktestEngine(data["engine"]),
             deployment_id=data["deployment_id"],
@@ -2781,7 +2788,7 @@ class BacktestResult:
             metrics=cls._parse_metrics(data.get("metrics")),
             trades=cls._parse_trades(data.get("trades")),
             equity_curve=cls._parse_equity_curve(data.get("equity_curve")),
-            initial_capital_usd=Decimal(data.get("initial_capital_usd", "10000")),
+            initial_portfolio_value_usd=Decimal(data.get("initial_portfolio_value_usd", "0")),
             final_capital_usd=Decimal(data.get("final_capital_usd", "10000")),
             numeraire=data.get("numeraire"),
             initial_capital_numeraire=cls._optional_decimal(data, "initial_capital_numeraire"),

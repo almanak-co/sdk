@@ -200,6 +200,20 @@ def collect_backtest_token_refs(
     return refs
 
 
+def _token_funding_refs(raw_funding: Any) -> list[str]:
+    """Extract token refs from a token_funding basket without resolving them."""
+    if not isinstance(raw_funding, Iterable) or isinstance(raw_funding, bytes | bytearray | str | Mapping):
+        return []
+
+    refs: list[str] = []
+    for entry in raw_funding:
+        if not isinstance(entry, Mapping):
+            continue
+        refs.extend(_string_token_values(entry.get("address")))
+        refs.extend(_string_token_values(entry.get("symbol")))
+    return refs
+
+
 def _resolve_backtest_token(ref: str, chain: str) -> ResolvedToken | None:
     try:
         return get_token_resolver().resolve(ref, chain, log_errors=False, skip_gateway=True)
@@ -572,7 +586,7 @@ def build_backtest_config(
     *,
     quick: bool = False,
     chain: str | None = None,
-    initial_capital_usd: Decimal | None = None,
+    token_funding: list[dict[str, Any]] | None = None,
     tokens: list[str] | None = None,
 ) -> PnLBacktestConfig:
     """Build PnLBacktestConfig from HTTP request parameters.
@@ -585,10 +599,14 @@ def build_backtest_config(
 
     if spec is not None:
         params = spec.parameters
-        capital = initial_capital_usd or Decimal(str(params.get("amount_usd", "10000")))
+        resolved_token_funding = token_funding if token_funding is not None else params.get("token_funding")
+        if not resolved_token_funding:
+            raise ValueError("token_funding is required for PnL backtests")
         resolved_chain = chain or spec.chain
-        raw_tokens = tokens or _extract_tokens(spec)
-        raw_tokens.extend(collect_backtest_token_refs(chain=resolved_chain, strategy_config=params))
+        raw_tokens = list(tokens or _extract_tokens(spec))
+        funding_params = {**params, "token_funding": resolved_token_funding}
+        raw_tokens.extend(collect_backtest_token_refs(chain=resolved_chain, strategy_config=funding_params))
+        raw_tokens.extend(_token_funding_refs(resolved_token_funding))
         resolved_tokens = normalize_backtest_token_refs(raw_tokens, resolved_chain)
         fee_model = spec.protocol.replace("-", "_")
     else:
@@ -596,9 +614,13 @@ def build_backtest_config(
             raise ValueError("chain is required when using strategy_name (no strategy_spec to infer it from)")
         if not tokens:
             raise ValueError("tokens is required when using strategy_name (no strategy_spec to infer it from)")
-        capital = initial_capital_usd or Decimal("10000")
+        if not token_funding:
+            raise ValueError("token_funding is required when using strategy_name")
+        resolved_token_funding = token_funding
         resolved_chain = chain
-        resolved_tokens = normalize_backtest_token_refs(tokens, resolved_chain)
+        raw_tokens = list(tokens)
+        raw_tokens.extend(_token_funding_refs(resolved_token_funding))
+        resolved_tokens = normalize_backtest_token_refs(raw_tokens, resolved_chain)
         fee_model = "realistic"
 
     # Quick mode: shorter interval, simplified
@@ -608,7 +630,7 @@ def build_backtest_config(
         start_time=start,
         end_time=end,
         interval_seconds=interval,
-        initial_capital_usd=capital,
+        token_funding=resolved_token_funding,
         chain=resolved_chain,
         tokens=resolved_tokens,
         fee_model=fee_model,
@@ -672,7 +694,7 @@ def resolve_strategy(
     is_quick = quick or getattr(request, "mode", "full") == "quick"
     chain = request.chain
     tokens = getattr(request, "tokens", None)
-    capital = request.initial_capital_usd
+    token_funding = request.token_funding
 
     if request.strategy_name:
         # Named strategy from registry — chain and tokens are required
@@ -686,7 +708,7 @@ def resolve_strategy(
             timeframe=timeframe,
             quick=is_quick,
             chain=chain,
-            initial_capital_usd=capital,
+            token_funding=token_funding,
             tokens=tokens,
         )
         return strategy, config
@@ -698,7 +720,7 @@ def resolve_strategy(
             timeframe=timeframe,
             quick=is_quick,
             chain=chain,
-            initial_capital_usd=capital,
+            token_funding=token_funding,
         )
         return strategy, config
 

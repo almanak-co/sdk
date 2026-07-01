@@ -20,11 +20,11 @@ Example:
 
     # Grid search: all combinations of parameters
     param_ranges = {
-        "initial_capital_usd": [Decimal("10000"), Decimal("50000")],
+        "trade_size_usd": [Decimal("100"), Decimal("500")],
         "interval_seconds": [3600, 7200],
     }
     grid_configs = generate_grid_configs(base_config, param_ranges)
-    # Returns 4 configs: all combinations of capital x interval
+    # Returns 4 configs: all combinations of trade size x interval
 
     # Random search: sample from parameter ranges
     param_ranges_continuous = {

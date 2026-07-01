@@ -47,7 +47,15 @@ async def main():
     config = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 6, 1, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=[
+            {
+                "symbol": "USDC",
+                "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                "chain": "arbitrum",
+                "amount": "10000",
+                "amount_type": "usd",
+            }
+        ],
         interval_seconds=3600,  # Hourly ticks
     )
     
@@ -174,7 +182,15 @@ For production-grade backtests with strict data quality:
 config = PnLBacktestConfig(
     start_time=datetime(2024, 1, 1, tzinfo=UTC),
     end_time=datetime(2024, 6, 1, tzinfo=UTC),
-    initial_capital_usd=Decimal("1000000"),
+    token_funding=[
+        {
+            "symbol": "USDC",
+            "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            "chain": "arbitrum",
+            "amount": "1000000",
+            "amount_type": "usd",
+        }
+    ],
     institutional_mode=True,  # Enables strict requirements
     random_seed=42,           # Required for reproducibility
 )
@@ -199,7 +215,7 @@ config = PnLBacktestConfig(
 | `start_time` | `datetime` | required | Backtest start |
 | `end_time` | `datetime` | required | Backtest end |
 | `interval_seconds` | `int` | `3600` | Tick interval |
-| `initial_capital_usd` | `Decimal` | `10000` | Starting capital |
+| `token_funding` | `list[dict]` | required | Starting wallet funding basket |
 | `chain` | `str` | `"arbitrum"` | Target chain |
 | `tokens` | `list[str]` | `[]` | Tokens to track |
 

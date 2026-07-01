@@ -181,7 +181,7 @@ def _prepare_result_dict(result: "BacktestResult") -> dict[str, Any]:
         "start_time": result.start_time,
         "end_time": result.end_time,
         "simulation_duration_days": float(result.simulation_duration_days),
-        "initial_capital_usd": str(result.initial_capital_usd),
+        "initial_portfolio_value_usd": str(result.initial_portfolio_value_usd),
         "final_capital_usd": str(result.final_capital_usd),
         "config": result.config if result.config else {},
         "run_started_at": result.run_started_at,

@@ -35,6 +35,7 @@ from almanak.framework.backtesting.models import (
     EquityPoint,
 )
 from almanak.framework.cli.backtest import backtest
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -70,6 +71,13 @@ class _DummyStrategy:
         return None
 
 
+def _strategy_config(deployment_id: str = "dummy_strategy") -> dict[str, Any]:
+    return {
+        "deployment_id": deployment_id,
+        "token_funding": _pnl_token_funding(Decimal("10000"), chain="arbitrum"),
+    }
+
+
 def _invoke_pnl(cli_runner: CliRunner, result: BacktestResult, extra_args: list[str] | None = None) -> Any:
     """Invoke `backtest pnl` with heavy phases mocked; backtester returns `result`."""
     base_args = [
@@ -91,7 +99,7 @@ def _invoke_pnl(cli_runner: CliRunner, result: BacktestResult, extra_args: list[
         ),
         patch(
             "almanak.framework.cli.backtest.pnl.load_strategy_config",
-            return_value={"deployment_id": "dummy_strategy"},
+            return_value=_strategy_config(),
         ),
         patch("almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"),
         patch("almanak.framework.cli.backtest.pnl._print_benchmark_comparison"),
@@ -180,7 +188,7 @@ class TestPnLExitCodes:
             ),
             patch(
                 "almanak.framework.cli.backtest.pnl.load_strategy_config",
-                return_value={"deployment_id": "dummy_strategy"},
+                return_value=_strategy_config(),
             ),
             patch("almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"),
             patch("almanak.framework.cli.backtest.pnl.PnLBacktester") as mock_backtester,

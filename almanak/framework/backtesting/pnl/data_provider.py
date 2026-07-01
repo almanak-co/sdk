@@ -276,6 +276,7 @@ class MarketState:
             if chain != str(self.chain).lower():
                 return keys
             add(address)
+            add(token_ref_provider_symbol((chain, address), chain))
             return keys
 
         assert isinstance(token, str)
@@ -287,6 +288,7 @@ class MarketState:
             if chain != str(self.chain).lower():
                 return keys
             add(address)
+            add(token_ref_provider_symbol((chain, address), chain))
             return keys
 
         if isinstance(normalized, str):

@@ -44,6 +44,7 @@ equity). The fixed semantics (engine ``_resolve_repay_close``):
 Companion to ``test_perp_conservation.py`` (collateral lane) and
 ``test_portfolio_conservation.py`` (token-flow lanes).
 """
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -55,6 +56,8 @@ from almanak.framework.backtesting.adapters.lending_adapter import LendingBackte
 from almanak.framework.backtesting.models import EquityPoint, IntentType
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
+
+
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktestConfig,
@@ -170,7 +173,7 @@ def _config() -> PnLBacktestConfig:
     return PnLBacktestConfig(
         start_time=TS,
         end_time=TS + timedelta(hours=1),
-        initial_capital_usd=INITIAL_CASH,
+        token_funding=_pnl_token_funding(INITIAL_CASH),
         include_gas_costs=False,
     )
 
@@ -1676,7 +1679,7 @@ class TestRejectedCloseSkipsGasResolution:
         config = PnLBacktestConfig(
             start_time=TS,
             end_time=TS + timedelta(hours=1),
-            initial_capital_usd=INITIAL_CASH,
+            token_funding=_pnl_token_funding(INITIAL_CASH),
             include_gas_costs=True,
         )
         portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)

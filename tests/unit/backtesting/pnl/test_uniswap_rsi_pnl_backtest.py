@@ -11,6 +11,7 @@ VIB-2309
 """
 
 from __future__ import annotations
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 import math
 from dataclasses import dataclass, field
@@ -23,6 +24,8 @@ import pytest
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
+
+
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktester,
@@ -178,7 +181,7 @@ def make_arbitrum_config(
     return PnLBacktestConfig(
         start_time=start,
         end_time=start + timedelta(hours=hours),
-        initial_capital_usd=initial_capital,
+        token_funding=_pnl_token_funding(initial_capital, chain="arbitrum"),
         tokens=["WETH", "USDC"],
         chain="arbitrum",
         inclusion_delay_blocks=1,

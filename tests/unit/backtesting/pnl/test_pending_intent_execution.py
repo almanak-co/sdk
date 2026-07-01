@@ -6,6 +6,7 @@ Tests verify that when inclusion_delay_blocks > 0:
 3. The execution_delayed_at_end counter accurately tracks these executions
 4. TradeRecord.delayed_at_end flag is set correctly for such trades
 """
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,8 @@ from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
+
+
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktester,
@@ -135,7 +138,7 @@ async def test_pending_intents_executed_at_simulation_end():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=3,
     )
@@ -182,7 +185,7 @@ async def test_execution_delayed_at_end_counter_accuracy():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=5,  # More than num_ticks
     )
@@ -215,7 +218,7 @@ async def test_no_intents_dropped_with_inclusion_delay():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=2,
     )
@@ -252,7 +255,7 @@ async def test_delayed_at_end_flag_set_on_trade_records():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=10,  # Very high delay
     )
@@ -287,7 +290,7 @@ async def test_mixed_delayed_and_normal_execution():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=2,
     )
@@ -348,7 +351,7 @@ async def test_minimal_delayed_execution_with_zero_delay():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=0,  # No delay
     )
@@ -390,7 +393,7 @@ async def test_serialization_preserves_delayed_at_end():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=10,
     )
@@ -436,7 +439,7 @@ async def test_intent_type_preserved_in_delayed_execution():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=5,
     )
@@ -474,7 +477,7 @@ async def test_final_pnl_includes_delayed_trade_impact():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=10,
     )
@@ -526,7 +529,7 @@ async def test_delayed_trade_pnl_affects_final_portfolio():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=5,
     )
@@ -614,7 +617,7 @@ async def test_various_inclusion_delay_values(
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=inclusion_delay_blocks,
     )
@@ -668,7 +671,7 @@ async def test_metrics_correctly_track_delayed_executions():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=end_time,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         inclusion_delay_blocks=2,
     )
@@ -754,7 +757,7 @@ async def test_rejected_fill_notifies_strategy_with_failure():
     config = PnLBacktestConfig(
         start_time=now,
         end_time=now + timedelta(hours=1),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         include_gas_costs=False,
     )
@@ -795,7 +798,7 @@ async def test_applied_fill_notifies_strategy_with_success():
     config = PnLBacktestConfig(
         start_time=now,
         end_time=now + timedelta(hours=1),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         include_gas_costs=False,
     )
@@ -830,7 +833,7 @@ async def test_rejected_fill_at_simulation_end_notifies_failure():
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=start_time + timedelta(hours=2),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         include_gas_costs=False,
         inclusion_delay_blocks=10,  # never executes in-loop; drains at end
@@ -870,7 +873,7 @@ async def test_drain_at_end_execution_error_notifies_failure(monkeypatch):
     config = PnLBacktestConfig(
         start_time=start_time,
         end_time=start_time + timedelta(hours=2),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         include_gas_costs=False,
         inclusion_delay_blocks=10,  # never executes in-loop; drains at end

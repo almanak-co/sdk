@@ -34,6 +34,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from almanak.framework.backtesting.models import BacktestEngine, BacktestMetrics, BacktestResult
 from almanak.framework.backtesting.pnl.calculators.monte_carlo import (
@@ -72,7 +73,7 @@ class _FakeMetrics:
 
 @dataclass
 class _FakeBacktestResult:
-    initial_capital_usd: Decimal
+    initial_portfolio_value_usd: Decimal
     final_capital_usd: Decimal
     metrics: _FakeMetrics
 
@@ -172,6 +173,7 @@ def _make_backtest_config() -> PnLBacktestConfig:
         start_time=datetime(2024, 1, 1),
         end_time=datetime(2024, 1, 2),
         interval_seconds=3600,
+        token_funding=_pnl_token_funding("10000"),
     )
 
 
@@ -327,7 +329,7 @@ class TestRunSinglePathBacktest:
         _configure_result(
             "100",
             _FakeBacktestResult(
-                initial_capital_usd=Decimal("10000"),
+                initial_portfolio_value_usd=Decimal("10000"),
                 final_capital_usd=Decimal("11000"),
                 metrics=_FakeMetrics(
                     max_drawdown_pct=Decimal("0.05"),
@@ -366,7 +368,7 @@ class TestRunSinglePathBacktest:
         _configure_result(
             "100",
             _FakeBacktestResult(
-                initial_capital_usd=Decimal("10000"),
+                initial_portfolio_value_usd=Decimal("10000"),
                 final_capital_usd=Decimal("10500"),
                 metrics=_FakeMetrics(),
             ),
@@ -391,7 +393,7 @@ class TestRunSinglePathBacktest:
         _configure_result(
             "100",
             _FakeBacktestResult(
-                initial_capital_usd=Decimal("0"),
+                initial_portfolio_value_usd=Decimal("0"),
                 final_capital_usd=Decimal("500"),
                 metrics=_FakeMetrics(),
             ),
@@ -456,7 +458,7 @@ def _results_for(
         _configure_result(
             first,
             _FakeBacktestResult(
-                initial_capital_usd=Decimal(initial),
+                initial_portfolio_value_usd=Decimal(initial),
                 final_capital_usd=Decimal(final),
                 metrics=_FakeMetrics(
                     max_drawdown_pct=md,
@@ -692,7 +694,7 @@ class TestRunMonteCarloBranches:
         _configure_result(
             "200",
             _FakeBacktestResult(
-                initial_capital_usd=Decimal("10000"),
+                initial_portfolio_value_usd=Decimal("10000"),
                 final_capital_usd=Decimal("11000"),
                 metrics=_FakeMetrics(max_drawdown_pct=Decimal("0.04"), sharpe_ratio=Decimal("1.5")),
             ),
@@ -738,7 +740,7 @@ class TestRunMonteCarloBranches:
         _configure_result(
             "100",
             _FakeBacktestResult(
-                initial_capital_usd=Decimal("10000"),
+                initial_portfolio_value_usd=Decimal("10000"),
                 final_capital_usd=Decimal("10500"),
                 metrics=_FakeMetrics(),
             ),
@@ -773,7 +775,7 @@ class TestRunMonteCarloBranches:
         _configure_result(
             "100",
             _FakeBacktestResult(
-                initial_capital_usd=Decimal("10000"),
+                initial_portfolio_value_usd=Decimal("10000"),
                 final_capital_usd=Decimal("11000"),
                 metrics=_FakeMetrics(),
             ),
@@ -797,7 +799,7 @@ class TestRunMonteCarloBranches:
         _configure_result(
             "100",
             _FakeBacktestResult(
-                initial_capital_usd=Decimal("10000"),
+                initial_portfolio_value_usd=Decimal("10000"),
                 final_capital_usd=Decimal("10000"),
                 metrics=_FakeMetrics(),
             ),
@@ -806,6 +808,7 @@ class TestRunMonteCarloBranches:
             start_time=datetime(2024, 6, 15, 12, 0, 0),
             end_time=datetime(2024, 6, 16),
             interval_seconds=1800,
+            token_funding=_pnl_token_funding("10000"),
         )
         paths = _make_paths([["100", "110"]])
         await run_monte_carlo(
@@ -837,7 +840,7 @@ class TestRunMonteCarloSync:
         _configure_result(
             "100",
             _FakeBacktestResult(
-                initial_capital_usd=Decimal("10000"),
+                initial_portfolio_value_usd=Decimal("10000"),
                 final_capital_usd=Decimal("12000"),
                 metrics=_FakeMetrics(),
             ),

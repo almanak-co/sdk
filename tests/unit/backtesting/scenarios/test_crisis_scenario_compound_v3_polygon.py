@@ -22,6 +22,7 @@ from almanak.framework.backtesting.pnl.data_provider import (
     OHLCV,
     HistoricalDataConfig,
     MarketState,
+    token_ref_provider_symbol,
 )
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
@@ -46,6 +47,12 @@ from almanak.framework.backtesting.scenarios.crisis_runner import (
 # =============================================================================
 # Deterministic data provider for Polygon crisis periods
 # =============================================================================
+
+
+def _provider_symbol(token: Any, chain: str) -> str:
+    if isinstance(token, tuple):
+        return token_ref_provider_symbol(token, chain, unwrap_wrapped_native=False) or token[1].upper()
+    return str(token).upper()
 
 
 class PolygonCrisisDataProvider:
@@ -103,7 +110,7 @@ class PolygonCrisisDataProvider:
         return prices
 
     async def get_price(self, token: str, timestamp: datetime) -> Decimal:
-        token = token.upper()
+        token = _provider_symbol(token, "polygon")
         if token in ("USDC", "USDC.E", "USDT", "DAI"):
             return Decimal("1")
         if token in ("ETH", "WETH"):
@@ -144,10 +151,11 @@ class PolygonCrisisDataProvider:
         while current <= config.end_time:
             prices = {}
             for token in config.tokens:
+                symbol = _provider_symbol(token, "polygon")
                 try:
-                    prices[token.upper()] = await self.get_price(token, current)
+                    prices[symbol] = await self.get_price(token, current)
                 except ValueError:
-                    prices[token.upper()] = Decimal("1")
+                    prices[symbol] = Decimal("1")
             # Always include ETH for gas cost calculations
             if "ETH" not in prices and "WETH" not in prices:
                 prices["ETH"] = Decimal("2500")
@@ -340,6 +348,18 @@ def _make_backtester(
     )
 
 
+def _crisis_token_funding(amount: Decimal) -> list[dict[str, str]]:
+    return [
+        {
+            "symbol": "USDC.e",
+            "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+            "chain": "polygon",
+            "amount": str(amount),
+            "amount_type": "token",
+        }
+    ]
+
+
 # =============================================================================
 # Tests: Hold baseline on Polygon
 # =============================================================================
@@ -359,7 +379,7 @@ class TestCrisisLendingPolygonHoldBaseline:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             include_gas_costs=False,
@@ -383,7 +403,7 @@ class TestCrisisLendingPolygonHoldBaseline:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             include_gas_costs=False,
@@ -421,7 +441,7 @@ class TestCrisisCompoundV3Lending:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             include_gas_costs=False,
@@ -449,7 +469,7 @@ class TestCrisisCompoundV3Lending:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             include_gas_costs=False,
@@ -477,7 +497,7 @@ class TestCrisisCompoundV3Lending:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             include_gas_costs=False,
@@ -510,7 +530,7 @@ class TestCrisisCompoundV3Lending:
                 strategy=strategy,
                 scenario=scenario,
                 backtester=backtester,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=_crisis_token_funding(Decimal("10000")),
                 chain="polygon",
                 tokens=["MATIC", "USDC.E"],
                 include_gas_costs=False,
@@ -546,7 +566,7 @@ class TestCrisisMetricsPolygon:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             include_gas_costs=False,
@@ -582,7 +602,7 @@ class TestCrisisMetricsPolygon:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             include_gas_costs=False,
@@ -606,7 +626,7 @@ class TestCrisisMetricsPolygon:
                 strategy=strategy,
                 scenario=scenario,
                 backtester=backtester,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=_crisis_token_funding(Decimal("10000")),
                 chain="polygon",
                 tokens=["MATIC", "USDC.E"],
                 include_gas_costs=False,
@@ -642,7 +662,7 @@ class TestCrisisComparisonPolygon:
             strategy=crisis_strategy,
             scenario=scenario,
             backtester=crisis_backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             include_gas_costs=False,
@@ -665,7 +685,7 @@ class TestCrisisComparisonPolygon:
             strategy=normal_strategy,
             scenario=normal_scenario,
             backtester=normal_backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             include_gas_costs=False,
@@ -690,7 +710,7 @@ class TestCrisisConfigPolygon:
         """CrisisBacktestConfig should accept polygon as chain."""
         config = CrisisBacktestConfig(
             scenario=BLACK_THURSDAY,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             gas_price_gwei=Decimal("50"),  # Polygon gas ~50 gwei MATIC
@@ -707,7 +727,7 @@ class TestCrisisConfigPolygon:
         """Config round-trips through serialization with Polygon settings."""
         config = CrisisBacktestConfig(
             scenario=FTX_COLLAPSE,
-            initial_capital_usd=Decimal("50000"),
+            token_funding=_crisis_token_funding(Decimal("50000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             gas_price_gwei=Decimal("50"),
@@ -739,7 +759,7 @@ class TestCrisisMultipleScenariosPolygon:
                 strategy=strategy,
                 scenario=scenario,
                 backtester=backtester,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=_crisis_token_funding(Decimal("10000")),
                 chain="polygon",
                 tokens=["MATIC", "USDC.E"],
                 include_gas_costs=False,
@@ -764,7 +784,7 @@ class TestCrisisMultipleScenariosPolygon:
             strategy=strategy,
             scenarios=scenarios,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             include_gas_costs=False,
@@ -790,7 +810,7 @@ class TestCrisisResultPolygon:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             include_gas_costs=False,
@@ -830,7 +850,7 @@ class TestCrisisResultPolygon:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="polygon",
             tokens=["MATIC", "USDC.E"],
             include_gas_costs=True,

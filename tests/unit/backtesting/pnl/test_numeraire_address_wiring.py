@@ -16,6 +16,7 @@ provider (the per-provider resolution behavior is pinned in
 """
 
 from __future__ import annotations
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -25,8 +26,15 @@ from typing import Any
 
 from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
-from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig, MarketState
+from almanak.framework.backtesting.pnl.data_provider import (
+    HistoricalDataConfig,
+    MarketState,
+    TokenRef,
+    token_ref_provider_symbol,
+)
 from almanak.framework.backtesting.pnl.engine import (
+
+
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktester,
@@ -54,6 +62,10 @@ class _RecordingProvider:
         self._series = {token.upper(): list(series) for token, series in price_series.items()}
         self.registered: list[dict[str, tuple[str, str]]] = []
 
+    @staticmethod
+    def _series_key(token: TokenRef, chain: str) -> str:
+        return token_ref_provider_symbol(token, chain).upper()
+
     def register_token_addresses(self, token_addresses: dict[str, tuple[str, str]]) -> None:
         self.registered.append(dict(token_addresses))
 
@@ -65,24 +77,26 @@ class _RecordingProvider:
     def supported_chains(self) -> list[str]:
         return ["arbitrum"]
 
-    async def get_price(self, token: str, timestamp: datetime) -> Decimal:
-        series = self._series.get(token.upper())
+    async def get_price(self, token: TokenRef, timestamp: datetime) -> Decimal:
+        series = self._series.get(self._series_key(token, "arbitrum"))
         return series[0] if series else Decimal("1")
 
     async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         current = config.start_time
         index = 0
         while current <= config.end_time:
+            chain = config.chains[0] if config.chains else "arbitrum"
             prices: dict[str, Decimal] = {}
             for token in config.tokens:
-                series = self._series.get(token.upper())
-                prices[token.upper()] = series[min(index, len(series) - 1)] if series else Decimal("1")
+                key = self._series_key(token, chain)
+                series = self._series.get(key)
+                prices[key] = series[min(index, len(series) - 1)] if series else Decimal("1")
             yield (
                 current,
                 MarketState(
                     timestamp=current,
                     prices=prices,
-                    chain=config.chains[0] if config.chains else "arbitrum",
+                    chain=chain,
                     block_number=1_000_000 + index,
                     gas_price_gwei=Decimal("30"),
                 ),
@@ -114,7 +128,7 @@ def _run(
         start_time=_START,
         end_time=_START + timedelta(hours=2),
         interval_seconds=_TICK_SECONDS,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000"), chain="arbitrum"),
         tokens=["WETH", "USDC"],
         chain="arbitrum",
         include_gas_costs=False,

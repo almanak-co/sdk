@@ -24,6 +24,7 @@ prices — no network, no mocks of the code under test.
 """
 
 from __future__ import annotations
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -35,6 +36,8 @@ from typing import Any
 import pytest
 
 from almanak.framework.backtesting.adapters.lp_adapter import (
+
+
     LPBacktestAdapter,
     LPBacktestConfig,
 )
@@ -47,6 +50,8 @@ from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataConfig,
     MarketState,
+    TokenRef,
+    token_ref_provider_symbol,
 )
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
@@ -272,20 +277,26 @@ class SyntheticPriceProvider:
     def __init__(self, price_series: dict[str, list[Decimal]]) -> None:
         self._series = {token.upper(): list(series) for token, series in price_series.items()}
 
+    @staticmethod
+    def _series_key(token: TokenRef, chain: str) -> str:
+        return token_ref_provider_symbol(token, chain).upper()
+
     async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         current = config.start_time
         index = 0
         while current <= config.end_time:
+            chain = config.chains[0] if config.chains else "arbitrum"
             prices: dict[str, Decimal] = {}
             for token in config.tokens:
-                series = self._series.get(token.upper())
-                prices[token.upper()] = series[min(index, len(series) - 1)] if series else Decimal("1")
+                key = self._series_key(token, chain)
+                series = self._series.get(key)
+                prices[key] = series[min(index, len(series) - 1)] if series else Decimal("1")
             yield (
                 current,
                 MarketState(
                     timestamp=current,
                     prices=prices,
-                    chain=config.chains[0] if config.chains else "arbitrum",
+                    chain=chain,
                     block_number=1_000_000 + index,
                     gas_price_gwei=Decimal("30"),
                 ),
@@ -363,7 +374,7 @@ def _run_backtest(strategy: Any, price_series: dict[str, list[Decimal]], hours: 
         start_time=START,
         end_time=START + timedelta(hours=hours),
         interval_seconds=TICK_SECONDS,
-        initial_capital_usd=INITIAL_CAPITAL,
+        token_funding=_pnl_token_funding(INITIAL_CAPITAL),
         tokens=sorted(price_series),
         include_gas_costs=False,
         inclusion_delay_blocks=0,

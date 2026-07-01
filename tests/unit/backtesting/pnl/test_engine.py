@@ -7,6 +7,7 @@ Tests cover:
 - Metric calculation
 - Inclusion delay simulation
 """
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -16,6 +17,8 @@ from typing import Any
 import pytest
 
 from almanak.framework.backtesting.models import (
+
+
     BacktestEngine,
     BacktestMetrics,
     BacktestResult,
@@ -136,7 +139,7 @@ def config(base_timestamp: datetime) -> PnLBacktestConfig:
         start_time=base_timestamp,
         end_time=base_timestamp + timedelta(hours=5),
         interval_seconds=3600,  # 1 hour
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
     )
 
@@ -557,7 +560,7 @@ class TestPnLBacktester:
         result = await backtester.backtest(strategy, config)
 
         assert isinstance(result.metrics, BacktestMetrics)
-        assert result.initial_capital_usd == Decimal("10000")
+        assert result.initial_portfolio_value_usd == Decimal("10000")
         # Final capital should be close to initial for hold-only
         assert result.final_capital_usd > Decimal("0")
 
@@ -725,7 +728,7 @@ class TestGasCostCalculation:
         config = PnLBacktestConfig(
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=1),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_pnl_token_funding(Decimal("10000")),
             include_gas_costs=True,
             gas_price_gwei=Decimal("30"),
         )
@@ -753,7 +756,7 @@ class TestBacktesterIntegration:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=24),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("100000"),
+            token_funding=_pnl_token_funding(Decimal("100000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
             gas_price_gwei=Decimal("30"),
@@ -790,7 +793,7 @@ class TestBacktesterIntegration:
         assert result.engine == BacktestEngine.PNL
         assert result.deployment_id == "mock_strategy"
         assert len(result.equity_curve) == 25  # 24 hours + initial
-        assert result.initial_capital_usd == Decimal("100000")
+        assert result.initial_portfolio_value_usd == Decimal("100000")
 
         # Verify summary doesn't crash
         summary = result.summary()
@@ -803,7 +806,7 @@ class TestBacktesterIntegration:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=5),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_pnl_token_funding(Decimal("10000")),
         )
 
         # Create custom fee model for uniswap

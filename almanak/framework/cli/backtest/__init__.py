@@ -23,7 +23,7 @@ Examples:
 
     # PnL backtest with custom settings
     almanak strat backtest pnl -s mean_reversion --start 2024-01-01 --end 2024-03-01 \
-        --interval 3600 --initial-capital 50000 --output results.json
+        --interval 3600 --config-file config.json --output results.json
 
     # Parameter sweep
     almanak strat backtest sweep -s momentum --start 2024-01-01 --end 2024-06-01 \

@@ -28,7 +28,7 @@ Examples:
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 6, 1),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=[...],
         )
         result = await backtester.backtest(strategy, config)
         print(result.summary())
@@ -40,7 +40,7 @@ Examples:
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 6, 1),
-            initial_capital_usd=Decimal("1000000"),
+            token_funding=[...],
             institutional_mode=True,  # Enables strict requirements
             random_seed=42,  # Required for reproducibility
         )
@@ -1172,7 +1172,7 @@ class PnLBacktester:
         default_config: PnLBacktestConfig,
     ) -> list[tuple[str, Any, Any]]:
         return [
-            ("initial_capital_usd", config.initial_capital_usd, default_config.initial_capital_usd),
+            ("token_funding", config.token_funding, default_config.token_funding),
             ("interval_seconds", config.interval_seconds, default_config.interval_seconds),
             ("fee_model", config.fee_model, default_config.fee_model),
             ("slippage_model", config.slippage_model, default_config.slippage_model),
@@ -1575,7 +1575,7 @@ class PnLBacktester:
         return PreflightReport(
             passed=self._preflight_passed(checks),
             checks=checks,
-            estimated_coverage=self._estimated_token_coverage(config, tokens_available),
+            estimated_coverage=self._estimated_token_coverage(tokens_available, tokens_unavailable),
             tokens_available=tokens_available,
             tokens_unavailable=tokens_unavailable,
             provider_capabilities=provider_result.capabilities,
@@ -1652,9 +1652,19 @@ class PnLBacktester:
         self,
         config: PnLBacktestConfig,
     ) -> tuple[list[str], list[str], PreflightCheckResult, list[str]]:
+        from almanak.framework.backtesting.pnl.initial_portfolio import funded_token_refs
+
+        tokens_to_check: list[TokenRef] = list(config.tokens)
+        existing = {normalize_token_ref(token, config.chain) for token in tokens_to_check}
+        if config.token_funding:
+            for funded_token in funded_token_refs(config.token_funding, chain=config.chain):
+                identity = normalize_token_ref(funded_token, config.chain)
+                if identity not in existing:
+                    tokens_to_check.append(funded_token)
+                    existing.add(identity)
         tokens_available, tokens_unavailable = await classify_token_availability(
             self.data_provider,
-            list(config.tokens),
+            tokens_to_check,
             config.start_time,
         )
         token_check, token_recommendations = _build_token_availability_check(
@@ -1765,10 +1775,9 @@ class PnLBacktester:
         )
 
     @staticmethod
-    def _estimated_token_coverage(config: PnLBacktestConfig, tokens_available: list[str]) -> Decimal:
-        total_tokens = len(config.tokens)
-        available_count = len(tokens_available)
-        return Decimal(available_count) / Decimal(total_tokens) if total_tokens > 0 else Decimal("1.0")
+    def _estimated_token_coverage(tokens_available: list[str], tokens_unavailable: list[str]) -> Decimal:
+        total_tokens = len(tokens_available) + len(tokens_unavailable)
+        return Decimal(len(tokens_available)) / Decimal(total_tokens) if total_tokens > 0 else Decimal("1.0")
 
     @staticmethod
     def _preflight_passed(checks: list[PreflightCheckResult]) -> bool:
@@ -1819,7 +1828,7 @@ class PnLBacktester:
         bt_logger.info(
             f"Starting backtest for {strategy.deployment_id} "
             f"from {config.start_time} to {config.end_time} "
-            f"with ${config.initial_capital_usd:,.2f} capital"
+            "with token_funding startup balances"
         )
 
         # Wrap entire backtest body in try/finally to guarantee async resource cleanup.

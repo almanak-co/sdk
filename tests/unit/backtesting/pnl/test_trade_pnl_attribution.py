@@ -15,6 +15,7 @@ semantics:
 - ``profit_factor`` / ``largest_win_usd`` serialize in normalized form (no
   ``0E+17``, no negative "win").
 """
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -26,6 +27,8 @@ from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.metrics_calculator import calculate_metrics
 from almanak.framework.backtesting.pnl.portfolio import (
+
+
     SimulatedFill,
     SimulatedPortfolio,
 )
@@ -156,7 +159,7 @@ class TestRejectedTradeMetrics:
             start_time=TS,
             end_time=TS + timedelta(hours=1),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
         )
         metrics = calculate_metrics(portfolio, portfolio.trades, config)
@@ -178,7 +181,7 @@ class TestHonestWinLossMetrics:
             start_time=TS,
             end_time=TS + timedelta(hours=4),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
         )
 

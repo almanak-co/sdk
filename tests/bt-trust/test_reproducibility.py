@@ -10,10 +10,11 @@ Tests:
     4.2 Config Hash Verification: Identical configs produce identical hashes
 """
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from almanak.framework.backtesting.pnl import PnLBacktestConfig
-from datetime import datetime, UTC
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 
 def test_config_hash():
@@ -28,7 +29,7 @@ def test_config_hash():
     config1 = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 31, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["ETH", "USDC"],
         random_seed=42,
     )
@@ -36,7 +37,7 @@ def test_config_hash():
     config2 = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 31, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["ETH", "USDC"],
         random_seed=42,
     )
@@ -45,21 +46,21 @@ def test_config_hash():
     config3 = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 31, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["ETH", "USDC"],
         random_seed=43,  # Different seed
     )
 
     # Check if configs are equal when they should be
     identical_match = (
-        config1.start_time == config2.start_time and
-        config1.end_time == config2.end_time and
-        config1.initial_capital_usd == config2.initial_capital_usd and
-        config1.tokens == config2.tokens and
-        config1.random_seed == config2.random_seed
+        config1.start_time == config2.start_time
+        and config1.end_time == config2.end_time
+        and config1.token_funding == config2.token_funding
+        and config1.tokens == config2.tokens
+        and config1.random_seed == config2.random_seed
     )
 
-    different_match = (config1.random_seed != config3.random_seed)
+    different_match = config1.random_seed != config3.random_seed
 
     assert identical_match, "Identical configs should be equal"
     assert different_match, "Different configs should have different seeds"
@@ -78,7 +79,7 @@ def test_reproducibility_concept():
     config1 = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 2, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["ETH", "USDC"],
         random_seed=42,
     )
@@ -86,7 +87,7 @@ def test_reproducibility_concept():
     config2 = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 2, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["ETH", "USDC"],
         random_seed=42,  # Same seed
     )
@@ -95,5 +96,5 @@ def test_reproducibility_concept():
     assert config1.random_seed == config2.random_seed == 42
     assert config1.start_time == config2.start_time
     assert config1.end_time == config2.end_time
-    assert config1.initial_capital_usd == config2.initial_capital_usd
+    assert config1.token_funding == config2.token_funding
     assert config1.tokens == config2.tokens

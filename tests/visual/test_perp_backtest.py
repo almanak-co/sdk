@@ -41,18 +41,25 @@ from almanak.framework.backtesting.pnl.data_provider import (
     OHLCV,
     HistoricalDataConfig,
     MarketState,
+    TokenRef,
+    token_ref_provider_symbol,
 )
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktester,
 )
+from tests.backtesting_funding import pnl_token_funding
 
 # =============================================================================
 # Output Configuration
 # =============================================================================
 
 OUTPUT_DIR = Path(__file__).parent / "output"
+
+
+def _provider_symbol(token: TokenRef, chain: str = "arbitrum") -> str:
+    return token_ref_provider_symbol(token, chain, unwrap_wrapped_native=False).upper()
 
 
 # =============================================================================
@@ -142,10 +149,10 @@ class PerpTestDataProvider:
         """Get the ETH price at a given hourly index."""
         return self._prices.get(index, self._base_eth_price)
 
-    async def get_price(self, token: str, timestamp: datetime) -> Decimal:
+    async def get_price(self, token: TokenRef, timestamp: datetime) -> Decimal:
         """Get price for token at specific timestamp."""
-        token = token.upper()
-        if token in ("USDC", "USDT"):
+        symbol = _provider_symbol(token)
+        if symbol in ("USDC", "USDT"):
             return Decimal("1")
 
         delta = timestamp - self._start_time
@@ -177,9 +184,7 @@ class PerpTestDataProvider:
             current += timedelta(seconds=interval_seconds)
         return result
 
-    async def iterate(
-        self, config: HistoricalDataConfig
-    ) -> AsyncIterator[tuple[datetime, MarketState]]:
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         """Iterate through historical data with mock prices."""
         current = config.start_time
         index = 0
@@ -187,11 +192,12 @@ class PerpTestDataProvider:
 
         while current <= config.end_time:
             prices = {}
+            chain = config.chains[0] if config.chains else "arbitrum"
             for token in config.tokens:
-                token = token.upper()
-                if token in ("USDC", "USDT"):
+                symbol = _provider_symbol(token, chain)
+                if symbol in ("USDC", "USDT"):
                     prices[token] = Decimal("1")
-                elif token in ("WETH", "ETH"):
+                elif symbol in ("WETH", "ETH"):
                     prices[token] = self.get_price_at_index(index)
                 else:
                     prices[token] = Decimal("1")
@@ -199,7 +205,7 @@ class PerpTestDataProvider:
             market_state = MarketState(
                 timestamp=current,
                 prices=prices,
-                chain=config.chains[0] if config.chains else "arbitrum",
+                chain=chain,
                 block_number=15000000 + index * 100,
                 gas_price_gwei=Decimal("30"),
             )
@@ -265,9 +271,7 @@ class MockPerpOpenIntent:
     protocol: str = "gmx_v2"
 
     @classmethod
-    def long(
-        cls, token: str, collateral_usd: Decimal, leverage: Decimal
-    ) -> "MockPerpOpenIntent":
+    def long(cls, token: str, collateral_usd: Decimal, leverage: Decimal) -> "MockPerpOpenIntent":
         return cls(
             intent_type="PERP_OPEN_LONG",
             token=token,
@@ -276,9 +280,7 @@ class MockPerpOpenIntent:
         )
 
     @classmethod
-    def short(
-        cls, token: str, collateral_usd: Decimal, leverage: Decimal
-    ) -> "MockPerpOpenIntent":
+    def short(cls, token: str, collateral_usd: Decimal, leverage: Decimal) -> "MockPerpOpenIntent":
         return cls(
             intent_type="PERP_OPEN_SHORT",
             token=token,
@@ -364,9 +366,7 @@ class SMACrossoverPerpStrategy:
     def deployment_id(self) -> str:
         return "sma_perp_visual_test_strategy"
 
-    def _calculate_liquidation_price(
-        self, entry_price: Decimal, is_long: bool
-    ) -> Decimal:
+    def _calculate_liquidation_price(self, entry_price: Decimal, is_long: bool) -> Decimal:
         """Calculate liquidation price for a position."""
         return self._liquidation_calculator.calculate_liquidation_price(
             entry_price=entry_price,
@@ -375,9 +375,7 @@ class SMACrossoverPerpStrategy:
             is_long=is_long,
         )
 
-    def decide(
-        self, market: Any
-    ) -> MockPerpOpenIntent | MockPerpCloseIntent | MockHoldIntent:
+    def decide(self, market: Any) -> MockPerpOpenIntent | MockPerpCloseIntent | MockHoldIntent:
         """Decide whether to open/close perp position based on SMA crossover.
 
         Args:
@@ -395,9 +393,7 @@ class SMACrossoverPerpStrategy:
             except (ValueError, AttributeError):
                 return MockHoldIntent(reason="No ETH price available")
 
-        self._current_timestamp = getattr(market, "timestamp", None) or getattr(
-            market, "_timestamp", None
-        )
+        self._current_timestamp = getattr(market, "timestamp", None) or getattr(market, "_timestamp", None)
         if self._current_timestamp is None:
             return MockHoldIntent(reason="No timestamp")
 
@@ -434,9 +430,7 @@ class SMACrossoverPerpStrategy:
                     price=eth_price,
                     sma=sma,
                     leverage=self._leverage,
-                    liquidation_price=self._calculate_liquidation_price(
-                        entry or eth_price, is_long=True
-                    ),
+                    liquidation_price=self._calculate_liquidation_price(entry or eth_price, is_long=True),
                 )
             )
             return MockPerpCloseIntent()
@@ -454,9 +448,7 @@ class SMACrossoverPerpStrategy:
                     price=eth_price,
                     sma=sma,
                     leverage=self._leverage,
-                    liquidation_price=self._calculate_liquidation_price(
-                        entry or eth_price, is_long=False
-                    ),
+                    liquidation_price=self._calculate_liquidation_price(entry or eth_price, is_long=False),
                 )
             )
             return MockPerpCloseIntent()
@@ -687,12 +679,8 @@ def generate_perp_backtest_chart(
             )
 
     # Add legend entry for liquidation lines
-    liq_long_patch = mpatches.Patch(
-        color="darkred", alpha=0.7, linestyle=":", label="Liq Price (Long)"
-    )
-    liq_short_patch = mpatches.Patch(
-        color="darkblue", alpha=0.7, linestyle=":", label="Liq Price (Short)"
-    )
+    liq_long_patch = mpatches.Patch(color="darkred", alpha=0.7, linestyle=":", label="Liq Price (Long)")
+    liq_short_patch = mpatches.Patch(color="darkblue", alpha=0.7, linestyle=":", label="Liq Price (Short)")
 
     # Statistics annotation
     total_longs = len(long_opens)
@@ -809,9 +797,7 @@ def calculate_perp_metrics_over_time(
                     break
             if close_time is None:
                 close_time = start_time + timedelta(hours=num_hours)
-            position_periods.append(
-                (signal.timestamp, close_time, "LONG", signal.leverage)
-            )
+            position_periods.append((signal.timestamp, close_time, "LONG", signal.leverage))
         elif signal.signal_type == "SHORT_OPEN":
             # Find corresponding close
             close_time = None
@@ -821,9 +807,7 @@ def calculate_perp_metrics_over_time(
                     break
             if close_time is None:
                 close_time = start_time + timedelta(hours=num_hours)
-            position_periods.append(
-                (signal.timestamp, close_time, "SHORT", signal.leverage)
-            )
+            position_periods.append((signal.timestamp, close_time, "SHORT", signal.leverage))
 
     def get_position_at_time(
         ts: datetime,
@@ -924,9 +908,7 @@ def generate_perp_complete_chart(
     leverage_values = [float(m.leverage) for m in perp_metrics]
 
     # Create figure with 3 subplots
-    fig, (ax1, ax2, ax3) = plt.subplots(
-        3, 1, figsize=(16, 14), height_ratios=[2, 1.5, 1], sharex=True
-    )
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 14), height_ratios=[2, 1.5, 1], sharex=True)
     fig.suptitle(
         "Perpetual Futures Strategy Backtest - ETH (30 Days) - Complete Analysis",
         fontsize=14,
@@ -1170,10 +1152,7 @@ def generate_perp_complete_chart(
     max_margin = max(margin_util_pct)
     nonzero_leverage = [lev for lev in leverage_values if lev > 0]
     avg_leverage = sum(leverage_values) / len(nonzero_leverage) if nonzero_leverage else 0
-    metrics_text = (
-        f"Max Margin Util: {max_margin:.1f}%\n"
-        f"Avg Leverage: {avg_leverage:.1f}x (when in position)"
-    )
+    metrics_text = f"Max Margin Util: {max_margin:.1f}%\nAvg Leverage: {avg_leverage:.1f}x (when in position)"
     ax3.text(
         0.02,
         0.98,
@@ -1252,7 +1231,7 @@ class TestPerpBacktestVisual:
             start_time=start_time,
             end_time=end_time,
             interval_seconds=3600,  # 1 hour intervals
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
         )
@@ -1301,14 +1280,10 @@ class TestPerpBacktestVisual:
         # Verify liquidation prices are calculated for all open signals
         for signal in strategy.signals:
             if signal.signal_type in ("LONG_OPEN", "SHORT_OPEN"):
-                assert signal.liquidation_price is not None, (
-                    f"Liquidation price should be set for {signal.signal_type}"
-                )
+                assert signal.liquidation_price is not None, f"Liquidation price should be set for {signal.signal_type}"
                 # Verify liquidation price direction
                 if signal.signal_type == "LONG_OPEN":
-                    assert signal.liquidation_price < signal.price, (
-                        "Long liquidation price should be below entry price"
-                    )
+                    assert signal.liquidation_price < signal.price, "Long liquidation price should be below entry price"
                 else:
                     assert signal.liquidation_price > signal.price, (
                         "Short liquidation price should be above entry price"
@@ -1331,14 +1306,10 @@ class TestPerpBacktestVisual:
 
         # Verify signal logic
         for signal in long_opens:
-            assert signal.price > signal.sma, (
-                f"Long open price {signal.price} should be above SMA {signal.sma}"
-            )
+            assert signal.price > signal.sma, f"Long open price {signal.price} should be above SMA {signal.sma}"
 
         for signal in short_opens:
-            assert signal.price < signal.sma, (
-                f"Short open price {signal.price} should be below SMA {signal.sma}"
-            )
+            assert signal.price < signal.sma, f"Short open price {signal.price} should be below SMA {signal.sma}"
 
     @pytest.mark.asyncio
     async def test_perp_strategy_complete_visualization(self) -> None:
@@ -1372,7 +1343,7 @@ class TestPerpBacktestVisual:
             start_time=start_time,
             end_time=end_time,
             interval_seconds=3600,
-            initial_capital_usd=initial_capital,
+            token_funding=pnl_token_funding(initial_capital),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
         )
@@ -1471,16 +1442,12 @@ class TestPerpBacktestVisual:
                 assert m.margin_utilization_pct == Decimal("0"), (
                     f"Margin utilization should be 0 when not in position: {m.margin_utilization_pct}"
                 )
-                assert m.leverage == Decimal("0"), (
-                    f"Leverage should be 0 when not in position: {m.leverage}"
-                )
+                assert m.leverage == Decimal("0"), f"Leverage should be 0 when not in position: {m.leverage}"
             else:
                 assert m.margin_utilization_pct > Decimal("0"), (
                     f"Margin utilization should be > 0 when in position: {m.margin_utilization_pct}"
                 )
-                assert m.leverage == leverage, (
-                    f"Leverage should be {leverage}x when in position: {m.leverage}"
-                )
+                assert m.leverage == leverage, f"Leverage should be {leverage}x when in position: {m.leverage}"
 
         # Verify funding direction based on position type
         # Note: Funding only changes when in position

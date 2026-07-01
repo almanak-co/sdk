@@ -38,6 +38,7 @@ from almanak import HoldIntent, IntentStrategy, MarketSnapshot
 from almanak.framework.backtesting.pnl import PnLBacktestConfig, PnLBacktester
 from almanak.framework.backtesting.pnl.providers import CoinGeckoDataProvider
 from almanak.framework.models.hot_reload_config import HotReloadableConfig
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 DUMMY_WALLET = "0x" + "0" * 40
 
@@ -112,7 +113,8 @@ async def test_no_trade_conservation():
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 2, tzinfo=UTC),  # Just 1 day
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_pnl_token_funding(Decimal("10000"), chain="ethereum"),
+            chain="ethereum",
             tokens=["ETH", "USDC"],
             interval_seconds=3600,  # Hourly
             random_seed=42,  # For reproducibility
@@ -131,8 +133,8 @@ async def test_no_trade_conservation():
 
         result = await backtester.backtest(strategy, config)
 
-        initial_capital = config.initial_capital_usd
-        final_capital = result.metrics.total_pnl_usd + initial_capital
+        initial_capital = result.initial_portfolio_value_usd
+        final_capital = result.final_capital_usd
 
         # Should be exactly equal (within small tolerance for floating point)
         tolerance = Decimal("0.0001")  # $0.0001 tolerance

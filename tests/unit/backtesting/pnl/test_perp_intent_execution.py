@@ -31,6 +31,7 @@ Conservation of collateral in ``apply_fill`` is covered separately
 (PR #2744 / test_perp_conservation.py); these tests assert the values
 *reaching* that machinery, not cash movement.
 """
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -42,6 +43,8 @@ from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
+
+
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktester,
@@ -83,7 +86,7 @@ def make_config() -> PnLBacktestConfig:
     return PnLBacktestConfig(
         start_time=T0,
         end_time=T0 + timedelta(days=1),
-        initial_capital_usd=Decimal("100000"),
+        token_funding=_pnl_token_funding(Decimal("100000")),
         include_gas_costs=False,
     )
 

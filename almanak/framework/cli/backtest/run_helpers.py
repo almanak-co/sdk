@@ -262,9 +262,9 @@ def build_pnl_config(
     start_time: datetime,
     end_time: datetime,
     interval_seconds: int,
-    initial_capital: float,
     chain: str,
     tokens: list[str],
+    token_funding: list[dict[str, Any]] | None = None,
     gas_price_gwei: float | None = None,
     include_gas_costs: bool = True,
     allow_degraded_data: bool | None = None,
@@ -273,8 +273,8 @@ def build_pnl_config(
 ) -> PnLBacktestConfig:
     """Construct a `PnLBacktestConfig` from CLI-shaped scalar arguments.
 
-    Centralises the `Decimal(str(initial_capital))` / `Decimal(str(gas_price))`
-    coercion repeated inline in `pnl_backtest` and `sweep_backtest`.
+    Centralises the `Decimal(str(gas_price))` coercion repeated inline in
+    `pnl_backtest` and `sweep_backtest`.
 
     The sweep-only robustness kwargs (`allow_degraded_data`,
     `preflight_validation`, `fail_on_preflight_error`) default to ``None`` so
@@ -291,9 +291,9 @@ def build_pnl_config(
         "start_time": start_time,
         "end_time": end_time,
         "interval_seconds": interval_seconds,
-        "initial_capital_usd": Decimal(str(initial_capital)),
         "chain": chain,
         "tokens": tokens,
+        "token_funding": token_funding,
         # None = chain-aware default resolved by PnLBacktestConfig from the
         # chain registry (VIB-5088 -- no silent flat 30 gwei).
         "gas_price_gwei": Decimal(str(gas_price_gwei)) if gas_price_gwei is not None else None,

@@ -135,7 +135,7 @@ def _sample_backtest_result(**overrides: Any) -> BacktestResult:
                 valuation_source="full",
             ),
         ],
-        initial_capital_usd=Decimal("10000"),
+        initial_portfolio_value_usd=Decimal("10000"),
         final_capital_usd=Decimal("11000"),
         chain="arbitrum",
         run_started_at=datetime(2024, 2, 1, 0, 0, 0),
@@ -290,7 +290,7 @@ class TestOptionalFieldHandling:
 
         assert result.engine == BacktestEngine.PNL
         assert result.deployment_id == "test_strategy"
-        assert result.initial_capital_usd == Decimal("10000")
+        assert result.initial_portfolio_value_usd == Decimal("0")
         assert result.final_capital_usd == Decimal("10000")
         assert result.chain == "arbitrum"
         assert result.run_started_at is None
@@ -718,7 +718,7 @@ class TestBacktestSummary:
         assert "Strategy:           round_trip_strategy" in summary
         assert "Chain:              arbitrum" in summary
         assert "Duration:           30.0 days" in summary
-        assert "Initial Capital:    $10,000.00" in summary
+        assert "Initial Portfolio:  $10,000.00" in summary
         assert "Final Capital:      $11,000.00" in summary
         assert "Net PnL:            $123.45" in summary
         assert "Total Trades:       5" in summary
@@ -862,7 +862,7 @@ class TestRoundTripStability:
         assert restored.deployment_id == original.deployment_id
         assert restored.start_time == original.start_time
         assert restored.end_time == original.end_time
-        assert restored.initial_capital_usd == original.initial_capital_usd
+        assert restored.initial_portfolio_value_usd == original.initial_portfolio_value_usd
         assert restored.final_capital_usd == original.final_capital_usd
         assert restored.chain == original.chain
         assert restored.run_started_at == original.run_started_at

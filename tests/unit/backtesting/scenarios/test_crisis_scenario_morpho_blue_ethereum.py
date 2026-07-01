@@ -16,11 +16,11 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.data import PriceUnavailableError
 from almanak.framework.backtesting.pnl.data_provider import (
     OHLCV,
     HistoricalDataConfig,
     MarketState,
+    token_ref_provider_symbol,
 )
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
@@ -41,10 +41,17 @@ from almanak.framework.backtesting.scenarios.crisis_runner import (
     run_crisis_backtest,
     run_multiple_crisis_backtests,
 )
+from almanak.framework.data import PriceUnavailableError
 
 # =============================================================================
 # Deterministic data provider for Ethereum crisis periods
 # =============================================================================
+
+
+def _provider_symbol(token: Any, chain: str) -> str:
+    if isinstance(token, tuple):
+        return (token_ref_provider_symbol(token, chain, unwrap_wrapped_native=False) or token[1]).upper()
+    return str(token).upper()
 
 
 class EthereumCrisisDataProvider:
@@ -101,7 +108,7 @@ class EthereumCrisisDataProvider:
         return prices
 
     async def get_price(self, token: str, timestamp: datetime) -> Decimal:
-        token = token.upper()
+        token = _provider_symbol(token, "ethereum")
         if token in ("USDC", "USDT", "DAI"):
             return Decimal("1")
         delta = timestamp - self._start_time
@@ -145,10 +152,11 @@ class EthereumCrisisDataProvider:
         while current <= config.end_time:
             prices = {}
             for token in config.tokens:
+                symbol = _provider_symbol(token, "ethereum")
                 try:
-                    prices[token.upper()] = await self.get_price(token, current)
+                    prices[symbol] = await self.get_price(token, current)
                 except ValueError:
-                    prices[token.upper()] = Decimal("1")
+                    prices[symbol] = Decimal("1")
             if "ETH" not in prices and "WETH" not in prices:
                 prices["ETH"] = await self.get_price("ETH", current)
             market_state = MarketState(
@@ -337,6 +345,33 @@ def _make_backtester(
     )
 
 
+def _crisis_token_funding(
+    amount: Decimal,
+    *,
+    include_wsteth: bool = True,
+) -> list[dict[str, str]]:
+    funding = [
+        {
+            "symbol": "USDC",
+            "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "chain": "ethereum",
+            "amount": str(amount),
+            "amount_type": "token",
+        }
+    ]
+    if include_wsteth:
+        funding.append(
+            {
+                "symbol": "wstETH",
+                "address": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
+                "chain": "ethereum",
+                "amount": "2",
+                "amount_type": "token",
+            }
+        )
+    return funding
+
+
 # =============================================================================
 # Tests: Hold baseline on Ethereum
 # =============================================================================
@@ -356,7 +391,7 @@ class TestCrisisLendingEthereumHoldBaseline:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000"), include_wsteth=False),
             chain="ethereum",
             tokens=["ETH", "USDC"],
             include_gas_costs=False,
@@ -380,7 +415,7 @@ class TestCrisisLendingEthereumHoldBaseline:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000"), include_wsteth=False),
             chain="ethereum",
             tokens=["ETH", "USDC"],
             include_gas_costs=False,
@@ -418,7 +453,7 @@ class TestCrisisMorphoBlueLending:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000"), include_wsteth=False),
             chain="ethereum",
             tokens=["ETH", "wstETH", "USDC"],
             include_gas_costs=False,
@@ -446,7 +481,7 @@ class TestCrisisMorphoBlueLending:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="ethereum",
             tokens=["ETH", "wstETH", "USDC"],
             include_gas_costs=False,
@@ -474,7 +509,7 @@ class TestCrisisMorphoBlueLending:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="ethereum",
             tokens=["ETH", "wstETH", "USDC"],
             include_gas_costs=False,
@@ -507,7 +542,7 @@ class TestCrisisMorphoBlueLending:
                 strategy=strategy,
                 scenario=scenario,
                 backtester=backtester,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=_crisis_token_funding(Decimal("10000")),
                 chain="ethereum",
                 tokens=["ETH", "wstETH", "USDC"],
                 include_gas_costs=False,
@@ -542,7 +577,7 @@ class TestCrisisMetricsEthereum:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="ethereum",
             tokens=["ETH", "wstETH", "USDC"],
             include_gas_costs=False,
@@ -578,7 +613,7 @@ class TestCrisisMetricsEthereum:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="ethereum",
             tokens=["ETH", "wstETH", "USDC"],
             include_gas_costs=False,
@@ -602,7 +637,7 @@ class TestCrisisMetricsEthereum:
                 strategy=strategy,
                 scenario=scenario,
                 backtester=backtester,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=_crisis_token_funding(Decimal("10000")),
                 chain="ethereum",
                 tokens=["ETH", "wstETH", "USDC"],
                 include_gas_costs=False,
@@ -638,7 +673,7 @@ class TestCrisisComparisonEthereum:
             strategy=crisis_strategy,
             scenario=scenario,
             backtester=crisis_backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="ethereum",
             tokens=["ETH", "wstETH", "USDC"],
             include_gas_costs=False,
@@ -661,7 +696,7 @@ class TestCrisisComparisonEthereum:
             strategy=normal_strategy,
             scenario=normal_scenario,
             backtester=normal_backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="ethereum",
             tokens=["ETH", "wstETH", "USDC"],
             include_gas_costs=False,
@@ -686,7 +721,7 @@ class TestCrisisConfigEthereum:
         """CrisisBacktestConfig should accept ethereum as chain."""
         config = CrisisBacktestConfig(
             scenario=BLACK_THURSDAY,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="ethereum",
             tokens=["ETH", "wstETH", "USDC"],
             gas_price_gwei=Decimal("30"),
@@ -703,7 +738,7 @@ class TestCrisisConfigEthereum:
         """Config round-trips through serialization with Ethereum settings."""
         config = CrisisBacktestConfig(
             scenario=FTX_COLLAPSE,
-            initial_capital_usd=Decimal("50000"),
+            token_funding=_crisis_token_funding(Decimal("50000")),
             chain="ethereum",
             tokens=["ETH", "wstETH", "USDC"],
             gas_price_gwei=Decimal("30"),
@@ -735,7 +770,7 @@ class TestCrisisMultipleScenariosEthereum:
                 strategy=strategy,
                 scenario=scenario,
                 backtester=backtester,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=_crisis_token_funding(Decimal("10000")),
                 chain="ethereum",
                 tokens=["ETH", "wstETH", "USDC"],
                 include_gas_costs=False,
@@ -760,7 +795,7 @@ class TestCrisisMultipleScenariosEthereum:
             strategy=strategy,
             scenarios=scenarios,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000"), include_wsteth=False),
             chain="ethereum",
             tokens=["ETH", "wstETH", "USDC"],
             include_gas_costs=False,
@@ -786,7 +821,7 @@ class TestCrisisResultEthereum:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="ethereum",
             tokens=["ETH", "wstETH", "USDC"],
             include_gas_costs=False,
@@ -820,7 +855,7 @@ class TestCrisisResultEthereum:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="ethereum",
             tokens=["ETH", "wstETH", "USDC"],
             include_gas_costs=True,

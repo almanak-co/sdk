@@ -50,7 +50,6 @@ class SweepBacktestContext:
     chain: str
     token_list: list[str]
     interval: int
-    initial_capital: float
     output_path: Path | None
     multi_period_mode: bool
     # Populated in later phases; defaults keep the dataclass instantiable

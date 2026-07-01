@@ -23,6 +23,7 @@ from almanak.framework.backtesting.pnl.data_provider import (
     OHLCV,
     HistoricalDataConfig,
     MarketState,
+    token_ref_provider_symbol,
 )
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
@@ -47,6 +48,12 @@ from almanak.framework.backtesting.scenarios.crisis_runner import (
 # =============================================================================
 # Deterministic data provider for Arbitrum crisis periods
 # =============================================================================
+
+
+def _provider_symbol(token: Any, chain: str) -> str:
+    if isinstance(token, tuple):
+        return token_ref_provider_symbol(token, chain, unwrap_wrapped_native=False) or token[1].upper()
+    return str(token).upper()
 
 
 class ArbitrumCrisisDataProvider:
@@ -103,7 +110,7 @@ class ArbitrumCrisisDataProvider:
         return prices
 
     async def get_price(self, token: str, timestamp: datetime) -> Decimal:
-        token = token.upper()
+        token = _provider_symbol(token, "arbitrum")
         if token in ("USDC", "USDT", "DAI"):
             return Decimal("1")
         delta = timestamp - self._start_time
@@ -142,10 +149,11 @@ class ArbitrumCrisisDataProvider:
         while current <= config.end_time:
             prices = {}
             for token in config.tokens:
+                symbol = _provider_symbol(token, "arbitrum")
                 try:
-                    prices[token.upper()] = await self.get_price(token, current)
+                    prices[symbol] = await self.get_price(token, current)
                 except ValueError:
-                    prices[token.upper()] = Decimal("1")
+                    prices[symbol] = Decimal("1")
             market_state = MarketState(
                 timestamp=current,
                 prices=prices,
@@ -299,6 +307,18 @@ def _make_backtester(
     )
 
 
+def _crisis_token_funding(amount: Decimal) -> list[dict[str, str]]:
+    return [
+        {
+            "symbol": "USDC",
+            "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "chain": "arbitrum",
+            "amount": str(amount),
+            "amount_type": "token",
+        }
+    ]
+
+
 # =============================================================================
 # Tests: Swap strategy on Arbitrum during crisis scenarios
 # =============================================================================
@@ -318,7 +338,7 @@ class TestCrisisSwapArbitrumHoldBaseline:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -342,7 +362,7 @@ class TestCrisisSwapArbitrumHoldBaseline:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -375,7 +395,7 @@ class TestCrisisSwapArbitrumTrading:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -406,7 +426,7 @@ class TestCrisisSwapArbitrumTrading:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -434,7 +454,7 @@ class TestCrisisSwapArbitrumTrading:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -461,7 +481,7 @@ class TestCrisisMetricsArbitrum:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -497,7 +517,7 @@ class TestCrisisMetricsArbitrum:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -520,7 +540,7 @@ class TestCrisisMetricsArbitrum:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -545,7 +565,7 @@ class TestCrisisMetricsArbitrum:
                 strategy=strategy,
                 scenario=scenario,
                 backtester=backtester,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=_crisis_token_funding(Decimal("10000")),
                 chain="arbitrum",
                 tokens=["WETH", "USDC"],
                 include_gas_costs=False,
@@ -577,7 +597,7 @@ class TestCrisisComparisonArbitrum:
             strategy=crisis_strategy,
             scenario=scenario,
             backtester=crisis_backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -601,7 +621,7 @@ class TestCrisisComparisonArbitrum:
             strategy=normal_strategy,
             scenario=normal_scenario,
             backtester=normal_backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -636,7 +656,7 @@ class TestCrisisMultipleScenarios:
                 strategy=strategy,
                 scenario=scenario,
                 backtester=backtester,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=_crisis_token_funding(Decimal("10000")),
                 chain="arbitrum",
                 tokens=["WETH", "USDC"],
                 include_gas_costs=False,
@@ -665,7 +685,7 @@ class TestCrisisMultipleScenarios:
             strategy=strategy,
             scenarios=scenarios,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -687,7 +707,7 @@ class TestCrisisConfigArbitrum:
         """CrisisBacktestConfig should accept arbitrum as chain."""
         config = CrisisBacktestConfig(
             scenario=BLACK_THURSDAY,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             gas_price_gwei=Decimal("0.1"),  # Arbitrum L2 gas price
@@ -704,7 +724,7 @@ class TestCrisisConfigArbitrum:
         """Config round-trips through serialization with Arbitrum settings."""
         config = CrisisBacktestConfig(
             scenario=FTX_COLLAPSE,
-            initial_capital_usd=Decimal("50000"),
+            token_funding=_crisis_token_funding(Decimal("50000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             gas_price_gwei=Decimal("0.1"),
@@ -725,7 +745,7 @@ class TestCrisisConfigArbitrum:
         scenario = TERRA_COLLAPSE
         config = CrisisBacktestConfig(
             scenario=scenario,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             gas_price_gwei=Decimal("0.1"),
@@ -761,7 +781,7 @@ class TestCrisisResultArbitrum:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -786,7 +806,7 @@ class TestCrisisResultArbitrum:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -813,7 +833,7 @@ class TestCrisisResultArbitrum:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -852,7 +872,7 @@ class TestCrisisCustomScenarioArbitrum:
             strategy=strategy,
             scenario=svb_collapse,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -892,7 +912,7 @@ class TestCrisisCustomScenarioArbitrum:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_crisis_token_funding(Decimal("10000")),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             include_gas_costs=True,

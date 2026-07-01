@@ -32,6 +32,7 @@ from almanak.framework.backtesting.pnl.providers.aggregated import (
     AggregatedDataProvider,
 )
 from almanak.framework.intents import HoldIntent
+from tests.backtesting_funding import pnl_token_funding, provider_symbol
 
 # =============================================================================
 # Mock Data Providers for Fallback Testing
@@ -61,18 +62,13 @@ class FailingChainlinkProvider:
         raise_on_stale: bool = True,
     ) -> Decimal:
         """Always fail - simulates missing RPC or network error."""
-        raise ValueError(
-            f"Chainlink provider failed: No RPC URL configured. "
-            f"Cannot fetch price for {token}"
-        )
+        raise ValueError(f"Chainlink provider failed: No RPC URL configured. Cannot fetch price for {token}")
 
     async def get_latest_price(self, token: str) -> Decimal | None:
         """Always fail - simulates missing RPC."""
         raise ValueError("Chainlink provider failed: No RPC URL configured")
 
-    async def iterate(
-        self, config: HistoricalDataConfig
-    ) -> AsyncIterator[tuple[datetime, MarketState]]:
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         """Fail iteration - no data available."""
         raise ValueError("Chainlink provider cannot iterate without RPC URL")
         yield  # Make this a generator (unreachable but required for type checking)
@@ -101,17 +97,14 @@ class FailingTWAPProvider:
     ) -> Decimal:
         """Always fail - simulates missing RPC or pool not found."""
         raise ValueError(
-            f"TWAP provider failed: Cannot query on-chain oracle for {token}. "
-            f"No RPC URL configured or pool not found."
+            f"TWAP provider failed: Cannot query on-chain oracle for {token}. No RPC URL configured or pool not found."
         )
 
     async def get_latest_price(self, token: str) -> Decimal | None:
         """Always fail - simulates missing RPC."""
         raise ValueError("TWAP provider failed: No RPC URL configured")
 
-    async def iterate(
-        self, config: HistoricalDataConfig
-    ) -> AsyncIterator[tuple[datetime, MarketState]]:
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         """Fail iteration - no data available."""
         raise ValueError("TWAP provider cannot iterate without RPC URL")
         yield  # Make this a generator
@@ -152,7 +145,7 @@ class MockCoinGeckoProvider:
     ) -> Decimal:
         """Return mock price - always succeeds."""
         self._call_count += 1
-        token_upper = token.upper()
+        token_upper = provider_symbol(token)
         if token_upper not in self._prices:
             raise ValueError(f"Unknown token: {token}")
         return self._prices[token_upper]
@@ -160,11 +153,9 @@ class MockCoinGeckoProvider:
     async def get_latest_price(self, token: str) -> Decimal | None:
         """Return mock price."""
         self._call_count += 1
-        return self._prices.get(token.upper())
+        return self._prices.get(provider_symbol(token))
 
-    async def iterate(
-        self, config: HistoricalDataConfig
-    ) -> AsyncIterator[tuple[datetime, MarketState]]:
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         """Generate market states for the backtest period."""
         current_time = config.start_time
         while current_time <= config.end_time:
@@ -209,14 +200,12 @@ class MockIteratingProvider:
         timestamp: datetime | None = None,
     ) -> Decimal:
         """Return mock price."""
-        token_upper = token.upper()
+        token_upper = provider_symbol(token)
         if token_upper not in self._prices:
             raise ValueError(f"Unknown token: {token}")
         return self._prices[token_upper]
 
-    async def iterate(
-        self, config: HistoricalDataConfig
-    ) -> AsyncIterator[tuple[datetime, MarketState]]:
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         """Generate market states for the backtest period."""
         current_time = config.start_time
         while current_time <= config.end_time:
@@ -262,7 +251,7 @@ def base_config() -> PnLBacktestConfig:
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 1, 6, tzinfo=UTC),  # 6 hour backtest
         interval_seconds=3600,  # 1 hour intervals
-        initial_capital_usd=Decimal("10000"),
+        token_funding=pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         chain="arbitrum",
         institutional_mode=False,
@@ -397,16 +386,17 @@ class TestChainlinkProviderWarnings:
             def historical_capability(self) -> HistoricalDataCapability:
                 return HistoricalDataCapability.PRE_CACHE
 
-            async def iterate(
-                self, config: HistoricalDataConfig
-            ) -> AsyncIterator[tuple[datetime, MarketState]]:
+            async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
                 current = config.start_time
                 while current <= config.end_time:
                     chain = config.chains[0] if config.chains else "arbitrum"
-                    yield current, MarketState(
-                        timestamp=current,
-                        prices=self._prices.copy(),
-                        chain=chain,
+                    yield (
+                        current,
+                        MarketState(
+                            timestamp=current,
+                            prices=self._prices.copy(),
+                            chain=chain,
+                        ),
                     )
                     current += timedelta(seconds=config.interval_seconds)
 
@@ -415,7 +405,7 @@ class TestChainlinkProviderWarnings:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 3, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             institutional_mode=False,
         )
@@ -507,16 +497,17 @@ class TestTWAPFallbackToCoinGecko:
             def historical_capability(self) -> HistoricalDataCapability:
                 return HistoricalDataCapability.CURRENT_ONLY
 
-            async def iterate(
-                self, config: HistoricalDataConfig
-            ) -> AsyncIterator[tuple[datetime, MarketState]]:
+            async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
                 current = config.start_time
                 while current <= config.end_time:
                     chain = config.chains[0] if config.chains else "arbitrum"
-                    yield current, MarketState(
-                        timestamp=current,
-                        prices=self._prices.copy(),
-                        chain=chain,
+                    yield (
+                        current,
+                        MarketState(
+                            timestamp=current,
+                            prices=self._prices.copy(),
+                            chain=chain,
+                        ),
                     )
                     current += timedelta(seconds=config.interval_seconds)
 
@@ -525,7 +516,7 @@ class TestTWAPFallbackToCoinGecko:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 3, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             institutional_mode=False,
         )
@@ -705,16 +696,17 @@ class TestBacktestWithProviderFallback:
             def historical_capability(self) -> HistoricalDataCapability:
                 return HistoricalDataCapability.CURRENT_ONLY
 
-            async def iterate(
-                self, config: HistoricalDataConfig
-            ) -> AsyncIterator[tuple[datetime, MarketState]]:
+            async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
                 current = config.start_time
                 while current <= config.end_time:
                     chain = config.chains[0] if config.chains else "arbitrum"
-                    yield current, MarketState(
-                        timestamp=current,
-                        prices=self._prices.copy(),
-                        chain=chain,
+                    yield (
+                        current,
+                        MarketState(
+                            timestamp=current,
+                            prices=self._prices.copy(),
+                            chain=chain,
+                        ),
                     )
                     current += timedelta(seconds=config.interval_seconds)
 
@@ -723,7 +715,7 @@ class TestBacktestWithProviderFallback:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, 3, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             institutional_mode=False,
         )

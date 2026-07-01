@@ -1285,7 +1285,7 @@ async def run_walk_forward_optimization(
         )
 
         param_ranges = {
-            "initial_capital_usd": continuous(Decimal("10000"), Decimal("50000")),
+            "trade_size_usd": continuous(Decimal("100"), Decimal("5000")),
             "interval_seconds": discrete(3600, 14400, step=3600),
         }
 

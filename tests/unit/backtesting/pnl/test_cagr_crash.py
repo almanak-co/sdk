@@ -1,4 +1,5 @@
 """Test that CAGR calculation handles portfolios that lose >100%."""
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -9,6 +10,8 @@ from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.engine import PnLBacktester
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 from almanak.framework.intents.vocabulary import IntentType
+
+
 
 
 @pytest.fixture
@@ -24,7 +27,7 @@ def config():
     return PnLBacktestConfig(
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 2, 1, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
     )
 
 

@@ -16,6 +16,7 @@ engine driven by a real ``LPOpenIntent`` over a moving synthetic price
 series: equity must track price, and the open tick must conserve value
 (blueprint 31 section 4).
 """
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -25,6 +26,8 @@ import pytest
 
 from almanak.framework.backtesting.pnl._engine_helpers import _resolve_lp_tokens
 from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
+
+
     ImpermanentLossCalculator,
 )
 from almanak.framework.backtesting.pnl.data_provider import MarketState
@@ -370,7 +373,7 @@ async def _run_lp_backtest(num_ticks: int, step: Decimal):
     config = PnLBacktestConfig(
         start_time=START,
         end_time=START + timedelta(hours=num_ticks),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
         preflight_validation=False,
         inclusion_delay_blocks=0,

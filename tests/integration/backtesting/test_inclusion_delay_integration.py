@@ -34,6 +34,7 @@ from almanak.framework.backtesting.pnl.engine import (
     DefaultSlippageModel,
     PnLBacktester,
 )
+from tests.backtesting_funding import pnl_token_funding, provider_symbol
 
 # =============================================================================
 # Mock Data Provider
@@ -75,16 +76,16 @@ class DeterministicDataProvider:
         while current <= config.end_time:
             prices = {}
             for token in config.tokens:
-                token = token.upper()
-                if token in self._price_series:
-                    series = self._price_series[token]
+                symbol = provider_symbol(token, config.chains[0] if config.chains else "arbitrum")
+                if symbol in self._price_series:
+                    series = self._price_series[symbol]
                     if index < len(series):
-                        prices[token] = series[index]
+                        prices[symbol] = series[index]
                     else:
-                        prices[token] = series[-1]
+                        prices[symbol] = series[-1]
                 else:
                     # Default stablecoin price
-                    prices[token] = Decimal("1")
+                    prices[symbol] = Decimal("1")
 
             market_state = MarketState(
                 timestamp=current,
@@ -198,16 +199,14 @@ class TestInclusionDelayBasicBehavior:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=10),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=3,  # Intent queued, executed 3 ticks later
         )
 
         # Submit intent on first tick only
-        strategy = DeterministicStrategy(
-            intents=[MockSwapIntent(amount_usd=Decimal("2000"))] + [None] * 10
-        )
+        strategy = DeterministicStrategy(intents=[MockSwapIntent(amount_usd=Decimal("2000"))] + [None] * 10)
 
         backtester = PnLBacktester(
             data_provider=data_provider,
@@ -222,9 +221,7 @@ class TestInclusionDelayBasicBehavior:
         assert result.engine == BacktestEngine.PNL
 
         # Intent should have been executed (just with delay)
-        assert result.metrics.total_trades == 1, (
-            f"Expected 1 trade, got {result.metrics.total_trades}"
-        )
+        assert result.metrics.total_trades == 1, f"Expected 1 trade, got {result.metrics.total_trades}"
 
     @pytest.mark.asyncio
     async def test_delay_affects_execution_timing(
@@ -250,15 +247,13 @@ class TestInclusionDelayBasicBehavior:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=10),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,  # Immediate
         )
 
-        strategy_no_delay = DeterministicStrategy(
-            intents=[MockSwapIntent(amount_usd=Decimal("5000"))] + [None] * 10
-        )
+        strategy_no_delay = DeterministicStrategy(intents=[MockSwapIntent(amount_usd=Decimal("5000"))] + [None] * 10)
 
         backtester = PnLBacktester(
             data_provider=data_provider,
@@ -274,7 +269,7 @@ class TestInclusionDelayBasicBehavior:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=10),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=3,  # Execute 3 ticks later
@@ -289,9 +284,7 @@ class TestInclusionDelayBasicBehavior:
             start_time=base_timestamp,
         )
 
-        strategy_with_delay = DeterministicStrategy(
-            intents=[MockSwapIntent(amount_usd=Decimal("5000"))] + [None] * 10
-        )
+        strategy_with_delay = DeterministicStrategy(intents=[MockSwapIntent(amount_usd=Decimal("5000"))] + [None] * 10)
 
         backtester_delay = PnLBacktester(
             data_provider=data_provider_delay,
@@ -336,16 +329,14 @@ class TestInclusionDelayPendingExecution:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=5),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=10,  # Very high delay - all intents pending at end
         )
 
         # Submit intents every tick
-        strategy = DeterministicStrategy(
-            intents=[MockSwapIntent(amount_usd=Decimal("500"))] * 6
-        )
+        strategy = DeterministicStrategy(intents=[MockSwapIntent(amount_usd=Decimal("500"))] * 6)
 
         backtester = PnLBacktester(
             data_provider=data_provider,
@@ -358,9 +349,7 @@ class TestInclusionDelayPendingExecution:
         assert result.success, f"Backtest failed: {result.error}"
 
         # All 6 intents should have been executed (at simulation end)
-        assert result.metrics.total_trades == 6, (
-            f"Expected 6 trades, got {result.metrics.total_trades}"
-        )
+        assert result.metrics.total_trades == 6, f"Expected 6 trades, got {result.metrics.total_trades}"
 
         # execution_delayed_at_end should be 6 (all intents)
         assert result.execution_delayed_at_end == 6, (
@@ -387,15 +376,13 @@ class TestInclusionDelayPendingExecution:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=3),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=10,  # All trades will be delayed
         )
 
-        strategy = DeterministicStrategy(
-            intents=[MockSwapIntent(amount_usd=Decimal("1000"))] * 4
-        )
+        strategy = DeterministicStrategy(intents=[MockSwapIntent(amount_usd=Decimal("1000"))] * 4)
 
         backtester = PnLBacktester(
             data_provider=data_provider,
@@ -409,9 +396,7 @@ class TestInclusionDelayPendingExecution:
 
         # All trades should have delayed_at_end=True
         for i, trade in enumerate(result.trades):
-            assert trade.delayed_at_end is True, (
-                f"Trade {i} expected delayed_at_end=True, got {trade.delayed_at_end}"
-            )
+            assert trade.delayed_at_end is True, f"Trade {i} expected delayed_at_end=True, got {trade.delayed_at_end}"
 
     @pytest.mark.asyncio
     async def test_mixed_delayed_and_normal_execution(
@@ -433,16 +418,14 @@ class TestInclusionDelayPendingExecution:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=8),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=2,  # Moderate delay
         )
 
         # 9 ticks, each with an intent
-        strategy = DeterministicStrategy(
-            intents=[MockSwapIntent(amount_usd=Decimal("200"))] * 9
-        )
+        strategy = DeterministicStrategy(intents=[MockSwapIntent(amount_usd=Decimal("200"))] * 9)
 
         backtester = PnLBacktester(
             data_provider=data_provider,
@@ -455,9 +438,7 @@ class TestInclusionDelayPendingExecution:
         assert result.success, f"Backtest failed: {result.error}"
 
         # All 9 intents should be executed
-        assert result.metrics.total_trades == 9, (
-            f"Expected 9 trades, got {result.metrics.total_trades}"
-        )
+        assert result.metrics.total_trades == 9, f"Expected 9 trades, got {result.metrics.total_trades}"
 
         # Count delayed vs normal
         normal_trades = [t for t in result.trades if not t.delayed_at_end]
@@ -499,15 +480,13 @@ class TestInclusionDelayComparisonWithWithoutDelay:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=5),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,
         )
 
-        strategy_1 = DeterministicStrategy(
-            intents=[MockSwapIntent(amount_usd=Decimal("500"))] * 6
-        )
+        strategy_1 = DeterministicStrategy(intents=[MockSwapIntent(amount_usd=Decimal("500"))] * 6)
 
         backtester_1 = PnLBacktester(
             data_provider=data_provider_1,
@@ -530,15 +509,13 @@ class TestInclusionDelayComparisonWithWithoutDelay:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=5),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=3,
         )
 
-        strategy_2 = DeterministicStrategy(
-            intents=[MockSwapIntent(amount_usd=Decimal("500"))] * 6
-        )
+        strategy_2 = DeterministicStrategy(intents=[MockSwapIntent(amount_usd=Decimal("500"))] * 6)
 
         backtester_2 = PnLBacktester(
             data_provider=data_provider_2,
@@ -580,15 +557,13 @@ class TestInclusionDelayComparisonWithWithoutDelay:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=5),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=0,  # No delay
         )
 
-        strategy = DeterministicStrategy(
-            intents=[MockSwapIntent(amount_usd=Decimal("500"))] * 6
-        )
+        strategy = DeterministicStrategy(intents=[MockSwapIntent(amount_usd=Decimal("500"))] * 6)
 
         backtester = PnLBacktester(
             data_provider=data_provider,
@@ -630,15 +605,13 @@ class TestInclusionDelayIntentTypes:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=3),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=10,
         )
 
-        strategy = DeterministicStrategy(
-            intents=[MockSwapIntent(amount_usd=Decimal("1000"))] * 4
-        )
+        strategy = DeterministicStrategy(intents=[MockSwapIntent(amount_usd=Decimal("1000"))] * 4)
 
         backtester = PnLBacktester(
             data_provider=data_provider,
@@ -652,9 +625,7 @@ class TestInclusionDelayIntentTypes:
 
         # All trades should be SWAP type
         for trade in result.trades:
-            assert trade.intent_type == IntentType.SWAP, (
-                f"Expected SWAP intent type, got {trade.intent_type}"
-            )
+            assert trade.intent_type == IntentType.SWAP, f"Expected SWAP intent type, got {trade.intent_type}"
 
 
 class TestInclusionDelaySerialization:
@@ -680,15 +651,13 @@ class TestInclusionDelaySerialization:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=3),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=10,
         )
 
-        strategy = DeterministicStrategy(
-            intents=[MockSwapIntent(amount_usd=Decimal("1000"))] * 4
-        )
+        strategy = DeterministicStrategy(intents=[MockSwapIntent(amount_usd=Decimal("1000"))] * 4)
 
         backtester = PnLBacktester(
             data_provider=data_provider,
@@ -713,9 +682,7 @@ class TestInclusionDelaySerialization:
         )
 
         # Verify delayed_at_end flag on each trade is preserved
-        for i, (original, restored_trade) in enumerate(
-            zip(result.trades, restored.trades, strict=True)
-        ):
+        for i, (original, restored_trade) in enumerate(zip(result.trades, restored.trades, strict=True)):
             assert original.delayed_at_end == restored_trade.delayed_at_end, (
                 f"Trade {i} delayed_at_end not preserved: "
                 f"original={original.delayed_at_end}, restored={restored_trade.delayed_at_end}"
@@ -745,15 +712,13 @@ class TestInclusionDelayEdgeCases:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=2),  # Only 3 ticks
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=100,  # Way more than ticks
         )
 
-        strategy = DeterministicStrategy(
-            intents=[MockSwapIntent(amount_usd=Decimal("1000"))] * 3
-        )
+        strategy = DeterministicStrategy(intents=[MockSwapIntent(amount_usd=Decimal("1000"))] * 3)
 
         backtester = PnLBacktester(
             data_provider=data_provider,
@@ -766,9 +731,7 @@ class TestInclusionDelayEdgeCases:
         assert result.success, f"Backtest failed: {result.error}"
 
         # All 3 intents should still execute (at simulation end)
-        assert result.metrics.total_trades == 3, (
-            f"Expected 3 trades, got {result.metrics.total_trades}"
-        )
+        assert result.metrics.total_trades == 3, f"Expected 3 trades, got {result.metrics.total_trades}"
 
         # All should be delayed at end
         assert result.execution_delayed_at_end == 3
@@ -793,7 +756,7 @@ class TestInclusionDelayEdgeCases:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(hours=5),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=3,
@@ -813,7 +776,7 @@ class TestInclusionDelayEdgeCases:
         assert result.success, f"Backtest failed: {result.error}"
         assert result.metrics.total_trades == 0
         assert result.execution_delayed_at_end == 0
-        assert result.final_capital_usd == config.initial_capital_usd
+        assert result.final_capital_usd == result.initial_portfolio_value_usd
 
     @pytest.mark.asyncio
     async def test_single_tick_with_delay(
@@ -835,15 +798,13 @@ class TestInclusionDelayEdgeCases:
             start_time=base_timestamp,
             end_time=base_timestamp + timedelta(seconds=3600),  # 1 tick
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
             inclusion_delay_blocks=2,
         )
 
-        strategy = DeterministicStrategy(
-            intents=[MockSwapIntent(amount_usd=Decimal("1000"))]
-        )
+        strategy = DeterministicStrategy(intents=[MockSwapIntent(amount_usd=Decimal("1000"))])
 
         backtester = PnLBacktester(
             data_provider=data_provider,

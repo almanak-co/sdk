@@ -8,6 +8,7 @@ Tests cover:
 - Config hash is included in BacktestResult
 """
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -15,6 +16,7 @@ import pytest
 
 from almanak.framework.backtesting.models import BacktestEngine, BacktestMetrics, BacktestResult
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 # =============================================================================
 # Test Fixtures
@@ -28,7 +30,7 @@ def base_config() -> PnLBacktestConfig:
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 6, 1, tzinfo=UTC),
         interval_seconds=3600,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000"), chain="arbitrum"),
         fee_model="realistic",
         slippage_model="realistic",
         include_gas_costs=True,
@@ -55,7 +57,7 @@ def identical_config() -> PnLBacktestConfig:
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 6, 1, tzinfo=UTC),
         interval_seconds=3600,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000"), chain="arbitrum"),
         fee_model="realistic",
         slippage_model="realistic",
         include_gas_costs=True,
@@ -108,7 +110,7 @@ def test_different_start_time_produces_different_hash(base_config: PnLBacktestCo
         start_time=datetime(2024, 2, 1, tzinfo=UTC),  # Changed
         end_time=base_config.end_time,
         interval_seconds=base_config.interval_seconds,
-        initial_capital_usd=base_config.initial_capital_usd,
+        token_funding=_pnl_token_funding(Decimal("10000"), chain=base_config.chain),
         fee_model=base_config.fee_model,
         slippage_model=base_config.slippage_model,
         chain=base_config.chain,
@@ -120,12 +122,12 @@ def test_different_start_time_produces_different_hash(base_config: PnLBacktestCo
 
 
 def test_different_capital_produces_different_hash(base_config: PnLBacktestConfig) -> None:
-    """Different initial_capital_usd should produce different hash."""
+    """Different startup funding should produce different hash."""
     modified_config = PnLBacktestConfig(
         start_time=base_config.start_time,
         end_time=base_config.end_time,
         interval_seconds=base_config.interval_seconds,
-        initial_capital_usd=Decimal("50000"),  # Changed
+        token_funding=_pnl_token_funding(Decimal("50000"), chain=base_config.chain),  # Changed
         fee_model=base_config.fee_model,
         slippage_model=base_config.slippage_model,
         chain=base_config.chain,
@@ -142,7 +144,7 @@ def test_different_fee_model_produces_different_hash(base_config: PnLBacktestCon
         start_time=base_config.start_time,
         end_time=base_config.end_time,
         interval_seconds=base_config.interval_seconds,
-        initial_capital_usd=base_config.initial_capital_usd,
+        token_funding=_pnl_token_funding(Decimal("10000"), chain=base_config.chain),
         fee_model="zero",  # Changed
         slippage_model=base_config.slippage_model,
         chain=base_config.chain,
@@ -159,7 +161,7 @@ def test_different_random_seed_produces_different_hash(base_config: PnLBacktestC
         start_time=base_config.start_time,
         end_time=base_config.end_time,
         interval_seconds=base_config.interval_seconds,
-        initial_capital_usd=base_config.initial_capital_usd,
+        token_funding=_pnl_token_funding(Decimal("10000"), chain=base_config.chain),
         fee_model=base_config.fee_model,
         slippage_model=base_config.slippage_model,
         chain=base_config.chain,
@@ -176,7 +178,7 @@ def test_token_order_does_not_affect_hash(base_config: PnLBacktestConfig) -> Non
         start_time=base_config.start_time,
         end_time=base_config.end_time,
         interval_seconds=base_config.interval_seconds,
-        initial_capital_usd=base_config.initial_capital_usd,
+        token_funding=_pnl_token_funding(Decimal("10000"), chain=base_config.chain),
         fee_model=base_config.fee_model,
         slippage_model=base_config.slippage_model,
         # VIB-5088: the gas default is chain-aware, not a constant -- copy
@@ -190,13 +192,38 @@ def test_token_order_does_not_affect_hash(base_config: PnLBacktestConfig) -> Non
     assert base_config.calculate_config_hash() == modified_config.calculate_config_hash()
 
 
+def test_config_hash_normalizes_json_unsafe_token_values() -> None:
+    """Token refs and Decimal funding values are normalized before hashing."""
+    base_usdc = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    config = PnLBacktestConfig(
+        start_time=datetime(2024, 1, 1, tzinfo=UTC),
+        end_time=datetime(2024, 1, 2, tzinfo=UTC),
+        token_funding=[
+            {
+                "symbol": "USDC",
+                "address": base_usdc,
+                "chain": "base",
+                "amount": Decimal("10000"),
+                "amount_type": "token",
+            }
+        ],
+        chain="base",
+        tokens=[("base", base_usdc), "WETH"],  # type: ignore[list-item]
+    )
+
+    assert len(config.calculate_config_hash()) == 64
+    assert config.to_dict()["token_funding"][0]["amount"] == "10000"
+    assert ["base", base_usdc] in config.to_dict()["tokens"]
+    json.dumps(config.to_dict())
+
+
 def test_different_chain_produces_different_hash(base_config: PnLBacktestConfig) -> None:
     """Different chain should produce different hash."""
     modified_config = PnLBacktestConfig(
         start_time=base_config.start_time,
         end_time=base_config.end_time,
         interval_seconds=base_config.interval_seconds,
-        initial_capital_usd=base_config.initial_capital_usd,
+        token_funding=_pnl_token_funding(Decimal("10000"), chain="base"),
         fee_model=base_config.fee_model,
         slippage_model=base_config.slippage_model,
         chain="base",  # Changed
@@ -221,7 +248,7 @@ class TestPnLBacktestConfigValidation:
             "start_time": datetime(2024, 1, 1, tzinfo=UTC),
             "end_time": datetime(2024, 1, 2, tzinfo=UTC),
             "interval_seconds": 3600,
-            "initial_capital_usd": Decimal("10000"),
+            "token_funding": _pnl_token_funding(Decimal("10000")),
             "gas_price_gwei": Decimal("30"),
             "chain": "arbitrum",
             "tokens": ["WETH", "USDC"],
@@ -234,7 +261,7 @@ class TestPnLBacktestConfigValidation:
         [
             ({"end_time": datetime(2024, 1, 1, tzinfo=UTC)}, "end_time must be after start_time"),
             ({"interval_seconds": 0}, "interval_seconds must be positive"),
-            ({"initial_capital_usd": Decimal("0")}, "initial_capital_usd must be positive"),
+            ({"token_funding": {"symbol": "USDC"}}, "token_funding must be a list"),
             ({"inclusion_delay_blocks": -1}, "inclusion_delay_blocks cannot be negative"),
             ({"tokens": []}, "tokens list cannot be empty"),
             ({"gas_price_gwei": Decimal("-0.1")}, "gas_price_gwei cannot be negative"),
@@ -460,14 +487,14 @@ def test_config_hash_with_none_random_seed() -> None:
     config_with_none = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 6, 1, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         random_seed=None,
     )
 
     config_with_seed = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 6, 1, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         random_seed=42,
     )
 
@@ -485,7 +512,7 @@ def test_config_hash_with_many_tokens() -> None:
     config = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 6, 1, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC", "WBTC", "DAI", "USDT", "LINK", "UNI", "AAVE"],
     )
 
@@ -499,7 +526,7 @@ def test_config_hash_with_extreme_values() -> None:
         start_time=datetime(2020, 1, 1, tzinfo=UTC),
         end_time=datetime(2030, 12, 31, tzinfo=UTC),
         interval_seconds=60,
-        initial_capital_usd=Decimal("1000000000"),  # 1 billion
+        token_funding=_pnl_token_funding(Decimal("1000000000")),  # 1 billion
         gas_price_gwei=Decimal("1000"),
         inclusion_delay_blocks=100,
     )

@@ -8,6 +8,7 @@ later close those positions via `Intent.lp_close(position_id=...)`.
 """
 
 from __future__ import annotations
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -19,6 +20,8 @@ import pytest
 from almanak.framework.backtesting.models import IntentType, TradeRecord
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.engine import (
+
+
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktester,
@@ -275,7 +278,7 @@ async def test_pnl_backtest_invokes_callback_with_real_position_id() -> None:
         start_time=base_ts,
         end_time=base_ts + timedelta(hours=5),
         interval_seconds=3600,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
     )
 
@@ -315,7 +318,7 @@ async def test_pnl_backtest_callback_result_is_simulated_execution_result() -> N
         start_time=base_ts,
         end_time=base_ts + timedelta(hours=5),
         interval_seconds=3600,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
     )
 
@@ -390,7 +393,7 @@ async def test_pnl_backtest_swap_callback_reaches_strategy() -> None:
         start_time=base_ts,
         end_time=base_ts + timedelta(hours=5),
         interval_seconds=3600,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000")),
         tokens=["WETH", "USDC"],
     )
 

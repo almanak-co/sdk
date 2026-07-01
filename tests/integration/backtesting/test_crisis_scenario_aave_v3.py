@@ -18,7 +18,6 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import (
     OHLCV,
     HistoricalDataConfig,
@@ -31,10 +30,10 @@ from almanak.framework.backtesting.pnl.engine import (
 )
 from almanak.framework.backtesting.scenarios.crisis import (
     BLACK_THURSDAY,
-    CrisisScenario,
     FTX_COLLAPSE,
     PREDEFINED_SCENARIOS,
     TERRA_COLLAPSE,
+    CrisisScenario,
     get_scenario_by_name,
 )
 from almanak.framework.backtesting.scenarios.crisis_runner import (
@@ -43,6 +42,7 @@ from almanak.framework.backtesting.scenarios.crisis_runner import (
     run_crisis_backtest,
     run_multiple_crisis_backtests,
 )
+from tests.backtesting_funding import pnl_token_funding, provider_symbol
 
 # =============================================================================
 # Deterministic data provider for crisis periods
@@ -111,23 +111,21 @@ class CrisisDataProvider:
 
         return prices
 
-    async def get_price(self, token: str, timestamp: datetime) -> Decimal:
-        token = token.upper()
+    async def get_price(self, token: Any, timestamp: datetime) -> Decimal:
+        symbol = provider_symbol(token, "ethereum")
         delta = timestamp - self._start_time
         index = int(delta.total_seconds() / self._interval_seconds)
-        if token in ("WETH", "ETH"):
+        if symbol in ("WETH", "ETH"):
             series = self._eth_prices
-        elif token in ("USDC", "USDT", "DAI"):
+        elif symbol in ("USDC", "USDT", "DAI"):
             return Decimal("1")
         else:
-            raise ValueError(f"No price for {token}")
+            raise ValueError(f"No price for {symbol}")
         if 0 <= index < len(series):
             return series[index]
         return series[-1] if index >= len(series) else series[0]
 
-    async def get_ohlcv(
-        self, token: str, start: datetime, end: datetime, interval_seconds: int = 3600
-    ) -> list[OHLCV]:
+    async def get_ohlcv(self, token: str, start: datetime, end: datetime, interval_seconds: int = 3600) -> list[OHLCV]:
         result = []
         current = start
         while current <= end:
@@ -151,10 +149,11 @@ class CrisisDataProvider:
         while current <= config.end_time:
             prices = {}
             for token in config.tokens:
+                symbol = provider_symbol(token, config.chains[0] if config.chains else "ethereum")
                 try:
-                    prices[token.upper()] = await self.get_price(token, current)
+                    prices[symbol] = await self.get_price(token, current)
                 except ValueError:
-                    prices[token.upper()] = Decimal("1")
+                    prices[symbol] = Decimal("1")
             market_state = MarketState(
                 timestamp=current,
                 prices=prices,
@@ -313,7 +312,7 @@ class TestCrisisBacktestAaveV3:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000"), chain="ethereum"),
             chain="ethereum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -360,7 +359,7 @@ class TestCrisisBacktestAaveV3:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000"), chain="ethereum"),
             chain="ethereum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -396,7 +395,7 @@ class TestCrisisBacktestAaveV3:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000"), chain="ethereum"),
             chain="ethereum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -417,7 +416,7 @@ class TestCrisisBacktestAaveV3:
         """Test CrisisBacktestConfig round-trip serialization."""
         config = CrisisBacktestConfig(
             scenario=FTX_COLLAPSE,
-            initial_capital_usd=Decimal("50000"),
+            token_funding=pnl_token_funding(Decimal("50000"), chain="ethereum"),
             chain="ethereum",
             tokens=["WETH", "USDC"],
             gas_price_gwei=Decimal("100"),
@@ -427,7 +426,7 @@ class TestCrisisBacktestAaveV3:
         restored = CrisisBacktestConfig.from_dict(d)
 
         assert restored.scenario.name == "ftx_collapse"
-        assert restored.initial_capital_usd == Decimal("50000")
+        assert restored.token_funding == pnl_token_funding(Decimal("50000"), chain="ethereum")
         assert restored.chain == "ethereum"
         assert restored.gas_price_gwei == Decimal("100")
 
@@ -454,7 +453,7 @@ class TestCrisisBacktestAaveV3:
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000"), chain="ethereum"),
             chain="ethereum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -494,7 +493,7 @@ class TestCrisisBacktestAaveV3:
                 strategy=strategy,
                 scenario=scenario,
                 backtester=backtester,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=pnl_token_funding(Decimal("10000"), chain="ethereum"),
                 chain="ethereum",
                 tokens=["WETH", "USDC"],
                 include_gas_costs=False,
@@ -538,7 +537,7 @@ class TestCrisisBacktestAaveV3:
             strategy=strategy,
             scenario=svb_collapse,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000"), chain="ethereum"),
             chain="ethereum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,
@@ -575,7 +574,7 @@ class TestCrisisBacktestAaveV3:
             strategy=strategy,
             scenarios=scenarios,
             backtester=backtester,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000"), chain="ethereum"),
             chain="ethereum",
             tokens=["WETH", "USDC"],
             include_gas_costs=False,

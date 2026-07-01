@@ -75,6 +75,11 @@ from almanak.framework.backtesting.pnl.error_handling import (
     BacktestErrorHandler,
     PreflightValidationError,
 )
+from almanak.framework.backtesting.pnl.initial_portfolio import (
+    TokenFundingInitializationError,
+    funded_token_refs,
+    seed_portfolio_from_token_funding,
+)
 from almanak.framework.backtesting.pnl.intent_extraction import (
     lp_explicit_pair,
     lp_pool_tokens,
@@ -168,6 +173,7 @@ class BacktestState:
     last_market_state: MarketState | None = None
     tick_count: int = 0
     execution_delayed_at_end: int = 0
+    initial_portfolio_seeded: bool = False
 
 
 # =============================================================================
@@ -266,6 +272,16 @@ def initialize_backtest(
         # Initialize strategy adapter for strategy-specific backtesting
         backtester._init_adapter(strategy)
 
+        strategy_config = backtester._get_strategy_config_dict(strategy) or {}
+        token_funding = config.token_funding
+        if token_funding is None:
+            token_funding = strategy_config.get("token_funding")
+        if token_funding is None:
+            raise TokenFundingInitializationError(
+                "Historical PnL backtests require token_funding in the strategy config."
+            )
+        config.token_funding = token_funding
+
         # Create parameter source tracker for audit trail
         # This must be created after _init_adapter so we can track adapter-specific params
         parameter_sources = backtester._create_parameter_source_tracker(config)
@@ -281,9 +297,11 @@ def initialize_backtest(
         numeraire_symbol = resolve_numeraire_symbol(strategy, config.chain)
         numeraire_address = numeraire_token_address(strategy, config.chain) if numeraire_symbol is not None else None
 
-        # Initialize portfolio
+        # Initialize an empty wallet. Token funding is converted to explicit
+        # units at the first market tick, when first historical prices exist.
         portfolio = SimulatedPortfolio(
-            initial_capital_usd=config.initial_capital_usd,
+            initial_capital_usd=Decimal("0"),
+            cash_usd=Decimal("0"),
             chain=config.chain,
         )
         # The portfolio captures the numeraire price per equity point; value_usd
@@ -298,6 +316,15 @@ def initialize_backtest(
         # config.tokens (it feeds config_hash / the reproducibility audit trail).
         data_tokens: list[TokenRef] = list(config.tokens)
         data_token_labels = {token_ref_display(token).upper() for token in data_tokens}
+        data_token_identities = {normalize_token_ref(token, config.chain) for token in data_tokens}
+        for funded_token in funded_token_refs(token_funding, chain=config.chain):
+            funded_identity = normalize_token_ref(funded_token, config.chain)
+            if funded_identity not in data_token_identities:
+                funded_label = token_ref_display(funded_token).upper()
+                data_tokens.append(funded_token)
+                data_token_identities.add(funded_identity)
+                data_token_labels.add(funded_label)
+                bt_logger.debug(f"Added funded token {funded_label} to the data-fetch token set")
         if numeraire_symbol is not None and numeraire_symbol not in data_token_labels:
             data_tokens.append(numeraire_symbol)
             bt_logger.debug(f"Added numeraire token {numeraire_symbol} to the data-fetch token set")
@@ -362,7 +389,6 @@ def initialize_backtest(
         # This enables strategies using market.rsi(), market.macd(), market.bollinger_bands()
         # to work identically in live and backtest modes.
         indicator_engine = backtester._create_indicator_engine(strategy)
-        strategy_config = backtester._get_strategy_config_dict(strategy)
 
         # Iteration counter for logging
         total_ticks = config.estimated_ticks
@@ -455,6 +481,16 @@ async def execute_iteration_loop(
                     f"Backtest progress: {state.tick_count}/{state.total_ticks} ticks "
                     f"({100 * state.tick_count / state.total_ticks:.1f}%)"
                 )
+
+            if not state.initial_portfolio_seeded:
+                initial_value = seed_portfolio_from_token_funding(
+                    state.portfolio,
+                    raw_funding=config.token_funding,
+                    chain=config.chain,
+                    market_state=market_state,
+                )
+                state.initial_portfolio_seeded = True
+                bt_logger.info(f"Seeded initial portfolio from token_funding: ${initial_value:,.2f}")
 
             # Create market snapshot for strategy
             snapshot = create_market_snapshot_from_state(
@@ -755,8 +791,8 @@ def build_error_result(
         start_time=config.start_time,
         end_time=config.end_time,
         metrics=BacktestMetrics(),
-        initial_capital_usd=config.initial_capital_usd,
-        final_capital_usd=config.initial_capital_usd,
+        initial_portfolio_value_usd=state.portfolio.initial_capital_usd,
+        final_capital_usd=state.portfolio.initial_capital_usd,
         chain=config.chain,
         run_started_at=run_started_at,
         run_ended_at=run_ended_at,
@@ -891,7 +927,9 @@ def finalize_backtest_result(
 
         # Get final portfolio value
         final_value = (
-            state.portfolio.equity_curve[-1].value_usd if state.portfolio.equity_curve else config.initial_capital_usd
+            state.portfolio.equity_curve[-1].value_usd
+            if state.portfolio.equity_curve
+            else state.portfolio.initial_capital_usd
         )
 
     run_ended_at = datetime.now(UTC)
@@ -932,7 +970,7 @@ def finalize_backtest_result(
         metrics=metrics,
         trades=state.portfolio.trades,
         equity_curve=state.portfolio.equity_curve,
-        initial_capital_usd=config.initial_capital_usd,
+        initial_portfolio_value_usd=state.portfolio.initial_capital_usd,
         final_capital_usd=final_value,
         numeraire=numeraire_symbol,
         initial_capital_numeraire=initial_capital_numeraire,

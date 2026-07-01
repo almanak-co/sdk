@@ -317,7 +317,6 @@ class TestBuildPnlConfigKwargs:
             start_time=self._start,
             end_time=self._end,
             interval_seconds=3600,
-            initial_capital=10000.0,
             chain="arbitrum",
             tokens=["WETH"],
             allow_degraded_data=False,
@@ -332,7 +331,6 @@ class TestBuildPnlConfigKwargs:
             start_time=self._start,
             end_time=self._end,
             interval_seconds=3600,
-            initial_capital=10000.0,
             chain="arbitrum",
             tokens=["WETH"],
             preflight_validation=False,
@@ -346,7 +344,6 @@ class TestBuildPnlConfigKwargs:
             start_time=self._start,
             end_time=self._end,
             interval_seconds=3600,
-            initial_capital=10000.0,
             chain="arbitrum",
             tokens=["WETH"],
             fail_on_preflight_error=False,
@@ -360,7 +357,6 @@ class TestBuildPnlConfigKwargs:
             start_time=self._start,
             end_time=self._end,
             interval_seconds=3600,
-            initial_capital=10000.0,
             chain="arbitrum",
             tokens=["WETH"],
             include_gas_costs=False,
@@ -373,7 +369,6 @@ class TestBuildPnlConfigKwargs:
             start_time=self._start,
             end_time=self._end,
             interval_seconds=3600,
-            initial_capital=10000.0,
             chain="arbitrum",
             tokens=["WETH"],
             allow_degraded_data=None,
@@ -384,16 +379,16 @@ class TestBuildPnlConfigKwargs:
         assert cfg.preflight_validation is True
         assert cfg.fail_on_preflight_error is True
 
-    def test_capital_zero_raises_underlying_validation(self) -> None:
-        """Zero initial_capital raises in `PnLBacktestConfig.__post_init__`."""
-        with pytest.raises(ValueError, match="initial_capital_usd must be positive"):
+    def test_token_funding_not_list_raises_underlying_validation(self) -> None:
+        """Non-list token_funding raises in `PnLBacktestConfig.__post_init__`."""
+        with pytest.raises(ValueError, match="token_funding must be a list"):
             build_pnl_config(
                 start_time=self._start,
                 end_time=self._end,
                 interval_seconds=3600,
-                initial_capital=0.0,
                 chain="arbitrum",
                 tokens=["WETH"],
+                token_funding="not-a-list",  # type: ignore[arg-type]
             )
 
     def test_tokens_empty_list_raises_underlying_validation(self) -> None:
@@ -403,7 +398,6 @@ class TestBuildPnlConfigKwargs:
                 start_time=self._start,
                 end_time=self._end,
                 interval_seconds=3600,
-                initial_capital=1000.0,
                 chain="arbitrum",
                 tokens=[],
             )
@@ -416,7 +410,6 @@ class TestBuildPnlConfigKwargs:
             start_time=self._start,
             end_time=self._end,
             interval_seconds=3600,
-            initial_capital=1000.0,
             chain="arbitrum",
             tokens=["WETH"],
         )
@@ -428,7 +421,6 @@ class TestBuildPnlConfigKwargs:
             start_time=self._start,
             end_time=self._end,
             interval_seconds=3600,
-            initial_capital=1000.0,
             chain="arbitrum",
             tokens=["WETH"],
             gas_price_gwei=30.0,
@@ -441,7 +433,6 @@ class TestBuildPnlConfigKwargs:
             start_time=self._start,
             end_time=self._end,
             interval_seconds=7200,
-            initial_capital=1000.0,
             chain="base",
             tokens=["WETH"],
         )

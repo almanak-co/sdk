@@ -341,8 +341,8 @@ def render_summary_metrics(result: BacktestResult) -> None:
 
     with col1:
         st.metric(
-            label="Initial Capital",
-            value=format_currency(result.initial_capital_usd),
+            label="Initial Portfolio",
+            value=format_currency(result.initial_portfolio_value_usd),
         )
 
     with col2:
@@ -723,7 +723,7 @@ def render_enhanced_metrics_comparison(  # noqa: C901
                     # VIB-2915: already-percentage values (not decimal ratios)
                     "Total Return": f"{float(m.total_return_pct):.2f}%" if m.total_return_pct else "-",
                     "Annualized Return": f"{float(m.annualized_return_pct):.2f}%" if m.annualized_return_pct else "-",
-                    "Initial Capital": format_currency(result.initial_capital_usd),
+                    "Initial Portfolio": format_currency(result.initial_portfolio_value_usd),
                     "Final Capital": format_currency(result.final_capital_usd),
                 }
             )
@@ -1058,7 +1058,7 @@ def main() -> None:  # noqa: C901
     "chain": "arbitrum",
     "start_time": "2024-01-01T00:00:00",
     "end_time": "2024-01-31T23:59:59",
-    "initial_capital_usd": "10000",
+    "initial_portfolio_value_usd": "10000",
     "final_capital_usd": "10500",
     "metrics": {
         "net_pnl_usd": "500",

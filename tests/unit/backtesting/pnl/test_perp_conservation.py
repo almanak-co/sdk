@@ -22,6 +22,7 @@ Companion to ``test_portfolio_conservation.py`` (VIB-5082), which covers
 the token-flow lanes (SWAP / LP / lending); this file covers the
 collateral lane.
 """
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -32,6 +33,8 @@ import pytest
 from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
+
+
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktestConfig,
@@ -298,7 +301,7 @@ class TestEngineGenericPerpLane:
         return PnLBacktestConfig(
             start_time=TS,
             end_time=TS + timedelta(hours=1),
-            initial_capital_usd=INITIAL_CASH,
+            token_funding=_pnl_token_funding(INITIAL_CASH),
             include_gas_costs=False,
         )
 

@@ -6,6 +6,7 @@ calculations. Gas valuation now resolves the chain's native gas asset price;
 
 The gas_price_source should be tracked in DataQualityReport.
 """
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from datetime import datetime
 from decimal import Decimal
@@ -16,6 +17,8 @@ from almanak.framework.backtesting.models import DataQualityReport, IntentType
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
+
+
     DataQualityTracker,
     DefaultFeeModel,
     DefaultSlippageModel,
@@ -143,7 +146,7 @@ class TestGasEthPriceFallbackRemoval:
         return PnLBacktestConfig(
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 1, 2),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_pnl_token_funding(Decimal("10000"), chain="ethereum"),
             chain="ethereum",
             tokens=["ETH", "USDC"],
             include_gas_costs=True,
@@ -175,7 +178,7 @@ class TestGasEthPriceFallbackRemoval:
         config = PnLBacktestConfig(
             start_time=base_config.start_time,
             end_time=base_config.end_time,
-            initial_capital_usd=base_config.initial_capital_usd,
+            token_funding=_pnl_token_funding(Decimal("10000"), chain=base_config.chain),
             chain=base_config.chain,
             tokens=base_config.tokens,
             include_gas_costs=True,
@@ -199,7 +202,7 @@ class TestGasEthPriceFallbackRemoval:
         config = PnLBacktestConfig(
             start_time=base_config.start_time,
             end_time=base_config.end_time,
-            initial_capital_usd=base_config.initial_capital_usd,
+            token_funding=_pnl_token_funding(Decimal("10000"), chain=base_config.chain),
             chain=base_config.chain,
             tokens=base_config.tokens,
             include_gas_costs=True,
@@ -212,7 +215,7 @@ class TestGasEthPriceFallbackRemoval:
         config = PnLBacktestConfig(
             start_time=base_config.start_time,
             end_time=base_config.end_time,
-            initial_capital_usd=base_config.initial_capital_usd,
+            token_funding=_pnl_token_funding(Decimal("10000"), chain=base_config.chain),
             chain=base_config.chain,
             tokens=base_config.tokens,
             include_gas_costs=True,
@@ -227,7 +230,7 @@ class TestGasEthPriceFallbackRemoval:
         config = PnLBacktestConfig(
             start_time=base_config.start_time,
             end_time=base_config.end_time,
-            initial_capital_usd=base_config.initial_capital_usd,
+            token_funding=_pnl_token_funding(Decimal("10000"), chain="base"),
             chain="base",
             tokens=["CBBTC", "USDC"],
             include_gas_costs=True,
@@ -261,7 +264,7 @@ class TestGasEthPriceFallbackRemoval:
         config = PnLBacktestConfig(
             start_time=base_config.start_time,
             end_time=base_config.end_time,
-            initial_capital_usd=base_config.initial_capital_usd,
+            token_funding=_pnl_token_funding(Decimal("10000"), chain="polygon"),
             chain="polygon",
             tokens=["WETH", "USDC"],
             include_gas_costs=True,

@@ -15,7 +15,15 @@ Usage:
     config = PnLBacktestConfig(
         start_time=datetime(2024, 1, 1),
         end_time=datetime(2024, 6, 1),
-        initial_capital_usd=Decimal("10000"),
+        token_funding=[
+            {
+                "symbol": "USDC",
+                "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+                "chain": "arbitrum",
+                "amount": "10000",
+                "amount_type": "usd",
+            }
+        ],
     )
     backtester = PnLBacktester(data_provider, fee_models, slippage_models)
     result = await backtester.backtest(strategy, config)

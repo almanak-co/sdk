@@ -464,7 +464,7 @@ async def _run_single_path_backtest(
         result: BacktestResult = await backtester.backtest(strategy, backtest_config)
 
         # Extract key metrics
-        initial = result.initial_capital_usd
+        initial = result.initial_portfolio_value_usd or Decimal("0")
         final = result.final_capital_usd
         final_return = (final - initial) / initial if initial > 0 else Decimal("0")
 

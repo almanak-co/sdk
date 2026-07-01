@@ -30,6 +30,7 @@ from almanak.framework.backtesting.pnl.engine import (
     PnLBacktester,
 )
 from almanak.framework.backtesting.pnl.parallel import generate_grid_configs
+from tests.backtesting_funding import pnl_token_funding
 
 # =============================================================================
 # Test Constants
@@ -257,7 +258,7 @@ class TestPnLBacktestThroughput:
         config = PnLBacktestConfig(
             start_time=start_time,
             end_time=end_time,
-            initial_capital_usd=Decimal("100000"),
+            token_funding=pnl_token_funding(Decimal("100000")),
             tokens=["WETH", "USDC"],
             interval_seconds=3600,  # 1 hour
             random_seed=42,
@@ -319,7 +320,7 @@ class TestPnLBacktestThroughput:
         config = PnLBacktestConfig(
             start_time=start_time,
             end_time=end_time,
-            initial_capital_usd=Decimal("100000"),
+            token_funding=pnl_token_funding(Decimal("100000")),
             tokens=["WETH", "USDC"],
             interval_seconds=3600,  # 1 hour
             random_seed=42,
@@ -379,7 +380,7 @@ class TestPnLBacktestThroughput:
             config = PnLBacktestConfig(
                 start_time=start_time,
                 end_time=end_time,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=pnl_token_funding(Decimal("10000")),
                 tokens=["WETH", "USDC"],
                 interval_seconds=3600,
                 random_seed=42,
@@ -452,7 +453,7 @@ class TestParameterSweepThroughput:
         base_config = PnLBacktestConfig(
             start_time=start_time,
             end_time=start_time + timedelta(days=30),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             interval_seconds=3600,  # 1 hour
             random_seed=42,
@@ -460,11 +461,11 @@ class TestParameterSweepThroughput:
 
         # Generate 100 configs using grid sampling
         param_ranges = {
-            "initial_capital_usd": [
-                Decimal("10000"),
-                Decimal("50000"),
-                Decimal("100000"),
-                Decimal("500000"),
+            "token_funding": [
+                pnl_token_funding(Decimal("10000")),
+                pnl_token_funding(Decimal("50000")),
+                pnl_token_funding(Decimal("100000")),
+                pnl_token_funding(Decimal("500000")),
             ],
             "gas_price_gwei": [Decimal("10"), Decimal("20"), Decimal("50"), Decimal("100")],
         }
@@ -546,7 +547,7 @@ class TestParameterSweepThroughput:
         base_config = PnLBacktestConfig(
             start_time=start_time,
             end_time=start_time + timedelta(days=7),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             interval_seconds=3600,
             random_seed=42,
@@ -601,9 +602,7 @@ class TestParameterSweepThroughput:
         # Warm runs should be consistent (max no more than 5x min to tolerate CI runner jitter)
         if min_time > 0:
             variance_ratio = max_time / min_time
-            assert variance_ratio < 5.0, (
-                f"Execution time variance too high: min={min_time:.4f}s, max={max_time:.4f}s"
-            )
+            assert variance_ratio < 5.0, f"Execution time variance too high: min={min_time:.4f}s, max={max_time:.4f}s"
 
 
 @pytest.mark.benchmark
@@ -627,7 +626,7 @@ class TestThroughputByStrategyType:
         config = PnLBacktestConfig(
             start_time=start_time,
             end_time=start_time + timedelta(hours=num_ticks),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             interval_seconds=3600,
             random_seed=42,

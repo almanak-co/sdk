@@ -31,11 +31,22 @@ from almanak.framework.cli.backtest import (
     backtest,
     run_sweep_backtest,
 )
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 
 @pytest.fixture
 def cli_runner() -> CliRunner:
     return CliRunner()
+
+
+def _strategy_config() -> dict[str, Any]:
+    return {
+        "trade_size_usd": "50",
+        "rsi_oversold": 35,
+        "rsi_overbought": 65,
+        "cooldown_ticks": 2,
+        "token_funding": _pnl_token_funding(Decimal("10000"), chain="arbitrum"),
+    }
 
 
 @pytest.fixture
@@ -45,7 +56,7 @@ def mock_pnl_config_rsi_arbitrum() -> PnLBacktestConfig:
         start_time=datetime(2025, 1, 1, tzinfo=UTC),
         end_time=datetime(2025, 3, 1, tzinfo=UTC),
         interval_seconds=3600,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000"), chain="arbitrum"),
         chain="arbitrum",
         tokens=["WETH", "USDC"],
         gas_price_gwei=Decimal("0.1"),
@@ -197,18 +208,22 @@ class TestPnLBacktestRSIDryRun:
 
     def test_dry_run_rsi_strategy(self, cli_runner: CliRunner) -> None:
         """Dry run with RSI strategy shows correct config."""
-        result = cli_runner.invoke(
-            backtest,
-            [
-                "pnl",
-                "-s", "uniswap_v3_pnl_backtest_arbitrum",
-                "--start", "2025-01-01",
-                "--end", "2025-03-01",
-                "--chain", "arbitrum",
-                "--tokens", "WETH,USDC",
-                "--dry-run",
-            ],
-        )
+        with patch(
+            "almanak.framework.cli.backtest.pnl.load_strategy_config",
+            return_value=_strategy_config(),
+        ):
+            result = cli_runner.invoke(
+                backtest,
+                [
+                    "pnl",
+                    "-s", "uniswap_v3_pnl_backtest_arbitrum",
+                    "--start", "2025-01-01",
+                    "--end", "2025-03-01",
+                    "--chain", "arbitrum",
+                    "--tokens", "WETH,USDC",
+                    "--dry-run",
+                ],
+            )
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         assert "uniswap_v3_pnl_backtest_arbitrum" in result.output
         assert "arbitrum" in result.output

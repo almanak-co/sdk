@@ -1,6 +1,7 @@
 """Integration-style tests for the backtest lifecycle: submit -> poll -> complete/fail."""
 
 from __future__ import annotations
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 import asyncio
 from datetime import UTC, datetime
@@ -14,6 +15,8 @@ from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.services.backtest.models import BacktestRequest, StrategySpec, TimeframeSpec
 from almanak.services.backtest.services.backtest_runner import (
+
+
     SpecBacktestStrategy,
     _extract_tokens,
     build_backtest_config,
@@ -199,10 +202,11 @@ class TestBuildBacktestConfig:
             parameters={"amount_usd": "5000", "tokens": ["WETH", "USDC"]},
         )
         timeframe = TimeframeSpec(start="2025-01-01", end="2025-01-08")
-        config = build_backtest_config(spec, timeframe)
+        token_funding = _pnl_token_funding(Decimal("5000"))
+        config = build_backtest_config(spec, timeframe, token_funding=token_funding)
 
         assert config.chain == "arbitrum"
-        assert config.initial_capital_usd == Decimal("5000")
+        assert config.token_funding == token_funding
         assert config.interval_seconds == 3600  # full mode = 1h
         assert config.include_gas_costs is True
 
@@ -211,7 +215,7 @@ class TestBuildBacktestConfig:
 
         spec = StrategySpec(protocol="uniswap_v3", chain="arbitrum", action="swap")
         timeframe = TimeframeSpec(start="2025-01-01", end="2025-01-08")
-        config = build_backtest_config(spec, timeframe, quick=True)
+        config = build_backtest_config(spec, timeframe, quick=True, token_funding=_pnl_token_funding(Decimal("5000")))
 
         assert config.interval_seconds == 86400  # quick mode = 1d
         assert config.include_gas_costs is False
@@ -243,11 +247,12 @@ class TestBuildBacktestConfigNamedStrategy:
             timeframe=timeframe,
             chain="arbitrum",
             tokens=["WETH", "USDC"],
-            initial_capital_usd=Decimal("5000"),
+            token_funding=_pnl_token_funding(Decimal("5000")),
         )
         assert config.chain == "arbitrum"
-        assert config.tokens == ["WETH", "USDC"]
-        assert config.initial_capital_usd == Decimal("5000")
+        assert "WETH" in config.tokens
+        assert "USDC" in config.tokens
+        assert config.token_funding == _pnl_token_funding(Decimal("5000"))
         assert config.fee_model == "realistic"
 
 
@@ -298,7 +303,7 @@ class TestBacktestTokenRefs:
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 2, tzinfo=UTC),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_pnl_token_funding(Decimal("10000"), chain="base"),
             chain="base",
             tokens=["ETH", "WETH", "USDC"],
         )
@@ -348,6 +353,7 @@ class TestBacktestTokenRefs:
                 },
             ),
             timeframe=TimeframeSpec(start="2024-01-01", end="2024-01-02"),
+            token_funding=_pnl_token_funding(Decimal("5000"), chain="base"),
         )
         job_manager = JobManager()
         job_id = job_manager.create_job()

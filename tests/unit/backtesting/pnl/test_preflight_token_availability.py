@@ -12,6 +12,7 @@ Covers two units extracted during the TOKEN_IDS-removal change:
 """
 
 from __future__ import annotations
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -19,6 +20,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from almanak.framework.backtesting.pnl.engine import classify_token_availability
+
+
 
 _TS = datetime(2024, 1, 1, tzinfo=UTC)
 
@@ -323,8 +326,9 @@ class _FakePriceProvider:
         if max_timestamp is not None:
             self.max_timestamp = max_timestamp
 
-    async def get_price(self, token: str, ts: datetime) -> object:
-        if token.upper() in self._unavailable:
+    async def get_price(self, token: object, ts: datetime) -> object:
+        token_key = f"{token[0]}:{token[1]}" if isinstance(token, tuple) else str(token)
+        if token_key.upper() in self._unavailable:
             raise ValueError(f"Unknown token: {token}")
         return 1
 
@@ -343,7 +347,7 @@ def _config(tokens: list[str], **overrides):
     config_kwargs = {
         "start_time": datetime(2024, 1, 1, tzinfo=UTC),
         "end_time": datetime(2024, 2, 1, tzinfo=UTC),
-        "initial_capital_usd": Decimal("10000"),
+        "token_funding": _pnl_token_funding(Decimal("10000"), chain=overrides.get("chain", "arbitrum")),
         "tokens": tokens,
     }
     config_kwargs.update(overrides)

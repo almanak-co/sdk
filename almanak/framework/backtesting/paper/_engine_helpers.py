@@ -507,7 +507,7 @@ def assemble_backtest_result(
         metrics=metrics,
         trades=trade_records,
         equity_curve=equity_curve,
-        initial_capital_usd=initial_capital,
+        initial_portfolio_value_usd=initial_capital,
         final_capital_usd=final_value,
         numeraire=numeraire_symbol,
         initial_capital_numeraire=initial_capital_numeraire,

@@ -730,14 +730,14 @@
                     </div>
                 </div>
                 <div class="summary-card">
-                    <div class="label">Initial Capital</div>
+                    <div class="label">Initial Portfolio</div>
                     <div class="value neutral">
-                        ${{ "{:,.2f}".format(result.initial_capital_usd|float) }}
+                        ${{ "{:,.2f}".format(result.initial_portfolio_value_usd|float) }}
                     </div>
                 </div>
                 <div class="summary-card">
                     <div class="label">Final Capital</div>
-                    <div class="value {% if result.final_capital_usd|float >= result.initial_capital_usd|float %}positive{% else %}negative{% endif %}">
+                    <div class="value {% if result.final_capital_usd|float >= result.initial_portfolio_value_usd|float %}positive{% else %}negative{% endif %}">
                         ${{ "{:,.2f}".format(result.final_capital_usd|float) }}
                     </div>
                 </div>
@@ -1275,8 +1275,8 @@
                         <span class="value">{{ "%.1f"|format(result.simulation_duration_days) }} days</span>
                     </div>
                     <div class="config-item">
-                        <span class="key">Initial Capital</span>
-                        <span class="value">${{ "{:,.2f}".format(result.initial_capital_usd|float) }}</span>
+                        <span class="key">Initial Portfolio</span>
+                        <span class="value">${{ "{:,.2f}".format(result.initial_portfolio_value_usd|float) }}</span>
                     </div>
                 </div>
 

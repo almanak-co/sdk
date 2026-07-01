@@ -61,7 +61,7 @@ def sample_backtest_result() -> BacktestResult:
         end_time=datetime(2024, 1, 5),
         metrics=metrics,
         equity_curve=equity_curve,
-        initial_capital_usd=Decimal("10000"),
+        initial_portfolio_value_usd=Decimal("10000"),
         final_capital_usd=Decimal("10350"),
     )
 
@@ -79,7 +79,7 @@ def empty_backtest_result() -> BacktestResult:
         end_time=datetime(2024, 1, 5),
         metrics=metrics,
         equity_curve=[],
-        initial_capital_usd=Decimal("10000"),
+        initial_portfolio_value_usd=Decimal("10000"),
         final_capital_usd=Decimal("10000"),
     )
 
@@ -497,7 +497,7 @@ class TestDrawdownHighlighting:
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
             equity_curve=equity_curve,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10600"),
         )
 
@@ -873,7 +873,7 @@ class TestPlotEquityCurveWithTrades:
             metrics=metrics,
             equity_curve=equity_curve,
             trades=trades,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10350"),
         )
 
@@ -982,7 +982,7 @@ class TestPlotEquityCurveInteractive:
             metrics=metrics,
             equity_curve=equity_curve,
             trades=trades,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10350"),
         )
 
@@ -1070,7 +1070,7 @@ class TestPlotEquityCurveInteractive:
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
             equity_curve=[],
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10000"),
         )
 
@@ -1177,7 +1177,7 @@ class TestGenerateEquityChartHtml:
             metrics=BacktestMetrics(total_trades=2),
             equity_curve=equity_curve,
             trades=trades,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10600"),
         )
 
@@ -1296,7 +1296,7 @@ class TestSaveChart:
             end_time=datetime(2024, 1, 3),
             metrics=metrics,
             equity_curve=equity_curve,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10150"),
         )
 
@@ -1482,7 +1482,7 @@ class TestPlotPnlHistogram:
             metrics=metrics,
             equity_curve=equity_curve,
             trades=trades,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10250"),
         )
 
@@ -1589,7 +1589,7 @@ class TestPlotDurationScatter:
             metrics=metrics,
             equity_curve=equity_curve,
             trades=trades,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10250"),
         )
 
@@ -1694,7 +1694,7 @@ class TestPlotIntentPie:
             metrics=metrics,
             equity_curve=equity_curve,
             trades=trades,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10300"),
         )
 
@@ -1767,7 +1767,7 @@ class TestPlotIntentPie:
             metrics=BacktestMetrics(),
             equity_curve=equity_curve,
             trades=trades,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10100"),
         )
 
@@ -1810,7 +1810,7 @@ class TestDistributionChartsCustomConfig:
             metrics=BacktestMetrics(),
             equity_curve=equity_curve,
             trades=trades,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10100"),
         )
 
@@ -2096,7 +2096,7 @@ class TestPnlHistogramWithStats:
             end_time=datetime(2024, 1, 10),
             metrics=metrics,
             equity_curve=equity_curve,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10500"),
             trades=trades,
         )
@@ -2171,7 +2171,7 @@ class TestPnlHistogramInteractive:
             end_time=datetime(2024, 1, 10),
             metrics=metrics,
             equity_curve=equity_curve,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10500"),
             trades=trades,
         )
@@ -2250,7 +2250,7 @@ class TestPnlHistogramInteractive:
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
             equity_curve=[],
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10000"),
             trades=[],
         )
@@ -2318,7 +2318,7 @@ class TestGeneratePnlDistributionHtml:
             end_time=datetime(2024, 1, 2),
             metrics=BacktestMetrics(total_trades=len(pnl_values)),
             equity_curve=[],
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10100"),
             trades=[self._trade(pnl, minute) for minute, pnl in enumerate(pnl_values)],
         )
@@ -2434,7 +2434,7 @@ class TestAttributionCharts:
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
             equity_curve=equity_curve,
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10200"),
         )
 
@@ -2551,7 +2551,7 @@ class TestAttributionCharts:
                 pnl_by_asset_display_labels={base_usdc_key: "USDC", arb_usdc_key: "USDC"},
             ),
             equity_curve=[],
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10000"),
         )
 
@@ -2609,7 +2609,7 @@ class TestAttributionCharts:
             end_time=datetime(2024, 1, 5),
             metrics=metrics,
             equity_curve=[],
-            initial_capital_usd=Decimal("10000"),
+            initial_portfolio_value_usd=Decimal("10000"),
             final_capital_usd=Decimal("10000"),
         )
 

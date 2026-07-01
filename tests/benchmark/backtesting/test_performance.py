@@ -36,6 +36,7 @@ from almanak.framework.backtesting.pnl.engine import (
     PnLBacktester,
 )
 from almanak.framework.backtesting.pnl.parallel import generate_grid_configs
+from tests.backtesting_funding import pnl_token_funding
 
 # =============================================================================
 # Test Constants
@@ -219,7 +220,7 @@ class TestOneYearBacktestBenchmark:
         config = PnLBacktestConfig(
             start_time=start_time,
             end_time=end_time,
-            initial_capital_usd=Decimal("100000"),
+            token_funding=pnl_token_funding(Decimal("100000")),
             tokens=["WETH", "USDC"],
             interval_seconds=3600,  # 1 hour
             random_seed=42,
@@ -282,7 +283,7 @@ class TestOneYearBacktestBenchmark:
         config = PnLBacktestConfig(
             start_time=start_time,
             end_time=end_time,
-            initial_capital_usd=Decimal("100000"),
+            token_funding=pnl_token_funding(Decimal("100000")),
             tokens=["WETH", "USDC"],
             interval_seconds=3600,
             random_seed=42,
@@ -329,8 +330,8 @@ class TestOneYearBacktestBenchmark:
         comparing throughput across 1-month, 3-month, and 6-month durations.
         """
         durations_hours = [
-            24 * 30,   # 1 month (720 hours)
-            24 * 90,   # 3 months (2160 hours)
+            24 * 30,  # 1 month (720 hours)
+            24 * 90,  # 3 months (2160 hours)
             24 * 180,  # 6 months (4320 hours)
         ]
         throughputs = []
@@ -342,7 +343,7 @@ class TestOneYearBacktestBenchmark:
             config = PnLBacktestConfig(
                 start_time=start_time,
                 end_time=end_time,
-                initial_capital_usd=Decimal("10000"),
+                token_funding=pnl_token_funding(Decimal("10000")),
                 tokens=["WETH", "USDC"],
                 interval_seconds=3600,
                 random_seed=42,
@@ -416,7 +417,7 @@ class TestParameterSweepBenchmark:
         base_config = PnLBacktestConfig(
             start_time=start_time,
             end_time=start_time + timedelta(days=30),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             interval_seconds=3600,  # 1 hour
             random_seed=42,
@@ -424,11 +425,11 @@ class TestParameterSweepBenchmark:
 
         # Generate parameter grid
         param_ranges = {
-            "initial_capital_usd": [
-                Decimal("10000"),
-                Decimal("50000"),
-                Decimal("100000"),
-                Decimal("500000"),
+            "token_funding": [
+                pnl_token_funding(Decimal("10000")),
+                pnl_token_funding(Decimal("50000")),
+                pnl_token_funding(Decimal("100000")),
+                pnl_token_funding(Decimal("500000")),
             ],
             "gas_price_gwei": [Decimal("10"), Decimal("20"), Decimal("50"), Decimal("100")],
         }
@@ -517,7 +518,7 @@ class TestParameterSweepBenchmark:
         base_config = PnLBacktestConfig(
             start_time=start_time,
             end_time=start_time + timedelta(days=7),
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             interval_seconds=3600,
             random_seed=42,

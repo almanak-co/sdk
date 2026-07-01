@@ -37,6 +37,8 @@ from almanak.framework.backtesting.pnl.data_provider import (
     OHLCV,
     HistoricalDataConfig,
     MarketState,
+    TokenRef,
+    token_ref_provider_symbol,
 )
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
@@ -44,12 +46,17 @@ from almanak.framework.backtesting.pnl.engine import (
     PnLBacktester,
 )
 from almanak.framework.data.indicators.rsi import RSICalculator
+from tests.backtesting_funding import pnl_token_funding
 
 # =============================================================================
 # Output Configuration
 # =============================================================================
 
 OUTPUT_DIR = Path(__file__).parent / "output"
+
+
+def _provider_symbol(token: TokenRef, chain: str = "arbitrum") -> str:
+    return token_ref_provider_symbol(token, chain, unwrap_wrapped_native=False).upper()
 
 
 # =============================================================================
@@ -135,10 +142,10 @@ class RSITestDataProvider:
         """Get the ETH price at a given hourly index."""
         return self._prices.get(index, self._base_eth_price)
 
-    async def get_price(self, token: str, timestamp: datetime) -> Decimal:
+    async def get_price(self, token: TokenRef, timestamp: datetime) -> Decimal:
         """Get price for token at specific timestamp."""
-        token = token.upper()
-        if token in ("USDC", "USDT"):
+        symbol = _provider_symbol(token)
+        if symbol in ("USDC", "USDT"):
             return Decimal("1")
 
         delta = timestamp - self._start_time
@@ -170,9 +177,7 @@ class RSITestDataProvider:
             current += timedelta(seconds=interval_seconds)
         return result
 
-    async def iterate(
-        self, config: HistoricalDataConfig
-    ) -> AsyncIterator[tuple[datetime, MarketState]]:
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         """Iterate through historical data with mock prices."""
         current = config.start_time
         index = 0
@@ -180,11 +185,12 @@ class RSITestDataProvider:
 
         while current <= config.end_time:
             prices = {}
+            chain = config.chains[0] if config.chains else "arbitrum"
             for token in config.tokens:
-                token = token.upper()
-                if token in ("USDC", "USDT"):
+                symbol = _provider_symbol(token, chain)
+                if symbol in ("USDC", "USDT"):
                     prices[token] = Decimal("1")
-                elif token in ("WETH", "ETH"):
+                elif symbol in ("WETH", "ETH"):
                     prices[token] = self.get_price_at_index(index)
                 else:
                     prices[token] = Decimal("1")
@@ -192,7 +198,7 @@ class RSITestDataProvider:
             market_state = MarketState(
                 timestamp=current,
                 prices=prices,
-                chain=config.chains[0] if config.chains else "arbitrum",
+                chain=chain,
                 block_number=15000000 + index * 100,
                 gas_price_gwei=Decimal("30"),
             )
@@ -298,9 +304,7 @@ class RSIStrategy:
         if len(self._price_history) < self._rsi_period + 1:
             return None
 
-        return RSICalculator.calculate_rsi_from_prices(
-            self._price_history, self._rsi_period
-        )
+        return RSICalculator.calculate_rsi_from_prices(self._price_history, self._rsi_period)
 
     def decide(self, market: Any) -> MockSwapIntent | None:
         """Decide whether to trade based on RSI.
@@ -321,9 +325,7 @@ class RSIStrategy:
             except (ValueError, AttributeError):
                 return None
 
-        self._current_timestamp = getattr(market, "timestamp", None) or getattr(
-            market, "_timestamp", None
-        )
+        self._current_timestamp = getattr(market, "timestamp", None) or getattr(market, "_timestamp", None)
         if self._current_timestamp is None:
             return None
 
@@ -423,17 +425,13 @@ def generate_rsi_backtest_chart(
 
     for i in range(rsi_period, num_hours):
         try:
-            rsi = RSICalculator.calculate_rsi_from_prices(
-                price_decimals[: i + 1], rsi_period
-            )
+            rsi = RSICalculator.calculate_rsi_from_prices(price_decimals[: i + 1], rsi_period)
             rsi_values.append(rsi)
         except Exception:
             rsi_values.append(None)
 
     # Create figure with two subplots
-    fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(14, 10), height_ratios=[2, 1], sharex=True
-    )
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), height_ratios=[2, 1], sharex=True)
     fig.suptitle(
         "RSI Strategy Backtest - ETH/USDC (30 Days)",
         fontsize=14,
@@ -485,15 +483,11 @@ def generate_rsi_backtest_chart(
     rsi_plot_values = [v for v in rsi_values[rsi_period:] if v is not None]
     rsi_plot_times = rsi_timestamps[: len(rsi_plot_values)]
 
-    ax2.plot(
-        rsi_plot_times, rsi_plot_values, linewidth=1.5, color="#9C27B0", label="RSI(14)"
-    )
+    ax2.plot(rsi_plot_times, rsi_plot_values, linewidth=1.5, color="#9C27B0", label="RSI(14)")
 
     # Add threshold lines
     ax2.axhline(y=70, color="red", linestyle="--", linewidth=1, label="Overbought (70)")
-    ax2.axhline(
-        y=30, color="green", linestyle="--", linewidth=1, label="Oversold (30)"
-    )
+    ax2.axhline(y=30, color="green", linestyle="--", linewidth=1, label="Oversold (30)")
     ax2.axhline(y=50, color="gray", linestyle=":", linewidth=0.5, alpha=0.5)
 
     # Fill zones
@@ -698,9 +692,7 @@ def generate_complete_rsi_chart(
         return False
 
     # Calculate data
-    equity_curve = calculate_equity_curve(
-        data_provider, strategy, start_time, initial_capital, trade_amount
-    )
+    equity_curve = calculate_equity_curve(data_provider, strategy, start_time, initial_capital, trade_amount)
     drawdowns = calculate_drawdown(equity_curve)
     trade_pnls = calculate_trade_pnls(strategy, data_provider, start_time, trade_amount)
 
@@ -714,17 +706,13 @@ def generate_complete_rsi_chart(
 
     for i in range(rsi_period, num_hours):
         try:
-            rsi = RSICalculator.calculate_rsi_from_prices(
-                price_decimals[: i + 1], rsi_period
-            )
+            rsi = RSICalculator.calculate_rsi_from_prices(price_decimals[: i + 1], rsi_period)
             rsi_values.append(rsi)
         except Exception:
             rsi_values.append(None)
 
     # Create figure with three subplots
-    fig, (ax1, ax2, ax3) = plt.subplots(
-        3, 1, figsize=(14, 12), height_ratios=[2, 1, 1]
-    )
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), height_ratios=[2, 1, 1])
     fig.suptitle(
         "RSI Strategy Complete Backtest Analysis - ETH/USDC (30 Days)",
         fontsize=14,
@@ -871,9 +859,7 @@ def generate_complete_rsi_chart(
     rsi_plot_values = [v for v in rsi_values[rsi_period:] if v is not None]
     rsi_plot_times = rsi_timestamps[: len(rsi_plot_values)]
 
-    ax3.plot(
-        rsi_plot_times, rsi_plot_values, linewidth=1.5, color="#9C27B0", label="RSI(14)"
-    )
+    ax3.plot(rsi_plot_times, rsi_plot_values, linewidth=1.5, color="#9C27B0", label="RSI(14)")
 
     # Add threshold lines
     ax3.axhline(y=70, color="red", linestyle="--", linewidth=1, label="Overbought (70)")
@@ -953,7 +939,7 @@ class TestRSIBacktestVisual:
             start_time=start_time,
             end_time=end_time,
             interval_seconds=3600,  # 1 hour intervals
-            initial_capital_usd=Decimal("10000"),
+            token_funding=pnl_token_funding(Decimal("10000")),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
         )
@@ -1051,7 +1037,7 @@ class TestRSIBacktestVisual:
             start_time=start_time,
             end_time=end_time,
             interval_seconds=3600,  # 1 hour intervals
-            initial_capital_usd=initial_capital,
+            token_funding=pnl_token_funding(initial_capital),
             tokens=["WETH", "USDC"],
             include_gas_costs=True,
         )

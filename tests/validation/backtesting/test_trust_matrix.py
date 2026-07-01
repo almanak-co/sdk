@@ -79,6 +79,7 @@ from tests.validation.backtesting.trust_matrix import (
     ScriptedStrategy,
     SupplyDuck,
     SwapDuck,
+    USDC_ARBITRUM,
     flat_series,
     run_backtest,
 )
@@ -627,7 +628,15 @@ def test_lp_fee_reporting_ties_out_to_per_trade() -> None:
         start_time=START,
         end_time=START + timedelta(hours=2),
         interval_seconds=TICK_SECONDS,
-        initial_capital_usd=INITIAL_CAPITAL,
+        token_funding=[
+            {
+                "symbol": "USDC",
+                "address": USDC_ARBITRUM,
+                "chain": "arbitrum",
+                "amount": str(INITIAL_CAPITAL),
+                "amount_type": "token",
+            }
+        ],
         tokens=["WETH", "USDC"],
     )
     metrics = calculate_metrics(portfolio, portfolio.trades, config)

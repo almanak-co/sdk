@@ -26,7 +26,7 @@ Usage:
         strategy=my_strategy,
         scenario=BLACK_THURSDAY,
         backtester=backtester,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=[...],
     )
 
     # Create a custom scenario

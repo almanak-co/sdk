@@ -258,6 +258,7 @@ def validate_loaded_config(config_data: dict[str, Any]) -> ValidationResult:  # 
 def _validate_config_errors(config_data: Mapping[str, Any]) -> list[str]:
     errors: list[str] = []
     _validate_required_fields(config_data, errors)
+    _validate_token_funding(config_data, errors)
     _validate_datetime_fields(config_data, errors)
     _validate_numeric_fields(config_data, errors)
     _validate_margin_ratios(config_data, errors)
@@ -266,9 +267,35 @@ def _validate_config_errors(config_data: Mapping[str, Any]) -> list[str]:
 
 
 def _validate_required_fields(config_data: Mapping[str, Any], errors: list[str]) -> None:
-    for field in ("start_time", "end_time", "initial_capital_usd"):
+    for field in ("start_time", "end_time", "token_funding"):
         if field not in config_data:
             errors.append(f"Missing required field: {field}")
+    if "initial_capital_usd" in config_data:
+        errors.append("initial_capital_usd is no longer supported; use token_funding")
+
+
+def _validate_token_funding(config_data: Mapping[str, Any], errors: list[str]) -> None:
+    if "token_funding" not in config_data:
+        return
+
+    token_funding = config_data["token_funding"]
+    if not isinstance(token_funding, list):
+        errors.append(f"token_funding must be a list, got {type(token_funding).__name__}")
+        return
+    if not token_funding:
+        errors.append("token_funding list cannot be empty")
+        return
+
+    for index, entry in enumerate(token_funding):
+        if not isinstance(entry, Mapping):
+            errors.append(f"token_funding[{index}] must be an object, got {type(entry).__name__}")
+            continue
+        if "amount" not in entry:
+            errors.append(f"token_funding[{index}].amount is required")
+            continue
+        amount = _parse_decimal_value(f"token_funding[{index}].amount", entry["amount"], errors)
+        if amount is not None and amount <= Decimal("0"):
+            errors.append(f"token_funding[{index}].amount must be positive: {amount}")
 
 
 def _validate_datetime_fields(config_data: Mapping[str, Any], errors: list[str]) -> None:
@@ -304,7 +331,6 @@ def _parse_datetime_field(field: str, config_data: Mapping[str, Any], errors: li
 
 _NUMERIC_FIELD_RULES: dict[str, tuple[Decimal | None, Decimal | None, bool, str]] = {
     "interval_seconds": (Decimal("1"), None, True, "must be positive"),
-    "initial_capital_usd": (Decimal("0"), None, False, "must be positive"),
     "gas_price_gwei": (Decimal("0"), None, True, "cannot be negative"),
     "inclusion_delay_blocks": (Decimal("0"), None, True, "cannot be negative"),
     "trading_days_per_year": (Decimal("1"), Decimal("366"), True, "must be between 1 and 366"),

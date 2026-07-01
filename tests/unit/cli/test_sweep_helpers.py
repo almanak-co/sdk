@@ -19,6 +19,7 @@ helpers. These tests pin the behavioural contracts that are load-bearing:
 
 from __future__ import annotations
 
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -116,7 +117,6 @@ def _make_ctx(
         chain=chain,
         token_list=["WETH", "USDC"],
         interval=3600,
-        initial_capital=10000.0,
         output_path=output_path,
         multi_period_mode=multi,
         backtest_periods=periods,
@@ -287,7 +287,6 @@ class TestSweepContextSetup:
                 params=("threshold:0.1,0.2",),
                 numeric_params=("threshold",),
                 interval=1800,
-                initial_capital=1234.5,
                 chain="base",
                 tokens="weth, usdc",
                 output="/tmp/sweep.json",
@@ -297,7 +296,6 @@ class TestSweepContextSetup:
         assert ctx.chain == "base"
         assert ctx.token_list == ["WETH", "USDC"]
         assert ctx.interval == 1800
-        assert ctx.initial_capital == 1234.5
         assert ctx.output_path == Path("/tmp/sweep.json")
         assert ctx.multi_period_mode is False
         assert ctx.backtest_periods[0].start == start
@@ -322,7 +320,6 @@ class TestSweepContextSetup:
                 params=("account:0001,0001",),
                 numeric_params=(),
                 interval=3600,
-                initial_capital=10000.0,
                 chain="arbitrum",
                 tokens="WETH",
                 output=None,
@@ -531,13 +528,12 @@ class TestBuildPnlConfig:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 2, 1, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital=10000.0,
             chain="arbitrum",
             tokens=["WETH", "USDC"],
         )
         assert cfg.chain == "arbitrum"
         assert cfg.tokens == ["WETH", "USDC"]
-        assert cfg.initial_capital_usd == Decimal("10000.0")
+        assert cfg.token_funding is None
         # VIB-5088: unset gas resolves to the chain-aware registry default
         # (arbitrum: 0.1 gwei) -- the flat 30 is gone.
         assert cfg.gas_price_gwei == Decimal("0.1")
@@ -552,7 +548,6 @@ class TestBuildPnlConfig:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 2, 1, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital=5000.0,
             chain="base",
             tokens=["WETH"],
             allow_degraded_data=True,
@@ -569,13 +564,11 @@ class TestBuildPnlConfig:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 2, 1, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital=12345.67,
             chain="arbitrum",
             tokens=["WETH"],
             gas_price_gwei=42.5,
         )
         # Decimal via str() preserves literal float formatting; existing behaviour.
-        assert cfg.initial_capital_usd == Decimal("12345.67")
         assert cfg.gas_price_gwei == Decimal("42.5")
 
 
@@ -659,7 +652,6 @@ def _make_optimization_ctx(
         chain="arbitrum",
         token_list=["WETH", "USDC"],
         interval=3600,
-        initial_capital=10000.0,
         output_label=output_label,
         output_path=Path(output_label) if output_label else None,
         periods_spec=periods_spec,
@@ -827,7 +819,7 @@ class TestOptimizationConfiguration:
         assert "Chain: arbitrum" in out
         assert "Period: 2024-01-01 -> 2024-02-01" in out
         assert "Interval: 3600s (1.0 hours)" in out
-        assert "Initial Capital: $10,000.00" in out
+        assert "Initial Capital:" not in out
         assert "Tokens: WETH, USDC" in out
         assert "Objective: sharpe_ratio" in out
         assert "Trials: 25" in out
@@ -872,7 +864,7 @@ class TestPrintSweepConfiguration:
         assert "Strategy: demo_strat" in out
         assert "Chain: arbitrum" in out
         assert "Interval: 3600s (1.0 hours)" in out
-        assert "Initial Capital: $10,000.00" in out
+        assert "Initial Capital:" not in out
         assert "Tokens: WETH, USDC" in out
         assert "Total combinations: 2" in out
         assert "Execution mode: Async (concurrent)" in out
@@ -1210,7 +1202,7 @@ class TestRunParallelSweep:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 2, 1, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_pnl_token_funding(Decimal("10000"), chain="arbitrum"),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             gas_price_gwei=Decimal("30"),
@@ -1282,17 +1274,17 @@ class TestRunParallelSweep:
         # failed-result contract matches the successful-result contract
         # (engine tag, deployment_id sentinel, time range, metrics instance)
         # and downstream consumers of the error SweepResult never hit
-        # MissingFieldError on a failure record. Chain + capital metadata
-        # must propagate from pnl_config rather than falling back to the
-        # BacktestResult dataclass defaults (arbitrum / 10k USD).
+        # MissingFieldError on a failure record. Chain metadata must propagate
+        # from pnl_config, while removed synthetic capital metadata stays
+        # zeroed on failure records.
         assert sr.result.engine == BacktestEngine.PNL
         assert sr.result.deployment_id == "error"
         assert sr.result.start_time == pnl_config.start_time
         assert sr.result.end_time == pnl_config.end_time
         assert isinstance(sr.result.metrics, BacktestMetrics)
         assert sr.result.chain == pnl_config.chain
-        assert sr.result.initial_capital_usd == pnl_config.initial_capital_usd
-        assert sr.result.final_capital_usd == pnl_config.initial_capital_usd
+        assert sr.result.initial_portfolio_value_usd == Decimal("0")
+        assert sr.result.final_capital_usd == Decimal("0")
         # Zeroed performance fields on the SweepResult wrapper.
         assert sr.sharpe_ratio == Decimal("0")
         assert sr.total_return_pct == Decimal("0")
@@ -1557,7 +1549,7 @@ class TestRunSweepBacktestCoro:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 2, 1, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_pnl_token_funding(Decimal("10000"), chain="arbitrum"),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             gas_price_gwei=Decimal("30"),
@@ -1914,7 +1906,7 @@ class TestSweepTaskAndWorker:
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 2, 1, tzinfo=UTC),
             interval_seconds=3600,
-            initial_capital_usd=Decimal("10000"),
+            token_funding=_pnl_token_funding(Decimal("10000"), chain="arbitrum"),
             chain="arbitrum",
             tokens=["WETH", "USDC"],
             gas_price_gwei=Decimal("30"),

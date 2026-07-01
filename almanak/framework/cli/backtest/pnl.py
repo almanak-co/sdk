@@ -187,7 +187,6 @@ def _validate_and_build_context(
     start: datetime | None,
     end: datetime | None,
     interval: int,
-    initial_capital: float,
     chain: str,
     tokens: str,
     gas_price: float | None,
@@ -229,7 +228,6 @@ def _validate_and_build_context(
             start_time=start,  # type: ignore[arg-type]
             end_time=end,  # type: ignore[arg-type]
             interval_seconds=interval,
-            initial_capital_usd=Decimal(str(initial_capital)),
             chain=chain,
             tokens=token_list,
             # None = chain-aware default resolved by PnLBacktestConfig from
@@ -288,7 +286,8 @@ def _print_pnl_configuration(
         f"Period: {pnl_config.start_time.date()} -> {pnl_config.end_time.date()} ({pnl_config.duration_days:.1f} days)"
     )
     click.echo(f"Interval: {pnl_config.interval_seconds}s ({pnl_config.interval_seconds / 3600:.1f} hours)")
-    click.echo(f"Initial Capital: ${pnl_config.initial_capital_usd:,.2f}")
+    if pnl_config.token_funding:
+        click.echo(f"Token Funding Entries: {len(pnl_config.token_funding)}")
     click.echo(f"Tokens: {', '.join(ctx.token_list)}")
     gas_suffix = " (chain default)" if pnl_config.gas_price_gwei_is_default else ""
     click.echo(f"Gas Price: {pnl_config.gas_price_gwei} Gwei{gas_suffix}")
@@ -388,6 +387,18 @@ def _load_strategy_runtime_config(ctx: PnLBacktestContext, config_file: str | No
     return load_strategy_config(ctx.strategy, ctx.pnl_config.chain)
 
 
+def _apply_strategy_token_funding(ctx: PnLBacktestContext, strategy_config: dict[str, Any]) -> None:
+    if ctx.loaded_from_result:
+        if ctx.pnl_config.token_funding is None:
+            raise click.UsageError("Loaded result config is missing token_funding; cannot reproduce PnL backtest.")
+        return
+
+    token_funding = strategy_config.get("token_funding")
+    if token_funding is None:
+        raise click.UsageError("PnL backtests require token_funding in the active strategy config.")
+    ctx.pnl_config.token_funding = token_funding
+
+
 def _create_pnl_strategy_instance(ctx: PnLBacktestContext, strategy_config: dict[str, Any]) -> Any:
     strategy_class = get_strategy(ctx.strategy)
     strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, ctx.pnl_config.chain)
@@ -426,7 +437,7 @@ def _new_pnl_data_provider(token_addresses: dict[str, tuple[str, str]]) -> CoinG
 def _prepare_pnl_runtime(
     *,
     ctx: PnLBacktestContext,
-    config_file: str | None,
+    strategy_config: dict[str, Any],
     warm_cache: bool,
     strict_warm: bool,
     start: datetime | None,
@@ -434,7 +445,6 @@ def _prepare_pnl_runtime(
     interval: int,
     volume_data_config: BacktestDataConfig | None,
 ) -> _PnlRuntime:
-    strategy_config = _load_strategy_runtime_config(ctx, config_file)
     strategy_instance = _create_pnl_strategy_instance(ctx, strategy_config)
     token_addresses = _build_pnl_token_addresses(ctx, strategy_config)
 
@@ -1082,12 +1092,6 @@ def _generate_html_report(
     help="Interval between ticks in seconds (default: 3600 = 1 hour)",
 )
 @click.option(
-    "--initial-capital",
-    type=float,
-    default=10000.0,
-    help="Initial portfolio balance in USD (default: 10000)",
-)
-@click.option(
     "--output",
     "-o",
     type=click.Path(exists=False),
@@ -1242,7 +1246,6 @@ def pnl_backtest(
     start: datetime | None,
     end: datetime | None,
     interval: int,
-    initial_capital: float,
     output: str | None,
     chain: str,
     tokens: str,
@@ -1302,7 +1305,7 @@ def pnl_backtest(
 
         # Custom settings with JSON output
         almanak backtest pnl -s mean_reversion --start 2024-01-01 --end 2024-03-01 \\
-            --interval 3600 --initial-capital 50000 --output results.json
+            --interval 3600 --output results.json
 
         # Backtest with BTC benchmark comparison
         almanak backtest pnl -s my_strategy --start 2024-01-01 --end 2024-06-01 \\
@@ -1336,7 +1339,6 @@ def pnl_backtest(
         start=start,
         end=end,
         interval=interval,
-        initial_capital=initial_capital,
         chain=chain,
         tokens=tokens,
         gas_price=gas_price,
@@ -1348,10 +1350,15 @@ def pnl_backtest(
     # Configure logging based on verbose flag
     configure_backtest_logging(verbose=verbose)
 
-    # Phase 5: display configuration banner
+    # Phase 5: load runtime strategy config and seed token funding before the
+    # banner/dry-run path so missing funding fails before simulation starts.
+    strategy_config = _load_strategy_runtime_config(ctx, config_file)
+    _apply_strategy_token_funding(ctx, strategy_config)
+
+    # Phase 5b: display configuration banner
     _print_pnl_configuration(ctx, from_result, warm_cache)
 
-    # Phase 5b: LP volume-source flags -> BacktestDataConfig (None when no flag
+    # Phase 5c: LP volume-source flags -> BacktestDataConfig (None when no flag
     # was passed, preserving the historical no-data_config behaviour). Runs
     # before the dry-run early return so flag echo + the LOW-confidence
     # fallback warning appear on every invocation path.
@@ -1371,7 +1378,7 @@ def pnl_backtest(
 
     runtime = _prepare_pnl_runtime(
         ctx=ctx,
-        config_file=config_file,
+        strategy_config=strategy_config,
         warm_cache=warm_cache,
         strict_warm=strict_warm,
         start=start,

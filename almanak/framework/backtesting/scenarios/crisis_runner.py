@@ -21,7 +21,7 @@ Example:
         strategy=my_strategy,
         scenario=BLACK_THURSDAY,
         backtester=backtester,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=[...],
     )
 
     # Or with custom scenario
@@ -36,6 +36,7 @@ Example:
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -52,6 +53,18 @@ logger = logging.getLogger(__name__)
 
 # CoinGecko free tier only provides 365 days of historical data
 _COINGECKO_FREE_TIER_MAX_DAYS = 365
+_LEGACY_FUNDING_FIELDS = frozenset({"initial_capital", "initial_capital_usd"})
+
+
+def _reject_legacy_funding_fields(data: Mapping[str, Any] | None) -> None:
+    """Reject removed startup-capital keys before they reach PnL config."""
+    if not data:
+        return
+    legacy_fields = _LEGACY_FUNDING_FIELDS.intersection(data)
+    if not legacy_fields:
+        return
+    joined = ", ".join(sorted(legacy_fields))
+    raise ValueError(f"{joined} is no longer supported; use token_funding")
 
 
 @dataclass
@@ -63,7 +76,7 @@ class CrisisBacktestConfig:
 
     Attributes:
         scenario: The crisis scenario defining the date range
-        initial_capital_usd: Starting capital for the backtest
+        token_funding: Strategy funding basket used to seed the starting wallet
         interval_seconds: Time between simulation ticks (default: 3600 = 1 hour)
         chain: Blockchain to simulate (default: 'arbitrum')
         tokens: List of tokens to track (default: ['WETH', 'USDC'])
@@ -77,13 +90,13 @@ class CrisisBacktestConfig:
     Example:
         config = CrisisBacktestConfig(
             scenario=BLACK_THURSDAY,
-            initial_capital_usd=Decimal("100000"),
+            token_funding=[...],
             tokens=["WETH", "USDC", "WBTC"],
         )
     """
 
     scenario: CrisisScenario
-    initial_capital_usd: Decimal = Decimal("10000")
+    token_funding: list[dict[str, Any]] | None = None
     interval_seconds: int = 3600
     chain: str = DEFAULT_CHAIN
     tokens: list[str] = field(default_factory=lambda: ["WETH", "USDC"])
@@ -104,11 +117,12 @@ class CrisisBacktestConfig:
         Returns:
             PnLBacktestConfig with warmup-extended start and scenario end
         """
+        _reject_legacy_funding_fields(self.extra_config)
         return PnLBacktestConfig(
             start_time=self.scenario.warmup_start_date,
             end_time=self.scenario.end_date,
             interval_seconds=self.interval_seconds,
-            initial_capital_usd=self.initial_capital_usd,
+            token_funding=self.token_funding,
             fee_model=self.fee_model,
             slippage_model=self.slippage_model,
             include_gas_costs=self.include_gas_costs,
@@ -127,7 +141,7 @@ class CrisisBacktestConfig:
         """
         return {
             "scenario": self.scenario.to_dict(),
-            "initial_capital_usd": str(self.initial_capital_usd),
+            "token_funding": self.token_funding,
             "interval_seconds": self.interval_seconds,
             "chain": self.chain,
             "tokens": self.tokens,
@@ -149,9 +163,12 @@ class CrisisBacktestConfig:
         Returns:
             CrisisBacktestConfig instance
         """
+        _reject_legacy_funding_fields(data)
+        extra_config = data.get("extra_config", {})
+        _reject_legacy_funding_fields(extra_config)
         return cls(
             scenario=CrisisScenario.from_dict(data["scenario"]),
-            initial_capital_usd=Decimal(data.get("initial_capital_usd", "10000")),
+            token_funding=data.get("token_funding"),
             interval_seconds=data.get("interval_seconds", 3600),
             chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
             tokens=data.get("tokens", ["WETH", "USDC"]),
@@ -160,7 +177,7 @@ class CrisisBacktestConfig:
             include_gas_costs=data.get("include_gas_costs", True),
             gas_price_gwei=Decimal(data.get("gas_price_gwei", "50")),
             mev_simulation_enabled=data.get("mev_simulation_enabled", True),
-            extra_config=data.get("extra_config", {}),
+            extra_config=extra_config,
         )
 
 
@@ -315,7 +332,7 @@ async def run_crisis_backtest(
     strategy: BacktestableStrategy,
     scenario: CrisisScenario,
     backtester: PnLBacktester,
-    initial_capital_usd: Decimal = Decimal("10000"),
+    token_funding: list[dict[str, Any]] | None = None,
     interval_seconds: int = 3600,
     chain: str = DEFAULT_CHAIN,
     tokens: list[str] | None = None,
@@ -337,7 +354,7 @@ async def run_crisis_backtest(
         strategy: Strategy to backtest (must implement BacktestableStrategy)
         scenario: CrisisScenario defining the crisis period (or custom scenario)
         backtester: PnLBacktester instance to use for the backtest
-        initial_capital_usd: Starting capital in USD (default: $10,000)
+        token_funding: Strategy funding basket used to seed the starting wallet
         interval_seconds: Time between simulation ticks (default: 3600 = 1 hour)
         chain: Blockchain to simulate (default: 'arbitrum')
         tokens: List of tokens to track (default: ['WETH', 'USDC'])
@@ -360,7 +377,7 @@ async def run_crisis_backtest(
             strategy=my_strategy,
             scenario=BLACK_THURSDAY,
             backtester=backtester,
-            initial_capital_usd=Decimal("100000"),
+            token_funding=[...],
         )
 
         # Using a custom scenario
@@ -376,6 +393,8 @@ async def run_crisis_backtest(
             backtester=backtester,
         )
     """
+    _reject_legacy_funding_fields(extra_config)
+
     if tokens is None:
         tokens = ["WETH", "USDC"]
 
@@ -388,7 +407,7 @@ async def run_crisis_backtest(
     else:
         crisis_config = CrisisBacktestConfig(
             scenario=scenario,
-            initial_capital_usd=initial_capital_usd,
+            token_funding=token_funding,
             interval_seconds=interval_seconds,
             chain=chain,
             tokens=tokens,
@@ -454,7 +473,7 @@ def run_crisis_backtest_sync(
     strategy: BacktestableStrategy,
     scenario: CrisisScenario,
     backtester: PnLBacktester,
-    initial_capital_usd: Decimal = Decimal("10000"),
+    token_funding: list[dict[str, Any]] | None = None,
     interval_seconds: int = 3600,
     chain: str = DEFAULT_CHAIN,
     tokens: list[str] | None = None,
@@ -475,7 +494,7 @@ def run_crisis_backtest_sync(
         strategy: Strategy to backtest (must implement BacktestableStrategy)
         scenario: CrisisScenario defining the crisis period
         backtester: PnLBacktester instance to use
-        initial_capital_usd: Starting capital in USD
+        token_funding: Strategy funding basket used to seed the starting wallet
         interval_seconds: Time between simulation ticks
         chain: Blockchain to simulate
         tokens: List of tokens to track
@@ -502,7 +521,7 @@ def run_crisis_backtest_sync(
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=initial_capital_usd,
+            token_funding=token_funding,
             interval_seconds=interval_seconds,
             chain=chain,
             tokens=tokens,
@@ -788,7 +807,7 @@ async def run_multiple_crisis_backtests(
     strategy: BacktestableStrategy,
     scenarios: list[CrisisScenario],
     backtester: PnLBacktester,
-    initial_capital_usd: Decimal = Decimal("10000"),
+    token_funding: list[dict[str, Any]] | None = None,
     **config_kwargs: Any,
 ) -> list[CrisisBacktestResult]:
     """Run backtests across multiple crisis scenarios.
@@ -801,7 +820,7 @@ async def run_multiple_crisis_backtests(
         strategy: Strategy to backtest
         scenarios: List of CrisisScenario to test
         backtester: PnLBacktester instance to use
-        initial_capital_usd: Starting capital for each backtest
+        token_funding: Strategy funding basket used to seed each starting wallet
         **config_kwargs: Additional config options passed to each backtest
 
     Returns:
@@ -816,7 +835,7 @@ async def run_multiple_crisis_backtests(
             strategy=my_strategy,
             scenarios=[BLACK_THURSDAY, TERRA_COLLAPSE, FTX_COLLAPSE],
             backtester=backtester,
-            initial_capital_usd=Decimal("100000"),
+            token_funding=[...],
         )
 
         for result in results:
@@ -830,7 +849,7 @@ async def run_multiple_crisis_backtests(
             strategy=strategy,
             scenario=scenario,
             backtester=backtester,
-            initial_capital_usd=initial_capital_usd,
+            token_funding=token_funding,
             **config_kwargs,
         )
         results.append(result)
@@ -842,7 +861,7 @@ def run_multiple_crisis_backtests_sync(
     strategy: BacktestableStrategy,
     scenarios: list[CrisisScenario],
     backtester: PnLBacktester,
-    initial_capital_usd: Decimal = Decimal("10000"),
+    token_funding: list[dict[str, Any]] | None = None,
     **config_kwargs: Any,
 ) -> list[CrisisBacktestResult]:
     """Synchronous wrapper for run_multiple_crisis_backtests.
@@ -851,7 +870,7 @@ def run_multiple_crisis_backtests_sync(
         strategy: Strategy to backtest
         scenarios: List of CrisisScenario to test
         backtester: PnLBacktester instance to use
-        initial_capital_usd: Starting capital for each backtest
+        token_funding: Strategy funding basket used to seed each starting wallet
         **config_kwargs: Additional config options
 
     Returns:
@@ -862,7 +881,7 @@ def run_multiple_crisis_backtests_sync(
             strategy=strategy,
             scenarios=scenarios,
             backtester=backtester,
-            initial_capital_usd=initial_capital_usd,
+            token_funding=token_funding,
             **config_kwargs,
         )
     )

@@ -38,7 +38,7 @@ Example:
 
     # Define parameter ranges with explicit types
     param_ranges = {
-        "initial_capital_usd": continuous(Decimal("10000"), Decimal("100000")),
+        "trade_size_usd": continuous(Decimal("100"), Decimal("5000")),
         "interval_seconds": discrete(3600, 86400, step=3600),
         "risk_level": categorical(["low", "medium", "high"]),
     }
@@ -1097,7 +1097,7 @@ class OptunaTuner:
             backtester_factory=create_backtester,
             base_config=base_config,
             param_ranges={
-                "initial_capital_usd": (Decimal("10000"), Decimal("100000")),
+                "trade_size_usd": (Decimal("100"), Decimal("5000")),
                 "interval_seconds": [3600, 7200, 14400],
             },
             n_trials=50,
@@ -1573,12 +1573,12 @@ class OptunaTuner:
             result = await tuner.optimize(
                 strategy_factory=create_strategy,
                 data_provider_factory=create_provider,
-                backtester_factory=create_backtester,
-                base_config=base_config,
-                param_ranges={
-                    "initial_capital_usd": (Decimal("10000"), Decimal("100000")),
+            backtester_factory=create_backtester,
+            base_config=base_config,
+            param_ranges={
+                    "trade_size_usd": (Decimal("100"), Decimal("5000")),
                     "interval_seconds": [3600, 7200, 14400],
-                },
+            },
                 n_trials=100,
                 patience=10,  # Stop if no improvement for 10 trials
             )

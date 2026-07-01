@@ -70,12 +70,14 @@ class BacktestRequest(BaseModel):
     If both are given, ``strategy_name`` takes precedence.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     strategy_spec: StrategySpec | None = None
     strategy_name: str | None = Field(None, description="Name of a registered SDK strategy")
     timeframe: TimeframeSpec
     chain: str | None = Field(None, description="Override chain (required when using strategy_name)")
     tokens: list[str] | None = Field(None, description="Tokens to track (required when using strategy_name)")
-    initial_capital_usd: Decimal | None = Field(None, description="Override initial capital")
+    token_funding: list[dict[str, Any]] | None = Field(None, description="Starting wallet token funding")
     mode: Literal["full", "quick"] = "full"
 
     @model_validator(mode="after")
@@ -192,12 +194,14 @@ class BacktestJobResponse(BaseModel):
 class QuickBacktestRequest(BaseModel):
     """Request for a synchronous quick eligibility check."""
 
+    model_config = ConfigDict(extra="forbid")
+
     strategy_spec: StrategySpec | None = None
     strategy_name: str | None = None
     timeframe: TimeframeSpec | None = None  # defaults to last 7 days
     chain: str | None = None
     tokens: list[str] | None = None
-    initial_capital_usd: Decimal | None = None
+    token_funding: list[dict[str, Any]] | None = None
 
     @model_validator(mode="after")
     def _require_strategy(self) -> QuickBacktestRequest:

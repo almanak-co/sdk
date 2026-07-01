@@ -6,6 +6,7 @@ and that the --parallel flag correctly enables multiprocessing.
 
 from __future__ import annotations
 
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -47,7 +48,7 @@ def mock_pnl_config() -> PnLBacktestConfig:
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 7, tzinfo=UTC),
         interval_seconds=3600,
-        initial_capital_usd=Decimal("10000"),
+        token_funding=_pnl_token_funding(Decimal("10000"), chain="arbitrum"),
         chain="arbitrum",
         tokens=["WETH", "USDC"],
         gas_price_gwei=Decimal("30"),

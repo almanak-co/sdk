@@ -17,6 +17,7 @@ $10k/84-trade run). These tests pin the replacement behaviour:
 """
 
 from __future__ import annotations
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -29,6 +30,8 @@ from almanak.core.chains import ChainRegistry
 from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.models import ParameterSource
 from almanak.framework.backtesting.pnl._engine_helpers import (
+
+
     _append_fallback_compliance_violations,
 )
 from almanak.framework.backtesting.pnl.config import (
@@ -88,7 +91,7 @@ def _config(**overrides: Any) -> PnLBacktestConfig:
     base: dict[str, Any] = {
         "start_time": START,
         "end_time": END,
-        "initial_capital_usd": Decimal("10000"),
+        "token_funding": _pnl_token_funding(Decimal("10000"), chain=overrides.get("chain", "arbitrum")),
     }
     base.update(overrides)
     return PnLBacktestConfig(**base)
