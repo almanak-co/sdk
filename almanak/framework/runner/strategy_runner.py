@@ -891,6 +891,32 @@ class StrategyRunner:
         # Track pause log state to avoid repetitive per-iteration info spam.
         self._logged_paused_deployment_ids: set[str] = set()
 
+        # VIB-5572: failed-teardown entry latch. Teardown means "exit and stop":
+        # if a teardown has FAILED for this deployment, the strategy must NEVER
+        # open or increase a position again in this process. Process shutdown
+        # alone does not guarantee this — ``_request_teardown_failure_shutdown``
+        # is a deliberate no-op in local mode (the runner stays alive so a
+        # developer can inspect state), so without this latch the normal entry
+        # loop resumes on the next iteration and re-opens the very positions the
+        # teardown just closed (the metamorpho re-deposit in VIB-5572). Scope is
+        # narrow on purpose: a COMPLETED teardown already shuts the process down
+        # on every path, so it needs no latch. The authoritative signal is the
+        # persisted teardown-request status (``_entry_blocked_by_failed_teardown``);
+        # this in-memory latch is a per-iteration short-circuit and a fail-safe
+        # that keeps the block in force even if a later status read degrades or
+        # the ``mark_failed`` write itself failed.
+        self._teardown_entry_blocked: bool = False
+        self._teardown_entry_blocked_reason: str | None = None
+        self._logged_teardown_entry_blocked_ids: set[str] = set()
+        # The persisted teardown-request status is the source of truth for the
+        # gate. This flag makes the HEALTHY path cheap: once a non-blocked status
+        # is confirmed it short-circuits to zero teardown-channel I/O. A blocked
+        # runner keeps re-reading (so clearing/superseding the FAILED request
+        # releases it); the in-memory latch above is set on a same-process FAILED
+        # terminal (``_request_teardown_failure_shutdown``) to drop off the cheap
+        # path and force that re-read.
+        self._teardown_status_checked: bool = False
+
         # VIB-3418: FIFO basis store for lending interest attribution.
         # Lives for the runner's lifetime so BORROW lots are available when REPAY arrives.
         # Reconstructable from accounting_events if the runner restarts.
@@ -1463,6 +1489,35 @@ class StrategyRunner:
         if teardown_mode is not None:
             return await self._execute_teardown(strategy, teardown_mode, start_time)
 
+        # Step 0.6 (VIB-5572): failed-teardown entry latch. When no teardown is
+        # currently pending (``teardown_mode is None``) but a PRIOR teardown
+        # FAILED for this deployment, the strategy must not open new positions —
+        # teardown means "exit and stop". Without this the normal iteration below
+        # re-enters (``should_teardown()`` reads active-only, and a failed
+        # teardown does not shut the local runner down), re-opening the positions
+        # the teardown just closed. HOLD the iteration exactly like the
+        # operator-pause gate.
+        entry_blocked, entry_block_reason = self._entry_blocked_by_failed_teardown(strategy)
+        if entry_blocked:
+            if deployment_id not in self._logged_teardown_entry_blocked_ids:
+                logger.warning(
+                    "%s %s entry blocked: %s",
+                    "[TEARDOWN]" if not _emojis_enabled() else "🛑",
+                    deployment_id,
+                    entry_block_reason,
+                )
+                self._logged_teardown_entry_blocked_ids.add(deployment_id)
+            self._record_success()
+            return IterationResult(
+                status=IterationStatus.HOLD,
+                intent=HoldIntent(reason=entry_block_reason or "Teardown FAILED — no new positions"),
+                deployment_id=deployment_id,
+                duration_ms=self._calculate_duration_ms(start_time),
+            )
+
+        # Not blocked: clear the throttle marker so a later re-block (e.g. a new
+        # teardown that fails after the FAILED request was cleared) logs again.
+        self._logged_teardown_entry_blocked_ids.discard(deployment_id)
         return None
 
     async def _step_periodic_hooks(self, state: RunIterationState) -> None:
@@ -5617,6 +5672,17 @@ class StrategyRunner:
         In local development, the runner stays alive so the developer can inspect
         state or retry — matching the circuit breaker pattern (see _check_circuit_breaker).
         """
+        # VIB-5572: a failed teardown is terminal for NEW risk regardless of
+        # mode. Flip the entry latch so the next iteration drops off the cheap
+        # fast-path and re-reads the persisted teardown status: in local mode
+        # (where this method deliberately keeps the runner alive) that read sees
+        # FAILED and HOLDs instead of re-opening the positions the teardown was
+        # trying to close. If ``mark_failed`` itself failed to persist, the
+        # request stays in a non-terminal active state and ``should_teardown()``
+        # re-dispatches teardown next iteration — still never ``decide()``.
+        self._teardown_entry_blocked = True
+        self._teardown_entry_blocked_reason = f"teardown failed — {error_message}"
+
         if not self._is_managed_deployment():
             logger.warning("Teardown failed in local mode — runner stays alive for debugging: %s", error_message)
             return
@@ -5633,6 +5699,102 @@ class StrategyRunner:
         from almanak.framework.deployment import is_hosted
 
         return is_hosted()
+
+    def _entry_blocked_by_failed_teardown(self, strategy: StrategyProtocol) -> tuple[bool, str | None]:
+        """Did a teardown FAIL for this deployment? (VIB-5572)
+
+        Teardown means "exit and stop". This gate closes the one path where the
+        current runner leaves the loop alive AND able to re-enter: a **FAILED**
+        teardown. A FAILED request is no longer ``is_active`` so
+        ``should_teardown()`` returns False, and ``_request_teardown_failure_shutdown``
+        is a deliberate no-op in local mode (the runner stays alive for
+        debugging) — so without this gate the next iteration runs ``decide()``
+        and re-opens the positions the teardown just closed. Confirmed root of
+        VIB-5572: after a metamorpho teardown, the runner re-deposited ~100s
+        later.
+
+        **Scope is deliberately narrow — only FAILED.** A ``COMPLETED`` teardown
+        already calls ``request_shutdown()`` on every path in every mode, so the
+        loop exits and same-process re-entry is impossible; gating COMPLETED here
+        would only add a NEW restriction (a deliberately re-launched, cleanly
+        torn-down strategy would stop trading) that the bug does not require.
+        ``CANCELLED`` / active / absent requests never block — cancel is the
+        operator "resume" signal, and active teardowns are handled by the
+        existing dispatch in ``_step_teardown_and_cb_gate``.
+
+        **The persisted request is the single source of truth.** The gate reads
+        it so the block survives a restart (a re-launched runner whose prior
+        teardown FAILED stays out of the market) AND releases as soon as the
+        FAILED request is cleared or superseded — clearing/cancelling the request
+        resumes a *live* runner on the next iteration, matching the HOLD reason.
+        The in-memory ``_teardown_entry_blocked`` latch (set here and, for the
+        immediate same-process signal, in ``_request_teardown_failure_shutdown``)
+        is NOT authoritative — it invalidates the cheap fast-path so a blocked
+        runner re-reads every iteration, and it is a fail-safe that keeps the
+        block in force if a status read *degrades* while blocked. A successful
+        non-FAILED read always releases it.
+
+        Cost: the healthy path reads once, then ``_teardown_status_checked``
+        short-circuits it to zero teardown-channel I/O. Only a *blocked* runner
+        re-reads each iteration — and a blocked runner is idle (HOLDing), so the
+        extra read costs nothing real. In hosted mode a FAILED teardown calls
+        ``request_shutdown()`` (the process exits), so the blocked-re-read path
+        is local-only in practice.
+
+        Returns ``(blocked, reason)``.
+        """
+        # Fast path: a confirmed non-blocked state does no I/O. A same-process
+        # FAILED terminal flips ``_teardown_entry_blocked`` (via
+        # ``_request_teardown_failure_shutdown``), which drops us off this fast
+        # path so the persisted truth is re-read below.
+        if self._teardown_status_checked and not self._teardown_entry_blocked:
+            return False, None
+
+        from ..deployment import is_hosted
+        from ..teardown import get_teardown_state_manager_for_runtime
+        from ..teardown.models import TeardownStatus
+
+        deployment_id = strategy.deployment_id
+        try:
+            manager = get_teardown_state_manager_for_runtime(gateway_client=self._get_gateway_client())
+            request = manager.get_request(deployment_id)
+        except Exception as e:  # noqa: BLE001
+            # Read-fail direction (incl. LocalPathError). Note the loud
+            # LocalPathError surface is ``_check_teardown_requested`` /
+            # ``should_teardown``, which run FIRST in this iteration and re-raise
+            # a local path-helper misconfiguration before this gate is reached —
+            # so in real execution this branch is the transient/degraded case.
+            if is_hosted():
+                logger.error("teardown.entry_gate_read_failed (hosted) for %s: %s", deployment_id, e)
+                raise
+            # Local: if we are already blocked, KEEP the block (fail-safe — never
+            # release on a degraded read). On a first check degrade open,
+            # consistent with ``should_teardown``'s local degradation; a genuine
+            # local run always has a resolvable strategy DB, and a same-process
+            # FAILED is covered by the in-memory latch, so this cannot re-open the
+            # VIB-5572 hole. It self-heals: ``_teardown_status_checked`` is set
+            # only on a successful read, so the next iteration retries.
+            logger.warning("teardown.entry_gate_read_failed (local) for %s: %s", deployment_id, e)
+            if self._teardown_entry_blocked:
+                return True, self._teardown_entry_blocked_reason
+            return False, None
+
+        # Read succeeded — it is authoritative.
+        self._teardown_status_checked = True
+        if request is not None and request.status == TeardownStatus.FAILED:
+            reason = (
+                "prior teardown FAILED — strategy will not open new positions "
+                "until the FAILED request is cleared or superseded (VIB-5572)"
+            )
+            self._teardown_entry_blocked = True
+            self._teardown_entry_blocked_reason = reason
+            return True, reason
+        # Not FAILED (cleared / cancelled / completed / absent / active) → the
+        # block, if any, is released. Active teardowns are dispatched by
+        # ``_step_teardown_and_cb_gate`` before this gate is reached.
+        self._teardown_entry_blocked = False
+        self._teardown_entry_blocked_reason = None
+        return False, None
 
     def setup_signal_handlers(self) -> None:
         """Set up signal handlers for graceful shutdown.

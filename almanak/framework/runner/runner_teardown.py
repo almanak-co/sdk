@@ -1148,6 +1148,13 @@ async def execute_teardown(  # noqa: C901
                     err = recovery_warning or "On-chain LP discovery incomplete; manual check required."
                     logger.error("🛑 %s teardown degraded (recovery incomplete): %s", deployment_id, err)
                     _safe_mark(manager, "mark_failed", deployment_id, error=err)
+                    # VIB-5572 (defense-in-depth): this success-branch path persists
+                    # FAILED without going through _request_teardown_failure_shutdown.
+                    # request_shutdown() above already prevents same-process re-entry,
+                    # but latch the entry gate too so the invariant holds even if the
+                    # shutdown is somehow not honoured.
+                    runner._teardown_entry_blocked = True
+                    runner._teardown_entry_blocked_reason = f"teardown failed — {err}"
                 else:
                     # VIB-5085: the multi-chain lane has no position verifier; a
                     # fully-successful teardown closed every open position, so report
