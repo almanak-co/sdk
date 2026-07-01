@@ -1,0 +1,49 @@
+{
+  "_provenance": {
+    "row_id": "lp-curve-tricrypto-ethereum",
+    "fixture": "lp_curve_tricrypto",
+    "chain": "ethereum",
+    "primitive": "curve_lp",
+    "captured_from": "scripts/qa/run_accounting_matrix.py :: lp-curve-tricrypto-ethereum",
+    "captured_at": "2026-06-30T19:02:10.578305+00:00",
+    "captured_at_commit": "e282baa24",
+    "post_fix_for": [
+      "VIB-5435 Curve tricrypto Accountant-Test fixture (Curve epic VIB-5422 M2)",
+      "VIB-5428 non-$1 crypto-numeraire snapshot valuation (proven: $291.55 mark)",
+      "VIB-5430 bespoke curve_lp scorecard profile (tick cells N/A not FAIL)",
+      "VIB-5441 CryptoSwap min_lp fail-closed protection (single-sided open)"
+    ],
+    "note": "Real-fork LP_OPEN -> teardown LP_CLOSE round-trip on managed Anvil ethereum (block 25432369). Pool: tricrypto2 0xD51a44d3FaE010294C616388b506AcdA1bfAAE46 (USDT/WBTC/WETH) \u2014 non-$1 numeraire. Single-sided 0.005 WBTC deposit -> CURVE4 XFAIL (IL undefined). min_lp derived fail-closed from on-chain calc_token_amount (VIB-5441; 200327799797463342, never 0). The crypto-numeraire SNAPSHOT valuation WORKS (portfolio_valuer marked the position at $291.55 = ownership 3.209e-5 x reserves $9.085M, WETH@$1574; VIB-5428) \u2014 CURVE1/2/3/5/6 PASS. HONEST FLOOR, not clean-green: G3 FAIL (no realized-yield/fee event booked on the crypto close) and G6 FAIL (component buckets carry unmeasured NULLs: Sigma_lp_usd / Sigma_lp_fees / Sigma_inventory_reval_usd; gap $191.38) \u2014 the per-ACCOUNTING-EVENT USD that the stablecoin lp_curve (3pool) close DOES populate (3pool: G3 PASS, G6 component $-80.68) is NOT populated on the crypto-numeraire close, even though the snapshot valuer marks the position. SAME teardown close-lane for both fixtures, so this is a stablecoin-vs-crypto per-event-USD accounting gap, NOT a lane/snapshot-valuation gap (Empty != Zero, not a false zero). Ticketed follow-up. L5_22 XFAIL (registry mode off, informational). NOT masked."
+  },
+  "cells": {
+    "CURVE1": "PASS",
+    "CURVE2": "PASS",
+    "CURVE3": "PASS",
+    "CURVE4": "XFAIL",
+    "CURVE5": "PASS",
+    "CURVE6": "PASS",
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "PASS",
+    "G15": "PASS",
+    "G2": "PASS",
+    "G3": "FAIL",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L5_22": "XFAIL"
+  },
+  "scores": {
+    "passed": 17,
+    "failed": 2,
+    "xfailed": 2,
+    "skipped": 1,
+    "total": 22
+  }
+}

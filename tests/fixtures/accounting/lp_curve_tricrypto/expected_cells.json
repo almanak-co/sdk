@@ -1,0 +1,29 @@
+{
+  "matching_policy_version": 6,
+  "ledger_row_count": 2,
+  "accounting_events_row_count": 2,
+  "cells": {
+    "CURVE1": "PASS",
+    "CURVE2": "PASS",
+    "CURVE3": "PASS",
+    "CURVE4": "XFAIL",
+    "CURVE5": "PASS",
+    "CURVE6": "PASS",
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "PASS",
+    "G15": "PASS",
+    "G2": "PASS",
+    "G3": "FAIL",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L5_22": "XFAIL"
+  }
+}
