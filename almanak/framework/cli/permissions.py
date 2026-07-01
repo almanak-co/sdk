@@ -171,19 +171,19 @@ def permissions(  # noqa: C901
     # This must happen before the compiler logger mutation so the early exit
     # doesn't leave the logger stuck at CRITICAL.
     if output_format == "zodiac":
-        from almanak.core.enums import CHAIN_FAMILY_MAP, Chain, ChainFamily
+        from almanak.core.chains import ChainRegistry
+        from almanak.core.enums import ChainFamily
 
         evm_chains = []
         for c in chains:
-            try:
-                chain_enum = Chain(c.upper())
-                if CHAIN_FAMILY_MAP.get(chain_enum) == ChainFamily.EVM:
-                    evm_chains.append(c)
-                else:
-                    click.echo(f"  Skipping {c} (non-EVM, Zodiac not applicable)", err=True)
-            except ValueError:
+            family = ChainRegistry.family_of(c)
+            if family is ChainFamily.EVM:
+                evm_chains.append(c)
+            elif family is None:
                 # Unknown chain -- fail closed to match PermissionManifest.is_evm_chain
                 click.echo(f"  Skipping {c} (unknown chain, cannot verify EVM)", err=True)
+            else:
+                click.echo(f"  Skipping {c} (non-EVM, Zodiac not applicable)", err=True)
         chains = evm_chains
 
     if not chains:

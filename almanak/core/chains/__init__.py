@@ -27,7 +27,7 @@ Public API::
 # ``ChainDescriptor`` etc. from these private submodules.
 # Import the enum after the side-effect block so the runtime cross-check
 # is performed once every descriptor has registered.
-from almanak.core.enums import CHAIN_FAMILY_MAP, Chain  # noqa: E402
+from almanak.core.enums import Chain  # noqa: E402
 
 # Side-effect imports: each module calls ``register_chain`` at import
 # time. Keep them sorted by canonical name so a missing chain is easy to
@@ -75,18 +75,7 @@ if _missing:
         "almanak/core/chains/ for each missing chain."
     )
 
-# Cross-check ``CHAIN_FAMILY_MAP`` (literal in ``core/enums.py``) against
-# the registry. The literal cannot import from this package (cycle), so
-# we treat the registry as authoritative and surface any drift loudly.
-for _chain, _family in CHAIN_FAMILY_MAP.items():
-    if ChainRegistry.get(_chain).family is not _family:
-        raise RuntimeError(
-            f"CHAIN_FAMILY_MAP drift: {_chain.name} is {_family} in "
-            f"core/enums.py but {ChainRegistry.get(_chain).family} in "
-            f"the chain descriptor. Update one to match the other."
-        )
-
-del _missing, _chain, _family
+del _missing
 
 
 __all__ = [

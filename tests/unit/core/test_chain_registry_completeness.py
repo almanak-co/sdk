@@ -13,9 +13,10 @@ VIB-2723: turns a recurring P1 runtime bug into a P0 CI failure.
 
 import pytest
 
+from almanak.core.chains import ChainRegistry
 from almanak.core.constants import CHAIN_IDS as CANONICAL_CHAIN_IDS
 from almanak.core.constants import _CHAIN_ALIASES
-from almanak.core.enums import Chain, ChainFamily, CHAIN_FAMILY_MAP
+from almanak.core.enums import Chain, ChainFamily
 from almanak.framework.anvil.fork_manager import CHAIN_IDS as FORK_MANAGER_CHAIN_IDS
 from almanak.framework.data.tokens.defaults import WRAPPED_NATIVE
 from almanak.framework.execution.config import CHAIN_IDS as EXECUTION_CHAIN_IDS
@@ -28,8 +29,8 @@ from almanak.gateway.managed import ManagedGateway
 # ---------------------------------------------------------------------------
 
 ALL_CHAINS = list(Chain)
-EVM_CHAINS = [c for c in Chain if CHAIN_FAMILY_MAP.get(c) == ChainFamily.EVM]
-NON_EVM_CHAINS = {c for c in Chain if CHAIN_FAMILY_MAP.get(c) != ChainFamily.EVM}
+EVM_CHAINS = [c for c in Chain if ChainRegistry.get(c).family == ChainFamily.EVM]
+NON_EVM_CHAINS = {c for c in Chain if ChainRegistry.get(c).family != ChainFamily.EVM}
 
 # Chains excluded from specific registries with documented reasons.
 # Remove entries as support is added.
@@ -45,16 +46,21 @@ REVERSE_CHECK_KNOWN_EXTRA: set[str] = {
 }
 
 # ---------------------------------------------------------------------------
-# 1. CHAIN_FAMILY_MAP — every Chain must have a family
+# 1. ChainDescriptor.family — every Chain must resolve to a descriptor family
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("chain", ALL_CHAINS, ids=lambda c: c.name)
-def test_chain_in_chain_family_map(chain: Chain):
-    """Every Chain enum member must have an entry in CHAIN_FAMILY_MAP."""
-    assert chain in CHAIN_FAMILY_MAP, (
-        f"Chain.{chain.name} is in the Chain enum but missing from "
-        f"CHAIN_FAMILY_MAP in core/enums.py. Add it with its ChainFamily."
+def test_chain_has_descriptor_family(chain: Chain):
+    """Every Chain enum member must resolve to a descriptor that declares a family.
+
+    ``family`` is a required ``ChainDescriptor`` field (VIB-4801) and is the
+    single source of truth for chain->family since VIB-4851 removed the parallel
+    ``CHAIN_FAMILY_MAP`` literal from ``core/enums.py``.
+    """
+    assert isinstance(ChainRegistry.get(chain).family, ChainFamily), (
+        f"Chain.{chain.name} is in the Chain enum but its descriptor declares "
+        f"no ChainFamily. Add family= to its file under almanak/core/chains/."
     )
 
 

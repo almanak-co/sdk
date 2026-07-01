@@ -393,11 +393,8 @@ def family_for_chain_enum(chain_enum: Chain) -> ChainFamilyAdapter:
     """Return the adapter for a :class:`Chain` enum member.
 
     Resolves via :class:`ChainRegistry` so the family is read off the
-    descriptor (the authoritative VIB-4801 source of truth). The legacy
-    ``get_chain_family()`` map is kept around for byte-identity tests but
-    is not the lookup path here — a descriptor edit that doesn't sync
-    ``CHAIN_FAMILY_MAP`` would silently return the wrong adapter if we
-    consulted the map.
+    descriptor — the authoritative VIB-4801 source of truth and, since
+    VIB-4851 deleted the parallel ``CHAIN_FAMILY_MAP`` literal, the only one.
     """
     descriptor = ChainRegistry.get(chain_enum)
     return family_for_kind(descriptor.family)
@@ -431,7 +428,4 @@ def _chain_name_is_solana(chain_name: str) -> bool:
     of remaining string-compare sites that are not yet on the family-adapter
     seam (typed-state predicates, etc.).
     """
-    descriptor = ChainRegistry.try_resolve(chain_name or "")
-    if descriptor is None:
-        return False
-    return descriptor.family is ChainFamily.SOLANA
+    return ChainRegistry.family_of(chain_name or "") is ChainFamily.SOLANA

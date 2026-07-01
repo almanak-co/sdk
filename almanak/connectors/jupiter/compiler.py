@@ -16,12 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 def _is_solana_chain(chain: str) -> bool:
-    try:
-        from almanak.core.enums import Chain, ChainFamily, get_chain_family
+    from almanak.core.chains import ChainRegistry
+    from almanak.core.enums import ChainFamily
 
-        return get_chain_family(Chain(chain.upper())) == ChainFamily.SOLANA
-    except (ValueError, KeyError):
-        return False
+    return ChainRegistry.family_of(chain) is ChainFamily.SOLANA
 
 
 class JupiterCompiler(BaseProtocolCompiler[BaseCompilerContext]):

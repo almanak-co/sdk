@@ -9573,15 +9573,11 @@ class StrategyRunner:
                 # constructing it for chain='solana' would raise NonEvmChainError
                 # before we even reach diagnose_revert. Solana strategies surface
                 # their failure modes through their own connector adapters.
-                from almanak.core.enums import CHAIN_FAMILY_MAP, Chain, ChainFamily
+                from almanak.core.chains import ChainRegistry
+                from almanak.core.enums import ChainFamily
                 from almanak.gateway.data.balance import Web3BalanceProvider
 
-                try:
-                    failed_chain_family = (
-                        CHAIN_FAMILY_MAP.get(Chain(str(failed_chain).strip().upper())) if failed_chain else None
-                    )
-                except (ValueError, AttributeError):
-                    failed_chain_family = None
+                failed_chain_family = ChainRegistry.family_of(str(failed_chain)) if failed_chain else None
                 is_evm_chain = failed_chain_family is None or failed_chain_family is ChainFamily.EVM
 
                 chain_rpc = state.rpc_urls.get(failed_chain)

@@ -63,7 +63,8 @@ class MultiChainWeb3BalanceProvider:
         # VIB-3896: drop non-EVM chains at the multi-chain entrypoint so that
         # callers passing a mixed EVM/Solana ``rpc_urls`` map don't construct a
         # degenerate provider for the Solana entry on first balance lookup.
-        from almanak.core.enums import CHAIN_FAMILY_MAP, Chain, ChainFamily
+        from almanak.core.chains import ChainRegistry
+        from almanak.core.enums import ChainFamily
 
         evm_rpc_urls: dict[str, str] = {}
         skipped_chains: list[str] = []
@@ -92,10 +93,7 @@ class MultiChainWeb3BalanceProvider:
             if not url_stripped:
                 invalid_urls.append(chain_lower)
                 continue
-            try:
-                family = CHAIN_FAMILY_MAP.get(Chain(chain_lower.upper()))
-            except (ValueError, AttributeError):
-                family = None
+            family = ChainRegistry.family_of(chain_lower)
             if family is not None and family is not ChainFamily.EVM:
                 skipped_chains.append(chain_lower)
                 continue

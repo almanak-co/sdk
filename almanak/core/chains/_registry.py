@@ -188,6 +188,27 @@ class ChainRegistry:
         return cls._by_name.get(raw.lower())
 
     @classmethod
+    def family_of(cls, name_or_alias: str) -> ChainFamily | None:
+        """Execution family for a chain name / alias / CAIP-2 id, or ``None``.
+
+        Registry-backed replacement for the deleted ``get_chain_family`` /
+        ``CHAIN_FAMILY_MAP`` (VIB-4801 / VIB-4851): the family is read straight
+        off the ``ChainDescriptor`` — the single source of truth — so no
+        parallel chain→family literal can drift from it. Returns ``None`` for an
+        unresolvable chain — including a missing / blank / non-string input — so
+        callers keep the legacy "unknown chain → tolerate" (fail-closed)
+        semantics without a hand-rolled ``Chain(x.upper())`` + ``try/except``
+        dance. The guard lives here rather than leaning on :meth:`try_resolve`
+        (which raises on a ``None`` input) so money-path callers such as
+        ``PermissionManifest.is_evm_chain`` stay robust when a chain field is
+        unset on a dataclass that carries no runtime validation.
+        """
+        if not name_or_alias or not isinstance(name_or_alias, str):
+            return None
+        descriptor = cls.try_resolve(name_or_alias)
+        return descriptor.family if descriptor is not None else None
+
+    @classmethod
     def by_caip2(cls, caip2: str) -> ChainDescriptor:
         """Look up a descriptor by its CAIP-2 blockchain id.
 

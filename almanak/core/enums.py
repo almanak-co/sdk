@@ -82,43 +82,6 @@ class ChainFamily(Enum):
     SOLANA = "SOLANA"
 
 
-# Authoritative mapping — every Chain MUST have a family
-CHAIN_FAMILY_MAP: dict[Chain, "ChainFamily"] = {
-    Chain.ETHEREUM: ChainFamily.EVM,
-    Chain.ARBITRUM: ChainFamily.EVM,
-    Chain.OPTIMISM: ChainFamily.EVM,
-    Chain.BASE: ChainFamily.EVM,
-    Chain.AVALANCHE: ChainFamily.EVM,
-    Chain.POLYGON: ChainFamily.EVM,
-    Chain.BSC: ChainFamily.EVM,
-    Chain.SONIC: ChainFamily.EVM,
-    Chain.PLASMA: ChainFamily.EVM,
-    Chain.BLAST: ChainFamily.EVM,
-    Chain.LINEA: ChainFamily.EVM,
-    Chain.MANTLE: ChainFamily.EVM,
-    Chain.BERACHAIN: ChainFamily.EVM,
-    Chain.MONAD: ChainFamily.EVM,
-    Chain.XLAYER: ChainFamily.EVM,
-    Chain.ZEROG: ChainFamily.EVM,
-    Chain.SOLANA: ChainFamily.SOLANA,
-}
-
-
-def get_chain_family(chain: Chain) -> ChainFamily:
-    """Get the execution family for a chain.
-
-    Args:
-        chain: Chain enum value
-
-    Returns:
-        ChainFamily for the given chain
-
-    Raises:
-        KeyError: If chain has no mapped family
-    """
-    return CHAIN_FAMILY_MAP[chain]
-
-
 class CommitmentLevel(Enum):
     """Solana transaction commitment level.
 

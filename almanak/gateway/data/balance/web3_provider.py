@@ -140,22 +140,22 @@ class TokenMetadata:
 def _reject_non_evm_chain(chain: str) -> None:
     """VIB-3896 fail-fast guard: reject non-EVM chains at construction.
 
-    Resolves ``chain`` against the canonical ``Chain`` / ``CHAIN_FAMILY_MAP``
-    registry in :mod:`almanak.core.enums` and raises :class:`NonEvmChainError`
+    Resolves ``chain`` against the canonical ``ChainRegistry`` in
+    :mod:`almanak.core.chains` and raises :class:`NonEvmChainError`
     if the family is not EVM. Unknown chains are tolerated (caller's
     chain-name typos are surfaced by downstream RPC paths) — only an
     explicit Solana-family registration triggers the guard.
     """
 
-    from almanak.core.enums import CHAIN_FAMILY_MAP, Chain, ChainFamily
+    from almanak.core.chains import ChainRegistry
+    from almanak.core.enums import ChainFamily
 
     if chain is None:
         return  # caller already in error path — no point classifying further
-    try:
-        chain_enum = Chain(str(chain).strip().upper())
-    except (ValueError, AttributeError):
-        return  # unknown chain — no registration → not a known non-EVM chain
-    family = CHAIN_FAMILY_MAP.get(chain_enum)
+    # ``family_of`` returns None for an unregistered chain, so a caller typo is
+    # tolerated here (surfaced later by downstream RPC paths); only an explicit
+    # non-EVM registration trips the guard.
+    family = ChainRegistry.family_of(str(chain))
     if family is not None and family is not ChainFamily.EVM:
         raise NonEvmChainError(chain=chain, family=family.value)
 

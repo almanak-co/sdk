@@ -2,8 +2,7 @@
 
 VIB-4803 (parent epic VIB-4800) promotes :class:`almanak.core.enums.ChainFamily`
 from a label enum into a real behavior seam. The enum stays as a label / kind
-discriminator (preserved verbatim for ``CHAIN_FAMILY_MAP`` byte-identity in
-VIB-4801), and this module adds a :class:`ChainFamilyAdapter` protocol with
+discriminator, and this module adds a :class:`ChainFamilyAdapter` protocol with
 :class:`EvmFamily` and :class:`SvmFamily` implementations that own the
 state-machine-specific operations: signing, address formatting, intent
 compilation, and (eventually) receipt envelope normalization.
@@ -19,8 +18,9 @@ Why this lives in ``almanak/framework/`` and not in ``almanak/core/chains/``:
 
 Adding a new family is now strictly local:
 
-    1. Add a new member to :class:`almanak.core.enums.ChainFamily` (and a row in
-       ``CHAIN_FAMILY_MAP``).
+    1. Add a new member to :class:`almanak.core.enums.ChainFamily`, and set
+       ``family=`` on each affected chain's descriptor under
+       ``almanak/core/chains/``.
     2. Write a new ``MyFamily`` adapter implementing :class:`ChainFamilyAdapter`.
     3. Register it in :data:`_FAMILY_ADAPTERS` below.
 

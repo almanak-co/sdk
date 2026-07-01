@@ -601,26 +601,6 @@ class TestImportGraphIsolation:
 
 
 # ---------------------------------------------------------------------------
-# 5. Cross-check: CHAIN_FAMILY_MAP in core/enums.py must match registry
-# ---------------------------------------------------------------------------
-
-
-class TestChainFamilyMapAgreement:
-    """``CHAIN_FAMILY_MAP`` in ``core/enums.py`` is a literal (cannot
-    import the registry — circular). It must agree with the registry on
-    every Chain. The chains/__init__ module asserts this at import time
-    too; this test catches the case where someone bypasses the import-time
-    assertion.
-    """
-
-    @pytest.mark.parametrize("chain", list(Chain), ids=lambda c: c.name)
-    def test_family_matches_registry(self, chain: Chain) -> None:
-        from almanak.core.enums import CHAIN_FAMILY_MAP
-
-        assert CHAIN_FAMILY_MAP[chain] is ChainRegistry.get(chain).family
-
-
-# ---------------------------------------------------------------------------
 # 6. RpcProfile + ChainDescriptor.rpc — schema and wiring
 # ---------------------------------------------------------------------------
 

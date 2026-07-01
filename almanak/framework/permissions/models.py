@@ -88,14 +88,12 @@ class PermissionManifest:
     @property
     def is_evm_chain(self) -> bool:
         """Check if the manifest's chain is EVM-based."""
-        from almanak.core.enums import CHAIN_FAMILY_MAP, Chain, ChainFamily
+        from almanak.core.chains import ChainRegistry
+        from almanak.core.enums import ChainFamily
 
-        try:
-            chain_enum = Chain(self.chain.upper())
-            return CHAIN_FAMILY_MAP.get(chain_enum) == ChainFamily.EVM
-        except ValueError:
-            # Unknown chain -- fail closed; don't produce zodiac targets for unrecognized chains
-            return False
+        # Unknown chain -> family_of returns None -> not EVM (fail closed): we
+        # don't produce zodiac targets for unrecognized chains.
+        return ChainRegistry.family_of(self.chain) is ChainFamily.EVM
 
     def to_zodiac_targets(self) -> list[dict[str, Any]]:
         """Convert permissions to Zodiac Roles Target[] format.
