@@ -207,7 +207,7 @@ class TestHandleLpCurveCloseFees:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# _is_usd_stable_pool — the peg gate (single source: valuation's frozenset)
+# _is_usd_stable_pool — the peg gate (single source: core's shared frozenset)
 # ──────────────────────────────────────────────────────────────────────────────
 class TestIsUsdStablePool:
     def test_all_stable_coins(self):
@@ -220,20 +220,19 @@ class TestIsUsdStablePool:
     def test_empty_is_not_stable(self):
         assert _is_usd_stable_pool([]) is False
 
-    def test_import_failure_degrades_to_not_stable(self, monkeypatch):
-        # Defensive: if the read-only _USD_STABLE_SYMBOLS import ever fails, the
-        # gate fails closed to "not stable" (never raises into the accounting path).
-        import builtins
+    def test_gate_reads_shared_core_constant(self):
+        # VIB-5536: the peg gate reads ``CURVE_USD_STABLE_SYMBOLS`` from
+        # ``almanak.core.constants`` (a lower layer than both accounting and
+        # valuation) — no backward import from valuation, no lazy re-import, so
+        # there is no import-failure degradation path to exercise: core is a hard
+        # dependency of this module. The valuation NAV repricer aliases the SAME
+        # object, so basis-peg and NAV-mark can never drift.
+        from almanak.core.constants import CURVE_USD_STABLE_SYMBOLS
+        from almanak.framework.accounting.category_handlers import lp_handler
+        from almanak.framework.valuation.curve_lp_position_reader import _USD_STABLE_SYMBOLS
 
-        real_import = builtins.__import__
-
-        def _boom(name, *args, **kwargs):
-            if name == "almanak.framework.valuation.curve_lp_position_reader":
-                raise ImportError("simulated relocation")
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", _boom)
-        assert _is_usd_stable_pool(["DAI", "USDC", "USDT"]) is False
+        assert lp_handler.CURVE_USD_STABLE_SYMBOLS is CURVE_USD_STABLE_SYMBOLS
+        assert _USD_STABLE_SYMBOLS is CURVE_USD_STABLE_SYMBOLS
 
 
 # ──────────────────────────────────────────────────────────────────────────────

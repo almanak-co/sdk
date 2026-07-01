@@ -44,6 +44,13 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+# Curve USD-numeraire allowlist — shared with the accounting LP handler's
+# basis-peg via ``almanak.core.constants`` (VIB-5536; see the ``_USD_STABLE_SYMBOLS``
+# note further down). Aliased to the original module-local name so this reader's
+# internal references and existing callers/tests that import it from here keep
+# working unchanged.
+from almanak.core.constants import CURVE_USD_STABLE_SYMBOLS as _USD_STABLE_SYMBOLS
+
 logger = logging.getLogger(__name__)
 
 # Curve StableSwap pools expose ``get_virtual_price()``; some newer NG / crypto
@@ -88,38 +95,13 @@ _NATIVE_ETH_ADDRESSES = frozenset(
 )
 _NATIVE_ETH_DECIMALS = 18  # decimal-policy-exempt: native ETH is always 18-dec (VIB-5428)
 
-# USD-pegged StableSwap numeraire: every coin in the pool tracks ~$1, so the LP
-# token's underlying-invariant unit IS a USD unit (peg = $1). A pool whose coins
-# are NOT all in this set is non-USD-numeraire (peg != 1) and out of v1 scope.
-# The allowlist is deliberately conservative — adding a coin asserts "this token
-# is a ~$1 USD stablecoin" and must be true on every supported chain.
-_USD_STABLE_SYMBOLS = frozenset(
-    {
-        "USDC",
-        "USDC.E",  # bridged USDC (Arbitrum/Optimism/Polygon) — 1:1 USDC
-        "USDT",
-        "DAI",
-        "FRAX",
-        "CRVUSD",
-        "USDD",
-        "TUSD",
-        "BUSD",
-        "GUSD",
-        "LUSD",
-        "MIM",
-        "SUSD",
-        "USDP",
-        "DOLA",
-        "GHO",
-        "PYUSD",
-        "USDE",
-        # Bridged / wrapped USDC variants held by PLAIN USD-stable Curve pools
-        # (audit P0-3). Each is a 1:1 USD-pegged wrapper of canonical USDC, so the
-        # peg = $1 numeraire holds exactly as for native USDC:
-        "USDBC",  # USD Base Coin — native-bridge bridged USDC on Base, 1:1 USDC
-        "AXLUSDC",  # Axelar-wrapped USDC, 1:1 backed by USDC. Used by Base 4pool.
-    }
-)
+# ``_USD_STABLE_SYMBOLS`` — the USD-pegged StableSwap numeraire allowlist —
+# is imported at the top of this module from ``almanak.core.constants``
+# (``CURVE_USD_STABLE_SYMBOLS``, VIB-5536). Every coin of a member pool tracks
+# ~$1, so the LP token's underlying-invariant unit IS a USD unit (peg = $1); a
+# pool with any non-member coin is non-USD-numeraire (peg != 1) and out of v1
+# scope. The allowlist is deliberately conservative — adding a coin asserts
+# "this token is a ~$1 USD stablecoin" and must be true on every supported chain.
 
 
 @dataclass

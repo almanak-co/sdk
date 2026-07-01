@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.constants import CURVE_USD_STABLE_SYMBOLS
 from almanak.framework.accounting.category_handlers._price_helpers import (
     load_raw_price_inputs,
     parse_price_inputs,
@@ -953,14 +954,14 @@ def _coin_decimals(symbol: str, chain: str) -> int | None:
 def _is_usd_stable_pool(coin_symbols: list[str]) -> bool:
     """True when EVERY coin in the pool is a recognized ~$1 USD stablecoin.
 
-    VIB-5429 — single source of truth for "is this a USD-stable pool": imports
-    the canonical ``_USD_STABLE_SYMBOLS`` frozenset READ-ONLY from the valuation
-    layer (``curve_lp_position_reader``), which already owns it for the NAV
-    repricer. Do NOT fork/duplicate the list — that drifts. The import is lazy so
-    it pays no module-load cost and cannot form an import cycle
-    (``curve_lp_position_reader`` imports nothing from accounting at module
-    scope). vib542728 is restructuring that file and may relocate the frozenset —
-    if this import target moves, it is a rename to reconcile at merge.
+    VIB-5536 — single source of truth for "is this a USD-stable pool" is the
+    conservative ``CURVE_USD_STABLE_SYMBOLS`` frozenset in
+    ``almanak.core.constants``. It is shared verbatim with the Curve NAV
+    repricer (``framework/valuation/curve_lp_position_reader._USD_STABLE_SYMBOLS``,
+    an alias of the SAME object), so the basis-peg here and the NAV mark there
+    can never drift. Home is ``core`` (a lower layer than both valuation and
+    accounting) so accounting no longer imports backward from valuation — that
+    was the interim VIB-5429 lazy import this replaces.
 
     A pool with ANY non-stable coin (tricrypto WBTC/WETH, a metapool's base-LP
     token) is NOT a USD-numeraire pool: its principal legs stay UNAVAILABLE
@@ -969,12 +970,7 @@ def _is_usd_stable_pool(coin_symbols: list[str]) -> bool:
     """
     if not coin_symbols:
         return False
-    try:
-        from almanak.framework.valuation.curve_lp_position_reader import _USD_STABLE_SYMBOLS
-    except Exception:  # noqa: BLE001 — degrade to "not stable" (fail closed), never raise
-        logger.debug("LP handler: could not import _USD_STABLE_SYMBOLS; treating pool as non-stable")
-        return False
-    return all((c or "").upper() in _USD_STABLE_SYMBOLS for c in coin_symbols)
+    return all((c or "").upper() in CURVE_USD_STABLE_SYMBOLS for c in coin_symbols)
 
 
 def _value_curve_legs_usd(
