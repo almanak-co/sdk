@@ -318,7 +318,6 @@ The SDK includes educational demo strategies to help you learn:
 | `lido_staker` | Stake ETH for liquid staking yield | Ethereum | Lido |
 | `gmx_perp_lifecycle` | Perpetual futures lifecycle (open + close) | Arbitrum | GMX V2 |
 | `gmx_v2_directional_perp` | Directional perp — EMA crossover, close-before-reverse, funding gate, stop-loss | Arbitrum | GMX V2 |
-| `balancer_flash_arb` | Flash-loan arbitrage with Enso swap callbacks | Arbitrum | Balancer V2, Enso |
 | `mantle_mnt_accumulator` | Multi-signal MNT accumulation | Mantle | Agni Finance |
 | `0g_swap` | Wrap native A0GI into W0G | 0G Chain | 0G |
 

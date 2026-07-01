@@ -56,11 +56,18 @@ ACTION_BRIDGE = "bridge"
 # text, so adding a new ACTION_* constant above only requires adding it here
 # once to flow through to the rendered table and CLI help.
 #
-# NOTE: `ACTION_PREDICTION` and `ACTION_FLASH_LOAN` are intentionally omitted
-# while those capabilities undergo further testing. The connectors stay
-# registered and the intents still compile/execute — they are simply not
-# advertised as supported in `almanak info matrix` (or the rendered docs)
-# until validation completes. Re-enable by adding the constants back here.
+# NOTE: `ACTION_FLASH_LOAN` is DISABLED and withheld from the support matrix
+# (`almanak info matrix` — table AND --json — plus the rendered docs). A flash
+# loan is only useful as *flash loan + atomic action* (borrow → act → repay in
+# one transaction), which requires an on-chain receiver contract implementing
+# the provider callback (Balancer `receiveFlashLoan` / Aave `executeOperation`);
+# an EOA wallet cannot receive one. Until a receiver-contract-backed demo exists
+# the capability is not shippable, so it is not advertised as supported. The
+# reference demo is parked at `strategies/internal/demo_catalog/balancer_flash_arb`.
+# `ACTION_PREDICTION` is likewise omitted pending further testing. The connectors
+# stay registered and the intents still compile at the framework level — they are
+# simply not advertised as supported. Re-enable a capability by adding its
+# constant back here (flash loans: only once a receiver contract ships).
 SUPPORTED_CATEGORIES: tuple[str, ...] = (
     ACTION_SWAP,
     ACTION_LP,
