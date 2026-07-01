@@ -1,46 +1,42 @@
-"""Spark historical APY provider.
+"""Compound V3 historical APY provider.
 
-This module provides a historical APY data provider for Spark lending protocol
-(a fork of Aave V3, governed by MakerDAO/Sky). It implements the HistoricalAPYProvider
-interface and fetches data from The Graph's Spark Lend subgraph (using Messari schema).
+This module provides a historical APY data provider for Compound V3 (Comet) lending protocol
+across multiple chains. It implements the HistoricalAPYProvider interface
+and fetches data from The Graph's Compound V3 community subgraphs.
 
 Key Features:
-    - Supports Ethereum chain (primary Spark deployment)
-    - Fetches historical supply and borrow APY from MarketDailySnapshot
+    - Supports Ethereum, Arbitrum, Polygon, Base chains
+    - Fetches historical supply and borrow APR from DailyMarketAccounting
     - Integrates with SubgraphClient for rate limiting and retry logic
-    - Uses Messari standardized schema for lending protocols
+    - APR values are already in decimal format [0.0, 1.0]
     - Returns APYResult with HIGH confidence for subgraph data
     - Falls back to LOW confidence results when data unavailable
 
-Spark Lend Subgraph Schema (Messari):
-    - MarketDailySnapshot entity contains daily rate snapshots
-    - `days` field: days since Unix epoch
+Compound V3 Subgraph Schema:
+    - DailyMarketAccounting entity contains daily rate snapshots
+    - `day` field: days since Unix epoch
     - `timestamp` field: seconds since Unix epoch
-    - `rates` array: InterestRate objects with rate, side (LENDER/BORROWER), type
-
-About Spark Protocol:
-    Spark is a MakerDAO/Sky ecosystem lending protocol forked from Aave V3.
-    It offers competitive rates on DAI and other assets, with deep integration
-    into the MakerDAO ecosystem.
+    - `accounting.supplyApr`: Base supply APR (decimal)
+    - `accounting.borrowApr`: Base borrow APR (decimal)
+    - `accounting.netSupplyApr`: Net supply APR (base + rewards)
+    - `accounting.netBorrowApr`: Net borrow APR (base - rewards)
 
 Subgraph Source:
-    Messari-maintained Spark Lend subgraph on The Graph decentralized network
-    https://thegraph.com/explorer/subgraphs/GbKdmBe4ycCYCQLQSjqGg6UHYoYfbyJyq5WrG35pv1si
+    Community subgraph by Paperclip Labs
+    https://github.com/papercliplabs/compound-v3-subgraph
 
 Example:
-    from almanak.framework.backtesting.pnl.providers.lending import (
-        SparkAPYProvider,
-    )
+    from almanak.connectors.compound_v3.backtest_apy import CompoundV3APYProvider
     from almanak.core.enums import Chain
     from datetime import datetime, UTC
 
-    provider = SparkAPYProvider()
+    provider = CompoundV3APYProvider()
 
     # Fetch APY for a date range
     async with provider:
         apys = await provider.get_apy(
-            protocol="spark",
-            market="DAI",
+            protocol="compound_v3",
+            market="USDC",  # or comet address
             start_date=datetime(2024, 1, 1, tzinfo=UTC),
             end_date=datetime(2024, 1, 31, tzinfo=UTC),
         )
@@ -54,74 +50,105 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from almanak.connectors._strategy_base.address_registry import AddressRegistry
 from almanak.core.enums import Chain
-
-from ....exceptions import DataSourceUnavailableError
-from ...types import APYResult, DataConfidence, DataSourceInfo
-from ..base import HistoricalAPYProvider
-from ..subgraph_client import (
+from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalAPYProvider
+from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
     SubgraphClientConfig,
     SubgraphQueryError,
     SubgraphRateLimitError,
 )
+from almanak.framework.backtesting.pnl.types import APYResult, DataConfidence, DataSourceInfo
 
 logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Spark Lend Subgraph IDs (from The Graph Explorer)
+# Compound V3 Subgraph IDs (from Paperclip Labs community subgraph)
 # =============================================================================
 
-# Subgraph deployment IDs for Spark Lend on various chains
-# Source: https://thegraph.com/explorer/subgraphs/GbKdmBe4ycCYCQLQSjqGg6UHYoYfbyJyq5WrG35pv1si
-SPARK_SUBGRAPH_IDS: dict[Chain, str] = {
-    Chain.ETHEREUM: "GbKdmBe4ycCYCQLQSjqGg6UHYoYfbyJyq5WrG35pv1si",
-    # Gnosis chain available but not in Chain enum, only supporting Ethereum per US-020
+# Subgraph deployment IDs for Compound V3 on various chains
+# Source: https://github.com/papercliplabs/compound-v3-subgraph
+COMPOUND_V3_SUBGRAPH_IDS: dict[Chain, str] = {
+    Chain.ETHEREUM: "5nwMCSHaTqG3Kd2gHznbTXEnZ9QNWsssQfbHhDqQSQFp",
+    Chain.ARBITRUM: "Ff7ha9ELmpmg81D6nYxy4t8aGP26dPztqD1LDJNPqjLS",
+    Chain.POLYGON: "AaFtUWKfFdj2x8nnE3RxTSJkHwGHvawH3VWFBykCGzLs",
+    Chain.BASE: "2hcXhs36pTBDVUmk5K2Zkr6N4UYGwaHuco2a6jyTsijo",
 }
 
 # Supported chains for this provider
-SUPPORTED_CHAINS: list[Chain] = list(SPARK_SUBGRAPH_IDS.keys())
+SUPPORTED_CHAINS: list[Chain] = list(COMPOUND_V3_SUBGRAPH_IDS.keys())
 
 # Data source identifier
-DATA_SOURCE = "spark_subgraph"
+DATA_SOURCE = "compound_v3_subgraph"
 
 # Default fallback APY values
 DEFAULT_SUPPLY_APY_FALLBACK = Decimal("0.03")  # 3% APY
 DEFAULT_BORROW_APY_FALLBACK = Decimal("0.05")  # 5% APY
 
-# Interest rate side constants (Messari schema)
-LENDER_SIDE = "LENDER"
-BORROWER_SIDE = "BORROWER"
+_COMET_MARKET_SYMBOLS: dict[str, tuple[str, ...]] = {
+    "usdc_bridged": ("USDC.e",),
+    "usdc_e": ("USDC",),
+    "usdbc": ("USDbC",),
+    "wsteth": ("wstETH",),
+}
+
+
+def _compound_v3_known_comet_addresses() -> dict[Chain, dict[str, str]]:
+    """Return the provider's legacy symbol-keyed view of connector-owned Comets."""
+    by_chain: dict[Chain, dict[str, str]] = {}
+    for chain_key in AddressRegistry.address_chains_ordered("compound_v3"):
+        try:
+            chain = Chain[chain_key.upper()]
+        except KeyError:
+            continue
+
+        markets: dict[str, str] = {}
+        for market_id, address in AddressRegistry.addresses_for("compound_v3", chain_key).items():
+            symbols = _COMET_MARKET_SYMBOLS.get(market_id, (market_id.upper(),))
+            for symbol in symbols:
+                markets[symbol] = address
+        by_chain[chain] = markets
+    return by_chain
+
+
+# Backward-compatible public view: connector-owned market ids keyed by the
+# provider's historical asset symbols.
+KNOWN_COMET_ADDRESSES: dict[Chain, dict[str, str]] = _compound_v3_known_comet_addresses()
 
 # Safety valve for cursor pagination (VIB-5089). Daily snapshots: 100 pages
 # of 1000 covers ~270 years, so real windows never hit the valve.
 MAX_PAGINATION_PAGES = 100
 
-# GraphQL query for fetching market daily snapshots.
-# Uses Messari schema: days field is days since Unix epoch.
-# Cursor-paginated (VIB-5089): ordered ascending by days, with days_gte
-# bound to $startDay which advances page by page.
-MARKET_DAILY_SNAPSHOTS_QUERY = """
-query GetMarketDailySnapshots($first: Int!, $marketId: String!, $startDay: Int!, $endDay: Int!) {
-    marketDailySnapshots(
+# GraphQL query for fetching daily market accounting data.
+# Uses day number for filtering (days since epoch).
+# Cursor-paginated (VIB-5089): ordered ascending by day, with day_gte bound
+# to $startDay which advances page by page.
+DAILY_MARKET_ACCOUNTING_QUERY = """
+query GetDailyMarketAccounting($first: Int!, $marketId: String!, $startDay: BigInt!, $endDay: BigInt!) {
+    dailyMarketAccountings(
         first: $first
         where: {
             market_: { id: $marketId }
-            days_gte: $startDay
-            days_lte: $endDay
+            day_gte: $startDay
+            day_lte: $endDay
         }
-        orderBy: days
+        orderBy: day
         orderDirection: asc
     ) {
         id
-        days
+        day
         timestamp
-        rates {
-            id
-            rate
-            side
-            type
+        accounting {
+            supplyApr
+            borrowApr
+            rewardSupplyApr
+            rewardBorrowApr
+            netSupplyApr
+            netBorrowApr
+            utilization
         }
     }
 }
@@ -129,29 +156,12 @@ query GetMarketDailySnapshots($first: Int!, $marketId: String!, $startDay: Int!,
 
 # GraphQL query to list available markets
 MARKETS_QUERY = """
-query GetMarkets($first: Int!) {
-    markets(first: $first, orderBy: totalBorrowBalanceUSD, orderDirection: desc) {
+query GetMarkets {
+    markets {
         id
-        name
-        inputToken {
+        cometProxy
+        protocol {
             id
-            symbol
-            name
-        }
-    }
-}
-"""
-
-# GraphQL query to find a market by input token symbol
-MARKET_BY_TOKEN_QUERY = """
-query GetMarketByToken($symbol: String!) {
-    markets(first: 10, where: { inputToken_: { symbol: $symbol } }) {
-        id
-        name
-        inputToken {
-            id
-            symbol
-            name
         }
     }
 }
@@ -164,55 +174,56 @@ query GetMarketByToken($symbol: String!) {
 
 
 @dataclass
-class SparkClientConfig:
-    """Configuration for Spark APY provider.
+class CompoundV3ClientConfig:
+    """Configuration for Compound V3 APY provider.
 
     Attributes:
         chain: Default chain for requests (default: ETHEREUM)
         requests_per_minute: Rate limit for subgraph requests (default: 100)
         supply_apy_fallback: Fallback supply APY when data unavailable
         borrow_apy_fallback: Fallback borrow APY when data unavailable
+        use_net_rates: If True, use net rates (includes rewards); else use base rates
     """
 
     chain: Chain = Chain.ETHEREUM
     requests_per_minute: int = 100
     supply_apy_fallback: Decimal = DEFAULT_SUPPLY_APY_FALLBACK
     borrow_apy_fallback: Decimal = DEFAULT_BORROW_APY_FALLBACK
+    use_net_rates: bool = False  # Use base rates by default for consistency
 
 
 # =============================================================================
-# SparkAPYProvider
+# CompoundV3APYProvider
 # =============================================================================
 
 
-class SparkAPYProvider(HistoricalAPYProvider):
-    """Historical APY provider for Spark lending protocol.
+class CompoundV3APYProvider(HistoricalAPYProvider):
+    """Historical APY provider for Compound V3 (Comet) lending protocol.
 
-    Fetches historical supply and borrow APY data from The Graph's Spark Lend
-    subgraph for Ethereum chain.
+    Fetches historical supply and borrow APY data from The Graph's Compound V3
+    community subgraphs for Ethereum, Arbitrum, Polygon, and Base.
 
-    Spark is a MakerDAO/Sky ecosystem lending protocol forked from Aave V3.
-    The subgraph uses Messari's standardized lending schema with MarketDailySnapshot
-    entities containing daily rate snapshots.
+    The provider queries DailyMarketAccounting which contains daily rate snapshots.
+    Rates are already in decimal format [0.0, 1.0], so no conversion is needed.
 
     Attributes:
         config: Client configuration
         client: SubgraphClient for querying The Graph
 
     Example:
-        provider = SparkAPYProvider()
+        provider = CompoundV3APYProvider()
 
         # Use as async context manager
         async with provider:
             apys = await provider.get_apy(
-                protocol="spark",
-                market="DAI",
+                protocol="compound_v3",
+                market="USDC",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
             )
 
         # Or manually close
-        provider = SparkAPYProvider()
+        provider = CompoundV3APYProvider()
         try:
             apys = await provider.get_apy(...)
         finally:
@@ -221,17 +232,17 @@ class SparkAPYProvider(HistoricalAPYProvider):
 
     def __init__(
         self,
-        config: SparkClientConfig | None = None,
+        config: CompoundV3ClientConfig | None = None,
         client: SubgraphClient | None = None,
     ) -> None:
-        """Initialize the Spark APY provider.
+        """Initialize the Compound V3 APY provider.
 
         Args:
             config: Client configuration. If None, uses defaults.
             client: Optional SubgraphClient instance. If None, creates one
                     using THEGRAPH_API_KEY from environment.
         """
-        self._config = config or SparkClientConfig()
+        self._config = config or CompoundV3ClientConfig()
 
         if client is not None:
             self._client = client
@@ -245,13 +256,31 @@ class SparkAPYProvider(HistoricalAPYProvider):
         self._market_cache: dict[str, str] = {}
 
         logger.debug(
-            "Initialized SparkAPYProvider: chain=%s, supported_chains=%s",
+            "Initialized CompoundV3APYProvider: chain=%s, supported_chains=%s",
             self._config.chain.value,
             [c.value for c in SUPPORTED_CHAINS],
         )
 
+    @classmethod
+    def for_backtest(cls, config: BacktestProviderConfig) -> "CompoundV3APYProvider":
+        """Construct from the adapter's protocol-neutral backtest config."""
+        return cls(
+            config=CompoundV3ClientConfig(
+                supply_apy_fallback=(
+                    config.supply_apy_fallback
+                    if config.supply_apy_fallback is not None
+                    else DEFAULT_SUPPLY_APY_FALLBACK
+                ),
+                borrow_apy_fallback=(
+                    config.borrow_apy_fallback
+                    if config.borrow_apy_fallback is not None
+                    else DEFAULT_BORROW_APY_FALLBACK
+                ),
+            )
+        )
+
     @property
-    def config(self) -> SparkClientConfig:
+    def config(self) -> CompoundV3ClientConfig:
         """Get the client configuration."""
         return self._config
 
@@ -264,9 +293,9 @@ class SparkAPYProvider(HistoricalAPYProvider):
         """Close the subgraph client and release resources."""
         if self._owns_client:
             await self._client.close()
-        logger.debug("SparkAPYProvider closed")
+        logger.debug("CompoundV3APYProvider closed")
 
-    async def __aenter__(self) -> "SparkAPYProvider":
+    async def __aenter__(self) -> "CompoundV3APYProvider":
         """Async context manager entry."""
         return self
 
@@ -283,7 +312,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
         Returns:
             Subgraph deployment ID or None if chain not supported
         """
-        return SPARK_SUBGRAPH_IDS.get(chain)
+        return COMPOUND_V3_SUBGRAPH_IDS.get(chain)
 
     def _date_to_day_number(self, dt: datetime | date) -> int:
         """Convert a date/datetime to day number (days since Unix epoch).
@@ -301,20 +330,16 @@ class SparkAPYProvider(HistoricalAPYProvider):
     def _parse_decimal(self, value: str | float | None) -> Decimal:
         """Parse a decimal value from subgraph response.
 
-        The Messari schema stores rates as percentages (e.g., 5.21 for 5.21%).
-        We convert to decimal form (0.0521).
-
         Args:
             value: Value from subgraph (string or number)
 
         Returns:
-            Decimal value as fraction (not percentage), or 0 if parsing fails
+            Decimal value, or 0 if parsing fails
         """
         if value is None:
             return Decimal("0")
         try:
-            # Convert percentage to decimal (5.21% -> 0.0521)
-            return Decimal(str(value)) / Decimal("100")
+            return Decimal(str(value))
         except (ValueError, TypeError, InvalidOperation):
             return Decimal("0")
 
@@ -322,7 +347,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
         """Normalize market symbol for querying.
 
         Args:
-            market: Market symbol (e.g., "DAI", "dai", "WETH", "ETH")
+            market: Market symbol (e.g., "USDC", "usdc", "WETH", "ETH")
 
         Returns:
             Normalized symbol in uppercase
@@ -332,6 +357,24 @@ class SparkAPYProvider(HistoricalAPYProvider):
         if symbol == "ETH":
             symbol = "WETH"
         return symbol
+
+    def _get_comet_address(self, chain: Chain, symbol: str) -> str | None:
+        """Get the Comet (market) address for a symbol on a chain.
+
+        Args:
+            chain: The blockchain
+            symbol: Asset symbol (e.g., "USDC", "WETH")
+
+        Returns:
+            Comet address in lowercase or None if not found
+        """
+        chain_markets = KNOWN_COMET_ADDRESSES.get(chain, {})
+        # Case-insensitive lookup to handle mixed-case symbols like USDC.e, USDbC
+        chain_markets_upper = {k.upper(): v for k, v in chain_markets.items()}
+        address = chain_markets_upper.get(symbol.upper())
+        if address:
+            return address.lower()
+        return None
 
     def _create_fallback_result(self, timestamp: datetime) -> APYResult:
         """Create a fallback APYResult with LOW confidence.
@@ -352,45 +395,27 @@ class SparkAPYProvider(HistoricalAPYProvider):
             ),
         )
 
-    def _extract_rates_from_snapshot(self, rates: list[dict[str, Any]]) -> tuple[Decimal, Decimal]:
-        """Extract supply and borrow rates from rates array.
-
-        The Messari schema stores rates in an array with side indicators.
-
-        Args:
-            rates: List of rate objects from snapshot
-
-        Returns:
-            Tuple of (supply_apy, borrow_apy) as Decimal
-        """
-        supply_apy = Decimal("0")
-        borrow_apy = Decimal("0")
-
-        for rate_info in rates:
-            side = rate_info.get("side", "")
-            rate_value = rate_info.get("rate")
-
-            if side == LENDER_SIDE:
-                supply_apy = self._parse_decimal(rate_value)
-            elif side == BORROWER_SIDE:
-                borrow_apy = self._parse_decimal(rate_value)
-
-        return supply_apy, borrow_apy
-
-    def _parse_apy_data(self, daily_snapshot: dict[str, Any]) -> APYResult:
+    def _parse_apy_data(self, daily_accounting: dict[str, Any]) -> APYResult:
         """Parse subgraph response into APYResult.
 
         Args:
-            daily_snapshot: Raw data from subgraph MarketDailySnapshot query
+            daily_accounting: Raw data from subgraph DailyMarketAccounting query
 
         Returns:
             APYResult with HIGH confidence
         """
-        timestamp = int(daily_snapshot.get("timestamp", 0))
+        timestamp = int(daily_accounting.get("timestamp", 0))
         dt = datetime.fromtimestamp(timestamp, tz=UTC)
 
-        rates = daily_snapshot.get("rates", [])
-        supply_apy, borrow_apy = self._extract_rates_from_snapshot(rates)
+        accounting = daily_accounting.get("accounting", {})
+
+        # Use net rates or base rates based on config
+        if self._config.use_net_rates:
+            supply_apy = self._parse_decimal(accounting.get("netSupplyApr"))
+            borrow_apy = self._parse_decimal(accounting.get("netBorrowApr"))
+        else:
+            supply_apy = self._parse_decimal(accounting.get("supplyApr"))
+            borrow_apy = self._parse_decimal(accounting.get("borrowApr"))
 
         return APYResult(
             supply_apy=supply_apy,
@@ -402,96 +427,23 @@ class SparkAPYProvider(HistoricalAPYProvider):
             ),
         )
 
-    def _normalize_market_id(self, market: str) -> str:
-        """Normalize market identifier.
-
-        Args:
-            market: Market ID or symbol
-
-        Returns:
-            Normalized market ID in lowercase
-        """
-        return market.lower().strip()
-
-    async def _find_market_by_token(
-        self,
-        chain: Chain,
-        symbol: str,
-    ) -> str | None:
-        """Find a market ID by input token symbol.
+    def _resolve_market_id(self, chain: Chain, market: str) -> str | None:
+        """Resolve market identifier to a comet address or market ID.
 
         Args:
             chain: The blockchain
-            symbol: Token symbol (e.g., "DAI", "WETH")
+            market: Market symbol (e.g., "USDC") or comet address
 
         Returns:
-            Market ID or None if not found
+            Market ID (comet address in lowercase) or None if not found
         """
-        # Check cache first
-        cache_key = f"{chain.value}:{symbol}"
-        if cache_key in self._market_cache:
-            return self._market_cache[cache_key]
+        # Check if market is already an address (0x prefix)
+        if market.startswith("0x") and len(market) == 42:
+            return market.lower()
 
-        subgraph_id = self._get_subgraph_id(chain)
-        if subgraph_id is None:
-            return None
-
-        try:
-            data = await self._client.query(
-                subgraph_id=subgraph_id,
-                query=MARKET_BY_TOKEN_QUERY,
-                variables={"symbol": symbol.upper()},
-            )
-
-            markets = data.get("markets", [])
-            if not markets:
-                logger.warning(
-                    "No market found for symbol=%s on chain=%s",
-                    symbol,
-                    chain.value,
-                )
-                return None
-
-            # Use the first matching market
-            market_id = markets[0].get("id")
-            if market_id:
-                self._market_cache[cache_key] = market_id
-                logger.debug(
-                    "Found market: symbol=%s, chain=%s, id=%s",
-                    symbol,
-                    chain.value,
-                    market_id[:20] + "..." if len(market_id) > 20 else market_id,
-                )
-            return market_id
-
-        except (SubgraphQueryError, SubgraphRateLimitError) as e:
-            logger.error(
-                "Error finding market: symbol=%s, chain=%s, error=%s",
-                symbol,
-                chain.value,
-                str(e),
-            )
-            return None
-
-    async def _resolve_market_id(self, chain: Chain, market: str) -> str | None:
-        """Resolve market identifier to a market ID.
-
-        Args:
-            chain: The blockchain
-            market: Market ID (hex string) or token symbol
-
-        Returns:
-            Market ID in lowercase or None if not found
-        """
-        # Check if market is already an ID (0x prefix or long hex string)
-        if market.startswith("0x") or len(market) > 20:
-            return self._normalize_market_id(market)
-
-        # Normalize symbol first (ETH -> WETH)
+        # Normalize and look up in known addresses
         symbol = self._normalize_market_symbol(market)
-
-        # Try to find by token symbol
-        return await self._find_market_by_token(chain, symbol)
+        return self._get_comet_address(chain, symbol)
 
     async def get_apy(
         self,
@@ -502,14 +454,14 @@ class SparkAPYProvider(HistoricalAPYProvider):
         *,
         _chain_override: Chain | None = None,
     ) -> list[APYResult]:
-        """Fetch historical APY data for a Spark market.
+        """Fetch historical APY data for a Compound V3 market.
 
-        Queries The Graph's Spark Lend subgraph for historical rate snapshots
-        (MarketDailySnapshot) within the specified date range.
+        Queries The Graph's Compound V3 subgraph for historical rate snapshots
+        (DailyMarketAccounting) within the specified date range.
 
         Args:
-            protocol: The protocol identifier. Must be "spark" or similar.
-            market: The asset symbol (e.g., "DAI", "WETH") or market ID.
+            protocol: The protocol identifier. Must be "compound_v3" or similar.
+            market: The asset symbol (e.g., "USDC", "WETH") or comet address.
             start_date: Start of date range (inclusive).
             end_date: End of date range (inclusive).
             _chain_override: Internal parameter for thread-safe chain override.
@@ -522,8 +474,8 @@ class SparkAPYProvider(HistoricalAPYProvider):
 
         Example:
             apys = await provider.get_apy(
-                protocol="spark",
-                market="DAI",
+                protocol="compound_v3",
+                market="USDC",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
             )
@@ -531,60 +483,94 @@ class SparkAPYProvider(HistoricalAPYProvider):
                 print(f"Supply: {apy.supply_apy:.4f}, Borrow: {apy.borrow_apy:.4f}")
         """
         chain = _chain_override if _chain_override is not None else self._config.chain
-        start_date, end_date = self._normalize_date_range(start_date, end_date)
 
+        # Ensure timestamps are in UTC (convert if needed to avoid day off-by-one)
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=UTC)
+        else:
+            start_date = start_date.astimezone(UTC)
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=UTC)
+        else:
+            end_date = end_date.astimezone(UTC)
+
+        # Validate chain
         subgraph_id = self._get_subgraph_id(chain)
         if subgraph_id is None:
             logger.warning(
-                "Unsupported chain for Spark: chain=%s. Returning fallback.",
+                "Unsupported chain for Compound V3: chain=%s. Returning fallback.",
                 chain.value,
             )
             return self._generate_fallback_results(start_date, end_date)
 
-        return await self._get_apy_or_fallback(
-            subgraph_id=subgraph_id,
-            chain=chain,
-            market=market,
-            start_date=start_date,
-            end_date=end_date,
+        # Resolve market to comet address
+        market_id = self._resolve_market_id(chain, market)
+        if market_id is None:
+            logger.warning(
+                "Unknown market for Compound V3: chain=%s, market=%s. Returning fallback.",
+                chain.value,
+                market,
+            )
+            return self._generate_fallback_results(start_date, end_date)
+
+        logger.info(
+            "Fetching Compound V3 APY: chain=%s, market=%s (%s), start=%s, end=%s",
+            chain.value,
+            market,
+            market_id[:10] + "...",
+            start_date,
+            end_date,
         )
 
-    def _normalize_date_range(
-        self,
-        start_date: datetime,
-        end_date: datetime,
-    ) -> tuple[datetime, datetime]:
-        """Normalize a query window to UTC datetimes."""
-        return self._normalize_datetime(start_date), self._normalize_datetime(end_date)
-
-    def _normalize_datetime(self, value: datetime) -> datetime:
-        """Normalize a single datetime to UTC."""
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
-
-    async def _get_apy_or_fallback(
-        self,
-        *,
-        subgraph_id: str,
-        chain: Chain,
-        market: str,
-        start_date: datetime,
-        end_date: datetime,
-    ) -> list[APYResult]:
-        """Fetch Spark APY data, degrading only expected subgraph failures."""
         try:
-            results = await self._fetch_apy_results(
+            # Convert dates to day numbers
+            start_day = self._date_to_day_number(start_date)
+            end_day = self._date_to_day_number(end_date)
+
+            # Query subgraph with cursor pagination on day (VIB-5089):
+            # windows with >1000 daily snapshots span multiple pages instead
+            # of silently truncating at the first 1000.
+            daily_accountings = await self._client.query_with_pagination(
                 subgraph_id=subgraph_id,
-                chain=chain,
-                market=market,
-                start_date=start_date,
-                end_date=end_date,
+                query=DAILY_MARKET_ACCOUNTING_QUERY,
+                variables={
+                    "marketId": market_id,
+                    "startDay": str(start_day),
+                    "endDay": str(end_day),
+                },
+                data_path="dailyMarketAccountings",
+                max_pages=MAX_PAGINATION_PAGES,
+                cursor_field="day",
+                cursor_variable="startDay",
             )
+
+            if not daily_accountings:
+                logger.warning(
+                    "No APY history from subgraph: chain=%s, market=%s, range=%s to %s",
+                    chain.value,
+                    market,
+                    start_date,
+                    end_date,
+                )
+                return self._generate_fallback_results(start_date, end_date)
+
+            # Parse results
+            results = [self._parse_apy_data(item) for item in daily_accountings]
+
+            logger.info(
+                "Fetched %d APY data points: chain=%s, market=%s",
+                len(results),
+                chain.value,
+                market,
+            )
+
+            return results
+
         except DataSourceUnavailableError:
             # Pagination overflow must stay loud (VIB-5089): a partial series
             # silently swapped for fallback would be silent truncation.
             raise
+
         except SubgraphRateLimitError as e:
             logger.warning(
                 "Subgraph rate limit exceeded: chain=%s, market=%s: %s",
@@ -593,6 +579,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
                 str(e),
             )
             return self._generate_fallback_results(start_date, end_date)
+
         except SubgraphQueryError as e:
             logger.error(
                 "Subgraph query error: chain=%s, market=%s: %s",
@@ -601,6 +588,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
                 str(e),
             )
             return self._generate_fallback_results(start_date, end_date)
+
         except Exception as e:
             logger.error(
                 "Unexpected error fetching APY: chain=%s, market=%s: %s",
@@ -609,70 +597,6 @@ class SparkAPYProvider(HistoricalAPYProvider):
                 str(e),
             )
             return self._generate_fallback_results(start_date, end_date)
-
-        if results is None:
-            return self._generate_fallback_results(start_date, end_date)
-        return results
-
-    async def _fetch_apy_results(
-        self,
-        *,
-        subgraph_id: str,
-        chain: Chain,
-        market: str,
-        start_date: datetime,
-        end_date: datetime,
-    ) -> list[APYResult] | None:
-        """Fetch and parse measured Spark APY rows, or None for no data."""
-        market_id = await self._resolve_market_id(chain, market)
-        if market_id is None:
-            logger.warning(
-                "Unknown market for Spark: chain=%s, market=%s. Returning fallback.",
-                chain.value,
-                market,
-            )
-            return None
-
-        logger.info(
-            "Fetching Spark APY: chain=%s, market=%s, start=%s, end=%s",
-            chain.value,
-            market_id[:20] + "..." if len(market_id) > 20 else market_id,
-            start_date,
-            end_date,
-        )
-
-        daily_snapshots = await self._client.query_with_pagination(
-            subgraph_id=subgraph_id,
-            query=MARKET_DAILY_SNAPSHOTS_QUERY,
-            variables={
-                "marketId": market_id,
-                "startDay": self._date_to_day_number(start_date),
-                "endDay": self._date_to_day_number(end_date),
-            },
-            data_path="marketDailySnapshots",
-            max_pages=MAX_PAGINATION_PAGES,
-            cursor_field="days",
-            cursor_variable="startDay",
-        )
-
-        if not daily_snapshots:
-            logger.warning(
-                "No APY history from subgraph: chain=%s, market=%s, range=%s to %s",
-                chain.value,
-                market,
-                start_date,
-                end_date,
-            )
-            return None
-
-        results = [self._parse_apy_data(snapshot) for snapshot in daily_snapshots]
-        logger.info(
-            "Fetched %d APY data points: chain=%s, market=%s",
-            len(results),
-            chain.value,
-            market,
-        )
-        return results
 
     def _generate_fallback_results(
         self,
@@ -711,7 +635,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
 
         Args:
             chain: The blockchain to query
-            market: The market symbol or ID
+            market: The asset symbol (e.g., "USDC", "WETH") or comet address
             start_date: Start of date range (inclusive)
             end_date: End of date range (inclusive)
 
@@ -720,15 +644,15 @@ class SparkAPYProvider(HistoricalAPYProvider):
 
         Example:
             apys = await provider.get_apy_for_chain(
-                chain=Chain.ETHEREUM,
-                market="DAI",
+                chain=Chain.ARBITRUM,
+                market="USDC",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
             )
         """
         # Use chain override parameter for thread-safe chain switching
         return await self.get_apy(
-            protocol="spark",
+            protocol="compound_v3",
             market=market,
             start_date=start_date,
             end_date=end_date,
@@ -746,15 +670,15 @@ class SparkAPYProvider(HistoricalAPYProvider):
         fetching historical data.
 
         Args:
-            market: The asset symbol (e.g., "DAI", "WETH")
+            market: The asset symbol (e.g., "USDC", "WETH") or comet address
             chain: Optional chain override (default: uses config.chain)
 
         Returns:
             APYResult with current rates
 
         Example:
-            apy = await provider.get_current_apy("DAI")
-            print(f"Current DAI supply APY: {apy.supply_apy:.4f}")
+            apy = await provider.get_current_apy("USDC")
+            print(f"Current USDC supply APY: {apy.supply_apy:.4f}")
         """
         chain = chain or self._config.chain
         now = datetime.now(UTC)
@@ -775,28 +699,27 @@ class SparkAPYProvider(HistoricalAPYProvider):
 
         return self._create_fallback_result(now)
 
-    async def list_markets(self, chain: Chain | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_markets(self, chain: Chain | None = None) -> list[dict[str, str]]:
         """List available markets on a chain.
 
         Args:
             chain: The blockchain to query (default: uses config.chain)
-            limit: Maximum number of markets to return (default: 100)
 
         Returns:
-            List of market info dicts with 'id', 'name', and 'inputToken' keys
+            List of market info dicts with 'id' and 'cometProxy' keys
         """
         chain = chain or self._config.chain
         subgraph_id = self._get_subgraph_id(chain)
 
         if subgraph_id is None:
-            logger.warning("Unsupported chain for Spark: chain=%s", chain.value)
+            logger.warning("Unsupported chain for Compound V3: chain=%s", chain.value)
             return []
 
         try:
             data = await self._client.query(
                 subgraph_id=subgraph_id,
                 query=MARKETS_QUERY,
-                variables={"first": limit},
+                variables={},
             )
 
             markets = data.get("markets", [])
@@ -809,12 +732,13 @@ class SparkAPYProvider(HistoricalAPYProvider):
 
 
 __all__ = [
-    "SparkAPYProvider",
-    "SparkClientConfig",
-    "SPARK_SUBGRAPH_IDS",
+    "CompoundV3APYProvider",
+    "CompoundV3ClientConfig",
+    "COMPOUND_V3_SUBGRAPH_IDS",
     "SUPPORTED_CHAINS",
     "DATA_SOURCE",
     "DEFAULT_SUPPLY_APY_FALLBACK",
     "DEFAULT_BORROW_APY_FALLBACK",
+    "KNOWN_COMET_ADDRESSES",
     "MAX_PAGINATION_PAGES",
 ]

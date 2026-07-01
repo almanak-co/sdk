@@ -6,12 +6,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
-    FundingHistoryPoint,
-)
-from almanak.framework.backtesting.pnl.providers.perp.hyperliquid_funding import (
+from almanak.connectors.hyperliquid.backtest_funding import (
     HyperliquidAPIError,
     HyperliquidFundingProvider,
+)
+from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
+    FundingHistoryPoint,
 )
 from almanak.framework.backtesting.pnl.types import DataConfidence
 

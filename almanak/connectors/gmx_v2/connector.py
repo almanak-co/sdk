@@ -105,7 +105,7 @@ CONNECTOR = Connector(
             "AVAX-USD",
         ),
         backtest_provider=ImportRef(
-            module="almanak.framework.backtesting.pnl.providers.perp.gmx_funding",
+            module="almanak.connectors.gmx_v2.backtest_funding",
             attribute="GMXFundingProvider",
         ),
     ),

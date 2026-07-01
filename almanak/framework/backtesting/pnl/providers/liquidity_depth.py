@@ -45,15 +45,6 @@ if TYPE_CHECKING:
 from ...exceptions import DataSourceUnavailableError
 from ..types import DataConfidence, DataSourceInfo, LiquidityResult
 from .base import HistoricalLiquidityProvider
-from .dex import (
-    AERODROME_SUBGRAPH_IDS,
-    BALANCER_SUBGRAPH_IDS,
-    CURVE_SUBGRAPH_IDS,
-    PANCAKESWAP_V3_SUBGRAPH_IDS,
-    SUSHISWAP_V3_SUBGRAPH_IDS,
-    TRADERJOE_V2_SUBGRAPH_IDS,
-    UNISWAP_V3_SUBGRAPH_IDS,
-)
 from .subgraph_client import (
     SubgraphClient,
     SubgraphClientConfig,
@@ -77,21 +68,6 @@ DATA_SOURCE_FALLBACK = "liquidity_fallback"
 
 # Default window for time-weighted average (in hours)
 DEFAULT_TWAP_WINDOW_HOURS = 24
-
-# Protocol to subgraph IDs mapping. Load-bearing: this provider still
-# queries TheGraph client-side through SubgraphClient — a pre-W7
-# gateway-boundary hole. The liquidity-depth gateway lane (follow-up to
-# VIB-4851 Phase D) moves this egress into the gateway and deletes these
-# client-side deployment-ID copies.
-PROTOCOL_SUBGRAPH_IDS: dict[str, dict[Chain, str]] = {
-    "uniswap_v3": UNISWAP_V3_SUBGRAPH_IDS,
-    "sushiswap_v3": SUSHISWAP_V3_SUBGRAPH_IDS,
-    "pancakeswap_v3": PANCAKESWAP_V3_SUBGRAPH_IDS,
-    "aerodrome": AERODROME_SUBGRAPH_IDS,
-    "traderjoe_v2": TRADERJOE_V2_SUBGRAPH_IDS,
-    "curve": CURVE_SUBGRAPH_IDS,
-    "balancer": BALANCER_SUBGRAPH_IDS,
-}
 
 LIQUIDITY_QUERY_METHOD_BY_FAMILY = {
     "v3_concentrated": "_query_v3_liquidity",
@@ -380,10 +356,10 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         Returns:
             Subgraph deployment ID or None if not supported
         """
-        subgraph_ids = PROTOCOL_SUBGRAPH_IDS.get(protocol_id)
+        subgraph_ids = DexVolumeRegistry.liquidity_subgraph_ids_for(protocol_id)
         if subgraph_ids is None:
             return None
-        return subgraph_ids.get(chain)
+        return subgraph_ids.get(chain.value.lower())
 
     def _detect_protocol_from_chain(self, chain: Chain) -> str | None:
         """Attempt to detect protocol based on chain.
@@ -1123,8 +1099,8 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
     @staticmethod
     def _protocol_supports_chain(protocol_id: str, chain: Chain) -> bool:
         """Return whether this protocol has a configured subgraph for chain."""
-        subgraph_ids = PROTOCOL_SUBGRAPH_IDS.get(protocol_id)
-        if subgraph_ids is not None and chain in subgraph_ids:
+        subgraph_ids = DexVolumeRegistry.liquidity_subgraph_ids_for(protocol_id)
+        if subgraph_ids is not None and chain.value.lower() in subgraph_ids:
             return True
 
         logger.warning(
@@ -1207,5 +1183,4 @@ __all__ = [
     "DATA_SOURCE_FALLBACK",
     "DEFAULT_TWAP_WINDOW_HOURS",
     "MAX_PAGINATION_PAGES",
-    "PROTOCOL_SUBGRAPH_IDS",
 ]

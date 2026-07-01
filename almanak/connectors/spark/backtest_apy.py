@@ -1,41 +1,44 @@
-"""Morpho Blue historical APY provider.
+"""Spark historical APY provider.
 
-This module provides a historical APY data provider for Morpho Blue lending protocol
-across multiple chains. It implements the HistoricalAPYProvider interface
-and fetches data from The Graph's Morpho Blue subgraphs (using Messari schema).
+This module provides a historical APY data provider for Spark lending protocol
+(a fork of Aave V3, governed by MakerDAO/Sky). It implements the HistoricalAPYProvider
+interface and fetches data from The Graph's Spark Lend subgraph (using Messari schema).
 
 Key Features:
-    - Supports Ethereum and Base chains
+    - Supports Ethereum chain (primary Spark deployment)
     - Fetches historical supply and borrow APY from MarketDailySnapshot
     - Integrates with SubgraphClient for rate limiting and retry logic
     - Uses Messari standardized schema for lending protocols
     - Returns APYResult with HIGH confidence for subgraph data
     - Falls back to LOW confidence results when data unavailable
 
-Morpho Blue Subgraph Schema (Messari):
+Spark Lend Subgraph Schema (Messari):
     - MarketDailySnapshot entity contains daily rate snapshots
     - `days` field: days since Unix epoch
     - `timestamp` field: seconds since Unix epoch
     - `rates` array: InterestRate objects with rate, side (LENDER/BORROWER), type
 
+About Spark Protocol:
+    Spark is a MakerDAO/Sky ecosystem lending protocol forked from Aave V3.
+    It offers competitive rates on DAI and other assets, with deep integration
+    into the MakerDAO ecosystem.
+
 Subgraph Source:
-    Official Morpho Blue subgraph implementing Messari schema
-    https://github.com/morpho-org/morpho-blue-subgraph
+    Messari-maintained Spark Lend subgraph on The Graph decentralized network
+    https://thegraph.com/explorer/subgraphs/GbKdmBe4ycCYCQLQSjqGg6UHYoYfbyJyq5WrG35pv1si
 
 Example:
-    from almanak.framework.backtesting.pnl.providers.lending import (
-        MorphoBlueAPYProvider,
-    )
+    from almanak.connectors.spark.backtest_apy import SparkAPYProvider
     from almanak.core.enums import Chain
     from datetime import datetime, UTC
 
-    provider = MorphoBlueAPYProvider()
+    provider = SparkAPYProvider()
 
     # Fetch APY for a date range
     async with provider:
         apys = await provider.get_apy(
-            protocol="morpho_blue",
-            market="0x...",  # market ID (unique key)
+            protocol="spark",
+            market="DAI",
             start_date=datetime(2024, 1, 1, tzinfo=UTC),
             end_date=datetime(2024, 1, 31, tzinfo=UTC),
         )
@@ -50,36 +53,35 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from almanak.core.enums import Chain
-
-from ....exceptions import DataSourceUnavailableError
-from ...types import APYResult, DataConfidence, DataSourceInfo
-from ..base import HistoricalAPYProvider
-from ..subgraph_client import (
+from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalAPYProvider
+from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
     SubgraphClientConfig,
     SubgraphQueryError,
     SubgraphRateLimitError,
 )
+from almanak.framework.backtesting.pnl.types import APYResult, DataConfidence, DataSourceInfo
 
 logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Morpho Blue Subgraph IDs (from The Graph Explorer)
+# Spark Lend Subgraph IDs (from The Graph Explorer)
 # =============================================================================
 
-# Subgraph deployment IDs for Morpho Blue on various chains
-# Source: https://docs.morpho.org/tools/offchain/subgraphs/
-MORPHO_BLUE_SUBGRAPH_IDS: dict[Chain, str] = {
-    Chain.ETHEREUM: "8Lz789DP5VKLXumTMTgygjU2xtuzx8AhbaacgN5PYCAs",
-    Chain.BASE: "71ZTy1veF9twER9CLMnPWeLQ7GZcwKsjmygejrgKirqs",
+# Subgraph deployment IDs for Spark Lend on various chains
+# Source: https://thegraph.com/explorer/subgraphs/GbKdmBe4ycCYCQLQSjqGg6UHYoYfbyJyq5WrG35pv1si
+SPARK_SUBGRAPH_IDS: dict[Chain, str] = {
+    Chain.ETHEREUM: "GbKdmBe4ycCYCQLQSjqGg6UHYoYfbyJyq5WrG35pv1si",
+    # Gnosis chain available but not in Chain enum, only supporting Ethereum per US-020
 }
 
 # Supported chains for this provider
-SUPPORTED_CHAINS: list[Chain] = list(MORPHO_BLUE_SUBGRAPH_IDS.keys())
+SUPPORTED_CHAINS: list[Chain] = list(SPARK_SUBGRAPH_IDS.keys())
 
 # Data source identifier
-DATA_SOURCE = "morpho_blue_subgraph"
+DATA_SOURCE = "spark_subgraph"
 
 # Default fallback APY values
 DEFAULT_SUPPLY_APY_FALLBACK = Decimal("0.03")  # 3% APY
@@ -159,8 +161,8 @@ query GetMarketByToken($symbol: String!) {
 
 
 @dataclass
-class MorphoBlueClientConfig:
-    """Configuration for Morpho Blue APY provider.
+class SparkClientConfig:
+    """Configuration for Spark APY provider.
 
     Attributes:
         chain: Default chain for requests (default: ETHEREUM)
@@ -176,38 +178,38 @@ class MorphoBlueClientConfig:
 
 
 # =============================================================================
-# MorphoBlueAPYProvider
+# SparkAPYProvider
 # =============================================================================
 
 
-class MorphoBlueAPYProvider(HistoricalAPYProvider):
-    """Historical APY provider for Morpho Blue lending protocol.
+class SparkAPYProvider(HistoricalAPYProvider):
+    """Historical APY provider for Spark lending protocol.
 
-    Fetches historical supply and borrow APY data from The Graph's Morpho Blue
-    subgraphs for Ethereum and Base chains.
+    Fetches historical supply and borrow APY data from The Graph's Spark Lend
+    subgraph for Ethereum chain.
 
-    The provider queries MarketDailySnapshot which contains daily rate snapshots
-    using the Messari standardized schema. Rates are stored as percentages
-    in the rates array with LENDER/BORROWER side indicators.
+    Spark is a MakerDAO/Sky ecosystem lending protocol forked from Aave V3.
+    The subgraph uses Messari's standardized lending schema with MarketDailySnapshot
+    entities containing daily rate snapshots.
 
     Attributes:
         config: Client configuration
         client: SubgraphClient for querying The Graph
 
     Example:
-        provider = MorphoBlueAPYProvider()
+        provider = SparkAPYProvider()
 
         # Use as async context manager
         async with provider:
             apys = await provider.get_apy(
-                protocol="morpho_blue",
-                market="0x...",  # market unique key
+                protocol="spark",
+                market="DAI",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
             )
 
         # Or manually close
-        provider = MorphoBlueAPYProvider()
+        provider = SparkAPYProvider()
         try:
             apys = await provider.get_apy(...)
         finally:
@@ -216,17 +218,17 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
 
     def __init__(
         self,
-        config: MorphoBlueClientConfig | None = None,
+        config: SparkClientConfig | None = None,
         client: SubgraphClient | None = None,
     ) -> None:
-        """Initialize the Morpho Blue APY provider.
+        """Initialize the Spark APY provider.
 
         Args:
             config: Client configuration. If None, uses defaults.
             client: Optional SubgraphClient instance. If None, creates one
                     using THEGRAPH_API_KEY from environment.
         """
-        self._config = config or MorphoBlueClientConfig()
+        self._config = config or SparkClientConfig()
 
         if client is not None:
             self._client = client
@@ -240,13 +242,31 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
         self._market_cache: dict[str, str] = {}
 
         logger.debug(
-            "Initialized MorphoBlueAPYProvider: chain=%s, supported_chains=%s",
+            "Initialized SparkAPYProvider: chain=%s, supported_chains=%s",
             self._config.chain.value,
             [c.value for c in SUPPORTED_CHAINS],
         )
 
+    @classmethod
+    def for_backtest(cls, config: BacktestProviderConfig) -> "SparkAPYProvider":
+        """Construct from the adapter's protocol-neutral backtest config."""
+        return cls(
+            config=SparkClientConfig(
+                supply_apy_fallback=(
+                    config.supply_apy_fallback
+                    if config.supply_apy_fallback is not None
+                    else DEFAULT_SUPPLY_APY_FALLBACK
+                ),
+                borrow_apy_fallback=(
+                    config.borrow_apy_fallback
+                    if config.borrow_apy_fallback is not None
+                    else DEFAULT_BORROW_APY_FALLBACK
+                ),
+            )
+        )
+
     @property
-    def config(self) -> MorphoBlueClientConfig:
+    def config(self) -> SparkClientConfig:
         """Get the client configuration."""
         return self._config
 
@@ -259,9 +279,9 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
         """Close the subgraph client and release resources."""
         if self._owns_client:
             await self._client.close()
-        logger.debug("MorphoBlueAPYProvider closed")
+        logger.debug("SparkAPYProvider closed")
 
-    async def __aenter__(self) -> "MorphoBlueAPYProvider":
+    async def __aenter__(self) -> "SparkAPYProvider":
         """Async context manager entry."""
         return self
 
@@ -278,7 +298,7 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
         Returns:
             Subgraph deployment ID or None if chain not supported
         """
-        return MORPHO_BLUE_SUBGRAPH_IDS.get(chain)
+        return SPARK_SUBGRAPH_IDS.get(chain)
 
     def _date_to_day_number(self, dt: datetime | date) -> int:
         """Convert a date/datetime to day number (days since Unix epoch).
@@ -312,6 +332,21 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
             return Decimal(str(value)) / Decimal("100")
         except (ValueError, TypeError, InvalidOperation):
             return Decimal("0")
+
+    def _normalize_market_symbol(self, market: str) -> str:
+        """Normalize market symbol for querying.
+
+        Args:
+            market: Market symbol (e.g., "DAI", "dai", "WETH", "ETH")
+
+        Returns:
+            Normalized symbol in uppercase
+        """
+        symbol = market.upper().strip()
+        # Handle common aliases
+        if symbol == "ETH":
+            symbol = "WETH"
+        return symbol
 
     def _create_fallback_result(self, timestamp: datetime) -> APYResult:
         """Create a fallback APYResult with LOW confidence.
@@ -385,8 +420,6 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
     def _normalize_market_id(self, market: str) -> str:
         """Normalize market identifier.
 
-        Morpho Blue uses market IDs (unique keys) that are hex strings.
-
         Args:
             market: Market ID or symbol
 
@@ -404,7 +437,7 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
 
         Args:
             chain: The blockchain
-            symbol: Token symbol (e.g., "USDC", "WETH")
+            symbol: Token symbol (e.g., "DAI", "WETH")
 
         Returns:
             Market ID or None if not found
@@ -469,8 +502,11 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
         if market.startswith("0x") or len(market) > 20:
             return self._normalize_market_id(market)
 
+        # Normalize symbol first (ETH -> WETH)
+        symbol = self._normalize_market_symbol(market)
+
         # Try to find by token symbol
-        return await self._find_market_by_token(chain, market)
+        return await self._find_market_by_token(chain, symbol)
 
     async def get_apy(
         self,
@@ -481,17 +517,18 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
         *,
         _chain_override: Chain | None = None,
     ) -> list[APYResult]:
-        """Fetch historical APY data for a Morpho Blue market.
+        """Fetch historical APY data for a Spark market.
 
-        Queries The Graph's Morpho Blue subgraph for historical rate snapshots
+        Queries The Graph's Spark Lend subgraph for historical rate snapshots
         (MarketDailySnapshot) within the specified date range.
 
         Args:
-            protocol: The protocol identifier. Must be "morpho_blue" or similar.
-            market: The market ID (unique key) or token symbol (e.g., "USDC").
+            protocol: The protocol identifier. Must be "spark" or similar.
+            market: The asset symbol (e.g., "DAI", "WETH") or market ID.
             start_date: Start of date range (inclusive).
             end_date: End of date range (inclusive).
-            _chain_override: Optional chain override for thread-safe multi-chain queries.
+            _chain_override: Internal parameter for thread-safe chain override.
+                Do not use directly; call get_apy_for_chain instead.
 
         Returns:
             List of APYResult objects containing supply and borrow APYs.
@@ -500,8 +537,8 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
 
         Example:
             apys = await provider.get_apy(
-                protocol="morpho_blue",
-                market="0x...",
+                protocol="spark",
+                market="DAI",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
             )
@@ -514,7 +551,7 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
         subgraph_id = self._get_subgraph_id(chain)
         if subgraph_id is None:
             logger.warning(
-                "Unsupported chain for Morpho Blue: chain=%s. Returning fallback.",
+                "Unsupported chain for Spark: chain=%s. Returning fallback.",
                 chain.value,
             )
             return self._generate_fallback_results(start_date, end_date)
@@ -550,7 +587,7 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
         start_date: datetime,
         end_date: datetime,
     ) -> list[APYResult]:
-        """Fetch Morpho APY data, degrading only expected subgraph failures."""
+        """Fetch Spark APY data, degrading only expected subgraph failures."""
         try:
             results = await self._fetch_apy_results(
                 subgraph_id=subgraph_id,
@@ -601,18 +638,18 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
         start_date: datetime,
         end_date: datetime,
     ) -> list[APYResult] | None:
-        """Fetch and parse measured Morpho APY rows, or None for no data."""
+        """Fetch and parse measured Spark APY rows, or None for no data."""
         market_id = await self._resolve_market_id(chain, market)
         if market_id is None:
             logger.warning(
-                "Unknown market for Morpho Blue: chain=%s, market=%s. Returning fallback.",
+                "Unknown market for Spark: chain=%s, market=%s. Returning fallback.",
                 chain.value,
                 market,
             )
             return None
 
         logger.info(
-            "Fetching Morpho Blue APY: chain=%s, market=%s, start=%s, end=%s",
+            "Fetching Spark APY: chain=%s, market=%s, start=%s, end=%s",
             chain.value,
             market_id[:20] + "..." if len(market_id) > 20 else market_id,
             start_date,
@@ -684,12 +721,12 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
     ) -> list[APYResult]:
         """Fetch historical APY data for a specific chain.
 
-        Thread-safe convenience method that uses chain override instead of
-        mutating shared config state.
+        Convenience method that temporarily overrides the config chain
+        for a single query.
 
         Args:
             chain: The blockchain to query
-            market: The market ID or token symbol
+            market: The market symbol or ID
             start_date: Start of date range (inclusive)
             end_date: End of date range (inclusive)
 
@@ -698,14 +735,15 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
 
         Example:
             apys = await provider.get_apy_for_chain(
-                chain=Chain.BASE,
-                market="0x...",
+                chain=Chain.ETHEREUM,
+                market="DAI",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
             )
         """
+        # Use chain override parameter for thread-safe chain switching
         return await self.get_apy(
-            protocol="morpho_blue",
+            protocol="spark",
             market=market,
             start_date=start_date,
             end_date=end_date,
@@ -723,15 +761,15 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
         fetching historical data.
 
         Args:
-            market: The market ID or token symbol
+            market: The asset symbol (e.g., "DAI", "WETH")
             chain: Optional chain override (default: uses config.chain)
 
         Returns:
             APYResult with current rates
 
         Example:
-            apy = await provider.get_current_apy("0x...")
-            print(f"Current supply APY: {apy.supply_apy:.4f}")
+            apy = await provider.get_current_apy("DAI")
+            print(f"Current DAI supply APY: {apy.supply_apy:.4f}")
         """
         chain = chain or self._config.chain
         now = datetime.now(UTC)
@@ -766,7 +804,7 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
         subgraph_id = self._get_subgraph_id(chain)
 
         if subgraph_id is None:
-            logger.warning("Unsupported chain for Morpho Blue: chain=%s", chain.value)
+            logger.warning("Unsupported chain for Spark: chain=%s", chain.value)
             return []
 
         try:
@@ -786,9 +824,9 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
 
 
 __all__ = [
-    "MorphoBlueAPYProvider",
-    "MorphoBlueClientConfig",
-    "MORPHO_BLUE_SUBGRAPH_IDS",
+    "SparkAPYProvider",
+    "SparkClientConfig",
+    "SPARK_SUBGRAPH_IDS",
     "SUPPORTED_CHAINS",
     "DATA_SOURCE",
     "DEFAULT_SUPPLY_APY_FALLBACK",

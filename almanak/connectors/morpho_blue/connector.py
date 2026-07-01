@@ -77,6 +77,10 @@ CONNECTOR = Connector(
         rate_history_chains=("ethereum", "base"),
         backtest_default_supply_apy="0.035",
         backtest_default_borrow_apy="0.04",
+        backtest_provider=ImportRef(
+            module="almanak.connectors.morpho_blue.backtest_apy",
+            attribute="MorphoBlueAPYProvider",
+        ),
         account_state=ImportRef(
             module="almanak.connectors.morpho_blue.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"
         ),

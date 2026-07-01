@@ -14,7 +14,7 @@ Key Features:
     - Liquidation warning and simulation
     - Accurate PnL tracking for long and short positions
     - Historical funding rate integration via BacktestDataConfig
-    - Support for GMXFundingProvider and HyperliquidFundingProvider
+    - Support for connector-declared historical funding providers
 
 Example:
     from almanak.framework.backtesting.adapters.perp_adapter import (
@@ -43,11 +43,11 @@ Example:
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
@@ -70,6 +70,7 @@ from almanak.framework.backtesting.pnl.calculators.margin import (
 )
 from almanak.framework.backtesting.pnl.data_provider import TokenRef, token_ref_display, token_ref_provider_symbol
 from almanak.framework.backtesting.pnl.portfolio import PositionType
+from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalFundingProvider
 from almanak.framework.backtesting.pnl.providers.funding_rates import (
     DEFAULT_FUNDING_RATE,
     FundingRateProvider,
@@ -83,8 +84,6 @@ if TYPE_CHECKING:
         SimulatedPortfolio,
         SimulatedPosition,
     )
-    from almanak.framework.backtesting.pnl.providers.perp.gmx_funding import GMXFundingProvider
-    from almanak.framework.backtesting.pnl.providers.perp.hyperliquid_funding import HyperliquidFundingProvider
     from almanak.framework.intents.vocabulary import Intent
 
 logger = logging.getLogger(__name__)
@@ -294,14 +293,13 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
     - Liquidation price calculation and monitoring
     - Margin validation for position opening and increases
     - Position valuation with unrealized PnL and accumulated funding
-    - Historical funding rate integration via GMXFundingProvider and HyperliquidFundingProvider
+    - Historical funding rate integration via connector-declared providers
 
     The adapter can be used with or without explicit configuration.
     When used without config, it uses sensible defaults.
 
-    When BacktestDataConfig is provided, the adapter uses GMXFundingProvider for GMX positions
-    and HyperliquidFundingProvider for Hyperliquid positions to fetch historical funding rates
-    from the respective protocol APIs.
+    When BacktestDataConfig is provided, the adapter uses connector-declared
+    providers to fetch historical funding rates for supported venues.
 
     Attributes:
         config: Perp-specific configuration (optional)
@@ -340,8 +338,9 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         self,
         config: PerpBacktestConfig | None = None,
         data_config: "BacktestDataConfig | None" = None,
-        gmx_provider: "GMXFundingProvider | None" = None,
-        hyperliquid_provider: "HyperliquidFundingProvider | None" = None,
+        gmx_provider: HistoricalFundingProvider | None = None,
+        hyperliquid_provider: HistoricalFundingProvider | None = None,
+        injected_providers: Mapping[str, HistoricalFundingProvider] | None = None,
     ) -> None:
         """Initialize the perp backtest adapter.
 
@@ -351,10 +350,11 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             data_config: BacktestDataConfig for controlling historical data provider
                 behavior. When provided, overrides config.funding_rate_source behavior
                 with data_config.use_historical_funding setting.
-            gmx_provider: Optional pre-configured GMXFundingProvider.
-                If None and use_historical_funding=True, will create one lazily.
-            hyperliquid_provider: Optional pre-configured HyperliquidFundingProvider.
-                If None and use_historical_funding=True, will create one lazily.
+            gmx_provider: Optional legacy injection for the GMX-compatible provider.
+                If None and historical funding is enabled, the registry creates one lazily.
+            hyperliquid_provider: Optional legacy injection for the Hyperliquid provider.
+                If None and historical funding is enabled, the registry creates one lazily.
+            injected_providers: Optional provider mapping keyed by accepted protocol identifier.
         """
         self._config = config or PerpBacktestConfig(strategy_type="perp")
         self._data_config = data_config
@@ -383,11 +383,12 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         # Track last funding application time for frequency control
         self._last_funding_time: dict[str, datetime] = {}
 
-        # Historical funding rate providers (lazy initialized)
-        self._gmx_provider: GMXFundingProvider | None = gmx_provider
-        self._gmx_provider_initialized = gmx_provider is not None
-        self._hyperliquid_provider: HyperliquidFundingProvider | None = hyperliquid_provider
-        self._hyperliquid_provider_initialized = hyperliquid_provider is not None
+        # Historical funding providers, keyed by connector registry canonical key.
+        self._provider_cache: dict[str, HistoricalFundingProvider | None] = {}
+        self._provider_tried: set[str] = set()
+        self._seed_injected_provider("gmx", gmx_provider)
+        self._seed_injected_provider("hyperliquid", hyperliquid_provider)
+        self._seed_injected_providers(injected_providers or {})
 
         # Cache for funding rate data to avoid repeated queries
         # Key: (protocol, market, timestamp_hour) -> (rate, confidence, source)
@@ -405,6 +406,22 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
                 self._config.chain,
                 self._config.protocol,
             )
+
+    def _seed_injected_provider(self, protocol: str, provider: HistoricalFundingProvider | None) -> None:
+        """Seed one injected provider into the connector-keyed provider cache."""
+        if provider is None:
+            return
+        canonical = FundingHistoryRegistry.canonical(protocol)
+        if canonical is None:
+            logger.debug("Ignoring injected funding provider for unknown protocol '%s'", protocol)
+            return
+        self._provider_cache[canonical] = provider
+        self._provider_tried.add(canonical)
+
+    def _seed_injected_providers(self, providers: Mapping[str, HistoricalFundingProvider | None]) -> None:
+        """Seed the generic provider cache from test/operator injections."""
+        for protocol, provider in providers.items():
+            self._seed_injected_provider(protocol, provider)
 
     @property
     def adapter_name(self) -> str:
@@ -463,150 +480,47 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             return self._data_config.strict_historical_mode
         return False
 
-    def _ensure_gmx_provider(self) -> "GMXFundingProvider | None":
-        """Lazily initialize the GMX funding rate provider if needed.
-
-        Creates a GMXFundingProvider instance for fetching historical funding
-        rate data from the GMX Stats API.
-
-        Returns:
-            GMXFundingProvider instance or None if disabled/failed
-        """
+    def _get_provider_for_protocol(self, protocol: str) -> HistoricalFundingProvider | None:
+        """Resolve a historical funding provider through connector declarations."""
         if not self._use_historical_funding():
             return None
 
-        if self._gmx_provider_initialized:
-            return self._gmx_provider
-
-        try:
-            from almanak.core.enums import Chain
-            from almanak.framework.backtesting.pnl.providers.perp.gmx_funding import (
-                GMXClientConfig,
-                GMXFundingProvider,
-            )
-
-            # Determine chain from config
-            chain_str = self._config.chain.upper()
-            try:
-                chain = Chain[chain_str]
-            except KeyError:
-                chain = Chain.ARBITRUM  # Default to Arbitrum for GMX
-
-            config = GMXClientConfig(
-                chain=chain,
-                fallback_rate=self._get_funding_fallback_rate(),
-            )
-            self._gmx_provider = GMXFundingProvider(config=config)
-            self._gmx_provider_initialized = True
-            logger.debug(
-                "Initialized GMXFundingProvider: chain=%s, fallback_rate=%s",
-                chain.value,
-                self._get_funding_fallback_rate(),
-            )
-            return self._gmx_provider
-        except Exception as e:
-            logger.warning(
-                "Failed to initialize GMXFundingProvider: %s. Will use fallback rate.",
-                e,
-            )
-            self._gmx_provider_initialized = True  # Don't retry
-            self._gmx_provider = None
-            return None
-
-    def _ensure_hyperliquid_provider(self) -> "HyperliquidFundingProvider | None":
-        """Lazily initialize the Hyperliquid funding rate provider if needed.
-
-        Creates a HyperliquidFundingProvider instance for fetching historical
-        funding rate data from the Hyperliquid Info API.
-
-        Returns:
-            HyperliquidFundingProvider instance or None if disabled/failed
-        """
-        if not self._use_historical_funding():
-            return None
-
-        if self._hyperliquid_provider_initialized:
-            return self._hyperliquid_provider
-
-        try:
-            from almanak.framework.backtesting.pnl.providers.perp.hyperliquid_funding import (
-                HyperliquidClientConfig,
-                HyperliquidFundingProvider,
-            )
-
-            config = HyperliquidClientConfig(
-                fallback_rate=self._get_funding_fallback_rate(),
-            )
-            self._hyperliquid_provider = HyperliquidFundingProvider(config=config)
-            self._hyperliquid_provider_initialized = True
-            logger.debug(
-                "Initialized HyperliquidFundingProvider: fallback_rate=%s",
-                self._get_funding_fallback_rate(),
-            )
-            return self._hyperliquid_provider
-        except Exception as e:
-            logger.warning(
-                "Failed to initialize HyperliquidFundingProvider: %s. Will use fallback rate.",
-                e,
-            )
-            self._hyperliquid_provider_initialized = True  # Don't retry
-            self._hyperliquid_provider = None
-            return None
-
-    def _get_provider_for_protocol(
-        self,
-        protocol: str,
-    ) -> "GMXFundingProvider | HyperliquidFundingProvider | None":
-        """Get the appropriate funding provider for a given protocol.
-
-        Routes via ``FundingHistoryRegistry.canonical()`` so alias resolution
-        (e.g. ``"gmx"`` -> ``"gmx_v2"``) and hyperliquid dispatch both go
-        through the manifest-declared ``FundingHistoryDecl``.  Provider
-        instantiation is delegated to the ``_ensure_*`` helpers which cache
-        the instance per adapter.
-
-        Args:
-            protocol: Protocol name (e.g., "gmx", "hyperliquid", "gmx_v2")
-
-        Returns:
-            The appropriate provider or None if not available
-        """
         canonical = FundingHistoryRegistry.canonical(protocol)
-        provider_cls = FundingHistoryRegistry.backtest_provider(canonical) if canonical is not None else None
-        if provider_cls is not None:
-            factory = self._provider_factory_map().get(provider_cls)
-            if factory is not None:
-                return factory()
-        logger.debug(
-            "No historical funding provider for protocol '%s', will use fallback",
-            protocol,
+        if canonical is None:
+            logger.debug("No historical funding provider for protocol '%s', will use fallback", protocol)
+            return None
+        if canonical in self._provider_tried:
+            return self._provider_cache.get(canonical)
+
+        self._provider_tried.add(canonical)
+        provider_cls = cast(
+            type[HistoricalFundingProvider] | None,
+            FundingHistoryRegistry.backtest_provider(canonical),
         )
-        return None
+        if provider_cls is None:
+            self._provider_cache[canonical] = None
+            logger.debug("No historical funding provider declared for protocol '%s'", canonical)
+            return None
 
-    def _provider_factory_map(
-        self,
-    ) -> "dict[type, Callable[[], GMXFundingProvider | HyperliquidFundingProvider | None]]":
-        """Provider class -> bound cache-slot factory, built once per adapter.
-
-        Adapter-internal binding (which ``_ensure_*`` slot caches which
-        provider class); carries no venue names — the dispatch key comes
-        entirely from the connector's ``FundingHistoryDecl.backtest_provider``.
-        Cached on the instance so the lazy imports and dict construction stay
-        out of the per-lookup path (review feedback on #2770).
-        """
-        cached = getattr(self, "_provider_factories", None)
-        if cached is None:
-            from almanak.framework.backtesting.pnl.providers.perp.gmx_funding import GMXFundingProvider
-            from almanak.framework.backtesting.pnl.providers.perp.hyperliquid_funding import (
-                HyperliquidFundingProvider,
+        try:
+            provider = provider_cls.for_backtest(
+                BacktestProviderConfig(
+                    funding_fallback_rate=self._get_funding_fallback_rate(),
+                    chain=self._config.chain,
+                )
             )
-
-            cached = {
-                GMXFundingProvider: self._ensure_gmx_provider,
-                HyperliquidFundingProvider: self._ensure_hyperliquid_provider,
-            }
-            self._provider_factories = cached
-        return cached
+            self._provider_cache[canonical] = provider
+            logger.debug(
+                "Initialized historical funding provider for %s: chain=%s, fallback_rate=%s",
+                canonical,
+                self._config.chain,
+                self._get_funding_fallback_rate(),
+            )
+            return provider
+        except Exception as e:
+            logger.warning("Failed to initialize funding provider for %s: %s. Will use fallback rate.", canonical, e)
+            self._provider_cache[canonical] = None
+            return None
 
     def _normalize_timestamp_to_hour(self, timestamp: datetime) -> datetime:
         """Normalize timestamp to hourly boundary for caching.

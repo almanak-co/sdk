@@ -1,6 +1,6 @@
 """Unit tests for Spark APY Provider.
 
-This module tests the SparkAPYProvider class in providers/lending/spark_apy.py,
+This module tests the SparkAPYProvider class in connectors/spark/backtest_apy.py,
 covering:
 - Provider initialization and configuration
 - Supported chains and subgraph ID mapping
@@ -17,9 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from almanak.core.enums import Chain
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
-from almanak.framework.backtesting.pnl.providers.lending.spark_apy import (
+from almanak.connectors.spark.backtest_apy import (
     BORROWER_SIDE,
     DATA_SOURCE,
     DEFAULT_BORROW_APY_FALLBACK,
@@ -30,6 +28,8 @@ from almanak.framework.backtesting.pnl.providers.lending.spark_apy import (
     SparkAPYProvider,
     SparkClientConfig,
 )
+from almanak.core.enums import Chain
+from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
     SubgraphClientConfig,
@@ -509,9 +509,7 @@ class TestMarketResolution:
         provider = SparkAPYProvider(client=mock_client)
 
         # Long hex string should pass through
-        market_id = await provider._resolve_market_id(
-            Chain.ETHEREUM, "0x1234567890abcdef1234567890abcdef12345678"
-        )
+        market_id = await provider._resolve_market_id(Chain.ETHEREUM, "0x1234567890abcdef1234567890abcdef12345678")
 
         assert market_id == "0x1234567890abcdef1234567890abcdef12345678"
         # No query should be made

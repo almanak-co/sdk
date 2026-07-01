@@ -1,6 +1,6 @@
 """Unit tests for Morpho Blue APY Provider.
 
-This module tests the MorphoBlueAPYProvider class in providers/lending/morpho_apy.py,
+This module tests the MorphoBlueAPYProvider class in connectors/morpho_blue/backtest_apy.py,
 covering:
 - Provider initialization and configuration
 - Supported chains and subgraph ID mapping
@@ -13,13 +13,11 @@ covering:
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
-from almanak.core.enums import Chain
-from almanak.framework.backtesting.pnl.providers.lending.morpho_apy import (
+from almanak.connectors.morpho_blue.backtest_apy import (
     BORROWER_SIDE,
     DATA_SOURCE,
     DEFAULT_BORROW_APY_FALLBACK,
@@ -30,6 +28,7 @@ from almanak.framework.backtesting.pnl.providers.lending.morpho_apy import (
     MorphoBlueAPYProvider,
     MorphoBlueClientConfig,
 )
+from almanak.core.enums import Chain
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
     SubgraphClientConfig,
@@ -110,7 +109,7 @@ class TestSupportedChains:
 
     def test_subgraph_ids_are_valid_format(self):
         """Test subgraph IDs have valid format (base58-like)."""
-        for chain, subgraph_id in MORPHO_BLUE_SUBGRAPH_IDS.items():
+        for _chain, subgraph_id in MORPHO_BLUE_SUBGRAPH_IDS.items():
             # Subgraph IDs are base58-like strings
             assert len(subgraph_id) >= 40
             assert all(c.isalnum() for c in subgraph_id)

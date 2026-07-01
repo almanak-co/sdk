@@ -47,11 +47,24 @@ Examples:
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
+from typing import Self
 
 from almanak.core.enums import Chain
 
 from ..types import APYResult, FundingResult, LiquidityResult, VolumeResult
+
+
+@dataclass(frozen=True)
+class BacktestProviderConfig:
+    """Protocol-neutral construction config for connector-owned providers."""
+
+    supply_apy_fallback: Decimal | None = None
+    borrow_apy_fallback: Decimal | None = None
+    funding_fallback_rate: Decimal | None = None
+    chain: str | None = None
 
 
 class HistoricalVolumeProvider(ABC):
@@ -125,6 +138,11 @@ class HistoricalFundingProvider(ABC):
         - Graceful degradation when data is unavailable
     """
 
+    @classmethod
+    def for_backtest(cls, config: BacktestProviderConfig) -> Self:
+        """Construct a provider from the adapter's protocol-neutral config."""
+        raise NotImplementedError(f"{cls.__name__} must implement for_backtest")
+
     @abstractmethod
     async def get_funding_rates(
         self,
@@ -175,6 +193,11 @@ class HistoricalAPYProvider(ABC):
         - Caching for efficiency
         - Graceful degradation when data is unavailable
     """
+
+    @classmethod
+    def for_backtest(cls, config: BacktestProviderConfig) -> Self:
+        """Construct a provider from the adapter's protocol-neutral config."""
+        raise NotImplementedError(f"{cls.__name__} must implement for_backtest")
 
     @abstractmethod
     async def get_apy(

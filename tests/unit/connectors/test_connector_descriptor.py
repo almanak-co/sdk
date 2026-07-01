@@ -2879,6 +2879,30 @@ class TestDexVolumeDeclValidation:
         with pytest.raises(ValueError, match=f"{field} must be None or a Mapping"):
             self._decl(**{field: [("ethereum", "https://gateway.example/subgraph")]})
 
+    def test_accepts_lowercase_liquidity_subgraph_ids(self):
+        decl = self._decl(liquidity_subgraph_ids={"ethereum": "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"})
+        assert decl.liquidity_subgraph_ids == {"ethereum": "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"}
+
+    @pytest.mark.parametrize(
+        "bad_ids",
+        [
+            {"Ethereum": "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"},  # uppercase key
+            {"  ": "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"},  # blank key
+            {"ethereum": "https://gateway.example/subgraph"},  # URL value
+            {"ethereum": ""},  # blank value
+        ],
+    )
+    def test_rejects_malformed_liquidity_subgraph_ids(self, bad_ids):
+        with pytest.raises(
+            ValueError,
+            match="liquidity_subgraph_ids values must be deployment IDs keyed by lowercase chain name",
+        ):
+            self._decl(liquidity_subgraph_ids=bad_ids)
+
+    def test_rejects_non_mapping_liquidity_subgraph_ids(self):
+        with pytest.raises(ValueError, match="liquidity_subgraph_ids must be None or a Mapping"):
+            self._decl(liquidity_subgraph_ids=[("ethereum", "deployment")])
+
 
 class TestBacktestStrategyTypeDeclValidation:
     """Each BacktestStrategyTypeDecl.__post_init__ guard fails closed (VIB-4851)."""
@@ -2952,10 +2976,20 @@ class TestLendingReadDeclRateLaneValidation:
     def test_valid_rate_lane_declaration(self):
         decl = self._decl(
             rate_history_chains=("ethereum", "base"),
+            backtest_provider=ImportRef(
+                module="almanak.connectors.aave_v3.backtest_apy",
+                attribute="AaveV3APYProvider",
+            ),
             backtest_default_supply_apy="0.03",
             backtest_default_borrow_apy="0.05",
         )
         assert decl.rate_history_chains == ("ethereum", "base")
+        assert decl.backtest_provider is not None
+
+    @pytest.mark.parametrize("bad", ["not-a-ref", 123, {}])
+    def test_rejects_non_import_ref_backtest_provider(self, bad):
+        with pytest.raises(ValueError, match="backtest_provider must be None or an ImportRef"):
+            self._decl(backtest_provider=bad)
 
     @pytest.mark.parametrize("bad", [["ethereum"], "ethereum"])
     def test_rejects_non_tuple_rate_history_chains(self, bad):

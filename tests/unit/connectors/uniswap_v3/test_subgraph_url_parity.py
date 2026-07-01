@@ -26,7 +26,7 @@ def test_volume_subgraph_url_ids_match_gateway_provider() -> None:
     mismatches: list[str] = []
     for chain, url in urls.items():
         assert url.startswith(prefix), f"Unexpected URL format for {chain!r}: {url!r}"
-        manifest_id = url[len(prefix):]
+        manifest_id = url[len(prefix) :]
         gateway_id = _UNISWAP_V3_VOLUME_SUBGRAPH_IDS.get(chain)
         if gateway_id is None:
             mismatches.append(f"  {chain!r}: manifest has ID but gateway dict missing the chain")
@@ -39,6 +39,21 @@ def test_volume_subgraph_url_ids_match_gateway_provider() -> None:
             mismatches.append(f"  {chain!r}: in gateway dict but missing from manifest volume_subgraph_urls")
 
     assert not mismatches, "ID mismatch between manifest and gateway provider:\n" + "\n".join(mismatches)
+
+
+def test_liquidity_subgraph_ids_are_derived_from_volume_subgraph_urls() -> None:
+    """Liquidity-depth IDs must stay in lockstep with the manifest's volume subgraph URLs."""
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+    connector = CONNECTOR_REGISTRY.get("uniswap_v3")
+    assert connector is not None
+    assert connector.dex_volume is not None
+    urls = connector.dex_volume.volume_subgraph_urls
+    liquidity_ids = connector.dex_volume.liquidity_subgraph_ids
+    assert urls is not None
+    assert liquidity_ids is not None
+
+    assert dict(liquidity_ids) == {chain: url.rsplit("/", 1)[-1] for chain, url in urls.items()}
 
 
 def test_hosted_subgraph_urls_match_subgraph_module() -> None:

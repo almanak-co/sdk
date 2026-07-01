@@ -1,6 +1,6 @@
 """Unit tests for Aave V3 APY Provider.
 
-This module tests the AaveV3APYProvider class in providers/lending/aave_v3_apy.py,
+This module tests the AaveV3APYProvider class in connectors/aave_v3/backtest_apy.py,
 covering:
 - Provider initialization and configuration
 - Supported chains and subgraph ID mapping
@@ -11,24 +11,24 @@ covering:
 - Reserve ID finding and caching
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
-from almanak.core.enums import Chain
-from almanak.framework.backtesting.pnl.providers.lending.aave_v3_apy import (
+from almanak.connectors.aave_v3.backtest_apy import (
     AAVE_V3_SUBGRAPH_IDS,
     DATA_SOURCE,
     DEFAULT_BORROW_APY_FALLBACK,
     DEFAULT_SUPPLY_APY_FALLBACK,
-    RAY,
     SUPPORTED_CHAINS,
     AaveV3APYProvider,
     AaveV3ClientConfig,
 )
+from almanak.core.enums import Chain
+from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
     SubgraphClientConfig,
@@ -91,6 +91,43 @@ class TestAaveV3APYProviderInitialization:
         assert chains1 == chains2
         assert chains1 is not chains2
 
+    @pytest.mark.parametrize(
+        ("config", "expected_supply", "expected_borrow"),
+        [
+            (
+                BacktestProviderConfig(
+                    supply_apy_fallback=Decimal("0.071"),
+                    borrow_apy_fallback=Decimal("0.083"),
+                ),
+                Decimal("0.071"),
+                Decimal("0.083"),
+            ),
+            (
+                BacktestProviderConfig(),
+                DEFAULT_SUPPLY_APY_FALLBACK,
+                DEFAULT_BORROW_APY_FALLBACK,
+            ),
+            (
+                BacktestProviderConfig(
+                    supply_apy_fallback=Decimal("0"),
+                    borrow_apy_fallback=Decimal("0"),
+                ),
+                Decimal("0"),
+                Decimal("0"),
+            ),
+        ],
+    )
+    def test_for_backtest_maps_fallback_config(
+        self,
+        config: BacktestProviderConfig,
+        expected_supply: Decimal,
+        expected_borrow: Decimal,
+    ) -> None:
+        """Backtest config fallbacks map directly, preserving None/default and zero semantics."""
+        provider = AaveV3APYProvider.for_backtest(config)
+        assert provider.config.supply_apy_fallback == expected_supply
+        assert provider.config.borrow_apy_fallback == expected_borrow
+
 
 class TestSupportedChains:
     """Tests for supported chains configuration."""
@@ -113,7 +150,7 @@ class TestSupportedChains:
 
     def test_subgraph_ids_are_valid_format(self):
         """Test subgraph IDs have valid format (base58-like)."""
-        for chain, subgraph_id in AAVE_V3_SUBGRAPH_IDS.items():
+        for _chain, subgraph_id in AAVE_V3_SUBGRAPH_IDS.items():
             # Subgraph IDs are base58-like strings
             assert len(subgraph_id) >= 40
             assert all(c.isalnum() for c in subgraph_id)
@@ -307,9 +344,7 @@ class TestGetAPY:
         """Test that timezone is added to naive datetimes."""
         provider = AaveV3APYProvider()
 
-        reserve_response = {
-            "reserves": [{"id": "0xusdc-0xpool-0", "symbol": "USDC"}]
-        }
+        reserve_response = {"reserves": [{"id": "0xusdc-0xpool-0", "symbol": "USDC"}]}
         history_response = {
             "reserveParamsHistoryItems": [
                 {
@@ -423,9 +458,7 @@ class TestGetAPYForChain:
         config = AaveV3ClientConfig(chain=Chain.ETHEREUM)
         provider = AaveV3APYProvider(config=config)
 
-        reserve_response = {
-            "reserves": [{"id": "0xusdc-0xpool-0", "symbol": "USDC"}]
-        }
+        reserve_response = {"reserves": [{"id": "0xusdc-0xpool-0", "symbol": "USDC"}]}
         history_response = {
             "reserveParamsHistoryItems": [
                 {
@@ -487,9 +520,7 @@ class TestGetCurrentAPY:
         """Test that get_current_apy returns the most recent APY."""
         provider = AaveV3APYProvider()
 
-        reserve_response = {
-            "reserves": [{"id": "0xusdc-0xpool-0", "symbol": "USDC"}]
-        }
+        reserve_response = {"reserves": [{"id": "0xusdc-0xpool-0", "symbol": "USDC"}]}
         history_response = {
             "reserveParamsHistoryItems": [
                 {
@@ -578,9 +609,7 @@ class TestReserveIDCaching:
         """Test that reserve ID is cached after first lookup."""
         provider = AaveV3APYProvider()
 
-        reserve_response = {
-            "reserves": [{"id": "0xusdc-0xpool-0", "symbol": "USDC"}]
-        }
+        reserve_response = {"reserves": [{"id": "0xusdc-0xpool-0", "symbol": "USDC"}]}
 
         mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=reserve_response)
@@ -781,7 +810,7 @@ class TestCursorPaginationThroughProvider:
         VIB-5089: the provider must never swap a partially fetched series for
         LOW-confidence fallback values - that would be silent truncation.
         """
-        import almanak.framework.backtesting.pnl.providers.lending.aave_v3_apy as aave_module
+        import almanak.connectors.aave_v3.backtest_apy as aave_module
         from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 
         monkeypatch.setattr(aave_module, "MAX_PAGINATION_PAGES", 2)

@@ -1,6 +1,6 @@
 """Unit tests for GMX V2 Funding Rate Provider.
 
-This module tests the GMXFundingProvider class in providers/perp/gmx_funding.py.
+This module tests the GMXFundingProvider class in connectors/gmx_v2/backtest_funding.py.
 The provider is a thin ``RateHistoryService`` client since VIB-4851 Phase D —
 tests mock ``fetch_funding_points`` (the gateway seam), never HTTP:
 - Provider initialization and configuration
@@ -16,21 +16,23 @@ from unittest.mock import patch
 
 import pytest
 
-from almanak.core.enums import Chain
-from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
-    FundingHistoryPoint,
-)
-from almanak.framework.backtesting.pnl.providers.perp.gmx_funding import (
+from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
+from almanak.connectors.gmx_v2.backtest_funding import (
     DATA_SOURCE,
     DEFAULT_REQUESTS_PER_MINUTE,
     GMXClientConfig,
     GMXFundingProvider,
 )
+from almanak.core.enums import Chain
+from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig
+from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
+    FundingHistoryPoint,
+)
 from almanak.framework.backtesting.pnl.providers.rate_limiter import TokenBucketRateLimiter
 from almanak.framework.backtesting.pnl.types import DataConfidence
 from almanak.framework.data.interfaces import DataSourceUnavailable
 
-_GATEWAY_SEAM = "almanak.framework.backtesting.pnl.providers.perp.gmx_funding.fetch_funding_points"
+_GATEWAY_SEAM = "almanak.connectors.gmx_v2.backtest_funding.fetch_funding_points"
 
 
 def _points(start: datetime, rates: list[str]) -> list[FundingHistoryPoint]:
@@ -75,6 +77,53 @@ class TestGMXFundingProviderInitialization:
         chains = provider.supported_chains
         chains.append(Chain.ETHEREUM)
         assert Chain.ETHEREUM not in provider.supported_chains
+
+    def test_for_backtest_defaults_to_arbitrum(self):
+        """Factory defaults to the connector's canonical backtest chain."""
+        provider = GMXFundingProvider.for_backtest(BacktestProviderConfig())
+        assert provider.config.chain == Chain.ARBITRUM
+        assert provider.config.fallback_rate == Decimal("0.0001")
+
+    def test_for_backtest_uses_declared_chain_and_fallback_rate(self):
+        """Declared chain config resolves through the funding-history registry."""
+        provider = GMXFundingProvider.for_backtest(
+            BacktestProviderConfig(
+                chain="avalanche",
+                funding_fallback_rate=Decimal("0"),
+            )
+        )
+        assert provider.config.chain == Chain.AVALANCHE
+        assert provider.config.fallback_rate == Decimal("0")
+
+    def test_for_backtest_warns_on_unsupported_chain(self, caplog: pytest.LogCaptureFixture):
+        """Unsupported configured chains fall back visibly to Arbitrum."""
+        caplog.set_level("WARNING", logger="almanak.connectors.gmx_v2.backtest_funding")
+
+        provider = GMXFundingProvider.for_backtest(
+            BacktestProviderConfig(
+                chain="ethereum",
+                funding_fallback_rate=Decimal("0.0007"),
+            )
+        )
+
+        assert provider.config.chain == Chain.ARBITRUM
+        assert provider.config.fallback_rate == Decimal("0.0007")
+        assert "unsupported chain 'ethereum'" in caplog.text
+        assert "falling back to ARBITRUM" in caplog.text
+
+    def test_for_backtest_warns_when_declared_chain_has_no_enum(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """A malformed manifest chain still falls back visibly instead of raising."""
+        caplog.set_level("WARNING", logger="almanak.connectors.gmx_v2.backtest_funding")
+
+        with patch.object(FundingHistoryRegistry, "declared_chains", return_value=("not_in_enum",)):
+            provider = GMXFundingProvider.for_backtest(BacktestProviderConfig(chain="not_in_enum"))
+
+        assert provider.config.chain == Chain.ARBITRUM
+        assert "Chain.NOT_IN_ENUM is unavailable" in caplog.text
+        assert "falling back to ARBITRUM" in caplog.text
 
 
 class TestSupportedChains:

@@ -78,8 +78,7 @@ class TestSupportedMarketsDerivation:
         # PEP 562: the attribute is NOT in the module __dict__ at import time
         # (it is served dynamically by __getattr__).
         assert "SUPPORTED_MARKETS" not in vars(models_mod), (
-            "SUPPORTED_MARKETS should not be a module-level literal — "
-            "it must be derived lazily via __getattr__"
+            "SUPPORTED_MARKETS should not be a module-level literal — it must be derived lazily via __getattr__"
         )
 
 
@@ -90,10 +89,7 @@ class TestVenueParity:
         from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
         from almanak.framework.data.funding.models import SUPPORTED_VENUES, Venue
 
-        declared_venues = {
-            FundingHistoryRegistry.venue_for(k)
-            for k in FundingHistoryRegistry._venues()
-        }
+        declared_venues = {FundingHistoryRegistry.venue_for(k) for k in FundingHistoryRegistry._venues()}
         enum_values = {v.value for v in Venue}
         assert declared_venues == enum_values, (
             f"Venue enum members {enum_values} != declared connector venues {declared_venues}. "
@@ -141,7 +137,7 @@ class TestFundingHistoryDeclValidation:
     def test_valid_backtest_provider_accepted(self) -> None:
         from almanak.connectors._connector_descriptor import FundingHistoryDecl, ImportRef
 
-        ref = ImportRef(module="almanak.framework.backtesting.pnl.providers.perp.gmx_funding", attribute="GMXFundingProvider")
+        ref = ImportRef(module="almanak.connectors.gmx_v2.backtest_funding", attribute="GMXFundingProvider")
         decl = FundingHistoryDecl(venue="test_venue", backtest_provider=ref)
         assert decl.backtest_provider is ref
 
@@ -207,7 +203,7 @@ class TestRegistryBacktestProviderAccessor:
 
     def test_gmx_provider_class(self) -> None:
         from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
-        from almanak.framework.backtesting.pnl.providers.perp.gmx_funding import GMXFundingProvider
+        from almanak.connectors.gmx_v2.backtest_funding import GMXFundingProvider
 
         FundingHistoryRegistry.reset_cache()
         cls = FundingHistoryRegistry.backtest_provider("gmx_v2")
@@ -224,7 +220,7 @@ class TestRegistryBacktestProviderAccessor:
 
     def test_hyperliquid_provider_class(self) -> None:
         from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
-        from almanak.framework.backtesting.pnl.providers.perp.hyperliquid_funding import HyperliquidFundingProvider
+        from almanak.connectors.hyperliquid.backtest_funding import HyperliquidFundingProvider
 
         FundingHistoryRegistry.reset_cache()
         cls = FundingHistoryRegistry.backtest_provider("hyperliquid")

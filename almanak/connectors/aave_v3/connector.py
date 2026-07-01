@@ -101,6 +101,10 @@ CONNECTOR = Connector(
         rate_history_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche"),
         backtest_default_supply_apy="0.03",
         backtest_default_borrow_apy="0.05",
+        backtest_provider=ImportRef(
+            module="almanak.connectors.aave_v3.backtest_apy",
+            attribute="AaveV3APYProvider",
+        ),
         spec=ImportRef(module="almanak.connectors.aave_v3.lending_read", attribute="LENDING_READ_SPEC"),
         account_state=ImportRef(module="almanak.connectors.aave_v3.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"),
         aliases=("aave", "aavev3"),

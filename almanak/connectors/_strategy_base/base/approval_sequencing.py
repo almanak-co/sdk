@@ -33,12 +33,9 @@ imports either — it only orders the caller's own builders.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TypeVar
-
-T = TypeVar("T")
 
 
-def build_approval_sequence(
+def build_approval_sequence[T](
     *,
     amount: int,
     current_allowance: int | None,

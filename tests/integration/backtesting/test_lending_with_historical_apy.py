@@ -15,7 +15,6 @@ Example:
     THEGRAPH_API_KEY=your_key pytest -m integration -v
 """
 
-import asyncio
 import logging
 import os
 from datetime import UTC, datetime, timedelta
@@ -23,6 +22,13 @@ from decimal import Decimal
 
 import pytest
 
+from almanak.connectors.aave_v3.backtest_apy import (
+    AaveV3APYProvider,
+    AaveV3ClientConfig,
+)
+from almanak.connectors.compound_v3.backtest_apy import CompoundV3APYProvider
+from almanak.connectors.morpho_blue.backtest_apy import MorphoBlueAPYProvider
+from almanak.connectors.spark.backtest_apy import SparkAPYProvider
 from almanak.core.enums import Chain
 from almanak.framework.backtesting.adapters.lending_adapter import (
     LendingBacktestAdapter,
@@ -32,15 +38,6 @@ from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.backtesting.pnl.portfolio import (
     PositionType,
     SimulatedPosition,
-)
-from almanak.framework.backtesting.pnl.providers.lending import (
-    AaveV3APYProvider,
-    CompoundV3APYProvider,
-    MorphoBlueAPYProvider,
-    SparkAPYProvider,
-)
-from almanak.framework.backtesting.pnl.providers.lending.aave_v3_apy import (
-    AaveV3ClientConfig,
 )
 from almanak.framework.backtesting.pnl.types import DataConfidence
 
@@ -133,14 +130,10 @@ class TestAaveV3APYProvider:
         assert len(apys) > 0, "Expected at least one APY result"
 
         # Check that results have HIGH confidence (real subgraph data)
-        high_confidence_count = sum(
-            1 for a in apys if a.source_info.confidence == DataConfidence.HIGH
-        )
+        high_confidence_count = sum(1 for a in apys if a.source_info.confidence == DataConfidence.HIGH)
 
         # At least some results should be HIGH confidence
-        assert high_confidence_count > 0, (
-            "Expected at least one HIGH confidence result from subgraph"
-        )
+        assert high_confidence_count > 0, "Expected at least one HIGH confidence result from subgraph"
 
         # Log the APY data for debugging
         logger.info(
@@ -160,21 +153,15 @@ class TestAaveV3APYProvider:
             )
 
         # Verify APY values are reasonable for USDC (typically 1-10% range)
-        high_conf_apys = [
-            a for a in apys if a.source_info.confidence == DataConfidence.HIGH
-        ]
+        high_conf_apys = [a for a in apys if a.source_info.confidence == DataConfidence.HIGH]
 
         if high_conf_apys:
             # Supply APY should be positive
             avg_supply_apy = sum(a.supply_apy for a in high_conf_apys) / len(high_conf_apys)
-            assert avg_supply_apy >= Decimal("0"), (
-                f"Expected non-negative supply APY, got {avg_supply_apy}"
-            )
+            assert avg_supply_apy >= Decimal("0"), f"Expected non-negative supply APY, got {avg_supply_apy}"
 
             # Supply APY for stablecoins should typically be below 20%
-            assert avg_supply_apy < Decimal("0.20"), (
-                f"Supply APY seems unreasonably high: {avg_supply_apy}"
-            )
+            assert avg_supply_apy < Decimal("0.20"), f"Supply APY seems unreasonably high: {avg_supply_apy}"
 
             # Borrow APY should be higher than supply APY (interest rate spread)
             avg_borrow_apy = sum(a.borrow_apy for a in high_conf_apys) / len(high_conf_apys)
@@ -255,21 +242,15 @@ class TestAaveV3APYProvider:
             pytest.skip("No Aave V3 APY data returned")
 
         # Filter to HIGH confidence results
-        high_conf_apys = [
-            a for a in apys if a.source_info.confidence == DataConfidence.HIGH
-        ]
+        high_conf_apys = [a for a in apys if a.source_info.confidence == DataConfidence.HIGH]
 
         if high_conf_apys:
             for apy in high_conf_apys:
                 # Supply APY should be between 0% and 100%
-                assert Decimal("0") <= apy.supply_apy <= Decimal("1"), (
-                    f"Supply APY {apy.supply_apy} out of valid range"
-                )
+                assert Decimal("0") <= apy.supply_apy <= Decimal("1"), f"Supply APY {apy.supply_apy} out of valid range"
 
                 # Borrow APY should be between 0% and 100%
-                assert Decimal("0") <= apy.borrow_apy <= Decimal("1"), (
-                    f"Borrow APY {apy.borrow_apy} out of valid range"
-                )
+                assert Decimal("0") <= apy.borrow_apy <= Decimal("1"), f"Borrow APY {apy.borrow_apy} out of valid range"
 
             logger.info("Aave V3 WETH: All %d APY values within valid range", len(high_conf_apys))
 
@@ -306,9 +287,7 @@ class TestMultiProtocolAPY:
             if apys:
                 logger.info("Compound V3: Fetched %d APY data points", len(apys))
 
-                high_conf_count = sum(
-                    1 for a in apys if a.source_info.confidence == DataConfidence.HIGH
-                )
+                high_conf_count = sum(1 for a in apys if a.source_info.confidence == DataConfidence.HIGH)
                 logger.info("Compound V3: %d HIGH confidence results", high_conf_count)
 
                 # Log sample data
@@ -347,9 +326,7 @@ class TestMultiProtocolAPY:
             if apys:
                 logger.info("Morpho Blue: Fetched %d APY data points", len(apys))
 
-                high_conf_count = sum(
-                    1 for a in apys if a.source_info.confidence == DataConfidence.HIGH
-                )
+                high_conf_count = sum(1 for a in apys if a.source_info.confidence == DataConfidence.HIGH)
                 logger.info("Morpho Blue: %d HIGH confidence results", high_conf_count)
 
         except Exception as e:
@@ -378,9 +355,7 @@ class TestMultiProtocolAPY:
             if apys:
                 logger.info("Spark: Fetched %d APY data points", len(apys))
 
-                high_conf_count = sum(
-                    1 for a in apys if a.source_info.confidence == DataConfidence.HIGH
-                )
+                high_conf_count = sum(1 for a in apys if a.source_info.confidence == DataConfidence.HIGH)
                 logger.info("Spark: %d HIGH confidence results", high_conf_count)
 
         except Exception as e:
@@ -452,8 +427,7 @@ class TestLendingAdapterWithHistoricalAPY:
 
             # Check position was updated with interest data
             logger.info(
-                "Supply position after update: "
-                "interest_accrued=%s, apy_confidence=%s, apy_data_source=%s",
+                "Supply position after update: interest_accrued=%s, apy_confidence=%s, apy_data_source=%s",
                 getattr(position, "interest_accrued", "N/A"),
                 getattr(position, "apy_confidence", "N/A"),
                 getattr(position, "apy_data_source", "N/A"),
@@ -512,9 +486,7 @@ class TestLendingAdapterWithHistoricalAPY:
         assert len(apys) > 0, "Should have APY data"
 
         high_count = confidence_counts.get("high", 0)
-        assert high_count > 0, (
-            "Expected at least one HIGH confidence result when subgraph data is available"
-        )
+        assert high_count > 0, "Expected at least one HIGH confidence result when subgraph data is available"
 
     @pytest.mark.asyncio
     async def test_interest_calculation_accuracy(self) -> None:
@@ -554,14 +526,10 @@ class TestLendingAdapterWithHistoricalAPY:
         )
 
         # Compound interest should be slightly higher than simple
-        assert compound_interest > simple_interest, (
-            "Compound interest should exceed simple interest"
-        )
+        assert compound_interest > simple_interest, "Compound interest should exceed simple interest"
 
         # Difference should be small for short periods
-        assert compound_interest - simple_interest < Decimal("1"), (
-            "Interest difference too large for 30-day period"
-        )
+        assert compound_interest - simple_interest < Decimal("1"), "Interest difference too large for 30-day period"
 
     @pytest.mark.asyncio
     async def test_borrow_position_interest_calculation(
@@ -620,8 +588,7 @@ class TestLendingAdapterWithHistoricalAPY:
             adapter.update_position(position, market_state, elapsed_seconds)
 
             logger.info(
-                "Borrow position after update: "
-                "interest_accrued=%s, apy_confidence=%s",
+                "Borrow position after update: interest_accrued=%s, apy_confidence=%s",
                 getattr(position, "interest_accrued", "N/A"),
                 getattr(position, "apy_confidence", "N/A"),
             )

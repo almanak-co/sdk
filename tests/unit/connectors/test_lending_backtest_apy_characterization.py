@@ -6,30 +6,30 @@ from typing import Any
 
 import pytest
 
-from almanak.core.enums import Chain
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
-from almanak.framework.backtesting.pnl.providers.lending.aave_v3_apy import (
+from almanak.connectors.aave_v3.backtest_apy import (
     AaveV3APYProvider,
     AaveV3ClientConfig,
 )
-from almanak.framework.backtesting.pnl.providers.lending.morpho_apy import (
+from almanak.connectors.morpho_blue.backtest_apy import (
     BORROWER_SIDE as MORPHO_BORROWER_SIDE,
 )
-from almanak.framework.backtesting.pnl.providers.lending.morpho_apy import (
+from almanak.connectors.morpho_blue.backtest_apy import (
     LENDER_SIDE as MORPHO_LENDER_SIDE,
 )
-from almanak.framework.backtesting.pnl.providers.lending.morpho_apy import (
+from almanak.connectors.morpho_blue.backtest_apy import (
     MorphoBlueAPYProvider,
 )
-from almanak.framework.backtesting.pnl.providers.lending.spark_apy import (
+from almanak.connectors.spark.backtest_apy import (
     BORROWER_SIDE as SPARK_BORROWER_SIDE,
 )
-from almanak.framework.backtesting.pnl.providers.lending.spark_apy import (
+from almanak.connectors.spark.backtest_apy import (
     LENDER_SIDE as SPARK_LENDER_SIDE,
 )
-from almanak.framework.backtesting.pnl.providers.lending.spark_apy import (
+from almanak.connectors.spark.backtest_apy import (
     SparkAPYProvider,
 )
+from almanak.core.enums import Chain
+from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphQueryError,
 )

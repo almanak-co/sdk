@@ -20,6 +20,10 @@ CONNECTOR = Connector(
         amm_family="stableswap",
         aliases=("crv",),
         volume_data_source="curve_messari_subgraph",
+        liquidity_subgraph_ids={
+            "ethereum": "3fy93eAT56UJsRCEht8iFhfi6wjHWXtZ9dnnbQmvFopF",
+            "optimism": "CXDZPduZE6nWuWEkSzWkRoJSSJ6CneSqiDxdnhhURShX",
+        },
     ),
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.curve.fee_model", attribute="CurveFeeModel"),

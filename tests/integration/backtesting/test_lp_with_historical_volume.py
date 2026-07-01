@@ -10,7 +10,7 @@ lives gateway-side, so these end-to-end tests require a **running gateway
 sidecar** (with ``thegraph_api_key`` configured), not a strategy-container
 ``THEGRAPH_API_KEY``. They skip when no gateway is reachable. The
 per-DEX decode + the no-silent-zeros contract are covered offline by
-``tests/unit/backtesting/providers/test_*_volume.py`` and the gateway
+``tests/unit/backtesting/providers/test_multi_dex_volume.py`` and the gateway
 dispatcher suite ``tests/gateway/services/test_rate_history_service_dex_volume.py``.
 
 Example:
@@ -31,9 +31,7 @@ from almanak.framework.backtesting.adapters.lp_adapter import (
     LPBacktestConfig,
 )
 from almanak.framework.backtesting.config import BacktestDataConfig
-from almanak.framework.backtesting.pnl.providers.dex import (
-    UniswapV3VolumeProvider,
-)
+from almanak.framework.backtesting.pnl.providers.dex import GatewayDexVolumeProvider
 from almanak.framework.backtesting.pnl.providers.multi_dex_volume import (
     MultiDEXVolumeProvider,
 )
@@ -138,7 +136,7 @@ class TestGatewayBackedVolumeContract:
             "almanak.framework.backtesting.pnl.providers.dex._gateway_volume._get_connected_gateway_client",
             side_effect=DataSourceUnavailable(source="gateway", reason="no gateway in test env"),
         ):
-            provider = UniswapV3VolumeProvider()
+            provider = GatewayDexVolumeProvider("uniswap_v3")
             with pytest.raises(DataSourceUnavailable):
                 await provider.get_volume(
                     pool_address=WETH_USDC_POOL_ETHEREUM,
@@ -162,7 +160,7 @@ class TestLPWithHistoricalVolume:
         self,
         gateway_available: bool,
     ) -> None:
-        """Test that UniswapV3VolumeProvider fetches real volume data from subgraph.
+        """Test that the Uniswap V3 gateway provider fetches real volume data.
 
         This test validates the volume provider can query The Graph and return
         VolumeResult objects with HIGH confidence when data is available.
@@ -170,7 +168,7 @@ class TestLPWithHistoricalVolume:
         if not gateway_available:
             pytest.skip("No gateway sidecar reachable - skipping live gateway test")
 
-        provider = UniswapV3VolumeProvider()
+        provider = GatewayDexVolumeProvider("uniswap_v3")
 
         async with provider:
             volumes = await provider.get_volume(
@@ -349,7 +347,7 @@ class TestLPWithHistoricalVolume:
             pytest.skip("No gateway sidecar reachable - skipping live gateway test")
 
         # Fetch actual volume data
-        provider = UniswapV3VolumeProvider()
+        provider = GatewayDexVolumeProvider("uniswap_v3")
 
         async with provider:
             volumes = await provider.get_volume(

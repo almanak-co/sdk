@@ -128,9 +128,7 @@ class TestInitialization:
 
     def test_init_without_client(self):
         """Test initialization without client creates one."""
-        with patch(
-            "almanak.framework.backtesting.pnl.providers.liquidity_depth.SubgraphClient"
-        ) as mock_class:
+        with patch("almanak.framework.backtesting.pnl.providers.liquidity_depth.SubgraphClient") as mock_class:
             mock_class.return_value = MagicMock()
             provider = LiquidityDepthProvider()
             assert provider._owns_client is True
@@ -181,9 +179,7 @@ class TestContextManager:
     @pytest.mark.asyncio
     async def test_context_manager_closes_owned_client(self, mock_subgraph_client):
         """Test context manager closes owned client."""
-        with patch(
-            "almanak.framework.backtesting.pnl.providers.liquidity_depth.SubgraphClient"
-        ) as mock_class:
+        with patch("almanak.framework.backtesting.pnl.providers.liquidity_depth.SubgraphClient") as mock_class:
             mock_instance = MagicMock()
             mock_instance.close = AsyncMock()
             mock_class.return_value = mock_instance
@@ -195,9 +191,7 @@ class TestContextManager:
             mock_instance.close.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_context_manager_does_not_close_provided_client(
-        self, provider, mock_subgraph_client
-    ):
+    async def test_context_manager_does_not_close_provided_client(self, provider, mock_subgraph_client):
         """Test context manager doesn't close provided client."""
         async with provider:
             pass
@@ -470,9 +464,7 @@ class TestTWAPCalculation:
     """Test time-weighted average depth calculation."""
 
     @pytest.mark.asyncio
-    async def test_twap_with_multiple_data_points(
-        self, provider_with_twap, mock_subgraph_client
-    ):
+    async def test_twap_with_multiple_data_points(self, provider_with_twap, mock_subgraph_client):
         """Test TWAP calculation with multiple data points."""
         # Multiple data points within the 24-hour TWAP window
         # Target timestamp is Jan 2, 2024 at 12:00 UTC
@@ -508,9 +500,7 @@ class TestTWAPCalculation:
         assert result.source_info.confidence == DataConfidence.HIGH
 
     @pytest.mark.asyncio
-    async def test_twap_with_single_data_point(
-        self, provider_with_twap, mock_subgraph_client
-    ):
+    async def test_twap_with_single_data_point(self, provider_with_twap, mock_subgraph_client):
         """Test TWAP with single data point returns that value."""
         mock_subgraph_client.query.return_value = {
             "poolDayDatas": [
@@ -776,9 +766,7 @@ class TestRangeQuery:
     """Test get_liquidity_depth_range method."""
 
     @pytest.mark.asyncio
-    async def test_range_query_returns_multiple_results(
-        self, provider, mock_subgraph_client
-    ):
+    async def test_range_query_returns_multiple_results(self, provider, mock_subgraph_client):
         """Test range query returns results for each day."""
         mock_subgraph_client.query.return_value = {
             "poolDayDatas": [
@@ -832,7 +820,7 @@ class TestProtocolNormalization:
         assert provider._get_protocol_id(None) is None
 
     def test_declared_aliases_resolve_to_canonical(self, provider):
-        """Decl aliases resolve so PROTOCOL_SUBGRAPH_IDS lookups succeed."""
+        """Decl aliases resolve so liquidity subgraph-ID lookups succeed."""
         assert provider._get_protocol_id("uni_v3") == "uniswap_v3"
         assert provider._get_protocol_id("crv") == "curve"
         assert provider._get_protocol_id("bal") == "balancer"

@@ -138,6 +138,7 @@ class _LendingDispatchMaps:
     account_state_loaders: dict[str, tuple[str, str]]
     market_health_loaders: dict[str, tuple[str, str]]
     market_table_loaders: dict[str, tuple[str, str]]
+    backtest_provider_loaders: dict[str, tuple[str, str]]
     aliases: dict[str, str]
     # Plan 027 Step 5: set of canonical protocol keys that declare
     # accepts_is_collateral=True on their LendingReadDecl.
@@ -184,6 +185,7 @@ class LendingReadRegistry:
             account_state_loaders: dict[str, tuple[str, str]] = {}
             market_health_loaders: dict[str, tuple[str, str]] = {}
             market_table_loaders: dict[str, tuple[str, str]] = {}
+            backtest_provider_loaders: dict[str, tuple[str, str]] = {}
             aliases: dict[str, str] = {}
             collateral_flag_protocols: set[str] = set()
             token_keyed_protocols: set[str] = set()
@@ -199,6 +201,11 @@ class LendingReadRegistry:
                     market_health_loaders[key] = (decl.market_health.module, decl.market_health.attribute)
                 if decl.market_table is not None:
                     market_table_loaders[key] = (decl.market_table.module, decl.market_table.attribute)
+                if decl.backtest_provider is not None:
+                    backtest_provider_loaders[key] = (
+                        decl.backtest_provider.module,
+                        decl.backtest_provider.attribute,
+                    )
                 for alias in decl.aliases:
                     aliases[alias] = key
                 if decl.accepts_is_collateral:
@@ -210,6 +217,7 @@ class LendingReadRegistry:
                 account_state_loaders=account_state_loaders,
                 market_health_loaders=market_health_loaders,
                 market_table_loaders=market_table_loaders,
+                backtest_provider_loaders=backtest_provider_loaders,
                 aliases=aliases,
                 collateral_flag_protocols=frozenset(collateral_flag_protocols),
                 token_keyed_protocols=frozenset(token_keyed_protocols),
@@ -226,6 +234,7 @@ class LendingReadRegistry:
     # Per-protocol resolved market-health reader callable (VIB-4851 PR-2). Lazily
     # populated by ``market_health_reader`` on first access.
     _market_health_cache: ClassVar[dict[str, Callable[..., Any]]] = {}
+    _backtest_provider_cache: ClassVar[dict[str, type | None]] = {}
     # Per-protocol resolved market table (VIB-4929 PR-3a). Lazily populated by
     # ``market_params`` on first access so the connector ``addresses`` module is
     # imported once, on demand, never eagerly at registry import.
@@ -551,6 +560,48 @@ class LendingReadRegistry:
         return reader
 
     @classmethod
+    def backtest_provider(cls, protocol: str | None) -> type | None:
+        """Return the connector-owned ``HistoricalAPYProvider`` class for ``protocol``.
+
+        The class is resolved lazily from the manifest ImportRef on first use
+        and cached for the registry lifetime. Returns ``None`` when the
+        connector has no declared historical APY provider or the protocol is
+        unknown.
+        """
+        key = cls.backtest_provider_key(protocol)
+        if key is None:
+            return None
+        if key in cls._backtest_provider_cache:
+            return cls._backtest_provider_cache[key]
+        entry = cls._dispatch().backtest_provider_loaders.get(key)
+        if entry is None:
+            cls._backtest_provider_cache[key] = None
+            return None
+        module_path, attribute = entry
+        module = importlib.import_module(module_path)
+        provider = getattr(module, attribute, None)
+        if not isinstance(provider, type):
+            raise TypeError(
+                f"Registry maps {protocol!r} backtest provider to {module_path}.{attribute}, "
+                f"but that attribute is {type(provider).__name__}, not a class."
+            )
+        cls._backtest_provider_cache[key] = provider
+        return provider
+
+    @classmethod
+    def backtest_provider_key(cls, protocol: str | None) -> str | None:
+        """Return the canonical key for protocols with backtest APY providers.
+
+        This is intentionally wider than :meth:`canonical`, which is scoped to
+        single-reserve lending reads. Historical APY providers also exist for
+        market/account-state protocols such as Compound V3 and Morpho Blue.
+        """
+        if not isinstance(protocol, str) or not protocol:
+            return None
+        key = cls._normalize(protocol)
+        return key if key in cls._dispatch().backtest_provider_loaders else None
+
+    @classmethod
     def market_health_inputs(cls, protocol: str, chain: str, market_id: str) -> dict[str, object] | None:
         """Resolve the multi-collateral health-read inputs for ``(protocol, chain, market_id)``.
 
@@ -851,4 +902,5 @@ class LendingReadRegistry:
         cls._account_state_cache.clear()
         cls._market_cache.clear()
         cls._market_health_cache.clear()
+        cls._backtest_provider_cache.clear()
         cls._dispatch_maps = None

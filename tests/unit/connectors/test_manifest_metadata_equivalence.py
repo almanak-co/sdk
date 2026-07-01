@@ -161,6 +161,12 @@ FROZEN_LENDING_MARKET_TABLE_LOADERS = {
     # VIB-5031: the pinned type-1 vault universe (vault address -> params).
     "fluid_vault": ("almanak.connectors._fluid_core.addresses", "FLUID_VAULT_MARKETS"),
 }
+FROZEN_LENDING_BACKTEST_PROVIDER_LOADERS = {
+    "aave_v3": ("almanak.connectors.aave_v3.backtest_apy", "AaveV3APYProvider"),
+    "spark": ("almanak.connectors.spark.backtest_apy", "SparkAPYProvider"),
+    "morpho_blue": ("almanak.connectors.morpho_blue.backtest_apy", "MorphoBlueAPYProvider"),
+    "compound_v3": ("almanak.connectors.compound_v3.backtest_apy", "CompoundV3APYProvider"),
+}
 # B3 (VIB-4851) deliberately WIDENED the lending aliases beyond the legacy
 # registry table: the spellings previously private to
 # ``position_health._normalize_protocol`` now resolve in every registry
@@ -198,7 +204,30 @@ def test_lending_read_dispatch_equals_frozen_legacy_tables() -> None:
     assert dispatch.account_state_loaders == FROZEN_LENDING_ACCOUNT_STATE_LOADERS
     assert dispatch.market_health_loaders == FROZEN_LENDING_MARKET_HEALTH_LOADERS
     assert dispatch.market_table_loaders == FROZEN_LENDING_MARKET_TABLE_LOADERS
+    assert dispatch.backtest_provider_loaders == FROZEN_LENDING_BACKTEST_PROVIDER_LOADERS
     assert dispatch.aliases == FROZEN_LENDING_ALIASES
+
+
+def test_lending_backtest_provider_accessor_loads_connector_classes() -> None:
+    """Manifest ImportRefs lazily resolve the connector-owned APY providers."""
+    from almanak.connectors.aave_v3.backtest_apy import AaveV3APYProvider
+    from almanak.connectors.compound_v3.backtest_apy import CompoundV3APYProvider
+    from almanak.connectors.morpho_blue.backtest_apy import MorphoBlueAPYProvider
+    from almanak.connectors.spark.backtest_apy import SparkAPYProvider
+
+    LendingReadRegistry.reset_cache()
+    expected = {
+        "aave_v3": AaveV3APYProvider,
+        "aave": AaveV3APYProvider,
+        "compound_v3": CompoundV3APYProvider,
+        "compound": CompoundV3APYProvider,
+        "morpho_blue": MorphoBlueAPYProvider,
+        "morpho": MorphoBlueAPYProvider,
+        "spark": SparkAPYProvider,
+    }
+    for protocol, provider_cls in expected.items():
+        assert LendingReadRegistry.backtest_provider(protocol) is provider_cls
+    assert LendingReadRegistry.backtest_provider("unknown") is None
 
 
 def test_perps_read_dispatch_equals_frozen_legacy_tables() -> None:
@@ -332,6 +361,33 @@ FROZEN_DEX_VOLUME_DATA_SOURCES = {
     "curve": "curve_messari_subgraph",
     "balancer": "balancer_v2_subgraph",
 }
+FROZEN_DEX_LIQUIDITY_SUBGRAPH_IDS = {
+    "uniswap_v3": {
+        "ethereum": "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
+        "arbitrum": "FbCGRftH4a3yZugY7TnbYgPJVEv2LvMT6oF1fxPe9aJM",
+        "base": "96eJ9Go8gFjySRGnndG7EYxThaiwVDV8BYPp1TMDcoYh",
+        "optimism": "Cghf4LfVqPiFw6fp6Y5X5Ubc8UpmUhSfJL82zwiBFLaj",
+        "polygon": "3hCPRGf4z88VC5rsBKU5AA9FBBq5nF3jbKJG7VZCbhjm",
+    },
+    "sushiswap_v3": {"ethereum": "2tGWMrDha4164KkFAfkU3rDCtuxGb4q1emXmFdLLzJ8x"},
+    "pancakeswap_v3": {
+        "ethereum": "CJYGNhb7RvnhfBDjqpRnD3oxgyhibzc7fkAMa38YV3oS",
+        "arbitrum": "251MHFNN1rwjErXD2efWMpNS73SANZN8Ua192zw6iXve",
+        "bsc": "Hv1GncLY5docZoGtXjo4kwbTvxm3MAhVZqBZE4sUT9eZ",
+        "base": "BHWNsedAHtmTCzXxCCDfhPmm6iN9rxUhoRHdHKyujic3",
+    },
+    "aerodrome": {"base": "GENunSHWLBXm59mBSgPzQ8metBEp9YDfdqwFr91Av1UM"},
+    "traderjoe_v2": {"avalanche": "6KD9JYCg2qa3TxNK3tLdhj5zuZTABoLLNcnUZXKG9vuH"},
+    "curve": {
+        "ethereum": "3fy93eAT56UJsRCEht8iFhfi6wjHWXtZ9dnnbQmvFopF",
+        "optimism": "CXDZPduZE6nWuWEkSzWkRoJSSJ6CneSqiDxdnhhURShX",
+    },
+    "balancer": {
+        "ethereum": "C4ayEZP2yTXRAB8vSaTrgN4m9anTe9Mdm2ViyiAuV9TV",
+        "arbitrum": "98cQDy6tufTJtshDCuhh9z2kWXsQWBHVh2bqnLHsGAeS",
+        "polygon": "H9oPAbXnobBRq1cB3HDmbZ1E8MWQyJYQjT1QDJMrdbNp",
+    },
+}
 # liquidity_depth.py family lists, frozen verbatim ("balancer" was in
 # WEIGHTED_POOL_PROTOCOLS, "curve" in STABLESWAP_PROTOCOLS, ...).
 FROZEN_DEX_FAMILIES = {
@@ -386,32 +442,17 @@ def test_dex_volume_decls_match_gateway_capability_implementers() -> None:
     assert decl_chains_by_dex == gateway_chains_by_dex
 
 
-def test_dex_volume_decls_match_wrapper_provider_chains() -> None:
-    """Decl chains == the legacy per-DEX wrapper SUPPORTED_CHAINS tables.
-
-    The wrapper modules keep their client-side subgraph-ID tables until the
-    liquidity-depth gateway lane lands; this parity test stops the two chain
-    vocabularies drifting in the meantime.
-    """
-    import importlib
-
+def test_dex_volume_decls_pin_liquidity_subgraph_ids() -> None:
+    """Decl liquidity IDs == the deleted legacy per-DEX wrapper tables."""
     from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
 
-    wrapper_modules = {
-        "uniswap_v3": "uniswap_v3_volume",
-        "sushiswap_v3": "sushiswap_v3_volume",
-        "pancakeswap_v3": "pancakeswap_v3_volume",
-        "aerodrome": "aerodrome_volume",
-        "traderjoe_v2": "traderjoe_v2_volume",
-        "curve": "curve_volume",
-        "balancer": "balancer_volume",
-    }
-    for key, module_name in wrapper_modules.items():
-        module = importlib.import_module(f"almanak.framework.backtesting.pnl.providers.dex.{module_name}")
-        wrapper_chains = [c.value.lower() for c in module.SUPPORTED_CHAINS]
+    for key, expected_ids in FROZEN_DEX_LIQUIDITY_SUBGRAPH_IDS.items():
+        assert DexVolumeRegistry.liquidity_subgraph_ids_for(key) == expected_ids
         entry = DexVolumeRegistry.entry_for(key)
         assert entry is not None, key
-        assert list(entry.chains) == wrapper_chains, (key, entry.chains, wrapper_chains)
+        assert tuple(expected_ids) == entry.chains, (key, expected_ids, entry.chains)
+    assert DexVolumeRegistry.liquidity_subgraph_ids_for("balancer_v2") == FROZEN_DEX_LIQUIDITY_SUBGRAPH_IDS["balancer"]
+    assert DexVolumeRegistry.liquidity_subgraph_ids_for("unknown") is None
 
 
 # almanak/framework/data/rates/monitor.py + backtesting/pnl/providers/

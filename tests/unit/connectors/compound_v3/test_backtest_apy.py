@@ -1,6 +1,6 @@
 """Unit tests for Compound V3 APY Provider.
 
-This module tests the CompoundV3APYProvider class in providers/lending/compound_v3_apy.py,
+This module tests the CompoundV3APYProvider class in connectors/compound_v3/backtest_apy.py,
 covering:
 - Provider initialization and configuration
 - Supported chains and subgraph ID mapping
@@ -11,16 +11,14 @@ covering:
 - Market resolution (symbol to comet address)
 """
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
 from almanak.connectors.compound_v3.addresses import COMPOUND_V3_COMET_ADDRESSES
-from almanak.core.enums import Chain
-from almanak.framework.backtesting.pnl.providers.lending.compound_v3_apy import (
+from almanak.connectors.compound_v3.backtest_apy import (
     COMPOUND_V3_SUBGRAPH_IDS,
     DATA_SOURCE,
     DEFAULT_BORROW_APY_FALLBACK,
@@ -30,6 +28,7 @@ from almanak.framework.backtesting.pnl.providers.lending.compound_v3_apy import 
     CompoundV3APYProvider,
     CompoundV3ClientConfig,
 )
+from almanak.core.enums import Chain
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
     SubgraphClientConfig,
@@ -114,7 +113,7 @@ class TestSupportedChains:
 
     def test_subgraph_ids_are_valid_format(self):
         """Test subgraph IDs have valid format (base58-like)."""
-        for chain, subgraph_id in COMPOUND_V3_SUBGRAPH_IDS.items():
+        for _chain, subgraph_id in COMPOUND_V3_SUBGRAPH_IDS.items():
             # Subgraph IDs are base58-like strings
             assert len(subgraph_id) >= 40
             assert all(c.isalnum() for c in subgraph_id)

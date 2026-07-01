@@ -1,7 +1,7 @@
 """Unit tests for Hyperliquid Funding Rate Provider.
 
 This module tests the HyperliquidFundingProvider class in
-providers/perp/hyperliquid_funding.py. The provider is a thin
+connectors/hyperliquid/backtest_funding.py. The provider is a thin
 ``RateHistoryService`` client since VIB-4851 Phase D — tests mock
 ``fetch_funding_points`` (the gateway seam), never HTTP:
 - Provider initialization and configuration
@@ -17,20 +17,21 @@ from unittest.mock import patch
 
 import pytest
 
-from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
-    FundingHistoryPoint,
-)
-from almanak.framework.backtesting.pnl.providers.perp.hyperliquid_funding import (
+from almanak.connectors.hyperliquid.backtest_funding import (
     DATA_SOURCE,
     DEFAULT_REQUESTS_PER_MINUTE,
     HyperliquidClientConfig,
     HyperliquidFundingProvider,
 )
+from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig
+from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
+    FundingHistoryPoint,
+)
 from almanak.framework.backtesting.pnl.providers.rate_limiter import TokenBucketRateLimiter
 from almanak.framework.backtesting.pnl.types import DataConfidence
 from almanak.framework.data.interfaces import DataSourceUnavailable
 
-_GATEWAY_SEAM = "almanak.framework.backtesting.pnl.providers.perp.hyperliquid_funding.fetch_funding_points"
+_GATEWAY_SEAM = "almanak.connectors.hyperliquid.backtest_funding.fetch_funding_points"
 
 
 def _points(start: datetime, rates: list[str]) -> list[FundingHistoryPoint]:
@@ -65,6 +66,22 @@ class TestHyperliquidFundingProviderInitialization:
         provider = HyperliquidFundingProvider(rate_limiter=limiter)
         assert provider.rate_limiter is limiter
         assert provider._owns_rate_limiter is False
+
+    @pytest.mark.parametrize(
+        ("config", "expected_fallback"),
+        [
+            (BacktestProviderConfig(funding_fallback_rate=Decimal("0.0007")), Decimal("0.0007")),
+            (BacktestProviderConfig(), Decimal("0.0001")),
+        ],
+    )
+    def test_for_backtest_maps_fallback_rate(
+        self,
+        config: BacktestProviderConfig,
+        expected_fallback: Decimal,
+    ) -> None:
+        """Backtest config maps directly into HyperliquidClientConfig fallback_rate."""
+        provider = HyperliquidFundingProvider.for_backtest(config)
+        assert provider.config.fallback_rate == expected_fallback
 
 
 class TestMarketSymbolNormalization:

@@ -1326,7 +1326,7 @@ class TestHistoricalAPYIntegration:
         assert adapter._get_borrow_apy_fallback() == Decimal("0.08")
 
     def test_protocol_routing_aave_v3(self) -> None:
-        """Test that aave_v3 protocol routes to AaveV3APYProvider."""
+        """Test that the legacy Aave injection seeds the generic cache."""
         from unittest.mock import MagicMock
 
         from almanak.framework.backtesting.config import BacktestDataConfig
@@ -1340,7 +1340,7 @@ class TestHistoricalAPYIntegration:
         assert provider is mock_provider
 
     def test_protocol_routing_compound_v3(self) -> None:
-        """Test that compound_v3 protocol routes to CompoundV3APYProvider."""
+        """Test that the legacy Compound injection seeds the generic cache."""
         from unittest.mock import MagicMock
 
         from almanak.framework.backtesting.config import BacktestDataConfig
@@ -1354,7 +1354,7 @@ class TestHistoricalAPYIntegration:
         assert provider is mock_provider
 
     def test_protocol_routing_morpho_blue(self) -> None:
-        """Test that morpho_blue protocol routes to MorphoBlueAPYProvider."""
+        """Test that the legacy Morpho injection seeds the generic cache."""
         from unittest.mock import MagicMock
 
         from almanak.framework.backtesting.config import BacktestDataConfig
@@ -1368,7 +1368,7 @@ class TestHistoricalAPYIntegration:
         assert provider is mock_provider
 
     def test_protocol_routing_spark(self) -> None:
-        """Test that spark protocol routes to SparkAPYProvider."""
+        """Test that the legacy Spark injection seeds the generic cache."""
         from unittest.mock import MagicMock
 
         from almanak.framework.backtesting.config import BacktestDataConfig

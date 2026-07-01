@@ -14,7 +14,7 @@ old current-rate extrapolation, so results carry HIGH confidence where a
 measured point covers the hour and LOW-confidence fallback fills elsewhere.
 
 Example:
-    from almanak.framework.backtesting.pnl.providers.perp import GMXFundingProvider
+    from almanak.connectors.gmx_v2.backtest_funding import GMXFundingProvider
     from datetime import datetime, UTC
 
     provider = GMXFundingProvider()
@@ -37,12 +37,15 @@ from typing import Any
 
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
 from almanak.core.enums import Chain
+from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalFundingProvider
+from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
+    FundingHistoryPoint,
+    fetch_funding_points,
+    run_sync_gateway_call,
+)
+from almanak.framework.backtesting.pnl.providers.rate_limiter import TokenBucketRateLimiter
+from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, FundingResult
 from almanak.framework.data.interfaces import DataSourceUnavailable
-
-from ...types import DataConfidence, DataSourceInfo, FundingResult
-from ..base import HistoricalFundingProvider
-from ..rate_limiter import TokenBucketRateLimiter
-from ._gateway_history import FundingHistoryPoint, fetch_funding_points, run_sync_gateway_call
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +169,39 @@ class GMXFundingProvider(HistoricalFundingProvider):
             "Initialized GMXFundingProvider: chain=%s, rate_limit=%d req/min",
             self._config.chain.value,
             self._config.requests_per_minute,
+        )
+
+    @classmethod
+    def for_backtest(cls, config: BacktestProviderConfig) -> "GMXFundingProvider":
+        """Construct from the adapter's protocol-neutral backtest config."""
+        chain = Chain.ARBITRUM
+        if config.chain is not None:
+            requested = config.chain.strip().lower()
+            declared = FundingHistoryRegistry.declared_chains(_PROTOCOL_KEY)
+            if requested in declared:
+                try:
+                    chain = Chain[requested.upper()]
+                except KeyError:
+                    logger.warning(
+                        "GMX V2 backtest requested declared chain %r, but Chain.%s is unavailable; falling back to %s",
+                        config.chain,
+                        requested.upper(),
+                        Chain.ARBITRUM.value,
+                    )
+            else:
+                logger.warning(
+                    "GMX V2 backtest requested unsupported chain %r; declared chains are %s; falling back to %s",
+                    config.chain,
+                    list(declared),
+                    Chain.ARBITRUM.value,
+                )
+        return cls(
+            config=GMXClientConfig(
+                chain=chain,
+                fallback_rate=(
+                    config.funding_fallback_rate if config.funding_fallback_rate is not None else Decimal("0.0001")
+                ),
+            )
         )
 
     @property

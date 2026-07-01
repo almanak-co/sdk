@@ -14,7 +14,7 @@ Key Features:
     - Health factor warnings before liquidation
     - Accurate interest tracking for both supply and borrow
     - Historical APY integration via BacktestDataConfig
-    - Support for AaveV3, CompoundV3, MorphoBlue, and Spark APY providers
+    - Support for connector-declared historical APY providers
 
 Example:
     from almanak.framework.backtesting.adapters.lending_adapter import (
@@ -44,11 +44,13 @@ Example:
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
+from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 from almanak.framework.backtesting.adapters.base import (
     StrategyBacktestAdapter,
     StrategyBacktestConfig,
@@ -65,6 +67,7 @@ from almanak.framework.backtesting.pnl.calculators.interest import (
 )
 from almanak.framework.backtesting.pnl.data_provider import TokenRef, token_ref_display, token_ref_provider_symbol
 from almanak.framework.backtesting.pnl.portfolio import PositionType
+from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalAPYProvider
 from almanak.framework.backtesting.pnl.types import DataConfidence
 
 if TYPE_CHECKING:
@@ -75,10 +78,6 @@ if TYPE_CHECKING:
         SimulatedPortfolio,
         SimulatedPosition,
     )
-    from almanak.framework.backtesting.pnl.providers.lending.aave_v3_apy import AaveV3APYProvider
-    from almanak.framework.backtesting.pnl.providers.lending.compound_v3_apy import CompoundV3APYProvider
-    from almanak.framework.backtesting.pnl.providers.lending.morpho_apy import MorphoBlueAPYProvider
-    from almanak.framework.backtesting.pnl.providers.lending.spark_apy import SparkAPYProvider
     from almanak.framework.intents.vocabulary import Intent
 
 logger = logging.getLogger(__name__)
@@ -312,8 +311,7 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
     - Health factor tracking and monitoring for borrow positions
     - Liquidation simulation when health factor falls below 1.0
     - Position valuation with principal plus accrued interest
-    - Historical APY integration via AaveV3APYProvider, CompoundV3APYProvider,
-      MorphoBlueAPYProvider, and SparkAPYProvider
+    - Historical APY integration via connector-declared providers
 
     The adapter can be used with or without explicit configuration.
     When used without config, it uses sensible defaults.
@@ -360,10 +358,11 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         self,
         config: LendingBacktestConfig | None = None,
         data_config: "BacktestDataConfig | None" = None,
-        aave_v3_provider: "AaveV3APYProvider | None" = None,
-        compound_v3_provider: "CompoundV3APYProvider | None" = None,
-        morpho_provider: "MorphoBlueAPYProvider | None" = None,
-        spark_provider: "SparkAPYProvider | None" = None,
+        aave_v3_provider: HistoricalAPYProvider | None = None,
+        compound_v3_provider: HistoricalAPYProvider | None = None,
+        morpho_provider: HistoricalAPYProvider | None = None,
+        spark_provider: HistoricalAPYProvider | None = None,
+        injected_providers: Mapping[str, HistoricalAPYProvider] | None = None,
     ) -> None:
         """Initialize the lending backtest adapter.
 
@@ -373,14 +372,15 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
             data_config: BacktestDataConfig for controlling historical data provider
                 behavior. When provided, overrides config.interest_rate_source behavior
                 with data_config.use_historical_apy setting.
-            aave_v3_provider: Optional pre-configured AaveV3APYProvider.
-                If None and use_historical_apy=True, will create one lazily.
-            compound_v3_provider: Optional pre-configured CompoundV3APYProvider.
-                If None and use_historical_apy=True, will create one lazily.
-            morpho_provider: Optional pre-configured MorphoBlueAPYProvider.
-                If None and use_historical_apy=True, will create one lazily.
-            spark_provider: Optional pre-configured SparkAPYProvider.
-                If None and use_historical_apy=True, will create one lazily.
+            aave_v3_provider: Optional legacy injection for the Aave-compatible provider.
+                If None and historical APY is enabled, the registry creates one lazily.
+            compound_v3_provider: Optional legacy injection for the Compound-compatible provider.
+                If None and historical APY is enabled, the registry creates one lazily.
+            morpho_provider: Optional legacy injection for the Morpho-compatible provider.
+                If None and historical APY is enabled, the registry creates one lazily.
+            spark_provider: Optional legacy injection for the Spark-compatible provider.
+                If None and historical APY is enabled, the registry creates one lazily.
+            injected_providers: Optional provider mapping keyed by accepted protocol identifier.
         """
         self._config = config or LendingBacktestConfig(strategy_type="lending")
         self._data_config = data_config
@@ -406,19 +406,34 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         self._position_collateral: dict[str, Decimal] = {}
         self._position_debt: dict[str, Decimal] = {}
 
-        # Historical APY providers (lazy initialized)
-        self._aave_v3_provider: AaveV3APYProvider | None = aave_v3_provider
-        self._aave_v3_provider_initialized = aave_v3_provider is not None
-        self._compound_v3_provider: CompoundV3APYProvider | None = compound_v3_provider
-        self._compound_v3_provider_initialized = compound_v3_provider is not None
-        self._morpho_provider: MorphoBlueAPYProvider | None = morpho_provider
-        self._morpho_provider_initialized = morpho_provider is not None
-        self._spark_provider: SparkAPYProvider | None = spark_provider
-        self._spark_provider_initialized = spark_provider is not None
+        # Historical APY providers, keyed by connector registry canonical key.
+        self._provider_cache: dict[str, HistoricalAPYProvider | None] = {}
+        self._provider_tried: set[str] = set()
+        self._seed_injected_provider("aave_v3", aave_v3_provider)
+        self._seed_injected_provider("compound_v3", compound_v3_provider)
+        self._seed_injected_provider("morpho", morpho_provider)
+        self._seed_injected_provider("spark", spark_provider)
+        self._seed_injected_providers(injected_providers or {})
 
         # Cache for APY data to avoid repeated queries
         # Key: (protocol, market, timestamp_day) -> (supply_apy, borrow_apy, confidence, source)
         self._apy_cache: dict[tuple[str, str, datetime], tuple[Decimal, Decimal, str, str]] = {}
+
+    def _seed_injected_provider(self, protocol: str, provider: HistoricalAPYProvider | None) -> None:
+        """Seed one injected provider into the connector-keyed provider cache."""
+        if provider is None:
+            return
+        canonical = LendingReadRegistry.backtest_provider_key(protocol)
+        if canonical is None:
+            logger.debug("Ignoring injected APY provider for unknown protocol '%s'", protocol)
+            return
+        self._provider_cache[canonical] = provider
+        self._provider_tried.add(canonical)
+
+    def _seed_injected_providers(self, providers: Mapping[str, HistoricalAPYProvider | None]) -> None:
+        """Seed the generic provider cache from test/operator injections."""
+        for protocol, provider in providers.items():
+            self._seed_injected_provider(protocol, provider)
 
     @property
     def adapter_name(self) -> str:
@@ -493,203 +508,43 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
             return self._data_config.strict_historical_mode
         return False
 
-    def _ensure_aave_v3_provider(self) -> "AaveV3APYProvider | None":
-        """Lazily initialize the Aave V3 APY provider if needed.
-
-        Creates an AaveV3APYProvider instance for fetching historical APY
-        data from the Aave V3 subgraph.
-
-        Returns:
-            AaveV3APYProvider instance or None if disabled/failed
-        """
+    def _get_provider_for_protocol(self, protocol: str) -> HistoricalAPYProvider | None:
+        """Resolve a historical APY provider through connector declarations."""
         if not self._use_historical_apy():
             return None
 
-        if self._aave_v3_provider_initialized:
-            return self._aave_v3_provider
+        canonical = LendingReadRegistry.backtest_provider_key(protocol)
+        if canonical is None:
+            logger.debug("No historical APY provider for protocol '%s', will use fallback", protocol)
+            return None
+        if canonical in self._provider_tried:
+            return self._provider_cache.get(canonical)
+
+        self._provider_tried.add(canonical)
+        provider_cls = cast(type[HistoricalAPYProvider] | None, LendingReadRegistry.backtest_provider(canonical))
+        if provider_cls is None:
+            self._provider_cache[canonical] = None
+            logger.debug("No historical APY provider declared for protocol '%s'", canonical)
+            return None
 
         try:
-            from almanak.framework.backtesting.pnl.providers.lending.aave_v3_apy import (
-                AaveV3APYProvider,
-                AaveV3ClientConfig,
+            provider = provider_cls.for_backtest(
+                BacktestProviderConfig(
+                    supply_apy_fallback=self._get_supply_apy_fallback(),
+                    borrow_apy_fallback=self._get_borrow_apy_fallback(),
+                )
             )
-
-            config = AaveV3ClientConfig(
-                supply_apy_fallback=self._get_supply_apy_fallback(),
-                borrow_apy_fallback=self._get_borrow_apy_fallback(),
-            )
-            self._aave_v3_provider = AaveV3APYProvider(config=config)
-            self._aave_v3_provider_initialized = True
+            self._provider_cache[canonical] = provider
             logger.debug(
-                "Initialized AaveV3APYProvider: supply_fallback=%s, borrow_fallback=%s",
+                "Initialized historical APY provider for %s: supply_fallback=%s, borrow_fallback=%s",
+                canonical,
                 self._get_supply_apy_fallback(),
                 self._get_borrow_apy_fallback(),
             )
-            return self._aave_v3_provider
+            return provider
         except Exception as e:
-            logger.warning(
-                "Failed to initialize AaveV3APYProvider: %s. Will use fallback rate.",
-                e,
-            )
-            self._aave_v3_provider_initialized = True  # Don't retry
-            self._aave_v3_provider = None
-            return None
-
-    def _ensure_compound_v3_provider(self) -> "CompoundV3APYProvider | None":
-        """Lazily initialize the Compound V3 APY provider if needed.
-
-        Creates a CompoundV3APYProvider instance for fetching historical APY
-        data from the Compound V3 subgraph.
-
-        Returns:
-            CompoundV3APYProvider instance or None if disabled/failed
-        """
-        if not self._use_historical_apy():
-            return None
-
-        if self._compound_v3_provider_initialized:
-            return self._compound_v3_provider
-
-        try:
-            from almanak.framework.backtesting.pnl.providers.lending.compound_v3_apy import (
-                CompoundV3APYProvider,
-                CompoundV3ClientConfig,
-            )
-
-            config = CompoundV3ClientConfig(
-                supply_apy_fallback=self._get_supply_apy_fallback(),
-                borrow_apy_fallback=self._get_borrow_apy_fallback(),
-            )
-            self._compound_v3_provider = CompoundV3APYProvider(config=config)
-            self._compound_v3_provider_initialized = True
-            logger.debug(
-                "Initialized CompoundV3APYProvider: supply_fallback=%s, borrow_fallback=%s",
-                self._get_supply_apy_fallback(),
-                self._get_borrow_apy_fallback(),
-            )
-            return self._compound_v3_provider
-        except Exception as e:
-            logger.warning(
-                "Failed to initialize CompoundV3APYProvider: %s. Will use fallback rate.",
-                e,
-            )
-            self._compound_v3_provider_initialized = True  # Don't retry
-            self._compound_v3_provider = None
-            return None
-
-    def _ensure_morpho_provider(self) -> "MorphoBlueAPYProvider | None":
-        """Lazily initialize the Morpho Blue APY provider if needed.
-
-        Creates a MorphoBlueAPYProvider instance for fetching historical APY
-        data from the Morpho Blue subgraph.
-
-        Returns:
-            MorphoBlueAPYProvider instance or None if disabled/failed
-        """
-        if not self._use_historical_apy():
-            return None
-
-        if self._morpho_provider_initialized:
-            return self._morpho_provider
-
-        try:
-            from almanak.framework.backtesting.pnl.providers.lending.morpho_apy import (
-                MorphoBlueAPYProvider,
-                MorphoBlueClientConfig,
-            )
-
-            config = MorphoBlueClientConfig(
-                supply_apy_fallback=self._get_supply_apy_fallback(),
-                borrow_apy_fallback=self._get_borrow_apy_fallback(),
-            )
-            self._morpho_provider = MorphoBlueAPYProvider(config=config)
-            self._morpho_provider_initialized = True
-            logger.debug(
-                "Initialized MorphoBlueAPYProvider: supply_fallback=%s, borrow_fallback=%s",
-                self._get_supply_apy_fallback(),
-                self._get_borrow_apy_fallback(),
-            )
-            return self._morpho_provider
-        except Exception as e:
-            logger.warning(
-                "Failed to initialize MorphoBlueAPYProvider: %s. Will use fallback rate.",
-                e,
-            )
-            self._morpho_provider_initialized = True  # Don't retry
-            self._morpho_provider = None
-            return None
-
-    def _ensure_spark_provider(self) -> "SparkAPYProvider | None":
-        """Lazily initialize the Spark APY provider if needed.
-
-        Creates a SparkAPYProvider instance for fetching historical APY
-        data from the Spark subgraph.
-
-        Returns:
-            SparkAPYProvider instance or None if disabled/failed
-        """
-        if not self._use_historical_apy():
-            return None
-
-        if self._spark_provider_initialized:
-            return self._spark_provider
-
-        try:
-            from almanak.framework.backtesting.pnl.providers.lending.spark_apy import (
-                SparkAPYProvider,
-                SparkClientConfig,
-            )
-
-            config = SparkClientConfig(
-                supply_apy_fallback=self._get_supply_apy_fallback(),
-                borrow_apy_fallback=self._get_borrow_apy_fallback(),
-            )
-            self._spark_provider = SparkAPYProvider(config=config)
-            self._spark_provider_initialized = True
-            logger.debug(
-                "Initialized SparkAPYProvider: supply_fallback=%s, borrow_fallback=%s",
-                self._get_supply_apy_fallback(),
-                self._get_borrow_apy_fallback(),
-            )
-            return self._spark_provider
-        except Exception as e:
-            logger.warning(
-                "Failed to initialize SparkAPYProvider: %s. Will use fallback rate.",
-                e,
-            )
-            self._spark_provider_initialized = True  # Don't retry
-            self._spark_provider = None
-            return None
-
-    def _get_provider_for_protocol(
-        self,
-        protocol: str,
-    ) -> "AaveV3APYProvider | CompoundV3APYProvider | MorphoBlueAPYProvider | SparkAPYProvider | None":
-        """Get the appropriate APY provider for a given protocol.
-
-        Routes to the correct APY provider based on the lending protocol.
-
-        Args:
-            protocol: Protocol name (e.g., "aave_v3", "compound_v3", "morpho_blue", "spark")
-
-        Returns:
-            The appropriate provider or None if not available
-        """
-        protocol_lower = protocol.lower()
-
-        if protocol_lower in ("aave_v3", "aave", "aavev3"):
-            return self._ensure_aave_v3_provider()
-        elif protocol_lower in ("compound_v3", "compound", "compoundv3"):
-            return self._ensure_compound_v3_provider()
-        elif protocol_lower in ("morpho_blue", "morpho", "morphoblue"):
-            return self._ensure_morpho_provider()
-        elif protocol_lower in ("spark", "spark_lend", "sparklend"):
-            return self._ensure_spark_provider()
-        else:
-            logger.debug(
-                "No historical APY provider for protocol '%s', will use fallback",
-                protocol,
-            )
+            logger.warning("Failed to initialize APY provider for %s: %s. Will use fallback rate.", canonical, e)
+            self._provider_cache[canonical] = None
             return None
 
     def _normalize_timestamp_to_day(self, timestamp: datetime) -> datetime:

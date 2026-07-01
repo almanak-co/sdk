@@ -155,6 +155,8 @@ class LendingReadDecl:
     ``backtesting/pnl/providers/lending_apy.py``) offer this venue's lending
     rates on — a parity test pins it as a subset of the connector's
     gateway-side ``GatewayLendingRateHistoryCapability.lending_supported_chains()``.
+    ``backtest_provider`` is a lazy reference to the connector-owned
+    ``HistoricalAPYProvider`` subclass used by the backtest lending adapter.
     ``backtest_default_supply_apy`` / ``backtest_default_borrow_apy`` are the
     offline-backtest fallback APYs (decimal strings, e.g. ``"0.03"`` = 3%)
     used when the gateway is unreachable; ``None`` means the venue has no
@@ -165,6 +167,7 @@ class LendingReadDecl:
     account_state: ImportRef | None = None
     market_table: ImportRef | None = None
     market_health: ImportRef | None = None
+    backtest_provider: ImportRef | None = None
     aliases: tuple[str, ...] = ()
     rate_history_chains: tuple[str, ...] = ()
     backtest_default_supply_apy: str | None = None
@@ -194,7 +197,7 @@ class LendingReadDecl:
 
     def __post_init__(self) -> None:
         """Validate the declaration's import references and aliases."""
-        for field_name in ("spec", "account_state", "market_table", "market_health"):
+        for field_name in ("spec", "account_state", "market_table", "market_health", "backtest_provider"):
             value = getattr(self, field_name)
             if value is not None and not isinstance(value, ImportRef):
                 raise ValueError(f"LendingReadDecl.{field_name} must be None or an ImportRef, got {value!r}")
@@ -371,6 +374,9 @@ class DexVolumeDecl:
     - ``hosted_volume_subgraph_urls``: same shape, for the free hosted-service
       fallback endpoints (plan 024). Typically fewer chains than
       ``volume_subgraph_urls``.
+    - ``liquidity_subgraph_ids``: sparse ``{chain: deployment_id}`` map used by
+      the direct operator-side liquidity-depth provider until that lane moves to
+      the gateway. Values are deployment IDs, not URLs.
     """
 
     chains: tuple[str, ...]
@@ -384,6 +390,7 @@ class DexVolumeDecl:
     twap_reference_pools: ImportRef | None = None
     volume_subgraph_urls: Mapping[str, str] | None = None
     hosted_volume_subgraph_urls: Mapping[str, str] | None = None
+    liquidity_subgraph_ids: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         """Validate the declaration's keys, chains, and family."""
@@ -421,6 +428,7 @@ class DexVolumeDecl:
             )
         self._validate_subgraph_urls("volume_subgraph_urls", self.volume_subgraph_urls)
         self._validate_subgraph_urls("hosted_volume_subgraph_urls", self.hosted_volume_subgraph_urls)
+        self._validate_subgraph_ids("liquidity_subgraph_ids", self.liquidity_subgraph_ids)
         _validate_decl_aliases("DexVolumeDecl", self.aliases)
         if self.name is not None and self.name in self.aliases:
             raise ValueError(f"DexVolumeDecl.aliases must not include the primary name {self.name!r}")
@@ -446,6 +454,29 @@ class DexVolumeDecl:
         if bad:
             raise ValueError(
                 f"DexVolumeDecl.{field} values must be https:// URLs keyed by lowercase chain name, got {bad!r}"
+            )
+
+    @staticmethod
+    def _validate_subgraph_ids(field: str, ids: Mapping[str, str] | None) -> None:
+        """Validate a ``{chain: deployment_id}`` subgraph-ID mapping."""
+        if ids is None:
+            return
+        if not isinstance(ids, Mapping):
+            raise ValueError(f"DexVolumeDecl.{field} must be None or a Mapping[str, str], got {ids!r}")
+        bad = [
+            (k, v)
+            for k, v in ids.items()
+            if not isinstance(k, str)
+            or not k.strip()
+            or k != k.lower()
+            or not isinstance(v, str)
+            or not v.strip()
+            or v.startswith("http://")
+            or v.startswith("https://")
+        ]
+        if bad:
+            raise ValueError(
+                f"DexVolumeDecl.{field} values must be deployment IDs keyed by lowercase chain name, got {bad!r}"
             )
 
 

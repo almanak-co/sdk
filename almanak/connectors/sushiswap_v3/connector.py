@@ -19,6 +19,9 @@ CONNECTOR = Connector(
         chains=("ethereum",),
         amm_family="v3_concentrated",
         aliases=("sushi_v3",),
+        liquidity_subgraph_ids={
+            "ethereum": "2tGWMrDha4164KkFAfkU3rDCtuxGb4q1emXmFdLLzJ8x",
+        },
     ),
     # Legacy backtest detection key is the bare "sushiswap".
     backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", name="sushiswap"),

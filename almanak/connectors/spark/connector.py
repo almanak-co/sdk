@@ -52,6 +52,10 @@ CONNECTOR = Connector(
     lending_read=LendingReadDecl(
         backtest_default_supply_apy="0.05",
         backtest_default_borrow_apy="0.055",
+        backtest_provider=ImportRef(
+            module="almanak.connectors.spark.backtest_apy",
+            attribute="SparkAPYProvider",
+        ),
         spec=ImportRef(module="almanak.connectors.spark.lending_read", attribute="LENDING_READ_SPEC"),
         account_state=ImportRef(module="almanak.connectors.spark.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"),
     ),

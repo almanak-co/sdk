@@ -16,24 +16,20 @@ Example:
     pytest -m integration -v -s --log-cli-level=INFO
 """
 
-import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
-from almanak.core.enums import Chain
+from almanak.connectors.gmx_v2.backtest_funding import GMXFundingProvider
+from almanak.connectors.hyperliquid.backtest_funding import HyperliquidFundingProvider
 from almanak.framework.backtesting.adapters.perp_adapter import (
     PerpBacktestAdapter,
     PerpBacktestConfig,
 )
 from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
-from almanak.framework.backtesting.pnl.providers.perp import (
-    GMXFundingProvider,
-    HyperliquidFundingProvider,
-)
 from almanak.framework.backtesting.pnl.types import DataConfidence
 
 logger = logging.getLogger(__name__)
@@ -117,9 +113,7 @@ class TestGMXFundingProvider:
             # measured history (HIGH confidence) through the gateway's
             # Hyperliquid cross-venue fallback; without a reachable gateway
             # the provider degrades to the LOW-confidence fallback fill.
-            high_confidence_count = sum(
-                1 for r in rates if r.source_info.confidence == DataConfidence.HIGH
-            )
+            high_confidence_count = sum(1 for r in rates if r.source_info.confidence == DataConfidence.HIGH)
 
             logger.info(
                 "GMX: Fetched %d funding rates, %d HIGH confidence",
@@ -240,9 +234,7 @@ class TestHyperliquidFundingProvider:
             assert len(rates) > 0, "Expected at least one funding rate result"
 
             # Hyperliquid returns HIGH confidence for real historical data
-            high_confidence_count = sum(
-                1 for r in rates if r.source_info.confidence == DataConfidence.HIGH
-            )
+            high_confidence_count = sum(1 for r in rates if r.source_info.confidence == DataConfidence.HIGH)
 
             logger.info(
                 "Hyperliquid: Fetched %d funding rates, %d HIGH confidence",
@@ -253,9 +245,7 @@ class TestHyperliquidFundingProvider:
             # At least some should be HIGH confidence if API returned data
             api_rates = [r for r in rates if r.source_info.source != "fallback"]
             if api_rates:
-                assert high_confidence_count > 0, (
-                    "Expected HIGH confidence results from Hyperliquid historical API"
-                )
+                assert high_confidence_count > 0, "Expected HIGH confidence results from Hyperliquid historical API"
 
             # Log sample rates
             for rate in rates[:5]:
@@ -290,16 +280,12 @@ class TestHyperliquidFundingProvider:
                 pytest.skip("No Hyperliquid funding data returned")
 
             # Filter to HIGH confidence results
-            high_conf_rates = [
-                r for r in rates if r.source_info.confidence == DataConfidence.HIGH
-            ]
+            high_conf_rates = [r for r in rates if r.source_info.confidence == DataConfidence.HIGH]
 
             if high_conf_rates:
                 # Hyperliquid caps funding at 4% per hour
                 for rate in high_conf_rates:
-                    assert abs(rate.rate) <= Decimal("0.04"), (
-                        f"Funding rate {rate.rate} exceeds Hyperliquid 4%/hr cap"
-                    )
+                    assert abs(rate.rate) <= Decimal("0.04"), f"Funding rate {rate.rate} exceeds Hyperliquid 4%/hr cap"
 
                 avg_rate = sum(r.rate for r in high_conf_rates) / len(high_conf_rates)
                 logger.info("Hyperliquid ETH average funding rate: %s (hourly)", avg_rate)
@@ -333,9 +319,7 @@ class TestHyperliquidFundingProvider:
             # Should have roughly 720 hours of data (if all available)
             # Allow for gaps - just verify we got substantial data
             if rates:
-                assert len(rates) > 100, (
-                    f"Expected >100 hourly rates for 30 days, got {len(rates)}"
-                )
+                assert len(rates) > 100, f"Expected >100 hourly rates for 30 days, got {len(rates)}"
 
         except Exception as e:
             pytest.skip(f"Hyperliquid API unavailable: {e}")
@@ -403,8 +387,7 @@ class TestPerpAdapterWithHistoricalFunding:
 
             # Check position was updated with funding data
             logger.info(
-                "Perp position after update: "
-                "funding_accrued=%s, funding_confidence=%s, funding_data_source=%s",
+                "Perp position after update: funding_accrued=%s, funding_confidence=%s, funding_data_source=%s",
                 getattr(position, "funding_accrued", "N/A"),
                 getattr(position, "funding_confidence", "N/A"),
                 getattr(position, "funding_data_source", "N/A"),
@@ -476,9 +459,7 @@ class TestPerpAdapterWithHistoricalFunding:
         hours = 24
 
         expected_funding = position_value * hourly_rate * hours
-        assert expected_funding == Decimal("24"), (
-            f"Expected $24 funding, got ${expected_funding}"
-        )
+        assert expected_funding == Decimal("24"), f"Expected $24 funding, got ${expected_funding}"
 
         logger.info(
             "Funding calculation: $%s position * %s rate * %d hours = $%s",

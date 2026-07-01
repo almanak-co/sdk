@@ -21,6 +21,12 @@ CONNECTOR = Connector(
         chains=("ethereum", "arbitrum", "bsc", "base"),
         amm_family="v3_concentrated",
         aliases=("pancake_v3",),
+        liquidity_subgraph_ids={
+            "ethereum": "CJYGNhb7RvnhfBDjqpRnD3oxgyhibzc7fkAMa38YV3oS",
+            "arbitrum": "251MHFNN1rwjErXD2efWMpNS73SANZN8Ua192zw6iXve",
+            "bsc": "Hv1GncLY5docZoGtXjo4kwbTvxm3MAhVZqBZE4sUT9eZ",
+            "base": "BHWNsedAHtmTCzXxCCDfhPmm6iN9rxUhoRHdHKyujic3",
+        },
     ),
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.pancakeswap_v3.fee_model", attribute="PancakeSwapV3FeeModel"),

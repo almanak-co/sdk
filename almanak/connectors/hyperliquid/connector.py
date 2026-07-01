@@ -56,7 +56,7 @@ CONNECTOR = Connector(
             "APT-USD",
         ),
         backtest_provider=ImportRef(
-            module="almanak.framework.backtesting.pnl.providers.perp.hyperliquid_funding",
+            module="almanak.connectors.hyperliquid.backtest_funding",
             attribute="HyperliquidFundingProvider",
         ),
     ),

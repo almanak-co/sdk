@@ -26,6 +26,9 @@ CONNECTOR = Connector(
         # (DexVolumeRegistry → MultiDEXVolumeProvider) resolves it here instead
         # of falling through to the LOW-confidence unknown-protocol fallback.
         aliases=("aerodrome_slipstream",),
+        liquidity_subgraph_ids={
+            "base": "GENunSHWLBXm59mBSgPzQ8metBEp9YDfdqwFr91Av1UM",
+        },
     ),
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.aerodrome.fee_model", attribute="AerodromeFeeModel"),

@@ -58,6 +58,10 @@ CONNECTOR = Connector(
         rate_history_chains=("ethereum", "arbitrum", "optimism", "polygon", "base"),
         backtest_default_supply_apy="0.025",
         backtest_default_borrow_apy="0.045",
+        backtest_provider=ImportRef(
+            module="almanak.connectors.compound_v3.backtest_apy",
+            attribute="CompoundV3APYProvider",
+        ),
         account_state=ImportRef(
             module="almanak.connectors.compound_v3.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"
         ),

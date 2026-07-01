@@ -856,20 +856,6 @@ RPC_CONFIG = CircuitBreakerConfig(
     success_threshold_half_open=2,
 )
 
-GMX_API_CONFIG = CircuitBreakerConfig(
-    failure_threshold=3,
-    reset_timeout_seconds=60.0,
-    half_open_max_calls=2,
-    success_threshold_half_open=1,
-)
-
-HYPERLIQUID_CONFIG = CircuitBreakerConfig(
-    failure_threshold=3,
-    reset_timeout_seconds=60.0,
-    half_open_max_calls=2,
-    success_threshold_half_open=1,
-)
-
 
 def create_coingecko_circuit_breaker() -> CircuitBreaker:
     """Create a circuit breaker configured for CoinGecko API."""
@@ -896,16 +882,6 @@ def create_rpc_circuit_breaker(chain: str = "default") -> CircuitBreaker:
     return get_circuit_breaker(f"rpc_{chain}", RPC_CONFIG)
 
 
-def create_gmx_circuit_breaker() -> CircuitBreaker:
-    """Create a circuit breaker configured for GMX Stats API."""
-    return get_circuit_breaker("gmx_stats", GMX_API_CONFIG)
-
-
-def create_hyperliquid_circuit_breaker() -> CircuitBreaker:
-    """Create a circuit breaker configured for Hyperliquid API."""
-    return get_circuit_breaker("hyperliquid", HYPERLIQUID_CONFIG)
-
-
 __all__ = [
     # Core classes
     "CircuitBreaker",
@@ -926,14 +902,10 @@ __all__ = [
     "create_subgraph_circuit_breaker",
     "create_etherscan_circuit_breaker",
     "create_rpc_circuit_breaker",
-    "create_gmx_circuit_breaker",
-    "create_hyperliquid_circuit_breaker",
     # Configurations
     "COINGECKO_CONFIG",
     "CHAINLINK_CONFIG",
     "SUBGRAPH_CONFIG",
     "ETHERSCAN_CONFIG",
     "RPC_CONFIG",
-    "GMX_API_CONFIG",
-    "HYPERLIQUID_CONFIG",
 ]

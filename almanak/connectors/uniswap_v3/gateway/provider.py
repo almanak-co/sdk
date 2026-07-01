@@ -112,11 +112,10 @@ _UNISWAP_V3_SUBGRAPHS: dict[str, str] = {
 # W7-followup / VIB-4870 — Uniswap V3 daily-volume subgraph spec
 # =============================================================================
 #
-# Deployment IDs originally migrated from
-# ``framework/backtesting/pnl/providers/dex/uniswap_v3_volume.py``
-# (``UNISWAP_V3_SUBGRAPH_IDS``). The strategy container no longer holds
-# these — the ``RateHistoryService`` servicer queries TheGraph
-# server-side via the shared ``_dex_volume_subgraph`` helper.
+# Deployment IDs originally migrated from the strategy-side DEX volume wrapper.
+# The strategy container no longer holds these — the ``RateHistoryService``
+# servicer queries TheGraph server-side via the shared ``_dex_volume_subgraph``
+# helper.
 #
 # Base and Optimism were re-pointed to live V3-native deployments after
 # the originally-migrated IDs went dead ("no allocations") on TheGraph's
@@ -370,8 +369,7 @@ class UniswapV3GatewayConnector(
     def volume_supported_chains(self) -> frozenset[str]:
         """Chains where Uniswap V3 daily-volume history is available.
 
-        = the chains with a registered volume subgraph (migrated from the
-        pre-W7 ``uniswap_v3_volume.UNISWAP_V3_SUBGRAPH_IDS`` keys).
+        = the chains with a registered volume subgraph.
         """
         return frozenset(_UNISWAP_V3_VOLUME_SUBGRAPH_IDS)
 

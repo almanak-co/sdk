@@ -22,6 +22,11 @@ CONNECTOR = Connector(
         name="balancer",
         dex="balancer_v2",
         volume_data_source="balancer_v2_subgraph",
+        liquidity_subgraph_ids={
+            "ethereum": "C4ayEZP2yTXRAB8vSaTrgN4m9anTe9Mdm2ViyiAuV9TV",
+            "arbitrum": "98cQDy6tufTJtshDCuhh9z2kWXsQWBHVh2bqnLHsGAeS",
+            "polygon": "H9oPAbXnobBRq1cB3HDmbZ1E8MWQyJYQjT1QDJMrdbNp",
+        },
     ),
     # Legacy backtest detection key is the bare "balancer", mirroring dex_volume.
     backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", name="balancer"),

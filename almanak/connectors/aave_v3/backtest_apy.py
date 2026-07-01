@@ -19,9 +19,7 @@ Aave V3 Rate Units:
     - Conversion: APY = rate / 1e27 (already annualized in the subgraph)
 
 Example:
-    from almanak.framework.backtesting.pnl.providers.lending import (
-        AaveV3APYProvider,
-    )
+    from almanak.connectors.aave_v3.backtest_apy import AaveV3APYProvider
     from almanak.core.enums import Chain
     from datetime import datetime, UTC
 
@@ -46,16 +44,15 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from almanak.core.enums import Chain
-
-from ....exceptions import DataSourceUnavailableError
-from ...types import APYResult, DataConfidence, DataSourceInfo
-from ..base import HistoricalAPYProvider
-from ..subgraph_client import (
+from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalAPYProvider
+from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
     SubgraphClientConfig,
     SubgraphQueryError,
     SubgraphRateLimitError,
 )
+from almanak.framework.backtesting.pnl.types import APYResult, DataConfidence, DataSourceInfo
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +220,24 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             "Initialized AaveV3APYProvider: chain=%s, supported_chains=%s",
             self._config.chain.value,
             [c.value for c in SUPPORTED_CHAINS],
+        )
+
+    @classmethod
+    def for_backtest(cls, config: BacktestProviderConfig) -> "AaveV3APYProvider":
+        """Construct from the adapter's protocol-neutral backtest config."""
+        return cls(
+            config=AaveV3ClientConfig(
+                supply_apy_fallback=(
+                    config.supply_apy_fallback
+                    if config.supply_apy_fallback is not None
+                    else DEFAULT_SUPPLY_APY_FALLBACK
+                ),
+                borrow_apy_fallback=(
+                    config.borrow_apy_fallback
+                    if config.borrow_apy_fallback is not None
+                    else DEFAULT_BORROW_APY_FALLBACK
+                ),
+            )
         )
 
     @property

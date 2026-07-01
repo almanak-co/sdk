@@ -405,8 +405,8 @@ class MorphoBlueGatewayConnector(
         """Historical lending series.
 
         Morpho Blue historical APY series is sourced from the dedicated
-        ``MorphoBlueAPYProvider`` (see ``framework/backtesting/pnl/providers/
-        lending/morpho_apy.py``) which continues to consume TheGraph subgraph
+        ``MorphoBlueAPYProvider`` (see ``connectors/morpho_blue/backtest_apy.py``)
+        which continues to consume TheGraph subgraph
         data through the shared ``SubgraphClient``. Surface lands in W7 step 4
         once the consumer rewrite wires through the gRPC service.
         """

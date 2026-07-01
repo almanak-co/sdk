@@ -61,6 +61,7 @@ from .aggregated import (
     ProviderConfig,
 )
 from .base import (
+    BacktestProviderConfig,
     HistoricalAPYProvider,
     HistoricalFundingProvider,
     HistoricalLiquidityProvider,
@@ -92,8 +93,6 @@ from .circuit_breaker import (
     CHAINLINK_CONFIG,
     COINGECKO_CONFIG,
     ETHERSCAN_CONFIG,
-    GMX_API_CONFIG,
-    HYPERLIQUID_CONFIG,
     RPC_CONFIG,
     SUBGRAPH_CONFIG,
     CircuitBreaker,
@@ -106,8 +105,6 @@ from .circuit_breaker import (
     create_chainlink_circuit_breaker,
     create_coingecko_circuit_breaker,
     create_etherscan_circuit_breaker,
-    create_gmx_circuit_breaker,
-    create_hyperliquid_circuit_breaker,
     create_rpc_circuit_breaker,
     create_subgraph_circuit_breaker,
     get_all_circuit_breaker_metrics,
@@ -145,24 +142,6 @@ from .gas import (
     GasPriceCache,
     GasPriceProvider,
 )
-from .lending import (
-    AAVE_V3_DATA_SOURCE,
-    AAVE_V3_SUBGRAPH_IDS,
-    AAVE_V3_SUPPORTED_CHAINS,
-    COMPOUND_V3_DATA_SOURCE,
-    COMPOUND_V3_SUBGRAPH_IDS,
-    COMPOUND_V3_SUPPORTED_CHAINS,
-    MORPHO_BLUE_DATA_SOURCE,
-    MORPHO_BLUE_SUBGRAPH_IDS,
-    MORPHO_BLUE_SUPPORTED_CHAINS,
-    SPARK_DATA_SOURCE,
-    SPARK_SUBGRAPH_IDS,
-    SPARK_SUPPORTED_CHAINS,
-    AaveV3APYProvider,
-    CompoundV3APYProvider,
-    MorphoBlueAPYProvider,
-    SparkAPYProvider,
-)
 from .lending_apy import (
     CachedLendingAPY,
     LendingAPYData,
@@ -186,13 +165,6 @@ from .liquidity_depth import (
 )
 from .multi_dex_volume import (
     MultiDEXVolumeProvider,
-)
-from .perp import (
-    GMX_DATA_SOURCE,
-    HYPERLIQUID_DATA_SOURCE,
-    HYPERLIQUID_MAX_HOURS_PER_REQUEST,
-    GMXFundingProvider,
-    HyperliquidFundingProvider,
 )
 from .rate_limiter import (
     RateLimiterStats,
@@ -224,6 +196,7 @@ __all__ = [
     "HistoricalFundingProvider",
     "HistoricalAPYProvider",
     "HistoricalLiquidityProvider",
+    "BacktestProviderConfig",
     # Price Providers
     "CoinGeckoDataProvider",
     "ChainlinkDataProvider",
@@ -325,42 +298,11 @@ __all__ = [
     "create_subgraph_circuit_breaker",
     "create_etherscan_circuit_breaker",
     "create_rpc_circuit_breaker",
-    "create_gmx_circuit_breaker",
-    "create_hyperliquid_circuit_breaker",
     "COINGECKO_CONFIG",
     "CHAINLINK_CONFIG",
     "SUBGRAPH_CONFIG",
     "ETHERSCAN_CONFIG",
     "RPC_CONFIG",
-    "GMX_API_CONFIG",
-    "HYPERLIQUID_CONFIG",
-    # GMX V2 Historical Funding Provider
-    "GMXFundingProvider",
-    "GMX_DATA_SOURCE",
-    # Hyperliquid Historical Funding Provider
-    "HyperliquidFundingProvider",
-    "HYPERLIQUID_DATA_SOURCE",
-    "HYPERLIQUID_MAX_HOURS_PER_REQUEST",
-    # Aave V3 Historical APY Provider
-    "AaveV3APYProvider",
-    "AAVE_V3_SUBGRAPH_IDS",
-    "AAVE_V3_SUPPORTED_CHAINS",
-    "AAVE_V3_DATA_SOURCE",
-    # Compound V3 Historical APY Provider
-    "CompoundV3APYProvider",
-    "COMPOUND_V3_SUBGRAPH_IDS",
-    "COMPOUND_V3_SUPPORTED_CHAINS",
-    "COMPOUND_V3_DATA_SOURCE",
-    # Morpho Blue Historical APY Provider
-    "MorphoBlueAPYProvider",
-    "MORPHO_BLUE_SUBGRAPH_IDS",
-    "MORPHO_BLUE_SUPPORTED_CHAINS",
-    "MORPHO_BLUE_DATA_SOURCE",
-    # Spark Historical APY Provider
-    "SparkAPYProvider",
-    "SPARK_SUBGRAPH_IDS",
-    "SPARK_SUPPORTED_CHAINS",
-    "SPARK_DATA_SOURCE",
     # Liquidity Depth Provider
     "LiquidityDepthProvider",
     "LIQUIDITY_DATA_SOURCE_FALLBACK",

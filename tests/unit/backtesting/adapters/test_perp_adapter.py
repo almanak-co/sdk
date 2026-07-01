@@ -1246,10 +1246,10 @@ class TestHistoricalFundingRateIntegration:
         assert adapter._use_historical_funding() is True
 
         # When data_config is None and config.funding_rate_source=='historical',
-        # the new provider system is used (GMXFundingProvider/HyperliquidFundingProvider)
-        # Legacy provider is not initialized in this case
-        assert adapter._gmx_provider_initialized is False  # Lazy init
-        assert adapter._hyperliquid_provider_initialized is False  # Lazy init
+        # the connector-declared providers are resolved lazily through the
+        # generic cache. The legacy provider is not initialized in this case.
+        assert adapter._provider_cache == {}
+        assert adapter._provider_tried == set()
 
     def test_fixed_funding_rate_no_provider(self) -> None:
         """Test that funding_rate_source='fixed' does not initialize provider."""
@@ -1275,8 +1275,6 @@ class TestHistoricalFundingRateIntegration:
 
     def test_historical_rate_fallback_on_error(self) -> None:
         """Test that historical rate falls back to default on provider error."""
-        from unittest.mock import patch
-
         from almanak.framework.backtesting.config import BacktestDataConfig
 
         # Use BacktestDataConfig to enable historical funding with fallback rate
@@ -1301,20 +1299,17 @@ class TestHistoricalFundingRateIntegration:
             protocol="gmx",
         )
 
-        # Mock the GMX provider's get_funding_rates to raise an error
-        with patch(
-            "almanak.framework.backtesting.adapters.perp_adapter.PerpBacktestAdapter._ensure_gmx_provider",
-            return_value=None,  # Simulate provider unavailable
-        ):
-            rate, confidence, source = adapter._get_historical_funding_rate_v2(
-                position=position,
-                timestamp=entry_time,
-            )
+        adapter._provider_tried.add("gmx_v2")
+        adapter._provider_cache["gmx_v2"] = None
+        rate, confidence, source = adapter._get_historical_funding_rate_v2(
+            position=position,
+            timestamp=entry_time,
+        )
 
-            # Should fall back to default rate
-            assert rate == Decimal("0.0002")  # Uses data_config.funding_fallback_rate
-            assert confidence == "low"
-            assert "fallback" in source
+        # Should fall back to default rate
+        assert rate == Decimal("0.0002")  # Uses data_config.funding_fallback_rate
+        assert confidence == "low"
+        assert "fallback" in source
 
     def test_historical_rate_fallback_no_timestamp(self) -> None:
         """Test that historical rate falls back to default when no timestamp."""
@@ -1347,7 +1342,7 @@ class TestHistoricalFundingRateIntegration:
 
     def test_historical_rate_applied_to_position(self, caplog: pytest.LogCaptureFixture) -> None:
         """Test that historical rates are applied correctly to position with logging."""
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock
 
         from almanak.framework.backtesting.config import BacktestDataConfig
         from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, FundingResult
@@ -1391,10 +1386,9 @@ class TestHistoricalFundingRateIntegration:
 
         import logging
 
-        with (
-            caplog.at_level(logging.DEBUG, logger="almanak.framework.backtesting.adapters.perp_adapter"),
-            patch.object(adapter, "_ensure_gmx_provider", return_value=mock_provider),
-        ):
+        adapter._provider_tried.add("gmx_v2")
+        adapter._provider_cache["gmx_v2"] = mock_provider
+        with caplog.at_level(logging.DEBUG, logger="almanak.framework.backtesting.adapters.perp_adapter"):
             # Apply 1 hour of funding
             adapter.update_position(position, market, elapsed_seconds=3600, timestamp=entry_time)
 
@@ -1413,7 +1407,7 @@ class TestHistoricalFundingRateIntegration:
 
     def test_historical_rate_uses_latest_timestamp_not_provider_order(self) -> None:
         """Provider results may be unsorted; choose the newest timestamp explicitly."""
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock
 
         from almanak.framework.backtesting.config import BacktestDataConfig
         from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, FundingResult
@@ -1448,11 +1442,12 @@ class TestHistoricalFundingRateIntegration:
         mock_provider = MagicMock()
         mock_provider.get_funding_rates = AsyncMock(return_value=[newest, older])
 
-        with patch.object(adapter, "_ensure_gmx_provider", return_value=mock_provider):
-            rate, confidence, source = adapter._get_historical_funding_rate_v2(
-                position=position,
-                timestamp=entry_time,
-            )
+        adapter._provider_tried.add("gmx_v2")
+        adapter._provider_cache["gmx_v2"] = mock_provider
+        rate, confidence, source = adapter._get_historical_funding_rate_v2(
+            position=position,
+            timestamp=entry_time,
+        )
 
         assert rate == Decimal("0.0007")
         assert confidence == "high"
@@ -1475,7 +1470,7 @@ class TestHistoricalFundingRateIntegration:
 
     def test_hyperliquid_historical_rate(self) -> None:
         """Test historical rate lookup for Hyperliquid protocol."""
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock
 
         from almanak.framework.backtesting.config import BacktestDataConfig
         from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, FundingResult
@@ -1514,15 +1509,16 @@ class TestHistoricalFundingRateIntegration:
         mock_provider = MagicMock()
         mock_provider.get_funding_rates = AsyncMock(return_value=[mock_funding_result])
 
-        with patch.object(adapter, "_ensure_hyperliquid_provider", return_value=mock_provider):
-            rate, confidence, source = adapter._get_historical_funding_rate_v2(
-                position=position,
-                timestamp=entry_time,
-            )
+        adapter._provider_tried.add("hyperliquid")
+        adapter._provider_cache["hyperliquid"] = mock_provider
+        rate, confidence, source = adapter._get_historical_funding_rate_v2(
+            position=position,
+            timestamp=entry_time,
+        )
 
-            assert rate == Decimal("0.00015")
-            assert confidence == "high"
-            assert "historical:hyperliquid_api" in source
+        assert rate == Decimal("0.00015")
+        assert confidence == "high"
+        assert "historical:hyperliquid_api" in source
 
     @staticmethod
     def _legacy_adapter_with_provider(

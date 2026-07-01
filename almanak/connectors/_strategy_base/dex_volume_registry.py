@@ -43,6 +43,7 @@ class DexVolumeEntry:
     generic_default: bool
     volume_subgraph_urls: dict[str, str] | None = None  # {chain: https_url} — plan 024
     hosted_volume_subgraph_urls: dict[str, str] | None = None  # fallback URLs — plan 024
+    liquidity_subgraph_ids: dict[str, str] | None = None  # {chain: deployment_id} — liquidity depth
 
 
 class DexVolumeRegistry:
@@ -84,6 +85,9 @@ class DexVolumeRegistry:
                 volume_subgraph_urls=dict(decl.volume_subgraph_urls) if decl.volume_subgraph_urls is not None else None,
                 hosted_volume_subgraph_urls=(
                     dict(decl.hosted_volume_subgraph_urls) if decl.hosted_volume_subgraph_urls is not None else None
+                ),
+                liquidity_subgraph_ids=(
+                    dict(decl.liquidity_subgraph_ids) if decl.liquidity_subgraph_ids is not None else None
                 ),
             )
             for alias in decl.aliases:
@@ -229,6 +233,14 @@ class DexVolumeRegistry:
             return None
         # Fresh copy per call — see volume_subgraph_urls_for.
         return dict(entry.hosted_volume_subgraph_urls)
+
+    @classmethod
+    def liquidity_subgraph_ids_for(cls, protocol: str | None) -> dict[str, str] | None:
+        """Return the ``{chain: deployment_id}`` liquidity-depth subgraph map."""
+        entry = cls.entry_for(protocol)
+        if entry is None or entry.liquidity_subgraph_ids is None:
+            return None
+        return dict(entry.liquidity_subgraph_ids)
 
     @classmethod
     def reset_cache(cls) -> None:

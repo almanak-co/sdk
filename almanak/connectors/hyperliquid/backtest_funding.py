@@ -12,9 +12,7 @@ fills only when no data comes back at all (preserving the pre-cutover
 graceful-degradation contract).
 
 Example:
-    from almanak.framework.backtesting.pnl.providers.perp import (
-        HyperliquidFundingProvider,
-    )
+    from almanak.connectors.hyperliquid.backtest_funding import HyperliquidFundingProvider
     from datetime import datetime, UTC
 
     provider = HyperliquidFundingProvider()
@@ -34,12 +32,15 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
+from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalFundingProvider
+from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
+    FundingHistoryPoint,
+    fetch_funding_points,
+    run_sync_gateway_call,
+)
+from almanak.framework.backtesting.pnl.providers.rate_limiter import TokenBucketRateLimiter
+from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, FundingResult
 from almanak.framework.data.interfaces import DataSourceUnavailable
-
-from ...types import DataConfidence, DataSourceInfo, FundingResult
-from ..base import HistoricalFundingProvider
-from ..rate_limiter import TokenBucketRateLimiter
-from ._gateway_history import FundingHistoryPoint, fetch_funding_points, run_sync_gateway_call
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,17 @@ class HyperliquidFundingProvider(HistoricalFundingProvider):
         logger.debug(
             "Initialized HyperliquidFundingProvider: rate_limit=%d req/min",
             self._config.requests_per_minute,
+        )
+
+    @classmethod
+    def for_backtest(cls, config: BacktestProviderConfig) -> "HyperliquidFundingProvider":
+        """Construct from the adapter's protocol-neutral backtest config."""
+        return cls(
+            config=HyperliquidClientConfig(
+                fallback_rate=(
+                    config.funding_fallback_rate if config.funding_fallback_rate is not None else Decimal("0.0001")
+                ),
+            )
         )
 
     @property
