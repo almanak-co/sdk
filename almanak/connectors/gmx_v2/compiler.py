@@ -14,7 +14,12 @@ from almanak.connectors._strategy_base.base.compiler import (
 )
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
 from almanak.framework.intents.intent_errors import InvalidCollateralForMarketError
-from almanak.framework.intents.vocabulary import IntentType, PerpCloseIntent, PerpOpenIntent
+from almanak.framework.intents.vocabulary import (
+    IntentType,
+    PerpCancelIntent,
+    PerpCloseIntent,
+    PerpOpenIntent,
+)
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
 from .adapter import GMX_V2_MARKETS, GMXv2Adapter, GMXv2Config
@@ -25,10 +30,12 @@ logger = logging.getLogger(__name__)
 
 
 class GMXV2Compiler(BasePerpCompiler):
-    """Compile GMX V2 PERP_OPEN and PERP_CLOSE intents."""
+    """Compile GMX V2 PERP_OPEN, PERP_CLOSE and PERP_CANCEL_ORDER intents."""
 
     protocols: ClassVar[frozenset[str]] = frozenset({"gmx_v2"})
-    intents: ClassVar[frozenset[IntentType]] = frozenset({IntentType.PERP_OPEN, IntentType.PERP_CLOSE})
+    intents: ClassVar[frozenset[IntentType]] = frozenset(
+        {IntentType.PERP_OPEN, IntentType.PERP_CLOSE, IntentType.PERP_CANCEL_ORDER}
+    )
     chains: ClassVar[frozenset[str]] = frozenset({"arbitrum", "avalanche"})
 
     #: Stable prefix strategies + the retry-classification keyword table match on.
@@ -347,6 +354,60 @@ class GMXV2Compiler(BasePerpCompiler):
             result.warnings = warnings
         except Exception as exc:
             logger.exception("Failed to compile GMX V2 PERP_CLOSE intent: %s", exc)
+            result.status = CompilationStatus.FAILED
+            result.error = str(exc)
+
+        return result
+
+    def compile_perp_cancel(self, ctx: PerpCompilerContext, intent: PerpCancelIntent) -> CompilationResult:
+        """Compile PERP_CANCEL_ORDER → ``ExchangeRouter.cancelOrder(bytes32)`` (VIB-5568).
+
+        Cancels a pending (unfilled) GMX V2 order, refunding its committed collateral
+        and unspent execution fee to the wallet (``cancellationReceiver`` defaults to
+        the caller). A single call, ``value=0`` — no keeper execution fee, no
+        multicall / ``sendWnt`` (unlike open/close). The ``order_key`` is a validated
+        bytes32 (``PerpCancelIntent`` rejects a malformed key that would zero-pad into
+        a *different* order), so the cancel can never target the wrong order.
+        """
+        result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent.intent_id)
+        try:
+            if ctx.chain not in self.chains:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"GMX v2 not supported on chain: {ctx.chain}",
+                    intent_id=intent.intent_id,
+                )
+
+            adapter = GMXv2Adapter(GMXv2Config(chain=ctx.chain, wallet_address=ctx.wallet_address))
+            # Pure, stateless calldata builder keyed only by the on-chain order key —
+            # NOT adapter.cancel_order(), which requires the order to be in the
+            # adapter's in-memory tracking (a teardown-discovered stranded order, on a
+            # fresh process, is never tracked there).
+            tx_data = adapter.build_cancel_order_tx(intent.order_key)
+            transactions = [
+                TransactionData(
+                    to=tx_data.to,
+                    value=tx_data.value,  # 0 — a cancel carries no keeper fee
+                    data=tx_data.data,
+                    gas_estimate=tx_data.gas_estimate,
+                    description=f"Cancel GMX v2 pending order {intent.order_key[:10]}... (recover collateral)",
+                    tx_type="perp_cancel_order",
+                )
+            ]
+
+            result.action_bundle = ActionBundle(
+                intent_type=IntentType.PERP_CANCEL_ORDER.value,
+                transactions=[tx.to_dict() for tx in transactions],
+                metadata={
+                    "protocol": intent.protocol,
+                    "order_key": intent.order_key,
+                    "chain": ctx.chain,
+                },
+            )
+            result.transactions = transactions
+            result.total_gas_estimate = sum(tx.gas_estimate for tx in transactions)
+        except Exception as exc:
+            logger.exception("Failed to compile GMX V2 PERP_CANCEL_ORDER intent: %s", exc)
             result.status = CompilationStatus.FAILED
             result.error = str(exc)
 

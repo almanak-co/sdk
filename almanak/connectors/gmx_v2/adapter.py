@@ -140,7 +140,12 @@ DEFAULT_EXECUTION_FEE: dict[str, int] = {
 GMX_V2_GAS_ESTIMATES: dict[str, int] = {
     "create_increase_order": 800000,
     "create_decrease_order": 600000,
-    "cancel_order": 200000,
+    # GMX cancelOrder does OrderVault refunds + optional callback. Real-fork
+    # eth_estimateGas measured ~1.48M (used ~660k); with simulation ON the estimate
+    # overrides this floor, but on the simulation-DISABLED submit path this floor IS
+    # the gas limit — sized above the observed node estimate so a colder-storage /
+    # callback cancel cannot OOG. Over-sizing a gas LIMIT is free (you pay gas used). VIB-5568.
+    "cancel_order": 1_500_000,
     "claim_funding_fees": 300000,
     "claim_collateral": 200000,
 }
@@ -148,7 +153,7 @@ GMX_V2_GAS_ESTIMATES: dict[str, int] = {
 # Function selectors for GMX v2 ExchangeRouter
 GMX_CREATE_ORDER_SELECTOR = "0x5e2c576b"  # createOrder((address,...))
 GMX_UPDATE_ORDER_SELECTOR = "0xfec7303e"  # updateOrder(bytes32,uint256,uint256,uint256)
-GMX_CANCEL_ORDER_SELECTOR = "0xd42a7b9e"  # cancelOrder(bytes32)
+GMX_CANCEL_ORDER_SELECTOR = "0x7489ec23"  # cancelOrder(bytes32) — keccak("cancelOrder(bytes32)")[:4]
 GMX_CLAIM_FUNDING_FEES_SELECTOR = "0xd294f093"  # claimFundingFees(address[],address[],address)
 
 # Order types
@@ -1362,7 +1367,7 @@ class GMXv2Adapter:
                 )
 
             # Build cancel transaction
-            tx_data = self._build_cancel_order_tx(order_key)
+            tx_data = self.build_cancel_order_tx(order_key)
 
             # Remove from tracking
             del self._orders[order_key]
@@ -1506,9 +1511,21 @@ class GMXv2Adapter:
             description=f"Create GMX v2 {action} {side} order",
         )
 
-    def _build_cancel_order_tx(self, order_key: str) -> TransactionData:
-        """Build transaction data for canceling an order."""
-        # cancelOrder(bytes32 key)
+    def build_cancel_order_tx(self, order_key: str) -> TransactionData:
+        """Build ``ExchangeRouter.cancelOrder(bytes32)`` transaction data for an order key.
+
+        Pure and stateless: keyed only by the on-chain ``order_key`` (bytes32), with
+        no dependency on the adapter's in-memory ``_orders`` tracking. This is what the
+        teardown recovery lane (VIB-5568) uses to cancel a *discovered* stranded order
+        (fresh process, nothing tracked) — unlike :meth:`cancel_order`, which requires
+        the order to be locally tracked and is blind to teardown-discovered residuals.
+
+        ``value=0`` — a cancel carries no keeper execution fee; the OrderVault refund
+        (committed collateral + unspent exec fee) lands in the wallet
+        (``cancellationReceiver`` defaults to the caller).
+        """
+        # cancelOrder(bytes32 key). The caller validates the key is a full bytes32
+        # (PerpCancelIntent); zfill here is defense-in-depth for the internal caller.
         key_padded = order_key.replace("0x", "").zfill(64)
         calldata = GMX_CANCEL_ORDER_SELECTOR + key_padded
 

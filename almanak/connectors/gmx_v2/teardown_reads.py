@@ -33,6 +33,36 @@ from almanak.connectors.gmx_v2.orders_read import (
 
 logger = logging.getLogger(__name__)
 
+# Canonical Multicall3 (same address on Arbitrum / Avalanche / most EVM chains).
+# ``getCurrentBlockTimestamp()`` (selector 0x0f28c97d) returns ``block.timestamp``
+# via the existing gateway ``eth_call`` — no new gateway capability, no provider
+# opened here (gateway-boundary rule). Used to age-gate account-initiated order
+# cancellation (VIB-5568): GMX rejects a cancel until the order is old enough.
+_MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
+_GET_CURRENT_BLOCK_TIMESTAMP_CALLDATA = "0x0f28c97d"
+
+
+def read_chain_timestamp(gateway_client: Any, chain: str, *, block: int | str | None = None) -> int | None:
+    """Read ``block.timestamp`` on ``chain`` via Multicall3 (gateway-routed).
+
+    Returns ``None`` on any unmeasured read (no gateway, eth_call error, or
+    undecodable result) — callers fail-closed (defer cancellation) rather than
+    guess the current time.
+    """
+    if gateway_client is None:
+        return None
+    try:
+        blob = gateway_client.eth_call(
+            chain=chain, to=_MULTICALL3, data=_GET_CURRENT_BLOCK_TIMESTAMP_CALLDATA, block=block
+        )
+        # decode_uint stays INSIDE the try: a malformed/empty blob must degrade to
+        # None (fail-closed), never propagate. (Gemini review.)
+        ts = decode_uint(blob)
+        return ts if ts and ts > 0 else None
+    except Exception:  # noqa: BLE001 — unmeasured ⇒ None (fail-closed at the caller)
+        logger.debug("Multicall3 getCurrentBlockTimestamp eth_call raised on %s", chain, exc_info=True)
+        return None
+
 
 def resolve_gmx_contracts(chain: str) -> tuple[str | None, str | None, str | None]:
     """Resolve ``(reader, data_store, order_vault)`` for ``chain``; ``None`` per role when absent."""
@@ -187,4 +217,4 @@ def read_pending_orders(
     )
 
 
-__all__ = ["read_pending_orders", "resolve_gmx_contracts"]
+__all__ = ["read_chain_timestamp", "read_pending_orders", "resolve_gmx_contracts"]

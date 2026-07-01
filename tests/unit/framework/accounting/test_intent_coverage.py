@@ -201,6 +201,11 @@ def test_no_intent_type_is_silently_unhandled() -> None:
         "UNWRAP_NATIVE",
         "ENSURE_BALANCE",
         "FLASH_LOAN",
+        # VIB-5568: a pending-order cancel is a refund of committed-but-unspent
+        # collateral, NOT a position open/close — no typed accounting/PnL event
+        # (the wallet credit is captured by the balance snapshot + a ledger row).
+        # Deliberately NO_ACCOUNTING; see taxonomy.py PERP_CANCEL_ORDER row.
+        "PERP_CANCEL_ORDER",
         # Not yet implemented (Phase 2+)
         "STAKE",
         "UNSTAKE",

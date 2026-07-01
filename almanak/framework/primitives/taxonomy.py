@@ -190,6 +190,24 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.CLOSE,
             required_lifecycle=_PERP_LIFECYCLE,
         ),
+        # PERP_CANCEL_ORDER (VIB-5568) — cancel a pending (unfilled) perp order and
+        # refund its committed collateral. Deliberately NOT AccountingCategory.PERP:
+        # a cancel closes NO position (a stranded pending order never opened one —
+        # the VIB-5116 orphaned-collateral case), so classifying it as a PERP CLOSE
+        # would fabricate an unmatched close leg with no PERP_OPEN counterpart and
+        # break perp lifecycle / lot-matching. It is a refund of committed-but-unspent
+        # collateral: the wallet credit is captured by the portfolio balance snapshot,
+        # and the cancel tx still gets a transaction_ledger row via the teardown commit
+        # pipeline — so it is visible without a phantom position/PnL event. Modeled on
+        # FLASH_LOAN (domain primitive + NO_ACCOUNTING + EventKind.NONE); position_type
+        # None and NO required_lifecycle (order-management, not a position leg).
+        _record(
+            "PERP_CANCEL_ORDER",
+            Primitive.PERP,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
         # ──────────────────────────────────────────────────────────────────
         # Vault (ERC-4626)
         # ──────────────────────────────────────────────────────────────────

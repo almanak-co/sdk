@@ -121,6 +121,7 @@ _NUM_ORDER_TYPE = 0
 _NUM_SIZE_DELTA_USD = 2
 _NUM_INITIAL_COLLATERAL_DELTA_AMOUNT = 3
 _NUM_EXECUTION_FEE = 6
+_NUM_UPDATED_AT_TIME = 9  # unix seconds the order was last created/updated (GMX cancel time-gate anchor)
 _FLAG_IS_LONG = 0
 
 
@@ -142,6 +143,12 @@ class PendingOrder:
     execution_fee: int
     is_long: bool
     order_key: str = ""
+    # Unix seconds the order was created/updated on-chain. ``0`` ⇒ unmeasured (a
+    # key-only stub, or an older struct without the field) — callers treat 0 as
+    # "age unknown" and fail-closed (defer cancellation), never as "age 0" (which
+    # would look infinitely old and cancel too early). GMX gates account-initiated
+    # cancellation on ``now - updated_at_time >= REQUEST_EXPIRATION_TIME`` (VIB-5568).
+    updated_at_time: int = 0
 
 
 @dataclass(frozen=True)
@@ -282,6 +289,7 @@ def decode_account_orders(blob: Any, order_keys: list[str] | None = None) -> lis
                     size_delta_usd=int(numbers[_NUM_SIZE_DELTA_USD]),
                     order_type=int(numbers[_NUM_ORDER_TYPE]),
                     execution_fee=int(numbers[_NUM_EXECUTION_FEE]),
+                    updated_at_time=int(numbers[_NUM_UPDATED_AT_TIME]),
                     is_long=bool(flags[_FLAG_IS_LONG]),
                     order_key=inline_key if int(inline_key, 16) != 0 else fallback_key,
                 )

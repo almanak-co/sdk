@@ -583,6 +583,136 @@ async def _recover_orphaned_lp_intents(
     return outcome.intents, outcome.incomplete, outcome.warning
 
 
+async def _recover_pending_order_intents(
+    runner: Any,  # noqa: ARG001 — signature parity with _recover_orphaned_lp_intents
+    strategy: Any,
+    teardown_intents: list,
+    teardown_mode: TeardownMode,  # noqa: ARG001 — a cancel is mode-agnostic (always full recovery)
+) -> tuple[list, bool, str | None]:
+    """Recover collateral from stranded pending (unfilled) perp orders (VIB-5568).
+
+    The RECOVERY half of VIB-5116. Teardown's residual discovery
+    (``discover_teardown_residuals``) reads the wallet's pending (unfilled) GMX V2
+    orders directly from chain — collateral committed to the OrderVault that is NOT
+    a position and is invisible to ``get_open_positions()`` /
+    ``generate_teardown_intents()``. #3130 folds those residuals into the
+    COMPLETENESS set so teardown fails LOUD on them, but nothing CANCELS them, so
+    the collateral stays stranded. This lane turns each discovered pending-order
+    residual into a ``PERP_CANCEL_ORDER`` intent (via ``full_close_intents``, whose
+    PERP branch maps a ``kind="pending_order"`` residual to
+    ``Intent.perp_cancel_order`` routed to the venue's compiler) and APPENDS it to
+    ``teardown_intents`` so it flows through the normal ``_execute_intents``
+    per-intent commit pipeline — no bypass. After the cancels execute, the venue's
+    teardown post-condition re-reads the OrderVault
+    (``getBytes32Count(ACCOUNT_ORDER_LIST) == 0``) and completeness passes.
+
+    Returns ``(augmented_intents, incomplete, warning)`` — ``incomplete=True`` when
+    the residual read was UNMEASURED (a ``residual_unverified`` sentinel: Empty ≠
+    Zero, fail-closed) so teardown is NOT certified clean while a strand may remain.
+
+    Never raises: discovery failure degrades loudly but never blocks the next
+    risk-reducing intent (teardown's inverted failure semantics).
+    """
+    from ..teardown.full_close import full_close_intents
+    from ..teardown.residual_discovery import discover_teardown_residuals
+
+    deployment_id = getattr(strategy, "deployment_id", "")
+    try:
+        residuals = discover_teardown_residuals(strategy)
+    except Exception as exc:  # noqa: BLE001 — discovery must never block risk reduction
+        # ``discover_teardown_residuals`` is contracted never-raise; if it DOES, we
+        # could not enumerate residuals, so fail CLOSED — do not certify clean (a
+        # strand may remain). This never blocks risk reduction (incomplete only
+        # degrades the post-execution result to manual-check) and is consistent with
+        # the post-discovery-crash branch below. (Gemini review.)
+        logger.exception(
+            "Teardown pending-order recovery: residual discovery raised for %s — failing closed (manual check)",
+            deployment_id,
+        )
+        return (
+            teardown_intents,
+            True,
+            f"Pending-order residual discovery failed for {deployment_id}: {exc} — "
+            "manual on-chain verification required.",
+        )
+
+    if not residuals:
+        return teardown_intents, False, None
+
+    # Residuals were MEASURED — from here a crash must fail CLOSED (do not certify
+    # clean) rather than raise, since a strand may remain unrecovered. This makes
+    # the "never raises" guarantee structural, not incidental to the list-ops below.
+    try:
+        # An UNMEASURED residual read (fail-closed sentinel) means we could NOT
+        # enumerate the OrderVault — a strand may remain, so do not certify clean.
+        unmeasured = any((p.details or {}).get("kind") == "residual_unverified" for p in residuals)
+
+        # Partition pending orders by the GMX cancel age-gate (VIB-5568). Only orders
+        # comfortably past REQUEST_EXPIRATION_TIME (~300s) carry ``cancellable=True``
+        # from residual discovery; a fresh order (or one whose age was unmeasured) is
+        # DEFERRED — cancelling it now would just revert (RequestNotYetCancellable) and
+        # burn the slippage-escalation ladder to FAILED.
+        pending = [p for p in residuals if (p.details or {}).get("kind") == "pending_order"]
+        cancellable = [p for p in pending if (p.details or {}).get("cancellable")]
+        deferred = [p for p in pending if not (p.details or {}).get("cancellable")]
+
+        # full_close_intents' PERP branch fail-closes any residual without a real
+        # bytes32 order key OR not marked cancellable to None, so a garbage key or a
+        # too-young order can never produce a mis-targeted / doomed cancel.
+        cancels = full_close_intents(cancellable) if cancellable else []
+        if cancels:
+            logger.warning(
+                "🛑 Teardown recovering %d stranded pending-order(s) for %s → PERP_CANCEL_ORDER to "
+                "return committed collateral to the wallet (VIB-5568)",
+                len(cancels),
+                deployment_id,
+            )
+            teardown_intents = list(teardown_intents) + list(cancels)
+
+        # Deferred (not-yet-cancellable) orders keep teardown from certifying clean
+        # and surface a precise "recoverable in ~Ns" message — the operator (or a
+        # later teardown) recovers them once the gate elapses.
+        deferred_warning = None
+        if deferred:
+            waits = [(p.details or {}).get("seconds_until_cancellable") for p in deferred]
+            max_wait = max((w for w in waits if isinstance(w, int)), default=None)
+            wait_txt = f"~{max_wait}s" if max_wait is not None else "up to ~300s"
+            deferred_warning = (
+                f"{len(deferred)} GMX pending order(s) not yet cancellable for {deployment_id} "
+                f"(GMX ~300s cancel gate) — recoverable in {wait_txt}; re-run teardown after that."
+            )
+            logger.warning(
+                "🛑 Teardown deferring %d not-yet-cancellable pending-order(s) for %s (recoverable in %s)",
+                len(deferred),
+                deployment_id,
+                wait_txt,
+            )
+
+        unmeasured_warning = None
+        if unmeasured:
+            unmeasured_warning = (
+                f"Pending-order residual read was UNMEASURED during teardown for {deployment_id}; "
+                "a stranded order may remain — manual on-chain verification required."
+            )
+        incomplete = unmeasured or bool(deferred)
+        warning = "; ".join(w for w in (unmeasured_warning, deferred_warning) if w) or None
+        return teardown_intents, incomplete, warning
+    except Exception:  # noqa: BLE001 — never block risk reduction; fail closed on the incomplete flag
+        logger.exception(
+            "Teardown pending-order recovery: building cancels raised for %s after residuals were "
+            "measured — failing closed (teardown not certified clean)",
+            deployment_id,
+        )
+        return (
+            teardown_intents,
+            True,
+            (
+                f"Pending-order recovery could not build cancels for {deployment_id} after discovering "
+                "residuals — manual on-chain verification required."
+            ),
+        )
+
+
 def _positions_completion_result(open_positions_count: int | None, intents_count: int) -> dict[str, Any]:
     """Build the ``mark_completed`` result_json for the unverified teardown lanes.
 
@@ -823,6 +953,19 @@ async def execute_teardown(  # noqa: C901
     teardown_intents, recovery_incomplete, recovery_warning = await _recover_orphaned_lp_intents(
         runner, strategy, teardown_intents, teardown_mode
     )
+    # Step T2.45 (VIB-5568): recover collateral from stranded pending (unfilled)
+    # perp orders. Residual discovery (VIB-5116) DETECTS them and #3130 fails the
+    # teardown loud on them; this RECOVERS them — turning each into a
+    # PERP_CANCEL_ORDER appended to teardown_intents so the OrderVault collateral is
+    # returned to the wallet and completeness then passes. Same commit pipeline; an
+    # UNMEASURED residual read degrades to incomplete (fail-closed, Empty ≠ Zero).
+    teardown_intents, pending_incomplete, pending_warning = await _recover_pending_order_intents(
+        runner, strategy, teardown_intents, teardown_mode
+    )
+    recovery_incomplete = recovery_incomplete or pending_incomplete
+    # Keep BOTH warnings when LP and pending-order recovery are each incomplete —
+    # ``or`` would drop the pending-order detail the operator needs.
+    recovery_warning = "; ".join(w for w in (recovery_warning, pending_warning) if w) or None
     # F3 (VIB-5138): stash the incomplete signal on the runner so the
     # intents-present path (multi-chain + TeardownManager lanes) can degrade the
     # teardown lifecycle to manual-check after execution, instead of letting an
@@ -1239,12 +1382,18 @@ async def execute_teardown_via_manager(
         # all the risk reduction we could; we just don't certify it). Read off the
         # runner attribute the recovery step stashed (cleared in finally).
         if getattr(runner, "_teardown_recovery_incomplete", False) and teardown_result.success:
+            # Source-agnostic: the incompleteness may come from LP orphan discovery
+            # (VIB-5138) OR pending-order recovery (VIB-5568, a deferred not-yet-
+            # cancellable order or an unmeasured OrderVault read). The specific reason
+            # is carried in ``warn`` (the recovery step's own message); keep the
+            # surrounding text + options generic so a pending-order defer is not
+            # mislabelled as "LP discovery".
             warn = (
                 getattr(runner, "_teardown_recovery_warning", None)
-                or "On-chain LP discovery incomplete; manual check required."
+                or "Teardown recovery incomplete; manual check required."
             )
             logger.error(
-                "🛑 %s teardown executed but LP discovery incomplete — marking manual-check: %s",
+                "🛑 %s teardown executed but recovery incomplete — marking manual-check: %s",
                 deployment_id,
                 warn,
             )
@@ -1253,8 +1402,8 @@ async def execute_teardown_via_manager(
                 success=False,
                 error=warn,
                 recovery_options=[
-                    "Verify LP positions on-chain (NPM balanceOf)",
-                    "Re-run teardown once RPC is healthy",
+                    "Verify residual positions / pending orders on-chain",
+                    "Re-run teardown once the blocking condition clears (RPC health / GMX cancel window)",
                 ],
             )
 

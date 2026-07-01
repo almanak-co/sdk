@@ -398,21 +398,37 @@ def _covers_lp(intent: Any, position: PositionInfo, itype: str) -> bool:
 
 
 # Residual ``kind`` markers (set by teardown residual discovery) for off-position
-# committed capital that NO position-closing intent can cover — a pending
-# (unfilled) order or an unverified residual is reclaimed by a cancel, not a
-# PERP_CLOSE (there is no cancel verb yet; VIB-5116). Keying on the generic
-# ``kind`` marker keeps this protocol-agnostic.
-_UNCOVERABLE_PERP_KINDS: frozenset[str] = frozenset({"pending_order", "residual_unverified"})
+# committed capital. An UNVERIFIED residual is a fail-closed sentinel with NO
+# cancellable identity — no intent can cover it, so it keeps the completeness gate
+# failing loud (Empty ≠ Zero). A ``pending_order`` residual is NOT in this set: it
+# IS coverable, but only by a key-matched PERP_CANCEL_ORDER (VIB-5568) — see
+# ``_covers_perp``. Keying on the generic ``kind`` marker keeps this protocol-agnostic.
+_UNCOVERABLE_PERP_KINDS: frozenset[str] = frozenset({"residual_unverified"})
 
 
 def _covers_perp(intent: Any, position: PositionInfo, itype: str) -> bool:
-    # A pending-ORDER residual is never covered by a PERP_CLOSE: a PERP_CLOSE closes
-    # an open position, it does not cancel a committed-but-unfilled order (VIB-5116
-    # C5). Without this, a real open long + a pending increase on the SAME
-    # market+side would let one PERP_CLOSE falsely "cover" the pending order and let
-    # the strand pass the completeness gate. (The on-chain post-condition backstops
-    # it, but completeness is the primary pre-execution gate.)
     kind = str((position.details or {}).get("kind") or "").lower()
+    # A pending (unfilled) ORDER residual (VIB-5116) is committed-but-unfilled
+    # collateral, NOT an open position. It is covered ONLY by a PERP_CANCEL_ORDER
+    # (VIB-5568) whose ``order_key`` MATCHES the residual's — never by a PERP_CLOSE
+    # (which closes an open position, not a pending order), and never by a cancel
+    # for a DIFFERENT order. The key match is the fund-safety anchor: a real open
+    # long + a pending increase on the SAME market+side must not let one cancel (or
+    # one close) falsely cover the other and let the strand pass the gate. When the
+    # matching cancel executed and completeness passes, the on-chain post-condition
+    # still re-reads the OrderVault (count == 0) as the authoritative backstop.
+    if kind == "pending_order":
+        if itype != "PERP_CANCEL_ORDER":
+            return False
+        # Normalise the 0x prefix on both sides so a prefixed key never mismatches an
+        # unprefixed one (both are 0x-prefixed in practice, but this is a fund-safety
+        # comparison — a false mismatch would leave a recovered order marked uncovered
+        # → teardown FAILED). removeprefix strips only the leading 0x. (Gemini review.)
+        intent_key = str(_field(intent, "order_key") or "").lower().removeprefix("0x")
+        res_key = (
+            str((position.details or {}).get("order_key") or position.position_id or "").lower().removeprefix("0x")
+        )
+        return bool(intent_key) and bool(res_key) and intent_key == res_key
     if kind in _UNCOVERABLE_PERP_KINDS:
         return False
     # Market alone is insufficient: a long and a short on the SAME market — or

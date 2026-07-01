@@ -129,6 +129,7 @@ from .vocabulary import (
     LPCloseIntent,
     LPOpenIntent,
     LpOpenZeroLiquidityError,
+    PerpCancelIntent,
     PerpCloseIntent,
     PerpOpenIntent,
     # Prediction market intents
@@ -185,6 +186,7 @@ __all__ = [
     "WithdrawIntent",
     "PerpOpenIntent",
     "PerpCloseIntent",
+    "PerpCancelIntent",
     "StakeIntent",
     "UnstakeIntent",
     "FlashLoanIntent",

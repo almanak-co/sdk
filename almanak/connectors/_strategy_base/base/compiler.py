@@ -450,6 +450,8 @@ class BasePerpCompiler(BaseProtocolCompiler[PerpCompilerContext]):
             return self.compile_perp_open(ctx, intent)
         if intent_type == IntentType.PERP_CLOSE:
             return self.compile_perp_close(ctx, intent)
+        if intent_type == IntentType.PERP_CANCEL_ORDER:
+            return self.compile_perp_cancel(ctx, intent)
         return self._unsupported(intent)
 
     @abstractmethod
@@ -457,6 +459,17 @@ class BasePerpCompiler(BaseProtocolCompiler[PerpCompilerContext]):
 
     @abstractmethod
     def compile_perp_close(self, ctx: PerpCompilerContext, intent: PerpCloseIntent) -> CompilationResult: ...
+
+    def compile_perp_cancel(self, ctx: PerpCompilerContext, intent: Any) -> CompilationResult:
+        """Compile a PERP_CANCEL_ORDER intent (cancel a pending order, recover collateral).
+
+        Not abstract: pending-order cancellation is venue-specific (GMX V2 only, for
+        now — VIB-5568). Perp connectors that do not support it inherit this default,
+        which reports unsupported. A connector that supports it overrides this AND
+        declares ``IntentType.PERP_CANCEL_ORDER`` in its ``intents`` so the registry
+        routes cancels only to it.
+        """
+        return self._unsupported(intent)
 
 
 class BaseBridgeCompiler(BaseProtocolCompiler[BaseCompilerContext]):

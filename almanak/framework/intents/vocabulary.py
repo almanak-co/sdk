@@ -159,6 +159,10 @@ class IntentType(Enum):
     WITHDRAW = "WITHDRAW"
     PERP_OPEN = "PERP_OPEN"
     PERP_CLOSE = "PERP_CLOSE"
+    # Cancel a pending (unfilled) perp order, recovering its committed collateral.
+    # Not a position open/close — a refund of committed-but-unspent collateral
+    # (the recovery half of VIB-5116; see PerpCancelIntent). NO_ACCOUNTING category.
+    PERP_CANCEL_ORDER = "PERP_CANCEL_ORDER"
     BRIDGE = "BRIDGE"
     ENSURE_BALANCE = "ENSURE_BALANCE"
     FLASH_LOAN = "FLASH_LOAN"
@@ -1040,6 +1044,7 @@ from .lending_intents import (  # noqa: E402, F401
     WithdrawIntent,
 )
 from .perp_intents import (  # noqa: E402, F401
+    PerpCancelIntent,
     PerpCloseIntent,
     PerpOpenIntent,
 )
@@ -1072,6 +1077,7 @@ type AnyIntent = (
     | WithdrawIntent
     | PerpOpenIntent
     | PerpCloseIntent
+    | PerpCancelIntent
     | FlashLoanIntent
     | StakeIntent
     | UnstakeIntent
@@ -1958,6 +1964,44 @@ class Intent:
         )
 
     @staticmethod
+    def perp_cancel_order(
+        order_key: str,
+        protocol: str = "gmx_v2",
+        chain: str | None = None,
+        registry_handle: str | None = None,
+    ) -> PerpCancelIntent:
+        """Create a perpetual pending-order cancel intent (recover committed collateral).
+
+        Cancels a pending (unfilled) perp order, returning its committed collateral
+        and unspent execution fee to the wallet. Not a position open/close — a
+        refund of committed-but-unspent collateral (the recovery half of VIB-5116).
+
+        Args:
+            order_key: On-chain order key (``bytes32``: 0x-prefixed, exactly 66 chars)
+                identifying the pending order to cancel. Obtained from the teardown
+                residual-discovery read or the open receipt.
+            protocol: Perpetuals protocol that owns the order (default "gmx_v2").
+            chain: Target chain for execution (defaults to strategy's primary chain).
+
+        Returns:
+            PerpCancelIntent: The created perp cancel intent.
+
+        Example:
+            # Cancel a stranded GMX V2 pending order and recover its collateral
+            intent = Intent.perp_cancel_order(
+                order_key="0x1234...cdef",  # bytes32 from read_pending_orders
+                protocol="gmx_v2",
+                chain="arbitrum",
+            )
+        """
+        return PerpCancelIntent(
+            order_key=order_key,
+            protocol=protocol,
+            chain=chain,
+            registry_handle=registry_handle,
+        )
+
+    @staticmethod
     def bridge(
         token: str,
         amount: Decimal | Literal["all"],
@@ -2751,6 +2795,7 @@ class Intent:
             IntentType.WITHDRAW.value: WithdrawIntent,
             IntentType.PERP_OPEN.value: PerpOpenIntent,
             IntentType.PERP_CLOSE.value: PerpCloseIntent,
+            IntentType.PERP_CANCEL_ORDER.value: PerpCancelIntent,
             IntentType.FLASH_LOAN.value: FlashLoanIntent,
             IntentType.STAKE.value: StakeIntent,
             IntentType.UNSTAKE.value: UnstakeIntent,

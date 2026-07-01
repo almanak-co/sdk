@@ -294,6 +294,12 @@ class ResultEnricher:
         "VAULT_REDEEM": ["redeem_data", "protocol_fees"],
         # === No-Op ===
         "HOLD": [],  # No extraction needed
+        # PERP_CANCEL_ORDER (VIB-5568) — cancel a pending order, recover collateral.
+        # No position/PnL fields to extract: the OrderVault refund (committed
+        # collateral + unspent exec fee) is a wallet-balance delta captured by the
+        # portfolio snapshot, and the ORDER_CANCELLED event is surfaced by the GMX
+        # parser's order_events. Empty spec (like HOLD) → enrichment short-circuits.
+        "PERP_CANCEL_ORDER": [],
     }
 
     # VIB-4320 — Per-protocol overlay appended onto the generic ``EXTRACTION_SPECS``

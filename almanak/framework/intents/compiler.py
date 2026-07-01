@@ -71,6 +71,7 @@ from .vocabulary import (
     IntentType,
     LPCloseIntent,
     LPOpenIntent,
+    PerpCancelIntent,
     PerpCloseIntent,
     PerpOpenIntent,
     RepayIntent,
@@ -967,6 +968,12 @@ class IntentCompiler:
             elif intent_type == IntentType.PERP_OPEN:
                 return self._compile_perp_via_registry(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.PERP_CLOSE:
+                return self._compile_perp_via_registry(intent)  # type: ignore[arg-type]
+            elif intent_type == IntentType.PERP_CANCEL_ORDER:
+                # VIB-5568: cancel a pending order (recover collateral). Routes through
+                # the SAME connector-owned perp compiler as open/close — the teardown
+                # recovery lane reaches the connector's compile_perp_cancel only via
+                # this top-level dispatch (the TeardownManager calls IntentCompiler).
                 return self._compile_perp_via_registry(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.HOLD:
                 return self._compile_hold(intent)  # type: ignore[arg-type]
@@ -2006,7 +2013,9 @@ class IntentCompiler:
         """Compile a WITHDRAW intent into an ActionBundle."""
         return self._compile_lending_via_registry(intent, "WITHDRAW")
 
-    def _compile_perp_via_registry(self, intent: PerpOpenIntent | PerpCloseIntent) -> CompilationResult:
+    def _compile_perp_via_registry(
+        self, intent: PerpOpenIntent | PerpCloseIntent | PerpCancelIntent
+    ) -> CompilationResult:
         """Compile a PERP intent through a connector-owned compiler."""
         protocol = self._resolve_protocol(intent.protocol)
         connector_compiler = get_connector_compiler(protocol)

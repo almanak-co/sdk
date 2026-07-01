@@ -4,6 +4,7 @@ Intent classes for perpetual futures operations: open and close positions.
 These intents support protocols like GMX V2, Hyperliquid, Drift, etc.
 """
 
+import re
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -26,6 +27,9 @@ from .intent_errors import InvalidProtocolParameterError
 from .vocabulary import (
     IntentType,
 )
+
+# A well-formed bytes32 order key: ``0x`` + exactly 64 hex chars (no underscores).
+_BYTES32_RE = re.compile(r"0x[0-9a-fA-F]{64}")
 
 
 def _capabilities_for(protocol_lower: str) -> dict[str, Any]:
@@ -221,6 +225,76 @@ class PerpCloseIntent(BaseIntent):
     @classmethod
     def deserialize(cls, data: dict[str, Any]) -> "PerpCloseIntent":
         """Deserialize a dictionary to a PerpCloseIntent."""
+        clean_data = {k: v for k, v in data.items() if k != "type"}
+        if "created_at" in clean_data and isinstance(clean_data["created_at"], str):
+            clean_data["created_at"] = datetime.fromisoformat(clean_data["created_at"])
+        return cls.model_validate(clean_data)
+
+
+class PerpCancelIntent(BaseIntent):
+    """Intent to cancel a pending (unfilled) perpetual order and recover its collateral.
+
+    A pending GMX V2 order holds its committed collateral in the OrderVault but is
+    **not a position** — no keeper executed it, and no ``position_registry`` row
+    exists for it (the enumeration-blindness that stranded collateral in VIB-5116).
+    Cancelling the order returns the committed ``initialCollateralDeltaAmount`` plus
+    the unspent execution fee to the wallet (``cancellationReceiver`` defaults to the
+    wallet). This is a pure risk-reducing, close-side action: **no collateral in, no
+    side, no size** — it neither opens nor closes a position, so it carries no PnL.
+
+    It is the *recovery* half of VIB-5116 (VIB-5568): teardown's residual discovery
+    (``read_pending_orders`` → ``order_keys``) DETECTS the stranded order; this verb
+    RECOVERS it, so teardown completeness passes instead of failing loud.
+
+    Attributes:
+        order_key: On-chain order key identifying the pending order to cancel. A
+            GMX V2 order key is a ``bytes32`` value — a **strict** 0x-prefixed,
+            exactly-66-char (0x + 64 hex) string. The strictness is fund-safety:
+            the adapter left-pads the key to 32 bytes, so a truncated key would
+            zero-pad into a *different* valid key and cancel the wrong order. It is
+            obtained from the teardown residual-discovery read or the open receipt.
+        protocol: Perpetuals protocol that owns the order (default "gmx_v2").
+        chain: Optional target chain for execution (defaults to strategy's primary chain).
+        intent_id: Unique identifier for this intent.
+        created_at: Timestamp when the intent was created.
+    """
+
+    order_key: str
+    protocol: str = "gmx_v2"
+    chain: str | None = None
+    intent_id: str = Field(default_factory=default_intent_id)
+    created_at: datetime = Field(default_factory=default_timestamp)
+
+    @model_validator(mode="after")
+    def validate_perp_cancel_intent(self) -> "PerpCancelIntent":
+        """Validate the order key is a well-formed ``bytes32`` (fail-closed).
+
+        A malformed / truncated key is rejected rather than silently zero-padded by
+        the adapter into a different valid order key (which would cancel — and refund
+        — the wrong order). ``bytes32`` = 32 bytes = exactly 64 hex chars + the ``0x``
+        prefix. We match with a strict regex rather than ``int(key, 16)`` because the
+        latter accepts digit-separator underscores (``0x1234_5678``), which would then
+        embed an invalid char into the calldata and only fail at signing.
+        """
+        key = self.order_key
+        if not isinstance(key, str) or not _BYTES32_RE.fullmatch(key):
+            raise ValueError("order_key must be a bytes32 value (0x + exactly 64 hex chars = 66 chars total)")
+        return self
+
+    @property
+    def intent_type(self) -> IntentType:
+        """Return the type of this intent."""
+        return IntentType.PERP_CANCEL_ORDER
+
+    def serialize(self) -> dict[str, Any]:
+        """Serialize the intent to a dictionary."""
+        data = self.model_dump(mode="json")
+        data["type"] = self.intent_type.value
+        return data
+
+    @classmethod
+    def deserialize(cls, data: dict[str, Any]) -> "PerpCancelIntent":
+        """Deserialize a dictionary to a PerpCancelIntent."""
         clean_data = {k: v for k, v in data.items() if k != "type"}
         if "created_at" in clean_data and isinstance(clean_data["created_at"], str):
             clean_data["created_at"] = datetime.fromisoformat(clean_data["created_at"])

@@ -23,9 +23,19 @@ from almanak.connectors._strategy_base.teardown_residual_discovery import (
     ResidualDiscoveryResult,
 )
 from almanak.connectors.gmx_v2.orders_read import GMX_USD_DECIMALS
-from almanak.connectors.gmx_v2.teardown_reads import read_pending_orders
+from almanak.connectors.gmx_v2.teardown_reads import read_chain_timestamp, read_pending_orders
 
 _USD_DIVISOR = Decimal(10**GMX_USD_DECIMALS)
+
+# GMX rejects an account-initiated order cancel until the order is at least
+# ``REQUEST_EXPIRATION_TIME`` old (300s on Arbitrum/Avalanche — RequestNotYetCancellable).
+# We add a safety buffer so the recovery lane only builds a cancel once the order is
+# COMFORTABLY past the gate: cancelling right at the boundary risks a revert (and the
+# governance-configurable expiration could differ). Deferring a bit longer is safe; a
+# pending unfilled order carries no liquidation risk. VIB-5568.
+_GMX_REQUEST_EXPIRATION_SECONDS = 300
+_CANCEL_SAFETY_BUFFER_SECONDS = 15
+_CANCEL_MIN_AGE_SECONDS = _GMX_REQUEST_EXPIRATION_SECONDS + _CANCEL_SAFETY_BUFFER_SECONDS
 
 
 def gmx_v2_teardown_residual_discovery(
@@ -52,6 +62,11 @@ def gmx_v2_teardown_residual_discovery(
         # teardown's inverted failure semantics: loud, never blocks risk reduction.
         return ResidualDiscoveryResult(ok=False, error=result.error)
 
+    # Current chain time for the cancel age-gate (VIB-5568). Read ONCE per sweep.
+    # ``None`` ⇒ unmeasured → every order is treated as NOT-yet-cancellable
+    # (fail-closed: never cancel on a guessed clock; the recovery lane defers loud).
+    now_ts = read_chain_timestamp(gateway_client, chain, block=block)
+
     residuals: list[PendingResidual] = []
     for idx, order in enumerate(result.orders):
         order_key = order.order_key or (result.order_keys[idx] if idx < len(result.order_keys) else "")
@@ -61,6 +76,22 @@ def gmx_v2_teardown_residual_discovery(
             "order_key": order_key,
             "venue": "gmx_v2",
         }
+        # Cancel age-gate: GMX rejects an account cancel until the order is old
+        # enough (RequestNotYetCancellable). Only mark ``cancellable`` when the age
+        # is MEASURED (now known AND updated_at_time>0) AND comfortably past the
+        # gate. A key-only stub (updated_at_time==0) or an unread clock → NOT
+        # cancellable → the recovery lane defers it loud instead of building a
+        # doomed cancel that would burn the slippage-escalation ladder to FAILED.
+        if now_ts is not None and order.updated_at_time > 0:
+            age = now_ts - order.updated_at_time
+            details["order_age_seconds"] = age
+            if age >= _CANCEL_MIN_AGE_SECONDS:
+                details["cancellable"] = True
+            else:
+                details["cancellable"] = False
+                details["seconds_until_cancellable"] = max(0, _CANCEL_MIN_AGE_SECONDS - age)
+        else:
+            details["cancellable"] = False
         # Detail fields are best-effort (order_type == -1 marks a key-only stub
         # where the Order.Props struct decode was unavailable — detection still
         # holds via the key). Only surface fields we actually measured.

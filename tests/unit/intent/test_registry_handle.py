@@ -805,6 +805,8 @@ _FACTORY_BUILDERS: dict[str, dict] = {
                        collateral_token="USDC",
                        is_long=True, protocol="gmx_v2",
                        chain="arbitrum"),
+    "perp_cancel_order": dict(order_key="0x" + "ab" * 32,
+                              protocol="gmx_v2", chain="arbitrum"),
     "flash_loan": dict(provider="aave", token="USDC",
                        amount=Decimal("1000"),
                        callback_intents=[_flash_loan_minimal_callback()],

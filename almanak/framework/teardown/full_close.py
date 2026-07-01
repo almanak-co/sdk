@@ -46,6 +46,7 @@ honour the markers cleanly.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -63,6 +64,10 @@ logger = logging.getLogger("almanak.framework.teardown.full_close")
 # under operator approval, so this is only the starting tolerance.
 _DEFAULT_SWAP_SLIPPAGE = Decimal("0.02")
 
+# A well-formed bytes32 order key: ``0x`` + exactly 64 hex chars (no underscores).
+# Mirrors ``PerpCancelIntent``'s validator so the two fail-closed gates never drift.
+_BYTES32_RE = re.compile(r"0x[0-9a-fA-F]{64}")
+
 
 def _first(details: dict[str, Any], *keys: str) -> Any:
     """Return the first present, truthy value among ``keys`` in ``details``."""
@@ -71,6 +76,64 @@ def _first(details: dict[str, Any], *keys: str) -> Any:
         if value:
             return value
     return None
+
+
+def _is_bytes32_key(value: Any) -> bool:
+    """Whether ``value`` is a well-formed ``bytes32`` order key (0x + exactly 64 hex chars).
+
+    Fail-closed gate for pending-order cancellation: a truncated / malformed key is
+    left-padded by the adapter and would target a DIFFERENT order, so a residual
+    without a real bytes32 key must be skipped (stays a loud uncovered residual),
+    never turned into a mis-targeted cancel. Uses a strict regex (not ``int(value,
+    16)``, which accepts digit-separator underscores) so the check matches the
+    ``PerpCancelIntent`` validator exactly.
+    """
+    return isinstance(value, str) and _BYTES32_RE.fullmatch(value) is not None
+
+
+def _perp_close_or_cancel_intent(
+    position: PositionInfo,
+    details: dict[str, Any],
+    *,
+    protocol: str,
+    chain: str,
+) -> BaseIntent | None:
+    """Map a PERP position OR a pending-order residual to its risk-reducing intent.
+
+    A pending (unfilled) order residual (VIB-5116 discovery) is NOT a position: it
+    holds committed collateral in the OrderVault but was never opened (no keeper
+    executed it). It is CANCELLED — recovering the collateral — NOT perp-closed
+    (there is no position to close). The residual the discovery lane DETECTS becomes
+    a cancel here (VIB-5568), so completeness passes instead of failing loud; the
+    protocol is carried on the residual, so the cancel routes to that venue's compiler.
+    Everything else is a live full close.
+    """
+    if details.get("kind") == "pending_order":
+        order_key = _first(details, "order_key") or position.position_id
+        # Fail-closed: without a real bytes32 order key we cannot safely cancel (a
+        # truncated key would target the wrong order), and a not-yet-cancellable
+        # order (GMX ~300s REQUEST_EXPIRATION_TIME gate) must not become a doomed
+        # cancel that the slippage-escalation ladder burns to FAILED. Skip -> the
+        # residual stays surfaced and the recovery lane defers it LOUD.
+        if not _is_bytes32_key(order_key) or not details.get("cancellable"):
+            return None
+        return Intent.perp_cancel_order(order_key=str(order_key), protocol=protocol, chain=chain)
+
+    market = _first(details, "market") or position.position_id
+    collateral = _first(details, "collateral_token", "asset")
+    is_long = details.get("is_long")
+    # Direction is not derivable — never guess long vs short.
+    if not market or not collateral or is_long is None:
+        return None
+    return Intent.perp_close(
+        market=str(market),
+        collateral_token=str(collateral),
+        is_long=bool(is_long),
+        size_usd=None,  # full close
+        protocol=protocol,
+        chain=chain,
+        position_id=_first(details, "venue_position_id"),
+    )
 
 
 def _close_intent_for_position(
@@ -143,21 +206,7 @@ def _close_intent_for_position(
         )
 
     if ptype == PositionType.PERP:
-        market = _first(details, "market") or position.position_id
-        collateral = _first(details, "collateral_token", "asset")
-        is_long = details.get("is_long")
-        # Direction is not derivable — never guess long vs short.
-        if not market or not collateral or is_long is None:
-            return None
-        return Intent.perp_close(
-            market=str(market),
-            collateral_token=str(collateral),
-            is_long=bool(is_long),
-            size_usd=None,  # full close
-            protocol=protocol,
-            chain=chain,
-            position_id=_first(details, "venue_position_id"),
-        )
+        return _perp_close_or_cancel_intent(position, details, protocol=protocol, chain=chain)
 
     if ptype in (PositionType.STAKE, PositionType.TOKEN):
         token = _first(details, "asset", "token", "address")

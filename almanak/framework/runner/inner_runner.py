@@ -788,6 +788,7 @@ class _MinimalIntent:
             "bridge": IntentType.BRIDGE,
             "perp_open": IntentType.PERP_OPEN,
             "perp_close": IntentType.PERP_CLOSE,
+            "perp_cancel_order": IntentType.PERP_CANCEL_ORDER,
             "stake": IntentType.STAKE,
             "unstake": IntentType.UNSTAKE,
             "wrap_native": IntentType.WRAP_NATIVE,

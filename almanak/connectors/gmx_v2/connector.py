@@ -110,6 +110,11 @@ CONNECTOR = Connector(
         ),
     ),
     backtest_risk=_BACKTEST_RISK,
+    # PERP_CANCEL_ORDER (VIB-5568) is INTENTIONALLY NOT here. strategy_intents is the
+    # STRATEGY-AUTHORING universe (what a strategy's decide() may return, driving the
+    # intent-coverage gate + SKILL surface). A cancel is a framework TEARDOWN-RECOVERY
+    # verb — never authored by a strategy — so it lives on GMXV2Compiler.intents (the
+    # compilation universe, which routes it) but not here. Do not "fix" this by adding it.
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
     strategy_chains=("arbitrum", "avalanche"),
 )
