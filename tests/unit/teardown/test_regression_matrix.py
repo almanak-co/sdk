@@ -27,15 +27,18 @@ Matrix shape and the cell → seam → owning-ticket → status table live in
 FINAL RATCHET (wired)
 ---------------------
 The epic's Done-when contract — "all merged-seam cells GREEN + fail-CI-on-
-regression" — is now satisfied. TD-10 (#3070), TD-11 (#3071) and TD-15 (#3066)
-all landed, so their cells assert the shipped behaviour as GREEN. VIB-3808 then
-added the Pendle on-chain closure post-condition (residual PT / LP-token
-``balanceOf`` via the gateway), flipping S6 × pendle GREEN. The only remaining
-strict-xfail is **S6 × perp**: TD-15 delivered fail-closed residual detection for
-LP (post-condition) + lending (Plan-A chain read) and VIB-3808 for Pendle, but
-perp has no per-position on-chain closure verifier yet (``_reconcile_one``
-returns UNVERIFIABLE) — tracked by VIB-5116 (GMX). When it lands, its cell
-XPASSes (strict ⇒ CI red) and is flipped GREEN.
+regression" — is now satisfied, with NO remaining strict-xfails. TD-10 (#3070),
+TD-11 (#3071) and TD-15 (#3066) all landed, so their cells assert the shipped
+behaviour as GREEN. VIB-3808 added the Pendle on-chain closure post-condition
+(residual PT / LP-token ``balanceOf`` via the gateway), flipping S6 × pendle
+GREEN. VIB-5116 added the GMX perp closure authority — the ``gmx_v2`` teardown
+post-condition reads the wallet's pending OrderVault orders (and open positions)
+via the gateway and fails the teardown closed on ANY residual, including a pending
+unfilled order that holds collateral but is not yet a position — flipping the last
+cell, **S6 × perp**, GREEN. (VIB-5116 ships the fail-closed DETECTION half; the
+on-chain cancellation/recovery of a pending order — a new ``PERP_CANCEL_ORDER``
+intent verb — is a scoped follow-up and does not affect this seam, which is about
+detecting a residual, not removing it.)
 
 This file is wired as a hard CI gate via ``make test-teardown-matrix`` (run in
 the teardown CI job). A GREEN cell regressing to red, or a strict-xfail XPASSing,
@@ -599,11 +602,13 @@ def check_s6_failclosed_onchain_verify(primitive: str) -> None:
 
     The merged seam delivers fail-closed residual detection for **LP** (the
     uniswap_v3 on-chain post-condition, VIB-2925 / VIB-5140) and **lending** (the
-    gateway-routed Plan-A debt/collateral chain read the hooks lack). **Perp** and
-    **pendle** have NO per-position on-chain closure verifier yet —
-    ``_reconcile_one`` returns UNVERIFIABLE for them and no post-condition is
-    registered, so a residual perp/pendle is NOT fail-closed → those cells remain
-    xfail against their owning tickets.
+    gateway-routed Plan-A debt/collateral chain read the hooks lack); **pendle**
+    via the VIB-3808 PT/LP-token ``balanceOf`` post-condition; and **perp** via the
+    VIB-5116 ``gmx_v2`` post-condition, which reads the wallet's pending OrderVault
+    orders (and open positions) through the gateway and fails the teardown closed
+    on any residual — including a pending unfilled order that holds collateral but
+    is not yet a position. All four primitives now have an on-chain closure
+    verifier, so no S6 cell remains xfail.
 
     Behaviour (not membership): each green cell asserts a residual position drives
     the result to FAILED via the real merged surfaces, never just that an API
@@ -679,13 +684,59 @@ def check_s6_failclosed_onchain_verify(primitive: str) -> None:
         assert closed.closed is True, "a zero Pendle LP balance reads closed on-chain"
         return
 
-    # perp (xfail target): assert the primitive HAS a fail-closed on-chain
-    # closure verifier. It does not yet, so this fails → strict xfail.
+    if primitive == PERP:
+        # GMX perp closure authority (VIB-5116): the gmx_v2 post-condition reads
+        # the wallet's pending OrderVault orders (and open positions) via the
+        # gateway and fails the teardown closed on ANY residual — including a
+        # pending unfilled order that holds collateral but is not yet a position
+        # (the strand VIB-5116 targets). Drive the REAL registered hook with a
+        # fake gateway and assert BEHAVIOUR (not membership): a still-pending order
+        # flips closed→False, and a cleared order reads closed=True.
+        assert has_teardown_post_condition("gmx_v2"), (
+            "gmx_v2 must register an on-chain teardown post-condition (perp closure authority)"
+        )
+        hook = get_teardown_post_condition("gmx_v2")
+        order_key = "0x9edb04b6c2e51bbabed42b2e344208d78e8ff4c39e84ee31903a5659fd161b24"
+        wallet = "0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF"
+        pending_order = PositionInfo(
+            position_type=PositionType.PERP,
+            position_id=order_key,
+            chain="arbitrum",
+            protocol="gmx_v2",
+            value_usd=Decimal("0"),
+            details={
+                "kind": "pending_order",
+                "order_key": order_key,
+                "market": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336",
+            },
+        )
+
+        class _GmxGateway:
+            """Serves the GMX DataStore order count/keys reads (see orders_read)."""
+
+            is_connected = True
+
+            def __init__(self, key_present: bool) -> None:
+                self._present = key_present
+
+            def eth_call(self, chain: str, to: str, data: str, block: Any = None) -> Any:  # noqa: ARG002
+                from eth_abi import encode
+
+                if data.startswith("0xf3903b9f"):  # getBytes32Count
+                    return "0x" + (1 if self._present else 0).to_bytes(32, "big").hex()
+                if data.startswith("0xf069052a"):  # getBytes32ValuesAt
+                    keys = [bytes.fromhex(order_key[2:])] if self._present else []
+                    return "0x" + encode(["bytes32[]"], [keys]).hex()
+                return "0x"  # getAccountOrders detail (unused for the key-membership check)
+
+        residual = hook(pending_order, wallet, gateway_client=_GmxGateway(key_present=True))
+        assert residual.closed is False, "a still-pending GMX order must fail the teardown closed (VIB-5116)"
+        cleared = hook(pending_order, wallet, gateway_client=_GmxGateway(key_present=False))
+        assert cleared.closed is True, "a cleared GMX order reads closed on-chain"
+        return
+
     proto = _POSTCOND_PROTO[primitive]
-    assert has_teardown_post_condition(proto), (
-        f"{proto}: no on-chain teardown post-condition AND no per-position Plan-A chain read "
-        "(reconciliation returns UNVERIFIABLE) — a residual position is not fail-closed yet"
-    )
+    assert has_teardown_post_condition(proto)
 
 
 def check_s7_authoritative_closure_count(primitive: str) -> None:
@@ -868,17 +919,13 @@ SEAMS: tuple[Seam, ...] = (
             LENDING: "green",
             # TD-15 (#3066) delivered fail-closed residual detection for LP (post-
             # condition) + lending (Plan-A chain read). VIB-3808 added the Pendle
-            # on-chain closure post-condition (residual PT / LP-token balanceOf via
-            # the gateway), so a residual Pendle holding is now fail-closed. Perp
-            # still has NO per-position on-chain closure verifier — _reconcile_one
-            # returns UNVERIFIABLE and no post-condition is registered, so a residual
-            # perp is not fail-closed; its on-chain closure read is owned by VIB-5116.
-            PERP: (
-                "xfail",
-                "VIB-5116",
-                "no on-chain closure verifier for GMX perp — reconciliation returns UNVERIFIABLE "
-                "and no post-condition is registered, so a residual perp is not fail-closed",
-            ),
+            # on-chain closure post-condition. VIB-5116 (this seam) added the GMX
+            # perp closure authority: the gmx_v2 post-condition reads pending
+            # OrderVault orders + open positions via the gateway and fails the
+            # teardown closed on any residual — including a pending unfilled order
+            # that holds collateral but is not yet a position (the strand the
+            # ticket targets). So a residual perp is now fail-closed.
+            PERP: "green",
             PENDLE: "green",
             STAKE: _NA_REGISTRY_STAKE,
         },
@@ -971,7 +1018,7 @@ def test_matrix_shape_is_complete() -> None:
             key = status if isinstance(status, str) else status[0]
             counts[key] += 1
     assert sum(counts.values()) == len(SEAMS) * len(PRIMITIVES) == 45
-    # 26 GREEN (all merged seams proven, incl. the Pendle on-chain closure
-    # verifier VIB-3808) / 1 XFAIL (perp on-chain closure verifier still unbuilt
-    # — VIB-5116 is now the only remaining xfail) / 18 N/A.
-    assert counts == {"green": 26, "xfail": 1, "na": 18}, counts
+    # 27 GREEN (all merged seams proven, incl. the Pendle on-chain closure
+    # verifier VIB-3808 and the GMX perp closure authority VIB-5116) / 0 XFAIL /
+    # 18 N/A.
+    assert counts == {"green": 27, "xfail": 0, "na": 18}, counts

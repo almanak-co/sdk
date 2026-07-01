@@ -30,8 +30,13 @@ from typing import TYPE_CHECKING, Any
 from almanak.connectors._strategy_base.pool_validation_base import ZERO_ADDRESS, decode_address
 from almanak.connectors._strategy_base.rpc import eth_call, eth_call_uint256
 from almanak.connectors._strategy_base.swap_oracle_guard import (
+    DEFAULT_STABLE_ORACLE_FLOOR_RESIDUAL_BPS,
+    DEFAULT_STABLE_ORACLE_FLOOR_TOLERANCE_BPS,
     DEFAULT_SWAP_ORACLE_DIVERGENCE_BPS,
+    DEFAULT_VOLATILE_ORACLE_FLOOR_RESIDUAL_BPS,
+    DEFAULT_VOLATILE_ORACLE_FLOOR_TOLERANCE_BPS,
     check_swap_oracle_divergence,
+    clamp_min_out_to_oracle,
 )
 from almanak.connectors.curve.receipt_parser import CURVE_LP_TOKEN_DECIMALS
 from almanak.core.chains._helpers import native_symbols_for
@@ -1274,6 +1279,106 @@ class CurveAdapter:
             )
         return None
 
+    def _oracle_anchored_min_out(
+        self,
+        *,
+        pool_info: "PoolInfo",
+        pool_floor_wei: int,
+        pool_quoted_out_wei: int,
+        amount_in: Decimal,
+        token_out_decimals: int,
+        price_ratio: Decimal | None,
+        oracle_guard_bps: int | None,
+        oracle_prices_real: bool,
+        token_in_symbol: str,
+        token_out_symbol: str,
+    ) -> int:
+        """Anchor the EXECUTED min-out floor to the independent oracle (VIB-5490).
+
+        The pool-self-referential floor (``pool_quote × (1 − slippage)``) stays
+        within a same-block sandwich no matter how wide ``slippage`` is: the
+        floor never references anything but the (attacker-moved) pool. This
+        raises the floor toward ``oracle_fair × (1 − tolerance)`` so atomic-
+        sandwich extraction is bounded by the oracle tolerance instead.
+
+        Pool-type-aware tolerance AND residual (revert risk is why this is
+        separate from the VIB-5439 detection guard): STABLE pools reuse the
+        detection threshold (default 150 bps tolerance) with a small 50 bps drift
+        residual; VOLATILE pools use a wide 500 bps tolerance with a wider 200 bps
+        drift residual. The clamp caps the oracle floor at
+        ``pool_quote × (1 − residual)`` (NOT the raw quote) inside
+        :func:`clamp_min_out_to_oracle`, so a genuine >tolerance-impact swap keeps
+        a benign inter-block-drift buffer and still fills — closing the zero-buffer
+        revert an earlier raw-quote cap would have caused on a drifted volatile
+        pool (e.g. a large tricrypto teardown). Degrade-open: a placeholder /
+        unmeasured oracle (or unusable quote) leaves the pool floor untouched
+        (never fabricates a higher floor).
+
+        The residual is pool-type-fixed (a benign-drift reality) and NOT driven by
+        the operator's ``oracle_guard_bps`` override — even a tight override cannot
+        tighten the residual below the drift buffer, so it cannot force a revert.
+        """
+        if pool_info.pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
+            default_tolerance = DEFAULT_VOLATILE_ORACLE_FLOOR_TOLERANCE_BPS
+            residual_bps = DEFAULT_VOLATILE_ORACLE_FLOOR_RESIDUAL_BPS
+        else:
+            default_tolerance = DEFAULT_STABLE_ORACLE_FLOOR_TOLERANCE_BPS
+            residual_bps = DEFAULT_STABLE_ORACLE_FLOOR_RESIDUAL_BPS
+
+        # A per-intent override applies to BOTH the detection threshold and the
+        # executed-floor TOLERANCE so an operator has one knob — but never the
+        # residual: the residual guarantees fills against benign drift regardless
+        # of how tight the operator anchors, so it stays pool-type-fixed.
+        tolerance_bps = oracle_guard_bps if oracle_guard_bps is not None else default_tolerance
+
+        clamp = clamp_min_out_to_oracle(
+            pool_floor_wei=pool_floor_wei,
+            pool_quoted_out_wei=pool_quoted_out_wei,
+            amount_in=amount_in,
+            # Empty ≠ Zero: a known-fake / placeholder price is unmeasured, so it
+            # must not fabricate a floor — pass None exactly as the detection
+            # guard does.
+            price_ratio=price_ratio if oracle_prices_real else None,
+            token_out_decimals=token_out_decimals,
+            tolerance_bps=tolerance_bps,
+            residual_bps=residual_bps,
+        )
+        if clamp.clamped:
+            logger.info(
+                "Curve executed-floor oracle anchor RAISED min-out for %s->%s on %s: "
+                "pool_floor=%d -> oracle_floor=%s (tolerance %d bps, residual %d bps, %s pool).",
+                token_in_symbol,
+                token_out_symbol,
+                pool_info.name,
+                clamp.pool_floor_wei,
+                clamp.oracle_floor_wei,
+                tolerance_bps,
+                residual_bps,
+                pool_info.pool_type.value,
+            )
+        elif clamp.reason == "oracle_config_invalid":
+            # A fat-fingered oracle_guard_bps override (outside (0, 10_000]) would
+            # otherwise silently disable the anchor via a negative floor. Fail LOUD.
+            logger.warning(
+                "Curve executed-floor oracle anchor DISABLED for %s->%s on %s: invalid "
+                "tolerance %d bps / residual %d bps (must be in (0, 10000]); executed floor "
+                "falls back to the pool-self-referential min-out — check oracle_guard_bps.",
+                token_in_symbol,
+                token_out_symbol,
+                pool_info.name,
+                tolerance_bps,
+                residual_bps,
+            )
+        elif clamp.reason == "oracle_unmeasured":
+            logger.debug(
+                "Curve executed-floor oracle anchor unmeasured for %s->%s on %s "
+                "(no real oracle price_ratio); pool-self-referential floor kept (degrade-open).",
+                token_in_symbol,
+                token_out_symbol,
+                pool_info.name,
+            )
+        return clamp.min_out_wei
+
     def swap(
         self,
         pool_address: str,
@@ -1405,6 +1510,26 @@ class CurveAdapter:
             )
             if guard_error is not None:
                 return SwapResult(success=False, error=guard_error)
+
+            # VIB-5490: anchor the EXECUTED floor to the independent oracle so an
+            # atomic same-block sandwich is bounded by the oracle tolerance, not
+            # the operator's (possibly wide) slippage. Applies to BOTH stable and
+            # volatile pools — volatile pools get no detection guard above, so
+            # this is their only oracle anchoring; the clamp is capped at
+            # pool_quote*(1-residual) so a legit high-impact swap keeps a benign-
+            # drift buffer and does not false-revert.
+            amount_out_minimum = self._oracle_anchored_min_out(
+                pool_info=pool_info,
+                pool_floor_wei=amount_out_minimum,
+                pool_quoted_out_wei=amount_out_estimate,
+                amount_in=amount_in,
+                token_out_decimals=token_out_decimals,
+                price_ratio=price_ratio,
+                oracle_guard_bps=oracle_guard_bps,
+                oracle_prices_real=oracle_prices_real,
+                token_in_symbol=token_in_symbol,
+                token_out_symbol=pool_info.coins[j],
+            )
 
             # Build transactions
             transactions: list[TransactionData] = []
@@ -2061,6 +2186,23 @@ class CurveAdapter:
             )
             if guard_error is not None:
                 return SwapResult(success=False, error=guard_error)
+
+            # VIB-5490: anchor the executed floor to the oracle (see swap()). The
+            # metapool combined space is all USD stables so the stable tolerance
+            # and residual apply; the clamp is capped at pool_quote*(1-residual),
+            # preserving a benign-drift buffer so a legit swap is not false-reverted.
+            amount_out_minimum = self._oracle_anchored_min_out(
+                pool_info=pool_info,
+                pool_floor_wei=amount_out_minimum,
+                pool_quoted_out_wei=amount_out_estimate,
+                amount_in=amount_in,
+                token_out_decimals=token_out_decimals,
+                price_ratio=price_ratio,
+                oracle_guard_bps=oracle_guard_bps,
+                oracle_prices_real=oracle_prices_real,
+                token_in_symbol=token_in_symbol,
+                token_out_symbol=token_out_symbol,
+            )
 
             transactions: list[TransactionData] = []
             transactions.extend(self._build_approve_txs(token_in_address, pool_address, amount_in_wei))

@@ -253,5 +253,51 @@ def test_missing_market_address_is_fail_closed() -> None:
     assert result.error is not None and "market address" in result.error
 
 
+# --------------------------------------------------------------------------- #
+# Strategy-sourced LP position (VIB-5487): position_id is the LP AMOUNT (not an
+# address); the market comes from details['market_id'|'pool_address'|'market'].
+# Regression for the closure verifier passing the LP amount to
+# query_erc20_balance -> "invalid address format" -> false fail-closed.
+# --------------------------------------------------------------------------- #
+_LP_AMOUNT = "179539621405497136"  # a real LP-token wei amount, NOT an address
+
+
+def test_lp_amount_position_id_uses_market_id_detail() -> None:
+    """position_id = LP amount → market read against details['market_id']."""
+    gw = _FakeGateway(balances={MARKET: 0})
+    pos = _position(position_id=_LP_AMOUNT, details={"kind": "lp", "market_id": MARKET})
+    result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw, block=7)
+    assert result.closed is True
+    assert result.error is None
+    # The residual is read against the MARKET address, never the LP amount.
+    assert gw.balance_calls[0]["token_address"] == MARKET
+
+
+def test_lp_amount_position_id_uses_pool_address_detail() -> None:
+    """Strategy get_open_positions contract: market in pool_address/market only."""
+    gw = _FakeGateway(balances={MARKET: 0})
+    pos = _position(
+        position_id=_LP_AMOUNT,
+        details={"kind": "lp", "pool_address": MARKET, "market": MARKET},
+    )
+    result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw, block=7)
+    assert result.closed is True
+    assert result.error is None
+    assert gw.balance_calls[0]["token_address"] == MARKET
+
+
+def test_lp_amount_position_id_never_used_as_address() -> None:
+    """No detail market + numeric position_id → fail-closed BEFORE any balance read.
+
+    The LP amount must never reach query_erc20_balance as a token address.
+    """
+    gw = _FakeGateway(balances={})
+    pos = _position(position_id=_LP_AMOUNT, details={"kind": "lp"})
+    result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw)
+    assert result.closed is False
+    assert result.error is not None and "market address" in result.error
+    assert gw.balance_calls == []  # never queried with the amount
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

@@ -75,6 +75,24 @@ from almanak.connectors._strategy_base.teardown_post_condition import ClosureChe
 _READ_TOKENS_SELECTOR = "0x2c8ce6bc"
 
 
+def _is_evm_address(value: Any) -> bool:
+    """True iff ``value`` is a 0x-prefixed 20-byte hex address string.
+
+    Used to guard the ``position_id`` fallback for the market address: a Pendle
+    LP ``position_id`` is the LP-token AMOUNT (wei), NOT the market address (only
+    the registry-enumeration path sets ``position_id = market_address``). Passing
+    the amount to ``query_erc20_balance`` yields a gateway "invalid address
+    format" error and a false fail-closed (VIB-5487).
+    """
+    if not isinstance(value, str) or not value.startswith(("0x", "0X")) or len(value) != 42:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
+
+
 def _resolve_pt_address(
     gateway_client: Any,
     chain: str,
@@ -179,14 +197,35 @@ def pendle_teardown_post_condition(
             kind = "pt"
 
     # The market address anchors both kinds (LP token IS the market; PT resolves
-    # from market.readTokens()).
-    market_address = details.get("market_id") or position_id
+    # from market.readTokens()). Resolve it from the details keys the position
+    # sources actually publish, in priority order:
+    #   * ``market_id``  — the registry-enumeration contract
+    #     (``_position_info_from_pendle_registry_row``), which ALSO sets
+    #     ``position_id = market_address``.
+    #   * ``pool_address`` / ``market`` — the strategy ``get_open_positions``
+    #     contract (e.g. ``strategies/accounting/pendle_lp``), where
+    #     ``position_id`` is instead the LP-token AMOUNT (wei), not an address.
+    # Only fall back to ``position_id`` when it is itself address-shaped — never
+    # pass an LP amount to ``query_erc20_balance`` (VIB-5487: doing so raised a
+    # gateway "invalid address format" error and falsely failed a successful
+    # teardown closed).
+    market_address = (
+        details.get("market_id")
+        or details.get("pool_address")
+        or details.get("market")
+        or (position_id if _is_evm_address(position_id) else None)
+    )
     if not market_address:
         return ClosureCheckResult(
             closed=False,
             protocol=protocol,
             position_id=position_id,
-            error="Pendle post-condition needs a market address (details['market_id'] or position_id); none found",
+            error=(
+                "Pendle post-condition needs a market address "
+                "(details['market_id'|'pool_address'|'market'] or an address-shaped "
+                f"position_id); none found (position_id={position_id!r} is not an address — "
+                "a Pendle LP position_id is the LP amount, not the market)"
+            ),
         )
     market_address = str(market_address)
 
