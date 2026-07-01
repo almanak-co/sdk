@@ -73,6 +73,7 @@ class Chain(Enum):
     MONAD = "MONAD"
     XLAYER = "XLAYER"
     ZEROG = "ZEROG"  # Preview support — 0G Chain (AI L1)
+    HYPEREVM = "HYPEREVM"  # Hyperliquid EVM layer (chain 999); distinct from the hyperliquid perps venue
 
 
 class ChainFamily(Enum):

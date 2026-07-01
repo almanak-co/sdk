@@ -46,6 +46,7 @@ FROZEN_COMPILER_MAP: dict[str, frozenset[str]] = {
     "monad": frozenset({"MON"}),
     "xlayer": frozenset({"OKB"}),
     "zerog": frozenset({"A0GI"}),
+    "hyperevm": frozenset({"HYPE"}),
     "solana": frozenset({"SOL"}),
 }
 
@@ -87,7 +88,7 @@ def _derived() -> dict[str, frozenset[str]]:
     return {d.name: native_symbols_for(d.name) for d in ChainRegistry.all()}
 
 
-# --- compiler map: exact parity (all 17 keys are registered) --------------------
+# --- compiler map: exact parity (all 18 keys are registered) --------------------
 
 
 def test_compiler_map_matches_registry_exactly() -> None:
@@ -125,7 +126,7 @@ def test_market_service_map_matches_registry_after_reconciliation() -> None:
     # The derive additionally covers a registered chain the legacy map missed
     # (zerog) — a strict improvement, not a regression. Pin it so the delta is
     # explicit rather than a mystery diff.
-    assert set(derived) - set(expected) == {"zerog"}
+    assert set(derived) - set(expected) == {"zerog", "hyperevm"}
 
 
 def test_market_reconciliation_deltas_are_real() -> None:

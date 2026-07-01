@@ -205,6 +205,7 @@ def test_non_eth_native_chains_carry_verified_slip44_values() -> None:
     assert ChainRegistry.get(Chain.BERACHAIN).native.slip44 == 8008
     assert ChainRegistry.get(Chain.SONIC).native.slip44 == 10007
     assert ChainRegistry.get(Chain.MONAD).native.slip44 == 268435779
+    assert ChainRegistry.get(Chain.HYPEREVM).native.slip44 == 2457
 
 
 def test_chains_without_verified_slip44_leave_slip44_unset() -> None:
@@ -227,6 +228,7 @@ def test_every_registered_chain_has_slip44_coverage() -> None:
         Chain.BERACHAIN,
         Chain.SONIC,
         Chain.MONAD,
+        Chain.HYPEREVM,
     }
     covered_without_slip44 = {Chain.XLAYER, Chain.MANTLE, Chain.PLASMA, Chain.ZEROG}
     all_registered = {descriptor.enum for descriptor in ChainRegistry.all()}

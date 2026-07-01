@@ -2456,6 +2456,7 @@ class IntentCompiler:
         # there should have its inverse here so price-oracle alias expansion
         # bridges both directions for new chains.
         "W0G": "A0GI",
+        "WHYPE": "HYPE",
         "WSOL": "SOL",
     }
 

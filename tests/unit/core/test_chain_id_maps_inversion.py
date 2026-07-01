@@ -61,7 +61,7 @@ def test_widening_over_the_legacy_subset_is_documented() -> None:
     # local token data still lacks them, so the final result is unchanged.
     evm_names = {d.name for d in ChainRegistry.all() if d.family is ChainFamily.EVM}
     added = evm_names - set(FROZEN_TOKEN_REGISTRY_ID_TO_NAME.values())
-    assert added == {"linea", "monad", "xlayer", "zerog"}
+    assert added == {"linea", "monad", "xlayer", "zerog", "hyperevm"}
 
 
 def test_unknown_id_returns_none() -> None:

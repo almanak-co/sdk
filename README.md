@@ -34,14 +34,14 @@
 
 ---
 
-Almanak is an intent-based Python framework for developing, testing, and deploying autonomous DeFi strategies. Express trading logic as high-level intents - the framework handles compilation, execution, and state management across 17 chains and 41 protocol connectors.
+Almanak is an intent-based Python framework for developing, testing, and deploying autonomous DeFi strategies. Express trading logic as high-level intents - the framework handles compilation, execution, and state management across 18 chains and 41 protocol connectors.
 
 ## Features
 
 - **Intent-Based Architecture**: Express trading logic as high-level intents (Swap, LP, Borrow, etc.) - the framework handles compilation and execution
 - **Three-Tier State Management**: Automatic persistence with HOT/WARM/COLD tiers for reliability
 - **Comprehensive Backtesting**: PnL simulation, paper trading on Anvil forks, and parameter sweeps
-- **Multi-Chain Support**: 17 chains across EVM and SVM — Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Mantle, X-Layer, Monad, 0G, Solana, plus Sonic, Blast, Linea, Berachain, Plasma (chain configs present; protocol coverage pending).
+- **Multi-Chain Support**: 18 chains across EVM and SVM — Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Mantle, X-Layer, Monad, 0G, Solana, plus Sonic, Blast, Linea, Berachain, Plasma, HyperEVM (chain configs present; protocol coverage pending).
 - **Protocol Integration**: Uniswap V3, Aave V3, Morpho Blue, GMX V2, Lido, Ethena, Polymarket, Kraken, and more
 - **Non-Custodial Design**: Full control over your funds through Safe smart accounts
 - **Agentic DeFAI Trading**: Build autonomous LLM-driven agents with 38 built-in tools and policy-enforced safety (BYO LLM API key)
@@ -251,7 +251,7 @@ almanak strat backtest run -d almanak/demo_strategies/morpho_looping # Leveraged
 
 ## Supported Networks
 
-17 chains have first-class `ChainDescriptor` configs. Chains marked with `*` have one or more registered protocol connectors today; the others have chain configs in place but no protocol coverage yet.
+18 chains have first-class `ChainDescriptor` configs. Chains marked with `*` have one or more registered protocol connectors today; the others have chain configs in place but no protocol coverage yet.
 
 **EVM**
 
@@ -271,6 +271,7 @@ almanak strat backtest run -d almanak/demo_strategies/morpho_looping # Leveraged
 - Linea
 - Berachain
 - Plasma
+- HyperEVM
 
 **SVM**
 

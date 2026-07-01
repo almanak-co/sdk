@@ -56,6 +56,8 @@ PINNED_WIDENING_ROWS: dict[str, str] = {
     "WXPL": "plasma",
     "A0GI": "zero-gravity",
     "W0G": "wrapped-0g",
+    "HYPE": "hyperliquid",
+    "WHYPE": "wrapped-hype",
 }
 
 FROZEN_TENDERLY_SLUGS: dict[str, str] = {
@@ -87,6 +89,7 @@ FROZEN_DASHBOARD_EXPLORERS: dict[str, str] = {
     "solana": "https://solscan.io/tx/",
     "monad": "https://explorer.monad.xyz/tx/",
     "plasma": "https://plasmascan.io/tx/",
+    "hyperevm": "https://hyperevmscan.io/tx/",
 }
 
 FROZEN_TIMELINE_CHAINS = frozenset(

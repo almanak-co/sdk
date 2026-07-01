@@ -105,6 +105,7 @@ class TestAllowedChainsTrustBoundary:
             "monad",
             "xlayer",
             "zerog",
+            "hyperevm",
         }
     )
 

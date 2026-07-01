@@ -58,6 +58,7 @@ HISTORICAL_CHAIN_IDS = {
     Chain.MONAD: 143,
     Chain.XLAYER: 196,
     Chain.ZEROG: 16661,
+    Chain.HYPEREVM: 999,
     Chain.SOLANA: 0,
 }
 
@@ -80,6 +81,7 @@ HISTORICAL_ALLOWED_CHAINS = frozenset(
         "monad",
         "xlayer",
         "zerog",
+        "hyperevm",
     }
 )
 
@@ -212,6 +214,7 @@ HISTORICAL_NATIVE_TOKEN_SYMBOLS = {
     "monad": "MON",
     "xlayer": "OKB",
     "zerog": "A0GI",
+    "hyperevm": "HYPE",
     "solana": "SOL",
 }
 
@@ -251,6 +254,7 @@ HISTORICAL_CHAIN_NATIVE_SYMBOL = {
     "monad": "MON",
     "xlayer": "OKB",
     "zerog": "A0GI",
+    "hyperevm": "HYPE",
 }
 
 

@@ -59,6 +59,7 @@ def test_to_caip19_native_uses_slip44() -> None:
         (Chain.BERACHAIN, "eip155:80094/slip44:8008"),  # Berachain
         (Chain.SONIC, "eip155:146/slip44:10007"),  # SONIC
         (Chain.MONAD, "eip155:143/slip44:268435779"),  # Monad
+        (Chain.HYPEREVM, "eip155:999/slip44:2457"),  # HYPE / Hyperliquid
     ],
 )
 def test_to_caip19_native_for_non_eth_chains(chain: Chain, expected: str) -> None:

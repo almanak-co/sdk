@@ -40,6 +40,7 @@ from . import (  # noqa: F401  (side-effect imports — registration)
     blast,
     bsc,
     ethereum,
+    hyperevm,
     linea,
     mantle,
     monad,

@@ -78,6 +78,7 @@ FROZEN_COINGECKO: dict[str, str] = {
     "linea": "linea",
     "blast": "blast",
     "plasma": "plasma",
+    "hyperevm": "hyperevm",
 }
 
 # 2. DexScreener CHAIN_TO_DEXSCREENER_PLATFORM (carries the "bnb" alias).
@@ -100,6 +101,7 @@ FROZEN_DEXSCREENER_PLATFORM: dict[str, str] = {
     "xlayer": "xlayer",
     "zerog": "zerog",
     "solana": "solana",
+    "hyperevm": "hyperevm",
 }
 
 # 3. DexScreener CHAIN_SLUG_MAP (no "bnb"; same "dexscreener" vendor as #2).
@@ -121,6 +123,7 @@ FROZEN_DEXSCREENER_SLUG: dict[str, str] = {
     "linea": "linea",
     "plasma": "plasma",
     "solana": "solana",
+    "hyperevm": "hyperevm",
 }
 
 # 4. GeckoTerminal _CHAIN_TO_NETWORK (has mantle).
@@ -378,7 +381,7 @@ def test_dexscreener_collapse_keeps_all_canonical_chains() -> None:
     assert external_id_for("optimism", "dexscreener") == "optimism"
     expected = (set(FROZEN_DEXSCREENER_PLATFORM) | set(FROZEN_DEXSCREENER_SLUG)) - ALIAS_KEYS
     assert set(vendor_chain_map("dexscreener")) == expected
-    assert len(expected) == 17
+    assert len(expected) == 18
 
 
 def test_geckoterminal_collapse_is_union_with_mantle() -> None:

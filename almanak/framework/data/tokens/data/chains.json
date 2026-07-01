@@ -71,6 +71,10 @@
     "zerog": {
       "wrapped_native_address": "0x1Cd0690fF9a693f5EF2dD976660a8dAFc81A109c",
       "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    },
+    "hyperevm": {
+      "wrapped_native_address": "0x5555555555555555555555555555555555555555",
+      "native_sentinel": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
     }
   }
 }

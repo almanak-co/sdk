@@ -15,6 +15,7 @@ matrix has no hand-maintained fallback.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,31 @@ from almanak.connectors._strategy_base.supported_chains_registry import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CHAINS_DIR = _REPO_ROOT / "almanak" / "core" / "chains"
+
+# A connector's name can legitimately appear in a chain file as *vendor data*
+# rather than a support declaration when the chain and the connector share a
+# project identity. HyperEVM (chain 999) forced this: native HYPE's only
+# CoinGecko coin id is literally "hyperliquid" (the perps connector's key) and
+# the "every gas asset must be priceable" invariant (VIB-3805) requires it in
+# the descriptor, while HyperEVM's official RPC host is rpc.hyperliquid.xyz.
+# Neither is a "which connectors run here" declaration, so strip those two data
+# contexts — URL literals and CoinGecko coin-id values — before scanning; the
+# guard then flags only real declarations (a field/collection naming
+# connectors) and prose. See VIB-5575 (VIB-4857 follow-up).
+_URL_LITERAL_RE = re.compile(r"https?://[^\s\"')]+")
+_COINGECKO_ID_RE = re.compile(r"(?:wrapped_)?coingecko_id\s*=\s*(?:\"[^\"]*\"|'[^']*')")
+
+
+def _strip_vendor_data(text: str) -> str:
+    """Remove URL literals and CoinGecko coin-id values from chain-file text.
+
+    These are vendor identifiers, not connector-support declarations; a connector
+    name that coincides with one (the HyperEVM / hyperliquid project-name overlap)
+    must not be read as the chain declaring which connectors run on it.
+    """
+    text = _URL_LITERAL_RE.sub("", text)
+    text = _COINGECKO_ID_RE.sub("", text)
+    return text
 
 
 def _matrix_protocol_names() -> set[str]:
@@ -56,14 +82,12 @@ def test_no_chain_file_names_a_connector() -> None:
     ``ChainDescriptor.supported_protocols`` and listed connector names like
     ``uniswap_v3`` / ``aave_v3`` inside every ``core/chains/<chain>.py``.
     """
-    import re
-
     protocol_names = _matrix_protocol_names()
     assert protocol_names, "expected to discover matrix protocols"
 
     offenders: list[str] = []
     for py in sorted(_CHAINS_DIR.glob("*.py")):
-        text = py.read_text()
+        text = _strip_vendor_data(py.read_text())
         for name in protocol_names:
             if re.search(rf"\b{re.escape(name)}\b", text):
                 offenders.append(f"{py.name}: names protocol {name!r}")
@@ -74,6 +98,26 @@ def test_no_chain_file_names_a_connector() -> None:
         "almanak/connectors/<proto>/supported_chains.py, never in a chain "
         "file):\n  " + "\n  ".join(offenders)
     )
+
+
+def test_vendor_data_and_urls_are_not_read_as_declarations() -> None:
+    """A connector name in vendor data (CoinGecko id / RPC URL) is not a support
+    declaration; a name in a collection literal still is.
+
+    HyperEVM regression (VIB-5575): the chain and the ``hyperliquid`` perps
+    connector share a project identity, so the chain's own CoinGecko coin id and
+    RPC host legitimately contain the connector key. Those must be ignored, while
+    a reintroduced ``supported_protocols``-style list must still be flagged.
+    """
+    proto = sorted(_matrix_protocol_names())[0]
+
+    # Vendor data (CoinGecko id + RPC URL): stripped -> the name no longer matches.
+    vendor = f'coingecko_id="{proto}"\n    public_rpc="https://rpc.{proto}.xyz/evm"\n'
+    assert not re.search(rf"\b{re.escape(proto)}\b", _strip_vendor_data(vendor))
+
+    # Support declaration (collection literal): preserved -> the name still matches.
+    declaration = f'supported_protocols=("{proto}",)\n'
+    assert re.search(rf"\b{re.escape(proto)}\b", _strip_vendor_data(declaration))
 
 
 def test_matrix_built_purely_from_connector_registry() -> None:

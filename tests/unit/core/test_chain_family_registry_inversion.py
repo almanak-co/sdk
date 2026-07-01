@@ -58,6 +58,7 @@ FROZEN_ANVIL_CHAINS = frozenset(
         "xlayer",
         "zerog",
         "plasma",
+        "hyperevm",
     }
 )
 

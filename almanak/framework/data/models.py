@@ -168,6 +168,7 @@ _NATIVE_TO_WRAPPED: dict[str, str] = {
     "MON": "WMON",
     "OKB": "WOKB",
     "A0GI": "W0G",
+    "HYPE": "WHYPE",
     "SOL": "WSOL",
 }
 

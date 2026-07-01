@@ -17,7 +17,7 @@ from almanak.gateway.managed import ManagedGateway
 # The exact literal removed from almanak/gateway/managed.py — do not "fix" this
 # set to make the test pass; it is the anti-widening contract.
 LEGACY_NATIVE_TOKEN_SYMBOLS = frozenset(
-    {"ETH", "AVAX", "MATIC", "BNB", "S", "POL", "MNT", "BERA", "MON", "OKB", "XPL", "A0GI"}
+    {"ETH", "AVAX", "MATIC", "BNB", "S", "POL", "MNT", "BERA", "MON", "OKB", "XPL", "A0GI", "HYPE"}
 )
 
 
