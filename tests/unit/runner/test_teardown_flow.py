@@ -70,16 +70,6 @@ def _make_strategy(
     strategy.chain = chain
     strategy.wallet_address = wallet_address
     strategy.should_teardown.return_value = should_teardown
-    # VIB-5116: the teardown enumeration runs a gateway-routed GMX pending-order
-    # sweep on Arbitrum/Avalanche. A real healthy gateway answers the order-count
-    # read with 0 for a wallet with no GMX orders (a MEASURED empty book → no
-    # residual). Make the mock realistic — a resolvable wallet + a gateway whose
-    # eth_call returns a zero word — so the sweep reads measured-empty instead of
-    # UNMEASURED (which would fail-close this mapping test's teardown). The
-    # per-chain wallet must be a valid checksummable address (the sweep derives a
-    # DataStore key from it); ``wallet_address`` stays as the test's sentinel value.
-    strategy.get_wallet_for_chain.return_value = "0x" + ("1" * 40)
-    strategy._gateway_client.eth_call.return_value = "0x" + ("0" * 64)
 
     if teardown_intents is not None:
         strategy.generate_teardown_intents.return_value = teardown_intents
@@ -1249,7 +1239,6 @@ def _make_teardown_manager_class_mock(
                 has_position_breakdown=True,
             )
         )
-
     # TD-15 (VIB-5473): the lanes now compose the post-condition verification with
     # a fail-closed on-chain POST-teardown reconciliation. The characterization
     # default has no residual chain signal, so the real method would return the

@@ -72,16 +72,6 @@ class _FakeGatewayClient:
     def disconnect(self) -> None:
         self.connected = False
 
-    def eth_call(self, chain=None, to=None, data=None, block=None) -> str:  # noqa: ARG002
-        # A real healthy gateway answers the teardown residual-discovery order-count
-        # read (VIB-5116) with 0 for a wallet that holds no GMX orders — a MEASURED
-        # empty book, so no residual is surfaced and the swap-only no-op path exits
-        # 0. Returning a zero word (uint 0 / empty bytes32[]) keeps this fake
-        # realistic; without it the discovery would fail-closed-loud on an
-        # unanswerable read (which is the correct behaviour for a genuinely broken
-        # gateway, but not what these no-op tests intend to exercise).
-        return "0x" + ("0" * 64)
-
 
 def _write_swap_only_strategy_files(tmp_path) -> tuple[str, str]:
     """Create the minimal strategy.py + config.json the CLI needs to load.

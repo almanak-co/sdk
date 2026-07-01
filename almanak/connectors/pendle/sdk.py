@@ -74,13 +74,6 @@ for _chain, _addrs in _PENDLE_REGISTRY.items():
     if _chain in _PENDLE_TOKENS:
         PENDLE_ADDRESSES[_chain].update(_PENDLE_TOKENS[_chain])
 
-# A Pendle market contract IS its own fungible LP token, and every Pendle
-# market/LP token is an 18-decimal ERC20 (protocol invariant; on-chain-verified
-# for the live sUSDai + wstETH Arbitrum markets). Used to register market
-# addresses as resolvable LP tokens so balance reads never hit the 30s gateway
-# metadata fallback (VIB-5487, BUG B).
-PENDLE_LP_TOKEN_DECIMALS: int = 18  # decimal-policy-exempt: Pendle market/LP ERC20 is always 18-dec (protocol invariant, on-chain-verified) — VIB-5487
-
 # Mapping of PT token names to market addresses (canonical lookup)
 # This provides a direct, unambiguous mapping from PT token names to market contracts
 MARKET_BY_PT_TOKEN: dict[str, dict[str, str]] = {
@@ -322,59 +315,27 @@ MARKET_TOKEN_MINT_SY: dict[str, dict[str, str]] = {
 # SY-mint token. For a lightweight token (e.g. wstETH) that SY mint is cheap, but
 # for a yield-bearing STAKING-VAULT token (e.g. sUSDai — the only live Pendle
 # market underlying on Arbitrum after the wstETH markets expired) the SY mint /
-# redeem runs the vault's deposit/withdraw logic AND the underlying stablecoins'
-# blocklist checks (USDai ArbitrumExtensionV2.isBlocked, USDC FiatTokenV2_2
-# .isBlacklisted) and is far heavier.
-#
-# VIB-5487 (root cause, on-chain proof): a live LP_CLOSE
-# ``removeLiquiditySingleToken`` on the sUSDai market reverted with
-# ``SafeERC20: low-level call failed`` (Arbitrum tx
-# 0xeeab1954a717699ffee4d8d669e2b9d57cfae9920317d0c37d023d2f135396bb, block
-# 477783713). ``cast run`` on that tx shows the true fault is ``EvmError:
-# OutOfGas`` deep in the SY -> sUSDai redeem (blocklist-check frames), which
-# bubbles up through each SafeERC20 wrapper as "low-level call failed" (the
-# 63/64 gas rule keeps the top frame from consuming 100%, so the symptom is a
-# SafeERC20 revert, NOT the empty-0x of a top-level OOG). The tx ran with a
-# 600k limit (the then-current 400k floor × the 1.5 chain buffer); the remove
-# needs ~608k, so it starved.
-#
-# Measured on an Arbitrum fork against the live PT-sUSDai-15OCT2026 market:
-# token->PT swap ≈ 711k (2026-06-29, eth_estimateGas); remove_liquidity_single
-# ≈ 608k (2026-06-30, actual gasUsed, near-constant across 0.4 → 1000 sUSDai —
-# dominated by the fixed blocklist/vault frames, not position size);
-# add_liquidity_single ≈ 920k (2026-06-29). Floors below clear those measured
-# needs with a must-not-fail margin (teardown remove MUST land — a starved
-# close strands on-chain risk). ``tests/unit/connectors/pendle/
-# test_gas_floor_regression.py`` guards each heavy single-token op so a future
-# edit can never silently drop a floor back under its measured requirement
-# (that guard is exactly what was missing when the 400k floor shipped). Raising
-# a floor only prevents OOG and costs nothing extra (callers pay for gas USED,
-# not the limit).
+# redeem runs the vault's deposit/withdraw logic and is far heavier. Measured on
+# an Arbitrum fork (2026-06-29) against the live PT-sUSDai-15OCT2026 market via
+# eth_estimateGas: token->PT swap ≈ 711k, add_liquidity_single ≈ 920k,
+# remove_liquidity_single ≈ 606k. The previous floors (400k / 500k / 400k) left
+# the buffered limit below those needs, so the router ran out of gas and reverted
+# with empty revert data (0x). Floors below cover the heavy vault-SY path with
+# comfortable headroom; raising a floor only prevents OOG and costs nothing extra
+# (callers pay for gas USED, not the limit).
 PENDLE_GAS_ESTIMATES: dict[str, int] = {
-    "swap_exact_token_for_pt": 900_000,
-    "swap_exact_pt_for_token": 900_000,
-    "swap_exact_token_for_yt": 900_000,
-    "swap_exact_yt_for_token": 900_000,
-    "add_liquidity_single": 1_100_000,
-    "remove_liquidity_single": 800_000,
+    "swap_exact_token_for_pt": 700_000,
+    "swap_exact_pt_for_token": 700_000,
+    "swap_exact_token_for_yt": 800_000,
+    "swap_exact_yt_for_token": 800_000,
+    "add_liquidity_single": 1_000_000,
+    "remove_liquidity_single": 700_000,
     "add_liquidity_dual": 600_000,
     "mint_sy": 200_000,
     "redeem_sy": 200_000,
     "mint_py": 300_000,
     "redeem_py": 300_000,
     "approve": 50_000,
-}
-
-# Measured heavy-vault-SY gas requirements (worst-observed, from the live
-# PT-sUSDai-15OCT2026 Arbitrum market) that the floors above MUST clear. The
-# regression guard (test_gas_floor_regression.py) asserts
-# ``PENDLE_GAS_ESTIMATES[op] >= requirement`` for each — a single source of
-# truth so the floor and the evidence never drift. See VIB-5487.
-PENDLE_HEAVY_VAULT_SY_GAS_REQUIREMENTS: dict[str, int] = {
-    "swap_exact_token_for_pt": 711_000,
-    "swap_exact_pt_for_token": 711_000,
-    "add_liquidity_single": 920_000,
-    "remove_liquidity_single": 608_000,
 }
 
 # Function selectors for Pendle Router V4

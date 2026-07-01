@@ -302,12 +302,7 @@ class LPCloseData:
         """
         result: list[int | None] = [self.amount0_collected, self.amount1_collected]
         if self.additional_amounts:
-            # Sort numerically: after a JSON round-trip the integer coin-index keys
-            # deserialize as strings, and plain ``sorted()`` orders them
-            # lexicographically ("10" < "2"). ``key=int`` restores numeric order
-            # regardless of str/int key type. Latent at <10 coins (single-digit
-            # keys sort identically); manifests at ≥10 coins (VIB-5545).
-            for i in sorted(self.additional_amounts, key=int):
+            for i in sorted(self.additional_amounts):
                 result.append(self.additional_amounts[i])
         return result
 
@@ -433,11 +428,7 @@ class LPOpenData:
         """
         result: list[int | None] = [self.amount0, self.amount1]
         if self.additional_amounts:
-            # Sort numerically: JSON-round-tripped integer coin-index keys
-            # deserialize as strings, so plain ``sorted()`` would order them
-            # lexicographically ("10" < "2"). ``key=int`` restores numeric order
-            # regardless of str/int key type (VIB-5545).
-            for i in sorted(self.additional_amounts, key=int):
+            for i in sorted(self.additional_amounts):
                 result.append(self.additional_amounts[i])
         return result
 

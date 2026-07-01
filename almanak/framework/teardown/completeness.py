@@ -397,24 +397,7 @@ def _covers_lp(intent: Any, position: PositionInfo, itype: str) -> bool:
     return not intent_id and not intent_pool
 
 
-# Residual ``kind`` markers (set by teardown residual discovery) for off-position
-# committed capital that NO position-closing intent can cover — a pending
-# (unfilled) order or an unverified residual is reclaimed by a cancel, not a
-# PERP_CLOSE (there is no cancel verb yet; VIB-5116). Keying on the generic
-# ``kind`` marker keeps this protocol-agnostic.
-_UNCOVERABLE_PERP_KINDS: frozenset[str] = frozenset({"pending_order", "residual_unverified"})
-
-
 def _covers_perp(intent: Any, position: PositionInfo, itype: str) -> bool:
-    # A pending-ORDER residual is never covered by a PERP_CLOSE: a PERP_CLOSE closes
-    # an open position, it does not cancel a committed-but-unfilled order (VIB-5116
-    # C5). Without this, a real open long + a pending increase on the SAME
-    # market+side would let one PERP_CLOSE falsely "cover" the pending order and let
-    # the strand pass the completeness gate. (The on-chain post-condition backstops
-    # it, but completeness is the primary pre-execution gate.)
-    kind = str((position.details or {}).get("kind") or "").lower()
-    if kind in _UNCOVERABLE_PERP_KINDS:
-        return False
     # Market alone is insufficient: a long and a short on the SAME market — or
     # the same market on two perp venues — are distinct positions, so one close
     # must not cross-cover the other. Protocol + side are lenient on absence

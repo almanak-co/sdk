@@ -22,7 +22,7 @@ Together these pin the parser-side contract used by
 
 from __future__ import annotations
 
-from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData
+from almanak.framework.execution.extracted_data import LPCloseData
 
 
 class TestLPCloseDataDefaults:
@@ -213,67 +213,3 @@ class TestLPCloseDataFeeSeparationTaxonomy:
         d = LPCloseData(amount0_collected=100, amount1_collected=200).to_dict()
         assert d["fee_separation_method"] == "BUNDLED"
         assert d["fee_confidence"] == "UNKNOWN"
-
-
-class TestAllAmountsNumericOrdering:
-    """VIB-5545 — ``all_amounts`` must sort ``additional_amounts`` numerically.
-
-    After a JSON round-trip (``to_dict`` writes ``{str(k): ...}``, then a
-    ``json.loads`` on the SQLite payload hands back string keys), the integer
-    coin-index keys deserialize as STRINGS. A plain ``sorted()`` over string
-    keys orders them lexicographically (``"10" < "2"``), which would misplace
-    coin amounts at ≥10 coins. ``sorted(..., key=int)`` restores numeric order
-    regardless of str/int key type.
-
-    Latent at ≤8 coins (single-digit keys sort identically under both orders);
-    these tests exercise the ≥10-coin regime with STRING keys where the two
-    orderings diverge, and assert index 2 lands before index 10.
-    """
-
-    # A JSON round-trip yields string keys — reproduce that exact shape.
-    # 12 coins ("0".."11"), value = index * 1000 so mis-ordering is visible.
-    _STR_KEYED_ADDITIONAL = {str(i): i * 1000 for i in range(2, 12)}
-
-    def test_lp_close_numeric_order_with_string_keys(self) -> None:
-        data = LPCloseData(
-            amount0_collected=0,
-            amount1_collected=1000,
-            additional_amounts=dict(self._STR_KEYED_ADDITIONAL),
-        )
-        amounts = data.all_amounts
-        # amount0/amount1 occupy slots 0 and 1; additional coins 2..11 follow
-        # in numeric index order.
-        assert amounts == [i * 1000 for i in range(12)]
-        # The load-bearing assertion: coin 2 must precede coin 10, which a
-        # lexicographic ("10" < "2") sort would invert.
-        assert amounts.index(2 * 1000) < amounts.index(10 * 1000)
-
-    def test_lp_open_numeric_order_with_string_keys(self) -> None:
-        data = LPOpenData(
-            position_id=1,
-            amount0=0,
-            amount1=1000,
-            additional_amounts=dict(self._STR_KEYED_ADDITIONAL),
-        )
-        amounts = data.all_amounts
-        assert amounts == [i * 1000 for i in range(12)]
-        assert amounts.index(2 * 1000) < amounts.index(10 * 1000)
-
-    def test_lp_close_numeric_order_survives_actual_to_dict_round_trip(self) -> None:
-        # End-to-end: build with int keys, serialise via to_dict, JSON
-        # round-trip (which stringifies keys), rebuild, and confirm order.
-        import json
-
-        original = LPCloseData(
-            amount0_collected=0,
-            amount1_collected=1000,
-            additional_amounts={i: i * 1000 for i in range(2, 12)},
-        )
-        payload = json.loads(json.dumps(original.to_dict()["additional_amounts"]))
-        # payload keys are now strings, values are strings ("2000", ...)
-        rehydrated = LPCloseData(
-            amount0_collected=0,
-            amount1_collected=1000,
-            additional_amounts={k: int(v) for k, v in payload.items()},
-        )
-        assert rehydrated.all_amounts == [i * 1000 for i in range(12)]

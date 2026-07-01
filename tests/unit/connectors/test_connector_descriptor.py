@@ -663,13 +663,8 @@ EXPECTED_SWAP_ROUTE_INFERENCE_MODULES = {
 }
 
 EXPECTED_TEARDOWN_POST_CONDITION_MODULES = {
-    "gmx_v2": "almanak.connectors.gmx_v2.teardown_post_condition",
     "pendle": "almanak.connectors.pendle.teardown_post_condition",
     "traderjoe_v2": "almanak.connectors.traderjoe_v2.teardown_post_condition",
-}
-
-EXPECTED_TEARDOWN_RESIDUAL_DISCOVERY_MODULES = {
-    "gmx_v2": "almanak.connectors.gmx_v2.teardown_residual_discovery",
 }
 
 EXPECTED_DEFERRED_REFRESH_MODULES = {
@@ -1161,16 +1156,6 @@ def test_connector_rejects_invalid_teardown_post_condition_ref() -> None:
             name="bad_teardown_post_condition_ref",
             kind=ProtocolKind.LP,
             teardown_post_condition=object(),  # type: ignore[arg-type]
-        )
-
-
-def test_connector_rejects_invalid_teardown_residual_discovery_ref() -> None:
-    """Invalid teardown residual-discovery refs fail during manifest validation (VIB-5116 S1)."""
-    with pytest.raises(ValueError, match="Connector.teardown_residual_discovery"):
-        Connector(
-            name="bad_teardown_residual_discovery_ref",
-            kind=ProtocolKind.PERP,
-            teardown_residual_discovery=object(),  # type: ignore[arg-type]
         )
 
 
@@ -2098,30 +2083,6 @@ def test_connector_teardown_post_conditions_are_not_hardcoded_in_framework() -> 
 
     assert "with_teardown_post_condition()" in source
     assert "almanak.connectors.traderjoe_v2" not in source
-
-
-def test_teardown_residual_discoveries_load_from_descriptors() -> None:
-    """Teardown residual-discovery hooks are published through connectors (VIB-5116)."""
-    CONNECTOR_REGISTRY.clear()
-
-    connectors: dict[str, str] = {}
-    for connector_manifest in CONNECTOR_REGISTRY.with_teardown_residual_discovery():
-        assert connector_manifest.teardown_residual_discovery is not None
-        hook = connector_manifest.teardown_residual_discovery.load()
-
-        assert callable(hook)
-        connectors[connector_manifest.name] = connector_manifest.teardown_residual_discovery.module
-
-    assert connectors == EXPECTED_TEARDOWN_RESIDUAL_DISCOVERY_MODULES
-
-
-def test_connector_teardown_residual_discoveries_are_not_hardcoded_in_framework() -> None:
-    """The framework residual-discovery registry discovers connector-owned hooks (no protocol literal)."""
-    repo_root = Path(__file__).resolve().parents[3]
-    source = (repo_root / "almanak/framework/teardown/residual_discovery.py").read_text()
-
-    assert "with_teardown_residual_discovery()" in source
-    assert "gmx_v2" not in source  # the framework names no protocol (coupling ratchet)
 
 
 def test_deferred_refresh_connectors_instantiate_from_descriptors() -> None:

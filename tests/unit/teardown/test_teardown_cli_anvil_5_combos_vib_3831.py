@@ -68,14 +68,6 @@ class _FakeGatewayClient:
     def disconnect(self) -> None:
         self.connected = False
 
-    def eth_call(self, chain=None, to=None, data=None, block=None) -> str:  # noqa: ARG002
-        # A real healthy gateway answers the teardown residual-discovery
-        # order-count read (VIB-5116) with 0 for a wallet with no GMX orders — a
-        # MEASURED empty book, so no residual is surfaced. Returning a zero word
-        # keeps this fake realistic for the Arbitrum/Avalanche probe chains where
-        # the GMX residual sweep runs.
-        return "0x" + ("0" * 64)
-
 
 class _SwapOnlyStrategy:
     STRATEGY_NAME = "vib_3831_probe"

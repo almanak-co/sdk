@@ -63,17 +63,6 @@ CONNECTOR = Connector(
         module="almanak.connectors.gmx_v2.protocol_family",
         attribute="PROTOCOL_FAMILY",
     ),
-    # VIB-5116: on-chain closure verify (open positions + pending OrderVault
-    # orders) and residual discovery of pending unfilled orders that hold
-    # collateral but are not yet positions.
-    teardown_post_condition=ImportRef(
-        module="almanak.connectors.gmx_v2.teardown_post_condition",
-        attribute="gmx_v2_teardown_post_condition",
-    ),
-    teardown_residual_discovery=ImportRef(
-        module="almanak.connectors.gmx_v2.teardown_residual_discovery",
-        attribute="gmx_v2_teardown_residual_discovery",
-    ),
     capabilities=CapabilitiesSpec(
         keys=("gmx_v2",),
         module="almanak.connectors.gmx_v2.capabilities",
