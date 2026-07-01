@@ -3,18 +3,25 @@
     "row_id": "lp-curve-ethereum",
     "fixture": "lp_curve",
     "chain": "ethereum",
-    "primitive": "lp",
+    "primitive": "curve_lp",
     "captured_from": "docs/internal/notes/.tmp/accounting-matrix/lp-curve-ethereum/accountant.json",
-    "captured_at": "2026-06-25T00:00:00.000000+00:00",
-    "captured_at_commit": "74a8362e0",
+    "captured_at": "2026-06-30T00:00:00.000000+00:00",
+    "captured_at_commit": "63136e69c",
     "post_fix_for": [
       "VIB-4316 Tier 1+2 matrix expansion (2026-05-14 overnight)",
       "VIB-3587 Curve single-sided LP_OPEN declares funded legs (no zero-leg)",
-      "VIB-5420 Curve LP USD valuation via live virtual_price (PortfolioValuer)"
+      "VIB-5420 Curve LP USD valuation via live virtual_price (PortfolioValuer)",
+      "VIB-5430 bespoke curve_lp scorecard profile (tick cells N/A not FAIL)"
     ],
-    "note": "Re-baselined for VIB-5420 (LP6 FAIL->PASS, passed 15->16): the PortfolioValuer now values a Curve LP position via the new _reprice_curve_lp_enriched path (lp_balance x live virtual_price x $1 USD peg) instead of the stale strategy-reported estimate. That path stamps `liquidity` and `lp_balance` into the position-state snapshot details, which is exactly what LP6 (liquidity-over-time) reads -- so LP6 moves from inapplicable-FAIL to PASS for the fungible Curve LP (the LP-token balance IS its liquidity measure; no concentrated-liquidity ticks are needed). Real-fork proof: tests/reports/curve_nleg_valuation_anvil_vib5420_report.md (virtual_price=1.0398 live, value_usd=10.0059 = lp_balance x vp x $1). LP1/LP2 remain inapplicable-FAIL (tick exposure / in-range-time DO NOT APPLY to a fungible StableSwap pool). G6 (native-gas-in-equity reconciliation, VIB-4256) and LP4 (single-sided IL undefined -> XFAIL) are out of scope for VIB-5420 and unchanged. Prior VIB-3587 history: single-sided USDC deposit, typed PrimitiveMoneyLegs, G13/G14/G15/LP5 forward (passed 11->15)."
+    "note": "Re-baselined for VIB-5430 (Curve epic VIB-5422 M2; passed 16->18, failed 3->1): the Curve fixture now scores under the bespoke `curve_lp` scorecard profile instead of the generic V3 `lp` profile. The two former tick cells become Curve-shaped cells -- LP1 (range exposure) -> CURVE1 (LP_OPEN books funded per-coin legs) and LP2 (in-range-time fraction) -> CURVE2 (LP_CLOSE books collected coin legs) -- so the structural inapplicability (a rangeless fungible StableSwap/CryptoSwap pool has no ticks) is converted from a false books-broken FAIL to an honest PASS on what Curve genuinely books. CURVE3 (fees measured OR explicitly unavailable-with-reason), CURVE4 (IL N/A->XFAIL on the single-sided deposit), CURVE5 (open->close decomposition, reuses the LP5 predicate), CURVE6 (LP-token balance over time, reuses the LP6 liquidity predicate). This is a SCORER re-baseline on the EXISTING frozen lp_curve fixture -- NO money-path read change, NO parser/leg-semantics change (merge-gate high-risk triggers a/b/c/d are not hit). G6 (native-gas-in-equity USD reconciliation) stays FAIL on a pre-existing wallet-side gap (M1-5, VIB-5427 cluster) -- NOT masked. L5_22 informational (excluded from gating). Gating: 18/21 PASS. Prior history retained: VIB-5420 (LP6 via live virtual_price), VIB-3587 (single-sided USDC deposit, typed PrimitiveMoneyLegs)."
   },
   "cells": {
+    "CURVE1": "PASS",
+    "CURVE2": "PASS",
+    "CURVE3": "PASS",
+    "CURVE4": "XFAIL",
+    "CURVE5": "PASS",
+    "CURVE6": "PASS",
     "G1": "PASS",
     "G10": "PASS",
     "G11": "SKIP",
@@ -30,17 +37,11 @@
     "G7": "PASS",
     "G8": "PASS",
     "G9": "PASS",
-    "L5_22": "XFAIL",
-    "LP1": "FAIL",
-    "LP2": "FAIL",
-    "LP3": "PASS",
-    "LP4": "XFAIL",
-    "LP5": "PASS",
-    "LP6": "PASS"
+    "L5_22": "XFAIL"
   },
   "scores": {
-    "passed": 16,
-    "failed": 3,
+    "passed": 18,
+    "failed": 1,
     "xfailed": 2,
     "total": 22
   }

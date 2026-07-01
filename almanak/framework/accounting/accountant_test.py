@@ -74,7 +74,7 @@ CLOSE_EVENT_TYPES: tuple[str, ...] = tuple(
 # ``Primitive`` via ``SCORECARD_PROFILES`` (assembled below). ``Primitive`` is
 # kept as a back-compat alias: it is exported in ``__all__`` and referenced by
 # annotations throughout this module.
-ProfileName = Literal["lp", "looping", "perp", "pendle_pt", "pendle_lp"]
+ProfileName = Literal["lp", "looping", "perp", "pendle_pt", "pendle_lp", "curve_lp"]
 Primitive = ProfileName
 CellStatus = Literal["PASS", "FAIL", "XFAIL", "SKIP"]
 
@@ -3541,6 +3541,234 @@ def _cells_pendle_lp(
     return out
 
 
+# ─── Curve LP cell pack (CURVE1–CURVE6) — VIB-5430 ────────────────────────
+#
+# Curve LP is a *multi-coin fungible* LP surface (2/3/4 coins; e.g. 3pool
+# DAI/USDC/USDT, tricrypto). A deposit mints an ERC-20 LP token (the pool /
+# gauge address — NO NFT, NO tick range); a proportional withdraw burns it and
+# returns ALL N coins with no token_in/out direction (a one-coin or imbalanced
+# withdraw returns a subset). It rides the LP primitive in the taxonomy
+# (``taxonomy.py`` ``LP_OPEN / LP_CLOSE -> Primitive.LP``) so its ledger
+# intent_type IS ``LP_OPEN`` / ``LP_CLOSE`` and the canonical lifecycle is LP's
+# — but the rangeless StableSwap / CryptoSwap economics make the generic V3 cell
+# pack (``_cells_lp``: LP1 tick exposure, LP2 in-range-time fraction) assert
+# structure a Curve pool NEVER emits. Scored under the ``lp`` profile those two
+# cells are a false "books-broken" FAIL on a healthy fixture — exactly the frozen
+# ``lp_curve`` verdict this pack corrects (VIB-5430, Curve epic VIB-5422 M2).
+#
+# Mirrors the Pendle precedent (``_cells_pendle_lp``): does NOT call ``_cells_lp``
+# and never asserts ticks. The inapplicable range cells are REPLACED, not dropped
+# — the pack still emits exactly 6 primitive cells (CURVE1–CURVE6), so the gating
+# denominator is unchanged (a fungible-LP equivalent assertion stands in for each
+# tick assertion). There is no first-class ``"N/A"`` ``CellResult`` status, and a
+# bare ``SKIP`` would understate what Curve genuinely books; converting the
+# structural inapplicability to a Curve-shaped PASS/XFAIL is the honest move
+# (rationale: ``docs/internal/qa/curve-cell-applicability-matrix.md``).
+#
+# This scores the EXISTING frozen ``lp_curve`` fixture (captured pre-#3109, so its
+# typed payload is the generic LP shape: ``amount0`` / ``amount1`` / ``token0`` /
+# ``token1``, no ``coin_symbols``). No money-path read changes here — only the
+# scorer. Each predicate also accepts the richer post-#3109 ``_curve_legs`` /
+# ``coin_symbols`` shape so a future re-captured fixture never silently FAILs.
+
+# Curve fixtures carry coin amounts on two surfaces: the typed accounting-event
+# payload (``amount0`` / ``amount1`` on the generic-LP shape) and — for the
+# realized collected coins on a proportional close — the CLOSE ``position_event``
+# (``amount0`` / ``amount1``, the proceeds surface CURVE5's decomposition rests
+# on). Empty != Zero: a leg present with a measured value (INCLUDING measured
+# zero, e.g. an imbalanced / one-coin withdraw that returns 0 of a coin) is a
+# booked leg; only ``None`` / ``""`` is unmeasured.
+_CURVE_COIN_AMOUNT_KEYS = ("amount0", "amount1")
+
+
+def _curve_funded_legs(values: dict[str, Any]) -> list[str]:
+    """Names of the coin-amount legs an event/position row booked.
+
+    Reads the generic ``amount0`` / ``amount1`` legs the frozen fixture carries.
+    Empty != Zero: a key present and not ``None`` / ``""`` counts (measured zero
+    included); unmeasured legs do not.
+    """
+    return [k for k in _CURVE_COIN_AMOUNT_KEYS if values.get(k) not in (None, "")]
+
+
+def _curve1_open_legs(
+    lp_opens: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    payload_errors: dict[Any, str],
+) -> CellResult:
+    """CURVE1 — LP_OPEN books at least one funded coin leg (replaces LP1 ticks)."""
+    desc = "LP_OPEN books funded per-coin legs (N-coin deposit, no tick range)"
+    blocked = _payload_block_cell("CURVE1", desc, lp_opens, payload_errors)
+    if blocked is not None:
+        return blocked
+    for r in lp_opens:
+        legs = _curve_funded_legs(acct_payloads.get(r.get("id"), {}))
+        if legs:
+            return CellResult("CURVE1", desc, "PASS", f"LP_OPEN books funded coin legs {legs}")
+    return CellResult("CURVE1", desc, "XFAIL", "no LP_OPEN carrying a funded coin leg (amount0/amount1)")
+
+
+def _curve2_close_legs(
+    lp_closes: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    pos_events: list[dict[str, Any]],
+    payload_errors: dict[Any, str],
+) -> CellResult:
+    """CURVE2 — LP_CLOSE books the collected coin legs (replaces LP2 in-range).
+
+    Proportional close returns ALL N coins (no token direction); a one-coin /
+    imbalanced close returns a subset. The realized collected coins land on the
+    typed payload (post-#3109 N-coin legs) or, on the frozen fixture, the CLOSE
+    ``position_event`` ``amount0`` / ``amount1`` — either booking the legs PASSes.
+    """
+    desc = "LP_CLOSE books collected coin legs (proportional / one-coin / imbalanced)"
+    blocked = _payload_block_cell("CURVE2", desc, lp_closes, payload_errors)
+    if blocked is not None:
+        return blocked
+    for r in lp_closes:
+        legs = _curve_funded_legs(acct_payloads.get(r.get("id"), {}))
+        if legs:
+            return CellResult("CURVE2", desc, "PASS", f"LP_CLOSE books collected coin legs {legs}")
+    close_pe = [r for r in pos_events if r.get("position_type") == "LP" and r.get("event_type") == "CLOSE"]
+    for r in close_pe:
+        legs = _curve_funded_legs(r)
+        if legs:
+            return CellResult("CURVE2", desc, "PASS", f"LP_CLOSE collected coin legs booked on position_event {legs}")
+    return CellResult("CURVE2", desc, "XFAIL", "no LP_CLOSE collected coin legs booked")
+
+
+def _curve3_fees(
+    lp_events: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    pos_events: list[dict[str, Any]],
+    payload_errors: dict[Any, str],
+) -> CellResult:
+    """CURVE3 — fees measured OR explicitly UNAVAILABLE-with-reason.
+
+    Curve fee USD valuation is unavailable by design today (no per-pool fee
+    accrual feed wired). The honest bar: a measured fee leg (Empty != Zero — a
+    no-time round-trip's measured-zero fee counts) PASSes; absent that, an
+    explicit ``unavailable_reason`` on the payload is an honest known-unknown and
+    also PASSes; only a silent gap (no fee, no reason) is XFAIL.
+    """
+    desc = "Fees measured OR explicitly unavailable-with-reason (Curve fee USD unavailable by design)"
+    # A schema-broken payload must FAIL loud, never be scored PASS/XFAIL off a
+    # partially-read payload (same guard the other CURVE cells use).
+    blocked = _payload_block_cell("CURVE3", desc, lp_events, payload_errors)
+    if blocked is not None:
+        return blocked
+    for r in lp_events:
+        p = acct_payloads.get(r.get("id"), {})
+        for k in ("fees0_collected", "fees1_collected", "fees_total_usd"):
+            if p.get(k) not in (None, ""):
+                return CellResult("CURVE3", desc, "PASS", f"fees measured on payload ({k})")
+    for r in (r for r in pos_events if r.get("position_type") == "LP"):
+        for k in ("fees_token0", "fees_token1"):
+            if r.get(k) not in (None, ""):
+                return CellResult("CURVE3", desc, "PASS", f"fees measured on position_event ({k}; Empty != Zero)")
+    for r in lp_events:
+        reason = acct_payloads.get(r.get("id"), {}).get("unavailable_reason")
+        if reason:
+            return CellResult(
+                "CURVE3", desc, "PASS", "Curve fee USD valuation unavailable by design — explicit reason recorded"
+            )
+    return CellResult("CURVE3", desc, "XFAIL", "no fees measured and no unavailable_reason recorded")
+
+
+def _curve4_il(
+    lp_opens: list[dict[str, Any]],
+    lp_closes: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    payload_errors: dict[Any, str],
+) -> CellResult:
+    """CURVE4 — IL diagnostic when 2-sided; N/A (XFAIL) for a single-sided deposit.
+
+    IL is only defined against a paired (>=2-coin) deposit; a single-sided Curve
+    deposit has no HODL counterfactual, so IL is undefined — XFAIL, not FAIL.
+    When the open booked >=2 funded coin legs, reuse the generic LP4 sanity-bound
+    check (same ``il_usd`` magnitude predicate) under the CURVE4 id.
+    """
+    desc = "Impermanent loss (diagnostic, NOT in net PnL) — N/A for single-sided"
+    lp_acct = lp_opens + lp_closes
+    # Check payload validity BEFORE inferring "single-sided": a broken LP_OPEN
+    # payload reads as zero funded legs, which would silently take the XFAIL
+    # single-sided path instead of the loud FAIL a schema-mismatch must produce.
+    blocked = _payload_block_cell("CURVE4", desc, lp_acct, payload_errors)
+    if blocked is not None:
+        return blocked
+    two_sided = any(len(_curve_funded_legs(acct_payloads.get(r.get("id"), {}))) >= 2 for r in lp_opens)
+    if not two_sided:
+        return CellResult(
+            "CURVE4", desc, "XFAIL", "single-sided deposit — IL undefined (no paired HODL counterfactual)"
+        )
+    inner = _lp4_il_sanity_cell(lp_acct, acct_payloads)
+    return CellResult("CURVE4", desc, inner.status, inner.diagnostic)
+
+
+def _curve6_liquidity(lp_state_rows: list[dict[str, Any]]) -> CellResult:
+    """CURVE6 — LP-token balance over time IS the liquidity measure (replaces LP6).
+
+    Fungible Curve LP has no concentrated-liquidity ticks: the LP-token balance
+    over the hold IS the position's liquidity. Non-zero LP balance on the Track-C
+    ``position_state_snapshots`` PASSes. (Empty != Zero: numeric / string ``0`` is
+    a genuinely-zero balance, not a measured liquidity.)
+    """
+    desc = "LP-token balance over time (fungible: LP balance IS the liquidity measure)"
+    if not lp_state_rows:
+        return CellResult("CURVE6", desc, "XFAIL", "no LP rows in position_state_snapshots")
+    liq_rows = [r for r in lp_state_rows if r.get("liquidity") not in (None, "", "0", 0)]
+    if liq_rows:
+        return CellResult(
+            "CURVE6", desc, "PASS", f"{len(liq_rows)}/{len(lp_state_rows)} LP rows carry non-zero LP-token balance"
+        )
+    return CellResult(
+        "CURVE6",
+        desc,
+        "FAIL",
+        f"{len(lp_state_rows)} LP track-c rows but none has non-zero LP-token balance",
+    )
+
+
+def _cells_curve_lp(
+    acct_events: list[dict[str, Any]],
+    pos_events: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    payload_errors: dict[Any, str],
+    position_state_rows: list[dict[str, Any]] | None = None,
+) -> list[CellResult]:
+    """CURVE1–CURVE6 — the bespoke Curve LP scorecard (VIB-5430).
+
+    See the module comment above this function for the design (rangeless,
+    multi-coin, fungible; tick cells replaced not dropped). Pins the CURRENT
+    HONEST FLOOR of the frozen ``lp_curve`` fixture, not a clean-green target:
+    CURVE4 stays XFAIL on a single-sided deposit (IL undefined), and the generic
+    G6 USD reconciliation stays FAIL on a pre-existing wallet-side gap (M1-5,
+    VIB-5427 cluster) — neither is masked here.
+    """
+    position_state_rows = position_state_rows or []
+    lp_state_rows = [r for r in position_state_rows if r.get("position_type") == "LP"]
+    lp_opens = [r for r in acct_events if r.get("event_type") == "LP_OPEN"]
+    lp_closes = [r for r in acct_events if r.get("event_type") == "LP_CLOSE"]
+
+    out: list[CellResult] = [
+        _curve1_open_legs(lp_opens, acct_payloads, payload_errors),
+        _curve2_close_legs(lp_closes, acct_payloads, pos_events, payload_errors),
+        _curve3_fees(lp_opens + lp_closes, acct_payloads, pos_events, payload_errors),
+        _curve4_il(lp_opens, lp_closes, acct_payloads, payload_errors),
+    ]
+    # CURVE5 — reuse the generic open->close decomposition predicate (it reads
+    # the CLOSE position_event's attribution_json, identical for Curve LP), under
+    # the CURVE5 id.
+    lp5 = _lp5_decomposition_cell(pos_events)
+    out.append(
+        CellResult(
+            "CURVE5", "LP open->close delta decomposition (net_pnl + principal legs)", lp5.status, lp5.diagnostic
+        )
+    )
+    out.append(_curve6_liquidity(lp_state_rows))
+    return out
+
+
 # ─── Scorecard profile registry (G-A foundation) ─────────────────────────
 #
 # One declarative table replaces the former per-primitive if/elif ladders (the
@@ -3647,6 +3875,40 @@ SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
             ctx.pos_events,
             ctx.acct_payloads,
             ctx.payload_errors,
+        ),
+    ),
+    # Curve LP rides the LP primitive in the taxonomy (taxonomy.py
+    # ``LP_OPEN / LP_CLOSE -> Primitive.LP``): the ledger intent_type IS
+    # ``LP_OPEN`` / ``LP_CLOSE``, so the canonical lifecycle is LP's and the
+    # FixtureLifecycleError guard verifies the round-trip from the ledger. The
+    # cell pack scores the *Curve* economics (multi-coin fungible LP, no NFT, no
+    # tick range) off the typed payload / position_events, NOT the generic V3 LP
+    # shape (tick exposure / in-range time) which a rangeless StableSwap /
+    # CryptoSwap pool never emits — using ``_cells_lp`` here scores LP1/LP2 a
+    # false "books-broken" FAIL (the frozen ``lp_curve`` verdict). LP's ε
+    # (0.0025 on notional_traded) is reused. VIB-5430, Curve epic VIB-5422 M2.
+    #
+    # P2-4 shared-matching-version coupling (recorded risk): the LP matching
+    # policy version (``MATCHING_POLICY_VERSIONS[Primitive.LP]``) is ONE key
+    # shared by every LP venue (uniswap / sushi / pancake / aerodrome / traderjoe
+    # / raydium / orca / meteora + Curve) — this profile reuses ``Primitive.LP``
+    # (no ``Primitive.CURVE_LP``: ``Primitive`` is AST-frozen, ``test_types.py``).
+    # This PR changes only the SCORECARD, not the matching algorithm, so the
+    # shared key is untouched. A future Curve-specific matching change would
+    # retro-restamp every LP venue — see
+    # docs/internal/qa/curve-cell-applicability-matrix.md §shared-matching-version.
+    "curve_lp": ScorecardProfile(
+        name="curve_lp",
+        canonical_primitive=_TaxonomyPrimitive.LP,
+        required_lifecycle=("LP_OPEN", "LP_CLOSE"),
+        eps_pct=Decimal("0.0025"),
+        eps_scaling=lambda b: (b.notional_traded, "notional_traded"),
+        cells=lambda ctx: _cells_curve_lp(
+            ctx.acct_events,
+            ctx.pos_events,
+            ctx.acct_payloads,
+            ctx.payload_errors,
+            ctx.position_state_rows,
         ),
     ),
 }

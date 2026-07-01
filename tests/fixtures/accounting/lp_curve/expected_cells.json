@@ -1,6 +1,12 @@
 {
   "accounting_events_row_count": 2,
   "cells": {
+    "CURVE1": "PASS",
+    "CURVE2": "PASS",
+    "CURVE3": "PASS",
+    "CURVE4": "XFAIL",
+    "CURVE5": "PASS",
+    "CURVE6": "PASS",
     "G1": "PASS",
     "G10": "PASS",
     "G11": "SKIP",
@@ -16,13 +22,7 @@
     "G7": "PASS",
     "G8": "PASS",
     "G9": "PASS",
-    "L5_22": "XFAIL",
-    "LP1": "FAIL",
-    "LP2": "FAIL",
-    "LP3": "PASS",
-    "LP4": "XFAIL",
-    "LP5": "PASS",
-    "LP6": "PASS"
+    "L5_22": "XFAIL"
   },
   "ledger_row_count": 2,
   "matching_policy_version": 6
