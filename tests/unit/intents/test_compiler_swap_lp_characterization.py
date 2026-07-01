@@ -37,6 +37,11 @@ VALIDATE_V3_POOL = "almanak.connectors.uniswap_v3.pool_validation.validate_v3_po
 # connector foundation; patch it where _fetch_lp_pool_slot0 looks it up.
 FETCH_SLOT0 = "almanak.connectors._strategy_base.v3_pool_validation.fetch_v3_pool_sqrt_price_x96"
 REGISTRY_QUOTE = "almanak.connectors.uniswap_v3.compiler.UniswapV3Compiler._quote_swap_via_registry"
+# VIB-5556: the orientation-invert + price->tick math moved out of the compiler
+# into the shared cl_range seam, so probes follow it to its new home. The seam
+# imports ``price_to_tick`` from concentrated_liquidity_math into its own module
+# namespace, which is the symbol callers patch.
+CL_RANGE_PRICE_TO_TICK = "almanak.connectors._strategy_base.cl_range.price_to_tick"
 
 
 # Realistic oracle shared across most tests. Deliberately small so derived
@@ -1016,25 +1021,25 @@ class TestCompileLPOpenTokenOrdering:
             approve_calls.append((token_addr, amount))
             return []
 
-        # Spy on _price_to_tick to capture the (possibly inverted) price inputs.
-        # _price_to_tick is a @staticmethod, so the spy signature matches the
-        # real function exactly (no self). The real implementation still runs
-        # via side_effect so tick math / spacing alignment produce valid output.
+        # Spy on the cl_range seam's price->tick core to capture the (inverted)
+        # price inputs. VIB-5556 moved orientation-invert + price->tick into the
+        # shared seam, so this probes the seam (which still inverts BEFORE calling
+        # price_to_tick, so the captured prices are the reciprocal range). The
+        # real implementation still runs via side_effect so spacing alignment
+        # produces valid output.
         price_to_tick_calls: list[Decimal] = []
-        real_price_to_tick = IntentCompiler._price_to_tick
+        from almanak.connectors._strategy_base.concentrated_liquidity_math import (
+            price_to_tick as real_price_to_tick,
+        )
 
-        def spy_price_to_tick(price, *, token0_decimals, token1_decimals):  # type: ignore[no-untyped-def]
+        def spy_price_to_tick(price, *, decimals0, decimals1):  # type: ignore[no-untyped-def]
             price_to_tick_calls.append(price)
-            return real_price_to_tick(
-                price,
-                token0_decimals=token0_decimals,
-                token1_decimals=token1_decimals,
-            )
+            return real_price_to_tick(price, decimals0=decimals0, decimals1=decimals1)
 
         with (
             patch.object(compiler, "_parse_pool_info", return_value=(_USDT, _WBNB, 500, True)),
             patch.object(compiler, "_build_approve_tx", side_effect=mock_build_approve),
-            patch.object(IntentCompiler, "_price_to_tick", side_effect=spy_price_to_tick),
+            patch(CL_RANGE_PRICE_TO_TICK, side_effect=spy_price_to_tick),
         ):
             intent = _make_lp_intent(
                 pool="WBNB/USDT/500",
@@ -1231,11 +1236,12 @@ class TestCompileLPOpenErrorPaths:
         mock_validate.return_value = _mock_pool_validation_ok()
         compiler = _make_compiler(chain="arbitrum")
 
-        # Force _price_to_tick to return identical ticks so tick_lower >=
-        # tick_upper after spacing alignment.
+        # Force the seam's price->tick core to return identical ticks so
+        # tick_lower >= tick_upper after spacing alignment (VIB-5556: collapse
+        # detection now lives in the cl_range seam).
         with (
             patch.object(compiler, "_parse_pool_info", return_value=(_USDC, _WETH, 3000, False)),
-            patch.object(IntentCompiler, "_price_to_tick", return_value=100),
+            patch(CL_RANGE_PRICE_TO_TICK, return_value=100),
             patch.object(compiler, "_build_approve_tx", return_value=[]),
         ):
             result = compiler.compile(_make_lp_intent())

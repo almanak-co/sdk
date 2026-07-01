@@ -219,17 +219,22 @@ class TestCompileLPOpenInversion:
         )
 
         tick_calls = []
-        original_price_to_tick = IntentCompiler._price_to_tick
+        # VIB-5556: orientation-invert + price->tick moved into the shared
+        # cl_range seam. Probe the seam's price->tick core (it inverts BEFORE
+        # calling it, so the captured prices are the reciprocal range).
+        from almanak.connectors._strategy_base.concentrated_liquidity_math import (
+            price_to_tick as original_price_to_tick,
+        )
 
-        def tracking_price_to_tick(price, token0_decimals=18, token1_decimals=18):
+        def tracking_price_to_tick(price, *, decimals0, decimals1):
             tick_calls.append(price)
-            return original_price_to_tick(price, token0_decimals, token1_decimals)
+            return original_price_to_tick(price, decimals0=decimals0, decimals1=decimals1)
 
         with (
             patch.object(compiler, "_parse_pool_info", return_value=(USDT, WBNB, 500, True)),
             patch.object(compiler, "_validate_pool", return_value=None),
             patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
-            patch.object(IntentCompiler, "_price_to_tick", side_effect=tracking_price_to_tick),
+            patch("almanak.connectors._strategy_base.cl_range.price_to_tick", side_effect=tracking_price_to_tick),
             patch.object(compiler, "_build_approve_tx", return_value=[]),
         ):
             compiler._compile_lp_open(intent)
@@ -254,7 +259,7 @@ class TestCompileLPOpenInversion:
             range_lower=550,
             range_upper=670,
             amount0=Decimal("0.165"),  # user's WBNB
-            amount1=Decimal("100"),    # user's USDT
+            amount1=Decimal("100"),  # user's USDT
         )
 
         approve_amounts = {}
@@ -298,17 +303,21 @@ class TestCompileLPOpenInversion:
         )
 
         tick_calls = []
-        original_price_to_tick = IntentCompiler._price_to_tick
+        # VIB-5556: price->tick lives in the shared cl_range seam now; probe it
+        # there. No swap -> the band reaches price_to_tick unchanged.
+        from almanak.connectors._strategy_base.concentrated_liquidity_math import (
+            price_to_tick as original_price_to_tick,
+        )
 
-        def tracking_price_to_tick(price, token0_decimals=18, token1_decimals=18):
+        def tracking_price_to_tick(price, *, decimals0, decimals1):
             tick_calls.append(price)
-            return original_price_to_tick(price, token0_decimals, token1_decimals)
+            return original_price_to_tick(price, decimals0=decimals0, decimals1=decimals1)
 
         with (
             patch.object(compiler, "_parse_pool_info", return_value=(USDC, WETH, 3000, False)),
             patch.object(compiler, "_validate_pool", return_value=None),
             patch.object(compiler, "_get_chain_rpc_url", return_value="http://localhost:8545"),
-            patch.object(IntentCompiler, "_price_to_tick", side_effect=tracking_price_to_tick),
+            patch("almanak.connectors._strategy_base.cl_range.price_to_tick", side_effect=tracking_price_to_tick),
             patch.object(compiler, "_build_approve_tx", return_value=[]),
         ):
             compiler._compile_lp_open(intent)

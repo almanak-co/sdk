@@ -17,6 +17,10 @@ from almanak.connectors._strategy_base.base.compiler import (
     CLAdapterFactoryContext,
     CLCompilerContext,
 )
+from almanak.connectors._strategy_base.cl_range import (
+    PriceBandToTicksError,
+    price_band_to_ticks,
+)
 from almanak.connectors._strategy_base.swap_quote_registry import (
     SwapQuoteRequest,
     SwapQuoteResult,
@@ -231,7 +235,9 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
             resolved_pool = self._resolve_lp_pool_and_amounts(ctx, intent)
             if isinstance(resolved_pool, CompilationResult):
                 return resolved_pool
-            token0_info, token1_info, fee_tier, range_lower, range_upper, amount0, amount1 = resolved_pool
+            token0_info, token1_info, fee_tier, range_lower, range_upper, amount0, amount1, tokens_swapped = (
+                resolved_pool
+            )
 
             from almanak.connectors.uniswap_v3.pool_validation import validate_v3_pool
 
@@ -255,6 +261,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 ctx=ctx,
                 range_lower=range_lower,
                 range_upper=range_upper,
+                tokens_swapped=tokens_swapped,
                 fee_tier=fee_tier,
                 token0_info=token0_info,
                 token1_info=token1_info,
@@ -826,7 +833,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
     @staticmethod
     def _resolve_lp_pool_and_amounts(
         ctx: CLCompilerContext, intent: LPOpenIntent
-    ) -> tuple[TokenInfo, TokenInfo, int, Decimal, Decimal, Decimal, Decimal] | CompilationResult:
+    ) -> tuple[TokenInfo, TokenInfo, int, Decimal, Decimal, Decimal, Decimal, bool] | CompilationResult:
         pool_info = ctx.services.parse_pool_info(intent.pool)
         if pool_info is None:
             return CompilationResult(
@@ -835,22 +842,31 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 intent_id=intent.intent_id,
             )
         token0_info, token1_info, fee_tier, tokens_swapped = pool_info
-        range_lower = intent.range_lower
-        range_upper = intent.range_upper
+        # The user's price band stays in the user's pair orientation here; the
+        # reciprocal-when-swapped inversion is owned by the shared cl_range seam
+        # (VIB-5556), so it is computed and tested in exactly one place. Only the
+        # amount-swap-on-reorder stays in the compiler (it is not tick math): the
+        # pool's token0 must receive the user's token0-side amount after reorder.
         amount0 = intent.amount0
         amount1 = intent.amount1
         if tokens_swapped:
-            range_lower = Decimal(1) / intent.range_upper
-            range_upper = Decimal(1) / intent.range_lower
             amount0, amount1 = amount1, amount0
             logger.debug(
-                "Tokens swapped: inverted price range [%s, %s] -> [%.10f, %.10f], swapped amounts",
+                "Tokens swapped: swapped LP amounts for pool token order (price band "
+                "[%s, %s] inverted downstream by the cl_range seam)",
                 intent.range_lower,
                 intent.range_upper,
-                range_lower,
-                range_upper,
             )
-        return token0_info, token1_info, fee_tier, range_lower, range_upper, amount0, amount1
+        return (
+            token0_info,
+            token1_info,
+            fee_tier,
+            intent.range_lower,
+            intent.range_upper,
+            amount0,
+            amount1,
+            tokens_swapped,
+        )
 
     @staticmethod
     def _compute_lp_ticks(
@@ -858,25 +874,31 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         ctx: CLCompilerContext,
         range_lower: Decimal,
         range_upper: Decimal,
+        tokens_swapped: bool,
         fee_tier: int,
         token0_info: TokenInfo,
         token1_info: TokenInfo,
         intent_id: str,
     ) -> tuple[int, int, int] | CompilationResult:
-        tick_lower = ctx.services.price_to_tick(
-            range_lower,
-            token0_decimals=token0_info.decimals,
-            token1_decimals=token1_info.decimals,
-        )
-        tick_upper = ctx.services.price_to_tick(
-            range_upper,
-            token0_decimals=token0_info.decimals,
-            token1_decimals=token1_info.decimals,
-        )
+        # Single-sourced via the shared cl_range seam: orientation invert,
+        # decimals-correct price->tick, tick-spacing alignment and collapse
+        # rejection all live in one place (VIB-5556). current_tick is omitted so
+        # the straddle invariant is not enforced here -- the uniswap_v3 family
+        # has never required a straddling band at compile time (out-of-range
+        # one-sided opens are supported) and slot0 is read later for the
+        # liquidity preflight, not for tick computation.
         tick_spacing = ctx.services.get_tick_spacing(fee_tier)
-        tick_lower = (tick_lower // tick_spacing) * tick_spacing
-        tick_upper = (tick_upper // tick_spacing) * tick_spacing
-        if tick_lower >= tick_upper:
+        try:
+            tick_range = price_band_to_ticks(
+                range_lower=range_lower,
+                range_upper=range_upper,
+                token0_decimals=token0_info.decimals,
+                token1_decimals=token1_info.decimals,
+                tokens_swapped=tokens_swapped,
+                tick_spacing=tick_spacing,
+                current_tick=None,
+            )
+        except PriceBandToTicksError:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
@@ -885,7 +907,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 ),
                 intent_id=intent_id,
             )
-        return tick_lower, tick_upper, tick_spacing
+        return tick_range.tick_lower, tick_range.tick_upper, tick_spacing
 
     # _fetch_lp_pool_slot0 is inherited from BaseConcentratedLiquidityCompiler
     # (shared V3-family slot0 read); the override was lifted to the base so the
