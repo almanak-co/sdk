@@ -30,6 +30,7 @@ import grpc
 
 from almanak.config.cli_runtime import anvil_port_for_chain
 from almanak.connectors._strategy_base import concentrated_liquidity_math as cl_math
+from almanak.connectors._strategy_base.base.approval_sequencing import build_approval_sequence
 from almanak.connectors._strategy_base.base.compiler import (
     BaseCompilerContext,
     BaseConcentratedLiquidityCompiler,
@@ -2264,8 +2265,8 @@ class IntentCompiler:
         Returns:
             List of TransactionData for approval (may be empty, 1, or 2 transactions)
         """
-        transactions: list[TransactionData] = []
         token_lower = token_address.lower()
+        spender_lower = spender.lower()
         requires_zero_first = token_lower in APPROVE_ZERO_FIRST_TOKENS
         on_chain_allowance = 0
 
@@ -2275,16 +2276,14 @@ class IntentCompiler:
             on_chain_allowance = self._query_allowance(token_address, spender)
             if on_chain_allowance >= amount:
                 # Already have sufficient on-chain allowance - update cache and skip
-                if token_lower not in self._allowance_cache:
-                    self._allowance_cache[token_lower] = {}
-                self._allowance_cache[token_lower][spender.lower()] = on_chain_allowance
+                self._allowance_cache.setdefault(token_lower, {})[spender_lower] = on_chain_allowance
                 logger.debug(
                     f"Sufficient on-chain allowance exists for {token_address} -> {spender}: {on_chain_allowance}"
                 )
                 return []
         else:
             # No way to query on-chain - check cache as fallback but log warning
-            cached = self._allowance_cache.get(token_lower, {}).get(spender.lower(), 0)
+            cached = self._allowance_cache.get(token_lower, {}).get(spender_lower, 0)
             if cached >= amount:
                 logger.warning(
                     f"Using cached allowance for {token_address} -> {spender} (no RPC available). "
@@ -2294,26 +2293,24 @@ class IntentCompiler:
 
         # Build approve calldata helper
         def build_approve_calldata(approve_amount: int) -> str:
-            spender_padded = spender.lower().replace("0x", "").zfill(64)
+            spender_padded = spender_lower.replace("0x", "").zfill(64)
             amount_padded = hex(approve_amount)[2:].zfill(64)
             return ERC20_APPROVE_SELECTOR + spender_padded + amount_padded
 
-        # If token requires approve(0) first AND has existing on-chain allowance > 0
-        if requires_zero_first and on_chain_allowance > 0:
-            logger.debug(f"Token {token_address} requires approve(0) first (existing allowance: {on_chain_allowance})")
-            # Add approve(0) transaction first
-            transactions.append(
-                TransactionData(
-                    to=token_address,
-                    value=0,
-                    data=build_approve_calldata(0),
-                    gas_estimate=get_gas_estimate(self.chain, "approve"),
-                    description=f"Reset approval to 0 for {spender[:10]}...",
-                    tx_type="approve_reset",
-                )
+        def _make_approve_tx(value: int, *, is_reset: bool) -> TransactionData:
+            return TransactionData(
+                to=token_address,
+                value=0,
+                data=build_approve_calldata(value),
+                gas_estimate=get_gas_estimate(self.chain, "approve"),
+                description=(
+                    f"Reset approval to 0 for {spender[:10]}..."
+                    if is_reset
+                    else f"Approve {spender[:10]}... to spend token"
+                ),
+                tx_type="approve_reset" if is_reset else "approve",
             )
 
-        # Build main approve TX
         # Use actual amount + 10% buffer, but cap at MAX_UINT256
         # to avoid overflow when building calldata (hex would be >64 chars)
         if amount >= MAX_UINT256:
@@ -2321,21 +2318,39 @@ class IntentCompiler:
         else:
             approval_amount = min(int(amount * 1.1), MAX_UINT256)  # 10% buffer, capped
 
-        transactions.append(
-            TransactionData(
-                to=token_address,
-                value=0,
-                data=build_approve_calldata(approval_amount),
-                gas_estimate=get_gas_estimate(self.chain, "approve"),
-                description=f"Approve {spender[:10]}... to spend token",
-                tx_type="approve",
-            )
+        # Delegate the money-critical ordering (skip-if-sufficient, reset-before-
+        # approve on a USDT-class token that reverts on a non-zero -> non-zero
+        # approve) to the SHARED sequencing primitive (VIB-5492) so it can never
+        # drift from the Curve adapter's copy. Framework posture is UNCHANGED for
+        # every connector that consumes this helper: reset only for
+        # APPROVE_ZERO_FIRST_TOKENS, and only on a positively-read non-zero
+        # allowance — ``_query_allowance`` reports a failed / absent read as 0, so
+        # ``current_allowance`` is never None here and the primitive's stricter
+        # fail-safe-on-unknown branch is intentionally NOT exercised. Reconciling
+        # the framework onto Curve's stricter reset-on-unknown rule (a fund-safety
+        # change for ~14 connectors) is tracked by VIB-5571, gated on per-connector
+        # intent-test proof.
+        #
+        # The reset-vs-approve decision (and its logging) now lives entirely in
+        # ``build_approval_sequence``; the reset tx it emits is self-describing
+        # ("Reset approval to 0 for …"), so no separate debug line is kept here
+        # (it would only risk drifting from the primitive's actual decision).
+        transactions = build_approval_sequence(
+            amount=amount,
+            current_allowance=on_chain_allowance,
+            reset_before_change=requires_zero_first,
+            approval_amount=approval_amount,
+            build_reset_tx=lambda: _make_approve_tx(0, is_reset=True),
+            build_approve_tx=lambda value: _make_approve_tx(value, is_reset=False),
         )
 
-        # Update cache
-        if token_lower not in self._allowance_cache:
-            self._allowance_cache[token_lower] = {}
-        self._allowance_cache[token_lower][spender.lower()] = approval_amount
+        # Update cache only when an approve was actually emitted — the primitive
+        # can now return [] (e.g. a non-positive amount), and caching
+        # approval_amount when no approve tx was built would poison the cache and
+        # mislead a later spend into skipping a genuinely-needed approve. Mirrors
+        # CurveAdapter._build_approve_txs.
+        if transactions:
+            self._allowance_cache.setdefault(token_lower, {})[spender_lower] = approval_amount
 
         return transactions
 

@@ -27,6 +27,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base.base.approval_sequencing import build_approval_sequence
 from almanak.connectors._strategy_base.pool_validation_base import ZERO_ADDRESS, decode_address
 from almanak.connectors._strategy_base.rpc import eth_call, eth_call_uint256
 from almanak.connectors._strategy_base.swap_oracle_guard import (
@@ -2839,21 +2840,23 @@ class CurveAdapter:
         """
         cache_key = self._allowance_cache_key(token_address, spender)
         current = self._current_allowance(cache_key, token_address, spender)
-        if current is not None and current >= amount:
+        # Delegate the money-critical ordering (skip-if-sufficient, reset-before-
+        # approve, fail-safe on unconfirmed allowance) to the SHARED sequencing
+        # primitive (VIB-5492) so it can never drift from the framework compiler's
+        # copy. Curve's posture: reset on ANY non-zero OR unconfirmed allowance —
+        # the safest general rule, a superset of the framework's USDT-class
+        # allowlist — and always approve MAX.
+        txs = build_approval_sequence(
+            amount=amount,
+            current_allowance=current,
+            reset_before_change=True,
+            approval_amount=MAX_UINT256,
+            build_reset_tx=lambda: self._single_approve_tx(token_address, spender, 0),
+            build_approve_tx=lambda value: self._single_approve_tx(token_address, spender, value),
+        )
+        if not txs:
             logger.debug("Sufficient allowance for %s (%d >= %d)", token_address, current, amount)
             return []
-
-        txs: list[TransactionData] = []
-        # Reset-to-zero before changing the allowance unless we have POSITIVELY
-        # confirmed it is zero (a successful on-chain read). Emitted when the
-        # allowance is non-zero, OR ``None`` (UNKNOWN — read failed, or no transport
-        # to read with): ``approve(0)`` never reverts on USDT (the ``value == 0``
-        # branch), so failing toward a reset is the always-safe default and costs
-        # only one extra tx — rather than a lone ``approve(MAX)`` that would revert
-        # on a USDT that turns out to still hold a non-zero allowance.
-        if current is None or current > 0:
-            txs.append(self._single_approve_tx(token_address, spender, 0))
-        txs.append(self._single_approve_tx(token_address, spender, MAX_UINT256))
         self._allowance_cache[cache_key] = MAX_UINT256
         return txs
 
