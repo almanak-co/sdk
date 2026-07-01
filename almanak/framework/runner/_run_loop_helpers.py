@@ -27,6 +27,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, cast
 
 from almanak.core.chains._helpers import is_solana_chain
@@ -1346,6 +1347,112 @@ async def _ensure_receipt_legs_in_teardown_oracle(
             symbol,
             price,
             address,
+            chain_lower,
+        )
+
+    return merged or None
+
+
+async def _ensure_coin_symbols_in_teardown_oracle(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    result: Any,
+    oracle: dict | None,
+) -> dict | None:
+    """VIB-5553 — price a Curve LP event's pool-coin SYMBOLS on the teardown lane.
+
+    Teardown twin of :meth:`StrategyRunner._backfill_coin_symbol_legs`. A
+    proportional Curve remove_liquidity returns ALL N pool coins, stamped on
+    ``result.lp_close_data.coin_symbols`` (e.g. ``["USDT","WBTC","WETH"]``), but
+    the teardown ledger row has empty ``token_in`` / ``token_out`` and the
+    intent-token / receipt-leg (currency0/1) top-offs above never surface them.
+    Without their prices in ``price_inputs_json`` the LP handler's non-USD-stable
+    valuation (``_value_curve_legs_usd``) fails closed for a crypto-numeraire pool
+    (tricrypto WBTC/WETH) → NULL ``cost_basis_usd`` / ``realized_pnl_usd`` /
+    ``fees_total_usd`` → Accountant G3 (no yield event) + G6 (component-fold gap).
+
+    UNLIKE :func:`_ensure_receipt_legs_in_teardown_oracle` there is NO
+    ``coingecko_id is None`` gate — pool coins (WBTC / USDT / WETH) HAVE CoinGecko
+    ids and MUST be priced. We price BY SYMBOL through
+    ``runner.price_oracle.get_aggregated_price`` (the same gateway-routed source
+    the sibling top-offs use), landing each quote under the canonical SYMBOL key
+    the LP accounting consumer reads.
+
+    Mutates ``oracle`` in place AND returns it (matches the sibling helpers).
+    Additive, best-effort: already-present symbols (case-insensitive) win — a
+    HIGH-confidence portfolio_valuer quote is never overwritten by a STALE /
+    ESTIMATED aggregated quote — and a miss / non-positive price leaves the key
+    absent (Empty ≠ Zero — the consumer then reports the coin UNAVAILABLE rather
+    than fabricating a zero). No-op for non-Curve / non-LP results.
+    """
+    if result is None:
+        return oracle
+
+    from .strategy_runner import StrategyRunner as _StrategyRunner
+
+    symbols = _StrategyRunner._receipt_coin_symbols(result)
+    if not symbols:
+        return oracle
+
+    chain = getattr(strategy, "chain", None) or getattr(runner.config, "chain", "")
+    if not chain:
+        return oracle
+    chain_lower = (chain or "").lower().strip()
+
+    price_oracle_obj = getattr(runner, "price_oracle", None)
+    if price_oracle_obj is None or not hasattr(price_oracle_obj, "get_aggregated_price"):
+        return oracle
+
+    merged: dict = oracle if oracle is not None else {}
+
+    def _already_present(sym: str) -> bool:
+        return any(key in merged for key in (sym, sym.upper(), sym.lower()))
+
+    for symbol in symbols:
+        if not symbol or _already_present(symbol):
+            continue
+        try:
+            agg = await price_oracle_obj.get_aggregated_price(symbol, "USD", chain=chain_lower)
+        except Exception as exc:  # noqa: BLE001 — best-effort; miss → leave absent
+            logger.debug(
+                "VIB-5553 teardown coin-symbol backfill: get_aggregated_price(%s) failed on %s: %s",
+                symbol,
+                chain_lower,
+                exc,
+            )
+            continue
+        raw_price = getattr(agg, "price", None)
+        # A None price is a miss (Empty ≠ Zero — leave the key absent). Normalise to
+        # Decimal BEFORE any comparison: ``get_aggregated_price`` may return a float
+        # or Decimal, and a non-finite NaN would either RAISE on ``<= 0`` (Decimal
+        # NaN) or slip past it (float nan <= 0 is False) and persist "nan" into
+        # price_inputs_json. Reject non-finite / ≤ 0 up front, mirroring the
+        # iteration-lane sibling ``_backfill_coin_symbol_legs``.
+        if raw_price is None:
+            continue
+        try:
+            price = Decimal(str(raw_price))
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+        # Fail closed on a non-finite / non-positive price (Empty ≠ Zero): a real
+        # token leg is never worth ≤ $0, so NaN / 0 / negative is a miss, not a value.
+        if not price.is_finite() or price <= 0:
+            continue
+        timestamp = getattr(agg, "timestamp", None)
+        fetched_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
+        confidence_str = str(getattr(agg, "confidence", None) or "ESTIMATED").upper()
+        if confidence_str not in {"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"}:
+            confidence_str = "ESTIMATED"
+        merged[symbol] = {
+            "price_usd": str(price),
+            "oracle_source": getattr(agg, "source", "") or "gateway",
+            "fetched_at": fetched_at,
+            "confidence": confidence_str,
+        }
+        logger.debug(
+            "VIB-5553 teardown coin-symbol backfill: priced %s ($%s) on %s",
+            symbol,
+            price,
             chain_lower,
         )
 

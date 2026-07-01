@@ -1200,6 +1200,50 @@ def _override_curve_close_fees(
     return curve_fees_usd if curve_fees_usd is not None else fees_total_usd
 
 
+def _curve_fee_unavailability(
+    intent_type_str: str,
+    lp_data: Any,
+    fees_total_usd: Decimal | None,
+    unavailable_reason: str,
+) -> tuple[str, AccountingConfidence] | None:
+    """Return ``(reason, ESTIMATED)`` to stamp on a Curve close with unmeasured fees (VIB-5553).
+
+    Records an explicit fee-unavailability reason on a Curve close whose fees are
+    genuinely UNMEASURED (parser stamped BUNDLED / None fee legs). Once VIB-5553
+    books the crypto-numeraire PRINCIPAL basis, the basis resolver would otherwise
+    clear ``unavailable_reason`` — but the per-coin FEE USD (``fees_total_usd``) is
+    still unavailable by design (no per-pool fee-accrual feed wired).
+    ``fees_total_usd`` IS a USD field, so per the VIB-3886 payload invariant
+    (``confidence=HIGH`` is incompatible with a non-empty ``unavailable_reason``;
+    enforced in ``payload_schemas.LPCloseEventPayload``) a close with a missing fee
+    USD MUST degrade to ESTIMATED and carry the reason (Empty ≠ Zero — the fees
+    were never measured, not a measured $0).
+
+    Returns ``None`` (no stamp) unless ALL hold: the intent is close-like,
+    ``lp_data`` carries pool-coin symbols, ``fees_total_usd`` is unmeasured
+    (``None``), and the reason slot is EMPTY — so a real basis-unavailability
+    reason (already ESTIMATED) is never overwritten.
+
+    NOTE: this closes the per-event-USD (component-side) gap only. The tricrypto
+    fixture's G6 still reconciles FAIL on two INDEPENDENT residual buckets that are
+    out of scope here: the BUNDLED per-coin fee USD above (shared with the
+    stablecoin ``lp_curve`` fixture) and the held-coin ``Σ_inventory_reval_usd``
+    snapshot-pricing bucket tracked as VIB-5566 — neither is the leg-coin basis
+    this stamp measures.
+    """
+    if (
+        intent_type_str in _LP_CLOSE_LIKE
+        and getattr(lp_data, "coin_symbols", None)
+        and fees_total_usd is None
+        and not unavailable_reason
+    ):
+        return (
+            "curve_fee_usd_unavailable: per-coin fee USD not measured on this Curve close (VIB-5553)",
+            AccountingConfidence.ESTIMATED,
+        )
+    return None
+
+
 def _value_weighted_leg_basis(
     active_legs: list[tuple[str, Decimal]],
     total_val_usd: Decimal | None,
@@ -1584,6 +1628,14 @@ def handle_lp(
     # close (no-op otherwise / when no coin_symbols). Extracted to keep handle_lp
     # within the CRAP budget; strictly additive (never overwrites measured w/ NULL).
     fees_total_usd = _override_curve_close_fees(intent_type_str, lp_data, chain, price_oracle, fees_total_usd)
+
+    # VIB-5553 — stamp an explicit fee-unavailability reason + degrade to ESTIMATED
+    # on a Curve close whose per-coin fee USD is genuinely unmeasured (BUNDLED). See
+    # ``_curve_fee_unavailability`` for the full guard + rationale (extracted to
+    # keep handle_lp within the CRAP budget). ``None`` ⇒ no stamp (leave as-is).
+    _fee_stamp = _curve_fee_unavailability(intent_type_str, lp_data, fees_total_usd, unavailable_reason)
+    if _fee_stamp is not None:
+        unavailable_reason, confidence = _fee_stamp
 
     # VIB-4319 — IL diagnostic on ``LP_CLOSE`` ONLY (Codex review on
     # PR #2259: ``LP_COLLECT_FEES`` leaves principal on-chain so the IL

@@ -6838,17 +6838,24 @@ class StrategyRunner:
             for sym, payload in nested_with_sources.items():
                 merged[sym] = payload
             merged = self._backfill_address_priced_legs(market, merged, intent, result, with_sources=True)
+            # VIB-5553 — also price a Curve LP event's pool-coin SYMBOLS (USDT/WBTC/
+            # WETH for tricrypto) so a non-USD-stable close books per-event USD.
+            merged = self._backfill_coin_symbol_legs(market, merged, intent, result, with_sources=True)
             return merged or None
 
         if not cached and not refreshed:
             # Even with no cached/refreshed symbol prices, a receipt-bearing
             # result may still let us price coingecko-null legs by address.
             backfilled = self._backfill_address_priced_legs(market, {}, intent, result, with_sources=False)
+            # VIB-5553 — Curve pool-coin symbol prices (see _merge_oracle_for_ledger).
+            backfilled = self._backfill_coin_symbol_legs(market, backfilled, intent, result, with_sources=False)
             return backfilled or None
         # Legacy path: ``refreshed`` first, ``cached`` overrides — preserves
         # cached provenance / confidence on overlap, fills gaps from refresh.
         merged_flat: dict = {**refreshed, **cached}
         merged_flat = self._backfill_address_priced_legs(market, merged_flat, intent, result, with_sources=False)
+        # VIB-5553 — Curve pool-coin symbol prices (see _merge_oracle_for_ledger).
+        merged_flat = self._backfill_coin_symbol_legs(market, merged_flat, intent, result, with_sources=False)
         return merged_flat or None
 
     @staticmethod
@@ -7004,6 +7011,156 @@ class StrategyRunner:
                 symbol,
                 price,
                 address,
+                chain,
+            )
+        return oracle
+
+    @staticmethod
+    def _receipt_coin_symbols(result: Any | None) -> list[str]:
+        """Collect a Curve/N-coin fungible pool's coin SYMBOLS from an ExecutionResult (VIB-5553).
+
+        The Curve receipt parser stamps ``coin_symbols`` (the pool-coin-ordered
+        symbol list, e.g. ``["USDT","WBTC","WETH"]``) on ``lp_open_data`` /
+        ``lp_close_data`` — the authoritative per-coin universe a proportional
+        Curve add/remove touches. Unlike a Uniswap swap, a fungible Curve LP
+        event lands with empty ``token_in`` / ``token_out`` and no ``currency0`` /
+        ``currency1`` (those are V4 fields), so neither ``_extract_tokens_from_intent``
+        nor :meth:`_receipt_token_legs` ever surfaces the pool coins — their prices
+        never reach ``price_inputs_json`` and the LP handler's non-USD-stable
+        valuation (``_value_curve_legs_usd``) fails closed for a crypto-numeraire
+        pool (tricrypto WBTC/WETH), leaving ``cost_basis_usd`` / ``realized_pnl_usd``
+        / ``fees_total_usd`` NULL (Accountant G3/G6 gap).
+
+        Returns canonical-UPPER symbols, deduped, first-seen order. ``[]`` when
+        no LP data carries ``coin_symbols`` (older data, non-Curve venues) — the
+        caller then no-ops. Symbol-only: this never reads ``coin_addresses`` (the
+        extracted LP data has no such field), so older rows are handled gracefully.
+
+        The AUTHORITATIVE source is ``result.extracted_data[...]`` — that is the
+        typed LP data the receipt parser / enricher populate AND the exact object
+        the ledger serialises into ``extracted_data_json`` (``_build_extracted_data_json``
+        → ``result.extracted_data``). The bare ``result.lp_open_data`` /
+        ``result.lp_close_data`` attributes are set at orchestration time and can be
+        a STALE pre-enrichment object that never received the connector's
+        ``coin_symbols`` stamp — so we read the dict first and fall back to the
+        attribute only when the dict has no entry.
+        """
+        symbols: list[str] = []
+        extracted = getattr(result, "extracted_data", None)
+        extracted = extracted if isinstance(extracted, dict) else {}
+        for key in ("lp_open_data", "lp_close_data"):
+            data = extracted.get(key)
+            if data is None:
+                data = getattr(result, key, None)
+            if data is None:
+                continue
+            # ``extracted_data`` may hold the typed dataclass OR a plain dict
+            # (deserialise fallback) — read both shapes.
+            if isinstance(data, dict):
+                coin_symbols = data.get("coin_symbols")
+            else:
+                coin_symbols = getattr(data, "coin_symbols", None)
+            if not coin_symbols:
+                continue
+            for sym in coin_symbols:
+                if isinstance(sym, str) and sym.strip():
+                    symbols.append(sym.strip().upper())
+        # Preserve first-seen order, dedupe (LP_OPEN + LP_CLOSE never co-occur on
+        # a single result, but a defensive dedupe keeps the price() calls minimal).
+        return list(dict.fromkeys(symbols))
+
+    def _backfill_coin_symbol_legs(
+        self,
+        market: Any | None,
+        oracle: dict,
+        intent: AnyIntent,
+        result: Any | None,
+        *,
+        with_sources: bool,
+    ) -> dict:
+        """VIB-5553 — price a Curve LP event's pool-coin SYMBOLS into the ledger oracle.
+
+        Symbol twin of :meth:`_backfill_address_priced_legs`, for the iteration
+        lane. A proportional Curve add/remove touches ALL N pool coins (stamped on
+        ``lp_open_data`` / ``lp_close_data`` ``coin_symbols``), but the swap-style
+        token extraction only sees ``token_in`` / ``token_out`` — empty for a
+        fungible Curve close. Without this, the LP_OPEN / LP_CLOSE ledger row's
+        ``price_inputs_json`` omits the pool coins (USDT / WBTC / WETH for
+        tricrypto), and the LP handler's ``_value_curve_legs_usd`` fails closed for
+        a non-USD-stable pool → NULL ``cost_basis_usd`` / ``realized_pnl_usd`` /
+        ``fees_total_usd`` (Accountant G3/G6). The handler is a pure consumer of
+        the ledger column (blueprint 27 §6.1 — "populated by the runner before
+        execution … no live chain calls"); the fix therefore lands here in capture,
+        not in the handler.
+
+        UNLIKE ``_backfill_address_priced_legs`` there is NO ``coingecko_id is None``
+        gate: pool coins (WBTC / USDT / WETH) DO have CoinGecko ids and MUST be
+        priced. We price BY SYMBOL (``market.price(symbol)``) — the canonical key
+        the symbol-keyed LP accounting consumer reads — so no address is needed
+        (the extracted LP data carries no coin addresses).
+
+        Best-effort and additive: never raises, never overwrites an existing
+        (higher-confidence) symbol price (case-insensitive membership check), and
+        on a price miss / non-positive quote leaves the key absent (Empty ≠ Zero —
+        the consumer then reports the coin UNAVAILABLE rather than fabricating a
+        zero). No-op for non-Curve / non-LP results.
+        """
+        if market is None or result is None or not hasattr(market, "price"):
+            return oracle
+        symbols = self._receipt_coin_symbols(result)
+        if not symbols:
+            return oracle
+
+        chain_raw = getattr(market, "chain", None) or getattr(intent, "chain", None)
+        if not chain_raw:
+            return oracle
+        chain = str(chain_raw).lower().strip()
+
+        for symbol in symbols:
+            # Absent-only: never overwrite a higher-confidence existing quote.
+            # Case-insensitive presence check mirrors _backfill_address_priced_legs.
+            if any(key in oracle for key in (symbol, symbol.lower())):
+                continue
+            source = "unknown"
+            try:
+                raw_price = market.price(symbol, chain=chain)
+                # Skip explicitly before Decimal() — a None price is a miss, not a
+                # value, and Decimal("None") would raise only to be swallowed below
+                # (Empty ≠ Zero: leave the key absent).
+                if raw_price is None:
+                    continue
+                price = Decimal(str(raw_price))
+                if with_sources:
+                    try:
+                        source = getattr(market.price_data(symbol, chain=chain), "source", "") or "unknown"
+                    except Exception:  # noqa: BLE001 — provenance is best-effort
+                        source = "unknown"
+            except Exception:  # noqa: BLE001 — best-effort; miss → leave absent
+                logger.debug(
+                    "VIB-5553 coin-symbol backfill: price(%s) failed on %s",
+                    symbol,
+                    chain,
+                    exc_info=True,
+                )
+                continue
+            # Fail closed on a non-positive / non-finite price (Empty ≠ Zero): a
+            # real token leg is never worth ≤ $0, so 0 / negative is an oracle
+            # miss, not a value.
+            if not price.is_finite() or price <= 0:
+                continue
+            if with_sources:
+                oracle[symbol] = {
+                    "price_usd": str(price),
+                    "oracle_source": source,
+                    "fetched_at": "",
+                    "confidence": "HIGH",
+                }
+            else:
+                oracle[symbol] = price
+            logger.debug(
+                "VIB-5553 coin-symbol backfill: priced %s ($%s) on %s",
+                symbol,
+                price,
                 chain,
             )
         return oracle

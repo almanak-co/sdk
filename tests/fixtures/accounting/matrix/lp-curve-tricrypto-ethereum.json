@@ -5,15 +5,16 @@
     "chain": "ethereum",
     "primitive": "curve_lp",
     "captured_from": "scripts/qa/run_accounting_matrix.py :: lp-curve-tricrypto-ethereum",
-    "captured_at": "2026-06-30T19:02:10.578305+00:00",
-    "captured_at_commit": "e282baa24",
+    "captured_at": "2026-07-01T03:00:00+00:00",
+    "captured_at_commit": "9b5f3aa72",
     "post_fix_for": [
+      "VIB-5553 crypto-numeraire per-event USD — pool-coin (USDT/WBTC/WETH) price capture into price_inputs_json (both lanes) → LP_OPEN/LP_CLOSE book cost_basis_usd + realized_pnl_usd; G3 FAIL->PASS, Σ_lp_usd_null closed. Fee USD still unavailable-by-design (BUNDLED) → CLOSE ESTIMATED + curve_fee_usd_unavailable reason (CURVE3 PASS). G6 remains an HONEST FAIL: Σ_lp_fees_null (BUNDLED fees) + Σ_inventory_reval_usd_null (held-WBTC not in the portfolio snapshot's tracked-token marks — a separate snapshot-pricing surface, follow-up).",
       "VIB-5435 Curve tricrypto Accountant-Test fixture (Curve epic VIB-5422 M2)",
       "VIB-5428 non-$1 crypto-numeraire snapshot valuation (proven: $291.55 mark)",
       "VIB-5430 bespoke curve_lp scorecard profile (tick cells N/A not FAIL)",
       "VIB-5441 CryptoSwap min_lp fail-closed protection (single-sided open)"
     ],
-    "note": "Real-fork LP_OPEN -> teardown LP_CLOSE round-trip on managed Anvil ethereum (block 25432369). Pool: tricrypto2 0xD51a44d3FaE010294C616388b506AcdA1bfAAE46 (USDT/WBTC/WETH) \u2014 non-$1 numeraire. Single-sided 0.005 WBTC deposit -> CURVE4 XFAIL (IL undefined). min_lp derived fail-closed from on-chain calc_token_amount (VIB-5441; 200327799797463342, never 0). The crypto-numeraire SNAPSHOT valuation WORKS (portfolio_valuer marked the position at $291.55 = ownership 3.209e-5 x reserves $9.085M, WETH@$1574; VIB-5428) \u2014 CURVE1/2/3/5/6 PASS. HONEST FLOOR, not clean-green: G3 FAIL (no realized-yield/fee event booked on the crypto close) and G6 FAIL (component buckets carry unmeasured NULLs: Sigma_lp_usd / Sigma_lp_fees / Sigma_inventory_reval_usd; gap $191.38) \u2014 the per-ACCOUNTING-EVENT USD that the stablecoin lp_curve (3pool) close DOES populate (3pool: G3 PASS, G6 component $-80.68) is NOT populated on the crypto-numeraire close, even though the snapshot valuer marks the position. SAME teardown close-lane for both fixtures, so this is a stablecoin-vs-crypto per-event-USD accounting gap, NOT a lane/snapshot-valuation gap (Empty != Zero, not a false zero). Ticketed follow-up. L5_22 XFAIL (registry mode off, informational). NOT masked."
+    "note": "Real-fork LP_OPEN (iteration lane) -> teardown LP_CLOSE round-trip on managed Anvil ethereum. Pool: tricrypto2 0xD51a44d3FaE010294C616388b506AcdA1bfAAE46 (USDT/WBTC/WETH) \u2014 non-$1 numeraire. Single-sided 0.005 WBTC deposit -> CURVE4 XFAIL (IL undefined). min_lp derived fail-closed from on-chain calc_token_amount (VIB-5441, never 0). VIB-5553: the runner now prices the pool coins (USDT/WBTC/WETH) into transaction_ledger.price_inputs_json on BOTH lanes (iteration StrategyRunner._backfill_coin_symbol_legs; teardown _ensure_coin_symbols_in_teardown_oracle), so the existing VIB-5429 handler books cost_basis_usd (OPEN $294.57 HIGH, CLOSE $294.84) + realized_pnl_usd ($0.28) on the crypto-numeraire close. G3 FAIL->PASS (realized-yield event now booked); Sigma_lp_usd_null CLOSED (the ~$191 LP value that never reached the component fold now does). Per-coin FEE USD is still unavailable by design (parser stamped BUNDLED / None fee legs) -> the close is ESTIMATED with an explicit curve_fee_usd_unavailable reason (CURVE3 PASS, schema-valid). G6 remains an HONEST FAIL on TWO independent residual surfaces (NOT the per-event-USD gap this ticket closed): Sigma_lp_fees_null (BUNDLED fees, shared with the stablecoin lp_curve fixture) and Sigma_inventory_reval_usd_null (the held-WBTC between OPEN and CLOSE is not in the portfolio snapshot's tracked-token marks -> unmeasured_price; a separate snapshot-pricing surface, follow-up). L5_22 XFAIL (registry mode off, informational). NOT masked."
   },
   "cells": {
     "CURVE1": "PASS",
@@ -30,7 +31,7 @@
     "G14": "PASS",
     "G15": "PASS",
     "G2": "PASS",
-    "G3": "FAIL",
+    "G3": "PASS",
     "G4": "PASS",
     "G5": "PASS",
     "G6": "FAIL",
@@ -40,8 +41,8 @@
     "L5_22": "XFAIL"
   },
   "scores": {
-    "passed": 17,
-    "failed": 2,
+    "passed": 18,
+    "failed": 1,
     "xfailed": 2,
     "skipped": 1,
     "total": 22

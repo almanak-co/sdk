@@ -463,6 +463,7 @@ async def commit_teardown_intent(
             # post-teardown bracket clears the stash so an iteration after
             # teardown never reads stale teardown prices).
             from ._run_loop_helpers import (
+                _ensure_coin_symbols_in_teardown_oracle,
                 _ensure_intent_tokens_in_teardown_oracle,
                 _ensure_receipt_legs_in_teardown_oracle,
             )
@@ -480,6 +481,19 @@ async def commit_teardown_intent(
             # top-off above cannot see them; without this the LP_CLOSE row's
             # price_inputs_json omits SUSDAI and cost_basis/realized stay null.
             runner._teardown_price_oracle = await _ensure_receipt_legs_in_teardown_oracle(
+                runner,
+                strategy,
+                enriched_result,
+                getattr(runner, "_teardown_price_oracle", None),
+            )
+            # VIB-5553 — price a Curve LP_CLOSE's pool-coin SYMBOLS (USDT/WBTC/WETH
+            # for tricrypto) onto the teardown row so a crypto-numeraire close books
+            # per-event USD. These coins come from the RECEIPT's coin_symbols (not
+            # the intent, and not currency0/1), so the intent-token / receipt-leg
+            # top-offs above never see them; without this the close row's
+            # price_inputs_json omits WBTC/USDT and cost_basis/realized stay null
+            # for a non-USD-stable pool (Accountant G3/G6).
+            runner._teardown_price_oracle = await _ensure_coin_symbols_in_teardown_oracle(
                 runner,
                 strategy,
                 enriched_result,

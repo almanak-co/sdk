@@ -12,6 +12,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -3055,3 +3056,191 @@ class TestLpImpermanentLoss:
             "against full cost_basis_usd produces a misleading IL."
         )
         assert result.hodl_value_usd is None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# VIB-5553 — Curve crypto-numeraire close: fee-unavailability reason + ESTIMATED
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestCurveCloseFeeUnavailabilityStamp:
+    """VIB-5553 — a Curve close whose crypto-numeraire principal basis IS measured
+    but whose per-coin FEE USD is genuinely unavailable (parser stamped BUNDLED /
+    ``None`` fee legs) must record an explicit ``curve_fee_usd_unavailable`` reason
+    and degrade to ESTIMATED — the VIB-3886 payload invariant forbids
+    ``confidence=HIGH`` with a non-empty ``unavailable_reason``.
+    """
+
+    @staticmethod
+    def _patch_resolver(monkeypatch, decimals: dict[str, int]) -> None:
+        mock_resolver = MagicMock()
+
+        def _resolve(token: str, chain: str = "", **kwargs: Any):
+            if token in decimals:
+                ti = MagicMock()
+                ti.decimals = decimals[token]
+                ti.symbol = token
+                return ti
+            return None
+
+        mock_resolver.resolve = MagicMock(side_effect=_resolve)
+        monkeypatch.setattr(
+            "almanak.framework.data.tokens.resolver.get_token_resolver",
+            lambda: mock_resolver,
+        )
+
+    @staticmethod
+    def _curve_close(
+        *,
+        fees0: str | None,
+        fees1: str | None,
+        additional_fees: dict[str, str] | None,
+    ) -> tuple[dict, dict]:
+        """Build a tricrypto-shaped Curve LP_CLOSE (USDT/WBTC/WETH), all coins priced.
+
+        Proceeds: USDT 96.97 (6 dec), WBTC 0.00167258 (8 dec), WETH 0.0618 (18 dec).
+        With every coin priced in ``price_inputs_json`` the VIB-5429 principal
+        valuation books a measured (HIGH) basis; the fee legs are controlled by
+        the caller to exercise the BUNDLED (unmeasured) vs measured-zero cases.
+        """
+        led_id = str(uuid.uuid4())
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            position_key="lp:curve:ethereum:0xwallet:tricrypto2",
+            market_id="0xd51a44d3fae010294c616388b506acda1bfaae46",
+        )
+        lp_close_data: dict[str, Any] = {
+            "_type": "LPCloseData",
+            "amount0_collected": "96976224",  # USDT (6 dec)
+            "amount1_collected": "167258",  # WBTC (8 dec)
+            "additional_amounts": {"2": "61761751957235312"},  # WETH (18 dec)
+            "coin_symbols": ["USDT", "WBTC", "WETH"],
+            "pool_address": "0xd51a44d3fae010294c616388b506acda1bfaae46",
+            "liquidity_removed": "1",
+        }
+        if fees0 is not None:
+            lp_close_data["fees0"] = fees0
+        if fees1 is not None:
+            lp_close_data["fees1"] = fees1
+        if additional_fees is not None:
+            lp_close_data["additional_fees"] = additional_fees
+        extracted = json.dumps({"lp_close_data": lp_close_data})
+        prices = {
+            "USDT": {"price_usd": "1.00", "oracle_source": "cg", "confidence": "HIGH"},
+            "WBTC": {"price_usd": "58000.00", "oracle_source": "cg", "confidence": "HIGH"},
+            "WETH": {"price_usd": "1574.00", "oracle_source": "cg", "confidence": "HIGH"},
+        }
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="LP_CLOSE",
+            protocol="curve",
+            chain="ethereum",
+            token_in="",  # fungible Curve close — no swap-style direction
+            token_out="",
+            extracted_data_json=extracted,
+            price_inputs_json=json.dumps(prices),
+        )
+        return outbox, ledger
+
+    def test_bundled_fees_stamp_reason_and_estimated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """fees genuinely UNMEASURED (BUNDLED / None) with a measured basis ⇒
+        ESTIMATED + curve_fee_usd_unavailable reason (schema-valid)."""
+        self._patch_resolver(monkeypatch, {"USDT": 6, "WBTC": 8, "WETH": 18})
+        # fees0/fees1 dropped entirely AND no additional_fees ⇒ all_fees are None
+        # ⇒ the Curve fee valuation returns None (unmeasured, Empty≠Zero).
+        outbox, ledger = self._curve_close(fees0=None, fees1=None, additional_fees=None)
+
+        result = handle_lp(outbox, ledger)
+
+        from almanak.framework.accounting.models import AccountingConfidence
+
+        assert result is not None
+        # The crypto-numeraire principal basis IS measured (VIB-5429 path).
+        assert result.cost_basis_usd is not None and result.cost_basis_usd > 0
+        # Fees are genuinely unmeasured (BUNDLED) — never fabricated to $0.
+        assert result.fees_total_usd is None
+        # VIB-5553: explicit fee-unavailability reason + ESTIMATED (VIB-3886 invariant).
+        assert result.confidence == AccountingConfidence.ESTIMATED
+        assert result.unavailable_reason.startswith("curve_fee_usd_unavailable")
+
+    def test_measured_fees_do_not_stamp_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A close with MEASURED fees (even a measured $0 balanced removal) books
+        fees_total_usd and must NOT stamp the fee-unavailability reason."""
+        self._patch_resolver(monkeypatch, {"USDT": 6, "WBTC": 8, "WETH": 18})
+        # Measured-zero fee legs for all three coins (balanced proportional removal).
+        outbox, ledger = self._curve_close(fees0="0", fees1="0", additional_fees={"2": "0"})
+
+        result = handle_lp(outbox, ledger)
+
+        from almanak.framework.accounting.models import AccountingConfidence
+
+        assert result is not None
+        assert result.cost_basis_usd is not None and result.cost_basis_usd > 0
+        # Measured-zero fees ⇒ fees_total_usd is a measured Decimal("0"), not None.
+        assert result.fees_total_usd == Decimal("0")
+        # No fee-unavailability reason; basis measured ⇒ HIGH.
+        assert result.unavailable_reason == ""
+        assert result.confidence == AccountingConfidence.HIGH
+
+    def test_existing_reason_is_not_overwritten(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The VIB-5553 stamp only fills an EMPTY reason slot — a pre-existing
+        (basis-unavailability) reason on an ESTIMATED close is never clobbered."""
+        # Decimals for BTC/WETH unresolvable ⇒ the Curve principal valuation fails
+        # closed (a non-zero leg it cannot scale) ⇒ basis stays None ⇒ the base
+        # resolver stamps a basis-unavailability reason + ESTIMATED. The VIB-5553
+        # block must then see a non-empty reason and leave it untouched.
+        self._patch_resolver(monkeypatch, {"USDT": 6})  # WBTC / WETH unresolvable
+        outbox, ledger = self._curve_close(fees0=None, fees1=None, additional_fees=None)
+
+        result = handle_lp(outbox, ledger)
+
+        from almanak.framework.accounting.models import AccountingConfidence
+
+        assert result is not None
+        assert result.confidence == AccountingConfidence.ESTIMATED
+        assert result.unavailable_reason  # non-empty
+        # Whatever the base resolver recorded, it is NOT the fee-unavailability
+        # stamp (the slot was already occupied by the basis-unavailability reason).
+        assert not result.unavailable_reason.startswith("curve_fee_usd_unavailable")
+
+    # ── direct unit coverage on the extracted _curve_fee_unavailability helper ──
+
+    def test_helper_stamps_when_all_conditions_hold(self) -> None:
+        """Positive: close-like + coin_symbols + fees None + empty reason ⇒ (reason, ESTIMATED)."""
+        from almanak.framework.accounting.category_handlers.lp_handler import _curve_fee_unavailability
+        from almanak.framework.accounting.models import AccountingConfidence
+
+        lp_data = SimpleNamespace(coin_symbols=["USDT", "WBTC", "WETH"])
+        out = _curve_fee_unavailability("LP_CLOSE", lp_data, None, "")
+        assert out is not None
+        reason, confidence = out
+        assert reason.startswith("curve_fee_usd_unavailable")
+        assert confidence == AccountingConfidence.ESTIMATED
+
+    @pytest.mark.parametrize(
+        ("intent_type_str", "lp_data", "fees_total_usd", "unavailable_reason"),
+        [
+            # Not a close (LP_OPEN) — no stamp.
+            ("LP_OPEN", SimpleNamespace(coin_symbols=["USDT", "WBTC"]), None, ""),
+            # No pool-coin symbols (non-Curve / not stamped) — no stamp.
+            ("LP_CLOSE", SimpleNamespace(coin_symbols=None), None, ""),
+            # lp_data is None — no stamp.
+            ("LP_CLOSE", None, None, ""),
+            # Fees ARE measured (even a measured $0) — no stamp.
+            ("LP_CLOSE", SimpleNamespace(coin_symbols=["USDT"]), Decimal("0"), ""),
+            # Reason slot already occupied — never overwrite.
+            ("LP_CLOSE", SimpleNamespace(coin_symbols=["USDT"]), None, "basis unavailable"),
+        ],
+    )
+    def test_helper_returns_none_when_a_condition_fails(
+        self,
+        intent_type_str: str,
+        lp_data: Any,
+        fees_total_usd: Decimal | None,
+        unavailable_reason: str,
+    ) -> None:
+        """Negative: any single guard failing ⇒ None (no stamp)."""
+        from almanak.framework.accounting.category_handlers.lp_handler import _curve_fee_unavailability
+
+        assert _curve_fee_unavailability(intent_type_str, lp_data, fees_total_usd, unavailable_reason) is None
