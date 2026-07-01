@@ -706,6 +706,74 @@ def reconcile_lp_with_registry(
     )
 
 
+def _union_residuals(
+    summary: TeardownPositionSummary,
+    residuals: list[PositionInfo],
+) -> TeardownPositionSummary:
+    """Additive union of on-chain-discovered residuals into the enumeration (VIB-5116).
+
+    Same additive-never-subtractive contract as :func:`reconcile_lp_with_registry`:
+    every strategy/registry-reported position is kept, and each residual whose
+    ``(chain, position_type, position_id)`` is not already present is appended.
+    Residuals carry unique identifiers (e.g. GMX order keys) so they never collapse
+    with a real position, but the de-dup keeps a residual from double-surfacing if a
+    future path already enumerated it. Preserves the summary's explicit totals —
+    residuals carry ``value_usd=0`` and no liquidation-risk signal, so they add
+    nothing to either total (valuation is out of scope for this identity surface).
+    """
+    if not residuals:
+        return summary
+
+    def _key(position: PositionInfo) -> tuple[str, str, str, str]:
+        # Include protocol: two connectors can surface a residual with the same
+        # (chain, type, position_id) shape, and keying without protocol would
+        # collapse them and DROP a distinct residual (VIB-5116 C3 — the exact
+        # silent-drop class this lane exists to prevent).
+        return (
+            str(position.chain or "").lower(),
+            str(position.position_type),
+            str(position.protocol or "").lower(),
+            str(position.position_id),
+        )
+
+    existing_positions = list(getattr(summary, "positions", None) or [])
+    seen = {_key(p) for p in existing_positions}
+    net_new: list[PositionInfo] = []
+    for residual in residuals:
+        key = _key(residual)
+        if key not in seen:
+            net_new.append(residual)
+            seen.add(key)
+    if not net_new:
+        return summary
+
+    # Read the summary's scalar fields defensively (getattr defaults) so a partial
+    # / mock summary can still carry residuals — production always passes a full
+    # ``TeardownPositionSummary``, but the enumeration must never fault the lane.
+    from datetime import UTC, datetime
+
+    # Capture the summary's AUTHORITATIVE totals (already finalized by its own
+    # __post_init__) before reconstruction. Residuals are an identity surface only
+    # (value_usd=0, no liquidation risk), so they must not change either total.
+    orig_total = getattr(summary, "total_value_usd", None)
+    orig_risk = getattr(summary, "has_liquidation_risk", False)
+    merged = TeardownPositionSummary(
+        deployment_id=getattr(summary, "deployment_id", None) or "unknown",
+        timestamp=getattr(summary, "timestamp", None) or datetime.now(UTC),
+        positions=existing_positions + net_new,
+        total_value_usd=orig_total if isinstance(orig_total, Decimal) else Decimal("0"),
+        has_liquidation_risk=bool(orig_risk),
+    )
+    # Re-assert the originals: __post_init__ recomputes a MEASURED-ZERO total from
+    # the position list (VIB-5116 S2), which would clobber a strategy's explicit
+    # zero. Restoring here keeps the strategy's totals authoritative — the residuals
+    # add nothing to either (value_usd=0 / no risk).
+    if isinstance(orig_total, Decimal):
+        merged.total_value_usd = orig_total
+    merged.has_liquidation_risk = bool(orig_risk)
+    return merged
+
+
 async def resolve_open_positions_with_registry(strategy: Any) -> TeardownPositionSummary:
     """Strategy enumeration reconciled against the ``position_registry`` WARM read path.
 
@@ -766,6 +834,15 @@ async def resolve_open_positions_with_registry(strategy: Any) -> TeardownPositio
         registry_positions=read.positions + lending_positions + perp_positions + pendle_positions,
         registry_available=read.available or lending_available or perp_available or pendle_available,
     )
+    # VIB-5116: fold in off-position on-chain residuals (e.g. GMX V2 pending
+    # unfilled orders holding collateral in the OrderVault) discovered directly
+    # from chain, INDEPENDENT of the strategy's get_open_positions() /
+    # _loop_state. This closes the enumeration-blindness that let committed-but-
+    # unfilled capital be reported as no_positions success. Additive/union like
+    # the registry reads; never subtracts a strategy-reported position.
+    from almanak.framework.teardown.residual_discovery import discover_teardown_residuals
+
+    reconciled = _union_residuals(reconciled, discover_teardown_residuals(strategy))
     # TD-05 (VIB-5463): chain-verify the enumeration completeness. This NEVER
     # mutates the additive union (the union→authoritative flip is TD-06's job) —
     # it (a) upgrades the registry-read-failure path from warn-only to an active

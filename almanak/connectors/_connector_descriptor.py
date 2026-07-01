@@ -681,6 +681,7 @@ class Connector:
     principal_token_market_reader: ImportRef | None = None
     swap_route_inference: ImportRef | None = None
     teardown_post_condition: ImportRef | None = None
+    teardown_residual_discovery: ImportRef | None = None
     deferred_refresh: ImportRef | None = None
     pool_reader: ImportRef | None = None
     capabilities: CapabilitiesSpec | None = None
@@ -970,6 +971,11 @@ class Connector:
         if self.teardown_post_condition is not None and not isinstance(self.teardown_post_condition, ImportRef):
             raise ValueError(
                 f"Connector.teardown_post_condition must be None or an ImportRef, got {self.teardown_post_condition!r}"
+            )
+        if self.teardown_residual_discovery is not None and not isinstance(self.teardown_residual_discovery, ImportRef):
+            raise ValueError(
+                "Connector.teardown_residual_discovery must be None or an ImportRef, "
+                f"got {self.teardown_residual_discovery!r}"
             )
 
     def _validate_deferred_refresh(self) -> None:
@@ -1484,6 +1490,10 @@ class ConnectorRegistry:
     def with_teardown_post_condition(self) -> tuple[Connector, ...]:
         """Return connectors that publish teardown post-condition hooks."""
         return tuple(d for d in self.all() if d.teardown_post_condition is not None)
+
+    def with_teardown_residual_discovery(self) -> tuple[Connector, ...]:
+        """Return connectors that publish teardown residual-discovery hooks (VIB-5116)."""
+        return tuple(d for d in self.all() if d.teardown_residual_discovery is not None)
 
     def with_deferred_refresh(self) -> tuple[Connector, ...]:
         """Return connectors that publish deferred transaction refresh providers."""
