@@ -45,9 +45,13 @@ What lives here
   instance. Concrete strategy-side connectors are registered into it
   by :func:`_register_all` in
   ``almanak/connectors/_strategy_receipt_registry.py`` (mirrors the
-  ``_gateway_registry.py`` boot file). Adding a new connector with a
-  receipt parser means one import + one ``register`` line in that
-  file — there is no central protocol-name table.
+  ``_gateway_registry.py`` boot file), which auto-discovers them via
+  ``CONNECTOR_REGISTRY.with_receipt_parser()`` — the boot file no
+  longer knows connector names. Adding a new connector with a receipt
+  parser means declaring ``receipt_parser_connector=ImportRef(...)``
+  on the connector's ``CONNECTOR`` manifest in ``connector.py`` —
+  there is no central protocol-name table and no manual
+  import/register line.
 
 Why a Protocol + per-connector classes (vs. a central
 ``_BUILTIN_LOADERS`` dict)
