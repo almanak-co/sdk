@@ -569,6 +569,27 @@ class TestResources:
         contents = response["result"]["contents"]
         assert len(contents) == 1
 
+    def test_resources_read_protocols_matches_connector_registry(self):
+        """almanak://protocols is registry-derived: canonical connector-manifest
+        names, sorted, exact (lowercase) casing — not a hardcoded list
+        (CodeRabbit PR #3149)."""
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+        from almanak.framework.agent_tools.adapters.mcp_adapter import (
+            RESOURCE_PROTOCOLS,
+            AlmanakMCPServer,
+        )
+
+        server = AlmanakMCPServer(executor=MagicMock())
+        result = server.resources_read(RESOURCE_PROTOCOLS)
+
+        contents = result["contents"]
+        assert len(contents) == 1
+        assert contents[0]["uri"] == RESOURCE_PROTOCOLS
+        payload = json.loads(contents[0]["text"])
+        expected = sorted(c.name for c in CONNECTOR_REGISTRY.all())
+        assert payload["protocols"] == expected
+        assert "curve" in payload["protocols"]
+
 
 # ---------------------------------------------------------------------------
 # End-to-end stdio loop test

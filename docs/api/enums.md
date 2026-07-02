@@ -16,13 +16,6 @@ Core enumeration types used throughout the SDK.
       show_root_heading: true
       members_order: source
 
-## Protocol
-
-::: almanak.core.enums.Protocol
-    options:
-      show_root_heading: true
-      members_order: source
-
 ## ActionType
 
 ::: almanak.core.enums.ActionType

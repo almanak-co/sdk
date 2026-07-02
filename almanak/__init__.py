@@ -19,12 +19,9 @@ if TYPE_CHECKING:
         CoSigners,
         ExecutionStatus,
         Network,
-        Protocol,
         SwapSide,
         TransactionType,
     )
-    from .core.models.action import Action
-    from .core.models.action_bundle import ActionBundle
     from .framework import (
         DEFAULT_GAS_ESTIMATES,
         PROTOCOL_ROUTERS,
@@ -195,12 +192,8 @@ __all__ = [
     "CoSigners",
     "ExecutionStatus",
     "Network",
-    "Protocol",
     "SwapSide",
     "TransactionType",
-    # Framework - Models
-    "Action",
-    "ActionBundle",
     # V2 Framework - Strategy base classes
     "Strategy",  # Alias for IntentStrategy
     "IntentStrategy",
@@ -387,16 +380,10 @@ _CORE_ENUM_NAMES: frozenset[str] = frozenset(
         "CoSigners",
         "ExecutionStatus",
         "Network",
-        "Protocol",
         "SwapSide",
         "TransactionType",
     }
 )
-
-_CORE_MODEL_NAMES: dict[str, str] = {
-    "Action": "almanak.core.models.action",
-    "ActionBundle": "almanak.core.models.action_bundle",
-}
 
 # Every other public name is re-exported from the top-level framework package,
 # whose own __getattr__ resolves to the right subpackage.
@@ -404,7 +391,6 @@ _FRAMEWORK_NAMES: frozenset[str] = frozenset(__all__) - {
     "__version__",
     "Strategy",
     *_CORE_ENUM_NAMES,
-    *_CORE_MODEL_NAMES,
 }
 
 
@@ -415,8 +401,6 @@ def __getattr__(name: str) -> object:
         attr = importlib.import_module("almanak.framework").IntentStrategy
     elif name in _CORE_ENUM_NAMES:
         attr = getattr(importlib.import_module("almanak.core.enums"), name)
-    elif name in _CORE_MODEL_NAMES:
-        attr = getattr(importlib.import_module(_CORE_MODEL_NAMES[name]), name)
     elif name in _FRAMEWORK_NAMES:
         attr = getattr(importlib.import_module("almanak.framework"), name)
     else:

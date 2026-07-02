@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
-from almanak.core.enums import Chain, Protocol
+from almanak.core.enums import Chain
 from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.providers.liquidity_depth import (
     DATA_SOURCE_FALLBACK,
@@ -256,7 +256,7 @@ class TestV3LiquidityQuery:
             pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
             chain=Chain.ARBITRUM,
             timestamp=timestamp,
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 
         assert result.depth == Decimal("5000000")
@@ -307,7 +307,7 @@ class TestV3LiquidityQuery:
             pool_address="0x789",
             chain=Chain.BSC,
             timestamp=timestamp,
-            protocol=Protocol.PANCAKESWAP_V3,
+            protocol="pancakeswap_v3",
         )
 
         assert result.depth == Decimal("10000000")
@@ -341,7 +341,7 @@ class TestV2LiquidityQuery:
             pool_address="0xaero",
             chain=Chain.BASE,
             timestamp=timestamp,
-            protocol=Protocol.AERODROME,
+            protocol="aerodrome",
         )
 
         assert result.depth == Decimal("8000000")
@@ -376,7 +376,7 @@ class TestLiquidityBookQuery:
             pool_address="0xtjoe",
             chain=Chain.AVALANCHE,
             timestamp=timestamp,
-            protocol=Protocol.TRADERJOE_V2,
+            protocol="traderjoe_v2",
         )
 
         assert result.depth == Decimal("3000000")
@@ -491,7 +491,7 @@ class TestTWAPCalculation:
             pool_address="0x123",
             chain=Chain.ARBITRUM,
             timestamp=timestamp,
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 
         # TWAP should be between the two values (time-weighted average)
@@ -518,7 +518,7 @@ class TestTWAPCalculation:
             pool_address="0x123",
             chain=Chain.ARBITRUM,
             timestamp=timestamp,
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 
         # Should return the single data point value
@@ -543,7 +543,7 @@ class TestFallbackBehavior:
             pool_address="0xnone",
             chain=Chain.ARBITRUM,
             timestamp=timestamp,
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 
         assert result.depth == Decimal("0")
@@ -558,7 +558,7 @@ class TestFallbackBehavior:
             pool_address="0xtest",
             chain=Chain.SONIC,  # Not supported
             timestamp=timestamp,
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 
         assert result.depth == Decimal("0")
@@ -604,7 +604,7 @@ class TestFallbackBehavior:
             pool_address="0xnone",
             chain=Chain.ARBITRUM,
             timestamp=timestamp,
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 
         assert result.depth == Decimal("1000000")
@@ -713,7 +713,7 @@ class TestErrorHandling:
             pool_address="0x123",
             chain=Chain.ARBITRUM,
             timestamp=timestamp,
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 
         assert result.depth == Decimal("0")
@@ -734,7 +734,7 @@ class TestErrorHandling:
             pool_address="0x123",
             chain=Chain.ARBITRUM,
             timestamp=timestamp,
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 
         assert result.depth == Decimal("0")
@@ -750,7 +750,7 @@ class TestErrorHandling:
             pool_address="0x123",
             chain=Chain.ARBITRUM,
             timestamp=timestamp,
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 
         assert result.depth == Decimal("0")
@@ -787,7 +787,7 @@ class TestRangeQuery:
             chain=Chain.ARBITRUM,
             start_time=start_time,
             end_time=end_time,
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 
         # Should have 3 results (Jan 1, 2, 3)
@@ -805,10 +805,10 @@ class TestRangeQuery:
 class TestProtocolNormalization:
     """Test protocol ID normalization."""
 
-    def test_protocol_enum_to_string(self, provider):
-        """Test Protocol enum is converted to lowercase string."""
-        assert provider._get_protocol_id(Protocol.UNISWAP_V3) == "uniswap_v3"
-        assert provider._get_protocol_id(Protocol.AERODROME) == "aerodrome"
+    def test_legacy_uppercase_to_canonical(self, provider):
+        """Legacy uppercase (enum-era) values convert to lowercase keys."""
+        assert provider._get_protocol_id("UNISWAP_V3") == "uniswap_v3"
+        assert provider._get_protocol_id("AERODROME") == "aerodrome"
 
     def test_string_to_lowercase(self, provider):
         """Test string protocols are lowercased."""
@@ -884,7 +884,7 @@ class TestTimestampHandling:
             pool_address="0x123",
             chain=Chain.ARBITRUM,
             timestamp=naive_timestamp,
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 
         # Result timestamp should have UTC

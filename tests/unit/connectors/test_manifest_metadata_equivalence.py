@@ -56,6 +56,11 @@ FROZEN_CAPABILITIES_LOADERS = {
     # VIB-5031: the vault NFT-CDP key (requires_market_id) — scoped to
     # fluid_vault ONLY; fluid/fluid_lending deliberately have no entry.
     "fluid_vault": "almanak.connectors._fluid_core.capabilities",
+    # Protocol-enum removal: curve gained a capabilities entry when the
+    # LPCloseIntent exit-selector guards (coin_index / imbalanced_amounts)
+    # moved from a Protocol.CURVE comparison onto the connector-declared
+    # lp_close_exit_selectors flag.
+    "curve": "almanak.connectors.curve.capabilities",
 }
 
 # almanak/connectors/_strategy_base/supported_chains_registry.py

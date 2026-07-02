@@ -9,7 +9,7 @@ fetching historical volume data across multiple DEX protocols.
 ``dex_volume=DexVolumeDecl(...)`` manifest declaration owns the dispatch keys,
 aliases, chain support, provenance string, and chain-detection defaults —
 this aggregator names no DEX and holds no dispatch table (previously:
-``PROTOCOL_PROVIDER_MAP`` keyed by the legacy ``Protocol`` enum +
+``PROTOCOL_PROVIDER_MAP`` keyed by the since-removed ``Protocol`` enum +
 ``STRING_PROTOCOL_MAP`` + ``PROTOCOL_CHAIN_SUPPORT``). Adding a DEX's volume
 lane is one connector folder, no edit here.
 
@@ -47,7 +47,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
 from almanak.core.enums import Chain
@@ -55,9 +55,6 @@ from almanak.core.enums import Chain
 from ..types import DataConfidence, DataSourceInfo, VolumeResult
 from .base import HistoricalVolumeProvider
 from .dex import GatewayDexVolumeProvider
-
-if TYPE_CHECKING:
-    from almanak.core.enums import Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +72,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
     """Aggregator that routes volume queries to declared DEX volume lanes.
 
     Routes volume queries to the gateway-backed volume lane the protocol's
-    connector declares. Supports the legacy ``Protocol`` enum (duck-typed via
-    ``.value``) and string identifiers for flexibility.
+    connector declares, keyed by string protocol identifiers.
 
     When no protocol is specified, the provider uses the connector-declared
     chain defaults (e.g. Base chain pools default to Aerodrome).
@@ -141,20 +137,18 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         """Async context manager exit: close all providers."""
         await self.close()
 
-    def _get_protocol_id(self, protocol: Protocol | str | None) -> str | None:
+    def _get_protocol_id(self, protocol: str | None) -> str | None:
         """Normalize protocol to its canonical declared identifier.
 
         Args:
-            protocol: Legacy ``Protocol`` enum (duck-typed via ``.value``),
-                string identifier, or None
+            protocol: String protocol identifier, or None
 
         Returns:
             Canonical declared protocol key, or None when unknown/None
         """
         if protocol is None:
             return None
-        value = getattr(protocol, "value", protocol)
-        return DexVolumeRegistry.canonical(str(value))
+        return DexVolumeRegistry.canonical(str(protocol))
 
     def _detect_protocol_from_chain(self, chain: Chain) -> str | None:
         """Attempt to detect protocol based on chain.
@@ -240,7 +234,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         chain: Chain,
         start_date: date,
         end_date: date,
-        protocol: Protocol | str | None = None,
+        protocol: str | None = None,
     ) -> list[VolumeResult]:
         """Fetch historical volume data by routing to the declared DEX lane.
 
@@ -253,7 +247,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
             chain: The blockchain the pool is on.
             start_date: Start of date range (inclusive).
             end_date: End of date range (inclusive).
-            protocol: Protocol enum, string identifier (e.g., "curve"), or None.
+            protocol: String protocol identifier (e.g., "curve"), or None.
                      If None, attempts to detect based on chain.
 
         Returns:
@@ -334,11 +328,11 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         """
         return list(DexVolumeRegistry.supported_protocols())
 
-    def get_supported_chains(self, protocol: Protocol | str) -> list[Chain]:
+    def get_supported_chains(self, protocol: str) -> list[Chain]:
         """Get list of supported chains for a protocol.
 
         Args:
-            protocol: Protocol enum or string identifier
+            protocol: String protocol identifier
 
         Returns:
             List of supported Chain enums (declaration order)

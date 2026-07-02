@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING: the legacy `Protocol` enum and the v1 `Action` / `ActionBundle`
+  models are removed from the public API** (`almanak.Protocol`,
+  `almanak.Action`, `almanak.ActionBundle`; supersedes the JOE_LEND cleanup
+  tracked in VIB-3963). Protocol identity is connector-manifest strings:
+  pass lowercase keys such as `protocol="uniswap_v3"` anywhere a protocol is
+  named, and enumerate the live universe via
+  `almanak.connectors._connector.CONNECTOR_REGISTRY` instead of iterating an
+  enum. The enum was stale by construction — it could not name most live
+  connectors (aave_v3, gmx_v2, orca, ...) — and the v1 models had no
+  remaining producer or consumer; the intent pipeline's `ActionBundle`
+  (`almanak.framework.models.reproduction_bundle`) is unaffected. The MCP
+  `almanak://protocols` resource now lists the full set of canonical
+  lowercase connector names instead of the enum's 17 uppercase values, and
+  the `LPCloseIntent` curve-only exit-selector guards (`coin_index` /
+  `imbalanced_amounts`) are driven by the connector-declared
+  `lp_close_exit_selectors` capability rather than a protocol-name check.
+
 ### Changed
 
 - **Teardown eligibility is now an authoritative opt-in (VIB-5474 / TD-16,

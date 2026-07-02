@@ -10,7 +10,6 @@ from __future__ import annotations
 import pytest
 
 from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
-from almanak.core.enums import Protocol
 from almanak.connectors._strategy_base.contract_registry import get_default_registry
 from almanak.connectors.uniswap_v4.sdk import (
     MODIFY_LIQUIDITIES_SELECTOR,
@@ -119,18 +118,6 @@ class TestCanonicalAddresses:
         for chain, addrs in UNISWAP_V4.items():
             missing = required_keys - set(addrs.keys())
             assert not missing, f"Chain '{chain}' missing V4 contract keys: {missing}"
-
-
-# =============================================================================
-# Protocol enum
-# =============================================================================
-
-
-class TestProtocolEnum:
-    def test_uniswap_v4_in_protocol_enum(self):
-        """UNISWAP_V4 should be a valid Protocol enum value."""
-        assert Protocol.UNISWAP_V4 == Protocol("UNISWAP_V4")
-        assert Protocol.UNISWAP_V4.value == "UNISWAP_V4"
 
 
 # =============================================================================

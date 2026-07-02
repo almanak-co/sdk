@@ -11,10 +11,15 @@ from almanak.connectors._connector import (
     ImportRef,
     MetadataAmountEncoding,
 )
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 
 CONNECTOR = Connector(
     name="curve",
     kind=ProtocolKind.LP,
+    capabilities=CapabilitiesSpec(
+        keys=("curve",),
+        module="almanak.connectors.curve.capabilities",
+    ),
     dex_volume=DexVolumeDecl(
         chains=("ethereum", "optimism"),
         amm_family="stableswap",

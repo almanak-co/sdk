@@ -106,7 +106,7 @@ class AlmanakMCPServer:
     # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def resources_read(self, uri: str) -> dict:
         """Read an MCP resource by URI."""
-        from almanak.core.enums import Chain, Protocol
+        from almanak.core.enums import Chain
 
         if uri == RESOURCE_CHAINS:
             return {
@@ -120,12 +120,17 @@ class AlmanakMCPServer:
             }
 
         if uri == RESOURCE_PROTOCOLS:
+            # Canonical connector-manifest names — the connector registry is
+            # the single source of truth for the protocol universe.
+            from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+            protocol_names = sorted(c.name for c in CONNECTOR_REGISTRY.all())
             return {
                 "contents": [
                     {
                         "uri": uri,
                         "mimeType": "application/json",
-                        "text": json.dumps({"protocols": [p.value for p in Protocol]}),
+                        "text": json.dumps({"protocols": protocol_names}),
                     }
                 ]
             }

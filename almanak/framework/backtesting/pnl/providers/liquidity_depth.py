@@ -34,13 +34,10 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
 from almanak.core.enums import Chain
-
-if TYPE_CHECKING:
-    from almanak.core.enums import Protocol
 
 from ...exceptions import DataSourceUnavailableError
 from ..types import DataConfidence, DataSourceInfo, LiquidityResult
@@ -240,7 +237,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
                 chain=Chain.ARBITRUM,
                 timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
-                protocol=Protocol.UNISWAP_V3,
+                protocol="uniswap_v3",
             )
 
         # Or manually close
@@ -311,11 +308,11 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         """Async context manager exit: close the client."""
         await self.close()
 
-    def _get_protocol_id(self, protocol: Protocol | str | None) -> str | None:
+    def _get_protocol_id(self, protocol: str | None) -> str | None:
         """Normalize protocol to its canonical declared identifier.
 
         Args:
-            protocol: Protocol enum, string identifier, or None
+            protocol: String protocol identifier, or None
 
         Returns:
             The canonical declared protocol key when the identifier (or one
@@ -324,11 +321,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         """
         if protocol is None:
             return None
-        # Duck-typed: accepts the legacy core Protocol enum (via .value)
-        # without importing it at runtime, so backtesting no longer depends
-        # on the enum (VIB-4851 Phase D, DEC-3).
-        value = getattr(protocol, "value", protocol)
-        proto_str = str(value).lower()
+        proto_str = str(protocol).lower()
         # Unknown identifiers keep the raw string rather than None: in this
         # provider None means "auto-detect from chain", and an explicit but
         # unknown protocol must hit the warning + fallback path instead of
@@ -987,7 +980,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         pool_address: str,
         chain: Chain,
         timestamp: datetime,
-        protocol: Protocol | str | None = None,
+        protocol: str | None = None,
     ) -> LiquidityResult:
         """Fetch historical liquidity depth for a pool at a specific timestamp.
 
@@ -1003,7 +996,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             pool_address: The pool contract address (checksummed or lowercase).
             chain: The blockchain the pool is on.
             timestamp: The point in time to get liquidity depth for.
-            protocol: Protocol enum, string identifier (e.g., "curve"), or None.
+            protocol: String protocol identifier (e.g., "curve"), or None.
                      If None, attempts to detect based on chain.
 
         Returns:
@@ -1017,7 +1010,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
                 chain=Chain.ARBITRUM,
                 timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
-                protocol=Protocol.UNISWAP_V3,
+                protocol="uniswap_v3",
             )
 
             # Auto-detect protocol
@@ -1071,7 +1064,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
 
     def _resolve_protocol_id(
         self,
-        protocol: Protocol | str | None,
+        protocol: str | None,
         chain: Chain,
         pool_address: str,
     ) -> str | None:
@@ -1144,7 +1137,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         chain: Chain,
         start_time: datetime,
         end_time: datetime,
-        protocol: Protocol | str | None = None,
+        protocol: str | None = None,
     ) -> list[LiquidityResult]:
         """Fetch historical liquidity depth for a date range.
 
@@ -1157,7 +1150,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             chain: The blockchain the pool is on.
             start_time: Start of date range (inclusive).
             end_time: End of date range (inclusive).
-            protocol: Protocol enum, string identifier, or None.
+            protocol: String protocol identifier, or None.
 
         Returns:
             List of LiquidityResult objects, one per day in the range.

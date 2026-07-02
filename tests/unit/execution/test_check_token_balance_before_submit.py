@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.core.models.action_bundle import ActionBundle
+from almanak.framework.models.reproduction_bundle import ActionBundle
 from almanak.framework.execution.interfaces import InsufficientFundsError
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
 

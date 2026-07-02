@@ -29,7 +29,6 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
-from almanak.core.enums import Protocol
 from almanak.framework.models.base import (
     AlmanakImmutableModel,
     OptionalChainedAmount,
@@ -90,18 +89,37 @@ ChainedAmount = Decimal | Literal["all"]
 InterestRateMode = Literal["variable"]
 
 
-def _is_curve_protocol(protocol: str | None) -> bool:
-    """Return True if ``protocol`` names the Curve connector (case-insensitive).
+def _supports_lp_close_exit_selectors(protocol: str | None) -> bool:
+    """Return True when ``protocol`` declares the LP_CLOSE exit-selector capability.
 
-    Compares against the canonical ``Protocol.CURVE`` enum rather than a bare
-    ``"curve"`` string literal so the curve-only LP_CLOSE field guards
-    (``coin_index`` / ``imbalanced_amounts``) do NOT each register as a new
-    protocol-literal dispatch site under
-    ``tests/static/test_protocol_chain_literal_ratchet.py``. One shared,
-    enum-backed predicate is also the single source of truth for "is this a
-    Curve intent" across those guards.
+    The pool-coin exit selectors on ``LPCloseIntent`` (``coin_index`` for a
+    single-sided close, ``imbalanced_amounts`` for an exact-amounts close) are
+    compiled only by connectors that declare ``lp_close_exit_selectors`` in
+    their connector-owned ``capabilities.py`` (Curve today). Reading the flag
+    from the capabilities registry keeps this guard free of protocol-name
+    dispatch (``tests/static/test_protocol_chain_literal_ratchet.py``) and
+    lets a future connector opt in from its own folder. Lazy import: the
+    connector packages import this module (``IntentType``), so an eager
+    registry import would create a cycle on cold boot.
     """
-    return (protocol or "").lower() == Protocol.CURVE.value.lower()
+    if not protocol:
+        return False
+    from almanak.connectors._strategy_base.capabilities_registry import get_protocol_capabilities
+
+    key = protocol.strip().lower().replace("-", "_").replace(" ", "_")
+    return bool(get_protocol_capabilities(key).get("lp_close_exit_selectors", False))
+
+
+def _lp_close_exit_selector_protocols() -> str:
+    """Comma-joined protocol names declaring ``lp_close_exit_selectors``.
+
+    Error-path helper for the two guard messages below; loads every connector
+    capabilities module, which is acceptable on a path that ends in a raise.
+    """
+    from almanak.connectors._strategy_base.capabilities_registry import all_protocol_capabilities
+
+    names = sorted(k for k, v in all_protocol_capabilities().items() if v.get("lp_close_exit_selectors"))
+    return ", ".join(f"'{n}'" for n in names) or "none"
 
 
 # =============================================================================
@@ -830,15 +848,17 @@ class LPCloseIntent(BaseIntent):
         if self.coin_index is not None:
             if isinstance(self.coin_index, bool) or self.coin_index < 0:
                 raise ValueError("coin_index must be a non-negative integer when set")
-            # coin_index, like imbalanced_amounts, is consumed ONLY by the Curve
-            # compiler; any other LP connector would silently ignore it. Fail fast
-            # rather than let a caller think a single-sided exit will happen on,
-            # e.g., the default uniswap_v3 protocol (CodeRabbit — applied to both
-            # Curve-only exit selectors for a consistent contract).
-            if not _is_curve_protocol(self.protocol):
+            # coin_index, like imbalanced_amounts, is compiled ONLY by connectors
+            # declaring the lp_close_exit_selectors capability; any other LP
+            # connector would silently ignore it. Fail fast rather than let a
+            # caller think a single-sided exit will happen on, e.g., the default
+            # uniswap_v3 protocol (CodeRabbit — applied to both exit selectors
+            # for a consistent contract).
+            if not _supports_lp_close_exit_selectors(self.protocol):
                 raise ValueError(
-                    f"coin_index is only supported by the Curve connector, not protocol "
-                    f"'{self.protocol}'. Set protocol='curve' for a single-sided LP close."
+                    f"coin_index is not supported by protocol '{self.protocol}'. "
+                    f"Protocols supporting a single-sided LP close: "
+                    f"{_lp_close_exit_selector_protocols()}."
                 )
         # imbalanced_amounts opts into an imbalanced close (exact per-coin amounts
         # OUT, capped by a derived max-burn). Mutually exclusive with the
@@ -850,15 +870,17 @@ class LPCloseIntent(BaseIntent):
         # connector validates the vector length against the resolved pool's coin
         # count, where n_coins is known.
         if self.imbalanced_amounts is not None:
-            # imbalanced_amounts is consumed ONLY by the Curve compiler; every other
-            # LP connector would silently ignore it. Fail fast rather than let a
-            # caller think an exact-amounts withdrawal will happen on, e.g., the
-            # default uniswap_v3 protocol (CodeRabbit). ``protocol`` is compared
-            # case-insensitively to match the connector-registry normalization.
-            if not _is_curve_protocol(self.protocol):
+            # imbalanced_amounts is compiled ONLY by connectors declaring the
+            # lp_close_exit_selectors capability; every other LP connector would
+            # silently ignore it. Fail fast rather than let a caller think an
+            # exact-amounts withdrawal will happen on, e.g., the default
+            # uniswap_v3 protocol (CodeRabbit). ``protocol`` is normalized
+            # case-insensitively to match the capability-registry keys.
+            if not _supports_lp_close_exit_selectors(self.protocol):
                 raise ValueError(
-                    f"imbalanced_amounts is only supported by the Curve connector, not protocol "
-                    f"'{self.protocol}'. Set protocol='curve' for an imbalanced LP close."
+                    f"imbalanced_amounts is not supported by protocol '{self.protocol}'. "
+                    f"Protocols supporting an imbalanced LP close: "
+                    f"{_lp_close_exit_selector_protocols()}."
                 )
             if self.coin_index is not None:
                 raise ValueError("imbalanced_amounts and coin_index are mutually exclusive")

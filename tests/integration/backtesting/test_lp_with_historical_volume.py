@@ -25,7 +25,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.core.enums import Chain, Protocol
+from almanak.core.enums import Chain
 from almanak.framework.backtesting.adapters.lp_adapter import (
     LPBacktestAdapter,
     LPBacktestConfig,
@@ -235,7 +235,7 @@ class TestLPWithHistoricalVolume:
                 chain=Chain.ETHEREUM,
                 start_date=TEST_START_DATE,
                 end_date=TEST_END_DATE,
-                protocol=Protocol.UNISWAP_V3,
+                protocol="uniswap_v3",
             )
 
         # Verify results
@@ -412,7 +412,7 @@ class TestLPWithHistoricalVolume:
                 chain=Chain.ETHEREUM,
                 start_date=TEST_START_DATE,
                 end_date=TEST_END_DATE,
-                protocol=Protocol.UNISWAP_V3,
+                protocol="uniswap_v3",
             )
 
         # Count high confidence results
@@ -463,7 +463,7 @@ class TestMultiDEXVolumeProviderIntegration:
                 chain=Chain.ARBITRUM,
                 start_date=TEST_START_DATE,
                 end_date=TEST_END_DATE,
-                protocol=Protocol.UNISWAP_V3,
+                protocol="uniswap_v3",
             )
 
         assert len(volumes) > 0, "Expected volume results for Arbitrum"

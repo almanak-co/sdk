@@ -399,9 +399,10 @@ class TestImbalancedVocabulary:
         assert intent.coin_index is None
 
     def test_rejects_non_curve_protocol(self) -> None:
-        """CodeRabbit: imbalanced_amounts is Curve-only; a non-Curve protocol
-        (e.g. the default uniswap_v3) would silently ignore it — fail fast."""
-        with pytest.raises(ValueError, match="only supported by the Curve connector"):
+        """CodeRabbit: imbalanced_amounts needs the lp_close_exit_selectors
+        capability (Curve today); a protocol without it (e.g. the default
+        uniswap_v3) would silently ignore it — fail fast."""
+        with pytest.raises(ValueError, match="imbalanced_amounts is not supported by protocol 'uniswap_v3'.*'curve'"):
             LPCloseIntent(
                 position_id="x",
                 protocol="uniswap_v3",

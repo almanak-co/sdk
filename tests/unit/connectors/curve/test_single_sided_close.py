@@ -396,9 +396,11 @@ class TestLpCloseCoinIndexField:
             LPCloseIntent(position_id="100", pool="3pool", protocol="curve", coin_index=True)
 
     def test_non_curve_protocol_rejected(self) -> None:
-        """coin_index is Curve-only; a non-Curve protocol (default uniswap_v3)
-        would silently ignore it — fail fast (CodeRabbit, VIB-5438 consistency)."""
-        with pytest.raises(ValueError, match="only supported by the Curve connector"):
+        """coin_index needs the lp_close_exit_selectors capability (Curve today);
+        a protocol without it (default uniswap_v3) would silently ignore the
+        field — fail fast (CodeRabbit, VIB-5438 consistency). The message names
+        the supporting protocols from the capabilities registry."""
+        with pytest.raises(ValueError, match="coin_index is not supported by protocol 'uniswap_v3'.*'curve'"):
             LPCloseIntent(position_id="100", pool="3pool", protocol="uniswap_v3", coin_index=1)
 
     def test_serialize_round_trip_preserves_coin_index(self) -> None:

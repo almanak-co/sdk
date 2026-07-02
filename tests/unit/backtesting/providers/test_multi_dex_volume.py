@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from almanak.core.enums import Chain, Protocol
+from almanak.core.enums import Chain
 from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
 from almanak.framework.backtesting.pnl.providers.multi_dex_volume import (
     FALLBACK_DATA_SOURCE,
@@ -49,17 +49,17 @@ class TestMultiDEXVolumeProviderInitialization:
 class TestProtocolMappings:
     """Tests for the declaration-derived protocol dispatch (VIB-4851 Phase D)."""
 
-    def test_protocol_enum_values_resolve(self):
-        """Legacy Protocol enum values resolve through the registry."""
+    def test_legacy_uppercase_values_resolve(self):
+        """Legacy uppercase (enum-era) values resolve through the registry."""
         expected_protocols = [
-            Protocol.UNISWAP_V3,
-            Protocol.SUSHISWAP_V3,
-            Protocol.PANCAKESWAP_V3,
-            Protocol.AERODROME,
-            Protocol.TRADERJOE_V2,
+            ("UNISWAP_V3", "uniswap_v3"),
+            ("SUSHISWAP_V3", "sushiswap_v3"),
+            ("PANCAKESWAP_V3", "pancakeswap_v3"),
+            ("AERODROME", "aerodrome"),
+            ("TRADERJOE_V2", "traderjoe_v2"),
         ]
-        for protocol in expected_protocols:
-            assert DexVolumeRegistry.canonical(protocol.value) == protocol.value.lower()
+        for legacy_value, canonical in expected_protocols:
+            assert DexVolumeRegistry.canonical(legacy_value) == canonical
 
     def test_aerodrome_slipstream_alias_resolves_to_aerodrome(self):
         """Slipstream (CL) volume rides the aerodrome connector: the canonical
@@ -105,11 +105,11 @@ class TestProtocolMappings:
 class TestProtocolNormalization:
     """Tests for protocol normalization."""
 
-    def test_normalize_protocol_enum(self):
-        """Test Protocol enum is normalized to string."""
+    def test_normalize_legacy_uppercase_values(self):
+        """Legacy uppercase (enum-era) values normalize to canonical keys."""
         provider = MultiDEXVolumeProvider()
-        assert provider._get_protocol_id(Protocol.UNISWAP_V3) == "uniswap_v3"
-        assert provider._get_protocol_id(Protocol.AERODROME) == "aerodrome"
+        assert provider._get_protocol_id("UNISWAP_V3") == "uniswap_v3"
+        assert provider._get_protocol_id("AERODROME") == "aerodrome"
 
     def test_normalize_string_protocol(self):
         """Test string protocol is normalized to lowercase."""
@@ -152,8 +152,8 @@ class TestGetVolume:
     """Tests for get_volume method routing."""
 
     @pytest.mark.asyncio
-    async def test_get_volume_with_protocol_enum(self):
-        """Test volume fetching with Protocol enum."""
+    async def test_get_volume_with_protocol(self):
+        """Test volume fetching with an explicit protocol key."""
         provider = MultiDEXVolumeProvider()
 
         # Mock the inner provider
@@ -177,7 +177,7 @@ class TestGetVolume:
             chain=Chain.ARBITRUM,
             start_date=date(2024, 1, 15),
             end_date=date(2024, 1, 15),
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 
         assert len(volumes) == 1
@@ -258,7 +258,7 @@ class TestGetVolume:
             chain=Chain.BSC,  # BSC not supported by Uniswap V3
             start_date=date(2024, 1, 15),
             end_date=date(2024, 1, 17),
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 
         assert len(volumes) == 3
@@ -327,7 +327,7 @@ class TestFallbackBehavior:
                 chain=Chain.ARBITRUM,
                 start_date=date(2024, 1, 15),
                 end_date=date(2024, 1, 15),
-                protocol=Protocol.UNISWAP_V3,
+                protocol="uniswap_v3",
             )
 
 
@@ -386,8 +386,7 @@ class TestHelperMethods:
         """Test get_supported_chains returns chains for a protocol."""
         provider = MultiDEXVolumeProvider()
 
-        # Test with Protocol enum
-        chains = provider.get_supported_chains(Protocol.UNISWAP_V3)
+        chains = provider.get_supported_chains("uniswap_v3")
         assert Chain.ETHEREUM in chains
         assert Chain.ARBITRUM in chains
 
