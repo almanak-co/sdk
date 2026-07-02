@@ -156,8 +156,23 @@ FROZEN_ETH_DENOMINATED_FEEDS: dict[str, dict[str, str]] = {
 MULTISEND_CREATE2 = "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"
 # Legacy keys included "gnosis" — not a registered chain, unreachable from
 # every consumer (all resolve through registered-chain names).
+# "hyperevm" declares the full Safe/Zodiac stack via safe_stack_contracts()
+# (VIB-5606): canonical CREATE2 addresses, on-chain-verified live on chain 999,
+# so it is in BOTH the multisend set and the full safe-stack set.
 FROZEN_MULTISEND_CHAINS = frozenset(
-    {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "gnosis", "bsc", "mantle", "xlayer"}
+    {
+        "ethereum",
+        "arbitrum",
+        "optimism",
+        "polygon",
+        "base",
+        "avalanche",
+        "gnosis",
+        "bsc",
+        "mantle",
+        "xlayer",
+        "hyperevm",
+    }
 )
 FROZEN_SAFE_STACK_CHAINS = FROZEN_MULTISEND_CHAINS - {"gnosis", "mantle", "xlayer"}
 FROZEN_SAFE_SIGNER_CONTRACTS: dict[str, str] = {
@@ -312,6 +327,20 @@ class TestSafeSignerAddressInversion:
         assert {chain: address.lower() for chain, address in secondary.items()} == {
             "ethereum": FROZEN_ENSO_DELEGATES["enso_delegate_secondary"]
         }
+
+    def test_hyperevm_resolves_full_safe_stack_without_enso(self) -> None:
+        """VIB-5606: HyperEVM (999) registers the canonical Safe/Zodiac stack so
+        the Safe-wallet execution path resolves on chain 999, but declares NO
+        Enso delegate (Enso isn't deployed there; CoreWriter is a CALL target)."""
+        from almanak.framework.execution.signer.safe.constants import get_multisend_address
+
+        # MultiSend + every Safe/Zodiac signer contract resolves for hyperevm.
+        assert get_multisend_address("hyperevm") == MULTISEND_CREATE2
+        for key, expected in FROZEN_SAFE_SIGNER_CONTRACTS.items():
+            assert contract_address_map(key).get("hyperevm") == expected
+        # No Enso delegate registered on hyperevm (would force DELEGATECALL).
+        assert "hyperevm" not in contract_address_map("enso_delegate_primary")
+        assert "hyperevm" not in contract_address_map("enso_delegate_secondary")
 
     def test_enso_delegate_operation_decision_derives_from_descriptor_contracts(self) -> None:
         from almanak.framework.execution.signer.safe.constants import (

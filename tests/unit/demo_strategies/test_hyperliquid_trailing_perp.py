@@ -20,6 +20,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.framework.teardown import TeardownMode as _TeardownMode
+
 _SEED_DIR = (
     Path(__file__).resolve().parents[3]
     / "almanak"
@@ -66,6 +68,8 @@ def _in_position(strat, module, *, entry: str, side=None, high_water="0"):
     strat._position_side = side or module.LONG
     strat._entry_price = Decimal(entry)
     strat._high_water_pnl = Decimal(high_water)
+    # A live, managed position is one whose fill has been CONFIRMED (VIB-5597).
+    strat._fill_confirmed = True
 
 
 class TestExitPrecedence:
@@ -158,6 +162,8 @@ class TestLifecycleState:
         strat.on_intent_executed(open_intent, True, SimpleNamespace(entry_price="100"))
         assert strat._position_side == module.LONG
         assert strat._entry_price == Decimal("100")
+        # VIB-5597: submission does NOT confirm the fill — position starts PENDING.
+        assert strat._fill_confirmed is False
 
         close_intent = SimpleNamespace(intent_type=SimpleNamespace(value="PERP_CLOSE"), is_long=True)
         strat.on_intent_executed(close_intent, True, None)
@@ -187,3 +193,88 @@ class TestLifecycleState:
         strat.on_intent_executed(open_intent, False, None)
         assert strat._position_side == module.LONG
         assert strat._entry_price == Decimal("100")
+
+
+class TestFillReconciliation:
+    """VIB-5597: position state is driven by the OBSERVED fill, not submission.
+
+    A CoreWriter submission returning status 1 only proves *submission*; the IOC
+    order may partial-fill or be rejected off-EVM. The strategy must not manage /
+    close a position that may not exist.
+    """
+
+    def _submit_open(self, strat, module):
+        open_intent = SimpleNamespace(intent_type=SimpleNamespace(value="PERP_OPEN"), is_long=True)
+        strat._position_side = None
+        strat._fill_confirmed = False
+        strat.on_intent_executed(open_intent, True, SimpleNamespace(entry_price="100"))
+
+    def test_submission_does_not_commit_a_confirmed_position(self, module):
+        strat = _make(module)
+        self._submit_open(strat, module)
+        # Side is latched (so teardown can cover a possibly-filled order) but the
+        # fill is UNCONFIRMED — the position is PENDING, not live.
+        assert strat._position_side == module.LONG
+        assert strat._fill_confirmed is False
+
+    def test_pending_position_holds_rather_than_manage_or_reopen(self, module):
+        strat = _make(module)
+        self._submit_open(strat, module)
+        # decide() must HOLD while pending — never manage (maybe-nonexistent) nor
+        # re-open (maybe-existing). Even a price that WOULD trip take-profit holds.
+        assert strat.decide(_market("102")).intent_type.value == "HOLD"
+
+    def test_confirmed_fill_promotes_to_a_live_managed_position(self, module):
+        strat = _make(module)
+        self._submit_open(strat, module)
+        strat.reconcile_fill("PERP_OPEN", module.FillStatus.FILLED)
+        assert strat._fill_confirmed is True
+        # Now management is live: a +2% move trips take-profit → PERP_CLOSE.
+        assert strat.decide(_market("102")).intent_type.value == "PERP_CLOSE"
+
+    def test_rejected_submission_clears_the_phantom_position(self, module):
+        strat = _make(module)
+        self._submit_open(strat, module)
+        strat.reconcile_fill("PERP_OPEN", module.FillStatus.REJECTED)
+        # No phantom position — back to FLAT; decide() re-enters (opens).
+        assert strat._position_side is None
+        assert strat._fill_confirmed is False
+        assert strat.decide(_market("100")).intent_type.value == "PERP_OPEN"
+
+    def test_unmeasured_status_keeps_position_pending(self, module):
+        strat = _make(module)
+        self._submit_open(strat, module)
+        strat.reconcile_fill("PERP_OPEN", module.FillStatus.UNMEASURED)
+        # Empty ≠ Zero: an unmeasured read neither confirms nor rejects — stay PENDING.
+        assert strat._position_side == module.LONG
+        assert strat._fill_confirmed is False
+        assert strat.decide(_market("102")).intent_type.value == "HOLD"
+
+    def test_partial_fill_is_treated_as_a_confirmed_fill(self, module):
+        strat = _make(module)
+        self._submit_open(strat, module)
+        strat.reconcile_fill("PERP_OPEN", module.FillStatus.PARTIALLY_FILLED)
+        assert strat._fill_confirmed is True
+
+    def test_reconcile_ignored_once_confirmed(self, module):
+        strat = _make(module)
+        self._submit_open(strat, module)
+        strat.reconcile_fill("PERP_OPEN", module.FillStatus.FILLED)
+        # A later spurious REJECT must not tear down an already-confirmed position.
+        strat.reconcile_fill("PERP_OPEN", module.FillStatus.REJECTED)
+        assert strat._position_side == module.LONG
+        assert strat._fill_confirmed is True
+
+    def test_pending_position_is_surfaced_for_teardown(self, module):
+        strat = _make(module)
+        strat._chain = "hyperevm"
+        strat._deployment_id = "deployment:test"
+        self._submit_open(strat, module)
+        # Fail-closed: a pending order may have filled on HyperCore, so teardown
+        # must still cover it.
+        summary = strat.get_open_positions()
+        assert len(summary.positions) == 1
+        assert summary.positions[0].details["fill_confirmed"] is False
+        intents = strat.generate_teardown_intents(_TeardownMode.SOFT)
+        assert len(intents) == 1
+        assert intents[0].intent_type.value == "PERP_CLOSE"

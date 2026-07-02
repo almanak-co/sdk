@@ -5618,6 +5618,206 @@ class FundingRateSpreadResponse(_message.Message):
 Global___FundingRateSpreadResponse: _TypeAlias = FundingRateSpreadResponse  # noqa: Y015
 
 @_typing.final
+class UserFillsRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    VENUE_FIELD_NUMBER: _builtins.int
+    WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    COIN_FIELD_NUMBER: _builtins.int
+    START_TIME_MS_FIELD_NUMBER: _builtins.int
+    venue: _builtins.str
+    """Venue name — one per perp connector that registers a
+    ``GatewayPerpFillsCapability``. Unknown values -> INVALID_ARGUMENT.
+    """
+    wallet_address: _builtins.str
+    """Account whose fills to read (HyperCore is keyed by the EVM address)."""
+    coin: _builtins.str
+    """Optional coin filter (e.g. "BTC", "ETH"). Empty = all coins."""
+    start_time_ms: _builtins.int
+    """Optional lower bound on fill time, epoch MILLISECONDS. 0 = no bound."""
+    def __init__(
+        self,
+        *,
+        venue: _builtins.str = ...,
+        wallet_address: _builtins.str = ...,
+        coin: _builtins.str = ...,
+        start_time_ms: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["coin", b"coin", "start_time_ms", b"start_time_ms", "venue", b"venue", "wallet_address", b"wallet_address"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___UserFillsRequest: _TypeAlias = UserFillsRequest  # noqa: Y015
+
+@_typing.final
+class PerpFill(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    COIN_FIELD_NUMBER: _builtins.int
+    PX_FIELD_NUMBER: _builtins.int
+    SZ_FIELD_NUMBER: _builtins.int
+    DIR_FIELD_NUMBER: _builtins.int
+    FEE_FIELD_NUMBER: _builtins.int
+    CLOSED_PNL_FIELD_NUMBER: _builtins.int
+    OID_FIELD_NUMBER: _builtins.int
+    CLOID_FIELD_NUMBER: _builtins.int
+    TIME_MS_FIELD_NUMBER: _builtins.int
+    CROSSED_FIELD_NUMBER: _builtins.int
+    FEE_TOKEN_FIELD_NUMBER: _builtins.int
+    coin: _builtins.str
+    """Coin / market symbol the fill is on (e.g. "BTC")."""
+    px: _builtins.str
+    """Fill price. Decimal-as-string. Empty = venue did not report it."""
+    sz: _builtins.str
+    """Fill size in base asset (absolute). Decimal-as-string. Empty = unmeasured."""
+    dir: _builtins.str
+    """Direction label as the venue reports it ("Open Long", "Close Short", ...)."""
+    fee: _builtins.str
+    """Fee PAID on this fill, USD-denominated. Decimal-as-string. Empty =
+    unmeasured (NEVER "0" unless the venue reported a measured zero fee).
+    """
+    closed_pnl: _builtins.str
+    """Realized PnL booked on this fill (non-zero only on closing fills).
+    Decimal-as-string. Empty = unmeasured.
+    """
+    oid: _builtins.str
+    """Order id (venue oid)."""
+    cloid: _builtins.str
+    """Client order id (cloid) the CoreWriter order carried — the correlation
+    key back to the originating intent. Hex string ("0x...") or empty.
+    """
+    time_ms: _builtins.int
+    """Fill time, epoch milliseconds."""
+    crossed: _builtins.bool
+    """True iff this fill crossed the spread (taker). Advisory."""
+    fee_token: _builtins.str
+    """Fee token symbol (e.g. "USDC"). Empty when the venue did not report it."""
+    def __init__(
+        self,
+        *,
+        coin: _builtins.str = ...,
+        px: _builtins.str = ...,
+        sz: _builtins.str = ...,
+        dir: _builtins.str = ...,
+        fee: _builtins.str = ...,
+        closed_pnl: _builtins.str = ...,
+        oid: _builtins.str = ...,
+        cloid: _builtins.str = ...,
+        time_ms: _builtins.int = ...,
+        crossed: _builtins.bool = ...,
+        fee_token: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cloid", b"cloid", "closed_pnl", b"closed_pnl", "coin", b"coin", "crossed", b"crossed", "dir", b"dir", "fee", b"fee", "fee_token", b"fee_token", "oid", b"oid", "px", b"px", "sz", b"sz", "time_ms", b"time_ms"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PerpFill: _TypeAlias = PerpFill  # noqa: Y015
+
+@_typing.final
+class UserFillsResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    FILLS_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def fills(self) -> _containers.RepeatedCompositeFieldContainer[Global___PerpFill]: ...
+    def __init__(
+        self,
+        *,
+        fills: _abc.Iterable[Global___PerpFill] | None = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "fills", b"fills", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___UserFillsResponse: _TypeAlias = UserFillsResponse  # noqa: Y015
+
+@_typing.final
+class UserFundingRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    VENUE_FIELD_NUMBER: _builtins.int
+    WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    COIN_FIELD_NUMBER: _builtins.int
+    START_TIME_MS_FIELD_NUMBER: _builtins.int
+    venue: _builtins.str
+    wallet_address: _builtins.str
+    coin: _builtins.str
+    """Optional coin filter. Empty = all coins."""
+    start_time_ms: _builtins.int
+    """Optional lower bound, epoch ms. 0 = no bound."""
+    def __init__(
+        self,
+        *,
+        venue: _builtins.str = ...,
+        wallet_address: _builtins.str = ...,
+        coin: _builtins.str = ...,
+        start_time_ms: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["coin", b"coin", "start_time_ms", b"start_time_ms", "venue", b"venue", "wallet_address", b"wallet_address"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___UserFundingRequest: _TypeAlias = UserFundingRequest  # noqa: Y015
+
+@_typing.final
+class PerpFundingDelta(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    COIN_FIELD_NUMBER: _builtins.int
+    USDC_FIELD_NUMBER: _builtins.int
+    FUNDING_RATE_FIELD_NUMBER: _builtins.int
+    TIME_MS_FIELD_NUMBER: _builtins.int
+    coin: _builtins.str
+    """Coin / market symbol."""
+    usdc: _builtins.str
+    """Signed funding amount in USDC (negative = paid, positive = received).
+    Decimal-as-string. Empty = unmeasured.
+    """
+    funding_rate: _builtins.str
+    """Funding rate applied for this settlement. Decimal-as-string. Empty =
+    unmeasured.
+    """
+    time_ms: _builtins.int
+    """Settlement time, epoch milliseconds."""
+    def __init__(
+        self,
+        *,
+        coin: _builtins.str = ...,
+        usdc: _builtins.str = ...,
+        funding_rate: _builtins.str = ...,
+        time_ms: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["coin", b"coin", "funding_rate", b"funding_rate", "time_ms", b"time_ms", "usdc", b"usdc"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PerpFundingDelta: _TypeAlias = PerpFundingDelta  # noqa: Y015
+
+@_typing.final
+class UserFundingResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DELTAS_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def deltas(self) -> _containers.RepeatedCompositeFieldContainer[Global___PerpFundingDelta]: ...
+    def __init__(
+        self,
+        *,
+        deltas: _abc.Iterable[Global___PerpFundingDelta] | None = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deltas", b"deltas", "error", b"error", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___UserFundingResponse: _TypeAlias = UserFundingResponse  # noqa: Y015
+
+@_typing.final
 class PoolAnalyticsRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 

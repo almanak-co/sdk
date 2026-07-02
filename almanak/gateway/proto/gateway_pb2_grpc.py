@@ -3535,6 +3535,195 @@ class FundingRateService(object):
             _registered_method=True)
 
 
+class PerpFillServiceStub(object):
+    """=============================================================================
+    PerpFillService - per-fill economics + funding deltas (VIB-5595)
+    =============================================================================
+
+    CoreWriter-style async-settlement perp venues (Hyperliquid) settle orders off
+    the EVM, so the submit receipt carries NO fill price / fee / realized PnL /
+    funding. That data lives on the venue's Info API (userFills / userFunding).
+    This service is the gateway-side reader; the HTTP egress to
+    ``api.hyperliquid.xyz/info`` lives in the connector's gateway provider
+    (``GatewayPerpFillsCapability``), never in the strategy container.
+
+    The accounting path correlates each fill to the intent that produced it via
+    the deterministic ``cloid`` a CoreWriter order carries (keccak(intent_id)[:16]).
+
+    Wire conventions: Decimal-as-string, Empty != Zero (an empty string is
+    "unmeasured by the venue for this field", NEVER substitute "0").
+
+    Error semantics — dual-channel wire shape:
+    - status OK + success=true   -> data returned (fills list may be empty =
+    measured empty book).
+    - status OK + success=false  -> framework treats as unavailable (no silent
+    zero-fill).
+    - non-OK status              -> framework treats as unavailable; the reader
+    stamps the PerpData as unmeasured (None).
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.GetUserFills = channel.unary_unary(
+                '/almanak.gateway.proto.PerpFillService/GetUserFills',
+                request_serializer=gateway__pb2.UserFillsRequest.SerializeToString,
+                response_deserializer=gateway__pb2.UserFillsResponse.FromString,
+                _registered_method=True)
+        self.GetUserFunding = channel.unary_unary(
+                '/almanak.gateway.proto.PerpFillService/GetUserFunding',
+                request_serializer=gateway__pb2.UserFundingRequest.SerializeToString,
+                response_deserializer=gateway__pb2.UserFundingResponse.FromString,
+                _registered_method=True)
+
+
+class PerpFillServiceServicer(object):
+    """=============================================================================
+    PerpFillService - per-fill economics + funding deltas (VIB-5595)
+    =============================================================================
+
+    CoreWriter-style async-settlement perp venues (Hyperliquid) settle orders off
+    the EVM, so the submit receipt carries NO fill price / fee / realized PnL /
+    funding. That data lives on the venue's Info API (userFills / userFunding).
+    This service is the gateway-side reader; the HTTP egress to
+    ``api.hyperliquid.xyz/info`` lives in the connector's gateway provider
+    (``GatewayPerpFillsCapability``), never in the strategy container.
+
+    The accounting path correlates each fill to the intent that produced it via
+    the deterministic ``cloid`` a CoreWriter order carries (keccak(intent_id)[:16]).
+
+    Wire conventions: Decimal-as-string, Empty != Zero (an empty string is
+    "unmeasured by the venue for this field", NEVER substitute "0").
+
+    Error semantics — dual-channel wire shape:
+    - status OK + success=true   -> data returned (fills list may be empty =
+    measured empty book).
+    - status OK + success=false  -> framework treats as unavailable (no silent
+    zero-fill).
+    - non-OK status              -> framework treats as unavailable; the reader
+    stamps the PerpData as unmeasured (None).
+    """
+
+    def GetUserFills(self, request, context):
+        """Executed fills for a wallet (optionally filtered to a coin + a start time).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetUserFunding(self, request, context):
+        """Funding settlements (deltas) for a wallet over the same window.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_PerpFillServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'GetUserFills': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetUserFills,
+                    request_deserializer=gateway__pb2.UserFillsRequest.FromString,
+                    response_serializer=gateway__pb2.UserFillsResponse.SerializeToString,
+            ),
+            'GetUserFunding': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetUserFunding,
+                    request_deserializer=gateway__pb2.UserFundingRequest.FromString,
+                    response_serializer=gateway__pb2.UserFundingResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'almanak.gateway.proto.PerpFillService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('almanak.gateway.proto.PerpFillService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class PerpFillService(object):
+    """=============================================================================
+    PerpFillService - per-fill economics + funding deltas (VIB-5595)
+    =============================================================================
+
+    CoreWriter-style async-settlement perp venues (Hyperliquid) settle orders off
+    the EVM, so the submit receipt carries NO fill price / fee / realized PnL /
+    funding. That data lives on the venue's Info API (userFills / userFunding).
+    This service is the gateway-side reader; the HTTP egress to
+    ``api.hyperliquid.xyz/info`` lives in the connector's gateway provider
+    (``GatewayPerpFillsCapability``), never in the strategy container.
+
+    The accounting path correlates each fill to the intent that produced it via
+    the deterministic ``cloid`` a CoreWriter order carries (keccak(intent_id)[:16]).
+
+    Wire conventions: Decimal-as-string, Empty != Zero (an empty string is
+    "unmeasured by the venue for this field", NEVER substitute "0").
+
+    Error semantics — dual-channel wire shape:
+    - status OK + success=true   -> data returned (fills list may be empty =
+    measured empty book).
+    - status OK + success=false  -> framework treats as unavailable (no silent
+    zero-fill).
+    - non-OK status              -> framework treats as unavailable; the reader
+    stamps the PerpData as unmeasured (None).
+    """
+
+    @staticmethod
+    def GetUserFills(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.PerpFillService/GetUserFills',
+            gateway__pb2.UserFillsRequest.SerializeToString,
+            gateway__pb2.UserFillsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetUserFunding(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.PerpFillService/GetUserFunding',
+            gateway__pb2.UserFundingRequest.SerializeToString,
+            gateway__pb2.UserFundingResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
 class PoolAnalyticsServiceStub(object):
     """=============================================================================
     PoolAnalyticsService - off-chain pool analytics (TVL / volume / fee APR)

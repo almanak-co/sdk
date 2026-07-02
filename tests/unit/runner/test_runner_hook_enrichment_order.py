@@ -42,7 +42,7 @@ class _Registry:
         self.events = events
         self.calls: list[tuple[Any, Any, str]] = []
 
-    def enrich_result(self, result: Any, *, gateway_client: Any, chain: str) -> None:
+    def enrich_result(self, result: Any, *, gateway_client: Any, chain: str, wallet_address: str = "") -> None:
         self.events.append("enrich")
         self.calls.append((result, gateway_client, chain))
         result.extracted_data = {"current_tick": 123}

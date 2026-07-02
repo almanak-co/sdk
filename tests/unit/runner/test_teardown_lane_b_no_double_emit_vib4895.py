@@ -61,7 +61,9 @@ class _Runner(StrategyRunner):
         self.emit_calls = 0
 
     # --- neutralise unrelated deps so build -> save -> emit-guard runs clean ---
-    def _maybe_enrich_result_with_runner_hooks(self, result: Any, chain: str) -> None:  # noqa: ARG002
+    def _maybe_enrich_result_with_runner_hooks(
+        self, result: Any, chain: str, wallet_address: str = ""
+    ) -> None:  # noqa: ARG002
         return None
 
     async def _maybe_save_ledger_with_registry(self, **_kwargs: Any) -> bool:

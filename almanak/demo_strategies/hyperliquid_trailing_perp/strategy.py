@@ -36,6 +36,16 @@ The "little interesting" part — the trailing stop:
 Design rules honoured (the golden promotion gate — same as gmx_v2_directional_perp):
   - State (`_position_side`, `_entry_price`, `_high_water_pnl`) is committed ONLY
     in on_intent_executed, after a fill confirms — never speculatively in decide().
+  - FILL-VS-SUBMISSION RECONCILIATION (VIB-5597): CoreWriter settles async — a
+    submitted IOC order can partial-fill or be rejected while the EVM tx still
+    returns status 1. So a PERP_OPEN submission commits the position as PENDING
+    (unconfirmed), NOT as open. It is promoted to a live, managed position only
+    once the fill is OBSERVED — via the reconcile_fill() seam, driven by the
+    `0x0800` position read and/or orderStatus-by-cloid (the same settlement-
+    observer shape gmx_v2 uses for keeper-settled fills). An unconfirmed
+    submission is `unmeasured`, never assumed-filled: while pending, the strategy
+    HOLDs (it neither manages a maybe-nonexistent position nor re-opens a
+    maybe-existing one), and it reports no confirmed open position.
   - PnL is measured against the FILL price, not the signal-time price.
   - Data-unavailable reads degrade to HOLD; any other exception propagates.
   - No direct network egress — all data via MarketSnapshot / the gateway.
@@ -63,6 +73,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors.hyperliquid.fill_reconciliation import FillStatus
 from almanak.framework.data import BalanceUnavailableError, MarketSnapshotError, PriceUnavailableError
 from almanak.framework.intents import Intent
 from almanak.framework.market import MarketSnapshot
@@ -181,6 +192,12 @@ class HyperliquidTrailingPerp(IntentStrategy):
         self._high_water_pnl: Decimal = Decimal("0")
         # Decide-time price, the entry-price fallback if the fill omits one.
         self._pending_entry_price: Decimal | None = None
+        # Fill-vs-submission reconciliation (VIB-5597): a PERP_OPEN submission sets
+        # ``_position_side`` but leaves ``_fill_confirmed`` False (PENDING) — the
+        # position is not managed as live until reconcile_fill() observes the fill.
+        # None side + not-confirmed = FLAT; a side + not-confirmed = PENDING
+        # (submitted, unconfirmed); a side + confirmed = a live managed position.
+        self._fill_confirmed: bool = False
 
         logger.info(
             "HyperliquidTrailingPerp initialized: market=%s, dir=%s, size=$%s, leverage=%sx, "
@@ -197,6 +214,12 @@ class HyperliquidTrailingPerp(IntentStrategy):
     def decide(self, market: MarketSnapshot) -> Intent | None:
         if self.force_action:
             return self._forced_intent(market)
+
+        # PENDING (submitted, fill unconfirmed): do NOT manage a position that may
+        # not exist, and do NOT re-open one that may. HOLD until reconcile_fill()
+        # resolves the submission (VIB-5597). Empty ≠ Zero: unconfirmed ≠ flat.
+        if self._position_side is not None and not self._fill_confirmed:
+            return Intent.hold(reason=f"{self._position_side} submitted, awaiting fill confirmation")
 
         if self._position_side is None:
             return self._enter(market)
@@ -337,21 +360,64 @@ class HyperliquidTrailingPerp(IntentStrategy):
         type_value = intent_type.value if hasattr(intent_type, "value") else str(intent_type)
 
         if type_value == "PERP_OPEN":
+            # VIB-5597: submission success ≠ fill. Record the intended side and the
+            # fallback entry price but mark the position PENDING (unconfirmed). It
+            # is promoted to a live, managed position only when reconcile_fill()
+            # observes the fill on HyperCore. Until then decide() HOLDs.
             self._position_side = LONG if getattr(intent, "is_long", True) else SHORT
             self._entry_price = self._resolve_fill_price(result) or self._pending_entry_price
             self._pending_entry_price = None
             self._high_water_pnl = Decimal("0")  # reset the trail for the new position
-            logger.info("OPEN confirmed: side=%s, entry=%s", self._position_side, self._entry_price)
+            self._fill_confirmed = False
+            logger.info(
+                "OPEN submitted (PENDING fill confirmation): side=%s, entry~%s", self._position_side, self._entry_price
+            )
 
         elif type_value == "PERP_CLOSE":
             logger.info("CLOSE confirmed: was %s, now FLAT (reenter=%s)", self._position_side, self.reenter_after_close)
             self._position_side = None
             self._entry_price = None
             self._high_water_pnl = Decimal("0")
+            self._fill_confirmed = False
             if not self.reenter_after_close:
                 # One-shot lifecycle: latch to force_action=hold so decide() stops
                 # re-opening after the single round-trip completes.
                 self.force_action = "done"
+
+    def reconcile_fill(self, intent_type: str, status: FillStatus) -> None:
+        """Drive position state from the OBSERVED fill (VIB-5597 seam).
+
+        Called after a PERP_OPEN submission once a fill signal has been read from
+        HyperCore (the ``0x0800`` position read and/or orderStatus-by-cloid,
+        combined by ``fill_reconciliation.reconcile_fill``). This is the seam that
+        turns a PENDING submission into a live managed position — or clears a
+        phantom one — so the strategy never manages a position that did not fill.
+
+        The wiring that feeds this each tick (gateway orderStatus lookup + a
+        post-execution position re-read) is a runner-level follow-up; the seam and
+        its state transitions live here so the reference behaviour is correct and
+        unit-testable now.
+
+        Transitions (Empty ≠ Zero — UNMEASURED changes nothing):
+          * FILLED / PARTIALLY_FILLED → promote PENDING → live managed position.
+          * REJECTED → clear PENDING → FLAT (no phantom position to manage/close).
+          * RESTING / UNMEASURED → stay PENDING (keep HOLDing until resolved).
+        """
+        if intent_type != "PERP_OPEN":
+            return
+        if self._position_side is None or self._fill_confirmed:
+            return  # nothing pending to reconcile
+        if status.is_confirmed_fill:
+            self._fill_confirmed = True
+            logger.info("FILL confirmed (%s): promoting %s to a live position", status, self._position_side)
+        elif status.is_confirmed_reject:
+            logger.warning("OPEN REJECTED (%s): clearing phantom %s position → FLAT", status, self._position_side)
+            self._position_side = None
+            self._entry_price = None
+            self._high_water_pnl = Decimal("0")
+            self._fill_confirmed = False
+        else:
+            logger.info("Fill still unconfirmed (%s) for %s — staying PENDING", status, self._position_side)
 
     @staticmethod
     def _resolve_fill_price(result: Any) -> Decimal | None:
@@ -380,6 +446,7 @@ class HyperliquidTrailingPerp(IntentStrategy):
             "position_side": self._position_side,
             "entry_price": str(self._entry_price) if self._entry_price is not None else None,
             "high_water_pnl": str(self._high_water_pnl),
+            "fill_confirmed": self._fill_confirmed,
         }
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -390,14 +457,25 @@ class HyperliquidTrailingPerp(IntentStrategy):
         self._entry_price = Decimal(str(ep)) if ep is not None else None
         hw = state.get("high_water_pnl")
         self._high_water_pnl = Decimal(str(hw)) if hw is not None else Decimal("0")
+        # A restart with a side but no persisted confirmation flag (legacy row, or
+        # a crash mid-open) is treated as PENDING — fail-safe: a fill must be
+        # re-observed before the position is managed (Empty ≠ Zero).
+        self._fill_confirmed = bool(state.get("fill_confirmed", False)) if self._position_side is not None else False
 
     def get_status(self) -> dict[str, Any]:
+        if self._position_side is None:
+            lifecycle = "flat"
+        elif not self._fill_confirmed:
+            lifecycle = "pending"  # submitted, fill unconfirmed (VIB-5597)
+        else:
+            lifecycle = self._position_side
         return {
             "strategy": "hyperliquid_trailing_perp",
             "chain": self.chain,
             "market": self.market,
             "direction": LONG if self.is_long else SHORT,
-            "position_side": self._position_side or "flat",
+            "position_side": lifecycle,
+            "fill_confirmed": self._fill_confirmed,
             "entry_price": str(self._entry_price) if self._entry_price is not None else None,
             "high_water_pnl_pct": str(self._high_water_pnl * 100),
         }
@@ -413,6 +491,10 @@ class HyperliquidTrailingPerp(IntentStrategy):
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
         positions: list[PositionInfo] = []
+        # A PENDING (unconfirmed) submission is STILL surfaced for teardown: the
+        # order may have filled on HyperCore even though we have not yet observed
+        # it, so teardown must fail-closed and reduce that possible risk (a
+        # reduce-only close is a safe no-op if nothing filled). VIB-5597.
         if self._position_side is not None:
             positions.append(
                 PositionInfo(
@@ -425,6 +507,7 @@ class HyperliquidTrailingPerp(IntentStrategy):
                         "market": self.market,
                         "side": self._position_side,
                         "size_usd": str(self.size_usd),
+                        "fill_confirmed": self._fill_confirmed,
                     },
                 )
             )

@@ -36,6 +36,8 @@ from almanak.connectors._base.gateway_capabilities import (
     GatewayFundingHistoryCapability,
     GatewayFundingRateCapability,
     GatewayOraclePriceCapability,
+    GatewayOrderStatusCapability,
+    GatewayPerpFillsCapability,
     OraclePriceQuery,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
@@ -244,11 +246,166 @@ def _hyperliquid_parse_funding_entries(
     return points
 
 
+async def _hyperliquid_post_order_status(
+    session: Any,
+    *,
+    wallet_address: str,
+    cloid: int,
+) -> dict[str, Any]:
+    """POST ``orderStatus`` (by ``cloid``) to the Hyperliquid Info API (VIB-5597).
+
+    Returns the raw response JSON — the connector-side parser
+    (``fill_reconciliation.parse_order_status_response``) turns it into a fill
+    verdict. Raises ``OrderStatusUnavailable`` on any transport/decode failure so
+    the caller fail-closes to ``UNMEASURED`` (Empty ≠ Zero — never assume filled).
+
+    The request body is built by the pure connector helper so the wire shape has
+    a single source of truth (and its own unit tests).
+    """
+    from almanak.connectors.hyperliquid.fill_reconciliation import build_order_status_request
+
+    payload = build_order_status_request(wallet_address, cloid)
+
+    try:
+        async with session.post(
+            _HYPERLIQUID_INFO_API,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise OrderStatusUnavailable(f"HTTP {response.status}: {text[:200]}")
+            data = await response.json()
+    except OrderStatusUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 — normalise all transport/decode faults
+        raise OrderStatusUnavailable(f"orderStatus request / decode failed: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise OrderStatusUnavailable(f"orderStatus returned non-object payload: {type(data).__name__}")
+    return data
+
+
+class OrderStatusUnavailable(Exception):
+    """The HyperCore ``orderStatus`` read could not be measured (VIB-5597).
+
+    Empty ≠ Zero: raised on any transport / non-200 / decode failure so the
+    caller treats the fill as UNMEASURED, never as filled or rejected.
+    """
+
+
+# =============================================================================
+# VIB-5595 — userFills / userFunding parsing (pure, module-private)
+# =============================================================================
+
+
+def _hl_str(value: Any) -> str:
+    """Coerce an Info-API field to a wire string, Empty ≠ Zero.
+
+    ``None`` / absent → ``""`` (unmeasured); a present value (including ``0`` /
+    ``"0"``) → its string form (measured). NEVER fabricates ``"0"`` for a missing
+    field — the gateway wire and the accounting path both depend on this.
+    """
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _hl_int_ms(value: Any) -> int:
+    """Coerce an Info-API epoch-ms field to int; 0 on absent/unparseable."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_user_fill(item: Any) -> Any:
+    """Convert one Hyperliquid ``userFills`` entry to ``PerpFillData``.
+
+    Field names per the Hyperliquid Info API ``userFills`` response
+    (``coin``, ``px``, ``sz``, ``dir``, ``closedPnl``, ``fee``, ``feeToken``,
+    ``oid``, ``cloid``, ``time``, ``crossed``). Empty ≠ Zero: a field the venue
+    omits is left as ``""`` (unmeasured), never coerced to ``"0"``.
+    """
+    from almanak.gateway.services.perp_fill_service import PerpFillData
+
+    if not isinstance(item, dict):
+        raise ValueError(f"userFills entry is not an object: {item!r}")
+
+    return PerpFillData(
+        coin=_hl_str(item.get("coin")),
+        px=_hl_str(item.get("px")),
+        sz=_hl_str(item.get("sz")),
+        dir=_hl_str(item.get("dir")),
+        fee=_hl_str(item.get("fee")),
+        closed_pnl=_hl_str(item.get("closedPnl")),
+        oid=_hl_str(item.get("oid")),
+        cloid=_hl_str(item.get("cloid")),
+        time_ms=_hl_int_ms(item.get("time")),
+        crossed=bool(item.get("crossed", False)),
+        fee_token=_hl_str(item.get("feeToken")),
+    )
+
+
+def _parse_user_funding(item: Any) -> Any:
+    """Convert one Hyperliquid ``userFunding`` entry to ``PerpFundingData``.
+
+    A ``userFunding`` row is ``{"time": <ms>, "delta": {"coin", "usdc",
+    "fundingRate", ...}}``. Empty ≠ Zero on every economics field.
+    """
+    from almanak.gateway.services.perp_fill_service import PerpFundingData
+
+    if not isinstance(item, dict):
+        raise ValueError(f"userFunding entry is not an object: {item!r}")
+
+    delta = item.get("delta")
+    if not isinstance(delta, dict):
+        delta = {}
+
+    return PerpFundingData(
+        coin=_hl_str(delta.get("coin")),
+        usdc=_hl_str(delta.get("usdc")),
+        funding_rate=_hl_str(delta.get("fundingRate")),
+        time_ms=_hl_int_ms(item.get("time")),
+    )
+
+
+def _coin_matches(entry_coin: str, filter_coin: str) -> bool:
+    """True when ``entry_coin`` matches the requested ``filter_coin``.
+
+    Empty ``filter_coin`` matches everything. Comparison is case-insensitive on
+    the bare base symbol (Hyperliquid ``userFills`` reports ``"BTC"``; a caller
+    may pass ``"BTC"`` / ``"btc"``).
+    """
+    if not filter_coin:
+        return True
+    return entry_coin.strip().upper() == filter_coin.strip().upper()
+
+
+async def _hl_post_info(session: Any, payload: dict[str, Any]) -> Any:
+    """POST a request body to the Hyperliquid Info API, raising on non-200.
+
+    Reuses the servicer's shared aiohttp session (bounded timeout). Raises on any
+    non-200 status or decode failure so the caller can surface ``ok=False``.
+    """
+    async with session.post(
+        _HYPERLIQUID_INFO_API,
+        json=payload,
+        headers={"Content-Type": "application/json"},
+    ) as response:
+        if response.status != 200:
+            text = await response.text()
+            raise RuntimeError(f"Hyperliquid Info API HTTP {response.status}: {text[:200]}")
+        return await response.json()
+
+
 class HyperliquidGatewayConnector(
     GatewayConnector,
     GatewayFundingRateCapability,
     GatewayFundingHistoryCapability,
     GatewayOraclePriceCapability,
+    GatewayOrderStatusCapability,
+    GatewayPerpFillsCapability,
 ):
     """Gateway-side connector for Hyperliquid perp venue."""
 
@@ -403,5 +560,136 @@ class HyperliquidGatewayConnector(
             return None
         return price
 
+    # ---------------------------------------------------------------------
+    # GatewayOrderStatusCapability (VIB-5597) — fill-vs-submission
+    # ---------------------------------------------------------------------
 
-__all__ = ["HyperliquidGatewayConnector"]
+    def order_status_venue(self) -> str:
+        """Venue identifier matching :meth:`venue` for the order-status lane."""
+        return "hyperliquid"
+
+    async def fetch_order_status(
+        self,
+        servicer: Any,
+        *,
+        wallet_address: str,
+        cloid: int,
+        chain: str,  # noqa: ARG002 — API is chain-agnostic; parity with on-chain venues
+    ) -> Any:
+        """Live ``orderStatus``-by-``cloid`` via the Hyperliquid Info API.
+
+        Confirms whether a specific CoreWriter submission (addressed by its
+        deterministic ``cloid``) filled / partially filled / was rejected. The
+        egress correctly lives here (gateway side); strategy/framework code reads
+        through the gateway. Reuses the servicer's shared aiohttp session so the
+        rate-limit budget is shared with the funding lanes.
+
+        Returns the raw response JSON (parsed connector-side by
+        ``fill_reconciliation.parse_order_status_response``). Raises
+        ``OrderStatusUnavailable`` on any unmeasured read (Empty ≠ Zero).
+        """
+        session = await servicer._get_http_session()
+        return await _hyperliquid_post_order_status(
+            session,
+            wallet_address=wallet_address,
+            cloid=cloid,
+        )
+
+    # ---------------------------------------------------------------------
+    # GatewayPerpFillsCapability (VIB-5595)
+    # ---------------------------------------------------------------------
+
+    def fills_venue(self) -> str:
+        """Venue identifier matching :meth:`venue` / :meth:`funding_venue`."""
+        return "hyperliquid"
+
+    async def fetch_user_fills(
+        self,
+        servicer: Any,
+        *,
+        wallet_address: str,
+        coin: str = "",
+        start_ts: int = 0,
+    ) -> Any:
+        """Per-fill economics for ``wallet_address`` via the Hyperliquid Info API.
+
+        ``servicer`` is the ``PerpFillServiceServicer`` — we reuse its shared
+        aiohttp session (bounded timeout, shared rate-limit budget). Returns a
+        ``PerpFillResult``; a malformed / non-200 response yields ``ok=False``
+        (UNMEASURED — the accounting reader leaves fill economics ``None``), and a
+        wallet with no fills yields ``ok=True`` with an empty list (measured empty
+        book). ``start_ts`` is an epoch-**ms** lower bound (0 = unbounded).
+        """
+        from almanak.gateway.services.perp_fill_service import PerpFillData, PerpFillResult
+
+        session = await servicer._get_http_session()
+        payload: dict[str, Any] = {"type": "userFills", "user": wallet_address}
+        try:
+            data = await _hl_post_info(session, payload)
+        except Exception as exc:  # noqa: BLE001 — surface as unmeasured, never fabricate fills
+            logger.warning("Hyperliquid userFills failed for %s: %s", wallet_address, exc)
+            return PerpFillResult(fills=[], ok=False, error=str(exc))
+
+        if not isinstance(data, list):
+            return PerpFillResult(fills=[], ok=False, error="userFills response was not a list")
+
+        fills: list[PerpFillData] = []
+        for item in data:
+            try:
+                fill = _parse_user_fill(item)
+            except (ValueError, TypeError):
+                logger.debug("Skipping malformed Hyperliquid fill: %s", item)
+                continue
+            if not _coin_matches(fill.coin, coin):
+                continue
+            if start_ts and fill.time_ms and fill.time_ms < start_ts:
+                continue
+            fills.append(fill)
+        return PerpFillResult(fills=fills, ok=True)
+
+    async def fetch_user_funding(
+        self,
+        servicer: Any,
+        *,
+        wallet_address: str,
+        coin: str = "",
+        start_ts: int = 0,
+    ) -> Any:
+        """Funding settlement deltas for ``wallet_address`` via the Info API.
+
+        Semantics mirror :meth:`fetch_user_fills`. The Info API ``userFunding``
+        request takes a ``startTime`` (epoch-ms) window; we pass ``start_ts`` when
+        provided (0 → a wide default window so the caller still gets recent
+        settlements). Returns a ``PerpFundingResult``.
+        """
+        from almanak.gateway.services.perp_fill_service import PerpFundingData, PerpFundingResult
+
+        session = await servicer._get_http_session()
+        payload: dict[str, Any] = {"type": "userFunding", "user": wallet_address}
+        if start_ts:
+            payload["startTime"] = start_ts
+        try:
+            data = await _hl_post_info(session, payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Hyperliquid userFunding failed for %s: %s", wallet_address, exc)
+            return PerpFundingResult(deltas=[], ok=False, error=str(exc))
+
+        if not isinstance(data, list):
+            return PerpFundingResult(deltas=[], ok=False, error="userFunding response was not a list")
+
+        deltas: list[PerpFundingData] = []
+        for item in data:
+            try:
+                delta = _parse_user_funding(item)
+            except (ValueError, TypeError):
+                logger.debug("Skipping malformed Hyperliquid funding entry: %s", item)
+                continue
+            if not _coin_matches(delta.coin, coin):
+                continue
+            if start_ts and delta.time_ms and delta.time_ms < start_ts:
+                continue
+            deltas.append(delta)
+        return PerpFundingResult(deltas=deltas, ok=True)
+
+
+__all__ = ["HyperliquidGatewayConnector", "OrderStatusUnavailable"]

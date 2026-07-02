@@ -25,6 +25,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | LifecycleService | 6 | Agent state management, heartbeat, and commands |
 | TeardownService | 23 | Hosted teardown state routing (V2 deployments): teardown requests, execution state, and operator approvals |
 | PositionService | 1 | Position registry reconciliation against on-chain truth (T24 / VIB-4210) |
+| PerpFillService | 2 | Executed perp fills and funding settlements for a wallet, used by the perp accounting path for realized fees, PnL, and funding (VIB-5595) |
 
 ## Health
 
@@ -2140,6 +2141,90 @@ message ReconcileRequest {
   int32 page_size = 9;                   // Max rows per page (default 64, cap 256; v1: clamped but does not slice)
   string operator_note = 10;             // ≤ 256 bytes
   string trigger = 11;                   // operator_cli | hosted_boot | dashboard | ci
+}
+```
+
+## PerpFillService
+
+Executed fills and funding settlements for a wallet on a perp venue (VIB-5595). Backs the
+perp accounting path: taker fees are routed via `ProtocolFees.perp_fee_usd`, and realized
+PnL / funding via `PerpAccountingEvent`. HTTP egress to the venue (e.g. the Hyperliquid
+Info API `userFills` / `userFunding`) happens server-side only; the framework reader is a
+thin gRPC client. Empty≠Zero: a venue field that is not reported stays unmeasured (empty
+string) and is never coerced to `"0"`.
+
+### GetUserFills
+
+Executed fills for a wallet, optionally filtered to a coin and a start time.
+
+```protobuf
+rpc GetUserFills(UserFillsRequest) returns (UserFillsResponse)
+```
+
+**Request:**
+```protobuf
+message UserFillsRequest {
+  string venue = 1;            // one per perp connector; unknown -> INVALID_ARGUMENT
+  string wallet_address = 2;   // account whose fills to read (EVM address)
+  string coin = 3;             // optional coin filter (e.g. "BTC"). Empty = all
+  int64 start_time_ms = 4;     // optional lower bound, epoch ms. 0 = no bound
+}
+```
+
+**Response:**
+```protobuf
+message PerpFill {
+  string coin = 1;             // market symbol (e.g. "BTC")
+  string px = 2;               // fill price (decimal string; empty = unreported)
+  string sz = 3;               // fill size, base asset absolute (empty = unmeasured)
+  string dir = 4;              // venue direction label ("Open Long", ...)
+  string fee = 5;              // fee paid, USD (empty = unmeasured, never "0")
+  string closed_pnl = 6;       // realized PnL on closing fills (empty = unmeasured)
+  string oid = 7;              // venue order id
+  string cloid = 8;            // client order id (correlation key to the intent)
+  int64 time_ms = 9;           // fill time, epoch ms
+  bool crossed = 10;           // true iff taker (crossed the spread). Advisory
+  string fee_token = 11;       // fee token symbol (e.g. "USDC"); empty = unreported
+}
+
+message UserFillsResponse {
+  repeated PerpFill fills = 1;
+  bool success = 2;
+  string error = 3;
+}
+```
+
+### GetUserFunding
+
+Funding settlements (deltas) for a wallet over the same window.
+
+```protobuf
+rpc GetUserFunding(UserFundingRequest) returns (UserFundingResponse)
+```
+
+**Request:**
+```protobuf
+message UserFundingRequest {
+  string venue = 1;
+  string wallet_address = 2;
+  string coin = 3;             // optional coin filter. Empty = all coins
+  int64 start_time_ms = 4;     // optional lower bound, epoch ms. 0 = no bound
+}
+```
+
+**Response:**
+```protobuf
+message PerpFundingDelta {
+  string coin = 1;             // market symbol
+  string usdc = 2;             // signed funding in USDC (- paid / + received; empty = unmeasured)
+  string funding_rate = 3;     // rate applied for this settlement (empty = unmeasured)
+  int64 time_ms = 4;           // settlement time, epoch ms
+}
+
+message UserFundingResponse {
+  repeated PerpFundingDelta deltas = 1;
+  bool success = 2;
+  string error = 3;
 }
 ```
 

@@ -44,6 +44,7 @@ from almanak.gateway.services import (
     LifecycleServiceServicer,
     MarketServiceServicer,
     ObserveServiceServicer,
+    PerpFillServiceServicer,
     PoolAnalyticsServiceServicer,
     PoolHistoryServiceServicer,
     PositionServiceServicer,
@@ -225,6 +226,7 @@ class GatewayServer:
         self._integration_servicer: IntegrationServiceServicer | None = None
         self._observe_servicer: ObserveServiceServicer | None = None
         self._funding_rate_servicer: FundingRateServiceServicer | None = None
+        self._perp_fill_servicer: PerpFillServiceServicer | None = None
         self._simulation_servicer: SimulationServiceServicer | None = None
         # VIB-4812 — connector-owned servicers (e.g. Polymarket, Enso) are
         # discovered via ``GATEWAY_REGISTRY.capability_providers(GatewayServicerCapability)``
@@ -472,6 +474,13 @@ class GatewayServer:
 
         self._funding_rate_servicer = FundingRateServiceServicer(self.settings)
         gateway_pb2_grpc.add_FundingRateServiceServicer_to_server(self._funding_rate_servicer, self.server)
+
+        # VIB-5595 — per-fill economics + funding deltas for async-settlement
+        # perp venues (Hyperliquid). Registry-driven dispatch over connectors
+        # advertising ``GatewayPerpFillsCapability``; the fill-history HTTP
+        # egress lives in the connector's gateway provider, not here.
+        self._perp_fill_servicer = PerpFillServiceServicer(self.settings)
+        gateway_pb2_grpc.add_PerpFillServiceServicer_to_server(self._perp_fill_servicer, self.server)
 
         self._simulation_servicer = SimulationServiceServicer(self.settings)
         gateway_pb2_grpc.add_SimulationServiceServicer_to_server(self._simulation_servicer, self.server)
@@ -750,6 +759,7 @@ class GatewayServer:
             self._integration_servicer,
             self._observe_servicer,
             self._funding_rate_servicer,
+            self._perp_fill_servicer,
             self._simulation_servicer,
             self._pool_analytics_servicer,
             self._pool_history_servicer,

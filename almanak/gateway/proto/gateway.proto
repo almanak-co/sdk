@@ -1884,6 +1884,110 @@ message FundingRateSpreadResponse {
 }
 
 // =============================================================================
+// PerpFillService - per-fill economics + funding deltas (VIB-5595)
+// =============================================================================
+//
+// CoreWriter-style async-settlement perp venues (Hyperliquid) settle orders off
+// the EVM, so the submit receipt carries NO fill price / fee / realized PnL /
+// funding. That data lives on the venue's Info API (userFills / userFunding).
+// This service is the gateway-side reader; the HTTP egress to
+// ``api.hyperliquid.xyz/info`` lives in the connector's gateway provider
+// (``GatewayPerpFillsCapability``), never in the strategy container.
+//
+// The accounting path correlates each fill to the intent that produced it via
+// the deterministic ``cloid`` a CoreWriter order carries (keccak(intent_id)[:16]).
+//
+// Wire conventions: Decimal-as-string, Empty != Zero (an empty string is
+// "unmeasured by the venue for this field", NEVER substitute "0").
+//
+// Error semantics — dual-channel wire shape:
+//   - status OK + success=true   -> data returned (fills list may be empty =
+//                                    measured empty book).
+//   - status OK + success=false  -> framework treats as unavailable (no silent
+//                                    zero-fill).
+//   - non-OK status              -> framework treats as unavailable; the reader
+//                                    stamps the PerpData as unmeasured (None).
+service PerpFillService {
+  // Executed fills for a wallet (optionally filtered to a coin + a start time).
+  rpc GetUserFills(UserFillsRequest) returns (UserFillsResponse);
+
+  // Funding settlements (deltas) for a wallet over the same window.
+  rpc GetUserFunding(UserFundingRequest) returns (UserFundingResponse);
+}
+
+message UserFillsRequest {
+  // Venue name — one per perp connector that registers a
+  // ``GatewayPerpFillsCapability``. Unknown values -> INVALID_ARGUMENT.
+  string venue = 1;
+  // Account whose fills to read (HyperCore is keyed by the EVM address).
+  string wallet_address = 2;
+  // Optional coin filter (e.g. "BTC", "ETH"). Empty = all coins.
+  string coin = 3;
+  // Optional lower bound on fill time, epoch MILLISECONDS. 0 = no bound.
+  int64 start_time_ms = 4;
+}
+
+message PerpFill {
+  // Coin / market symbol the fill is on (e.g. "BTC").
+  string coin = 1;
+  // Fill price. Decimal-as-string. Empty = venue did not report it.
+  string px = 2;
+  // Fill size in base asset (absolute). Decimal-as-string. Empty = unmeasured.
+  string sz = 3;
+  // Direction label as the venue reports it ("Open Long", "Close Short", ...).
+  string dir = 4;
+  // Fee PAID on this fill, USD-denominated. Decimal-as-string. Empty =
+  // unmeasured (NEVER "0" unless the venue reported a measured zero fee).
+  string fee = 5;
+  // Realized PnL booked on this fill (non-zero only on closing fills).
+  // Decimal-as-string. Empty = unmeasured.
+  string closed_pnl = 6;
+  // Order id (venue oid).
+  string oid = 7;
+  // Client order id (cloid) the CoreWriter order carried — the correlation
+  // key back to the originating intent. Hex string ("0x...") or empty.
+  string cloid = 8;
+  // Fill time, epoch milliseconds.
+  int64 time_ms = 9;
+  // True iff this fill crossed the spread (taker). Advisory.
+  bool crossed = 10;
+  // Fee token symbol (e.g. "USDC"). Empty when the venue did not report it.
+  string fee_token = 11;
+}
+
+message UserFillsResponse {
+  repeated PerpFill fills = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+message UserFundingRequest {
+  string venue = 1;
+  string wallet_address = 2;
+  string coin = 3;              // Optional coin filter. Empty = all coins.
+  int64 start_time_ms = 4;      // Optional lower bound, epoch ms. 0 = no bound.
+}
+
+message PerpFundingDelta {
+  // Coin / market symbol.
+  string coin = 1;
+  // Signed funding amount in USDC (negative = paid, positive = received).
+  // Decimal-as-string. Empty = unmeasured.
+  string usdc = 2;
+  // Funding rate applied for this settlement. Decimal-as-string. Empty =
+  // unmeasured.
+  string funding_rate = 3;
+  // Settlement time, epoch milliseconds.
+  int64 time_ms = 4;
+}
+
+message UserFundingResponse {
+  repeated PerpFundingDelta deltas = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+// =============================================================================
 // PoolAnalyticsService - off-chain pool analytics (TVL / volume / fee APR)
 // =============================================================================
 //

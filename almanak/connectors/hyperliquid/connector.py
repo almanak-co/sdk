@@ -41,6 +41,14 @@ CONNECTOR = Connector(
         module="almanak.connectors.hyperliquid.receipt_parser_provider",
         attribute="HyperliquidReceiptParserConnector",
     ),
+    # VIB-5595 — post-receipt fill-economics enrichment: read HyperCore
+    # userFills / userFunding through the gateway and stamp a measured PerpData
+    # onto the result so the perp accounting handler records fee / realized-PnL /
+    # funding (the CoreWriter submit receipt settles off-EVM and carries none).
+    runner_hook_connector=ImportRef(
+        module="almanak.connectors.hyperliquid.runner_hooks",
+        attribute="HyperliquidRunnerHookConnector",
+    ),
     perps_read=PerpsReadDecl(
         spec=ImportRef(module="almanak.connectors.hyperliquid.perps_read", attribute="PERPS_READ_SPEC"),
     ),

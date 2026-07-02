@@ -44,9 +44,16 @@ class RunnerLPReceiptTopicCapability(Protocol):
 
 @runtime_checkable
 class RunnerResultEnrichmentCapability(Protocol):
-    """Connector performs best-effort post-receipt result enrichment."""
+    """Connector performs best-effort post-receipt result enrichment.
 
-    def enrich_result(self, result: Any, *, gateway_client: Any, chain: str) -> None: ...
+    ``wallet_address`` (VIB-5595) is the acting wallet for the executed intent.
+    It is required by async-settlement perp venues (Hyperliquid) whose fill
+    economics live off-EVM and are keyed by account — the enrichment reads
+    ``userFills`` / ``userFunding`` for this wallet through the gateway. Hooks
+    that do not need it (LP slot0 fallbacks) simply ignore the argument.
+    """
+
+    def enrich_result(self, result: Any, *, gateway_client: Any, chain: str, wallet_address: str = "") -> None: ...
 
 
 @runtime_checkable
@@ -144,13 +151,29 @@ class RunnerHookRegistry:
         self._lp_receipt_topics_cache = frozenset(topics)
         return self._lp_receipt_topics_cache
 
-    def enrich_result(self, result: Any, *, gateway_client: Any, chain: str) -> None:
-        """Run every registered post-receipt enrichment hook."""
+    def enrich_result(
+        self,
+        result: Any,
+        *,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str = "",
+    ) -> None:
+        """Run every registered post-receipt enrichment hook.
+
+        ``wallet_address`` (VIB-5595) is threaded to hooks that need the acting
+        account (async-settlement perp fill reads); LP hooks ignore it.
+        """
         for connector in self._connectors.values():
             if not isinstance(connector, RunnerResultEnrichmentCapability):
                 continue
             try:
-                connector.enrich_result(result, gateway_client=gateway_client, chain=chain)
+                connector.enrich_result(
+                    result,
+                    gateway_client=gateway_client,
+                    chain=chain,
+                    wallet_address=wallet_address,
+                )
             except Exception:
                 logger.debug(
                     "Runner hook connector %s enrichment failed; continuing",
@@ -192,7 +215,7 @@ class RunnerHookRegistry:
                 connector,
                 "enrich_result",
                 positional_count=1,
-                keyword_names=("gateway_client", "chain"),
+                keyword_names=("gateway_client", "chain", "wallet_address"),
             )
         if isinstance(connector, RunnerPoolKeyLookupCapability):
             cls._validate_method_signature(connector, "build_pool_key_lookup", positional_count=1)

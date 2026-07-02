@@ -2958,8 +2958,13 @@ class StrategyRunner:
             close_timestamp=None,
         )
 
-    def _maybe_enrich_result_with_runner_hooks(self, result: Any, chain: str) -> None:
-        """Run connector-owned best-effort result enrichment before ledger writes."""
+    def _maybe_enrich_result_with_runner_hooks(self, result: Any, chain: str, wallet_address: str = "") -> None:
+        """Run connector-owned best-effort result enrichment before ledger writes.
+
+        ``wallet_address`` (VIB-5595) is the acting account; async-settlement perp
+        hooks (Hyperliquid) need it to read off-EVM fill economics keyed by
+        wallet. LP hooks ignore it.
+        """
         try:
             gateway = self._get_gateway_client()
             if gateway is None:
@@ -2969,7 +2974,12 @@ class StrategyRunner:
                 STRATEGY_RUNNER_HOOK_REGISTRY,
             )
 
-            STRATEGY_RUNNER_HOOK_REGISTRY.enrich_result(result, gateway_client=gateway, chain=chain)
+            STRATEGY_RUNNER_HOOK_REGISTRY.enrich_result(
+                result,
+                gateway_client=gateway,
+                chain=chain,
+                wallet_address=wallet_address,
+            )
         except Exception:  # noqa: BLE001 — fail-open
             logger.debug("runner hook enrichment failed", exc_info=True)
 
@@ -3036,7 +3046,11 @@ class StrategyRunner:
             # Net effect: the LP accounting payload (built later from the
             # ledger row) showed ``in_range=None`` on every production
             # swap-then-mint-across-cycles run.
-            self._maybe_enrich_result_with_runner_hooks(result, chain)
+            self._maybe_enrich_result_with_runner_hooks(
+                result,
+                chain,
+                wallet_address=getattr(strategy, "wallet_address", "") or "",
+            )
 
             entry = build_ledger_entry(
                 deployment_id=strategy.deployment_id,

@@ -100,6 +100,27 @@ class TestCompileOpen:
         assert result.status == CompilationStatus.FAILED
         assert "oracle price unavailable" in result.error
 
+    def test_open_below_min_order_value_fails_closed(self) -> None:
+        # $9.99 < HyperCore ~$10 minimum order value → HyperCore would reject the
+        # order off-EVM (silent no-op) while sendRawAction returns status 1. The
+        # compiler must refuse to emit the tx. This is a pure compile-time check
+        # (no oracle read reached), so eth_call must not even be consulted.
+        def eth_call(*a, **k):  # pragma: no cover — asserts guard runs pre-read
+            raise AssertionError("min-order guard must fail before any eth_call")
+
+        ctx = _ctx(eth_call)
+        result = HyperliquidCompiler().compile_perp_open(ctx, _open_intent(size_usd=Decimal("9.99")))
+        assert result.status == CompilationStatus.FAILED
+        assert "minimum order value" in result.error
+        assert result.action_bundle is None  # no tx emitted
+
+    def test_open_at_min_order_value_succeeds(self) -> None:
+        # Exactly $10 is at (not below) the floor → allowed.
+        ctx = _ctx(lambda to, data, chain=None: _oracle_return(Decimal("59897"), 5))
+        result = HyperliquidCompiler().compile_perp_open(ctx, _open_intent(size_usd=Decimal("10")))
+        assert result.status == CompilationStatus.SUCCESS
+        assert len(result.action_bundle.transactions) == 1
+
 
 class TestCompileClose:
     def _ctx_with_position(self, szi: int, price: Decimal = Decimal("59897"), sz_decimals: int = 5):
@@ -140,6 +161,17 @@ class TestCompileClose:
         assert result.status == CompilationStatus.SUCCESS
         # sz_wire equals the full position (0.01 BTC * 1e8 = 1_000_000), not the oversized request.
         assert result.action_bundle.metadata["sz_wire"] == 1_000_000
+
+    def test_close_below_min_order_value_not_blocked(self) -> None:
+        # Reduce-only closes are EXEMPT from HyperCore's minimum order value: a
+        # sub-$10 partial close (here ~$5) must still compile to a CoreWriter tx.
+        # The min-order guard lives only on the open path; regressing it onto the
+        # close path would strand a small residual position (can't shrink it).
+        ctx = self._ctx_with_position(szi=1000)  # long 0.01 BTC (~$599 @ 59897)
+        result = HyperliquidCompiler().compile_perp_close(ctx, _close_intent(size_usd=Decimal("5")))
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle.metadata["reduce_only"] is True
+        assert len(result.action_bundle.transactions) == 1
 
     def test_partial_close_non_positive_size_fails_closed(self) -> None:
         # PerpCloseIntent already rejects size_usd<=0 at construction (the primary

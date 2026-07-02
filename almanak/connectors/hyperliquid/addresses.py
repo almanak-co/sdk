@@ -27,6 +27,8 @@ Read vs write scaling is asymmetric and easy to conflate — keep them apart:
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 # =============================================================================
 # CoreWriter — the HyperCore write bridge.
 # =============================================================================
@@ -95,6 +97,15 @@ WIRE_DECIMALS: int = 8
 # The chain this connector executes on.
 HYPEREVM_CHAIN: str = "hyperevm"
 
+# HyperCore rejects opening orders below a minimum *order value* (notional in
+# USD). The EVM `sendRawAction` still returns status 1 for a sub-minimum order —
+# HyperCore rejects it asynchronously off-EVM, so the order silently no-ops
+# (never fills) with no on-chain revert. The compiler fails a PERP_OPEN closed
+# below this floor rather than emit a tx HyperCore will drop. Verified against
+# Hyperliquid docs on 2026-07-01 ($10 minimum order value; reduce-only closes
+# are exempt).
+HYPERCORE_MIN_ORDER_USD: Decimal = Decimal("10")
+
 __all__ = [
     "ACTION_CANCEL_ORDER_BY_CLOID",
     "ACTION_CANCEL_ORDER_BY_OID",
@@ -103,6 +114,7 @@ __all__ = [
     "ACTION_VAULT_TRANSFER",
     "CORE_WRITER_ADDRESS",
     "CORE_WRITER_ENCODING_VERSION",
+    "HYPERCORE_MIN_ORDER_USD",
     "HYPEREVM_CHAIN",
     "PERP_PX_MAX_DECIMALS",
     "PRECOMPILE_ACCOUNT_MARGIN_SUMMARY",

@@ -333,6 +333,10 @@ class GatewayClient:
         self._integration_stub: gateway_pb2_grpc.IntegrationServiceStub | None = None
         self._dashboard_stub: gateway_pb2_grpc.DashboardServiceStub | None = None
         self._funding_rate_stub: gateway_pb2_grpc.FundingRateServiceStub | None = None
+        # VIB-5595: PerpFillService stub for per-fill economics + funding deltas
+        # on async-settlement perp venues (Hyperliquid). Backs the accounting
+        # ``PerpFillReader``; the userFills/userFunding HTTP egress is gateway-side.
+        self._perp_fill_stub: gateway_pb2_grpc.PerpFillServiceStub | None = None
         # VIB-4727: PoolAnalyticsService stub for market.pool_analytics(...).
         self._pool_analytics_stub: gateway_pb2_grpc.PoolAnalyticsServiceStub | None = None
         # VIB-4728 / POOL-7 (VIB-4755): PoolHistoryService stub. Backs
@@ -425,6 +429,19 @@ class GatewayClient:
         if self._funding_rate_stub is None:
             raise RuntimeError("Gateway client not connected")
         return self._funding_rate_stub
+
+    @property
+    def perp_fill(self) -> gateway_pb2_grpc.PerpFillServiceStub:
+        """Get PerpFillService stub (VIB-5595). Raises if not connected.
+
+        Backs the accounting ``PerpFillReader``: per-fill economics (fee,
+        realized PnL, price, size) + funding deltas for async-settlement perp
+        venues. All HTTP egress to the venue Info API (userFills / userFunding)
+        happens gateway-side; the strategy container only speaks gRPC.
+        """
+        if self._perp_fill_stub is None:
+            raise RuntimeError("Gateway client not connected")
+        return self._perp_fill_stub
 
     @property
     def pool_analytics(self) -> gateway_pb2_grpc.PoolAnalyticsServiceStub:
@@ -557,6 +574,9 @@ class GatewayClient:
         # Initialize FundingRate service stub
         self._funding_rate_stub = gateway_pb2_grpc.FundingRateServiceStub(self._channel)
 
+        # Initialize PerpFill service stub (VIB-5595)
+        self._perp_fill_stub = gateway_pb2_grpc.PerpFillServiceStub(self._channel)
+
         # Initialize PoolAnalytics service stub (VIB-4727)
         self._pool_analytics_stub = gateway_pb2_grpc.PoolAnalyticsServiceStub(self._channel)
 
@@ -614,6 +634,7 @@ class GatewayClient:
             self._integration_stub = None
             self._dashboard_stub = None
             self._funding_rate_stub = None
+            self._perp_fill_stub = None
             self._pool_analytics_stub = None
             self._pool_history_stub = None
             self._rate_history_stub = None

@@ -14,15 +14,23 @@ connector's protocol key (shared project identity). The self-containment guard
 those vendor-data contexts as legitimate, but the connector key must still never
 appear here as prose or a support declaration.
 
-Plumbing-only registration: no protocol connectors target HyperEVM yet, so the
-test-infra / pricing-vendor fields that nothing consumes today (``anvil``,
-``chainlink``, ``simulation``, gas caps) are left at their documented-miss
-defaults and populated when the first connector lands. Every value below is a
-public, explorer-verifiable fact.
+Mostly plumbing-only registration: no protocol *connector* targets HyperEVM
+yet, so the test-infra / pricing-vendor fields that nothing consumes today
+(``anvil``, ``chainlink``, ``simulation``, gas caps) are left at their
+documented-miss defaults and populated when the first connector lands. The one
+non-default is ``contracts=safe_stack_contracts()`` — the canonical Safe v1.4.1
++ Zodiac Roles stack, whose CREATE2 addresses are identical on every EVM chain
+and are on-chain-verified live on HyperEVM (VIB-5606). Registering it makes the
+Safe-wallet execution path (``get_multisend_address``, the Safe/Roles signer
+address maps) resolve on chain 999 so a Safe/Zodiac-scoped agent can execute
+here; without it those lookups raise. No Enso delegate is declared (Enso is not
+deployed on HyperEVM, and CoreWriter is a plain CALL, not a DELEGATECALL
+target). Every value below is a public, explorer-verifiable fact.
 """
 
 from almanak.core.enums import ChainFamily
 
+from ._contracts import safe_stack_contracts
 from ._descriptor import (
     ChainDescriptor,
     Explorer,
@@ -63,6 +71,10 @@ DESCRIPTOR = register_chain(
             anvil_port=8559,  # first free port (8545–8558, 8899 already taken)
         ),
         explorer=Explorer(browse_url="https://hyperevmscan.io"),
+        # Canonical Safe v1.4.1 + Zodiac Roles stack (CREATE2 — same address on
+        # every EVM chain; on-chain-verified live on HyperEVM, VIB-5606). No Enso
+        # delegate: Enso is not deployed here and CoreWriter is a CALL target.
+        contracts=safe_stack_contracts(),
         # Lowercase symbol → chain-canonical ERC-20 address (explorer-verified).
         tokens={
             "whype": "0x5555555555555555555555555555555555555555",

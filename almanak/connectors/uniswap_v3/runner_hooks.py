@@ -33,8 +33,13 @@ class UniswapV3RunnerHookConnector(
             }
         )
 
-    def enrich_result(self, result: Any, *, gateway_client: Any, chain: str) -> None:
-        """Fill missing LP current_tick fields from pool slot0 when possible."""
+    def enrich_result(self, result: Any, *, gateway_client: Any, chain: str, wallet_address: str = "") -> None:
+        """Fill missing LP current_tick fields from pool slot0 when possible.
+
+        ``wallet_address`` is part of the VIB-5595 hook contract (perp fill
+        reads need it); the LP slot0 fallback does not use it.
+        """
+        _ = wallet_address
         extracted = getattr(result, "extracted_data", None)
         if not isinstance(extracted, dict):
             return

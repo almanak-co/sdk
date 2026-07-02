@@ -306,6 +306,74 @@ class GatewayOraclePriceCapability(Protocol):
 
 
 @runtime_checkable
+class GatewayPerpFillsCapability(Protocol):
+    """Perp connector publishes per-fill economics + funding deltas (VIB-5595).
+
+    The CoreWriter-style async-settlement venues (Hyperliquid first) settle
+    orders **off the EVM** on their own matching engine, so the submit receipt
+    carries NO fill price, fee, realized PnL, or funding. That data lives on the
+    venue's Info API (``api.hyperliquid.xyz/info`` ``userFills`` / ``userFunding``)
+    — egress that MUST live in the gateway sidecar, never the strategy container
+    (AGENTS.md §"Gateway boundary"). This capability is the gateway-side reader:
+    the ``PerpFillService`` servicer dispatches ``GetUserFills`` / ``GetUserFunding``
+    to the connector whose :meth:`fills_venue` matches the request venue.
+
+    Sibling of :class:`GatewayFundingRateCapability` (live rate) and
+    :class:`GatewayFundingHistoryCapability` (historical rate); this one is the
+    per-account **executed-fill** lane the accounting path correlates by the
+    deterministic ``cloid`` a CoreWriter order carries.
+
+    Contract:
+
+    * ``fills_venue() -> str`` — venue identifier matching
+      :meth:`GatewayFundingRateCapability.venue` so all perp capabilities on the
+      same connector agree on identity (e.g. ``"hyperliquid"``).
+    * ``fetch_user_fills(servicer, *, wallet_address, coin, start_ts) -> Awaitable``
+      — per-fill economics for ``wallet_address`` (optionally filtered to
+      ``coin`` and to fills at/after ``start_ts`` epoch-ms). Returns the
+      gateway-side ``PerpFillData`` list the servicer maps to the proto
+      envelope. Each fill carries ``fee`` / ``closed_pnl`` / ``px`` / ``sz`` /
+      ``dir`` / ``oid`` / ``cloid`` / ``time`` — Empty≠Zero: a value the venue
+      did not report is unmeasured (empty string on the wire), never a
+      fabricated ``0``.
+    * ``fetch_user_funding(servicer, *, wallet_address, coin, start_ts) -> Awaitable``
+      — per-settlement funding deltas (``usdc`` signed amount, negative = paid).
+
+    Both fetch methods receive ``servicer`` so the venue REST client + shared
+    aiohttp session stay on the gateway service; the connector body holds only
+    venue-specific request/response encoding. The return types are ``Any``
+    because the ``PerpFillData`` / ``PerpFundingData`` dataclasses live gateway-
+    side (coupling ``_base/`` to gateway internals would break the foundation's
+    leaf-of-the-import-graph invariant).
+
+    "No silent zeros" (matching ``RateHistoryService``): a "no data" path returns
+    an empty list (a measured empty book), NEVER a fabricated fill; the framework
+    reader treats an empty list as "no fills for this window", distinct from an
+    RPC failure which the servicer surfaces as ``success=false``.
+    """
+
+    def fills_venue(self) -> str: ...
+
+    async def fetch_user_fills(
+        self,
+        servicer: Any,
+        *,
+        wallet_address: str,
+        coin: str = "",
+        start_ts: int = 0,
+    ) -> Any: ...
+
+    async def fetch_user_funding(
+        self,
+        servicer: Any,
+        *,
+        wallet_address: str,
+        coin: str = "",
+        start_ts: int = 0,
+    ) -> Any: ...
+
+
+@runtime_checkable
 class GatewayDefillamaSlugCapability(Protocol):
     """Connector publishes its DefiLlama project slug.
 
@@ -697,6 +765,45 @@ class GatewayFundingHistoryCapability(Protocol):
         chain: str,
         start_ts: int,
         end_ts: int,
+    ) -> Any: ...
+
+
+@runtime_checkable
+class GatewayOrderStatusCapability(Protocol):
+    """Perp connector publishes fill-vs-submission order-status lookup (VIB-5597).
+
+    For venues that settle **asynchronously** (an EVM submit tx does not carry
+    the fill), a strategy cannot trust submission success — it must confirm the
+    fill against the venue. Hyperliquid CoreWriter is the canonical case: the
+    order settles off-EVM on HyperCore and is addressable by a deterministic
+    client-order-id (``cloid``) via the HyperCore Info API (``orderStatus``).
+
+    This capability puts that API egress on the **gateway side** (where third-
+    party HTTP correctly lives — gateway-boundary rule); strategy/framework code
+    reads through the gateway. The connector's pure request-builder + response-
+    parser live in the connector module (e.g.
+    ``almanak.connectors.hyperliquid.fill_reconciliation``); this method performs
+    only the transport.
+
+    Contract:
+
+    * ``order_status_venue() -> str`` — venue identifier, matching
+      :meth:`GatewayFundingRateCapability.venue` for the same connector.
+    * ``fetch_order_status(servicer, *, wallet_address, cloid, chain) -> dict``
+      — the raw HyperCore ``orderStatus`` response JSON (the connector-side
+      parser turns it into a fill verdict). Raises on transport failure so the
+      caller fail-closes to ``UNMEASURED`` (Empty ≠ Zero — never assume filled).
+    """
+
+    def order_status_venue(self) -> str: ...
+
+    async def fetch_order_status(
+        self,
+        servicer: Any,
+        *,
+        wallet_address: str,
+        cloid: int,
+        chain: str,
     ) -> Any: ...
 
 

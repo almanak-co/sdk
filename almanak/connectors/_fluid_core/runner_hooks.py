@@ -59,14 +59,18 @@ class FluidVaultRunnerHookConnector(
     protocol: ClassVar[ProtocolName] = ProtocolName("fluid_vault")
     kind: ClassVar[ProtocolKind] = ProtocolKind.LENDING
 
-    def enrich_result(self, result: Any, *, gateway_client: Any, chain: str) -> None:
+    def enrich_result(self, result: Any, *, gateway_client: Any, chain: str, wallet_address: str = "") -> None:
         """Stamp ``FluidVaultOperateData`` onto ``result.extracted_data``.
 
         Best-effort (the registry already wraps hooks fail-open): never
         overwrites an existing value, never fabricates one — a receipt with
         no single attributable vault LogOperate stamps nothing (the parser's
         fail-closed contract).
+
+        ``wallet_address`` is part of the VIB-5595 hook contract; the Fluid
+        vault-operate stamp does not use it.
         """
+        _ = wallet_address
         extracted = getattr(result, "extracted_data", None)
         if not isinstance(extracted, dict) or FLUID_VAULT_OPERATE_KEY in extracted:
             return

@@ -38,6 +38,7 @@ from almanak.gateway.services.integration_service import IntegrationServiceServi
 from almanak.gateway.services.lifecycle_service import LifecycleServiceServicer
 from almanak.gateway.services.market_service import MarketServiceServicer
 from almanak.gateway.services.observe_service import ObserveServiceServicer
+from almanak.gateway.services.perp_fill_service import PerpFillServiceServicer
 from almanak.gateway.services.pool_analytics_service import PoolAnalyticsServiceServicer
 from almanak.gateway.services.pool_history_service import PoolHistoryServiceServicer
 from almanak.gateway.services.position_service import PositionServiceServicer
@@ -60,6 +61,7 @@ __all__ = [
     "RpcServiceServicer",
     "IntegrationServiceServicer",
     "FundingRateServiceServicer",
+    "PerpFillServiceServicer",
     "SimulationServiceServicer",
     "PoolAnalyticsServiceServicer",
     "PoolHistoryServiceServicer",

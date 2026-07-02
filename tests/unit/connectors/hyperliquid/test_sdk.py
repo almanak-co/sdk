@@ -134,3 +134,71 @@ class TestPrecompileInputEncoders:
     def test_position_query_encodes_address_and_perp(self) -> None:
         data = sdk.encode_position_query("0x" + "11" * 20, 3)
         assert len(data) == 64  # address word + uint32 word
+
+    def test_account_margin_query_encodes_perp_dex_index_first(self) -> None:
+        # accountMarginSummary input is INVERTED vs position: (uint32 perpDexIndex,
+        # address user). perpDexIndex default 0 → first word all-zero, then the
+        # address word. This mirrors the live-confirmed encoding that returned a
+        # summary (the (address, uint32) order reverts with PrecompileError).
+        from eth_abi import encode as abi_encode
+
+        wallet = "0x" + "11" * 20
+        data = sdk.encode_account_margin_query(wallet)
+        assert data == abi_encode(["uint32", "address"], [0, wallet])
+        assert data[:32] == b"\x00" * 32  # perpDexIndex 0 is the FIRST word
+
+
+class TestAccountMarginSummaryDecode:
+    """0x080F accountMarginSummary decode — layout + scale CONFIRMED live
+    (2026-07-02, two independent cross accounts; see perps_read.py docstring)."""
+
+    def test_decodes_four_1e6_usd_fields_in_order(self) -> None:
+        from eth_abi import encode as abi_encode
+
+        # account_value $1.5, margin_used $0.5, ntl_pos $10, raw_usd $4 (all 1e6).
+        blob = "0x" + abi_encode(
+            ["int64", "uint64", "uint64", "int64"], [1_500_000, 500_000, 10_000_000, 4_000_000]
+        ).hex()
+        s = sdk.decode_account_margin_summary(blob)
+        assert s is not None
+        assert (s.account_value, s.margin_used, s.ntl_pos, s.raw_usd) == (1_500_000, 500_000, 10_000_000, 4_000_000)
+
+    def test_signed_fields_decode_negative(self) -> None:
+        from eth_abi import encode as abi_encode
+
+        # accountValue and rawUsd are int64 — can go negative (underwater account).
+        blob = "0x" + abi_encode(
+            ["int64", "uint64", "uint64", "int64"], [-1_000_000, 0, 0, -2_000_000]
+        ).hex()
+        s = sdk.decode_account_margin_summary(blob)
+        assert s is not None
+        assert s.account_value == -1_000_000
+        assert s.raw_usd == -2_000_000
+
+    def test_empty_return_is_none_not_zero(self) -> None:
+        # Empty≠Zero: an unmeasured account (no HyperCore cross account / revert)
+        # decodes to None, NOT an all-zero summary.
+        assert sdk.decode_account_margin_summary("0x") is None
+        assert sdk.decode_account_margin_summary("") is None
+
+    def test_layout_matches_live_confirmed_ordering_and_scale(self) -> None:
+        # Regression on the CONFIRMED layout order + 1e6 scale, using the shape of a
+        # real live read (2026-07-02 account 0x31ca8395…974b ≈ $3.00M equity,
+        # rawUsd ≈ $4.33M): accountValue and rawUsd are the SIGNED int64 fields,
+        # marginUsed and ntlPos the unsigned ones, in that exact order. A layout
+        # regression (e.g. swapping ntlPos/marginUsed or mis-scaling) fails here.
+        from eth_abi import encode as abi_encode
+
+        account_value = 3_001_008_760_000  # $3,001,008.76 at 1e6
+        margin_used = 198_982_610_000  # $198,982.61
+        ntl_pos = 3_979_652_190_000  # $3,979,652.19
+        raw_usd = 4_334_549_030_000  # $4,334,549.03
+        blob = "0x" + abi_encode(
+            ["int64", "uint64", "uint64", "int64"], [account_value, margin_used, ntl_pos, raw_usd]
+        ).hex()
+        s = sdk.decode_account_margin_summary(blob)
+        assert s is not None
+        assert round(s.account_value / 1e6, 2) == 3_001_008.76
+        assert round(s.margin_used / 1e6, 2) == 198_982.61
+        assert round(s.ntl_pos / 1e6, 2) == 3_979_652.19
+        assert round(s.raw_usd / 1e6, 2) == 4_334_549.03

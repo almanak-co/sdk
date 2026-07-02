@@ -46,7 +46,7 @@ class _EnrichmentConnector(RunnerHookConnector, RunnerResultEnrichmentCapability
     def __init__(self) -> None:
         self.calls: list[tuple[Any, Any, str]] = []
 
-    def enrich_result(self, result: Any, *, gateway_client: Any, chain: str) -> None:
+    def enrich_result(self, result: Any, *, gateway_client: Any, chain: str, wallet_address: str = "") -> None:
         self.calls.append((result, gateway_client, chain))
 
 
@@ -54,7 +54,7 @@ class _FailingEnrichmentConnector(RunnerHookConnector, RunnerResultEnrichmentCap
     protocol: ClassVar[ProtocolName] = ProtocolName("failing_enrichment")
     kind: ClassVar[ProtocolKind] = ProtocolKind.LP
 
-    def enrich_result(self, result: Any, *, gateway_client: Any, chain: str) -> None:
+    def enrich_result(self, result: Any, *, gateway_client: Any, chain: str, wallet_address: str = "") -> None:
         raise RuntimeError("boom")
 
 

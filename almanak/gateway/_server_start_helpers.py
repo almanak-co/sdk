@@ -490,6 +490,7 @@ def build_reflection_service_names() -> tuple[str, ...]:
         "almanak.gateway.proto.IntegrationService",
         "almanak.gateway.proto.DashboardService",
         "almanak.gateway.proto.FundingRateService",
+        "almanak.gateway.proto.PerpFillService",
         "almanak.gateway.proto.SimulationService",
         "almanak.gateway.proto.PolymarketService",
         "almanak.gateway.proto.PoolAnalyticsService",

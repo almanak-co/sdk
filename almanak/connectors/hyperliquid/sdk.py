@@ -377,6 +377,63 @@ def decode_uint64(raw: str | bytes) -> int | None:
     return int(value)
 
 
+@dataclass(frozen=True)
+class AccountMarginSummary:
+    """Decoded HyperCore cross-margin account summary (``accountMarginSummary``).
+
+    Solidity struct (verified against hyper-evm-lib ``PrecompileLib``):
+    ``(int64 accountValue, uint64 marginUsed, uint64 ntlPos, int64 rawUsd)``.
+
+    All four fields are HyperCore perp USD scaled by ``1e6`` (the same convention
+    as the position struct's ``entryNtl``).
+
+    MONEY-PATH SCALE + LAYOUT — CONFIRMED against LIVE MAINNET (2026-07-02,
+    chain 999): the ``0x080F`` precompile was read back-to-back against
+    ``clearinghouseState.marginSummary`` from ``api.hyperliquid.xyz`` (human
+    units) for TWO independent live cross-margin accounts and every field matched
+    to sub-cent (residual is market-maker drift between the two snapshots, not a
+    scale error):
+      * ``0x7fdafde5…517d1`` ($23.9M, 27 cross positions): precompile
+        accountValue ``23,942,354.3341`` vs API ``23,942,354.3918``; marginUsed,
+        ntlPos, rawUsd all matched to &lt;0.001%.
+      * ``0x31ca8395…974b`` ($3.0M): precompile accountValue ``3,001,008.76`` vs
+        API ``3,001,056.26``; the other three fields matched to &lt;0.01%.
+    The account equity identity ``accountValue = rawUsd + Σ signed_mark_notional``
+    was also verified exactly on the $23.9M account. ✅ 1e6 USD, field order as
+    above.
+
+    Note the INPUT arg order is INVERTED relative to the position precompile:
+    ``position`` takes ``(address user, uint32 perp)`` but
+    ``accountMarginSummary`` takes ``(uint32 perpDexIndex, address user)`` — see
+    :func:`encode_account_margin_query`.
+    """
+
+    account_value: int  # 1e6 USD — total cross-account equity (marked-to-market)
+    margin_used: int  # 1e6 USD — margin currently committed across cross positions
+    ntl_pos: int  # 1e6 USD — total |notional| of open cross positions
+    raw_usd: int  # 1e6 USD — signed net USD basis (accountValue = rawUsd + Σ signed mark ntl)
+
+
+def decode_account_margin_summary(raw: str | bytes) -> AccountMarginSummary | None:
+    """Decode an ``accountMarginSummary`` (0x080F) precompile return.
+
+    Returns ``None`` on an empty return (Empty≠Zero: an unmeasured account is not
+    a measured all-zero account). A wallet with no HyperCore cross account /
+    reverting read yields ``None`` so callers fall back to the PnL-only value
+    rather than fabricating collateral.
+    """
+    data = _to_bytes(raw)
+    if len(data) == 0:
+        return None
+    account_value, margin_used, ntl_pos, raw_usd = abi_decode(["int64", "uint64", "uint64", "int64"], data)
+    return AccountMarginSummary(
+        account_value=int(account_value),
+        margin_used=int(margin_used),
+        ntl_pos=int(ntl_pos),
+        raw_usd=int(raw_usd),
+    )
+
+
 # =============================================================================
 # Read-precompile input encoders (raw ABI args, NO selector)
 # =============================================================================
@@ -392,6 +449,19 @@ def encode_position_query(user: str, perp_index: int) -> bytes:
     """ABI-encode ``(address user, uint32 perp)`` for the position precompile."""
     _check_uint(perp_index, _UINT32_MAX, "perp_index", allow_zero=True)
     return abi_encode(["address", "uint32"], [_check_address(user), int(perp_index)])
+
+
+def encode_account_margin_query(user: str, perp_dex_index: int = 0) -> bytes:
+    """ABI-encode ``(uint32 perpDexIndex, address user)`` for accountMarginSummary.
+
+    Note the arg order is INVERTED versus :func:`encode_position_query`: the
+    ``accountMarginSummary`` precompile takes ``perpDexIndex`` FIRST then
+    ``user`` (verified against hyper-evm-lib ``PrecompileLib`` and live — the
+    ``(address, uint32)`` order reverts with ``PrecompileError``). ``perpDexIndex``
+    is 0 for the standard first perp DEX.
+    """
+    _check_uint(perp_dex_index, _UINT32_MAX, "perp_dex_index", allow_zero=True)
+    return abi_encode(["uint32", "address"], [int(perp_dex_index), _check_address(user)])
 
 
 # =============================================================================
@@ -435,12 +505,15 @@ __all__ = [
     "TIF_ALO",
     "TIF_GTC",
     "TIF_IOC",
+    "AccountMarginSummary",
     "LimitOrderAction",
     "Position",
+    "decode_account_margin_summary",
     "decode_limit_order_action",
     "decode_position",
     "decode_raw_action_log_data",
     "decode_uint64",
+    "encode_account_margin_query",
     "encode_cancel_by_cloid_action",
     "encode_cancel_by_oid_action",
     "encode_limit_order_action",

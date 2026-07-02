@@ -36,6 +36,7 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 
 from .addresses import (
     CORE_WRITER_ADDRESS,
+    HYPERCORE_MIN_ORDER_USD,
     HYPEREVM_CHAIN,
     PERP_PX_MAX_DECIMALS,
     PRECOMPILE_ORACLE_PX,
@@ -82,6 +83,22 @@ class HyperliquidCompiler(BasePerpCompiler):
 
         if intent.size_usd is None or intent.size_usd <= 0:
             return self._fail(intent.intent_id, f"PERP_OPEN requires a positive size_usd, got {intent.size_usd}")
+
+        # Fail closed below HyperCore's minimum order value. HyperCore rejects a
+        # sub-$10 open asynchronously off-EVM while `sendRawAction` still returns
+        # status 1, so the order silently no-ops (never fills) — refuse to emit a
+        # tx HyperCore will drop. Reduce-only closes are exempt (no min-order
+        # rule), so this guard lives only on the open path.
+        # VIB-5596: the insufficient-*margin* preflight (does the account have
+        # enough free margin to open this size) is a separate follow-up — it
+        # needs an account-margin read and is intentionally NOT implemented here.
+        if intent.size_usd < HYPERCORE_MIN_ORDER_USD:
+            return self._fail(
+                intent.intent_id,
+                f"PERP_OPEN size_usd ${intent.size_usd} is below the HyperCore "
+                f"~${HYPERCORE_MIN_ORDER_USD} minimum order value; HyperCore would "
+                "reject it off-EVM (silent no-op). Increase size_usd.",
+            )
 
         ref_price = self._read_oracle_price(ctx, market)
         if ref_price is None:
