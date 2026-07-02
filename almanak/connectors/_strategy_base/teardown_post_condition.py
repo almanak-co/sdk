@@ -13,14 +13,30 @@ logger = logging.getLogger(__name__)
 class ClosureCheckResult:
     """Outcome of an on-chain closure verification for a single position.
 
+    Three-valued by design (VIB-5573, Empty ≠ Zero): a position is either
+    MEASURED-closed, MEASURED-open (residual), or UNMEASURED (the read itself
+    could not be completed). Conflating "we could not read" with "we read a
+    residual" is a real bug: it lets a transient gateway/RPC blip during the
+    post-teardown verify fabricate a residual → ``FAILED`` → hosted shutdown +
+    entry latch on a healthy strategy. So a read fault sets ``unmeasured=True``
+    (→ ``UNVERIFIED``, honest don't-know) and NEVER masquerades as a residual.
+    Only a *positive on-chain measurement* of residual value is ``closed=False``
+    (→ ``FAILED``).
+
     Attributes:
-        closed: True iff the post-condition determined the position is fully
-            closed on-chain. False means residual liquidity or debt was
-            detected, or the check itself errored out.
+        closed: True iff the post-condition MEASURED the position fully closed
+            on-chain. Only meaningful when ``unmeasured`` is False.
+        unmeasured: True iff the check could not obtain a trustworthy on-chain
+            reading (gateway/RPC fault after bounded read-retry, missing client,
+            unresolved address, unsupported vault interface). The composition
+            seam lowers this to ``UNVERIFIED`` — never ``FAILED``. When True,
+            ``closed`` is ignored and MUST NOT be treated as a residual.
         protocol: Protocol the result is for, for logs and operator output.
         position_id: Position identifier checked.
-        residual: Protocol-specific residual data.
-        error: Set when the check itself failed. Treated as ``closed=False``.
+        residual: Protocol-specific residual data (only set on a MEASURED
+            residual, i.e. ``closed=False`` AND ``unmeasured=False``).
+        error: Human-readable reason. Set on a read fault (``unmeasured=True``)
+            or, rarely, alongside a measured residual for operator context.
     """
 
     closed: bool
@@ -28,6 +44,7 @@ class ClosureCheckResult:
     position_id: str = ""
     residual: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    unmeasured: bool = False
 
 
 class TeardownPostCondition(Protocol):

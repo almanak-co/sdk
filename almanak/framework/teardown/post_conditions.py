@@ -38,6 +38,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import CONNECTOR_REGISTRY, ConnectorDiscoveryError
 from almanak.connectors._strategy_base.address_registry import AbiFamily, AddressRegistry
 from almanak.connectors._strategy_base.teardown_post_condition import (
@@ -47,10 +48,46 @@ from almanak.connectors._strategy_base.teardown_post_condition import (
     get_teardown_post_condition,
     has_teardown_post_condition,
 )
+from almanak.connectors._strategy_base.vault_post_condition import (
+    erc4626_vault_teardown_post_condition,
+)
+
+
+def _connector_teardown_slugs(connector: Any) -> frozenset[str]:
+    """Every protocol slug a position from ``connector`` could carry, lowercased.
+
+    VIB-5573: the registry is keyed by ``position.protocol`` (see
+    ``teardown_manager._verify_closure_detailed``), but a position's protocol
+    string is NOT always the connector's folder ``name`` — e.g. a ``morpho_vault``
+    connector produces ``metamorpho`` positions. Registering a hook under the bare
+    ``name`` therefore silently fails to resolve for such connectors (gmx/pendle
+    only worked because their primitive string equals their name). Register under
+    the connector's full identity set — ``discovery_keys`` (name + aliases +
+    receipt-parser protocols) ∪ ``compiler_protocols`` — so lookup by any protocol
+    string the connector emits resolves to the hook.
+
+    ``connector.name`` is already inside ``discovery_keys`` (``Connector.protocol_keys``
+    = ``{name, *aliases}``); it is added explicitly below too, defensively, so the
+    connector name is guaranteed present regardless of how ``discovery_keys`` is
+    computed (VIB-5573, Gemini). ``discovery_keys`` is a ``frozenset`` and
+    ``compiler_protocols`` a tuple, so char-iteration of a stray string is not a
+    risk here.
+    """
+    slugs: set[str] = set(getattr(connector, "discovery_keys", None) or ())
+    slugs.update(getattr(connector, "compiler_protocols", None) or ())
+    name = getattr(connector, "name", None)
+    if name:
+        slugs.add(name)
+    return frozenset(s.lower() for s in slugs if s)
 
 
 def _register_manifest_teardown_post_conditions() -> None:
-    """Register connector-owned teardown post-conditions from manifests."""
+    """Register connector-owned teardown post-conditions from manifests.
+
+    Registered under every slug the connector can emit (``_connector_teardown_slugs``),
+    not just ``connector.name`` — see that helper for the register-by-name /
+    lookup-by-protocol mismatch this closes (VIB-5573).
+    """
     for connector_manifest in CONNECTOR_REGISTRY.with_teardown_post_condition():
         if connector_manifest.teardown_post_condition is None:
             continue
@@ -61,7 +98,8 @@ def _register_manifest_teardown_post_conditions() -> None:
                 f"{connector_manifest.teardown_post_condition.attribute} must be callable, "
                 f"got {type(hook).__qualname__}"
             )
-        _register_teardown_post_condition(connector_manifest.name, hook)
+        for slug in _connector_teardown_slugs(connector_manifest):
+            _register_teardown_post_condition(slug, hook)
 
 
 _register_manifest_teardown_post_conditions()
@@ -162,11 +200,14 @@ def _uniswap_v3_post_condition(
       (``positions(tokenId)`` reverts with "Invalid token ID"; the gateway
       folds that revert into ``liquidity = 0`` and ``tokensOwed = (0, 0)``)
       AND (b) the decrease-without-burn path.
-    - Any non-zero residual → ``closed=False`` with a residual map.
-    - Either RPC returning ``None`` (gateway disconnected, RPC timeout,
-      malformed response) → ``closed=False`` with an error string.
-      Fail-closed: an unknown on-chain state must NOT be reported as
-      closed.
+    - Any non-zero residual (a MEASURED liquidity / tokensOwed) →
+      ``closed=False`` with a residual map → the seam fails the teardown.
+    - A read fault (missing chain / gateway_client / NPM address /
+      unresolvable NFT id, or either RPC returning ``None`` / raising) →
+      ``unmeasured=True`` (VIB-5573) → the seam lowers to ``UNVERIFIED``,
+      NEVER ``FAILED``. Empty ≠ Zero: an unknown on-chain state must not be
+      reported as closed, but must also not be fabricated into a residual
+      that false-fails the teardown on a transient gateway/RPC blip.
 
     No direct network egress: the post-condition uses the supplied
     ``gateway_client``. ``rpc_url`` is intentionally NOT consumed here —
@@ -222,6 +263,7 @@ def _uniswap_v3_post_condition(
     if not chain:
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error="Uniswap V3 post-condition needs position.chain; none found",
@@ -258,6 +300,7 @@ def _uniswap_v3_post_condition(
     except (TypeError, ValueError):
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=(
@@ -274,6 +317,7 @@ def _uniswap_v3_post_condition(
         # closure — fail-closed so a missing client is loud, not silent.
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=(
@@ -287,6 +331,7 @@ def _uniswap_v3_post_condition(
     if not npm_address:
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=(
@@ -309,6 +354,7 @@ def _uniswap_v3_post_condition(
     except Exception as exc:  # noqa: BLE001 — fail-closed
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=f"Uniswap V3 query_position_liquidity raised: {exc}",
@@ -317,6 +363,7 @@ def _uniswap_v3_post_condition(
     if liquidity is None:
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=(
@@ -335,6 +382,7 @@ def _uniswap_v3_post_condition(
     except Exception as exc:  # noqa: BLE001 — fail-closed
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=f"Uniswap V3 query_position_tokens_owed raised: {exc}",
@@ -343,6 +391,7 @@ def _uniswap_v3_post_condition(
     if tokens_owed is None:
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=(
@@ -389,7 +438,31 @@ def _register_default_v3_post_conditions() -> None:
             _register_teardown_post_condition(v3_slug, _uniswap_v3_post_condition)
 
 
+def _register_default_vault_post_conditions() -> None:
+    """Register the generic ERC-4626 hook as the default for every VAULT connector.
+
+    VIB-5573: before this, no ``ProtocolKind.VAULT`` connector (``beefy``,
+    ``lagoon``, ``morpho_vault``, ``yearn``) had a post-condition, so a vault
+    teardown was pinned at ``UNVERIFIED`` and a residual was invisible. This
+    default gives the whole vault primitive an on-chain closure check via the
+    ERC-4626 standard interface. A vault that is not ERC-4626 degrades to
+    ``unmeasured`` (→ ``UNVERIFIED``), never a false result.
+
+    Registered under every slug each vault connector can emit
+    (``_connector_teardown_slugs``) and never clobbers a connector that owns its
+    own hook via manifest (connector-owned wins — same fallback discipline as the
+    V3 default).
+    """
+    for connector in CONNECTOR_REGISTRY.all():
+        if connector.kind is not ProtocolKind.VAULT:
+            continue
+        for slug in _connector_teardown_slugs(connector):
+            if not has_teardown_post_condition(slug):
+                _register_teardown_post_condition(slug, erc4626_vault_teardown_post_condition)
+
+
 _register_default_v3_post_conditions()
+_register_default_vault_post_conditions()
 
 
 __all__ = [

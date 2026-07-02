@@ -117,9 +117,17 @@ async def test_verify_closure_fails_when_post_condition_returns_residual(
 
 
 @pytest.mark.asyncio
-async def test_verify_closure_fails_closed_when_post_condition_raises(
+async def test_verify_closure_treats_hook_raise_as_unmeasured_unverified(
     _restore_traderjoe_v2_hook,
 ):
+    """VIB-5573 (Q7): a hook that RAISES is a read fault, not a measured residual.
+
+    Pre-VIB-5573 a raising hook was fail-closed to FAILED. That fabricated a
+    residual → hosted shutdown + entry latch on a transient gateway/RPC blip.
+    Empty ≠ Zero: a raise means "could not measure" → UNMEASURED → UNVERIFIED
+    (honest don't-know, non-blocking), NEVER FAILED. Only a *measured* residual
+    is FAILED (see ``test_verify_closure_fails_when_post_condition_returns_residual``).
+    """
     hook = MagicMock(side_effect=RuntimeError("boom"))
     _register_teardown_post_condition("traderjoe_v2", hook)
 
@@ -133,12 +141,22 @@ async def test_verify_closure_fails_closed_when_post_condition_raises(
         )
     )
 
+    # The bool wrapper: an unmeasured position is NOT a measured residual, so it
+    # does not fail the closure (no fabricated FAILED on a transient fault).
     result = await mgr._verify_closure(
-        strategy=_make_strategy(),
+        strategy=_make_strategy(open_positions=[]),
         pre_execution_positions=snapshot,
     )
+    assert result is True
 
-    assert result is False  # fail-closed
+    # The detailed verdict: honest UNVERIFIED, not CHAIN_VERIFIED (unmeasured is
+    # never counted as chain-proven) and not FAILED (no measured residual).
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_strategy(open_positions=[]),
+        pre_execution_positions=snapshot,
+    )
+    assert detailed.all_closed is True
+    assert detailed.verification_status is VerificationStatus.UNVERIFIED
 
 
 @pytest.mark.asyncio

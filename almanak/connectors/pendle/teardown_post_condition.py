@@ -42,10 +42,19 @@ network egress from this framework/connector strategy-side path — ``rpc_url`` 
 accepted to satisfy the ``TeardownPostCondition`` protocol but is intentionally
 NOT consumed (framework code MUST cross the gateway boundary). The only
 non-gateway dependency is ``eth_abi.decode`` to unpack the ``readTokens`` return
-— pure ABI decoding, not egress. NEVER raises: any failure (missing client,
-gateway error, malformed response, unknown kind) returns
-``ClosureCheckResult(closed=False, error=...)`` so an unverifiable position can
-never read as closed.
+— pure ABI decoding, not egress. NEVER raises.
+
+Three-valued result (VIB-5573, Empty ≠ Zero)
+--------------------------------------------
+A **measured residual** (``int(balance) != 0`` from a successful ``balanceOf``
+read) is ``closed=False`` (→ FAILED) — the still-funded holding the seam exists
+to catch. A **read fault** (missing client, missing chain, an unresolvable
+market/PT address, a ``readTokens`` that returned None/undecodable/zero, a
+``query_erc20_balance`` that raised or returned ``None``, an unknown holding
+kind) is ``unmeasured=True`` (→ UNVERIFIED, honest don't-know) — NEVER lowered to
+FAILED, so a transient gateway/RPC blip during the post-teardown verify cannot
+fabricate a residual and shut down a healthy strategy. Only a clean, MEASURED
+zero balance is ``closed=True``.
 
 Ethena note
 -----------
@@ -146,10 +155,12 @@ def pendle_teardown_post_condition(
       ``eth_call``, selector ``0x2c8ce6bc``), then residual is
       ``query_erc20_balance(PT, wallet)``.
 
-    Closure: ``balance == 0`` → ``closed=True``; any non-zero balance →
-    ``closed=False`` with a residual map. A ``None`` balance (gateway/RPC
-    error) or any other failure → ``closed=False`` with an ``error`` string.
-    Fail-closed: an unknown on-chain state must NOT be reported as closed.
+    Closure (three-valued, VIB-5573): a MEASURED ``balance == 0`` → ``closed=True``;
+    a MEASURED non-zero balance → ``closed=False`` with a residual map (FAILED). A
+    read fault — ``None`` balance (gateway/RPC error), an unresolvable market/PT
+    address, a raising gateway, or an unknown kind — → ``unmeasured=True`` with an
+    ``error`` string (UNVERIFIED), NEVER FAILED, so a transient blip cannot
+    fabricate a residual. An unknown on-chain state must NOT be reported as closed.
 
     ``block`` is pinned to the close-tx receipt's block (VIB-5140) so the read
     cannot race a replica trailing the writer. ``rpc_url`` is intentionally NOT
@@ -163,17 +174,19 @@ def pendle_teardown_post_condition(
     if not chain:
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
-            error="Pendle post-condition needs position.chain; none found",
+            error="Pendle post-condition needs position.chain; none found — cannot read on-chain",
         )
 
     if gateway_client is None:
         # Framework rule: no egress from the strategy container. Without a
         # gateway client there is no authoritative way to read on-chain truth —
-        # fail-closed so a missing client is loud, not a silent pass.
+        # a read fault (UNVERIFIED), loud but never a fabricated residual.
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=(
@@ -218,6 +231,7 @@ def pendle_teardown_post_condition(
     if not market_address:
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=(
@@ -237,6 +251,7 @@ def pendle_teardown_post_condition(
         if err is not None or pt_address is None:
             return ClosureCheckResult(
                 closed=False,
+                unmeasured=True,
                 protocol=protocol,
                 position_id=position_id,
                 error=err or "Pendle post-condition: PT address unresolved (readTokens returned no PT)",
@@ -245,11 +260,12 @@ def pendle_teardown_post_condition(
     else:
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=(
                 f"Pendle post-condition: unknown holding kind {kind!r} "
-                "(expected 'pt' or 'lp'); cannot verify on-chain closure — fail-closed"
+                "(expected 'pt' or 'lp'); cannot verify on-chain closure — read fault"
             ),
         )
 
@@ -260,9 +276,10 @@ def pendle_teardown_post_condition(
             wallet_address=wallet_address,
             block=block,
         )
-    except Exception as exc:  # noqa: BLE001 — fail-closed
+    except Exception as exc:  # noqa: BLE001 — read fault (UNVERIFIED, never a fabricated residual)
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=f"Pendle query_erc20_balance raised: {exc}",
@@ -271,11 +288,10 @@ def pendle_teardown_post_condition(
     if balance is None:
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
-            error=(
-                "Pendle query_erc20_balance returned None (gateway/RPC error); cannot confirm closure — fail-closed"
-            ),
+            error=("Pendle query_erc20_balance returned None (gateway/RPC error); cannot confirm closure — read fault"),
         )
 
     if int(balance) == 0:

@@ -1,4 +1,15 @@
-"""Trader Joe V2 teardown post-condition."""
+"""Trader Joe V2 teardown post-condition.
+
+Three-valued result (VIB-5573, Empty ≠ Zero): a **measured residual** — a
+successful ``balanceOf`` read that found non-zero LB-token liquidity — is
+``closed=False`` (→ FAILED). A **read fault** — a missing/invalid pool address, a
+missing chain, a hosted-mode call with no ``gateway_client``, an unavailable
+connector, a failed SDK init, an unresolvable LBPair, or a ``balanceOf`` query
+that raised — is ``unmeasured=True`` (→ UNVERIFIED, honest don't-know), NEVER
+lowered to FAILED, so a transient gateway/RPC blip during the post-teardown
+verify cannot fabricate a residual and shut down a healthy strategy. A clean,
+MEASURED empty read is ``closed=True``.
+"""
 
 from __future__ import annotations
 
@@ -28,11 +39,13 @@ def _resolve_tj_v2_target(
     """Run the fail-closed input guards and resolve the on-chain LB-pair target.
 
     Returns a short-circuit ``ClosureCheckResult`` — a non-LP scope skip
-    (``closed=True``) or a fail-closed error (``closed=False``) for a
-    missing/invalid pool address, a missing chain, or a hosted-mode call with
-    no ``gateway_client`` — or the validated ``(pool_address, chain)`` pair when
-    the position is eligible for an on-chain balance check. Never raises: an
-    unverifiable position must surface as ``closed=False``, not an exception.
+    (``closed=True``) or a read-fault result (``closed=False, unmeasured=True``
+    → UNVERIFIED, VIB-5573) for a missing/invalid pool address, a missing chain,
+    or a hosted-mode call with no ``gateway_client`` — or the validated
+    ``(pool_address, chain)`` pair when the position is eligible for an on-chain
+    balance check. Never raises: an unverifiable position surfaces as a read
+    fault (``unmeasured=True``), never a fabricated residual, and never an
+    exception.
 
     ``pool_address`` in the returned pair is ``None`` when the position carries
     no explicit 42-char address but DOES carry a ``token_x``/``token_y``/
@@ -77,6 +90,7 @@ def _resolve_tj_v2_target(
         elif pool_address:
             return ClosureCheckResult(
                 closed=False,
+                unmeasured=True,
                 protocol=protocol,
                 position_id=position_id,
                 error=(
@@ -90,6 +104,7 @@ def _resolve_tj_v2_target(
         else:
             return ClosureCheckResult(
                 closed=False,
+                unmeasured=True,
                 protocol=protocol,
                 position_id=position_id,
                 error=(
@@ -106,9 +121,10 @@ def _resolve_tj_v2_target(
     if not chain:
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
-            error="TraderJoe V2 post-condition needs position.chain; none found",
+            error="TraderJoe V2 post-condition needs position.chain; none found — cannot read on-chain",
         )
 
     # Gateway-boundary guard: the strategy container has no outbound network
@@ -121,11 +137,12 @@ def _resolve_tj_v2_target(
     if gateway_client is None and is_hosted():
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=(
                 "TraderJoe V2 post-condition requires a gateway_client in hosted "
-                "mode; direct rpc_url fallback is local/test only"
+                "mode; direct rpc_url fallback is local/test only — cannot read on-chain"
             ),
         )
 
@@ -169,6 +186,7 @@ def traderjoe_v2_post_condition(
     except Exception as exc:  # noqa: BLE001 - defensive
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=f"TraderJoe V2 connector unavailable: {exc}",
@@ -187,6 +205,7 @@ def traderjoe_v2_post_condition(
     except Exception as exc:  # noqa: BLE001
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=f"TraderJoe V2 SDK init failed: {exc}",
@@ -205,9 +224,10 @@ def traderjoe_v2_post_condition(
             token_x_addr = adapter.resolve_token_address(str(details["token_x"]))
             token_y_addr = adapter.resolve_token_address(str(details["token_y"]))
             pool_address = sdk.get_pool_address(token_x_addr, token_y_addr, int(details["bin_step"]))
-        except Exception as exc:  # noqa: BLE001 — fail closed on unresolvable pair
+        except Exception as exc:  # noqa: BLE001 — read fault on unresolvable pair (UNVERIFIED)
             return ClosureCheckResult(
                 closed=False,
+                unmeasured=True,
                 protocol=protocol,
                 position_id=position_id,
                 error=(
@@ -232,6 +252,7 @@ def traderjoe_v2_post_condition(
     except Exception as exc:  # noqa: BLE001
         return ClosureCheckResult(
             closed=False,
+            unmeasured=True,
             protocol=protocol,
             position_id=position_id,
             error=f"TraderJoe V2 balanceOf query failed: {exc}",

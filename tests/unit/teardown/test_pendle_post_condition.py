@@ -125,6 +125,7 @@ def test_lp_nonzero_balance_is_not_closed_with_residual() -> None:
     pos = _position(details={"kind": "lp", "market_id": MARKET})
     result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw)
     assert result.closed is False
+    assert result.unmeasured is False  # MEASURED residual → FAILED, not UNVERIFIED (VIB-5573)
     assert result.error is None
     assert result.residual["token"] == MARKET
     assert result.residual["balance"] == 4242
@@ -158,6 +159,7 @@ def test_pt_nonzero_balance_is_not_closed() -> None:
     pos = _position(details={"kind": "pt", "market_id": MARKET})
     result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw)
     assert result.closed is False
+    assert result.unmeasured is False  # MEASURED residual → FAILED, not UNVERIFIED (VIB-5573)
     assert result.residual["balance"] == 99
     assert result.residual["kind"] == "pt"
     assert result.residual["token"].lower() == PT.lower()
@@ -175,6 +177,7 @@ def test_pt_readtokens_none_is_fail_closed() -> None:
     pos = _position(details={"kind": "pt", "market_id": MARKET})
     result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw)
     assert result.closed is False
+    assert result.unmeasured is True  # readTokens read fault → UNVERIFIED (VIB-5573)
     assert result.error is not None and "readTokens" in result.error
 
 
@@ -183,6 +186,7 @@ def test_pt_readtokens_malformed_is_fail_closed() -> None:
     pos = _position(details={"kind": "pt", "market_id": MARKET})
     result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw)
     assert result.closed is False
+    assert result.unmeasured is True  # undecodable readTokens → read fault → UNVERIFIED (VIB-5573)
     assert result.error is not None and "undecodable" in result.error
 
 
@@ -192,6 +196,7 @@ def test_pt_zero_pt_address_is_fail_closed() -> None:
     pos = _position(details={"kind": "pt", "market_id": MARKET})
     result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw)
     assert result.closed is False
+    assert result.unmeasured is True  # PT address unresolved → read fault → UNVERIFIED (VIB-5573)
     assert result.error is not None and "zero PT address" in result.error
 
 
@@ -202,6 +207,7 @@ def test_no_gateway_client_is_fail_closed() -> None:
     pos = _position(details={"kind": "lp", "market_id": MARKET})
     result = pendle_teardown_post_condition(pos, WALLET, gateway_client=None)
     assert result.closed is False
+    assert result.unmeasured is True  # no gateway_client → cannot read → UNVERIFIED (VIB-5573)
     assert result.error is not None and "gateway_client" in result.error
 
 
@@ -210,6 +216,7 @@ def test_missing_chain_is_fail_closed() -> None:
     pos = _position(chain="", details={"kind": "lp", "market_id": MARKET})
     result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw)
     assert result.closed is False
+    assert result.unmeasured is True  # missing chain → cannot read → UNVERIFIED (VIB-5573)
     assert result.error is not None and "chain" in result.error
 
 
@@ -218,6 +225,7 @@ def test_unknown_kind_is_fail_closed() -> None:
     pos = _position(details={"kind": "yt", "market_id": MARKET})
     result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw)
     assert result.closed is False
+    assert result.unmeasured is True  # unknown kind prevents reading → UNVERIFIED (VIB-5573)
     assert result.error is not None and "yt" in result.error
 
 
@@ -226,6 +234,7 @@ def test_gateway_balance_raises_is_fail_closed() -> None:
     pos = _position(details={"kind": "lp", "market_id": MARKET})
     result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw)
     assert result.closed is False
+    assert result.unmeasured is True  # balance read raised → read fault → UNVERIFIED (VIB-5573)
     assert result.error is not None and "raised" in result.error
 
 
@@ -234,6 +243,7 @@ def test_gateway_eth_call_raises_is_fail_closed() -> None:
     pos = _position(details={"kind": "pt", "market_id": MARKET})
     result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw)
     assert result.closed is False
+    assert result.unmeasured is True  # readTokens eth_call raised → read fault → UNVERIFIED (VIB-5573)
     assert result.error is not None and "raised" in result.error
 
 
@@ -242,6 +252,7 @@ def test_balance_none_is_fail_closed() -> None:
     pos = _position(details={"kind": "lp", "market_id": MARKET})
     result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw)
     assert result.closed is False
+    assert result.unmeasured is True  # None balance = unmeasured read → UNVERIFIED (VIB-5573)
     assert result.error is not None and "None" in result.error
 
 
@@ -250,6 +261,7 @@ def test_missing_market_address_is_fail_closed() -> None:
     pos = _position(position_id="", details={"kind": "lp"})
     result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw)
     assert result.closed is False
+    assert result.unmeasured is True  # market address unresolvable → cannot read → UNVERIFIED (VIB-5573)
     assert result.error is not None and "market address" in result.error
 
 
@@ -295,6 +307,7 @@ def test_lp_amount_position_id_never_used_as_address() -> None:
     pos = _position(position_id=_LP_AMOUNT, details={"kind": "lp"})
     result = pendle_teardown_post_condition(pos, WALLET, gateway_client=gw)
     assert result.closed is False
+    assert result.unmeasured is True  # market address unresolvable → cannot read → UNVERIFIED (VIB-5573)
     assert result.error is not None and "market address" in result.error
     assert gw.balance_calls == []  # never queried with the amount
 

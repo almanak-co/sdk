@@ -491,6 +491,20 @@ def _covers_token(intent: Any, position: PositionInfo, itype: str) -> bool:
     # them as coverage — additive/safe, matched only on the token (VIB-5469).
     if itype in ("BRIDGE", "UNWRAP_NATIVE") and _intent_token_matches(intent, position, "token"):
         return True
+    # VIB-5573: an ERC-4626 vault position a strategy reports as PositionType.TOKEN
+    # rather than PositionType.VAULT (e.g. the metamorpho_base_yield demo, which
+    # types its vault position TOKEN for USD-pegged valuation simplicity — see its
+    # get_open_positions) is closed by a VAULT_REDEEM. Credit it by the SAME
+    # vault-address identity match _covers_vault uses. Safe against false-coverage:
+    # a VAULT_REDEEM always carries vault_address and a position always has an id,
+    # so this is ALWAYS a strict address match — a plain held token (whose id is
+    # not a vault address) can never be leniently covered. Without this a real
+    # on-chain redeem that closes the position is flagged uncovered and the
+    # completeness gate FAILs the whole teardown (the E2E-caught metamorpho case).
+    if itype == "VAULT_REDEEM" and _lenient_identity_match(
+        intent, position, "vault_address", ("vault_address", "address", "vault")
+    ):
+        return True
     return itype == "UNSTAKE" and _intent_token_matches(intent, position, "token_in")
 
 

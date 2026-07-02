@@ -100,7 +100,8 @@ LENDING = "lending"
 PERP = "perp"
 PENDLE = "pendle"
 STAKE = "stake"  # staking / wrap / CDP — the NO_ACCOUNTING wallet-token family
-PRIMITIVES = (LP, LENDING, PERP, PENDLE, STAKE)
+VAULT = "vault"  # ERC-4626 vaults (MetaMorpho, Beefy, Yearn V3, Lagoon, ...)
+PRIMITIVES = (LP, LENDING, PERP, PENDLE, STAKE, VAULT)
 
 _CHAIN = "ethereum"
 
@@ -147,7 +148,20 @@ def _representative_positions(primitive: str) -> list[PositionInfo]:
         return [_pos(PositionType.TOKEN, "pendle", {"asset": "PT-wstETH"})]
     if primitive == STAKE:
         return [_pos(PositionType.STAKE, "lido", {"asset": "wstETH"})]
+    if primitive == VAULT:
+        return [
+            _pos(
+                PositionType.VAULT,
+                "metamorpho",
+                {"vault_address": _VAULT_ADDRESS, "asset": "USDC"},
+                position_id=_VAULT_ADDRESS,
+            )
+        ]
     raise AssertionError(f"unknown primitive {primitive!r}")
+
+
+# A representative ERC-4626 vault (MetaMorpho on Base) for the VAULT column.
+_VAULT_ADDRESS = "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca"
 
 
 class _Health:
@@ -315,6 +329,11 @@ def _assert_live_marker(intent: Any) -> None:
         # No amount: the connector reads the position's LIVE liquidity at close.
         assert getattr(intent, "amount", "x") is None
         assert getattr(intent, "position_id", None)
+    elif kind == "VAULT_REDEEM":
+        # shares="all" -> live get_max_redeem -> redeem(maxRedeem) at execution,
+        # never a cached share count (Seam-2 live-resolution marker for vaults).
+        assert getattr(intent, "shares", None) == "all"
+        assert getattr(intent, "vault_address", None)
     else:
         raise AssertionError(f"unexpected close intent type {kind!r}")
 
@@ -735,6 +754,56 @@ def check_s6_failclosed_onchain_verify(primitive: str) -> None:
         assert cleared.closed is True, "a cleared GMX order reads closed on-chain"
         return
 
+    if primitive == VAULT:
+        # THE VIB-5573 DELIVERABLE. Vault closure authority is the generic
+        # ERC-4626 post-condition, registered as a framework default for every
+        # ``ProtocolKind.VAULT`` slug (metamorpho / morpho_vault / beefy / yearn /
+        # lagoon). Drive the REAL registered hook with a fake gateway (scripted
+        # balanceOf + convertToAssets, per test_vault_post_condition_vib5573.py)
+        # and assert BEHAVIOUR in BOTH directions: a positive MEASURED asset
+        # residual flips closed→False (with unmeasured False — a residual, not a
+        # read fault), and a clean vault (zero shares) reads closed=True. The
+        # asset-denominated exact-0 rule (not shares) tolerates the share-dust a
+        # clean redeem(maxRedeem) leaves.
+        assert has_teardown_post_condition("metamorpho"), (
+            "metamorpho must resolve the ERC-4626 vault teardown post-condition (VAULT closure authority)"
+        )
+        hook = get_teardown_post_condition("metamorpho")
+        wallet = "0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF"
+        vault_pos = PositionInfo(
+            position_type=PositionType.VAULT,
+            position_id=_VAULT_ADDRESS,
+            chain="base",
+            protocol="metamorpho",
+            value_usd=Decimal("0"),
+            details={"vault_address": _VAULT_ADDRESS, "asset": "USDC"},
+        )
+
+        class _VaultGateway:
+            """Scripted ERC-4626 reads: balanceOf (shares) + convertToAssets."""
+
+            def __init__(self, shares: int, assets: int) -> None:
+                self._shares = shares
+                self._assets = assets
+
+            def query_erc20_balance(
+                self, *, chain: str, token_address: str, wallet_address: str, block: Any = None
+            ) -> int:  # noqa: ARG002
+                return self._shares
+
+            def eth_call(self, *, chain: str, to: str, data: str, block: Any = None) -> str:  # noqa: ARG002
+                # convertToAssets(shares) -> uint256 asset value.
+                return "0x" + f"{self._assets:064x}"
+
+        residual = hook(vault_pos, wallet, gateway_client=_VaultGateway(shares=2963669482273198015, assets=3200145))
+        assert residual.closed is False, "a positive vault asset residual must fail the teardown closed"
+        assert residual.unmeasured is False, "a MEASURED residual is FAILED, not unmeasured"
+        assert residual.residual.get("assets") == 3200145
+        cleared = hook(vault_pos, wallet, gateway_client=_VaultGateway(shares=0, assets=999))
+        assert cleared.closed is True, "a zero-share vault reads closed on-chain"
+        assert cleared.unmeasured is False
+        return
+
     proto = _POSTCOND_PROTO[primitive]
     assert has_teardown_post_condition(proto)
 
@@ -749,7 +818,7 @@ def check_s7_authoritative_closure_count(primitive: str) -> None:
     residual) and assert the closure surface reports POSITIONS, separates the
     confidence into ``verification_status``, and pairs a residual with
     ``FAILED`` + ``success=False`` — the exact VIB-5085 / VIB-5472 contract."""
-    assert primitive in (LP, LENDING, PERP, PENDLE)
+    assert primitive in (LP, LENDING, PERP, PENDLE, VAULT)
 
     # Confidence is a distinct axis from the count: a closure REPORTED closed but
     # not chain-proven (UNVERIFIED) must never read as chain-confirmed.
@@ -854,6 +923,16 @@ _NA_REGISTRY_STAKE = (
     "staking/wrap acquisitions are NO_ACCOUNTING wallet tokens, not registry positions (handled by Seam 9)",
 )
 _NA_LENDING_ONLY = ("na", "seam is lending-specific")
+_NA_REGISTRY_VAULT = (
+    "na",
+    "vault positions surface via the strategy get_open_positions union; there is no dedicated "
+    "vault registry-enumeration reader (lp/lending/perp/pendle only)",
+)
+_NA_NO_ACCOUNTING_VAULT = (
+    "na",
+    "vault deposits/redeems emit accounting events (VAULT_DEPOSIT/VAULT_REDEEM), not the "
+    "NO_ACCOUNTING wallet-token lane",
+)
 
 SEAMS: tuple[Seam, ...] = (
     Seam(
@@ -867,6 +946,7 @@ SEAMS: tuple[Seam, ...] = (
             PERP: "green",
             PENDLE: "green",
             STAKE: _NA_REGISTRY_STAKE,
+            VAULT: _NA_REGISTRY_VAULT,
         },
     ),
     Seam(
@@ -874,7 +954,7 @@ SEAMS: tuple[Seam, ...] = (
         name="live per-position amount resolution (close fully -> live figure)",
         ticket="VIB-5465",
         check=check_s2_live_close_fully,
-        status={LP: "green", LENDING: "green", PERP: "green", PENDLE: "green", STAKE: "green"},
+        status={LP: "green", LENDING: "green", PERP: "green", PENDLE: "green", STAKE: "green", VAULT: "green"},
     ),
     Seam(
         id="S3",
@@ -887,6 +967,7 @@ SEAMS: tuple[Seam, ...] = (
             PERP: _NA_LENDING_ONLY,
             PENDLE: _NA_LENDING_ONLY,
             STAKE: _NA_LENDING_ONLY,
+            VAULT: _NA_LENDING_ONLY,
         },
     ),
     Seam(
@@ -900,6 +981,7 @@ SEAMS: tuple[Seam, ...] = (
             PERP: _NA_LENDING_ONLY,
             PENDLE: _NA_LENDING_ONLY,
             STAKE: _NA_LENDING_ONLY,
+            VAULT: _NA_LENDING_ONLY,
         },
     ),
     Seam(
@@ -928,6 +1010,13 @@ SEAMS: tuple[Seam, ...] = (
             PERP: "green",
             PENDLE: "green",
             STAKE: _NA_REGISTRY_STAKE,
+            # VIB-5573: the generic ERC-4626 vault post-condition — registered as a
+            # framework default for every ProtocolKind.VAULT slug — reads residual
+            # shares (balanceOf) + convertToAssets via the gateway and fails the
+            # teardown closed on any positive asset residual (asset-denominated
+            # exact-0, tolerating clean-redeem share dust). This is the seam's
+            # deliverable for the VAULT column.
+            VAULT: "green",
         },
     ),
     Seam(
@@ -944,6 +1033,7 @@ SEAMS: tuple[Seam, ...] = (
                 "na",
                 "staking is swept via the consolidation/clamp lane, not a verified position closure",
             ),
+            VAULT: "green",
         },
     ),
     Seam(
@@ -957,6 +1047,7 @@ SEAMS: tuple[Seam, ...] = (
             PERP: _NA_LENDING_ONLY,
             PENDLE: _NA_LENDING_ONLY,
             STAKE: _NA_LENDING_ONLY,
+            VAULT: _NA_LENDING_ONLY,
         },
     ),
     Seam(
@@ -970,6 +1061,7 @@ SEAMS: tuple[Seam, ...] = (
             PERP: ("na", "perp acquisitions emit accounting events (not the NO_ACCOUNTING lane)"),
             PENDLE: "green",
             STAKE: "green",
+            VAULT: _NA_NO_ACCOUNTING_VAULT,
         },
     ),
 )
@@ -1017,8 +1109,9 @@ def test_matrix_shape_is_complete() -> None:
         for status in seam.status.values():
             key = status if isinstance(status, str) else status[0]
             counts[key] += 1
-    assert sum(counts.values()) == len(SEAMS) * len(PRIMITIVES) == 45
-    # 27 GREEN (all merged seams proven, incl. the Pendle on-chain closure
-    # verifier VIB-3808 and the GMX perp closure authority VIB-5116) / 0 XFAIL /
-    # 18 N/A.
-    assert counts == {"green": 27, "xfail": 0, "na": 18}, counts
+    assert sum(counts.values()) == len(SEAMS) * len(PRIMITIVES) == 54
+    # 31 GREEN (all merged seams proven, incl. the Pendle on-chain closure
+    # verifier VIB-3808, the GMX perp closure authority VIB-5116, and the generic
+    # ERC-4626 vault closure authority VIB-5573 — VAULT adds S2/S5/S6/S7 green) /
+    # 0 XFAIL / 23 N/A (VAULT adds S1/S3/S4/S8/S9 na).
+    assert counts == {"green": 31, "xfail": 0, "na": 23}, counts

@@ -142,6 +142,7 @@ class TestTraderJoeV2PostCondition:
             )
 
         assert result.closed is False
+        assert result.unmeasured is False  # MEASURED residual → FAILED, not UNVERIFIED (VIB-5573)
         assert result.residual["bin_balances"] == {100: 4567, 101: 1234}
         assert result.residual["total_lb_tokens"] == 5801
         assert result.residual["pool_address"] == POOL
@@ -184,6 +185,7 @@ class TestTraderJoeV2PostCondition:
             )
 
         assert result.closed is False
+        assert result.unmeasured is False  # MEASURED residual → FAILED, not UNVERIFIED (VIB-5573)
         assert result.residual["fallback_scan"]
         assert result.residual["bin_balances"] == {500: 999}
 
@@ -196,6 +198,7 @@ class TestTraderJoeV2PostCondition:
         )
         result = traderjoe_v2_post_condition(position=position, wallet_address=WALLET)
         assert result.closed is False
+        assert result.unmeasured is True  # no pool descriptor → cannot resolve → UNVERIFIED (VIB-5573)
         assert "pool_address" in (result.error or "")
 
     def test_pool_symbol_string_rejected_as_non_hex(self) -> None:
@@ -213,6 +216,7 @@ class TestTraderJoeV2PostCondition:
         )
         result = traderjoe_v2_post_condition(position=position, wallet_address=WALLET)
         assert result.closed is False
+        assert result.unmeasured is True  # invalid pool address → cannot resolve → UNVERIFIED (VIB-5573)
         assert "42-char hex address" in (result.error or "")
         assert "WAVAX/USDC/20" in (result.error or "")
 
@@ -277,6 +281,7 @@ class TestTraderJoeV2PostCondition:
             )
 
         assert result.closed is False
+        assert result.unmeasured is False  # MEASURED residual → FAILED, not UNVERIFIED (VIB-5573)
         assert result.residual["bin_balances"] == {100: 42}
         assert result.residual["pool_address"] == POOL
 
@@ -328,6 +333,7 @@ class TestTraderJoeV2PostCondition:
             )
 
         assert result.closed is False
+        assert result.unmeasured is True  # unresolvable LBPair → cannot read → UNVERIFIED (VIB-5573)
         assert "could not derive" in (result.error or "")
 
     def test_sdk_init_failure_returns_error(self) -> None:
@@ -342,6 +348,7 @@ class TestTraderJoeV2PostCondition:
                 rpc_url="http://localhost:8545",
             )
         assert result.closed is False
+        assert result.unmeasured is True  # SDK init failed → cannot read → UNVERIFIED (VIB-5573)
         assert "boom" in (result.error or "")
 
     def test_skips_token_position_type_without_failing_closed(self) -> None:
@@ -428,6 +435,7 @@ class TestTraderJoeV2PostCondition:
             )
 
         assert result.closed is False
+        assert result.unmeasured is False  # MEASURED residual → FAILED, not UNVERIFIED (VIB-5573)
         assert result.residual["bin_balances"] == {10: 7777}
 
     def test_balance_query_failure_returns_error(self) -> None:
@@ -443,6 +451,7 @@ class TestTraderJoeV2PostCondition:
                 rpc_url="http://localhost:8545",
             )
         assert result.closed is False
+        assert result.unmeasured is True  # balanceOf query failed → read fault → UNVERIFIED (VIB-5573)
         assert "rpc-down" in (result.error or "")
 
     def test_missing_chain_fails_closed(self) -> None:
@@ -463,6 +472,7 @@ class TestTraderJoeV2PostCondition:
                 rpc_url="http://localhost:8545",
             )
         assert result.closed is False
+        assert result.unmeasured is True  # missing chain → cannot read → UNVERIFIED (VIB-5573)
         assert "position.chain" in (result.error or "")
         # The chain check fires before SDK construction.
         adapter_cls.assert_not_called()
@@ -483,6 +493,7 @@ class TestTraderJoeV2PostCondition:
                 rpc_url="http://localhost:8545",
             )
         assert result.closed is False
+        assert result.unmeasured is True  # hosted + no gateway_client → cannot read → UNVERIFIED (VIB-5573)
         assert "hosted" in (result.error or "")
         # No direct-RPC SDK is built when the gateway path is unavailable in hosted.
         adapter_cls.assert_not_called()

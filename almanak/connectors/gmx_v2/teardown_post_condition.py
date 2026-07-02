@@ -20,11 +20,21 @@ on-chain truth via the gateway and fails the teardown closed on ANY residual:
   perp-cutover row): closed iff the wallet has no active position for that market
   (and side, when known) — ``sizeInUsd == 0``.
 
-Closure rule is **exact**: any pending order / any matching active position ⇒ NOT
-closed. Fail-closed is the safe error direction (teardown's inverted failure
-semantics make a FAILED verification loud-but-non-blocking); the opposite error —
-reporting a still-funded order/position as closed — is the leak we must never
-make. Empty ≠ Zero: an unmeasured read (gateway/RPC error) is NEVER "closed".
+Closure rule is **exact** and three-valued (VIB-5573, Empty ≠ Zero):
+
+* A **measured residual** — a genuinely-read pending order still in the wallet's
+  on-chain set, or a genuinely-read active position (``sizeInUsd != 0``) — is
+  ``closed=False`` (→ FAILED). This is the leak we must never miss.
+* A **read fault** — missing chain/wallet/gateway_client, a gateway read that
+  came back unmeasured (``not result.ok``), or a TRUNCATED read window where the
+  key could lie beyond the partial set — is ``unmeasured=True`` (→ UNVERIFIED,
+  honest don't-know). It is NEVER lowered to FAILED, so a transient gateway/RPC
+  blip during the post-teardown verify cannot fabricate a residual and shut down
+  a healthy strategy.
+
+The opposite error — reporting a still-funded order/position as ``closed=True`` —
+is the leak the seam exists to prevent; only a clean, MEASURED, empty re-read is
+``closed=True``.
 
 Gateway boundary: every read goes through the supplied ``gateway_client``. No
 direct egress; ``rpc_url`` is accepted for protocol parity but not consumed.
@@ -41,7 +51,7 @@ from almanak.connectors.gmx_v2.teardown_reads import read_open_positions, read_p
 _PENDING_KINDS = frozenset({"pending_order", "residual_unverified"})
 
 
-def _result(closed: bool, position_id: str, **extra: Any) -> ClosureCheckResult:
+def _result(closed: bool, position_id: str, *, unmeasured: bool = False, **extra: Any) -> ClosureCheckResult:
     residual = {k: v for k, v in extra.items() if k not in ("error",)}
     return ClosureCheckResult(
         closed=closed,
@@ -49,7 +59,17 @@ def _result(closed: bool, position_id: str, **extra: Any) -> ClosureCheckResult:
         position_id=position_id,
         residual=residual,
         error=extra.get("error"),
+        unmeasured=unmeasured,
     )
+
+
+def _unverified(position_id: str, error: str) -> ClosureCheckResult:
+    """A read fault: the check could not measure on-chain truth (VIB-5573).
+
+    Lowered to UNVERIFIED by the composition seam — NEVER FAILED. Carries no
+    residual: Empty ≠ Zero, so a gateway blip must not masquerade as a residual.
+    """
+    return _result(False, position_id, unmeasured=True, error=error)
 
 
 def _verify_pending_order(
@@ -63,12 +83,11 @@ def _verify_pending_order(
 
     result = read_pending_orders(gateway_client, chain, wallet_address, block=block)
     if not result.ok:
-        return _result(
-            False,
+        return _unverified(
             position_id,
-            error=(
+            (
                 f"GMX pending-order closure UNVERIFIED for {position_id}: {result.error} — "
-                "fail-closed (an unmeasured order read is never 'closed')"
+                "read fault, an unmeasured order read is never 'closed' nor a residual"
             ),
         )
 
@@ -94,13 +113,12 @@ def _verify_pending_order(
     # orders than one window), this key may lie beyond the window — do NOT read it
     # as closed (that would be the silent-strand class VIB-5116 fixes); fail-closed.
     if getattr(result, "truncated", False):
-        return _result(
-            False,
+        return _unverified(
             position_id,
-            order_key=order_key,
-            error=(
+            (
                 f"GMX pending-order closure UNVERIFIED for {position_id}: on-chain order set was "
-                "TRUNCATED (more orders than one read window); key not in the partial set — fail-closed"
+                "TRUNCATED (more orders than one read window); key not in the partial set — "
+                "could not measure whether it is closed"
             ),
         )
     return _result(True, position_id)
@@ -126,12 +144,11 @@ def _verify_open_position(
 
     pr = read_open_positions(gateway_client, chain, wallet_address, block=block)
     if not getattr(pr, "ok", False):
-        return _result(
-            False,
+        return _unverified(
             position_id,
-            error=(
+            (
                 f"GMX position closure UNVERIFIED for {position_id}: getAccountPositions "
-                "read was unmeasured — fail-closed"
+                "read was unmeasured — read fault, not a residual"
             ),
         )
 
@@ -157,18 +174,17 @@ def gmx_v2_teardown_post_condition(
     position_id = str(getattr(position, "position_id", "") or "")
     chain = getattr(position, "chain", None) or ""
     if not chain:
-        return _result(False, position_id, error="GMX post-condition needs position.chain; none found")
+        return _unverified(position_id, "GMX post-condition needs position.chain; none found — cannot read on-chain")
     if gateway_client is None:
-        return _result(
-            False,
+        return _unverified(
             position_id,
-            error=(
+            (
                 "GMX post-condition requires a gateway_client to read on-chain truth "
                 "(pending orders / getAccountPositions). None supplied — verification cannot proceed."
             ),
         )
     if not str(wallet_address or "").strip():
-        return _result(False, position_id, error="GMX post-condition needs a wallet address; none found")
+        return _unverified(position_id, "GMX post-condition needs a wallet address; none found — cannot read on-chain")
 
     details = getattr(position, "details", None) or {}
     kind = str(details.get("kind") or "").lower()

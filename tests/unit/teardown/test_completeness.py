@@ -228,6 +228,55 @@ def test_vault_uncovered_by_wrong_intent_type():
     assert not check_intent_coverage(_summary([_vault()]), [swap]).complete
 
 
+# ---------------------------------------------------------------------------
+# VIB-5573: a vault position a strategy reports as PositionType.TOKEN (e.g. the
+# metamorpho_base_yield demo, for USD-pegged valuation simplicity) is still
+# closed by a VAULT_REDEEM. The E2E real-fork proof caught this: without the
+# _covers_token VAULT_REDEEM credit the completeness gate FAILs the whole
+# teardown even though the redeem executed and closed the position on-chain.
+# ---------------------------------------------------------------------------
+
+
+def _token_typed_vault(vault_address: str = _VAULT_ADDR) -> PositionInfo:
+    return PositionInfo(
+        position_type=PositionType.TOKEN,  # the metamorpho demo types it TOKEN
+        position_id=f"metamorpho-base-{vault_address[:16]}",
+        chain="base",
+        protocol="metamorpho",
+        value_usd=Decimal("50"),
+        details={"vault_address": vault_address, "deposit_token": "USDC"},
+    )
+
+
+def test_token_typed_vault_covered_by_matching_vault_redeem():
+    redeem = Intent.vault_redeem(protocol="metamorpho", vault_address=_VAULT_ADDR, shares="all", chain="base")
+    assert check_intent_coverage(_summary([_token_typed_vault()]), [redeem]).complete
+    assert not check_intent_coverage(_summary([_token_typed_vault()]), []).complete
+
+
+def test_token_typed_vault_uncovered_when_address_differs():
+    redeem = Intent.vault_redeem(protocol="metamorpho", vault_address=_OTHER_VAULT_ADDR, shares="all", chain="base")
+    assert not check_intent_coverage(_summary([_token_typed_vault()]), [redeem]).complete
+
+
+def test_plain_held_token_not_falsely_covered_by_vault_redeem():
+    """Safety: a VAULT_REDEEM must NOT leniently cover an unrelated held TOKEN.
+
+    A plain held token has no vault identity; its position_id is not a vault
+    address, so the strict address match fails — no false coverage.
+    """
+    held = PositionInfo(
+        position_type=PositionType.TOKEN,
+        position_id="held-usdc",
+        chain="base",
+        protocol="",
+        value_usd=Decimal("10"),
+        details={"token": "USDC"},
+    )
+    redeem = Intent.vault_redeem(protocol="metamorpho", vault_address=_VAULT_ADDR, shares="all", chain="base")
+    assert not check_intent_coverage(_summary([held]), [redeem]).complete
+
+
 def test_stake_covered_by_unstake_or_swap():
     stake = PositionInfo(
         position_type=PositionType.STAKE,

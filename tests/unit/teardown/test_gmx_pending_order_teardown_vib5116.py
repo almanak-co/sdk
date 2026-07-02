@@ -214,8 +214,11 @@ def _pending_order_position() -> PositionInfo:
 
 
 def test_post_condition_pending_order_fails_closed() -> None:
+    # MEASURED residual (the order is genuinely in the on-chain pending set) →
+    # FAILED, not UNVERIFIED (VIB-5573).
     result = gmx_v2_teardown_post_condition(_pending_order_position(), _WALLET, _FakeGateway())
     assert result.closed is False
+    assert result.unmeasured is False
     assert result.residual.get("order_key", "").lower() == _ORDER_KEY
 
 
@@ -227,15 +230,19 @@ def test_post_condition_order_gone_reads_closed() -> None:
 
 
 def test_post_condition_unmeasured_is_failclosed() -> None:
+    # A read fault (count read came back None) → UNVERIFIED, never a fabricated
+    # residual → FAILED (VIB-5573).
     gw = _FakeGateway(count=None)
     result = gmx_v2_teardown_post_condition(_pending_order_position(), _WALLET, gw)
     assert result.closed is False
+    assert result.unmeasured is True
     assert result.error
 
 
 def test_post_condition_missing_gateway_is_failclosed() -> None:
     result = gmx_v2_teardown_post_condition(_pending_order_position(), _WALLET, None)
     assert result.closed is False
+    assert result.unmeasured is True
     assert result.error
 
 
@@ -260,6 +267,7 @@ def test_post_condition_open_position_failclosed_when_any_active(monkeypatch) ->
     monkeypatch.setattr(tpc, "read_open_positions", lambda *a, **k: SimpleNamespace(ok=True, positions=[active]))
     r = tpc.gmx_v2_teardown_post_condition(_open_perp_position(), _WALLET, _FakeGateway())
     assert r.closed is False  # any active GMX position of this deployment fails closed
+    assert r.unmeasured is False  # MEASURED residual → FAILED, not UNVERIFIED
 
 
 def test_post_condition_open_position_closed_when_flat(monkeypatch) -> None:
@@ -279,7 +287,9 @@ def test_post_condition_open_position_unmeasured_failclosed(monkeypatch) -> None
 
     monkeypatch.setattr(tpc, "read_open_positions", lambda *a, **k: SimpleNamespace(ok=False, positions=[]))
     r = tpc.gmx_v2_teardown_post_condition(_open_perp_position(), _WALLET, _FakeGateway())
+    # getAccountPositions read fault → UNVERIFIED, never FAILED (VIB-5573).
     assert r.closed is False and r.error
+    assert r.unmeasured is True
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +540,10 @@ def test_c4_truncated_read_flags_and_post_condition_fails_closed_on_notfound() -
         {"kind": "pending_order", "order_key": "0xbeyondwindowkey"},
     )
     check = gmx_v2_teardown_post_condition(pos, _WALLET, gw)
+    # TRUNCATED window: the key may lie beyond the partial set → cannot measure →
+    # UNVERIFIED, not a fabricated residual → FAILED (VIB-5573).
     assert check.closed is False and check.error
+    assert check.unmeasured is True
 
 
 def test_c5_pending_order_residual_never_covered_by_perp_close() -> None:

@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -55,6 +56,7 @@ from almanak.framework.teardown.models import (
 from almanak.framework.teardown.oracle_warmup import warm_and_validate_oracle
 from almanak.framework.teardown.plan_a_reconciliation import reconcile_known_positions_against_chain
 from almanak.framework.teardown.revert_hints import annotate_teardown_error
+from almanak.framework.teardown.revert_transience import Transience, classify_revert_transience
 from almanak.framework.teardown.safety_guard import SafetyGuard
 from almanak.framework.teardown.slippage_manager import (
     EscalatingSlippageManager,
@@ -63,6 +65,34 @@ from almanak.framework.teardown.slippage_manager import (
 from almanak.framework.teardown.swap_clamp import SwapClampDecision, decide_swap_clamp
 
 logger = logging.getLogger(__name__)
+
+# VIB-5573 (WI-2): bounded time-axis retry for a vetted TRANSIENT revert (e.g.
+# MetaMorpho withdraw-queue Panic 0x11 that clears within blocks). The retry is
+# DEFERRED — the intent is re-queued to the END of the work queue and re-fired
+# after a backoff, so it never delays a not-yet-tried risk-reducing close (the
+# execution lane is sequential; blueprint 14a §Stage 6 "never block a
+# risk-reducing intent"). Bounded so a revert that never clears still ends the
+# teardown LOUD (FAILED) rather than looping forever. Backoff is per re-attempt
+# (``_TRANSIENT_BACKOFF_S * attempts``) → ~4s, 8s, 12s ⇒ ≤~24s worst case for a
+# single stuck vault, comfortably inside typical teardown SLAs (Q3: confirm
+# against the hosted teardown deadline if it tightens).
+_TRANSIENT_MAX_ATTEMPTS = 3
+_TRANSIENT_BACKOFF_S = 4.0
+
+
+def _intent_field(intent: Any, name: str) -> str | None:
+    """Read a string field (``intent_type`` / ``protocol``) from an intent that
+    may be a dict or an object, as the bare value.
+
+    Returns ``None`` when absent. An enum is unwrapped to its ``.value`` (so an
+    ``IntentType.VAULT_REDEEM`` reads as ``"VAULT_REDEEM"``, not
+    ``"IntentType.VAULT_REDEEM"``) — the transience classifier matches the bare
+    verb / protocol slug.
+    """
+    value = intent.get(name) if isinstance(intent, dict) else getattr(intent, name, None)
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))
 
 
 class Intent(Protocol):
@@ -1476,14 +1506,55 @@ class TeardownManager:
         # accounting_degraded_count for operator visibility + reconciliation.
         accounting_degraded_records: list[Any] = []
 
-        for i, intent in enumerate(intents[start_from_index:], start=start_from_index):
+        # VIB-5573 (WI-2): iterate a mutable work QUEUE, not a fixed range, so a
+        # TRANSIENT-reverting close can be re-queued to the TAIL and retried on
+        # the time axis AFTER every first-attempt intent. ``attempts`` counts a
+        # given intent's deferrals. The first pass preserves the planner's
+        # risk-priority order (enumerate from start_from_index); deferred items
+        # always trail, so a transient retry never delays a not-yet-tried
+        # risk-reducing close (blueprint 14a §Stage 6).
+        work: deque[tuple[int, Any, int]] = deque(
+            (idx, it, 0) for idx, it in enumerate(intents[start_from_index:], start=start_from_index)
+        )
+
+        # VIB-5573 (WI-2): resume-safe progress cutoff. Deferred transient retries
+        # make completion NON-CONTIGUOUS (intent 0 can finish AFTER intent 1), so
+        # the running ``succeeded`` count is NOT a safe resume cutoff — persisting
+        # ``start_from_index + succeeded`` could let ``resume()``
+        # (``max(current_intent_index, completed_intents)``) skip a deferred but
+        # unfinished intent and strand it (CodeRabbit). Track the still-PENDING
+        # original indices and persist the resume FLOOR = the lowest not-yet-done
+        # index, so resume always re-runs a pending deferred intent. Re-running a
+        # later-already-completed close on resume is a safe no-op (live resolution
+        # → zero-balance skip). For a purely sequential teardown the floor equals
+        # ``start_from_index + succeeded`` exactly, so behaviour is unchanged.
+        _pending_indices: set[int] = {idx for idx, _, _ in work}
+
+        def _resume_floor() -> int:
+            return min(_pending_indices) if _pending_indices else len(intents)
+
+        while work:
+            i, intent, attempts = work.popleft()
+
+            # VIB-5573 (WI-2): a re-queued transient waits a bounded backoff
+            # BEFORE re-firing so the underflow/queue-inconsistency has time to
+            # clear. Placed at the queue level (not inside the per-intent await)
+            # so the wait never delays a first-attempt risk-reducing close —
+            # deferred items sit behind every attempts==0 intent in the queue.
+            if attempts > 0:
+                await asyncio.sleep(_TRANSIENT_BACKOFF_S * attempts)
+
             # Update progress
             progress_pct = int((i / len(intents)) * 100)
             if on_progress:
                 await on_progress(progress_pct, f"Executing step {i + 1}/{len(intents)}")
 
-            # Update state
-            teardown_state.current_intent_index = i
+            # Update state — persist the resume FLOOR (lowest pending index), NOT
+            # the raw ``i``: a deferred retry pops out of original order, so ``i``
+            # can be ahead of an earlier still-pending intent (VIB-5573).
+            _floor = _resume_floor()
+            teardown_state.current_intent_index = _floor
+            teardown_state.completed_intents = _floor
             teardown_state.updated_at = datetime.now(UTC)
             if self.state_manager:
                 await self.state_manager.save_teardown_state(teardown_state)
@@ -1504,15 +1575,14 @@ class TeardownManager:
                 skipped += 1
                 if on_progress:
                     await on_progress(progress_pct, f"Skipped step {i + 1}/{len(intents)}: {skip_reason}")
-                # Mirror the success-path persist so a crash mid-teardown
-                # records the skip as completed and resume picks up at i+1.
-                # ABSOLUTE count (offset + this call's successes): ``succeeded``
-                # is call-relative, and this method runs with a non-zero
-                # ``start_from_index`` both on resume and for the VIB-5011
-                # consolidation extension — persisting the relative count would
-                # rewind ``completed_intents`` below already-finished work
-                # (pr-auditor finding).
-                teardown_state.completed_intents = start_from_index + succeeded
+                # Mirror the success-path persist so a crash mid-teardown records
+                # the skip as completed and resume picks up past it. Persist the
+                # resume FLOOR (lowest still-pending index) — a no-op skip is done,
+                # so drop it from the pending set first (VIB-5573).
+                _pending_indices.discard(i)
+                _floor = _resume_floor()
+                teardown_state.completed_intents = _floor
+                teardown_state.current_intent_index = _floor
                 teardown_state.updated_at = datetime.now(UTC)
                 if self.state_manager:
                     await self.state_manager.save_teardown_state(teardown_state)
@@ -1617,7 +1687,11 @@ class TeardownManager:
                             await on_progress(
                                 progress_pct, f"Skipped step {i + 1}/{len(intents)}: clamp {decision.reason}"
                             )
-                        teardown_state.completed_intents = start_from_index + succeeded
+                        # Done → drop from pending; persist the resume floor (VIB-5573).
+                        _pending_indices.discard(i)
+                        _floor = _resume_floor()
+                        teardown_state.completed_intents = _floor
+                        teardown_state.current_intent_index = _floor
                         teardown_state.updated_at = datetime.now(UTC)
                         if self.state_manager:
                             await self.state_manager.save_teardown_state(teardown_state)
@@ -2132,6 +2206,7 @@ class TeardownManager:
 
             if exec_result.success:
                 succeeded += 1
+                _pending_indices.discard(i)  # done → advances the resume floor (VIB-5573)
                 # VIB-5140: fold this intent's receipt block into the running
                 # MAX across all successful closes (see _fold_max_receipt_block
                 # for why MAX, not last-processed, is correct under
@@ -2182,6 +2257,44 @@ class TeardownManager:
                         e,
                     )
             else:
+                # VIB-5573 (WI-2): a vetted TRANSIENT revert (context-scoped by
+                # intent_type + protocol + signature — e.g. MetaMorpho
+                # withdraw-queue Panic 0x11) is retried on the time axis rather
+                # than counted failed now: re-queue to the TAIL (retried after
+                # every other close) up to a bounded number of attempts. A
+                # paused_awaiting_approval is an approval pause, not a revert, so
+                # it is never deferred here. On attempt exhaustion the intent
+                # falls through to the normal failed path (loud).
+                if exec_result.status != "paused_awaiting_approval" and attempts < _TRANSIENT_MAX_ATTEMPTS:
+                    # The aggregate ExecutionResult has no ``error`` attribute —
+                    # the raw revert text is on the last ExecutionAttempt (or the
+                    # summarized ``message``). Prefer the attempt's raw error so
+                    # the classifier's selector/panic regex sees the exact string.
+                    _revert_text = None
+                    if exec_result.attempts and exec_result.attempts[-1].error:
+                        _revert_text = exec_result.attempts[-1].error
+                    if not _revert_text:
+                        _revert_text = exec_result.message
+                    _it = _intent_field(intent, "intent_type")
+                    _proto = _intent_field(intent, "protocol")
+                    if (
+                        classify_revert_transience(_revert_text, intent_type=_it, protocol=_proto)
+                        is Transience.TRANSIENT
+                    ):
+                        work.append((i, intent, attempts + 1))
+                        logger.warning(
+                            "Teardown intent %d/%d reverted TRANSIENT (%s/%s): %s — deferring "
+                            "retry %d/%d to end of queue (time-axis backoff).",
+                            i + 1,
+                            len(intents),
+                            _proto,
+                            _it,
+                            _revert_text,
+                            attempts + 1,
+                            _TRANSIENT_MAX_ATTEMPTS,
+                        )
+                        continue
+
                 failed += 1
                 if exec_result.status == "paused_awaiting_approval":
                     # Pause for approval
@@ -2218,12 +2331,15 @@ class TeardownManager:
                         accounting_degraded_count=len(accounting_degraded_records),
                     )
 
-            # Update completed count and persist teardown progress so that
-            # a crash/restart resumes from the correct index. ABSOLUTE count
-            # (offset + this call's successes) — see the skip-path comment
-            # above: a relative count would rewind already-finished work on
-            # resume and during the VIB-5011 consolidation extension.
-            teardown_state.completed_intents = start_from_index + succeeded
+            # Persist the resume FLOOR (lowest still-pending original index) so a
+            # crash/restart resumes at the first unfinished intent — including a
+            # deferred transient retry that has not completed yet. For a purely
+            # sequential teardown this equals ``start_from_index + succeeded``;
+            # with deferrals it does NOT (completion is non-contiguous), which is
+            # exactly the resume-skip strand this fixes (VIB-5573).
+            _floor = _resume_floor()
+            teardown_state.completed_intents = _floor
+            teardown_state.current_intent_index = _floor
             teardown_state.updated_at = datetime.now(UTC)
             if self.state_manager:
                 await self.state_manager.save_teardown_state(teardown_state)
@@ -2410,7 +2526,6 @@ class TeardownManager:
                     )
                     continue
 
-                positions_with_hook += 1
                 try:
                     check = hook(
                         position=position,
@@ -2419,19 +2534,39 @@ class TeardownManager:
                         rpc_url=rpc_url,
                         block=close_receipt_block,
                     )
-                except Exception as exc:  # noqa: BLE001 — fail-closed
-                    logger.exception(
-                        "Teardown post-condition for %s raised: %s",
+                except Exception as exc:  # noqa: BLE001 — fail-safe
+                    # VIB-5573 (Empty ≠ Zero): a hook that RAISES could not MEASURE
+                    # on-chain state — it is a read fault, not a measured residual.
+                    # Treating it as a residual (pre-VIB-5573 behaviour) fabricates
+                    # a FAILED → hosted shutdown + entry latch on a transient
+                    # gateway/RPC blip. Treat as UNMEASURED → lowers to UNVERIFIED,
+                    # exactly like a no-hook position (skip: not counted, not failed).
+                    # exc_info=True preserves the traceback — a hook that raises is
+                    # usually a programming error (NameError/AttributeError) we must
+                    # be able to debug, not just a one-line message (Gemini).
+                    logger.warning(
+                        "Teardown post-condition for %s raised — treating as UNMEASURED (UNVERIFIED, not FAILED): %s",
                         protocol,
                         exc,
+                        exc_info=True,
                     )
-                    check = ClosureCheckResult(
-                        closed=False,
-                        protocol=protocol,
-                        position_id=getattr(position, "position_id", "") or "",
-                        error=f"Post-condition raised: {exc}",
-                    )
+                    continue
 
+                # VIB-5573: an explicit UNMEASURED result (gateway/RPC fault after
+                # the hook's own bounded read-retry, missing client, unsupported
+                # vault interface) is honest "don't-know". It must NOT be counted as
+                # chain-verified NOR as a residual — lower to UNVERIFIED by skipping,
+                # same as a no-hook position. Only a *measured* residual is FAILED.
+                if getattr(check, "unmeasured", False):
+                    logger.warning(
+                        "Teardown verification UNMEASURED for %s position %s: %s — counting UNVERIFIED (not FAILED).",
+                        protocol,
+                        getattr(position, "position_id", ""),
+                        check.error,
+                    )
+                    continue
+
+                positions_with_hook += 1
                 if not check.closed:
                     failed_results.append(check)
 
