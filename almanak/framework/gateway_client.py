@@ -1001,6 +1001,81 @@ class GatewayClient:
             logger.warning(f"eth_call RPC error: {e}")
             return None
 
+    def estimate_gas(
+        self,
+        chain: str,
+        to: str,
+        data: str,
+        *,
+        from_address: str | None = None,
+        value: int = 0,
+    ) -> int | None:
+        """Perform ``eth_estimateGas`` via the gateway's RPC proxy.
+
+        ``eth_estimateGas`` is already on the gateway's ``ALLOWED_RPC_METHODS``
+        allowlist (``almanak/gateway/validation.py``), so this rides the SAME
+        gateway RPC channel as :meth:`eth_call` / ``eth_getBalance`` — the
+        strategy container never opens a socket. Connectors use it to seed a
+        live, pool-shape-aware gas floor instead of a hardcoded per-op constant
+        that under-sizes 4-coin / native-ETH / aave-type pools (VIB-5440).
+
+        Args:
+            chain: Chain identifier (e.g. "ethereum", "base", "arbitrum").
+            to: Target contract address.
+            data: Hex-encoded calldata (``0x``-prefixed).
+            from_address: Caller address. Gas depends on caller state (token
+                balances / allowances), so pass the execution wallet for an
+                accurate estimate; omit only when the caller is unknown.
+            value: Native value (wei) attached to the call — required for
+                native-ETH pool paths so the estimate reflects the msg.value leg.
+
+        Returns:
+            Estimated gas units, or ``None`` on any failure (RPC error, revert
+            on estimate, gateway not connected) so callers fall back to their
+            conservative static floor. ``None`` means "unmeasured", never 0
+            (Empty≠Zero).
+        """
+        import json
+
+        from almanak.gateway.proto import gateway_pb2
+
+        if self._rpc_stub is None:
+            logger.warning("Gateway client not connected; cannot estimate gas")
+            return None
+
+        tx_obj: dict[str, str] = {"to": to, "data": data}
+        if from_address:
+            tx_obj["from"] = from_address
+        if value:
+            tx_obj["value"] = hex(value)
+
+        try:
+            response = self._rpc_stub.Call(
+                gateway_pb2.RpcRequest(
+                    chain=chain,
+                    method="eth_estimateGas",
+                    params=json.dumps([tx_obj]),
+                ),
+                timeout=self.config.timeout,
+            )
+            if not response.success:
+                logger.debug(f"eth_estimateGas failed: {response.error}")
+                return None
+            if response.result:
+                return int(json.loads(response.result), 16)
+            return None
+        except grpc.RpcError as e:
+            logger.debug(f"eth_estimateGas RPC error: {e}")
+            return None
+        except (ValueError, TypeError) as e:
+            # A malformed / unexpected result (e.g. ``'0x'``, non-hex, non-JSON)
+            # makes ``json.loads`` / ``int(..., 16)`` raise — which ``except
+            # grpc.RpcError`` does not catch. Degrade to None (Empty≠Zero — the
+            # caller falls back to the conservative static floor) rather than
+            # propagate and crash the strategy container. Mirrors ``block_number``.
+            logger.debug(f"eth_estimateGas decode error: {e}")
+            return None
+
     def block_number(self, chain: str, *, timeout: float | None = None) -> int | None:
         """Return the current chain head block number via the gateway RPC proxy.
 

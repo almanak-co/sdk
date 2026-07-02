@@ -232,3 +232,72 @@ class TestQueryNativeBalanceBlockParam:
         response.error = "boom"
         client._rpc_stub.Call.return_value = response
         assert client.query_native_balance("arbitrum", "0xabc", block=5) is None
+
+
+class TestEstimateGas:
+    """VIB-5440: GatewayClient.estimate_gas via the RpcService (eth_estimateGas)."""
+
+    def test_decodes_hex_estimate(self):
+        client = _make_client()
+        response = MagicMock()
+        response.success = True
+        response.result = json.dumps(hex(450_000))  # "0x6ddd0"
+        client._rpc_stub.Call.return_value = response
+
+        assert client.estimate_gas("ethereum", "0xpool", "0xcalldata") == 450_000
+        req = client._rpc_stub.Call.call_args[0][0]
+        assert req.method == "eth_estimateGas"
+        assert req.chain == "ethereum"
+        # Default: only to+data in the tx object (no from / value).
+        assert json.loads(req.params) == [{"to": "0xpool", "data": "0xcalldata"}]
+
+    def test_includes_from_and_hex_value(self):
+        client = _make_client()
+        response = MagicMock()
+        response.success = True
+        response.result = json.dumps(hex(600_000))
+        client._rpc_stub.Call.return_value = response
+
+        client.estimate_gas("base", "0xpool", "0xdata", from_address="0xwallet", value=10**18)
+        req = client._rpc_stub.Call.call_args[0][0]
+        assert json.loads(req.params) == [{"to": "0xpool", "data": "0xdata", "from": "0xwallet", "value": hex(10**18)}]
+
+    def test_returns_none_when_not_connected(self):
+        config = GatewayClientConfig(host="localhost", port=50051, timeout=10.0)
+        client = GatewayClient(config)
+        client._rpc_stub = None
+        assert client.estimate_gas("ethereum", "0xpool", "0xdata") is None
+
+    def test_returns_none_on_rpc_failure(self):
+        """A revert-on-estimate (success=False) yields None -- Empty≠Zero."""
+        client = _make_client()
+        response = MagicMock()
+        response.success = False
+        response.error = "execution reverted"
+        client._rpc_stub.Call.return_value = response
+        assert client.estimate_gas("ethereum", "0xpool", "0xdata") is None
+
+    def test_returns_none_on_empty_result(self):
+        client = _make_client()
+        response = MagicMock()
+        response.success = True
+        response.result = ""
+        client._rpc_stub.Call.return_value = response
+        assert client.estimate_gas("ethereum", "0xpool", "0xdata") is None
+
+    def test_returns_none_on_grpc_error(self):
+        client = _make_client()
+        client._rpc_stub.Call.side_effect = grpc.RpcError()
+        assert client.estimate_gas("ethereum", "0xpool", "0xdata") is None
+
+    def test_returns_none_on_malformed_result_no_crash(self):
+        """A malformed / non-hex result (e.g. ``'0x'``) makes ``int(json.loads(...), 16)``
+        raise ValueError/TypeError — which ``except grpc.RpcError`` does NOT catch. It must
+        degrade to None (Empty≠Zero → caller uses the static floor), never propagate."""
+        for bad in ('"0x"', '"not-hex"', "not-json"):
+            client = _make_client()
+            response = MagicMock()
+            response.success = True
+            response.result = bad
+            client._rpc_stub.Call.return_value = response
+            assert client.estimate_gas("ethereum", "0xpool", "0xdata") is None

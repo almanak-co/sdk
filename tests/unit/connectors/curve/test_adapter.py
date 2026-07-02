@@ -17,6 +17,7 @@ import pytest
 from almanak.connectors.curve.adapter import (
     ADD_LIQUIDITY_3_SELECTOR,
     CURVE_ADDRESSES,
+    CURVE_GAS_ESTIMATE_BUFFER,
     CURVE_GAS_ESTIMATES,
     CURVE_POOLS,
     EXCHANGE_SELECTOR,
@@ -1493,3 +1494,113 @@ class TestRemoveLiquidityUnderlying:
         # combined min-amounts vector: [meta, DAI, USDC, USDT] all > 0
         assert len(result.amounts) == 4
         assert all(a > 0 for a in result.amounts)
+
+
+# =============================================================================
+# Gas estimation — live eth_estimateGas × buffer, conservative static floor (VIB-5440)
+# =============================================================================
+
+
+def _connected_gateway(estimate: int | None) -> MagicMock:
+    """A mock GatewayClient that reports connected and returns ``estimate`` gas."""
+    gw = MagicMock()
+    gw.is_connected = True
+    gw.estimate_gas.return_value = estimate
+    return gw
+
+
+class TestResolveGas:
+    """``CurveAdapter._resolve_gas`` — the live-estimate + buffer + static-floor seam."""
+
+    def _adapter_with_gateway(self, estimate: int | None) -> CurveAdapter:
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            gateway_client=_connected_gateway(estimate),
+        )
+        return CurveAdapter(config)
+
+    def test_live_estimate_buffered_when_above_floor(self) -> None:
+        """A live estimate whose buffered value exceeds the floor governs the limit."""
+        adapter = self._adapter_with_gateway(1_000_000)
+        static_floor = 500_000
+        gas = adapter._resolve_gas(to="0xpool", data="0xdata", value=0, static_gas=static_floor)
+        assert gas == round(1_000_000 * CURVE_GAS_ESTIMATE_BUFFER)
+        assert gas > static_floor
+
+    def test_buffer_rounds_not_truncates(self) -> None:
+        """The buffered estimate is ROUNDED, not truncated (int() would 1-gas
+        under-estimate a fractional product, e.g. 500_003 * 1.20 = 600003.6)."""
+        adapter = self._adapter_with_gateway(500_003)
+        gas = adapter._resolve_gas(to="0xpool", data="0xdata", value=0, static_gas=300_000)
+        assert gas == round(500_003 * CURVE_GAS_ESTIMATE_BUFFER) == 600_004
+        assert gas == 600_004 and int(500_003 * CURVE_GAS_ESTIMATE_BUFFER) == 600_003
+
+    def test_estimate_clamped_up_to_static_floor(self) -> None:
+        """A low estimate may only RAISE the floor, never lower it below the static."""
+        adapter = self._adapter_with_gateway(100_000)
+        static_floor = 500_000
+        gas = adapter._resolve_gas(to="0xpool", data="0xdata", value=0, static_gas=static_floor)
+        # buffered 120_000 < 500_000 floor -> floor wins.
+        assert gas == static_floor
+
+    def test_unavailable_estimate_falls_back_to_static(self) -> None:
+        """Empty≠Zero: a None estimate (revert / miss) falls back to the static floor, not 0."""
+        adapter = self._adapter_with_gateway(None)
+        static_floor = 450_000
+        gas = adapter._resolve_gas(to="0xpool", data="0xdata", value=0, static_gas=static_floor)
+        assert gas == static_floor
+
+    def test_zero_estimate_falls_back_to_static(self) -> None:
+        """A non-positive estimate is treated as unmeasured -> static floor."""
+        adapter = self._adapter_with_gateway(0)
+        static_floor = 350_000
+        gas = adapter._resolve_gas(to="0xpool", data="0xdata", value=0, static_gas=static_floor)
+        assert gas == static_floor
+
+    def test_no_transport_returns_static(self) -> None:
+        """With no gateway and no rpc_url, the static floor is used unchanged."""
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+        )
+        adapter = CurveAdapter(config)
+        assert adapter._has_read_transport() is False
+        gas = adapter._resolve_gas(to="0xpool", data="0xdata", value=0, static_gas=600_000)
+        assert gas == 600_000
+
+    def test_estimate_passes_wallet_and_value(self) -> None:
+        """The estimate is issued from the execution wallet and carries the native value."""
+        gw = _connected_gateway(700_000)
+        config = CurveConfig(
+            chain="ethereum",
+            wallet_address="0x1234567890123456789012345678901234567890",
+            gateway_client=gw,
+        )
+        adapter = CurveAdapter(config)
+        adapter._resolve_gas(to="0xpool", data="0xdata", value=10**18, static_gas=250_000)
+        gw.estimate_gas.assert_called_once_with(
+            "ethereum",
+            "0xpool",
+            "0xdata",
+            from_address="0x1234567890123456789012345678901234567890",
+            value=10**18,
+        )
+
+
+class TestStaticGasFloors:
+    """The raised conservative static floors under-sized 4-coin / aave paths before (VIB-5440)."""
+
+    def test_remove_liquidity_floor_scales_with_coin_count(self) -> None:
+        assert (
+            CURVE_GAS_ESTIMATES["remove_liquidity_2"]
+            <= CURVE_GAS_ESTIMATES["remove_liquidity_3"]
+            < CURVE_GAS_ESTIMATES["remove_liquidity_4"]
+        )
+
+    def test_aave_exchange_underlying_not_below_plain_exchange(self) -> None:
+        # Aave-type exchange_underlying wraps/unwraps aTokens -> must be >= plain exchange.
+        assert CURVE_GAS_ESTIMATES["exchange_underlying"] >= CURVE_GAS_ESTIMATES["exchange"]
+
+    def test_four_coin_add_floor_raised(self) -> None:
+        assert CURVE_GAS_ESTIMATES["add_liquidity_4"] >= 600_000

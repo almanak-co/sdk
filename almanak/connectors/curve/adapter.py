@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base.approval_sequencing import build_approval_sequence
 from almanak.connectors._strategy_base.pool_validation_base import ZERO_ADDRESS, decode_address
-from almanak.connectors._strategy_base.rpc import eth_call, eth_call_uint256
+from almanak.connectors._strategy_base.rpc import eth_call, eth_call_uint256, eth_estimate_gas
 from almanak.connectors._strategy_base.swap_oracle_guard import (
     DEFAULT_STABLE_ORACLE_FLOOR_RESIDUAL_BPS,
     DEFAULT_STABLE_ORACLE_FLOOR_TOLERANCE_BPS,
@@ -365,11 +365,25 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
 }
 
 
-# Gas estimates for Curve operations
+# Conservative static gas FLOORS for Curve operations.
+#
+# These are FALLBACKS, not the primary source: ``_resolve_gas`` seeds each op's
+# limit from a live ``eth_estimateGas`` against the pool's actual shape and only
+# falls back to the value here when the estimate is unavailable (no transport,
+# RPC error, or a revert under pre-approval state). The live estimate is
+# gateway-only (``eth_estimate_gas`` returns ``None`` with no connected gateway,
+# rather than opening a direct-RPC bypass), so a bare no-gateway context relies
+# ENTIRELY on these floors — another reason they must stay conservatively high.
+# A gas LIMIT is not gas SPENT —
+# unused gas is refunded — so these are deliberately sized HIGH to never OOG a
+# 4-coin / native-ETH / aave-type op when the live estimate cannot run (VIB-5440).
 CURVE_GAS_ESTIMATES: dict[str, int] = {
     "approve": 65000,  # 65K to accommodate proxy tokens (USDC FiatTokenProxy ~56-65K)
     "exchange": 500000,
-    "exchange_underlying": 300000,
+    # Aave-type exchange_underlying wraps/unwraps aTokens around the swap, so it
+    # is HEAVIER than a plain exchange — the prior 300K floor was below the plain
+    # 500K and under-sized these paths. Floor at 500K (>= exchange) (VIB-5440).
+    "exchange_underlying": 500000,
     # Metapool exchange_underlying routes a leg through the BASE pool (two pools,
     # extra SLOADs/SSTOREs), so it costs more than a flat aave-type
     # exchange_underlying — measured ~284K on FRAX/3CRV. 300K is too tight a
@@ -381,12 +395,35 @@ CURVE_GAS_ESTIMATES: dict[str, int] = {
     "metapool_zap_remove_liquidity": 600000,
     "add_liquidity_2": 250000,
     "add_liquidity_3": 350000,
-    "add_liquidity_4": 450000,
-    "remove_liquidity": 200000,
-    "remove_liquidity_one_coin": 250000,
-    "remove_liquidity_imbalance": 300000,
+    # A 4-coin add — especially aave-type, which wraps each underlying into an
+    # aToken — was under-sized at 450K. 600K conservative floor (VIB-5440).
+    "add_liquidity_4": 600000,
+    # Proportional ``remove_liquidity`` returns ALL N coins (N transfers + LP
+    # burn + invariant recompute), so cost scales with coin count. The prior
+    # single 200K floor was applied regardless of N and under-sized 3/4-coin
+    # exits. Keyed by coin count now; ``remove_liquidity`` is the generic
+    # fallback for callers that do not pass n_coins (VIB-5440).
+    "remove_liquidity": 250000,
+    "remove_liquidity_2": 250000,
+    "remove_liquidity_3": 350000,
+    "remove_liquidity_4": 450000,
+    # Single-coin exit recomputes the invariant and, for CryptoSwap/Tricrypto,
+    # the price scale — heavier than the prior 250K floor (VIB-5440).
+    "remove_liquidity_one_coin": 350000,
+    # Imbalanced 4-coin exit is the heaviest withdrawal shape (VIB-5440).
+    "remove_liquidity_imbalance": 450000,
     "router_exchange": 400000,
 }
+
+# Safety buffer applied to a live ``eth_estimateGas`` result before it becomes
+# the gas LIMIT. ``eth_estimateGas`` binary-searches the minimum gas for the
+# CURRENT state; branchy / storage-heavy Curve ops (per-coin loops, virtual-price
+# and oracle-EMA writes) can cost more once state drifts between the estimate and
+# execution (a preceding approve warms/cools storage, first trade of a block
+# writes the oracle, etc.). 1.20x covers that drift without grossly overshooting;
+# the execution orchestrator layers its own per-chain buffer on top, so this only
+# needs to be a SAFE seed, never the final word (VIB-5440).
+CURVE_GAS_ESTIMATE_BUFFER: float = 1.20
 
 # Function selectors
 EXCHANGE_SELECTOR = "0x3df02124"  # exchange(int128,int128,uint256,uint256) - StableSwap
@@ -979,6 +1016,54 @@ class CurveAdapter:
         if gateway_client is not None and getattr(gateway_client, "is_connected", False):
             return True
         return bool(self._rpc_url)
+
+    def _resolve_gas(self, *, to: str, data: str, value: int, static_gas: int) -> int:
+        """Live ``eth_estimateGas`` × safety buffer, clamped to a conservative static floor.
+
+        The per-op constants in ``CURVE_GAS_ESTIMATES`` were hand-typed and
+        optimistic for 4-coin / native-ETH / aave-type pools, risking an L1
+        out-of-gas revert that strands a tx on-chain (VIB-5440). This seeds the
+        gas limit from a live estimate against the pool's ACTUAL shape, routed
+        through the gateway (``eth_estimateGas`` is on the gateway RPC allowlist,
+        so there is no strategy-container egress — it rides the same gateway
+        channel the M0 metadata reads use).
+
+        The result is ``max(estimate × buffer, static_floor)`` so the estimate
+        may only RAISE the limit above the floor, never lower it.
+
+        Empty≠Zero: an unavailable estimate — no read transport, an RPC error,
+        or a revert under pre-approval state (the estimate for an ``add_liquidity``
+        that follows an unexecuted ``approve`` in the same bundle) — returns the
+        conservative static floor, never 0 or a raw under-buffered value.
+        """
+        if not self._has_read_transport():
+            return static_gas
+        try:
+            raw = eth_estimate_gas(
+                chain=self.chain,
+                to=to,
+                data=data,
+                from_address=self.wallet_address,
+                value=value,
+                gateway_client=self._gateway_client,
+            )
+        except Exception as exc:  # noqa: BLE001 — any estimate failure → conservative static floor
+            logger.debug("Curve gas estimate raised for %s: %s; using static floor %d", to, exc, static_gas)
+            raw = None
+        if raw is None or raw <= 0:
+            return static_gas
+        buffered = round(raw * CURVE_GAS_ESTIMATE_BUFFER)
+        resolved = max(buffered, static_gas)
+        logger.debug(
+            "Curve gas for %s: raw=%d buffered=%d (x%.2f) static_floor=%d -> %d",
+            to,
+            raw,
+            buffered,
+            CURVE_GAS_ESTIMATE_BUFFER,
+            static_gas,
+            resolved,
+        )
+        return resolved
 
     def _refresh_pool_info_from_chain(self, pool_info: PoolInfo) -> PoolInfo:
         """Return ``pool_info`` with safety-critical fields refreshed from chain.
@@ -2221,7 +2306,12 @@ class CurveAdapter:
                     to=pool_address,
                     value=0,
                     data=calldata,
-                    gas_estimate=CURVE_GAS_ESTIMATES["exchange_underlying_metapool"],
+                    gas_estimate=self._resolve_gas(
+                        to=pool_address,
+                        data=calldata,
+                        value=0,
+                        static_gas=CURVE_GAS_ESTIMATES["exchange_underlying_metapool"],
+                    ),
                     description=f"Curve metapool underlying swap {token_in_symbol} -> {token_out_symbol}",
                     tx_type="swap",
                 )
@@ -2313,7 +2403,12 @@ class CurveAdapter:
                     to=zap,
                     value=0,
                     data=calldata,
-                    gas_estimate=CURVE_GAS_ESTIMATES["metapool_zap_add_liquidity"],
+                    gas_estimate=self._resolve_gas(
+                        to=zap,
+                        data=calldata,
+                        value=0,
+                        static_gas=CURVE_GAS_ESTIMATES["metapool_zap_add_liquidity"],
+                    ),
                     description=f"Add underlying liquidity to Curve metapool {pool_info.name} (zap)",
                     tx_type="add_liquidity",
                 )
@@ -2399,7 +2494,12 @@ class CurveAdapter:
                     to=zap,
                     value=0,
                     data=calldata,
-                    gas_estimate=CURVE_GAS_ESTIMATES["metapool_zap_remove_liquidity"],
+                    gas_estimate=self._resolve_gas(
+                        to=zap,
+                        data=calldata,
+                        value=0,
+                        static_gas=CURVE_GAS_ESTIMATES["metapool_zap_remove_liquidity"],
+                    ),
                     description=f"Remove underlying liquidity from Curve metapool {pool_info.name} (zap)",
                     tx_type="remove_liquidity",
                 )
@@ -2633,7 +2733,12 @@ class CurveAdapter:
             to=pool_address,
             value=value,
             data=calldata,
-            gas_estimate=CURVE_GAS_ESTIMATES["exchange_underlying" if use_underlying else "exchange"],
+            gas_estimate=self._resolve_gas(
+                to=pool_address,
+                data=calldata,
+                value=value,
+                static_gas=CURVE_GAS_ESTIMATES["exchange_underlying" if use_underlying else "exchange"],
+            ),
             description=f"Curve swap {token_in_symbol} -> {token_out_symbol}",
             tx_type="swap",
         )
@@ -2683,7 +2788,7 @@ class CurveAdapter:
             to=pool_address,
             value=value,
             data=calldata,
-            gas_estimate=gas_estimate,
+            gas_estimate=self._resolve_gas(to=pool_address, data=calldata, value=value, static_gas=gas_estimate),
             description=f"Add liquidity to Curve {pool_name}",
             tx_type="add_liquidity",
         )
@@ -2725,11 +2830,14 @@ class CurveAdapter:
             for min_amount in min_amounts:
                 calldata += self._pad_uint256(min_amount)
 
+        # Proportional remove returns ALL N coins — cost scales with coin count,
+        # so key the static floor by ``n_coins`` (VIB-5440).
+        static_gas = CURVE_GAS_ESTIMATES.get(f"remove_liquidity_{n_coins}", CURVE_GAS_ESTIMATES["remove_liquidity_4"])
         return TransactionData(
             to=pool_address,
             value=0,
             data=calldata,
-            gas_estimate=CURVE_GAS_ESTIMATES["remove_liquidity"],
+            gas_estimate=self._resolve_gas(to=pool_address, data=calldata, value=0, static_gas=static_gas),
             description=f"Remove liquidity from Curve {pool_name}",
             tx_type="remove_liquidity",
         )
@@ -2775,7 +2883,12 @@ class CurveAdapter:
             to=pool_address,
             value=0,
             data=calldata,
-            gas_estimate=CURVE_GAS_ESTIMATES["remove_liquidity_imbalance"],
+            gas_estimate=self._resolve_gas(
+                to=pool_address,
+                data=calldata,
+                value=0,
+                static_gas=CURVE_GAS_ESTIMATES["remove_liquidity_imbalance"],
+            ),
             description=f"Remove liquidity (imbalanced) from Curve {pool_name}",
             tx_type="remove_liquidity_imbalance",
         )
@@ -2808,7 +2921,12 @@ class CurveAdapter:
             to=pool_address,
             value=0,
             data=calldata,
-            gas_estimate=CURVE_GAS_ESTIMATES["remove_liquidity_one_coin"],
+            gas_estimate=self._resolve_gas(
+                to=pool_address,
+                data=calldata,
+                value=0,
+                static_gas=CURVE_GAS_ESTIMATES["remove_liquidity_one_coin"],
+            ),
             description=f"Remove {coin_symbol} from Curve {pool_name}",
             tx_type="remove_liquidity",
         )

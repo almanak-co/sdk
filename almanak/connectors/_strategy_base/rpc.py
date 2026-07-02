@@ -15,7 +15,7 @@ from almanak.connectors._strategy_base.pool_validation_base import eth_call as _
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
-__all__ = ["decode_uint256", "eth_call", "eth_call_hex", "eth_call_uint256"]
+__all__ = ["decode_uint256", "eth_call", "eth_call_hex", "eth_call_uint256", "eth_estimate_gas"]
 
 
 _SUPPORTED_DIRECT_RPC_SCHEMES: frozenset[str] = frozenset({"http", "https"})
@@ -107,3 +107,45 @@ def eth_call_uint256(
     if raw is None:
         return None
     return decode_uint256(raw)
+
+
+def eth_estimate_gas(
+    *,
+    chain: str | None,
+    to: str,
+    data: str,
+    from_address: str | None = None,
+    value: int = 0,
+    gateway_client: GatewayClient | None = None,
+) -> int | None:
+    """Gateway-only ``eth_estimateGas`` returning the raw (un-buffered) estimate.
+
+    ``eth_estimateGas`` is on the gateway's RPC allowlist, so a connected
+    ``gateway_client`` serves the estimate over the gateway channel (no
+    strategy-container egress). There is deliberately **no direct-RPC
+    fallback**: unlike :func:`eth_call` (whose result a connector cannot
+    proceed without), this estimate is OPTIONAL — callers (e.g. the Curve
+    adapter's ``_resolve_gas``) fall back to a conservative static gas floor
+    when it is ``None``. So a bare no-gateway context simply returns ``None``
+    rather than opening a socket, and no new ``vib-2986-exempt`` bypass is
+    introduced.
+
+    Returns ``None`` — never ``0`` — when the estimate is unavailable (no
+    connected gateway, RPC error, or the op reverts under the CURRENT state,
+    which is common for a not-yet-approved spend). ``None`` means "unmeasured":
+    callers apply their own safety buffer and clamp to a conservative static
+    floor (Empty≠Zero).
+    """
+    if not _gateway_connected(gateway_client, chain):
+        return None
+    try:
+        # ``chain`` is truthy here (checked by ``_gateway_connected``).
+        return gateway_client.estimate_gas(  # type: ignore[union-attr]
+            chain,  # type: ignore[arg-type]
+            to,
+            data,
+            from_address=from_address,
+            value=value,
+        )
+    except Exception:
+        return None
