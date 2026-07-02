@@ -45,7 +45,11 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any, NamedTuple
 
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError, HistoricalDataUnavailableError
+from almanak.framework.backtesting.exceptions import (
+    DataSourceUnavailableError,
+    HistoricalDataUnavailableError,
+    UnsupportedIntentError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +126,9 @@ class _ErrorPattern(NamedTuple):
     class_keywords: tuple[str, ...] = ()
 
 
-_FAIL_LOUD_DATA_ERRORS = (DataSourceUnavailableError, HistoricalDataUnavailableError)
+# Typed fail-loud errors: classified UNKNOWN -> FATAL -> stop, never pattern-matched
+# into a recoverable bucket by message keywords.
+_FAIL_LOUD_DATA_ERRORS = (DataSourceUnavailableError, HistoricalDataUnavailableError, UnsupportedIntentError)
 
 _ERROR_PATTERNS = (
     _ErrorPattern(ErrorType.RATE_LIMIT, ("rate limit", "too many requests", "429", "throttl")),

@@ -80,6 +80,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "math_max_drawdown",
     "round_trip_conservation_numeraire",
     "fiat_usd_pin",
+    "unsupported_intent_refused",
 )
 
 
@@ -176,6 +177,16 @@ CELLS: tuple[TrustCell, ...] = (
         "swap",
         "A default (fiat_usd) strategy emits no numeraire fields and serializes "
         "byte-for-byte as pre-VIB-5127 (no numeraire* keys in the artifact).",
+    ),
+    _cell(
+        "unsupported_intent_refused",
+        "swap",
+        "An intent type outside the simulated envelope stops the run with a fatal "
+        "UnsupportedIntentError and zero state mutation — never a costed no-op.",
+        # Design decision 2026-07-02: the generic lane used to record ANY intent
+        # type as a trade with fees/gas charged but empty token flows and no
+        # position (~15 vocabulary types affected). A backtest that silently
+        # skips part of the strategy certifies numbers it never earned.
     ),
     # --- LP column ---
     _cell(
@@ -557,6 +568,16 @@ class PerpCloseDuck:
     token: str = "WETH"
     side: str = "long"
     protocol: str = "gmx"
+
+
+@dataclass
+class StakeDuck:
+    """An intent type the engine does NOT simulate (maps to IntentType.UNKNOWN)."""
+
+    intent_type: str = "STAKE"
+    token: str = "WETH"
+    amount_usd: Decimal = Decimal("1000")
+    protocol: str = "lido"
 
 
 def flat_series(n_ticks: int, weth: str = "2000") -> dict[TokenRef, list[Decimal]]:

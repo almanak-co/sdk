@@ -1352,6 +1352,24 @@ _SIMPLE_FLOW_HANDLERS: dict[IntentType, object] = {
     IntentType.VAULT_REDEEM: _calculate_vault_redeem_flows,
 }
 
+# The intent types the generic (no-adapter) lane simulates END TO END: token
+# flows via :data:`_SIMPLE_FLOW_HANDLERS` / the SWAP branch, or position
+# lifecycle handling (PERP_OPEN collateral + PERP_CLOSE credit), plus the
+# explicit no-action HOLD. Anything outside this set is REFUSED by
+# ``PnLBacktester._refuse_unsupported_intent`` — never recorded as a costed
+# no-op (design decision 2026-07-02: a backtest that silently skips part of
+# the strategy certifies numbers the strategy never earned). Extend this set
+# only together with a real simulation lane for the new type.
+GENERIC_SIMULATED_INTENT_TYPES: frozenset[IntentType] = frozenset(
+    {
+        IntentType.SWAP,
+        IntentType.HOLD,
+        IntentType.PERP_OPEN,
+        IntentType.PERP_CLOSE,
+        *_SIMPLE_FLOW_HANDLERS,
+    }
+)
+
 
 def calculate_token_flows(
     intent: Any,

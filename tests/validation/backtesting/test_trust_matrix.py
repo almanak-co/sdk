@@ -77,6 +77,7 @@ from tests.validation.backtesting.trust_matrix import (
     PerpCloseDuck,
     PerpOpenDuck,
     ScriptedStrategy,
+    StakeDuck,
     SupplyDuck,
     SwapDuck,
     USDC_ARBITRUM,
@@ -224,6 +225,25 @@ def test_swap_fiat_usd_byte_for_byte_pin() -> None:
     assert "final_capital_numeraire" not in payload
     assert "numeraire_metrics" not in payload["metrics"]
     assert all("numeraire_price_usd" not in point for point in payload["equity_curve"])
+
+
+@pytest.mark.trust_cell("swap:unsupported_intent_refused")
+def test_unsupported_intent_stops_the_run_without_state_change() -> None:
+    """An intent outside the simulated envelope is fatal — never a costed no-op.
+
+    Design decision 2026-07-02: pre-change, the generic lane recorded ANY
+    intent type as a trade (fees/gas charged, zero token flows, no position),
+    silently diverging the backtest from live behaviour. The engine now stops
+    the run with UnsupportedIntentError; the equity that exists is untouched
+    and no trade is recorded.
+    """
+    result = run_backtest(ScriptedStrategy([StakeDuck()]), flat_series(12), hours=9)
+
+    assert not result.success
+    assert "Unsupported intent" in str(result.error)
+    assert "STAKE" in str(result.error)
+    assert result.metrics.total_trades == 0
+    assert all(point.value_usd == INITIAL_CAPITAL for point in result.equity_curve)
 
 
 @pytest.mark.trust_cell("swap:rejection_no_state_change")

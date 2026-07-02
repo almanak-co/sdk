@@ -81,7 +81,7 @@ from almanak.framework.backtesting.adapters.registry import (
     get_adapter_for_strategy_with_config,
 )
 from almanak.framework.backtesting.config import BacktestDataConfig
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+from almanak.framework.backtesting.exceptions import DataSourceUnavailableError, UnsupportedIntentError
 from almanak.framework.backtesting.models import (
     BacktestMetrics,
     BacktestResult,
@@ -2287,6 +2287,8 @@ class PnLBacktester:
         if adapter_record is not None:
             return adapter_record
 
+        self._refuse_unsupported_intent(intent)
+
         details = self._generic_intent_details(intent, portfolio, market_state, config)
         costs = await self._generic_execution_costs(
             details=details,
@@ -2964,6 +2966,36 @@ class PnLBacktester:
                 f"default ({config.gas_price_gwei} gwei) and institutional mode "
                 f"refuses to fabricate execution costs"
             ),
+        )
+
+    def _refuse_unsupported_intent(self, intent: Any) -> None:
+        """Fail loud when the generic lane cannot simulate ``intent``.
+
+        Runs after adapter dispatch declined the intent, so an adapter that
+        genuinely handles a type outside the generic envelope is unaffected.
+        Anything else outside :data:`GENERIC_SIMULATED_INTENT_TYPES` used to
+        become a costed no-op (fees/gas charged, zero token flows, no
+        position); it is now a fatal, run-stopping error — the design
+        decision is that no backtest runs past an intent it cannot simulate.
+        """
+        hint: str | None = None
+        if isinstance(intent, list | tuple):
+            # A collection is never a simulable intent — refuse without
+            # running type classification on it.
+            label = f"{type(intent).__name__} of {len(intent)} intents"
+            hint = "decide() returned multiple intents; the PnL engine executes a single intent per tick (VIB-5094)."
+        else:
+            intent_type = self._get_intent_type(intent)
+            if intent_type in _engine_helpers.GENERIC_SIMULATED_INTENT_TYPES:
+                return
+            declared = getattr(intent, "intent_type", None)
+            declared_label = getattr(declared, "value", declared)
+            label = f"{declared_label or intent_type.value} ({type(intent).__name__})"
+
+        raise UnsupportedIntentError(
+            label,
+            tuple(sorted(t.value for t in _engine_helpers.GENERIC_SIMULATED_INTENT_TYPES)),
+            hint,
         )
 
     def _get_intent_type(self, intent: Any) -> IntentType:
