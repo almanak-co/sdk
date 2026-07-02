@@ -66,6 +66,8 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "round_trip_conservation",
     "borrow_repay_conservation",
     "generic_lane_entry",
+    "funding_gated_entry",
+    "funding_lane_coherence",
     "rejection_no_state_change",
     "cost_accounting",
     "gas_native_asset_pricing",
@@ -303,6 +305,32 @@ CELLS: tuple[TrustCell, ...] = (
         "PERP_OPEN is value-neutral at the open instant: collateral moves cash -> position, no minting.",
     ),
     _cell(
+        "funding_gated_entry",
+        "perp",
+        "A strategy that gates entries on market.funding_rate(...) receives the engine-configured "
+        "rate from the snapshot's backtest funding lane and enters (>= 1 successful trade).",
+        # Guards the unwired strategy-facing funding read: the engine's
+        # create_market_snapshot_from_state handed decide() a snapshot with no
+        # funding_rate_provider, so every funding read raised "No funding rate
+        # provider configured for MarketSnapshot" and funding-gated perp
+        # strategies (e.g. gmx_v2_directional_perp) produced 0-trade backtests
+        # over any window. Fixed by SnapshotFundingRateSource / view_at wiring.
+    ),
+    _cell(
+        "funding_lane_coherence",
+        "perp",
+        "With historical funding enabled, the rate decide() gates on and the rate the open "
+        "position accrues resolve from the SAME measured source: closed form ties final "
+        "capital to exactly two funding-hour applications at the measured (not fallback) rate.",
+        # Guards the async-context skip (PR `#3153` review): the perp adapter's
+        # update_position runs inside the engine's async task and used to skip
+        # historical funding fetches there (fallback:async_context, low
+        # confidence), while the snapshot lane thread-bridged and served
+        # measured history - so a strategy could enter on the measured rate
+        # while its position accrued the fallback. The adapter now bridges
+        # through the same worker-thread path.
+    ),
+    _cell(
         "round_trip_conservation",
         "perp",
         "Perp open -> close at flat price returns initial capital minus exactly the modeled funding.",
@@ -518,6 +546,59 @@ class ScriptedStrategy:
         return None
 
 
+class FundingGatedPerpStrategy:
+    """Perp strategy gated on ``market.funding_rate`` — the demo-seed entry gate.
+
+    Mirrors ``gmx_v2_directional_perp._funding_hourly``: a funding read failure
+    is treated as "funding unavailable" and the strategy refuses to open blind.
+    Before the snapshot funding lane was wired, EVERY tick took the except
+    branch, so a funding-gated strategy could never trade in a backtest.
+    """
+
+    deployment_id = "trust-matrix-funding-gated"
+
+    def __init__(self, entry_threshold_hourly: Decimal = Decimal("0.0005")) -> None:
+        self._entry_threshold = entry_threshold_hourly
+        self._opened = False
+        self.rates_seen: list[Decimal] = []
+
+    def decide(self, market: Any) -> Any:
+        try:
+            rate = market.funding_rate("gmx_v2", "ETH-USD").rate_hourly
+        except Exception:  # noqa: BLE001 - funding unavailable -> refuse to open blind
+            return None
+        self.rates_seen.append(rate)
+        if self._opened or rate > self._entry_threshold:
+            return None
+        self._opened = True
+        return PerpOpenDuck()
+
+
+class FundingCoherenceProbeStrategy:
+    """Funding-reading perp round trip: open on the first tick, close on the third.
+
+    Reads ``market.funding_rate`` on EVERY tick without a guard — a funding-lane
+    failure fails the cell loudly — and records what decide() saw so the cell
+    can tie the decide-visible rate to the funding the position accrued.
+    """
+
+    deployment_id = "trust-matrix-funding-coherence"
+
+    def __init__(self, notional: Decimal = Decimal("5000")) -> None:
+        self._notional = notional
+        self._ticks = 0
+        self.rates_seen: list[Decimal] = []
+
+    def decide(self, market: Any) -> Any:
+        self.rates_seen.append(market.funding_rate("gmx_v2", "ETH-USD").rate_hourly)
+        self._ticks += 1
+        if self._ticks == 1:
+            return PerpOpenDuck(size_usd=self._notional, collateral_usd=Decimal("1000"))
+        if self._ticks == 3:
+            return PerpCloseDuck()
+        return None
+
+
 # --- duck-typed intents exercising the engine's generic execution lane ---
 
 
@@ -597,12 +678,15 @@ def run_backtest(
     fee_pct: Decimal = Decimal("0"),
     slippage_pct: Decimal = Decimal("0"),
     strategy_type: str | None = None,
+    data_config: Any | None = None,
     **config_overrides: Any,
 ) -> Any:
     """Run the REAL PnL engine loop over synthetic data and return BacktestResult.
 
     Defaults isolate conservation: zero fees/slippage/gas and immediate
     (next-tick) execution. Cells that test cost accounting override them.
+    Cells that pass a ``data_config`` must keep it network-free
+    (``use_historical_funding=False`` etc.) — this is the no-network tier.
     """
     funding_chain = str(config_overrides.get("chain", "arbitrum")).lower()
     funding_address = USDC_BY_CHAIN[funding_chain]
@@ -635,5 +719,6 @@ def run_backtest(
         fee_models={"default": DefaultFeeModel(fee_pct=fee_pct)},
         slippage_models={"default": DefaultSlippageModel(slippage_pct=slippage_pct)},
         strategy_type=strategy_type,
+        data_config=data_config,
     )
     return asyncio.run(backtester.backtest(strategy, config))

@@ -43,6 +43,7 @@ from almanak.framework.backtesting.adapters.lp_adapter import (
     LPBacktestAdapter,
     LPBacktestConfig,
 )
+from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.backtesting.pnl.calculators.funding import FundingCalculator
 from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
     MAX_TICK,
@@ -61,6 +62,7 @@ from almanak.framework.backtesting.pnl.metrics_calculator import (
 )
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 from almanak.framework.backtesting.pnl.position_models import PositionType, SimulatedPosition
+from almanak.framework.backtesting.pnl.providers.perp._gateway_history import FundingHistoryPoint
 from almanak.framework.intents.lending_intents import (
     BorrowIntent,
     RepayIntent,
@@ -73,6 +75,9 @@ from tests.validation.backtesting.trust_matrix import (
     INITIAL_CAPITAL,
     START,
     TICK_SECONDS,
+    USDC_ARBITRUM,
+    FundingCoherenceProbeStrategy,
+    FundingGatedPerpStrategy,
     LPOpenDuck,
     PerpCloseDuck,
     PerpOpenDuck,
@@ -80,7 +85,6 @@ from tests.validation.backtesting.trust_matrix import (
     StakeDuck,
     SupplyDuck,
     SwapDuck,
-    USDC_ARBITRUM,
     flat_series,
     run_backtest,
 )
@@ -1104,6 +1108,93 @@ def test_perp_round_trip_closed_form_funding_only() -> None:
     expected_funding = hourly_rate * notional  # one funding hour
     assert result.final_capital_usd == INITIAL_CAPITAL - expected_funding
     # The close trade realizes exactly the accumulated funding (price PnL is 0).
+    assert result.trades[-1].pnl_usd == -expected_funding
+
+
+@pytest.mark.trust_cell("perp:funding_gated_entry")
+def test_perp_funding_gated_strategy_can_enter() -> None:
+    """A funding-gated strategy reads a rate from the snapshot and enters.
+
+    Guards the unwired strategy-facing funding lane: the engine used to hand
+    decide() a snapshot with no funding_rate_provider, so every
+    market.funding_rate(...) read raised and funding-gated perp strategies
+    (the gmx_v2_directional_perp entry gate) produced 0-trade backtests over
+    any window. The fallback here (0.0002/h) sits below the 0.0005/h entry
+    threshold, so a wired lane MUST admit the entry.
+    """
+    fallback = Decimal("0.0002")
+    strategy = FundingGatedPerpStrategy()
+    result = run_backtest(
+        strategy,
+        flat_series(8),
+        hours=4,
+        strategy_type="perp",
+        # Network-free tier: the fixed lane serves funding_fallback_rate with
+        # zero gateway traffic.
+        data_config=BacktestDataConfig(use_historical_funding=False, funding_fallback_rate=fallback),
+    )
+
+    assert result.success
+    assert strategy.rates_seen, "decide() never observed a funding rate - snapshot funding lane unwired"
+    # The lane serves the ENGINE-CONFIGURED rate (the same knob the perp
+    # adapter's historical-fallback lane charges), not a fabricated global.
+    assert all(rate == fallback for rate in strategy.rates_seen)
+    assert result.metrics.total_trades == 1
+    assert result.trades[0].success
+
+
+@pytest.mark.trust_cell("perp:funding_lane_coherence")
+def test_perp_funding_lanes_agree_on_measured_rate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """decide()-visible funding and position-accrued funding share one source.
+
+    With historical funding enabled, the strategy-facing snapshot lane and the
+    perp adapter's position-evolution lane must resolve the SAME measured
+    rate. The adapter used to skip historical fetches inside the engine's
+    async task (fallback:async_context), so a strategy could enter on the
+    measured rate while its open position accrued the fallback (PR #3153
+    review). The gateway seam is stubbed with one measured point per window
+    (synthetic data, not a mock of the code under test); the fallback is set
+    to a DIFFERENT rate so any lane falling back breaks the closed form.
+
+    Choreography mirrors perp:round_trip_conservation: open decided t0
+    (executes t1), close decided t2 (executes t3). Funding applies at the t1
+    and t2 marks (the adapter's first update after open charges the first
+    elapsed hour) — two one-hour applications, both at the measured rate.
+    """
+    measured = Decimal("0.0004")
+
+    def _fetch(**kwargs):
+        return [FundingHistoryPoint(timestamp=kwargs["end_ts"] - 60, rate_hourly=measured)]
+
+    # Both lanes' import-site bindings of the shared gateway seam.
+    monkeypatch.setattr("almanak.framework.backtesting.pnl.providers.funding_rates.fetch_funding_points", _fetch)
+    monkeypatch.setattr("almanak.connectors.gmx_v2.backtest_funding.fetch_funding_points", _fetch)
+
+    notional = Decimal("5000")
+    strategy = FundingCoherenceProbeStrategy(notional=notional)
+    result = run_backtest(
+        strategy,
+        flat_series(10),
+        hours=5,
+        strategy_type="perp",
+        data_config=BacktestDataConfig(
+            use_historical_funding=True,
+            funding_fallback_rate=Decimal("0.0007"),
+        ),
+    )
+
+    assert result.success
+    assert result.metrics.total_trades == 2
+    assert all(trade.success for trade in result.trades)
+    # decide() saw the measured rate on every tick...
+    assert strategy.rates_seen, "decide() never observed a funding rate"
+    assert all(rate == measured for rate in strategy.rates_seen)
+    # ...the position's funding was stamped as measured history, not fallback...
+    assert result.data_coverage_metrics.perp_metrics.data_sources == ["historical:gateway"]
+    assert result.data_coverage_metrics.perp_metrics.funding_confidence_breakdown["high"] == 1
+    # ...and the position accrued exactly that rate for its two funding hours.
+    expected_funding = measured * notional * 2
+    assert result.final_capital_usd == INITIAL_CAPITAL - expected_funding
     assert result.trades[-1].pnl_usd == -expected_funding
 
 

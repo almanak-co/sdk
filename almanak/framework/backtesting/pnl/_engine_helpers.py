@@ -469,6 +469,15 @@ async def execute_iteration_loop(
     """
     # Local import to avoid cyclic import at module load
     from almanak.framework.backtesting.pnl.engine import create_market_snapshot_from_state
+    from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import SnapshotFundingRateSource
+
+    # Strategy-facing funding lane: one source per run; each tick binds it to
+    # the tick's simulated timestamp so decide()'s market.funding_rate(...)
+    # resolves the rate in effect at that instant (no look-ahead).
+    funding_rate_source = SnapshotFundingRateSource(
+        chain=config.chain,
+        data_config=backtester.data_config,
+    )
 
     with bt_logger.phase("simulation"):
         # Iterate through historical data
@@ -497,6 +506,7 @@ async def execute_iteration_loop(
                 market_state=market_state,
                 chain=config.chain,
                 portfolio=state.portfolio,
+                funding_rate_source=funding_rate_source,
             )
 
             # Cache available_tokens once per tick: the property returns a

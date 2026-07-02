@@ -1129,9 +1129,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             return cached
 
         try:
-            rates = self._fetch_historical_funding_rates(provider, lookup, position)
-            if rates is None:
-                return self._funding_async_context_result()
+            rates = self._fetch_historical_funding_rates(provider, lookup)
             if not rates:
                 return self._funding_no_data_result(position, lookup)
             return self._cache_latest_funding_rate(position, lookup, cache_key, rates)
@@ -1231,25 +1229,21 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         self,
         provider: Any,
         lookup: _FundingLookup,
-        position: "SimulatedPosition",
-    ) -> list[Any] | None:
-        assert lookup.timestamp is not None
-        loop_is_running = self._event_loop_is_running()
-        if loop_is_running and asyncio.current_task() is not None:
-            if self._is_strict_historical_mode():
-                raise HistoricalDataUnavailableError(
-                    data_type="funding",
-                    identifier=lookup.market,
-                    timestamp=lookup.timestamp,
-                    message="Cannot fetch historical funding rate in async context",
-                    chain=self._config.chain,
-                    protocol=position.protocol,
-                )
-            logger.debug("Historical funding fetch skipped in async context; using fallback.")
-            return None
+    ) -> list[Any]:
+        """Fetch the ``[T - 1h, T]`` funding window, bridging out of a running loop.
 
+        ``update_position`` runs inside the engine's async iteration task, and
+        a running event loop cannot be re-entered with ``asyncio.run`` on its
+        own thread — so the query runs in a dedicated worker thread instead
+        (the same bridge ``MarketSnapshot._run_async_bridged`` uses for the
+        strategy-facing funding lane). The old behaviour skipped the fetch in
+        that case (``fallback:async_context``), which silently broke the
+        funding-lane coherence contract: decide() gated on measured history
+        while the open position accrued the fallback rate (PR #3153 review).
+        """
+        assert lookup.timestamp is not None
         start_time = lookup.timestamp - timedelta(hours=1)
-        if loop_is_running:
+        if self._event_loop_is_running():
             return self._run_funding_query_in_thread(provider, lookup.market, start_time, lookup.timestamp)
         return asyncio.run(
             provider.get_funding_rates(
@@ -1289,10 +1283,6 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             return future.result(timeout=30)
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
-
-    def _funding_async_context_result(self) -> tuple[Decimal, str, str]:
-        default_rate = self._get_funding_fallback_rate()
-        return default_rate, "low", "fallback:async_context"
 
     def _funding_no_data_result(
         self,

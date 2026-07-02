@@ -127,6 +127,7 @@ from almanak.framework.backtesting.pnl.portfolio import (
     SimulatedPosition,
 )
 from almanak.framework.backtesting.pnl.providers.gas import GasPrice, GasPriceProvider
+from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import SnapshotFundingRateSource
 from almanak.framework.backtesting.pnl.simulated_result import (
     SimulatedExecutionResult,
     build_simulated_result,
@@ -437,6 +438,7 @@ def create_market_snapshot_from_state(
     wallet_address: str = "",
     portfolio: SimulatedPortfolio | None = None,
     token_aliases: dict[str, str] | None = None,
+    funding_rate_source: "SnapshotFundingRateSource | None" = None,
 ) -> MarketSnapshot:
     """Create a MarketSnapshot from historical MarketState data.
 
@@ -448,6 +450,12 @@ def create_market_snapshot_from_state(
         chain: Chain identifier
         wallet_address: Wallet address (can be empty for simulation)
         portfolio: Optional portfolio for balance simulation
+        funding_rate_source: Optional per-run funding lane. When provided, the
+            snapshot's ``funding_rate`` / ``funding_rate_spread`` accessors are
+            served by a view bound to this tick's simulated timestamp, so
+            funding-gated strategies read the historical (or configured
+            fallback) rate in effect at the tick instead of raising
+            "No funding rate provider configured".
 
     Returns:
         MarketSnapshot populated with historical price data
@@ -457,6 +465,9 @@ def create_market_snapshot_from_state(
         chain=chain,
         wallet_address=wallet_address,
         timestamp=market_state.timestamp,
+        funding_rate_provider=(
+            funding_rate_source.view_at(market_state.timestamp) if funding_rate_source is not None else None
+        ),
     )
     _ = token_aliases
     _seed_snapshot_prices(snapshot, market_state)

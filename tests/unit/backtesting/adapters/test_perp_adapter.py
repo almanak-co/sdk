@@ -494,7 +494,7 @@ class TestFundingAccumulationOverTime:
 
         monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda protocol: object())
 
-        def fake_fetch_historical_funding_rates(provider, lookup, position):
+        def fake_fetch_historical_funding_rates(provider, lookup):
             captured["market"] = lookup.market
             return []
 
