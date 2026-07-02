@@ -11,12 +11,12 @@ Extracted from pnl/engine.py for module size management.
 """
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from typing import Any
 
 from almanak.framework.backtesting.models import IntentType
-from almanak.framework.backtesting.pnl.data_provider import MarketState
+from almanak.framework.backtesting.pnl.data_provider import MarketState, is_address_like, is_token_key
 
 logger = logging.getLogger(__name__)
 
@@ -435,9 +435,36 @@ def _lp_amount_tokens(intent: Any) -> tuple[str, str]:
     return token0, token1
 
 
-def _positive_market_price(market_state: MarketState, token: str) -> Decimal | None:
+def _market_price_for(
+    token: Any,
+    market_state: MarketState,
+    token_addresses: Mapping[str, tuple[str, str]] | None,
+) -> Decimal:
+    """``market_state.get_price`` with the engine's registered-address retry.
+
+    Address-native market states (VIB-5508) keep plain-symbol reads an honest
+    miss, so a symbol-carrying intent must be priced through the engine's own
+    registered ``{SYMBOL: (chain, address)}`` map before the caller applies
+    its miss fallback. Raises ``KeyError`` exactly like ``get_price`` when
+    neither the direct read nor the registered retry resolves.
+    """
     try:
-        price: Decimal | None = market_state.get_price(token)
+        return market_state.get_price(token)
+    except KeyError:
+        if isinstance(token, str) and token_addresses:
+            entry = token_addresses.get(token.strip().upper())
+            if entry is not None:
+                return market_state.get_price(entry)
+        raise
+
+
+def _positive_market_price(
+    market_state: MarketState,
+    token: str,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
+) -> Decimal | None:
+    try:
+        price: Decimal | None = _market_price_for(token, market_state, token_addresses)
     except KeyError:
         return None
     return price if price is not None and price > 0 else None
@@ -471,10 +498,11 @@ def _lp_leg_value_usd(
     market_state: MarketState,
     strict_reproducibility: bool,
     track_fallback: Callable[[str], None] | None,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
 ) -> Decimal | None:
     if amount == 0:
         return Decimal("0")
-    price = _positive_market_price(market_state, token)
+    price = _positive_market_price(market_state, token, token_addresses)
     if price is not None:
         return amount * price
     _handle_unpriced_lp_leg(token, amount, strict_reproducibility, track_fallback)
@@ -486,6 +514,7 @@ def _lp_pair_amount_usd(
     market_state: MarketState,
     strict_reproducibility: bool,
     track_fallback: Callable[[str], None] | None,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
 ) -> Decimal | None:
     """Price an LP intent's ``amount0``/``amount1`` token legs in USD.
 
@@ -503,7 +532,9 @@ def _lp_pair_amount_usd(
     token0, token1 = _lp_amount_tokens(intent)
     total = Decimal("0")
     for token, amount in ((token0, amount_pair[0]), (token1, amount_pair[1])):
-        leg_value = _lp_leg_value_usd(token, amount, market_state, strict_reproducibility, track_fallback)
+        leg_value = _lp_leg_value_usd(
+            token, amount, market_state, strict_reproducibility, track_fallback, token_addresses
+        )
         if leg_value is None:
             return Decimal("0")
         total += leg_value
@@ -515,6 +546,7 @@ def _borrow_amount_usd(
     market_state: MarketState,
     strict_reproducibility: bool,
     track_fallback: Callable[[str], None] | None,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
 ) -> Decimal | None:
     """Price a BORROW-vocabulary intent's ``borrow_amount`` leg in USD.
 
@@ -536,7 +568,7 @@ def _borrow_amount_usd(
     token = token.upper() if isinstance(token, str) and token else None
     if token is not None:
         try:
-            price: Decimal | None = market_state.get_price(token)
+            price: Decimal | None = _market_price_for(token, market_state, token_addresses)
         except KeyError:
             price = None
         if price is not None and price > 0:
@@ -616,10 +648,11 @@ def _generic_amount_usd(
     market_state: MarketState,
     strict_reproducibility: bool,
     track_fallback: Callable[[str], None] | None,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
 ) -> Decimal:
     if amount is not None and token:
         try:
-            price = market_state.get_price(token)
+            price = _market_price_for(token, market_state, token_addresses)
             return amount * price
         except KeyError as err:
             if strict_reproducibility:
@@ -665,6 +698,7 @@ def get_intent_amount_usd(
     market_state: MarketState,
     strict_reproducibility: bool = False,
     track_fallback: Callable[[str], None] | None = None,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
 ) -> Decimal:
     """Extract or calculate the USD amount for an intent.
 
@@ -689,18 +723,18 @@ def get_intent_amount_usd(
     # BORROW vocabulary intents (BorrowIntent) size the borrow via
     # borrow_amount of borrow_token; the generic scan below would price the
     # amount at collateral_token instead (VIB-5098).
-    borrow_usd = _borrow_amount_usd(intent, market_state, strict_reproducibility, track_fallback)
+    borrow_usd = _borrow_amount_usd(intent, market_state, strict_reproducibility, track_fallback, token_addresses)
     if borrow_usd is not None:
         return borrow_usd
 
     # LP vocabulary intents (LPOpenIntent) size the position via per-leg
     # token amounts instead of a USD field; price both legs.
-    lp_amount_usd = _lp_pair_amount_usd(intent, market_state, strict_reproducibility, track_fallback)
+    lp_amount_usd = _lp_pair_amount_usd(intent, market_state, strict_reproducibility, track_fallback, token_addresses)
     if lp_amount_usd is not None:
         return lp_amount_usd
 
     amount, token = _generic_amount_and_token(intent)
-    return _generic_amount_usd(amount, token, market_state, strict_reproducibility, track_fallback)
+    return _generic_amount_usd(amount, token, market_state, strict_reproducibility, track_fallback, token_addresses)
 
 
 def _collateral_usd_from_intent(
@@ -708,6 +742,7 @@ def _collateral_usd_from_intent(
     market_state: MarketState,
     strict_reproducibility: bool,
     track_fallback: Callable[[str], None] | None,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
 ) -> Decimal | None:
     """Price a perp intent's declared collateral, or None when unresolvable.
 
@@ -725,7 +760,7 @@ def _collateral_usd_from_intent(
     if not isinstance(collateral_token, str) or not collateral_token:
         return None
     try:
-        return amount * market_state.get_price(collateral_token)
+        return amount * _market_price_for(collateral_token, market_state, token_addresses)
     except KeyError as err:
         if strict_reproducibility:
             msg = (
@@ -748,6 +783,7 @@ def get_perp_open_params(
     fallback_amount_usd: Decimal,
     strict_reproducibility: bool = False,
     track_fallback: Callable[[str], None] | None = None,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
 ) -> tuple[Decimal, Decimal]:
     """Resolve ``(collateral_usd, leverage)`` for a PERP_OPEN intent.
 
@@ -766,7 +802,9 @@ def get_perp_open_params(
     if leverage <= 0:
         leverage = Decimal("1")
 
-    collateral_usd = _collateral_usd_from_intent(intent, market_state, strict_reproducibility, track_fallback)
+    collateral_usd = _collateral_usd_from_intent(
+        intent, market_state, strict_reproducibility, track_fallback, token_addresses
+    )
     if collateral_usd is None and size_usd is not None:
         collateral_usd = size_usd / leverage
     if collateral_usd is None:
@@ -901,7 +939,11 @@ def find_perp_close_position_id(intent: Any, positions: Sequence[Any]) -> str | 
     return candidates[0].position_id
 
 
-def find_lending_close_position_id(intent: Any, positions: Sequence[Any]) -> str | None:
+def find_lending_close_position_id(
+    intent: Any,
+    positions: Sequence[Any],
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
+) -> str | None:
     """Resolve the simulated SUPPLY position a WITHDRAW intent targets.
 
     Mirrors :func:`find_perp_close_position_id` (PR #2751): an exact-id
@@ -929,10 +971,14 @@ def find_lending_close_position_id(intent: Any, positions: Sequence[Any]) -> str
     """
     from almanak.framework.backtesting.pnl.position_models import PositionType
 
-    return _find_lending_position_id(intent, positions, PositionType.SUPPLY, "WITHDRAW", "supply")
+    return _find_lending_position_id(intent, positions, PositionType.SUPPLY, "WITHDRAW", "supply", token_addresses)
 
 
-def find_borrow_close_position_id(intent: Any, positions: Sequence[Any]) -> str | None:
+def find_borrow_close_position_id(
+    intent: Any,
+    positions: Sequence[Any],
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
+) -> str | None:
     """Resolve the simulated BORROW position a REPAY intent targets.
 
     Debt-side sibling of :func:`find_lending_close_position_id`
@@ -955,7 +1001,7 @@ def find_borrow_close_position_id(intent: Any, positions: Sequence[Any]) -> str 
     """
     from almanak.framework.backtesting.pnl.position_models import PositionType
 
-    return _find_lending_position_id(intent, positions, PositionType.BORROW, "REPAY", "borrow")
+    return _find_lending_position_id(intent, positions, PositionType.BORROW, "REPAY", "borrow", token_addresses)
 
 
 def _explicit_lending_position_match(
@@ -1000,18 +1046,43 @@ def _lending_close_token(intent: Any) -> str | None:
     return token.upper() if isinstance(token, str) and token else None
 
 
+def _token_identity_label(
+    token: Any,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
+) -> str:
+    """Upper-cased identity label for lending position/intent matching.
+
+    Registered plain symbols and ``(chain, address)`` keys collapse onto the
+    same address label so a symbol-carrying close intent matches the
+    address-native position its open intent created (VIB-5508). The label is
+    the bare address (a backtest portfolio is single-chain, so the chain
+    component adds no discrimination and would break symbol-vs-key matches
+    for bare-address intents). Unregistered symbols keep their symbol label.
+    """
+    if isinstance(token, str) and not is_address_like(token):
+        entry = (token_addresses or {}).get(token.strip().upper())
+        if entry is None or not is_token_key(entry):
+            return token.strip().upper()
+        token = entry
+    if is_token_key(token):
+        return str(token[1]).strip().upper()
+    return str(token).strip().upper()
+
+
 def _lending_position_candidates(
     positions: Sequence[Any],
     target_type: Any,
     token: str,
     protocol: str | None,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
 ) -> list[Any]:
+    token_label = _token_identity_label(token, token_addresses)
     candidates = []
     for position in positions:
         if position.position_type != target_type:
             continue
-        position_token = position.tokens[0].upper() if position.tokens else ""
-        if position_token != token:
+        position_token = _token_identity_label(position.tokens[0], token_addresses) if position.tokens else ""
+        if position_token != token_label:
             continue
         # A protocol-specific intent must not target a position whose
         # protocol is unknown: skip on missing OR mismatched stamp. (Every
@@ -1029,6 +1100,7 @@ def _find_lending_position_id(
     target_type: Any,
     intent_label: str,
     position_label: str,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
 ) -> str | None:
     """Shared matcher behind the WITHDRAW/SUPPLY and REPAY/BORROW pairs.
 
@@ -1057,7 +1129,7 @@ def _find_lending_position_id(
     # Resolve protocol with the same resolver the open path used to stamp
     # the position, so protocol_name / connector / adapter spellings match.
     protocol = _normalized_intent_protocol(intent)
-    candidates = _lending_position_candidates(positions, target_type, token, protocol)
+    candidates = _lending_position_candidates(positions, target_type, token, protocol, token_addresses)
 
     if not candidates:
         logger.warning(
@@ -1261,6 +1333,7 @@ def get_executed_price(
     market_state: MarketState,
     slippage_pct: Decimal,
     intent_type: IntentType,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
 ) -> Decimal:
     """Get the executed price for an intent after applying slippage.
 
@@ -1282,7 +1355,7 @@ def get_executed_price(
 
     # Get market price
     try:
-        market_price = market_state.get_price(primary_token)
+        market_price = _market_price_for(primary_token, market_state, token_addresses)
     except KeyError:
         market_price = Decimal("1")
 

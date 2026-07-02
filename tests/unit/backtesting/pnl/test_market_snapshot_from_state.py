@@ -543,6 +543,214 @@ class TestSymbolAliasBridge:
         assert snapshot.balance("CBBTC").balance == Decimal("0.05")
 
 
+class TestSymbolIntentFlows:
+    """Symbol-carrying intents resolve through the engine's registered map.
+
+    Without the map, a plain-symbol intent leg on an address-keyed market
+    state missed its price and fell back to $1-per-unit sizing under an
+    unvalued symbol key — silent value minting (a $31 USD swap booked as
+    31 WETH). Registered symbols must size at the real price and land on
+    the address-native key; unregistered symbols keep the legacy fallback.
+    """
+
+    WETH_ADDR = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    USDC_ADDR = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    WETH_KEY = ("ethereum", WETH_ADDR)
+    USDC_KEY = ("ethereum", USDC_ADDR)
+    TOKEN_ADDRESSES = {"WETH": WETH_KEY, "USDC": USDC_KEY}
+
+    def _state(self):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        return MarketState(
+            timestamp=datetime(2026, 3, 23, tzinfo=UTC),
+            chain="ethereum",
+            prices={self.WETH_KEY: Decimal("2000"), self.USDC_KEY: Decimal("1")},
+        )
+
+    def test_swap_flows_resolve_symbols_through_registered_map(self):
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl._engine_helpers import calculate_token_flows
+
+        intent = SimpleNamespace(from_token="WETH", to_token="USDC")
+        tokens_in, tokens_out = calculate_token_flows(
+            intent, IntentType.SWAP, Decimal("31"), Decimal("0"), Decimal("0"), self._state(), self.TOKEN_ADDRESSES
+        )
+        assert tokens_out == {self.WETH_KEY: Decimal("31") / Decimal("2000")}
+        assert tokens_in == {self.USDC_KEY: Decimal("31")}
+
+    def test_swap_flows_keep_legacy_fallback_for_unregistered_symbols(self):
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl._engine_helpers import calculate_token_flows
+
+        intent = SimpleNamespace(from_token="CBBTC", to_token="USDC")
+        _tokens_in, tokens_out = calculate_token_flows(
+            intent, IntentType.SWAP, Decimal("31"), Decimal("0"), Decimal("0"), self._state(), self.TOKEN_ADDRESSES
+        )
+        assert tokens_out == {"CBBTC": Decimal("31")}
+
+    def test_supply_flows_resolve_symbol_through_registered_map(self):
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl._engine_helpers import calculate_token_flows
+
+        intent = SimpleNamespace(token="WETH")
+        _tokens_in, tokens_out = calculate_token_flows(
+            intent, IntentType.SUPPLY, Decimal("100"), Decimal("0"), Decimal("0"), self._state(), self.TOKEN_ADDRESSES
+        )
+        assert tokens_out == {self.WETH_KEY: Decimal("100") / Decimal("2000")}
+
+    def test_lp_open_flows_resolve_pool_symbols_through_registered_map(self):
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl._engine_helpers import calculate_token_flows
+
+        intent = SimpleNamespace(pool="WETH/USDC")
+        _tokens_in, tokens_out = calculate_token_flows(
+            intent, IntentType.LP_OPEN, Decimal("100"), Decimal("0"), Decimal("0"), self._state(), self.TOKEN_ADDRESSES
+        )
+        assert tokens_out == {
+            self.WETH_KEY: Decimal("50") / Decimal("2000"),
+            self.USDC_KEY: Decimal("50"),
+        }
+
+    def test_lp_position_mark_to_market_uses_registered_market_state_aliases(self):
+        """Symbol-keyed LP positions must still read address-native prices."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+        from almanak.framework.backtesting.pnl.engine import PnLBacktester
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        bt = PnLBacktester(
+            data_provider=MagicMock(_token_addresses=None),
+            fee_models={},
+            slippage_models={},
+            token_addresses=self.TOKEN_ADDRESSES,
+        )
+        intent = SimpleNamespace(
+            amount_usd=Decimal("1000"),
+            pool="WETH/USDC",
+            fee_tier=Decimal("0.003"),
+            range_lower=Decimal("1000"),
+            range_upper=Decimal("4000"),
+        )
+        entry_state = self._state()
+
+        def marked_value(weth_price: str) -> Decimal:
+            state = MarketState(
+                timestamp=datetime(2026, 3, 23, tzinfo=UTC),
+                chain="ethereum",
+                prices={self.WETH_KEY: Decimal(weth_price), self.USDC_KEY: Decimal("1")},
+            )
+            state.register_symbol_aliases(self.TOKEN_ADDRESSES)
+            position = bt._lp_open_delta(
+                intent,
+                protocol="uniswap_v3",
+                tokens=["WETH", "USDC"],
+                executed_price=Decimal("2000"),
+                timestamp=entry_state.timestamp,
+                market_state=entry_state,
+                strict_reproducibility=False,
+            )
+            portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"), chain="ethereum")
+            return portfolio._mark_lp_position(position, state, state.timestamp)
+
+        assert marked_value("2500") != marked_value("5000")
+
+    def test_intent_amount_usd_prices_symbol_through_registered_map(self):
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.pnl.intent_extraction import get_intent_amount_usd
+
+        intent = SimpleNamespace(amount=Decimal("2"), token="WETH")
+        amount_usd = get_intent_amount_usd(intent, self._state(), token_addresses=self.TOKEN_ADDRESSES)
+        assert amount_usd == Decimal("4000")
+
+    def test_executed_price_resolves_symbol_through_registered_map(self):
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.intent_extraction import get_executed_price
+
+        intent = SimpleNamespace(from_token="WETH", to_token="USDC", token="WETH")
+        price = get_executed_price(
+            intent, self._state(), Decimal("0.01"), IntentType.SWAP, token_addresses=self.TOKEN_ADDRESSES
+        )
+        assert price == Decimal("2000") * Decimal("0.99")
+
+    def test_supply_position_delta_resolves_symbol_amount_and_key(self):
+        """A symbol SUPPLY must book real units under the address key.
+
+        Pre-fix the position booked amount_usd as token units under the
+        symbol key while entry_price carried the real price — a $453 supply
+        marked as 453 WETH (~$1M of minted equity in the spark demo).
+        """
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from almanak.framework.backtesting.pnl.engine import PnLBacktester
+
+        bt = PnLBacktester(
+            data_provider=MagicMock(_token_addresses=None),
+            fee_models={},
+            slippage_models={},
+            token_addresses=self.TOKEN_ADDRESSES,
+        )
+        intent = SimpleNamespace(amount_usd=Decimal("453"), apy=Decimal("0.05"))
+        position = bt._supply_delta(
+            intent,
+            protocol="spark",
+            tokens=["WETH"],
+            executed_price=Decimal("2000"),
+            timestamp=datetime(2026, 3, 23, tzinfo=UTC),
+            market_state=self._state(),
+            strict_reproducibility=False,
+        )
+        assert self.WETH_KEY in position.tokens
+        assert position.total_amount == Decimal("453") / Decimal("2000")
+
+    def test_repay_matches_address_keyed_borrow_position_by_symbol(self):
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.pnl.intent_extraction import find_borrow_close_position_id
+        from almanak.framework.backtesting.pnl.position_models import PositionType
+
+        position = SimpleNamespace(
+            position_type=PositionType.BORROW,
+            tokens=[self.USDC_KEY],
+            protocol="benqi",
+            position_id="borrow-1",
+            entry_time=datetime(2026, 3, 23, tzinfo=UTC),
+        )
+        intent = SimpleNamespace(token="USDC", protocol="benqi")
+        matched = find_borrow_close_position_id(intent, [position], self.TOKEN_ADDRESSES)
+        assert matched == "borrow-1"
+
+    def test_repay_does_not_match_unregistered_symbol(self):
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.pnl.intent_extraction import find_borrow_close_position_id
+        from almanak.framework.backtesting.pnl.position_models import PositionType
+
+        position = SimpleNamespace(
+            position_type=PositionType.BORROW,
+            tokens=[self.USDC_KEY],
+            protocol="benqi",
+            position_id="borrow-1",
+            entry_time=datetime(2026, 3, 23, tzinfo=UTC),
+        )
+        intent = SimpleNamespace(token="CBBTC", protocol="benqi")
+        assert find_borrow_close_position_id(intent, [position], self.TOKEN_ADDRESSES) is None
+
+
 class TestAddressKeyedFlows:
     """Address-keyed intents preserve token identity in flows and positions."""
 

@@ -6,8 +6,6 @@ calculations. Gas valuation now resolves the chain's native gas asset price;
 
 The gas_price_source should be tracked in DataQualityReport.
 """
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
-
 from datetime import datetime
 from decimal import Decimal
 
@@ -17,13 +15,12 @@ from almanak.framework.backtesting.models import DataQualityReport, IntentType
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
-
-
     DataQualityTracker,
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktester,
 )
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 
 class _EmptyDataProvider:
@@ -304,6 +301,22 @@ class TestGasEthPriceFallbackRemoval:
         weth_key = ("ethereum", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")
         engine = _backtester()
         engine.token_addresses = {"WETH": weth_key}
+        market_state = MarketState(
+            timestamp=datetime(2024, 1, 1, 12, 0, 0),
+            chain="ethereum",
+            prices={weth_key: Decimal("2500")},
+        )
+
+        price, source = engine._resolve_gas_eth_price(base_config, market_state, market_state.timestamp)
+
+        assert price == Decimal("2500")
+        assert source == "market"
+
+    def test_gas_asset_resolves_through_provider_registered_token_addresses(self, base_config):
+        """Provider-side registrations are part of the engine's registered map."""
+        weth_key = ("ethereum", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")
+        engine = _backtester()
+        engine.data_provider._token_addresses = {"WETH": weth_key}
         market_state = MarketState(
             timestamp=datetime(2024, 1, 1, 12, 0, 0),
             chain="ethereum",

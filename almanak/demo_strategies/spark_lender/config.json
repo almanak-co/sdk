@@ -5,14 +5,14 @@
             "symbol": "DAI",
             "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
             "chain": "ethereum",
-            "amount": "10",
+            "amount": "25",
             "amount_type": "usd"
         },
         {
             "symbol": "WETH",
             "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
             "chain": "ethereum",
-            "amount": "0.01",
+            "amount": "0.2",
             "amount_type": "token"
         }
     ],

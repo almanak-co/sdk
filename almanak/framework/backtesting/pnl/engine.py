@@ -2908,7 +2908,7 @@ class PnLBacktester:
             return market_state.get_price(symbol)
         except KeyError:
             pass
-        token_key = (self.token_addresses or {}).get(symbol.upper())
+        token_key = self._registered_token_addresses().get(symbol.strip().upper())
         if token_key is None:
             return None
         try:
@@ -3128,6 +3128,38 @@ class PnLBacktester:
             for token in tokens
         ]
 
+    def _registered_token_addresses(self) -> dict[str, tuple[str, str]]:
+        """The engine's registered ``{SYMBOL: (chain, address)}`` map.
+
+        Threaded into every intent-ingestion surface (USD extraction,
+        executed price, token flows, position deltas) so symbol-carrying
+        intents resolve onto the address-native market-state keys the
+        engine registered itself (VIB-5508; same design as the gas lane's
+        ``_market_gas_asset_price`` retry).
+        """
+        return _engine_helpers._registered_token_addresses(self)
+
+    def _position_token_and_price(
+        self,
+        token: TokenRef,
+        market_state: MarketState,
+    ) -> tuple[Any, Decimal | None]:
+        """Resolve a position token to its registered key and price it.
+
+        Plain symbols resolve through the engine's registered map so
+        simulated positions carry the same ``(chain, address)`` identity as
+        the market state — a symbol-keyed position is invisible to every
+        address-native valuation path (it can only be priced at its entry
+        price, which mints or hides value as the market moves). ``None``
+        price means genuinely unpriceable (unregistered custom token).
+        """
+        chain = str(getattr(market_state, "chain", DEFAULT_CHAIN))
+        resolved = _engine_helpers._normalize_token(token, chain, self._registered_token_addresses())
+        try:
+            return resolved, market_state.get_price(resolved)
+        except KeyError:
+            return resolved, None
+
     def _get_intent_amount_usd(
         self,
         intent: Any,
@@ -3142,6 +3174,7 @@ class PnLBacktester:
             market_state,
             strict_reproducibility=strict_reproducibility,
             track_fallback=self._track_fallback,
+            token_addresses=self._registered_token_addresses(),
         )
 
     def _estimate_gas_for_intent(self, intent_type: IntentType) -> int:
@@ -3160,7 +3193,13 @@ class PnLBacktester:
         """Get the executed price for an intent after slippage. Delegates to intent_extraction module."""
         from .intent_extraction import get_executed_price
 
-        return get_executed_price(intent, market_state, slippage_pct, intent_type)
+        return get_executed_price(
+            intent,
+            market_state,
+            slippage_pct,
+            intent_type,
+            token_addresses=self._registered_token_addresses(),
+        )
 
     def _calculate_token_flows(
         self,
@@ -3200,6 +3239,7 @@ class PnLBacktester:
             fee_usd=fee_usd,
             slippage_usd=slippage_usd,
             market_state=market_state,
+            token_addresses=self._registered_token_addresses(),
         )
 
     def _create_position_delta(
@@ -3289,11 +3329,20 @@ class PnLBacktester:
             # V3 range and non-zero value (same handling as the adapter lane).
             tick_upper = tick_lower + 1
 
+        token_addresses = self._registered_token_addresses()
+
         def price_or_fallback(token: TokenRef) -> Decimal:
+            price: Decimal | None
             try:
-                price: Decimal | None = market_state.get_price(token)
+                price = market_state.get_price(token)
             except KeyError:
-                price = None
+                # Plain-symbol miss on an address-keyed state: retry through
+                # the engine's own registered map before the $1 fallback.
+                entry = token_addresses.get(token.strip().upper()) if isinstance(token, str) else None
+                try:
+                    price = market_state.get_price(entry) if entry is not None else None
+                except KeyError:
+                    price = None
             if price is not None and price > 0:
                 return price
             if strict_reproducibility:
@@ -3362,14 +3411,9 @@ class PnLBacktester:
         """Create the simulated lending position for a SUPPLY intent."""
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
 
-        token = tokens[0] if tokens else "WETH"
+        token, price = self._position_token_and_price(tokens[0] if tokens else "WETH", market_state)
         amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
-
-        try:
-            price = market_state.get_price(token)
-            amount = amount_usd / price
-        except KeyError:
-            amount = amount_usd
+        amount = amount_usd / price if price is not None and price > 0 else amount_usd
 
         # Get APY if available
         apy = getattr(intent, "apy", Decimal("0.05"))
@@ -3399,22 +3443,16 @@ class PnLBacktester:
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
 
         deposit_tok = getattr(intent, "deposit_token", None)
-        chain = str(getattr(market_state, "chain", DEFAULT_CHAIN))
         if deposit_tok:
-            token = _engine_helpers._normalize_token(deposit_tok, chain)
+            token, price = self._position_token_and_price(deposit_tok, market_state)
         else:
-            token = tokens[0] if tokens else _engine_helpers._normalize_token("USDC", chain)
+            token, price = self._position_token_and_price(tokens[0] if tokens else "USDC", market_state)
             logger.warning(
                 "Vault deposit missing deposit_token, defaulting to %s — set deposit_token for accurate backtesting",
                 token_ref_display(token),
             )
         amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
-
-        try:
-            price = market_state.get_price(token)
-            amount = amount_usd / price if price > 0 else amount_usd
-        except KeyError:
-            amount = amount_usd
+        amount = amount_usd / price if price is not None and price > 0 else amount_usd
 
         # ERC-4626 vault yield: pending PPFS-curve replay via gateway
         # MarketService.GetSharePriceHistory (VIB-3367). Until that ships,
@@ -3446,14 +3484,9 @@ class PnLBacktester:
         """Create the simulated borrow position for a BORROW intent."""
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
 
-        token = tokens[0] if tokens else "USDC"
+        token, price = self._position_token_and_price(tokens[0] if tokens else "USDC", market_state)
         amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
-
-        try:
-            price = market_state.get_price(token)
-            amount = amount_usd / price
-        except KeyError:
-            amount = amount_usd
+        amount = amount_usd / price if price is not None and price > 0 else amount_usd
 
         # Get APY if available
         apy = getattr(intent, "apy", getattr(intent, "borrow_apy", Decimal("0.08")))
@@ -3498,6 +3531,7 @@ class PnLBacktester:
             fallback_amount_usd=amount_usd,
             strict_reproducibility=strict_reproducibility,
             track_fallback=self._track_fallback,
+            token_addresses=self._registered_token_addresses(),
         )
 
         factory = SimulatedPosition.perp_long if intent_is_long(intent) else SimulatedPosition.perp_short
@@ -3562,7 +3596,9 @@ class PnLBacktester:
         """
         from .intent_extraction import find_lending_close_position_id
 
-        position_close_id = find_lending_close_position_id(intent, portfolio.positions)
+        position_close_id = find_lending_close_position_id(
+            intent, portfolio.positions, self._registered_token_addresses()
+        )
         position = portfolio.get_position(position_close_id) if position_close_id else None
         if position is None:
             return _CloseResolution(
@@ -3615,7 +3651,9 @@ class PnLBacktester:
         """
         from .intent_extraction import find_borrow_close_position_id
 
-        position_close_id = find_borrow_close_position_id(intent, portfolio.positions)
+        position_close_id = find_borrow_close_position_id(
+            intent, portfolio.positions, self._registered_token_addresses()
+        )
         position = portfolio.get_position(position_close_id) if position_close_id else None
         if position is None:
             return _CloseResolution(
