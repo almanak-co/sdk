@@ -159,6 +159,7 @@ nav:
       - Agent Tools: agentic/agent-tools.md
       - Adapters: agentic/adapters.md
     - Solana: solana.md
+    - Hyperliquid: hyperliquid.md
     - Supported Chains: chains.md
   - CLI Reference:
     - cli/almanak.md

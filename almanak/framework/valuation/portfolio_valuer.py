@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+from almanak.framework.data.market_snapshot import DEFAULT_STABLECOINS
 from almanak.framework.portfolio.models import (
     PortfolioSnapshot,
     PositionValue,
@@ -45,6 +46,7 @@ from almanak.framework.valuation.lp_position_reader import LPPositionReader
 from almanak.framework.valuation.lp_valuer import value_lp_position
 from almanak.framework.valuation.peg_divergence import (
     DEFAULT_DEPEG_THRESHOLD_BPS,
+    PegCheck,
     check_peg_divergence,
 )
 from almanak.framework.valuation.perps_position_reader import PerpsPositionReader
@@ -1138,6 +1140,11 @@ class PortfolioValuer:
                 if token_price is None or token_price <= 0:
                     wallet_data_incomplete = True
 
+            # VIB-4868 — de-peg cross-check for HELD stablecoins (see
+            # _scan_wallet_stable_depeg). A confirmed depeg forces the snapshot
+            # UNAVAILABLE below rather than marking a broken stable at HIGH.
+            stable_depeg = self._scan_wallet_stable_depeg(balances, prices, chain)
+
             # Step 3: Apply spot valuation math (pure, deterministic)
             wallet_balances = value_tokens(balances, prices)
             # Append the native row directly — value_tokens filters
@@ -1191,6 +1198,7 @@ class PortfolioValuer:
                 wallet_balances=wallet_balances,
                 positions_unavailable=positions_unavailable,
                 wallet_data_incomplete=wallet_data_incomplete,
+                stable_depeg=bool(stable_depeg),
             )
 
             # Step 6: Build audit-safe token price map (chain:address keyed)
@@ -1266,7 +1274,7 @@ class PortfolioValuer:
                 chain=chain,
                 iteration_number=iteration_number,
                 snapshot_metadata=self._build_snapshot_metadata(
-                    gas_native_status, swap_inventory.metadata, pt_inventory.metadata
+                    gas_native_status, swap_inventory.metadata, pt_inventory.metadata, stable_depeg=stable_depeg
                 ),
             )
             # Reconciliation is advisory — never let it downgrade the framework snapshot.
@@ -1309,6 +1317,7 @@ class PortfolioValuer:
         wallet_balances: list,
         positions_unavailable: bool,
         wallet_data_incomplete: bool,
+        stable_depeg: bool = False,
     ) -> ValueConfidence:
         """Compute the snapshot-level confidence from per-position + wallet signals.
 
@@ -1319,11 +1328,17 @@ class PortfolioValuer:
         precedence over ESTIMATED because one unvalued LP can hide
         arbitrary value behind a $0 row.
 
+        VIB-4868 — ``stable_depeg`` is the same UNAVAILABLE-precedence signal for
+        a HELD wallet stablecoin whose oracle price has broken its $1 peg: the
+        spot mark cannot be trusted as USD, so (like ``no_path``) the whole
+        snapshot is UNAVAILABLE rather than HIGH. A confirmed depeg is rare and
+        high-severity, so the conservative degrade matches the Curve-LP posture.
+
         Extracted from ``value()`` (Phase 5 of the snapshot pipeline) so
         the confidence policy lives in one place and ``value()`` stays
         under the CC threshold.
         """
-        if any(p.details.get("valuation_status") == "no_path" for p in positions):
+        if stable_depeg or any(p.details.get("valuation_status") == "no_path" for p in positions):
             return ValueConfidence.UNAVAILABLE
         has_any_value = bool(wallet_balances or positions)
         if not has_any_value and (positions_unavailable or wallet_data_incomplete):
@@ -1545,20 +1560,26 @@ class PortfolioValuer:
         gas_native_status: str,
         swap_inventory_metadata: dict[str, Any] | None,
         pt_inventory_metadata: dict[str, Any] | None = None,
+        *,
+        stable_depeg: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Assemble the writer-side ``snapshot_metadata`` dict.
 
-        The ``swap_inventory`` / ``pt_inventory`` stamps are only present when
-        there is something to report (applied / unmeasured / unavailable) — their
-        ABSENCE is the documented "no open lots, nothing reclassified" state,
-        keeping non-swap / non-Pendle strategies byte-identical (VIB-5057 /
-        VIB-5316).
+        The ``swap_inventory`` / ``pt_inventory`` / ``stable_depeg`` stamps are
+        only present when there is something to report — their ABSENCE is the
+        documented "no open lots, nothing reclassified, no depeg" state, keeping
+        non-swap / non-Pendle / healthy-peg strategies byte-identical (VIB-5057 /
+        VIB-5316 / VIB-4868). ``stable_depeg`` maps each broken-peg wallet
+        stablecoin symbol to its measured divergence (e.g. ``{"USDC": "1180bps"}``)
+        so an operator card can show WHY the snapshot went UNAVAILABLE.
         """
         metadata: dict[str, Any] = {"gas_native_status": gas_native_status}
         if swap_inventory_metadata is not None:
             metadata["swap_inventory"] = swap_inventory_metadata
         if pt_inventory_metadata is not None:
             metadata["pt_inventory"] = pt_inventory_metadata
+        if stable_depeg:
+            metadata["stable_depeg"] = dict(stable_depeg)
         return metadata
 
     def _reconcile_with_external(
@@ -3508,9 +3529,9 @@ class PortfolioValuer:
             if not on_chain.is_active:
                 return Decimal("0"), {"valuation_source": "on_chain", "is_active": False}
 
-            token_symbol = self._resolve_token_symbol(on_chain.asset_address, position, "asset")
-            if not token_symbol:
-                token_symbol = position.details.get("asset")
+            token_symbol = self._resolve_token_symbol(
+                on_chain.asset_address, position, "asset"
+            ) or position.details.get("asset")
             if not token_symbol:
                 return None
 
@@ -3521,6 +3542,13 @@ class PortfolioValuer:
 
             if token_price <= 0:
                 return None
+
+            # VIB-4868 — de-peg cross-check for a STABLECOIN lending asset
+            # (see _lending_stable_depeg_degrade). A broken peg degrades the
+            # position to no_path/UNAVAILABLE rather than marking it at $1 par.
+            depeg_degrade = self._lending_stable_depeg_degrade(position, token_symbol, token_price)
+            if depeg_degrade is not None:
+                return depeg_degrade
 
             token_decimals = self._get_token_decimals(token_symbol, chain)
             if token_decimals is None:
@@ -4857,6 +4885,172 @@ class PortfolioValuer:
             "valuation_status": "no_path",
             "mark_unmeasured": True,
             "unavailable_reason": reason,
+        }
+
+    def _stable_peg_check(
+        self,
+        symbol: str | None,
+        price_usd: Decimal,
+        *,
+        threshold_bps: int = DEFAULT_DEPEG_THRESHOLD_BPS,
+    ) -> PegCheck | None:
+        """Cross-check a HARD-$1 stablecoin spot mark against its $1 peg (VIB-4868).
+
+        The valuer marks every non-Curve stablecoin straight off the gateway price
+        oracle — spot wallet tokens (``value``) and lending asset legs
+        (``_reprice_lending_on_chain_enriched``). For a coin that genuinely tracks a
+        hard $1, an oracle price drifted past ``threshold_bps`` from $1 is a depeg
+        event: the mark is no longer trustworthy USD and the caller must degrade to
+        UNAVAILABLE (mirroring the Curve-LP posture, which degrades even though
+        ``virtual_price`` still yields a number) rather than report a visibly-broken
+        stable at HIGH confidence.
+
+        **The gate is a HARD-$1 cash-equivalent set, NOT the broad
+        :data:`~almanak.core.constants.STABLECOINS`.** Using ``STABLECOINS`` here
+        would be a money-path observability regression: that set deliberately
+        includes (a) **yield-bearing ERC-4626 wrappers** — ``sDAI`` (≈ $1.15–1.20
+        from accrued DSR), ``sUSDe`` (≈ $1.2–1.5 from accrued Ethena yield) — whose
+        CORRECT oracle price is their appreciated value (≫ 100 bps off $1), and
+        (b) **soft-pegs** (FRAX, crvUSD, GHO, LUSD, USDe) that legitimately trade
+        100–300 bps off $1 under normal stress. Gating on those would flip a
+        fully-solvent strategy's snapshot to UNAVAILABLE every iteration — a
+        permanent NAV / drawdown / dashboard blackout on a healthy position. So the
+        gate is :data:`~almanak.framework.data.market_snapshot.DEFAULT_STABLECOINS`
+        = ``{USDC, USDT, DAI}``, the canonical cash-equivalent set every member of
+        which holds a genuine hard $1 peg well inside 100 bps in normal conditions.
+        (The backtesting ``CASH_EQUIVALENT_STABLECOINS`` is the same set; the
+        framework/data constant is preferred as the valuer's own layer.) Conservative
+        by design: a hard-pegged stable NOT in this set — e.g. ``USDC.e`` — is priced
+        normally rather than risk a false-fire; missing a catch is safer than
+        blacking out a healthy NAV.
+
+        Returns ``None`` when ``symbol`` is not a hard-$1 cash equivalent (volatile
+        tokens, yield wrappers, and soft-pegs are all priced normally — this is what
+        keeps the check from false-firing). Otherwise runs the pool-agnostic
+        :func:`check_peg_divergence` over the single oracle-priced coin against the
+        expected $1 numeraire. Callers pass a MEASURED price (``> 0``); an unmeasured
+        price (Empty ≠ Zero) is handled by the caller's own missing-price path,
+        never fabricated here.
+
+        Routing both the spot (``_scan_wallet_stable_depeg``) and lending
+        (``_lending_stable_depeg_degrade``) gates through this single helper keeps
+        the set choice identical on both paths.
+        """
+        if not symbol or symbol.upper() not in DEFAULT_STABLECOINS:
+            return None
+        return check_peg_divergence([price_usd], threshold_bps=threshold_bps, expected_peg_usd=Decimal("1"))
+
+    def _stable_peg_symbol(self, token_key: str, chain: str) -> str | None:
+        """Resolve a wallet balance key (symbol OR address) to a hard-$1 stable symbol (VIB-4868).
+
+        Wallet balances can be keyed by SYMBOL or by token ADDRESS. A raw address
+        never matches the symbol-keyed :data:`DEFAULT_STABLECOINS` gate, so an
+        address-keyed stablecoin balance would silently bypass the depeg check and
+        stay HIGH even when depegged (CodeRabbit finding). Resolve an address to its
+        symbol first (:meth:`_symbol_from_address`, the address-only resolver — NO
+        strategy-metadata fallback), then apply the same hard-$1 membership gate.
+
+        Returns the UPPERCASE symbol when the key IS a hard-$1 cash equivalent, else
+        ``None``. Empty ≠ Zero: an UNRESOLVABLE address returns ``None`` (left to the
+        caller's normal spot-pricing path), never fabricated as a stable match.
+        """
+        if not token_key:
+            return None
+        upper = token_key.upper()
+        if upper in DEFAULT_STABLECOINS:
+            return upper
+        # Address form (0x…): resolve to a symbol, then re-apply the membership gate.
+        if token_key.startswith("0x"):
+            symbol = self._symbol_from_address(token_key, chain)
+            if symbol and symbol.upper() in DEFAULT_STABLECOINS:
+                return symbol.upper()
+        return None
+
+    def _scan_wallet_stable_depeg(
+        self, balances: dict[str, Decimal], prices: dict[str, Decimal], chain: str
+    ) -> dict[str, str]:
+        """Find HELD wallet stablecoins whose oracle price has broken the $1 peg (VIB-4868).
+
+        The spot mark is ``balance × oracle_price``; a stablecoin is DEFINED by its
+        ~$1 peg, so an oracle price drifted past the threshold from $1 is a depeg
+        event — the mark is no longer trustworthy USD and the snapshot degrades to
+        UNAVAILABLE (the returned map is non-empty) rather than reporting a
+        visibly-broken stable at HIGH confidence. Mirrors the Curve-LP posture (it
+        degrades even though ``virtual_price`` still yields a number). Only hard-$1
+        stables (by symbol OR resolved address — :meth:`_stable_peg_symbol`) with a
+        MEASURED price are checked, so volatile tokens never false-fire and a
+        transient oracle MISS stays on the existing ``wallet_data_incomplete`` →
+        ESTIMATED path (an outage is not a depeg). Empty ≠ Zero: a depeg is a typed
+        UNAVAILABLE, not a fabricated $1.
+
+        Returns ``{balance_key: "<bps>bps"}`` for each broken-peg held stable (keyed
+        by the wallet's own balance key — symbol or address — so it maps back to the
+        wallet_balances row; empty when all held stables hold their peg — the
+        byte-identical healthy state).
+
+        NOTE: like the existing ``wallet_data_incomplete`` → ESTIMATED pattern, the
+        broken stable's raw spot value still flows into ``total_value_usd`` /
+        ``wallet_total_value_usd`` (the per-token mark is not zeroed here, unlike the
+        lending leg which returns a measured ``Decimal("0")`` no_path row). The
+        degrade signal is carried purely by the snapshot CONFIDENCE — a non-empty
+        result forces UNAVAILABLE — so consumers MUST gate on ``value_confidence``,
+        not trust a raw ``total_value_usd`` from an UNAVAILABLE snapshot.
+        """
+        stable_depeg: dict[str, str] = {}
+        for token in balances:
+            token_price = prices.get(token)
+            if token_price is None or token_price <= 0:
+                continue
+            symbol = self._stable_peg_symbol(token, chain)
+            if symbol is None:
+                continue
+            peg = self._stable_peg_check(symbol, token_price)
+            if peg is not None and not peg.ok and peg.reason == "depeg_divergence":
+                stable_depeg[token] = f"{peg.max_divergence_bps}bps"
+                logger.warning(
+                    "Stablecoin de-peg cross-check degraded snapshot token=%s price=$%s "
+                    "divergence=%sbps threshold=%sbps — marking UNAVAILABLE, not at $1",
+                    token,
+                    token_price,
+                    peg.max_divergence_bps,
+                    DEFAULT_DEPEG_THRESHOLD_BPS,
+                )
+        return stable_depeg
+
+    def _lending_stable_depeg_degrade(
+        self, position: "PositionInfo", token_symbol: str, token_price: Decimal
+    ) -> tuple[Decimal, dict[str, Any]] | None:
+        """Degrade a STABLECOIN lending asset whose oracle price broke the $1 peg (VIB-4868).
+
+        Both the supply (collateral) and net-debt USD legs are ``balance ×
+        token_price``; a stablecoin reserve marked off-peg can no longer be valued
+        at par, so the position degrades to ``valuation_status="no_path"`` (the same
+        marker the Curve-LP path uses — it forces the snapshot UNAVAILABLE via
+        :meth:`_determine_value_confidence`) instead of booking a confident
+        supply/debt USD value off a broken peg. Returns ``None`` when the asset is
+        not a known stablecoin (WETH / WBTC price normally) or its peg holds —
+        keeping the healthy path byte-identical. Callers pass a MEASURED price.
+        """
+        stable_peg = self._stable_peg_check(token_symbol, token_price)
+        if stable_peg is None or stable_peg.ok or stable_peg.reason != "depeg_divergence":
+            return None
+        logger.warning(
+            "Lending de-peg cross-check degraded position=%s asset=%s price=$%s "
+            "divergence=%sbps — marking UNAVAILABLE, not at $1",
+            position.position_id,
+            token_symbol,
+            token_price,
+            stable_peg.max_divergence_bps,
+        )
+        return Decimal("0"), {
+            "asset": token_symbol,
+            "valuation_source": "on_chain",
+            "valuation_status": "no_path",
+            "mark_unmeasured": True,
+            "unavailable_reason": "lending_oracle_depeg_divergence",
+            "depeg_divergence_bps": str(stable_peg.max_divergence_bps),
+            "depeg_threshold_bps": str(DEFAULT_DEPEG_THRESHOLD_BPS),
+            "oracle_peg_usd": str(stable_peg.peg_usd) if stable_peg.peg_usd is not None else "",
         }
 
     def _resolve_curve_depeg_threshold_bps(self, position: "PositionInfo") -> int:

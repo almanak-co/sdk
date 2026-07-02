@@ -94,6 +94,24 @@ def _try_record_metric(func_name: str, *args: Any, **kwargs: Any) -> None:
         pass
 
 
+# Chains whose symbol->address resolution is STATIC-REGISTRY-ONLY: an unknown
+# bare symbol fails instantly instead of falling through to the ~15s gateway
+# dynamic-symbol discovery (CoinGecko/DexScreener search + on-chain confirm).
+#
+# HyperEVM (VIB-5576): the chain's real ERC-20s (USDC / USDT0 / WHYPE / …) are
+# statically registered, and every OTHER symbol a strategy hands the resolver on
+# this chain ("ETH", "BTC", "HYPE", …) is a HyperCore *perp index* — not a
+# balance-able ERC-20 — so ERC-20 symbol discovery for such a symbol is always
+# futile. Skipping it makes a doomed GetBalance("ETH") fail in <100ms instead of
+# burning ~15s (twice per iteration) on a lookup that can never succeed.
+#
+# This is a SYMBOL->address policy only. Resolution BY ADDRESS (0x...) on these
+# chains still uses the gateway on-chain ERC-20 lookup — an address IS a real
+# ERC-20 contract, so discovery is meaningful there. Chains not in this set are
+# entirely unaffected: they keep both dynamic symbol search and address discovery.
+STATIC_ONLY_SYMBOL_CHAINS: frozenset[str] = frozenset({"hyperevm"})
+
+
 # Address validation patterns
 ADDRESS_PATTERN = re.compile(r"^0x[a-fA-F0-9]{40}$")
 # Pattern to detect strings that look like addresses (start with 0x and are ~42 chars)
@@ -790,22 +808,41 @@ class TokenResolver:
                     # _resolve_by_symbol returns None (sentinel) when gateway is available
                     # and the symbol wasn't found statically, signalling us to try the
                     # gateway's dynamic resolution path outside the lock.
-                    if result is None:
+                    #
+                    # STATIC-ONLY chains (VIB-5576, e.g. hyperevm) never take that
+                    # dynamic path: an unknown bare symbol there is always a non-ERC-20
+                    # (a HyperCore perp index), so we leave symbol_needs_gateway False and
+                    # fall straight through to the "Symbol not found" error below. This
+                    # makes GetBalance("ETH") on hyperevm fail in <100ms instead of
+                    # burning the ~15s ResolveToken discovery timeout. Address discovery
+                    # (the is_address branch above) is deliberately NOT gated.
+                    if result is None and chain_lower not in STATIC_ONLY_SYMBOL_CHAINS:
                         symbol_needs_gateway = True
 
             if result is not None:
                 self._record_resolution_success(token, chain_lower, result, start_time)
                 return result
 
-            # Slow path: gateway lookup (NO lock held)
+            # Slow path: gateway lookup (NO lock held).
+            #
+            # Reached with symbol_needs_gateway=False only when the input is an
+            # address (address not in static registry -> on-chain ERC-20 lookup)
+            # OR when the symbol is on a STATIC-ONLY chain (VIB-5576) — in the
+            # latter case there is nothing to try, so we skip the gateway entirely
+            # and fall through to the "Symbol not found" error below. The
+            # ``is_address`` guard keeps a static-only symbol from being sent to
+            # the address-discovery RPC as if it were a contract address.
             if not skip_gateway and (self._gateway_channel is not None or self._gateway_client is not None):
                 if symbol_needs_gateway:
                     # Symbol not in static registry -- try gateway's dynamic resolution
                     # (Jupiter for Solana, CoinGecko for EVM)
                     resolved = self._resolve_symbol_via_gateway(token, chain_lower)
-                else:
+                elif is_address:
                     # Address not in static registry -- try on-chain ERC20 lookup
                     resolved = self._resolve_via_gateway(token, chain_lower)
+                else:
+                    # Static-only-symbol chain: unknown symbol, no gateway path.
+                    resolved = None
 
                 if resolved:
                     # Write back to cache (under lock)
@@ -814,9 +851,11 @@ class TokenResolver:
                     self._record_resolution_success(token, chain_lower, resolved, start_time)
                     return resolved
 
-            # Token not found - provide helpful error
+            # Token not found - provide helpful error. A non-address input is a
+            # symbol regardless of whether the gateway symbol path was attempted
+            # (static-only chains skip it), so key the message off ``is_address``.
             _try_record_metric("record_token_resolution_cache_miss", chain_lower)
-            if is_address or not symbol_needs_gateway:
+            if is_address:
                 suggestions = [
                     "Verify the contract address is correct",
                     "Check if the address is deployed on this chain",

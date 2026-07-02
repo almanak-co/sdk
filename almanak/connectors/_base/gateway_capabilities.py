@@ -224,6 +224,87 @@ class GatewayFundingRateCapability(Protocol):
     ) -> Any: ...
 
 
+@dataclass(frozen=True)
+class OraclePriceQuery:
+    """A resolved venue-native oracle-price read request.
+
+    Returned by :class:`GatewayOraclePriceCapability.resolve_oracle_query` so a
+    gateway price source can perform the eth_call WITHOUT importing any concrete
+    connector module (gateway↔connector isolation, VIB-4121). The connector owns
+    the venue-specific knowledge — which precompile / contract to read, how to
+    encode the query, and how to decode + scale the raw return — and hands the
+    gateway a protocol-agnostic (address, calldata) pair plus the decode routine
+    via :meth:`GatewayOraclePriceCapability.decode_oracle_price`.
+
+    The gateway source owns ALL the RPC plumbing (aiohttp session, RPC URL via
+    ChainRegistry, bounded timeout) and ALL the Empty≠Zero miss semantics (a
+    ``None`` decode, empty read, or non-positive price is a MISS, never a
+    fabricated zero). The capability never performs network egress.
+
+    Attributes:
+        symbol: Canonical symbol the query resolves (e.g. ``"BTC"``), for logging.
+        to_address: The precompile / contract address the gateway ``eth_call``s.
+        calldata: Hex-encoded calldata (``0x``-prefixed). For a precompile this is
+            raw ABI args with no selector; for a contract it includes the selector.
+        context: Opaque connector-owned handle threaded back into
+            :meth:`GatewayOraclePriceCapability.decode_oracle_price` so the decode
+            can access the scale metadata (e.g. ``szDecimals``) without the gateway
+            interpreting it. Typed ``Any`` to keep ``_base/`` a leaf of the import
+            graph.
+    """
+
+    symbol: str
+    to_address: str
+    calldata: str
+    context: Any
+
+
+@runtime_checkable
+class GatewayOraclePriceCapability(Protocol):
+    """Perp connector publishes a venue-native oracle price read.
+
+    Lets a gateway price source (e.g.
+    ``almanak.gateway.data.price.hyperevm.HypercoreOraclePriceSource``) read a
+    venue's canonical oracle price for a perp symbol WITHOUT importing the
+    concrete connector's ``addresses`` / ``markets`` / ``sdk`` modules — the
+    gateway↔connector isolation ratchet forbids that direct import (VIB-4121).
+
+    The gateway source resolves the provider from the registry via
+    ``GATEWAY_REGISTRY.capability_providers(GatewayOraclePriceCapability)`` and
+    dispatches by ``oracle_price_chain()``. The provider (which lives UNDER the
+    connector package) owns the venue-specific bits — precompile address, query
+    encoding, decode + fixed-point scale, and symbol→asset resolution — while the
+    gateway source keeps the RPC plumbing and Empty≠Zero miss semantics.
+
+    Contract:
+
+    * ``oracle_price_chain() -> str`` — the chain string this oracle serves
+      (e.g. ``"hyperevm"``). The gateway source uses it to index providers.
+    * ``resolve_oracle_query(symbol) -> OraclePriceQuery | None`` — resolve a
+      symbol to the ``(to_address, calldata, context)`` the gateway needs to make
+      the read. Returns ``None`` when the symbol is not a resolvable market on
+      this venue (the gateway maps ``None`` to a MISS so its aggregator falls
+      through to other spot sources). MUST NOT perform network egress —
+      resolution is from connector-owned static metadata only.
+    * ``decode_oracle_price(query, raw_hex) -> Decimal | None`` — decode + scale
+      the raw eth_call return into a human price. Returns ``None`` for an empty /
+      undecodable / non-positive read (Empty≠Zero — the gateway maps ``None`` to
+      a MISS, never a fabricated zero). MUST NOT raise on a malformed payload:
+      swallow decode errors and return ``None`` so the gateway source's aggregator
+      never crashes on a bad on-chain payload.
+
+    The ``Decimal`` return + ``OraclePriceQuery`` argument are the only shared
+    types; the connector's own precompile constants and encode/decode helpers
+    stay private to the connector package.
+    """
+
+    def oracle_price_chain(self) -> str: ...
+
+    def resolve_oracle_query(self, symbol: str) -> OraclePriceQuery | None: ...
+
+    def decode_oracle_price(self, query: OraclePriceQuery, raw_hex: str) -> Any | None: ...
+
+
 @runtime_checkable
 class GatewayDefillamaSlugCapability(Protocol):
     """Connector publishes its DefiLlama project slug.

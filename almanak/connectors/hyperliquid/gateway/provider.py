@@ -35,9 +35,21 @@ from typing import Any, ClassVar
 from almanak.connectors._base.gateway_capabilities import (
     GatewayFundingHistoryCapability,
     GatewayFundingRateCapability,
+    GatewayOraclePriceCapability,
+    OraclePriceQuery,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
+
+# NOTE: the venue-specific connector modules (``.addresses`` / ``.markets`` /
+# ``.sdk``) are imported LAZILY inside the oracle-capability methods below, NOT
+# at module top level. This provider is instantiated eagerly at gateway registry
+# bootstrap (``_gateway_registry._register_all``), and ``hyperliquid.sdk`` is a
+# strategy-side heavy submodule the gateway sidecar must not eagerly load
+# (guarded by tests/gateway/test_imports_lean.py). Deferring the import keeps the
+# gateway boot import graph lean while still letting the provider — which lives
+# under the connector package, so the gateway↔connector isolation ratchet does
+# not apply here — expose the venue read through the capability.
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +248,7 @@ class HyperliquidGatewayConnector(
     GatewayConnector,
     GatewayFundingRateCapability,
     GatewayFundingHistoryCapability,
+    GatewayOraclePriceCapability,
 ):
     """Gateway-side connector for Hyperliquid perp venue."""
 
@@ -317,6 +330,78 @@ class HyperliquidGatewayConnector(
             )
 
         return points
+
+    # ---------------------------------------------------------------------
+    # GatewayOraclePriceCapability (VIB-5576)
+    # ---------------------------------------------------------------------
+    #
+    # HyperCore's oracle price for a perp is read from the ``0x0807``
+    # precompile. The gateway's ``HypercoreOraclePriceSource`` used to import
+    # ``hyperliquid.addresses`` / ``.markets`` / ``.sdk`` directly, which the
+    # gateway↔connector isolation ratchet forbids. These methods publish the
+    # venue-specific read (precompile address, calldata encoding, decode +
+    # fixed-point scale, symbol→asset resolution) so the gateway source can do
+    # the eth_call without importing the connector. The gateway source keeps
+    # ALL the RPC plumbing and Empty≠Zero miss semantics.
+
+    def oracle_price_chain(self) -> str:
+        """The chain whose oracle prices this capability serves (HyperEVM, 999)."""
+        return "hyperevm"
+
+    def resolve_oracle_query(self, symbol: str) -> OraclePriceQuery | None:
+        """Resolve a perp symbol to the ``0x0807`` oracle read, or ``None`` on a miss.
+
+        ``None`` (not an exception) for an unresolvable symbol so the gateway
+        source maps it to a MISS and its aggregator falls through to spot
+        sources. No network egress — resolution is from the connector's static
+        market seed only.
+        """
+        # Lazy import: keeps the strategy-side heavy ``.sdk`` module out of the
+        # gateway boot import graph (see module-level note + test_imports_lean).
+        from almanak.connectors.hyperliquid.addresses import PRECOMPILE_ORACLE_PX
+        from almanak.connectors.hyperliquid.markets import resolve_market
+        from almanak.connectors.hyperliquid.sdk import encode_perp_query
+
+        try:
+            market = resolve_market(symbol)
+        except ValueError:
+            return None
+        return OraclePriceQuery(
+            symbol=market.symbol,
+            to_address=PRECOMPILE_ORACLE_PX,
+            calldata="0x" + encode_perp_query(market.asset_index).hex(),
+            # Carry szDecimals so decode can apply the exact precompile scale
+            # ``raw / 10**(PERP_PX_MAX_DECIMALS - szDecimals)``. Opaque to the gateway.
+            context=market.sz_decimals,
+        )
+
+    def decode_oracle_price(self, query: OraclePriceQuery, raw_hex: str) -> Decimal | None:
+        """Decode + scale the raw ``0x0807`` return into a human USD price.
+
+        Wire → human: ``raw / 10**(PERP_PX_MAX_DECIMALS - szDecimals)`` — the
+        EXACT scale the connector compiler uses. Returns ``None`` (Empty≠Zero)
+        for an empty / undecodable / non-positive read; NEVER raises on a
+        malformed payload (the gateway source relies on this to keep its
+        aggregator crash-free on bad on-chain data).
+        """
+        # Lazy import: keeps the strategy-side heavy ``.sdk`` module out of the
+        # gateway boot import graph (see module-level note + test_imports_lean).
+        from almanak.connectors.hyperliquid.addresses import PERP_PX_MAX_DECIMALS
+        from almanak.connectors.hyperliquid.sdk import decode_uint64
+
+        try:
+            wire = decode_uint64(raw_hex)
+        except Exception:
+            # Malformed / undecodable payload is a MISS, not a crash.
+            return None
+        if wire is None or wire <= 0:
+            # Empty / zero read: unavailable is NOT a measured zero.
+            return None
+        sz_decimals = query.context
+        price = Decimal(wire) / (Decimal(10) ** (PERP_PX_MAX_DECIMALS - sz_decimals))
+        if price <= 0:
+            return None
+        return price
 
 
 __all__ = ["HyperliquidGatewayConnector"]

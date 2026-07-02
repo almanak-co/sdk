@@ -17,6 +17,7 @@ from typing import Any
 import grpc
 
 from almanak.connectors._base.gateway_capabilities import (
+    GatewayOraclePriceCapability,
     GatewayPoolKeyCacheCapability,
     PoolKeyCacheError,
     PoolKeyCacheProtocol,
@@ -111,6 +112,25 @@ def _is_native_symbol(token: str, chain: str) -> bool:
     `ChainDescriptor.native`; adding a chain needs no edit here (VIB-4851 A1).
     """
     return token.upper() in native_symbols_for(chain)
+
+
+def _chain_has_venue_oracle(chain: str) -> bool:
+    """True iff a perp connector publishes a venue-native oracle price for `chain`.
+
+    Registry-driven (not a chain literal): a chain qualifies when some registered
+    ``GatewayOraclePriceCapability`` provider declares it via
+    ``oracle_price_chain()`` (e.g. HyperEVM/HyperCore's 0x0807 precompile). This
+    is the seam ``_init_price_sources`` keys on to pick the venue-oracle price
+    stack instead of the default EVM Chainlink stack — a new venue-oracle chain
+    wires itself by registering a provider, with no edit here (mirrors the
+    ChainRegistry-driven ``is_solana_chain`` routing branch above; VIB-5576).
+    """
+    if not chain:
+        return False
+    for provider in GATEWAY_REGISTRY.capability_providers(GatewayOraclePriceCapability):  # type: ignore[type-abstract]
+        if provider.oracle_price_chain() == chain:
+            return True
+    return False
 
 
 def _block_pin_unsupported_reason(chain: str, block_tag: int | None) -> str | None:
@@ -475,6 +495,22 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             dexscreener_source = DexScreenerPriceSource(default_chain_id="solana", cache_ttl=30)
             sources = [pyth_source, dexscreener_source, cg_source]
             logger.info("MarketService: Pyth (primary) + DexScreener + CoinGecko (fallback), chain=%s", chain)
+        elif _chain_has_venue_oracle(chain):
+            # A perp connector publishes a venue-native oracle price for this
+            # chain via GatewayOraclePriceCapability (e.g. HyperEVM/HyperCore's
+            # 0x0807 precompile). Such chains have no Chainlink feeds and their
+            # perp majors (ETH/BTC/…) have no ERC-20 to price by address, so the
+            # venue oracle is primary; DexScreener + CoinGecko stay as fallback
+            # for any spot token. No OnChainPriceSource (Chainlink). Keyed on the
+            # capability registry — not a chain literal — so a new venue-oracle
+            # chain wires itself by registering a provider.
+            from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
+            from almanak.gateway.data.price.hyperevm import HypercoreOraclePriceSource
+
+            venue_oracle_source = HypercoreOraclePriceSource(network=self.settings.network)
+            dexscreener_source = DexScreenerPriceSource(default_chain_id=chain.lower(), cache_ttl=30)
+            sources = [venue_oracle_source, dexscreener_source, cg_source]
+            logger.info("MarketService: venue oracle (primary) + DexScreener + CoinGecko (fallback), chain=%s", chain)
         else:
             # EVM: 4-source pricing for production resilience.
             # All sources are queried concurrently; PriceAggregator returns the
