@@ -293,6 +293,40 @@ class TestGasEthPriceFallbackRemoval:
         assert source == "config"
         assert gas_cost_usd == Decimal("0.009000000")
 
+    def test_gas_asset_resolves_through_registered_token_addresses(self, base_config):
+        """Address-keyed market state (VIB-5508) prices gas via token_addresses.
+
+        Address-native states keep plain-symbol reads an honest miss, so the
+        gas lane must fall back through the engine's registered
+        ``{SYMBOL: (chain, address)}`` map instead of failing every
+        gas-costed intent.
+        """
+        weth_key = ("ethereum", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")
+        engine = _backtester()
+        engine.token_addresses = {"WETH": weth_key}
+        market_state = MarketState(
+            timestamp=datetime(2024, 1, 1, 12, 0, 0),
+            chain="ethereum",
+            prices={weth_key: Decimal("2500")},
+        )
+
+        price, source = engine._resolve_gas_eth_price(base_config, market_state, market_state.timestamp)
+
+        assert price == Decimal("2500")
+        assert source == "market"
+
+    def test_gas_asset_stays_loud_without_registered_address(self, base_config):
+        """No symbol price and no registered gas-asset address still fails loud."""
+        engine = _backtester()
+        market_state = MarketState(
+            timestamp=datetime(2024, 1, 1, 12, 0, 0),
+            chain="ethereum",
+            prices={("ethereum", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"): Decimal("1")},
+        )
+
+        with pytest.raises(ValueError, match="Gas asset price"):
+            engine._resolve_gas_eth_price(base_config, market_state, market_state.timestamp)
+
 
 class TestGasCostCalculationWithTracker:
     """Tests for gas cost calculation with data quality tracking."""

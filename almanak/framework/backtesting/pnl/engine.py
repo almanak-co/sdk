@@ -2770,18 +2770,17 @@ class PnLBacktester:
 
         gas_price_source = "historical" if config.use_historical_gas_prices else "market"
         for symbol in gas_symbols:
-            try:
-                gas_asset_price = market_state.get_price(symbol)
-            except KeyError:
+            resolved_price = self._market_gas_asset_price(market_state, symbol)
+            if resolved_price is None:
                 continue
             logger.debug(
                 "Gas asset price: Using %s %s price $%.2f at %s",
                 gas_price_source,
                 symbol,
-                gas_asset_price,
+                resolved_price,
                 timestamp.isoformat(),
             )
-            return gas_asset_price, gas_price_source
+            return resolved_price, gas_price_source
 
         joined_symbols = "/".join(gas_symbols)
         if config.use_historical_gas_prices:
@@ -2798,6 +2797,27 @@ class PnLBacktester:
             f"{timestamp.isoformat()}.{strict_detail} Set gas_eth_price_override to provide "
             "an explicit gas asset price for gas calculations."
         ) from None
+
+    def _market_gas_asset_price(self, market_state: MarketState, symbol: str) -> Decimal | None:
+        """Price a gas-asset symbol from ``market_state``.
+
+        Address-native market states (VIB-5508) keep plain-symbol reads an
+        honest miss, so after the symbol lookup misses, retry through the
+        engine's registered ``{SYMBOL: (chain, address)}`` map — the engine
+        must be able to consume the data it registered itself (the gas lane's
+        analogue of the providers' ``register_token_addresses`` ingress).
+        """
+        try:
+            return market_state.get_price(symbol)
+        except KeyError:
+            pass
+        token_key = (self.token_addresses or {}).get(symbol.upper())
+        if token_key is None:
+            return None
+        try:
+            return market_state.get_price(token_key)
+        except KeyError:
+            return None
 
     def _gas_asset_price_symbols(self, chain: str) -> tuple[str, ...]:
         """Return ordered symbols that can price ``chain``'s native gas asset."""
