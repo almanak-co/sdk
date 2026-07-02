@@ -1331,7 +1331,9 @@ def format_iteration_result(result: IterationResult) -> str:
     "--keep-anvil",
     is_flag=True,
     default=False,
-    help="Keep Anvil instances running after gateway shutdown.",
+    help="Keep managed Anvil fork(s) running after the runner exits (incl. after a "
+    "graceful teardown), detached in their own session, for post-run/post-teardown "
+    "inspection or a sealed audit. You must kill the fork PID(s) yourself afterwards.",
 )
 @click.option(
     "--wallet",

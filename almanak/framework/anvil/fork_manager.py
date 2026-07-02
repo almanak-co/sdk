@@ -351,6 +351,12 @@ class RollingForkManager:
     block_time: int | None = None
     fork_block_number: int | None = None
     cache_path: str | None = field(default_factory=_default_fork_cache_path)
+    # When True, spawn Anvil in its OWN session (start_new_session) so the fork
+    # survives the runner's process-group signals and its exit — required for a
+    # `--keep-anvil` post-teardown audit window (VIB-5063). Off by default: a
+    # normal run leaves Anvil in the runner's group and stops it explicitly via
+    # `.stop()`, so nothing changes unless the caller opted into keep-alive.
+    keep_alive_detached: bool = False
 
     # Timeout defaults (env-overridable)
     rpc_timeout_seconds: float = field(default_factory=_default_fork_rpc_timeout)
@@ -478,11 +484,15 @@ class RollingForkManager:
             masked_cmd = [ForkManagerConfig._mask_url(arg) for arg in cmd]
             logger.debug(f"Anvil command: {' '.join(masked_cmd)}")
 
-            # Start Anvil process
+            # Start Anvil process. When keep_alive_detached is set, put Anvil in its
+            # own session so a `--keep-anvil` fork outlives the runner's exit and is
+            # immune to process-group signals (Ctrl-C / terminal SIGHUP); the runner
+            # still stops it explicitly by PID via .stop() on the normal path.
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                start_new_session=self.keep_alive_detached,
             )
 
             # Wait for Anvil to be ready

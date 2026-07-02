@@ -18,6 +18,38 @@ def _clear_flags_cache():
     fm._anvil_flags_detected = False
 
 
+class TestKeepAliveDetached:
+    """VIB-5063: a `--keep-anvil` fork must be spawned in its own session so it
+    survives the runner's exit / process-group signals for a post-teardown audit.
+    Off by default so a normal run's Anvil stays in the runner's group."""
+
+    async def _start_and_capture_popen(self, *, keep_alive_detached: bool):
+        _clear_flags_cache()
+        mgr = RollingForkManager(
+            rpc_url="http://rpc.test", chain="avalanche", anvil_port=9999,
+            keep_alive_detached=keep_alive_detached,
+        )
+        with (
+            patch.object(mgr, "_validate_source_chain_id", new_callable=AsyncMock),
+            patch.object(mgr, "_wait_for_ready", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_rpc_call_raw", new_callable=AsyncMock, return_value=(True, None)),
+            patch("almanak.framework.anvil.fork_manager.subprocess.Popen") as mock_popen,
+        ):
+            ok = await mgr.start()
+        assert ok is True
+        return mock_popen.call_args.kwargs
+
+    @pytest.mark.asyncio()
+    async def test_detached_when_keep_alive(self):
+        kwargs = await self._start_and_capture_popen(keep_alive_detached=True)
+        assert kwargs.get("start_new_session") is True
+
+    @pytest.mark.asyncio()
+    async def test_grouped_by_default(self):
+        kwargs = await self._start_and_capture_popen(keep_alive_detached=False)
+        assert kwargs.get("start_new_session") is False
+
+
 class TestGetAnvilSupportedFlags:
     """Tests for _get_anvil_supported_flags()."""
 

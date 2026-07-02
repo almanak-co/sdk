@@ -302,6 +302,7 @@ class ManagedGateway:
                     anvil_port=port,
                     fork_block_number=fork_block,
                     startup_timeout_seconds=anvil_startup_timeout,
+                    keep_alive_detached=self._keep_anvil,
                 )
                 ok = await manager.start()
                 if not ok:
@@ -326,6 +327,7 @@ class ManagedGateway:
                             anvil_port=port,
                             fork_block_number=fork_block,
                             startup_timeout_seconds=anvil_startup_timeout,
+                            keep_alive_detached=self._keep_anvil,
                         )
                         ok = await manager.start()
                         if ok:
