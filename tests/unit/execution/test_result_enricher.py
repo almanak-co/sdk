@@ -1297,10 +1297,12 @@ class TestExtractionSpecPerProtocolOverlay:
         base = list(ResultEnricher.EXTRACTION_SPECS["LP_OPEN"])
         merged = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "no_such_protocol")
         assert merged == base
-        # (b) overlay fields append at the tail.
+        # (b) overlay fields append at the tail. The TJ V2 LP_OPEN overlay is
+        # ``["bin_ids", "primitive_money_legs"]`` (VIB-5414 added the latter), so
+        # both append after the base fields in declaration order.
         merged_tj = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "traderjoe_v2")
         assert merged_tj[: len(base)] == base, "base fields must come first"
-        assert merged_tj[-1] == "bin_ids", "overlay field appended at tail"
+        assert merged_tj[len(base) :] == ["bin_ids", "primitive_money_legs"], "overlay fields appended at tail in order"
         # (c) duplicates collapse — overlay containing a field already in base
         # must not duplicate it. Drive this by temporarily extending the
         # overlay class attribute and restoring it.
@@ -1338,6 +1340,21 @@ class TestExtractionSpecPerProtocolOverlay:
         assert merged[-1] == "primitive_money_legs", "overlay field appended at tail"
         # A non-migrated protocol's LP_CLOSE spec is untouched.
         assert "primitive_money_legs" not in ResultEnricher._merge_spec_with_overlay("LP_CLOSE", "uniswap_v3")
+
+    def test_traderjoe_v2_lp_open_overlay_appends_primitive_money_legs(self) -> None:
+        """VIB-5414 — TJ V2 LP_OPEN now declares ``primitive_money_legs`` too (the
+        symmetric mirror of the LP_CLOSE overlay above), so the enricher lands the
+        deposited token0/token1 INPUT legs at ``extracted_data["primitive_money_legs"]``
+        and the LP handler computes a MEASURED ``cost_basis_usd`` instead of ``0``
+        (which kept the snapshot degrading HIGH→ESTIMATED). The additive overlay
+        keeps the base LP_OPEN fields first and the existing ``bin_ids`` overlay."""
+        base = list(ResultEnricher.EXTRACTION_SPECS["LP_OPEN"])
+        merged = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "traderjoe_v2")
+        assert merged[: len(base)] == base, "base LP_OPEN fields preserved first"
+        assert "bin_ids" in merged, "existing TJ LP_OPEN bin_ids overlay preserved"
+        assert "primitive_money_legs" in merged
+        # A non-migrated protocol's LP_OPEN spec is untouched.
+        assert "primitive_money_legs" not in ResultEnricher._merge_spec_with_overlay("LP_OPEN", "uniswap_v3")
 
     def test_with_parser_extra_extractions_merges_connector_declared_fields(self) -> None:
         """A parser's connector-DECLARED ``EXTRA_EXTRACTIONS_BY_INTENT`` is merged

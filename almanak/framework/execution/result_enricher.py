@@ -330,7 +330,15 @@ class ResultEnricher:
             # address must be added here for the fee-harvest path (the parser's
             # ``extract_lp_close_data`` emits a principal-zero LPCloseData
             # carrying only the pool_address for a ClaimedFees-only receipt).
-            "LP_OPEN": ["bin_ids"],
+            # VIB-5414 — declare the LP_OPEN money legs too (the symmetric mirror of
+            # the LP_CLOSE entry below). ``extract_primitive_money_legs`` now returns
+            # two INPUT legs (the deposited token0/token1 notional) for a
+            # ``DepositedToBins`` receipt, so the LP handler can compute a MEASURED
+            # ``cost_basis_usd`` instead of ``0`` — which kept the gateway state
+            # manager degrading the snapshot HIGH→ESTIMATED for the whole hold (same
+            # class as the Uniswap-V3 ``deployed_capital=0`` family VIB-3883/3894).
+            # ``bin_ids`` stays for the LPPositionTracker / leveraged_lp consumers.
+            "LP_OPEN": ["bin_ids", "primitive_money_legs"],
             "LP_COLLECT_FEES": ["bin_ids", "lp_close_data"],
             # VIB-5221 (US-011) — declare the LP_CLOSE money legs as a typed
             # ``PrimitiveMoneyLegs`` (``TraderJoeV2ReceiptParser.extract_primitive_money_legs``).

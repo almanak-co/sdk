@@ -864,8 +864,12 @@ class TestExtractPrimitiveMoneyLegs:
         }
         assert parser.extract_primitive_money_legs(receipt) is None
 
-    def test_add_returns_none(self, parser: TraderJoeV2ReceiptParser) -> None:
-        """An LP_OPEN (DepositedToBins → is_add) declares no close legs → None."""
+    def test_add_with_no_deposit_transfers_returns_none(self, parser: TraderJoeV2ReceiptParser) -> None:
+        """An LP_OPEN (DepositedToBins → is_add) with NO wallet → LBPair deposit
+        Transfer logs declares no legs → None, so the dispatcher falls back to the
+        legacy ``lp_open_data`` path (VIB-5414 keeps this degenerate-receipt edge
+        byte-identical; a real deposit declares INPUT legs — see
+        ``test_two_sided_open_declares_two_input_legs``)."""
         receipt = {
             "status": 1,
             "transactionHash": "0x" + "5c" * 32,
@@ -887,6 +891,167 @@ class TestExtractPrimitiveMoneyLegs:
         to the legacy ``extract_lp_close_data`` 0/0 → None fallback)."""
         receipt = self._withdraw_receipt(0, 0)
         assert parser.extract_primitive_money_legs(receipt) is None
+
+    # ── VIB-5414 — LP_OPEN INPUT-leg declaration (cost-basis stamping) ───────────
+
+    def _deposit_receipt(self, x_raw: int, y_raw: int) -> dict:
+        """A ``DepositedToBins`` (LP_OPEN) receipt with wallet → LBPair deposit
+        Transfers — the INPUT mirror of ``_withdraw_receipt``. Transfer ``to`` is
+        the pool (``to_pool=True`` matches ``to``)."""
+        return {
+            "status": 1,
+            "transactionHash": "0x" + "6a" * 32,
+            "blockNumber": 30,
+            "gasUsed": 500,
+            "logs": [
+                _make_log(
+                    EVENT_TOPICS["DepositedToBins"],
+                    POOL,
+                    topics=[_topic_addr(WALLET), _topic_addr(WALLET)],
+                    data=_bins_data([8388608]),
+                ),
+                _make_log(
+                    EVENT_TOPICS["Transfer"],
+                    TOKEN_X,
+                    topics=[_topic_addr(WALLET), _topic_addr(POOL)],
+                    data="0x" + _uint256_hex(x_raw),
+                ),
+                _make_log(
+                    EVENT_TOPICS["Transfer"],
+                    TOKEN_Y,
+                    topics=[_topic_addr(WALLET), _topic_addr(POOL)],
+                    data="0x" + _uint256_hex(y_raw),
+                ),
+            ],
+        }
+
+    def test_two_sided_open_declares_two_input_legs(self, parser: TraderJoeV2ReceiptParser) -> None:
+        """token0=WAVAX (18d) leg0 + token1=USDC (6d) leg1 are declared as INPUT
+        legs with human-scaled MeasuredMoney amounts resolved from the deposit
+        Transfer's emitting token address (VIB-5414 — the open mirror of the
+        two-sided close)."""
+        from almanak.connectors._strategy_base.primitive_money_leg import MoneyLegRole
+
+        receipt = self._deposit_receipt(10**18, 2_000_000)  # 1 WAVAX, 2 USDC
+        resolver = self._resolver({TOKEN_X.lower(): ("WAVAX", 18), TOKEN_Y.lower(): ("USDC", 6)})
+        with patch(
+            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
+            return_value=resolver,
+        ):
+            legs = parser.extract_primitive_money_legs(receipt)
+
+        assert legs is not None
+        ins = legs.input_legs
+        assert len(ins) == 2
+        assert all(leg.role is MoneyLegRole.INPUT for leg in ins)
+        assert (ins[0].token, ins[0].amount.is_measured, ins[0].amount.value) == ("WAVAX", True, Decimal("1"))
+        assert (ins[1].token, ins[1].amount.is_measured, ins[1].amount.value) == ("USDC", True, Decimal("2"))
+
+    def test_dispatcher_projects_open_legs_onto_ledger_row(self, parser: TraderJoeV2ReceiptParser) -> None:
+        """End-to-end: the LP_OPEN INPUT legs the parser declares, projected by the
+        US-009 dispatcher, yield the ledger row (leg0 → token_in/amount_in, leg1 →
+        token_out/amount_out) WITHOUT any intent."""
+        import types
+
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        receipt = self._deposit_receipt(10**18, 2_000_000)
+        resolver = self._resolver({TOKEN_X.lower(): ("WAVAX", 18), TOKEN_Y.lower(): ("USDC", 6)})
+        with patch(
+            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
+            return_value=resolver,
+        ):
+            legs = parser.extract_primitive_money_legs(receipt)
+
+        result = types.SimpleNamespace(swap_amounts=None, extracted_data={"primitive_money_legs": legs})
+        assert _extract_tokens_and_amounts(object(), result) == ("WAVAX", "USDC", "1", "2", "", None)
+
+    def test_open_legs_yield_nonzero_measured_cost_basis(self, parser: TraderJoeV2ReceiptParser) -> None:
+        """The whole point of VIB-5414: the declared INPUT legs feed
+        ``compute_lp_cost_basis`` a MEASURED, non-zero cost basis from the deposited
+        WAVAX+USDC notional — so the LP handler stamps ``cost_basis_usd>0`` and the
+        snapshot stays HIGH instead of degrading to ESTIMATED on a fabricated $0."""
+        import types
+
+        from almanak.framework.accounting.lp_accounting import compute_lp_cost_basis
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        receipt = self._deposit_receipt(10**18, 2_000_000)  # 1 WAVAX + 2 USDC
+        resolver = self._resolver({TOKEN_X.lower(): ("WAVAX", 18), TOKEN_Y.lower(): ("USDC", 6)})
+        with patch(
+            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
+            return_value=resolver,
+        ):
+            legs = parser.extract_primitive_money_legs(receipt)
+
+        result = types.SimpleNamespace(swap_amounts=None, extracted_data={"primitive_money_legs": legs})
+        token_in, token_out, amount_in, amount_out, _, _ = _extract_tokens_and_amounts(object(), result)
+
+        # Prices keyed by uppercase symbol (the compute_lp_cost_basis contract).
+        price_oracle = {"WAVAX": Decimal("30"), "USDC": Decimal("1")}
+        cost_basis = compute_lp_cost_basis(Decimal(amount_in), Decimal(amount_out), token_in, token_out, price_oracle)
+        # 1 WAVAX * $30 + 2 USDC * $1 = $32 — measured, NOT the old fabricated $0.
+        assert cost_basis == Decimal("32")
+
+    def test_open_unresolved_token_unmeasured_not_zero(self, parser: TraderJoeV2ReceiptParser) -> None:
+        """Empty ≠ Zero on the open path: a non-zero deposit whose token cannot be
+        resolved → the INPUT leg amount is UNMEASURED (never a wrongly-scaled value)
+        and the identity ""."""
+        receipt = self._deposit_receipt(10**18, 2_000_000)
+        resolver = MagicMock()
+        resolver.resolve.side_effect = KeyError("token not found")
+        with patch(
+            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
+            return_value=resolver,
+        ):
+            legs = parser.extract_primitive_money_legs(receipt)
+
+        assert legs is not None
+        for leg in legs.input_legs:
+            assert leg.token == ""
+            assert not leg.amount.is_measured
+
+    def test_single_sided_open_one_input_leg_out_empty_not_zero(self, parser: TraderJoeV2ReceiptParser) -> None:
+        """A genuinely single-sided deposit (one wallet → LBPair Transfer) declares
+        ONE INPUT leg; the dispatcher leaves ``token_out`` / ``amount_out`` ABSENT
+        (``""``) — never a fabricated measured ``"0"`` for the unfunded side."""
+        import types
+
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        receipt = {
+            "status": 1,
+            "transactionHash": "0x" + "6b" * 32,
+            "blockNumber": 31,
+            "gasUsed": 500,
+            "logs": [
+                _make_log(
+                    EVENT_TOPICS["DepositedToBins"],
+                    POOL,
+                    topics=[_topic_addr(WALLET), _topic_addr(WALLET)],
+                    data=_bins_data([8388608]),
+                ),
+                _make_log(
+                    EVENT_TOPICS["Transfer"],
+                    TOKEN_X,
+                    topics=[_topic_addr(WALLET), _topic_addr(POOL)],
+                    data="0x" + _uint256_hex(10**18),  # 1 WAVAX, no second-token transfer
+                ),
+            ],
+        }
+        resolver = self._resolver({TOKEN_X.lower(): ("WAVAX", 18)})
+        with patch(
+            "almanak.connectors.traderjoe_v2.receipt_parser.get_token_resolver",
+            return_value=resolver,
+        ):
+            legs = parser.extract_primitive_money_legs(receipt)
+
+        assert legs is not None
+        assert len(legs.input_legs) == 1
+        assert (legs.input_legs[0].token, legs.input_legs[0].amount.value) == ("WAVAX", Decimal("1"))
+
+        result = types.SimpleNamespace(swap_amounts=None, extracted_data={"primitive_money_legs": legs})
+        assert _extract_tokens_and_amounts(object(), result) == ("WAVAX", "", "1", "", "", None)
 
 
 class TestExtractLPOpenData:
