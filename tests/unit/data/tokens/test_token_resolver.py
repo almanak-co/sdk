@@ -22,7 +22,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.data.tokens.exceptions import (
     InvalidTokenAddressError,
     TokenNotFoundError,
@@ -42,7 +41,7 @@ from almanak.framework.data.tokens.resolver import (
 def make_resolved_token(
     symbol: str = "TEST",
     address: str = "0x1234567890123456789012345678901234567890",
-    chain: Chain = Chain.ARBITRUM,
+    chain: str = "arbitrum",
     decimals: int = 18,
 ) -> ResolvedToken:
     """Create a ResolvedToken for testing."""
@@ -126,21 +125,18 @@ class TestHelperFunctions:
 
     def test_normalize_chain_string(self):
         """Test _normalize_chain with string input."""
-        chain_lower, chain_enum = _normalize_chain("arbitrum")
+        chain_lower = _normalize_chain("arbitrum")
         assert chain_lower == "arbitrum"
-        assert chain_enum == Chain.ARBITRUM
 
     def test_normalize_chain_uppercase_string(self):
         """Test _normalize_chain with uppercase string."""
-        chain_lower, chain_enum = _normalize_chain("ETHEREUM")
+        chain_lower = _normalize_chain("ETHEREUM")
         assert chain_lower == "ethereum"
-        assert chain_enum == Chain.ETHEREUM
 
-    def test_normalize_chain_enum(self):
-        """Test _normalize_chain with Chain enum."""
-        chain_lower, chain_enum = _normalize_chain(Chain.BASE)
-        assert chain_lower == "base"
-        assert chain_enum == Chain.BASE
+    def test_normalize_chain_alias(self):
+        """Test _normalize_chain with a registered alias (e.g. 'bnb' -> 'bsc')."""
+        chain_lower = _normalize_chain("bnb")
+        assert chain_lower == "bsc"
 
     def test_normalize_chain_unknown(self):
         """Test _normalize_chain with unknown chain."""
@@ -236,7 +232,7 @@ class TestTokenResolverBySymbol:
 
         assert token.symbol == "USDC"
         assert token.decimals == 6
-        assert token.chain == Chain.ARBITRUM
+        assert token.chain == "arbitrum"
         assert token.chain_id == 42161
         assert token.is_stablecoin is True
         assert token.address.lower() == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
@@ -248,7 +244,7 @@ class TestTokenResolverBySymbol:
 
         assert token.symbol == "WETH"
         assert token.decimals == 18
-        assert token.chain == Chain.ETHEREUM
+        assert token.chain == "ethereum"
         assert token.is_wrapped_native is True
         assert token.address.lower() == "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 
@@ -271,12 +267,12 @@ class TestTokenResolverBySymbol:
 
         assert token1.symbol == token2.symbol == token3.symbol == "USDC"
 
-    def test_resolve_with_chain_enum(self, temp_cache_file):
-        """Test resolution with Chain enum."""
+    def test_resolve_with_chain_alias(self, temp_cache_file):
+        """Test resolution with a chain alias ('arb' -> 'arbitrum')."""
         resolver = TokenResolver(cache_file=temp_cache_file)
-        token = resolver.resolve("USDC", Chain.ARBITRUM)
+        token = resolver.resolve("USDC", "arb")
 
-        assert token.chain == Chain.ARBITRUM
+        assert token.chain == "arbitrum"
         assert token.decimals == 6
 
     def test_resolve_unknown_symbol_raises(self, temp_cache_file):
@@ -304,7 +300,7 @@ class TestTokenResolverBySymbol:
 
         assert token.symbol.upper() == "PT-WSTETH"
         assert token.decimals == 18
-        assert token.chain == Chain.ARBITRUM
+        assert token.chain == "arbitrum"
         assert token.address.lower() == "0x71fbf40651e9d4278a74586afc99f307f369ce9a"
 
     def test_pendle_metadata_chain_is_normalized(self, temp_cache_file, monkeypatch):
@@ -331,7 +327,7 @@ class TestTokenResolverBySymbol:
         token = resolver.resolve("PT-MIXED", "arbitrum")
 
         assert token.symbol == "PT-MIXED"
-        assert token.chain == Chain.ARBITRUM
+        assert token.chain == "arbitrum"
         assert token.address.lower() == "0x1111111111111111111111111111111111111111"
 
 
@@ -345,7 +341,7 @@ class TestTokenResolverByAddress:
 
         assert token.symbol == "USDC"
         assert token.decimals == 6
-        assert token.chain == Chain.ARBITRUM
+        assert token.chain == "arbitrum"
 
     def test_resolve_by_address_lowercase(self, temp_cache_file):
         """Test resolving by lowercase address."""
@@ -584,7 +580,7 @@ class TestTokenResolverMultipleChains:
             token = resolver.resolve("USDC", chain)
             assert token.symbol == "USDC"
             assert token.decimals == 6
-            assert token.chain.value.lower() == chain
+            assert token.chain == chain
 
     def test_resolve_weth_multiple_chains(self, temp_cache_file):
         """Test resolving WETH on multiple chains."""
@@ -712,7 +708,7 @@ class TestResolveForSwap:
 
         assert token.symbol == "WETH"
         assert token.decimals == 18
-        assert token.chain == Chain.ARBITRUM
+        assert token.chain == "arbitrum"
         assert token.address.lower() == "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
 
     def test_eth_resolves_to_weth_on_optimism(self, temp_cache_file):
@@ -721,7 +717,7 @@ class TestResolveForSwap:
         token = resolver.resolve_for_swap("ETH", "optimism")
 
         assert token.symbol == "WETH"
-        assert token.chain == Chain.OPTIMISM
+        assert token.chain == "optimism"
         assert token.address.lower() == "0x4200000000000000000000000000000000000006"
 
     def test_eth_resolves_to_weth_on_base(self, temp_cache_file):
@@ -730,7 +726,7 @@ class TestResolveForSwap:
         token = resolver.resolve_for_swap("ETH", "base")
 
         assert token.symbol == "WETH"
-        assert token.chain == Chain.BASE
+        assert token.chain == "base"
         assert token.address.lower() == "0x4200000000000000000000000000000000000006"
 
     def test_matic_resolves_to_wmatic_for_swap(self, temp_cache_file):
@@ -741,7 +737,7 @@ class TestResolveForSwap:
         assert token.symbol == "WMATIC"
         assert token.decimals == 18
         assert token.is_wrapped_native is True
-        assert token.chain == Chain.POLYGON
+        assert token.chain == "polygon"
         assert token.address.lower() == "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270"
 
     def test_avax_resolves_to_wavax_for_swap(self, temp_cache_file):
@@ -752,7 +748,7 @@ class TestResolveForSwap:
         assert token.symbol == "WAVAX"
         assert token.decimals == 18
         assert token.is_wrapped_native is True
-        assert token.chain == Chain.AVALANCHE
+        assert token.chain == "avalanche"
         assert token.address.lower() == "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7"
 
     def test_bnb_resolves_to_wbnb_for_swap(self, temp_cache_file):
@@ -763,7 +759,7 @@ class TestResolveForSwap:
         assert token.symbol == "WBNB"
         assert token.decimals == 18
         assert token.is_wrapped_native is True
-        assert token.chain == Chain.BSC
+        assert token.chain == "bsc"
         assert token.address.lower() == "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"
 
     def test_s_resolves_to_ws_for_swap(self, temp_cache_file):
@@ -774,7 +770,7 @@ class TestResolveForSwap:
         assert token.symbol == "WS"
         assert token.decimals == 18
         assert token.is_wrapped_native is True
-        assert token.chain == Chain.SONIC
+        assert token.chain == "sonic"
         assert token.address.lower() == "0x039e2fb66102314ce7b64ce5ce3e5183bc94ad38"
 
     def test_non_native_token_unchanged(self, temp_cache_file):
@@ -804,13 +800,13 @@ class TestResolveForSwap:
         assert token.decimals == 6
         assert token.is_stablecoin is True
 
-    def test_resolve_for_swap_with_chain_enum(self, temp_cache_file):
-        """Test resolve_for_swap works with Chain enum."""
+    def test_resolve_for_swap_with_chain_alias(self, temp_cache_file):
+        """Test resolve_for_swap works with a chain alias ('eth' -> 'ethereum')."""
         resolver = TokenResolver(cache_file=temp_cache_file)
-        token = resolver.resolve_for_swap("ETH", Chain.ETHEREUM)
+        token = resolver.resolve_for_swap("ETH", "eth")
 
         assert token.symbol == "WETH"
-        assert token.chain == Chain.ETHEREUM
+        assert token.chain == "ethereum"
 
     def test_resolve_for_swap_unknown_raises(self, temp_cache_file):
         """Test resolve_for_swap raises for unknown tokens."""
@@ -891,13 +887,13 @@ class TestResolveForProtocol:
         assert token2.symbol == "WETH"
         assert token3.symbol == "WETH"
 
-    def test_protocol_with_chain_enum(self, temp_cache_file):
-        """Test resolve_for_protocol works with Chain enum."""
+    def test_protocol_with_chain_alias(self, temp_cache_file):
+        """Test resolve_for_protocol works with a chain alias ('arb' -> 'arbitrum')."""
         resolver = TokenResolver(cache_file=temp_cache_file)
 
-        token = resolver.resolve_for_protocol("ETH", Chain.ARBITRUM, "uniswap_v3")
+        token = resolver.resolve_for_protocol("ETH", "arb", "uniswap_v3")
         assert token.symbol == "WETH"
-        assert token.chain == Chain.ARBITRUM
+        assert token.chain == "arbitrum"
 
 
 class TestBridgedTokenAliases:
@@ -914,7 +910,7 @@ class TestBridgedTokenAliases:
 
         assert token.symbol == "USDC.E"
         assert token.decimals == 6
-        assert token.chain == Chain.ARBITRUM
+        assert token.chain == "arbitrum"
         assert token.is_stablecoin is True
         assert token.address.lower() == "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8"
 
@@ -951,7 +947,7 @@ class TestBridgedTokenAliases:
 
         assert token.symbol == "USDC.E"
         assert token.decimals == 6
-        assert token.chain == Chain.OPTIMISM
+        assert token.chain == "optimism"
         assert token.address.lower() == "0x7f5c764cbc14f9669b88837ca1490cca17c31607"
 
     def test_native_usdc_on_optimism(self, temp_cache_file):
@@ -974,7 +970,7 @@ class TestBridgedTokenAliases:
 
         assert token.symbol == "USDBC"
         assert token.decimals == 6
-        assert token.chain == Chain.BASE
+        assert token.chain == "base"
         assert token.address.lower() == "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
 
     def test_usdbc_case_insensitive(self, temp_cache_file):
@@ -1007,7 +1003,7 @@ class TestBridgedTokenAliases:
 
         assert token.symbol == "USDC.E"
         assert token.decimals == 6
-        assert token.chain == Chain.POLYGON
+        assert token.chain == "polygon"
         assert token.address.lower() == "0x2791bca1f2de4661ed88a30c99a7a9449aa84174"
 
     def test_native_usdc_on_polygon(self, temp_cache_file):
@@ -1030,7 +1026,7 @@ class TestBridgedTokenAliases:
 
         assert token.symbol == "USDC.E"
         assert token.decimals == 6
-        assert token.chain == Chain.AVALANCHE
+        assert token.chain == "avalanche"
         assert token.address.lower() == "0xa7d7079b0fead91f3e65f86e8915cb59c1a4c664"
 
     def test_usdt_e_resolves_on_avalanche(self, temp_cache_file):
@@ -1040,7 +1036,7 @@ class TestBridgedTokenAliases:
 
         assert token.symbol == "USDT.E"
         assert token.decimals == 6
-        assert token.chain == Chain.AVALANCHE
+        assert token.chain == "avalanche"
         assert token.address.lower() == "0xc7198437980c041c805a1edcba50c1ce5db95118"
 
     def test_weth_e_resolves_on_avalanche(self, temp_cache_file):
@@ -1050,7 +1046,7 @@ class TestBridgedTokenAliases:
 
         assert token.symbol == "WETH.E"
         assert token.decimals == 18
-        assert token.chain == Chain.AVALANCHE
+        assert token.chain == "avalanche"
         assert token.address.lower() == "0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab"
 
     def test_native_usdc_on_avalanche(self, temp_cache_file):
@@ -1069,7 +1065,7 @@ class TestBridgedTokenAliases:
 
         assert token.symbol == "BTC.B"
         assert token.decimals == 8
-        assert token.chain == Chain.AVALANCHE
+        assert token.chain == "avalanche"
         assert token.address.lower() == "0x152b9d0fdc40c096757f570a51e494bd4b943e50"
 
     def test_btcb_alias_resolves_on_avalanche(self, temp_cache_file):
@@ -1079,7 +1075,7 @@ class TestBridgedTokenAliases:
 
         assert token.symbol == "BTC.B"
         assert token.decimals == 8
-        assert token.chain == Chain.AVALANCHE
+        assert token.chain == "avalanche"
         assert token.address.lower() == "0x152b9d0fdc40c096757f570a51e494bd4b943e50"
 
     def test_savax_resolves_on_avalanche(self, temp_cache_file):
@@ -1089,7 +1085,7 @@ class TestBridgedTokenAliases:
 
         assert token.symbol == "SAVAX"
         assert token.decimals == 18
-        assert token.chain == Chain.AVALANCHE
+        assert token.chain == "avalanche"
         assert token.address.lower() == "0x2b2c81e08f1af8835a78bb2a90ae924ace0ea4be"
 
     # =========================================================================
@@ -1111,7 +1107,7 @@ class TestBridgedTokenAliases:
 
         assert token.symbol == "BTCB"
         assert token.decimals == 18
-        assert token.chain == Chain.BSC
+        assert token.chain == "bsc"
         assert token.address.lower() == "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c"
 
     def test_btc_alias_on_bsc_routes_to_btcb(self, temp_cache_file):
@@ -1164,7 +1160,7 @@ class TestBridgedTokenAliases:
 
         assert token.symbol == "BTC.B"
         assert token.decimals == 8
-        assert token.chain == Chain.AVALANCHE
+        assert token.chain == "avalanche"
         assert token.address.lower() == "0x152b9d0fdc40c096757f570a51e494bd4b943e50"
 
     # =========================================================================
@@ -1317,7 +1313,7 @@ class TestResolveForSwapBalanceQueries:
         assert token.symbol == "WS"
         assert token.decimals == 18
         assert token.address.lower() == "0x039e2fb66102314ce7b64ce5ce3e5183bc94ad38"
-        assert token.chain == Chain.SONIC
+        assert token.chain == "sonic"
 
 
 class TestGatewayConnection:
@@ -1761,7 +1757,7 @@ class TestRegisterToken:
 
         assert result.symbol == "PT-wstETH-25JUN2026"
         assert result.decimals == 18
-        assert result.chain == Chain.ARBITRUM
+        assert result.chain == "arbitrum"
         assert result.chain_id == 42161
         assert result.source == "registered"
 
@@ -1866,20 +1862,20 @@ class TestRegisterToken:
         )
 
         assert isinstance(result, ResolvedToken)
-        assert result.chain == Chain.POLYGON
+        assert result.chain == "polygon"
 
-    def test_register_token_chain_enum(self):
-        """register_token() accepts Chain enum as well as string."""
+    def test_register_token_legacy_uppercase_chain(self):
+        """register_token() accepts legacy UPPERCASE serialized chain names."""
         resolver = TokenResolver(cache_file=str(Path(tempfile.mkdtemp()) / "cache.json"))
 
         result = resolver.register_token(
             symbol="ENUM-TOKEN",
-            chain=Chain.BASE,
+            chain="BASE",
             address="0x1111111111111111111111111111111111111111",
             decimals=18,
         )
 
-        assert result.chain == Chain.BASE
+        assert result.chain == "base"
         assert result.chain_id == 8453
 
     def test_register_token_chain_not_in_models_map(self):
@@ -1893,7 +1889,7 @@ class TestRegisterToken:
             decimals=18,
         )
 
-        assert result.chain == Chain.SONIC
+        assert result.chain == "sonic"
         assert result.chain_id == 146
 
     def test_register_token_invalid_decimals_raises(self):
@@ -1969,7 +1965,7 @@ class TestGatewayIntegrityCheck:
         resolver._gateway_stub = mock_stub
 
         result = resolver._resolve_via_gateway(
-            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum", Chain.ARBITRUM,
+            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum",
         )
         assert result is None  # Rejected due to invalid decimals
 
@@ -1991,7 +1987,7 @@ class TestGatewayIntegrityCheck:
         resolver._gateway_stub = mock_stub
 
         result = resolver._resolve_via_gateway(
-            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum", Chain.ARBITRUM,
+            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum",
         )
         assert result is None
 
@@ -2014,7 +2010,7 @@ class TestGatewayIntegrityCheck:
         resolver._gateway_stub = mock_stub
 
         result = resolver._resolve_via_gateway(
-            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum", Chain.ARBITRUM,
+            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum",
         )
         assert result is None  # Rejected due to address mismatch
 
@@ -2037,7 +2033,7 @@ class TestGatewayIntegrityCheck:
         resolver._gateway_stub = mock_stub
 
         result = resolver._resolve_via_gateway(
-            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum", Chain.ARBITRUM,
+            "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "arbitrum",
         )
         assert result is not None
         assert result.symbol == "TEST"

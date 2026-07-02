@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.data.tokens import (
     NATIVE_SENTINEL,
     ParsedAsset,
@@ -34,32 +33,32 @@ USDC_SOLANA = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 
 def test_to_caip19_erc20_evm() -> None:
-    ref = TokenRef(chain=Chain.ETHEREUM, address=DAI_ETHEREUM, decimals=18, symbol="DAI")
+    ref = TokenRef(chain="ethereum", address=DAI_ETHEREUM, decimals=18, symbol="DAI")
     assert ref.to_caip19() == f"eip155:1/erc20:{DAI_ETHEREUM}"
 
 
 def test_to_caip19_bridged_token_is_still_address_based() -> None:
     # A bridged variant (USDC.e) has a distinct address but is still erc20-by-address.
     usdc_e = "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8"
-    ref = TokenRef(chain=Chain.ARBITRUM, address=usdc_e, decimals=6, symbol="USDC.e")
+    ref = TokenRef(chain="arbitrum", address=usdc_e, decimals=6, symbol="USDC.e")
     assert ref.to_caip19() == f"eip155:42161/erc20:{usdc_e}"
 
 
 def test_to_caip19_native_uses_slip44() -> None:
-    ref = TokenRef(chain=Chain.ARBITRUM, address=NATIVE_SENTINEL, decimals=18, symbol="ETH")
+    ref = TokenRef(chain="arbitrum", address=NATIVE_SENTINEL, decimals=18, symbol="ETH")
     assert ref.to_caip19() == "eip155:42161/slip44:60"
 
 
 @pytest.mark.parametrize(
     ("chain", "expected"),
     [
-        (Chain.POLYGON, "eip155:137/slip44:966"),  # Matic
-        (Chain.AVALANCHE, "eip155:43114/slip44:9000"),  # Avalanche
-        (Chain.BSC, "eip155:56/slip44:9006"),  # Binance Smart Chain
-        (Chain.BERACHAIN, "eip155:80094/slip44:8008"),  # Berachain
-        (Chain.SONIC, "eip155:146/slip44:10007"),  # SONIC
-        (Chain.MONAD, "eip155:143/slip44:268435779"),  # Monad
-        (Chain.HYPEREVM, "eip155:999/slip44:2457"),  # HYPE / Hyperliquid
+        ("polygon", "eip155:137/slip44:966"),  # Matic
+        ("avalanche", "eip155:43114/slip44:9000"),  # Avalanche
+        ("bsc", "eip155:56/slip44:9006"),  # Binance Smart Chain
+        ("berachain", "eip155:80094/slip44:8008"),  # Berachain
+        ("sonic", "eip155:146/slip44:10007"),  # SONIC
+        ("monad", "eip155:143/slip44:268435779"),  # Monad
+        ("hyperevm", "eip155:999/slip44:2457"),  # HYPE / Hyperliquid
     ],
 )
 def test_to_caip19_native_for_non_eth_chains(chain: Chain, expected: str) -> None:
@@ -68,17 +67,17 @@ def test_to_caip19_native_for_non_eth_chains(chain: Chain, expected: str) -> Non
 
 
 def test_to_caip19_solana_spl_token() -> None:
-    ref = TokenRef(chain=Chain.SOLANA, address=USDC_SOLANA, decimals=6, symbol="USDC")
+    ref = TokenRef(chain="solana", address=USDC_SOLANA, decimals=6, symbol="USDC")
     assert ref.to_caip19() == f"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/token:{USDC_SOLANA}"
 
 
 @pytest.mark.parametrize(
     ("chain", "symbol"),
     [
-        (Chain.XLAYER, "OKB"),
-        (Chain.MANTLE, "MNT"),
-        (Chain.PLASMA, "XPL"),
-        (Chain.ZEROG, "A0GI"),
+        ("xlayer", "OKB"),
+        ("mantle", "MNT"),
+        ("plasma", "XPL"),
+        ("zerog", "A0GI"),
     ],
 )
 def test_to_caip19_native_fails_loud_without_slip44(chain: Chain, symbol: str) -> None:
@@ -144,7 +143,7 @@ def test_resolve_caip19_native_slip44() -> None:
     resolver = get_token_resolver()
     native = resolver.resolve_caip19("eip155:1/slip44:60", skip_gateway=True)
     assert native.is_native
-    assert native.chain is Chain.ETHEREUM
+    assert native.chain is "ethereum"
 
 
 @pytest.mark.parametrize(

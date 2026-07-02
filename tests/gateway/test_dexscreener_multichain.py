@@ -18,7 +18,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.tokens import ResolvedToken
 from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
@@ -85,7 +84,7 @@ async def test_single_instance_serves_arbitrum_and_base_in_one_process():
         symbol="FOO",
         address=same_address,
         decimals=18,
-        chain=Chain("ARBITRUM"),
+        chain="arbitrum",
         chain_id=42161,
         source="test",
         is_verified=False,
@@ -94,7 +93,7 @@ async def test_single_instance_serves_arbitrum_and_base_in_one_process():
         symbol="FOO",
         address=same_address,
         decimals=18,
-        chain=Chain("BASE"),
+        chain="base",
         chain_id=8453,
         source="test",
         is_verified=False,
@@ -423,7 +422,7 @@ def test_bnb_alias_canonicalized_to_bsc_on_ctor() -> None:
 
 def test_bnb_alias_canonicalized_from_resolved_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """Same canonicalization must apply when the chain comes from
-    ``resolved_token.chain`` so a caller that supplies ``Chain.bnb`` (or
+    ``resolved_token.chain`` so a caller that supplies a non-canonical (or
     the string "bnb") via the ResolvedToken path cannot bypass the
     canonicalization done at construction time.
     """

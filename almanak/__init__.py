@@ -15,7 +15,6 @@ from ._version import __version__
 if TYPE_CHECKING:
     from .core.enums import (
         ActionType,
-        Chain,
         CoSigners,
         ExecutionStatus,
         Network,
@@ -188,7 +187,6 @@ __all__ = [
     "__version__",
     # Framework - Enums
     "ActionType",
-    "Chain",
     "CoSigners",
     "ExecutionStatus",
     "Network",
@@ -376,7 +374,6 @@ __all__ = [
 _CORE_ENUM_NAMES: frozenset[str] = frozenset(
     {
         "ActionType",
-        "Chain",
         "CoSigners",
         "ExecutionStatus",
         "Network",

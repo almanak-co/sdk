@@ -5,7 +5,7 @@ change numeric values here without an explicit owner sign-off; the
 chain_id is the on-the-wire identifier owned by ``metrics-database``.
 """
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._contracts import safe_stack_contracts
 from ._descriptor import (
@@ -23,7 +23,6 @@ from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.ETHEREUM,
         name="ethereum",
         chain_id=1,
         family=ChainFamily.EVM,

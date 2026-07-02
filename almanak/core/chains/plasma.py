@@ -1,6 +1,6 @@
 """Plasma (chain_id 9745) — EVM L1."""
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._descriptor import (
     AnvilProfile,
@@ -16,7 +16,6 @@ from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.PLASMA,
         name="plasma",
         chain_id=9745,
         family=ChainFamily.EVM,

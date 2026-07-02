@@ -63,7 +63,6 @@ resolver exception hierarchy need no new branches.
 
 from __future__ import annotations
 
-from almanak.core.enums import Chain
 from almanak.framework.data.tokens.exceptions import (
     InvalidTokenAddressError,
     TokenResolutionError,
@@ -115,7 +114,7 @@ def _reject_cross_family_address(token: str, chain_lower: str) -> None:
         )
 
 
-def canonicalize_token_identity(token: str, chain: str | Chain) -> tuple[str, str]:
+def canonicalize_token_identity(token: str, chain: str) -> tuple[str, str]:
     """Canonicalize a token identifier for read-side inventory matching.
 
     Accepts either a symbol form (``"USDC"``, ``"WETH"``, ``"USDC.e"``) or an
@@ -178,7 +177,7 @@ def canonicalize_token_identity(token: str, chain: str | Chain) -> tuple[str, st
     # Normalize the chain first so the rest of the helper consistently
     # operates on lowercased chain names. ``_normalize_chain`` raises
     # ``TokenResolutionError`` for unknown chains.
-    chain_lower, _chain_enum = _normalize_chain(chain)
+    chain_lower = _normalize_chain(chain)
 
     stripped = token.strip()
 

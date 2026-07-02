@@ -106,15 +106,16 @@ class AlmanakMCPServer:
     # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def resources_read(self, uri: str) -> dict:
         """Read an MCP resource by URI."""
-        from almanak.core.enums import Chain
+        from almanak.core.chains import ChainRegistry
 
         if uri == RESOURCE_CHAINS:
+            # Canonical lowercase names, sorted (was UPPERCASE enum values).
             return {
                 "contents": [
                     {
                         "uri": uri,
                         "mimeType": "application/json",
-                        "text": json.dumps({"chains": [c.value for c in Chain]}),
+                        "text": json.dumps({"chains": list(ChainRegistry.names())}),
                     }
                 ]
             }

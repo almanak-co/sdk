@@ -52,7 +52,7 @@ from almanak.core.chains._descriptor import (
     NativeToken,
 )
 from almanak.core.chains._helpers import external_id_for, vendor_chain_map
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 # --- the 11 OLD maps, frozen verbatim from origin/main (pre-B1) ------------------
 #
@@ -429,13 +429,12 @@ def test_moralis_omits_solana() -> None:
 def _descriptor(external_ids: dict[str, str] | None) -> ChainDescriptor:
     """Build a throwaway descriptor with a given external_ids map.
 
-    Uses Chain.ETHEREUM (never registered into the singleton here — construction
-    does not touch ``ChainRegistry``) so we exercise ``__post_init__`` in
-    isolation without disturbing the process-wide registry the inversion
-    assertions above read from.
+    Never registered into the singleton here — construction does not touch
+    ``ChainRegistry`` — so we exercise ``__post_init__`` in isolation without
+    disturbing the process-wide registry the inversion assertions above read
+    from.
     """
     return ChainDescriptor(
-        enum=Chain.ETHEREUM,
         name="ethereum",
         chain_id=1,
         family=ChainFamily.EVM,

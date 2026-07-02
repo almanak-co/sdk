@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.data.tokens import ResolvedToken
 from almanak.gateway.data.price.coingecko import CoinGeckoPriceSource
 
@@ -74,7 +73,7 @@ async def test_same_address_two_chains_hits_correct_platform_endpoint():
         symbol="FOO",
         address=COLLIDING_ADDRESS,
         decimals=18,
-        chain=Chain("ARBITRUM"),
+        chain="arbitrum",
         chain_id=42161,
         source="test",
         is_verified=False,
@@ -83,7 +82,7 @@ async def test_same_address_two_chains_hits_correct_platform_endpoint():
         symbol="FOO",
         address=COLLIDING_ADDRESS,
         decimals=18,
-        chain=Chain("BASE"),
+        chain="base",
         chain_id=8453,
         source="test",
         is_verified=False,

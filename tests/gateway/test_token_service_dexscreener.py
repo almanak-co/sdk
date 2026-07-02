@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import grpc
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.data.tokens import ResolvedToken, TokenNotFoundError
 from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
 from almanak.framework.data.tokens.models import BridgeType
@@ -381,7 +380,7 @@ class TestCacheOverwriteGuard:
             symbol=symbol,
             address=address,
             decimals=6,
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             chain_id=42161,
             name="USD Coin",
             source="static",
@@ -441,7 +440,7 @@ class TestCacheOverwriteGuard:
             symbol=symbol,
             address=address,
             decimals=18,
-            chain=Chain.BASE,
+            chain="base",
             chain_id=8453,
             name=None,
             source="dexscreener_dynamic",

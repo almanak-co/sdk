@@ -163,10 +163,10 @@ class TestFamilyLockstepInvariant:
 
     def test_helper_matches_registry_for_aliases(self) -> None:
         # Every alias must resolve identically to its canonical chain.
-        for alias, chain_enum in ChainRegistry.aliases().items():
-            descriptor = ChainRegistry.get(chain_enum)
+        for alias, canonical in ChainRegistry.aliases().items():
+            descriptor = ChainRegistry.get(canonical)
             expected = descriptor.family is ChainFamily.SOLANA
             assert _is_solana_chain(alias) is expected, (
-                f"alias {alias!r} (chain {chain_enum.name}): helper says "
+                f"alias {alias!r} (chain {canonical}): helper says "
                 f"solana={_is_solana_chain(alias)}, registry family={descriptor.family.name}"
             )

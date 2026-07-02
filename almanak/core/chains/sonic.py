@@ -8,7 +8,7 @@ derived legacy view is byte-identical at the lookup boundary, even though
 the dict now formally contains an entry.
 """
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._descriptor import (
     AnvilProfile,
@@ -25,7 +25,6 @@ from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.SONIC,
         name="sonic",
         chain_id=146,
         family=ChainFamily.EVM,

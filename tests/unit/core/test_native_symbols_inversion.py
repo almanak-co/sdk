@@ -24,7 +24,6 @@ from __future__ import annotations
 
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import native_symbols_for
-from almanak.core.enums import Chain
 from almanak.framework.accounting.gas_pricing import native_token_for_chain
 
 # --- the three OLD maps, frozen verbatim from origin/main (pre-A1) --------------
@@ -144,7 +143,7 @@ def test_polygon_accepted_symbols_bridge() -> None:
     # Balance-routing accepts both symbols...
     assert native_symbols_for("polygon") == frozenset({"MATIC", "POL"})
     # ...while the canonical gas/price/funding symbol stays MATIC.
-    descriptor = ChainRegistry.get(Chain.POLYGON)
+    descriptor = ChainRegistry.get("polygon")
     assert descriptor.native.symbol == "MATIC"
     assert descriptor.native.accepted_symbols == ("POL",)
 

@@ -3,8 +3,8 @@
 A ``ChainDescriptor`` consolidates everything the SDK needs to know about a
 single chain:
 
-* Identity: ``enum`` (the ``Chain`` enum member), ``name`` (canonical lowercase
-  string), ``aliases`` (e.g. ``"bnb"`` for ``Chain.BSC``).
+* Identity: ``name`` (canonical lowercase string, the sole chain identity —
+  VIB-4851), ``aliases`` (e.g. ``"bnb"`` for BSC).
 * Wire format: ``chain_id`` (EIP-155). The numeric value is the on-the-wire
   identifier owned by the ``metrics-database`` repo — restructuring how we
   source it in the SDK is fine, **renumbering it is not**.
@@ -27,7 +27,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 # CAIP-2 (https://chainagnostic.org/CAIPs/caip-2) blockchain-id namespace per
 # execution family. EVM chains serialize as ``eip155:<chain_id>``; non-EVM
@@ -526,9 +526,9 @@ class ChainDescriptor:
     descriptors are immutable.
 
     Attributes:
-        enum: The :class:`Chain` enum member.
-        name: Canonical lowercase name (e.g. ``"ethereum"``).
-            Always equal to ``enum.name.lower()`` — never diverge.
+        name: Canonical lowercase name (e.g. ``"ethereum"``) — the sole
+            chain identity (the Chain enum was removed, VIB-4851). Must
+            equal the descriptor module's file stem.
         chain_id: EIP-155 chain ID. ``0`` is reserved for non-EVM chains
             (Solana).
         family: Execution family (EVM vs SOLANA).
@@ -617,7 +617,6 @@ class ChainDescriptor:
             CAIP-2 lookups. VIB-5175 (CAIP adoption, Phase 1).
     """
 
-    enum: Chain
     name: str
     chain_id: int
     family: ChainFamily
@@ -663,13 +662,6 @@ class ChainDescriptor:
         return f"{namespace}:{reference}"
 
     def __post_init__(self) -> None:
-        # Strong invariant: ``name`` always equals the lowercase enum name.
-        # If they drift, downstream lookups break in subtle ways.
-        if self.name != self.enum.name.lower():
-            raise ValueError(
-                f"ChainDescriptor.name {self.name!r} must equal enum name "
-                f"{self.enum.name.lower()!r} (enum: {self.enum.name})"
-            )
         # VIB-3350: a confirmation depth is a non-negative block count. A negative
         # value would make ``receipt_block + depth`` nonsensical and the
         # confirmation-wait would treat the target as trivially already-reached.

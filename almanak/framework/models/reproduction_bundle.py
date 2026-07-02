@@ -11,6 +11,7 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
 
+from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import vendor_chain_map
 
 
@@ -314,12 +315,18 @@ class ReproductionBundle:
             for e in data.get("events_before", [])
         ]
 
+        # Canonicalize the chain when it resolves (legacy records may carry
+        # UPPERCASE enum values); pass unknown values through verbatim so a
+        # forensics artifact from an unrecognized chain still loads.
+        raw_chain = data["chain"]
+        chain_descriptor = ChainRegistry.try_resolve(raw_chain) if isinstance(raw_chain, str) else None
+
         return cls(
             bundle_id=data["bundle_id"],
             deployment_id=data["deployment_id"],
             failure_timestamp=datetime.fromisoformat(data["failure_timestamp"]),
             block_number=data["block_number"],
-            chain=data["chain"],
+            chain=chain_descriptor.name if chain_descriptor is not None else raw_chain,
             persistent_state=data["persistent_state"],
             config=data["config"],
             action_bundle=action_bundle,

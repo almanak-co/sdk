@@ -1,6 +1,6 @@
 """Arbitrum One (chain_id 42161) — L2 (Optimistic rollup)."""
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._contracts import safe_stack_contracts
 from ._descriptor import (
@@ -18,7 +18,6 @@ from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.ARBITRUM,
         name="arbitrum",
         chain_id=42161,
         family=ChainFamily.EVM,

@@ -26,7 +26,7 @@ from almanak.core.chains import (
     to_caip2,
 )
 from almanak.core.constants import resolve_chain_name
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 
 def _native() -> NativeToken:
@@ -43,8 +43,10 @@ def test_every_descriptor_round_trips_caip2() -> None:
         caip2 = descriptor.caip2
         assert ChainRegistry.by_caip2(caip2) is descriptor
         assert to_caip2(descriptor) == caip2
-        assert to_caip2(descriptor.enum) == caip2
         assert to_caip2(descriptor.name) == caip2
+        # Legacy UPPERCASE serialized names keep working (case-insensitive
+        # resolution contract, VIB-4851).
+        assert to_caip2(descriptor.name.upper()) == caip2
 
 
 def test_caip2_input_resolves_same_descriptor_as_name() -> None:
@@ -58,17 +60,17 @@ def test_caip2_input_resolves_same_descriptor_as_name() -> None:
 
 
 def test_evm_caip2_is_eip155_chain_id() -> None:
-    assert to_caip2(Chain.ARBITRUM) == "eip155:42161"
-    assert to_caip2(Chain.ETHEREUM) == "eip155:1"
+    assert to_caip2("arbitrum") == "eip155:42161"
+    assert to_caip2("ethereum") == "eip155:1"
     assert to_caip2("base") == "eip155:8453"
-    arb = ChainRegistry.get(Chain.ARBITRUM)
+    arb = ChainRegistry.get("arbitrum")
     assert arb.caip2 == f"eip155:{arb.chain_id}"
 
 
 def test_solana_caip2_uses_genesis_reference() -> None:
-    assert to_caip2(Chain.SOLANA) == "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+    assert to_caip2("solana") == "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
     # Solana is not indexed by numeric id (chain_id == 0 sentinel) but resolves by CAIP-2.
-    assert ChainRegistry.by_caip2("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp").enum is Chain.SOLANA
+    assert ChainRegistry.by_caip2("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp").name == "solana"
 
 
 def test_solana_caip2_reference_is_case_sensitive() -> None:
@@ -101,7 +103,7 @@ def test_try_resolve_caip2_detector_semantics() -> None:
     # Unknown namespace -> None.
     assert ChainRegistry.try_resolve_caip2("bip122:000000000019d6689c085ae165831e93") is None
     # Known -> descriptor.
-    assert ChainRegistry.try_resolve_caip2("eip155:1").enum is Chain.ETHEREUM
+    assert ChainRegistry.try_resolve_caip2("eip155:1").name == "ethereum"
 
 
 def test_by_caip2_raises_on_unknown_or_malformed() -> None:
@@ -148,7 +150,6 @@ def test_parse_caip2_rejects_malformed(bad: str) -> None:
 def test_evm_descriptor_rejects_explicit_caip2_reference() -> None:
     with pytest.raises(ValueError, match="caip2_reference must be None"):
         ChainDescriptor(
-            enum=Chain.ETHEREUM,
             name="ethereum",
             chain_id=1,
             family=ChainFamily.EVM,
@@ -162,7 +163,6 @@ def test_non_evm_descriptor_without_reference_constructs_but_caip2_raises() -> N
     # Construction stays permissive so synthetic non-EVM fixtures are buildable
     # (the registration-time guard is what enforces presence for real chains)...
     descriptor = ChainDescriptor(
-        enum=Chain.SOLANA,
         name="solana",
         chain_id=0,
         family=ChainFamily.SOLANA,
@@ -177,7 +177,6 @@ def test_non_evm_descriptor_without_reference_constructs_but_caip2_raises() -> N
 def test_non_evm_descriptor_validates_reference_grammar() -> None:
     with pytest.raises(ValueError, match="CAIP-2 reference grammar"):
         ChainDescriptor(
-            enum=Chain.SOLANA,
             name="solana",
             chain_id=0,
             family=ChainFamily.SOLANA,
@@ -193,44 +192,44 @@ def test_native_token_rejects_negative_slip44() -> None:
 
 
 def test_eth_native_chains_carry_slip44_60() -> None:
-    for chain in (Chain.ETHEREUM, Chain.ARBITRUM, Chain.OPTIMISM, Chain.BASE, Chain.BLAST, Chain.LINEA):
+    for chain in ("ethereum", "arbitrum", "optimism", "base", "blast", "linea"):
         assert ChainRegistry.get(chain).native.slip44 == 60
-    assert ChainRegistry.get(Chain.SOLANA).native.slip44 == 501
+    assert ChainRegistry.get("solana").native.slip44 == 501
 
 
 def test_non_eth_native_chains_carry_verified_slip44_values() -> None:
-    assert ChainRegistry.get(Chain.POLYGON).native.slip44 == 966
-    assert ChainRegistry.get(Chain.AVALANCHE).native.slip44 == 9000
-    assert ChainRegistry.get(Chain.BSC).native.slip44 == 9006
-    assert ChainRegistry.get(Chain.BERACHAIN).native.slip44 == 8008
-    assert ChainRegistry.get(Chain.SONIC).native.slip44 == 10007
-    assert ChainRegistry.get(Chain.MONAD).native.slip44 == 268435779
-    assert ChainRegistry.get(Chain.HYPEREVM).native.slip44 == 2457
+    assert ChainRegistry.get("polygon").native.slip44 == 966
+    assert ChainRegistry.get("avalanche").native.slip44 == 9000
+    assert ChainRegistry.get("bsc").native.slip44 == 9006
+    assert ChainRegistry.get("berachain").native.slip44 == 8008
+    assert ChainRegistry.get("sonic").native.slip44 == 10007
+    assert ChainRegistry.get("monad").native.slip44 == 268435779
+    assert ChainRegistry.get("hyperevm").native.slip44 == 2457
 
 
 def test_chains_without_verified_slip44_leave_slip44_unset() -> None:
-    for chain in (Chain.XLAYER, Chain.MANTLE, Chain.PLASMA, Chain.ZEROG):
+    for chain in ("xlayer", "mantle", "plasma", "zerog"):
         assert ChainRegistry.get(chain).native.slip44 is None
 
 
 def test_every_registered_chain_has_slip44_coverage() -> None:
     covered_with_slip44 = {
-        Chain.ETHEREUM,
-        Chain.ARBITRUM,
-        Chain.OPTIMISM,
-        Chain.BASE,
-        Chain.BLAST,
-        Chain.LINEA,
-        Chain.SOLANA,
-        Chain.POLYGON,
-        Chain.AVALANCHE,
-        Chain.BSC,
-        Chain.BERACHAIN,
-        Chain.SONIC,
-        Chain.MONAD,
-        Chain.HYPEREVM,
+        "ethereum",
+        "arbitrum",
+        "optimism",
+        "base",
+        "blast",
+        "linea",
+        "solana",
+        "polygon",
+        "avalanche",
+        "bsc",
+        "berachain",
+        "sonic",
+        "monad",
+        "hyperevm",
     }
-    covered_without_slip44 = {Chain.XLAYER, Chain.MANTLE, Chain.PLASMA, Chain.ZEROG}
-    all_registered = {descriptor.enum for descriptor in ChainRegistry.all()}
+    covered_without_slip44 = {"xlayer", "mantle", "plasma", "zerog"}
+    all_registered = {descriptor.name for descriptor in ChainRegistry.all()}
 
     assert all_registered == covered_with_slip44 | covered_without_slip44

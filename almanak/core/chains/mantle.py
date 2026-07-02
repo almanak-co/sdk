@@ -1,6 +1,6 @@
 """Mantle (chain_id 5000) — L2."""
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._contracts import safe_multisend_contracts
 from ._descriptor import (
@@ -17,7 +17,6 @@ from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.MANTLE,
         name="mantle",
         chain_id=5000,
         family=ChainFamily.EVM,

@@ -29,7 +29,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.data.tokens.cache import TokenCacheManager
 from almanak.framework.data.tokens.defaults import DEFAULT_TOKENS, SYMBOL_ALIASES, WRAPPED_NATIVE
 from almanak.framework.data.tokens.exceptions import (
@@ -72,7 +71,7 @@ def resolver(temp_cache_file):
 def make_resolved_token(
     symbol="TEST",
     address="0x1234567890123456789012345678901234567890",
-    chain=Chain.ARBITRUM,
+    chain="arbitrum",
     decimals=18,
     source="static",
     is_native=False,
@@ -164,15 +163,15 @@ class TestResolveBySymbolAllMajorTokens:
         usdc_eth = resolver.resolve("USDC", "ethereum")
         usdc_opt = resolver.resolve("USDC", "optimism")
         assert usdc_arb.address != usdc_eth.address
-        assert usdc_arb.chain == Chain.ARBITRUM
-        assert usdc_eth.chain == Chain.ETHEREUM
-        assert usdc_opt.chain == Chain.OPTIMISM
+        assert usdc_arb.chain == "arbitrum"
+        assert usdc_eth.chain == "ethereum"
+        assert usdc_opt.chain == "optimism"
 
-    def test_resolve_with_chain_enum(self, resolver):
-        """Resolution works with Chain enum values."""
-        token = resolver.resolve("USDC", Chain.ARBITRUM)
+    def test_resolve_with_chain_alias(self, resolver):
+        """Resolution works with registered chain aliases ('arb' -> 'arbitrum')."""
+        token = resolver.resolve("USDC", "arb")
         assert token.symbol == "USDC"
-        assert token.chain == Chain.ARBITRUM
+        assert token.chain == "arbitrum"
 
 
 # ============================================================================

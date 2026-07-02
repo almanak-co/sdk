@@ -12,17 +12,16 @@ with this single registry.
 Usage::
 
     from almanak.core.chains import ChainRegistry
-    from almanak.core.enums import Chain
 
-    ChainRegistry.get(Chain.ETHEREUM).chain_id           # -> 1
-    ChainRegistry.resolve("bnb").enum                    # -> Chain.BSC
+    ChainRegistry.get("ethereum").chain_id                # -> 1
+    ChainRegistry.resolve("bnb").name                     # -> "bsc"
     ChainRegistry.by_id(42161).name                       # -> "arbitrum"
     ChainRegistry.all()                                   # -> tuple of descriptors
 """
 
 from __future__ import annotations
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._descriptor import CAIP2_NAMESPACE_BY_FAMILY, ChainDescriptor, GasProfile
 
@@ -44,7 +43,6 @@ class ChainRegistry:
     The class exposes only classmethods; instantiating it is not useful.
     """
 
-    _by_enum: dict[Chain, ChainDescriptor] = {}
     _by_name: dict[str, ChainDescriptor] = {}
     _by_id: dict[int, ChainDescriptor] = {}
     # CAIP-2 id (e.g. "eip155:42161", "solana:5eykt4UsFv8P8…") → descriptor.
@@ -63,36 +61,32 @@ class ChainRegistry:
         :meth:`try_resolve`, which lowercase their input. ``descriptor.name``
         is already enforced to be lowercase by ``ChainDescriptor.__post_init__``.
 
-        Raises ``ValueError`` if the same enum is registered twice, an alias
-        collides with another chain, or two EVM chains declare the same
-        ``chain_id`` — each almost always means a copy/paste bug in a chain
-        file.
+        Raises ``ValueError`` if the same canonical name is registered
+        twice, an alias collides with another chain, or two EVM chains
+        declare the same ``chain_id`` — each almost always means a
+        copy/paste bug in a chain file.
         """
         # ----- preflight validation (no mutation) -----
-        if descriptor.enum in cls._by_enum:
-            existing = cls._by_enum[descriptor.enum]
-            raise ValueError(
-                f"Duplicate ChainDescriptor for {descriptor.enum.name}: "
-                f"existing chain_id={existing.chain_id}, "
-                f"incoming chain_id={descriptor.chain_id}"
-            )
-
+        # Canonical-name identity: any second registration claiming an
+        # already-taken name is a copy/paste bug in a chain file (this is
+        # what duplicate enum members used to catch via syntax errors).
         existing_for_name = cls._by_name.get(descriptor.name)
-        if existing_for_name is not None and existing_for_name.enum is not descriptor.enum:
+        if existing_for_name is not None:
             raise ValueError(
-                f"Canonical name {descriptor.name!r} for {descriptor.enum.name} "
-                f"collides with already-registered chain {existing_for_name.enum.name} "
-                f"(its alias claimed the slot first)"
+                f"Canonical name {descriptor.name!r} collides with "
+                f"already-registered chain {existing_for_name.name!r} "
+                f"(existing chain_id={existing_for_name.chain_id}, "
+                f"incoming chain_id={descriptor.chain_id})"
             )
 
         normalized_aliases = tuple(alias.lower() for alias in descriptor.aliases)
         # descriptor.name is already lowercase (enforced by __post_init__).
         for alias in normalized_aliases:
-            if alias in cls._by_name and cls._by_name[alias].enum is not descriptor.enum:
+            if alias in cls._by_name and cls._by_name[alias] is not descriptor:
                 raise ValueError(
-                    f"Alias {alias!r} for {descriptor.enum.name} collides "
+                    f"Alias {alias!r} for {descriptor.name} collides "
                     f"with already-registered chain "
-                    f"{cls._by_name[alias].enum.name}"
+                    f"{cls._by_name[alias].name}"
                 )
 
         # chain_id == 0 is the non-EVM sentinel (Solana); we don't index it
@@ -100,8 +94,8 @@ class ChainRegistry:
         if descriptor.chain_id != 0 and descriptor.chain_id in cls._by_id:
             raise ValueError(
                 f"Duplicate chain_id {descriptor.chain_id} for "
-                f"{descriptor.enum.name} (already used by "
-                f"{cls._by_id[descriptor.chain_id].enum.name})"
+                f"{descriptor.name} (already used by "
+                f"{cls._by_id[descriptor.chain_id].name})"
             )
 
         # Non-EVM chains must declare an explicit caip2_reference to be
@@ -111,7 +105,7 @@ class ChainRegistry:
         # buildable without one. VIB-5175.
         if descriptor.family is not ChainFamily.EVM and not descriptor.caip2_reference:
             raise ValueError(
-                f"Non-EVM ChainDescriptor {descriptor.enum.name} must declare a "
+                f"Non-EVM ChainDescriptor {descriptor.name} must declare a "
                 f"caip2_reference (chain_id is the non-EVM sentinel and cannot serve "
                 f"as a CAIP-2 reference)"
             )
@@ -121,13 +115,12 @@ class ChainRegistry:
         # ``caip2_reference``, so guard that namespace here. VIB-5175.
         caip2 = descriptor.caip2
         existing_caip2 = cls._by_caip2.get(caip2)
-        if existing_caip2 is not None and existing_caip2.enum is not descriptor.enum:
+        if existing_caip2 is not None and existing_caip2 is not descriptor:
             raise ValueError(
-                f"Duplicate CAIP-2 id {caip2!r} for {descriptor.enum.name} (already used by {existing_caip2.enum.name})"
+                f"Duplicate CAIP-2 id {caip2!r} for {descriptor.name} (already used by {existing_caip2.name})"
             )
 
         # ----- commit (every validation has passed) -----
-        cls._by_enum[descriptor.enum] = descriptor
         cls._by_name[descriptor.name] = descriptor
         for alias in normalized_aliases:
             cls._by_name[alias] = descriptor
@@ -136,20 +129,18 @@ class ChainRegistry:
         cls._by_caip2[caip2] = descriptor
 
     @classmethod
-    def get(cls, chain: Chain) -> ChainDescriptor:
-        """Get descriptor by :class:`Chain` enum.
+    def get(cls, chain: str | ChainDescriptor) -> ChainDescriptor:
+        """Get a descriptor by canonical name / alias / CAIP-2 id.
 
-        Raises ``KeyError`` if the chain is not registered (a programming
-        error — every enum member must have a descriptor).
+        A :class:`ChainDescriptor` passes through unchanged; a string
+        delegates to :meth:`resolve` (raises ``ValueError`` for unknown
+        chains).
         """
-        try:
-            return cls._by_enum[chain]
-        except KeyError as e:
-            raise KeyError(
-                f"No ChainDescriptor registered for {chain.name}. "
-                f"Add a file under almanak/core/chains/ that calls "
-                f"@register_chain."
-            ) from e
+        if isinstance(chain, ChainDescriptor):
+            return chain
+        if not isinstance(chain, str):
+            raise TypeError(f"chain must be a canonical name string or ChainDescriptor, got {type(chain).__name__}")
+        return cls.resolve(chain)
 
     @classmethod
     def resolve(cls, name_or_alias: str) -> ChainDescriptor:
@@ -260,17 +251,19 @@ class ChainRegistry:
 
     @classmethod
     def all(cls) -> tuple[ChainDescriptor, ...]:
-        """Return every registered descriptor, sorted by enum name.
+        """Return every registered descriptor, sorted by canonical name.
 
         Deterministic ordering matters for tests, log output, and any
-        ``frozenset`` derived view (e.g. ``ALLOWED_CHAINS``).
+        ``frozenset`` derived view (e.g. ``ALLOWED_CHAINS``). Canonical names
+        are the lowercase enum names, so this ordering is identical to the
+        historical sort-by-enum-name ordering.
         """
-        return tuple(sorted(cls._by_enum.values(), key=lambda d: d.enum.name))
+        return tuple(cls._by_name[name] for name in cls.names())
 
     @classmethod
     def names(cls) -> tuple[str, ...]:
         """Return every canonical chain name, sorted."""
-        return tuple(sorted(d.name for d in cls._by_enum.values()))
+        return tuple(sorted({d.name for d in cls._by_name.values()}))
 
     @classmethod
     def conservative_gas_fallback(cls) -> GasProfile:
@@ -283,22 +276,23 @@ class ChainRegistry:
         (e.g. the backtester's default gas resolution, VIB-5088) carry no
         chain literals (VIB-4851 coupling rule).
         """
-        return cls._by_enum[Chain.ETHEREUM].gas
+        return cls._by_name["ethereum"].gas
 
     @classmethod
-    def aliases(cls) -> dict[str, Chain]:
-        """Return the full alias map (canonical names + aliases → Chain).
+    def aliases(cls) -> dict[str, str]:
+        """Return the full alias map (canonical names + aliases → canonical name).
 
-        Equivalent to the legacy ``_CHAIN_ALIASES`` dict.
+        Equivalent to the legacy ``_CHAIN_ALIASES`` dict, with canonical
+        lowercase names as values (the Chain enum is being removed —
+        VIB-4851).
         """
-        return {name: d.enum for name, d in cls._by_name.items()}
+        return {name: d.name for name, d in cls._by_name.items()}
 
     # ----- internal: only used by tests --------------------------------
 
     @classmethod
     def _reset(cls) -> None:
         """Clear every registration. Tests only."""
-        cls._by_enum.clear()
         cls._by_name.clear()
         cls._by_id.clear()
         cls._by_caip2.clear()

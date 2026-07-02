@@ -156,16 +156,14 @@ def test_chain_alias_normalization() -> None:
     assert eth_alias == eth_canonical
 
 
-def test_chain_enum_accepted() -> None:
-    """The helper accepts :class:`Chain` enum instances on the chain
-    parameter, matching ``TokenResolver.resolve`` and ``_normalize_chain``
-    upstream. Callers that already type their chains as the enum get
-    correct static type-checking without having to ``.value`` first."""
-    from almanak.core.enums import Chain
-
-    enum_out = canonicalize_token_identity("USDC", Chain.ARBITRUM)
+def test_legacy_uppercase_chain_accepted() -> None:
+    """The helper accepts legacy UPPERCASE serialized chain names on the
+    chain parameter (records persisted before the Chain-enum removal
+    serialized ``"ARBITRUM"``), matching ``TokenResolver.resolve`` and
+    ``_normalize_chain`` upstream — case-insensitive resolution, forever."""
+    legacy_out = canonicalize_token_identity("USDC", "ARBITRUM")
     str_out = canonicalize_token_identity("USDC", "arbitrum")
-    assert enum_out == str_out == ("arbitrum", USDC_ARBITRUM)
+    assert legacy_out == str_out == ("arbitrum", USDC_ARBITRUM)
 
 
 # ---------------------------------------------------------------------------

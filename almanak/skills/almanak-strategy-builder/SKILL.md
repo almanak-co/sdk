@@ -1534,26 +1534,26 @@ class MyStrategy(IntentStrategy):
 
 ### Chains
 
-| Chain | Enum Value | Config Name |
-|-------|-----------|-------------|
-| Ethereum | `ETHEREUM` | `ethereum` |
-| Arbitrum | `ARBITRUM` | `arbitrum` |
-| Optimism | `OPTIMISM` | `optimism` |
-| Base | `BASE` | `base` |
-| Avalanche | `AVALANCHE` | `avalanche` |
-| Polygon | `POLYGON` | `polygon` |
-| BSC | `BSC` | `bsc` |
-| Sonic | `SONIC` | `sonic` |
-| Plasma | `PLASMA` | `plasma` |
-| Blast | `BLAST` | `blast` |
-| Linea | `LINEA` | `linea` |
-| Mantle | `MANTLE` | `mantle` |
-| Berachain | `BERACHAIN` | `berachain` |
-| Monad | `MONAD` | `monad` |
-| X-Layer | `XLAYER` | `xlayer` |
-| 0G Chain | `ZEROG` | `zerog` |
-| HyperEVM | `HYPEREVM` | `hyperevm` |
-| Solana | `SOLANA` | `solana` |
+| Chain | Config Name |
+|-------|-------------|
+| Ethereum | `ethereum` |
+| Arbitrum | `arbitrum` |
+| Optimism | `optimism` |
+| Base | `base` |
+| Avalanche | `avalanche` |
+| Polygon | `polygon` |
+| BSC | `bsc` |
+| Sonic | `sonic` |
+| Plasma | `plasma` |
+| Blast | `blast` |
+| Linea | `linea` |
+| Mantle | `mantle` |
+| Berachain | `berachain` |
+| Monad | `monad` |
+| X-Layer | `xlayer` |
+| 0G Chain | `zerog` |
+| HyperEVM | `hyperevm` |
+| Solana | `solana` |
 
 <!-- almanak-sdk-end: supported-chains -->
 

@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
 from almanak.framework.backtesting.pnl.providers.multi_dex_volume import (
     FALLBACK_DATA_SOURCE,
@@ -130,22 +129,22 @@ class TestProtocolDetection:
     def test_detect_aerodrome_for_base(self):
         """Test Aerodrome is detected for Base chain."""
         provider = MultiDEXVolumeProvider()
-        assert provider._detect_protocol_from_chain(Chain.BASE) == "aerodrome"
+        assert provider._detect_protocol_from_chain("base") == "aerodrome"
 
     def test_detect_traderjoe_for_avalanche(self):
         """Test TraderJoe V2 is detected for Avalanche chain."""
         provider = MultiDEXVolumeProvider()
-        assert provider._detect_protocol_from_chain(Chain.AVALANCHE) == "traderjoe_v2"
+        assert provider._detect_protocol_from_chain("avalanche") == "traderjoe_v2"
 
     def test_detect_uniswap_for_ethereum(self):
         """Test Uniswap V3 is detected for Ethereum chain."""
         provider = MultiDEXVolumeProvider()
-        assert provider._detect_protocol_from_chain(Chain.ETHEREUM) == "uniswap_v3"
+        assert provider._detect_protocol_from_chain("ethereum") == "uniswap_v3"
 
     def test_detect_uniswap_for_arbitrum(self):
         """Test Uniswap V3 is detected for Arbitrum chain."""
         provider = MultiDEXVolumeProvider()
-        assert provider._detect_protocol_from_chain(Chain.ARBITRUM) == "uniswap_v3"
+        assert provider._detect_protocol_from_chain("arbitrum") == "uniswap_v3"
 
 
 class TestGetVolume:
@@ -174,7 +173,7 @@ class TestGetVolume:
 
         volumes = await provider.get_volume(
             pool_address="0x123",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             start_date=date(2024, 1, 15),
             end_date=date(2024, 1, 15),
             protocol="uniswap_v3",
@@ -207,7 +206,7 @@ class TestGetVolume:
 
         volumes = await provider.get_volume(
             pool_address="0x123",
-            chain=Chain.ETHEREUM,
+            chain="ethereum",
             start_date=date(2024, 1, 15),
             end_date=date(2024, 1, 15),
             protocol="curve",
@@ -239,7 +238,7 @@ class TestGetVolume:
 
         volumes = await provider.get_volume(
             pool_address="0x123",
-            chain=Chain.BASE,
+            chain="base",
             start_date=date(2024, 1, 15),
             end_date=date(2024, 1, 15),
             # No protocol specified - should auto-detect Aerodrome for Base
@@ -255,7 +254,7 @@ class TestGetVolume:
 
         volumes = await provider.get_volume(
             pool_address="0x123",
-            chain=Chain.BSC,  # BSC not supported by Uniswap V3
+            chain="bsc",  # BSC not supported by Uniswap V3
             start_date=date(2024, 1, 15),
             end_date=date(2024, 1, 17),
             protocol="uniswap_v3",
@@ -274,7 +273,7 @@ class TestGetVolume:
 
         volumes = await provider.get_volume(
             pool_address="0x123",
-            chain=Chain.ETHEREUM,
+            chain="ethereum",
             start_date=date(2024, 1, 15),
             end_date=date(2024, 1, 15),
             protocol="unknown_protocol",
@@ -295,7 +294,7 @@ class TestFallbackBehavior:
 
         volumes = await provider.get_volume(
             pool_address="0x123",
-            chain=Chain.SONIC,  # Unsupported chain
+            chain="sonic",  # Unsupported chain
             start_date=date(2024, 1, 15),
             end_date=date(2024, 1, 20),  # 6 days
         )
@@ -324,7 +323,7 @@ class TestFallbackBehavior:
         with pytest.raises(DataSourceUnavailable):
             await provider.get_volume(
                 pool_address="0x123",
-                chain=Chain.ARBITRUM,
+                chain="arbitrum",
                 start_date=date(2024, 1, 15),
                 end_date=date(2024, 1, 15),
                 protocol="uniswap_v3",
@@ -387,13 +386,13 @@ class TestHelperMethods:
         provider = MultiDEXVolumeProvider()
 
         chains = provider.get_supported_chains("uniswap_v3")
-        assert Chain.ETHEREUM in chains
-        assert Chain.ARBITRUM in chains
+        assert "ethereum" in chains
+        assert "arbitrum" in chains
 
         # Test with string
         chains = provider.get_supported_chains("balancer")
-        assert Chain.ETHEREUM in chains
-        assert Chain.POLYGON in chains
+        assert "ethereum" in chains
+        assert "polygon" in chains
 
     def test_get_supported_chains_unknown_protocol(self):
         """Test get_supported_chains returns empty for unknown protocol."""
@@ -448,3 +447,27 @@ class TestAllProtocols:
 
         assert inner_provider is not None
         assert hasattr(inner_provider, "get_volume")
+
+
+class TestChainInputNormalization:
+    """Alias / mixed-case chain inputs must not silently downgrade to fallback."""
+
+    @pytest.mark.asyncio
+    async def test_alias_chain_routes_to_declared_lane(self, caplog):
+        provider = MultiDEXVolumeProvider()
+        caplog.set_level("WARNING")
+        # "bnb" is an alias of the declared "bsc"; the routing check must
+        # normalize before comparing against entry.chains. The gateway call
+        # itself may fail (no channel) and fall back later — only the
+        # "Chain ... not supported by protocol" downgrade matters here.
+        try:
+            await provider.get_volume(
+                pool_address="0x0000000000000000000000000000000000000001",
+                chain="bnb",
+                start_date=date(2024, 1, 1),
+                end_date=date(2024, 1, 2),
+                protocol="pancakeswap_v3",
+            )
+        except Exception:
+            pass
+        assert "not supported by protocol" not in caplog.text

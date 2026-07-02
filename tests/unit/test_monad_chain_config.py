@@ -1,13 +1,17 @@
 """Tests for Monad chain configuration across the SDK."""
 
 
-class TestMonadChainEnum:
-    """Monad is registered in the canonical Chain enum."""
+class TestMonadChainRegistry:
+    """Monad is registered in the canonical chain registry."""
 
-    def test_core_chain_enum(self):
-        from almanak.core.enums import Chain
+    def test_core_chain_registry(self):
+        from almanak.core.chains import ChainRegistry
 
-        assert Chain.MONAD.value == "MONAD"
+        assert ChainRegistry.resolve("monad").chain_id == 143
+        assert ChainRegistry.resolve("monad").name == "monad"
+        # Legacy-case contract: records serialized before the Chain-enum
+        # removal carry "MONAD" — case-insensitive resolution, forever.
+        assert ChainRegistry.resolve("MONAD").name == "monad"
 
 
 class TestMonadChainConfig:

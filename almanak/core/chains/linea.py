@@ -1,6 +1,6 @@
 """Linea (chain_id 59144) — zkEVM L2."""
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._descriptor import (
     AnvilProfile,
@@ -16,7 +16,6 @@ from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.LINEA,
         name="linea",
         chain_id=59144,
         family=ChainFamily.EVM,

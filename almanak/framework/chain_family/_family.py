@@ -9,7 +9,6 @@ Public surface:
 * :class:`EvmFamily`, :class:`SvmFamily` — concrete adapters.
 * :func:`family_for(chain_name)` — primary lookup used by call sites that already
   hold a chain name string (``IntentCompiler.chain``, connector ``ctx.chain``).
-* :func:`family_for_chain_enum(chain_enum)` — lookup by :class:`Chain` enum.
 * :func:`family_for_kind(kind)` — lookup by :class:`ChainFamily` enum kind.
 
 Receipt parsing pre-dispatch hook
@@ -30,7 +29,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from almanak.core.chains import ChainRegistry
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 if TYPE_CHECKING:
     from almanak.framework.intents.compiler import IntentCompiler
@@ -387,17 +386,6 @@ def all_families() -> tuple[ChainFamilyAdapter, ...]:
     allocation on the hot path.
     """
     return _ALL_FAMILIES
-
-
-def family_for_chain_enum(chain_enum: Chain) -> ChainFamilyAdapter:
-    """Return the adapter for a :class:`Chain` enum member.
-
-    Resolves via :class:`ChainRegistry` so the family is read off the
-    descriptor — the authoritative VIB-4801 source of truth and, since
-    VIB-4851 deleted the parallel ``CHAIN_FAMILY_MAP`` literal, the only one.
-    """
-    descriptor = ChainRegistry.get(chain_enum)
-    return family_for_kind(descriptor.family)
 
 
 def family_for(chain_name: str) -> ChainFamilyAdapter:

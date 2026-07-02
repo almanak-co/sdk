@@ -190,10 +190,9 @@ class TestChainFamilyAntiBypass:
             GasProfile,
             NativeToken,
         )
-        from almanak.core.enums import Chain, ChainFamily
+        from almanak.core.enums import ChainFamily
 
         fake_descriptor = ChainDescriptor(
-            enum=Chain.SOLANA,
             name="solana",
             chain_id=0,
             family=ChainFamily.SOLANA,
@@ -221,10 +220,9 @@ class TestChainFamilyAntiBypass:
             GasProfile,
             NativeToken,
         )
-        from almanak.core.enums import Chain, ChainFamily
+        from almanak.core.enums import ChainFamily
 
         fake_descriptor = ChainDescriptor(
-            enum=Chain.SOLANA,
             name="solana",
             chain_id=0,
             family=ChainFamily.SOLANA,

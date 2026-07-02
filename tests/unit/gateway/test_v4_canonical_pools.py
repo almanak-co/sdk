@@ -32,7 +32,6 @@ from almanak.connectors.uniswap_v4.sdk import (
     PoolKey as FrameworkPoolKey,
 )
 from almanak.framework.data.tokens.exceptions import TokenNotFoundError
-from almanak.framework.data.tokens.models import Chain
 from almanak.connectors.uniswap_v4.gateway.canonical_pools import (
     CANONICAL_V4_PAIRS,
     CanonicalV4Pair,
@@ -737,4 +736,4 @@ def test_public_api_importable() -> None:
 
 
 # Quick sanity assertion against unused imports — placate ruff.
-_ = (Chain, TokenNotFoundError)
+_ = (TokenNotFoundError,)

@@ -6,7 +6,6 @@ from datetime import datetime
 
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.data.tokens import NATIVE_SENTINEL, TokenRef, normalize_token_address_for_chain
 from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType, ResolvedToken
 from almanak.framework.data.tokens.resolver import _normalize_address_for_chain
@@ -22,8 +21,8 @@ def _resolved_token(**overrides: object) -> ResolvedToken:
         "symbol": "USDC",
         "address": USDC_ARBITRUM_MIXED,
         "decimals": 6,
-        "chain": Chain.ARBITRUM,
-        "chain_id": CHAIN_ID_MAP[Chain.ARBITRUM],
+        "chain": "arbitrum",
+        "chain_id": CHAIN_ID_MAP["arbitrum"],
         "name": "USD Coin",
         "coingecko_id": "usd-coin",
         "is_stablecoin": True,
@@ -39,7 +38,7 @@ def _resolved_token(**overrides: object) -> ResolvedToken:
 
 def test_token_ref_identity_ignores_display_metadata() -> None:
     left = TokenRef(
-        chain=Chain.ARBITRUM,
+        chain="arbitrum",
         address=USDC_ARBITRUM_MIXED,
         decimals=6,
         symbol="USDC",
@@ -55,67 +54,67 @@ def test_token_ref_identity_ignores_display_metadata() -> None:
 
     assert left == right
     assert hash(left) == hash(right)
-    assert left.identity_key == (Chain.ARBITRUM, USDC_ARBITRUM_LOWER)
+    assert left.identity_key == ("arbitrum", USDC_ARBITRUM_LOWER)
 
 
 def test_token_ref_equality_rejects_other_types() -> None:
-    token_ref = TokenRef(chain=Chain.ARBITRUM, address=USDC_ARBITRUM_LOWER, decimals=6, symbol="USDC")
+    token_ref = TokenRef(chain="arbitrum", address=USDC_ARBITRUM_LOWER, decimals=6, symbol="USDC")
 
     assert token_ref.__eq__(object()) is NotImplemented
 
 
 def test_token_ref_same_symbol_different_address_is_distinct() -> None:
-    arbitrum_usdc = TokenRef(chain=Chain.ARBITRUM, address=USDC_ARBITRUM_LOWER, decimals=6, symbol="USDC")
-    ethereum_usdc_on_arbitrum = TokenRef(chain=Chain.ARBITRUM, address=USDC_ETHEREUM, decimals=6, symbol="USDC")
+    arbitrum_usdc = TokenRef(chain="arbitrum", address=USDC_ARBITRUM_LOWER, decimals=6, symbol="USDC")
+    ethereum_usdc_on_arbitrum = TokenRef(chain="arbitrum", address=USDC_ETHEREUM, decimals=6, symbol="USDC")
 
     assert arbitrum_usdc != ethereum_usdc_on_arbitrum
 
 
 def test_token_ref_same_address_different_chain_is_distinct() -> None:
-    on_arbitrum = TokenRef(chain=Chain.ARBITRUM, address=USDC_ARBITRUM_LOWER, decimals=6, symbol="USDC")
-    on_ethereum = TokenRef(chain=Chain.ETHEREUM, address=USDC_ARBITRUM_LOWER, decimals=6, symbol="USDC")
+    on_arbitrum = TokenRef(chain="arbitrum", address=USDC_ARBITRUM_LOWER, decimals=6, symbol="USDC")
+    on_ethereum = TokenRef(chain="ethereum", address=USDC_ARBITRUM_LOWER, decimals=6, symbol="USDC")
 
     assert on_arbitrum != on_ethereum
 
 
 def test_token_ref_normalization_matches_resolver_helper() -> None:
-    assert normalize_token_address_for_chain(USDC_ARBITRUM_MIXED, Chain.ARBITRUM) == _normalize_address_for_chain(
+    assert normalize_token_address_for_chain(USDC_ARBITRUM_MIXED, "arbitrum") == _normalize_address_for_chain(
         USDC_ARBITRUM_MIXED, "arbitrum"
     )
-    assert normalize_token_address_for_chain(f" {USDC_ARBITRUM_MIXED}\n", Chain.ARBITRUM) == USDC_ARBITRUM_LOWER
-    assert normalize_token_address_for_chain(USDC_SOLANA, Chain.SOLANA) == _normalize_address_for_chain(
+    assert normalize_token_address_for_chain(f" {USDC_ARBITRUM_MIXED}\n", "arbitrum") == USDC_ARBITRUM_LOWER
+    assert normalize_token_address_for_chain(USDC_SOLANA, "solana") == _normalize_address_for_chain(
         USDC_SOLANA, "solana"
     )
-    assert normalize_token_address_for_chain(f"\t{USDC_SOLANA} ", Chain.SOLANA) == USDC_SOLANA
-    assert normalize_token_address_for_chain(USDC_SOLANA, Chain.SOLANA) == USDC_SOLANA
+    assert normalize_token_address_for_chain(f"\t{USDC_SOLANA} ", "solana") == USDC_SOLANA
+    assert normalize_token_address_for_chain(USDC_SOLANA, "solana") == USDC_SOLANA
 
 
 def test_token_ref_normalization_rejects_non_string_address() -> None:
     with pytest.raises(TypeError, match="Token address must be a string"):
-        normalize_token_address_for_chain(123, Chain.ARBITRUM)  # type: ignore[arg-type]
+        normalize_token_address_for_chain(123, "arbitrum")  # type: ignore[arg-type]
 
 
 def test_token_ref_native_sentinel_is_valid_identity() -> None:
-    native = TokenRef(chain=Chain.ARBITRUM, address=NATIVE_SENTINEL, decimals=18, symbol="ETH")
+    native = TokenRef(chain="arbitrum", address=NATIVE_SENTINEL, decimals=18, symbol="ETH")
 
     assert native.address == NATIVE_SENTINEL.lower()
-    assert native.identity_key == (Chain.ARBITRUM, NATIVE_SENTINEL.lower())
+    assert native.identity_key == ("arbitrum", NATIVE_SENTINEL.lower())
 
 
 def test_token_ref_rejects_bad_identity_inputs() -> None:
     with pytest.raises(ValueError, match="address cannot be empty"):
-        TokenRef(chain=Chain.ARBITRUM, address="", decimals=18)
+        TokenRef(chain="arbitrum", address="", decimals=18)
     with pytest.raises(ValueError, match="address cannot be empty"):
-        TokenRef(chain=Chain.ARBITRUM, address="   ", decimals=18)
+        TokenRef(chain="arbitrum", address="   ", decimals=18)
     with pytest.raises(ValueError, match="Invalid decimals"):
-        TokenRef(chain=Chain.ARBITRUM, address=USDC_ARBITRUM_LOWER, decimals=-1)
+        TokenRef(chain="arbitrum", address=USDC_ARBITRUM_LOWER, decimals=-1)
     with pytest.raises(ValueError, match="Unknown chain"):
         TokenRef(chain="not-a-chain", address=USDC_ARBITRUM_LOWER, decimals=6)
 
 
 def test_token_ref_wire_shape_round_trips() -> None:
     original = TokenRef(
-        chain=Chain.SOLANA,
+        chain="solana",
         address=USDC_SOLANA,
         decimals=6,
         symbol="USDC",
@@ -125,8 +124,11 @@ def test_token_ref_wire_shape_round_trips() -> None:
     restored = TokenRef.from_dict(original.to_dict())
 
     assert restored == original
+    # Wire shape writes the canonical lowercase name (VIB-4851); legacy
+    # UPPERCASE records keep loading via the case-insensitive from_dict
+    # (pinned in test_token_chain_compat.py).
     assert restored.to_dict() == {
-        "chain": "SOLANA",
+        "chain": "solana",
         "address": USDC_SOLANA,
         "decimals": 6,
         "symbol": "USDC",
@@ -139,7 +141,7 @@ def test_resolved_token_exposes_token_ref_identity() -> None:
 
     assert resolved.address == USDC_ARBITRUM_MIXED
     assert resolved.token_ref == TokenRef(
-        chain=Chain.ARBITRUM,
+        chain="arbitrum",
         address=USDC_ARBITRUM_LOWER,
         decimals=6,
         symbol="USDC",

@@ -1,6 +1,6 @@
 """Base (chain_id 8453) — Coinbase L2 (OP Stack)."""
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._contracts import safe_stack_contracts
 from ._descriptor import (
@@ -18,7 +18,6 @@ from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.BASE,
         name="base",
         chain_id=8453,
         family=ChainFamily.EVM,

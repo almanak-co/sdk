@@ -27,7 +27,6 @@ Subgraph Source:
 
 Example:
     from almanak.connectors.compound_v3.backtest_apy import CompoundV3APYProvider
-    from almanak.core.enums import Chain
     from datetime import datetime, UTC
 
     provider = CompoundV3APYProvider()
@@ -51,7 +50,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from almanak.connectors._strategy_base.address_registry import AddressRegistry
-from almanak.core.enums import Chain
+from almanak.core.chains import ChainRegistry
 from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalAPYProvider
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
@@ -65,21 +64,31 @@ from almanak.framework.backtesting.pnl.types import APYResult, DataConfidence, D
 logger = logging.getLogger(__name__)
 
 
+def _canonical_chain(chain: str) -> str:
+    """Normalize any-case names / aliases to the canonical lowercase name.
+
+    Unknown chains pass through verbatim so the provider's existing
+    unsupported-chain fallback paths (and their warnings) still fire.
+    """
+    descriptor = ChainRegistry.try_resolve(chain)
+    return descriptor.name if descriptor is not None else chain
+
+
 # =============================================================================
 # Compound V3 Subgraph IDs (from Paperclip Labs community subgraph)
 # =============================================================================
 
 # Subgraph deployment IDs for Compound V3 on various chains
 # Source: https://github.com/papercliplabs/compound-v3-subgraph
-COMPOUND_V3_SUBGRAPH_IDS: dict[Chain, str] = {
-    Chain.ETHEREUM: "5nwMCSHaTqG3Kd2gHznbTXEnZ9QNWsssQfbHhDqQSQFp",
-    Chain.ARBITRUM: "Ff7ha9ELmpmg81D6nYxy4t8aGP26dPztqD1LDJNPqjLS",
-    Chain.POLYGON: "AaFtUWKfFdj2x8nnE3RxTSJkHwGHvawH3VWFBykCGzLs",
-    Chain.BASE: "2hcXhs36pTBDVUmk5K2Zkr6N4UYGwaHuco2a6jyTsijo",
+COMPOUND_V3_SUBGRAPH_IDS: dict[str, str] = {
+    "ethereum": "5nwMCSHaTqG3Kd2gHznbTXEnZ9QNWsssQfbHhDqQSQFp",
+    "arbitrum": "Ff7ha9ELmpmg81D6nYxy4t8aGP26dPztqD1LDJNPqjLS",
+    "polygon": "AaFtUWKfFdj2x8nnE3RxTSJkHwGHvawH3VWFBykCGzLs",
+    "base": "2hcXhs36pTBDVUmk5K2Zkr6N4UYGwaHuco2a6jyTsijo",
 }
 
 # Supported chains for this provider
-SUPPORTED_CHAINS: list[Chain] = list(COMPOUND_V3_SUBGRAPH_IDS.keys())
+SUPPORTED_CHAINS: list[str] = list(COMPOUND_V3_SUBGRAPH_IDS.keys())
 
 # Data source identifier
 DATA_SOURCE = "compound_v3_subgraph"
@@ -96,14 +105,14 @@ _COMET_MARKET_SYMBOLS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _compound_v3_known_comet_addresses() -> dict[Chain, dict[str, str]]:
+def _compound_v3_known_comet_addresses() -> dict[str, dict[str, str]]:
     """Return the provider's legacy symbol-keyed view of connector-owned Comets."""
-    by_chain: dict[Chain, dict[str, str]] = {}
+    by_chain: dict[str, dict[str, str]] = {}
     for chain_key in AddressRegistry.address_chains_ordered("compound_v3"):
-        try:
-            chain = Chain[chain_key.upper()]
-        except KeyError:
+        descriptor = ChainRegistry.try_resolve(chain_key)
+        if descriptor is None:
             continue
+        chain = descriptor.name
 
         markets: dict[str, str] = {}
         for market_id, address in AddressRegistry.addresses_for("compound_v3", chain_key).items():
@@ -116,7 +125,7 @@ def _compound_v3_known_comet_addresses() -> dict[Chain, dict[str, str]]:
 
 # Backward-compatible public view: connector-owned market ids keyed by the
 # provider's historical asset symbols.
-KNOWN_COMET_ADDRESSES: dict[Chain, dict[str, str]] = _compound_v3_known_comet_addresses()
+KNOWN_COMET_ADDRESSES: dict[str, dict[str, str]] = _compound_v3_known_comet_addresses()
 
 # Safety valve for cursor pagination (VIB-5089). Daily snapshots: 100 pages
 # of 1000 covers ~270 years, so real windows never hit the valve.
@@ -178,14 +187,14 @@ class CompoundV3ClientConfig:
     """Configuration for Compound V3 APY provider.
 
     Attributes:
-        chain: Default chain for requests (default: ETHEREUM)
+        chain: Default chain for requests (default: "ethereum")
         requests_per_minute: Rate limit for subgraph requests (default: 100)
         supply_apy_fallback: Fallback supply APY when data unavailable
         borrow_apy_fallback: Fallback borrow APY when data unavailable
         use_net_rates: If True, use net rates (includes rewards); else use base rates
     """
 
-    chain: Chain = Chain.ETHEREUM
+    chain: str = "ethereum"
     requests_per_minute: int = 100
     supply_apy_fallback: Decimal = DEFAULT_SUPPLY_APY_FALLBACK
     borrow_apy_fallback: Decimal = DEFAULT_BORROW_APY_FALLBACK
@@ -257,8 +266,8 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
 
         logger.debug(
             "Initialized CompoundV3APYProvider: chain=%s, supported_chains=%s",
-            self._config.chain.value,
-            [c.value for c in SUPPORTED_CHAINS],
+            self._config.chain,
+            SUPPORTED_CHAINS,
         )
 
     @classmethod
@@ -285,7 +294,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
         return self._config
 
     @property
-    def supported_chains(self) -> list[Chain]:
+    def supported_chains(self) -> list[str]:
         """Get the list of supported chains."""
         return SUPPORTED_CHAINS.copy()
 
@@ -303,7 +312,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
         """Async context manager exit: close the client."""
         await self.close()
 
-    def _get_subgraph_id(self, chain: Chain) -> str | None:
+    def _get_subgraph_id(self, chain: str) -> str | None:
         """Get the subgraph ID for a chain.
 
         Args:
@@ -358,7 +367,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
             symbol = "WETH"
         return symbol
 
-    def _get_comet_address(self, chain: Chain, symbol: str) -> str | None:
+    def _get_comet_address(self, chain: str, symbol: str) -> str | None:
         """Get the Comet (market) address for a symbol on a chain.
 
         Args:
@@ -427,7 +436,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
             ),
         )
 
-    def _resolve_market_id(self, chain: Chain, market: str) -> str | None:
+    def _resolve_market_id(self, chain: str, market: str) -> str | None:
         """Resolve market identifier to a comet address or market ID.
 
         Args:
@@ -452,7 +461,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
         start_date: datetime,
         end_date: datetime,
         *,
-        _chain_override: Chain | None = None,
+        _chain_override: str | None = None,
     ) -> list[APYResult]:
         """Fetch historical APY data for a Compound V3 market.
 
@@ -482,7 +491,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
             for apy in apys:
                 print(f"Supply: {apy.supply_apy:.4f}, Borrow: {apy.borrow_apy:.4f}")
         """
-        chain = _chain_override if _chain_override is not None else self._config.chain
+        chain = _canonical_chain(_chain_override if _chain_override is not None else self._config.chain)
 
         # Ensure timestamps are in UTC (convert if needed to avoid day off-by-one)
         if start_date.tzinfo is None:
@@ -499,7 +508,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
         if subgraph_id is None:
             logger.warning(
                 "Unsupported chain for Compound V3: chain=%s. Returning fallback.",
-                chain.value,
+                chain,
             )
             return self._generate_fallback_results(start_date, end_date)
 
@@ -508,14 +517,14 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
         if market_id is None:
             logger.warning(
                 "Unknown market for Compound V3: chain=%s, market=%s. Returning fallback.",
-                chain.value,
+                chain,
                 market,
             )
             return self._generate_fallback_results(start_date, end_date)
 
         logger.info(
             "Fetching Compound V3 APY: chain=%s, market=%s (%s), start=%s, end=%s",
-            chain.value,
+            chain,
             market,
             market_id[:10] + "...",
             start_date,
@@ -547,7 +556,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
             if not daily_accountings:
                 logger.warning(
                     "No APY history from subgraph: chain=%s, market=%s, range=%s to %s",
-                    chain.value,
+                    chain,
                     market,
                     start_date,
                     end_date,
@@ -560,7 +569,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
             logger.info(
                 "Fetched %d APY data points: chain=%s, market=%s",
                 len(results),
-                chain.value,
+                chain,
                 market,
             )
 
@@ -574,7 +583,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
         except SubgraphRateLimitError as e:
             logger.warning(
                 "Subgraph rate limit exceeded: chain=%s, market=%s: %s",
-                chain.value,
+                chain,
                 market,
                 str(e),
             )
@@ -583,7 +592,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
         except SubgraphQueryError as e:
             logger.error(
                 "Subgraph query error: chain=%s, market=%s: %s",
-                chain.value,
+                chain,
                 market,
                 str(e),
             )
@@ -592,7 +601,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
         except Exception as e:
             logger.error(
                 "Unexpected error fetching APY: chain=%s, market=%s: %s",
-                chain.value,
+                chain,
                 market,
                 str(e),
             )
@@ -623,7 +632,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
 
     async def get_apy_for_chain(
         self,
-        chain: Chain,
+        chain: str,
         market: str,
         start_date: datetime,
         end_date: datetime,
@@ -644,7 +653,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
 
         Example:
             apys = await provider.get_apy_for_chain(
-                chain=Chain.ARBITRUM,
+                chain="arbitrum",
                 market="USDC",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
@@ -662,7 +671,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
     async def get_current_apy(
         self,
         market: str,
-        chain: Chain | None = None,
+        chain: str | None = None,
     ) -> APYResult:
         """Fetch the current APY for a market.
 
@@ -680,7 +689,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
             apy = await provider.get_current_apy("USDC")
             print(f"Current USDC supply APY: {apy.supply_apy:.4f}")
         """
-        chain = chain or self._config.chain
+        chain = _canonical_chain(chain or self._config.chain)
         now = datetime.now(UTC)
 
         # Query for recent data (last 7 days to ensure we get data)
@@ -699,7 +708,7 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
 
         return self._create_fallback_result(now)
 
-    async def list_markets(self, chain: Chain | None = None) -> list[dict[str, str]]:
+    async def list_markets(self, chain: str | None = None) -> list[dict[str, str]]:
         """List available markets on a chain.
 
         Args:
@@ -708,11 +717,11 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
         Returns:
             List of market info dicts with 'id' and 'cometProxy' keys
         """
-        chain = chain or self._config.chain
+        chain = _canonical_chain(chain or self._config.chain)
         subgraph_id = self._get_subgraph_id(chain)
 
         if subgraph_id is None:
-            logger.warning("Unsupported chain for Compound V3: chain=%s", chain.value)
+            logger.warning("Unsupported chain for Compound V3: chain=%s", chain)
             return []
 
         try:
@@ -723,11 +732,11 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
             )
 
             markets = data.get("markets", [])
-            logger.info("Found %d markets on chain=%s", len(markets), chain.value)
+            logger.info("Found %d markets on chain=%s", len(markets), chain)
             return markets
 
         except (SubgraphQueryError, SubgraphRateLimitError) as e:
-            logger.error("Error listing markets: chain=%s, error=%s", chain.value, str(e))
+            logger.error("Error listing markets: chain=%s, error=%s", chain, str(e))
             return []
 
 

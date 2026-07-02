@@ -27,7 +27,6 @@ from almanak.connectors.aave_v3.backtest_apy import (
     AaveV3APYProvider,
     AaveV3ClientConfig,
 )
-from almanak.core.enums import Chain
 from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
@@ -58,20 +57,20 @@ class TestAaveV3APYProviderInitialization:
         """Test provider initializes with default settings."""
         provider = AaveV3APYProvider()
         assert provider.supported_chains == SUPPORTED_CHAINS
-        assert provider.config.chain == Chain.ETHEREUM
+        assert provider.config.chain == "ethereum"
         assert provider.config.requests_per_minute == 100
         assert provider._owns_client is True
 
     def test_init_with_custom_config(self):
         """Test provider initializes with custom config."""
         config = AaveV3ClientConfig(
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             requests_per_minute=50,
             supply_apy_fallback=Decimal("0.05"),
             borrow_apy_fallback=Decimal("0.08"),
         )
         provider = AaveV3APYProvider(config=config)
-        assert provider.config.chain == Chain.ARBITRUM
+        assert provider.config.chain == "arbitrum"
         assert provider.config.requests_per_minute == 50
         assert provider.config.supply_apy_fallback == Decimal("0.05")
         assert provider.config.borrow_apy_fallback == Decimal("0.08")
@@ -135,12 +134,12 @@ class TestSupportedChains:
     def test_supported_chains_include_required_networks(self):
         """Test that all required networks are supported (US-017)."""
         # US-017 requires: Ethereum, Arbitrum, Optimism, Polygon, Base, Avalanche
-        assert Chain.ETHEREUM in SUPPORTED_CHAINS
-        assert Chain.ARBITRUM in SUPPORTED_CHAINS
-        assert Chain.OPTIMISM in SUPPORTED_CHAINS
-        assert Chain.POLYGON in SUPPORTED_CHAINS
-        assert Chain.BASE in SUPPORTED_CHAINS
-        assert Chain.AVALANCHE in SUPPORTED_CHAINS
+        assert "ethereum" in SUPPORTED_CHAINS
+        assert "arbitrum" in SUPPORTED_CHAINS
+        assert "optimism" in SUPPORTED_CHAINS
+        assert "polygon" in SUPPORTED_CHAINS
+        assert "base" in SUPPORTED_CHAINS
+        assert "avalanche" in SUPPORTED_CHAINS
 
     def test_all_supported_chains_have_subgraph_ids(self):
         """Test all supported chains have subgraph IDs."""
@@ -455,7 +454,7 @@ class TestGetAPYForChain:
     @pytest.mark.asyncio
     async def test_get_apy_for_chain_overrides_config_chain(self):
         """Test that get_apy_for_chain uses specified chain."""
-        config = AaveV3ClientConfig(chain=Chain.ETHEREUM)
+        config = AaveV3ClientConfig(chain="ethereum")
         provider = AaveV3APYProvider(config=config)
 
         reserve_response = {"reserves": [{"id": "0xusdc-0xpool-0", "symbol": "USDC"}]}
@@ -477,7 +476,7 @@ class TestGetAPYForChain:
 
         # Query for Arbitrum instead of default Ethereum
         await provider.get_apy_for_chain(
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             market="USDC",
             start_date=datetime(2024, 1, 1, tzinfo=UTC),
             end_date=datetime(2024, 1, 1, tzinfo=UTC),
@@ -486,12 +485,12 @@ class TestGetAPYForChain:
         # Verify the subgraph ID used was for Arbitrum
         call_args = mock_client.query.call_args_list[0]
         subgraph_id = call_args.kwargs.get("subgraph_id") or call_args.args[0]
-        assert subgraph_id == AAVE_V3_SUBGRAPH_IDS[Chain.ARBITRUM]
+        assert subgraph_id == AAVE_V3_SUBGRAPH_IDS["arbitrum"]
 
     @pytest.mark.asyncio
     async def test_get_apy_for_chain_restores_original_chain(self):
         """Test that original chain is restored after query."""
-        config = AaveV3ClientConfig(chain=Chain.ETHEREUM)
+        config = AaveV3ClientConfig(chain="ethereum")
         provider = AaveV3APYProvider(config=config)
 
         mock_client = _make_client()
@@ -502,14 +501,14 @@ class TestGetAPYForChain:
 
         # Query for Arbitrum
         await provider.get_apy_for_chain(
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             market="USDC",
             start_date=datetime(2024, 1, 1, tzinfo=UTC),
             end_date=datetime(2024, 1, 1, tzinfo=UTC),
         )
 
         # Original chain should be restored
-        assert provider.config.chain == Chain.ETHEREUM
+        assert provider.config.chain == "ethereum"
 
 
 class TestGetCurrentAPY:
@@ -618,12 +617,12 @@ class TestReserveIDCaching:
         provider._owns_client = False
 
         # First lookup
-        reserve_id1 = await provider._find_reserve_id(Chain.ETHEREUM, "USDC")
+        reserve_id1 = await provider._find_reserve_id("ethereum", "USDC")
         assert reserve_id1 == "0xusdc-0xpool-0"
         assert mock_client.query.call_count == 1
 
         # Second lookup should use cache
-        reserve_id2 = await provider._find_reserve_id(Chain.ETHEREUM, "USDC")
+        reserve_id2 = await provider._find_reserve_id("ethereum", "USDC")
         assert reserve_id2 == "0xusdc-0xpool-0"
         # Query count should still be 1 (cached)
         assert mock_client.query.call_count == 1
@@ -636,7 +635,7 @@ class TestUnsupportedChain:
     async def test_unsupported_chain_returns_fallback(self):
         """Test that unsupported chain returns fallback results."""
         # Use a chain not in SUPPORTED_CHAINS
-        config = AaveV3ClientConfig(chain=Chain.PLASMA)
+        config = AaveV3ClientConfig(chain="plasma")
         provider = AaveV3APYProvider(config=config)
 
         apys = await provider.get_apy(
@@ -654,7 +653,34 @@ class TestUnsupportedChain:
         """Test that _get_subgraph_id returns None for unsupported chain."""
         provider = AaveV3APYProvider()
         # PLASMA is not in AAVE_V3_SUBGRAPH_IDS
-        assert provider._get_subgraph_id(Chain.PLASMA) is None
+        assert provider._get_subgraph_id("plasma") is None
+
+
+class TestChainInputNormalization:
+    """Mixed-case / alias chain inputs normalize at the provider boundary.
+
+    The enum used to force canonical form at the type level (VIB-4851
+    removal); the string boundary must normalize before the exact-string
+    subgraph/cache lookups or supported chains silently fall back.
+    """
+
+    @pytest.mark.asyncio
+    async def test_uppercase_chain_is_not_treated_as_unsupported(self, caplog):
+        config = AaveV3ClientConfig(chain="ETHEREUM")
+        provider = AaveV3APYProvider(config=config)
+        caplog.set_level("WARNING")
+
+        await provider.get_apy(
+            protocol="aave_v3",
+            market="USDC",
+            start_date=datetime(2024, 1, 1, tzinfo=UTC),
+            end_date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+
+        # The unsupported-chain fallback warning must NOT fire — "ETHEREUM"
+        # resolves to the supported "ethereum" subgraph lane (the query
+        # itself may fail without a live client; only the routing matters).
+        assert "Unsupported chain for Aave V3" not in caplog.text
 
 
 class TestFallbackResultGeneration:

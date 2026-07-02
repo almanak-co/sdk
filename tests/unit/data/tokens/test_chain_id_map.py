@@ -32,7 +32,7 @@ class TestChainIdMapMembership:
 
     def test_every_nonzero_chain_present_with_matching_id(self) -> None:
         expected = {
-            descriptor.enum: descriptor.chain_id
+            descriptor.name: descriptor.chain_id
             for descriptor in ChainRegistry.all()
             if descriptor.chain_id != 0
         }
@@ -45,36 +45,36 @@ class TestChainIdMapMembership:
         for descriptor in ChainRegistry.all():
             if descriptor.chain_id == 0:
                 continue
-            assert CHAIN_ID_MAP[descriptor.enum] == descriptor.chain_id, (
-                f"{descriptor.enum.name}: CHAIN_ID_MAP has "
-                f"{CHAIN_ID_MAP.get(descriptor.enum)}, registry has "
+            assert CHAIN_ID_MAP[descriptor.name] == descriptor.chain_id, (
+                f"{descriptor.name}: CHAIN_ID_MAP has "
+                f"{CHAIN_ID_MAP.get(descriptor.name)}, registry has "
                 f"{descriptor.chain_id}"
             )
 
     def test_no_extra_entries_beyond_registry(self) -> None:
-        registry_evm_enums = {
-            descriptor.enum
+        registry_evm_names = {
+            descriptor.name
             for descriptor in ChainRegistry.all()
             if descriptor.chain_id != 0
         }
-        assert set(CHAIN_ID_MAP) == registry_evm_enums
+        assert set(CHAIN_ID_MAP) == registry_evm_names
 
 
 class TestChainIdMapExcludesSentinelChains:
     """Chains using the ``0`` EIP-155 sentinel (non-EVM) are excluded."""
 
     def test_zero_chain_id_chains_excluded(self) -> None:
-        sentinel_enums = [
-            descriptor.enum
+        sentinel_names = [
+            descriptor.name
             for descriptor in ChainRegistry.all()
             if descriptor.chain_id == 0
         ]
         # Sanity: there is at least one non-EVM chain (e.g. Solana) so this
         # assertion is meaningful rather than vacuous.
-        assert sentinel_enums, "expected at least one chain with chain_id == 0 (e.g. Solana)"
-        for enum in sentinel_enums:
-            assert enum not in CHAIN_ID_MAP, (
-                f"{enum.name} has chain_id 0 but leaked into CHAIN_ID_MAP"
+        assert sentinel_names, "expected at least one chain with chain_id == 0 (e.g. Solana)"
+        for name in sentinel_names:
+            assert name not in CHAIN_ID_MAP, (
+                f"{name} has chain_id 0 but leaked into CHAIN_ID_MAP"
             )
 
     def test_get_returns_zero_default_for_excluded_chain(self) -> None:
@@ -83,7 +83,7 @@ class TestChainIdMapExcludesSentinelChains:
                 continue
             # The ``.get(chain, 0)`` call pattern across the codebase relies on
             # excluded chains falling through to the ``0`` default.
-            assert CHAIN_ID_MAP.get(descriptor.enum, 0) == 0
+            assert CHAIN_ID_MAP.get(descriptor.name, 0) == 0
 
 
 class TestChainIdMapImmutability:

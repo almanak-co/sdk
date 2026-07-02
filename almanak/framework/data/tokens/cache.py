@@ -321,8 +321,8 @@ class TokenCacheManager:
             self._ensure_disk_loaded()
 
             # Create keys for both address and symbol lookups
-            address_key = cache_key(token.chain.value, address=token.address)
-            symbol_key = cache_key(token.chain.value, symbol=token.symbol)
+            address_key = cache_key(token.chain, address=token.address)
+            symbol_key = cache_key(token.chain, symbol=token.symbol)
 
             # Serialize token
             token_dict = token.to_dict()

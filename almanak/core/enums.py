@@ -55,27 +55,6 @@ class SwapSide(Enum):
     SELL = "SELL"
 
 
-class Chain(Enum):
-    ETHEREUM = "ETHEREUM"
-    ARBITRUM = "ARBITRUM"
-    OPTIMISM = "OPTIMISM"
-    BASE = "BASE"
-    AVALANCHE = "AVALANCHE"
-    POLYGON = "POLYGON"
-    BSC = "BSC"
-    SONIC = "SONIC"
-    PLASMA = "PLASMA"
-    BLAST = "BLAST"
-    LINEA = "LINEA"
-    MANTLE = "MANTLE"
-    BERACHAIN = "BERACHAIN"
-    SOLANA = "SOLANA"
-    MONAD = "MONAD"
-    XLAYER = "XLAYER"
-    ZEROG = "ZEROG"  # Preview support — 0G Chain (AI L1)
-    HYPEREVM = "HYPEREVM"  # Hyperliquid EVM layer (chain 999); distinct from the hyperliquid perps venue
-
-
 class ChainFamily(Enum):
     """Execution substrate family. Routes to chain-family-specific code paths."""
 

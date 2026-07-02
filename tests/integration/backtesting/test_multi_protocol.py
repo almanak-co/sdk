@@ -22,7 +22,6 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.backtesting.adapters.lending_adapter import (
     LendingBacktestAdapter,
     LendingBacktestConfig,

@@ -1,6 +1,6 @@
 """X Layer (chain_id 196) — zkEVM L2 (Polygon CDK, OKX)."""
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._contracts import safe_multisend_contracts
 from ._descriptor import AnvilProfile, ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
@@ -8,7 +8,6 @@ from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.XLAYER,
         name="xlayer",
         chain_id=196,
         family=ChainFamily.EVM,

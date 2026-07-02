@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Removed
 
+- **BREAKING: the `Chain` enum is removed (`almanak.Chain`,
+  `almanak.core.enums.Chain`) — VIB-4851.** Chain identity is the canonical
+  lowercase chain-name string (`"ethereum"`, `"arbitrum"`, …) resolved through
+  `almanak.core.chains.ChainRegistry` (`resolve` / `try_resolve` / `get` /
+  `names` / `all`; case-insensitive, alias- and CAIP-2-aware). Migration:
+  `Chain.ETHEREUM` → `"ethereum"`; `Chain[s]` / `Chain(s)` →
+  `ChainRegistry.resolve(s)` (raises `ValueError`) or
+  `ChainRegistry.try_resolve(s)` (returns `None`); `chain.value` /
+  `chain.name` → the name itself; `list(Chain)` → `ChainRegistry.names()`.
+  Typed surfaces that carried the enum (`ActionBundle.chain`,
+  `ResolvedToken.chain`, `TokenRef.chain`, backtest provider signatures) now
+  carry the canonical string. No deprecation shim is provided (matches prior
+  enum removals); the lazy `almanak.__getattr__` raises `AttributeError`.
+  Chains are now fully self-registered: adding a chain is creating ONE
+  descriptor file under `almanak/core/chains/<name>.py` — descriptor modules
+  are auto-discovered, there is no enum to extend and no central import list.
+
 - **BREAKING: the legacy `Protocol` enum and the v1 `Action` / `ActionBundle`
   models are removed from the public API** (`almanak.Protocol`,
   `almanak.Action`, `almanak.ActionBundle`; supersedes the JOE_LEND cleanup
@@ -26,6 +43,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `lp_close_exit_selectors` capability rather than a protocol-name check.
 
 ### Changed
+
+- **Serialized chain values are canonical lowercase names.** `ActionBundle`
+  and `ResolvedToken` / `TokenRef` wire shapes (and their SQLite/disk-cache
+  rows) now write `"ethereum"` where they wrote the UPPERCASE enum value
+  (`"ETHEREUM"`). Read paths resolve case-insensitively **forever**, so
+  records persisted before this change keep deserializing (pinned by
+  dedicated compat tests). The MCP `chains` resource served by the
+  agent-tools adapter now reports lowercase, sorted names.
 
 - **Teardown eligibility is now an authoritative opt-in (VIB-5474 / TD-16,
   resolves VIB-5370).** The runner gated teardown on

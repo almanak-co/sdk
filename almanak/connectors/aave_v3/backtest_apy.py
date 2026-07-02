@@ -20,7 +20,6 @@ Aave V3 Rate Units:
 
 Example:
     from almanak.connectors.aave_v3.backtest_apy import AaveV3APYProvider
-    from almanak.core.enums import Chain
     from datetime import datetime, UTC
 
     provider = AaveV3APYProvider()
@@ -43,7 +42,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from almanak.core.enums import Chain
+from almanak.core.chains import ChainRegistry
 from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalAPYProvider
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
@@ -57,23 +56,33 @@ from almanak.framework.backtesting.pnl.types import APYResult, DataConfidence, D
 logger = logging.getLogger(__name__)
 
 
+def _canonical_chain(chain: str) -> str:
+    """Normalize any-case names / aliases to the canonical lowercase name.
+
+    Unknown chains pass through verbatim so the provider's existing
+    unsupported-chain fallback paths (and their warnings) still fire.
+    """
+    descriptor = ChainRegistry.try_resolve(chain)
+    return descriptor.name if descriptor is not None else chain
+
+
 # =============================================================================
 # Aave V3 Subgraph IDs (from The Graph Explorer)
 # =============================================================================
 
 # Subgraph deployment IDs for Aave V3 on various chains
 # These are from The Graph's decentralized network
-AAVE_V3_SUBGRAPH_IDS: dict[Chain, str] = {
-    Chain.ETHEREUM: "Cd2gEDVeqnjBn1hSeqFMitw8Q1iiyV9FYUZkLNRcL87g",
-    Chain.ARBITRUM: "DLuE98kEb5pQNXAcKFQGQgfSQ57Xdou4jnVbAEqMfy3B",
-    Chain.OPTIMISM: "DSfLz8oQBUeU5atALgUFQKMTSYV9mZAVYp4noLSXAfvb",
-    Chain.POLYGON: "Co2URyXjnxaw8WqxKyVHdirq9Ahhm5vcTs4dMedAq211",
-    Chain.BASE: "GQFbb95cE6d8mV989mL5figjaGaKCQB3xqYrr1bRyXqF",
-    Chain.AVALANCHE: "2h9woxy8RTjHu1HJsCEnmzpPHFArU33avmUh4f71JpVn",
+AAVE_V3_SUBGRAPH_IDS: dict[str, str] = {
+    "ethereum": "Cd2gEDVeqnjBn1hSeqFMitw8Q1iiyV9FYUZkLNRcL87g",
+    "arbitrum": "DLuE98kEb5pQNXAcKFQGQgfSQ57Xdou4jnVbAEqMfy3B",
+    "optimism": "DSfLz8oQBUeU5atALgUFQKMTSYV9mZAVYp4noLSXAfvb",
+    "polygon": "Co2URyXjnxaw8WqxKyVHdirq9Ahhm5vcTs4dMedAq211",
+    "base": "GQFbb95cE6d8mV989mL5figjaGaKCQB3xqYrr1bRyXqF",
+    "avalanche": "2h9woxy8RTjHu1HJsCEnmzpPHFArU33avmUh4f71JpVn",
 }
 
 # Supported chains for this provider
-SUPPORTED_CHAINS: list[Chain] = list(AAVE_V3_SUBGRAPH_IDS.keys())
+SUPPORTED_CHAINS: list[str] = list(AAVE_V3_SUBGRAPH_IDS.keys())
 
 # Data source identifier
 DATA_SOURCE = "aave_v3_subgraph"
@@ -140,13 +149,13 @@ class AaveV3ClientConfig:
     """Configuration for Aave V3 APY provider.
 
     Attributes:
-        chain: Default chain for requests (default: ETHEREUM)
+        chain: Default chain for requests (default: "ethereum")
         requests_per_minute: Rate limit for subgraph requests (default: 100)
         supply_apy_fallback: Fallback supply APY when data unavailable
         borrow_apy_fallback: Fallback borrow APY when data unavailable
     """
 
-    chain: Chain = Chain.ETHEREUM
+    chain: str = "ethereum"
     requests_per_minute: int = 100
     supply_apy_fallback: Decimal = DEFAULT_SUPPLY_APY_FALLBACK
     borrow_apy_fallback: Decimal = DEFAULT_BORROW_APY_FALLBACK
@@ -218,8 +227,8 @@ class AaveV3APYProvider(HistoricalAPYProvider):
 
         logger.debug(
             "Initialized AaveV3APYProvider: chain=%s, supported_chains=%s",
-            self._config.chain.value,
-            [c.value for c in SUPPORTED_CHAINS],
+            self._config.chain,
+            SUPPORTED_CHAINS,
         )
 
     @classmethod
@@ -246,7 +255,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
         return self._config
 
     @property
-    def supported_chains(self) -> list[Chain]:
+    def supported_chains(self) -> list[str]:
         """Get the list of supported chains."""
         return SUPPORTED_CHAINS.copy()
 
@@ -264,7 +273,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
         """Async context manager exit: close the client."""
         await self.close()
 
-    def _get_subgraph_id(self, chain: Chain) -> str | None:
+    def _get_subgraph_id(self, chain: str) -> str | None:
         """Get the subgraph ID for a chain.
 
         Args:
@@ -368,7 +377,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
 
     async def _find_reserve_id(
         self,
-        chain: Chain,
+        chain: str,
         symbol: str,
     ) -> str | None:
         """Find the reserve ID for a given symbol on a chain.
@@ -384,7 +393,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             Reserve ID or None if not found
         """
         # Check cache first
-        cache_key = f"{chain.value}:{symbol}"
+        cache_key = f"{chain}:{symbol}"
         if cache_key in self._reserve_cache:
             return self._reserve_cache.get(cache_key, {}).get("id")
 
@@ -404,7 +413,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
                 logger.warning(
                     "No reserve found for symbol=%s on chain=%s",
                     symbol,
-                    chain.value,
+                    chain,
                 )
                 return None
 
@@ -415,7 +424,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
                 logger.debug(
                     "Found reserve: symbol=%s, chain=%s, id=%s",
                     symbol,
-                    chain.value,
+                    chain,
                     reserve_id[:30] + "..." if len(reserve_id) > 30 else reserve_id,
                 )
             return reserve_id
@@ -424,7 +433,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             logger.error(
                 "Error finding reserve: symbol=%s, chain=%s, error=%s",
                 symbol,
-                chain.value,
+                chain,
                 str(e),
             )
             return None
@@ -436,7 +445,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
         start_date: datetime,
         end_date: datetime,
         *,
-        _chain_override: Chain | None = None,
+        _chain_override: str | None = None,
     ) -> list[APYResult]:
         """Fetch historical APY data for an Aave V3 market.
 
@@ -467,20 +476,20 @@ class AaveV3APYProvider(HistoricalAPYProvider):
                 print(f"Supply: {apy.supply_apy:.4f}, Borrow: {apy.borrow_apy:.4f}")
         """
         symbol = self._normalize_market_symbol(market)
-        chain = _chain_override if _chain_override is not None else self._config.chain
+        chain = _canonical_chain(_chain_override if _chain_override is not None else self._config.chain)
         start_date, end_date = self._normalize_date_range(start_date, end_date)
 
         subgraph_id = self._get_subgraph_id(chain)
         if subgraph_id is None:
             logger.warning(
                 "Unsupported chain for Aave V3: chain=%s. Returning fallback.",
-                chain.value,
+                chain,
             )
             return self._generate_fallback_results(start_date, end_date)
 
         logger.info(
             "Fetching Aave V3 APY: chain=%s, market=%s, start=%s, end=%s",
-            chain.value,
+            chain,
             symbol,
             start_date,
             end_date,
@@ -498,7 +507,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
         self,
         *,
         subgraph_id: str,
-        chain: Chain,
+        chain: str,
         symbol: str,
         start_date: datetime,
         end_date: datetime,
@@ -519,7 +528,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
         except SubgraphRateLimitError as e:
             logger.warning(
                 "Subgraph rate limit exceeded: chain=%s, market=%s: %s",
-                chain.value,
+                chain,
                 symbol,
                 str(e),
             )
@@ -527,7 +536,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
         except SubgraphQueryError as e:
             logger.error(
                 "Subgraph query error: chain=%s, market=%s: %s",
-                chain.value,
+                chain,
                 symbol,
                 str(e),
             )
@@ -535,7 +544,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
         except Exception as e:
             logger.error(
                 "Unexpected error fetching APY: chain=%s, market=%s: %s",
-                chain.value,
+                chain,
                 symbol,
                 str(e),
             )
@@ -549,7 +558,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
         self,
         *,
         subgraph_id: str,
-        chain: Chain,
+        chain: str,
         symbol: str,
         start_date: datetime,
         end_date: datetime,
@@ -559,7 +568,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
         if reserve_id is None:
             logger.warning(
                 "Reserve not found: chain=%s, symbol=%s. Returning fallback.",
-                chain.value,
+                chain,
                 symbol,
             )
             return None
@@ -581,7 +590,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
         if not history_items:
             logger.warning(
                 "No APY history from subgraph: chain=%s, market=%s, range=%s to %s",
-                chain.value,
+                chain,
                 symbol,
                 start_date,
                 end_date,
@@ -592,7 +601,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
         logger.info(
             "Fetched %d APY data points: chain=%s, market=%s",
             len(results),
-            chain.value,
+            chain,
             symbol,
         )
         return results
@@ -622,7 +631,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
 
     async def get_apy_for_chain(
         self,
-        chain: Chain,
+        chain: str,
         market: str,
         start_date: datetime,
         end_date: datetime,
@@ -643,7 +652,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
 
         Example:
             apys = await provider.get_apy_for_chain(
-                chain=Chain.ARBITRUM,
+                chain="arbitrum",
                 market="USDC",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
@@ -661,7 +670,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
     async def get_current_apy(
         self,
         market: str,
-        chain: Chain | None = None,
+        chain: str | None = None,
     ) -> APYResult:
         """Fetch the current APY for a market.
 
@@ -679,7 +688,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             apy = await provider.get_current_apy("USDC")
             print(f"Current USDC supply APY: {apy.supply_apy:.4f}")
         """
-        chain = chain or self._config.chain
+        chain = _canonical_chain(chain or self._config.chain)
         now = datetime.now(UTC)
 
         # Query for recent data (last 24 hours)

@@ -1,6 +1,6 @@
 """Polygon PoS (chain_id 137) — Ethereum sidechain."""
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._contracts import safe_stack_contracts
 from ._descriptor import (
@@ -18,7 +18,6 @@ from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.POLYGON,
         name="polygon",
         chain_id=137,
         family=ChainFamily.EVM,

@@ -6,7 +6,7 @@ framework default 120s). The descriptor captures that by leaving
 still picks up the framework default.
 """
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._contracts import safe_stack_contracts
 from ._descriptor import (
@@ -24,7 +24,6 @@ from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.BSC,
         name="bsc",
         chain_id=56,
         family=ChainFamily.EVM,

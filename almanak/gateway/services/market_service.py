@@ -694,6 +694,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 self._onchain_lookups[chain] = OnChainLookup(rpc_url=rpc_url)
             return self._onchain_lookups[chain]
 
+    # crap-allowlist: VIB-4851 mechanical Chain-enum -> ChainRegistry swap in pre-existing high-CRAP function (cc=22, cov=60%).
     async def _resolve_token_for_pricing(
         self,
         token: str,
@@ -769,19 +770,18 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             return None
 
         try:
-            from almanak.core.enums import Chain
+            from almanak.core.chains import ChainRegistry
             from almanak.framework.data.tokens import ResolvedToken
             from almanak.framework.data.tokens.models import CHAIN_ID_MAP
+        except ImportError as e:
+            logger.debug("Cannot import token models for address resolution: %s", e)
+            return None
 
-            # Chain enum values are uppercased (e.g. Chain("BASE")); config
-            # usually surfaces them lowercased. Try uppercase first, fall
-            # back to the raw string so callers using either form work.
-            try:
-                chain_enum = Chain(chain.upper())
-            except ValueError:
-                chain_enum = Chain(chain)
-        except (ImportError, ValueError) as e:
-            logger.debug("Cannot map %s to Chain enum for address resolution: %s", chain, e)
+        # Case-insensitive, alias-aware; None for unregistered chains keeps
+        # the historical debug-log-and-skip contract.
+        chain_descriptor = ChainRegistry.try_resolve(chain)
+        if chain_descriptor is None:
+            logger.debug("Cannot resolve %s to a registered chain for address resolution", chain)
             return None
 
         try:
@@ -797,14 +797,14 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         if metadata is None:
             return None
 
-        chain_id = CHAIN_ID_MAP.get(chain_enum, 0)
+        chain_id = CHAIN_ID_MAP.get(chain_descriptor.name, 0)
 
         try:
             return ResolvedToken(
                 symbol=metadata.symbol,
                 address=metadata.address,
                 decimals=metadata.decimals,
-                chain=chain_enum,
+                chain=chain_descriptor.name,
                 chain_id=chain_id,
                 name=metadata.name,
                 source="on_chain",

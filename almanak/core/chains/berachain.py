@@ -1,13 +1,12 @@
 """Berachain (chain_id 80094) — EVM-compatible L1."""
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._descriptor import AnvilProfile, ChainDescriptor, Explorer, GasProfile, NativeToken, SimulationProfile, Timeouts
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.BERACHAIN,
         name="berachain",
         chain_id=80094,
         family=ChainFamily.EVM,

@@ -127,8 +127,6 @@ class TestStablecoinFallback:
         from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
         from almanak.gateway.data.price.aggregator import PriceAggregator
 
-        from almanak import Chain
-
         sources = [
             MockPriceSource("chainlink", error="no feed"),
             MockPriceSource("coingecko", error="404 not listed"),
@@ -139,7 +137,7 @@ class TestStablecoinFallback:
             symbol="PUSD",
             address="0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
             decimals=6,
-            chain=Chain.POLYGON,
+            chain="polygon",
             chain_id=137,
             name="Polymarket USD",
             coingecko_id="",
@@ -164,8 +162,6 @@ class TestStablecoinFallback:
         from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
         from almanak.gateway.data.price.aggregator import PriceAggregator
 
-        from almanak import Chain
-
         sources = [
             MockPriceSource("chainlink", error="no feed"),
             MockPriceSource("coingecko", error="404 not listed"),
@@ -176,7 +172,7 @@ class TestStablecoinFallback:
             symbol="PUSD",
             address="0x1111111111111111111111111111111111111111",
             decimals=18,
-            chain=Chain.ETHEREUM,
+            chain="ethereum",
             chain_id=1,
             name="Pleasing USD",
             coingecko_id="",
@@ -237,8 +233,6 @@ class TestStablecoinFallback:
         from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
         from almanak.gateway.data.price.aggregator import PriceAggregator
 
-        from almanak import Chain
-
         sources = [MockPriceSource("chainlink", error="no feed")]
         aggregator = PriceAggregator(sources=sources)
 
@@ -246,7 +240,7 @@ class TestStablecoinFallback:
             symbol="PUSD",
             address="0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
             decimals=6,
-            chain=Chain.POLYGON,
+            chain="polygon",
             chain_id=137,
             name="Polymarket USD",
             coingecko_id="",

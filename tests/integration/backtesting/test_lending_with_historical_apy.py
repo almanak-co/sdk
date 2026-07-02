@@ -29,7 +29,6 @@ from almanak.connectors.aave_v3.backtest_apy import (
 from almanak.connectors.compound_v3.backtest_apy import CompoundV3APYProvider
 from almanak.connectors.morpho_blue.backtest_apy import MorphoBlueAPYProvider
 from almanak.connectors.spark.backtest_apy import SparkAPYProvider
-from almanak.core.enums import Chain
 from almanak.framework.backtesting.adapters.lending_adapter import (
     LendingBacktestAdapter,
     LendingBacktestConfig,
@@ -115,7 +114,7 @@ class TestAaveV3APYProvider:
         if not has_thegraph_api_key:
             pytest.skip("THEGRAPH_API_KEY not set - skipping live API test")
 
-        config = AaveV3ClientConfig(chain=Chain.ETHEREUM)
+        config = AaveV3ClientConfig(chain="ethereum")
         provider = AaveV3APYProvider(config=config)
 
         async with provider:
@@ -189,7 +188,7 @@ class TestAaveV3APYProvider:
         # Test Ethereum
         async with provider:
             eth_apys = await provider.get_apy_for_chain(
-                chain=Chain.ETHEREUM,
+                chain="ethereum",
                 market=USDC_MARKET,
                 start_date=TEST_START_DATE,
                 end_date=TEST_START_DATE + timedelta(days=1),
@@ -198,7 +197,7 @@ class TestAaveV3APYProvider:
         assert len(eth_apys) > 0, "Expected APY data for Ethereum"
 
         # Test Arbitrum
-        provider_arb = AaveV3APYProvider(config=AaveV3ClientConfig(chain=Chain.ARBITRUM))
+        provider_arb = AaveV3APYProvider(config=AaveV3ClientConfig(chain="arbitrum"))
         async with provider_arb:
             arb_apys = await provider_arb.get_apy(
                 protocol="aave_v3",
@@ -227,7 +226,7 @@ class TestAaveV3APYProvider:
         if not has_thegraph_api_key:
             pytest.skip("THEGRAPH_API_KEY not set - skipping live API test")
 
-        config = AaveV3ClientConfig(chain=Chain.ETHEREUM)
+        config = AaveV3ClientConfig(chain="ethereum")
         provider = AaveV3APYProvider(config=config)
 
         async with provider:
@@ -460,7 +459,7 @@ class TestLendingAdapterWithHistoricalAPY:
             pytest.skip("THEGRAPH_API_KEY not set - skipping live API test")
 
         # First verify the provider returns HIGH confidence data
-        config = AaveV3ClientConfig(chain=Chain.ETHEREUM)
+        config = AaveV3ClientConfig(chain="ethereum")
         provider = AaveV3APYProvider(config=config)
 
         async with provider:

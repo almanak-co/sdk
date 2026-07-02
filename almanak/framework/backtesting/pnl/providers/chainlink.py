@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 ARCHIVE_RPC_URL_ENV_PATTERN = "ARCHIVE_RPC_URL_{chain}"
 
 # Supported chains for archive RPC URLs
-ARCHIVE_RPC_CHAINS = ["ETHEREUM", "ARBITRUM", "BASE", "OPTIMISM", "POLYGON", "AVALANCHE"]
+ARCHIVE_RPC_CHAINS = ["ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche"]
 
 # Default cache directory for persistent round data
 DEFAULT_CACHE_DIR = ".almanak_cache/chainlink"

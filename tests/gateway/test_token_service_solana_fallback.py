@@ -212,7 +212,6 @@ class TestGetTokenMetadataSolanaIntegration:
         touching Jupiter or SPL RPC. Without this fast path a previously-resolved
         mint would be re-fetched (and, in the Jupiter-miss case, re-written with
         the mint address as symbol, silently degrading metadata)."""
-        from almanak.core.enums import Chain
         from almanak.framework.data.tokens import ResolvedToken
         from almanak.framework.data.tokens.models import BridgeType
 
@@ -220,7 +219,7 @@ class TestGetTokenMetadataSolanaIntegration:
             symbol="MSBR",
             address=MINT_ADDRESS,
             decimals=6,
-            chain=Chain.SOLANA,
+            chain="solana",
             chain_id=0,
             canonical_symbol="MSBR",
             bridge_type=BridgeType.NATIVE,
@@ -439,7 +438,6 @@ class TestSourceRankGuard:
         )
 
         # Simulate an existing jupiter cache entry.
-        from almanak.core.enums import Chain
         from almanak.framework.data.tokens import ResolvedToken
         from almanak.framework.data.tokens.models import BridgeType
 
@@ -447,7 +445,7 @@ class TestSourceRankGuard:
             symbol="MSBR",
             address=MINT_ADDRESS,
             decimals=6,
-            chain=Chain.SOLANA,
+            chain="solana",
             chain_id=0,
             canonical_symbol="MSBR",
             bridge_type=BridgeType.NATIVE,

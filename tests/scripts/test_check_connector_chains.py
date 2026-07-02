@@ -6,7 +6,7 @@ unit tests without re-shelling.
 
 Coverage:
 
-* String, int, and enum-keyed connector address dicts.
+* String and int-keyed connector address dicts (enum keys are rejected).
 * The heuristic that distinguishes chain-keyed from non-chain-keyed
   dicts (the false-positive guard the ticket calls out).
 * Strategy ``supported_chains=[...]`` decorator lists.
@@ -103,20 +103,24 @@ def test_pass_int_keyed_addresses(module, tmp_path: Path) -> None:
     assert violations == [], violations
 
 
-def test_pass_enum_keyed_addresses(module, tmp_path: Path) -> None:
-    """All-valid Chain.X-keyed dict → exit 0 (Python already enforces validity)."""
+def test_fail_enum_keyed_addresses(module, tmp_path: Path) -> None:
+    """Chain.X-keyed dicts are rejected: the Chain enum was removed (VIB-4851).
+
+    Any surviving enum-shaped key is a migration miss — the structured CI
+    message points the author at canonical chain strings.
+    """
     _redirect_to_tmp(module, tmp_path)
     _make_connector(
         tmp_path,
         "fakeenum",
-        "from almanak.core.enums import Chain\n"
         "FACTORY_ADDRESSES = {\n"
         '    Chain.ARBITRUM: "0x1111111111111111111111111111111111111111",\n'
         '    Chain.BASE: "0x2222222222222222222222222222222222222222",\n'
         "}\n",
     )
     violations, _ = module.run()
-    assert violations == [], violations
+    assert len(violations) == 2
+    assert all("canonical chain string" in v.message for v in violations)
 
 
 # ---------------------------------------------------------------------------
@@ -162,17 +166,12 @@ def test_fail_int_key_outside_chain_ids(module, tmp_path: Path) -> None:
 
 
 def test_fail_enum_key_unknown_attr(module, tmp_path: Path) -> None:
-    """A reference to ``Chain.NOT_A_CHAIN`` is statically flagged.
-
-    Python itself would raise AttributeError at import time; the AST
-    walker still catches it cleanly so CI prints a structured message
-    instead of an opaque traceback.
-    """
+    """Any ``Chain.X``-shaped key is flagged, member-like or not (the enum
+    is gone — VIB-4851)."""
     _redirect_to_tmp(module, tmp_path)
     _make_connector(
         tmp_path,
         "fakeenum",
-        "from almanak.core.enums import Chain\n"
         "FACTORY_ADDRESSES = {\n"
         '    Chain.NOT_A_CHAIN: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",\n'
         "}\n",

@@ -44,7 +44,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from almanak.core.enums import Chain
+from almanak.core.chains import ChainRegistry
 from almanak.framework.data.interfaces import DataSourceUnavailable
 
 from ...types import DataConfidence, DataSourceInfo, VolumeResult
@@ -111,7 +111,7 @@ def _date_to_window(start_date: date, end_date: date) -> tuple[int, int]:
 async def fetch_volume_via_gateway(
     *,
     dex: str,
-    chain: Chain,
+    chain: str,
     pool_address: str,
     start_date: date,
     end_date: date,
@@ -123,7 +123,7 @@ async def fetch_volume_via_gateway(
         dex: The gateway ``dex_name`` routing key (e.g. ``"uniswap_v3"``,
             ``"balancer_v2"``) the connector's
             :class:`GatewayDexVolumeCapability` registered under.
-        chain: The chain enum; lowercased to the gateway chain key.
+        chain: Canonical lowercase chain name (the gateway chain key).
         pool_address: Pool / pair / LB-pair address (lowercased server-side).
         start_date: Inclusive start of the day range.
         end_date: Inclusive end of the day range.
@@ -146,7 +146,7 @@ async def fetch_volume_via_gateway(
     start_ts, end_ts = _date_to_window(start_date, end_date)
     request = gateway_pb2.GetDexVolumeHistoryRequest(
         dex=dex,
-        chain=chain.value.lower(),
+        chain=chain,
         pool_address=pool_address,
         start_ts=start_ts,
         end_ts=end_ts,
@@ -224,9 +224,9 @@ class GatewayDexVolumeProvider:
         return entry
 
     @property
-    def supported_chains(self) -> list[Chain]:
+    def supported_chains(self) -> list[str]:
         """Chains the owning connector declares volume data for."""
-        return [Chain(c.upper()) for c in self._entry().chains]
+        return [ChainRegistry.resolve(c).name for c in self._entry().chains]
 
     async def close(self) -> None:
         """No-op shutdown hook (no owned client to close)."""
@@ -243,7 +243,7 @@ class GatewayDexVolumeProvider:
     async def get_volume(
         self,
         pool_address: str,
-        chain: Chain,
+        chain: str,
         start_date: date,
         end_date: date,
     ) -> list[VolumeResult]:
@@ -255,8 +255,8 @@ class GatewayDexVolumeProvider:
                 subgraph returned no or errored data (no silent zero-fill).
         """
         entry = self._entry()
-        if chain.value.lower() not in entry.chains:
-            supported = [c.upper() for c in entry.chains]
+        if chain not in entry.chains:
+            supported = list(entry.chains)
             raise ValueError(f"Unsupported chain: {chain}. Supported chains: {supported}")
 
         return await fetch_volume_via_gateway(

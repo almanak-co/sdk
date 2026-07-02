@@ -28,7 +28,6 @@ from almanak.connectors.spark.backtest_apy import (
 from almanak.connectors.spark.backtest_apy import (
     SparkAPYProvider,
 )
-from almanak.core.enums import Chain
 from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphQueryError,
@@ -134,7 +133,7 @@ class TestAaveV3ProtocolAPYProvider:
     async def test_unsupported_chain_returns_fallback_without_querying(self) -> None:
         client = StubSubgraphClient()
         provider = AaveV3APYProvider(
-            config=AaveV3ClientConfig(chain=Chain.SOLANA),
+            config=AaveV3ClientConfig(chain="solana"),
             client=client,
         )
 

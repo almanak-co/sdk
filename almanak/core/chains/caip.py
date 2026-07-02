@@ -18,8 +18,6 @@ from __future__ import annotations
 
 import re
 
-from almanak.core.enums import Chain
-
 from ._descriptor import ChainDescriptor
 from ._registry import ChainRegistry
 
@@ -30,18 +28,15 @@ from ._registry import ChainRegistry
 _CAIP2_RE = re.compile(r"^(?P<namespace>[-a-z0-9]{3,8}):(?P<reference>[-_a-zA-Z0-9]{1,32})$")
 
 
-def to_caip2(chain: Chain | str | ChainDescriptor) -> str:
+def to_caip2(chain: str | ChainDescriptor) -> str:
     """Return the CAIP-2 blockchain id for a chain.
 
-    Accepts a :class:`Chain` enum, a chain name / alias / CAIP-2 string, or a
-    :class:`ChainDescriptor`. Raises ``KeyError`` (enum) or ``ValueError``
-    (string) for an unknown chain — same contract as ``ChainRegistry.get`` /
-    ``ChainRegistry.resolve``.
+    Accepts a chain name / alias / CAIP-2 string or a
+    :class:`ChainDescriptor`. Raises ``ValueError`` for an unknown chain —
+    same contract as ``ChainRegistry.resolve``.
     """
     if isinstance(chain, ChainDescriptor):
         return chain.caip2
-    if isinstance(chain, Chain):
-        return ChainRegistry.get(chain).caip2
     return ChainRegistry.resolve(str(chain)).caip2
 
 

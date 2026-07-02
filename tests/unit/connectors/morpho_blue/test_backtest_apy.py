@@ -28,7 +28,6 @@ from almanak.connectors.morpho_blue.backtest_apy import (
     MorphoBlueAPYProvider,
     MorphoBlueClientConfig,
 )
-from almanak.core.enums import Chain
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
     SubgraphClientConfig,
@@ -58,20 +57,20 @@ class TestMorphoBlueAPYProviderInitialization:
         """Test provider initializes with default settings."""
         provider = MorphoBlueAPYProvider()
         assert provider.supported_chains == SUPPORTED_CHAINS
-        assert provider.config.chain == Chain.ETHEREUM
+        assert provider.config.chain == "ethereum"
         assert provider.config.requests_per_minute == 100
         assert provider._owns_client is True
 
     def test_init_with_custom_config(self):
         """Test provider initializes with custom config."""
         config = MorphoBlueClientConfig(
-            chain=Chain.BASE,
+            chain="base",
             requests_per_minute=50,
             supply_apy_fallback=Decimal("0.05"),
             borrow_apy_fallback=Decimal("0.08"),
         )
         provider = MorphoBlueAPYProvider(config=config)
-        assert provider.config.chain == Chain.BASE
+        assert provider.config.chain == "base"
         assert provider.config.requests_per_minute == 50
         assert provider.config.supply_apy_fallback == Decimal("0.05")
         assert provider.config.borrow_apy_fallback == Decimal("0.08")
@@ -98,8 +97,8 @@ class TestSupportedChains:
     def test_supported_chains_include_required_networks(self):
         """Test that all required networks are supported (US-019)."""
         # US-019 requires: Ethereum, Base
-        assert Chain.ETHEREUM in SUPPORTED_CHAINS
-        assert Chain.BASE in SUPPORTED_CHAINS
+        assert "ethereum" in SUPPORTED_CHAINS
+        assert "base" in SUPPORTED_CHAINS
 
     def test_all_supported_chains_have_subgraph_ids(self):
         """Test all supported chains have subgraph IDs."""
@@ -474,7 +473,7 @@ class TestGetAPYForChain:
     @pytest.mark.asyncio
     async def test_get_apy_for_chain_overrides_config_chain(self):
         """Test that get_apy_for_chain uses specified chain."""
-        config = MorphoBlueClientConfig(chain=Chain.ETHEREUM)
+        config = MorphoBlueClientConfig(chain="ethereum")
         provider = MorphoBlueAPYProvider(config=config)
 
         snapshots_response = {
@@ -499,7 +498,7 @@ class TestGetAPYForChain:
 
         # Query for Base instead of default Ethereum
         await provider.get_apy_for_chain(
-            chain=Chain.BASE,
+            chain="base",
             market="0x1234567890abcdef1234567890abcdef12345678",
             start_date=datetime(2024, 1, 1, tzinfo=UTC),
             end_date=datetime(2024, 1, 1, tzinfo=UTC),
@@ -508,12 +507,12 @@ class TestGetAPYForChain:
         # Verify the subgraph ID used was for Base
         call_args = mock_client.query.call_args_list[0]
         subgraph_id = call_args.kwargs.get("subgraph_id") or call_args.args[0]
-        assert subgraph_id == MORPHO_BLUE_SUBGRAPH_IDS[Chain.BASE]
+        assert subgraph_id == MORPHO_BLUE_SUBGRAPH_IDS["base"]
 
     @pytest.mark.asyncio
     async def test_get_apy_for_chain_restores_original_chain(self):
         """Test that original chain is restored after query."""
-        config = MorphoBlueClientConfig(chain=Chain.ETHEREUM)
+        config = MorphoBlueClientConfig(chain="ethereum")
         provider = MorphoBlueAPYProvider(config=config)
 
         mock_client = _make_client()
@@ -524,14 +523,14 @@ class TestGetAPYForChain:
 
         # Query for Base
         await provider.get_apy_for_chain(
-            chain=Chain.BASE,
+            chain="base",
             market="0x1234567890abcdef1234567890abcdef12345678",
             start_date=datetime(2024, 1, 1, tzinfo=UTC),
             end_date=datetime(2024, 1, 1, tzinfo=UTC),
         )
 
         # Original chain should be restored
-        assert provider.config.chain == Chain.ETHEREUM
+        assert provider.config.chain == "ethereum"
 
 
 class TestGetCurrentAPY:
@@ -653,12 +652,12 @@ class TestMarketIDCaching:
         provider._owns_client = False
 
         # First lookup
-        market_id1 = await provider._find_market_by_token(Chain.ETHEREUM, "USDC")
+        market_id1 = await provider._find_market_by_token("ethereum", "USDC")
         assert market_id1 == "0xmarket123"
         assert mock_client.query.call_count == 1
 
         # Second lookup should use cache
-        market_id2 = await provider._find_market_by_token(Chain.ETHEREUM, "USDC")
+        market_id2 = await provider._find_market_by_token("ethereum", "USDC")
         assert market_id2 == "0xmarket123"
         # Query count should still be 1 (cached)
         assert mock_client.query.call_count == 1
@@ -671,7 +670,7 @@ class TestUnsupportedChain:
     async def test_unsupported_chain_returns_fallback(self):
         """Test that unsupported chain returns fallback results."""
         # Use a chain not in SUPPORTED_CHAINS
-        config = MorphoBlueClientConfig(chain=Chain.ARBITRUM)  # Not supported
+        config = MorphoBlueClientConfig(chain="arbitrum")  # Not supported
         provider = MorphoBlueAPYProvider(config=config)
 
         apys = await provider.get_apy(
@@ -689,7 +688,7 @@ class TestUnsupportedChain:
         """Test that _get_subgraph_id returns None for unsupported chain."""
         provider = MorphoBlueAPYProvider()
         # ARBITRUM is not in MORPHO_BLUE_SUBGRAPH_IDS
-        assert provider._get_subgraph_id(Chain.ARBITRUM) is None
+        assert provider._get_subgraph_id("arbitrum") is None
 
 
 class TestFallbackResultGeneration:
@@ -836,7 +835,7 @@ class TestListMarkets:
         """Test listing markets for unsupported chain returns empty."""
         provider = MorphoBlueAPYProvider()
 
-        markets = await provider.list_markets(chain=Chain.ARBITRUM)
+        markets = await provider.list_markets(chain="arbitrum")
 
         assert markets == []
 

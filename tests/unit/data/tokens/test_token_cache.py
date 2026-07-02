@@ -21,7 +21,6 @@ from unittest.mock import patch
 
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.data.tokens.cache import TokenCacheManager, cache_key
 from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
 
@@ -29,7 +28,7 @@ from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
 def make_resolved_token(
     symbol: str = "USDC",
     address: str = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-    chain: Chain = Chain.ARBITRUM,
+    chain: str = "arbitrum",
     decimals: int = 6,
 ) -> ResolvedToken:
     """Create a ResolvedToken for testing."""
@@ -38,7 +37,7 @@ def make_resolved_token(
         address=address,
         decimals=decimals,
         chain=chain,
-        chain_id=42161 if chain == Chain.ARBITRUM else 1,
+        chain_id=42161 if chain == "arbitrum" else 1,
         name=f"{symbol} Token",
         coingecko_id=symbol.lower(),
         is_stablecoin=symbol in ("USDC", "USDT", "DAI"),

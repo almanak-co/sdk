@@ -200,7 +200,7 @@ async def test_getprice_forwards_resolved_token_with_chain_to_aggregator():
     resolved = captured["resolved_token"]
     assert isinstance(resolved, ResolvedToken)
     assert resolved.address.lower() == RENBTC_ADDRESS.lower()
-    assert resolved.chain.value.lower() == "base"
+    assert resolved.chain == "base"
     assert resolved.symbol == "renBTC"
 
 
@@ -225,7 +225,7 @@ async def test_getprice_address_without_chain_uses_primary_chain():
 
     assert isinstance(resolved, ResolvedToken)
     assert resolved.symbol == "renBTC"
-    assert resolved.chain.value.lower() == "base"
+    assert resolved.chain == "base"
     # The fake was called with the primary chain.
     fake_lookup.lookup.assert_awaited_once_with("base", RENBTC_ADDRESS)
 

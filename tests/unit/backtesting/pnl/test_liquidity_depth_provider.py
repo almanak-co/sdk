@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.providers.liquidity_depth import (
     DATA_SOURCE_FALLBACK,
@@ -55,7 +54,7 @@ class TestLiquidityDepthProviderRouting:
         ) as query:
             result = await provider.get_liquidity_depth(
                 "0x0000000000000000000000000000000000000001",
-                Chain.ETHEREUM,
+                "ethereum",
                 timestamp,
                 protocol="uniswap_v3",
             )
@@ -79,7 +78,7 @@ class TestLiquidityDepthProviderRouting:
         ):
             result = await provider.get_liquidity_depth(
                 "0x0000000000000000000000000000000000000001",
-                Chain.ETHEREUM,
+                "ethereum",
                 timestamp,
                 protocol=None,
             )
@@ -95,7 +94,7 @@ class TestLiquidityDepthProviderRouting:
         with patch.object(provider, "_query_liquidity_by_family", AsyncMock()) as query:
             result = await provider.get_liquidity_depth(
                 "0x0000000000000000000000000000000000000001",
-                Chain.SOLANA,
+                "solana",
                 timestamp,
                 protocol="uniswap_v3",
             )
@@ -113,7 +112,7 @@ class TestLiquidityDepthProviderRouting:
         with patch.object(provider, "_query_liquidity_by_family", AsyncMock()) as query:
             result = await provider.get_liquidity_depth(
                 "0x0000000000000000000000000000000000000001",
-                Chain.ETHEREUM,
+                "ethereum",
                 timestamp,
                 protocol="unknown_dex",
             )
@@ -135,7 +134,7 @@ class TestLiquidityDepthProviderRouting:
         ):
             result = await provider.get_liquidity_depth(
                 "0x0000000000000000000000000000000000000001",
-                Chain.ETHEREUM,
+                "ethereum",
                 timestamp,
                 protocol="uniswap_v3",
             )
@@ -155,7 +154,7 @@ class TestLiquidityDepthProviderRouting:
         ):
             result = await provider.get_liquidity_depth(
                 "0x0000000000000000000000000000000000000001",
-                Chain.ETHEREUM,
+                "ethereum",
                 timestamp,
                 protocol="uniswap_v3",
             )
@@ -176,7 +175,7 @@ class TestLiquidityDepthProviderRouting:
             with pytest.raises(DataSourceUnavailableError, match="pagination window"):
                 await provider.get_liquidity_depth(
                     "0x0000000000000000000000000000000000000001",
-                    Chain.ETHEREUM,
+                    "ethereum",
                     timestamp,
                     protocol="uniswap_v3",
                 )
@@ -188,7 +187,7 @@ class TestLiquidityDepthProviderRouting:
 
         result = await provider.get_liquidity_depth(
             "0x0000000000000000000000000000000000000001",
-            Chain.SOLANA,
+            "solana",
             datetime(2024, 1, 1, 20, tzinfo=eastern),
             protocol="uniswap_v3",
         )

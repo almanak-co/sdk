@@ -60,7 +60,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.chains import ChainRegistry
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from .cache import TokenCacheManager
 from .defaults import DEFAULT_TOKENS, NATIVE_SENTINEL, SYMBOL_ALIASES, WRAPPED_NATIVE
@@ -249,41 +249,24 @@ def _normalize_symbol_input(token: str) -> str:
     return stripped
 
 
-def _normalize_chain(chain: str | Chain) -> tuple[str, Chain]:
-    """Normalize chain input to both string and Chain enum.
+def _normalize_chain(chain: str) -> str:
+    """Normalize chain input to its canonical lowercase name.
 
-    Uses the central resolve_chain_name() for alias resolution.
-
-    Args:
-        chain: Chain as string or Chain enum
-
-    Returns:
-        Tuple of (chain_name_lower, Chain enum)
+    Accepts canonical names, aliases, and CAIP-2 ids.
 
     Raises:
         TokenResolutionError: If chain is not recognized
     """
-    if isinstance(chain, Chain):
-        return chain.value.lower(), chain
-
-    try:
-        from almanak.core.constants import resolve_chain_name
-
-        chain_lower = resolve_chain_name(chain)
-    except (ValueError, ImportError):
-        chain_lower = chain.lower()
-
-    # Try to find matching Chain enum
-    for c in Chain:
-        if c.value.lower() == chain_lower:
-            return chain_lower, c
-
-    raise TokenResolutionError(
-        token="",
-        chain=chain,
-        reason=f"Unknown chain '{chain}'",
-        suggestions=[f"Supported chains: {', '.join(c.value.lower() for c in Chain)}"],
-    )
+    raw = str(chain)
+    descriptor = ChainRegistry.try_resolve(raw)
+    if descriptor is None:
+        raise TokenResolutionError(
+            token="",
+            chain=raw,
+            reason=f"Unknown chain '{raw}'",
+            suggestions=[f"Supported chains: {', '.join(ChainRegistry.names())}"],
+        )
+    return descriptor.name
 
 
 def _parse_ambiguous_candidates(error_str: str) -> list[str]:
@@ -584,8 +567,7 @@ class TokenResolver:
             if token is None:
                 continue
 
-            _, chain_enum = _normalize_chain(chain_lower)
-            resolved = self._token_to_resolved(token, chain_lower, chain_enum, source="static")
+            resolved = self._token_to_resolved(token, chain_lower, source="static")
             self._cache.put(resolved)
 
     @classmethod
@@ -703,7 +685,7 @@ class TokenResolver:
         return self.resolve(target, descriptor.name, log_errors=log_errors, skip_gateway=skip_gateway)
 
     def resolve(  # noqa: C901
-        self, token: str, chain: str | Chain, *, log_errors: bool = True, skip_gateway: bool = False
+        self, token: str, chain: str, *, log_errors: bool = True, skip_gateway: bool = False
     ) -> ResolvedToken:
         """Resolve a token by symbol, address, or CAIP-19 asset id on a chain.
 
@@ -749,7 +731,7 @@ class TokenResolver:
             return self.resolve_caip19(token, log_errors=log_errors, skip_gateway=skip_gateway)
 
         start_time = time.perf_counter()
-        chain_lower, chain_enum = _normalize_chain(chain)
+        chain_lower = _normalize_chain(chain)
 
         # Reset the per-call miss flag at the top. The gateway helpers
         # set ``definitive = True`` only when they actually reach the
@@ -802,9 +784,9 @@ class TokenResolver:
             symbol_needs_gateway = False
             with self._lock:
                 if is_address:
-                    result = self._try_fast_resolve_address(token, chain_lower, chain_enum)
+                    result = self._try_fast_resolve_address(token, chain_lower)
                 else:
-                    result = self._resolve_by_symbol(token, chain_lower, chain_enum)
+                    result = self._resolve_by_symbol(token, chain_lower)
                     # _resolve_by_symbol returns None (sentinel) when gateway is available
                     # and the symbol wasn't found statically, signalling us to try the
                     # gateway's dynamic resolution path outside the lock.
@@ -820,10 +802,10 @@ class TokenResolver:
                 if symbol_needs_gateway:
                     # Symbol not in static registry -- try gateway's dynamic resolution
                     # (Jupiter for Solana, CoinGecko for EVM)
-                    resolved = self._resolve_symbol_via_gateway(token, chain_lower, chain_enum)
+                    resolved = self._resolve_symbol_via_gateway(token, chain_lower)
                 else:
                     # Address not in static registry -- try on-chain ERC20 lookup
-                    resolved = self._resolve_via_gateway(token, chain_lower, chain_enum)
+                    resolved = self._resolve_via_gateway(token, chain_lower)
 
                 if resolved:
                     # Write back to cache (under lock)
@@ -892,7 +874,7 @@ class TokenResolver:
             _try_record_metric("record_token_resolution_error", chain_lower, error_type)
             raise
 
-    def _try_fast_resolve_address(self, address: str, chain_lower: str, chain_enum: Chain) -> ResolvedToken | None:
+    def _try_fast_resolve_address(self, address: str, chain_lower: str) -> ResolvedToken | None:
         """Try to resolve an address from cache or static registry (must be called under lock).
 
         Returns:
@@ -917,7 +899,7 @@ class TokenResolver:
 
         if static_token:
             self._stats["static_hits"] += 1
-            resolved = self._token_to_resolved(static_token, chain_lower, chain_enum, source="static")
+            resolved = self._token_to_resolved(static_token, chain_lower, source="static")
             self._cache.put(resolved)
             logger.debug(
                 "token_cache_miss",
@@ -946,7 +928,7 @@ class TokenResolver:
         )
         _try_record_metric("record_token_resolution_latency", chain_lower, result.source, elapsed_s)
 
-    def _resolve_by_symbol(self, symbol: str, chain_lower: str, chain_enum: Chain) -> ResolvedToken | None:
+    def _resolve_by_symbol(self, symbol: str, chain_lower: str) -> ResolvedToken | None:
         """Resolve a token by symbol.
 
         Returns:
@@ -975,7 +957,7 @@ class TokenResolver:
 
         if static_token:
             self._stats["static_hits"] += 1
-            resolved = self._token_to_resolved(static_token, chain_lower, chain_enum, source="static")
+            resolved = self._token_to_resolved(static_token, chain_lower, source="static")
             # Cache for future lookups
             self._cache.put(resolved)
             logger.debug(
@@ -993,7 +975,7 @@ class TokenResolver:
                 extra={"token": symbol, "chain": chain_lower, "alias_address": alias_address},
             )
             # Resolve by the canonical address
-            return self._resolve_by_address(alias_address, chain_lower, chain_enum)
+            return self._resolve_by_address(alias_address, chain_lower)
 
         # 4. Try gateway dynamic symbol resolution (Jupiter for Solana, CoinGecko for EVM).
         # Must be called WITHOUT the lock held to avoid blocking while waiting for network.
@@ -1011,14 +993,14 @@ class TokenResolver:
         # by returning None instead of raising.  resolve() will handle this outside the lock.
         return None  # sentinel: gateway path needed
 
-    def _resolve_by_address(self, address: str, chain_lower: str, chain_enum: Chain) -> ResolvedToken:
+    def _resolve_by_address(self, address: str, chain_lower: str) -> ResolvedToken:
         """Resolve a token by address from cache or static registry (must be called under lock).
 
         This method does NOT call the gateway. It is used for alias resolution
         (from _resolve_by_symbol) where the address should be in the static registry.
         Gateway-based address resolution is handled in resolve() outside the lock.
         """
-        result = self._try_fast_resolve_address(address, chain_lower, chain_enum)
+        result = self._try_fast_resolve_address(address, chain_lower)
         if result is not None:
             return result
 
@@ -1113,7 +1095,7 @@ class TokenResolver:
                 return static_decimals
         return None
 
-    def _resolve_via_gateway(self, address: str, chain_lower: str, chain_enum: Chain) -> ResolvedToken | None:
+    def _resolve_via_gateway(self, address: str, chain_lower: str) -> ResolvedToken | None:
         """Attempt to resolve token via gateway on-chain lookup.
 
         Makes a gRPC call to the gateway's GetTokenMetadata RPC to query
@@ -1122,7 +1104,6 @@ class TokenResolver:
         Args:
             address: Token contract address
             chain_lower: Chain name (lowercase)
-            chain_enum: Chain enum value
 
         Returns:
             ResolvedToken if successful, None otherwise
@@ -1248,8 +1229,8 @@ class TokenResolver:
                 symbol=response.symbol,
                 address=resolved_address,
                 decimals=decimals,
-                chain=chain_enum,
-                chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+                chain=chain_lower,
+                chain_id=CHAIN_ID_MAP.get(chain_lower, 0),
                 name=response.name or None,
                 coingecko_id=None,
                 is_stablecoin=False,  # Can't determine from on-chain
@@ -1331,7 +1312,7 @@ class TokenResolver:
             _try_record_metric("record_token_resolution_onchain_lookup", chain_lower, status)
             return None
 
-    def _resolve_symbol_via_gateway(self, symbol: str, chain_lower: str, chain_enum: Chain) -> "ResolvedToken | None":
+    def _resolve_symbol_via_gateway(self, symbol: str, chain_lower: str) -> "ResolvedToken | None":
         """Attempt to resolve a symbol via the gateway's dynamic ResolveToken RPC.
 
         The gateway's ResolveToken now includes dynamic fallbacks (Jupiter for
@@ -1342,7 +1323,6 @@ class TokenResolver:
         Args:
             symbol: Token symbol (e.g., "swETH", "USDS")
             chain_lower: Chain name (lowercase)
-            chain_enum: Chain enum value
 
         Returns:
             ResolvedToken if successful, None otherwise
@@ -1431,8 +1411,8 @@ class TokenResolver:
                 symbol=response.symbol or symbol,
                 address=returned_address,
                 decimals=decimals,
-                chain=chain_enum,
-                chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+                chain=chain_lower,
+                chain_id=CHAIN_ID_MAP.get(chain_lower, 0),
                 name=response.name or None,
                 coingecko_id=None,
                 is_stablecoin=False,
@@ -1550,7 +1530,6 @@ class TokenResolver:
         self,
         token: Token,
         chain_lower: str,
-        chain_enum: Chain,
         source: str = "static",
     ) -> ResolvedToken:
         """Convert a Token to ResolvedToken for a specific chain."""
@@ -1584,8 +1563,8 @@ class TokenResolver:
             symbol=token.symbol,
             address=addr_norm,
             decimals=decimals,
-            chain=chain_enum,
-            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            chain=chain_lower,
+            chain_id=CHAIN_ID_MAP.get(chain_lower, 0),
             name=token.name,
             coingecko_id=token.coingecko_id,
             is_stablecoin=token.is_stablecoin,
@@ -1618,7 +1597,7 @@ class TokenResolver:
         self,
         token_in: str,
         token_out: str,
-        chain: str | Chain,
+        chain: str,
     ) -> tuple[ResolvedToken, ResolvedToken]:
         """Resolve a pair of tokens for a swap operation.
 
@@ -1643,7 +1622,7 @@ class TokenResolver:
         resolved_out = self.resolve(token_out, chain)
         return resolved_in, resolved_out
 
-    def get_decimals(self, chain: str | Chain, token: str) -> int:
+    def get_decimals(self, chain: str, token: str) -> int:
         """Get the decimals for a token on a specific chain.
 
         Convenience method that extracts just the decimals from resolution.
@@ -1687,7 +1666,6 @@ class TokenResolver:
                         chain_tokens[address] = self._token_to_resolved(
                             token,
                             descriptor.name,
-                            descriptor.enum,
                             source="static",
                         )
                     except TokenNotFoundError:
@@ -1702,7 +1680,7 @@ class TokenResolver:
 
         return MappingProxyType(snapshot)
 
-    def get_address(self, chain: str | Chain, symbol: str) -> str:
+    def get_address(self, chain: str, symbol: str) -> str:
         """Get the address for a token symbol on a specific chain.
 
         Convenience method that extracts just the address from resolution.
@@ -1724,7 +1702,7 @@ class TokenResolver:
         resolved = self.resolve(symbol, chain)
         return resolved.address
 
-    def resolve_for_swap(self, token: str, chain: str | Chain) -> ResolvedToken:
+    def resolve_for_swap(self, token: str, chain: str) -> ResolvedToken:
         """Resolve a token for swap operations, auto-wrapping native tokens.
 
         This method resolves a token and if it's a native token (ETH, MATIC, AVAX, BNB),
@@ -1758,7 +1736,7 @@ class TokenResolver:
 
         # If it's a native token, resolve to wrapped version
         if resolved.is_native:
-            chain_lower, _ = _normalize_chain(chain)
+            chain_lower = _normalize_chain(chain)
             wrapped_address = WRAPPED_NATIVE.get(chain_lower)
 
             if wrapped_address:
@@ -1775,7 +1753,7 @@ class TokenResolver:
     def resolve_for_protocol(
         self,
         token: str,
-        chain: str | Chain,
+        chain: str,
         protocol: str,
     ) -> ResolvedToken:
         """Resolve a token with protocol-specific handling.
@@ -1918,13 +1896,13 @@ class TokenResolver:
                 symbol="CUSTOM",
                 address="0x...",
                 decimals=18,
-                chain=Chain.ARBITRUM,
+                chain="arbitrum",
                 chain_id=42161,
                 name="Custom Token",
             )
             resolver.register(custom_token)
         """
-        chain_lower = token.chain.value.lower()
+        chain_lower = token.chain
         # One critical section: populate the cache AND clear any pending
         # negative-cache entry atomically. A concurrent resolve() must
         # never see "cache has the token" while "negative cache still
@@ -1940,7 +1918,7 @@ class TokenResolver:
     def register_token(
         self,
         symbol: str,
-        chain: str | Chain,
+        chain: str,
         address: str,
         decimals: int,
         *,
@@ -1989,13 +1967,13 @@ class TokenResolver:
             # Now works:
             token = resolver.resolve("PT-wstETH-25JUN2026", "arbitrum")
         """
-        chain_lower, chain_enum = _normalize_chain(chain)
+        chain_lower = _normalize_chain(chain)
         _validate_address(address, chain_lower)
 
         from almanak.core.constants import get_chain_id
 
         try:
-            chain_id = get_chain_id(chain_enum)
+            chain_id = get_chain_id(chain_lower)
         except ValueError:
             chain_id = 0  # Fallback for chains without EIP-155 IDs (e.g., Solana)
 
@@ -2004,7 +1982,7 @@ class TokenResolver:
                 symbol=symbol,
                 address=_normalize_address_for_chain(address, chain_lower),
                 decimals=decimals,
-                chain=chain_enum,
+                chain=chain_lower,
                 chain_id=chain_id,
                 name=name or symbol,
                 coingecko_id=coingecko_id,

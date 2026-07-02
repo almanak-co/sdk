@@ -23,7 +23,6 @@ from almanak.connectors.gmx_v2.backtest_funding import (
     GMXClientConfig,
     GMXFundingProvider,
 )
-from almanak.core.enums import Chain
 from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig
 from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
     FundingHistoryPoint,
@@ -47,7 +46,7 @@ class TestGMXFundingProviderInitialization:
     def test_init_default(self):
         """Defaults: arbitrum chain, default throttle, owns its limiter."""
         provider = GMXFundingProvider()
-        assert provider.config.chain == Chain.ARBITRUM
+        assert provider.config.chain == "arbitrum"
         assert provider.config.requests_per_minute == DEFAULT_REQUESTS_PER_MINUTE
         assert provider._owns_rate_limiter is True
 
@@ -56,12 +55,12 @@ class TestGMXFundingProviderInitialization:
         config = GMXClientConfig(
             requests_per_minute=10,
             timeout_seconds=15,
-            chain=Chain.AVALANCHE,
+            chain="avalanche",
             fallback_rate=Decimal("0.0002"),
         )
         provider = GMXFundingProvider(config=config)
         assert provider.config is config
-        assert provider.config.chain == Chain.AVALANCHE
+        assert provider.config.chain == "avalanche"
         assert provider.config.fallback_rate == Decimal("0.0002")
 
     def test_init_with_provided_rate_limiter(self):
@@ -75,13 +74,13 @@ class TestGMXFundingProviderInitialization:
         """Mutating the returned list does not poison subsequent reads."""
         provider = GMXFundingProvider()
         chains = provider.supported_chains
-        chains.append(Chain.ETHEREUM)
-        assert Chain.ETHEREUM not in provider.supported_chains
+        chains.append("ethereum")
+        assert "ethereum" not in provider.supported_chains
 
     def test_for_backtest_defaults_to_arbitrum(self):
         """Factory defaults to the connector's canonical backtest chain."""
         provider = GMXFundingProvider.for_backtest(BacktestProviderConfig())
-        assert provider.config.chain == Chain.ARBITRUM
+        assert provider.config.chain == "arbitrum"
         assert provider.config.fallback_rate == Decimal("0.0001")
 
     def test_for_backtest_uses_declared_chain_and_fallback_rate(self):
@@ -92,7 +91,7 @@ class TestGMXFundingProviderInitialization:
                 funding_fallback_rate=Decimal("0"),
             )
         )
-        assert provider.config.chain == Chain.AVALANCHE
+        assert provider.config.chain == "avalanche"
         assert provider.config.fallback_rate == Decimal("0")
 
     def test_for_backtest_warns_on_unsupported_chain(self, caplog: pytest.LogCaptureFixture):
@@ -106,10 +105,10 @@ class TestGMXFundingProviderInitialization:
             )
         )
 
-        assert provider.config.chain == Chain.ARBITRUM
+        assert provider.config.chain == "arbitrum"
         assert provider.config.fallback_rate == Decimal("0.0007")
         assert "unsupported chain 'ethereum'" in caplog.text
-        assert "falling back to ARBITRUM" in caplog.text
+        assert "falling back to arbitrum" in caplog.text
 
     def test_for_backtest_warns_when_declared_chain_has_no_enum(
         self,
@@ -121,9 +120,9 @@ class TestGMXFundingProviderInitialization:
         with patch.object(FundingHistoryRegistry, "declared_chains", return_value=("not_in_enum",)):
             provider = GMXFundingProvider.for_backtest(BacktestProviderConfig(chain="not_in_enum"))
 
-        assert provider.config.chain == Chain.ARBITRUM
-        assert "Chain.NOT_IN_ENUM is unavailable" in caplog.text
-        assert "falling back to ARBITRUM" in caplog.text
+        assert provider.config.chain == "arbitrum"
+        assert "not a registered chain" in caplog.text
+        assert "falling back to arbitrum" in caplog.text
 
 
 class TestSupportedChains:
@@ -132,13 +131,13 @@ class TestSupportedChains:
     def test_supported_chains_include_required_networks(self):
         """The GMX V2 connector declares arbitrum + avalanche funding data."""
         provider = GMXFundingProvider()
-        assert provider.supported_chains == [Chain.ARBITRUM, Chain.AVALANCHE]
+        assert provider.supported_chains == ["arbitrum", "avalanche"]
 
     def test_unsupported_chain_is_rejected(self):
         """A chain outside the declared set fails validation."""
         provider = GMXFundingProvider()
         with pytest.raises(ValueError) as exc_info:
-            provider._validate_chain(Chain.ETHEREUM)
+            provider._validate_chain("ethereum")
         assert "Unsupported chain" in str(exc_info.value)
 
 
@@ -272,7 +271,7 @@ class TestGetCurrentFundingRate:
         provider = GMXFundingProvider()
 
         with patch(_GATEWAY_SEAM, return_value=[]):
-            result = await provider.get_current_funding_rate("ETH-USD", chain=Chain.ETHEREUM)
+            result = await provider.get_current_funding_rate("ETH-USD", chain="ethereum")
 
         assert result.source_info.source == "fallback"
 
@@ -284,5 +283,5 @@ class TestContextManager:
     async def test_context_manager(self):
         """The provider supports async-with (close is a compat no-op)."""
         async with GMXFundingProvider() as provider:
-            assert provider.config.chain == Chain.ARBITRUM
+            assert provider.config.chain == "arbitrum"
         await provider.close()

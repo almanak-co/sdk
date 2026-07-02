@@ -19,14 +19,13 @@ Examples:
             HistoricalVolumeProvider,
         )
         from almanak.framework.backtesting.pnl.types import VolumeResult
-        from almanak.core.enums import Chain
         from datetime import date
 
         class MyVolumeProvider(HistoricalVolumeProvider):
             async def get_volume(
                 self,
                 pool_address: str,
-                chain: Chain,
+                chain: str,
                 start_date: date,
                 end_date: date,
             ) -> list[VolumeResult]:
@@ -38,7 +37,7 @@ Examples:
         provider = MyVolumeProvider()
         volumes = await provider.get_volume(
             pool_address="0x...",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             start_date=date(2024, 1, 1),
             end_date=date(2024, 1, 31),
         )
@@ -51,8 +50,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Self
-
-from almanak.core.enums import Chain
 
 from ..types import APYResult, FundingResult, LiquidityResult, VolumeResult
 
@@ -88,7 +85,7 @@ class HistoricalVolumeProvider(ABC):
     async def get_volume(
         self,
         pool_address: str,
-        chain: Chain,
+        chain: str,
         start_date: date,
         end_date: date,
     ) -> list[VolumeResult]:
@@ -113,7 +110,7 @@ class HistoricalVolumeProvider(ABC):
         Example:
             volumes = await provider.get_volume(
                 pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
-                chain=Chain.ARBITRUM,
+                chain="arbitrum",
                 start_date=date(2024, 1, 1),
                 end_date=date(2024, 1, 31),
             )
@@ -257,7 +254,7 @@ class HistoricalLiquidityProvider(ABC):
     async def get_liquidity_depth(
         self,
         pool_address: str,
-        chain: Chain,
+        chain: str,
         timestamp: datetime,
     ) -> LiquidityResult:
         """Fetch historical liquidity depth for a pool at a specific timestamp.
@@ -283,7 +280,7 @@ class HistoricalLiquidityProvider(ABC):
         Example:
             liquidity = await provider.get_liquidity_depth(
                 pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
-                chain=Chain.ARBITRUM,
+                chain="arbitrum",
                 timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
             )
         """

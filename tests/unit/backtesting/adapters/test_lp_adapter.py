@@ -2520,15 +2520,14 @@ class TestVolumeUnavailableHelper:
 
 
 class TestResolveVolumeChain:
-    """Config-string to Chain enum resolution for the volume lane."""
+    """Config-string to canonical chain name resolution for the volume lane."""
 
     def test_known_chain_returns_enum(self) -> None:
-        from almanak.core.enums import Chain
 
         adapter = make_volume_adapter(chain="ethereum")
         key = ("0xpool", datetime(2024, 1, 15).date())
 
-        assert adapter._resolve_volume_chain(datetime(2024, 1, 15), None, key) is Chain.ETHEREUM
+        assert adapter._resolve_volume_chain(datetime(2024, 1, 15), None, key) == "ethereum"
         assert adapter._volume_cache == {}
 
     def test_unknown_chain_non_strict_warns_and_caches_low(self, caplog: pytest.LogCaptureFixture) -> None:
@@ -2545,7 +2544,7 @@ class TestResolveVolumeChain:
 
         assert result is None
         assert adapter._volume_cache[key] == (None, DataConfidence.LOW)
-        assert any("Unknown chain 'NOTACHAIN'" in record.getMessage() for record in caplog.records)
+        assert any("Unknown chain 'notachain'" in record.getMessage() for record in caplog.records)
 
     def test_unknown_chain_strict_raises_with_suppressed_keyerror_context(self) -> None:
         from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
@@ -2557,12 +2556,14 @@ class TestResolveVolumeChain:
             adapter._resolve_volume_chain(ts, "uniswap_v3", ("0xpool", ts.date()))
 
         err = exc_info.value
-        assert err.chain == "NOTACHAIN"
+        assert err.chain == "notachain"
         assert err.identifier == "0xpool"
         assert err.protocol == "uniswap_v3"
-        # Matches the original `raise ... from None` inside `except KeyError`.
+        # `cause=None` still raises `from None` (suppressed context); the
+        # registry lookup is a non-raising `try_resolve`, so no in-flight
+        # KeyError exists anymore.
         assert err.__suppress_context__ is True
-        assert isinstance(err.__context__, KeyError)
+        assert err.__context__ is None
         assert adapter._volume_cache == {}
 
 
@@ -2623,7 +2624,6 @@ class TestGetHistoricalVolumeOrchestration:
         )
 
     def test_success_via_stub_provider(self) -> None:
-        from almanak.core.enums import Chain
         from almanak.framework.backtesting.pnl.types import DataConfidence
 
         stub = StubVolumeProvider(results=[self._stub_result()])
@@ -2638,7 +2638,7 @@ class TestGetHistoricalVolumeOrchestration:
         assert stub.calls == [
             {
                 "pool_address": "0xpool",
-                "chain": Chain.ETHEREUM,
+                "chain": "ethereum",
                 "start_date": ts.date(),
                 "end_date": ts.date(),
                 "protocol": "uniswap_v3",
@@ -2924,14 +2924,13 @@ class TestLiquidityUnavailableHelper:
 
 
 class TestResolveLiquidityChain:
-    """Config-string to Chain enum resolution for the liquidity lane."""
+    """Config-string to canonical chain name resolution for the liquidity lane."""
 
     def test_known_chain_returns_enum(self) -> None:
-        from almanak.core.enums import Chain
 
         adapter = make_liquidity_adapter(chain="ethereum")
 
-        assert adapter._resolve_liquidity_chain(datetime(2024, 1, 15), None, "0xpool") is Chain.ETHEREUM
+        assert adapter._resolve_liquidity_chain(datetime(2024, 1, 15), None, "0xpool") == "ethereum"
         assert adapter._liquidity_cache == {}
 
     def test_unknown_chain_non_strict_warns_without_caching(self, caplog: pytest.LogCaptureFixture) -> None:
@@ -2945,7 +2944,7 @@ class TestResolveLiquidityChain:
 
         assert result is None
         assert adapter._liquidity_cache == {}
-        assert any("Unknown chain 'NOTACHAIN'" in record.getMessage() for record in caplog.records)
+        assert any("Unknown chain 'notachain'" in record.getMessage() for record in caplog.records)
 
     def test_unknown_chain_strict_raises_with_suppressed_keyerror_context(self) -> None:
         from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
@@ -2956,12 +2955,14 @@ class TestResolveLiquidityChain:
             adapter._resolve_liquidity_chain(datetime(2024, 1, 15), "uniswap_v3", "0xpool")
 
         err = exc_info.value
-        assert err.chain == "NOTACHAIN"
+        assert err.chain == "notachain"
         assert err.identifier == "0xpool"
         assert err.protocol == "uniswap_v3"
-        # Matches the original `raise ... from None` inside `except KeyError`.
+        # `cause=None` still raises `from None` (suppressed context); the
+        # registry lookup is a non-raising `try_resolve`, so no in-flight
+        # KeyError exists anymore.
         assert err.__suppress_context__ is True
-        assert isinstance(err.__context__, KeyError)
+        assert err.__context__ is None
         assert adapter._liquidity_cache == {}
 
 
@@ -2989,7 +2990,6 @@ class TestGetHistoricalLiquidityOrchestration:
     """End-to-end behaviour of _get_historical_liquidity through the helpers."""
 
     def test_success_via_stub_provider(self) -> None:
-        from almanak.core.enums import Chain
 
         stub = StubLiquidityProvider(result=make_liquidity_result(Decimal("50000000")))
         adapter = make_liquidity_adapter(provider=stub)
@@ -3002,7 +3002,7 @@ class TestGetHistoricalLiquidityOrchestration:
         assert stub.calls == [
             {
                 "pool_address": "0xpool",
-                "chain": Chain.ETHEREUM,
+                "chain": "ethereum",
                 "timestamp": ts,
                 "protocol": "uniswap_v3",
             }

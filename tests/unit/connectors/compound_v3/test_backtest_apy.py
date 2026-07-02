@@ -28,7 +28,6 @@ from almanak.connectors.compound_v3.backtest_apy import (
     CompoundV3APYProvider,
     CompoundV3ClientConfig,
 )
-from almanak.core.enums import Chain
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
     SubgraphClientConfig,
@@ -58,21 +57,21 @@ class TestCompoundV3APYProviderInitialization:
         """Test provider initializes with default settings."""
         provider = CompoundV3APYProvider()
         assert provider.supported_chains == SUPPORTED_CHAINS
-        assert provider.config.chain == Chain.ETHEREUM
+        assert provider.config.chain == "ethereum"
         assert provider.config.requests_per_minute == 100
         assert provider._owns_client is True
 
     def test_init_with_custom_config(self):
         """Test provider initializes with custom config."""
         config = CompoundV3ClientConfig(
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             requests_per_minute=50,
             supply_apy_fallback=Decimal("0.05"),
             borrow_apy_fallback=Decimal("0.08"),
             use_net_rates=True,
         )
         provider = CompoundV3APYProvider(config=config)
-        assert provider.config.chain == Chain.ARBITRUM
+        assert provider.config.chain == "arbitrum"
         assert provider.config.requests_per_minute == 50
         assert provider.config.supply_apy_fallback == Decimal("0.05")
         assert provider.config.borrow_apy_fallback == Decimal("0.08")
@@ -100,10 +99,10 @@ class TestSupportedChains:
     def test_supported_chains_include_required_networks(self):
         """Test that all required networks are supported (US-018)."""
         # US-018 requires: Ethereum, Arbitrum, Polygon, Base
-        assert Chain.ETHEREUM in SUPPORTED_CHAINS
-        assert Chain.ARBITRUM in SUPPORTED_CHAINS
-        assert Chain.POLYGON in SUPPORTED_CHAINS
-        assert Chain.BASE in SUPPORTED_CHAINS
+        assert "ethereum" in SUPPORTED_CHAINS
+        assert "arbitrum" in SUPPORTED_CHAINS
+        assert "polygon" in SUPPORTED_CHAINS
+        assert "base" in SUPPORTED_CHAINS
 
     def test_all_supported_chains_have_subgraph_ids(self):
         """Test all supported chains have subgraph IDs."""
@@ -210,29 +209,29 @@ class TestCometAddressResolution:
         provider = CompoundV3APYProvider()
 
         # Ethereum USDC
-        address = provider._get_comet_address(Chain.ETHEREUM, "USDC")
-        assert address == KNOWN_COMET_ADDRESSES[Chain.ETHEREUM]["USDC"].lower()
+        address = provider._get_comet_address("ethereum", "USDC")
+        assert address == KNOWN_COMET_ADDRESSES["ethereum"]["USDC"].lower()
 
         # Arbitrum USDC
-        address = provider._get_comet_address(Chain.ARBITRUM, "USDC")
-        assert address == KNOWN_COMET_ADDRESSES[Chain.ARBITRUM]["USDC"].lower()
+        address = provider._get_comet_address("arbitrum", "USDC")
+        assert address == KNOWN_COMET_ADDRESSES["arbitrum"]["USDC"].lower()
 
     def test_get_comet_address_unknown_returns_none(self):
         """Test getting comet address for unknown market returns None."""
         provider = CompoundV3APYProvider()
-        assert provider._get_comet_address(Chain.ETHEREUM, "NONEXISTENT") is None
+        assert provider._get_comet_address("ethereum", "NONEXISTENT") is None
 
     def test_resolve_market_id_from_symbol(self):
         """Test resolving market ID from symbol."""
         provider = CompoundV3APYProvider()
-        market_id = provider._resolve_market_id(Chain.ETHEREUM, "USDC")
-        assert market_id == KNOWN_COMET_ADDRESSES[Chain.ETHEREUM]["USDC"].lower()
+        market_id = provider._resolve_market_id("ethereum", "USDC")
+        assert market_id == KNOWN_COMET_ADDRESSES["ethereum"]["USDC"].lower()
 
     def test_resolve_market_id_from_address(self):
         """Test resolving market ID from address."""
         provider = CompoundV3APYProvider()
         address = "0xc3d688B66703497DAA19211EEdff47f25384cdc3"
-        market_id = provider._resolve_market_id(Chain.ETHEREUM, address)
+        market_id = provider._resolve_market_id("ethereum", address)
         assert market_id == address.lower()
 
 
@@ -248,11 +247,11 @@ class TestKnownCometAddressesPinned:
 
     def test_arbitrum_usdc_is_native_usdc_comet(self):
         """baseToken() of 0x9c4e... is native USDC (0xaf88...)."""
-        assert KNOWN_COMET_ADDRESSES[Chain.ARBITRUM]["USDC"] == "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf"
+        assert KNOWN_COMET_ADDRESSES["arbitrum"]["USDC"] == "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf"
 
     def test_arbitrum_usdc_e_is_bridged_usdc_comet(self):
         """baseToken() of 0xA5ED... is bridged USDC.e (0xFF97...)."""
-        assert KNOWN_COMET_ADDRESSES[Chain.ARBITRUM]["USDC.e"] == "0xA5EDBDD9646f8dFF606d7448e414884C7d905dCA"
+        assert KNOWN_COMET_ADDRESSES["arbitrum"]["USDC.e"] == "0xA5EDBDD9646f8dFF606d7448e414884C7d905dCA"
 
     def test_base_usdbc_comet(self):
         """Base 0x9c4e... is the USDbC Comet (baseToken() = 0xd9aA... USDbC).
@@ -260,7 +259,7 @@ class TestKnownCometAddressesPinned:
         Same vanity address as the Arbitrum native-USDC Comet -- it exists on
         both chains with different base tokens, so the pin is per-chain.
         """
-        assert KNOWN_COMET_ADDRESSES[Chain.BASE]["USDbC"] == "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf"
+        assert KNOWN_COMET_ADDRESSES["base"]["USDbC"] == "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf"
 
     def test_matches_connector_comet_addresses(self):
         """Every overlapping entry agrees with the connector's address table."""
@@ -273,9 +272,9 @@ class TestKnownCometAddressesPinned:
         }
         overlap_found = False
         for chain, chain_key in (
-            (Chain.ETHEREUM, "ethereum"),
-            (Chain.ARBITRUM, "arbitrum"),
-            (Chain.BASE, "base"),
+            ("ethereum", "ethereum"),
+            ("arbitrum", "arbitrum"),
+            ("base", "base"),
         ):
             connector_markets = COMPOUND_V3_COMET_ADDRESSES[chain_key]
             for symbol, address in KNOWN_COMET_ADDRESSES[chain].items():
@@ -593,7 +592,7 @@ class TestGetAPYForChain:
     @pytest.mark.asyncio
     async def test_get_apy_for_chain_overrides_config_chain(self):
         """Test that get_apy_for_chain uses specified chain."""
-        config = CompoundV3ClientConfig(chain=Chain.ETHEREUM)
+        config = CompoundV3ClientConfig(chain="ethereum")
         provider = CompoundV3APYProvider(config=config)
 
         accounting_response = {
@@ -618,7 +617,7 @@ class TestGetAPYForChain:
 
         # Query for Arbitrum instead of default Ethereum
         await provider.get_apy_for_chain(
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             market="USDC",
             start_date=datetime(2024, 1, 1, tzinfo=UTC),
             end_date=datetime(2024, 1, 1, tzinfo=UTC),
@@ -627,12 +626,12 @@ class TestGetAPYForChain:
         # Verify the subgraph ID used was for Arbitrum
         call_args = mock_client.query.call_args_list[0]
         subgraph_id = call_args.kwargs.get("subgraph_id") or call_args.args[0]
-        assert subgraph_id == COMPOUND_V3_SUBGRAPH_IDS[Chain.ARBITRUM]
+        assert subgraph_id == COMPOUND_V3_SUBGRAPH_IDS["arbitrum"]
 
     @pytest.mark.asyncio
     async def test_get_apy_for_chain_restores_original_chain(self):
         """Test that original chain is restored after query."""
-        config = CompoundV3ClientConfig(chain=Chain.ETHEREUM)
+        config = CompoundV3ClientConfig(chain="ethereum")
         provider = CompoundV3APYProvider(config=config)
 
         mock_client = _make_client()
@@ -643,14 +642,14 @@ class TestGetAPYForChain:
 
         # Query for Arbitrum
         await provider.get_apy_for_chain(
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             market="USDC",
             start_date=datetime(2024, 1, 1, tzinfo=UTC),
             end_date=datetime(2024, 1, 1, tzinfo=UTC),
         )
 
         # Original chain should be restored
-        assert provider.config.chain == Chain.ETHEREUM
+        assert provider.config.chain == "ethereum"
 
 
 class TestGetCurrentAPY:
@@ -754,7 +753,7 @@ class TestUnsupportedChain:
     async def test_unsupported_chain_returns_fallback(self):
         """Test that unsupported chain returns fallback results."""
         # Use a chain not in SUPPORTED_CHAINS
-        config = CompoundV3ClientConfig(chain=Chain.AVALANCHE)
+        config = CompoundV3ClientConfig(chain="avalanche")
         provider = CompoundV3APYProvider(config=config)
 
         apys = await provider.get_apy(
@@ -772,7 +771,7 @@ class TestUnsupportedChain:
         """Test that _get_subgraph_id returns None for unsupported chain."""
         provider = CompoundV3APYProvider()
         # AVALANCHE is not in COMPOUND_V3_SUBGRAPH_IDS
-        assert provider._get_subgraph_id(Chain.AVALANCHE) is None
+        assert provider._get_subgraph_id("avalanche") is None
 
 
 class TestFallbackResultGeneration:
@@ -933,7 +932,7 @@ class TestListMarkets:
         """Test that list_markets returns empty list for unsupported chain."""
         provider = CompoundV3APYProvider()
 
-        markets = await provider.list_markets(chain=Chain.AVALANCHE)
+        markets = await provider.list_markets(chain="avalanche")
 
         assert markets == []
 
@@ -943,24 +942,24 @@ class TestKnownCometAddresses:
 
     def test_ethereum_markets_exist(self):
         """Test Ethereum has known markets."""
-        assert Chain.ETHEREUM in KNOWN_COMET_ADDRESSES
-        assert "USDC" in KNOWN_COMET_ADDRESSES[Chain.ETHEREUM]
-        assert "WETH" in KNOWN_COMET_ADDRESSES[Chain.ETHEREUM]
+        assert "ethereum" in KNOWN_COMET_ADDRESSES
+        assert "USDC" in KNOWN_COMET_ADDRESSES["ethereum"]
+        assert "WETH" in KNOWN_COMET_ADDRESSES["ethereum"]
 
     def test_arbitrum_markets_exist(self):
         """Test Arbitrum has known markets."""
-        assert Chain.ARBITRUM in KNOWN_COMET_ADDRESSES
-        assert "USDC" in KNOWN_COMET_ADDRESSES[Chain.ARBITRUM]
+        assert "arbitrum" in KNOWN_COMET_ADDRESSES
+        assert "USDC" in KNOWN_COMET_ADDRESSES["arbitrum"]
 
     def test_polygon_markets_exist(self):
         """Test Polygon has known markets."""
-        assert Chain.POLYGON in KNOWN_COMET_ADDRESSES
-        assert "USDC" in KNOWN_COMET_ADDRESSES[Chain.POLYGON]
+        assert "polygon" in KNOWN_COMET_ADDRESSES
+        assert "USDC" in KNOWN_COMET_ADDRESSES["polygon"]
 
     def test_base_markets_exist(self):
         """Test Base has known markets."""
-        assert Chain.BASE in KNOWN_COMET_ADDRESSES
-        assert "USDC" in KNOWN_COMET_ADDRESSES[Chain.BASE]
+        assert "base" in KNOWN_COMET_ADDRESSES
+        assert "USDC" in KNOWN_COMET_ADDRESSES["base"]
 
     def test_all_addresses_are_valid_format(self):
         """Test all addresses are valid Ethereum address format."""

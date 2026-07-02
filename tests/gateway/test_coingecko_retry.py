@@ -29,7 +29,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.data.interfaces import DataSourceRateLimited, DataSourceUnavailable
 from almanak.framework.data.tokens import ResolvedToken
 from almanak.gateway.data.price.coingecko import CoinGeckoPriceSource
@@ -44,7 +43,7 @@ def _resolved_cbbtc() -> ResolvedToken:
         symbol="cbBTC",
         address=_CBBTC_ADDRESS,
         decimals=8,
-        chain=Chain.BASE,
+        chain="base",
         chain_id=8453,
         source="on_chain",
         is_verified=False,

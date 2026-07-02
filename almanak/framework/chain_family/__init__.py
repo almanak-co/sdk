@@ -36,7 +36,6 @@ from ._family import (
     SvmFamily,
     all_families,
     family_for,
-    family_for_chain_enum,
     family_for_kind,
 )
 
@@ -47,6 +46,5 @@ __all__ = [
     "SvmFamily",
     "all_families",
     "family_for",
-    "family_for_chain_enum",
     "family_for_kind",
 ]

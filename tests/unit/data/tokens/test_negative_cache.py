@@ -109,7 +109,7 @@ class TestNegativeCacheSymbol:
         resolver = fresh_resolver()
         hit_chains: list[str] = []
 
-        def _impl(_sym, chain, _enum):
+        def _impl(_sym, chain):
             hit_chains.append(chain)
             resolver._gateway_miss_state.definitive = True
             return None
@@ -144,8 +144,6 @@ class TestNegativeCacheSymbol:
         assert counter["symbol"] == 2, "gateway should be re-attempted after TTL expiry"
 
     def test_register_evicts_negative_cache(self, fresh_resolver, monkeypatch) -> None:
-        from almanak.core.enums import Chain
-
         resolver = fresh_resolver()
         counter: dict = {}
         _install_definitive_miss(resolver, monkeypatch, counter)
@@ -158,7 +156,7 @@ class TestNegativeCacheSymbol:
                 symbol="NEWTOKEN",
                 address="0x1234567890abcdef1234567890abcdef12345678",
                 decimals=18,
-                chain=Chain.ARBITRUM,
+                chain="arbitrum",
                 chain_id=42161,
                 name="New Token",
                 source="manual",

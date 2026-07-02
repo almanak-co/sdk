@@ -1,13 +1,12 @@
 """Blast (chain_id 81457) — L2."""
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._descriptor import ChainDescriptor, Explorer, GasProfile, NativeToken, SimulationProfile, Timeouts
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.BLAST,
         name="blast",
         chain_id=81457,
         family=ChainFamily.EVM,

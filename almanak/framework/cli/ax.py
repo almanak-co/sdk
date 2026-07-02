@@ -821,7 +821,7 @@ def _render_resolved_token(resolved, *, chain: str, json_output: bool, contract_
         "symbol": resolved.symbol,
         "address": resolved.address,
         "decimals": resolved.decimals,
-        "chain": resolved.chain.value.lower(),
+        "chain": resolved.chain,
         "chain_id": resolved.chain_id,
         "name": resolved.name,
         "coingecko_id": resolved.coingecko_id,

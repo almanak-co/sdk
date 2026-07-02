@@ -243,13 +243,12 @@ class TestResolverGatewaySymbolFallback:
     def test_resolve_by_symbol_returns_none_sentinel_when_gateway_available(self):
         """_resolve_by_symbol returns None (not raises) when symbol not found and gateway set."""
         from almanak.framework.data.tokens.resolver import TokenResolver, _normalize_chain
-        from almanak.core.enums import Chain
 
         resolver = self._make_resolver_with_gateway()
-        chain_lower, chain_enum = _normalize_chain("arbitrum")
+        chain_lower = _normalize_chain("arbitrum")
 
         with resolver._lock:
-            result = resolver._resolve_by_symbol("EXOTIC_TOKEN_XYZ", chain_lower, chain_enum)
+            result = resolver._resolve_by_symbol("EXOTIC_TOKEN_XYZ", chain_lower)
 
         # Should return None sentinel (not raise) when gateway is configured
         assert result is None
@@ -261,11 +260,11 @@ class TestResolverGatewaySymbolFallback:
 
         TokenResolver.reset_instance()
         resolver = TokenResolver()  # no gateway
-        chain_lower, chain_enum = _normalize_chain("arbitrum")
+        chain_lower = _normalize_chain("arbitrum")
 
         with resolver._lock:
             with pytest.raises(TokenNotFoundError):
-                resolver._resolve_by_symbol("EXOTIC_TOKEN_XYZ", chain_lower, chain_enum)
+                resolver._resolve_by_symbol("EXOTIC_TOKEN_XYZ", chain_lower)
 
     def test_resolve_symbol_via_gateway_returns_resolved_token(self):
         """_resolve_symbol_via_gateway returns ResolvedToken on successful gateway call."""
@@ -274,7 +273,7 @@ class TestResolverGatewaySymbolFallback:
         from almanak.framework.data.tokens.resolver import TokenResolver, _normalize_chain
 
         resolver = self._make_resolver_with_gateway()
-        chain_lower, chain_enum = _normalize_chain("arbitrum")
+        chain_lower = _normalize_chain("arbitrum")
 
         mock_response = MagicMock()
         mock_response.success = True
@@ -290,7 +289,7 @@ class TestResolverGatewaySymbolFallback:
 
         with patch.object(resolver, "_get_gateway_stub", return_value=mock_stub):
             with patch.object(resolver, "_check_gateway_available", return_value=True):
-                result = resolver._resolve_symbol_via_gateway("swETH", chain_lower, chain_enum)
+                result = resolver._resolve_symbol_via_gateway("swETH", chain_lower)
 
         assert result is not None
         assert result.symbol == "swETH"
@@ -304,7 +303,7 @@ class TestResolverGatewaySymbolFallback:
         from almanak.framework.data.tokens.resolver import TokenResolver, _normalize_chain
 
         resolver = self._make_resolver_with_gateway()
-        chain_lower, chain_enum = _normalize_chain("arbitrum")
+        chain_lower = _normalize_chain("arbitrum")
 
         mock_response = MagicMock()
         mock_response.success = False
@@ -315,7 +314,7 @@ class TestResolverGatewaySymbolFallback:
 
         with patch.object(resolver, "_get_gateway_stub", return_value=mock_stub):
             with patch.object(resolver, "_check_gateway_available", return_value=True):
-                result = resolver._resolve_symbol_via_gateway("UNKNOWN", chain_lower, chain_enum)
+                result = resolver._resolve_symbol_via_gateway("UNKNOWN", chain_lower)
 
         assert result is None
 
@@ -332,7 +331,7 @@ class TestResolverGatewaySymbolFallback:
         from almanak.framework.data.tokens.resolver import TokenResolver, _normalize_chain
 
         resolver = self._make_resolver_with_gateway()
-        chain_lower, chain_enum = _normalize_chain("arbitrum")
+        chain_lower = _normalize_chain("arbitrum")
 
         # Minimal happy-path response; we only care about the call args below.
         mock_response = MagicMock()
@@ -349,7 +348,7 @@ class TestResolverGatewaySymbolFallback:
 
         with patch.object(resolver, "_get_gateway_stub", return_value=mock_stub):
             with patch.object(resolver, "_check_gateway_available", return_value=True):
-                resolver._resolve_symbol_via_gateway("USDC", chain_lower, chain_enum)
+                resolver._resolve_symbol_via_gateway("USDC", chain_lower)
 
         # ``ResolveToken`` is invoked with a keyword-only ``timeout`` kwarg in
         # resolver.py:_resolve_symbol_via_gateway — assert its exact value so

@@ -17,7 +17,6 @@ from unittest.mock import MagicMock
 import grpc
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.data.tokens.exceptions import AmbiguousTokenError, TokenNotFoundError
 from almanak.framework.data.tokens.resolver import TokenResolver, _parse_ambiguous_candidates
 
@@ -79,7 +78,7 @@ class TestAmbiguityPropagation:
         monkeypatch.setattr(resolver, "_check_gateway_available", lambda: True)
 
         with pytest.raises(AmbiguousTokenError) as exc_info:
-            resolver._resolve_symbol_via_gateway("DUPE", "base", Chain.BASE)
+            resolver._resolve_symbol_via_gateway("DUPE", "base")
 
         err = exc_info.value
         assert err.matching_addresses == candidates
@@ -101,7 +100,7 @@ class TestAmbiguityPropagation:
 
         # Trigger the ambiguous path once
         with pytest.raises(AmbiguousTokenError):
-            resolver._resolve_symbol_via_gateway("DUPE", "base", Chain.BASE)
+            resolver._resolve_symbol_via_gateway("DUPE", "base")
 
         # Definitive-miss flag must remain False so `resolve()` does not
         # write into the negative cache on this path.
@@ -118,5 +117,5 @@ class TestAmbiguityPropagation:
         monkeypatch.setattr(resolver, "_get_gateway_stub", lambda: fake_stub)
         monkeypatch.setattr(resolver, "_check_gateway_available", lambda: True)
 
-        result = resolver._resolve_symbol_via_gateway("MISSING", "base", Chain.BASE)
+        result = resolver._resolve_symbol_via_gateway("MISSING", "base")
         assert result is None

@@ -2,9 +2,9 @@
 
 Three layers of guarantee:
 
-1. **Structural** — every ``Chain`` enum member has a registered
-   ``ChainDescriptor``; names / aliases / chain_ids are well-formed; the
-   registry round-trips correctly.
+1. **Structural** — every chain in the frozen historical inventory has a
+   registered ``ChainDescriptor``; names / aliases / chain_ids are
+   well-formed; the registry round-trips correctly.
 2. **Legacy byte-identity** — every derived view (CHAIN_IDS,
    ALLOWED_CHAINS, the 6 gas / timeout dicts, NATIVE_TOKEN_INFO,
    NATIVE_TOKEN_SYMBOLS, CHAIN_NATIVE_SYMBOL, fork_manager.CHAIN_IDS) is
@@ -18,6 +18,7 @@ Three layers of guarantee:
 from __future__ import annotations
 
 import dataclasses
+import re
 import sys
 
 import pytest
@@ -30,7 +31,7 @@ from almanak.core.chains import (
     RpcProfile,
     Timeouts,
 )
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 # ---------------------------------------------------------------------------
 # Snapshots of the historical literal dicts (frozen at PR-merge time).
@@ -39,27 +40,31 @@ from almanak.core.enums import Chain, ChainFamily
 # assertions fail it means the registry-derived view has drifted from the
 # pre-VIB-4801 behavior — that needs a deliberate decision, not a silent
 # diff.
+#
+# Keys were re-spelled from ``Chain`` enum members to the canonical
+# lowercase names when the enum was removed (VIB-4851); the frozen chain_id
+# VALUES are unchanged.
 # ---------------------------------------------------------------------------
 
 HISTORICAL_CHAIN_IDS = {
-    Chain.ETHEREUM: 1,
-    Chain.ARBITRUM: 42161,
-    Chain.OPTIMISM: 10,
-    Chain.BASE: 8453,
-    Chain.AVALANCHE: 43114,
-    Chain.POLYGON: 137,
-    Chain.BSC: 56,
-    Chain.SONIC: 146,
-    Chain.PLASMA: 9745,
-    Chain.BLAST: 81457,
-    Chain.LINEA: 59144,
-    Chain.MANTLE: 5000,
-    Chain.BERACHAIN: 80094,
-    Chain.MONAD: 143,
-    Chain.XLAYER: 196,
-    Chain.ZEROG: 16661,
-    Chain.HYPEREVM: 999,
-    Chain.SOLANA: 0,
+    "ethereum": 1,
+    "arbitrum": 42161,
+    "optimism": 10,
+    "base": 8453,
+    "avalanche": 43114,
+    "polygon": 137,
+    "bsc": 56,
+    "sonic": 146,
+    "plasma": 9745,
+    "blast": 81457,
+    "linea": 59144,
+    "mantle": 5000,
+    "berachain": 80094,
+    "monad": 143,
+    "xlayer": 196,
+    "zerog": 16661,
+    "hyperevm": 999,
+    "solana": 0,
 }
 
 HISTORICAL_ALLOWED_CHAINS = frozenset(
@@ -259,67 +264,68 @@ HISTORICAL_CHAIN_NATIVE_SYMBOL = {
 
 
 # ---------------------------------------------------------------------------
-# 1. Structural — every Chain has a descriptor; roundtrips work
+# 1. Structural — every historical chain has a descriptor; roundtrips work
 # ---------------------------------------------------------------------------
 
 
 class TestRegistryStructure:
     """Structural invariants of the registry."""
 
-    def test_every_chain_enum_has_descriptor(self) -> None:
-        registered = {d.enum for d in ChainRegistry.all()}
-        missing = set(Chain) - registered
+    def test_every_historical_chain_has_descriptor(self) -> None:
+        missing = set(HISTORICAL_CHAIN_IDS) - set(ChainRegistry.names())
         assert not missing, (
-            f"Chain enum members without a descriptor: {[c.name for c in missing]}. "
-            f"Add a file under almanak/core/chains/."
+            f"Historical chains without a descriptor: {sorted(missing)}. Add a file under almanak/core/chains/."
         )
 
-    def test_no_descriptors_outside_chain_enum(self) -> None:
-        registered = {d.enum for d in ChainRegistry.all()}
-        stray = registered - set(Chain)
+    def test_no_descriptors_outside_historical_inventory(self) -> None:
+        stray = set(ChainRegistry.names()) - set(HISTORICAL_CHAIN_IDS)
         assert not stray, (
-            f"Descriptors registered for enum values not in Chain: {stray}. "
-            f"Either add to Chain or remove the stray descriptor."
+            f"Descriptors registered for chains not in the frozen historical "
+            f"inventory: {sorted(stray)}. Either extend HISTORICAL_CHAIN_IDS "
+            f"(deliberate review act) or remove the stray descriptor."
         )
 
-    @pytest.mark.parametrize("chain", list(Chain), ids=lambda c: c.name)
-    def test_descriptor_name_matches_enum_lowercase(self, chain: Chain) -> None:
-        d = ChainRegistry.get(chain)
-        assert d.name == chain.name.lower()
+    @pytest.mark.parametrize("name", sorted(HISTORICAL_CHAIN_IDS))
+    def test_descriptor_name_is_canonical_lowercase(self, name: str) -> None:
+        d = ChainRegistry.get(name)
+        assert d.name == name
+        assert re.fullmatch(r"[a-z0-9]+", d.name), (
+            f"Canonical chain name {d.name!r} must be lowercase alphanumeric"
+        )
 
-    @pytest.mark.parametrize("chain", list(Chain), ids=lambda c: c.name)
-    def test_roundtrip_name_to_enum_to_name(self, chain: Chain) -> None:
-        d = ChainRegistry.get(chain)
-        d2 = ChainRegistry.resolve(d.name)
-        assert d is d2
-        assert d2.enum is chain
+    @pytest.mark.parametrize("name", sorted(HISTORICAL_CHAIN_IDS))
+    def test_roundtrip_name_resolves_to_same_descriptor(self, name: str) -> None:
+        d = ChainRegistry.get(name)
+        assert ChainRegistry.resolve(d.name) is d
+        # Legacy UPPERCASE serialized names must keep resolving (case-
+        # insensitive read-path contract, VIB-4851).
+        assert ChainRegistry.resolve(d.name.upper()) is d
 
     def test_alias_resolution_is_case_insensitive(self) -> None:
         # Canonical name
-        assert ChainRegistry.resolve("ethereum").enum is Chain.ETHEREUM
+        assert ChainRegistry.resolve("ethereum").name == "ethereum"
         # Aliases
-        assert ChainRegistry.resolve("eth").enum is Chain.ETHEREUM
-        assert ChainRegistry.resolve("ETH").enum is Chain.ETHEREUM
-        assert ChainRegistry.resolve("  bnb  ").enum is Chain.BSC
-        assert ChainRegistry.resolve("0g").enum is Chain.ZEROG
+        assert ChainRegistry.resolve("eth").name == "ethereum"
+        assert ChainRegistry.resolve("ETH").name == "ethereum"
+        assert ChainRegistry.resolve("  bnb  ").name == "bsc"
+        assert ChainRegistry.resolve("0g").name == "zerog"
 
     def test_unknown_name_raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="Unknown chain"):
             ChainRegistry.resolve("not-a-chain")
 
     def test_by_id_returns_correct_descriptor(self) -> None:
-        assert ChainRegistry.by_id(1).enum is Chain.ETHEREUM
-        assert ChainRegistry.by_id(42161).enum is Chain.ARBITRUM
-        assert ChainRegistry.by_id(8453).enum is Chain.BASE
+        assert ChainRegistry.by_id(1).name == "ethereum"
+        assert ChainRegistry.by_id(42161).name == "arbitrum"
+        assert ChainRegistry.by_id(8453).name == "base"
         with pytest.raises(ValueError, match="Unknown chain_id"):
             ChainRegistry.by_id(999_999_999)
 
-    def test_register_rejects_duplicate_enum(self) -> None:
-        """Two descriptors for the same Chain must raise."""
-        with pytest.raises(ValueError, match="Duplicate ChainDescriptor"):
+    def test_register_rejects_duplicate_canonical_name(self) -> None:
+        """Two descriptors claiming the same canonical name must raise."""
+        with pytest.raises(ValueError, match="Canonical name.*collides"):
             ChainRegistry.register(
                 ChainDescriptor(
-                    enum=Chain.ETHEREUM,
                     name="ethereum",
                     chain_id=1,
                     family=ChainFamily.EVM,
@@ -329,25 +335,11 @@ class TestRegistryStructure:
                 )
             )
 
-    def test_descriptor_post_init_rejects_name_drift(self) -> None:
-        """Descriptor name must equal enum.name.lower()."""
-        with pytest.raises(ValueError, match="must equal enum name"):
-            ChainDescriptor(
-                enum=Chain.ETHEREUM,
-                name="ETH",  # wrong case
-                chain_id=1,
-                family=ChainFamily.EVM,
-                native=NativeToken(symbol="ETH", name="Ethereum", decimals=18),
-                gas=GasProfile(),
-                timeouts=Timeouts(),
-            )
-
     def test_descriptor_post_init_rejects_negative_reorg_safe_depth(self) -> None:
         """VIB-3350 (audit M2): a negative reorg_safe_depth fails loudly at
         registration like the sibling field validations."""
         with pytest.raises(ValueError, match="reorg_safe_depth must be non-negative"):
             ChainDescriptor(
-                enum=Chain.ETHEREUM,
                 name="ethereum",
                 chain_id=1,
                 family=ChainFamily.EVM,
@@ -364,16 +356,13 @@ class TestRegistryStructure:
         descriptor's canonical name, register() must raise rather than
         silently overwrite the alias mapping in _by_name.
         """
-        bsc_descriptor = ChainRegistry.get(Chain.BSC)
+        bsc_descriptor = ChainRegistry.get("bsc")
         # Forge the corrupt state: an alias entry under "ethereum" owned by BSC.
         monkeypatch.setitem(ChainRegistry._by_name, "ethereum", bsc_descriptor)
-        # Evict Chain.ETHEREUM from _by_enum so the enum preflight passes.
-        monkeypatch.delitem(ChainRegistry._by_enum, Chain.ETHEREUM)
 
         with pytest.raises(ValueError, match="Canonical name.*collides"):
             ChainRegistry.register(
                 ChainDescriptor(
-                    enum=Chain.ETHEREUM,
                     name="ethereum",
                     chain_id=1,
                     family=ChainFamily.EVM,
@@ -399,12 +388,11 @@ class TestWireFormatStability:
     @pytest.mark.parametrize(
         "chain,expected_id",
         list(HISTORICAL_CHAIN_IDS.items()),
-        ids=lambda v: v.name if isinstance(v, Chain) else str(v),
     )
-    def test_chain_id_matches_historical_value(self, chain: Chain, expected_id: int) -> None:
+    def test_chain_id_matches_historical_value(self, chain: str, expected_id: int) -> None:
         d = ChainRegistry.get(chain)
         assert d.chain_id == expected_id, (
-            f"Chain.{chain.name} chain_id is now {d.chain_id} but was "
+            f"{chain!r} chain_id is now {d.chain_id} but was "
             f"{expected_id} pre-VIB-4801. Renumbering chain_ids is a "
             f"wire-format change owned by metrics-database — coordinate "
             f"with Infra before changing this."
@@ -426,7 +414,9 @@ class TestLegacyDictByteIdentity:
 
         assert ALLOWED_CHAINS == HISTORICAL_ALLOWED_CHAINS
 
-    def test_chain_ids_enum_keyed_byte_identical(self) -> None:
+    def test_chain_ids_name_keyed_byte_identical(self) -> None:
+        # core/constants.py CHAIN_IDS re-keyed from Chain enum to canonical
+        # lowercase names (VIB-4851 Chain-enum removal); frozen ids unchanged.
         from almanak.core.constants import CHAIN_IDS
 
         assert dict(CHAIN_IDS) == HISTORICAL_CHAIN_IDS
@@ -434,22 +424,20 @@ class TestLegacyDictByteIdentity:
     def test_chain_ids_string_keyed_runtime_byte_identical(self) -> None:
         from almanak.config.runtime import CHAIN_IDS
 
-        expected = {c.name.lower(): cid for c, cid in HISTORICAL_CHAIN_IDS.items()}
-        assert dict(CHAIN_IDS) == expected
+        assert dict(CHAIN_IDS) == HISTORICAL_CHAIN_IDS
 
     def test_chain_ids_string_keyed_execution_config_byte_identical(self) -> None:
         from almanak.framework.execution.config import CHAIN_IDS
 
-        expected = {c.name.lower(): cid for c, cid in HISTORICAL_CHAIN_IDS.items()}
-        assert dict(CHAIN_IDS) == expected
+        assert dict(CHAIN_IDS) == HISTORICAL_CHAIN_IDS
 
     def test_fork_manager_chain_ids_byte_identical(self) -> None:
         from almanak.framework.anvil.fork_manager import CHAIN_IDS
 
         expected = {
-            c.name.lower(): cid
-            for c, cid in HISTORICAL_CHAIN_IDS.items()
-            if c is not Chain.SOLANA  # Anvil cannot fork Solana
+            name: cid
+            for name, cid in HISTORICAL_CHAIN_IDS.items()
+            if name != "solana"  # Anvil cannot fork Solana
         }
         assert dict(CHAIN_IDS) == expected
 
@@ -658,7 +646,6 @@ class TestRpcProfile:
         empty ``RpcProfile`` — not ``None``, so downstream
         ``descriptor.rpc.public_rpc`` access is always safe."""
         descriptor = ChainDescriptor(
-            enum=Chain.ETHEREUM,
             name="ethereum",
             chain_id=1,
             family=ChainFamily.EVM,
@@ -678,7 +665,6 @@ class TestRpcProfile:
             poa=True,
         )
         descriptor = ChainDescriptor(
-            enum=Chain.ETHEREUM,
             name="ethereum",
             chain_id=1,
             family=ChainFamily.EVM,
@@ -700,20 +686,20 @@ class TestRpcProfile:
         """Spot-check that one chain's descriptor still carries the
         RPC values from its module — guards the wiring between the
         per-chain file and the registry."""
-        ethereum = ChainRegistry.get(Chain.ETHEREUM)
+        ethereum = ChainRegistry.get("ethereum")
         assert ethereum.rpc.public_rpc == "https://ethereum-rpc.publicnode.com"
         assert ethereum.rpc.alchemy_prefix == "eth"
         assert ethereum.rpc.tenderly_subdomain == "mainnet"
         assert ethereum.rpc.anvil_port == 8549
         assert ethereum.rpc.poa is False
 
-        avalanche = ChainRegistry.get(Chain.AVALANCHE)
+        avalanche = ChainRegistry.get("avalanche")
         assert avalanche.rpc.poa is True  # POA flag wired through
 
     def test_registered_chain_without_rpc_data_uses_default(self) -> None:
         """``berachain`` / ``blast`` had no entry in the old JSON, so
         their descriptor must carry the empty ``RpcProfile``."""
-        for chain in (Chain.BERACHAIN, Chain.BLAST):
+        for chain in ("berachain", "blast"):
             assert ChainRegistry.get(chain).rpc == RpcProfile()
 
 
@@ -819,9 +805,7 @@ def test_alias_input_yields_fallback_tokens() -> None:
 
     # 'bnb' is an alias for bsc -- must get fallback, not bsc tokens
     result = ToolExecutor._default_tokens_for_chain("bnb")
-    assert result == ToolExecutor._FALLBACK_TOKENS, (
-        f"Alias 'bnb' should yield fallback tokens, got {result!r}"
-    )
+    assert result == ToolExecutor._FALLBACK_TOKENS, f"Alias 'bnb' should yield fallback tokens, got {result!r}"
 
 
 def test_ten_chains_declare_default_display_tokens() -> None:

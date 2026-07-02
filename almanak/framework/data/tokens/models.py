@@ -16,23 +16,21 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any
 
 from almanak.core.chains import ChainRegistry
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 
-def _coerce_chain_enum(chain: Chain | str) -> Chain:
-    """Coerce a public chain value into the canonical :class:`Chain` enum."""
-    if isinstance(chain, Chain):
-        return chain
+def _canonical_chain_name(chain: str) -> str:
+    """Normalize a public chain value to its canonical lowercase name."""
     try:
-        return ChainRegistry.resolve(str(chain)).enum
+        return ChainRegistry.resolve(str(chain)).name
     except ValueError as exc:
         raise ValueError(f"Unknown chain for token identity: {chain!r}") from exc
 
 
-def normalize_token_address_for_chain(address: str, chain: Chain | str) -> str:
+def normalize_token_address_for_chain(address: str, chain: str) -> str:
     """Normalize a token address for identity comparisons on ``chain``.
 
     EVM addresses are case-insensitive and normalize to lowercase. Solana
@@ -44,7 +42,7 @@ def normalize_token_address_for_chain(address: str, chain: Chain | str) -> str:
         raise TypeError("Token address must be a string")
 
     address = address.strip()
-    descriptor = ChainRegistry.try_resolve(chain.value if isinstance(chain, Chain) else str(chain))
+    descriptor = ChainRegistry.try_resolve(str(chain))
     if descriptor is not None and descriptor.family is ChainFamily.SOLANA:
         return address
     return address.lower()
@@ -59,14 +57,14 @@ class TokenRef:
     participates in equality or hashing.
     """
 
-    chain: Chain | str
+    chain: str
     address: str
     decimals: int
     symbol: str | None = None
     provenance: str | None = None
 
     def __post_init__(self) -> None:
-        chain = _coerce_chain_enum(self.chain)
+        chain = _canonical_chain_name(self.chain)
         normalized_address = normalize_token_address_for_chain(self.address, chain)
         if not normalized_address:
             raise ValueError("TokenRef address cannot be empty")
@@ -77,9 +75,9 @@ class TokenRef:
         object.__setattr__(self, "address", normalized_address)
 
     @property
-    def identity_key(self) -> tuple[Chain, str]:
+    def identity_key(self) -> tuple[str, str]:
         """Return the stable identity key used by equality and hashing."""
-        return (cast(Chain, self.chain), self.address)
+        return (self.chain, self.address)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, TokenRef):
@@ -90,10 +88,14 @@ class TokenRef:
         return hash(self.identity_key)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to the stable TokenRef wire shape."""
-        chain = cast(Chain, self.chain)
+        """Serialize to the stable TokenRef wire shape.
+
+        Writes the canonical lowercase chain name (VIB-4851). Legacy records
+        carrying UPPERCASE enum values keep loading: ``from_dict`` routes
+        through the case-insensitive ``ChainRegistry.resolve``.
+        """
         return {
-            "chain": chain.value,
+            "chain": self.chain,
             "address": self.address,
             "decimals": self.decimals,
             "symbol": self.symbol,
@@ -197,7 +199,7 @@ class ResolvedToken:
         symbol: Token symbol (e.g., "ETH", "USDC", "WBTC")
         address: Contract address on the resolved chain in resolver output/display form
         decimals: Token decimal places
-        chain: Chain enum value where this token is resolved
+        chain: Canonical lowercase chain name where this token is resolved
         chain_id: Numeric chain ID for the resolved chain
         name: Human-readable token name (e.g., "Ethereum", "USD Coin")
         coingecko_id: CoinGecko API identifier for price fetching
@@ -215,7 +217,7 @@ class ResolvedToken:
             symbol="USDC",
             address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
             decimals=6,
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             chain_id=42161,
             name="USD Coin",
             coingecko_id="usd-coin",
@@ -233,7 +235,7 @@ class ResolvedToken:
     symbol: str
     address: str
     decimals: int
-    chain: Chain
+    chain: str
     chain_id: int
     name: str | None = None
     coingecko_id: str | None = None
@@ -256,10 +258,16 @@ class ResolvedToken:
         if self.decimals < 0 or self.decimals > 77:
             raise ValueError(f"Invalid decimals: {self.decimals}. Must be 0-77.")
 
+        # Canonicalize the chain (accepts legacy enum members / UPPERCASE /
+        # aliases during the staged enum removal; raises on unknown chains —
+        # the enum-typed field made unknown-chain construction impossible and
+        # that property is preserved).
+        object.__setattr__(self, "chain", _canonical_chain_name(self.chain))
+
         # Ensure chain and chain_id stay in sync
         expected_chain_id = CHAIN_ID_MAP.get(self.chain)
         if expected_chain_id is not None and self.chain_id != expected_chain_id:
-            raise ValueError(f"Chain {self.chain.value} has chain_id {expected_chain_id}, but got {self.chain_id}")
+            raise ValueError(f"Chain {self.chain} has chain_id {expected_chain_id}, but got {self.chain_id}")
 
     @property
     def token_ref(self) -> TokenRef:
@@ -278,7 +286,7 @@ class ResolvedToken:
             "symbol": self.symbol,
             "address": self.address,
             "decimals": self.decimals,
-            "chain": self.chain.value,
+            "chain": self.chain,
             "chain_id": self.chain_id,
             "name": self.name,
             "coingecko_id": self.coingecko_id,
@@ -299,7 +307,8 @@ class ResolvedToken:
             symbol=data["symbol"],
             address=data["address"],
             decimals=data["decimals"],
-            chain=Chain(data["chain"]),
+            # __post_init__ canonicalizes — legacy UPPERCASE disk caches load.
+            chain=data["chain"],
             chain_id=data["chain_id"],
             name=data.get("name"),
             coingecko_id=data.get("coingecko_id"),
@@ -330,15 +339,16 @@ class ResolvedToken:
 # and ``GatewayBalanceProvider`` raised "no chain_id mapping" for non-EVM chains.
 #
 # Read-only ``MappingProxyType`` so the registry stays the only mutation surface;
-# accidental ``CHAIN_ID_MAP[...] = ...`` raises ``TypeError``. The ``dict[Chain,
-# int]`` shape is preserved for the many ``CHAIN_ID_MAP.get(enum, 0)`` callers.
-def _build_chain_id_map() -> "MappingProxyType[Chain, int]":
+# accidental ``CHAIN_ID_MAP[...] = ...`` raises ``TypeError``. Keyed by canonical
+# lowercase chain name (VIB-4851 Chain-enum removal); the ``.get(chain, 0)``
+# caller shape is unchanged.
+def _build_chain_id_map() -> "MappingProxyType[str, int]":
     from almanak.core.chains import ChainRegistry
 
-    return MappingProxyType({d.enum: d.chain_id for d in ChainRegistry.all() if d.chain_id != 0})
+    return MappingProxyType({d.name: d.chain_id for d in ChainRegistry.all() if d.chain_id != 0})
 
 
-CHAIN_ID_MAP: "MappingProxyType[Chain, int]" = _build_chain_id_map()
+CHAIN_ID_MAP: "MappingProxyType[str, int]" = _build_chain_id_map()
 
 
 @dataclass

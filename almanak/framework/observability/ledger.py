@@ -63,6 +63,8 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
+from almanak.core.chains import ChainRegistry
+
 logger = logging.getLogger(__name__)
 
 
@@ -114,6 +116,17 @@ class LedgerEntry:
     price_inputs_json: str = ""  # token prices at execution time — enables audit-grade replay (VIB-3480)
     pre_state_json: str = ""  # on-chain state before execution (VIB-3480)
     post_state_json: str = ""  # on-chain state after execution (VIB-3480)
+
+    def __post_init__(self) -> None:
+        # transaction_ledger.chain participates in case-sensitive SQLite keys
+        # and accounting joins; canonicalize known chains at construction so a
+        # mixed-case producer can never fork rows ("ETHEREUM" vs "ethereum").
+        # Unknown or empty values pass through verbatim — absence semantics
+        # are load-bearing for older rows.
+        if self.chain and isinstance(self.chain, str):
+            descriptor = ChainRegistry.try_resolve(self.chain)
+            if descriptor is not None:
+                self.chain = descriptor.name
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary for storage."""

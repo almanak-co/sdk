@@ -4,13 +4,11 @@
 Aave, Compound, Morpho, Beefy, Yearn, Fluid) into its EVM resolution
 cascade. Two cross-cutting helpers hold the cascade together:
 
-* ``_resolve_chain_enum(name)`` maps the lowercased chain strings that
-  each protocol lookup indexes by onto the uppercase ``Chain`` enum so
+* ``_resolve_chain_name(name)`` maps the chain strings that each
+  protocol lookup indexes by onto the canonical lowercase chain name so
   ``_build_resolved_from_*`` helpers emit the correct ``chain`` value on
-  the returned ``ResolvedToken``. Naive ``Chain(name)`` with a lowercase
-  string raises ``ValueError`` (enum values are uppercase), which is why
-  this helper exists; the tests below cover every supported chain plus
-  fallback behavior for unknown inputs.
+  the returned ``ResolvedToken``; the tests below cover every supported
+  chain plus fallback behavior for unknown inputs.
 * ``TokenServiceServicer._SOURCE_RANK`` drives the source-provenance
   policy in ``_cache_discovered_token``. Every ``source=<protocol>``
   string emitted by a ``_build_resolved_from_*`` helper must carry a
@@ -23,55 +21,54 @@ other protocol prefix checks at module scope.
 
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.gateway.services.token_service import (
     TokenServiceServicer,
     _looks_like_compound_symbol,
-    _resolve_chain_enum,
+    _resolve_chain_name,
 )
 
 
-class TestResolveChainEnum:
-    """Lowercase chain strings must resolve to the correct ``Chain`` enum.
+class TestResolveChainName:
+    """Chain strings must resolve to the canonical lowercase name.
 
     The protocol lookup services index tokens by a lowercased chain name
     (``"ethereum"``, ``"arbitrum"``, ...) and ``_build_resolved_from_*``
-    passes that name straight into ``_resolve_chain_enum`` to populate
+    passes that name straight into ``_resolve_chain_name`` to populate
     ``ResolvedToken.chain``. A case-sensitive lookup here would stamp a
-    wrong-chain enum on every non-ethereum resolution.
+    wrong chain on every non-ethereum resolution.
     """
 
     @pytest.mark.parametrize(
         "name, expected",
         [
-            ("ethereum", Chain.ETHEREUM),
-            ("ETHEREUM", Chain.ETHEREUM),
-            ("Ethereum", Chain.ETHEREUM),
-            ("arbitrum", Chain.ARBITRUM),
-            ("ARBITRUM", Chain.ARBITRUM),
-            ("base", Chain.BASE),
-            ("optimism", Chain.OPTIMISM),
-            ("polygon", Chain.POLYGON),
-            ("bsc", Chain.BSC),
-            ("avalanche", Chain.AVALANCHE),
-            ("linea", Chain.LINEA),
-            ("solana", Chain.SOLANA),
+            ("ethereum", "ethereum"),
+            ("ETHEREUM", "ethereum"),
+            ("Ethereum", "ethereum"),
+            ("arbitrum", "arbitrum"),
+            ("ARBITRUM", "arbitrum"),
+            ("base", "base"),
+            ("optimism", "optimism"),
+            ("polygon", "polygon"),
+            ("bsc", "bsc"),
+            ("avalanche", "avalanche"),
+            ("linea", "linea"),
+            ("solana", "solana"),
         ],
     )
     def test_recognises_known_chains_case_insensitive(self, name, expected):
-        assert _resolve_chain_enum(name) is expected
+        assert _resolve_chain_name(name) == expected
 
     @pytest.mark.parametrize(
         "name",
         [
             "",
             "not_a_chain",
-            "gnosis",  # real chain but not in Chain enum today
+            "gnosis",  # real chain but not registered today
             "katana",
         ],
     )
     def test_falls_back_to_ethereum_for_unknown(self, name):
-        assert _resolve_chain_enum(name) is Chain.ETHEREUM
+        assert _resolve_chain_name(name) == "ethereum"
 
 
 class TestSourceRankCoversAllProtocols:

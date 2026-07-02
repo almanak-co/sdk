@@ -1,13 +1,12 @@
 """0G Chain (chain_id 16661) — AI L1 (preview support)."""
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._descriptor import ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.ZEROG,
         name="zerog",
         chain_id=16661,
         family=ChainFamily.EVM,

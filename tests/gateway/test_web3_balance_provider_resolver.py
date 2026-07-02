@@ -257,9 +257,7 @@ class TestWeb3BalanceProviderTokenResolver:
         registered = mock_resolver.register.call_args[0][0]
         assert registered.symbol == "CUSTOM"
         assert registered.decimals == 18
-        from almanak.core.enums import Chain
-
-        assert registered.chain == Chain.ARBITRUM
+        assert registered.chain == "arbitrum"
 
 
 class TestWeb3BalanceProviderMultiChain:

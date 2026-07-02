@@ -7,7 +7,7 @@ This section documents the public Python API of the Almanak SDK.
 ```python
 # Top-level exports (most common)
 from almanak import (
-    Chain, Network, ActionType,
+    Network, ActionType,
     IntentStrategy, MarketSnapshot,
     SwapIntent, HoldIntent, LPOpenIntent, LPCloseIntent,
     BorrowIntent, RepayIntent,
@@ -34,7 +34,7 @@ from almanak.framework.utils.logging import configure_logging, get_logger
 
 | Module | Description |
 |--------|-------------|
-| [Enums](enums.md) | `Chain`, `Network`, `ActionType`, and more |
+| [Enums](enums.md) | `Network`, `ActionType`, and more (chains are name strings resolved via `ChainRegistry`; protocols are connector-manifest strings) |
 | [Strategies](strategies.md) | `IntentStrategy`, `StrategyBase` |
 | [Market](market.md) | `MarketSnapshot`, `MarketSnapshotBuilder`, typed errors and return models |
 | [Intents](intents.md) | `SwapIntent`, `LPOpenIntent`, `HoldIntent`, and all intent types |

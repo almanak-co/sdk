@@ -1,6 +1,6 @@
 """Monad (chain_id 143) — high-throughput EVM-compatible L1."""
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._descriptor import (
     AnvilProfile,
@@ -16,7 +16,6 @@ from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.MONAD,
         name="monad",
         chain_id=143,
         family=ChainFamily.EVM,

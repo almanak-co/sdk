@@ -1,7 +1,7 @@
 """Cross-cutting connector types — strategy-safe leaf of the foundation.
 
 Imports nothing from inside ``_base/`` so it is unambiguously the leaf of
-the foundation's import graph. ``Chain`` and ``ChainFamily`` are owned by
+the foundation's import graph. ``ChainFamily`` is owned by
 ``almanak.core.enums`` and re-exported here per PR 2169 spec §6.2.4
 (canonical home stays in ``core``).
 """
@@ -11,9 +11,9 @@ from __future__ import annotations
 from enum import Enum
 from typing import NewType
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
-__all__ = ["Chain", "ChainFamily", "ProtocolKind", "ProtocolName"]
+__all__ = ["ChainFamily", "ProtocolKind", "ProtocolName"]
 
 
 ProtocolName = NewType("ProtocolName", str)

@@ -151,12 +151,11 @@ class TestGetFallbackTeardownPrices:
             GasProfile,
             NativeToken,
         )
-        from almanak.core.enums import Chain, ChainFamily
+        from almanak.core.enums import ChainFamily
         from almanak.framework.runner import runner_teardown as rt
 
         synthetic = ChainDescriptor(
-            enum=Chain.ETHEREUM,  # placeholder; we patch the lookup map directly below
-            name="ethereum",  # placeholder
+            name="ethereum",  # placeholder; we patch the lookup map directly below
             chain_id=999_999,
             family=ChainFamily.EVM,
             native=NativeToken(symbol="ZZZ", name="Synthetic", decimals=18),

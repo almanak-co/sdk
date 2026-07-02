@@ -49,9 +49,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, cast
 
-from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN, ChainRegistry
 from almanak.core.constants import STABLECOINS
-from almanak.core.enums import Chain
 from almanak.framework.backtesting.adapters._sync_bridge import (
     in_running_event_loop_task,
     run_coroutine_blocking,
@@ -910,27 +909,27 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         timestamp: datetime,
         protocol: str | None,
         pool_address_lower: str,
-    ) -> Chain | None:
-        """Resolve the config chain string to a Chain enum for liquidity lookups.
+    ) -> str | None:
+        """Resolve the config chain string to a canonical chain name for liquidity lookups.
 
         Returns None when the chain is unknown and the non-strict fallback has
         already been applied (warning logged, nothing cached); strict mode
         raises instead.
         """
-        chain_str = self._config.chain.upper()
-        try:
-            return Chain[chain_str]
-        except KeyError:
-            self._liquidity_data_unavailable(
-                identifier=pool_address_lower,
-                timestamp=timestamp,
-                message=f"Unknown chain '{chain_str}', cannot fetch historical liquidity",
-                chain=chain_str,
-                protocol=protocol,
-                cause=None,
-                on_fallback=lambda: logger.warning("Unknown chain '%s', cannot fetch historical liquidity", chain_str),
-            )
-            return None
+        chain_str = self._config.chain
+        descriptor = ChainRegistry.try_resolve(chain_str)
+        if descriptor is not None:
+            return descriptor.name
+        self._liquidity_data_unavailable(
+            identifier=pool_address_lower,
+            timestamp=timestamp,
+            message=f"Unknown chain '{chain_str}', cannot fetch historical liquidity",
+            chain=chain_str,
+            protocol=protocol,
+            cause=None,
+            on_fallback=lambda: logger.warning("Unknown chain '%s', cannot fetch historical liquidity", chain_str),
+        )
+        return None
 
     def _cache_liquidity_success(
         self,
@@ -955,7 +954,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         pool_address_lower: str,
         timestamp: datetime,
         target_date: date,
-        chain: Chain,
+        chain: str,
         protocol: str | None,
         cache_key: tuple[str, date],
     ) -> "LiquidityResult | None":
@@ -965,7 +964,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         strict mode raises, non-strict mode degrades to None without caching.
         Only provider results are cached -- never failure markers.
         """
-        chain_label = chain.value if chain else self._config.chain
+        chain_label = chain if chain else self._config.chain
         try:
             if in_running_event_loop_task():
                 self._liquidity_data_unavailable(
@@ -1023,7 +1022,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         self,
         pool_address: str | None,
         timestamp: datetime,
-        chain: Chain | None = None,
+        chain: str | None = None,
         protocol: str | None = None,
     ) -> "LiquidityResult | None":
         """Get historical liquidity depth for a pool at a specific timestamp.
@@ -1034,7 +1033,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         Args:
             pool_address: The pool contract address (optional)
             timestamp: The timestamp to get liquidity for
-            chain: Chain enum for subgraph routing (optional, defaults to config.chain)
+            chain: Canonical chain name for subgraph routing (optional, defaults to config.chain)
             protocol: Protocol identifier (e.g., "uniswap_v3", "aerodrome") (optional)
 
         Returns:
@@ -1093,7 +1092,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         trade_amount_usd: Decimal,
         pool_address: str | None,
         timestamp: datetime,
-        chain: Chain | None = None,
+        chain: str | None = None,
         protocol: str | None = None,
         pool_type: str = "v3",
     ) -> "HistoricalSlippageResult":
@@ -1107,7 +1106,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             trade_amount_usd: Trade size in USD.
             pool_address: Pool contract address for liquidity lookup.
             timestamp: Timestamp for historical liquidity query.
-            chain: Chain enum for subgraph routing (optional).
+            chain: Canonical chain name for subgraph routing (optional).
             protocol: Protocol identifier (optional).
             pool_type: Type of pool ("v2" or "v3") for slippage calculation.
 
@@ -1241,28 +1240,28 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         timestamp: datetime,
         protocol: str | None,
         cache_key: tuple[str, date],
-    ) -> Chain | None:
-        """Resolve the config chain string to a Chain enum for volume lookups.
+    ) -> str | None:
+        """Resolve the config chain string to a canonical chain name for volume lookups.
 
         Returns None when the chain is unknown and the non-strict fallback has
         already been applied (warning logged, ``(None, LOW)`` cached); strict
         mode raises instead.
         """
-        chain_str = self._config.chain.upper()
-        try:
-            return Chain[chain_str]
-        except KeyError:
-            self._volume_data_unavailable(
-                identifier=cache_key[0],
-                timestamp=timestamp,
-                message=f"Unknown chain '{chain_str}', cannot fetch historical volume",
-                chain=chain_str,
-                protocol=protocol,
-                cache_key=cache_key,
-                cause=None,
-                on_fallback=lambda: logger.warning("Unknown chain '%s', cannot fetch historical volume", chain_str),
-            )
-            return None
+        chain_str = self._config.chain
+        descriptor = ChainRegistry.try_resolve(chain_str)
+        if descriptor is not None:
+            return descriptor.name
+        self._volume_data_unavailable(
+            identifier=cache_key[0],
+            timestamp=timestamp,
+            message=f"Unknown chain '{chain_str}', cannot fetch historical volume",
+            chain=chain_str,
+            protocol=protocol,
+            cache_key=cache_key,
+            cause=None,
+            on_fallback=lambda: logger.warning("Unknown chain '%s', cannot fetch historical volume", chain_str),
+        )
+        return None
 
     def _cache_volume_success(
         self,
@@ -1289,7 +1288,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         pool_address_lower: str,
         timestamp: datetime,
         target_date: date,
-        chain: Chain,
+        chain: str,
         protocol: str | None,
         cache_key: tuple[str, date],
     ) -> tuple[Decimal | None, DataConfidence]:
@@ -1298,7 +1297,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         Refuses to block when called from inside a running event-loop task:
         strict mode raises, non-strict mode caches the degraded fallback.
         """
-        chain_label = chain.value if chain else self._config.chain
+        chain_label = chain if chain else self._config.chain
         try:
             if in_running_event_loop_task():
                 return self._volume_data_unavailable(
@@ -1356,7 +1355,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         self,
         pool_address: str | None,
         timestamp: datetime,
-        chain: Chain | None = None,
+        chain: str | None = None,
         protocol: str | None = None,
     ) -> tuple[Decimal | None, DataConfidence]:
         """Get historical pool volume for a specific date.
@@ -1368,7 +1367,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         Args:
             pool_address: The pool contract address (optional)
             timestamp: The timestamp to get volume for
-            chain: Chain enum for gateway DEX-volume lane routing (optional,
+            chain: Canonical chain name for gateway DEX-volume lane routing (optional,
                 defaults to config.chain)
             protocol: Protocol identifier (e.g., "uniswap_v3", "aerodrome") (optional)
 

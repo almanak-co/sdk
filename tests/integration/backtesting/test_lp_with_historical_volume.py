@@ -25,7 +25,6 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.backtesting.adapters.lp_adapter import (
     LPBacktestAdapter,
     LPBacktestConfig,
@@ -140,7 +139,7 @@ class TestGatewayBackedVolumeContract:
             with pytest.raises(DataSourceUnavailable):
                 await provider.get_volume(
                     pool_address=WETH_USDC_POOL_ETHEREUM,
-                    chain=Chain.ETHEREUM,
+                    chain="ethereum",
                     start_date=TEST_START_DATE,
                     end_date=TEST_END_DATE,
                 )
@@ -173,7 +172,7 @@ class TestLPWithHistoricalVolume:
         async with provider:
             volumes = await provider.get_volume(
                 pool_address=WETH_USDC_POOL_ETHEREUM,
-                chain=Chain.ETHEREUM,
+                chain="ethereum",
                 start_date=TEST_START_DATE,
                 end_date=TEST_END_DATE,
             )
@@ -232,7 +231,7 @@ class TestLPWithHistoricalVolume:
         async with provider:
             volumes = await provider.get_volume(
                 pool_address=WETH_USDC_POOL_ETHEREUM,
-                chain=Chain.ETHEREUM,
+                chain="ethereum",
                 start_date=TEST_START_DATE,
                 end_date=TEST_END_DATE,
                 protocol="uniswap_v3",
@@ -352,7 +351,7 @@ class TestLPWithHistoricalVolume:
         async with provider:
             volumes = await provider.get_volume(
                 pool_address=WETH_USDC_POOL_ETHEREUM,
-                chain=Chain.ETHEREUM,
+                chain="ethereum",
                 start_date=TEST_START_DATE,
                 end_date=TEST_END_DATE,
             )
@@ -409,7 +408,7 @@ class TestLPWithHistoricalVolume:
         async with provider:
             volumes = await provider.get_volume(
                 pool_address=WETH_USDC_POOL_ETHEREUM,
-                chain=Chain.ETHEREUM,
+                chain="ethereum",
                 start_date=TEST_START_DATE,
                 end_date=TEST_END_DATE,
                 protocol="uniswap_v3",
@@ -460,7 +459,7 @@ class TestMultiDEXVolumeProviderIntegration:
         async with provider:
             volumes = await provider.get_volume(
                 pool_address=WETH_USDC_POOL_ARBITRUM,
-                chain=Chain.ARBITRUM,
+                chain="arbitrum",
                 start_date=TEST_START_DATE,
                 end_date=TEST_END_DATE,
                 protocol="uniswap_v3",
@@ -492,7 +491,7 @@ class TestMultiDEXVolumeProviderIntegration:
         async with provider:
             volumes = await provider.get_volume(
                 pool_address=WETH_USDC_POOL_ETHEREUM,
-                chain=Chain.ETHEREUM,
+                chain="ethereum",
                 start_date=TEST_START_DATE,
                 end_date=TEST_END_DATE,
                 # No protocol specified - should auto-detect Uniswap V3 for Ethereum

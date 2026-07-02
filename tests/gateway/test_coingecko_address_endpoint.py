@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.core.enums import Chain
+from almanak.core.chains import ChainRegistry
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.tokens import ResolvedToken
 from almanak.gateway.data.price.coingecko import (
@@ -79,7 +79,7 @@ class TestCoinGeckoAddressEndpoint:
             symbol="renBTC",
             address=RENBTC_ADDRESS,
             decimals=8,
-            chain=Chain.BASE,
+            chain="base",
             chain_id=8453,
             source="on_chain",
             is_verified=False,
@@ -113,7 +113,7 @@ class TestCoinGeckoAddressEndpoint:
             symbol="renBTC",
             address=RENBTC_ADDRESS,
             decimals=8,
-            chain=Chain.BASE,
+            chain="base",
             chain_id=8453,
             source="on_chain",
             is_verified=False,
@@ -130,11 +130,11 @@ class TestCoinGeckoAddressEndpoint:
         # Use a plausible ResolvedToken on a chain absent from the platform map.
         # We assert the source never calls HTTP at all.
         chain_without_platform = next(
-            (c for c in Chain if c.value.lower() not in COINGECKO_PLATFORM_IDS),
+            (name for name in ChainRegistry.names() if name not in COINGECKO_PLATFORM_IDS),
             None,
         )
         if chain_without_platform is None:
-            pytest.skip("Every Chain enum value currently has a CoinGecko platform mapping")
+            pytest.skip("Every registered chain currently has a CoinGecko platform mapping")
 
         resolved = ResolvedToken(
             symbol="XYZ",
@@ -162,7 +162,7 @@ class TestCoinGeckoAddressEndpoint:
             symbol="renBTC",
             address=RENBTC_ADDRESS,  # mixed-case input
             decimals=8,
-            chain=Chain.BASE,
+            chain="base",
             chain_id=8453,
             source="on_chain",
             is_verified=False,

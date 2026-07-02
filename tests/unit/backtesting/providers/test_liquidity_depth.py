@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.core.chains import ChainRegistry
 from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
-from almanak.core.enums import Chain
 from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.providers.liquidity_depth import (
     DATA_SOURCE_FALLBACK,
@@ -99,13 +99,13 @@ class TestConstants:
         """Supported chains derive from the declared DEX chain union."""
         provider = LiquidityDepthProvider(client=mock_subgraph_client)
         chains = provider.supported_chains
-        assert Chain.ETHEREUM in chains
-        assert Chain.ARBITRUM in chains
-        assert Chain.BASE in chains
-        assert Chain.OPTIMISM in chains
-        assert Chain.POLYGON in chains
-        assert Chain.AVALANCHE in chains
-        assert Chain.BSC in chains
+        assert "ethereum" in chains
+        assert "arbitrum" in chains
+        assert "base" in chains
+        assert "optimism" in chains
+        assert "polygon" in chains
+        assert "avalanche" in chains
+        assert "bsc" in chains
 
     def test_default_twap_window(self):
         """Test default TWAP window."""
@@ -156,10 +156,10 @@ class TestInitialization:
         """Test supported_chains property derives from declared DEX chains."""
         chains = provider.supported_chains
         declared = DexVolumeRegistry.all_supported_chains()
-        assert chains == [c for c in Chain if c.value.lower() in declared]
+        assert chains == [name for name in ChainRegistry.names() if name in declared]
         # Verify it's a copy
-        chains.append(Chain.SONIC)
-        assert Chain.SONIC not in provider.supported_chains
+        chains.append("sonic")
+        assert "sonic" not in provider.supported_chains
 
 
 # =============================================================================
@@ -209,22 +209,22 @@ class TestProtocolDetection:
 
     def test_detect_base_chain_defaults_to_aerodrome(self, provider):
         """Test Base chain defaults to Aerodrome."""
-        protocol = provider._detect_protocol_from_chain(Chain.BASE)
+        protocol = provider._detect_protocol_from_chain("base")
         assert protocol == "aerodrome"
 
     def test_detect_avalanche_defaults_to_traderjoe(self, provider):
         """Test Avalanche chain defaults to TraderJoe V2."""
-        protocol = provider._detect_protocol_from_chain(Chain.AVALANCHE)
+        protocol = provider._detect_protocol_from_chain("avalanche")
         assert protocol == "traderjoe_v2"
 
     def test_detect_ethereum_defaults_to_uniswap_v3(self, provider):
         """Test Ethereum defaults to Uniswap V3."""
-        protocol = provider._detect_protocol_from_chain(Chain.ETHEREUM)
+        protocol = provider._detect_protocol_from_chain("ethereum")
         assert protocol == "uniswap_v3"
 
     def test_detect_arbitrum_defaults_to_uniswap_v3(self, provider):
         """Test Arbitrum defaults to Uniswap V3."""
-        protocol = provider._detect_protocol_from_chain(Chain.ARBITRUM)
+        protocol = provider._detect_protocol_from_chain("arbitrum")
         assert protocol == "uniswap_v3"
 
 
@@ -254,7 +254,7 @@ class TestV3LiquidityQuery:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=timestamp,
             protocol="uniswap_v3",
         )
@@ -280,7 +280,7 @@ class TestV3LiquidityQuery:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0x456",
-            chain=Chain.ETHEREUM,
+            chain="ethereum",
             timestamp=timestamp,
             protocol="sushiswap_v3",
         )
@@ -305,7 +305,7 @@ class TestV3LiquidityQuery:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0x789",
-            chain=Chain.BSC,
+            chain="bsc",
             timestamp=timestamp,
             protocol="pancakeswap_v3",
         )
@@ -339,7 +339,7 @@ class TestV2LiquidityQuery:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0xaero",
-            chain=Chain.BASE,
+            chain="base",
             timestamp=timestamp,
             protocol="aerodrome",
         )
@@ -374,7 +374,7 @@ class TestLiquidityBookQuery:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0xtjoe",
-            chain=Chain.AVALANCHE,
+            chain="avalanche",
             timestamp=timestamp,
             protocol="traderjoe_v2",
         )
@@ -410,7 +410,7 @@ class TestBalancerQuery:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0xbal",
-            chain=Chain.ETHEREUM,
+            chain="ethereum",
             timestamp=timestamp,
             protocol="balancer",
         )
@@ -445,7 +445,7 @@ class TestCurveQuery:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0xcurve",
-            chain=Chain.ETHEREUM,
+            chain="ethereum",
             timestamp=timestamp,
             protocol="curve",
         )
@@ -489,7 +489,7 @@ class TestTWAPCalculation:
         timestamp = datetime(2024, 1, 2, 12, 0, tzinfo=UTC)
         result = await provider_with_twap.get_liquidity_depth(
             pool_address="0x123",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=timestamp,
             protocol="uniswap_v3",
         )
@@ -516,7 +516,7 @@ class TestTWAPCalculation:
         timestamp = datetime(2024, 1, 2, 12, 0, tzinfo=UTC)
         result = await provider_with_twap.get_liquidity_depth(
             pool_address="0x123",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=timestamp,
             protocol="uniswap_v3",
         )
@@ -541,7 +541,7 @@ class TestFallbackBehavior:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0xnone",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=timestamp,
             protocol="uniswap_v3",
         )
@@ -556,7 +556,7 @@ class TestFallbackBehavior:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0xtest",
-            chain=Chain.SONIC,  # Not supported
+            chain="sonic",  # Not supported
             timestamp=timestamp,
             protocol="uniswap_v3",
         )
@@ -582,7 +582,7 @@ class TestFallbackBehavior:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0x123",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=timestamp,
             # No protocol specified - should auto-detect Uniswap V3
         )
@@ -602,7 +602,7 @@ class TestFallbackBehavior:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0xnone",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=timestamp,
             protocol="uniswap_v3",
         )
@@ -623,11 +623,11 @@ class TestLiquidityDepthRouting:
     @pytest.mark.parametrize(
         ("protocol", "chain", "method_name"),
         [
-            ("uniswap_v3", Chain.ARBITRUM, "_query_v3_liquidity"),
-            ("aerodrome", Chain.BASE, "_query_v2_liquidity"),
-            ("traderjoe_v2", Chain.AVALANCHE, "_query_liquidity_book"),
-            ("balancer", Chain.ETHEREUM, "_query_balancer_liquidity"),
-            ("curve", Chain.ETHEREUM, "_query_curve_liquidity"),
+            ("uniswap_v3", "arbitrum", "_query_v3_liquidity"),
+            ("aerodrome", "base", "_query_v2_liquidity"),
+            ("traderjoe_v2", "avalanche", "_query_liquidity_book"),
+            ("balancer", "ethereum", "_query_balancer_liquidity"),
+            ("curve", "ethereum", "_query_curve_liquidity"),
         ],
     )
     async def test_protocol_family_dispatches_to_expected_query_method(
@@ -662,7 +662,7 @@ class TestLiquidityDepthRouting:
 
         result = await provider.get_liquidity_depth(
             pool_address="0xpool",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
             protocol="not_a_dex",
         )
@@ -685,7 +685,7 @@ class TestLiquidityDepthRouting:
         with pytest.raises(DataSourceUnavailableError, match="window too large"):
             await provider.get_liquidity_depth(
                 pool_address="0xpool",
-                chain=Chain.ARBITRUM,
+                chain="arbitrum",
                 timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
                 protocol="uniswap_v3",
             )
@@ -711,7 +711,7 @@ class TestErrorHandling:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0x123",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=timestamp,
             protocol="uniswap_v3",
         )
@@ -732,7 +732,7 @@ class TestErrorHandling:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0x123",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=timestamp,
             protocol="uniswap_v3",
         )
@@ -748,7 +748,7 @@ class TestErrorHandling:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0x123",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=timestamp,
             protocol="uniswap_v3",
         )
@@ -784,7 +784,7 @@ class TestRangeQuery:
 
         results = await provider.get_liquidity_depth_range(
             pool_address="0x123",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             start_time=start_time,
             end_time=end_time,
             protocol="uniswap_v3",
@@ -846,7 +846,7 @@ class TestProtocolNormalization:
 
         result = await provider.get_liquidity_depth(
             pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
             protocol="uni_v3",
         )
@@ -882,7 +882,7 @@ class TestTimestampHandling:
         naive_timestamp = datetime(2024, 1, 15, 12, 0)
         result = await provider.get_liquidity_depth(
             pool_address="0x123",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=naive_timestamp,
             protocol="uniswap_v3",
         )
@@ -936,7 +936,7 @@ class TestCursorPaginationThroughProvider:
         target = datetime.fromtimestamp(day0 + (n_days - 1) * 86_400, tz=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=target,
             protocol="uniswap_v3",
         )

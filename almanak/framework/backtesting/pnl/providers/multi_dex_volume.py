@@ -28,14 +28,13 @@ Example:
     from almanak.framework.backtesting.pnl.providers.multi_dex_volume import (
         MultiDEXVolumeProvider,
     )
-    from almanak.core.enums import Chain
     from datetime import date
 
     provider = MultiDEXVolumeProvider()
     async with provider:
         volumes = await provider.get_volume(
             pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             start_date=date(2024, 1, 1),
             end_date=date(2024, 1, 31),
             protocol="uniswap_v3",
@@ -50,7 +49,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
-from almanak.core.enums import Chain
+from almanak.core.chains import ChainRegistry
 
 from ..types import DataConfidence, DataSourceInfo, VolumeResult
 from .base import HistoricalVolumeProvider
@@ -85,7 +84,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         async with provider:
             volumes = await provider.get_volume(
                 pool_address="0x...",
-                chain=Chain.ARBITRUM,
+                chain="arbitrum",
                 start_date=date(2024, 1, 1),
                 end_date=date(2024, 1, 31),
                 protocol="uniswap_v3",
@@ -150,7 +149,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
             return None
         return DexVolumeRegistry.canonical(str(protocol))
 
-    def _detect_protocol_from_chain(self, chain: Chain) -> str | None:
+    def _detect_protocol_from_chain(self, chain: str) -> str | None:
         """Attempt to detect protocol based on chain.
 
         Connector-declared defaults: ``chain_default`` declarations win
@@ -163,7 +162,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         Returns:
             Best-guess protocol identifier or None
         """
-        return DexVolumeRegistry.chain_default(chain.value)
+        return DexVolumeRegistry.chain_default(chain)
 
     def _get_provider(self, protocol_id: str) -> GatewayDexVolumeProvider | None:
         """Get or create the gateway-backed provider for ``protocol_id``.
@@ -231,7 +230,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
     async def get_volume(
         self,
         pool_address: str,
-        chain: Chain,
+        chain: str,
         start_date: date,
         end_date: date,
         protocol: str | None = None,
@@ -261,6 +260,9 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
                 ``Decimal("0")`` LOW row for an empty/errored subgraph is
                 intentionally removed (VIB-4859 decision 4).
         """
+        descriptor = ChainRegistry.try_resolve(chain)
+        if descriptor is not None:
+            chain = descriptor.name
         # Normalize protocol identifier (canonical declared key or None)
         protocol_id = self._get_protocol_id(protocol)
 
@@ -279,24 +281,24 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
                 logger.info(
                     "Auto-detected protocol %s for chain %s",
                     protocol_id,
-                    chain.value,
+                    chain,
                 )
 
         # If still no protocol, return fallback (routing mismatch)
         if protocol_id is None:
             logger.warning(
                 "Could not determine protocol for chain=%s, pool=%s..., returning fallback",
-                chain.value,
+                chain,
                 pool_address[:10],
             )
             return self._generate_fallback_results(start_date, end_date)
 
         # Check if chain is declared by this protocol (routing mismatch)
         entry = DexVolumeRegistry.entry_for(protocol_id)
-        if entry is None or chain.value.lower() not in entry.chains:
+        if entry is None or chain not in entry.chains:
             logger.warning(
                 "Chain %s not supported by protocol %s, returning fallback",
-                chain.value,
+                chain,
                 protocol_id,
             )
             return self._generate_fallback_results(start_date, end_date)
@@ -307,7 +309,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         logger.info(
             "Routing volume query to %s: chain=%s, pool=%s...",
             protocol_id,
-            chain.value,
+            chain,
             pool_address[:10],
         )
         provider = self._get_provider(protocol_id)
@@ -328,14 +330,14 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         """
         return list(DexVolumeRegistry.supported_protocols())
 
-    def get_supported_chains(self, protocol: str) -> list[Chain]:
+    def get_supported_chains(self, protocol: str) -> list[str]:
         """Get list of supported chains for a protocol.
 
         Args:
             protocol: String protocol identifier
 
         Returns:
-            List of supported Chain enums (declaration order)
+            List of canonical chain names (declaration order)
         """
         protocol_id = self._get_protocol_id(protocol)
         if protocol_id is None:
@@ -343,7 +345,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         entry = DexVolumeRegistry.entry_for(protocol_id)
         if entry is None:
             return []
-        return [Chain(c.upper()) for c in entry.chains]
+        return [ChainRegistry.resolve(c).name for c in entry.chains]
 
 
 __all__ = [

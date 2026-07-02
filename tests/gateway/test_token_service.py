@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import grpc
 import pytest
 
-from almanak.core.enums import Chain
 from almanak.framework.data.tokens import (
     InvalidTokenAddressError,
     ResolvedToken,
@@ -53,7 +52,7 @@ def sample_resolved_token():
         symbol="USDC",
         address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
         decimals=6,
-        chain=Chain.ARBITRUM,
+        chain="arbitrum",
         chain_id=42161,
         name="USD Coin",
         coingecko_id="usd-coin",
@@ -513,7 +512,7 @@ class TestBatchResolveTokens:
             symbol="USDC",
             address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
             decimals=6,
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             chain_id=42161,
             name="USD Coin",
             coingecko_id="usd-coin",
@@ -530,7 +529,7 @@ class TestBatchResolveTokens:
             symbol="WETH",
             address="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
             decimals=18,
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             chain_id=42161,
             name="Wrapped Ether",
             coingecko_id="weth",

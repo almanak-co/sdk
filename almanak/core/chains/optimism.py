@@ -1,6 +1,6 @@
 """Optimism (chain_id 10) — L2 (Optimistic rollup)."""
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._contracts import safe_stack_contracts
 from ._descriptor import (
@@ -18,7 +18,6 @@ from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.OPTIMISM,
         name="optimism",
         chain_id=10,
         family=ChainFamily.EVM,

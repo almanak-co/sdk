@@ -79,13 +79,11 @@ class TestStablecoins:
         this is the direct unit assertion at the OnChainPriceSource layer."""
         from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
 
-        from almanak import Chain
-
         polymarket_pusd = ResolvedToken(
             symbol="PUSD",
             address="0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
             decimals=6,
-            chain=Chain.POLYGON,
+            chain="polygon",
             chain_id=137,
             name="Polymarket USD",
             coingecko_id="",

@@ -36,7 +36,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
-from almanak.core.enums import Chain
+from almanak.core.chains import ChainRegistry
 from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalFundingProvider
 from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
     FundingHistoryPoint,
@@ -101,13 +101,13 @@ class GMXClientConfig:
     Attributes:
         requests_per_minute: Client-side RPC throttle (default: 30)
         timeout_seconds: Legacy config echo (default: 30)
-        chain: Default chain for requests (default: ARBITRUM)
+        chain: Default chain for requests (default: "arbitrum")
         fallback_rate: Fallback funding rate when data unavailable
     """
 
     requests_per_minute: int = DEFAULT_REQUESTS_PER_MINUTE
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
-    chain: Chain = Chain.ARBITRUM
+    chain: str = "arbitrum"
     fallback_rate: Decimal = Decimal("0.0001")  # 0.01% per hour
 
 
@@ -167,33 +167,33 @@ class GMXFundingProvider(HistoricalFundingProvider):
 
         logger.debug(
             "Initialized GMXFundingProvider: chain=%s, rate_limit=%d req/min",
-            self._config.chain.value,
+            self._config.chain,
             self._config.requests_per_minute,
         )
 
     @classmethod
     def for_backtest(cls, config: BacktestProviderConfig) -> "GMXFundingProvider":
         """Construct from the adapter's protocol-neutral backtest config."""
-        chain = Chain.ARBITRUM
+        chain = "arbitrum"
         if config.chain is not None:
             requested = config.chain.strip().lower()
             declared = FundingHistoryRegistry.declared_chains(_PROTOCOL_KEY)
             if requested in declared:
-                try:
-                    chain = Chain[requested.upper()]
-                except KeyError:
+                descriptor = ChainRegistry.try_resolve(requested)
+                if descriptor is not None:
+                    chain = descriptor.name
+                else:
                     logger.warning(
-                        "GMX V2 backtest requested declared chain %r, but Chain.%s is unavailable; falling back to %s",
+                        "GMX V2 backtest requested declared chain %r, but it is not a registered chain; falling back to %s",
                         config.chain,
-                        requested.upper(),
-                        Chain.ARBITRUM.value,
+                        chain,
                     )
             else:
                 logger.warning(
                     "GMX V2 backtest requested unsupported chain %r; declared chains are %s; falling back to %s",
                     config.chain,
                     list(declared),
-                    Chain.ARBITRUM.value,
+                    chain,
                 )
         return cls(
             config=GMXClientConfig(
@@ -215,10 +215,9 @@ class GMXFundingProvider(HistoricalFundingProvider):
         return self._rate_limiter
 
     @property
-    def supported_chains(self) -> list[Chain]:
+    def supported_chains(self) -> list[str]:
         """Chains the GMX V2 connector declares funding data for."""
-        # Decl chains are lowercase identifiers; Chain enum values are UPPERCASE.
-        return [Chain(c.upper()) for c in FundingHistoryRegistry.declared_chains(_PROTOCOL_KEY)]
+        return [ChainRegistry.resolve(c).name for c in FundingHistoryRegistry.declared_chains(_PROTOCOL_KEY)]
 
     async def close(self) -> None:
         """Release resources (no-op; retained for API compatibility)."""
@@ -232,7 +231,7 @@ class GMXFundingProvider(HistoricalFundingProvider):
         """Async context manager exit: close the session."""
         await self.close()
 
-    def _validate_chain(self, chain: Chain) -> str:
+    def _validate_chain(self, chain: str) -> str:
         """Validate ``chain`` against the connector-declared funding chains.
 
         Args:
@@ -245,15 +244,14 @@ class GMXFundingProvider(HistoricalFundingProvider):
             ValueError: If the connector declares no funding data for it
         """
         declared = FundingHistoryRegistry.declared_chains(_PROTOCOL_KEY)
-        chain_lower = chain.value.lower()
-        if chain_lower not in declared:
+        if chain not in declared:
             raise ValueError(f"Unsupported chain: {chain}. Supported: {list(declared)}")
-        return chain_lower
+        return chain
 
     async def _fetch_points(
         self,
         market: str,
-        chain: Chain,
+        chain: str,
         start_ts: int,
         end_ts: int,
     ) -> list[FundingHistoryPoint]:
@@ -436,7 +434,7 @@ class GMXFundingProvider(HistoricalFundingProvider):
     async def get_current_funding_rate(
         self,
         market: str,
-        chain: Chain | None = None,
+        chain: str | None = None,
     ) -> FundingResult:
         """Fetch the current funding rate for a market.
 

@@ -781,41 +781,30 @@ class Web3BalanceProvider:
             )
             result = await provider.get_balance("CUSTOM")
         """
+        from almanak.core.chains import ChainRegistry
         from almanak.framework.data.tokens.models import CHAIN_ID_MAP, ResolvedToken
 
         checksum_address = AsyncWeb3.to_checksum_address(address)
 
-        from almanak.core.enums import Chain
-
-        # Normalize canonical chain aliases to Chain enum values
-        _CHAIN_ALIASES: dict[str, str] = {
-            "bnb": "BSC",
-            "bsc": "BSC",
-            "eth": "ETHEREUM",
-            "avax": "AVALANCHE",
-            "matic": "POLYGON",
-            "op": "OPTIMISM",
-            "arb": "ARBITRUM",
-        }
-        chain_str = _CHAIN_ALIASES.get(self._chain.lower(), self._chain.upper())
-
-        try:
-            matched_chain = Chain(chain_str)
-        except ValueError:
+        # ChainRegistry owns alias normalization ("bnb" -> "bsc", "eth" ->
+        # "ethereum", "matic" -> "polygon", ...); the local alias dict this
+        # replaced was a strict subset of the registry's aliases.
+        descriptor = ChainRegistry.try_resolve(self._chain)
+        if descriptor is None:
             raise ValueError(
-                f"Unknown chain '{self._chain}': cannot resolve to a valid Chain enum. "
-                f"Known chains: {[c.value for c in Chain]}"
-            ) from None
+                f"Unknown chain '{self._chain}': cannot resolve to a registered chain. "
+                f"Known chains: {list(ChainRegistry.names())}"
+            )
 
-        chain_id = CHAIN_ID_MAP.get(matched_chain, 0)
+        chain_id = CHAIN_ID_MAP.get(descriptor.name, 0)
         if chain_id == 0:
-            raise ValueError(f"Chain '{matched_chain.value}' has no chain_id mapping in CHAIN_ID_MAP")
+            raise ValueError(f"Chain '{descriptor.name}' has no chain_id mapping in CHAIN_ID_MAP")
 
         resolved = ResolvedToken(
             symbol=symbol.upper(),
             address=checksum_address,
             decimals=decimals,
-            chain=matched_chain,
+            chain=descriptor.name,
             chain_id=chain_id,
             is_native=is_native,
             source="manual",

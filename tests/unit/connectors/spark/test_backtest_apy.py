@@ -28,7 +28,6 @@ from almanak.connectors.spark.backtest_apy import (
     SparkAPYProvider,
     SparkClientConfig,
 )
-from almanak.core.enums import Chain
 from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
@@ -59,20 +58,20 @@ class TestSparkAPYProviderInitialization:
         """Test provider initializes with default settings."""
         provider = SparkAPYProvider()
         assert provider.supported_chains == SUPPORTED_CHAINS
-        assert provider.config.chain == Chain.ETHEREUM
+        assert provider.config.chain == "ethereum"
         assert provider.config.requests_per_minute == 100
         assert provider._owns_client is True
 
     def test_init_with_custom_config(self):
         """Test provider initializes with custom config."""
         config = SparkClientConfig(
-            chain=Chain.ETHEREUM,
+            chain="ethereum",
             requests_per_minute=50,
             supply_apy_fallback=Decimal("0.05"),
             borrow_apy_fallback=Decimal("0.08"),
         )
         provider = SparkAPYProvider(config=config)
-        assert provider.config.chain == Chain.ETHEREUM
+        assert provider.config.chain == "ethereum"
         assert provider.config.requests_per_minute == 50
         assert provider.config.supply_apy_fallback == Decimal("0.05")
         assert provider.config.borrow_apy_fallback == Decimal("0.08")
@@ -98,7 +97,7 @@ class TestSupportedChains:
 
     def test_supported_chains_include_ethereum(self):
         """Test that Ethereum is supported (US-020 requirement)."""
-        assert Chain.ETHEREUM in SUPPORTED_CHAINS
+        assert "ethereum" in SUPPORTED_CHAINS
 
     def test_all_supported_chains_have_subgraph_ids(self):
         """Test all supported chains have subgraph IDs."""
@@ -309,7 +308,7 @@ class TestAPYFetching:
     @pytest.mark.asyncio
     async def test_get_apy_unsupported_chain_returns_fallback(self, mock_client: MagicMock):
         """Test fallback when chain is not supported."""
-        config = SparkClientConfig(chain=Chain.ARBITRUM)  # Not supported
+        config = SparkClientConfig(chain="arbitrum")  # Not supported
         provider = SparkAPYProvider(config=config, client=mock_client)
 
         results = await provider.get_apy(
@@ -497,11 +496,11 @@ class TestMarketResolution:
         }
 
         provider = SparkAPYProvider(client=mock_client)
-        market_id = await provider._resolve_market_id(Chain.ETHEREUM, "DAI")
+        market_id = await provider._resolve_market_id("ethereum", "DAI")
 
         assert market_id == "0xmarket123"
         # Verify it's cached
-        assert "ETHEREUM:DAI" in provider._market_cache
+        assert "ethereum:DAI" in provider._market_cache
 
     @pytest.mark.asyncio
     async def test_resolve_market_by_id(self, mock_client: MagicMock):
@@ -509,7 +508,7 @@ class TestMarketResolution:
         provider = SparkAPYProvider(client=mock_client)
 
         # Long hex string should pass through
-        market_id = await provider._resolve_market_id(Chain.ETHEREUM, "0x1234567890abcdef1234567890abcdef12345678")
+        market_id = await provider._resolve_market_id("ethereum", "0x1234567890abcdef1234567890abcdef12345678")
 
         assert market_id == "0x1234567890abcdef1234567890abcdef12345678"
         # No query should be made
@@ -525,11 +524,11 @@ class TestMarketResolution:
         provider = SparkAPYProvider(client=mock_client)
 
         # First call - should query
-        await provider._find_market_by_token(Chain.ETHEREUM, "DAI")
+        await provider._find_market_by_token("ethereum", "DAI")
         assert mock_client.query.call_count == 1
 
         # Second call - should use cache
-        await provider._find_market_by_token(Chain.ETHEREUM, "DAI")
+        await provider._find_market_by_token("ethereum", "DAI")
         assert mock_client.query.call_count == 1  # Still 1
 
 
@@ -595,7 +594,7 @@ class TestConvenienceMethods:
 
         provider = SparkAPYProvider(client=mock_client)
         results = await provider.get_apy_for_chain(
-            chain=Chain.ETHEREUM,
+            chain="ethereum",
             market="DAI",
             start_date=datetime(2024, 1, 1, tzinfo=UTC),
             end_date=datetime(2024, 1, 1, tzinfo=UTC),

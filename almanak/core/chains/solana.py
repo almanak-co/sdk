@@ -7,7 +7,7 @@ we keep that contract. EVM gas / timeout knobs do not apply, so the
 compute-unit + priority-fee accounting, not gas multipliers).
 """
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._descriptor import ChainDescriptor, Explorer, GasProfile, NativeToken, RpcProfile, Timeouts
 from ._registry import register_chain
@@ -24,7 +24,6 @@ SOLANA_CLUSTERS: dict[str, str] = {
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.SOLANA,
         name="solana",
         chain_id=0,  # Non-EVM sentinel; matches legacy CHAIN_IDS
         family=ChainFamily.SOLANA,

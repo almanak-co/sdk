@@ -21,7 +21,7 @@ defaults and populated when the first connector lands. Every value below is a
 public, explorer-verifiable fact.
 """
 
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 
 from ._descriptor import (
     ChainDescriptor,
@@ -34,7 +34,6 @@ from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
     ChainDescriptor(
-        enum=Chain.HYPEREVM,
         name="hyperevm",
         chain_id=999,
         family=ChainFamily.EVM,

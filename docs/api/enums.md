@@ -2,12 +2,13 @@
 
 Core enumeration types used throughout the SDK.
 
-## Chain
-
-::: almanak.core.enums.Chain
-    options:
-      show_root_heading: true
-      members_order: source
+!!! note "Chains are identified by name strings"
+    There is no `Chain` enum. Chains are identified by canonical lowercase
+    name strings (`"ethereum"`, `"arbitrum"`, `"solana"`, ...). Resolve
+    names, aliases, and CAIP-2 ids through
+    `almanak.core.chains.ChainRegistry` — e.g.
+    `ChainRegistry.resolve("bnb").name == "bsc"`,
+    `ChainRegistry.get("arbitrum").chain_id == 42161`.
 
 ## Network
 

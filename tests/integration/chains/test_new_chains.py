@@ -26,7 +26,7 @@ import pytest
 from web3 import Web3
 
 from almanak.core.constants import CHAIN_IDS as CORE_CHAIN_IDS
-from almanak.core.constants import Chain, get_chain_id
+from almanak.core.constants import get_chain_id
 from almanak.framework.execution.config import CHAIN_IDS as CONFIG_CHAIN_IDS
 
 # =============================================================================
@@ -42,19 +42,19 @@ NEW_CHAINS = {
         "chain_id": 81457,
         "rpc_url": "https://rpc.blast.io",
         "native_token": "ETH",
-        "chain_enum": Chain.BLAST,
+        "chain_name": "blast",
     },
     "mantle": {
         "chain_id": 5000,
         "rpc_url": "https://rpc.mantle.xyz",
         "native_token": "MNT",
-        "chain_enum": Chain.MANTLE,
+        "chain_name": "mantle",
     },
     "berachain": {
         "chain_id": 80094,
         "rpc_url": "https://rpc.berachain.com",
         "native_token": "BERA",
-        "chain_enum": Chain.BERACHAIN,
+        "chain_name": "berachain",
     },
 }
 
@@ -104,23 +104,23 @@ class TestChainIDConsistency:
 
     def test_blast_chain_id_in_core_constants(self):
         """Verify Blast chain ID is correctly defined in core/constants.py."""
-        assert Chain.BLAST in CORE_CHAIN_IDS, "Chain.BLAST should be in CORE_CHAIN_IDS"
-        assert CORE_CHAIN_IDS[Chain.BLAST] == 81457, (
-            f"Blast chain ID should be 81457, got {CORE_CHAIN_IDS[Chain.BLAST]}"
+        assert "blast" in CORE_CHAIN_IDS, "blast should be in CORE_CHAIN_IDS"
+        assert CORE_CHAIN_IDS["blast"] == 81457, (
+            f"Blast chain ID should be 81457, got {CORE_CHAIN_IDS["blast"]}"
         )
 
     def test_mantle_chain_id_in_core_constants(self):
         """Verify Mantle chain ID is correctly defined in core/constants.py."""
-        assert Chain.MANTLE in CORE_CHAIN_IDS, "Chain.MANTLE should be in CORE_CHAIN_IDS"
-        assert CORE_CHAIN_IDS[Chain.MANTLE] == 5000, (
-            f"Mantle chain ID should be 5000, got {CORE_CHAIN_IDS[Chain.MANTLE]}"
+        assert "mantle" in CORE_CHAIN_IDS, "mantle should be in CORE_CHAIN_IDS"
+        assert CORE_CHAIN_IDS["mantle"] == 5000, (
+            f"Mantle chain ID should be 5000, got {CORE_CHAIN_IDS["mantle"]}"
         )
 
     def test_berachain_chain_id_in_core_constants(self):
         """Verify Berachain chain ID is correctly defined in core/constants.py."""
-        assert Chain.BERACHAIN in CORE_CHAIN_IDS, "Chain.BERACHAIN should be in CORE_CHAIN_IDS"
-        assert CORE_CHAIN_IDS[Chain.BERACHAIN] == 80094, (
-            f"Berachain chain ID should be 80094, got {CORE_CHAIN_IDS[Chain.BERACHAIN]}"
+        assert "berachain" in CORE_CHAIN_IDS, "berachain should be in CORE_CHAIN_IDS"
+        assert CORE_CHAIN_IDS["berachain"] == 80094, (
+            f"Berachain chain ID should be 80094, got {CORE_CHAIN_IDS["berachain"]}"
         )
 
     def test_blast_chain_id_in_config(self):
@@ -142,27 +142,24 @@ class TestChainIDConsistency:
 
     def test_blast_chain_ids_match(self):
         """Verify Blast chain ID matches between constants.py and config.py."""
-        core_id = CORE_CHAIN_IDS[Chain.BLAST]
+        core_id = CORE_CHAIN_IDS["blast"]
         config_id = CONFIG_CHAIN_IDS["blast"]
         assert core_id == config_id, f"Blast chain ID mismatch: constants.py={core_id}, config.py={config_id}"
 
     def test_mantle_chain_ids_match(self):
         """Verify Mantle chain ID matches between constants.py and config.py."""
-        core_id = CORE_CHAIN_IDS[Chain.MANTLE]
+        core_id = CORE_CHAIN_IDS["mantle"]
         config_id = CONFIG_CHAIN_IDS["mantle"]
         assert core_id == config_id, f"Mantle chain ID mismatch: constants.py={core_id}, config.py={config_id}"
 
     def test_berachain_chain_ids_match(self):
         """Verify Berachain chain ID matches between constants.py and config.py."""
-        core_id = CORE_CHAIN_IDS[Chain.BERACHAIN]
+        core_id = CORE_CHAIN_IDS["berachain"]
         config_id = CONFIG_CHAIN_IDS["berachain"]
         assert core_id == config_id, f"Berachain chain ID mismatch: constants.py={core_id}, config.py={config_id}"
 
     def test_get_chain_id_function_blast(self):
         """Verify get_chain_id() works for Blast with various inputs."""
-        # Test with Chain enum
-        assert get_chain_id(Chain.BLAST) == 81457
-
         # Test with string
         assert get_chain_id("blast") == 81457
         assert get_chain_id("BLAST") == 81457
@@ -173,9 +170,6 @@ class TestChainIDConsistency:
 
     def test_get_chain_id_function_mantle(self):
         """Verify get_chain_id() works for Mantle with various inputs."""
-        # Test with Chain enum
-        assert get_chain_id(Chain.MANTLE) == 5000
-
         # Test with string
         assert get_chain_id("mantle") == 5000
         assert get_chain_id("MANTLE") == 5000
@@ -186,9 +180,6 @@ class TestChainIDConsistency:
 
     def test_get_chain_id_function_berachain(self):
         """Verify get_chain_id() works for Berachain with various inputs."""
-        # Test with Chain enum
-        assert get_chain_id(Chain.BERACHAIN) == 80094
-
         # Test with string
         assert get_chain_id("berachain") == 80094
         assert get_chain_id("BERACHAIN") == 80094
@@ -257,7 +248,7 @@ class TestBlastFork:
         print(f"Test wallet funded with {balance / 10**18:.2f} ETH")
 
         # Verify chain ID matches our constants
-        assert chain_id == CORE_CHAIN_IDS[Chain.BLAST], "Chain ID should match CORE_CHAIN_IDS"
+        assert chain_id == CORE_CHAIN_IDS["blast"], "Chain ID should match CORE_CHAIN_IDS"
         assert chain_id == CONFIG_CHAIN_IDS["blast"], "Chain ID should match CONFIG_CHAIN_IDS"
 
 
@@ -311,7 +302,7 @@ class TestMantleFork:
         print(f"Test wallet funded with {balance / 10**18:.2f} MNT")
 
         # Verify chain ID matches our constants
-        assert chain_id == CORE_CHAIN_IDS[Chain.MANTLE], "Chain ID should match CORE_CHAIN_IDS"
+        assert chain_id == CORE_CHAIN_IDS["mantle"], "Chain ID should match CORE_CHAIN_IDS"
         assert chain_id == CONFIG_CHAIN_IDS["mantle"], "Chain ID should match CONFIG_CHAIN_IDS"
 
 
@@ -365,7 +356,7 @@ class TestBerachainFork:
         print(f"Test wallet funded with {balance / 10**18:.2f} BERA")
 
         # Verify chain ID matches our constants
-        assert chain_id == CORE_CHAIN_IDS[Chain.BERACHAIN], "Chain ID should match CORE_CHAIN_IDS"
+        assert chain_id == CORE_CHAIN_IDS["berachain"], "Chain ID should match CORE_CHAIN_IDS"
         assert chain_id == CONFIG_CHAIN_IDS["berachain"], "Chain ID should match CONFIG_CHAIN_IDS"
 
 

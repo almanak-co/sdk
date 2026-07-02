@@ -23,7 +23,7 @@ from urllib.parse import quote as _url_quote
 import grpc
 
 from almanak.core.chains import ChainRegistry
-from almanak.core.enums import Chain, ChainFamily
+from almanak.core.enums import ChainFamily
 from almanak.framework.data.tokens import (
     InvalidTokenAddressError,
     ResolvedToken,
@@ -202,36 +202,23 @@ def _looks_like_fluid_symbol(symbol: str) -> bool:
 
 
 # =============================================================================
-# Chain enum helper
+# Chain name helper
 # =============================================================================
 
 
-# Pre-built lookup: lowercased enum value → Chain member.  The protocol
-# lookup services return ``meta.chain`` as a lowercased string (the same
-# key they use to index tokens per chain), but ``Chain`` enum *values*
-# are uppercase ("ETHEREUM", "ARBITRUM", ...).  Naive ``Chain(meta.chain)``
-# therefore always raises ``ValueError`` for lowercase inputs, silently
-# falling back to whatever the caller uses as its default — which in the
-# ``_build_resolved_from_*`` helpers is ``Chain.ETHEREUM``, meaning every
-# non-ethereum protocol resolution would stamp the wrong chain onto the
-# returned ``ResolvedToken``.  This helper makes the lookup explicit and
-# case-insensitive.
-def _resolve_chain_enum(name: str) -> Chain:
-    """Return the ``Chain`` enum for a lowercased chain name.
+def _resolve_chain_name(name: str) -> str:
+    """Return the canonical lowercase chain name for any-case input.
 
-    Accepts any case ("ethereum", "ETHEREUM", "Ethereum") and falls back
-    to ``Chain.ETHEREUM`` for unknown / empty names.  Callers expect the
-    fallback so they can still construct a ``ResolvedToken`` even when a
-    protocol lookup returns a chain we don't recognize (e.g. a newer
-    Pendle/Morpho deployment on a chain that isn't in our ``Chain`` enum
-    yet).
+    Falls back to ``"ethereum"`` for unknown / empty names. Callers expect
+    the fallback so they can still construct a ``ResolvedToken`` even when
+    a protocol lookup returns a chain we don't recognize (e.g. a newer
+    Pendle/Morpho deployment on a chain that isn't registered yet) —
+    stamping SOME chain beats dropping the resolution on the floor here.
     """
     if not name:
-        return Chain.ETHEREUM
-    try:
-        return Chain[name.upper()]
-    except KeyError:
-        return Chain.ETHEREUM
+        return "ethereum"
+    descriptor = ChainRegistry.try_resolve(str(name))
+    return descriptor.name if descriptor is not None else "ethereum"
 
 
 # =============================================================================
@@ -542,16 +529,15 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
         """
         from datetime import UTC, datetime
 
-        from almanak.core.enums import Chain
         from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
 
-        chain_enum = Chain.SOLANA
+        chain_name = "solana"
         return ResolvedToken(
             symbol=info.address,  # mint address as stable identifier
             address=info.address,
             decimals=info.decimals,
-            chain=chain_enum,
-            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            chain=chain_name,
+            chain_id=CHAIN_ID_MAP.get(chain_name, 0),
             name=None,
             coingecko_id=None,
             is_stablecoin=False,
@@ -680,13 +666,13 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
         from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
 
-        chain_enum = Chain.SOLANA
+        chain_name = "solana"
         return ResolvedToken(
             symbol=meta.symbol,
             address=meta.address,
             decimals=meta.decimals,
-            chain=chain_enum,
-            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            chain=chain_name,
+            chain_id=CHAIN_ID_MAP.get(chain_name, 0),
             name=meta.name or None,
             coingecko_id=None,
             is_stablecoin=False,
@@ -737,7 +723,7 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
         from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
 
-        chain_enum = _resolve_chain_enum(meta.chain)
+        chain_name = _resolve_chain_name(meta.chain)
 
         source = "aave_atoken" if meta.token_type == "A" else "aave_vtoken"
 
@@ -745,8 +731,8 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
             symbol=meta.symbol,
             address=meta.address,
             decimals=meta.decimals,
-            chain=chain_enum,
-            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            chain=chain_name,
+            chain_id=CHAIN_ID_MAP.get(chain_name, 0),
             name=meta.name or None,
             coingecko_id=None,
             is_stablecoin=False,
@@ -793,14 +779,14 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
         from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
 
-        chain_enum = _resolve_chain_enum(meta.chain)
+        chain_name = _resolve_chain_name(meta.chain)
 
         return ResolvedToken(
             symbol=meta.symbol,
             address=meta.address,
             decimals=meta.decimals,
-            chain=chain_enum,
-            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            chain=chain_name,
+            chain_id=CHAIN_ID_MAP.get(chain_name, 0),
             name=meta.name or None,
             coingecko_id=None,
             is_stablecoin=False,
@@ -850,14 +836,14 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
         from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
 
-        chain_enum = _resolve_chain_enum(meta.chain)
+        chain_name = _resolve_chain_name(meta.chain)
 
         return ResolvedToken(
             symbol=meta.symbol,
             address=meta.address,
             decimals=meta.decimals,
-            chain=chain_enum,
-            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            chain=chain_name,
+            chain_id=CHAIN_ID_MAP.get(chain_name, 0),
             name=meta.name or None,
             coingecko_id=None,
             is_stablecoin=False,
@@ -908,14 +894,14 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
         from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
 
-        chain_enum = _resolve_chain_enum(meta.chain)
+        chain_name = _resolve_chain_name(meta.chain)
 
         return ResolvedToken(
             symbol=meta.symbol,
             address=meta.address,
             decimals=meta.decimals,
-            chain=chain_enum,
-            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            chain=chain_name,
+            chain_id=CHAIN_ID_MAP.get(chain_name, 0),
             name=meta.name or None,
             coingecko_id=None,
             is_stablecoin=False,
@@ -965,14 +951,14 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
         from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
 
-        chain_enum = _resolve_chain_enum(meta.chain)
+        chain_name = _resolve_chain_name(meta.chain)
 
         return ResolvedToken(
             symbol=meta.symbol,
             address=meta.address,
             decimals=meta.decimals,
-            chain=chain_enum,
-            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            chain=chain_name,
+            chain_id=CHAIN_ID_MAP.get(chain_name, 0),
             name=meta.name or None,
             coingecko_id=None,
             is_stablecoin=False,
@@ -1023,14 +1009,14 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
         from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
 
-        chain_enum = _resolve_chain_enum(meta.chain)
+        chain_name = _resolve_chain_name(meta.chain)
 
         return ResolvedToken(
             symbol=meta.symbol,
             address=meta.address,
             decimals=meta.decimals,
-            chain=chain_enum,
-            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            chain=chain_name,
+            chain_id=CHAIN_ID_MAP.get(chain_name, 0),
             name=meta.name or None,
             coingecko_id=None,
             is_stablecoin=False,
@@ -1080,14 +1066,14 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
         from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
 
-        chain_enum = _resolve_chain_enum(meta.chain)
+        chain_name = _resolve_chain_name(meta.chain)
 
         return ResolvedToken(
             symbol=meta.symbol,
             address=meta.address,
             decimals=meta.decimals,
-            chain=chain_enum,
-            chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+            chain=chain_name,
+            chain_id=CHAIN_ID_MAP.get(chain_name, 0),
             name=meta.name or None,
             coingecko_id=None,
             is_stablecoin=False,
@@ -1735,14 +1721,8 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
 
             from almanak.framework.data.tokens.models import CHAIN_ID_MAP, BridgeType
 
-            # Find Chain enum
-            chain_enum = None
-            for c in Chain:
-                if c.value.lower() == chain.lower():
-                    chain_enum = c
-                    break
-
-            if chain_enum is None:
+            descriptor = ChainRegistry.try_resolve(chain)
+            if descriptor is None:
                 logger.warning(f"Unknown chain {chain} - not caching discovered token")
                 return
 
@@ -1787,8 +1767,8 @@ class TokenServiceServicer(gateway_pb2_grpc.TokenServiceServicer):
                 symbol=metadata.symbol,
                 address=metadata.address,
                 decimals=metadata.decimals,
-                chain=chain_enum,
-                chain_id=CHAIN_ID_MAP.get(chain_enum, 0),
+                chain=descriptor.name,
+                chain_id=CHAIN_ID_MAP.get(descriptor.name, 0),
                 name=metadata.name,
                 coingecko_id=None,
                 is_stablecoin=False,

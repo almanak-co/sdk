@@ -8,9 +8,12 @@ scattered across ``almanak/core/enums.py``, ``almanak/core/constants.py``,
 
 Per-chain descriptor files (``ethereum.py``, ``arbitrum.py``, …) register
 themselves into :class:`ChainRegistry` at import time. Importing this
-package guarantees every supported chain is loaded, so consumers can rely
-on ``ChainRegistry.get(...)`` / ``ChainRegistry.resolve(...)`` /
-``ChainRegistry.all()`` without any further setup.
+package **auto-discovers** every descriptor module in the directory, so
+adding a chain is creating ONE file — there is no hand-maintained import
+list. Discovery validates that each module defines a registered
+``DESCRIPTOR`` whose canonical ``name`` matches the module stem; support
+modules (``caip``, ``defaults``) and ``_``-prefixed infrastructure modules
+are excluded.
 
 VIB-4801 (parent epic VIB-4800).
 
@@ -22,36 +25,14 @@ Public API::
     )
 """
 
+from __future__ import annotations
+
+import importlib
+import pkgutil
+
 # Public types and the registry singleton must be importable BEFORE we
 # trigger any per-chain registration, because the chain modules import
 # ``ChainDescriptor`` etc. from these private submodules.
-# Import the enum after the side-effect block so the runtime cross-check
-# is performed once every descriptor has registered.
-from almanak.core.enums import Chain  # noqa: E402
-
-# Side-effect imports: each module calls ``register_chain`` at import
-# time. Keep them sorted by canonical name so a missing chain is easy to
-# spot in a code review.
-from . import (  # noqa: F401  (side-effect imports — registration)
-    arbitrum,
-    avalanche,
-    base,
-    berachain,
-    blast,
-    bsc,
-    ethereum,
-    hyperevm,
-    linea,
-    mantle,
-    monad,
-    optimism,
-    plasma,
-    polygon,
-    solana,
-    sonic,
-    xlayer,
-    zerog,
-)
 from ._descriptor import (
     ChainDescriptor,
     GasProfile,
@@ -61,23 +42,62 @@ from ._descriptor import (
     Timeouts,
 )
 from ._registry import ChainRegistry, register_chain
-from .caip import parse_caip2, to_caip2
-from .defaults import DEFAULT_CHAIN, DEFAULT_VAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 
-# Runtime cross-check: every Chain enum member must have a descriptor.
-# This catches the recurring "added a chain to the enum but forgot the
-# descriptor file" failure mode at import time, rather than at the first
-# lookup site (which might never run in CI for a rarely-touched chain).
-_missing = [c for c in Chain if c not in {d.enum for d in ChainRegistry.all()}]
-if _missing:
-    raise RuntimeError(
-        "ChainRegistry is missing descriptors for: "
-        f"{[c.name for c in _missing]}. Add a file under "
-        "almanak/core/chains/ for each missing chain."
-    )
+# Modules in this package that are not per-chain descriptor files.
+_SUPPORT_MODULES = frozenset({"__init__", "caip", "defaults"})
 
-del _missing
 
+def _is_descriptor_module(stem: str) -> bool:
+    return not stem.startswith("_") and stem not in _SUPPORT_MODULES
+
+
+def _import_descriptor_modules() -> None:
+    """Import every descriptor module (side effect: ``register_chain``).
+
+    The file IS the registration: a misnamed, unregistered, or malformed
+    descriptor module fails loudly here at import time instead of silently
+    dropping a chain from the registry.
+    """
+    discovered = 0
+    for module_info in pkgutil.iter_modules(__path__):
+        stem = module_info.name
+        if not _is_descriptor_module(stem):
+            continue
+        module = importlib.import_module(f"{__name__}.{stem}")
+        descriptor = getattr(module, "DESCRIPTOR", None)
+        if not isinstance(descriptor, ChainDescriptor):
+            raise RuntimeError(
+                f"Chain descriptor module {module.__name__} must define a "
+                "module-level DESCRIPTOR = register_chain(ChainDescriptor(...))"
+            )
+        if descriptor.name != stem:
+            raise RuntimeError(
+                f"Chain descriptor module {module.__name__} declares "
+                f"name={descriptor.name!r}; expected {stem!r} (module stem and "
+                "canonical chain name must match)"
+            )
+        if ChainRegistry.try_resolve(stem) is not descriptor:
+            raise RuntimeError(
+                f"Chain descriptor module {module.__name__} defines DESCRIPTOR "
+                "but did not register it — wrap it in register_chain(...)"
+            )
+        discovered += 1
+
+    if discovered == 0:
+        raise RuntimeError(
+            "Chain descriptor discovery registered zero chains — the "
+            "almanak.core.chains package is broken or mispackaged."
+        )
+
+
+_import_descriptor_modules()
+
+# Completeness is owned by the frozen inventory in
+# tests/unit/core/test_chain_identity_freeze.py and the file<->registry
+# bijection in tests/unit/core/test_chain_discovery.py (the legacy Chain
+# enum cross-check was removed with the enum — VIB-4851).
+from .caip import parse_caip2, to_caip2  # noqa: E402
+from .defaults import DEFAULT_CHAIN, DEFAULT_VAULT_CHAIN, LEGACY_SERIALIZED_CHAIN  # noqa: E402
 
 __all__ = [
     "DEFAULT_CHAIN",

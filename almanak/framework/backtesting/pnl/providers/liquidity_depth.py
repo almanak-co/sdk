@@ -14,7 +14,6 @@ Example:
     from almanak.framework.backtesting.pnl.providers.liquidity_depth import (
         LiquidityDepthProvider,
     )
-    from almanak.core.enums import Chain
     from datetime import datetime, UTC
 
     provider = LiquidityDepthProvider()
@@ -22,7 +21,7 @@ Example:
         # Query liquidity at a specific timestamp
         liquidity = await provider.get_liquidity_depth(
             pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
-            chain=Chain.ARBITRUM,
+            chain="arbitrum",
             timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
             protocol="uniswap_v3",
         )
@@ -37,7 +36,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
-from almanak.core.enums import Chain
+from almanak.core.chains import ChainRegistry
 
 from ...exceptions import DataSourceUnavailableError
 from ..types import DataConfidence, DataSourceInfo, LiquidityResult
@@ -235,7 +234,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         async with provider:
             liquidity = await provider.get_liquidity_depth(
                 pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
-                chain=Chain.ARBITRUM,
+                chain="arbitrum",
                 timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
                 protocol="uniswap_v3",
             )
@@ -289,10 +288,10 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         )
 
     @property
-    def supported_chains(self) -> list[Chain]:
-        """Chains any declared DEX serves liquidity data for (enum order)."""
+    def supported_chains(self) -> list[str]:
+        """Chains any declared DEX serves liquidity data for (sorted)."""
         declared = DexVolumeRegistry.all_supported_chains()
-        return [chain for chain in Chain if chain.value.lower() in declared]
+        return [name for name in ChainRegistry.names() if name in declared]
 
     async def close(self) -> None:
         """Close the subgraph client and release resources."""
@@ -339,7 +338,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             return f"{DexVolumeRegistry.canonical(protocol_id)}_subgraph"
         return DATA_SOURCE_FALLBACK
 
-    def _get_subgraph_id(self, protocol_id: str, chain: Chain) -> str | None:
+    def _get_subgraph_id(self, protocol_id: str, chain: str) -> str | None:
         """Get the subgraph ID for a protocol and chain.
 
         Args:
@@ -352,9 +351,9 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         subgraph_ids = DexVolumeRegistry.liquidity_subgraph_ids_for(protocol_id)
         if subgraph_ids is None:
             return None
-        return subgraph_ids.get(chain.value.lower())
+        return subgraph_ids.get(chain)
 
-    def _detect_protocol_from_chain(self, chain: Chain) -> str | None:
+    def _detect_protocol_from_chain(self, chain: str) -> str | None:
         """Attempt to detect protocol based on chain.
 
         Uses heuristics based on chain-specific DEXs.
@@ -368,7 +367,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         # Connector-declared defaults: chain_default declarations win
         # (aerodrome on base, traderjoe_v2 on avalanche), then the
         # generic_default DEX (uniswap_v3) for any chain it supports.
-        return DexVolumeRegistry.chain_default(chain.value)
+        return DexVolumeRegistry.chain_default(chain)
 
     def _datetime_to_timestamp(self, dt: datetime) -> int:
         """Convert datetime to Unix timestamp.
@@ -495,7 +494,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
     async def _query_v3_liquidity(
         self,
         pool_address: str,
-        chain: Chain,
+        chain: str,
         timestamp: datetime,
         protocol_id: str,
     ) -> LiquidityResult | None:
@@ -545,7 +544,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 logger.warning(
                     "No liquidity data from V3 subgraph: protocol=%s, chain=%s, pool=%s...",
                     protocol_id,
-                    chain.value,
+                    chain,
                     pool_address_lower[:10],
                 )
                 return None
@@ -564,7 +563,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             logger.info(
                 "Fetched V3 liquidity: protocol=%s, chain=%s, pool=%s..., depth=$%s",
                 protocol_id,
-                chain.value,
+                chain,
                 pool_address_lower[:10],
                 depth,
             )
@@ -582,7 +581,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             logger.warning(
                 "V3 subgraph error: protocol=%s, chain=%s, pool=%s...: %s",
                 protocol_id,
-                chain.value,
+                chain,
                 pool_address_lower[:10],
                 str(e),
             )
@@ -591,7 +590,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
     async def _query_v2_liquidity(
         self,
         pool_address: str,
-        chain: Chain,
+        chain: str,
         timestamp: datetime,
         protocol_id: str,
     ) -> LiquidityResult | None:
@@ -640,7 +639,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 logger.warning(
                     "No liquidity data from V2 subgraph: protocol=%s, chain=%s, pool=%s...",
                     protocol_id,
-                    chain.value,
+                    chain,
                     pool_address_lower[:10],
                 )
                 return None
@@ -659,7 +658,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             logger.info(
                 "Fetched V2 liquidity: protocol=%s, chain=%s, pool=%s..., depth=$%s",
                 protocol_id,
-                chain.value,
+                chain,
                 pool_address_lower[:10],
                 depth,
             )
@@ -677,7 +676,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             logger.warning(
                 "V2 subgraph error: protocol=%s, chain=%s, pool=%s...: %s",
                 protocol_id,
-                chain.value,
+                chain,
                 pool_address_lower[:10],
                 str(e),
             )
@@ -686,7 +685,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
     async def _query_liquidity_book(
         self,
         pool_address: str,
-        chain: Chain,
+        chain: str,
         timestamp: datetime,
         protocol_id: str,
     ) -> LiquidityResult | None:
@@ -735,7 +734,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 logger.warning(
                     "No liquidity data from LB subgraph: protocol=%s, chain=%s, pool=%s...",
                     protocol_id,
-                    chain.value,
+                    chain,
                     pool_address_lower[:10],
                 )
                 return None
@@ -754,7 +753,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             logger.info(
                 "Fetched LB liquidity: protocol=%s, chain=%s, pool=%s..., depth=$%s",
                 protocol_id,
-                chain.value,
+                chain,
                 pool_address_lower[:10],
                 depth,
             )
@@ -772,7 +771,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             logger.warning(
                 "LB subgraph error: protocol=%s, chain=%s, pool=%s...: %s",
                 protocol_id,
-                chain.value,
+                chain,
                 pool_address_lower[:10],
                 str(e),
             )
@@ -781,7 +780,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
     async def _query_balancer_liquidity(
         self,
         pool_address: str,
-        chain: Chain,
+        chain: str,
         timestamp: datetime,
         protocol_id: str,
     ) -> LiquidityResult | None:
@@ -839,7 +838,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             if not pool_snapshots:
                 logger.warning(
                     "No liquidity data from Balancer subgraph: chain=%s, pool=%s...",
-                    chain.value,
+                    chain,
                     pool_address_lower[:10],
                 )
                 return None
@@ -858,7 +857,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
 
             logger.info(
                 "Fetched Balancer liquidity: chain=%s, pool=%s..., depth=$%s",
-                chain.value,
+                chain,
                 pool_address_lower[:10],
                 depth,
             )
@@ -875,7 +874,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         except (SubgraphRateLimitError, SubgraphQueryError) as e:
             logger.warning(
                 "Balancer subgraph error: chain=%s, pool=%s...: %s",
-                chain.value,
+                chain,
                 pool_address_lower[:10],
                 str(e),
             )
@@ -884,7 +883,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
     async def _query_curve_liquidity(
         self,
         pool_address: str,
-        chain: Chain,
+        chain: str,
         timestamp: datetime,
         protocol_id: str,
     ) -> LiquidityResult | None:
@@ -933,7 +932,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             if not pool_snapshots:
                 logger.warning(
                     "No liquidity data from Curve subgraph: chain=%s, pool=%s...",
-                    chain.value,
+                    chain,
                     pool_address_lower[:10],
                 )
                 return None
@@ -952,7 +951,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
 
             logger.info(
                 "Fetched Curve liquidity: chain=%s, pool=%s..., depth=$%s",
-                chain.value,
+                chain,
                 pool_address_lower[:10],
                 depth,
             )
@@ -969,7 +968,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         except (SubgraphRateLimitError, SubgraphQueryError) as e:
             logger.warning(
                 "Curve subgraph error: chain=%s, pool=%s...: %s",
-                chain.value,
+                chain,
                 pool_address_lower[:10],
                 str(e),
             )
@@ -978,7 +977,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
     async def get_liquidity_depth(
         self,
         pool_address: str,
-        chain: Chain,
+        chain: str,
         timestamp: datetime,
         protocol: str | None = None,
     ) -> LiquidityResult:
@@ -1008,7 +1007,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             # With explicit protocol
             liquidity = await provider.get_liquidity_depth(
                 pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
-                chain=Chain.ARBITRUM,
+                chain="arbitrum",
                 timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
                 protocol="uniswap_v3",
             )
@@ -1016,7 +1015,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             # Auto-detect protocol
             liquidity = await provider.get_liquidity_depth(
                 pool_address="0x...",
-                chain=Chain.BASE,
+                chain="base",
                 timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
             )  # Will use Aerodrome for Base chain
         """
@@ -1044,7 +1043,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             logger.error(
                 "Unexpected error querying liquidity: protocol=%s, chain=%s, pool=%s...: %s",
                 protocol_id,
-                chain.value,
+                chain,
                 pool_address[:10],
                 str(e),
             )
@@ -1065,7 +1064,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
     def _resolve_protocol_id(
         self,
         protocol: str | None,
-        chain: Chain,
+        chain: str,
         pool_address: str,
     ) -> str | None:
         """Resolve explicit or chain-default protocol id for a liquidity lookup."""
@@ -1078,27 +1077,27 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             logger.info(
                 "Auto-detected protocol %s for chain %s",
                 detected_protocol_id,
-                chain.value,
+                chain,
             )
             return detected_protocol_id
 
         logger.warning(
             "Could not determine protocol for chain=%s, pool=%s..., returning fallback",
-            chain.value,
+            chain,
             pool_address[:10],
         )
         return None
 
     @staticmethod
-    def _protocol_supports_chain(protocol_id: str, chain: Chain) -> bool:
+    def _protocol_supports_chain(protocol_id: str, chain: str) -> bool:
         """Return whether this protocol has a configured subgraph for chain."""
         subgraph_ids = DexVolumeRegistry.liquidity_subgraph_ids_for(protocol_id)
-        if subgraph_ids is not None and chain.value.lower() in subgraph_ids:
+        if subgraph_ids is not None and chain in subgraph_ids:
             return True
 
         logger.warning(
             "Chain %s not supported by protocol %s, returning fallback",
-            chain.value,
+            chain,
             protocol_id,
         )
         return False
@@ -1107,7 +1106,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         self,
         *,
         pool_address: str,
-        chain: Chain,
+        chain: str,
         timestamp: datetime,
         protocol_id: str,
     ) -> LiquidityResult | None:
@@ -1115,7 +1114,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         logger.info(
             "Querying liquidity depth: protocol=%s, chain=%s, pool=%s...",
             protocol_id,
-            chain.value,
+            chain,
             pool_address[:10],
         )
 
@@ -1134,7 +1133,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
     async def get_liquidity_depth_range(
         self,
         pool_address: str,
-        chain: Chain,
+        chain: str,
         start_time: datetime,
         end_time: datetime,
         protocol: str | None = None,

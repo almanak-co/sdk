@@ -29,7 +29,6 @@ Subgraph Source:
 
 Example:
     from almanak.connectors.spark.backtest_apy import SparkAPYProvider
-    from almanak.core.enums import Chain
     from datetime import datetime, UTC
 
     provider = SparkAPYProvider()
@@ -52,7 +51,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from almanak.core.enums import Chain
+from almanak.core.chains import ChainRegistry
 from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalAPYProvider
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
@@ -66,19 +65,29 @@ from almanak.framework.backtesting.pnl.types import APYResult, DataConfidence, D
 logger = logging.getLogger(__name__)
 
 
+def _canonical_chain(chain: str) -> str:
+    """Normalize any-case names / aliases to the canonical lowercase name.
+
+    Unknown chains pass through verbatim so the provider's existing
+    unsupported-chain fallback paths (and their warnings) still fire.
+    """
+    descriptor = ChainRegistry.try_resolve(chain)
+    return descriptor.name if descriptor is not None else chain
+
+
 # =============================================================================
 # Spark Lend Subgraph IDs (from The Graph Explorer)
 # =============================================================================
 
 # Subgraph deployment IDs for Spark Lend on various chains
 # Source: https://thegraph.com/explorer/subgraphs/GbKdmBe4ycCYCQLQSjqGg6UHYoYfbyJyq5WrG35pv1si
-SPARK_SUBGRAPH_IDS: dict[Chain, str] = {
-    Chain.ETHEREUM: "GbKdmBe4ycCYCQLQSjqGg6UHYoYfbyJyq5WrG35pv1si",
-    # Gnosis chain available but not in Chain enum, only supporting Ethereum per US-020
+SPARK_SUBGRAPH_IDS: dict[str, str] = {
+    "ethereum": "GbKdmBe4ycCYCQLQSjqGg6UHYoYfbyJyq5WrG35pv1si",
+    # Gnosis chain available but not a registered Almanak chain; only supporting Ethereum per US-020
 }
 
 # Supported chains for this provider
-SUPPORTED_CHAINS: list[Chain] = list(SPARK_SUBGRAPH_IDS.keys())
+SUPPORTED_CHAINS: list[str] = list(SPARK_SUBGRAPH_IDS.keys())
 
 # Data source identifier
 DATA_SOURCE = "spark_subgraph"
@@ -165,13 +174,13 @@ class SparkClientConfig:
     """Configuration for Spark APY provider.
 
     Attributes:
-        chain: Default chain for requests (default: ETHEREUM)
+        chain: Default chain for requests (default: "ethereum")
         requests_per_minute: Rate limit for subgraph requests (default: 100)
         supply_apy_fallback: Fallback supply APY when data unavailable
         borrow_apy_fallback: Fallback borrow APY when data unavailable
     """
 
-    chain: Chain = Chain.ETHEREUM
+    chain: str = "ethereum"
     requests_per_minute: int = 100
     supply_apy_fallback: Decimal = DEFAULT_SUPPLY_APY_FALLBACK
     borrow_apy_fallback: Decimal = DEFAULT_BORROW_APY_FALLBACK
@@ -243,8 +252,8 @@ class SparkAPYProvider(HistoricalAPYProvider):
 
         logger.debug(
             "Initialized SparkAPYProvider: chain=%s, supported_chains=%s",
-            self._config.chain.value,
-            [c.value for c in SUPPORTED_CHAINS],
+            self._config.chain,
+            SUPPORTED_CHAINS,
         )
 
     @classmethod
@@ -271,7 +280,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
         return self._config
 
     @property
-    def supported_chains(self) -> list[Chain]:
+    def supported_chains(self) -> list[str]:
         """Get the list of supported chains."""
         return SUPPORTED_CHAINS.copy()
 
@@ -289,7 +298,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
         """Async context manager exit: close the client."""
         await self.close()
 
-    def _get_subgraph_id(self, chain: Chain) -> str | None:
+    def _get_subgraph_id(self, chain: str) -> str | None:
         """Get the subgraph ID for a chain.
 
         Args:
@@ -430,7 +439,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
 
     async def _find_market_by_token(
         self,
-        chain: Chain,
+        chain: str,
         symbol: str,
     ) -> str | None:
         """Find a market ID by input token symbol.
@@ -443,7 +452,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
             Market ID or None if not found
         """
         # Check cache first
-        cache_key = f"{chain.value}:{symbol}"
+        cache_key = f"{chain}:{symbol}"
         if cache_key in self._market_cache:
             return self._market_cache[cache_key]
 
@@ -463,7 +472,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
                 logger.warning(
                     "No market found for symbol=%s on chain=%s",
                     symbol,
-                    chain.value,
+                    chain,
                 )
                 return None
 
@@ -474,7 +483,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
                 logger.debug(
                     "Found market: symbol=%s, chain=%s, id=%s",
                     symbol,
-                    chain.value,
+                    chain,
                     market_id[:20] + "..." if len(market_id) > 20 else market_id,
                 )
             return market_id
@@ -483,12 +492,12 @@ class SparkAPYProvider(HistoricalAPYProvider):
             logger.error(
                 "Error finding market: symbol=%s, chain=%s, error=%s",
                 symbol,
-                chain.value,
+                chain,
                 str(e),
             )
             return None
 
-    async def _resolve_market_id(self, chain: Chain, market: str) -> str | None:
+    async def _resolve_market_id(self, chain: str, market: str) -> str | None:
         """Resolve market identifier to a market ID.
 
         Args:
@@ -515,7 +524,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
         start_date: datetime,
         end_date: datetime,
         *,
-        _chain_override: Chain | None = None,
+        _chain_override: str | None = None,
     ) -> list[APYResult]:
         """Fetch historical APY data for a Spark market.
 
@@ -545,14 +554,14 @@ class SparkAPYProvider(HistoricalAPYProvider):
             for apy in apys:
                 print(f"Supply: {apy.supply_apy:.4f}, Borrow: {apy.borrow_apy:.4f}")
         """
-        chain = _chain_override if _chain_override is not None else self._config.chain
+        chain = _canonical_chain(_chain_override if _chain_override is not None else self._config.chain)
         start_date, end_date = self._normalize_date_range(start_date, end_date)
 
         subgraph_id = self._get_subgraph_id(chain)
         if subgraph_id is None:
             logger.warning(
                 "Unsupported chain for Spark: chain=%s. Returning fallback.",
-                chain.value,
+                chain,
             )
             return self._generate_fallback_results(start_date, end_date)
 
@@ -582,7 +591,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
         self,
         *,
         subgraph_id: str,
-        chain: Chain,
+        chain: str,
         market: str,
         start_date: datetime,
         end_date: datetime,
@@ -603,7 +612,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
         except SubgraphRateLimitError as e:
             logger.warning(
                 "Subgraph rate limit exceeded: chain=%s, market=%s: %s",
-                chain.value,
+                chain,
                 market,
                 str(e),
             )
@@ -611,7 +620,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
         except SubgraphQueryError as e:
             logger.error(
                 "Subgraph query error: chain=%s, market=%s: %s",
-                chain.value,
+                chain,
                 market,
                 str(e),
             )
@@ -619,7 +628,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
         except Exception as e:
             logger.error(
                 "Unexpected error fetching APY: chain=%s, market=%s: %s",
-                chain.value,
+                chain,
                 market,
                 str(e),
             )
@@ -633,7 +642,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
         self,
         *,
         subgraph_id: str,
-        chain: Chain,
+        chain: str,
         market: str,
         start_date: datetime,
         end_date: datetime,
@@ -643,14 +652,14 @@ class SparkAPYProvider(HistoricalAPYProvider):
         if market_id is None:
             logger.warning(
                 "Unknown market for Spark: chain=%s, market=%s. Returning fallback.",
-                chain.value,
+                chain,
                 market,
             )
             return None
 
         logger.info(
             "Fetching Spark APY: chain=%s, market=%s, start=%s, end=%s",
-            chain.value,
+            chain,
             market_id[:20] + "..." if len(market_id) > 20 else market_id,
             start_date,
             end_date,
@@ -673,7 +682,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
         if not daily_snapshots:
             logger.warning(
                 "No APY history from subgraph: chain=%s, market=%s, range=%s to %s",
-                chain.value,
+                chain,
                 market,
                 start_date,
                 end_date,
@@ -684,7 +693,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
         logger.info(
             "Fetched %d APY data points: chain=%s, market=%s",
             len(results),
-            chain.value,
+            chain,
             market,
         )
         return results
@@ -714,7 +723,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
 
     async def get_apy_for_chain(
         self,
-        chain: Chain,
+        chain: str,
         market: str,
         start_date: datetime,
         end_date: datetime,
@@ -735,7 +744,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
 
         Example:
             apys = await provider.get_apy_for_chain(
-                chain=Chain.ETHEREUM,
+                chain="ethereum",
                 market="DAI",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
@@ -753,7 +762,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
     async def get_current_apy(
         self,
         market: str,
-        chain: Chain | None = None,
+        chain: str | None = None,
     ) -> APYResult:
         """Fetch the current APY for a market.
 
@@ -771,7 +780,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
             apy = await provider.get_current_apy("DAI")
             print(f"Current DAI supply APY: {apy.supply_apy:.4f}")
         """
-        chain = chain or self._config.chain
+        chain = _canonical_chain(chain or self._config.chain)
         now = datetime.now(UTC)
 
         # Query for recent data (last 7 days to ensure we get data)
@@ -790,7 +799,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
 
         return self._create_fallback_result(now)
 
-    async def list_markets(self, chain: Chain | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_markets(self, chain: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """List available markets on a chain.
 
         Args:
@@ -800,11 +809,11 @@ class SparkAPYProvider(HistoricalAPYProvider):
         Returns:
             List of market info dicts with 'id', 'name', and 'inputToken' keys
         """
-        chain = chain or self._config.chain
+        chain = _canonical_chain(chain or self._config.chain)
         subgraph_id = self._get_subgraph_id(chain)
 
         if subgraph_id is None:
-            logger.warning("Unsupported chain for Spark: chain=%s", chain.value)
+            logger.warning("Unsupported chain for Spark: chain=%s", chain)
             return []
 
         try:
@@ -815,11 +824,11 @@ class SparkAPYProvider(HistoricalAPYProvider):
             )
 
             markets = data.get("markets", [])
-            logger.info("Found %d markets on chain=%s", len(markets), chain.value)
+            logger.info("Found %d markets on chain=%s", len(markets), chain)
             return markets
 
         except (SubgraphQueryError, SubgraphRateLimitError) as e:
-            logger.error("Error listing markets: chain=%s, error=%s", chain.value, str(e))
+            logger.error("Error listing markets: chain=%s, error=%s", chain, str(e))
             return []
 
 
