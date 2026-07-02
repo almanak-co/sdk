@@ -712,6 +712,14 @@ class CoinGeckoDataProvider:
     # this absent / False and keep the membership path.
     resolution_based_availability = True
 
+    # Preflight signal (support matrix): contract-addressed token prices
+    # resolve through the chain's CoinGecko asset-platform id
+    # (``external_id_for(chain, "coingecko")``). A chain without one cannot
+    # price any ERC20-style token, so ``evaluate_backtest_support`` keys its
+    # price-lane hard failure on this attribute. Providers that do not price
+    # via a vendor chain platform (custom/synthetic fixtures) leave it absent.
+    price_platform_vendor = "coingecko"
+
     def __init__(
         self,
         api_key: str = "",

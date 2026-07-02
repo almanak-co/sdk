@@ -135,6 +135,11 @@ from almanak.framework.backtesting.pnl.simulated_result import (
     SimulatedExecutionResult,
     build_simulated_result,
 )
+from almanak.framework.backtesting.pnl.support_matrix import (
+    BacktestSupportReport,
+    boot_compliance_violations,
+    evaluate_backtest_support,
+)
 
 # Import strategy-related types
 from almanak.framework.market import MarketSnapshot, TokenBalance
@@ -1610,10 +1615,15 @@ class PnLBacktester:
     async def run_preflight_validation(
         self,
         config: PnLBacktestConfig,
+        strategy: BacktestableStrategy | None = None,
     ) -> PreflightReport:
         """Run preflight validation checks before starting a backtest.
 
         Performs validation checks to ensure data requirements can be met:
+        - Evaluates the chain/protocol support matrix (registry-derived) —
+          a hard failure (unresolvable chain, or a vendor-platform price
+          provider that cannot price any token on the chain) short-circuits
+          the remaining checks so nothing touches the network
         - Checks price data availability for all tokens in config
         - Verifies data provider capabilities match requirements
         - Tests archive node accessibility if historical TWAP/Chainlink needed
@@ -1621,6 +1631,10 @@ class PnLBacktester:
 
         Args:
             config: Backtest configuration specifying tokens, time range, etc.
+            strategy: Optional strategy (instance or class) used for the
+                support-matrix strategy-type / protocol detection. ``None``
+                keeps the pre-existing behavior plus chain-level support
+                checks only.
 
         Returns:
             PreflightReport with pass/fail status and detailed check results.
@@ -1637,6 +1651,29 @@ class PnLBacktester:
 
         validation_started = time.time()
         provider_name = getattr(self.data_provider, "provider_name", "unknown")
+
+        support_report = evaluate_backtest_support(
+            config,
+            strategy=strategy,
+            strategy_config=self._get_strategy_config_dict(strategy) if strategy is not None else None,
+            data_provider=self.data_provider,
+            data_config=self.data_config,
+            explicit_strategy_type=self.strategy_type,
+        )
+        support_check = self._support_matrix_check(support_report)
+        if support_report.hard_failures:
+            # Abort before any data fetch: the token-availability check below
+            # probes the provider (network for CoinGecko), which is pointless
+            # when the chain cannot be priced at all.
+            assert support_check is not None  # hard failures always produce a check
+            return PreflightReport(
+                passed=False,
+                checks=[support_check],
+                estimated_coverage=Decimal("0"),
+                recommendations=list(support_report.recommendations),
+                validation_time_seconds=time.time() - validation_started,
+                support=support_report,
+            )
 
         provider_result = self._preflight_provider_capability(provider_name)
         (
@@ -1658,6 +1695,8 @@ class PnLBacktester:
         checks.append(time_range_result.check)
         if institutional_check is not None:
             checks.append(institutional_check)
+        if support_check is not None:
+            checks.append(support_check)
 
         recommendations = [
             *provider_result.recommendations,
@@ -1677,7 +1716,40 @@ class PnLBacktester:
             archive_node_accessible=archive_result.accessible,
             recommendations=recommendations,
             validation_time_seconds=time.time() - validation_started,
+            support=support_report,
         )
+
+    @staticmethod
+    def _support_matrix_check(support_report: BacktestSupportReport) -> PreflightCheckResult | None:
+        """Fold the support-matrix verdict into one preflight check row.
+
+        Additive contract: no row is emitted for an all-clear report, so
+        default artifacts keep their exact pre-existing ``checks`` list
+        (blueprint 31, ``swap:fiat_usd_pin`` discipline). Hard failures are
+        error severity (abort); degraded lanes are warning severity
+        (table + WARNING, run continues).
+        """
+        # details stay slim: the full report serializes once via
+        # PreflightReport.support (always present whenever this row exists).
+        if support_report.hard_failures:
+            return PreflightCheckResult(
+                check_name="support_matrix",
+                passed=False,
+                message="; ".join(support_report.hard_failures),
+                details={"chain": support_report.chain, "protocols": list(support_report.protocols)},
+                severity="error",
+            )
+        degraded = support_report.degraded_lanes
+        if degraded:
+            summary = "; ".join(f"{lane.label}: {lane.detail}" for lane in degraded)
+            return PreflightCheckResult(
+                check_name="support_matrix",
+                passed=False,
+                message=f"{len(degraded)} degraded lane(s): {summary}",
+                details={"chain": support_report.chain, "degraded_lanes": [lane.label for lane in degraded]},
+                severity="warning",
+            )
+        return None
 
     def _preflight_provider_capability(self, provider_name: str) -> _ProviderCapabilityPreflight:
         try:
@@ -1962,6 +2034,7 @@ class PnLBacktester:
             backtester=self,
             config=config,
             bt_logger=bt_logger,
+            strategy=strategy,
         )
 
         # Initialization phase: build the shared BacktestState.
@@ -1971,6 +2044,12 @@ class PnLBacktester:
             config=config,
             bt_logger=bt_logger,
         )
+
+        # Institutional / strict-reproducibility mode records degraded
+        # support-matrix lanes as compliance violations at boot (default
+        # mode already surfaced them as table + WARNING in run_preflight).
+        if preflight_report is not None:
+            state.compliance_violations.extend(boot_compliance_violations(preflight_report.support, config))
 
         # Simulation phase
         try:

@@ -39,6 +39,12 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 
+if TYPE_CHECKING:
+    # Type-only: pnl.support_matrix imports this module at runtime, so a
+    # runtime import here would be a cycle. PreflightReport.from_dict does
+    # the deferred runtime import.
+    from almanak.framework.backtesting.pnl.support_matrix import BacktestSupportReport
+
 
 def _decimal_str(value: Decimal) -> str:
     """Serialize a Decimal in fixed-point, human-readable form (VIB-5083).
@@ -1035,6 +1041,11 @@ class PreflightReport:
             for historical queries (None if not tested).
         recommendations: List of actionable recommendations to fix issues.
         validation_time_seconds: Time taken to run preflight validation.
+        support: Chain/protocol support-matrix report evaluated at preflight
+            (``pnl/support_matrix.py``). ``None`` when support evaluation did
+            not run. Serialized only when it carries signal (hard failures,
+            degraded lanes, or warnings) so fully supported default runs keep
+            byte-identical artifacts (the ``swap:fiat_usd_pin`` discipline).
     """
 
     passed: bool
@@ -1046,10 +1057,11 @@ class PreflightReport:
     archive_node_accessible: bool | None = None
     recommendations: list[str] = field(default_factory=list)
     validation_time_seconds: float = 0.0
+    support: "BacktestSupportReport | None" = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
-        return {
+        result: dict[str, Any] = {
             "passed": self.passed,
             "checks": [c.to_dict() for c in self.checks],
             "estimated_coverage": str(self.estimated_coverage),
@@ -1060,11 +1072,23 @@ class PreflightReport:
             "recommendations": self.recommendations,
             "validation_time_seconds": self.validation_time_seconds,
         }
+        # Additive contract: the support key exists only when the support
+        # matrix found something (never for an all-green default run).
+        if self.support is not None and self.support.has_signal:
+            result["support"] = self.support.to_dict()
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PreflightReport":
         """Deserialize from dictionary."""
         checks = [PreflightCheckResult.from_dict(c) for c in data.get("checks", [])]
+        support = None
+        if data.get("support"):
+            # Deferred import: pnl.support_matrix imports backtesting models
+            # (module-level here would be a cycle).
+            from almanak.framework.backtesting.pnl.support_matrix import BacktestSupportReport
+
+            support = BacktestSupportReport.from_dict(data["support"])
         return cls(
             passed=data["passed"],
             checks=checks,
@@ -1075,6 +1099,7 @@ class PreflightReport:
             archive_node_accessible=data.get("archive_node_accessible"),
             recommendations=data.get("recommendations", []),
             validation_time_seconds=data.get("validation_time_seconds", 0.0),
+            support=support,
         )
 
     @property

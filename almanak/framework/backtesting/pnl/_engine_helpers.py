@@ -193,6 +193,7 @@ async def run_preflight(
     backtester: PnLBacktester,
     config: PnLBacktestConfig,
     bt_logger: BacktestLogger,
+    strategy: BacktestableStrategy | None = None,
 ) -> tuple[PreflightReport | None, bool]:
     """Execute preflight validation if enabled.
 
@@ -201,16 +202,23 @@ async def run_preflight(
     pre-extraction behavior.
 
     Raises:
-        PreflightValidationError: if ``config.fail_on_preflight_error`` is
-            True and any check failed.
+        PreflightValidationError: if the support matrix reports a hard
+            failure (unconditional — ``fail_on_preflight_error=False`` does
+            not bypass it; a chain that cannot price any token has no
+            degraded mode, and disabling ``preflight_validation`` entirely
+            is the only escape hatch), or if
+            ``config.fail_on_preflight_error`` is True and any check failed.
     """
     preflight_report: PreflightReport | None = None
     preflight_passed: bool = True  # Default to True if validation is disabled
     if config.preflight_validation:
         with bt_logger.phase("preflight_validation"):
             bt_logger.info("Running preflight validation checks...")
-            preflight_report = await backtester.run_preflight_validation(config)
+            preflight_report = await backtester.run_preflight_validation(config, strategy=strategy)
             preflight_passed = preflight_report.passed
+
+            _log_support_matrix(preflight_report, bt_logger)
+            _raise_on_support_hard_failures(preflight_report)
 
             if preflight_report.passed:
                 bt_logger.info(
@@ -248,6 +256,48 @@ async def run_preflight(
                         "Results may be inaccurate due to data quality issues."
                     )
     return preflight_report, preflight_passed
+
+
+def _log_support_matrix(preflight_report: PreflightReport, bt_logger: BacktestLogger) -> None:
+    """Surface the support-matrix table and warnings in the run log.
+
+    Degraded lanes print the table + a WARNING per lane and the run
+    continues (default mode); institutional / strict-reproducibility mode
+    additionally records them as boot compliance violations in
+    ``_run_backtest``.
+    """
+    support = preflight_report.support
+    if support is None or not support.has_signal:
+        return
+    for line in support.render_table().splitlines():
+        bt_logger.info(line)
+    for lane in support.degraded_lanes:
+        bt_logger.warning(f"Support lane '{lane.label}' is {lane.status}: {lane.detail}")
+    for warning in support.warnings:
+        bt_logger.warning(f"Support: {warning}")
+
+
+def _raise_on_support_hard_failures(preflight_report: PreflightReport) -> None:
+    """Abort on support-matrix hard failures, before the simulation loop.
+
+    Unconditional by design: ``fail_on_preflight_error=False`` (the
+    ``--allow-missing-prices`` escape hatch) opts into degraded DATA, not
+    into running on a chain/provider combination that cannot price any
+    token. ``preflight_validation=False`` remains the only bypass.
+    """
+    support = preflight_report.support
+    if support is None or not support.hard_failures:
+        return
+    message = "Backtest support preflight failed: " + "; ".join(support.hard_failures)
+    if support.recommendations:
+        message += " | Remediation: " + " ".join(support.recommendations)
+    raise PreflightValidationError(
+        message=message,
+        failed_checks=["support_matrix"],
+        recommendations=list(support.recommendations),
+        error_count=len(support.hard_failures),
+        warning_count=len(support.warnings),
+    )
 
 
 # =============================================================================

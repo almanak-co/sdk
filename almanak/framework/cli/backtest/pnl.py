@@ -11,10 +11,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 import click
+
+if TYPE_CHECKING:
+    from ...backtesting.pnl.support_matrix import BacktestSupportReport
 
 from almanak.core.chains import DEFAULT_CHAIN
 
@@ -376,6 +379,90 @@ def _handle_pnl_dry_run(dry_run: bool) -> bool:
     click.echo()
     click.echo("Dry run - backtest not executed.")
     return True
+
+
+def _evaluate_support_matrix(
+    ctx: PnLBacktestContext,
+    strategy_config: dict[str, Any],
+    volume_data_config: BacktestDataConfig | None,
+) -> "BacktestSupportReport":
+    """Phase 5d: evaluate the chain/protocol support matrix upfront.
+
+    Runs before strategy instantiation and provider construction so an
+    unsupported combination aborts before any object that could touch the
+    network (or reject the chain with a raw traceback) is built. The engine
+    re-evaluates the same matrix inside ``run_preflight_validation`` for
+    non-CLI callers — this is the same pure function, invoked early.
+
+    ``price_vendor`` names the platform-id lane of the provider this command
+    constructs two phases later (``CoinGeckoDataProvider``); it is the
+    class-declared preflight signal, not a hardcoded chain table.
+    """
+    from ...backtesting.pnl.support_matrix import evaluate_backtest_support
+
+    strategy_class = get_strategy(ctx.strategy)
+    return evaluate_backtest_support(
+        ctx.pnl_config,
+        strategy=strategy_class,
+        strategy_config=strategy_config,
+        data_config=volume_data_config,
+        price_vendor=CoinGeckoDataProvider.price_platform_vendor,
+    )
+
+
+def _print_support_matrix(report: "BacktestSupportReport") -> None:
+    """Print the support table; degraded lanes and warnings go to stderr."""
+    click.echo()
+    click.echo("-" * 60)
+    click.echo("BACKTEST SUPPORT")
+    click.echo("-" * 60)
+    click.echo(report.render_table())
+    click.echo("-" * 60)
+    for lane in report.degraded_lanes:
+        click.echo(f"Warning: support lane '{lane.label}' is {lane.status}: {lane.detail}", err=True)
+    for warning in report.warnings:
+        click.echo(f"Warning: {warning}", err=True)
+
+
+def _abort_on_support_failures(report: "BacktestSupportReport") -> None:
+    """Exit 2 on support-matrix hard failures (same code as preflight aborts).
+
+    Unconditional: --allow-missing-prices opts into degraded token DATA, not
+    into a chain/provider combination that cannot price any token. Fires on
+    --dry-run too — a hard-unsupported configuration is a usage error, and
+    usage errors already abort dry runs (e.g. missing token_funding).
+    """
+    if not report.hard_failures:
+        return
+    click.echo("", err=True)
+    click.echo("=" * 60, err=True)
+    click.echo("BACKTEST ABORTED: UNSUPPORTED CHAIN / PROTOCOL COMBINATION", err=True)
+    click.echo("=" * 60, err=True)
+    for failure in report.hard_failures:
+        click.echo(f"  - {failure}", err=True)
+    for recommendation in report.recommendations:
+        click.echo(f"  Fix: {recommendation}", err=True)
+    sys.exit(2)
+
+
+def _run_support_matrix_phase(
+    ctx: PnLBacktestContext,
+    strategy_config: dict[str, Any],
+    volume_data_config: "BacktestDataConfig | None",
+) -> None:
+    """Phase 5d: evaluate + print the support matrix, hard-abort on failures.
+
+    Gated on the same config flag as the engine's preflight:
+    ``preflight_validation=False`` (e.g. a ``--from-result`` artifact that
+    recorded the bypass) skips the phase entirely — CLI and engine semantics
+    must agree on the documented escape hatch (PR #3161 review regression:
+    this gate must never run unconditionally).
+    """
+    if not ctx.pnl_config.preflight_validation:
+        return
+    support_report = _evaluate_support_matrix(ctx, strategy_config, volume_data_config)
+    _print_support_matrix(support_report)
+    _abort_on_support_failures(support_report)
 
 
 def _load_strategy_runtime_config(ctx: PnLBacktestContext, config_file: str | None) -> dict[str, Any]:
@@ -1295,8 +1382,11 @@ def pnl_backtest(
       error and returned a partial result; results and JSON output are
       still printed/written before exiting
     - 2: preflight validation aborted (a tracked non-cash asset could not be
-      priced; re-run with --allow-missing-prices to continue degraded), or a
-      usage error from invalid CLI flags/arguments
+      priced; re-run with --allow-missing-prices to continue degraded), the
+      upfront support matrix found the chain/protocol combination
+      hard-unsupported (e.g. a chain the price provider cannot price at
+      all — not bypassable with --allow-missing-prices), or a usage error
+      from invalid CLI flags/arguments
 
     Examples:
 
@@ -1371,6 +1461,13 @@ def pnl_backtest(
 
     _warn_if_strict_warm_is_inert(strict_warm, warm_cache)
     _apply_missing_price_policy(ctx, allow_missing_prices)
+
+    # Phase 5d: upfront chain/protocol support matrix. Hard failures abort
+    # with exit code 2 BEFORE strategy instantiation, provider construction,
+    # or any data fetch; degraded lanes print the table + warnings and
+    # continue. The engine re-runs the same check in preflight for non-CLI
+    # callers; preflight_validation=False skips the phase (see helper).
+    _run_support_matrix_phase(ctx, strategy_config, volume_data_config)
 
     # Phase 6: --dry-run early exit
     if _handle_pnl_dry_run(dry_run):
