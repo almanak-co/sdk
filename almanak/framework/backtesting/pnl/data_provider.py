@@ -30,7 +30,7 @@ Example:
 """
 
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -252,6 +252,9 @@ class MarketState:
         block_number: Approximate block number at this timestamp (optional)
         gas_price_gwei: Gas price in gwei at this timestamp (optional)
         metadata: Additional market data (e.g., funding rates, liquidity)
+        symbol_aliases: Registered ``{SYMBOL_UPPER: (chain, address)}`` read
+            aliases (see :meth:`register_symbol_aliases`). Not serialized:
+            derived per run from the engine's registered token-address map.
     """
 
     timestamp: datetime
@@ -261,6 +264,28 @@ class MarketState:
     block_number: int | None = None
     gas_price_gwei: Decimal | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    symbol_aliases: dict[str, TokenKey] = field(default_factory=dict)
+
+    def register_symbol_aliases(self, token_addresses: Mapping[str, Any]) -> None:
+        """Register same-chain ``{SYMBOL: (chain, address)}`` read aliases.
+
+        The engine-internal analogue of the MarketSnapshot symbol alias
+        bridge (blueprint 31 §2): plain-symbol reads — intent USD sizing,
+        executed-price lookup, adapter position valuation, health-factor
+        collateral — resolve onto the address-native keys this state is
+        keyed by. Aliases come from the run's own registered token-address
+        map, never guessed: cross-chain entries and symbols outside the map
+        stay honest misses, and state keys themselves remain
+        ``(chain, address)``.
+        """
+        run_chain = str(self.chain).lower()
+        for symbol, entry in token_addresses.items():
+            if not is_token_key(entry):
+                continue
+            chain, address = normalize_token_key(entry[0], entry[1])
+            if chain != run_chain:
+                continue
+            self.symbol_aliases[str(symbol).upper()] = (chain, address)
 
     def _lookup_keys(self, token: TokenRef) -> list[TokenRef]:
         """Return direct and address-native lookup candidates for ``token``."""
@@ -294,6 +319,20 @@ class MarketState:
         if isinstance(normalized, str):
             add(normalized)
             add(normalized.upper())
+            # Non-EVM display keys ("solana:So1111...") round-trip as lookup
+            # candidates: token_ref_display emits them for non-EVM token keys
+            # (available_tokens reads them back for indicator population), but
+            # the strict EVM display parse in normalize_token_ref cannot parse
+            # them — identity normalization stays strict; this is read-only.
+            chain_part, separator, address_part = token.strip().partition(":")
+            if separator and chain_part and address_part:
+                add(normalize_token_key(chain_part, address_part))
+            # Registered symbol aliases resolve last so a literal
+            # symbol-keyed fixture entry keeps precedence.
+            alias = self.symbol_aliases.get(normalized.upper())
+            if alias is not None:
+                add(alias)
+                add(alias[1])
 
         return keys
 

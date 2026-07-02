@@ -479,10 +479,21 @@ async def execute_iteration_loop(
         data_config=backtester.data_config,
     )
 
+    # Stable for the whole run: provider registrations happen during
+    # initialize_backtest, before this loop starts.
+    token_addresses = _registered_token_addresses(backtester)
+
     with bt_logger.phase("simulation"):
         # Iterate through historical data
         async for timestamp, market_state in backtester.data_provider.iterate(state.data_config):
             state.tick_count += 1
+
+            # Bridge engine-internal plain-symbol reads (intent USD sizing,
+            # adapter valuation, health-factor collateral) onto the
+            # address-native state keys through the run's registered map —
+            # the MarketState analogue of the snapshot alias bridge below.
+            if token_addresses:
+                market_state.register_symbol_aliases(token_addresses)
 
             # Log progress periodically
             if state.tick_count % 100 == 0 or state.tick_count == 1:
@@ -506,6 +517,7 @@ async def execute_iteration_loop(
                 market_state=market_state,
                 chain=config.chain,
                 portfolio=state.portfolio,
+                token_addresses=token_addresses,
                 funding_rate_source=funding_rate_source,
             )
 
@@ -531,7 +543,7 @@ async def execute_iteration_loop(
             # Track data quality: record successful price lookups
             # Count tokens with available prices in this tick
             expected_tokens = config.tokens
-            expected_token_addresses = _registered_token_addresses(backtester)
+            expected_token_addresses = token_addresses
             provider_name = getattr(backtester.data_provider, "provider_name", "unknown")
 
             # Record successful lookups for each available token

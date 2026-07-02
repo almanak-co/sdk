@@ -20,6 +20,7 @@ import concurrent.futures
 import inspect
 import logging
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -139,6 +140,32 @@ def _token_cache_key(token: str, chain: str) -> str:
     if _is_evm_address(stripped):
         return f"{chain.lower()}:{stripped.lower()}"
     return token
+
+
+def _alias_target_display_key(key: str) -> str | None:
+    """Validate an alias target as a ``chain:address`` display key, or None.
+
+    Family-aware: EVM-family chains require a ``0x`` address (lower-cased to
+    the seeded-key form); non-EVM families (e.g. Solana) accept the chain's
+    opaque address strings with casing preserved — base58 mints are
+    case-sensitive and ``token_ref_display`` seeds them verbatim. Targets on
+    chains the ChainRegistry does not know are rejected: an alias must point
+    at a key the engine could actually have seeded, never invent one.
+    """
+    from almanak.core.chains import ChainRegistry
+    from almanak.core.enums import ChainFamily
+
+    prefix, separator, address = key.strip().partition(":")
+    if not (separator and prefix and address):
+        return None
+    descriptor = ChainRegistry.try_resolve(prefix)
+    if descriptor is None:
+        return None
+    if descriptor.family is ChainFamily.EVM:
+        if not _is_evm_address(address):
+            return None
+        return f"{prefix.lower()}:{address.lower()}"
+    return f"{prefix.lower()}:{address}"
 
 
 # Preserves the precise type of a caller-supplied ``default`` in soft-fallback
@@ -538,6 +565,13 @@ class MarketSnapshot:
         self._price_cache: dict[str, PriceData] = {}
         self._rsi_cache: dict[tuple[str, str, int], RSIData] = {}
         self._balance_cache: dict[str, TokenBalance] = {}
+        # Explicit plain-symbol -> "chain:0xaddress" read/write aliases for
+        # address-native backtest snapshots (VIB-5508 follow-up). Populated
+        # ONLY via ``_register_symbol_alias_keys`` by the PnL engine bridge,
+        # from the run's own registered token-address map. Live snapshots
+        # never register aliases, so ``_token_cache_key`` stays a pure
+        # pass-through for plain symbols outside a backtest.
+        self._symbol_alias_keys: dict[str, str] = {}
         # VIB-4843 (Empty≠Zero): cache keys whose ``balance_usd`` is the
         # *unmeasured* coerced sentinel (provider returned a bare balance with
         # no USD). Only these may be (re)filled from a price; a provider that
@@ -2232,8 +2266,44 @@ class MarketSnapshot:
         return filled
 
     def _token_cache_key(self, token: str, chain: str | None = None) -> str:
-        """Return the seeded/cache lookup key for ``token`` on ``chain``."""
-        return _token_cache_key(token, chain or self._chain)
+        """Return the seeded/cache lookup key for ``token`` on ``chain``.
+
+        When symbol aliases are registered (address-native backtest snapshots
+        only), a plain symbol resolves through the alias map so setters and
+        getters land on the same address-native key. Address-shaped tokens and
+        symbols outside the map are untouched — an unregistered symbol on an
+        address-keyed snapshot stays an honest miss.
+        """
+        key = _token_cache_key(token, chain or self._chain)
+        if self._symbol_alias_keys and isinstance(key, str) and ":" not in key:
+            return self._symbol_alias_keys.get(key.strip().upper(), key)
+        return key
+
+    def _register_symbol_alias_keys(self, aliases: Mapping[str, str]) -> None:
+        """Register explicit plain-symbol -> "chain:address" token aliases.
+
+        Backtest-only bridge: the PnL engine registers the run's own
+        ``{symbol: display_key}`` map (derived from its registered
+        token-address map) so plain-symbol strategy reads such as
+        ``price("WETH")`` resolve onto the address-native keys the engine
+        seeded. Entries whose name is not a plain symbol or whose target is
+        not a ``chain:address`` display key on a registered chain are
+        skipped — the alias map must never redirect address-shaped reads or
+        invent identities. Target validation is chain-family-aware
+        (``_alias_target_display_key``): EVM targets must be ``0x`` keys,
+        non-EVM targets (e.g. Solana mints) keep their opaque, case-sensitive
+        address strings.
+        """
+        for symbol, key in aliases.items():
+            if not isinstance(symbol, str) or not isinstance(key, str):
+                continue
+            plain = symbol.strip()
+            if not plain or ":" in plain or _is_evm_address(plain):
+                continue
+            target = _alias_target_display_key(key)
+            if target is None:
+                continue
+            self._symbol_alias_keys[plain.upper()] = target
 
     def _seeded_price_for_symbol(self, token: str) -> Decimal | None:
         """Case-insensitive lookup in the ``set_price()``-seeded ``_prices`` map.

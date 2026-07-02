@@ -60,6 +60,7 @@ Examples:
 
 import logging
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 # Note: There's a naming conflict between fee_models.py (module) and fee_models/ (package)
@@ -104,6 +105,8 @@ from almanak.framework.backtesting.pnl.data_provider import (
     MarketState,
     TokenRef,
     is_address_like,
+    is_token_key,
+    normalize_token_key,
     normalize_token_ref,
     token_ref_display,
 )
@@ -438,6 +441,7 @@ def create_market_snapshot_from_state(
     wallet_address: str = "",
     portfolio: SimulatedPortfolio | None = None,
     token_aliases: dict[str, str] | None = None,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
     funding_rate_source: "SnapshotFundingRateSource | None" = None,
 ) -> MarketSnapshot:
     """Create a MarketSnapshot from historical MarketState data.
@@ -450,6 +454,14 @@ def create_market_snapshot_from_state(
         chain: Chain identifier
         wallet_address: Wallet address (can be empty for simulation)
         portfolio: Optional portfolio for balance simulation
+        token_aliases: Deprecated and ignored (the pre-VIB-5508
+            address->symbol bridge shape); kept for call-shape compatibility.
+        token_addresses: The run's registered ``{SYMBOL: (chain, address)}``
+            map. Same-chain entries become explicit symbol aliases on the
+            snapshot so plain-symbol strategy reads (``price("WETH")``,
+            ``balance("USDC")``, indicators) resolve onto the address-native
+            keys the engine seeded. Symbols outside the map — and entries on
+            another chain — stay honest misses.
         funding_rate_source: Optional per-run funding lane. When provided, the
             snapshot's ``funding_rate`` / ``funding_rate_spread`` accessors are
             served by a view bound to this tick's simulated timestamp, so
@@ -470,10 +482,55 @@ def create_market_snapshot_from_state(
         ),
     )
     _ = token_aliases
+    # Canonicalize map keys ONCE at ingress: alias registration upper-cases
+    # alias names, so every downstream probe (the cash lane's held-key guard
+    # in _registered_key_held) must see the same casing — a mixed-case map
+    # would otherwise register the alias but miss the guard, letting the
+    # cash face value clobber a tracked balance.
+    token_addresses = _normalized_token_address_map(token_addresses)
+    # Register aliases BEFORE seeding so setters and getters resolve through
+    # the same keys (the cash lane's symbol writes land on address keys).
+    _register_snapshot_symbol_aliases(snapshot, token_addresses, chain)
     _seed_snapshot_prices(snapshot, market_state)
     if portfolio:
-        _seed_snapshot_balances(snapshot, market_state, portfolio)
+        _seed_snapshot_balances(snapshot, market_state, portfolio, token_addresses)
     return snapshot
+
+
+def _normalized_token_address_map(
+    token_addresses: Mapping[str, tuple[str, str]] | None,
+) -> dict[str, tuple[str, str]] | None:
+    """Upper-case the token-address map's symbol keys at ingress.
+
+    The engine's own map (``_registered_token_addresses``) is already
+    upper-keyed; a direct caller's may not be. Normalizing once here keeps
+    the consumers (alias registration, ``_registered_key_held``) probing a
+    single casing instead of each handling case drift.
+    """
+    if not token_addresses:
+        return None
+    return {str(symbol).upper(): entry for symbol, entry in token_addresses.items()}
+
+
+def _register_snapshot_symbol_aliases(
+    snapshot: MarketSnapshot,
+    token_addresses: Mapping[str, tuple[str, str]] | None,
+    chain: str,
+) -> None:
+    """Register same-chain symbol aliases; cross-chain entries stay misses."""
+    if not token_addresses:
+        return
+    run_chain = str(chain).lower()
+    aliases: dict[str, str] = {}
+    for symbol, entry in token_addresses.items():
+        if not is_token_key(entry):
+            continue
+        key_chain, address = normalize_token_key(entry[0], entry[1])
+        if key_chain != run_chain:
+            continue
+        aliases[str(symbol)] = token_ref_display((key_chain, address))
+    if aliases:
+        snapshot._register_symbol_alias_keys(aliases)
 
 
 def _seed_snapshot_prices(snapshot: MarketSnapshot, market_state: MarketState) -> None:
@@ -524,10 +581,14 @@ def _seed_snapshot_balances(
     snapshot: MarketSnapshot,
     market_state: MarketState,
     portfolio: SimulatedPortfolio,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
 ) -> None:
     _seed_portfolio_token_balances(snapshot, market_state, portfolio)
-    _seed_cash_balances(snapshot, portfolio)
+    # Zero-seed BEFORE the cash lane: with symbol aliases registered, the
+    # cash lane's symbol writes land on address-native keys, and a later
+    # zero-seed of the same key would hide the cash balance.
     _seed_zero_balances_for_unheld_tokens(snapshot, market_state, portfolio)
+    _seed_cash_balances(snapshot, portfolio, token_addresses)
 
 
 def _seed_portfolio_token_balances(
@@ -555,17 +616,40 @@ def _token_balance_from_market_state(
     return TokenBalance(symbol=symbol, balance=amount, balance_usd=balance_usd)
 
 
-def _seed_cash_balances(snapshot: MarketSnapshot, portfolio: SimulatedPortfolio) -> None:
+def _seed_cash_balances(
+    snapshot: MarketSnapshot,
+    portfolio: SimulatedPortfolio,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
+) -> None:
     snapshot.set_balance("USD", _face_value_balance("USD", portfolio.cash_usd))
     for stable in CASH_EQUIVALENT_STABLECOINS:
-        if stable not in portfolio.tokens:
-            snapshot.set_balance(stable, _face_value_balance(stable, portfolio.cash_usd))
+        if stable in portfolio.tokens:
+            continue
+        # With a symbol alias registered, the symbol write below lands on the
+        # stable's address-native key — skip it when that key is a real
+        # holding, or the cash face value would clobber the tracked balance.
+        if _registered_key_held(stable, token_addresses, portfolio):
+            continue
+        snapshot.set_balance(stable, _face_value_balance(stable, portfolio.cash_usd))
     for stable_key in _portfolio_cash_equivalent_keys(portfolio):
         display_token = token_ref_display(stable_key)
         if stable_key in portfolio.tokens or display_token in portfolio.tokens:
             continue
         snapshot.set_price(display_token, Decimal("1"))
         snapshot.set_balance(display_token, _face_value_balance(display_token, portfolio.cash_usd))
+
+
+def _registered_key_held(
+    symbol: str,
+    token_addresses: Mapping[str, tuple[str, str]] | None,
+    portfolio: SimulatedPortfolio,
+) -> bool:
+    if not token_addresses:
+        return False
+    entry = token_addresses.get(str(symbol).upper())
+    if entry is None or not is_token_key(entry):
+        return False
+    return normalize_token_key(entry[0], entry[1]) in portfolio.tokens
 
 
 def _portfolio_chain(portfolio: SimulatedPortfolio, fallback: str) -> str:

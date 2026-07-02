@@ -369,6 +369,180 @@ class TestAddressKeyedSnapshotResolutionAllReads:
         assert snap.price_data(self.CB_ADDR).price == Decimal("60000")
 
 
+class TestSymbolAliasBridge:
+    """Engine-registered token addresses bridge plain-symbol strategy reads.
+
+    The bridge is fallback-only and explicit: only symbols in the run's own
+    registered ``{SYMBOL: (chain, address)}`` map resolve onto address-native
+    keys; everything else keeps the VIB-5508 honest-miss semantics pinned by
+    the classes above (which construct snapshots WITHOUT a map).
+    """
+
+    WETH_ADDR = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    USDC_ADDR = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    WETH_KEY = ("ethereum", WETH_ADDR)
+    USDC_KEY = ("ethereum", USDC_ADDR)
+    TOKEN_ADDRESSES = {"WETH": WETH_KEY, "USDC": USDC_KEY}
+
+    def _state(self, prices=None):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        return MarketState(
+            timestamp=datetime(2026, 3, 23, tzinfo=UTC),
+            chain="ethereum",
+            prices=prices or {self.WETH_KEY: Decimal("3000"), self.USDC_KEY: Decimal("1")},
+        )
+
+    def _portfolio(self):
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        return SimulatedPortfolio(initial_capital_usd=Decimal("10000"), chain="ethereum")
+
+    def test_price_resolves_registered_symbol(self):
+        snapshot = create_market_snapshot_from_state(
+            self._state(), chain="ethereum", token_addresses=self.TOKEN_ADDRESSES
+        )
+        assert snapshot.price("WETH") == Decimal("3000")
+        assert snapshot.price("weth") == Decimal("3000")
+        assert snapshot.price(self.WETH_ADDR) == Decimal("3000")
+
+    def test_unregistered_symbol_stays_honest_miss(self):
+        snapshot = create_market_snapshot_from_state(
+            self._state(), chain="ethereum", token_addresses=self.TOKEN_ADDRESSES
+        )
+        with pytest.raises(ValueError, match="Cannot determine price"):
+            snapshot.price("CBBTC")
+
+    def test_balance_resolves_registered_symbol_for_holding(self):
+        portfolio = self._portfolio()
+        portfolio.tokens[self.WETH_KEY] = Decimal("2.5")
+        snapshot = create_market_snapshot_from_state(
+            self._state(), chain="ethereum", portfolio=portfolio, token_addresses=self.TOKEN_ADDRESSES
+        )
+        assert snapshot.balance("WETH").balance == Decimal("2.5")
+        assert snapshot.balance(self.WETH_ADDR).balance == Decimal("2.5")
+
+    def test_cash_stays_readable_through_alias(self):
+        portfolio = self._portfolio()
+        snapshot = create_market_snapshot_from_state(
+            self._state(), chain="ethereum", portfolio=portfolio, token_addresses=self.TOKEN_ADDRESSES
+        )
+        assert snapshot.balance("USDC").balance == Decimal("10000")
+        assert snapshot.balance("WETH").balance == Decimal("0")
+
+    def test_cash_face_value_does_not_clobber_held_stable(self):
+        portfolio = self._portfolio()
+        portfolio.tokens[self.USDC_KEY] = Decimal("500")
+        snapshot = create_market_snapshot_from_state(
+            self._state(), chain="ethereum", portfolio=portfolio, token_addresses=self.TOKEN_ADDRESSES
+        )
+        assert snapshot.balance("USDC").balance == Decimal("500")
+        assert snapshot.balance(self.USDC_ADDR).balance == Decimal("500")
+
+    def test_mixed_case_map_keys_do_not_clobber_held_stable(self):
+        # A direct caller may pass non-upper map keys; alias registration
+        # upper-cases the alias name, so the held-key guard must probe the
+        # same casing or the cash face value clobbers the tracked balance
+        # (PR #3156 review).
+        portfolio = self._portfolio()
+        portfolio.tokens[self.USDC_KEY] = Decimal("500")
+        snapshot = create_market_snapshot_from_state(
+            self._state(),
+            chain="ethereum",
+            portfolio=portfolio,
+            token_addresses={"weth": self.WETH_KEY, "usdc": self.USDC_KEY},
+        )
+        assert snapshot.balance("USDC").balance == Decimal("500")
+        assert snapshot.balance(self.USDC_ADDR).balance == Decimal("500")
+        assert snapshot.price("WETH") == Decimal("3000")
+
+    def test_zero_seed_does_not_hide_cash_for_noncanonical_stable_address(self):
+        # A funding entry may register a stable under a non-registry address
+        # (e.g. a bridged variant). The zero-seed for that unheld address key
+        # must not shadow the cash face value written through the alias.
+        bridged_usdc = ("ethereum", "0x9999999999999999999999999999999999999999")
+        portfolio = self._portfolio()
+        snapshot = create_market_snapshot_from_state(
+            self._state(prices={self.WETH_KEY: Decimal("3000"), bridged_usdc: Decimal("1")}),
+            chain="ethereum",
+            portfolio=portfolio,
+            token_addresses={"WETH": self.WETH_KEY, "USDC": bridged_usdc},
+        )
+        assert snapshot.balance("USDC").balance == Decimal("10000")
+        assert snapshot.balance(bridged_usdc[1]).balance == Decimal("10000")
+
+    def test_indicator_set_by_address_reads_by_symbol(self):
+        from almanak.framework.market import RSIData
+
+        snapshot = create_market_snapshot_from_state(
+            self._state(), chain="ethereum", token_addresses=self.TOKEN_ADDRESSES
+        )
+        snapshot.set_rsi(f"ethereum:{self.WETH_ADDR}", RSIData(value=Decimal("31"), period=14))
+        assert snapshot.rsi("WETH", period=14).value == Decimal("31")
+        assert snapshot.rsi(self.WETH_ADDR, period=14).value == Decimal("31")
+
+    def test_cross_chain_entry_is_not_aliased(self):
+        wsteth_key = ("arbitrum", "0x5979d7b546e38e414f7e9822514be443a4800529")
+        snapshot = create_market_snapshot_from_state(
+            self._state(), chain="ethereum", token_addresses={"WSTETH": wsteth_key}
+        )
+        with pytest.raises(ValueError, match="Cannot determine price"):
+            snapshot.price("WSTETH")
+
+    def test_malformed_entries_are_skipped(self):
+        snapshot = create_market_snapshot_from_state(
+            self._state(),
+            chain="ethereum",
+            token_addresses={
+                self.WETH_ADDR: self.WETH_KEY,  # address-shaped name: not a symbol
+                "WETH": ("ethereum", "not-an-address"),  # EVM-family target must be a 0x key
+            },
+        )
+        with pytest.raises(ValueError, match="Cannot determine price"):
+            snapshot.price("WETH")
+
+    SOL_MINT = "So11111111111111111111111111111111111111112"
+    SOL_KEY = ("solana", SOL_MINT)
+
+    def test_solana_mint_alias_resolves_symbol_read(self):
+        # Non-EVM chains key state by (chain, mint) with case-sensitive
+        # base58 addresses; the alias bridge must cover them too or Solana
+        # strategies lose the strategy-facing symbol surface (PR #3156
+        # review). Family-aware target validation: opaque address accepted,
+        # casing preserved.
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        state = MarketState(
+            timestamp=datetime(2026, 3, 23, tzinfo=UTC),
+            chain="solana",
+            prices={self.SOL_KEY: Decimal("150")},
+        )
+        snapshot = create_market_snapshot_from_state(
+            state, chain="solana", token_addresses={"SOL": self.SOL_KEY}
+        )
+        assert snapshot.price("SOL") == Decimal("150")
+        assert snapshot.price(f"solana:{self.SOL_MINT}") == Decimal("150")
+
+    def test_unknown_chain_target_is_skipped(self):
+        # An alias must point at a key the engine could have seeded; a chain
+        # the ChainRegistry does not know cannot be a run chain. Registered
+        # directly because the engine-side helper already drops cross-chain
+        # entries before they reach the snapshot guard.
+        snapshot = create_market_snapshot_from_state(self._state(), chain="ethereum")
+        snapshot._register_symbol_alias_keys({"FOO": "notachain:abcdef"})
+        assert snapshot._symbol_alias_keys == {}
+        with pytest.raises(ValueError, match="Cannot determine price"):
+            snapshot.price("FOO")
+
+    def test_symbol_keyed_portfolio_token_stays_distinct_without_map_entry(self):
+        portfolio = self._portfolio()
+        portfolio.tokens["CBBTC"] = Decimal("0.05")
+        snapshot = create_market_snapshot_from_state(
+            self._state(), chain="ethereum", portfolio=portfolio, token_addresses=self.TOKEN_ADDRESSES
+        )
+        assert snapshot.balance("CBBTC").balance == Decimal("0.05")
+
+
 class TestAddressKeyedFlows:
     """Address-keyed intents preserve token identity in flows and positions."""
 
