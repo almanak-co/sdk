@@ -13,9 +13,10 @@
   "gas_reserve": 0.05,
   "token_funding": [
     {
-      "symbol": "AVAX",
+      "symbol": "WAVAX",
+      "address": "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7",
       "chain": "avalanche",
-      "amount": "0.3",
+      "amount": "0.5",
       "amount_type": "token"
     }
   ],

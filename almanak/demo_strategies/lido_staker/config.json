@@ -9,9 +9,11 @@
     },
     "token_funding": [
         {
-            "token": "ETH",
-            "amount": 100,
-            "chain": "ethereum"
+            "symbol": "WETH",
+            "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "chain": "ethereum",
+            "amount": "1.0",
+            "amount_type": "token"
         }
     ]
 }
