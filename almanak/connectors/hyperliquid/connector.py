@@ -9,6 +9,7 @@ from almanak.connectors._connector import (
     FeeModelDecl,
     FundingHistoryDecl,
     ImportRef,
+    PerpsReadDecl,
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
 from almanak.connectors.hyperliquid.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
@@ -16,6 +17,11 @@ from almanak.connectors.hyperliquid.backtest_risk import BACKTEST_RISK as _BACKT
 CONNECTOR = Connector(
     name="hyperliquid",
     kind=ProtocolKind.PERP,
+    # Strategy-facing execution surface: market open/close via CoreWriter on
+    # HyperEVM (chain 999). See compiler.py for the scope bounded by the
+    # CoreWriter action set + the perp intent vocabulary.
+    strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
+    strategy_chains=("hyperevm",),
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.hyperliquid.fee_model", attribute="HyperliquidFeeModel"),
         description="Hyperliquid perpetuals protocol fee model with maker/taker fees and volume tiers",
@@ -30,6 +36,13 @@ CONNECTOR = Connector(
     compiler=ImportRef(
         module="almanak.connectors.hyperliquid.compiler",
         attribute="HyperliquidCompiler",
+    ),
+    receipt_parser_connector=ImportRef(
+        module="almanak.connectors.hyperliquid.receipt_parser_provider",
+        attribute="HyperliquidReceiptParserConnector",
+    ),
+    perps_read=PerpsReadDecl(
+        spec=ImportRef(module="almanak.connectors.hyperliquid.perps_read", attribute="PERPS_READ_SPEC"),
     ),
     capabilities=CapabilitiesSpec(
         keys=("hyperliquid",),

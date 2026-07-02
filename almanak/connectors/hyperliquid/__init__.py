@@ -1,21 +1,24 @@
-"""Hyperliquid Connector — EXPERIMENTAL / NOT PRODUCTION-READY.
+"""Hyperliquid perpetuals connector — HyperEVM / CoreWriter.
 
-The Hyperliquid PERP production execution path has not shipped (VIB-4774).
-No demo, no incubating strategy, no on-chain intent test references this
-connector. The adapter / type definitions remain in-tree as a scaffold for
-VIB-4774 — they are NOT a supported strategy-layer connector. The adapter
-holds no keys and performs no in-process signing: write operations delegate
-through ``MessageSigner`` / ``ExternalSigner``, and real signing ships
-gateway-side with the VIB-4774 execution lane.
+Executes ``PERP_OPEN`` / ``PERP_CLOSE`` on **HyperEVM** (chain id 999) by
+calling the CoreWriter system contract (``0x3333…3333``) with a versioned
+action, submitted as an ordinary gateway ActionBundle transaction. Reads
+(position, oracle price) go through HyperCore read precompiles via the gateway.
+The strategy holds no keys and signs nothing — it returns an ``Intent``.
 
-This connector is intentionally:
-- Omitted from ``ConnectorRegistry`` (see deregistration block at end of file)
-- Removed from ``almanak strat matrix`` (no longer probed in
-  ``almanak/framework/cli/support_matrix.py``)
-- Removed from public docs (``docs/api/connectors/`` + ``README.md``)
+Scope is bounded by the CoreWriter action set and the perp intent vocabulary:
+market open (IOC) and market close (reduce-only IOC, full/partial). CoreWriter
+has no set-leverage action and no native trigger orders, so leverage changes
+and TP/SL are not reachable through this path (they need the L1 EIP-712 API);
+see ``compiler.py``.
 
-See ``docs/internal/plans/connector-status-audit-2026-05-23.html`` for the
-audit that flagged this gap and VIB-4774 for the production-execution work.
+Order encoding lives in ``sdk.py`` (byte-exact, szDecimals-aware), market
+resolution in ``markets.py`` (static seed of the liquid majors, fail-closed on
+unknowns — see the module docstring for the seed vs. dynamic-universe seam).
+
+Note: ``adapter.py`` (the abandoned V1-style native-L1 REST simulation) is
+retained only for its type definitions and is NOT on the execution path — the
+CoreWriter compiler does not use it.
 """
 
 from __future__ import annotations

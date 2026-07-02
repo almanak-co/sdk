@@ -1,0 +1,22 @@
+{
+    "chain": "hyperevm",
+    "market": "ETH/USD",
+    "base_token": "ETH",
+    "collateral_token": "USDC",
+    "size_usd": "15",
+    "leverage": "2.0",
+    "is_long": true,
+    "max_slippage": "0.01",
+    "take_profit_pct": "0.02",
+    "stop_loss_pct": "0.03",
+    "trail_activation_pct": "0.01",
+    "trail_pct": "0.015",
+    "reenter_after_close": true,
+    "force_action": "",
+    "anvil_funding": {
+        "USDC": 100
+    },
+    "qa": {
+        "sidecar_skip_ticket": "VIB-5576"
+    }
+}

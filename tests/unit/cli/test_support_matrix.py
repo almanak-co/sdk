@@ -277,11 +277,12 @@ class TestPreviouslyMissingConnectors:
             # jupiter_lend removed — folded into compiler_solana.py but
             # unexercised (no demo / no intent test); deregistered from
             # ConnectorRegistry and from support_matrix.py
-            # hyperliquid removed — production PERP execution not shipped
-            # (VIB-4774); deregistered from ConnectorRegistry and from
-            # support_matrix.py
             ("aster_perps", "perps", {"bsc"}),
             ("pancakeswap_perps", "perps", {"bsc"}),
+            # hyperliquid PERP execution now shipped on HyperEVM via CoreWriter
+            # (PERP_OPEN/PERP_CLOSE); the runner data layer is tracked separately
+            # (VIB-5576) but the connector is registered and matrix-visible.
+            ("hyperliquid", "perps", {"hyperevm"}),
             ("gimo", "yield", {"zerog"}),
             # polymarket / prediction temporarily withheld from the matrix
             # pending further testing — see TestPredictionDisabledPendingTesting.
@@ -302,7 +303,6 @@ class TestPreviouslyMissingConnectors:
             # support_matrix.py collectors. Re-emitting any of these would
             # advertise an unexercised / not-production-ready connector in
             # `almanak strat matrix`.
-            ("hyperliquid", "perps"),  # VIB-4774 — production PERP exec not shipped
             ("jupiter_lend", "lending"),  # folded compiler unexercised
             ("joelend", "lending"),  # VIB-3960 — protocol wound down
         ],

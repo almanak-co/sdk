@@ -10,7 +10,7 @@
 
 | Chain | Family | Supported Intents |
 |-------|--------|-------------------|
-| No strategy chains registered | N/A | No strategy intents registered |
+| [Hyperevm](../../chains/hyperevm.md) | EVM | ``PERP_CLOSE``, ``PERP_OPEN`` |
 
 ## API Reference
 

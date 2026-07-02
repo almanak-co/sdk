@@ -126,6 +126,23 @@ def test_registry_resolve_returns_none_for_unknown_protocol():
     assert PerpsReadRegistry.value_position("unknown_perp") is None
 
 
+def test_markets_scoped_venue_not_deployed_off_its_chain():
+    """A per-market venue with no markets on a chain is not deployed there.
+
+    hyperliquid reads HyperCore precompiles (no ``contract_kinds`` / AddressRegistry
+    address to gate on), so an empty ``markets_for_chain`` is the only
+    "not deployed on this chain" signal. Discovery relies on ``resolve_plan``
+    returning ``None`` to skip such a venue silently instead of issuing an empty
+    read on every chain (e.g. ethereum). On its own chain (hyperevm) the plan
+    resolves normally.
+    """
+    wallet = "0x1111111111111111111111111111111111111111"  # valid 0x+40-hex (calls are built on-chain)
+    on_chain = PerpsPositionQuery(chain="hyperevm", wallet_address=wallet)
+    off_chain = PerpsPositionQuery(chain="ethereum", wallet_address=wallet)
+    assert PerpsReadRegistry.resolve_plan("hyperliquid", on_chain) is not None
+    assert PerpsReadRegistry.resolve_plan("hyperliquid", off_chain) is None
+
+
 def test_normalize_is_total_for_none_and_non_str():
     # ``_normalize`` is reached by ``market_metadata`` / ``value_position`` with a
     # loosely typed ``position.protocol`` — ``None`` / non-``str`` must normalise

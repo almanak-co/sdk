@@ -191,6 +191,7 @@ FROZEN_LENDING_ALIASES = {
 FROZEN_PERPS_SPEC_LOADERS = {
     "gmx_v2": ("almanak.connectors.gmx_v2.perps_read", "PERPS_READ_SPEC"),
     "aster_perps": ("almanak.connectors.aster_perps.perps_read", "PERPS_READ_SPEC"),
+    "hyperliquid": ("almanak.connectors.hyperliquid.perps_read", "PERPS_READ_SPEC"),
 }
 # B3 (VIB-4851) added "gmx" (previously a local tuple in the backtesting
 # funding-rate dispatch) as a manifest-declared perps alias.

@@ -26,7 +26,7 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each g
 | [Fluid Vault](fluid_vault.md) | Lending | [Arbitrum](../../chains/arbitrum.md), [Base](../../chains/base.md) | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` | ``almanak.connectors.fluid_vault`` |
 | [Gimo](gimo.md) | Staking | [0G](../../chains/zerog.md) | ``STAKE``, ``UNSTAKE`` | ``almanak.connectors.gimo`` |
 | [GMX V2](gmx_v2.md) | Perp | [Arbitrum](../../chains/arbitrum.md), [Avalanche](../../chains/avalanche.md) | ``PERP_CLOSE``, ``PERP_OPEN`` | ``almanak.connectors.gmx_v2`` |
-| [Hyperliquid](hyperliquid.md) | Perp | No strategy chains registered | No strategy intents registered | ``almanak.connectors.hyperliquid`` |
+| [Hyperliquid](hyperliquid.md) | Perp | [Hyperevm](../../chains/hyperevm.md) | ``PERP_CLOSE``, ``PERP_OPEN`` | ``almanak.connectors.hyperliquid`` |
 | [JoeLend](joelend.md) | Lending | No strategy chains registered | No strategy intents registered | ``almanak.connectors.joelend`` |
 | [Jupiter](jupiter.md) | DEX | [Solana](../../chains/solana.md) | ``SWAP`` | ``almanak.connectors.jupiter`` |
 | [Jupiter Lend](jupiter_lend.md) | Lending | No strategy chains registered | No strategy intents registered | ``almanak.connectors.jupiter_lend`` |

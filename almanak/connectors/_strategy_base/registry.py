@@ -53,6 +53,7 @@ KNOWN_VENUES: frozenset[str] = frozenset(
         "zerog",
         "solana",
         "hyperliquid",
+        "hyperevm",
     }
 )
 
@@ -92,6 +93,7 @@ MATRIX_CHAIN_DISPLAY_ORDER: tuple[str, ...] = (
     "monad",
     "solana",
     "hyperliquid",
+    "hyperevm",
 )
 
 

@@ -196,6 +196,15 @@ class PerpsReadRegistry:
         markets = query.markets
         if spec.markets_for_chain is not None and not markets:
             markets = tuple(spec.markets_for_chain(query.chain))
+            if not markets:
+                # A per-market venue with no markets on this chain is not deployed
+                # here — the markets-scoped analogue of the missing contract-address
+                # gate above. A precompile/markets venue (e.g. hyperliquid) has no
+                # AddressRegistry entry to fail on, so an empty market set is the
+                # only "not deployed on this chain" signal; return None so the
+                # discovery scan skips it silently instead of issuing an empty read.
+                logger.debug("No markets for perp protocol %s on chain %s (not deployed)", key, query.chain)
+                return None
 
         resolved = replace(query, targets=targets, markets=markets)
         calls = tuple(spec.build_calls(resolved))
