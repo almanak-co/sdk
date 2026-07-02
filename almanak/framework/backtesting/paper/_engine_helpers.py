@@ -41,7 +41,10 @@ from almanak.framework.backtesting.models import (
     IntentType,
     TradeRecord,
 )
-from almanak.framework.backtesting.numeraire import compute_numeraire_metrics_paper
+from almanak.framework.backtesting.numeraire import (
+    compute_numeraire_metrics_paper,
+    merge_numeraire_canonical,
+)
 from almanak.framework.backtesting.paper.config import (
     ForkLifecycle,
     PaperTraderConfig,
@@ -486,18 +489,20 @@ def assemble_backtest_result(
 ) -> BacktestResult:
     """Build the final ``BacktestResult`` — pure data assembly, no I/O.
 
-    Attaches the numeraire reporting projection (VIB-5127) when the strategy
-    declared a non-USD ``quote_asset``: equity-curve-derived metrics recomputed
-    on the numeraire-denominated equity series (paper's hourly convention),
-    plus the numeraire-denominated start / end capital. All ``None`` / unset for
-    USD strategies, so a USD paper result is unchanged.
+    Applies the numeraire-canonical merge (VIB-5127, blueprint 31 §7) when the
+    strategy declared a non-USD ``quote_asset``: equity-curve-derived metrics
+    are recomputed on the numeraire-denominated equity series (paper's hourly
+    convention) and folded into the primary metrics fields as the canonical
+    performance expression, plus the numeraire-denominated start / end capital.
+    All ``None`` / unset for USD strategies, so a USD paper result is unchanged.
     """
     numeraire_symbol = trader._resolve_numeraire()
     numeraire_metrics, initial_capital_numeraire, final_capital_numeraire = compute_numeraire_metrics_paper(
         equity_curve,
         numeraire_symbol=numeraire_symbol,
     )
-    metrics.numeraire_metrics = numeraire_metrics
+    if numeraire_metrics is not None:
+        merge_numeraire_canonical(metrics, numeraire_metrics, equity_curve, trade_records)
 
     return BacktestResult(
         engine=BacktestEngine.PAPER,

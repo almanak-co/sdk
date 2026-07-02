@@ -71,8 +71,14 @@ def _prepare_metrics_dict(result: "BacktestResult") -> dict[str, Any]:
     """
     metrics = result.metrics
 
-    # Convert all Decimal values to strings that can be parsed as floats
+    # Convert all Decimal values to strings that can be parsed as floats.
+    # Under the numeraire-canonical merge (blueprint 31 §7) the *_usd values
+    # for a token-quoted strategy are already the numeraire figures expressed
+    # in USD at the end reference price; performance_denomination names the
+    # canon so templates can surface it.
     return {
+        "performance_denomination": metrics.performance_denomination,
+        "net_pnl_numeraire": str(metrics.net_pnl_numeraire) if metrics.net_pnl_numeraire is not None else None,
         "total_pnl_usd": str(metrics.total_pnl_usd),
         "net_pnl_usd": str(metrics.net_pnl_usd),
         "sharpe_ratio": str(metrics.sharpe_ratio),

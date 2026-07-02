@@ -173,9 +173,10 @@ def test_swap_round_trip_conservation_numeraire() -> None:
 
     Same buy-then-sell round trip as the USD cell, but the strategy declares a
     token quote_asset (WETH on Arbitrum). The USD core is untouched (final USD
-    equity == initial capital), and the additive numeraire projection values the
-    portfolio at a flat 5 WETH (10,000 USD / 2,000 USD-per-WETH) at every mark.
-    Decimal-exact because the WETH price is flat.
+    equity == initial capital), and the canonical numeraire expression
+    (blueprint 31 §7 merge) values the portfolio at a flat 5 WETH
+    (10,000 USD / 2,000 USD-per-WETH) at every mark. Decimal-exact because the
+    WETH price is flat.
     """
     intents = [
         SwapDuck(amount_usd=Decimal("5000")),  # buy 2.5 WETH
@@ -193,21 +194,109 @@ def test_swap_round_trip_conservation_numeraire() -> None:
     assert result.numeraire == "WETH"
     assert result.initial_capital_numeraire == expected_weth
     assert result.final_capital_numeraire == expected_weth
-    assert result.metrics.numeraire_metrics is not None
-    assert result.metrics.numeraire_metrics.numeraire == "WETH"
-    assert result.metrics.numeraire_metrics.total_pnl == Decimal("0")
+    # Numeraire-canonical merge: the numeraire IS the primary expression; the
+    # legacy sub-block is no longer attached (v3).
+    assert result.metrics.numeraire_metrics is None
+    assert result.metrics.performance_denomination == "WETH"
+    assert result.metrics.total_pnl_numeraire == Decimal("0")
+    assert result.metrics.net_pnl_numeraire == Decimal("0")
+    assert result.metrics.total_pnl_usd == Decimal("0")
+    assert result.metrics.numeraire_price_usd_start == Decimal("2000")
+    assert result.metrics.numeraire_price_usd_end == Decimal("2000")
     for point in result.equity_curve:
         assert point.numeraire_price_usd == Decimal("2000")
         assert point.value_usd / point.numeraire_price_usd == expected_weth
 
 
+@pytest.mark.trust_cell("swap:numeraire_canonical_metrics")
+def test_swap_numeraire_canonical_metrics_reconcile() -> None:
+    """The numeraire is the canonical expression; USD figures derive from it.
+
+    WETH-numeraire strategy: buy 2.5 WETH at $2,000, sell all of it after the
+    price jumps to $2,500, then hold USD cash to the end. In dollars the run
+    gains +$1,250; in WETH — the declared objective — the portfolio decays
+    from 5 WETH to 4.5 WETH. The merged metrics must tell the WETH story, with
+    every ``*_usd`` PnL figure equal to its ``*_numeraire`` sibling x the
+    emitted end reference price, Decimal-exact (blueprint 31 §7).
+    """
+    weth = [Decimal(p) for p in ("2000", "2000", "2000", "2500", "2500", "2500", "2500", "2500", "2500", "2500")]
+    series = {
+        "WETH": weth,
+        "USDC": [Decimal("1")] * 10,
+        ("arbitrum", USDC_ARBITRUM): [Decimal("1")] * 10,
+    }
+    intents = [
+        SwapDuck(amount_usd=Decimal("5000")),  # executes at tick 1 @ 2000 -> 2.5 WETH
+        None,
+        None,
+        SwapDuck(from_token="WETH", to_token="USDC", amount_usd=Decimal("6250")),  # tick 4 @ 2500
+    ]
+    strategy = ScriptedStrategy(intents, quote_asset=QuoteAsset.token(42161, _WETH_ARBITRUM))
+    result = run_backtest(strategy, series, hours=8)
+
+    assert result.success
+    assert all(trade.success for trade in result.trades)
+    metrics = result.metrics
+
+    # Raw USD delta is +1,250 (the conservation core is untouched)...
+    assert result.final_capital_usd == INITIAL_CAPITAL + Decimal("1250")
+    # ...but the CANONICAL story is the numeraire: 5 WETH -> 4.5 WETH.
+    assert result.numeraire == "WETH"
+    assert result.initial_capital_numeraire == Decimal("5")
+    assert result.final_capital_numeraire == Decimal("4.5")
+    assert metrics.performance_denomination == "WETH"
+    assert metrics.numeraire_price_usd_start == Decimal("2000")
+    assert metrics.numeraire_price_usd_end == Decimal("2500")
+
+    # Headline PnL: numeraire-native, with USD derived at the end price —
+    # opposite sign to the raw USD delta, which is exactly the point.
+    assert metrics.total_pnl_numeraire == Decimal("-0.5")
+    assert metrics.net_pnl_numeraire == Decimal("-0.5")
+    assert metrics.total_pnl_usd == Decimal("-1250")
+    assert metrics.net_pnl_usd == metrics.total_pnl_numeraire * metrics.numeraire_price_usd_end
+    assert metrics.total_return_pct == Decimal("-10")
+    assert result.total_return_pct == Decimal("-10")  # top-level property agrees
+    # 5 -> 4.5 WETH peak-to-trough on the numeraire equity series.
+    assert metrics.max_drawdown_pct == Decimal("0.1")
+
+    # Trade statistics convert per-trade at the trade tick: the sell realized
+    # +$1,250 at a $2,500 WETH price -> a +0.5 WETH win (trade-time conversion;
+    # the equity-level WETH decay is a holding effect, not a trade effect).
+    assert metrics.trades_with_realized_pnl == 1
+    assert metrics.winning_trades == 1
+    assert metrics.win_rate == Decimal("1")
+    assert metrics.largest_win_numeraire == Decimal("0.5")
+    assert metrics.largest_win_usd == metrics.largest_win_numeraire * metrics.numeraire_price_usd_end
+    assert metrics.avg_trade_pnl_numeraire == Decimal("0.5")
+    assert metrics.realized_pnl_numeraire == Decimal("0.5")
+    assert metrics.realized_pnl == Decimal("1250")
+
+    # Attribution buckets the numeraire PnLs, expressed at the end price.
+    assert metrics.pnl_by_intent_type == {"SWAP": Decimal("1250")}
+
+    # Zero-cost run: the numeraire cost ledger is exactly zero, and the USD
+    # cost ledger is untouched.
+    assert metrics.total_fees_numeraire == Decimal("0")
+    assert metrics.total_fees_usd == Decimal("0")
+
+    # The artifact carries the merged expression only (schema v3).
+    payload = result.to_dict()
+    assert payload["metrics"]["schema_version"] == 3
+    assert payload["metrics"]["performance_denomination"] == "WETH"
+    assert "numeraire_metrics" not in payload["metrics"]
+    assert payload["metrics"]["total_pnl_numeraire"] == "-0.5"
+    assert payload["metrics"]["numeraire_price_usd_end"] == "2500"
+
+
 @pytest.mark.trust_cell("swap:fiat_usd_pin")
 def test_swap_fiat_usd_byte_for_byte_pin() -> None:
-    """A default (USD) strategy emits no numeraire fields -- byte-for-byte pin.
+    """A default (USD) strategy emits no numeraire keys -- the fiat pin.
 
-    Guards the additive contract (VIB-5127): the numeraire feature must never
-    change a fiat_usd artifact. Any reviewer who reuses the _usd storage for
-    the numeraire would grow numeraire* keys here and trip this cell.
+    Guards the fiat lane of the numeraire-canonical contract (VIB-5127 +
+    blueprint 31 §7 merge): a fiat_usd artifact carries no numeraire* keys
+    anywhere and declares performance_denomination == "USD". Any reviewer who
+    reuses the _usd storage for the numeraire, or emits numeraire fields on a
+    fiat run, trips this cell.
     """
     intents = [
         SwapDuck(amount_usd=Decimal("5000")),
@@ -220,14 +309,17 @@ def test_swap_fiat_usd_byte_for_byte_pin() -> None:
     assert result.initial_capital_numeraire is None
     assert result.final_capital_numeraire is None
     assert result.metrics.numeraire_metrics is None
+    assert result.metrics.performance_denomination == "USD"
     assert all(point.numeraire_price_usd is None for point in result.equity_curve)
 
-    # No numeraire* keys leak into the serialized artifact.
+    # No numeraire* keys leak into the serialized artifact — including the
+    # v3 *_numeraire scalar fields, which must stay emit-when-set.
     payload = result.to_dict()
     assert "numeraire" not in payload
     assert "initial_capital_numeraire" not in payload
     assert "final_capital_numeraire" not in payload
-    assert "numeraire_metrics" not in payload["metrics"]
+    assert payload["metrics"]["performance_denomination"] == "USD"
+    assert all("numeraire" not in key for key in payload["metrics"])
     assert all("numeraire_price_usd" not in point for point in payload["equity_curve"])
 
 
@@ -248,6 +340,53 @@ def test_unsupported_intent_stops_the_run_without_state_change() -> None:
     assert "STAKE" in str(result.error)
     assert result.metrics.total_trades == 0
     assert all(point.value_usd == INITIAL_CAPITAL for point in result.equity_curve)
+
+
+@pytest.mark.trust_cell("swap:price_series_consistency")
+def test_swap_price_series_matches_valuation() -> None:
+    """price_series is tick-aligned and carries the exact valuation prices.
+
+    Buy WETH at a flat price, then let the price move: at every post-fill
+    mark, ``cash + weth_held x emitted_price`` must reproduce the marked
+    equity exactly — proving the exported series is the valuation input,
+    never a re-fetch.
+    """
+    weth_prices = [Decimal(p) for p in ("2000", "2000", "1900", "2050", "2200", "2150", "1950", "2000", "2100", "2000")]
+    series = {
+        "WETH": weth_prices,
+        "USDC": [Decimal("1")] * 10,
+        ("arbitrum", USDC_ARBITRUM): [Decimal("1")] * 10,
+    }
+    result = run_backtest(ScriptedStrategy([SwapDuck(amount_usd=Decimal("5000"))]), series, hours=8)
+
+    assert result.success
+    assert result.metrics.total_trades == 1
+    # Aligned 1:1 with the equity curve, same timestamps.
+    assert len(result.price_series) == len(result.equity_curve) > 0
+    for eq_point, price_point in zip(result.equity_curve, result.price_series, strict=True):
+        assert price_point.timestamp == eq_point.timestamp
+
+    # The display-label map resolves the address-native WETH key.
+    weth_keys = [k for k, label in result.price_series_display_labels.items() if label.upper() == "WETH"]
+    assert len(weth_keys) == 1
+    weth_key = weth_keys[0]
+
+    trade = result.trades[0]
+    weth_held = trade.actual_amount_out
+    assert weth_held == Decimal("2.5")  # filled at the flat 2000 opening price
+    cash_after = INITIAL_CAPITAL - Decimal("5000")
+    for eq_point, price_point in zip(result.equity_curve, result.price_series, strict=True):
+        emitted = price_point.prices[weth_key]
+        if eq_point.timestamp < trade.timestamp:
+            assert eq_point.value_usd == INITIAL_CAPITAL
+        else:
+            # Holdings x the EMITTED price reproduces the marked equity exactly.
+            assert eq_point.value_usd == cash_after + weth_held * emitted
+
+    # Round-trips through the artifact.
+    payload = result.to_dict()
+    assert len(payload["price_series"]) == len(result.price_series)
+    assert payload["price_series_display_labels"][weth_key].upper() == "WETH"
 
 
 @pytest.mark.trust_cell("swap:rejection_no_state_change")

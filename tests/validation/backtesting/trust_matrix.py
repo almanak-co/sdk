@@ -83,6 +83,8 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "round_trip_conservation_numeraire",
     "fiat_usd_pin",
     "unsupported_intent_refused",
+    "price_series_consistency",
+    "numeraire_canonical_metrics",
 )
 
 
@@ -189,6 +191,20 @@ CELLS: tuple[TrustCell, ...] = (
         # type as a trade with fees/gas charged but empty token flows and no
         # position (~15 vocabulary types affected). A backtest that silently
         # skips part of the strategy certifies numbers it never earned.
+    ),
+    _cell(
+        "price_series_consistency",
+        "swap",
+        "The result's price_series is aligned 1:1 with the equity curve and carries "
+        "exactly the prices the engine valued the portfolio with — holdings x emitted "
+        "price reproduces the marked equity.",
+    ),
+    _cell(
+        "numeraire_canonical_metrics",
+        "swap",
+        "Numeraire-canonical merge (blueprint 31 §7): with a moving numeraire price, "
+        "the primary metrics tell the numeraire story and every USD PnL figure equals "
+        "its numeraire sibling x the emitted end reference price, Decimal-exact.",
     ),
     # --- LP column ---
     _cell(

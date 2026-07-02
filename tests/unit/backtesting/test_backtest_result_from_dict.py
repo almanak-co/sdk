@@ -469,6 +469,42 @@ class TestNestedDataclassRehydration:
         assert result.equity_curve[1].eth_price_usd is None
         assert result.equity_curve[1].valuation_source == "simple"
 
+    def test_price_series_rehydrates_and_round_trips(self) -> None:
+        """price_series points and their display labels survive from_dict/to_dict."""
+        data = _minimal_dict(
+            price_series=[
+                {
+                    "timestamp": "2024-01-01T00:00:00",
+                    "prices": {"arbitrum:0xweth": "2000", "USDC": "1"},
+                },
+                {
+                    "timestamp": "2024-01-01T01:00:00",
+                    "prices": {"arbitrum:0xweth": "2100", "USDC": "1"},
+                },
+            ],
+            price_series_display_labels={"arbitrum:0xweth": "WETH", "USDC": "USDC"},
+        )
+
+        result = BacktestResult.from_dict(data)
+
+        assert len(result.price_series) == 2
+        assert result.price_series[0].prices["arbitrum:0xweth"] == Decimal("2000")
+        assert result.price_series[1].prices["arbitrum:0xweth"] == Decimal("2100")
+        assert result.price_series_display_labels["arbitrum:0xweth"] == "WETH"
+
+        payload = result.to_dict()
+        assert payload["price_series"][0]["prices"]["arbitrum:0xweth"] == "2000"
+        assert payload["price_series_display_labels"] == {"arbitrum:0xweth": "WETH", "USDC": "USDC"}
+
+    def test_legacy_artifact_without_price_series_loads_empty(self) -> None:
+        """Artifacts predating price_series load with an empty series and emit no key."""
+        result = BacktestResult.from_dict(_minimal_dict())
+        assert result.price_series == []
+        assert result.price_series_display_labels == {}
+        payload = result.to_dict()
+        assert "price_series" not in payload
+        assert "price_series_display_labels" not in payload
+
     def test_equity_point_tolerates_explicit_none_optionals(self) -> None:
         """Explicit JSON `null` on EquityPoint optional fields must round-trip to None.
 

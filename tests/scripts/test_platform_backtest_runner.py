@@ -253,7 +253,14 @@ def test_platform_numeraire_backtest_prices_address_keyed_data_and_coverage() ->
     ]
     assert result.error is None
     assert len(result.trades) > 0
-    assert result.metrics.numeraire_metrics is not None
+    # Numeraire-canonical merge (blueprint 31 §7): the CBBTC quote asset is
+    # priced through the address-keyed provider and becomes the canonical
+    # performance denomination; the legacy sub-block is no longer attached.
+    assert result.metrics.performance_denomination == "CBBTC"
+    assert result.metrics.total_pnl_numeraire is not None
+    assert result.metrics.numeraire_price_usd_end is not None
+    assert result.metrics.total_pnl_usd == result.metrics.total_pnl_numeraire * result.metrics.numeraire_price_usd_end
+    assert result.metrics.numeraire_metrics is None
     assert result.data_quality is not None
     assert result.data_quality.coverage_ratio == Decimal("1")
     assert result.institutional_compliance is True
@@ -451,6 +458,7 @@ def test_build_result_summary_uses_metrics_and_trade_fallback() -> None:
     )
 
     assert summary == {
+        "performance_denomination": "USD",
         "total_return_pct": "12.4",
         "sharpe_ratio": "1.8",
         "max_drawdown_pct": "8.2",
@@ -458,6 +466,31 @@ def test_build_result_summary_uses_metrics_and_trade_fallback() -> None:
         "net_pnl_usd": "1240.00",
         "duration_seconds": 87.3,
     }
+
+
+def test_build_result_summary_carries_numeraire_denomination() -> None:
+    """Token-quoted runs headline their denomination and native PnL."""
+    summary = runner.build_result_summary(
+        {
+            "metrics": {
+                "performance_denomination": "CBBTC",
+                "total_return_pct": "-4.35",
+                "sharpe_ratio": "-3.47",
+                "max_drawdown_pct": "0.0699",
+                "net_pnl_usd": "-14.96",
+                "net_pnl_numeraire": "-0.000255625736414282553855967989",
+                "total_trades": 46,
+            },
+            "trades": [],
+            "duration_seconds": 17.9,
+        },
+        elapsed_seconds=20.0,
+    )
+
+    assert summary["performance_denomination"] == "CBBTC"
+    assert summary["net_pnl_usd"] == "-14.96"
+    assert summary["net_pnl_numeraire"] == "-0.000255625736414282553855967989"
+    assert summary["total_trades"] == 46
 
 
 def test_clone_strategy_repo_separates_options_from_clone_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

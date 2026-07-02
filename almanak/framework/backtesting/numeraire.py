@@ -35,6 +35,7 @@ and numeraire metrics share one convention and are directly comparable.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -46,9 +47,9 @@ from almanak.framework.backtesting.models import NumeraireMetrics
 from almanak.framework.backtesting.paper.token_registry import is_token_known, resolve_to_canonical_symbol
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
-    from almanak.framework.backtesting.models import EquityPoint
+    from almanak.framework.backtesting.models import BacktestMetrics, EquityPoint, TradeRecord
 
 
 def resolve_numeraire_symbol(strategy: object, chain: str) -> str | None:
@@ -282,9 +283,172 @@ def compute_numeraire_metrics_paper(
     return metrics, initial, final
 
 
+def _numeraire_price_lookup(
+    equity_curve: Sequence[EquityPoint],
+) -> Callable[[datetime], Decimal]:
+    """Trade-timestamp -> numeraire USD price, backed by the equity curve.
+
+    Trades are recorded at tick timestamps, which are exactly the equity-point
+    timestamps, so lookups are exact matches in practice. Off-grid timestamps
+    (defensive) resolve to the most recent earlier point; a timestamp before
+    the first point resolves to the first point. Precondition (enforced by
+    ``_project_numeraire_equity`` raising first): every point carries a
+    positive ``numeraire_price_usd``.
+    """
+    timestamps = [point.timestamp for point in equity_curve]
+    prices: list[Decimal] = []
+    for point in equity_curve:
+        # Explicit raise, not assert: an optimized run (python -O) must fail
+        # just as loudly if the projection's validation was ever bypassed.
+        if point.numeraire_price_usd is None:
+            raise ValueError(
+                f"Equity point at {point.timestamp.isoformat()} is missing numeraire_price_usd; "
+                "the numeraire projection must validate the curve before the canonical merge."
+            )
+        prices.append(point.numeraire_price_usd)
+
+    def lookup(timestamp: datetime) -> Decimal:
+        index = bisect_right(timestamps, timestamp) - 1
+        return prices[max(index, 0)]
+
+    return lookup
+
+
+def merge_numeraire_canonical(
+    metrics: BacktestMetrics,
+    numeraire_metrics: NumeraireMetrics,
+    equity_curve: Sequence[EquityPoint],
+    trades: Sequence[TradeRecord],
+) -> None:
+    """Fold the numeraire view into ``metrics`` as the canonical expression.
+
+    Blueprint 31 §7 (numeraire-canonical merge): when a strategy declares a
+    token quote asset there is exactly one performance story, told in the
+    numeraire — every USD performance figure is derived from the numeraire
+    figure, never computed independently from the USD equity series. Mutates
+    ``metrics`` in place:
+
+    * equity-derived fields (returns, sharpe, sortino, volatility, drawdown,
+      calmar) <- the numeraire equity series (``numeraire_metrics``);
+    * PnL amounts: native ``*_numeraire`` fields, with ``*_usd`` counterparts
+      converted at the end-of-window reference price
+      (``numeraire_price_usd_end``);
+    * trade statistics: recomputed over per-trade numeraire PnLs (each realized
+      trade's USD PnL converted at its own tick's numeraire price), through the
+      same win/loss and attribution rules as the USD lane;
+    * cost columns: the ``*_usd`` ledger is left untouched (dollars actually
+      paid); ``*_numeraire`` convenience columns carry trade-time conversions;
+    * ``performance_denomination`` names the canon; the legacy
+      ``numeraire_metrics`` sub-block is NOT attached (v3 artifacts carry the
+      merged fields instead).
+
+    Engine-agnostic: both engines pass their own convention's
+    ``numeraire_metrics`` (daily/riskfree for PnL, hourly for paper).
+    """
+    from almanak.framework.backtesting.pnl.calculators.attribution import calculate_all_attributions
+    from almanak.framework.backtesting.pnl.metrics_calculator import trade_statistics_from_realized_pnls
+
+    price_at = _numeraire_price_lookup(equity_curve)
+    price_start = equity_curve[0].numeraire_price_usd
+    price_end = equity_curve[-1].numeraire_price_usd
+    # Explicit raise, not assert: these flow into numeraire_price_usd_start/_end
+    # and every USD conversion below, and must fail loudly under python -O too.
+    if price_start is None or price_end is None:
+        raise ValueError(
+            "Equity curve endpoints are missing numeraire_price_usd; "
+            "the numeraire projection must validate the curve before the canonical merge."
+        )
+
+    def realized_net_numeraire(trade: TradeRecord) -> Decimal | None:
+        if not trade.has_realized_pnl:
+            return None
+        return trade.realized_net_pnl() / price_at(trade.timestamp)
+
+    realized_net_pnls = [pnl for pnl in (realized_net_numeraire(t) for t in trades) if pnl is not None]
+    stats = trade_statistics_from_realized_pnls(realized_net_pnls, failed_count=metrics.failed_trades)
+
+    # Denomination of the canonical expression.
+    metrics.performance_denomination = numeraire_metrics.numeraire
+    metrics.numeraire_price_usd_start = price_start
+    metrics.numeraire_price_usd_end = price_end
+
+    # Equity-derived fields <- the numeraire equity series.
+    metrics.total_return_pct = numeraire_metrics.total_return_pct
+    metrics.annualized_return_pct = numeraire_metrics.annualized_return_pct
+    metrics.sharpe_ratio = numeraire_metrics.sharpe_ratio
+    metrics.sortino_ratio = numeraire_metrics.sortino_ratio
+    metrics.volatility = numeraire_metrics.volatility
+    metrics.max_drawdown_pct = numeraire_metrics.max_drawdown_pct
+    metrics.calmar_ratio = numeraire_metrics.calmar_ratio
+
+    # PnL amounts: native numeraire + end-price-converted USD expression.
+    # net == total for the same reason as the USD lane: the equity curve is
+    # already net of execution costs.
+    metrics.total_pnl_numeraire = numeraire_metrics.total_pnl
+    metrics.net_pnl_numeraire = numeraire_metrics.total_pnl
+    metrics.total_pnl_usd = numeraire_metrics.total_pnl * price_end
+    metrics.net_pnl_usd = metrics.total_pnl_usd
+
+    # Trade statistics over per-trade numeraire PnLs. Counts (win/loss/realized)
+    # are sign-invariant under the positive-price conversion; magnitudes are
+    # numeraire-native with end-price USD expressions.
+    metrics.win_rate = stats.win_rate
+    metrics.profit_factor = stats.profit_factor
+    metrics.winning_trades = stats.winning_trades
+    metrics.losing_trades = stats.losing_trades
+    metrics.trades_with_realized_pnl = stats.trades_with_realized_pnl
+    metrics.avg_trade_pnl_numeraire = stats.avg_trade_pnl
+    metrics.largest_win_numeraire = stats.largest_win
+    metrics.largest_loss_numeraire = stats.largest_loss
+    metrics.avg_win_numeraire = stats.avg_win
+    metrics.avg_loss_numeraire = stats.avg_loss
+    metrics.avg_trade_pnl_usd = stats.avg_trade_pnl * price_end
+    metrics.largest_win_usd = stats.largest_win * price_end
+    metrics.largest_loss_usd = stats.largest_loss * price_end
+    metrics.avg_win_usd = stats.avg_win * price_end
+    metrics.avg_loss_usd = stats.avg_loss * price_end
+
+    # Attribution maps: bucket the per-trade numeraire PnLs through the exact
+    # USD-lane rules, expressed in USD at the end reference price (divide by
+    # numeraire_price_usd_end to recover the native maps).
+    by_protocol, by_intent, by_asset = calculate_all_attributions(
+        list(trades),
+        pnl_override=realized_net_numeraire,
+    )
+    metrics.pnl_by_protocol = {k: v * price_end for k, v in by_protocol.items()}
+    metrics.pnl_by_intent_type = {k: v * price_end for k, v in by_intent.items()}
+    metrics.pnl_by_asset = {k: v * price_end for k, v in by_asset.items()}
+
+    # Realized: per-trade gross PnL converted at time-of-realization (mirrors
+    # the USD lane's gross realized accumulation). Unrealized: an end-of-window
+    # mark, so its honest conversion point IS the end price — the USD field is
+    # unchanged by construction.
+    metrics.realized_pnl_numeraire = sum(
+        (t.pnl_usd / price_at(t.timestamp) for t in trades if t.has_realized_pnl and t.pnl_usd is not None),
+        Decimal("0"),
+    )
+    metrics.unrealized_pnl_numeraire = metrics.unrealized_pnl / price_end
+    metrics.realized_pnl = metrics.realized_pnl_numeraire * price_end
+    metrics.unrealized_pnl = metrics.unrealized_pnl_numeraire * price_end
+
+    # Cost columns: USD ledger untouched; numeraire columns are trade-time
+    # conversions (failed fills carry zeroed costs and contribute nothing).
+    metrics.total_fees_numeraire = sum((t.fee_usd / price_at(t.timestamp) for t in trades), Decimal("0"))
+    metrics.total_slippage_numeraire = sum((t.slippage_usd / price_at(t.timestamp) for t in trades), Decimal("0"))
+    metrics.total_gas_numeraire = sum((t.gas_cost_usd / price_at(t.timestamp) for t in trades), Decimal("0"))
+    metrics.total_mev_cost_numeraire = sum(
+        (t.estimated_mev_cost_usd / price_at(t.timestamp) for t in trades if t.estimated_mev_cost_usd is not None),
+        Decimal("0"),
+    )
+
+    # v3 artifacts carry the merged fields; the legacy sub-block stays unset.
+    metrics.numeraire_metrics = None
+
+
 __all__ = [
     "resolve_numeraire_symbol",
     "numeraire_token_address",
     "compute_numeraire_metrics",
     "compute_numeraire_metrics_paper",
+    "merge_numeraire_canonical",
 ]

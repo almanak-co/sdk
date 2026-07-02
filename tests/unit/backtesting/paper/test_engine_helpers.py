@@ -902,6 +902,91 @@ class TestAssembleBacktestResult:
         )
         assert result.error == "Session cancelled"
 
+    def test_token_numeraire_applies_canonical_merge(self) -> None:
+        """A token-quoted paper result gets the numeraire-canonical merge.
+
+        Pins the paper-lane semantics of ``merge_numeraire_canonical``
+        (blueprint 31 §7): equity-derived fields come from the numeraire
+        series (paper's hourly convention leaves sortino/calmar/annualized at
+        0, matching paper's USD conventions), USD PnL figures derive from the
+        natives at the end reference price, trade stats recompute over
+        trade-tick numeraire PnLs (a zero-net trade counts as a loss, the
+        PnL-engine convention), and the legacy sub-block stays unattached.
+        """
+        trader = _make_fake_trader()
+        trader._resolve_numeraire = lambda: "WETH"
+        trader._backtest_id = "bt-num"
+        started = datetime.now(UTC)
+        curve = [
+            EquityPoint(started, Decimal("10000"), numeraire_price_usd=Decimal("2000")),
+            EquityPoint(started + timedelta(hours=1), Decimal("10000"), numeraire_price_usd=Decimal("2000")),
+            EquityPoint(started + timedelta(hours=2), Decimal("11250"), numeraire_price_usd=Decimal("2500")),
+        ]
+        trades = [
+            TradeRecord(
+                timestamp=started + timedelta(hours=2),
+                intent_type=IntentType.SWAP,
+                executed_price=Decimal("2500"),
+                fee_usd=Decimal("0"),
+                slippage_usd=Decimal("0"),
+                gas_cost_usd=Decimal("0"),
+                pnl_usd=Decimal("1250"),
+                success=True,
+                amount_usd=Decimal("6250"),
+            ),
+            TradeRecord(
+                timestamp=started + timedelta(hours=2),
+                intent_type=IntentType.SWAP,
+                executed_price=Decimal("2500"),
+                fee_usd=Decimal("0"),
+                slippage_usd=Decimal("0"),
+                gas_cost_usd=Decimal("0"),
+                pnl_usd=Decimal("0"),  # zero-net trade -> a LOSS in the merged stats
+                success=True,
+                amount_usd=Decimal("100"),
+            ),
+        ]
+
+        result = _engine_helpers.assemble_backtest_result(
+            trader=trader,
+            deployment_id="s-num",
+            run_started_at=started,
+            run_ended_at=started + timedelta(hours=2),
+            metrics=BacktestMetrics(net_pnl_usd=Decimal("1250")),
+            trade_records=trades,
+            equity_curve=curve,
+            final_value=Decimal("11250"),
+            error=None,
+            initial_capital=Decimal("10000"),
+            config_dict={"chain": "arbitrum"},
+            fallback_usage={},
+            compliance_violations=[],
+            institutional_compliance=True,
+        )
+
+        metrics = result.metrics
+        assert result.numeraire == "WETH"
+        assert result.initial_capital_numeraire == Decimal("5")
+        assert result.final_capital_numeraire == Decimal("4.5")
+        assert metrics.performance_denomination == "WETH"
+        assert metrics.numeraire_metrics is None
+        # Equity-derived: -0.5 WETH == -$1,250 at P_end, despite +$1,250 raw USD.
+        assert metrics.total_pnl_numeraire == Decimal("-0.5")
+        assert metrics.net_pnl_usd == Decimal("-1250")
+        assert metrics.total_return_pct == Decimal("-10")
+        # Paper's hourly convention leaves the daily-only fields at 0.
+        assert metrics.annualized_return_pct == Decimal("0")
+        assert metrics.sortino_ratio == Decimal("0")
+        assert metrics.calmar_ratio == Decimal("0")
+        # Trade stats over trade-tick numeraire PnLs: one win (+0.5 WETH),
+        # one zero-net trade counted as a loss (PnL-engine convention).
+        assert metrics.trades_with_realized_pnl == 2
+        assert metrics.winning_trades == 1
+        assert metrics.losing_trades == 1
+        assert metrics.win_rate == Decimal("0.5")
+        assert metrics.largest_win_numeraire == Decimal("0.5")
+        assert metrics.largest_win_usd == Decimal("1250")
+
     def test_non_compliant_flag(self) -> None:
         trader = _make_fake_trader()
         started = datetime.now(UTC)

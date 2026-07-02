@@ -1512,6 +1512,58 @@ class EquityPoint:
 
 
 @dataclass
+class PricePoint:
+    """Per-tick USD token prices, captured at portfolio mark time.
+
+    One point per equity point (aligned 1:1 with ``equity_curve``), holding the
+    exact ``MarketState.prices`` snapshot the engine valued the portfolio with —
+    a visualization/audit export, never a re-fetch. Keys follow the
+    ``pnl_by_asset`` attribution convention: ``chain:address`` for resolved
+    ERC20s, plain symbols for natives and custom fixtures. A token with no
+    price at this tick is simply absent (informational surface — no
+    fabrication).
+
+    Attributes:
+        timestamp: When these prices were observed (equity-point timestamp).
+        prices: Attribution key -> USD price at this tick.
+    """
+
+    timestamp: datetime
+    prices: dict[str, Decimal] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dictionary (Decimals normalized via ``_decimal_str``)."""
+        return {
+            "timestamp": self.timestamp.isoformat(),
+            "prices": {k: _decimal_str(v) for k, v in self.prices.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PricePoint":
+        """Deserialize from dictionary."""
+        return cls(
+            timestamp=datetime.fromisoformat(data["timestamp"]),
+            prices={str(k): Decimal(v) for k, v in (data.get("prices") or {}).items()},
+        )
+
+
+def price_series_display_labels(price_series: "list[PricePoint]") -> dict[str, str]:
+    """Human display labels for every attribution key in ``price_series``.
+
+    Mirrors ``BacktestMetrics.pnl_by_asset_display_labels``: keys stay the
+    canonical attribution keys; labels resolve ``chain:address`` keys to token
+    symbols where known.
+    """
+    from almanak.framework.backtesting.pnl.calculators.attribution import asset_display_label
+
+    keys: dict[str, None] = {}
+    for point in price_series:
+        for key in point.prices:
+            keys.setdefault(key, None)
+    return {key: asset_display_label(key) for key in keys}
+
+
+@dataclass
 class TradeRecord:
     """Record of a single trade executed during backtest.
 
@@ -1720,7 +1772,13 @@ class NumeraireMetrics:
 class BacktestMetrics:
     """Performance metrics calculated from backtest results.
 
-    All financial values are in USD. Ratios are decimal (0.1 = 10%).
+    Ratios are decimal (0.1 = 10%). ``performance_denomination`` names the
+    canonical performance expression (schema v3, blueprint 31 §7): for
+    ``fiat_usd`` strategies everything is USD as before; for token-quoted
+    strategies the equity-derived fields are computed on the numeraire equity
+    series and every ``*_usd`` PnL figure is its ``*_numeraire`` sibling
+    converted at ``numeraire_price_usd_end``. The ``*_usd`` cost columns are
+    always the actual USD ledger.
 
     Attributes:
         total_pnl_usd: Equity-curve PnL (final - initial portfolio value).
@@ -1855,13 +1913,41 @@ class BacktestMetrics:
     pnl_by_asset_display_labels: dict[str, str] = field(default_factory=dict)
     realized_pnl: Decimal = Decimal("0")
     unrealized_pnl: Decimal = Decimal("0")
-    #: Equity-curve-derived metrics denominated in the strategy's numeraire token
-    #: (VIB-5127). ``None`` for USD-numeraire strategies (the default) so a USD
-    #: artifact serializes identically to pre-VIB-5127. The cost columns above
-    #: stay USD even when this is populated.
+    #: Denomination of the canonical performance expression (schema v3):
+    #: ``"USD"`` for ``fiat_usd`` strategies, else the numeraire token symbol
+    #: (e.g. ``"WETH"``). When a token numeraire is declared, the equity-derived
+    #: fields above are computed on the numeraire equity series and every
+    #: ``*_usd`` PnL figure is the ``*_numeraire`` sibling converted at
+    #: ``numeraire_price_usd_end`` — see blueprint 31 §7. Always serialized.
+    performance_denomination: str = "USD"
+    #: Native numeraire amounts (populated only for token-quoted strategies;
+    #: ``None`` -> omitted from the artifact, keeping fiat payloads clean).
+    total_pnl_numeraire: Decimal | None = None
+    net_pnl_numeraire: Decimal | None = None
+    avg_trade_pnl_numeraire: Decimal | None = None
+    largest_win_numeraire: Decimal | None = None
+    largest_loss_numeraire: Decimal | None = None
+    avg_win_numeraire: Decimal | None = None
+    avg_loss_numeraire: Decimal | None = None
+    #: Trade-time-converted execution costs. The ``*_usd`` cost columns remain
+    #: the actual USD ledger (dollars paid at trade time) — costs are not
+    #: performance and are never re-derived from the numeraire.
+    total_fees_numeraire: Decimal | None = None
+    total_slippage_numeraire: Decimal | None = None
+    total_gas_numeraire: Decimal | None = None
+    total_mev_cost_numeraire: Decimal | None = None
+    realized_pnl_numeraire: Decimal | None = None
+    unrealized_pnl_numeraire: Decimal | None = None
+    #: Reference prices making the numeraire<->USD conversion auditable.
+    numeraire_price_usd_start: Decimal | None = None
+    numeraire_price_usd_end: Decimal | None = None
+    #: Legacy (schema v2) equity-curve-derived numeraire sub-block (VIB-5127).
+    #: No longer populated by the engines — the numeraire-canonical merge folds
+    #: it into the primary fields above — but still parsed and re-emitted so a
+    #: v2 artifact survives a load/save cycle without losing its numeraire view.
     numeraire_metrics: "NumeraireMetrics | None" = None
 
-    SCHEMA_VERSION: ClassVar[int] = 2
+    SCHEMA_VERSION: ClassVar[int] = 3
 
     def __post_init__(self) -> None:
         """Populate token display labels from attribution keys when omitted."""
@@ -1889,13 +1975,14 @@ class BacktestMetrics:
         artifacts like ``profit_factor: 0E+17`` never leak into JSON or
         reports (VIB-5083); they render as finite, plain-notation values.
 
-        ``numeraire_metrics`` is emitted only when populated (a non-USD
-        strategy), so a USD artifact is byte-for-byte identical to
-        pre-VIB-5127 — the same emit-when-set discipline as the optional
-        ``EquityPoint`` fields.
+        The ``*_numeraire`` fields (and the legacy ``numeraire_metrics``
+        sub-block) are emitted only when populated (a token-quoted strategy),
+        so a fiat_usd artifact carries no numeraire keys — the same
+        emit-when-set discipline as the optional ``EquityPoint`` fields.
         """
         result: dict[str, Any] = {
             "schema_version": self.SCHEMA_VERSION,
+            "performance_denomination": self.performance_denomination,
             "total_pnl_usd": _decimal_str(self.total_pnl_usd),
             "net_pnl_usd": _decimal_str(self.net_pnl_usd),
             "sharpe_ratio": _decimal_str(self.sharpe_ratio),
@@ -1953,6 +2040,26 @@ class BacktestMetrics:
             "realized_pnl": _decimal_str(self.realized_pnl),
             "unrealized_pnl": _decimal_str(self.unrealized_pnl),
         }
+        numeraire_optionals = {
+            "total_pnl_numeraire": self.total_pnl_numeraire,
+            "net_pnl_numeraire": self.net_pnl_numeraire,
+            "avg_trade_pnl_numeraire": self.avg_trade_pnl_numeraire,
+            "largest_win_numeraire": self.largest_win_numeraire,
+            "largest_loss_numeraire": self.largest_loss_numeraire,
+            "avg_win_numeraire": self.avg_win_numeraire,
+            "avg_loss_numeraire": self.avg_loss_numeraire,
+            "total_fees_numeraire": self.total_fees_numeraire,
+            "total_slippage_numeraire": self.total_slippage_numeraire,
+            "total_gas_numeraire": self.total_gas_numeraire,
+            "total_mev_cost_numeraire": self.total_mev_cost_numeraire,
+            "realized_pnl_numeraire": self.realized_pnl_numeraire,
+            "unrealized_pnl_numeraire": self.unrealized_pnl_numeraire,
+            "numeraire_price_usd_start": self.numeraire_price_usd_start,
+            "numeraire_price_usd_end": self.numeraire_price_usd_end,
+        }
+        for key, value in numeraire_optionals.items():
+            if value is not None:
+                result[key] = _decimal_str(value)
         if self.numeraire_metrics is not None:
             result["numeraire_metrics"] = self.numeraire_metrics.to_dict()
         return result
@@ -2134,6 +2241,13 @@ class BacktestResult:
     numeraire: str | None = None
     initial_capital_numeraire: Decimal | None = None
     final_capital_numeraire: Decimal | None = None
+    #: Per-tick token prices the engine valued the portfolio with, aligned 1:1
+    #: with ``equity_curve`` (PnL engine only today; empty for paper results
+    #: and legacy artifacts). See :class:`PricePoint`.
+    price_series: list[PricePoint] = field(default_factory=list)
+    #: Display labels keyed by ``price_series`` attribution key (mirrors
+    #: ``pnl_by_asset_display_labels``).
+    price_series_display_labels: dict[str, str] = field(default_factory=dict)
     chain: str = DEFAULT_CHAIN
     run_started_at: datetime | None = None
     run_ended_at: datetime | None = None
@@ -2231,7 +2345,33 @@ class BacktestResult:
 
     @property
     def total_return_pct(self) -> Decimal:
-        """Get total return as an actual percentage (e.g. 10 for 10%). (VIB-2915)"""
+        """Canonical total return as an actual percentage (e.g. 10 for 10%). (VIB-2915)
+
+        For a token-quoted strategy the canonical performance expression is the
+        numeraire (blueprint 31 §7), so the return is computed on the
+        numeraire-denominated start/end capital; fiat_usd strategies keep the
+        USD computation unchanged. This keeps sweep tables, the dashboard, and
+        the top-level artifact key consistent with ``metrics``.
+
+        The numeraire branch is gated on the v3 canonical discriminator
+        (``metrics.performance_denomination``), NOT on the top-level numeraire
+        capital fields alone: a loaded v2 artifact (the old additive model)
+        carries ``numeraire`` / ``initial_capital_numeraire`` /
+        ``final_capital_numeraire`` while its stored metrics stay
+        USD-canonical, and this property must keep agreeing with them.
+        """
+        if (
+            self.numeraire is not None
+            and self.metrics.performance_denomination != "USD"
+            and self.initial_capital_numeraire is not None
+            and self.final_capital_numeraire is not None
+            and self.initial_capital_numeraire > 0
+        ):
+            return (
+                (self.final_capital_numeraire - self.initial_capital_numeraire)
+                / self.initial_capital_numeraire
+                * Decimal("100")
+            )
         if self.initial_portfolio_value_usd == 0:
             return Decimal("0")
         return (
@@ -2287,6 +2427,20 @@ class BacktestResult:
         else:
             logger.info(f"Non-critical error at {timestamp}: {context_str}{error_type} - {error_message}{handled_str}")
 
+    def _summary_numeraire_lines(self) -> list[str]:
+        """Numeraire-canonical context lines (empty for fiat_usd results)."""
+        if self.numeraire is None:
+            return []
+        lines = [f"Denomination:       {self.metrics.performance_denomination} (numeraire-canonical)"]
+        if self.initial_capital_numeraire is not None and self.final_capital_numeraire is not None:
+            lines.append(
+                f"Capital ({self.numeraire}): "
+                f"{self.initial_capital_numeraire:,.6f} -> {self.final_capital_numeraire:,.6f}"
+            )
+        if self.metrics.net_pnl_numeraire is not None:
+            lines.append(f"Net PnL ({self.numeraire}): {self.metrics.net_pnl_numeraire:,.6f}")
+        return lines
+
     def _summary_base_lines(self) -> list[str]:
         return [
             "=" * 70,
@@ -2303,6 +2457,7 @@ class BacktestResult:
             "",
             "PERFORMANCE",
             "-" * 70,
+            *self._summary_numeraire_lines(),
             f"Final Capital:      ${self.final_capital_usd:,.2f}",
             f"Net PnL:            ${self.metrics.net_pnl_usd:,.2f}",
             f"Total Return:       {self.metrics.total_return_pct:.2f}%",
@@ -2527,6 +2682,11 @@ class BacktestResult:
             result["initial_capital_numeraire"] = str(self.initial_capital_numeraire)
         if self.final_capital_numeraire is not None:
             result["final_capital_numeraire"] = str(self.final_capital_numeraire)
+        # Emit-when-set, like the numeraire keys: paper results and legacy
+        # artifacts carry no price series, so their payloads are unchanged.
+        if self.price_series:
+            result["price_series"] = [p.to_dict() for p in self.price_series]
+            result["price_series_display_labels"] = dict(self.price_series_display_labels)
         return result
 
     # -------------------------------------------------------------------------
@@ -2566,15 +2726,22 @@ class BacktestResult:
         """Rehydrate a `BacktestMetrics` dict, migrating v1 -> v2 when needed.
 
         VIB-2915: v1 stored total_return_pct / annualized_return_pct as ratios
-        (0.10 for 10%); v2 stores them as whole percentages (10 for 10%).
-        Artifacts without a schema_version are treated as v1 and migrated.
+        (0.10 for 10%); v2+ stores them as whole percentages (10 for 10%).
+        Artifacts without a schema_version are treated as v1 and migrated. The
+        migration keys off ``schema_version < 2`` — NOT ``< SCHEMA_VERSION`` —
+        so later schema bumps (v3: numeraire-canonical fields) never re-apply
+        the x100 percentage migration to a v2 artifact.
+
+        v2 artifacts load with their stored (USD-canonical) semantics; nothing
+        is re-canonicalized on load — ``schema_version`` discriminates and the
+        legacy ``numeraire_metrics`` sub-block is preserved for re-emission.
 
         Explicit `None` (JSON `null` on the top-level `metrics` key) is treated
         as an empty dict -- defensive against hand-authored / third-party
         artifacts; `to_dict` itself always emits a dict.
         """
         metrics_data = metrics_data or {}
-        legacy_metrics_schema = metrics_data.get("schema_version", 1) < BacktestMetrics.SCHEMA_VERSION
+        legacy_metrics_schema = metrics_data.get("schema_version", 1) < 2
         total_return_pct = Decimal(metrics_data.get("total_return_pct", "0"))
         annualized_return_pct = Decimal(metrics_data.get("annualized_return_pct", "0"))
         if legacy_metrics_schema:
@@ -2650,7 +2817,25 @@ class BacktestResult:
             },
             realized_pnl=Decimal(metrics_data.get("realized_pnl", "0")),
             unrealized_pnl=Decimal(metrics_data.get("unrealized_pnl", "0")),
-            # Optional (VIB-5127): absent key -> None -> a USD artifact.
+            # Numeraire-canonical fields (schema v3): absent on fiat / pre-v3
+            # artifacts -> "USD" denomination and None natives.
+            performance_denomination=str(metrics_data.get("performance_denomination", "USD")),
+            total_pnl_numeraire=opt_dec(metrics_data, "total_pnl_numeraire"),
+            net_pnl_numeraire=opt_dec(metrics_data, "net_pnl_numeraire"),
+            avg_trade_pnl_numeraire=opt_dec(metrics_data, "avg_trade_pnl_numeraire"),
+            largest_win_numeraire=opt_dec(metrics_data, "largest_win_numeraire"),
+            largest_loss_numeraire=opt_dec(metrics_data, "largest_loss_numeraire"),
+            avg_win_numeraire=opt_dec(metrics_data, "avg_win_numeraire"),
+            avg_loss_numeraire=opt_dec(metrics_data, "avg_loss_numeraire"),
+            total_fees_numeraire=opt_dec(metrics_data, "total_fees_numeraire"),
+            total_slippage_numeraire=opt_dec(metrics_data, "total_slippage_numeraire"),
+            total_gas_numeraire=opt_dec(metrics_data, "total_gas_numeraire"),
+            total_mev_cost_numeraire=opt_dec(metrics_data, "total_mev_cost_numeraire"),
+            realized_pnl_numeraire=opt_dec(metrics_data, "realized_pnl_numeraire"),
+            unrealized_pnl_numeraire=opt_dec(metrics_data, "unrealized_pnl_numeraire"),
+            numeraire_price_usd_start=opt_dec(metrics_data, "numeraire_price_usd_start"),
+            numeraire_price_usd_end=opt_dec(metrics_data, "numeraire_price_usd_end"),
+            # Legacy v2 sub-block (VIB-5127): absent key -> None.
             numeraire_metrics=(
                 NumeraireMetrics.from_dict(metrics_data["numeraire_metrics"])
                 if metrics_data.get("numeraire_metrics")
@@ -2793,6 +2978,10 @@ class BacktestResult:
             numeraire=data.get("numeraire"),
             initial_capital_numeraire=cls._optional_decimal(data, "initial_capital_numeraire"),
             final_capital_numeraire=cls._optional_decimal(data, "final_capital_numeraire"),
+            price_series=[PricePoint.from_dict(p) for p in (data.get("price_series") or [])],
+            price_series_display_labels={
+                str(k): str(v) for k, v in (data.get("price_series_display_labels") or {}).items()
+            },
             chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
             run_started_at=cls._optional_datetime(data.get("run_started_at")),
             run_ended_at=cls._optional_datetime(data.get("run_ended_at")),

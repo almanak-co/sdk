@@ -261,6 +261,13 @@ def render_summary_metrics(result: BacktestResult) -> None:
         return
 
     st.subheader("Performance Summary")
+    # Numeraire-canonical results (blueprint 31 §7): the $ figures below are
+    # the numeraire performance expressed in USD at the end reference price.
+    if metrics.performance_denomination != "USD":
+        caption = f"Performance denominated in {metrics.performance_denomination} (numeraire-canonical)"
+        if metrics.net_pnl_numeraire is not None:
+            caption += f" — net PnL {metrics.net_pnl_numeraire:,.6f} {metrics.performance_denomination}"
+        st.caption(caption)
 
     # Row 1: Key performance metrics
     col1, col2, col3, col4 = st.columns(4)

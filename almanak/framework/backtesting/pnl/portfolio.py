@@ -28,6 +28,7 @@ from almanak.framework.backtesting.models import (
     LiquidationEvent,
     LPMetrics,
     PerpMetrics,
+    PricePoint,
     SlippageMetrics,
     TradeRecord,
 )
@@ -235,6 +236,10 @@ class SimulatedPortfolio:
     positions: list[SimulatedPosition] = field(default_factory=list)
     equity_curve: list[EquityPoint] = field(default_factory=list)
     trades: list[TradeRecord] = field(default_factory=list)
+    #: Per-tick token-price snapshots, one per equity point (captured by
+    #: ``mark_to_market`` from the tick's ``MarketState.prices``). Purely a
+    #: reporting/visualization export — never read back by the simulation.
+    price_series: list[PricePoint] = field(default_factory=list)
     # Margin configuration
     initial_margin_ratio: Decimal = Decimal("0.1")  # 10% default
     maintenance_margin_ratio: Decimal = Decimal("0.05")  # 5% default
@@ -2698,6 +2703,24 @@ class SimulatedPortfolio:
             )
         )
 
+    def _record_price_point(self, timestamp: datetime, market_state: MarketState) -> None:
+        """Snapshot the tick's token prices next to the equity point.
+
+        Captures ``market_state.prices`` verbatim — the exact prices this mark
+        valued the portfolio with — under the ``pnl_by_asset`` attribution key
+        convention (``chain:address`` for resolved ERC20s, symbols for natives
+        and custom fixtures). Reporting-only; the simulation never reads it.
+
+        Duck-typed market states that expose only ``get_price`` (test
+        fixtures) record an empty snapshot: the 1:1 alignment with
+        ``equity_curve`` is preserved and nothing is fabricated.
+        """
+        prices = getattr(market_state, "prices", None)
+        snapshot: dict[str, Decimal] = (
+            {token_ref_display(token): price for token, price in prices.items()} if isinstance(prices, dict) else {}
+        )
+        self.price_series.append(PricePoint(timestamp=timestamp, prices=snapshot))
+
     def mark_to_market(
         self,
         market_state: MarketState,
@@ -2763,6 +2786,9 @@ class SimulatedPortfolio:
         # value_usd by it; a missing price stays None and fails loud at metrics
         # time rather than aborting an otherwise-valid USD run mid-loop.
         self._record_equity_point(timestamp, total_value, self._numeraire_price_usd(market_state))
+        # Snapshot the prices this mark used (aligned 1:1 with equity_curve)
+        # for the result's visualization/audit price series.
+        self._record_price_point(timestamp, market_state)
 
         return total_value
 
@@ -3357,6 +3383,7 @@ class SimulatedPortfolio:
             "tokens": {token_ref_display(k): str(v) for k, v in self.tokens.items()},
             "positions": [p.to_dict() for p in self.positions],
             "equity_curve": [e.to_dict() for e in self.equity_curve],
+            "price_series": [p.to_dict() for p in self.price_series],
             "trades": [t.to_dict() for t in self.trades],
             "closed_positions": [p.to_dict() for p in self._closed_positions],
             "initial_margin_ratio": str(self.initial_margin_ratio),
@@ -3451,6 +3478,7 @@ class SimulatedPortfolio:
             tokens={k: Decimal(v) for k, v in data.get("tokens", {}).items()},
             positions=[SimulatedPosition.from_dict(p) for p in data.get("positions", [])],
             equity_curve=[cls._equity_point_from_dict(e) for e in data.get("equity_curve", [])],
+            price_series=[PricePoint.from_dict(p) for p in data.get("price_series", [])],
             trades=[cls._trade_record_from_dict(t) for t in data.get("trades", [])],
             _closed_positions=[SimulatedPosition.from_dict(p) for p in data.get("closed_positions", [])],
             initial_margin_ratio=Decimal(data.get("initial_margin_ratio", "0.1")),

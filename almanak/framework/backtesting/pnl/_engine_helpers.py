@@ -53,9 +53,11 @@ from almanak.framework.backtesting.models import (
     ParameterSourceTracker,
     PreflightReport,
     TradeRecord,
+    price_series_display_labels,
 )
 from almanak.framework.backtesting.numeraire import (
     compute_numeraire_metrics,
+    merge_numeraire_canonical,
     numeraire_token_address,
     resolve_numeraire_symbol,
 )
@@ -947,7 +949,11 @@ def finalize_backtest_result(
 
         # Numeraire reporting projection (VIB-5127). No-op (None) for USD
         # strategies; raises here (after the loop) if the numeraire token was
-        # unpriceable at any equity point.
+        # unpriceable at any equity point. For token-quoted strategies the
+        # projection is then folded into the metrics as the CANONICAL
+        # performance expression (blueprint 31 §7): equity-derived fields move
+        # to the numeraire series and USD PnL figures become numeraire amounts
+        # converted at the end reference price.
         numeraire_symbol = state.portfolio._numeraire_symbol
         numeraire_metrics, initial_capital_numeraire, final_capital_numeraire = compute_numeraire_metrics(
             state.portfolio.equity_curve,
@@ -955,7 +961,13 @@ def finalize_backtest_result(
             trading_days_per_year=config.trading_days_per_year,
             risk_free_rate=config.risk_free_rate,
         )
-        metrics.numeraire_metrics = numeraire_metrics
+        if numeraire_metrics is not None:
+            merge_numeraire_canonical(
+                metrics,
+                numeraire_metrics,
+                state.portfolio.equity_curve,
+                state.portfolio.trades,
+            )
 
         # Get final portfolio value
         final_value = (
@@ -1007,6 +1019,8 @@ def finalize_backtest_result(
         numeraire=numeraire_symbol,
         initial_capital_numeraire=initial_capital_numeraire,
         final_capital_numeraire=final_capital_numeraire,
+        price_series=state.portfolio.price_series,
+        price_series_display_labels=price_series_display_labels(state.portfolio.price_series),
         chain=config.chain,
         run_started_at=run_started_at,
         run_ended_at=run_ended_at,

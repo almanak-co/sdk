@@ -113,19 +113,17 @@ def _profit_factor(winning_pnls: list[Decimal], losing_pnls: list[Decimal]) -> D
     return gross_profit / gross_loss
 
 
-def _compute_trade_statistics(trades: list[TradeRecord]) -> _TradeStatistics:
-    """Win/loss statistics over the trades that realized PnL (VIB-5083).
+def trade_statistics_from_realized_pnls(
+    realized_pnls: list[Decimal],
+    failed_count: int,
+) -> _TradeStatistics:
+    """Win/loss statistics over a list of realized per-trade PnLs (VIB-5083).
 
-    Performance stats operate ONLY on trades that actually realized PnL:
-    rejected fills (``success=False``) and opening / inventory-building
-    trades (``pnl_usd=None``) carry no win/loss signal. Empty != Zero -- an
-    unknown PnL must never be miscounted as a loss, which is exactly what
-    degraded ``win_rate`` to 0 and produced negative "wins" before this fix.
-    ``failed_trades`` is reported separately so rejected fills never inflate
-    the win/loss denominator.
+    Denomination-agnostic: the USD lane feeds ``realized_net_pnl()`` values;
+    the numeraire-canonical merge (blueprint 31 §7) feeds the same values
+    converted at trade-tick numeraire prices. One implementation so the two
+    lanes can never drift on win/loss semantics.
     """
-    failed_count = sum(1 for t in trades if not t.success)
-    realized_pnls = _realized_net_pnls(trades)
     winning_pnls, losing_pnls = _split_wins_and_losses(realized_pnls)
 
     return _TradeStatistics(
@@ -146,6 +144,21 @@ def _compute_trade_statistics(trades: list[TradeRecord]) -> _TradeStatistics:
         avg_win=_mean(winning_pnls),
         avg_loss=_mean(losing_pnls),
     )
+
+
+def _compute_trade_statistics(trades: list[TradeRecord]) -> _TradeStatistics:
+    """Win/loss statistics over the trades that realized PnL (VIB-5083).
+
+    Performance stats operate ONLY on trades that actually realized PnL:
+    rejected fills (``success=False``) and opening / inventory-building
+    trades (``pnl_usd=None``) carry no win/loss signal. Empty != Zero -- an
+    unknown PnL must never be miscounted as a loss, which is exactly what
+    degraded ``win_rate`` to 0 and produced negative "wins" before this fix.
+    ``failed_trades`` is reported separately so rejected fills never inflate
+    the win/loss denominator.
+    """
+    failed_count = sum(1 for t in trades if not t.success)
+    return trade_statistics_from_realized_pnls(_realized_net_pnls(trades), failed_count)
 
 
 def _compute_equity_metrics(portfolio: SimulatedPortfolio) -> _EquityMetrics:

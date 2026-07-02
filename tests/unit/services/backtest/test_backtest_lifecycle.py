@@ -657,3 +657,48 @@ class TestSerializeResult:
         serialized = out["trades"]
         assert serialized[0]["pnl_usd"] is None  # opening trade -> JSON null, not "None"
         assert serialized[1]["pnl_usd"] == "1250"  # closing trade -> realized gain
+
+    def test_usd_result_emits_no_numeraire_or_price_keys(self):
+        """A fiat_usd result payload stays free of numeraire / price-series keys."""
+        out = serialize_result(self._result([]))
+        assert "numeraire" not in out
+        assert "initial_capital_numeraire" not in out
+        assert "final_capital_numeraire" not in out
+        assert "price_series" not in out
+        assert "price_series_display_labels" not in out
+        assert all("numeraire_price_usd" not in pt and "value_numeraire" not in pt for pt in out["equity_curve"])
+
+    def test_numeraire_and_price_series_pass_through(self):
+        """The service serializer must not strip the numeraire projection (VIB-5127).
+
+        Regression: the old serializer emitted only ``{timestamp, value_usd}``
+        per equity point, dropping ``numeraire_price_usd`` and the top-level
+        numeraire descriptors that the SDK result carried.
+        """
+        from datetime import UTC, datetime
+
+        from almanak.framework.backtesting.models import EquityPoint, PricePoint
+
+        result = self._result([])
+        result.numeraire = "WETH"
+        result.initial_capital_numeraire = Decimal("5")
+        result.final_capital_numeraire = Decimal("5.5")
+        ts = datetime(2025, 11, 1, tzinfo=UTC)
+        result.equity_curve = [
+            EquityPoint(timestamp=ts, value_usd=Decimal("10000"), numeraire_price_usd=Decimal("2000")),
+        ]
+        result.price_series = [
+            PricePoint(timestamp=ts, prices={"arbitrum:0xweth": Decimal("2000"), "USDC": Decimal("1")}),
+        ]
+        result.price_series_display_labels = {"arbitrum:0xweth": "WETH", "USDC": "USDC"}
+
+        out = serialize_result(result)
+        assert out["numeraire"] == "WETH"
+        assert out["initial_capital_numeraire"] == "5"
+        assert out["final_capital_numeraire"] == "5.5"
+        point = out["equity_curve"][0]
+        assert point["numeraire_price_usd"] == "2000"
+        assert point["value_numeraire"] == "5"  # 10000 / 2000
+        price_point = out["price_series"][0]
+        assert price_point["prices"] == {"arbitrum:0xweth": "2000", "USDC": "1"}
+        assert out["price_series_display_labels"]["arbitrum:0xweth"] == "WETH"

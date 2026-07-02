@@ -7,7 +7,7 @@ Tests cover:
 - Position management and token balance tracking
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -1491,3 +1491,41 @@ class TestPortfolioIntegration:
         # Metrics should show 2 trades
         metrics = portfolio.get_metrics()
         assert metrics.total_trades == 2
+
+
+class TestPriceSeriesSerialization:
+    """SimulatedPortfolio.price_series checkpoint/resume round-trip."""
+
+    def test_price_series_round_trips_through_to_dict(self) -> None:
+        """price_series survives to_dict()/from_dict() exactly (keys + Decimals)."""
+        from almanak.framework.backtesting.models import PricePoint
+
+        ts0 = datetime(2024, 1, 1, tzinfo=UTC)
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+        portfolio.price_series = [
+            PricePoint(
+                timestamp=ts0,
+                prices={"arbitrum:0xweth": Decimal("2000"), "USDC": Decimal("1")},
+            ),
+            PricePoint(
+                timestamp=ts0 + timedelta(hours=1),
+                prices={"arbitrum:0xweth": Decimal("2100.50"), "USDC": Decimal("1")},
+            ),
+        ]
+
+        restored = SimulatedPortfolio.from_dict(portfolio.to_dict())
+
+        assert len(restored.price_series) == 2
+        assert restored.price_series[0].timestamp == ts0
+        assert restored.price_series[0].prices == {"arbitrum:0xweth": Decimal("2000"), "USDC": Decimal("1")}
+        assert restored.price_series[1].prices["arbitrum:0xweth"] == Decimal("2100.50")
+
+    def test_legacy_portfolio_dict_without_price_series_loads_empty(self) -> None:
+        """Checkpoints written before price_series existed resume with an empty series."""
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+        payload = portfolio.to_dict()
+        payload.pop("price_series", None)
+
+        restored = SimulatedPortfolio.from_dict(payload)
+
+        assert restored.price_series == []

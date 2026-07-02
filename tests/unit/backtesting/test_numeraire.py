@@ -263,3 +263,215 @@ def test_simulated_portfolio_round_trips_numeraire_context() -> None:
     usd_restored = SimulatedPortfolio.from_dict(usd.to_dict())
     assert usd_restored._numeraire_symbol is None
     assert usd_restored.equity_curve[0].numeraire_price_usd is None
+
+
+# ---------------------------------------------------------------------------
+# Numeraire-canonical merge (blueprint 31 §7)
+# ---------------------------------------------------------------------------
+
+
+def _moving_price_fixture() -> tuple[list[EquityPoint], list["TradeRecord"], NumeraireMetrics]:
+    """Buy-low / sell-high fixture with a moving numeraire price.
+
+    Curve: 10,000 USD flat, jumps to 11,250 USD when the sell realizes
+    +1,250 gross at t2; WETH price moves 2,000 -> 2,500 at t2. In WETH the
+    portfolio decays 5 -> 4.5 despite the positive USD delta.
+    """
+    from almanak.framework.backtesting.models import IntentType, TradeRecord
+
+    prices = [Decimal("2000"), Decimal("2000"), Decimal("2500"), Decimal("2500")]
+    values = [Decimal("10000"), Decimal("10000"), Decimal("11250"), Decimal("11250")]
+    curve = [
+        EquityPoint(timestamp=_TS0 + timedelta(hours=i), value_usd=v, numeraire_price_usd=p)
+        for i, (v, p) in enumerate(zip(values, prices, strict=True))
+    ]
+    trades = [
+        TradeRecord(
+            timestamp=_TS0 + timedelta(hours=1),
+            intent_type=IntentType.SWAP,
+            executed_price=Decimal("2000"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            pnl_usd=None,  # opening / inventory-building
+            success=True,
+            amount_usd=Decimal("5000"),
+            protocol="uniswap_v3",
+        ),
+        TradeRecord(
+            timestamp=_TS0 + timedelta(hours=2),
+            intent_type=IntentType.SWAP,
+            executed_price=Decimal("2500"),
+            fee_usd=Decimal("10"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            pnl_usd=Decimal("1250"),  # gross realized at the 2,500 tick
+            success=True,
+            amount_usd=Decimal("6250"),
+            protocol="uniswap_v3",
+        ),
+    ]
+    nm, initial, final = compute_numeraire_metrics(
+        curve,
+        numeraire_symbol="WETH",
+        trading_days_per_year=365,
+        risk_free_rate=Decimal("0"),
+    )
+    assert nm is not None and initial == Decimal("5") and final == Decimal("4.5")
+    return curve, trades, nm
+
+
+def test_merge_numeraire_canonical_overwrites_primary_fields() -> None:
+    from almanak.framework.backtesting.numeraire import merge_numeraire_canonical
+
+    curve, trades, nm = _moving_price_fixture()
+    metrics = BacktestMetrics(
+        total_pnl_usd=Decimal("1250"),
+        net_pnl_usd=Decimal("1250"),
+        total_fees_usd=Decimal("10"),
+        realized_pnl=Decimal("1250"),
+        unrealized_pnl=Decimal("0"),
+        failed_trades=0,
+    )
+    merge_numeraire_canonical(metrics, nm, curve, trades)
+
+    assert metrics.performance_denomination == "WETH"
+    assert metrics.numeraire_price_usd_start == Decimal("2000")
+    assert metrics.numeraire_price_usd_end == Decimal("2500")
+    # Equity-derived: the WETH story (-0.5 WETH == -10%), USD derived at P_end.
+    assert metrics.total_pnl_numeraire == Decimal("-0.5")
+    assert metrics.total_pnl_usd == Decimal("-1250")
+    assert metrics.net_pnl_usd == Decimal("-1250")
+    assert metrics.total_return_pct == Decimal("-10")
+    assert metrics.max_drawdown_pct == Decimal("0.1")
+    # Trade stats convert at the trade tick: +1,240 net at 2,500 -> +0.496 WETH.
+    assert metrics.trades_with_realized_pnl == 1
+    assert metrics.winning_trades == 1
+    assert metrics.win_rate == Decimal("1")
+    assert metrics.largest_win_numeraire == Decimal("0.496")
+    assert metrics.largest_win_usd == Decimal("1240")
+    # Realized uses gross per-trade PnL at the trade tick (1,250 / 2,500).
+    assert metrics.realized_pnl_numeraire == Decimal("0.5")
+    assert metrics.realized_pnl == Decimal("1250")
+    assert metrics.unrealized_pnl_numeraire == Decimal("0")
+    # Costs: USD ledger untouched; numeraire column converted at trade tick.
+    assert metrics.total_fees_usd == Decimal("10")
+    assert metrics.total_fees_numeraire == Decimal("0.004")
+    # Attribution buckets numeraire PnLs, expressed at P_end (0.496 x 2500).
+    assert metrics.pnl_by_intent_type == {"SWAP": Decimal("1240")}
+    # The legacy sub-block is not attached at v3.
+    assert metrics.numeraire_metrics is None
+
+
+def test_merge_trade_price_lookup_uses_most_recent_earlier_point() -> None:
+    """Off-grid trade timestamps resolve to the most recent earlier mark."""
+    from almanak.framework.backtesting.models import IntentType, TradeRecord
+    from almanak.framework.backtesting.numeraire import merge_numeraire_canonical
+
+    curve, _trades, nm = _moving_price_fixture()
+    off_grid = TradeRecord(
+        timestamp=_TS0 + timedelta(hours=1, minutes=30),  # between the 2,000 and 2,500 marks
+        intent_type=IntentType.SWAP,
+        executed_price=Decimal("2000"),
+        fee_usd=Decimal("0"),
+        slippage_usd=Decimal("0"),
+        gas_cost_usd=Decimal("0"),
+        pnl_usd=Decimal("100"),
+        success=True,
+        amount_usd=Decimal("100"),
+    )
+    metrics = BacktestMetrics()
+    merge_numeraire_canonical(metrics, nm, curve, [off_grid])
+    # 100 USD at the most recent earlier mark (2,000) -> 0.05 WETH.
+    assert metrics.realized_pnl_numeraire == Decimal("0.05")
+
+
+def test_v2_artifact_with_numeraire_metrics_preserves_legacy_block() -> None:
+    """A v2 numeraire artifact loads USD-canonical and keeps its sub-block.
+
+    Nothing is re-canonicalized on load: the primary fields keep their stored
+    (v2, USD) semantics -- so performance_denomination correctly reads "USD" --
+    and the legacy numeraire_metrics sub-block survives a load/save cycle.
+    """
+    v2_metrics = {
+        "schema_version": 2,
+        "total_pnl_usd": "1250",
+        "total_return_pct": "12.5",
+        "numeraire_metrics": {
+            "numeraire": "WETH",
+            "total_pnl": "-0.5",
+            "total_return_pct": "-10",
+        },
+    }
+    result = BacktestResult.from_dict(
+        {
+            "engine": "pnl",
+            "deployment_id": "d",
+            "start_time": "2024-01-01T00:00:00+00:00",
+            "end_time": "2024-01-01T01:00:00+00:00",
+            "metrics": v2_metrics,
+        }
+    )
+    metrics = result.metrics
+    # v2 percentages are NOT re-migrated (the x100 rule applies only below v2).
+    assert metrics.total_return_pct == Decimal("12.5")
+    assert metrics.performance_denomination == "USD"
+    assert metrics.total_pnl_numeraire is None
+    assert metrics.numeraire_metrics is not None
+    assert metrics.numeraire_metrics.total_pnl == Decimal("-0.5")
+    # Re-emission keeps the legacy block (now under the v3 schema version).
+    payload = metrics.to_dict()
+    assert payload["schema_version"] == 3
+    assert payload["numeraire_metrics"]["numeraire"] == "WETH"
+
+
+def test_v2_artifact_with_top_level_numeraire_capitals_keeps_usd_return() -> None:
+    """A loaded v2 additive-model artifact must not re-canonicalize on save.
+
+    v2 artifacts carry the top-level ``numeraire`` /
+    ``initial_capital_numeraire`` / ``final_capital_numeraire`` fields while
+    their stored metrics stay USD-canonical
+    (``performance_denomination == "USD"``). The ``total_return_pct`` property
+    (and therefore ``to_dict()["total_return_pct"]``) must keep telling the
+    stored USD story — gating on the capitals alone would flip it to the
+    numeraire return (-10% here) and contradict ``metrics.total_return_pct``.
+    """
+    payload = {
+        "engine": "pnl",
+        "deployment_id": "d",
+        "start_time": "2024-01-01T00:00:00+00:00",
+        "end_time": "2024-01-01T01:00:00+00:00",
+        "metrics": {
+            "schema_version": 2,
+            "total_pnl_usd": "1250",
+            "total_return_pct": "12.5",
+            "numeraire_metrics": {
+                "numeraire": "WETH",
+                "total_pnl": "-0.5",
+                "total_return_pct": "-10",
+            },
+        },
+        "initial_portfolio_value_usd": "10000",
+        "final_capital_usd": "11250",
+        "numeraire": "WETH",
+        "initial_capital_numeraire": "5",
+        "final_capital_numeraire": "4.5",
+    }
+    result = BacktestResult.from_dict(payload)
+
+    assert result.metrics.performance_denomination == "USD"
+    # The property stays USD-canonical, agreeing with the stored v2 metrics.
+    assert result.total_return_pct == Decimal("12.5")
+    saved = result.to_dict()
+    assert Decimal(saved["total_return_pct"]) == Decimal("12.5")
+    # The additive v2 fields still round-trip untouched.
+    assert saved["numeraire"] == "WETH"
+    assert saved["initial_capital_numeraire"] == "5"
+    assert saved["final_capital_numeraire"] == "4.5"
+    assert saved["metrics"]["numeraire_metrics"]["total_return_pct"] == "-10"
+
+    # Contrast: a fresh v3 token-quoted result (denomination set by the merge)
+    # DOES report the numeraire return through the same property.
+    v3 = BacktestResult.from_dict(payload)
+    v3.metrics.performance_denomination = "WETH"
+    assert v3.total_return_pct == Decimal("-10")

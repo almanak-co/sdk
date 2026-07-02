@@ -43,7 +43,7 @@ Example:
     )
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -144,6 +144,12 @@ class AttributionCalculator:
     Attributes:
         use_net_pnl: If True, use net_pnl_usd (after costs) for attribution.
             If False, use pnl_usd (before costs). Default True.
+        pnl_override: Optional per-trade PnL extractor that replaces the
+            USD-field lookup entirely (``use_net_pnl`` is then ignored). Used
+            by the numeraire-canonical merge (blueprint 31 §7) to attribute
+            trade-time-converted numeraire PnLs through the exact same
+            bucketing rules as the USD lane — never duplicate the bucketing.
+            Must return ``None`` for trades that realized nothing.
 
     Example:
         calc = AttributionCalculator()
@@ -155,6 +161,7 @@ class AttributionCalculator:
     """
 
     use_net_pnl: bool = True
+    pnl_override: "Callable[[TradeRecord], Decimal | None] | None" = None
 
     def _get_trade_pnl(self, trade: "TradeRecord") -> Decimal:
         """Get the realized PnL value to use for a trade.
@@ -170,10 +177,14 @@ class AttributionCalculator:
             trade: TradeRecord to extract PnL from
 
         Returns:
-            Net PnL if use_net_pnl is True, otherwise gross PnL; ``0`` when
-            the trade realized no PnL.
+            The ``pnl_override`` value when configured; otherwise net PnL if
+            use_net_pnl is True, else gross PnL; ``0`` when the trade realized
+            no PnL.
         """
-        value = trade.net_pnl_usd if self.use_net_pnl else trade.pnl_usd
+        if self.pnl_override is not None:
+            value = self.pnl_override(trade)
+        else:
+            value = trade.net_pnl_usd if self.use_net_pnl else trade.pnl_usd
         return value if value is not None else Decimal("0")
 
     def attribute_pnl_by_protocol(
@@ -490,6 +501,7 @@ def verify_attribution_totals(
 def calculate_all_attributions(
     trades: list["TradeRecord"],
     use_net_pnl: bool = True,
+    pnl_override: "Callable[[TradeRecord], Decimal | None] | None" = None,
 ) -> tuple[dict[str, Decimal], dict[str, Decimal], dict[str, Decimal]]:
     """Calculate all three attribution breakdowns at once.
 
@@ -499,6 +511,8 @@ def calculate_all_attributions(
     Args:
         trades: List of TradeRecord objects from the backtest
         use_net_pnl: If True, use net PnL after costs. Default True.
+        pnl_override: Optional per-trade PnL extractor replacing the USD-field
+            lookup (see :class:`AttributionCalculator.pnl_override`).
 
     Returns:
         Tuple of (pnl_by_protocol, pnl_by_intent_type, pnl_by_asset) dictionaries
@@ -506,7 +520,7 @@ def calculate_all_attributions(
     Example:
         by_protocol, by_intent, by_asset = calculate_all_attributions(trades)
     """
-    calc = AttributionCalculator(use_net_pnl=use_net_pnl)
+    calc = AttributionCalculator(use_net_pnl=use_net_pnl, pnl_override=pnl_override)
     return (
         calc.attribute_pnl_by_protocol(trades),
         calc.attribute_pnl_by_intent_type(trades),

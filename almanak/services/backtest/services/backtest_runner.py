@@ -21,7 +21,7 @@ from typing import Any
 from almanak.core.chains import ChainRegistry
 from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.config import BacktestDataConfig
-from almanak.framework.backtesting.models import BacktestResult
+from almanak.framework.backtesting.models import BacktestResult, _decimal_str
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
@@ -643,18 +643,39 @@ def build_backtest_config(
     )
 
 
+def _serialize_equity_point(pt: Any) -> dict[str, Any]:
+    """Serialize one equity point, keeping the numeraire projection intact.
+
+    For a token-quoted strategy (VIB-5127) every point carries the numeraire
+    token's USD price; ``value_numeraire`` (= ``value_usd / numeraire_price_usd``)
+    is emitted alongside as a derived convenience so dashboards can plot the
+    canonical numeraire equity curve without re-deriving it. USD points are
+    unchanged.
+
+    Timestamps deliberately keep the service payload's ``str(datetime)``
+    format (matching the trades array and the pre-existing equity points);
+    the new Decimal fields are normalized via ``_decimal_str`` so exponent
+    artifacts (``0E+17``) never leak into JSON (VIB-5083).
+    """
+    payload: dict[str, Any] = {"timestamp": str(pt.timestamp), "value_usd": str(pt.value_usd)}
+    if pt.numeraire_price_usd is not None and pt.numeraire_price_usd > 0:
+        payload["numeraire_price_usd"] = _decimal_str(pt.numeraire_price_usd)
+        payload["value_numeraire"] = _decimal_str(pt.value_usd / pt.numeraire_price_usd)
+    return payload
+
+
 def serialize_result(result: BacktestResult) -> dict[str, Any]:
     """Serialize BacktestResult to a JSON-compatible dict.
 
     Uses BacktestMetrics.to_dict() to expose the full metric set. All Decimal
     values are stringified for JSON safety. The field names match the SDK's
-    internal BacktestMetrics dataclass exactly.
+    internal BacktestMetrics dataclass exactly. Numeraire fields (top-level
+    descriptors, per-point prices) and the per-tick ``price_series`` are
+    passed through emit-when-set, mirroring ``BacktestResult.to_dict``.
     """
-    return {
+    payload: dict[str, Any] = {
         "metrics": result.metrics.to_dict(),
-        "equity_curve": [
-            {"timestamp": str(pt.timestamp), "value_usd": str(pt.value_usd)} for pt in (result.equity_curve or [])
-        ],
+        "equity_curve": [_serialize_equity_point(pt) for pt in (result.equity_curve or [])],
         "trades": [
             {
                 "timestamp": str(t.timestamp),
@@ -670,6 +691,24 @@ def serialize_result(result: BacktestResult) -> dict[str, Any]:
         ],
         "duration_seconds": result.run_duration_seconds or 0.0,
     }
+    if result.numeraire is not None:
+        payload["numeraire"] = result.numeraire
+    if result.initial_capital_numeraire is not None:
+        payload["initial_capital_numeraire"] = str(result.initial_capital_numeraire)
+    if result.final_capital_numeraire is not None:
+        payload["final_capital_numeraire"] = str(result.final_capital_numeraire)
+    if result.price_series:
+        payload["price_series"] = [
+            {
+                # str(datetime), not isoformat: consistent with every other
+                # timestamp in this service payload (equity curve, trades).
+                "timestamp": str(pt.timestamp),
+                "prices": {key: _decimal_str(price) for key, price in pt.prices.items()},
+            }
+            for pt in result.price_series
+        ]
+        payload["price_series_display_labels"] = dict(result.price_series_display_labels)
+    return payload
 
 
 def resolve_strategy(
