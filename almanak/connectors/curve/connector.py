@@ -10,7 +10,9 @@ from almanak.connectors._connector import (
     FeeModelDecl,
     ImportRef,
     MetadataAmountEncoding,
+    PositionReadDecl,
 )
+from almanak.connectors._strategy_base.position_read_base import CURVE_LP
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 
 CONNECTOR = Connector(
@@ -58,6 +60,12 @@ CONNECTOR = Connector(
     # Curve LP positions are fungible ERC20 LP tokens: LPCloseIntent.position_id
     # is overloaded as the burn AMOUNT, never an NFT discriminator (VIB-4968).
     fungible_lp=True,
+    # On-chain LP repricing is framework-owned (CurveLpPositionReader:
+    # lp_balance × live virtual_price × numeraire). Declaring the curve_lp kind
+    # routes the valuer's capability dispatch through PositionReadRegistry instead
+    # of the reader's old hardcoded {"curve"} set (VIB-5420). No builder — the
+    # math is framework-valued, not connector-side.
+    position_read=PositionReadDecl(kind=CURVE_LP),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE"),
     strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base"),
 )

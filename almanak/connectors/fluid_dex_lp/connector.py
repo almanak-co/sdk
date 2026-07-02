@@ -6,8 +6,10 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    PositionReadDecl,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.connectors._strategy_base.position_read_base import FUNGIBLE_LP
 
 CONNECTOR = Connector(
     # DEX LP surface (Phase 4, VIB-5032): a third thin manifest over the fluid
@@ -38,6 +40,17 @@ CONNECTOR = Connector(
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.fluid_dex_lp.receipt_parser_provider",
         attribute="FluidDexLpReceiptParserConnector",
+    ),
+    # On-chain LP repricing is connector-valued (share balance → per-share
+    # token0/token1 claim via the SmartLending resolver). Declaring the
+    # fungible_lp kind + builder routes the valuer's FungibleLpPositionReader
+    # through PositionReadRegistry instead of its old _BOOTSTRAP map (VIB-5126).
+    position_read=PositionReadDecl(
+        kind=FUNGIBLE_LP,
+        builder=ImportRef(
+            module="almanak.connectors._fluid_core.dex_lp_valuation",
+            attribute="read_fungible_lp_position",
+        ),
     ),
     strategy_intents=("LP_OPEN", "LP_CLOSE"),
     # v1 scope — arbitrum only (the sole chain whose SmartLending wrappers were

@@ -24,6 +24,7 @@ from typing import Any
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.connectors._strategy_base.position_read_base import BUILDER_REQUIRED_KINDS, POSITION_READ_KINDS
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 from almanak.connectors._strategy_base.vault_representatives import VaultRepresentativeSpec
@@ -51,6 +52,7 @@ __all__ = [
     "LiquidationDefault",
     "MetadataAmountEncoding",
     "PerpsReadDecl",
+    "PositionReadDecl",
     "StrategyMatrixEntry",
     "SupportedChainsSpec",
     "VaultRepresentativeSpec",
@@ -276,6 +278,48 @@ class PerpsReadDecl:
         if not isinstance(self.spec, ImportRef):
             raise ValueError(f"PerpsReadDecl.spec must be an ImportRef, got {self.spec!r}")
         _validate_decl_aliases("PerpsReadDecl", self.aliases)
+
+
+@dataclass(frozen=True)
+class PositionReadDecl:
+    """Connector-owned LP/vault position-read dispatch declaration (VIB-5126 / VIB-5420).
+
+    Declares which framework on-chain repricer family marks this connector's
+    LP/vault position, so the framework valuer's capability-gated readers
+    (``FungibleLpPositionReader`` / ``CurveLpPositionReader``) dispatch through
+    :class:`~almanak.connectors._strategy_base.position_read_registry.PositionReadRegistry`
+    instead of a hardcoded protocol-name set. Promotes the two dated coupling-
+    baseline exceptions (``FungibleLpPositionReader._BOOTSTRAP`` and
+    ``CurveLpPositionReader._SUPPORTED_PROTOCOLS``) onto the manifest.
+
+    ``kind`` is one of ``POSITION_READ_KINDS`` (``"fungible_lp"`` / ``"curve_lp"``):
+    which repricer family owns this protocol's valuation. ``builder`` names a
+    connector-side repricer callable and is REQUIRED for builder-valued kinds
+    (``fungible_lp`` — share balance → token0/token1) and FORBIDDEN for
+    framework-valued kinds (``curve_lp`` — the framework reader owns the math).
+    ``aliases`` are position-read-scoped protocol aliases resolving to this
+    connector's canonical key; they join the position-read dispatch namespace
+    only, NOT the manifest discovery / compiler alias namespaces.
+    """
+
+    kind: str
+    builder: ImportRef | None = None
+    aliases: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the declaration's kind, builder reference, and aliases."""
+        if not isinstance(self.kind, str) or self.kind not in POSITION_READ_KINDS:
+            raise ValueError(f"PositionReadDecl.kind must be one of {sorted(POSITION_READ_KINDS)}, got {self.kind!r}")
+        if self.builder is not None and not isinstance(self.builder, ImportRef):
+            raise ValueError(f"PositionReadDecl.builder must be None or an ImportRef, got {self.builder!r}")
+        # Builder-valued kinds carry their math in a connector module (resolved
+        # lazily by the registry); framework-valued kinds own the math in the
+        # framework reader and must NOT declare one. Mismatches fail loudly here.
+        if self.kind in BUILDER_REQUIRED_KINDS and self.builder is None:
+            raise ValueError(f"PositionReadDecl.kind={self.kind!r} requires a builder ImportRef")
+        if self.kind not in BUILDER_REQUIRED_KINDS and self.builder is not None:
+            raise ValueError(f"PositionReadDecl.kind={self.kind!r} is framework-valued and must not declare a builder")
+        _validate_decl_aliases("PositionReadDecl", self.aliases)
 
 
 @dataclass(frozen=True)
@@ -720,6 +764,7 @@ class Connector:
     primitive: ImportRef | None = None
     lending_read: LendingReadDecl | None = None
     perps_read: PerpsReadDecl | None = None
+    position_read: PositionReadDecl | None = None
     funding_history: FundingHistoryDecl | None = None
     fee_model: FeeModelDecl | None = None
     yield_poke: YieldPokeDecl | None = None
@@ -796,6 +841,7 @@ class Connector:
         self._validate_primitive()
         self._validate_lending_read()
         self._validate_perps_read()
+        self._validate_position_read()
         self._validate_funding_history()
         self._validate_fee_model()
         self._validate_yield_poke()
@@ -1045,6 +1091,11 @@ class Connector:
         """Validate the perps-read dispatch declaration."""
         if self.perps_read is not None and not isinstance(self.perps_read, PerpsReadDecl):
             raise ValueError(f"Connector.perps_read must be None or a PerpsReadDecl, got {self.perps_read!r}")
+
+    def _validate_position_read(self) -> None:
+        """Validate the LP/vault position-read dispatch declaration."""
+        if self.position_read is not None and not isinstance(self.position_read, PositionReadDecl):
+            raise ValueError(f"Connector.position_read must be None or a PositionReadDecl, got {self.position_read!r}")
 
     def _validate_funding_history(self) -> None:
         """Validate the optional funding-history declaration."""
@@ -1569,6 +1620,10 @@ class ConnectorRegistry:
     def with_perps_read(self) -> tuple[Connector, ...]:
         """Return connectors that publish perps-read dispatch declarations."""
         return tuple(d for d in self.all() if d.perps_read is not None)
+
+    def with_position_read(self) -> tuple[Connector, ...]:
+        """Return connectors that publish LP/vault position-read declarations."""
+        return tuple(d for d in self.all() if d.position_read is not None)
 
     def with_metadata_amount_encoding(self) -> tuple[Connector, ...]:
         """Return connectors that declare a metadata amount encoding."""

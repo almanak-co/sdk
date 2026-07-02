@@ -7,17 +7,24 @@ the connector's resolver. The framework LP valuer is hardcoded to V3-NFT
 this reader fills that gap, mirroring ``VaultPositionReader`` (ERC-4626
 share→assets) but two-legged.
 
-Per-protocol logic stays connector-local: a connector registers a builder via
-:func:`register_fungible_lp_reader`. The reader returns ``None`` on any failure
-(Empty ≠ Zero — the valuer then flags ``no_path``/``UNAVAILABLE``, never a
-fabricated zero). All reads route through the gateway.
+Per-protocol logic stays connector-local: a connector declares
+``position_read=PositionReadDecl(kind="fungible_lp", builder=ImportRef(...))``
+on its ``CONNECTOR`` manifest, and this reader dispatches through
+:class:`~almanak.connectors._strategy_base.position_read_registry.PositionReadRegistry`
+(VIB-5126 — promotes the old hardcoded ``_BOOTSTRAP`` map onto the manifest, so
+adding a fungible-LP connector needs no framework edit). The reader returns
+``None`` on any failure (Empty ≠ Zero — the valuer then flags
+``no_path``/``UNAVAILABLE``, never a fabricated zero). All reads route through
+the gateway.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
+
+from almanak.connectors._strategy_base.position_read_base import FUNGIBLE_LP
+from almanak.connectors._strategy_base.position_read_registry import PositionReadRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -48,46 +55,14 @@ class FungibleLpPosition:
         return self.shares_wei > 0
 
 
-# Builder signature: (gateway_client, chain, wrapper, wallet) -> FungibleLpPosition | None
-_Builder = Callable[[object, str, str, str], "FungibleLpPosition | None"]
-
-_BUILDERS: dict[str, _Builder] = {}
-
-# Lazy bootstrap: importing the module registers the protocol's builder. One
-# entry per fungible-LP connector (v1: fluid_dex_lp). This is the single
-# framework→connector PROTOCOL_STRING the coupling ratchet records as an
-# intentional, dated exception (see VIB-5126 + the coupling baseline): with one
-# fungible-LP connector, a manifest-field generalization is premature
-# (rule-of-three). Promote to a ``fungible_lp_reader=ImportRef(...)`` manifest
-# decl — resolved from the registry generically — when a 2nd fungible-LP
-# connector lands (VIB-5126), which removes this map and the baseline entry.
-_BOOTSTRAP: dict[str, str] = {
-    "fluid_dex_lp": "almanak.connectors.fluid.dex_lp_valuation",
-}
-
-
-def register_fungible_lp_reader(protocol: str, builder: _Builder) -> None:
-    """Register a connector-local fungible-LP position builder."""
-    _BUILDERS[protocol.lower()] = builder
-
-
-def _ensure_bootstrapped(protocol: str) -> None:
-    key = protocol.lower()
-    if key in _BUILDERS:
-        return
-    module_path = _BOOTSTRAP.get(key)
-    if module_path is None:
-        return
-    try:
-        import importlib
-
-        importlib.import_module(module_path)
-    except Exception:  # noqa: BLE001
-        logger.debug("Fungible-LP reader bootstrap failed for protocol=%s", protocol, exc_info=True)
-
-
 class FungibleLpPositionReader:
-    """Reads fungible two-token LP positions via registered connector builders."""
+    """Reads fungible two-token LP positions via manifest-declared connector builders.
+
+    Capability-gated by :meth:`supports`, which asks
+    :class:`PositionReadRegistry` whether a protocol declares the ``fungible_lp``
+    kind — so the valuer dispatches fungible-LP positions here (and NOT into the
+    V3-NFT read) without a hardcoded protocol-name set.
+    """
 
     def __init__(self, gateway_client: object | None = None) -> None:
         self._gateway = gateway_client
@@ -96,8 +71,7 @@ class FungibleLpPositionReader:
         self._gateway = gateway_client
 
     def supports(self, protocol: str) -> bool:
-        _ensure_bootstrapped(protocol)
-        return protocol.lower() in _BUILDERS
+        return PositionReadRegistry.kind(protocol) == FUNGIBLE_LP
 
     def read_position(
         self,
@@ -108,10 +82,9 @@ class FungibleLpPositionReader:
         wallet_address: str,
     ) -> FungibleLpPosition | None:
         """Read share balance + per-share token amounts. None on any failure."""
-        if self._gateway is None:
+        if self._gateway is None or not self.supports(protocol):
             return None
-        _ensure_bootstrapped(protocol)
-        builder = _BUILDERS.get(protocol.lower())
+        builder = PositionReadRegistry.builder(protocol)
         if builder is None:
             return None
         try:
@@ -127,4 +100,4 @@ class FungibleLpPositionReader:
             return None
 
 
-__all__ = ["FungibleLpPosition", "FungibleLpPositionReader", "register_fungible_lp_reader"]
+__all__ = ["FungibleLpPosition", "FungibleLpPositionReader"]

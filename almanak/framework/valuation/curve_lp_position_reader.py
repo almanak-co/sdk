@@ -26,8 +26,8 @@ at ``peg=1`` (Empty ≠ Zero — a wrong mark is worse than no mark).
 holds no RPC URL. Pool metadata (address / coins) is resolved from a READ-ONLY
 lookup of the Curve connector's static ``CURVE_POOLS`` registry — a pure data
 read, no connector logic, no egress — reached via a LAZY
-``importlib.import_module`` (the same seam ``FungibleLpPositionReader._BOOTSTRAP``
-uses) so the framework→concrete-connector static-import ratchet stays clean.
+``importlib.import_module`` so the framework→concrete-connector static-import
+ratchet stays clean.
 
 Returns ``None`` on any failure (Empty ≠ Zero — the valuer then flags
 ``no_path`` / ``UNAVAILABLE``, never a fabricated zero); returns a measured
@@ -43,6 +43,9 @@ import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
+
+from almanak.connectors._strategy_base.position_read_base import CURVE_LP
+from almanak.connectors._strategy_base.position_read_registry import PositionReadRegistry
 
 # Curve USD-numeraire allowlist — shared with the accounting LP handler's
 # basis-peg via ``almanak.core.constants`` (VIB-5536; see the ``_USD_STABLE_SYMBOLS``
@@ -173,7 +176,7 @@ def _resolve_curve_pool_meta(chain: str, *, pool: str, lp_token: str) -> dict[st
 
     Resolved via a LAZY ``importlib.import_module`` (not a static ``import``) so
     the framework→concrete-connector static-import ratchet stays clean — the same
-    seam ``FungibleLpPositionReader._BOOTSTRAP`` uses to reach the fluid connector
+    lazy-import seam the connector-side fungible-LP builder is reached through,
     without a top-level connector import. Recorded as the dated CONNECTOR_IMPORT
     exception in the coupling baseline (VIB-5420).
     """
@@ -212,15 +215,12 @@ def _resolve_curve_pool_meta(chain: str, *, pool: str, lp_token: str) -> dict[st
 class CurveLpPositionReader:
     """Reads Curve LP positions (balance + live virtual_price) via the gateway.
 
-    Capability-gated by :meth:`supports` so the valuer dispatches Curve LP
-    positions here (and NOT into the V3-NFT read) without an inline protocol-name
-    branch — mirroring the registry seam of :class:`FungibleLpPositionReader`.
+    Capability-gated by :meth:`supports`, which asks :class:`PositionReadRegistry`
+    whether a protocol declares the ``curve_lp`` kind — so the valuer dispatches
+    Curve LP positions here (and NOT into the V3-NFT read) without an inline
+    protocol-name set (VIB-5420 promotes the old ``{"curve"}`` literal onto the
+    Curve manifest's ``position_read`` declaration).
     """
-
-    # The single framework→connector protocol-string this reader keys on. Recorded
-    # as an intentional, dated exception in the coupling baseline (VIB-5420),
-    # mirroring the ``fluid_dex_lp`` precedent for the fungible-LP reader.
-    _SUPPORTED_PROTOCOLS = frozenset({"curve"})
 
     def __init__(self, gateway_client: object | None = None) -> None:
         self._gateway = gateway_client
@@ -246,7 +246,7 @@ class CurveLpPositionReader:
         self._lp_reader = LPPositionReader(gateway_client)
 
     def supports(self, protocol: str) -> bool:
-        return bool(protocol) and protocol.lower() in self._SUPPORTED_PROTOCOLS
+        return PositionReadRegistry.kind(protocol) == CURVE_LP
 
     def read_position(
         self,
