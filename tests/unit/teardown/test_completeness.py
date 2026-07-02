@@ -674,3 +674,80 @@ def test_none_intents_are_filtered_not_raised():
     report = check_intent_coverage(summary, intents)
     assert report.complete
     assert report.uncovered == ()
+
+
+# ---------------------------------------------------------------------------
+# Pendle PT (VIB-5590) — a PT tracked as a generic TOKEN closed by a
+# ``protocol="pendle"`` SWAP must be credited as covered.
+# ---------------------------------------------------------------------------
+
+
+def test_pendle_pt_uncovered_despite_correct_swap_VIB_5590():
+    """A PT TOKEN position whose identity is stored under ``details['pt_token']``
+    must be credited by its legitimate ``protocol='pendle'`` SWAP.
+
+    RED baseline pre-fix: ``pt_token`` was not a recognized token-detail key, so
+    the SWAP did not match and the position was falsely 'uncovered'. Post-fix
+    (``pt_token``/``pt_symbol`` recognized) this is COVERED.
+    """
+    pt = PositionInfo(
+        position_type=PositionType.TOKEN,
+        position_id="pendle_pt_0",
+        chain="ethereum",
+        protocol="pendle",
+        value_usd=Decimal("10"),
+        details={
+            "market": "PT-stETH-30DEC2027",
+            "pt_token": "PT-stETH-30DEC2027",
+            "base_token": "WSTETH",
+        },
+    )
+    swap = Intent.swap(
+        from_token="PT-stETH-30DEC2027", to_token="WSTETH", amount="all", protocol="pendle"
+    )
+    report = check_intent_coverage(_summary([pt]), [swap])
+    assert report.complete, f"PT SWAP should cover the PT TOKEN position; uncovered={report.uncovered}"
+
+
+def test_pendle_pt_covered_via_asset_symbol_key_VIB_5590():
+    """Producers aligned on recognized keys (``asset_symbol`` + ``market_id``)
+    are credited by the ``protocol='pendle'`` SWAP (the demo's teardown shape)."""
+    pt = PositionInfo(
+        position_type=PositionType.TOKEN,
+        position_id="pendle_pt_0",
+        chain="ethereum",
+        protocol="pendle",
+        value_usd=Decimal("10"),
+        details={
+            "asset_symbol": "PT-stETH-30DEC2027",
+            "pt_token": "PT-stETH-30DEC2027",
+            "pt_symbol": "PT-stETH-30DEC2027",
+            "market_id": "0x34280882267ffa6383B363E278B027Be083bBe3b",
+            "base_token": "WSTETH",
+        },
+    )
+    swap = Intent.swap(
+        from_token="PT-stETH-30DEC2027",
+        to_token="WSTETH",
+        amount="all",
+        protocol="pendle",
+        chain="ethereum",
+    )
+    assert check_intent_coverage(_summary([pt]), [swap]).complete
+
+
+def test_non_pt_token_not_false_matched_by_pt_swap_VIB_5590():
+    """Additive/lenient guard: a DIFFERENT held TOKEN is NOT covered by a PT
+    swap — recognizing ``pt_token`` must not let unrelated positions match."""
+    other = PositionInfo(
+        position_type=PositionType.TOKEN,
+        position_id="held-USDC",
+        chain="ethereum",
+        protocol="wallet",
+        value_usd=Decimal("10"),
+        details={"asset": "USDC"},
+    )
+    pt_swap = Intent.swap(
+        from_token="PT-stETH-30DEC2027", to_token="WSTETH", amount="all", protocol="pendle"
+    )
+    assert not check_intent_coverage(_summary([other]), [pt_swap]).complete

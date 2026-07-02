@@ -173,3 +173,62 @@ def test_one_bad_position_does_not_abort_the_unwind():
 def test_none_positions_returns_empty():
     """Defensive: get_open_positions() returning None → nothing to close."""
     assert full_close_intents(None) == []
+
+
+# ---------------------------------------------------------------------------
+# Pendle PT (VIB-5590) — a pendle-protocol TOKEN position must build a
+# ``protocol="pendle"`` SWAP so the generic close can route the PT.
+# ---------------------------------------------------------------------------
+
+
+def test_pendle_pt_token_builds_protocol_pendle_swap():
+    """A pendle-protocol TOKEN position (a held PT) must yield a live-resolving
+    ``SWAP(protocol='pendle', amount='all')`` — a generic protocol-less swap
+    cannot route a PT (VIB-5590). Identity read from recognized keys."""
+    pt = PositionInfo(
+        position_type=PositionType.TOKEN,
+        position_id="pendle_pt_0",
+        chain="ethereum",
+        protocol="pendle",
+        value_usd=Decimal("10"),
+        details={
+            "asset_symbol": "PT-stETH-30DEC2027",
+            "pt_token": "PT-stETH-30DEC2027",
+            "market_id": "0x34280882267ffa6383B363E278B027Be083bBe3b",
+            "base_token": "WSTETH",
+            # Producer opts the held PT into protocol-routed close (VIB-5590).
+            "protocol_routed_close": True,
+        },
+    )
+    intents = full_close_intents(
+        TeardownPositionSummary(deployment_id="dep", timestamp=datetime.now(UTC), positions=[pt]),
+        target_token="WSTETH",
+    )
+    assert len(intents) == 1, f"expected one PT close swap, got {intents}"
+    swap = intents[0]
+    assert swap.intent_type == IntentType.SWAP
+    assert str(swap.from_token).upper() == "PT-STETH-30DEC2027"
+    assert str(swap.to_token).upper() == "WSTETH"
+    assert swap.amount == "all"  # live-resolved at execution
+    assert str(getattr(swap, "protocol", "")).lower() == "pendle", (
+        "PT close swap MUST stamp protocol='pendle' to route through Pendle"
+    )
+
+
+def test_plain_token_close_swap_has_no_protocol_stamp():
+    """A plain (non-pendle) held TOKEN still yields a protocol-less generic
+    swap — the pendle stamp must NOT leak to unrelated token positions."""
+    held = PositionInfo(
+        position_type=PositionType.TOKEN,
+        position_id="held-USDC",
+        chain="ethereum",
+        protocol="wallet",
+        value_usd=Decimal("10"),
+        details={"asset": "USDC"},
+    )
+    intents = full_close_intents(
+        TeardownPositionSummary(deployment_id="dep", timestamp=datetime.now(UTC), positions=[held]),
+        target_token="WSTETH",
+    )
+    assert len(intents) == 1
+    assert not getattr(intents[0], "protocol", None)

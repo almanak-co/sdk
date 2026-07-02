@@ -862,6 +862,10 @@ async def test_read_builds_pendle_pt_and_lp_positions() -> None:
     assert by_id["pt-wsteth-25jun2026"].details["source"] == "position_registry"
     assert by_id["pt-wsteth-25jun2026"].details["kind"] == "pt"
     assert by_id["pt-wsteth-25jun2026"].details["asset_symbol"] == "pt-wsteth-25jun2026"
+    # VIB-5590: a PT is a routing-required protocol-token — the registry enumeration
+    # stamps ``protocol_routed_close`` so full_close routes its close SWAP through
+    # the Pendle compiler (stamps the position's own protocol), not a generic DEX.
+    assert by_id["pt-wsteth-25jun2026"].details["protocol_routed_close"] is True
     assert by_id["0xmarket"].details["kind"] == "lp"
 
 

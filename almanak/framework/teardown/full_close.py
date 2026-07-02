@@ -209,12 +209,31 @@ def _close_intent_for_position(
         return _perp_close_or_cancel_intent(position, details, protocol=protocol, chain=chain)
 
     if ptype in (PositionType.STAKE, PositionType.TOKEN):
-        token = _first(details, "asset", "token", "address")
+        # ``asset_symbol`` / ``pt_token`` are recognised so a Pendle PT/YT held
+        # as a generic TOKEN (whose registry/producer identity is the PT symbol,
+        # not a plain ``asset``) still resolves a swap-back token (VIB-5590).
+        # ``pt_symbol`` is included for parity with completeness._TOKEN_DETAIL_KEYS
+        # (which credits both ``pt_token`` and ``pt_symbol``): a producer that sets
+        # only ``pt_symbol`` must still resolve a swap-back token here, else the
+        # close is silently skipped and the teardown gets stuck (fail-safe, but
+        # avoidable) (VIB-5590 / CodeRabbit).
+        token = _first(details, "asset", "asset_symbol", "token", "address", "pt_token", "pt_symbol")
         if not token:
             return None
         if str(token).upper() == target_token.upper():
             # Already the target asset — nothing to swap.
             return None
+        # A held protocol-token (e.g. a Pendle PT/YT) is NOT a plain ERC20: a
+        # protocol-less swap cannot route it (no direct DEX pair), so its close
+        # MUST route through the owning protocol's swap compiler. A position whose
+        # producer sets ``details["protocol_routed_close"]`` opts in: the close
+        # SWAP is stamped with the position's OWN ``protocol`` value so the
+        # compiler resolves the market from the token (VIB-5590). Keyed on a
+        # capability FLAG — never a protocol-name literal — so this module stays
+        # protocol-agnostic (blueprint 22) and generalises to YT / any future
+        # routing-required protocol-token. A plain held token carries no flag and
+        # keeps the generic protocol-less swap, so this cannot misroute it.
+        swap_protocol = protocol if _first(details, "protocol_routed_close") else None
         # amount="all" -> live wallet balance of the KNOWN held token, resolved
         # at execution and clamped to the strategy's tracked quantity (ALM-2766).
         return Intent.swap(
@@ -223,6 +242,7 @@ def _close_intent_for_position(
             amount="all",
             max_slippage=max_slippage,
             chain=chain,
+            protocol=swap_protocol,
         )
 
     # PREDICTION / CEX / anything else: not generically closable here.

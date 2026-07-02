@@ -98,6 +98,16 @@ _TOKEN_DETAIL_KEYS: tuple[str, ...] = (
     "address",
     "token0",
     "token1",
+    # A Pendle PT/YT held as a generic TOKEN carries its identity under
+    # ``pt_token`` / ``pt_symbol`` (the producer-side symbol used by the
+    # ``protocol="pendle"`` swap-back exit). Recognising them lets a legitimate
+    # PT close SWAP be credited instead of false-failing the teardown as a
+    # silent strand (VIB-5590). Additive/lenient: a token key only ever WIDENS
+    # the match set, and a match still requires the intent's token to equal one
+    # of these — no unrelated position type carries a pt_* detail, so this
+    # cannot false-match another position.
+    "pt_token",
+    "pt_symbol",
 )
 
 

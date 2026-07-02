@@ -534,7 +534,15 @@ def _position_info_from_pendle_registry_row(row: Any) -> PositionInfo | None:
     # fall back to the registry primitive so a label is always present — no
     # protocol-name literal in this framework module.
     protocol = str(payload.get("protocol") or row.get("primitive") or "").lower()
-    details: dict[str, Any] = {"source": "position_registry", "kind": kind, "market_id": str(market_id)}
+    details: dict[str, Any] = {
+        "source": "position_registry",
+        "kind": kind,
+        "market_id": str(market_id),
+        # A Pendle held token (PT/YT) routes its teardown close through the owning
+        # protocol's swap compiler, not a generic DEX — full_close reads this flag
+        # to stamp the position's own protocol on the close SWAP (VIB-5590).
+        "protocol_routed_close": True,
+    }
     pt_symbol = payload.get("pt_symbol")
     if pt_symbol:
         # The maturity-bearing PT symbol — maturity is intrinsic to it (no
