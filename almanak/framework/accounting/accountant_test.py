@@ -24,6 +24,7 @@ same strategy across PRs.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -57,6 +58,8 @@ from almanak.framework.primitives.taxonomy import (
     Primitive as _TaxonomyPrimitive,
 )
 from almanak.framework.primitives.types import EventKind
+
+logger = logging.getLogger(__name__)
 
 # VIB-4201 (T15): close-event allow-list for cell #22.
 # Materialized once at module import from the canonical taxonomy.
@@ -181,6 +184,12 @@ class AccountantReport:
     # an upstream payload validation error. Lets reviewers triage cell-status
     # changes between runs without re-deriving the propagation by hand.
     cells_blocked_by_payload_errors: list[str] = field(default_factory=list)
+    # VIB-5540: non-failing N-leg reconciliation diagnostics computed by
+    # ``run_against_sqlite`` (Seam A snapshot-coverage + Seam B LP5-principal).
+    # Empty on a post-fix DB and on any fixture with no ``coin_symbols``; a
+    # Seam-A/B regression on a real run makes this non-empty and visible in the
+    # report without changing a cell status. See the invariant helpers below.
+    nleg_invariant_findings: list[str] = field(default_factory=list)
 
     @property
     def total_cells(self) -> int:
@@ -233,6 +242,7 @@ class AccountantReport:
             },
             "payload_validation_errors": list(self.payload_validation_errors),
             "cells_blocked_by_payload_errors": list(self.cells_blocked_by_payload_errors),
+            "nleg_invariant_findings": list(self.nleg_invariant_findings),
             "g6_decomposition": dict(self.g6_decomposition),
             "on_chain_footprint": list(self.on_chain_footprint),
             "db_dump_path": self.db_dump_path,
@@ -310,6 +320,16 @@ class AccountantReport:
             if self.cells_blocked_by_payload_errors:
                 lines.append("")
                 lines.append(f"_Cells blocked by validation errors: {', '.join(self.cells_blocked_by_payload_errors)}_")
+            lines.append("")
+        if self.nleg_invariant_findings:
+            # VIB-5540: N-leg reconciliation diagnostics (non-failing). Their
+            # presence means a returned coin fell out of the equity universe
+            # (Seam A) or a fungible-close principal diverged from the measured
+            # cost_basis (Seam B) on this DB — investigate before trusting NAV.
+            lines.append("## N-leg reconciliation diagnostics (VIB-5540)")
+            lines.append("")
+            for finding in self.nleg_invariant_findings:
+                lines.append(f"- {finding}")
             lines.append("")
         if self.on_chain_footprint:
             lines.append("## On-chain footprint")
@@ -519,6 +539,21 @@ def _json(s: Any) -> dict[str, Any]:
         return d if isinstance(d, dict) else {}
     except (json.JSONDecodeError, TypeError):
         return {}
+
+
+def _json_list(s: Any) -> list[Any]:
+    """Decode a JSON-array column (e.g. ``wallet_balances_json`` /
+    ``positions_json``) to a list, tolerating ``None`` / ``""`` / malformed
+    input (→ ``[]``) and an already-decoded list. Never raises."""
+    if s is None or s == "":
+        return []
+    if isinstance(s, list):
+        return s
+    try:
+        d = json.loads(s)
+        return d if isinstance(d, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
 
 
 # ─── VIB-3868: typed payload reads ───────────────────────────────────────
@@ -1235,6 +1270,22 @@ def _cell_g6_reconciliation(  # noqa: C901
                 notional_traded += abs(amt0_usd)
             if amt1_usd is not None:
                 notional_traded += abs(amt1_usd)
+            # VIB-5540 / VIB-5566 — an N-coin fungible LP (Curve StableSwap /
+            # CryptoSwap, Balancer) books its position size as a single
+            # ``cost_basis_usd`` over ALL N coins and carries NO per-token
+            # ``amount0_usd``/``amount1_usd`` (those are a 2-coin concept). Without
+            # this the fungible LP contributes ZERO to ``notional_traded``, so the
+            # G6 tolerance collapses to the $0.10 floor and sub-percent round-trip
+            # pricing noise on a real portfolio false-FAILs G6 — the same 2-coin
+            # assumption that hid the returned coins from equity (Seam A), here on
+            # the tolerance side. Fall back to ``cost_basis_usd`` ONLY when the
+            # per-token amounts are absent, so a 2-coin LP is unchanged and the
+            # notional is never double-counted. Primitive-agnostic — keyed on the
+            # payload shape, not a protocol.
+            if amt0_usd is None and amt1_usd is None:
+                lp_cost_basis = _dec(p.get("cost_basis_usd"))
+                if lp_cost_basis is not None:
+                    notional_traded += abs(lp_cost_basis)
         if et == "BORROW":
             borrowed = _dec(p.get("borrowed_amount_usd"))
             if borrowed is not None:
@@ -4083,6 +4134,220 @@ def evaluate_cells(
     )
 
 
+# ─── VIB-5540 standing invariants (primitive-agnostic N-leg reconciliation) ──
+#
+# These are NOT scored 21-cell cells (adding a cell would churn every fixture's
+# expected_cells) — they are surfaced as a NON-failing diagnostic
+# (``AccountantReport.nleg_invariant_findings``). ``run_against_sqlite`` calls
+# both on the real DB it evaluates, so every ``make test-accounting-matrix`` run
+# and every real-fork DB carries the findings in its report: on a post-fix DB
+# they are empty, and a Seam-A/B regression on a real run makes them non-empty
+# and visible without silently changing a cell status. They are primitive-
+# agnostic (Curve 3pool/4pool/tricrypto/metapool, Balancer, any future N-coin
+# venue keyed on the shared ``coin_symbols`` carrier, no per-primitive branch)
+# and FAIL-SAFE: a fixture with no ``coin_symbols`` (2-coin venues, legacy
+# captures) yields no findings, so they never break a frozen fixture's score.
+
+
+def _acct_event_coin_symbols(acct_events: list[dict[str, Any]]) -> set[str]:
+    """Union of the pool-coin-ordered ``coin_symbols`` across all accounting
+    events that stamped one (the shared N-coin carrier). Case-folded to upper.
+    """
+    out: set[str] = set()
+    for ae in acct_events:
+        payload = _json(ae.get("payload_json"))
+        coins = payload.get("coin_symbols")
+        if isinstance(coins, list | tuple):
+            for c in coins:
+                if c:
+                    out.add(str(c).upper())
+    return out
+
+
+def _snapshot_covered_symbols(snapshots: list[dict[str, Any]]) -> set[str]:
+    """Union across ALL snapshots of every symbol that was priced into the
+    equity universe — wallet-balance rows plus per-position token identities.
+
+    Taking the union across snapshots (not just the final one) keeps the
+    invariant robust to teardown consolidation: a returned coin that was priced
+    into a close-time snapshot and later swapped to the target token still
+    counts as "was in the equity universe", so the check flags only the true
+    defect (a returned coin that NEVER entered equity), never a legitimately
+    consolidated coin.
+    """
+    covered: set[str] = set()
+    for s in snapshots:
+        for wb in _json_list(s.get("wallet_balances_json")):
+            sym = wb.get("symbol") if isinstance(wb, dict) else None
+            if sym:
+                covered.add(str(sym).upper())
+        for pos in _json_list(s.get("positions_json")):
+            if not isinstance(pos, dict):
+                continue
+            for key in ("symbol", "token0", "token1"):
+                sym = pos.get(key)
+                if sym:
+                    covered.add(str(sym).upper())
+            details = pos.get("details")
+            details = details if isinstance(details, dict) else _json(details)
+            coins = details.get("coin_symbols") if isinstance(details, dict) else None
+            if isinstance(coins, list | tuple):
+                for c in coins:
+                    if c:
+                        covered.add(str(c).upper())
+    return covered
+
+
+def check_snapshot_covers_position_coins(
+    snapshots: list[dict[str, Any]],
+    acct_events: list[dict[str, Any]],
+) -> list[str]:
+    """VIB-5540 (Seam A) standing invariant — the snapshot equity universe must
+    cover every coin any position touched.
+
+    Returns a list of violation messages (empty ⇒ invariant holds). A non-empty
+    result means a coin the strategy deposited into / recovered from an N-coin
+    position (its ``coin_symbols``) never appeared in ANY portfolio snapshot's
+    priced token universe — exactly the "a returned coin fell out of equity"
+    defect that makes the wallet-method PnL short and G6 report a spurious gap.
+    Primitive-agnostic: keyed only on the shared ``coin_symbols`` carrier.
+
+    Correlation note (CodeRabbit): this is an order-independent, position-AGNOSTIC
+    UNION check — it asserts ``⋃ snapshot covered symbols ⊇ ⋃ every position's
+    coin_symbols`` (a set-superset), NOT a per-position comparison, so it needs no
+    position-identity correlation (unlike the LP5 principal↔cost_basis companion,
+    which does correlate by ``ledger_entry_id``). Cross-contamination is
+    structurally impossible here: adding position B's coins to ``required`` can
+    only make the superset test STRICTER, never mask a coin missing for position
+    A — every coin any position touched must be covered.
+    """
+    required = _acct_event_coin_symbols(acct_events)
+    if not required:
+        return []  # no N-coin position in this fixture — nothing to assert
+    covered = _snapshot_covered_symbols(snapshots)
+    missing = sorted(required - covered)
+    if missing:
+        return [
+            f"position coin(s) {missing} never entered the snapshot equity universe "
+            f"(covered={sorted(covered)}); wallet-method PnL understated → G6 gap"
+        ]
+    return []
+
+
+def check_lp5_principal_matches_cost_basis(
+    pos_events: list[dict[str, Any]],
+    acct_events: list[dict[str, Any]],
+    *,
+    rel_eps: Decimal = Decimal("0.005"),
+    abs_floor_usd: Decimal = Decimal("1.00"),
+) -> list[str]:
+    """VIB-5612 (Seam B) LP5 companion — a fungible LP close's
+    ``principal_recovered_usd`` (position-event attribution) must reconcile with
+    the N-complete ``cost_basis_usd`` the typed accounting layer measured for the
+    same close.
+
+    Guards Seam B against regressing to the 2-coin ``position_events.value_usd``
+    that left ``principal_recovered_usd`` at zero for a fungible Curve close.
+    Returns violation messages (empty ⇒ holds / not applicable). Empty ≠ Zero:
+    an unmeasured cost_basis (``None`` / missing) is skipped, never compared as
+    zero.
+
+    Tolerance = ``max(rel_eps × |cost_basis|, abs_floor_usd)``. Both sides value
+    the IDENTICAL close-time coin-leg amounts, so on a shared price snapshot they
+    agree to within oracle/rounding noise; ``rel_eps=0.5%`` is 10x tighter than
+    the original 2% the audit flagged (2% permitted ~$1k silent divergence on a
+    $50k position) and well below the depeg / price-impact guards (100-500 bps),
+    so a real Seam-B drift on a volatile N-coin close surfaces. The $1 absolute
+    floor prevents false positives on sub-few-hundred-dollar positions where
+    sub-cent rounding on 18-dec legs would otherwise exceed a pure-relative bound.
+
+    **Position-identity correlation (CodeRabbit Major):** on a multi-LP strategy
+    the two streams carry DIFFERENT identity schemes (accounting_events key on a
+    composite ``position_key`` = ``lp:proto:chain:wallet:pool``; position_events
+    key on ``position_id`` = the pool/LP-token address), so principal and
+    cost_basis are matched by the field BOTH close rows share for the same close
+    intent — ``ledger_entry_id`` (the per-intent ledger row that produced both),
+    falling back to ``tx_hash``. Each position's principal is compared against
+    ITS OWN close cost_basis; a close with one side measured but not the other
+    (Empty≠Zero) is skipped, never cross-matched to a different position.
+    """
+    # Group each fungible N-coin close's measured cost_basis by its correlation
+    # key. Only closes that stamp ``coin_symbols`` (the N-coin carrier) are in
+    # scope; an unmeasured cost_basis (None) is skipped (Empty≠Zero).
+    cost_basis_by_key: dict[str, Decimal] = {}
+    for ae in acct_events:
+        if (ae.get("event_type") or "").upper() != "LP_CLOSE":
+            continue
+        payload = _json(ae.get("payload_json"))
+        if not payload.get("coin_symbols"):
+            continue  # not a fungible N-coin close
+        cb = _dec(payload.get("cost_basis_usd"))
+        if cb is None:
+            continue  # cost_basis unmeasured → nothing to correlate against
+        key = _lp_close_correlation_key(ae)
+        if key:
+            cost_basis_by_key[key] = cb
+    if not cost_basis_by_key:
+        return []
+    # Compare each CLOSE position-event's principal against the cost_basis of the
+    # SAME close (correlated by ledger_entry_id / tx_hash), never a different one.
+    findings: list[str] = []
+    for pe in pos_events:
+        if (pe.get("event_type") or "").upper() != "CLOSE":
+            continue
+        key = _lp_close_correlation_key(pe)
+        if not key or key not in cost_basis_by_key:
+            continue  # no correlated fungible-close cost_basis for this position
+        attr = _json(pe.get("attribution_json"))
+        principal = _dec(attr.get("principal_recovered_usd"))
+        if principal is None:
+            continue  # principal unmeasured (Empty≠Zero) — never compared as zero
+        cb = cost_basis_by_key[key]
+        tolerance = max(rel_eps * abs(cb), abs_floor_usd)
+        if abs(principal - cb) > tolerance:
+            findings.append(
+                f"position (key={key}): principal_recovered_usd={principal} diverges "
+                f"from measured accounting cost_basis_usd={cb} beyond tolerance "
+                f"{tolerance} (max of {rel_eps:%} × cost_basis and ${abs_floor_usd} floor) "
+                "(Seam B N-complete principal regressed)"
+            )
+    return findings
+
+
+def _lp_close_correlation_key(event: dict[str, Any]) -> str | None:
+    """The field that correlates an accounting LP_CLOSE with its position-event
+    CLOSE for the SAME close intent — ``ledger_entry_id`` (both rows are derived
+    from the one per-intent ledger row), falling back to ``tx_hash``. Returns
+    ``None`` when neither is present so an un-correlatable row is skipped rather
+    than cross-matched to a different position."""
+    return event.get("ledger_entry_id") or event.get("tx_hash") or None
+
+
+def evaluate_nleg_invariants(
+    snapshots: list[dict[str, Any]],
+    pos_events: list[dict[str, Any]],
+    acct_events: list[dict[str, Any]],
+) -> list[str]:
+    """Run both VIB-5540 N-leg reconciliation invariants over a real DB's rows
+    and return the union of findings (empty ⇒ all hold / not applicable).
+
+    Called by ``run_against_sqlite`` so the accounting-matrix path and every
+    real-fork DB carry these diagnostics. Fail-safe: never raises (a decode
+    failure inside a helper degrades to "no findings" rather than crashing the
+    report), and yields nothing on a fixture with no ``coin_symbols``.
+    """
+    findings: list[str] = []
+    try:
+        findings.extend(check_snapshot_covers_position_coins(snapshots, acct_events))
+    except Exception:  # noqa: BLE001 — diagnostic must never crash the report
+        logger.debug("check_snapshot_covers_position_coins failed", exc_info=True)
+    try:
+        findings.extend(check_lp5_principal_matches_cost_basis(pos_events, acct_events))
+    except Exception:  # noqa: BLE001 — diagnostic must never crash the report
+        logger.debug("check_lp5_principal_matches_cost_basis failed", exc_info=True)
+    return findings
+
+
 def run_against_sqlite(
     db_path: str | Path,
     *,
@@ -4151,7 +4416,7 @@ def run_against_sqlite(
         ) = _cell22_preflight(conn, deployment_id=deployment_id)
     finally:
         conn.close()
-    return evaluate_cells(
+    report = evaluate_cells(
         ledger=ledger,
         pos_events=pos_events,
         acct_events=acct_events,
@@ -4165,6 +4430,12 @@ def run_against_sqlite(
         position_registry_table_present=position_registry_table_present,
         malformed_position_reference_row_ids=malformed_position_reference_row_ids,
     )
+    # VIB-5540 — run the N-leg reconciliation invariants over the SAME real DB
+    # the cells were scored against, so every ``make test-accounting-matrix`` run
+    # and every real-fork DB carries the findings (non-failing diagnostic; empty
+    # on a clean post-fix DB and on any fixture with no ``coin_symbols``).
+    report.nleg_invariant_findings = evaluate_nleg_invariants(snapshots, pos_events, acct_events)
+    return report
 
 
 def _cell22_preflight(

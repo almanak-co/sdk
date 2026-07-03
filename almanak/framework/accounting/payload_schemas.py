@@ -476,6 +476,13 @@ class LPCloseEventPayload(_Versioned):
     amount1: Decimal | None = Field(...)
     amount0_usd: Decimal | None = None
     amount1_usd: Decimal | None = None
+    # VIB-5540 / VIB-5566 — the N-complete close position value the LP handler
+    # measured over ALL coin legs (the same field the OPEN payload carries). The
+    # writer (``LPAccountingEvent.to_payload_json``) already emits it on CLOSE;
+    # modelling it here stops ``extra="ignore"`` from dropping it during
+    # validation, so the G6 tolerance can scale off the N-coin LP notional (a
+    # fungible Curve close carries no per-token ``amount0_usd``/``amount1_usd``).
+    cost_basis_usd: Decimal | None = None
     fees0_collected: Decimal | None = None
     fees1_collected: Decimal | None = None
     fees_total_usd: Decimal | None = None

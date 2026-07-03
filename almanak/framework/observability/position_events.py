@@ -1534,8 +1534,15 @@ def build_position_event_from_intent(
     # ι — VIB-3883: populate value_usd for LP_OPEN so deployed_capital_usd
     # on portfolio_snapshots reflects the deployed position size. Must run
     # AFTER _apply_lp_open populates amount0/amount1.
+    # VIB-5540 (Seam B): an N-coin fungible open (single-sided Curve deposit)
+    # funds one coin only, so the 2-coin path fails closed and leaves
+    # principal_deposited at zero. Prefer the N-complete coin-leg valuation when
+    # the connector stamped ``coin_symbols``; that path OWNS the open (no
+    # misleading 2-coin fallback). Concentrated-liquidity venues fall through to
+    # the canonical 2-coin path unchanged.
     if price_oracle:
-        _apply_lp_open_value_usd(event, price_oracle, chain=chain)
+        if not _apply_lp_open_value_usd_ncoin(event, ctx, price_oracle):
+            _apply_lp_open_value_usd(event, price_oracle, chain=chain)
 
     # κ — VIB-3919: LP_CLOSE column symmetry. The CLOSE event's
     # tick_lower/tick_upper/liquidity/in_range come from the matching
@@ -1641,9 +1648,20 @@ def _apply_lp_close_columns(
     # informative for the closed lifecycle stage.
     if event.in_range is None:
         event.in_range = False
-    # Compute value_usd from received amounts when prices available.
+    # Compute value_usd from the close-time received amounts when prices are
+    # available. VIB-5540 (Seam B) — an N-coin fungible close (Curve StableSwap /
+    # CryptoSwap, Balancer) returns ALL N pool coins, so the 2-coin
+    # token0/token1 × amount0/amount1 product structurally misses coins 3..N and
+    # (for a single-sided Curve deposit with no close direction) leaves value_usd
+    # unmeasured — which then zeroes principal_recovered in attribute_lp / LP5.
+    # When the connector stamped the pool-coin-ordered ``coin_symbols`` universe,
+    # value the close N-completely over every coin leg; that path OWNS the close
+    # (no misleading 2-coin fallback). Otherwise keep the canonical 2-coin path
+    # for concentrated-liquidity venues. Primitive-agnostic — no per-protocol
+    # branch.
     if not event.value_usd and price_oracle:
-        _apply_lp_close_value_usd(event, price_oracle, chain=ctx.chain)
+        if not _apply_lp_close_value_usd_ncoin(event, ctx, price_oracle):
+            _apply_lp_close_value_usd(event, price_oracle, chain=ctx.chain)
 
 
 @dataclass(frozen=True)
@@ -1798,6 +1816,205 @@ def compute_lp_close_value_usd(
             exc_info=True,
         )
         return LpCloseValueResult(skip_reason="arithmetic_or_resolver_error")
+
+
+def _price_from_oracle(price_oracle: dict, sym: str) -> Decimal | None:
+    """Tolerant per-symbol price lookup shared by the N-coin close valuer.
+
+    Mirrors the ``_price`` closure inside :func:`compute_lp_close_value_usd`
+    (VIB-3885 / PR #2490): accepts an upper- or lower-cased oracle key and both
+    ``price_usd`` / ``price`` on a nested dict entry, and rejects a
+    non-finite Decimal. Returns ``None`` (unmeasured — Empty≠Zero) on any miss,
+    never a fabricated zero.
+    """
+    # Explicit membership + ``is None`` checks (NOT ``or`` chaining): a legitimate
+    # 0 / 0.0 price is falsy, so ``or`` would wrongly fall through to the next
+    # key / field and resolve an INCORRECT price (or None when a real zero was
+    # present). Take the first key actually PRESENT with a non-None value, and
+    # the first field actually PRESENT — a downstream ``is_finite`` / ``<= 0``
+    # guard is what rejects a bad price, not the lookup.
+    entry = None
+    for key in (sym, sym.lower(), sym.upper()):
+        if key in price_oracle and price_oracle[key] is not None:
+            entry = price_oracle[key]
+            break
+    if entry is None:
+        return None
+    if isinstance(entry, dict):
+        if entry.get("price_usd") is not None:
+            p = entry["price_usd"]
+        elif entry.get("price") is not None:
+            p = entry["price"]
+        else:
+            return None
+        try:
+            d = Decimal(str(p))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+        return d if d.is_finite() else None
+    try:
+        d = Decimal(str(entry))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return d if d.is_finite() else None
+
+
+def compute_lp_ncoin_value_usd(
+    coin_symbols: list[str],
+    all_amounts: list[int | None],
+    price_oracle: dict,
+    chain: str = "",
+    *,
+    position_id: str = "",
+) -> str:
+    """VIB-5540 (Seam B) — N-complete ``value_usd`` for a fungible LP open/close.
+
+    An N-coin fungible LP event (Curve StableSwap / CryptoSwap, Balancer
+    weighted) touches ALL N pool coins, so the canonical 2-coin
+    ``token0/token1 × amount0/amount1`` product in
+    :func:`compute_lp_close_value_usd` / :func:`_apply_lp_open_value_usd`
+    structurally misses coins 3..N and — for a single-sided Curve deposit whose
+    event carries no token0/token1 direction — leaves ``value_usd`` unmeasured
+    entirely. That empty ``value_usd`` then zeroes ``principal_deposited`` /
+    ``principal_recovered`` in ``attribute_lp`` (LP5 / principal_*). This values
+    the event over EVERY coin leg using the shared pool-coin-ordered
+    ``coin_symbols`` carrier, so it is primitive-agnostic (no per-protocol
+    branch) and direction-agnostic (identical math for the deposit and the
+    withdrawal side).
+
+    ``value_usd`` = Σ_i ``all_amounts[i]`` / 10**decimals_i × price_i.
+
+    **Fails closed as a whole** (Empty ≠ Zero per CLAUDE.md §Accounting): if ANY
+    coin's amount is unmeasured (``None``), decimals are unresolvable, or a price
+    is missing, the returned value stays ``""`` — never a partial sum that would
+    understate recovered principal, and never a fabricated ``0``. A measured
+    ``0`` amount is a legitimate leg and contributes zero (not unmeasured).
+
+    Returns the empty string on every fail-closed path; a non-empty decimal
+    string on success.
+    """
+    if not coin_symbols or len(coin_symbols) != len(all_amounts):
+        return ""
+    try:
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        resolver = get_token_resolver()
+        total = Decimal(0)
+        for sym, raw_amount in zip(coin_symbols, all_amounts, strict=True):
+            symbol = (sym or "").upper()
+            if not symbol or raw_amount is None:
+                # Empty ≠ Zero — an unmeasured leg (or an unknown coin) poisons
+                # the whole close value; a partial sum would understate recovered
+                # principal. A measured 0 raw_amount is NOT None and passes here.
+                logger.warning(
+                    "lp_ncoin_value_usd.skipped reason=unmeasured_or_unknown_leg "
+                    "position_id=%s chain=%s symbol=%s have_amount=%s",
+                    position_id,
+                    chain,
+                    symbol,
+                    raw_amount is not None,
+                )
+                return ""
+            try:
+                ti = resolver.resolve(symbol, chain=chain, log_errors=False)
+            except Exception as resolver_err:  # noqa: BLE001 — fail-closed
+                logger.warning(
+                    "lp_ncoin_value_usd.skipped reason=token_decimals_unresolved "
+                    "position_id=%s chain=%s symbol=%s err=%s",
+                    position_id,
+                    chain,
+                    symbol,
+                    resolver_err,
+                )
+                return ""
+            price = _price_from_oracle(price_oracle, symbol)
+            if price is None:
+                logger.warning(
+                    "lp_ncoin_value_usd.skipped reason=price_oracle_miss position_id=%s chain=%s symbol=%s",
+                    position_id,
+                    chain,
+                    symbol,
+                )
+                return ""
+            total += (Decimal(str(raw_amount)) / Decimal(10**ti.decimals)) * price
+        return str(total)
+    except Exception:  # noqa: BLE001 — best-effort enrichment, never crash the write
+        logger.warning(
+            "lp_ncoin_value_usd.skipped reason=arithmetic_or_resolver_error position_id=%s chain=%s",
+            position_id,
+            chain,
+            exc_info=True,
+        )
+        return ""
+
+
+def _apply_lp_open_value_usd_ncoin(event: PositionEvent, ctx: "IntentEventContext", price_oracle: dict) -> bool:
+    """VIB-5540 (Seam B) — stamp an N-complete ``event.value_usd`` for a fungible
+    N-coin LP OPEN, returning whether the N-coin path OWNS this open.
+
+    Symmetric to :func:`_apply_lp_close_value_usd_ncoin`. A single-sided Curve
+    deposit funds only one coin, so the 2-coin ``_apply_lp_open_value_usd`` path
+    fails closed (it requires BOTH amount0 AND amount1) and leaves
+    ``principal_deposited`` at zero. When the connector stamped the pool-coin-
+    ordered ``coin_symbols`` universe on ``lp_open_data`` this values the deposit
+    N-completely over every funded leg (unfunded legs are a measured ``0``, not
+    unmeasured). Concentrated-liquidity venues (``coin_symbols`` is ``None``)
+    return ``False`` so the canonical 2-coin path runs unchanged.
+    """
+    if event.event_type != "OPEN" or event.position_type != "LP" or event.value_usd:
+        return False
+    lp_open = ctx.extracted.get("lp_open_data") if isinstance(ctx.extracted, dict) else None
+    coin_symbols = getattr(lp_open, "coin_symbols", None)
+    if not coin_symbols:
+        return False
+    all_amounts = getattr(lp_open, "all_amounts", None)
+    if not all_amounts or len(coin_symbols) != len(all_amounts):
+        return True
+    value_usd = compute_lp_ncoin_value_usd(
+        list(coin_symbols),
+        list(all_amounts),
+        price_oracle,
+        chain=ctx.chain,
+        position_id=event.position_id,
+    )
+    if value_usd:
+        event.value_usd = value_usd
+    return True
+
+
+def _apply_lp_close_value_usd_ncoin(event: PositionEvent, ctx: "IntentEventContext", price_oracle: dict) -> bool:
+    """VIB-5540 (Seam B) — stamp an N-complete ``event.value_usd`` for a fungible
+    N-coin LP close, returning whether the N-coin path OWNS this close.
+
+    Applicable only when the connector stamped the pool-coin-ordered
+    ``coin_symbols`` universe on the extracted ``lp_close_data`` (Curve, Balancer,
+    any future N-coin venue). When applicable this path is authoritative — it
+    either sets a full N-complete ``value_usd`` or leaves it unmeasured
+    (Empty≠Zero) — and the caller MUST NOT fall back to the 2-coin
+    ``compute_lp_close_value_usd`` product, which would emit a misleading partial
+    value for an N-coin close. Concentrated-liquidity venues (``coin_symbols`` is
+    ``None``) return ``False`` so the canonical 2-coin path runs unchanged.
+    """
+    lp_close = ctx.extracted.get("lp_close_data") if isinstance(ctx.extracted, dict) else None
+    coin_symbols = getattr(lp_close, "coin_symbols", None)
+    if not coin_symbols:
+        return False
+    all_amounts = getattr(lp_close, "all_amounts", None)
+    if not all_amounts or len(coin_symbols) != len(all_amounts):
+        # coin_symbols present but the leg vector doesn't line up — still an
+        # N-coin close (do not emit a partial 2-coin value), but nothing safe to
+        # measure. Own the close with an unmeasured value_usd.
+        return True
+    value_usd = compute_lp_ncoin_value_usd(
+        list(coin_symbols),
+        list(all_amounts),
+        price_oracle,
+        chain=ctx.chain,
+        position_id=event.position_id,
+    )
+    if value_usd:
+        event.value_usd = value_usd
+    return True
 
 
 def _apply_lp_close_value_usd(event: PositionEvent, price_oracle: dict, chain: str = "") -> None:

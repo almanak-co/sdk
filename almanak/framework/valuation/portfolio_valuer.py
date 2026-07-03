@@ -1089,8 +1089,23 @@ class PortfolioValuer:
             # omit a wallet. Cleared in the finally so a stale wallet never leaks.
             self._strategy_wallet_address = getattr(strategy, "wallet_address", "") or ""
 
-            # Step 1: Discover tracked tokens from strategy config
-            tracked_tokens = strategy._get_tracked_tokens()
+            # Step 1: Discover tracked tokens from strategy config, then union in
+            # the N-coin universe of every position in the strategy's accounting
+            # history (VIB-5540 / VIB-5566 — Seam A). ``_get_tracked_tokens()`` is a
+            # config-derived allowlist; it misses coins a strategy never names in
+            # config but receives back from an N-coin venue on close (a Curve
+            # 3pool close returns DAI+USDC+USDT; a tricrypto close returns WBTC).
+            # Without the union those returned coins vanish from wallet equity →
+            # the wallet-method PnL is short by their value and G6 reports a
+            # spurious gap. Keyed on the shared ``coin_symbols`` carrier every
+            # N-coin connector already stamps on its accounting events, so this is
+            # primitive-agnostic (Curve 3pool/4pool/tricrypto/metapool, Balancer,
+            # any future N-coin primitive) by construction — zero per-primitive
+            # code. Newly-added coins flow through the SAME balance/price loop
+            # below, so a coin with a positive balance but a missing price still
+            # flips ``wallet_data_incomplete`` (Empty≠Zero) rather than being
+            # silently priced at $0 (``value_tokens`` drops unpriced tokens).
+            tracked_tokens = self._union_tracked_with_position_coins(strategy._get_tracked_tokens())
 
             # Step 2: Fetch wallet balances and prices via gateway
             balances: dict[str, Decimal] = {}
@@ -1134,7 +1149,13 @@ class PortfolioValuer:
             if gas_native_status not in ("ok", "already_tracked"):
                 wallet_data_incomplete = True
 
-            # Check for tokens with positive balance but missing/non-positive price
+            # Check for tokens with positive balance but missing/non-positive price.
+            # VIB-5540 (Seam A) — this covers the N-coin universe unioned into
+            # ``tracked_tokens`` above: a returned coin the strategy now holds but
+            # whose price failed to resolve flips ``wallet_data_incomplete`` and is
+            # dropped from ``wallet_balances`` by ``value_tokens`` (Empty≠Zero),
+            # NEVER silently priced at $0. The snapshot degrades to ESTIMATED
+            # rather than reporting a spuriously-complete equity.
             for token in balances:
                 token_price = prices.get(token)
                 if token_price is None or token_price <= 0:
@@ -1422,6 +1443,89 @@ class PortfolioValuer:
             return self._accounting_store.get_accounting_events_sync(self._deployment_id, position_key=position_key)
         except Exception:
             return []
+
+    def _union_tracked_with_position_coins(self, base_tokens: list[str]) -> list[str]:
+        """Union the config-derived token allowlist with the coin universe of the
+        strategy's full position history (VIB-5540 / VIB-5566 — Seam A). See
+        ``_position_coin_symbols`` for why the unbounded full-history union is
+        safe (monotonic, only ever adds coins the strategy genuinely touched).
+
+        The config allowlist (``_get_tracked_tokens``) only sees tokens the
+        strategy names in config; it is blind to coins an N-coin venue returns to
+        the wallet on close (a Curve 3pool close returns DAI+USDC+USDT even for a
+        single-sided USDC deposit). Those returned coins must be priced into
+        wallet equity or the wallet-method PnL is structurally short and G6
+        reports a spurious gap. Sourcing the extra coins from the shared
+        ``coin_symbols`` carrier on the prefetched accounting events makes this
+        primitive-agnostic: any connector that stamps ``coin_symbols`` (Curve,
+        Balancer, future N-coin venues) contributes with no per-primitive code.
+
+        Order-preserving and case-insensitive de-duped: the config tokens keep
+        their position at the head of the list, extra coins append in first-seen
+        order, and a coin already tracked (any case) is never duplicated. Never
+        raises — a decode failure degrades to the pre-fix config allowlist (the
+        snapshot hot path must not crash on a malformed payload).
+        """
+        result = list(base_tokens)
+        seen = {str(t).upper() for t in result if t}
+        for symbol in self._position_coin_symbols():
+            key = symbol.upper()
+            if key and key not in seen:
+                seen.add(key)
+                result.append(symbol)
+        return result
+
+    def _position_coin_symbols(self) -> list[str]:
+        """Return the de-duped ``coin_symbols`` across the strategy's FULL
+        accounting-event history in this snapshot's prefetch (VIB-5540 — Seam A).
+
+        Reads the order-preserving event prefetch (``_snapshot_events_flat``,
+        populated at the top of ``value()`` from ``get_accounting_events_sync``,
+        which is deployment-scoped but otherwise unbounded) and decodes each
+        event's ``payload_json`` to pull the pool-coin-ordered ``coin_symbols``
+        vector. This is therefore the union over EVERY position the strategy ever
+        opened/closed, not just the currently-open or most-recently-closed ones —
+        a monotonically-growing set. That is acceptable and safe: it only ever
+        ADDS coins the strategy genuinely touched, so a token with a zero balance
+        is skipped by the ``bal > 0`` guard in ``value()`` (no cost beyond one
+        price lookup), and a residual dust balance of a long-closed coin can at
+        worst degrade the snapshot to ESTIMATED if that coin's price is
+        momentarily unresolvable (Empty≠Zero) — never a silent $0 or a dropped
+        coin. Primitive-agnostic — keyed only on the shared payload carrier, never
+        on a specific protocol. Never raises: a missing prefetch or a malformed
+        payload degrades to "no extra coins" (the pre-fix behaviour), never a
+        crash of the read-side hot path.
+        """
+        events = self._snapshot_events_flat
+        if not events:
+            return []
+        symbols: list[str] = []
+        seen: set[str] = set()
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            raw = ev.get("payload_json")
+            if isinstance(raw, dict):
+                payload = raw
+            else:
+                try:
+                    decoded = json.loads(raw) if raw else None
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(decoded, dict):
+                    continue
+                payload = decoded
+            coins = payload.get("coin_symbols")
+            if not coins or not isinstance(coins, list | tuple):
+                continue
+            for coin in coins:
+                if not coin:
+                    continue
+                key = str(coin).upper()
+                if key not in seen:
+                    seen.add(key)
+                    symbols.append(str(coin))
+        return symbols
 
     def _swap_inventory_for_snapshot(
         self,
