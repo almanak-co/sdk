@@ -1104,6 +1104,101 @@ def _apply_lending_unwind_guard_cli(intents: list[Any], market: Any, mode: Any =
     return guarded.intents
 
 
+def _discover_pool_string(details: dict[str, Any] | None, chain: str) -> str | None:
+    """Build a ``TOKEN0/TOKEN1[/FEE]`` *symbol* pool string for a discovered LP.
+
+    The ``--discover`` (Plan-B break-glass) path synthesizes ``LPCloseIntent``
+    from an on-chain NPM scan whose ``details`` carry token0/token1 *addresses*
+    and the fee tier (``almanak.framework.teardown.discovery.to_teardown_summary``)
+    — never symbols. Without a ``pool`` the teardown oracle warm
+    (``oracle_warmup.extract_required_token_chains``) sees no pool symbols and
+    requires only the native gas token; on a chain whose native symbol has no
+    direct price feed the warm hard-stops (``TeardownPriceOracleError``) BEFORE
+    the close can compile, even though the close resolves its own tokens on-chain
+    at compile time (VIB-5488).
+
+    Resolving token0/token1 to symbols makes the warm price the *actual* close
+    tokens. When the pool holds the wrapped-native token (e.g. WETH), the native
+    gas requirement then resolves through the compiler's wrapped<->native alias
+    (``oracle_warmup._can_resolve_price``) instead of a missing direct native
+    price — which is exactly the documented abort.
+
+    Uses the process-wide static ``TokenResolver`` (``get_token_resolver()``,
+    the same registry-backed, gateway-boundary-safe resolver ``cli/run.py`` and
+    ``market/builders.py`` use for symbol<->address resolution). ``skip_gateway``
+    keeps it purely static — no gateway round-trip, no break-glass hang risk.
+
+    Returns ``TOKEN0/TOKEN1/FEE`` (or ``TOKEN0/TOKEN1`` when the fee is absent)
+    only when BOTH token addresses resolve to symbols; otherwise ``None`` (Empty
+    != Zero: we never fabricate a half-known pool string — an unresolved token
+    stays absent so the warm still surfaces a genuinely unpriceable close loudly
+    rather than silently skipping it).
+    """
+    if not isinstance(details, dict):
+        return None
+    token0 = details.get("token0")
+    token1 = details.get("token1")
+    if not (isinstance(token0, str) and token0 and isinstance(token1, str) and token1):
+        return None
+
+    from ..data.tokens import get_token_resolver
+
+    resolver = get_token_resolver()
+    try:
+        sym0 = resolver.resolve(token0, chain, skip_gateway=True, log_errors=False).symbol
+        sym1 = resolver.resolve(token1, chain, skip_gateway=True, log_errors=False).symbol
+    except Exception as exc:  # noqa: BLE001 — best-effort; None falls back to loud warm
+        logger.debug("Teardown --discover: pool symbol resolution failed on %s: %s", chain, exc)
+        return None
+    if not (sym0 and sym1):
+        return None
+
+    fee = details.get("fee")
+    if isinstance(fee, int) and not isinstance(fee, bool) and fee > 0:
+        return f"{sym0}/{sym1}/{fee}"
+    return f"{sym0}/{sym1}"
+
+
+def _synthesize_discovered_lp_close_intents(positions: Any, collect_fees_default: bool) -> list[Any]:
+    """Synthesize ``LPCloseIntent`` for every discovered LP position (Plan-B).
+
+    Populates each intent's ``pool`` with a resolved symbol pool string
+    (``_discover_pool_string``) so the teardown oracle warm prices the real
+    close tokens instead of only the native gas token (VIB-5488). ``pool`` is
+    metadata-only for the V3-NPM protocols the discovery scan surfaces — the
+    LP_CLOSE compiler resolves the position from ``position_id`` on-chain — so
+    setting it never changes the compiled calldata.
+    """
+    from ..intents.vocabulary import LPCloseIntent
+    from ..teardown import PositionType
+
+    intents: list[Any] = []
+    for pos in positions.positions:
+        if pos.position_type != PositionType.LP:
+            continue
+        pool_str = _discover_pool_string(getattr(pos, "details", None), pos.chain)
+        if pool_str is None:
+            logger.warning(
+                "Teardown --discover: could not resolve pool token symbols for LP position "
+                "%s (%s on %s); synthesizing LP_CLOSE without a pool string. The close still "
+                "resolves its tokens on-chain at compile time, but the pre-flight oracle warm "
+                "may hard-stop on the native gas token for this position (VIB-5488).",
+                pos.position_id,
+                pos.protocol,
+                pos.chain,
+            )
+        intents.append(
+            LPCloseIntent(
+                position_id=pos.position_id,
+                protocol=pos.protocol,
+                chain=pos.chain,
+                collect_fees=collect_fees_default,
+                pool=pool_str,
+            )
+        )
+    return intents
+
+
 def generate_teardown_intents_for_cli(
     *,
     strategy: Any,
@@ -1128,23 +1223,12 @@ def generate_teardown_intents_for_cli(
     Echoes the resulting steps to stdout (preserving the original
     "Teardown Steps (N): ..." block).
     """
-    from ..teardown import PositionType, TeardownMode
+    from ..teardown import TeardownMode
 
     internal_mode = TeardownMode.SOFT if mode_str == "graceful" else TeardownMode.HARD
     if discover:
-        from ..intents.vocabulary import LPCloseIntent
-
         collect_fees_default = internal_mode == TeardownMode.SOFT
-        intents = [
-            LPCloseIntent(
-                position_id=pos.position_id,
-                protocol=pos.protocol,
-                chain=pos.chain,
-                collect_fees=collect_fees_default,
-            )
-            for pos in positions.positions
-            if pos.position_type == PositionType.LP
-        ]
+        intents = _synthesize_discovered_lp_close_intents(positions, collect_fees_default)
     else:
         try:
             try:

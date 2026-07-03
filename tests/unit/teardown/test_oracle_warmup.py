@@ -1030,3 +1030,71 @@ async def test_resume_stale_regeneration_with_prior_progress_skips_loud_gate():
     assert state.completed_intents == 0
     assert state.current_intent_index == 0
     assert captured_start[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# VIB-5488 — Plan-B --discover synthesized LP_CLOSE carries a symbol pool
+# string so the warm prices the real close tokens (and resolves the native gas
+# token via the wrapped<->native alias) instead of aborting on an unpriceable
+# native-only requirement.
+# ---------------------------------------------------------------------------
+
+
+def test_discover_lp_close_without_pool_aborts_on_unpriceable_native():
+    """Repro of the VIB-5488 abort: a synthesized LP_CLOSE with no ``pool`` (the
+    pre-fix shape) yields only the native gas token as required. On a network
+    whose native symbol has no direct price, the fail-loud warm raises before
+    the close can compile.
+    """
+    from almanak.framework.intents.vocabulary import LPCloseIntent
+
+    # WETH IS priceable (ERC-20 with DEX liquidity), but the native ETH symbol
+    # is NOT (no direct feed for the non-ERC-20 native asset).
+    market = _FakeMarket({"WETH": Decimal("3400"), "USDC": Decimal("1")})
+    close = LPCloseIntent(position_id="42", protocol="uniswap_v3", chain="ethereum", pool=None)
+
+    with pytest.raises(TeardownPriceOracleError) as exc:
+        warm_and_validate_oracle(market, [close], "ethereum", raise_on_missing=True)
+    # Only the native gas token was required, and it was the blocker.
+    assert "ETH" in str(exc.value)
+
+
+def test_discover_lp_close_with_pool_string_resolves_native_via_alias():
+    """VIB-5488 fix: once the synthesized LP_CLOSE carries a ``TOKEN0/TOKEN1/FEE``
+    symbol pool string, the warm prices the real pool tokens (WETH/USDC). The
+    native ETH gas requirement then resolves through the wrapped<->native alias
+    from WETH's price — no abort — and the warmed oracle holds the close tokens.
+    """
+    from almanak.framework.intents.vocabulary import LPCloseIntent
+
+    market = _FakeMarket({"WETH": Decimal("3400"), "USDC": Decimal("1")})
+    close = LPCloseIntent(
+        position_id="42", protocol="uniswap_v3", chain="ethereum", pool="WETH/USDC/3000"
+    )
+
+    # Must NOT raise: WETH/USDC price fine and native ETH resolves via the alias.
+    oracle = warm_and_validate_oracle(market, [close], "ethereum", raise_on_missing=True)
+
+    assert oracle is not None
+    assert oracle["WETH"] == Decimal("3400")
+    assert oracle["USDC"] == Decimal("1")
+    # The pool tokens that actually matter for the close were warmed.
+    assert {"WETH", "USDC"} <= set(market.price_calls)
+
+
+def test_discover_lp_close_pool_string_still_fails_loud_on_unpriceable_pool_token():
+    """VIB-5488 (Empty != Zero): populating ``pool`` makes the warm meaningful,
+    it does NOT weaken it. A genuinely unpriceable pool token still raises a
+    named pre-flight error rather than being silently skipped.
+    """
+    from almanak.framework.intents.vocabulary import LPCloseIntent
+
+    # Neither the pool's non-stable token nor native ETH is priceable.
+    market = _FakeMarket({"USDC": Decimal("1")})
+    close = LPCloseIntent(
+        position_id="42", protocol="uniswap_v3", chain="ethereum", pool="WBTC/USDC/3000"
+    )
+
+    with pytest.raises(TeardownPriceOracleError) as exc:
+        warm_and_validate_oracle(market, [close], "ethereum", raise_on_missing=True)
+    assert "WBTC" in str(exc.value)

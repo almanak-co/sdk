@@ -707,6 +707,88 @@ class TestGenerateTeardownIntentsForCli:
             )
         assert intents[0].collect_fees is False
 
+    def test_discover_populates_pool_symbol_string_from_details(self):
+        """VIB-5488: the ``--discover`` synthesis resolves the discovered
+        token0/token1 addresses + fee into a ``TOKEN0/TOKEN1/FEE`` symbol pool
+        string on the synthesized ``LPCloseIntent``. Without it the teardown
+        oracle warm sees no pool symbols and requires only the (possibly
+        unpriceable) native gas token, aborting before the close can compile.
+        """
+        from almanak.framework.teardown import PositionType
+
+        positions = SimpleNamespace(
+            positions=[
+                SimpleNamespace(
+                    position_type=PositionType.LP,
+                    position_id="lp1",
+                    protocol="uniswap_v3",
+                    chain="ethereum",
+                    # As emitted by teardown.discovery.to_teardown_summary:
+                    # token0/token1 are ADDRESSES, plus the fee tier.
+                    details={
+                        "token0": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",  # WETH
+                        "token1": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",  # USDC
+                        "fee": 3000,
+                    },
+                ),
+            ]
+        )
+        runner = CliRunner()
+        with runner.isolation():
+            intents = th.generate_teardown_intents_for_cli(
+                strategy=SimpleNamespace(),
+                mode_str="graceful",
+                market=None,
+                discover=True,
+                positions=positions,
+            )
+        assert len(intents) == 1
+        assert intents[0].pool == "WETH/USDC/3000"
+
+    def test_discover_pool_string_none_when_details_absent_or_unresolvable(self):
+        """VIB-5488 (Empty != Zero): the synthesis never fabricates a half-known
+        pool string. When ``details`` is absent (legacy discovery) or the token
+        addresses do not resolve to symbols, ``pool`` stays ``None`` so the warm
+        still surfaces a genuinely unpriceable close loudly rather than silently
+        skipping it.
+        """
+        from almanak.framework.teardown import PositionType
+
+        positions = SimpleNamespace(
+            positions=[
+                # No details attribute at all (legacy shape).
+                SimpleNamespace(
+                    position_type=PositionType.LP,
+                    position_id="lp1",
+                    protocol="uniswap_v3",
+                    chain="ethereum",
+                ),
+                # Details with unknown token addresses -> no symbol resolution.
+                SimpleNamespace(
+                    position_type=PositionType.LP,
+                    position_id="lp2",
+                    protocol="uniswap_v3",
+                    chain="ethereum",
+                    details={
+                        "token0": "0x1111111111111111111111111111111111111111",
+                        "token1": "0x2222222222222222222222222222222222222222",
+                        "fee": 3000,
+                    },
+                ),
+            ]
+        )
+        runner = CliRunner()
+        with runner.isolation():
+            intents = th.generate_teardown_intents_for_cli(
+                strategy=SimpleNamespace(),
+                mode_str="graceful",
+                market=None,
+                discover=True,
+                positions=positions,
+            )
+        assert len(intents) == 2
+        assert all(i.pool is None for i in intents)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # display_teardown_result
