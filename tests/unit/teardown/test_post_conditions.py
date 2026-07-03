@@ -122,7 +122,7 @@ class TestTraderJoeV2PostCondition:
 
         assert result.closed is True
         assert result.residual == {}
-        sdk.get_position_balances_for_ids.assert_called_once_with(POOL, WALLET, [100, 101, 102])
+        sdk.get_position_balances_for_ids.assert_called_once_with(POOL, WALLET, [100, 101, 102], block_identifier=None)
         # Heuristic must NOT fire when bin_ids are present.
         sdk.get_position_balances.assert_not_called()
 
@@ -166,7 +166,7 @@ class TestTraderJoeV2PostCondition:
 
         assert result.closed is True
         assert "fallback_scan" in result.residual
-        sdk.get_position_balances.assert_called_once_with(POOL, WALLET)
+        sdk.get_position_balances.assert_called_once_with(POOL, WALLET, block_identifier=None)
         sdk.get_position_balances_for_ids.assert_not_called()
 
     def test_fallback_scan_residual_marks_incomplete(self) -> None:
@@ -258,7 +258,7 @@ class TestTraderJoeV2PostCondition:
         assert result.closed is True
         assert result.residual == {}
         sdk.get_pool_address.assert_called_once_with(TOKEN_X, TOKEN_Y, 20)
-        sdk.get_position_balances_for_ids.assert_called_once_with(POOL, WALLET, [100, 101])
+        sdk.get_position_balances_for_ids.assert_called_once_with(POOL, WALLET, [100, 101], block_identifier=None)
 
     def test_derives_pool_then_detects_residual(self) -> None:
         """Derivation path still catches real residual liquidity (closed=False)."""
@@ -311,7 +311,7 @@ class TestTraderJoeV2PostCondition:
         assert result.closed is True
         assert "fallback_scan" in result.residual
         sdk.get_pool_address.assert_called_once_with(TOKEN_X, TOKEN_Y, 20)
-        sdk.get_position_balances.assert_called_once_with(POOL, WALLET)
+        sdk.get_position_balances.assert_called_once_with(POOL, WALLET, block_identifier=None)
 
     def test_derive_failure_fails_closed(self) -> None:
         """An unresolvable token pair must fail closed (never report closed)."""
@@ -409,7 +409,7 @@ class TestTraderJoeV2PostCondition:
 
         assert result.closed is True
         assert "skipped_reason" not in result.residual
-        sdk.get_position_balances_for_ids.assert_called_once_with(POOL, WALLET, [10, 11, 12])
+        sdk.get_position_balances_for_ids.assert_called_once_with(POOL, WALLET, [10, 11, 12], block_identifier=None)
 
     def test_lp_position_with_residual_still_fails_closure(self) -> None:
         """Regression guard: an LP position with residual liquidity must
@@ -518,6 +518,55 @@ class TestTraderJoeV2PostCondition:
             )
         assert result.closed is True
         adapter_cls.assert_called_once()
+
+    def test_pinned_block_reaches_strong_mode_balanceof_batch_read(self) -> None:
+        """VIB-5148 (Layer-2 follow-up to VIB-5140): a caller-supplied ``block``
+        MUST reach the strong-mode ``get_position_balances_for_ids`` read as
+        ``block_identifier``, not silently read "latest".
+
+        Before this fix, ``block`` was accepted only to satisfy the
+        ``TeardownPostCondition`` protocol and the LB-token balance read
+        always ran at "latest" regardless — a stale read-replica trailing the
+        close-tx writer by a block could then return PRE-close LB-token
+        balances and false-negative a healthy TJ V2 LP teardown.
+        """
+        sdk = MagicMock()
+        sdk.get_position_balances_for_ids.return_value = {}
+
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
+            adapter_cls.return_value.sdk = sdk
+
+            position = _make_position(bin_ids=[100, 101, 102])
+            result = traderjoe_v2_post_condition(
+                position=position,
+                wallet_address=WALLET,
+                rpc_url="http://localhost:8545",
+                block=19_000_000,
+            )
+
+        assert result.closed is True
+        sdk.get_position_balances_for_ids.assert_called_once_with(
+            POOL, WALLET, [100, 101, 102], block_identifier=19_000_000
+        )
+
+    def test_pinned_block_reaches_fallback_scan_read(self) -> None:
+        """Same pinning guarantee for the weak-mode (no bin_ids) fallback scan."""
+        sdk = MagicMock()
+        sdk.get_position_balances.return_value = {}
+
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
+            adapter_cls.return_value.sdk = sdk
+
+            position = _make_position(bin_ids=None)
+            result = traderjoe_v2_post_condition(
+                position=position,
+                wallet_address=WALLET,
+                rpc_url="http://localhost:8545",
+                block=19_000_000,
+            )
+
+        assert result.closed is True
+        sdk.get_position_balances.assert_called_once_with(POOL, WALLET, block_identifier=19_000_000)
 
 
 if __name__ == "__main__":

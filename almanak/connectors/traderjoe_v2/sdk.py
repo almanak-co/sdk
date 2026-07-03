@@ -42,7 +42,7 @@ import os
 import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from web3 import Web3
 from web3.contract import Contract
@@ -50,9 +50,34 @@ from web3.contract import Contract
 from .addresses import TRADERJOE_V2 as TRADERJOE_V2_ADDRESSES
 
 if TYPE_CHECKING:
+    from web3.types import BlockIdentifier
+
     from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
+
+
+def _as_block_identifier(block_identifier: int | str | None) -> "BlockIdentifier | None":
+    """Narrow our ``int | str | None`` block-reference contract to web3.py's
+    stricter ``BlockIdentifier`` union for ``ContractFunction.call()``.
+
+    Our own callers (the teardown closure verifier, VIB-5148) pass a plain
+    ``int`` block number, a decimal/hex ``str``, or ``None`` — the same
+    contract used across the codebase's other block-pinning surfaces
+    (``GatewayClient._encode_block_tag``, the gateway's ``_block_param``).
+
+    A **decimal** ``str`` (e.g. ``"19000000"``) is converted to ``int`` here:
+    web3.py hex-encodes an ``int`` block number for the JSON-RPC ``eth_call``
+    but passes a raw string through untouched, and a decimal string is NOT
+    valid JSON-RPC — the node requires an ``int``, a ``0x``-prefixed hex
+    string, or a tag ("latest"/"earliest"/"pending"). Without this
+    conversion a decimal-string block reference would silently fail the read
+    at the node (Gemini review, PR #3179). Hex strings ("0x…") and tags pass
+    through unchanged; ``None``/``int`` are unchanged.
+    """
+    if isinstance(block_identifier, str) and block_identifier.isdigit():
+        return int(block_identifier)
+    return cast("BlockIdentifier | None", block_identifier)
 
 
 # =============================================================================
@@ -910,6 +935,7 @@ class TraderJoeV2SDK:
         pool_address: str,
         wallet_address: str,
         bin_range: int = 50,
+        block_identifier: int | str | None = None,
     ) -> dict[int, int]:
         """Get LB token balances for a wallet across bins.
 
@@ -917,6 +943,15 @@ class TraderJoeV2SDK:
             pool_address: Address of the LBPair contract
             wallet_address: Address to query balances for
             bin_range: Number of bins to check on each side of active bin
+            block_identifier: Optional block reference (VIB-5148, Layer-2
+                follow-up to VIB-5140). ``None`` (default) is web3.py's own
+                "latest" default — legacy behaviour for every caller that
+                omits it. The teardown closure verifier MUST pin this to the
+                close-tx receipt's block so a read replica that trails the
+                writer by a block cannot return PRE-close liquidity and
+                false-negative the closure check. Threaded into every read
+                below, including ``getActiveId``, so the scan window and the
+                balances read against it are consistent as of the SAME block.
 
         Returns:
             Dict mapping bin ID to balance
@@ -924,7 +959,7 @@ class TraderJoeV2SDK:
         pair = self.get_pair_contract(pool_address)
 
         t0 = time.perf_counter()
-        active_id = pair.functions.getActiveId().call()
+        active_id = pair.functions.getActiveId().call(block_identifier=_as_block_identifier(block_identifier))
         logger.debug(f"LBPair.getActiveId: {time.perf_counter() - t0:.2f}s")
 
         wallet = Web3.to_checksum_address(wallet_address)
@@ -934,7 +969,9 @@ class TraderJoeV2SDK:
         t0 = time.perf_counter()
         accounts = [wallet] * len(candidate_bins)
         try:
-            raw_balances = pair.functions.balanceOfBatch(accounts, candidate_bins).call()
+            raw_balances = pair.functions.balanceOfBatch(accounts, candidate_bins).call(
+                block_identifier=_as_block_identifier(block_identifier)
+            )
             for bin_id, balance in zip(candidate_bins, raw_balances, strict=True):
                 if balance > 0:
                     balances[bin_id] = balance
@@ -943,7 +980,9 @@ class TraderJoeV2SDK:
             failed_bins = 0
             for bin_id in candidate_bins:
                 try:
-                    balance = pair.functions.balanceOf(wallet, bin_id).call()
+                    balance = pair.functions.balanceOf(wallet, bin_id).call(
+                        block_identifier=_as_block_identifier(block_identifier)
+                    )
                     if balance > 0:
                         balances[bin_id] = balance
                 except Exception:
@@ -972,6 +1011,7 @@ class TraderJoeV2SDK:
         pool_address: str,
         wallet_address: str,
         bin_ids: list[int],
+        block_identifier: int | str | None = None,
     ) -> dict[int, int]:
         """Get LB token balances for a wallet in specific bins.
 
@@ -982,6 +1022,13 @@ class TraderJoeV2SDK:
             pool_address: Address of the LBPair contract
             wallet_address: Address to query balances for
             bin_ids: Exact bin IDs to query
+            block_identifier: Optional block reference (VIB-5148, Layer-2
+                follow-up to VIB-5140). ``None`` (default) is web3.py's own
+                "latest" default — legacy behaviour for every caller that
+                omits it. The teardown closure verifier MUST pin this to the
+                close-tx receipt's block so a read replica that trails the
+                writer by a block cannot return PRE-close liquidity and
+                false-negative the closure check.
 
         Returns:
             Dict mapping bin ID to balance for bins with non-zero balance
@@ -996,7 +1043,9 @@ class TraderJoeV2SDK:
             return balances
         accounts = [wallet] * len(candidate_bins)
         try:
-            raw_balances = pair.functions.balanceOfBatch(accounts, candidate_bins).call()
+            raw_balances = pair.functions.balanceOfBatch(accounts, candidate_bins).call(
+                block_identifier=_as_block_identifier(block_identifier)
+            )
             for bin_id, balance in zip(candidate_bins, raw_balances, strict=True):
                 if balance > 0:
                     balances[bin_id] = balance
@@ -1005,7 +1054,9 @@ class TraderJoeV2SDK:
             failed_bins = 0
             for bin_id in candidate_bins:
                 try:
-                    balance = pair.functions.balanceOf(wallet, bin_id).call()
+                    balance = pair.functions.balanceOf(wallet, bin_id).call(
+                        block_identifier=_as_block_identifier(block_identifier)
+                    )
                     if balance > 0:
                         balances[bin_id] = balance
                 except Exception:

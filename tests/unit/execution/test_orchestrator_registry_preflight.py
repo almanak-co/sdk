@@ -153,6 +153,145 @@ async def _state_manager_with_open_lp_row(*, deployment_id: str, handle=None):
     return sm
 
 
+_V4_POOL_ID = "0x" + "ab" * 32
+
+
+async def _state_manager_with_open_v4_lp_row(*, deployment_id: str, handle=None):
+    """Return a StateManager whose position_registry has one open V4 LP row
+    (VIB-5582) — the V4 sibling of :func:`_state_manager_with_open_lp_row`,
+    keyed on ``semantic_grouping_key_univ4`` (``chain:pool_id``) instead of
+    ``semantic_grouping_key_univ3`` (``chain:pool_address``)."""
+    from almanak.framework.migration import semantic_grouping_key_univ4
+    from almanak.framework.state.state_manager import (
+        StateManager,
+        StateManagerConfig,
+        WarmBackendType,
+    )
+
+    config = StateManagerConfig(warm_backend=WarmBackendType.SQLITE)
+    config.sqlite_config.db_path = ":memory:"
+    sm = StateManager(config)
+    await sm.initialize()
+
+    sgk = semantic_grouping_key_univ4(chain=_CHAIN, pool_id=_V4_POOL_ID)
+    warm = sm._warm
+    warm._conn.execute(
+        """
+        INSERT INTO position_registry (
+            deployment_id, chain, primitive, accounting_category,
+            physical_identity_hash, semantic_grouping_key, grouping_policy_version,
+            handle, status, payload, matching_policy_version
+        ) VALUES (?, ?, 'lp_v4', 'lp', ?, ?, 'v1', ?, 'open', '{}', 1)
+        """,
+        (deployment_id, _CHAIN, "0xpih_v4_existing", sgk, handle),
+    )
+    warm._conn.commit()
+    return sm
+
+
+class TestRunnerInjectedCallbackV4:
+    """VIB-5582 — the preflight must dispatch V4 protocols to the V4
+    (``pool_id``) grouping key, not the V3 (``pool_address``) one, so a
+    same-pool V4 reopen collision is rejected BEFORE mint exactly like V3.
+    """
+
+    @pytest.mark.asyncio
+    async def test_second_auto_mode_v4_open_same_pool_is_rejected(self):
+        from almanak.framework.accounting.registry_preflight import (
+            build_registry_preflight_check,
+        )
+
+        deployment_id = "V4DoubleLpOpenReproStrategy:abc123"
+        sm = await _state_manager_with_open_v4_lp_row(deployment_id=deployment_id, handle=None)
+        check = build_registry_preflight_check(sm, deployment_id)
+
+        # V4 bundle metadata carries `pool_id` (compile-time, from the
+        # adapter's `compute_pool_id(pool_key)`), not `pool` — no V3 pool
+        # address exists for a V4 position.
+        bundle = ActionBundle(
+            intent_type="LP_OPEN",
+            transactions=[{"to": "0x00"}],
+            metadata={
+                "pool_id": _V4_POOL_ID,
+                "chain": _CHAIN,
+                "protocol": "uniswap_v4",
+                "registry_handle": None,
+            },
+        )
+        reason = await check(bundle)
+        assert reason is not None
+        assert "would collide" in reason
+        assert "0xpih_v4_existing" in reason
+        await sm.close()
+
+    @pytest.mark.asyncio
+    async def test_v4_open_different_pool_id_is_allowed(self):
+        from almanak.framework.accounting.registry_preflight import (
+            build_registry_preflight_check,
+        )
+
+        deployment_id = "V4DoubleLpOpenReproStrategy:diffpool"
+        sm = await _state_manager_with_open_v4_lp_row(deployment_id=deployment_id, handle=None)
+        check = build_registry_preflight_check(sm, deployment_id)
+
+        bundle = ActionBundle(
+            intent_type="LP_OPEN",
+            transactions=[{"to": "0x00"}],
+            metadata={
+                "pool_id": "0x" + "cd" * 32,  # different pool_id — no collision
+                "chain": _CHAIN,
+                "protocol": "uniswap_v4",
+                "registry_handle": None,
+            },
+        )
+        assert await check(bundle) is None
+        await sm.close()
+
+    @pytest.mark.asyncio
+    async def test_v4_open_missing_pool_id_metadata_allows(self):
+        """Empty ≠ Zero: an absent ``pool_id`` anchor can't compute a key —
+        the callback fails open rather than guessing (the commit-path
+        unique-index INSERT remains the backstop)."""
+        from almanak.framework.accounting.registry_preflight import (
+            build_registry_preflight_check,
+        )
+
+        deployment_id = "V4DoubleLpOpenReproStrategy:nopoolid"
+        sm = await _state_manager_with_open_v4_lp_row(deployment_id=deployment_id, handle=None)
+        check = build_registry_preflight_check(sm, deployment_id)
+
+        bundle = ActionBundle(
+            intent_type="LP_OPEN",
+            transactions=[{"to": "0x00"}],
+            metadata={"chain": _CHAIN, "protocol": "uniswap_v4", "registry_handle": None},
+        )
+        assert await check(bundle) is None
+        await sm.close()
+
+    @pytest.mark.asyncio
+    async def test_v3_pool_metadata_never_collides_with_v4_row(self):
+        """A V3-shape bundle must key on `pool` / `semantic_grouping_key_univ3`
+        and therefore never spuriously collide with an existing V4 row (whose
+        grouping key is a distinct format — 32-byte pool_id vs 20-byte pool
+        address) even when both target the SAME `chain` + `accounting_category`.
+        """
+        from almanak.framework.accounting.registry_preflight import (
+            build_registry_preflight_check,
+        )
+
+        deployment_id = "V4DoubleLpOpenReproStrategy:crossversion"
+        sm = await _state_manager_with_open_v4_lp_row(deployment_id=deployment_id, handle=None)
+        check = build_registry_preflight_check(sm, deployment_id)
+
+        bundle = ActionBundle(
+            intent_type="LP_OPEN",
+            transactions=[{"to": "0x00"}],
+            metadata={"pool": _POOL, "chain": _CHAIN, "protocol": "uniswap_v3", "registry_handle": None},
+        )
+        assert await check(bundle) is None
+        await sm.close()
+
+
 class TestRunnerInjectedCallback:
     @pytest.mark.asyncio
     async def test_second_auto_mode_open_is_rejected(self):

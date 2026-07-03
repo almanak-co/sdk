@@ -4393,6 +4393,7 @@ class V4PositionStateRequest(_message.Message):
     POSITION_MANAGER_FIELD_NUMBER: _builtins.int
     STATE_VIEW_FIELD_NUMBER: _builtins.int
     TOKEN_ID_FIELD_NUMBER: _builtins.int
+    BLOCK_FIELD_NUMBER: _builtins.int
     chain: _builtins.str
     """Chain identifier (e.g. "base")"""
     position_manager: _builtins.str
@@ -4401,6 +4402,16 @@ class V4PositionStateRequest(_message.Message):
     """V4 StateView address (connector-resolved)"""
     token_id: _builtins.int
     """Position NFT token ID"""
+    block: _builtins.str
+    """VIB-5148 (Layer-2 follow-up to VIB-5140): optional block reference for
+    the underlying eth_calls (getPositionLiquidity, getPoolAndPositionInfo,
+    getSlot0, getPositionInfo, getFeeGrowthInside). Empty ("") → "latest"
+    (legacy, backward-compatible). Not reachable via a teardown closure path
+    today (no V4 teardown post-condition hook is registered yet), but a
+    future post-tx V4 read MUST pin this to the close-tx receipt's block so
+    the call cannot race a read replica that trails the writer by a block
+    and return PRE-tx state — the same latent race VIB-5140 fixed for V3.
+    """
     def __init__(
         self,
         *,
@@ -4408,8 +4419,9 @@ class V4PositionStateRequest(_message.Message):
         position_manager: _builtins.str = ...,
         state_view: _builtins.str = ...,
         token_id: _builtins.int = ...,
+        block: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "position_manager", b"position_manager", "state_view", b"state_view", "token_id", b"token_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["block", b"block", "chain", b"chain", "position_manager", b"position_manager", "state_view", b"state_view", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___V4PositionStateRequest: _TypeAlias = V4PositionStateRequest  # noqa: Y015

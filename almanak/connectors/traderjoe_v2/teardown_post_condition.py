@@ -163,12 +163,15 @@ def traderjoe_v2_post_condition(
     +/-50 bin scan the compiler uses, marking the result with
     ``residual["fallback_scan"]`` so operators can see the scan was incomplete.
 
-    VIB-5140: ``block`` is accepted to satisfy the ``TeardownPostCondition``
-    protocol (the teardown manager pins V3 reads to the close-tx receipt's
-    block). It is NOT yet threaded through this hook's LB-token
-    ``balanceOfBatch`` read path — block-pinning the TJ V2 SDK read is a
-    Layer-2 follow-up. Accepting and ignoring it keeps the hook backward
-    compatible with the manager's pinned-call site.
+    VIB-5148 (Layer-2 follow-up to VIB-5140): ``block`` is now threaded all
+    the way into the LB-token ``balanceOfBatch`` / per-bin ``balanceOf`` reads
+    via ``TraderJoeV2SDK.get_position_balances[_for_ids](block_identifier=...)``.
+    Previously this hook only accepted ``block`` to satisfy the
+    ``TeardownPostCondition`` protocol and silently read "latest" regardless —
+    a stale read-replica one block behind the close-tx writer could return
+    PRE-close LB-token balances and false-negative a healthy TJ V2 LP
+    teardown. ``block=None`` (default) still reads "latest" (legacy,
+    backward-compatible for every caller that omits it).
     """
     protocol = "traderjoe_v2"
     position_id = getattr(position, "position_id", "") or ""
@@ -245,10 +248,12 @@ def traderjoe_v2_post_condition(
     used_fallback = False
     try:
         if known_bin_ids:
-            balances = sdk.get_position_balances_for_ids(pool_address, wallet_address, known_bin_ids)
+            balances = sdk.get_position_balances_for_ids(
+                pool_address, wallet_address, known_bin_ids, block_identifier=block
+            )
         else:
             used_fallback = True
-            balances = sdk.get_position_balances(pool_address, wallet_address)
+            balances = sdk.get_position_balances(pool_address, wallet_address, block_identifier=block)
     except Exception as exc:  # noqa: BLE001
         return ClosureCheckResult(
             closed=False,

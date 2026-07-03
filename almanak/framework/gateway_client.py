@@ -24,9 +24,10 @@ AUTH_METADATA_KEY = "authorization"
 def _encode_block_tag(block: int | str | None) -> str:
     """Encode an optional block reference for a typed-query proto ``block`` field.
 
-    VIB-5140: the typed RPC queries (QueryAllowance / QueryBalance /
-    QueryPositionLiquidity / QueryPositionTokensOwed) carry block as a
-    ``string`` (proto3 default ``""``). This helper mirrors
+    VIB-5140 (+ VIB-5148 Layer-2): the typed RPC queries (QueryAllowance /
+    QueryBalance / QueryPositionLiquidity / QueryPositionTokensOwed /
+    QueryV4PositionState) carry block as a ``string`` (proto3 default
+    ``""``). This helper mirrors
     :meth:`GatewayClient.eth_call`'s JSON-RPC block encoding so the gateway
     handler receives a wire-ready tag:
 
@@ -1275,6 +1276,7 @@ class GatewayClient:
         position_manager: str,
         state_view: str,
         token_id: int,
+        block: int | str | None = None,
     ) -> "V4PositionState | None":
         """Read live Uniswap V4 LP position state on-chain via the gateway (VIB-5024).
 
@@ -1283,6 +1285,14 @@ class GatewayClient:
             position_manager: V4 PositionManager address (connector-resolved).
             state_view: V4 StateView address (connector-resolved).
             token_id: Position NFT token ID.
+            block: Optional block reference (VIB-5148, Layer-2 follow-up to
+                VIB-5140). ``None`` (default) → ``"latest"`` (legacy
+                behaviour). A future post-tx V4 read (e.g. a V4 teardown
+                closure verifier, not yet implemented) MUST pin this to the
+                close-tx receipt's ``block_number`` so a read replica that
+                trails the writer cannot return PRE-close state and
+                false-negative the closure check — the same latent race
+                VIB-5140 fixed for V3.
 
         Returns:
             A :class:`V4PositionState` on a clean full read, or ``None`` when the
@@ -1304,6 +1314,7 @@ class GatewayClient:
                     position_manager=position_manager,
                     state_view=state_view,
                     token_id=token_id,
+                    block=_encode_block_tag(block),
                 ),
                 timeout=self.config.timeout,
             )

@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.connectors.uniswap_v4.hooks import HookFlags
+from almanak.connectors.uniswap_v4.hooks import HookFlags, compute_pool_id
 from almanak.connectors.uniswap_v4.sdk import (
     NATIVE_CURRENCY,
     PERMIT2_ADDRESS,
@@ -803,6 +803,17 @@ class UniswapV4Adapter:
             # is the normal case for any minted position.
             self._reject_unsupported_v0_pool(pool_key)
 
+            # VIB-5582: the V4 pool identity (`pool_id`) is fully determined by
+            # `pool_key` — a pure offline hash, no chain read needed — so it is
+            # available at COMPILE time, before signing/submission. Surfacing it
+            # on the ActionBundle metadata (below) lets the pre-execution
+            # registry-collision preflight (`registry_preflight.py`) reject a
+            # same-pool V4 reopen BEFORE minting a second NFT, exactly as the V3
+            # preflight uses the V3 pool address. Without this, the V4 identity
+            # is only ever known post-receipt (`ModifyLiquidity.pool_id`), so the
+            # preflight has nothing to key on and always allows.
+            pool_id = compute_pool_id(pool_key)
+
             # Try on-chain query via StateView.getSlot0()
             if self.rpc_url:
                 sqrt_price_x96 = self._sdk.get_pool_sqrt_price(pool_key, rpc_url=self.rpc_url)
@@ -961,6 +972,21 @@ class UniswapV4Adapter:
                 "estimated_sqrt_price_x96": (str(sqrt_price_x96) if price_source != "on_chain" else None),
                 "compile_time_current_tick": compile_time_current_tick,
                 "compile_time_current_tick_source": "onchain" if used_onchain_price else "estimated",
+                # VIB-5582: pool identity + protocol slug + registry_handle, in the
+                # SAME shape the V3 LP_OPEN compiler emits (`pool`/`protocol`/
+                # `registry_handle` in uniswap_v3/compiler.py), so the
+                # pre-execution registry-collision preflight
+                # (`accounting/registry_preflight.py`) can dispatch on `protocol`
+                # and key the V4 auto-mode collision check on `pool_id` — the
+                # SAME anchor `semantic_grouping_key_univ4` and the runtime
+                # registry-commit path (`strategy_runner._build_lp_v4_open_
+                # registry_row`) both use. `protocol` mirrors the intent's own
+                # field (falling back to this connector's slug) so the preflight
+                # dispatch agrees byte-for-byte with the commit-path dispatch
+                # (`_UNIV4_LP_PROTOCOLS` membership, keyed off `intent.protocol`).
+                "pool_id": pool_id,
+                "protocol": (getattr(intent, "protocol", None) or "uniswap_v4"),
+                "registry_handle": getattr(intent, "registry_handle", None),
             }
             if warnings:
                 metadata["warnings"] = warnings

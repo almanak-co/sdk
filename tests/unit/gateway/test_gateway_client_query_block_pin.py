@@ -1,9 +1,11 @@
-"""VIB-5140: the typed-query wrappers forward an optional ``block`` ref.
+"""VIB-5140 (+ VIB-5148 Layer-2): the typed-query wrappers forward an optional
+``block`` ref.
 
 QueryAllowance / QueryBalance / QueryPositionLiquidity / QueryPositionTokensOwed
 gained an optional ``block`` parameter so post-transaction reads (the teardown
 closure verifier) can pin to the confirmed receipt's block instead of an
 unpinned "latest" that a trailing read replica can answer with PRE-tx state.
+VIB-5148 extended the same ``block`` parameter to ``QueryV4PositionState``.
 
 The wrapper encodes the block ref into the proto's ``string block`` field
 exactly as ``eth_call`` does:
@@ -122,6 +124,57 @@ class TestQueryWrappersForwardBlock:
 
         req = client._rpc_stub.QueryBalance.call_args.args[0]
         assert req.block == ""
+
+
+class TestQueryV4PositionStateForwardsBlock:
+    """VIB-5148: QueryV4PositionState gained the same optional ``block`` field."""
+
+    def _v4_response(self) -> MagicMock:
+        return MagicMock(
+            success=True,
+            liquidity="0",
+            tick_lower=0,
+            tick_upper=0,
+            current_tick=0,
+            sqrt_price_x96="0",
+            pool_id="0x" + "00" * 32,
+            tokens_owed0="0",
+            tokens_owed1="0",
+            error="",
+        )
+
+    def test_omitted_block_is_empty(self):
+        client = _make_client()
+        client._rpc_stub.QueryV4PositionState.return_value = self._v4_response()
+
+        client.query_v4_position_state(
+            chain="base", position_manager="0xPM", state_view="0xSV", token_id=1
+        )
+
+        req = client._rpc_stub.QueryV4PositionState.call_args.args[0]
+        assert req.block == ""
+
+    def test_int_block_encoded_hex(self):
+        client = _make_client()
+        client._rpc_stub.QueryV4PositionState.return_value = self._v4_response()
+
+        client.query_v4_position_state(
+            chain="base", position_manager="0xPM", state_view="0xSV", token_id=1, block=19_000_000
+        )
+
+        req = client._rpc_stub.QueryV4PositionState.call_args.args[0]
+        assert req.block == hex(19_000_000)
+
+    def test_str_block_passthrough(self):
+        client = _make_client()
+        client._rpc_stub.QueryV4PositionState.return_value = self._v4_response()
+
+        client.query_v4_position_state(
+            chain="base", position_manager="0xPM", state_view="0xSV", token_id=1, block="0xabc123"
+        )
+
+        req = client._rpc_stub.QueryV4PositionState.call_args.args[0]
+        assert req.block == "0xabc123"
 
 
 if __name__ == "__main__":

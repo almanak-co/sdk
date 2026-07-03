@@ -102,12 +102,13 @@ def _ok_reads(*, liquidity, tick_lower, tick_upper, sqrt_price_x96, tick, fg0_la
     ]
 
 
-def _request(token_id: int = 2350913) -> gateway_pb2.V4PositionStateRequest:
+def _request(token_id: int = 2350913, block: str = "") -> gateway_pb2.V4PositionStateRequest:
     return gateway_pb2.V4PositionStateRequest(
         chain="base",
         position_manager=_PM,
         state_view=_STATE_VIEW,
         token_id=token_id,
+        block=block,
     )
 
 
@@ -399,3 +400,82 @@ class TestQueryV4PositionState:
         service = RpcServiceServicer(GatewaySettings(chains=["zerog"]))
         resp = await service.QueryV4PositionState(_request(), mock_context)
         assert resp.success is False
+
+
+class TestBlockPinning:
+    """VIB-5148 (Layer-2 follow-up to VIB-5140): ``request.block`` must reach
+    ALL FIVE underlying eth_calls (getPositionLiquidity, getPoolAndPositionInfo,
+    getSlot0, getPositionInfo, getFeeGrowthInside) — not just the first two.
+
+    Before this fix, a caller-supplied ``block`` on ``V4PositionStateRequest``
+    had no effect at all (the field didn't exist); every read silently used
+    "latest". A post-tx V4 read pinned to a stale read-replica one block
+    behind the writer could then return PRE-tx state. This test proves the
+    field is threaded end-to-end: an unpinned request still reads "latest"
+    (backward-compatible), and a pinned request reaches every eth_call with
+    the exact block tag — never "latest".
+    """
+
+    @pytest.mark.asyncio
+    async def test_omitted_block_reads_latest_on_every_call(self, rpc_service, mock_context):
+        """Legacy behaviour preserved: an unpinned request reads "latest" everywhere."""
+        payloads = _ok_reads(
+            liquidity=5,
+            tick_lower=-100,
+            tick_upper=100,
+            sqrt_price_x96=79228162514264337593543950336,
+            tick=0,
+        )
+        captured: list[tuple[str, str]] = []
+
+        async def _capture(rpc_url, method, params, label):
+            captured.append((label, params[1]))
+            return payloads[len(captured) - 1]
+
+        with (
+            patch.object(rpc_service, "_get_rpc_url", return_value="http://test"),
+            patch.object(rpc_service, "_make_rpc_call", side_effect=_capture),
+        ):
+            resp = await rpc_service.QueryV4PositionState(_request(block=""), mock_context)
+
+        assert resp.success is True
+        assert len(captured) == 5
+        assert [tag for _label, tag in captured] == ["latest"] * 5
+
+    @pytest.mark.asyncio
+    async def test_pinned_block_reaches_every_eth_call(self, rpc_service, mock_context):
+        """A pinned request must NOT fall back to "latest" on any of the 5 reads.
+
+        This is the false-negative regression this ticket fixes: before the fix
+        a stale read-replica trailing the writer by a block could answer an
+        unpinned "latest" call with PRE-tx state. Pinning to the exact receipt
+        block (here a decimal string, mirroring ``_block_param``'s contract)
+        closes that race for every eth_call the servicer issues.
+        """
+        payloads = _ok_reads(
+            liquidity=5,
+            tick_lower=-100,
+            tick_upper=100,
+            sqrt_price_x96=79228162514264337593543950336,
+            tick=0,
+        )
+        captured: list[tuple[str, str]] = []
+
+        async def _capture(rpc_url, method, params, label):
+            captured.append((label, params[1]))
+            return payloads[len(captured) - 1]
+
+        pinned_block = "12345678"
+        with (
+            patch.object(rpc_service, "_get_rpc_url", return_value="http://test"),
+            patch.object(rpc_service, "_make_rpc_call", side_effect=_capture),
+        ):
+            resp = await rpc_service.QueryV4PositionState(_request(block=pinned_block), mock_context)
+
+        assert resp.success is True
+        assert len(captured) == 5
+        labels = [label for label, _tag in captured]
+        assert labels == ["v4_position", "v4_position", "v4_slot0", "v4_posinfo", "v4_feegrowth"]
+        for _label, tag in captured:
+            assert tag == pinned_block
+            assert tag != "latest"

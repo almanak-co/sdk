@@ -1518,6 +1518,15 @@ message V4PositionStateRequest {
   string position_manager = 2;    // V4 PositionManager address (connector-resolved)
   string state_view = 3;          // V4 StateView address (connector-resolved)
   uint64 token_id = 4;            // Position NFT token ID
+  // VIB-5148 (Layer-2 follow-up to VIB-5140): optional block reference for
+  // the underlying eth_calls (getPositionLiquidity, getPoolAndPositionInfo,
+  // getSlot0, getPositionInfo, getFeeGrowthInside). Empty ("") → "latest"
+  // (legacy, backward-compatible). Not reachable via a teardown closure path
+  // today (no V4 teardown post-condition hook is registered yet), but a
+  // future post-tx V4 read MUST pin this to the close-tx receipt's block so
+  // the call cannot race a read replica that trails the writer by a block
+  // and return PRE-tx state — the same latent race VIB-5140 fixed for V3.
+  string block = 5;
 }
 
 // All numeric fields are decimal strings so the framework can distinguish

@@ -35,6 +35,7 @@ behaviour exercised within the function body.
 
 from __future__ import annotations
 
+import functools
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -850,6 +851,19 @@ class TestMaybeSaveLedgerWithRegistry:
 
         runner._build_registry_row = _stub_build_registry_row
         runner._registry_intent_type_str = StrategyRunner._registry_intent_type_str
+        # VIB-5582: the atomic-write call site now routes through the
+        # orphan-candidate safety-net wrapper. `functools.partial` binds
+        # `runner` as `self` (a bare attribute assignment on a SimpleNamespace
+        # does NOT go through the descriptor protocol, so the method would
+        # otherwise be called with no `self`) so the real dispatch + orphan-
+        # guard branches run unmocked — the leaf collaborator
+        # `save_ledger_and_registry` is monkeypatched at module level by the
+        # tests that need it, exactly as before.
+        runner._save_ledger_and_registry_lp_with_orphan_guard = functools.partial(
+            StrategyRunner._save_ledger_and_registry_lp_with_orphan_guard, runner
+        )
+        runner._log_orphan_candidate_lp_open = functools.partial(StrategyRunner._log_orphan_candidate_lp_open, runner)
+        runner._best_effort_ledger_fallback = functools.partial(StrategyRunner._best_effort_ledger_fallback, runner)
         runner._registry_resolve_chain_and_nft_manager = MagicMock(
             return_value=("arbitrum", "0xc36442b4a4522e871399cd717abdd847ab11fe88")
         )

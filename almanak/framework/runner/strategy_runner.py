@@ -3985,6 +3985,162 @@ class StrategyRunner:
                         cache.pop(key, None)
         self._lp_registry_id_cache = cache
 
+    async def _save_ledger_and_registry_lp_with_orphan_guard(
+        self,
+        *,
+        entry: Any,
+        registry_row: Any,
+        strategy: StrategyProtocol,
+        intent_type_str: str,
+        chain: str,
+        protocol: str,
+        payload: dict,
+    ) -> None:
+        """LP registry-mode commit with an orphan-candidate safety net (VIB-5582).
+
+        ``save_ledger_and_registry_atomic`` is a SINGLE transaction (SQLite
+        backend) / single RPC (gateway backend) — a raise means NOTHING
+        landed: no ledger row, no registry row, no ``position_events`` row.
+        For an LP_OPEN whose on-chain mint already succeeded, that is an
+        orphan NFT with zero accounting trace and — for Uniswap V4
+        specifically — no way for Plan-B ``--discover`` to find it either
+        (the V4 ``PositionManager`` is not ``ERC721Enumerable``: it exposes
+        no ``tokenOfOwnerByIndex``, so there is no on-chain wallet-wide
+        enumeration path at all, unlike the V3-NPM family
+        ``discovery.py`` already walks). See VIB-5582 design notes.
+
+        This wrapper does NOT change the raise/halt contract — the caller's
+        existing ``except AccountingPersistenceError`` / ``except
+        RegistryAutoCollisionError`` handlers (VIB-3157 fail-closed live
+        semantics; VIB-5409's "propagate the typed class verbatim, never
+        launder it into a generic AccountingPersistenceError" contract)
+        still see the EXACT SAME exception, bare-``raise``d. It only adds
+        two best-effort, gateway-boundary-compliant recovery actions first:
+
+        Both exception types are caught here because BOTH are the
+        atomic-write failure modes an LP_OPEN mint can hit:
+        ``AccountingPersistenceError`` for a generic backend failure, and
+        ``RegistryAutoCollisionError`` for the specific VIB-4614/VIB-5360
+        auto-mode collision the registry preflight is meant to catch
+        BEFORE mint — this wrapper is the safety net for when it doesn't
+        (missing pool identity metadata, an unsupported backend, or a
+        genuine concurrent-writer race the SELECT-then-INSERT preflight
+        cannot close).
+
+        1. A structured, greppable ERROR log
+           (``orphan_candidate_lp_open``) carrying every identity anchor an
+           operator needs to close the position manually — chain, protocol,
+           wallet, tx_hash, token_id, pool_id/pool_address,
+           position_manager/nft_manager_addr. This requires no further RPC
+           or DB read, so it works identically local and hosted, and lets
+           an operator close the position directly (e.g. a handle-supplied
+           LP_CLOSE) WITHOUT ``--wallet-wide`` — the log IS the precise,
+           deployment-scoped attribution, not an ambiguous wallet scan.
+        2. A best-effort fallback to the plain ``save_ledger_entry`` RPC —
+           the SAME call every non-registry-mode intent already uses, so it
+           is fully gateway-routed (no bypass). Because the atomic write
+           rolled back completely, this cannot create a duplicate row. A
+           second failure here is logged and swallowed — this is defense
+           in depth, never allowed to mask the original error.
+
+        Fires the orphan-candidate log only for LP_OPEN (a failed LP_CLOSE
+        commit is a different, already-covered shape — VIB-5409's
+        close-row fallback / typed-error propagation). The ledger fallback
+        runs for both OPEN and CLOSE — pure durability upside either way.
+        """
+        from almanak.framework.accounting.commit import save_ledger_and_registry
+
+        try:
+            await save_ledger_and_registry(
+                self.state_manager,
+                ledger=entry,
+                registry=registry_row,
+                mode="registry",
+            )
+        except (AccountingPersistenceError, RegistryAutoCollisionError):
+            if intent_type_str == "LP_OPEN":
+                self._log_orphan_candidate_lp_open(
+                    strategy=strategy,
+                    entry=entry,
+                    registry_row=registry_row,
+                    chain=chain,
+                    protocol=protocol,
+                    payload=payload,
+                )
+            await self._best_effort_ledger_fallback(entry)
+            raise
+
+    def _log_orphan_candidate_lp_open(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        entry: Any,
+        registry_row: Any,
+        chain: str,
+        protocol: str,
+        payload: dict,
+    ) -> None:
+        """Emit the ``orphan_candidate_lp_open`` recovery marker (VIB-5582).
+
+        Every field logged here is already in local scope at the LP_OPEN
+        registry-commit call site (receipt-derived ``payload`` +
+        ``registry_row`` + ``entry``) — no extra read, no gateway call.
+        """
+        logger.error(
+            "orphan_candidate_lp_open: on-chain LP_OPEN mint SUCCEEDED but the "
+            "atomic ledger+registry commit failed — this NFT has NO ledger row, "
+            "NO registry row, and NO position_event. deployment_id=%s chain=%s "
+            "protocol=%s wallet=%s tx_hash=%s token_id=%s pool_id_or_address=%s "
+            "position_manager=%s physical_identity_hash=%s ledger_entry_id=%s. "
+            "Recover manually — a --discover wallet scan will NOT find this "
+            "position if protocol is a V4-shape family (no on-chain "
+            "enumeration ABI); for V3-shape families --discover WILL find it "
+            "but this log avoids relying on that.",
+            strategy.deployment_id,
+            chain,
+            protocol,
+            getattr(strategy, "wallet_address", "") or "",
+            getattr(entry, "tx_hash", "") or "",
+            payload.get("token_id"),
+            payload.get("pool_id") or payload.get("pool_address"),
+            payload.get("position_manager") or payload.get("nft_manager_addr"),
+            getattr(registry_row, "physical_identity_hash", ""),
+            getattr(entry, "id", "") or "",
+        )
+
+    async def _best_effort_ledger_fallback(self, entry: Any) -> None:
+        """Best-effort plain ``save_ledger_entry`` after an atomic registry-mode
+        commit failure (VIB-5582).
+
+        The atomic write is all-or-nothing (single SQLite transaction /
+        single gateway RPC) — a raise means nothing landed, so this
+        fallback cannot create a duplicate row. It uses the SAME
+        gateway-routed ``save_ledger_entry`` RPC every non-registry-mode
+        intent already relies on (no bypass; identical local + hosted). A
+        second failure here is logged and swallowed: this is a defense-in-
+        depth net, never allowed to mask the original
+        ``AccountingPersistenceError`` or introduce a new failure/halt path.
+        """
+        if not self.state_manager or not hasattr(self.state_manager, "save_ledger_entry"):
+            return
+        try:
+            await self.state_manager.save_ledger_entry(entry)
+            logger.warning(
+                "orphan_candidate_ledger_fallback_ok: plain ledger row persisted "
+                "(id=%s tx_hash=%s) despite the registry-mode commit failure above "
+                "— the position itself is still absent from position_registry.",
+                getattr(entry, "id", ""),
+                getattr(entry, "tx_hash", "") or "",
+            )
+        except Exception:
+            logger.error(
+                "orphan_candidate_ledger_fallback_failed: even the plain ledger "
+                "fallback write failed (tx_hash=%s) — this on-chain trade has NO "
+                "durable trace anywhere except the log line above.",
+                getattr(entry, "tx_hash", "") or "",
+                exc_info=True,
+            )
+
     async def _maybe_save_ledger_with_registry(
         self,
         *,
@@ -4167,13 +4323,14 @@ class StrategyRunner:
             return False
         registry_row, payload, token_id = built
 
-        from almanak.framework.accounting.commit import save_ledger_and_registry
-
-        await save_ledger_and_registry(
-            self.state_manager,
-            ledger=entry,
-            registry=registry_row,
-            mode="registry",
+        await self._save_ledger_and_registry_lp_with_orphan_guard(
+            entry=entry,
+            registry_row=registry_row,
+            strategy=strategy,
+            intent_type_str=intent_type_str,
+            chain=chain,
+            protocol=protocol,
+            payload=payload,
         )
         # Keep the LP-tracker registry-id cache in sync so subsequent
         # LP_CLOSE intents see the OPEN row's token_id without an extra
@@ -4283,13 +4440,14 @@ class StrategyRunner:
             return False
         registry_row, payload, token_id = built
 
-        from almanak.framework.accounting.commit import save_ledger_and_registry
-
-        await save_ledger_and_registry(
-            self.state_manager,
-            ledger=entry,
-            registry=registry_row,
-            mode="registry",
+        await self._save_ledger_and_registry_lp_with_orphan_guard(
+            entry=entry,
+            registry_row=registry_row,
+            strategy=strategy,
+            intent_type_str=intent_type_str,
+            chain=chain,
+            protocol=protocol,
+            payload=payload,
         )
         logger.info(
             "Registry-mode V4 write OK for %s on %s NFT=%s pool_id=%s pih=%s",

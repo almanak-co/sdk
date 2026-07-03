@@ -1536,6 +1536,14 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         ``success=False`` so the valuer falls back to the ESTIMATED OPEN-amount
         path rather than ever emitting a HIGH-confidence value from incomplete
         on-chain data (the never-wrong-HIGH guarantee).
+
+        VIB-5148 (Layer-2 follow-up to VIB-5140): ``request.block`` optionally
+        pins ALL FIVE underlying eth_calls (this method's two + the three in
+        ``_read_v4_pool_and_fee_state``) to the same block via ``_block_param``
+        (empty → "latest", unchanged legacy behaviour). No V4 teardown
+        post-condition hook calls this with a pinned block today, but the
+        plumbing closes the same latent stale-read-replica race VIB-5140 fixed
+        for V3 for whenever a post-tx V4 read is added.
         """
         self._metrics.total_requests += 1
 
@@ -1599,9 +1607,12 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             return gateway_pb2.V4PositionStateResponse(success=False, error=f"Chain '{chain}' is not configured")
 
         token_id_hex = format(request.token_id, "064x")
+        # VIB-5148 (Layer-2 follow-up to VIB-5140): pin every eth_call below to
+        # the caller-supplied block (empty → "latest", unchanged behaviour).
+        block_param = _block_param(request.block)
 
         # 1. getPositionLiquidity(uint256) — selector 0x1efeed33
-        liq_params = [{"to": position_manager, "data": "0x1efeed33" + token_id_hex}, "latest"]
+        liq_params = [{"to": position_manager, "data": "0x1efeed33" + token_id_hex}, block_param]
         start_time = time.time()
         liq_result, liq_error = await self._make_rpc_call(rpc_url, "eth_call", liq_params, "v4_position")
         record_rpc_request(chain, "eth_call")
@@ -1613,7 +1624,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             )
 
         # 2. getPoolAndPositionInfo(uint256) — selector 0x7ba03aad
-        info_params = [{"to": position_manager, "data": "0x7ba03aad" + token_id_hex}, "latest"]
+        info_params = [{"to": position_manager, "data": "0x7ba03aad" + token_id_hex}, block_param]
         start_time = time.time()
         info_result, info_error = await self._make_rpc_call(rpc_url, "eth_call", info_params, "v4_position")
         record_rpc_request(chain, "eth_call")
@@ -1659,6 +1670,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             tick_upper=tick_upper,
             token_id=request.token_id,
             liquidity=liquidity,
+            block_param=block_param,
         )
         if isinstance(pool_state, str):
             self._metrics.failed_requests += 1
@@ -1690,6 +1702,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         tick_upper: int,
         token_id: int,
         liquidity: int,
+        block_param: str = "latest",
     ) -> tuple[int, int, int, int] | str:
         """Read pool price (getSlot0) + the position's uncollected fees off ``pool_id_full``.
 
@@ -1699,9 +1712,14 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         Fees are V3 parity: ``owed = liquidity·(fgInside − fgLast)/2^128`` per token,
         gated by a self-verifying check that the pool-position liquidity read via the
         derived positionId equals ``liquidity`` (the getPositionLiquidity value).
+
+        ``block_param`` (VIB-5148, Layer-2 follow-up to VIB-5140) pins every read
+        below to the same block as the caller's ``getPositionLiquidity`` /
+        ``getPoolAndPositionInfo`` reads — defaults to ``"latest"`` for any
+        caller that omits it (legacy behaviour unchanged).
         """
         # StateView.getSlot0(poolId) — the deployed V4 StateView takes the bytes32 PoolId.
-        slot0_params = [{"to": state_view, "data": "0x" + _GET_SLOT0_SELECTOR + pool_id_full[2:]}, "latest"]
+        slot0_params = [{"to": state_view, "data": "0x" + _GET_SLOT0_SELECTOR + pool_id_full[2:]}, block_param]
         start_time = time.time()
         slot0_result, slot0_error = await self._make_rpc_call(rpc_url, "eth_call", slot0_params, "v4_slot0")
         record_rpc_request(chain, "eth_call")
@@ -1719,7 +1737,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         position_id = _v4_position_id(position_manager, tick_lower, tick_upper, token_id)
         posinfo_params = [
             {"to": state_view, "data": "0x" + _GET_POSITION_INFO_SELECTOR + pool_id_full[2:] + position_id[2:]},
-            "latest",
+            block_param,
         ]
         start_time = time.time()
         posinfo_result, posinfo_error = await self._make_rpc_call(rpc_url, "eth_call", posinfo_params, "v4_posinfo")
@@ -1737,7 +1755,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 + _abi_int24_word(tick_lower)
                 + _abi_int24_word(tick_upper),
             },
-            "latest",
+            block_param,
         ]
         start_time = time.time()
         fgi_result, fgi_error = await self._make_rpc_call(rpc_url, "eth_call", fgi_params, "v4_feegrowth")
