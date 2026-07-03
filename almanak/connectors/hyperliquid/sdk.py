@@ -389,6 +389,22 @@ def build_usdc_withdraw_calldata(amount: Decimal) -> bytes:
     )
 
 
+def build_usd_class_transfer_calldata(amount: Decimal, *, to_perp: bool) -> bytes:
+    """Build ``sendRawAction`` calldata for a USD-class transfer (perp ↔ spot).
+
+    Wraps :func:`encode_usd_class_transfer_action` (action 7) as CoreWriter
+    ``sendRawAction`` calldata. ``to_perp=False`` moves USDC perp→spot (the first
+    leg of a HyperCore→L1 withdraw: ``spotSend`` reads the SPOT account, so free
+    perp margin must be rotated to spot first); ``to_perp=True`` moves spot→perp.
+
+    ``amount`` is the human USD amount — the encoder applies the action-7 **1e6
+    ntl** scale internally (distinct from the ``spotSend`` weiDecimals=8 scale, so
+    never share a pre-scaled integer between the two legs).
+    """
+    blob = encode_usd_class_transfer_action(amount, to_perp=to_perp)
+    return encode_send_raw_action_calldata(blob)
+
+
 # =============================================================================
 # Read-precompile output decoders (pure; the eth_call I/O lives in the caller)
 # =============================================================================
@@ -592,6 +608,7 @@ __all__ = [
     "LimitOrderAction",
     "Position",
     "build_spot_send_calldata",
+    "build_usd_class_transfer_calldata",
     "build_usdc_withdraw_calldata",
     "decode_account_margin_summary",
     "decode_limit_order_action",

@@ -789,6 +789,7 @@ class _MinimalIntent:
             "perp_open": IntentType.PERP_OPEN,
             "perp_close": IntentType.PERP_CLOSE,
             "perp_cancel_order": IntentType.PERP_CANCEL_ORDER,
+            "perp_withdraw": IntentType.PERP_WITHDRAW,
             "stake": IntentType.STAKE,
             "unstake": IntentType.UNSTAKE,
             "wrap_native": IntentType.WRAP_NATIVE,

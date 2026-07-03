@@ -452,6 +452,8 @@ class BasePerpCompiler(BaseProtocolCompiler[PerpCompilerContext]):
             return self.compile_perp_close(ctx, intent)
         if intent_type == IntentType.PERP_CANCEL_ORDER:
             return self.compile_perp_cancel(ctx, intent)
+        if intent_type == IntentType.PERP_WITHDRAW:
+            return self.compile_perp_withdraw(ctx, intent)
         return self._unsupported(intent)
 
     @abstractmethod
@@ -468,6 +470,18 @@ class BasePerpCompiler(BaseProtocolCompiler[PerpCompilerContext]):
         which reports unsupported. A connector that supports it overrides this AND
         declares ``IntentType.PERP_CANCEL_ORDER`` in its ``intents`` so the registry
         routes cancels only to it.
+        """
+        return self._unsupported(intent)
+
+    def compile_perp_withdraw(self, ctx: PerpCompilerContext, intent: Any) -> CompilationResult:
+        """Compile a PERP_WITHDRAW intent (withdraw free margin off-chain → L1).
+
+        Not abstract: off-chain-account withdrawal is venue-specific (Hyperliquid
+        only, for now — VIB-5617; the CoreWriter spotSend HyperCore→HyperEVM bridge).
+        Perp connectors that do not support it inherit this default, which reports
+        unsupported. A connector that supports it overrides this AND declares
+        ``IntentType.PERP_WITHDRAW`` in its ``intents`` so the registry routes
+        withdraws only to it.
         """
         return self._unsupported(intent)
 

@@ -181,6 +181,10 @@ class IntentType(Enum):
     # Not a position open/close — a refund of committed-but-unspent collateral
     # (the recovery half of VIB-5116; see PerpCancelIntent). NO_ACCOUNTING category.
     PERP_CANCEL_ORDER = "PERP_CANCEL_ORDER"
+    # Withdraw free margin off a perp venue's off-chain account back to L1 (a cash
+    # movement, not a trade — no position, no PnL). On Hyperliquid this is a
+    # CoreWriter spotSend HyperCore→HyperEVM bridge (VIB-5617). NO_ACCOUNTING category.
+    PERP_WITHDRAW = "PERP_WITHDRAW"
     BRIDGE = "BRIDGE"
     ENSURE_BALANCE = "ENSURE_BALANCE"
     FLASH_LOAN = "FLASH_LOAN"
@@ -1069,6 +1073,7 @@ from .perp_intents import (  # noqa: E402, F401
     PerpCancelIntent,
     PerpCloseIntent,
     PerpOpenIntent,
+    PerpWithdrawIntent,
 )
 from .prediction_intents import (  # noqa: E402, F401
     PredictionBuyIntent,
@@ -1100,6 +1105,7 @@ type AnyIntent = (
     | PerpOpenIntent
     | PerpCloseIntent
     | PerpCancelIntent
+    | PerpWithdrawIntent
     | FlashLoanIntent
     | StakeIntent
     | UnstakeIntent
@@ -2024,6 +2030,62 @@ class Intent:
         )
 
     @staticmethod
+    def perp_withdraw(
+        amount: Decimal | Literal["all"],
+        asset: str = "USDC",
+        protocol: str | None = None,
+        chain: str | None = None,
+        destination: str | None = None,
+        registry_handle: str | None = None,
+    ) -> PerpWithdrawIntent:
+        """Create a perp-venue withdraw intent (off-chain account → L1).
+
+        A cash movement, not a trade: it moves the strategy's free margin off the
+        venue's off-chain ledger back to the on-chain wallet. No position, no PnL.
+
+        On Hyperliquid this compiles to a TWO-action CoreWriter bundle — a
+        ``usdClassTransfer`` (perp→spot) followed by a ``spotSend`` HyperCore→HyperEVM
+        USDC bridge (VIB-5617); a Safe uses it to recover parked HyperCore funds
+        without an ECDSA L1 withdraw signature.
+
+        Args:
+            amount: Amount to withdraw in human token terms, or ``"all"`` ONLY as a
+                CHAINED amount (a prior step's received amount). Standalone
+                ``"all"`` is NOT supported for PERP_WITHDRAW — there is no live
+                venue free-margin read to resolve it against yet (a follow-up).
+            asset: Token to withdraw (default ``"USDC"``).
+            protocol: Perp venue holding the funds. ``None`` resolves to the sole
+                registered PERP_WITHDRAW venue (blueprint 22 — no hardcoded
+                connector name in the vocabulary).
+            chain: Target chain (defaults to strategy's primary chain; ``hyperevm``
+                for Hyperliquid).
+            destination: Optional explicit L1 recipient. Defaults to the deployment
+                wallet's own address — for the HyperCore bridge the credited wallet
+                is ALWAYS the sender, so a non-sender destination is a plain spot
+                transfer, not a bridge. It is a fail-closed sender-equality
+                ASSERTION only, never threaded into the withdraw calldata.
+
+        Returns:
+            PerpWithdrawIntent: The created perp withdraw intent.
+
+        Example:
+            # Sweep parked HyperCore USDC back to the Safe's HyperEVM wallet
+            intent = Intent.perp_withdraw(amount=Decimal("6.99"), chain="hyperevm")
+        """
+        # ``protocol=None`` defers to PerpWithdrawIntent's registry-resolved default
+        # (the sole PERP_WITHDRAW venue) — no hardcoded connector name here.
+        fields: dict[str, Any] = {
+            "amount": amount,
+            "asset": asset,
+            "chain": chain,
+            "destination": destination,
+            "registry_handle": registry_handle,
+        }
+        if protocol is not None:
+            fields["protocol"] = protocol
+        return PerpWithdrawIntent(**fields)
+
+    @staticmethod
     def bridge(
         token: str,
         amount: Decimal | Literal["all"],
@@ -2818,6 +2880,7 @@ class Intent:
             IntentType.PERP_OPEN.value: PerpOpenIntent,
             IntentType.PERP_CLOSE.value: PerpCloseIntent,
             IntentType.PERP_CANCEL_ORDER.value: PerpCancelIntent,
+            IntentType.PERP_WITHDRAW.value: PerpWithdrawIntent,
             IntentType.FLASH_LOAN.value: FlashLoanIntent,
             IntentType.STAKE.value: StakeIntent,
             IntentType.UNSTAKE.value: UnstakeIntent,

@@ -206,6 +206,11 @@ def test_no_intent_type_is_silently_unhandled() -> None:
         # (the wallet credit is captured by the balance snapshot + a ledger row).
         # Deliberately NO_ACCOUNTING; see taxonomy.py PERP_CANCEL_ORDER row.
         "PERP_CANCEL_ORDER",
+        # VIB-5617: a perp-venue withdraw is a cash movement (off-chain account →
+        # L1), NOT a position open/close — no typed accounting/PnL event (the wallet
+        # credit, net of the ~$1 HyperCore fee, is captured by the balance snapshot
+        # + a ledger row). Deliberately NO_ACCOUNTING; see taxonomy.py PERP_WITHDRAW.
+        "PERP_WITHDRAW",
         # Not yet implemented (Phase 2+)
         "STAKE",
         "UNSTAKE",

@@ -427,6 +427,19 @@ def _covers_perp(intent: Any, position: PositionInfo, itype: str) -> bool:
     # one close) falsely cover the other and let the strand pass the gate. When the
     # matching cancel executed and completeness passes, the on-chain post-condition
     # still re-reads the OrderVault (count == 0) as the authoritative backstop.
+    # A HyperCore free-margin residual (VIB-5617) is unencumbered cash parked on
+    # the venue's off-chain ledger, NOT an open position. It is recovered — and
+    # thus covered — ONLY by a PERP_WITHDRAW (the CoreWriter spotSend HyperCore→L1
+    # bridge), never by a PERP_CLOSE (which closes a position, not a cash balance)
+    # and never by a cancel. Keyed on the generic ``kind`` marker so it stays
+    # protocol-agnostic. NOTE: no hyperliquid teardown path emits this residual kind
+    # today (HyperCore free margin is not yet enumerated as a PositionInfo), so this
+    # branch is inert until that discovery lands — it makes the verb completeness-
+    # ready (a PERP_WITHDRAW recovering surfaced cash passes the gate) rather than
+    # latently uncovered, without fabricating coverage for anything currently
+    # surfaced. Fail-safe: only credits when a residual explicitly carries this kind.
+    if kind == "hypercore_cash":
+        return itype == "PERP_WITHDRAW"
     if kind == "pending_order":
         if itype != "PERP_CANCEL_ORDER":
             return False

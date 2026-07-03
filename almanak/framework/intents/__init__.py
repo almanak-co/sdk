@@ -132,6 +132,7 @@ from .vocabulary import (
     PerpCancelIntent,
     PerpCloseIntent,
     PerpOpenIntent,
+    PerpWithdrawIntent,
     # Prediction market intents
     PredictionBuyIntent,
     PredictionOrderType,
@@ -187,6 +188,7 @@ __all__ = [
     "PerpOpenIntent",
     "PerpCloseIntent",
     "PerpCancelIntent",
+    "PerpWithdrawIntent",
     "StakeIntent",
     "UnstakeIntent",
     "FlashLoanIntent",

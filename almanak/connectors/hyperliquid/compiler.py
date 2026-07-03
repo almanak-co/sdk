@@ -5,6 +5,10 @@ transaction on HyperEVM (chain 999). The order settles **asynchronously** on
 HyperCore — the EVM tx only emits ``RawAction`` and never carries the fill — so
 this compiler's job ends at "submit a correctly-encoded, fail-closed order";
 settlement is observed later via the perps-read snapshot (see ``perps_read.py``).
+``PERP_WITHDRAW`` (VIB-5617) is a cash movement, not a trade, and compiles to a
+TWO-action CoreWriter bundle: a ``usdClassTransfer`` (action 7) rotating USDC
+perp→spot, then a USDC ``spotSend`` (action 6) to the USDC system address that
+HyperCore bridges back to the sender's HyperEVM wallet.
 
 Reference price comes from the HyperCore **oracle precompile** (``0x0807``): it
 is the venue's own mark, so the slippage band is anchored to exactly the price
@@ -24,14 +28,14 @@ ignored and never faked.
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import ClassVar
 
 from eth_utils import keccak
 
 from almanak.connectors._strategy_base.base.compiler import BasePerpCompiler, PerpCompilerContext
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
-from almanak.framework.intents.vocabulary import IntentType, PerpCloseIntent, PerpOpenIntent
+from almanak.framework.intents.vocabulary import IntentType, PerpCloseIntent, PerpOpenIntent, PerpWithdrawIntent
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
 from .addresses import (
@@ -41,12 +45,16 @@ from .addresses import (
     PERP_PX_MAX_DECIMALS,
     PRECOMPILE_ORACLE_PX,
     PRECOMPILE_POSITION,
+    USDC_SPOT_TOKEN_INDEX,
+    USDC_SPOT_WEI_DECIMALS,
 )
 from .markets import PerpMarket, resolve_market
 from .sdk import (
     TIF_IOC,
     LimitOrderAction,
     Position,
+    build_usd_class_transfer_calldata,
+    build_usdc_withdraw_calldata,
     decode_position,
     decode_uint64,
     encode_limit_order_action,
@@ -67,7 +75,9 @@ class HyperliquidCompiler(BasePerpCompiler):
     """Compile Hyperliquid perp intents into CoreWriter transactions on HyperEVM."""
 
     protocols: ClassVar[frozenset[str]] = frozenset({"hyperliquid"})
-    intents: ClassVar[frozenset[IntentType]] = frozenset({IntentType.PERP_OPEN, IntentType.PERP_CLOSE})
+    intents: ClassVar[frozenset[IntentType]] = frozenset(
+        {IntentType.PERP_OPEN, IntentType.PERP_CLOSE, IntentType.PERP_WITHDRAW}
+    )
     chains: ClassVar[frozenset[str]] = frozenset({HYPEREVM_CHAIN})
 
     # ------------------------------------------------------------------ open
@@ -132,7 +142,7 @@ class HyperliquidCompiler(BasePerpCompiler):
         return self._success(
             intent.intent_id,
             IntentType.PERP_OPEN,
-            tx,
+            [tx],
             metadata={
                 "protocol": intent.protocol,
                 "market": intent.market,
@@ -216,7 +226,7 @@ class HyperliquidCompiler(BasePerpCompiler):
         return self._success(
             intent.intent_id,
             IntentType.PERP_CLOSE,
-            tx,
+            [tx],
             metadata={
                 "protocol": intent.protocol,
                 "market": intent.market,
@@ -230,6 +240,129 @@ class HyperliquidCompiler(BasePerpCompiler):
                 "sz_wire": sz_wire,
                 "tif": "IOC",
                 "reduce_only": True,
+                "chain": ctx.chain,
+            },
+            warnings=[],
+        )
+
+    # -------------------------------------------------------------- withdraw
+    def compile_perp_withdraw(self, ctx: PerpCompilerContext, intent: PerpWithdrawIntent) -> CompilationResult:
+        """Compile a PERP_WITHDRAW into a 2-action CoreWriter HyperCore→L1 bundle.
+
+        Recovering **perp** margin back on-chain is two ordered CoreWriter actions
+        (each a ``sendRawAction`` call), mirroring the real-money proof exactly:
+
+        1. ``usdClassTransfer`` (action 7) — rotate USDC perp→spot. ``spotSend``
+           reads the SPOT account, so free perp margin must be moved to spot first;
+           this is the leg the proof had to do manually before the verb existed.
+        2. ``spotSend`` (action 6) — send that USDC (token index 0, weiDecimals 8 —
+           NOT the 1e6 perp ntl scale) to the USDC system address, which HyperCore
+           detects as a HyperCore→HyperEVM bridge and credits back to the SENDER's
+           HyperEVM (L1) wallet.
+
+        This is a cash movement (no position, no PnL); HyperCore deducts a small
+        (~$1) withdraw fee from the credited amount off-EVM. The framework submits
+        the bundle sequentially for an EOA and as one atomic Zodiac MultiSend for a
+        Safe. Fail-closed on a non-USDC asset (the only bridge-linked token today),
+        a non-positive amount, a non-sender destination, and an unresolved ``"all"``
+        marker. ``"all"`` is supported ONLY as a CHAINED amount (a prior step's
+        received amount, resolved to a concrete Decimal by the runner before
+        compile); standalone ``"all"`` is NOT yet supported — PERP_WITHDRAW is not a
+        wallet-funded type, so there is no live HyperCore free-margin read to resolve
+        it against (a follow-up), and a bare ``"all"`` reaching here fails closed.
+        """
+        chain_err = self._require_hyperevm(ctx, intent.intent_id)
+        if chain_err is not None:
+            return chain_err
+
+        if intent.asset.upper() != "USDC":
+            return self._fail(
+                intent.intent_id,
+                f"PERP_WITHDRAW on Hyperliquid supports only USDC (the HyperCore bridge-linked "
+                f"token), got asset '{intent.asset}'",
+            )
+
+        amount = intent.amount
+        if not isinstance(amount, Decimal):
+            return self._fail(
+                intent.intent_id,
+                "PERP_WITHDRAW amount must be a resolved positive Decimal at compile time; "
+                f"got {amount!r}. Standalone amount='all' is not supported for PERP_WITHDRAW "
+                "(no live HyperCore free-margin read yet); use 'all' only as a chained amount "
+                "(a prior step's received amount), which the runner resolves before compile.",
+            )
+        if not amount.is_finite() or amount <= 0:
+            return self._fail(
+                intent.intent_id,
+                f"PERP_WITHDRAW amount must be a finite positive Decimal, got {amount}",
+            )
+
+        # The HyperCore bridge ALWAYS credits the sender's own HyperEVM wallet — a
+        # spotSend to the USDC system address is bridge-detected only for the
+        # originator. An explicit non-sender destination would be a plain spot
+        # transfer, not a bridge (and cannot land funds on-chain), so fail closed.
+        # NOTE: destination is a fail-closed sender-equality ASSERTION only; it is
+        # NEVER threaded into the encoder — build_usdc_withdraw_calldata hardcodes
+        # the USDC system bridge address, which credits the originating sender.
+        if not ctx.wallet_address:
+            return self._fail(intent.intent_id, "PERP_WITHDRAW requires a resolved deployment wallet address")
+        destination = intent.destination or ctx.wallet_address
+        if destination.lower() != ctx.wallet_address.lower():
+            return self._fail(
+                intent.intent_id,
+                f"PERP_WITHDRAW destination {destination} must be the sender's own wallet "
+                f"({ctx.wallet_address}); the HyperCore bridge credits only the spotSend originator.",
+            )
+
+        # The two legs use DIFFERENT venue scales (usdClassTransfer: 1e6 ntl;
+        # spotSend USDC: weiDecimals=8). Build BOTH from the SAME amount quantized
+        # DOWN to the coarser 6-dp scale — otherwise a >6-dp amount would transfer a
+        # 6-dp-floored value perp->spot but spotSend the full 8-dp amount, leaving
+        # spot short so HyperCore async-rejects the bridge while the EVM txs still
+        # report success (VIB-5617 audit / Codex P1). ROUND_DOWN never over-withdraws.
+        amount = amount.quantize(Decimal("0.000001"), rounding=ROUND_DOWN)
+        if amount <= 0:
+            return self._fail(
+                intent.intent_id,
+                f"PERP_WITHDRAW amount {intent.amount} is below the 6-dp minimum after "
+                "quantization to the usdClassTransfer scale.",
+            )
+        try:
+            transfer_calldata = build_usd_class_transfer_calldata(amount, to_perp=False)
+            withdraw_calldata = build_usdc_withdraw_calldata(amount)
+        except ValueError as exc:
+            return self._fail(intent.intent_id, f"withdraw sizing failed: {exc}")
+
+        transfer_tx = TransactionData(
+            to=CORE_WRITER_ADDRESS,
+            value=0,
+            data="0x" + transfer_calldata.hex(),
+            gas_estimate=_CORE_WRITER_GAS,
+            description=f"Hyperliquid usdClassTransfer {amount} USDC perp->spot",
+            tx_type="perp_withdraw",
+        )
+        withdraw_tx = TransactionData(
+            to=CORE_WRITER_ADDRESS,
+            value=0,
+            data="0x" + withdraw_calldata.hex(),
+            gas_estimate=_CORE_WRITER_GAS,
+            description=f"Hyperliquid withdraw {amount} USDC HyperCore->HyperEVM",
+            tx_type="perp_withdraw",
+        )
+
+        return self._success(
+            intent.intent_id,
+            IntentType.PERP_WITHDRAW,
+            [transfer_tx, withdraw_tx],
+            metadata={
+                "protocol": intent.protocol,
+                "asset": "USDC",
+                "amount": str(amount),
+                "spot_token_index": USDC_SPOT_TOKEN_INDEX,
+                "wei_decimals": USDC_SPOT_WEI_DECIMALS,
+                "destination": destination,
+                "bridge": "hypercore->hyperevm",
+                "legs": ["usd_class_transfer_perp_to_spot", "spot_send_bridge_to_l1"],
                 "chain": ctx.chain,
             },
             warnings=[],
@@ -335,19 +468,26 @@ class HyperliquidCompiler(BasePerpCompiler):
         self,
         intent_id: str,
         intent_type: IntentType,
-        tx: TransactionData,
+        txs: list[TransactionData],
         *,
         metadata: dict,
         warnings: list[str],
     ) -> CompilationResult:
+        # ``txs`` is an ordered bundle: one tx for open/close, TWO for a
+        # PERP_WITHDRAW (usd_class_transfer perp->spot, then spotSend spot->L1).
+        # The framework submits a multi-tx bundle sequentially for an EOA and as
+        # one atomic Zodiac MultiSend for a Safe (see orchestrator; MultiSend is
+        # authorized globally as framework infrastructure).
+        if not txs:
+            raise ValueError("_success requires at least one transaction")
         result = CompilationResult(status=CompilationStatus.SUCCESS, intent_id=intent_id)
         result.action_bundle = ActionBundle(
             intent_type=intent_type.value,
-            transactions=[tx.to_dict()],
+            transactions=[tx.to_dict() for tx in txs],
             metadata=metadata,
         )
-        result.transactions = [tx]
-        result.total_gas_estimate = tx.gas_estimate
+        result.transactions = list(txs)
+        result.total_gas_estimate = sum(tx.gas_estimate for tx in txs)
         result.warnings = warnings
         return result
 

@@ -18,9 +18,10 @@ CONNECTOR = Connector(
     name="hyperliquid",
     kind=ProtocolKind.PERP,
     # Strategy-facing execution surface: market open/close via CoreWriter on
-    # HyperEVM (chain 999). See compiler.py for the scope bounded by the
-    # CoreWriter action set + the perp intent vocabulary.
-    strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
+    # HyperEVM (chain 999), plus PERP_WITHDRAW (a CoreWriter spotSend
+    # HyperCore->HyperEVM USDC bridge, VIB-5617). See compiler.py for the scope
+    # bounded by the CoreWriter action set + the perp intent vocabulary.
+    strategy_intents=("PERP_OPEN", "PERP_CLOSE", "PERP_WITHDRAW"),
     strategy_chains=("hyperevm",),
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.hyperliquid.fee_model", attribute="HyperliquidFeeModel"),

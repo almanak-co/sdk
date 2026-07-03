@@ -19,6 +19,13 @@ dynamic to discover. The target address and selector below are taken from the
 connector's own ``addresses.py`` / ``sdk.py`` constants so they cannot drift from
 the encoder that actually builds the calldata.
 
+``PERP_WITHDRAW`` (VIB-5617 — a CoreWriter ``spotSend`` HyperCore→HyperEVM USDC
+bridge) reuses the SAME ``(CoreWriter, sendRawAction)`` target/selector (a spotSend
+is just another action blob wrapped in ``sendRawAction(bytes)``), so it needs NO
+new Zodiac target — it is scoped onto the same static entry below. This is the
+exact path the Safe uses to recover parked HyperCore funds without an ECDSA L1
+``withdraw3`` signature.
+
 Without this entry a Safe-wallet hyperliquid strategy gets NO permission for
 ``CoreWriter.sendRawAction`` and every order reverts at ``execTransactionWithRole``
 (Zodiac Roles: unauthorized).
@@ -44,7 +51,11 @@ PERMISSION_HINTS = PermissionHints(
                 label="Hyperliquid CoreWriter",
                 selectors={_SEND_RAW_ACTION_SELECTOR: _SEND_RAW_ACTION_LABEL},
                 send_allowed=False,  # CoreWriter calls carry value == 0 (see compiler._core_writer_tx)
-                intent_types=frozenset({"PERP_OPEN", "PERP_CLOSE"}),
+                # PERP_WITHDRAW (VIB-5617) reuses the SAME (CoreWriter, sendRawAction)
+                # target/selector — a spotSend is just another action wrapped in
+                # sendRawAction(bytes) — so no new Zodiac target; scope the intent here
+                # so the Safe manifest authorises the withdraw path.
+                intent_types=frozenset({"PERP_OPEN", "PERP_CLOSE", "PERP_WITHDRAW"}),
             )
         ]
     },

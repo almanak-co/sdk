@@ -83,6 +83,17 @@ class TestHyperliquidManifest:
         """
         assert _core_writer_selectors(["SWAP"]) == set()
 
+    def test_perp_withdraw_authorises_corewriter(self) -> None:
+        """VIB-5617: PERP_WITHDRAW (a CoreWriter spotSend HyperCore→L1 bridge)
+        reuses the SAME (CoreWriter, sendRawAction) target/selector — no new
+        Zodiac target — so it must be authorised by the same static entry.
+        Without this a Safe sweeping parked HyperCore funds reverts at
+        execTransactionWithRole.
+        """
+        assert _SEND_RAW_ACTION_SEL in _core_writer_selectors(["PERP_WITHDRAW"])
+        # Withdraw-only strategy still carries the permission.
+        assert _core_writer_selectors(["PERP_WITHDRAW"]) == {_SEND_RAW_ACTION_SEL}
+
     def test_corewriter_send_allowed_is_false(self) -> None:
         """CoreWriter calls carry value == 0 (margin is on HyperCore, gas is
         native HYPE) — the Safe must not be granted native-value send on it.

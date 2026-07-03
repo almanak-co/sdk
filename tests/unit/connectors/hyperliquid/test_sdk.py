@@ -187,6 +187,24 @@ class TestSpotSend:
         assert token == 0
         assert wei == 699_000_000
 
+    def test_usd_class_transfer_calldata_wraps_action_7_perp_to_spot(self) -> None:
+        from eth_abi import decode as abi_decode
+
+        cd = sdk.build_usd_class_transfer_calldata(Decimal("6.99"), to_perp=False)
+        assert cd[:4] == sdk.SELECTOR_SEND_RAW_ACTION
+        (inner,) = abi_decode(["bytes"], cd[4:])
+        # version 1 + action id 7 (usdClassTransfer) header.
+        assert inner[:4].hex() == "01000007"
+        ntl, to_perp = abi_decode(["uint64", "bool"], inner[4:])
+        # 1e6 ntl scale (NOT the spotSend weiDecimals=8 scale) and perp->spot.
+        assert ntl == 6_990_000
+        assert to_perp is False
+        # Matches wrapping the bare action encoder directly (no drift).
+        expected = sdk.encode_send_raw_action_calldata(
+            sdk.encode_usd_class_transfer_action(Decimal("6.99"), to_perp=False)
+        )
+        assert cd == expected
+
 
 class TestPrecompileInputEncoders:
     def test_perp_query_no_selector_raw_abi(self) -> None:

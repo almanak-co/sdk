@@ -561,6 +561,18 @@ Intent.perp_close(
 )
 ```
 
+**Intent.perp_withdraw** - Withdraw free margin off a perp venue's off-chain account back to L1 (a cash movement, not a trade — no position, no PnL). On Hyperliquid this compiles to a CoreWriter perp→spot `usdClassTransfer` followed by a spot→L1 `spotSend` HyperCore→HyperEVM bridge of USDC (VIB-5617).
+
+```python
+Intent.perp_withdraw(
+    amount=Decimal("6.99"),      # human token amount, or "all" ONLY as a chained amount (a prior step's output)
+    asset="USDC",                # the only HyperCore bridge-linked token today
+    protocol="hyperliquid",
+    chain="hyperevm",
+    destination=None,            # defaults to the deployment wallet; the bridge always credits the sender
+)
+```
+
 ### Bridging
 
 **Intent.bridge** - Cross-chain token transfer

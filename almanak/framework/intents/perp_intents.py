@@ -31,6 +31,9 @@ from .vocabulary import (
 # A well-formed bytes32 order key: ``0x`` + exactly 64 hex chars (no underscores).
 _BYTES32_RE = re.compile(r"0x[0-9a-fA-F]{64}")
 
+# A well-formed EVM address: ``0x`` + exactly 40 hex chars (no underscores).
+_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
+
 
 def _capabilities_for(protocol_lower: str) -> dict[str, Any]:
     """Return the capability dict for ``protocol_lower`` via the connector registry.
@@ -41,6 +44,23 @@ def _capabilities_for(protocol_lower: str) -> dict[str, Any]:
     from almanak.connectors._strategy_base.capabilities_registry import get_protocol_capabilities
 
     return get_protocol_capabilities(protocol_lower)
+
+
+def default_perp_withdraw_protocol() -> str:
+    """Resolve the default PERP_WITHDRAW venue from the compiler registry.
+
+    Self-containment (blueprint 22): the framework must NOT hardcode a connector
+    folder name. Exactly one connector registers ``IntentType.PERP_WITHDRAW`` in
+    its compiler manifest today (hyperliquid), so the default is that sole
+    registered protocol — resolved from the registry, not a bare literal, so
+    adding/renaming the venue needs no edit here. Function-local import + falling
+    back to the sole registered perp venue keeps the vocabulary importable during
+    cold-boot connector registration (same constraint as ``_capabilities_for``).
+    """
+    from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+
+    protocols = CompilerRegistry.protocols_for_intent(IntentType.PERP_WITHDRAW)
+    return protocols[0] if protocols else ""
 
 
 class PerpOpenIntent(BaseIntent):
@@ -295,6 +315,107 @@ class PerpCancelIntent(BaseIntent):
     @classmethod
     def deserialize(cls, data: dict[str, Any]) -> "PerpCancelIntent":
         """Deserialize a dictionary to a PerpCancelIntent."""
+        clean_data = {k: v for k, v in data.items() if k != "type"}
+        if "created_at" in clean_data and isinstance(clean_data["created_at"], str):
+            clean_data["created_at"] = datetime.fromisoformat(clean_data["created_at"])
+        return cls.model_validate(clean_data)
+
+
+class PerpWithdrawIntent(BaseIntent):
+    """Intent to withdraw funds from a perp venue's off-chain account back to L1.
+
+    This is a **cash movement**, not a trade — it transfers the strategy's free
+    (unencumbered) margin balance off the venue's off-chain ledger back to the
+    on-chain wallet. It opens and closes NO position and carries NO PnL: the
+    withdrawn amount is captured by the portfolio balance snapshot (the on-chain
+    wallet credit), and the tx gets a ``transaction_ledger`` row via the normal
+    commit pipeline — so it is visible without a phantom position / PnL event.
+
+    On **Hyperliquid** (``protocol="hyperliquid"``, chain ``hyperevm``) the
+    withdraw is a CoreWriter ``spotSend`` (action 6) of USDC (spot token index 0,
+    weiDecimals **8** — NOT the 1e6 perp ntl scale) to the USDC **system address**
+    (``0x2000…0000``). HyperCore detects the spot-send-to-system-address as a
+    HyperCore→HyperEVM bridge and credits the SENDER's HyperEVM (L1) wallet with
+    the linked ERC-20 (funds appear in ~seconds). This is the programmatic
+    HyperCore→L1 withdraw a Safe (which cannot ECDSA-sign an L1 ``withdraw3``)
+    uses to move parked HyperCore funds back on-chain (VIB-5615 / VIB-5617).
+
+    HyperCore charges a small (~$1) withdraw fee, deducted from the credited
+    amount by the venue. The fee is a measured venue deduction observable in the
+    balance delta, not a PnL event — it is NOT synthesised into an accounting
+    row (Empty ≠ Zero: an unmeasured fee is never fabricated as zero).
+
+    Attributes:
+        amount: Amount to withdraw in human token terms (e.g. ``Decimal("6.99")``
+            USDC), or ``"all"`` to chain the previous step's output.
+        asset: Token symbol to withdraw (default ``"USDC"`` — the only HyperCore
+            bridge-linked token today).
+        protocol: Perp venue that holds the funds (default ``"hyperliquid"``).
+        chain: Target chain for execution (defaults to the strategy's primary
+            chain; ``hyperevm`` for Hyperliquid).
+        destination: Optional explicit L1 recipient. Defaults to the deployment
+            wallet's own address — for the HyperCore bridge path the credited
+            wallet is ALWAYS the sender (the spotSend originator), so a non-sender
+            destination is a plain spot transfer, NOT a bridge; when set it must
+            be a well-formed EVM address.
+        intent_id: Unique identifier for this intent.
+        created_at: Timestamp when the intent was created.
+    """
+
+    amount: PydanticChainedAmount
+    asset: str = "USDC"
+    # Default resolved from the compiler registry (blueprint 22 — no hardcoded
+    # connector name in framework code); the sole PERP_WITHDRAW venue today.
+    protocol: str = Field(default_factory=default_perp_withdraw_protocol)
+    chain: str | None = None
+    # Fail-closed sender-equality ASSERTION only. The HyperCore bridge credits the
+    # spotSend originator, so a non-sender destination is rejected at compile time.
+    # It is NEVER threaded into the encoder — build_usdc_withdraw_calldata hardcodes
+    # the USDC system bridge address (which credits the sender), so a compromised /
+    # mistaken destination can never redirect funds. Do not wire it into calldata.
+    destination: str | None = None
+    intent_id: str = Field(default_factory=default_intent_id)
+    created_at: datetime = Field(default_factory=default_timestamp)
+
+    @model_validator(mode="after")
+    def validate_perp_withdraw_intent(self) -> "PerpWithdrawIntent":
+        """Validate withdraw parameters (fail-closed)."""
+        if isinstance(self.amount, Decimal):
+            if not self.amount.is_finite():
+                raise ValueError("amount must be a finite Decimal (not NaN/Infinity)")
+            if self.amount <= 0:
+                raise ValueError("amount must be positive")
+        elif self.amount != "all":
+            raise ValueError("amount must be a positive Decimal or 'all'")
+        if not self.asset or not self.asset.strip():
+            raise ValueError("asset must be a non-empty token symbol")
+        if self.destination is not None:
+            dest = self.destination
+            if not isinstance(dest, str) or not _ADDRESS_RE.fullmatch(dest):
+                raise ValueError("destination must be a 0x-prefixed 20-byte EVM address (42 chars)")
+        return self
+
+    @property
+    def is_chained_amount(self) -> bool:
+        """Check if this intent uses a chained amount from previous step."""
+        return self.amount == "all"
+
+    @property
+    def intent_type(self) -> IntentType:
+        """Return the type of this intent."""
+        return IntentType.PERP_WITHDRAW
+
+    def serialize(self) -> dict[str, Any]:
+        """Serialize the intent to a dictionary."""
+        data = self.model_dump(mode="json")
+        data["type"] = self.intent_type.value
+        if self.amount == "all":
+            data["amount"] = "all"
+        return data
+
+    @classmethod
+    def deserialize(cls, data: dict[str, Any]) -> "PerpWithdrawIntent":
+        """Deserialize a dictionary to a PerpWithdrawIntent."""
         clean_data = {k: v for k, v in data.items() if k != "type"}
         if "created_at" in clean_data and isinstance(clean_data["created_at"], str):
             clean_data["created_at"] = datetime.fromisoformat(clean_data["created_at"])

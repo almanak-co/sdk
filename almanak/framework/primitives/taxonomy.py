@@ -208,6 +208,26 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=None,
             event_kind=EventKind.NONE,
         ),
+        # PERP_WITHDRAW (VIB-5617) — withdraw free margin off the venue's off-chain
+        # account back to L1 (Hyperliquid: a CoreWriter spotSend HyperCore→HyperEVM
+        # USDC bridge). Deliberately NOT AccountingCategory.PERP: a withdraw closes
+        # NO position — it is a cash movement (moving already-owned USD from the
+        # off-chain ledger to the on-chain wallet), so classifying it as a PERP
+        # CLOSE would fabricate an unmatched close leg with no PERP_OPEN counterpart
+        # and break perp lifecycle / lot-matching. The credited wallet balance is
+        # captured by the portfolio snapshot and the tx still gets a
+        # transaction_ledger row via the commit pipeline — visible without a phantom
+        # position/PnL event. The ~$1 HyperCore withdraw fee is a measured venue
+        # deduction in the balance delta, never synthesised as a PnL row (Empty ≠
+        # Zero). Modeled on PERP_CANCEL_ORDER / FLASH_LOAN (domain primitive +
+        # NO_ACCOUNTING + EventKind.NONE); position_type None, no required_lifecycle.
+        _record(
+            "PERP_WITHDRAW",
+            Primitive.PERP,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
         # ──────────────────────────────────────────────────────────────────
         # Vault (ERC-4626)
         # ──────────────────────────────────────────────────────────────────

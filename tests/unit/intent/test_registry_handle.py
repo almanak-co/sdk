@@ -807,6 +807,8 @@ _FACTORY_BUILDERS: dict[str, dict] = {
                        chain="arbitrum"),
     "perp_cancel_order": dict(order_key="0x" + "ab" * 32,
                               protocol="gmx_v2", chain="arbitrum"),
+    "perp_withdraw": dict(amount=Decimal("6.99"),
+                          protocol="hyperliquid", chain="hyperevm"),
     "flash_loan": dict(provider="aave", token="USDC",
                        amount=Decimal("1000"),
                        callback_intents=[_flash_loan_minimal_callback()],

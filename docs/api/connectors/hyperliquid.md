@@ -10,7 +10,7 @@
 
 | Chain | Family | Supported Intents |
 |-------|--------|-------------------|
-| [Hyperevm](../../chains/hyperevm.md) | EVM | ``PERP_CLOSE``, ``PERP_OPEN`` |
+| [Hyperevm](../../chains/hyperevm.md) | EVM | ``PERP_CLOSE``, ``PERP_OPEN``, ``PERP_WITHDRAW`` |
 
 ## API Reference
 

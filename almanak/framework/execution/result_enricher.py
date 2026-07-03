@@ -300,6 +300,14 @@ class ResultEnricher:
         # portfolio snapshot, and the ORDER_CANCELLED event is surfaced by the GMX
         # parser's order_events. Empty spec (like HOLD) → enrichment short-circuits.
         "PERP_CANCEL_ORDER": [],
+        # PERP_WITHDRAW (VIB-5617) — withdraw free margin off the venue's off-chain
+        # account back to L1 (Hyperliquid: a CoreWriter spotSend HyperCore→HyperEVM
+        # USDC bridge). A cash movement, not a trade: no position/PnL fields to
+        # extract. The credited amount (net of the ~$1 HyperCore withdraw fee) is a
+        # wallet-balance delta captured by the portfolio snapshot; the HyperCore
+        # settlement is async off-EVM (the EVM tx only emits RawAction). Empty spec
+        # (like HOLD / PERP_CANCEL_ORDER) → enrichment short-circuits.
+        "PERP_WITHDRAW": [],
     }
 
     # VIB-4320 — Per-protocol overlay appended onto the generic ``EXTRACTION_SPECS``
