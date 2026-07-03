@@ -9,6 +9,7 @@ Auto-starts a gateway if none is running. Use ``--network anvil`` for local test
 from __future__ import annotations
 
 import asyncio
+import functools
 import sys
 import time
 from typing import TYPE_CHECKING
@@ -43,6 +44,42 @@ def _merge_flags(ctx, sub_yes=False, sub_dry_run=False, sub_json_output=False):
     dry_run = ctx.obj["dry_run"] or sub_dry_run
     json_output = ctx.obj["json_output"] or sub_json_output
     return yes, dry_run, json_output
+
+
+def _chain_option(fn):
+    """Accept ``--chain``/``-c`` after the subcommand as well as at group level.
+
+    The group-level placement (``almanak ax -c <chain> <subcommand>``) always
+    works; this decorator additionally accepts the flag after the subcommand
+    (``almanak ax price ETH -c base``) with "more specific placement wins"
+    semantics, so both invocation styles behave identically on every
+    chain-aware subcommand instead of only the four that historically declared
+    their own ``sub_chain`` option.
+
+    The override is written into ``ctx.obj["chain"]`` (not just a tool arg)
+    because downstream infrastructure — ``_get_executor()`` and
+    ``_start_managed_gateway()`` — reads the chain from ``ctx.obj`` to
+    initialize the executor / gateway client / managed gateway. Passing the
+    override only to the tool args would leave the gateway pointed at the
+    group-level chain (or default).
+
+    Apply directly above ``@click.pass_context`` so the wrapper strips
+    ``sub_chain`` before the command body runs.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, sub_chain=None, **kwargs):
+        if sub_chain is not None:
+            click.get_current_context().obj["chain"] = sub_chain
+        return fn(*args, **kwargs)
+
+    return click.option(
+        "--chain",
+        "-c",
+        "sub_chain",
+        default=None,
+        help="Chain to use (overrides the group-level --chain when both are set).",
+    )(wrapper)
 
 
 @click.group(invoke_without_command=True)
@@ -561,15 +598,9 @@ def _run_tool(ctx: click.Context, tool_name: str, arguments: dict):
 
 @ax.command()
 @click.argument("token")
-@click.option(
-    "--chain",
-    "-c",
-    "sub_chain",
-    default=None,
-    help="Chain to query (overrides the group-level --chain when both are set).",
-)
+@_chain_option
 @click.pass_context
-def price(ctx, token, sub_chain):
+def price(ctx, token):
     """Get the current USD price of a token.
 
     \b
@@ -581,19 +612,6 @@ def price(ctx, token, sub_chain):
     from almanak.framework.cli.ax_render import render_error, render_result
 
     json_output = ctx.obj["json_output"]
-    # Subcommand-level --chain wins over group-level when provided. This
-    # matches Click's "more specific placement wins" convention and keeps
-    # both invocation styles working:
-    #   almanak ax price ETH --chain base          (sub)
-    #   almanak ax --chain base price ETH          (group)
-    #
-    # We update ctx.obj["chain"] (not just the tool arg) because downstream
-    # infrastructure -- _get_executor() and _start_managed_gateway() -- reads
-    # the chain from ctx.obj to initialize the executor / gateway client /
-    # managed gateway. Passing the override only to the tool args would leave
-    # the gateway pointed at the group-level chain (or default).
-    if sub_chain is not None:
-        ctx.obj["chain"] = sub_chain
     try:
         response = _run_tool(
             ctx,
@@ -641,6 +659,7 @@ def price(ctx, token, sub_chain):
         "on-chain check (faster, offline)."
     ),
 )
+@_chain_option
 @click.pass_context
 def resolve(ctx, token, gateway: bool, verify: bool):
     """Resolve a token symbol or address to its metadata on a chain.
@@ -1135,15 +1154,9 @@ def _gateway_is_reachable(host: str, port: int, timeout: float = 0.5) -> bool:
 
 @ax.command()
 @click.argument("token")
-@click.option(
-    "--chain",
-    "-c",
-    "sub_chain",
-    default=None,
-    help="Chain to query (overrides the group-level --chain when both are set).",
-)
+@_chain_option
 @click.pass_context
-def balance(ctx, token, sub_chain):
+def balance(ctx, token):
     """Get the balance of a token in your wallet.
 
     \b
@@ -1155,19 +1168,6 @@ def balance(ctx, token, sub_chain):
     from almanak.framework.cli.ax_render import render_error, render_result
 
     json_output = ctx.obj["json_output"]
-    # Subcommand-level --chain wins over group-level when provided. This
-    # matches Click's "more specific placement wins" convention and keeps
-    # both invocation styles working:
-    #   almanak ax balance ETH --chain base        (sub)
-    #   almanak ax --chain base balance ETH        (group)
-    #
-    # We update ctx.obj["chain"] (not just the tool arg) because downstream
-    # infrastructure -- _get_executor() and _start_managed_gateway() -- reads
-    # the chain from ctx.obj to initialize the executor / gateway client /
-    # managed gateway. Passing the override only to the tool args would leave
-    # the gateway pointed at the group-level chain (or default).
-    if sub_chain is not None:
-        ctx.obj["chain"] = sub_chain
     try:
         response = _run_tool(
             ctx,
@@ -1207,16 +1207,10 @@ def balance(ctx, token, sub_chain):
     default=None,
     help="Specific DEX protocol (default: best available).",
 )
-@click.option(
-    "--chain",
-    "-c",
-    "sub_chain",
-    default=None,
-    help="Chain to swap on (overrides the group-level --chain when both are set).",
-)
+@_chain_option
 @_action_options
 @click.pass_context
-def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_chain, sub_yes, sub_dry_run, sub_json_output):
+def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_yes, sub_dry_run, sub_json_output):
     """Swap tokens on a DEX.
 
     \b
@@ -1234,20 +1228,6 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_chain, sub_y
     )
 
     yes, dry_run, json_output = _merge_flags(ctx, sub_yes, sub_dry_run, sub_json_output)
-
-    # Subcommand-level --chain wins over group-level when provided. This
-    # matches Click's "more specific placement wins" convention and keeps
-    # both invocation styles working:
-    #   almanak ax swap USDC ETH 100 --chain base   (sub)
-    #   almanak ax --chain base swap USDC ETH 100   (group)
-    #
-    # We update ctx.obj["chain"] (not just the tool arg) because downstream
-    # infrastructure -- _get_executor() and _start_managed_gateway() -- reads
-    # the chain from ctx.obj to initialize the executor / gateway client /
-    # managed gateway. Passing the override only to the tool args would leave
-    # the gateway pointed at the group-level chain (or default).
-    if sub_chain is not None:
-        ctx.obj["chain"] = sub_chain
 
     _chain = ctx.obj["chain"]
     _network = ctx.obj.get("network")
@@ -1343,6 +1323,7 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_chain, sub_y
     help="Skip collecting accrued fees.",
 )
 @_action_options
+@_chain_option
 @click.pass_context
 def lp_close(ctx, position_id, protocol, pool, no_collect_fees, sub_yes, sub_dry_run, sub_json_output):
     """Close (fully withdraw) a liquidity position.
@@ -1429,6 +1410,7 @@ def lp_close(ctx, position_id, protocol, pool, no_collect_fees, sub_yes, sub_dry
     default="mainnet",
     help="Network to query (default: mainnet). Use 'anvil' for local fork.",
 )
+@_chain_option
 @click.pass_context
 def lp_info(ctx, position_id, protocol, lp_network):
     """Get details about an existing LP position.
@@ -1493,6 +1475,7 @@ def lp_info(ctx, position_id, protocol, lp_network):
     default=None,
     help="Network to query. Defaults to group-level --network, then 'mainnet'.",
 )
+@_chain_option
 @click.pass_context
 def lp_list(ctx, protocol, wallet_override, include_empty, lp_network):
     """List all LP positions owned by your wallet on a chain.
@@ -1547,6 +1530,7 @@ def lp_list(ctx, protocol, wallet_override, include_empty, lp_network):
     default=None,
     help="Network to query. Defaults to group-level --network, then 'mainnet'.",
 )
+@_chain_option
 @click.pass_context
 def lending_list(ctx, protocol, wallet_override, lend_network):
     """List a wallet's lending positions (account totals + health factor).
@@ -1587,6 +1571,7 @@ def lending_list(ctx, protocol, wallet_override, lend_network):
 @ax.command("lending-reserves")
 @click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
 @click.option("--asset", default="", help="Filter to a single reserve symbol (e.g. 'WMATIC').")
+@_chain_option
 @click.pass_context
 def lending_reserves(ctx, protocol, asset):
     """List a lending market's reserves with borrowable / active flags.
@@ -1641,9 +1626,9 @@ def lending_reserves(ctx, protocol, asset):
 def _render_reserves_table(response, *, protocol: str, chain: str) -> None:
     """Human-readable column table for `ax lending-reserves` (VIB-4925).
 
-    Columns: SYMBOL ADDRESS BORROW COLLAT ACTIVE FROZEN LTV%. A reserve whose
-    config read failed shows ``err`` in the flag columns and its error text on
-    a trailing line, so a single dead reserve is visible, not hidden.
+    Columns: SYMBOL ADDRESS BORROW COLLAT ACTIVE FROZEN LTV% LT%. A reserve
+    whose config read failed shows ``err`` in the flag columns and its error
+    text on a trailing line, so a single dead reserve is visible, not hidden.
     """
     data = response.data or {}
     reserves = data.get("reserves", [])
@@ -1677,9 +1662,10 @@ def _render_reserves_table(response, *, protocol: str, chain: str) -> None:
                 "err" if r.get("error") else _flag(r.get("is_active")),
                 "err" if r.get("error") else _flag(r.get("is_frozen")),
                 "—" if r.get("error") else _ltv(r.get("ltv_bps")),
+                "—" if r.get("error") else _ltv(r.get("liquidation_threshold_bps")),
             )
         )
-    headers = ("SYMBOL", "ADDRESS", "BORROW", "COLLAT", "ACTIVE", "FROZEN", "LTV")
+    headers = ("SYMBOL", "ADDRESS", "BORROW", "COLLAT", "ACTIVE", "FROZEN", "LTV", "LT")
     widths = [
         max(len(headers[i]), *(len(row[i]) for row in rows)) if rows else len(headers[i]) for i in range(len(headers))
     ]
@@ -1711,6 +1697,7 @@ def _render_reserves_table(response, *, protocol: str, chain: str) -> None:
     default=None,
     help="Network to query. Defaults to group-level --network, then 'mainnet'.",
 )
+@_chain_option
 @click.pass_context
 def portfolio(ctx, tokens, wallet_override, pf_network):
     """Aggregate snapshot: native + ERC20 balances, LP positions, lending.
@@ -1845,6 +1832,7 @@ def _run_lending_tool(
 @click.option("--no-collateral", is_flag=True, default=False, help="Supply without enabling as collateral.")
 @click.option("--market-id", default=None, help="Market id for isolated-market protocols (e.g. Morpho Blue).")
 @_action_options
+@_chain_option
 @click.pass_context
 def lending_supply(ctx, token, amount, protocol, no_collateral, market_id, sub_yes, sub_dry_run, sub_json_output):
     """Supply tokens to a lending protocol.
@@ -1891,6 +1879,7 @@ def lending_supply(ctx, token, amount, protocol, no_collateral, market_id, sub_y
 @click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
 @click.option("--market-id", default=None, help="Market id for isolated-market protocols (e.g. Morpho Blue).")
 @_action_options
+@_chain_option
 @click.pass_context
 def lending_borrow(
     ctx,
@@ -1953,6 +1942,7 @@ def lending_borrow(
 @click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
 @click.option("--market-id", default=None, help="Market id for isolated-market protocols (e.g. Morpho Blue).")
 @_action_options
+@_chain_option
 @click.pass_context
 def lending_repay(ctx, token, amount, repay_full, protocol, market_id, sub_yes, sub_dry_run, sub_json_output):
     """Repay a lending position.
@@ -2024,6 +2014,7 @@ def lending_repay(ctx, token, amount, repay_full, protocol, market_id, sub_yes, 
     ),
 )
 @_action_options
+@_chain_option
 @click.pass_context
 def lending_withdraw(
     ctx,
@@ -2140,6 +2131,7 @@ def _pool_title_suffix(protocol: str, fee_tier: int) -> str:
     default="uniswap_v3",
     help="DEX protocol (default: uniswap_v3).",
 )
+@_chain_option
 @click.pass_context
 def pool(ctx, token_a, token_b, fee_tier, protocol):
     """Get details about a liquidity pool.
@@ -2281,16 +2273,10 @@ def bridge(ctx, token, amount, from_chain, to_chain, slippage, preferred_bridge,
 @ax.command()
 @click.argument("token")
 @click.argument("amount")
-@click.option(
-    "--chain",
-    "-c",
-    "sub_chain",
-    default=None,
-    help="Chain to unwrap on (overrides the group-level --chain when both are set).",
-)
+@_chain_option
 @_action_options
 @click.pass_context
-def unwrap(ctx, token, amount, sub_chain, sub_yes, sub_dry_run, sub_json_output):
+def unwrap(ctx, token, amount, sub_yes, sub_dry_run, sub_json_output):
     """Unwrap wrapped native tokens (e.g. WETH -> ETH, WMATIC -> MATIC).
 
     \b
@@ -2308,20 +2294,6 @@ def unwrap(ctx, token, amount, sub_chain, sub_yes, sub_dry_run, sub_json_output)
     )
 
     yes, dry_run, json_output = _merge_flags(ctx, sub_yes, sub_dry_run, sub_json_output)
-
-    # Subcommand-level --chain wins over group-level when provided. This
-    # matches Click's "more specific placement wins" convention and keeps
-    # both invocation styles working:
-    #   almanak ax unwrap WETH 0.002 --chain base   (sub)
-    #   almanak ax --chain base unwrap WETH 0.002   (group)
-    #
-    # We update ctx.obj["chain"] (not just the tool arg) because downstream
-    # infrastructure -- _get_executor() and _start_managed_gateway() -- reads
-    # the chain from ctx.obj to initialize the executor / gateway client /
-    # managed gateway. Passing the override only to the tool args would leave
-    # the gateway pointed at the group-level chain (or default).
-    if sub_chain is not None:
-        ctx.obj["chain"] = sub_chain
 
     action_desc = f"Unwrap {amount} {token.upper()} to native on {ctx.obj['chain']}"
 

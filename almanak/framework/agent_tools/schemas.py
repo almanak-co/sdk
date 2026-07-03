@@ -302,6 +302,9 @@ class LendingReserveSummary(BaseModel):
     is_active: bool | None = None
     is_frozen: bool | None = None
     ltv_bps: int | None = Field(default=None, description="Loan-to-value in basis points; None when unknown.")
+    liquidation_threshold_bps: int | None = Field(
+        default=None, description="Liquidation threshold in basis points; None when unknown."
+    )
     error: str = Field(default="", description="Per-reserve read error, when the config could not be fetched.")
 
 

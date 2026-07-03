@@ -1111,6 +1111,51 @@ class TestAxReadCommands:
         assert captured["args"]["network"] == "mainnet"
 
     @patch("almanak.framework.cli.ax._get_executor")
+    def test_lending_reserves_sub_level_chain_flag(self, mock_get_exec):
+        """-c/--chain after the subcommand works on commands that historically lacked it (_chain_option)."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        captured: dict = {}
+
+        async def mock_execute(tool_name, args):
+            captured["tool_name"] = tool_name
+            captured["args"] = args
+            return ToolResponse(
+                status="success",
+                data={"schema_version": 1, "chain": "base", "protocol": "aave_v3", "count": 0, "reserves": []},
+            )
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "lending-reserves", "-c", "base"])
+        assert result.exit_code == 0
+        assert captured["args"]["chain"] == "base"
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_pool_sub_level_chain_flag(self, mock_get_exec):
+        """pool accepts -c after the subcommand and forwards the override to the tool args."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        captured: dict = {}
+
+        async def mock_execute(tool_name, args):
+            captured["tool_name"] = tool_name
+            captured["args"] = args
+            return ToolResponse(status="success", data={"chain": "base"})
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "pool", "WETH", "USDC", "-c", "base", "--protocol", "aerodrome"])
+        assert result.exit_code == 0
+        assert captured["tool_name"] == "get_pool_state"
+        assert captured["args"]["chain"] == "base"
+        assert captured["args"]["protocol"] == "aerodrome"
+
+    @patch("almanak.framework.cli.ax._get_executor")
     def test_lending_reserves_human_table(self, mock_get_exec):
         """Human (non-JSON) output renders a scannable column table, not a flat repr."""
         mock_executor, mock_client = _mock_executor_and_client()

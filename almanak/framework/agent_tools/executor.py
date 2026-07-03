@@ -2749,6 +2749,7 @@ class ToolExecutor:
                 "is_active": None,
                 "is_frozen": None,
                 "ltv_bps": None,
+                "liquidation_threshold_bps": None,
                 "error": "",
             }
             asset_padded = address.removeprefix("0x").lower().zfill(64)
@@ -2776,6 +2777,7 @@ class ToolExecutor:
                 is_active=cfg.is_active,
                 is_frozen=cfg.is_frozen,
                 ltv_bps=cfg.ltv,
+                liquidation_threshold_bps=cfg.liquidation_threshold,
             )
             reserves.append(row)
 

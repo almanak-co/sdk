@@ -75,6 +75,7 @@ class PoolReserveFrozenError(ValueError):
 class _DecodedReserveConfig:
     __slots__ = (
         "ltv",
+        "liquidation_threshold",
         "usage_as_collateral_enabled",
         "borrowing_enabled",
         "is_active",
@@ -89,8 +90,10 @@ class _DecodedReserveConfig:
         borrowing_enabled: bool,
         is_active: bool,
         is_frozen: bool,
+        liquidation_threshold: int = 0,
     ) -> None:
         self.ltv = ltv
+        self.liquidation_threshold = liquidation_threshold
         self.usage_as_collateral_enabled = usage_as_collateral_enabled
         self.borrowing_enabled = borrowing_enabled
         self.is_active = is_active
@@ -121,6 +124,7 @@ def decode_reserve_configuration_data(raw_hex: str) -> _DecodedReserveConfig | N
         return None
     try:
         ltv = int(raw[64:128], 16)
+        liquidation_threshold = int(raw[2 * 64 : 3 * 64], 16)
         usage_as_collateral_enabled = int(raw[5 * 64 : 6 * 64], 16) != 0
         borrowing_enabled = int(raw[6 * 64 : 7 * 64], 16) != 0  # word 6 — VIB-3825
         is_active = int(raw[8 * 64 : 9 * 64], 16) != 0
@@ -130,6 +134,7 @@ def decode_reserve_configuration_data(raw_hex: str) -> _DecodedReserveConfig | N
 
     return _DecodedReserveConfig(
         ltv=ltv,
+        liquidation_threshold=liquidation_threshold,
         usage_as_collateral_enabled=usage_as_collateral_enabled,
         borrowing_enabled=borrowing_enabled,
         is_active=is_active,

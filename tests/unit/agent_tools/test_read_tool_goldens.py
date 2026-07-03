@@ -343,7 +343,7 @@ def _reserve_cfg_hex(*, ltv: int, usage: bool, borrow: bool, active: bool, froze
     return (
         _hex_word(6)  # decimals (unused by decoder)
         + _hex_word(ltv)
-        + _hex_word(8250)  # liquidationThreshold (unused)
+        + _hex_word(8250)  # liquidationThreshold (word 2 — decoded)
         + _hex_word(10500)  # liquidationBonus (unused)
         + _hex_word(1000)  # reserveFactor (unused)
         + _hex_word(1 if usage else 0)
@@ -432,17 +432,20 @@ async def test_list_lending_reserves_polygon_golden() -> None:
     assert by_symbol["WMATIC"]["is_active"] is True  # pins the isActive (word 8) decode bit
     assert by_symbol["WMATIC"]["is_frozen"] is False  # pins the isFrozen (word 9) decode bit
     assert by_symbol["WMATIC"]["ltv_bps"] == 6800
+    assert by_symbol["WMATIC"]["liquidation_threshold_bps"] == 8250  # pins the word-2 decode
     assert by_symbol["WMATIC"]["address"] == _WMATIC_POLYGON  # address comes from on-chain enumeration
     assert by_symbol["USDC"]["borrowing_enabled"] is True
     assert by_symbol["USDC"]["usage_as_collateral_enabled"] is True
     assert by_symbol["USDC"]["is_active"] is True
     assert by_symbol["USDC"]["ltv_bps"] == 7000
+    assert by_symbol["USDC"]["liquidation_threshold_bps"] == 8250
 
     # Fail-open: a dead reserve read surfaces an error row, ALL flags stay None
     # (Empty != Zero — not fabricated booleans), and the rest is still reported.
     assert by_symbol["DAI"]["borrowing_enabled"] is None
     assert by_symbol["DAI"]["is_active"] is None
     assert by_symbol["DAI"]["is_frozen"] is None
+    assert by_symbol["DAI"]["liquidation_threshold_bps"] is None
     assert by_symbol["DAI"]["error"]
 
 
