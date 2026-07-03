@@ -220,19 +220,53 @@ class TestLp5PrincipalMatchesCostBasis:
 # ── Wiring: run_against_sqlite surfaces the invariants as a report diagnostic ──
 
 
-def test_run_against_sqlite_populates_nleg_findings() -> None:
+def _strip_position_coins_from_snapshots(src_db: Path, dst_db: Path) -> None:
+    """Copy ``src_db`` to ``dst_db`` and blank the N-coin universe out of every
+    portfolio snapshot, leaving only native ETH — a synthetic "pre-Seam-A"
+    capture where the returned coins fell out of equity. Used to drive the
+    snapshot-coverage invariant from the canonical evaluation path independent of
+    whether any shipped fixture happens to violate."""
+    import shutil
+
+    shutil.copyfile(src_db, dst_db)
+    only_eth = json.dumps([{"symbol": "ETH", "balance": "1", "value_usd": "1", "price_usd": "1"}])
+    conn = sqlite3.connect(dst_db)  # sqlite3.connect accepts a Path directly
+    try:
+        with conn:  # transaction context manager: auto-commit on success, rollback on error
+            conn.execute(
+                "UPDATE portfolio_snapshots SET wallet_balances_json = ?, positions_json = '[]'",
+                (only_eth,),
+            )
+    finally:
+        conn.close()
+
+
+def test_run_against_sqlite_populates_nleg_findings(tmp_path: Path) -> None:
     """M1 — the invariants are called from the canonical evaluation path, not
-    only the unit test. The frozen tricrypto fixture carries coin_symbols with
-    pre-Seam-A snapshots, so run_against_sqlite must surface a non-empty
-    diagnostic (without changing any cell status)."""
+    only the unit test. VIB-5618: the tricrypto fixture now COVERS its N-coin
+    universe (Seam A re-capture), so the wiring is proven against a synthetic
+    pre-Seam-A copy (returned coins stripped out of equity). run_against_sqlite
+    must surface the non-empty diagnostic (without changing any cell status), and
+    the pristine fixture must surface an EMPTY diagnostic."""
     from almanak.framework.accounting.accountant_test import run_against_sqlite
     from almanak.framework.primitives.types import Primitive
 
     db = _FIXTURE_BASE / "lp_curve_tricrypto" / "expected_baseline.sqlite"
     if not db.exists():
         pytest.skip(f"fixture DB missing: {db}")
-    report = run_against_sqlite(db, primitive=Primitive.LP)
-    # The diagnostic field exists and is populated on this violating fixture.
+
+    # Pristine (re-captured) fixture: Seam A holds → EMPTY diagnostic, and the
+    # field still flows to the JSON surface (the markdown section renders only
+    # when there ARE findings — asserted on the violating copy below).
+    clean = run_against_sqlite(db, primitive=Primitive.LP)
+    assert clean.nleg_invariant_findings == []
+    assert clean.to_json()["nleg_invariant_findings"] == []
+
+    # Synthetic pre-Seam-A copy: returned coins stripped from equity → the
+    # snapshot-coverage invariant fires and the diagnostic surfaces the message.
+    bad_db = tmp_path / "pre_seam_a.sqlite"
+    _strip_position_coins_from_snapshots(db, bad_db)
+    report = run_against_sqlite(bad_db, primitive=Primitive.LP)
     assert report.nleg_invariant_findings
     assert any("equity universe" in f for f in report.nleg_invariant_findings)
     # It's a NON-failing diagnostic: it also lands in the JSON + markdown.
@@ -268,19 +302,16 @@ def _load_rows(db_path: Path, table: str) -> list[dict]:
     "fixture",
     [
         "lp_curve",
-        # The frozen tricrypto snapshots predate the Seam A fix (they carry
-        # coin_symbols but their portfolio_snapshots were captured before the
-        # N-coin token-universe union), so the invariant correctly FLAGS the
-        # missing WBTC/USDT until the fixture is regenerated from a tricrypto
-        # round-trip on the fixed valuer (VIB-5566). Non-strict xfail: when the
-        # fixture is regenerated the check passes and this xpasses.
-        pytest.param(
-            "lp_curve_tricrypto",
-            marks=pytest.mark.xfail(
-                reason="VIB-5566: frozen tricrypto snapshots predate Seam A — regenerate to enforce",
-                strict=False,
-            ),
-        ),
+        # VIB-5618: the tricrypto fixture was RE-CAPTURED from a fresh managed-Anvil
+        # tricrypto2 round-trip on the fixed valuer (Seam A), so its
+        # portfolio_snapshots now price the N-coin universe (USDT/WBTC/WETH) into
+        # wallet equity. The snapshot-coverage invariant is therefore a HARD gate
+        # on the VOLATILE non-$1 path — the one place a stablecoin fixture cannot
+        # exercise (WBTC ~$61.5k must be marked, not $1-shortcut). Was xfail'd while
+        # the frozen snapshots predated Seam A (VIB-5566); un-xfail'd now that the
+        # fresh capture covers WBTC. Real-fork proof:
+        # tests/reports/vib-5618-tricrypto-volatile-nleg-realfork.md.
+        "lp_curve_tricrypto",
     ],
 )
 def test_curve_fixtures_satisfy_snapshot_coverage(fixture: str) -> None:
