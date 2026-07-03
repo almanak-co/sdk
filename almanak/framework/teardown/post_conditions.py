@@ -36,6 +36,7 @@ Hard constraints
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from almanak.connectors._base.types import ProtocolKind
@@ -51,6 +52,8 @@ from almanak.connectors._strategy_base.teardown_post_condition import (
 from almanak.connectors._strategy_base.vault_post_condition import (
     erc4626_vault_teardown_post_condition,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _connector_teardown_slugs(connector: Any) -> frozenset[str]:
@@ -424,6 +427,74 @@ def _uniswap_v3_post_condition(
     )
 
 
+# =============================================================================
+# Cut-over LP primitive-label aliases (registry key-format bridge)
+# =============================================================================
+#
+# The teardown WARM enumeration (``registry_enumeration._position_info_from_
+# registry_row``) labels a cut-over LP position with the registry PRIMITIVE value
+# (``lp`` for the V3 family, ``lp_v4`` for Uniswap V4), NOT the connector slug the
+# strategy's own enumeration carries — the registry row holds no connector slug.
+# So a restart-derived position (WARM registry read, strategy in-memory state
+# wiped) reaches ``_verify_closure_detailed`` with ``protocol='lp_v4'`` and a
+# hook registered only under ``uniswap_v4`` would NOT resolve — the closed V4
+# position would be mis-classified (VIB-5634 strand 2, the "V4 pool_id vs V3
+# pool_address" registry key-format mismatch).
+#
+# For Uniswap V4 the connector-owned post-condition resolves its addresses by
+# CHAIN (not by protocol), so aliasing it under the ``lp_v4`` primitive value is
+# safe and complete. The V3 family shares the ``lp`` primitive across many forks
+# and its hook resolves the NPM by the specific fork protocol, so a bare ``lp``
+# label is NOT resolvable to one NPM — V3 is deliberately NOT aliased here (its
+# restart-safe verification is a separate concern, out of scope for VIB-5634).
+
+
+def _register_lp_v4_primitive_alias() -> None:
+    """Alias the connector-owned V4 post-condition under the LP_V4 primitive value.
+
+    A V4 LP position enumerated from the WARM registry carries
+    ``protocol=Primitive.LP_V4.value`` (``'lp_v4'``), not the connector slug. This
+    registers the SAME connector-published hook (loaded by
+    ``_register_manifest_teardown_post_conditions`` under ``uniswap_v4``) under the
+    primitive value too, so a restart-derived closed V4 position resolves to the
+    verifier instead of falling through to UNVERIFIED. Sourced canonically (the
+    LP_V4 primitive + the connector's own manifest-registered hook) — no
+    framework-side connector import or protocol-name literal. Idempotent and
+    never clobbers an already-registered hook.
+    """
+    from almanak.framework.primitives.types import Primitive
+
+    lp_v4 = Primitive.LP_V4.value
+    if has_teardown_post_condition(lp_v4):
+        return
+    # The V4 connector is the one whose declared primitive is LP_V4; reuse the
+    # hook it published (no re-import of the hook module here).
+    for connector_manifest in CONNECTOR_REGISTRY.with_teardown_post_condition():
+        primitive_ref = getattr(connector_manifest, "primitive", None)
+        if primitive_ref is None or connector_manifest.teardown_post_condition is None:
+            continue
+        # Both loads run INSIDE the try: a broken primitive ref OR a broken
+        # hook-module import in ONE connector must not crash framework
+        # registration at startup (which would take down every strategy). Never
+        # silent — log loudly with the connector name; skipping only means that
+        # connector's LP_V4 alias is absent, so a restart-derived V4 position
+        # falls back to UNVERIFIED (fail-safe), never a false closure.
+        try:
+            declared = primitive_ref.load()
+            if getattr(declared, "primitive", None) is Primitive.LP_V4:
+                _register_teardown_post_condition(lp_v4, connector_manifest.teardown_post_condition.load())
+                return
+        except Exception:  # noqa: BLE001 — one bad connector must not break registration
+            logger.warning(
+                "Failed to load LP_V4 primitive-alias hook for connector %r — skipping its "
+                "lp_v4 teardown post-condition alias (a restart-derived V4 position will fall "
+                "back to UNVERIFIED, fail-safe)",
+                getattr(connector_manifest, "name", "<unknown>"),
+                exc_info=True,
+            )
+            continue
+
+
 def _register_default_v3_post_conditions() -> None:
     """Register the generic V3 NPM hook as the default for each V3-fork slug.
 
@@ -462,6 +533,7 @@ def _register_default_vault_post_conditions() -> None:
 
 
 _register_default_v3_post_conditions()
+_register_lp_v4_primitive_alias()
 _register_default_vault_post_conditions()
 
 

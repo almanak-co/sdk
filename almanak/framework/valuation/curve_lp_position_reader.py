@@ -164,15 +164,22 @@ class CurveLpPosition:
         return self.lp_balance_wei > 0
 
 
-def _resolve_curve_pool_meta(chain: str, *, pool: str, lp_token: str) -> dict[str, Any] | None:
-    """Resolve a Curve pool's static metadata from the connector's pool registry.
+def _resolve_curve_pool_meta(
+    chain: str, *, pool: str, lp_token: str, gateway_client: object | None = None
+) -> dict[str, Any] | None:
+    """Resolve a Curve pool's metadata — static registry first, then MetaRegistry.
 
     READ-ONLY lookup of the connector's ``CURVE_POOLS`` (static pool DATA only —
     no connector logic, no egress) to map a pool name / LP-token / pool address to
     its `{address, lp_token, coins}`. Matches by pool NAME first, then by LP-token
     / pool ADDRESS, so a discovered position (which may carry only an address) and
-    a strategy-reported one (which may carry only a name) both resolve. Returns
-    ``None`` when the pool is unknown.
+    a strategy-reported one (which may carry only a name) both resolve.
+
+    On a static miss (VIB-5628) an ADDRESS-shaped ``pool`` / ``lp_token`` falls
+    back to the connector's gateway-backed ``resolve_pool_metadata``, which reads
+    the pool's shape live from Curve's on-chain MetaRegistry. Returns ``None``
+    (fail closed) when the pool is neither in the static registry nor a resolvable
+    on-chain Curve pool.
 
     Resolved via a LAZY ``importlib.import_module`` (not a static ``import``) so
     the framework→concrete-connector static-import ratchet stays clean — the same
@@ -188,11 +195,9 @@ def _resolve_curve_pool_meta(chain: str, *, pool: str, lp_token: str) -> dict[st
         return None
 
     chain_pools = curve_pools.get(chain, {})
-    if not chain_pools:
-        return None
 
     # 1) by pool name (e.g. "3pool")
-    if pool:
+    if pool and chain_pools:
         meta = chain_pools.get(pool)
         if meta is not None:
             return meta
@@ -209,7 +214,56 @@ def _resolve_curve_pool_meta(chain: str, *, pool: str, lp_token: str) -> dict[st
         for meta in chain_pools.values():
             if str(meta.get("lp_token", "")).lower() == needle or str(meta.get("address", "")).lower() == needle:
                 return meta
-    return None
+
+    # 3) VIB-5628 dynamic fallback: an uncurated pool resolved live from the
+    # on-chain MetaRegistry via the connector's gateway-backed resolver. Needs a
+    # gateway client (the reader's) and an ADDRESS to query on.
+    return _resolve_curve_pool_meta_dynamic(chain, pool=pool, lp_token=lp_token, gateway_client=gateway_client)
+
+
+def _resolve_curve_pool_meta_dynamic(
+    chain: str, *, pool: str, lp_token: str, gateway_client: object | None
+) -> dict[str, Any] | None:
+    """MetaRegistry fallback seed dict for an uncurated Curve pool (VIB-5628).
+
+    Returns a ``meta`` dict in the SAME shape as a static ``CURVE_POOLS`` entry
+    (``address`` / ``lp_token`` / ``coins`` / ``coin_addresses`` / ``coin_decimals``
+    / ``is_metapool`` / ``base_pool`` / ``base_pool_coin_addresses``) so the
+    reader's family classifier and downstream marks consume it unchanged. Fails
+    closed (``None``) with no gateway, no address, or a non-pool address.
+
+    Lazy connector import — same VIB-5420 CONNECTOR_IMPORT exception as the
+    registry read above.
+    """
+    if gateway_client is None:
+        return None
+    pool_address = pool if (pool and pool.lower().startswith("0x")) else lp_token
+    if not pool_address or not pool_address.lower().startswith("0x"):
+        return None
+    try:
+        resolver = importlib.import_module("almanak.connectors.curve.pool_resolver")
+        meta = resolver.resolve_pool_metadata(chain=chain, pool_address=pool_address, gateway_client=gateway_client)
+    except Exception:  # noqa: BLE001 — connector resolver optional; fail closed
+        logger.debug("Curve MetaRegistry meta resolution failed for %s on %s", pool_address, chain, exc_info=True)
+        return None
+    if meta is None:
+        return None
+    return {
+        "address": meta.address,
+        "lp_token": meta.lp_token,
+        "coins": list(meta.coin_symbols),
+        "coin_addresses": list(meta.coin_addresses),
+        "coin_decimals": list(meta.coin_decimals),
+        "is_metapool": meta.is_metapool,
+        "base_pool": meta.base_pool,
+        "base_pool_coin_addresses": (
+            list(meta.base_pool_coin_addresses) if meta.base_pool_coin_addresses is not None else None
+        ),
+        # Base-pool coin SYMBOLS — _classify_family / _build_metapool_position key
+        # the USD-metapool classification on these; without them a dynamic metapool
+        # fails the metapool_usd classification and falls through (CodeRabbit #3191).
+        "base_pool_coins": (list(meta.base_pool_coins) if meta.base_pool_coins is not None else None),
+    }
 
 
 class CurveLpPositionReader:
@@ -272,7 +326,7 @@ class CurveLpPositionReader:
         if self._gateway is None or not self.supports(protocol):
             return None
 
-        meta = _resolve_curve_pool_meta(chain, pool=pool, lp_token=lp_token)
+        meta = _resolve_curve_pool_meta(chain, pool=pool, lp_token=lp_token, gateway_client=self._gateway)
         if meta is None:
             logger.debug("Curve pool meta unknown for pool=%s lp_token=%s on %s", pool, lp_token, chain)
             return None

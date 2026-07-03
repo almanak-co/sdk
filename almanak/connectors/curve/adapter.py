@@ -961,7 +961,61 @@ class CurveAdapter:
         for name, pool_data in self.pools.items():
             if pool_data["address"].lower() == pool_address.lower():
                 return self._resolve_pool_info(self._build_cold_start_pool_info(name, pool_data), refresh=refresh)
+        # VIB-5628: static miss -> resolve an UNCURATED pool from the on-chain
+        # MetaRegistry (gateway-first), so the adapter works for pools not in the
+        # hand-curated CURVE_POOLS. Returns None (preserving the unknown-pool
+        # contract) when there is no read transport or the address is not a Curve
+        # pool.
+        if self._has_read_transport():
+            return self._build_pool_info_from_metaregistry(pool_address, refresh=refresh)
         return None
+
+    def _build_pool_info_from_metaregistry(self, pool_address: str, *, refresh: bool) -> PoolInfo | None:
+        """Build a ``PoolInfo`` for an UNCURATED Curve pool from the MetaRegistry (VIB-5628).
+
+        Resolves the pool's coins / decimals / lp_token / metapool shape and the
+        gamma-discriminated pool_type from Curve's on-chain MetaRegistry (via the
+        gateway-first ``resolve_pool_metadata`` seam), assembles a cold-start
+        ``PoolInfo``, then runs it through the SAME refresh-on-read reconcile the
+        static path uses (``_resolve_pool_info`` → ``_refresh_pool_info_from_chain``)
+        so ``is_ng`` / ``virtual_price`` / live coin order are filled and the
+        result is cached in ``_pool_refresh_cache``.
+
+        Returns ``None`` (fail closed) when the resolver cannot safely and fully
+        resolve the address (not a Curve pool, aave-type/wrapped, no transport) —
+        preserving today's unknown-pool contract for a genuine miss.
+        """
+        cached = self._pool_refresh_cache.get(pool_address.lower())
+        if cached is not None:
+            return self._resolve_pool_info(cached, refresh=refresh)
+
+        from almanak.connectors.curve.pool_resolver import resolve_pool_metadata
+
+        meta = resolve_pool_metadata(
+            chain=self.chain,
+            pool_address=pool_address,
+            gateway_client=self._gateway_client,
+            rpc_url=self._rpc_url,
+        )
+        if meta is None:
+            return None
+
+        cold_start = PoolInfo(
+            address=meta.address,
+            lp_token=meta.lp_token,
+            coins=list(meta.coin_symbols),
+            coin_addresses=list(meta.coin_addresses),
+            pool_type=PoolType(meta.pool_type),
+            n_coins=meta.n_coins,
+            name=f"dynamic:{meta.address[:10]}",
+            coin_decimals=list(meta.coin_decimals),
+            is_metapool=meta.is_metapool,
+            base_pool=meta.base_pool,
+            base_pool_coin_addresses=(
+                list(meta.base_pool_coin_addresses) if meta.base_pool_coin_addresses is not None else None
+            ),
+        )
+        return self._resolve_pool_info(cold_start, refresh=refresh)
 
     def get_pool_by_name(self, name: str, *, refresh: bool = True) -> PoolInfo | None:
         """Get pool info by name.

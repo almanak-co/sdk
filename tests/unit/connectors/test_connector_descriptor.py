@@ -643,6 +643,9 @@ EXPECTED_VAULT_TOOL_PROVIDER_MODULES = {
 }
 
 EXPECTED_RUNNER_HOOK_PROVIDER_MODULES = {
+    # VIB-5628: builds the sync pool_meta_lookup the receipt parser uses to
+    # resolve uncurated Curve pools (MetaRegistry) for leg-labeling.
+    "curve": "almanak.connectors.curve.runner_hooks",
     # VIB-5031: stamps FluidVaultOperateData (the nftId home) into
     # extracted_data before the ledger write.
     "fluid_vault": "almanak.connectors._fluid_core.runner_hooks",
@@ -669,6 +672,7 @@ EXPECTED_TEARDOWN_POST_CONDITION_MODULES = {
     "gmx_v2": "almanak.connectors.gmx_v2.teardown_post_condition",
     "pendle": "almanak.connectors.pendle.teardown_post_condition",
     "traderjoe_v2": "almanak.connectors.traderjoe_v2.teardown_post_condition",
+    "uniswap_v4": "almanak.connectors.uniswap_v4.teardown_post_condition",
 }
 
 EXPECTED_TEARDOWN_RESIDUAL_DISCOVERY_MODULES = {

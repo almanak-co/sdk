@@ -152,8 +152,8 @@ def _legacy_warn(parser: Any, field: str) -> None:
     )
 
 
-def _pool_key_lookup_protocols() -> frozenset[str]:
-    """Receipt-parser keys whose connector declares the ``pool_key_lookup`` kwarg.
+def _receipt_parser_kwarg_keys(kwarg_name: str) -> frozenset[str]:
+    """Receipt-parser keys whose connector declares ``kwarg_name`` in its manifest.
 
     Derived from each connector's manifest ``receipt_parser_kwargs`` declaration
     (VIB-4851 C3) — keyed by ``receipt_parser_keys`` (canonical name + aliases +
@@ -170,9 +170,28 @@ def _pool_key_lookup_protocols() -> frozenset[str]:
     return frozenset(
         key
         for connector in CONNECTOR_REGISTRY.all()
-        if "pool_key_lookup" in connector.receipt_parser_kwargs
+        if kwarg_name in connector.receipt_parser_kwargs
         for key in connector.receipt_parser_keys
     )
+
+
+def _pool_key_lookup_protocols() -> frozenset[str]:
+    """Receipt-parser keys whose connector declares the ``pool_key_lookup`` kwarg.
+
+    The Uniswap V4 parser resolves ``ModifyLiquidity.pool_id`` -> canonical
+    ``PoolKey`` via the gateway (VIB-4477 T08).
+    """
+    return _receipt_parser_kwarg_keys("pool_key_lookup")
+
+
+def _pool_meta_lookup_protocols() -> frozenset[str]:
+    """Receipt-parser keys whose connector declares the ``pool_meta_lookup`` kwarg.
+
+    The Curve parser resolves an uncurated pool's coin addresses / symbols /
+    pool_type from the on-chain MetaRegistry on a static-registry miss
+    (VIB-5628).
+    """
+    return _receipt_parser_kwarg_keys("pool_meta_lookup")
 
 
 class ResultEnricher:
@@ -585,6 +604,7 @@ class ResultEnricher:
         *,
         live_mode: bool = True,
         pool_key_lookup: Any = None,
+        pool_meta_lookup: Any = None,
     ) -> None:
         """Initialize the ResultEnricher.
 
@@ -608,10 +628,20 @@ class ResultEnricher:
                 blueprint 27, the parser fails loud rather than misattribute).
                 The strategy runner builds this from connector-owned runner
                 hooks bound to its ``GatewayClient``.
+            pool_meta_lookup: VIB-5628. Sync ``(pool_address, chain) ->
+                CurvePoolMetadata | None`` callable injected into the Curve
+                receipt parser so the leg-labelling helpers can resolve an
+                UNCURATED pool's coin addresses / symbols / pool_type from the
+                on-chain MetaRegistry on a static ``CURVE_POOLS`` miss. ``None``
+                (default) skips the wiring — uncurated-pool legs then degrade to
+                ``[]`` / ``""`` (the legacy static-only path; Empty != Zero,
+                never fabricates). The strategy runner builds this from the
+                Curve gateway bridge bound to its ``GatewayClient``.
         """
         self.parser_registry = parser_registry or ReceiptParserRegistry()
         self.live_mode = live_mode
         self._pool_key_lookup = pool_key_lookup
+        self._pool_meta_lookup = pool_meta_lookup
         # Counter for ExtractError occurrences in non-live mode. Exposed so
         # monitoring / paper engines can surface the total.
         self.extract_error_count: int = 0
@@ -2256,6 +2286,11 @@ class ResultEnricher:
         kwargs: dict[str, Any] = {"chain": chain}
         if self._pool_key_lookup is not None and protocol.lower() in _pool_key_lookup_protocols():
             kwargs["pool_key_lookup"] = self._pool_key_lookup
+        # VIB-5628: thread the Curve dynamic-pool-meta lookup into parsers whose
+        # connector declares it (the Curve parser). Same declare-only discipline
+        # as pool_key_lookup — other parsers' cache behaviour stays unchanged.
+        if self._pool_meta_lookup is not None and protocol.lower() in _pool_meta_lookup_protocols():
+            kwargs["pool_meta_lookup"] = self._pool_meta_lookup
         return kwargs
 
     @staticmethod

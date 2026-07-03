@@ -422,6 +422,9 @@ async def commit_teardown_intent(
                 enricher = ResultEnricher(
                     live_mode=runner._is_live_mode(),
                     pool_key_lookup=runner._build_pool_key_lookup(),
+                    # VIB-5628: teardown-lane receipts get the same Curve
+                    # uncurated-pool leg labelling as iteration-lane receipts.
+                    pool_meta_lookup=runner._build_curve_pool_meta_lookup(),
                 )
                 enriched_result = enricher.enrich(
                     execution_result,

@@ -65,6 +65,28 @@ def _strip_0x(hex_result: object) -> str:
     return clean.lower()
 
 
+def _is_empty_eth_return(hex_result: object) -> bool:
+    """True iff an eth_call returned an EMPTY payload (``""`` / ``"0x"``).
+
+    An empty return means the call executed with NO return data. For a Uniswap
+    V4 PositionManager position query (getPositionLiquidity /
+    getPoolAndPositionInfo) this is the burned/closed position: the tokenId's
+    mapping was deleted, so the call reverts with no revert-data / returns
+    nothing (VIB-5634). This is a MEASURED "position gone" signal, and it is
+    distinct from:
+
+    - an RPC-level error — surfaced by the ``(result, error)`` tuple's error
+      slot, which the caller handles BEFORE reaching this check, and
+    - a truncated-but-nonempty payload — a malformed read that is a genuine
+      FAULT (not a closure) and must fall through to the length-checked
+      decoders (``_decode_uint_word`` etc.), never be mistaken for "gone".
+
+    Empty ≠ Zero: an all-zero WORD (``0x000…0``, 64 hex chars) is a measured
+    zero (position exists with liquidity 0), NOT empty — it is decoded normally.
+    """
+    return isinstance(hex_result, str) and hex_result.strip().lower() in ("", "0x")
+
+
 def _decode_uint_word(hex_data: str, word_index: int) -> int:
     """Decode the uint256 at ``word_index`` (each word is 64 hex chars)."""
     start = word_index * 64
@@ -1634,6 +1656,21 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             return gateway_pb2.V4PositionStateResponse(
                 success=False, error=info_error.get("message", "getPoolAndPositionInfo failed")
             )
+
+        # VIB-5634 (Empty != Zero): a burned/closed V4 position no longer exists —
+        # the PositionManager mapping was deleted, so getPositionLiquidity /
+        # getPoolAndPositionInfo return an EMPTY "0x" (the eth_call executed with
+        # no return data; an RPC-level error already returned above). That empty
+        # return is a MEASURED closure, not a decode fault: report it as
+        # ``closed=True`` so the teardown closure verifier treats "position gone"
+        # as CLOSED rather than ABI-decoding 0x and raising ("invalid string
+        # length"). ``success`` stays False (no live state to value). A
+        # truncated-but-nonempty payload is NOT empty here — it falls through to
+        # the length-checked decoders below and stays ``success=False,
+        # closed=False`` (an honest read fault -> UNVERIFIED downstream).
+        if _is_empty_eth_return(liq_result) or _is_empty_eth_return(info_result):
+            self._metrics.successful_requests += 1  # a clean, definitive read
+            return gateway_pb2.V4PositionStateResponse(success=False, closed=True)
 
         try:
             liquidity = _decode_v4_liquidity(liq_result)

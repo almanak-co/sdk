@@ -479,3 +479,84 @@ class TestBlockPinning:
         for _label, tag in captured:
             assert tag == pinned_block
             assert tag != "latest"
+
+
+class TestClosedPositionEmptyReturn:
+    """VIB-5634: a burned/closed V4 position returns empty "0x" — a MEASURED
+    closure (``closed=True``), distinct from an RPC error or a truncated payload
+    (an honest read fault → ``success=False, closed=False``). Empty ≠ Zero: an
+    all-zero WORD is a measured-zero liquidity, still a normal successful read.
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_liquidity_return_is_closed(self, rpc_service, mock_context):
+        # getPositionLiquidity returns empty 0x (mapping deleted / burned NFT).
+        # The eth_call executed with NO return data (error slot is None).
+        with (
+            patch.object(rpc_service, "_get_rpc_url", return_value="http://test"),
+            patch.object(
+                rpc_service,
+                "_make_rpc_call",
+                side_effect=[("0x", None), (_pool_and_position_info_payload(-100, 100), None)],
+            ),
+        ):
+            resp = await rpc_service.QueryV4PositionState(_request(), mock_context)
+
+        assert resp.closed is True
+        assert resp.success is False  # no live HIGH state to value
+        # We stopped after the two PositionManager reads — never decoded / hit slot0.
+        assert resp.liquidity == ""
+
+    @pytest.mark.asyncio
+    async def test_empty_pool_info_return_is_closed(self, rpc_service, mock_context):
+        # getPositionLiquidity may still return 0, but getPoolAndPositionInfo is
+        # empty → the position is gone.
+        with (
+            patch.object(rpc_service, "_get_rpc_url", return_value="http://test"),
+            patch.object(
+                rpc_service,
+                "_make_rpc_call",
+                side_effect=[(_liquidity_payload(0), None), ("0x", None)],
+            ),
+        ):
+            resp = await rpc_service.QueryV4PositionState(_request(), mock_context)
+
+        assert resp.closed is True
+        assert resp.success is False
+
+    @pytest.mark.asyncio
+    async def test_rpc_error_is_not_closed(self, rpc_service, mock_context):
+        # A genuine RPC-level error (error slot set) must NOT be mistaken for a
+        # closure — it is an honest read fault → success=False, closed=False.
+        with (
+            patch.object(rpc_service, "_get_rpc_url", return_value="http://test"),
+            patch.object(
+                rpc_service,
+                "_make_rpc_call",
+                side_effect=[(None, {"message": "execution reverted"})],
+            ),
+        ):
+            resp = await rpc_service.QueryV4PositionState(_request(), mock_context)
+
+        assert resp.closed is False
+        assert resp.success is False
+        assert "reverted" in resp.error
+
+    @pytest.mark.asyncio
+    async def test_truncated_liquidity_is_fault_not_closed(self, rpc_service, mock_context):
+        # A truncated-but-NONEMPTY payload is a malformed read (a FAULT), NOT a
+        # closure: it must fall through to the length-checked decoders and stay
+        # success=False, closed=False (→ UNVERIFIED downstream, never CLOSED).
+        with (
+            patch.object(rpc_service, "_get_rpc_url", return_value="http://test"),
+            patch.object(
+                rpc_service,
+                "_make_rpc_call",
+                side_effect=[("0x" + "00" * 8, None), (_pool_and_position_info_payload(-100, 100), None)],
+            ),
+        ):
+            resp = await rpc_service.QueryV4PositionState(_request(), mock_context)
+
+        assert resp.closed is False
+        assert resp.success is False
+        assert "decode" in resp.error.lower() or "V4 position info" in resp.error

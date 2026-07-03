@@ -1041,6 +1041,47 @@ class StrategyRunner:
             )
             return None
 
+    def _build_curve_pool_meta_lookup(self, client: Any | None = None) -> Any | None:
+        """Build a sync ``(pool_address, chain) -> CurvePoolMetadata | None`` callable.
+
+        VIB-5628. Binds the Curve dynamic-pool-metadata resolver to this
+        runner's ``GatewayClient`` so the sync ``ResultEnricher`` pipeline can
+        inject it into the Curve receipt parser — on a static ``CURVE_POOLS``
+        miss the parser then labels an uncurated pool's legs from the on-chain
+        MetaRegistry.
+
+        Returns ``None`` when no gateway client is configured (paper / dry-run /
+        unit-test modes); the parser then degrades to the legacy static-only
+        path (Empty != Zero, never fabricates a leg).
+        """
+        if client is None:
+            client = self._get_gateway_client()
+        if client is None:
+            return None
+        try:
+            from almanak.connectors._strategy_runner_hook_registry import (
+                STRATEGY_RUNNER_HOOK_REGISTRY,
+            )
+        except Exception as exc:
+            logger.error(
+                "curve pool_meta_lookup registry unavailable: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return None
+
+        try:
+            return STRATEGY_RUNNER_HOOK_REGISTRY.build_curve_pool_meta_lookup(client)
+        except Exception as exc:
+            # A configured gateway client exists but the Curve bridge could not
+            # be constructed. Surface loudly (parity with pool_key_lookup).
+            logger.error(
+                "curve pool_meta_lookup bridge unavailable: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return None
+
     def _register_with_gateway(self, strategy: StrategyProtocol) -> None:
         from .runner_gateway import register_with_gateway
 
@@ -8098,9 +8139,13 @@ class StrategyRunner:
                 # parsers that need it emit structured warnings and the rest
                 # of the pipeline degrades cleanly.
                 pool_key_lookup = self._build_pool_key_lookup()
+                # VIB-5628: Curve dynamic-pool-metadata lookup for uncurated-pool
+                # leg labelling, bound to this runner's GatewayClient.
+                curve_pool_meta_lookup = self._build_curve_pool_meta_lookup()
                 enricher = ResultEnricher(
                     live_mode=self._is_live_mode(),
                     pool_key_lookup=pool_key_lookup,
+                    pool_meta_lookup=curve_pool_meta_lookup,
                 )
                 # VIB-3203: thread compiler bundle metadata so swap_amounts
                 # extractors can compute realized slippage_bps from the

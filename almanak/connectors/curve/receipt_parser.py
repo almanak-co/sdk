@@ -5,6 +5,7 @@ Uses int128 for token indices and handles 2-pool and 3-pool variants.
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -348,7 +349,41 @@ def _canonical_pool_address(event: CurveEvent) -> str:
     return str(addr).lower()
 
 
-def _pool_coin_addresses(pool_address: str, chain: str) -> list[str]:
+# VIB-5628 — runner-injected sync ``(pool_address, chain) -> CurvePoolMetadata
+# | None`` bridge. The parser holds no gateway client of its own, so the three
+# static-registry lookups below take this optional callable and consult it on a
+# static MISS to label an UNCURATED pool's legs. ``CurvePoolMetadata`` is
+# duck-typed (``.coin_addresses`` / ``.coin_symbols`` / ``.pool_type``) to keep
+# this leaf import-cycle-free; ``None`` (no bridge / miss / failure) degrades to
+# the legacy static-only behaviour unchanged (Empty ≠ Zero).
+PoolMetaLookup = Callable[[str, str], Any]
+
+
+def _lookup_pool_meta(
+    pool_meta_lookup: PoolMetaLookup | None,
+    pool_address: str,
+    chain: str,
+) -> Any | None:
+    """Best-effort dynamic pool-metadata resolve — ``None`` on absent bridge / failure.
+
+    The bridge itself is already fail-closed (returns ``None``, never raises);
+    this wrapper is defence-in-depth so a malformed injected callable can never
+    break the accounting path.
+    """
+    if pool_meta_lookup is None:
+        return None
+    try:
+        return pool_meta_lookup(pool_address, chain)
+    except Exception as exc:  # noqa: BLE001 — accounting path: degrade to legacy, never raise
+        logger.debug("Curve dynamic pool-meta lookup failed for %s on %s: %s", pool_address, chain, exc)
+        return None
+
+
+def _pool_coin_addresses(
+    pool_address: str,
+    chain: str,
+    pool_meta_lookup: PoolMetaLookup | None = None,
+) -> list[str]:
     """Return the pool-coin-ordered ERC-20 addresses for a Curve pool, or ``[]``.
 
     Looks the pool up by its on-chain address in the static ``CURVE_POOLS``
@@ -361,9 +396,11 @@ def _pool_coin_addresses(pool_address: str, chain: str) -> list[str]:
     single-sided deposit of coin index 1+ left coin 0 carrying a fabricated zero
     leg, and a deposit of coin index 2+ was dropped entirely).
 
-    Returns ``[]`` (→ caller declares no legs, legacy fallback unchanged) when
-    the pool is unknown or carries no ``coin_addresses`` — never fabricates an
-    address (Empty ≠ Zero).
+    The static registry is the FIRST choice (a cache). On a static MISS, if a
+    ``pool_meta_lookup`` bridge is wired (VIB-5628), consult it so an UNCURATED
+    pool's legs are still labelled. Returns ``[]`` (→ caller declares no legs,
+    legacy fallback unchanged) when the pool is unknown to both — never
+    fabricates an address (Empty ≠ Zero).
     """
     if not pool_address:
         return []
@@ -378,10 +415,18 @@ def _pool_coin_addresses(pool_address: str, chain: str) -> list[str]:
                 return [str(a) for a in coin_addresses]
     except Exception as exc:  # noqa: BLE001 — accounting path: degrade to legacy, never raise
         logger.debug("Curve money-legs: pool-coin lookup failed for %s on %s: %s", pool_address, chain, exc)
+    # Static miss → dynamic MetaRegistry resolve (VIB-5628); ``None`` ⇒ ``[]``.
+    meta = _lookup_pool_meta(pool_meta_lookup, pool_address, chain)
+    if meta is not None and meta.coin_addresses:
+        return [str(a) for a in meta.coin_addresses]
     return []
 
 
-def _pool_coin_symbols(pool_address: str, chain: str) -> list[str]:
+def _pool_coin_symbols(
+    pool_address: str,
+    chain: str,
+    pool_meta_lookup: PoolMetaLookup | None = None,
+) -> list[str]:
     """Return the pool-coin-ordered token SYMBOLS for a Curve pool, or ``[]``.
 
     Sibling of :func:`_pool_coin_addresses` reading the static ``CURVE_POOLS``
@@ -393,8 +438,10 @@ def _pool_coin_symbols(pool_address: str, chain: str) -> list[str]:
     no ``token_in`` / ``token_out`` and the fungible position_key has no token
     descriptor, so without this lookup the close legs collapse to NULLs.
 
+    Static registry FIRST (cache); on a MISS, consult the ``pool_meta_lookup``
+    bridge (VIB-5628) so an UNCURATED pool's close legs are still labelled.
     Returns ``[]`` (→ caller degrades, never fabricates) when the pool is
-    unknown or carries no ``coins`` (Empty ≠ Zero).
+    unknown to both (Empty ≠ Zero).
     """
     if not pool_address:
         return []
@@ -408,16 +455,26 @@ def _pool_coin_symbols(pool_address: str, chain: str) -> list[str]:
                 return [str(c) for c in coins]
     except Exception as exc:  # noqa: BLE001 — accounting path: degrade to legacy, never raise
         logger.debug("Curve coin-symbol lookup failed for %s on %s: %s", pool_address, chain, exc)
+    # Static miss → dynamic MetaRegistry resolve (VIB-5628); ``None`` ⇒ ``[]``.
+    meta = _lookup_pool_meta(pool_meta_lookup, pool_address, chain)
+    if meta is not None and meta.coin_symbols:
+        return [str(c) for c in meta.coin_symbols]
     return []
 
 
-def _pool_type(pool_address: str, chain: str) -> str:
+def _pool_type(
+    pool_address: str,
+    chain: str,
+    pool_meta_lookup: PoolMetaLookup | None = None,
+) -> str:
     """Return the static ``CURVE_POOLS`` ``pool_type`` for a pool, or ``""``.
 
     Used to disambiguate the two incompatible 3-word ``RemoveLiquidityOne``
     layouts that share topic0 (CryptoSwap carries a ``coin_index``; StableSwap-NG
-    does not — VIB-5433). Returns ``""`` (→ caller defers to the Transfer-based
-    proceeds resolver) when the pool is unknown; never raises.
+    does not — VIB-5433). Static registry FIRST (cache); on a MISS, consult the
+    ``pool_meta_lookup`` bridge (VIB-5628). Returns ``""`` (→ caller defers to
+    the Transfer-based proceeds resolver) when the pool is unknown to both;
+    never raises.
     """
     if not pool_address:
         return ""
@@ -430,6 +487,10 @@ def _pool_type(pool_address: str, chain: str) -> str:
                 return str(data.get("pool_type", "")).lower()
     except Exception as exc:  # noqa: BLE001 — accounting path: degrade, never raise
         logger.debug("Curve pool-type lookup failed for %s on %s: %s", pool_address, chain, exc)
+    # Static miss → dynamic MetaRegistry resolve (VIB-5628); ``None`` ⇒ ``""``.
+    meta = _lookup_pool_meta(pool_meta_lookup, pool_address, chain)
+    if meta is not None and meta.pool_type:
+        return str(meta.pool_type).lower()
     return ""
 
 
@@ -488,14 +549,31 @@ class CurveReceiptParser:
         }
     )
 
-    def __init__(self, chain: str = "ethereum", **kwargs: Any) -> None:
+    def __init__(
+        self,
+        chain: str = "ethereum",
+        *,
+        pool_meta_lookup: PoolMetaLookup | None = None,
+        **kwargs: Any,
+    ) -> None:
         """Initialize the parser.
 
         Args:
             chain: Blockchain network
+            pool_meta_lookup: VIB-5628. Runner-injected sync
+                ``(pool_address, chain) -> CurvePoolMetadata | None`` bridge
+                (built from the runner's ``GatewayClient`` by
+                ``make_sync_curve_pool_meta_lookup``). Threaded by the enricher
+                only to connectors that declare it in ``receipt_parser_kwargs``.
+                Consulted by the leg-labelling helpers on a static
+                ``CURVE_POOLS`` MISS so an UNCURATED pool's coin addresses /
+                symbols / pool_type are still resolved. ``None`` (default —
+                paper / dry-run / unit-test, or no gateway) degrades to the
+                legacy static-only behaviour (Empty ≠ Zero, never fabricates).
             **kwargs: Additional arguments (ignored for compatibility)
         """
         self.chain = chain.lower()
+        self._pool_meta_lookup = pool_meta_lookup
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
 
     def parse_receipt(
@@ -1043,7 +1121,7 @@ class CurveReceiptParser:
                 coin_amount = HexDecoder.decode_uint256(data, 64)
             elif nwords == 3:
                 # Topic-collision (0x5ad056…): disambiguate by pool family.
-                ptype = _pool_type(pool_address, self.chain)
+                ptype = _pool_type(pool_address, self.chain, self._pool_meta_lookup)
                 if ptype in _CRYPTO_POOL_TYPES:
                     # CryptoSwap: (token_amount, coin_index, coin_amount).
                     coin_index = HexDecoder.decode_uint256(data, 32)
@@ -1258,7 +1336,7 @@ class CurveReceiptParser:
         instead of booking a zero-proceeds ghost.
         """
         pool_address = _canonical_pool_address(event)
-        coin_addresses = _pool_coin_addresses(pool_address, self.chain)
+        coin_addresses = _pool_coin_addresses(pool_address, self.chain, self._pool_meta_lookup)
         n_coins = len(coin_addresses)
         coin_addresses_lower = [a.lower() for a in coin_addresses]
 
@@ -1695,7 +1773,7 @@ class CurveReceiptParser:
                 # Curve LP_OPEN carries no token0/token1 on the ledger row. ``[]``
                 # for an unknown pool ⇒ ``None`` (handler keeps its legacy path).
                 open_pool_address = _canonical_pool_address(event)
-                coin_symbols = _pool_coin_symbols(open_pool_address, self.chain) or None
+                coin_symbols = _pool_coin_symbols(open_pool_address, self.chain, self._pool_meta_lookup) or None
 
                 return LPOpenData(
                     # Fungible LP: no NFT id. ``0`` is the canonical
@@ -1837,7 +1915,7 @@ class CurveReceiptParser:
                     continue
 
                 pool_address = _canonical_pool_address(event)
-                coin_addresses = _pool_coin_addresses(pool_address, self.chain)
+                coin_addresses = _pool_coin_addresses(pool_address, self.chain, self._pool_meta_lookup)
                 if not coin_addresses:
                     # Without the pool-coin address map we cannot bind an amount to
                     # the coin it funds; fall back to the legacy two-slot path
@@ -1955,7 +2033,7 @@ class CurveReceiptParser:
                 # close payload (fees AND principal) collapses to NULLs. ``[]``
                 # for an unknown pool ⇒ ``None`` (handler keeps its legacy path).
                 close_pool_address = _canonical_pool_address(event)
-                coin_symbols = _pool_coin_symbols(close_pool_address, self.chain) or None
+                coin_symbols = _pool_coin_symbols(close_pool_address, self.chain, self._pool_meta_lookup) or None
 
                 return LPCloseData(
                     amount0_collected=amount0,

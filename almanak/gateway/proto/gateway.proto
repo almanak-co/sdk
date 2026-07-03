@@ -1545,6 +1545,18 @@ message V4PositionStateResponse {
   string error = 8;
   string tokens_owed0 = 9;        // Uncollected fees token0 (uint128 raw) as decimal string; "" if unread
   string tokens_owed1 = 10;       // Uncollected fees token1 (uint128 raw) as decimal string; "" if unread
+  // VIB-5634: Empty != Zero for teardown closure. A burned/closed V4 position
+  // no longer exists — the PositionManager mapping is deleted, so
+  // getPositionLiquidity / getPoolAndPositionInfo return an EMPTY "0x" (the
+  // eth_call executed with no return data, distinct from an RPC-level error).
+  // ``closed=true`` marks that MEASURED closure so the teardown closure verifier
+  // treats "position gone" as CLOSED instead of ABI-decoding 0x and raising
+  // ("invalid string length"). It is set ONLY on a clean empty-return read; a
+  // truncated-but-nonempty payload / RPC fault keeps ``success=false`` with
+  // ``closed=false`` (an honest read fault -> UNVERIFIED, never FAILED). When
+  // ``closed=true``, ``success`` is false (there is no HIGH-confidence live
+  // state to value) — the two fields answer different questions.
+  bool closed = 11;
 }
 
 // =============================================================================

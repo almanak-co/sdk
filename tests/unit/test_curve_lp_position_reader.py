@@ -21,6 +21,7 @@ from almanak.framework.valuation.curve_lp_position_reader import (
     CurveLpPosition,
     CurveLpPositionReader,
     _resolve_curve_pool_meta,
+    _resolve_curve_pool_meta_dynamic,
 )
 from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
@@ -1164,3 +1165,109 @@ def test_classify_family_override_cannot_reclassify_crypto() -> None:
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+class TestResolveCurvePoolMetaDynamic:
+    """VIB-5628: the valuer's MetaRegistry fallback seed-dict builder.
+
+    Branch coverage for the fail-closed guards + the base_pool_coins metapool
+    mapping (CRAP-gate + CodeRabbit #3191). ``resolve_pool_metadata`` is mocked —
+    these tests exercise ONLY the dynamic wrapper's mapping/fail-closed logic.
+    """
+
+    UNCURATED = "0x4DEcE678ceceb27446b35C672dC7d61F30bAD69E"
+    LP_ADDR = "0x4DEcE678ceceb27446b35C672dC7d61F30bAD69E"
+
+    @staticmethod
+    def _meta(**kw: Any) -> Any:
+        from almanak.connectors.curve.pool_resolver import CurvePoolMetadata
+
+        defaults: dict[str, Any] = {
+            "address": TestResolveCurvePoolMetaDynamic.UNCURATED,
+            "lp_token": TestResolveCurvePoolMetaDynamic.LP_ADDR,
+            "coin_addresses": ["0xa0b8", "0xf939"],
+            "coin_decimals": [6, 18],
+            "coin_symbols": ["USDC", "CRVUSD"],
+            "n_coins": 2,
+            "pool_type": "stableswap",
+            "is_metapool": False,
+            "base_pool": None,
+            "base_pool_coin_addresses": None,
+            "base_pool_coins": None,
+        }
+        defaults.update(kw)
+        return CurvePoolMetadata(**defaults)
+
+    def test_none_gateway_fails_closed(self) -> None:
+        assert (
+            _resolve_curve_pool_meta_dynamic("ethereum", pool=self.UNCURATED, lp_token="", gateway_client=None) is None
+        )
+
+    def test_no_hex_address_fails_closed(self) -> None:
+        # Neither pool nor lp_token is a 0x address -> nothing to query on.
+        assert _resolve_curve_pool_meta_dynamic("ethereum", pool="3pool", lp_token="", gateway_client=object()) is None
+
+    def test_falls_back_to_lp_token_address(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: dict[str, Any] = {}
+
+        def _fake(*, chain: str, pool_address: str, gateway_client: Any) -> Any:
+            seen["pool_address"] = pool_address
+            return self._meta()
+
+        monkeypatch.setattr("almanak.connectors.curve.pool_resolver.resolve_pool_metadata", _fake)
+        # pool is a name (not 0x); the lp_token address must be used to query.
+        out = _resolve_curve_pool_meta_dynamic(
+            "ethereum", pool="crvusd_usdc", lp_token=self.LP_ADDR, gateway_client=object()
+        )
+        assert out is not None
+        assert seen["pool_address"] == self.LP_ADDR
+
+    def test_resolver_none_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "almanak.connectors.curve.pool_resolver.resolve_pool_metadata",
+            lambda **_: None,
+        )
+        assert (
+            _resolve_curve_pool_meta_dynamic("ethereum", pool=self.UNCURATED, lp_token="", gateway_client=object())
+            is None
+        )
+
+    def test_resolver_raises_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(**_: Any) -> Any:
+            raise RuntimeError("resolver blew up")
+
+        monkeypatch.setattr("almanak.connectors.curve.pool_resolver.resolve_pool_metadata", _boom)
+        assert (
+            _resolve_curve_pool_meta_dynamic("ethereum", pool=self.UNCURATED, lp_token="", gateway_client=object())
+            is None
+        )
+
+    def test_plain_pool_maps_fields(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "almanak.connectors.curve.pool_resolver.resolve_pool_metadata",
+            lambda **_: self._meta(),
+        )
+        out = _resolve_curve_pool_meta_dynamic("ethereum", pool=self.UNCURATED, lp_token="", gateway_client=object())
+        assert out is not None
+        assert out["coins"] == ["USDC", "CRVUSD"]
+        assert out["coin_decimals"] == [6, 18]
+        assert out["is_metapool"] is False
+        assert out["base_pool_coins"] is None
+        assert out["base_pool_coin_addresses"] is None
+
+    def test_metapool_maps_base_pool_coins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "almanak.connectors.curve.pool_resolver.resolve_pool_metadata",
+            lambda **_: self._meta(
+                is_metapool=True,
+                base_pool="0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7",
+                base_pool_coin_addresses=["0x6b17", "0xa0b8", "0xdac1"],
+                base_pool_coins=["DAI", "USDC", "USDT"],
+            ),
+        )
+        out = _resolve_curve_pool_meta_dynamic("ethereum", pool=self.UNCURATED, lp_token="", gateway_client=object())
+        assert out is not None
+        assert out["is_metapool"] is True
+        # base_pool_coins (SYMBOLS) must be threaded through — the classifier keys on it.
+        assert out["base_pool_coins"] == ["DAI", "USDC", "USDT"]
+        assert out["base_pool_coin_addresses"] == ["0x6b17", "0xa0b8", "0xdac1"]

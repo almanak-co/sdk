@@ -23,6 +23,7 @@ __all__ = [
     "RunnerHookConnector",
     "RunnerHookRegistry",
     "RunnerHookRegistryError",
+    "RunnerCurvePoolMetaLookupCapability",
     "RunnerLPReceiptTopicCapability",
     "RunnerPoolKeyLookupCapability",
     "RunnerResultEnrichmentCapability",
@@ -131,6 +132,20 @@ class RunnerPoolKeyLookupCapability(Protocol):
 
 
 @runtime_checkable
+class RunnerCurvePoolMetaLookupCapability(Protocol):
+    """Connector builds a sync uncurated-pool metadata lookup for receipt parsing (VIB-5628).
+
+    The returned callback maps ``(pool_address, chain) -> CurvePoolMetadata | None``,
+    binding the connector-owned dynamic pool resolver to the runner's gateway
+    client so the Curve receipt parser can label an uncurated pool's LP legs on a
+    static-registry miss. Keeps the framework runner free of any concrete Curve
+    module import while the on-chain read stays gateway-routed.
+    """
+
+    def build_curve_pool_meta_lookup(self, gateway_client: Any) -> Any | None: ...
+
+
+@runtime_checkable
 class RunnerV4PositionStateCapability(Protocol):
     """Connector builds a live V4 LP on-chain position-state reader (VIB-5024).
 
@@ -174,6 +189,7 @@ class RunnerHookRegistry:
             or isinstance(connector, RunnerResultEnrichmentCapability)
             or isinstance(connector, RunnerFillReconciliationCapability)
             or isinstance(connector, RunnerPoolKeyLookupCapability)
+            or isinstance(connector, RunnerCurvePoolMetaLookupCapability)
             or isinstance(connector, RunnerV4PositionStateCapability)
         ):
             raise RunnerHookRegistryError(
@@ -316,6 +332,21 @@ class RunnerHookRegistry:
                 return lookup
         return None
 
+    def build_curve_pool_meta_lookup(self, gateway_client: Any) -> Any | None:
+        """Build the first connector-provided Curve uncurated-pool metadata lookup (VIB-5628).
+
+        Returns ``None`` when no connector declares the capability (parity with
+        :meth:`build_pool_key_lookup`), so the Curve receipt parser degrades to
+        the legacy static-registry-only path.
+        """
+        for connector in self._connectors.values():
+            if not isinstance(connector, RunnerCurvePoolMetaLookupCapability):
+                continue
+            lookup = connector.build_curve_pool_meta_lookup(gateway_client)
+            if lookup is not None:
+                return lookup
+        return None
+
     def build_v4_position_state_reader(self, gateway_client: Any) -> Any | None:
         """Build the first connector-provided live V4 position-state reader (VIB-5024)."""
         for connector in self._connectors.values():
@@ -352,6 +383,8 @@ class RunnerHookRegistry:
             )
         if isinstance(connector, RunnerPoolKeyLookupCapability):
             cls._validate_method_signature(connector, "build_pool_key_lookup", positional_count=1)
+        if isinstance(connector, RunnerCurvePoolMetaLookupCapability):
+            cls._validate_method_signature(connector, "build_curve_pool_meta_lookup", positional_count=1)
         if isinstance(connector, RunnerV4PositionStateCapability):
             cls._validate_method_signature(connector, "build_v4_position_state_reader", positional_count=1)
 

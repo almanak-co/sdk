@@ -132,3 +132,132 @@ class TestNoLiveState:
 
         client._rpc_stub.QueryV4PositionState.return_value = _response(tokens_owed1="")
         assert _call(client) is None
+
+
+# ---------------------------------------------------------------------------
+# query_v4_position_closure — teardown tri-state (VIB-5634)
+# ---------------------------------------------------------------------------
+
+
+def _closure_call(client, block=None):
+    return client.query_v4_position_closure(
+        chain="base",
+        position_manager="0x7C5f5A4bBd8fD63184577525326123B519429bDc",
+        state_view="0xA3c0c9b65baD0b08107Aa264b0f3dB444b867A71",
+        token_id=4242,
+        block=block,
+    )
+
+
+def _closure_response(*, success=False, closed=False, liquidity="", tokens_owed0="", tokens_owed1="", error=""):
+    r = MagicMock()
+    r.success = success
+    r.closed = closed
+    r.liquidity = liquidity
+    r.tokens_owed0 = tokens_owed0
+    r.tokens_owed1 = tokens_owed1
+    r.error = error
+    return r
+
+
+class TestQueryV4PositionClosure:
+    def test_gateway_closed_flag_is_closed(self):
+        """Empty-return (burned) → gateway sets closed=True → MEASURED closure."""
+        client = _make_client()
+        client._rpc_stub.QueryV4PositionState.return_value = _closure_response(success=False, closed=True)
+        read = _closure_call(client)
+        assert read.closed is True
+        assert read.unmeasured is False
+
+    def test_measured_full_drain_is_closed(self):
+        """success + liquidity 0 + no owed fees → measured full drain → closed."""
+        client = _make_client()
+        client._rpc_stub.QueryV4PositionState.return_value = _closure_response(
+            success=True, closed=False, liquidity="0", tokens_owed0="0", tokens_owed1="0"
+        )
+        read = _closure_call(client)
+        assert read.closed is True
+        assert read.unmeasured is False
+
+    def test_measured_residual_liquidity_is_open(self):
+        """success + residual liquidity → measured-open → FAILED (closed=False)."""
+        client = _make_client()
+        client._rpc_stub.QueryV4PositionState.return_value = _closure_response(
+            success=True, closed=False, liquidity="123", tokens_owed0="0", tokens_owed1="0"
+        )
+        read = _closure_call(client)
+        assert read.closed is False
+        assert read.unmeasured is False
+        assert read.residual_liquidity == 123
+
+    def test_measured_residual_fees_is_open(self):
+        """success + liquidity 0 but owed fees > 0 → still a residual (open)."""
+        client = _make_client()
+        client._rpc_stub.QueryV4PositionState.return_value = _closure_response(
+            success=True, closed=False, liquidity="0", tokens_owed0="0", tokens_owed1="9"
+        )
+        read = _closure_call(client)
+        assert read.closed is False
+        assert read.unmeasured is False
+        assert read.residual_owed1 == 9
+
+    def test_read_fault_is_unmeasured(self):
+        """success=False WITHOUT closed → honest read fault → UNVERIFIED, not FAILED."""
+        client = _make_client()
+        client._rpc_stub.QueryV4PositionState.return_value = _closure_response(
+            success=False, closed=False, error="execution reverted"
+        )
+        read = _closure_call(client)
+        assert read.closed is False
+        assert read.unmeasured is True
+
+    def test_not_connected_is_unmeasured(self):
+        client = _make_client()
+        client._rpc_stub = None
+        read = _closure_call(client)
+        assert read.unmeasured is True
+
+    def test_rpc_error_is_unmeasured(self):
+        client = _make_client()
+        client._rpc_stub.QueryV4PositionState.side_effect = grpc.RpcError("boom")
+        read = _closure_call(client)
+        assert read.unmeasured is True
+
+    def test_unparseable_numeric_on_success_is_unmeasured(self):
+        """success but a garbage numeric field must NOT coerce to a residual/closed."""
+        client = _make_client()
+        client._rpc_stub.QueryV4PositionState.return_value = _closure_response(
+            success=True, closed=False, liquidity="not-a-number", tokens_owed0="0", tokens_owed1="0"
+        )
+        read = _closure_call(client)
+        assert read.unmeasured is True
+
+
+class TestQueryV4PositionClosureNeverRaises:
+    """VIB-5634 (Gemini #2): query_v4_position_closure must honour its "Never
+    raises" contract — an UNEXPECTED error (not just grpc.RpcError) degrades to
+    unmeasured=True (fail-safe -> UNVERIFIED), never a false closure and never a
+    crash into the teardown-verification caller."""
+
+    def test_encode_block_tag_raise_is_unmeasured(self):
+        # A bool block makes _encode_block_tag raise (bool is rejected as a block)
+        # BEFORE the grpc call — the general except must catch it.
+        client = _make_client()
+        client._rpc_stub.QueryV4PositionState.return_value = _closure_response(success=False, closed=True)
+        read = client.query_v4_position_closure(
+            chain="base",
+            position_manager="0x7C5f5A4bBd8fD63184577525326123B519429bDc",
+            state_view="0xA3c0c9b65baD0b08107Aa264b0f3dB444b867A71",
+            token_id=4242,
+            block=True,  # bool -> _encode_block_tag raises
+        )
+        assert read.unmeasured is True
+        assert read.closed is False
+
+    def test_unexpected_stub_exception_is_unmeasured(self):
+        # A non-RpcError exception from the stub must NOT propagate.
+        client = _make_client()
+        client._rpc_stub.QueryV4PositionState.side_effect = RuntimeError("kaboom")
+        read = _closure_call(client)
+        assert read.unmeasured is True
+        assert read.closed is False

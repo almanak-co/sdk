@@ -330,6 +330,40 @@ def _resolve_lp_open_amounts(
     return (amounts, False)
 
 
+def _is_pool_address(value: str | None) -> bool:
+    """True when ``value`` is a 0x-prefixed 20-byte address literal."""
+    return value is not None and value.startswith("0x") and len(value) == 42
+
+
+def _resolve_dynamic_pool(ctx: BaseCompilerContext, pool_address: str) -> tuple[str, dict[str, Any]] | None:
+    """Resolve an UNCURATED Curve pool from the on-chain MetaRegistry (VIB-5628).
+
+    Builds a Curve adapter and calls ``get_pool_info``, whose static-miss path
+    resolves the pool shape (coins / decimals / lp_token / metapool / gamma-
+    discriminated pool_type) from Curve's MetaRegistry via the gateway-first
+    seam. Returns ``(pool_name, pool_data)`` — the same ``dict`` shape the static
+    ``CURVE_POOLS`` entries carry, so every downstream consumer is unchanged — or
+    ``None`` when the address is not a Curve pool / there is no read transport
+    (preserving today's "Unknown Curve pool" behaviour for a genuine miss).
+
+    The heavy MetaRegistry reads are memoised per-process in
+    ``pool_resolver._METADATA_CACHE``, so a second adapter that later executes the
+    trade re-uses the cached resolution rather than re-reading the chain.
+    """
+    from almanak.connectors.curve.adapter import CurveAdapter, CurveConfig
+
+    config = CurveConfig(
+        chain=ctx.chain,
+        wallet_address=ctx.wallet_address,
+        rpc_url=ctx.rpc_url,
+        gateway_client=ctx.gateway_client,
+    )
+    info = CurveAdapter(config).get_pool_info(pool_address)
+    if info is None:
+        return None
+    return info.name, info.to_dict()
+
+
 class _ClosePool(NamedTuple):
     """Resolved Curve pool for an LP_CLOSE compile (VIB-5438 decomposition).
 
@@ -439,6 +473,13 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
 
             swap_params = intent.swap_params if hasattr(intent, "swap_params") and intent.swap_params else {}
             chain_pools = CURVE_POOLS.get(ctx.chain, {})
+
+            # VIB-5628: an explicit ``swap_params["pool"]`` ADDRESS that misses the
+            # static registry is NOT a hard error here — ``_resolve_swap_pool_and_route``
+            # returns the given address, and ``adapter.swap`` resolves the uncurated
+            # pool's shape (coins / decimals / gamma-discriminated pool_type) live
+            # from the on-chain MetaRegistry via ``get_pool_info``. Native-coin
+            # routing only; metapool-underlying routing for uncurated pools is P1-4.
 
             # Pool selection + route detection (native vs metapool-underlying).
             # `use_metapool_underlying` is True when the resolved Curve pool is a
@@ -644,6 +685,15 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                     pool_name, pool_data = asset_match
                     pool_address = pool_data["address"]
 
+            # VIB-5628: static + asset-set miss on an ADDRESS -> resolve the
+            # UNCURATED pool live from the on-chain MetaRegistry.
+            if pool_data is None and _is_pool_address(intent.pool):
+                dynamic = _resolve_dynamic_pool(ctx, intent.pool)
+                if dynamic is not None:
+                    dyn_name, pool_data = dynamic
+                    pool_name = pool_name or dyn_name
+                    pool_address = pool_data["address"]
+
             if pool_data is None:
                 available = {name: d["address"] for name, d in chain_pools.items()}
                 coins_by_pool = {name: d.get("coins") for name, d in chain_pools.items()}
@@ -792,6 +842,15 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             asset_match = _resolve_pool_by_asset_set(intent.pool, chain_pools, ctx)
             if asset_match is not None:
                 pool_name, pool_data = asset_match
+                pool_address = pool_data["address"]
+
+        # VIB-5628: static + asset-set miss on an ADDRESS -> resolve the UNCURATED
+        # pool live from the MetaRegistry so an uncurated LP position can be closed.
+        if pool_data is None and _is_pool_address(intent.pool):
+            dynamic = _resolve_dynamic_pool(ctx, intent.pool)
+            if dynamic is not None:
+                dyn_name, pool_data = dynamic
+                pool_name = pool_name or dyn_name
                 pool_address = pool_data["address"]
 
         if pool_data is None:

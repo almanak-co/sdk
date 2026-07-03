@@ -4447,6 +4447,7 @@ class V4PositionStateResponse(_message.Message):
     ERROR_FIELD_NUMBER: _builtins.int
     TOKENS_OWED0_FIELD_NUMBER: _builtins.int
     TOKENS_OWED1_FIELD_NUMBER: _builtins.int
+    CLOSED_FIELD_NUMBER: _builtins.int
     success: _builtins.bool
     liquidity: _builtins.str
     """PositionManager.getPositionLiquidity (uint128) as decimal string"""
@@ -4465,6 +4466,19 @@ class V4PositionStateResponse(_message.Message):
     """Uncollected fees token0 (uint128 raw) as decimal string; "" if unread"""
     tokens_owed1: _builtins.str
     """Uncollected fees token1 (uint128 raw) as decimal string; "" if unread"""
+    closed: _builtins.bool
+    """VIB-5634: Empty != Zero for teardown closure. A burned/closed V4 position
+    no longer exists — the PositionManager mapping is deleted, so
+    getPositionLiquidity / getPoolAndPositionInfo return an EMPTY "0x" (the
+    eth_call executed with no return data, distinct from an RPC-level error).
+    ``closed=true`` marks that MEASURED closure so the teardown closure verifier
+    treats "position gone" as CLOSED instead of ABI-decoding 0x and raising
+    ("invalid string length"). It is set ONLY on a clean empty-return read; a
+    truncated-but-nonempty payload / RPC fault keeps ``success=false`` with
+    ``closed=false`` (an honest read fault -> UNVERIFIED, never FAILED). When
+    ``closed=true``, ``success`` is false (there is no HIGH-confidence live
+    state to value) — the two fields answer different questions.
+    """
     def __init__(
         self,
         *,
@@ -4478,8 +4492,9 @@ class V4PositionStateResponse(_message.Message):
         error: _builtins.str = ...,
         tokens_owed0: _builtins.str = ...,
         tokens_owed1: _builtins.str = ...,
+        closed: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["current_tick", b"current_tick", "error", b"error", "liquidity", b"liquidity", "pool_id", b"pool_id", "sqrt_price_x96", b"sqrt_price_x96", "success", b"success", "tick_lower", b"tick_lower", "tick_upper", b"tick_upper", "tokens_owed0", b"tokens_owed0", "tokens_owed1", b"tokens_owed1"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["closed", b"closed", "current_tick", b"current_tick", "error", b"error", "liquidity", b"liquidity", "pool_id", b"pool_id", "sqrt_price_x96", b"sqrt_price_x96", "success", b"success", "tick_lower", b"tick_lower", "tick_upper", b"tick_upper", "tokens_owed0", b"tokens_owed0", "tokens_owed1", b"tokens_owed1"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___V4PositionStateResponse: _TypeAlias = V4PositionStateResponse  # noqa: Y015

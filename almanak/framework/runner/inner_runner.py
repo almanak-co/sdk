@@ -528,7 +528,30 @@ class IntentExecutionService:
                     exc,
                 )
                 pool_key_lookup = None
-            enricher = ResultEnricher(pool_key_lookup=pool_key_lookup)
+
+            # VIB-5628: Curve dynamic-pool-metadata lookup for uncurated-pool leg
+            # labelling, bound to this service's GatewayClient via the runner-hook
+            # registry (framework names no concrete Curve module). ``None`` when no
+            # gateway client so the parser degrades to the static-only path.
+            curve_pool_meta_lookup = None
+            if self._client is not None:
+                try:
+                    from almanak.connectors._strategy_runner_hook_registry import (
+                        STRATEGY_RUNNER_HOOK_REGISTRY as _HOOK_REGISTRY,
+                    )
+
+                    curve_pool_meta_lookup = _HOOK_REGISTRY.build_curve_pool_meta_lookup(self._client)
+                except Exception as exc:
+                    logger.error(
+                        "curve pool_meta_lookup bridge unavailable: %s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    curve_pool_meta_lookup = None
+            enricher = ResultEnricher(
+                pool_key_lookup=pool_key_lookup,
+                pool_meta_lookup=curve_pool_meta_lookup,
+            )
             enriched = enricher.enrich(exec_result, intent_obj, context, bundle_metadata=bundle_metadata)
 
             # Transfer enriched data to our result

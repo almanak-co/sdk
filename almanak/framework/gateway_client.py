@@ -80,6 +80,33 @@ class V4PositionState:
     tokens_owed1: int = 0
 
 
+@dataclass(frozen=True)
+class V4ClosureRead:
+    """Tri-state result of a V4 LP closure read for teardown (VIB-5634).
+
+    The valuation reader (:meth:`GatewayClient.query_v4_position_state`) collapses
+    every non-HIGH read to ``None`` (fall back to ESTIMATED), which is correct for
+    valuation but LOSES the distinction the teardown closure verifier needs:
+    "position gone" (CLOSED) vs "read failed" (UNVERIFIED). This carries that
+    three-valued signal, mirroring :class:`ClosureCheckResult` (Empty != Zero):
+
+    - ``closed=True`` — the chain MEASURED the position gone (empty return ->
+      burned NFT) OR fully drained (liquidity == 0 AND no owed fees). Risk removed.
+    - ``closed=False`` with ``unmeasured=False`` — the chain MEASURED a residual
+      (still open): ``residual_*`` carry the measured amounts -> the seam FAILS.
+    - ``unmeasured=True`` — the read could not be completed (RPC fault, missing
+      client / addresses, unparseable fields). Honest don't-know -> UNVERIFIED,
+      never FAILED. ``closed`` is ignored when ``unmeasured`` is True.
+    """
+
+    closed: bool
+    unmeasured: bool = False
+    residual_liquidity: int = 0
+    residual_owed0: int = 0
+    residual_owed1: int = 0
+    error: str = ""
+
+
 class _AuthClientInterceptor(
     grpc.UnaryUnaryClientInterceptor,
     grpc.UnaryStreamClientInterceptor,
@@ -1287,9 +1314,9 @@ class GatewayClient:
             token_id: Position NFT token ID.
             block: Optional block reference (VIB-5148, Layer-2 follow-up to
                 VIB-5140). ``None`` (default) → ``"latest"`` (legacy
-                behaviour). A future post-tx V4 read (e.g. a V4 teardown
-                closure verifier, not yet implemented) MUST pin this to the
-                close-tx receipt's ``block_number`` so a read replica that
+                behaviour). A post-tx V4 read (the V4 teardown closure verifier
+                — :meth:`query_v4_position_closure`, VIB-5634) MUST pin this to
+                the close-tx receipt's ``block_number`` so a read replica that
                 trails the writer cannot return PRE-close state and
                 false-negative the closure check — the same latent race
                 VIB-5140 fixed for V3.
@@ -1354,6 +1381,104 @@ class GatewayClient:
             pool_id=response.pool_id or "",
             tokens_owed0=tokens_owed0,
             tokens_owed1=tokens_owed1,
+        )
+
+    def query_v4_position_closure(
+        self,
+        chain: str,
+        position_manager: str,
+        state_view: str,
+        token_id: int,
+        block: int | str | None = None,
+    ) -> "V4ClosureRead":
+        """Read a V4 LP position's CLOSURE state on-chain for teardown (VIB-5634).
+
+        The teardown closure verifier needs a three-valued answer that the
+        valuation reader (:meth:`query_v4_position_state`) cannot give — it maps
+        every non-HIGH read to ``None``, conflating "position gone" with "read
+        failed". This calls the SAME gateway RPC but classifies the response into
+        :class:`V4ClosureRead` (Empty != Zero):
+
+        - The gateway sets ``closed=True`` on an EMPTY-return read (burned/gone
+          position) -> ``V4ClosureRead(closed=True)``. A MEASURED closure.
+        - ``success=True`` with ``liquidity == 0`` and no owed fees -> a measured
+          full drain -> ``V4ClosureRead(closed=True)``.
+        - ``success=True`` with residual liquidity / owed fees -> a measured
+          residual -> ``V4ClosureRead(closed=False, residual_*=...)`` -> FAILED.
+        - Any other non-success (RPC error, decode fault, truncated payload,
+          uninitialised pool, missing client) -> ``unmeasured=True`` -> UNVERIFIED.
+
+        Args:
+            chain: Chain identifier (e.g. "base").
+            position_manager: V4 PositionManager address (connector-resolved).
+            state_view: V4 StateView address (connector-resolved).
+            token_id: Position NFT token ID.
+            block: Optional block reference; pin to the close-tx receipt's block
+                so a read replica trailing the writer cannot return PRE-close
+                state and false-negative the closure (VIB-5140/5148 parity).
+
+        Never raises — a fault degrades to ``unmeasured=True`` so the teardown
+        closure CHECK can never fault the teardown lane.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        if self._rpc_stub is None:
+            return V4ClosureRead(closed=False, unmeasured=True, error="gateway client not connected")
+
+        try:
+            response = self._rpc_stub.QueryV4PositionState(
+                gateway_pb2.V4PositionStateRequest(
+                    chain=chain,
+                    position_manager=position_manager,
+                    state_view=state_view,
+                    token_id=token_id,
+                    block=_encode_block_tag(block),
+                ),
+                timeout=self.config.timeout,
+            )
+        except grpc.RpcError as e:
+            return V4ClosureRead(closed=False, unmeasured=True, error=f"QueryV4PositionState RPC error: {e}")
+        except Exception as e:  # noqa: BLE001 — honour the "Never raises" contract
+            # Empty != Zero: an UNEXPECTED error (e.g. _encode_block_tag raising on
+            # a bad block, or any other fault) is UNMEASURED (honest don't-know ->
+            # UNVERIFIED), never a false closure. This read must never crash the
+            # teardown-verification caller. Log loudly — an unexpected error here is
+            # usually a programming error we must be able to debug.
+            logger.warning(
+                "query_v4_position_closure hit an unexpected error — treating as UNMEASURED: %s", e, exc_info=True
+            )
+            return V4ClosureRead(closed=False, unmeasured=True, error=f"QueryV4PositionState unexpected error: {e}")
+
+        # Empty != Zero: the gateway flags a burned/gone position (empty-return
+        # read) with ``closed=True`` regardless of ``success`` — a MEASURED
+        # closure, taken FIRST so it is never mistaken for a read fault.
+        if response.closed:
+            return V4ClosureRead(closed=True)
+
+        if not response.success:
+            # success=False WITHOUT closed is an honest read fault (RPC error,
+            # decode fault, truncated payload, uninitialised pool). UNVERIFIED,
+            # never FAILED — a transient blip must not fabricate a residual.
+            return V4ClosureRead(closed=False, unmeasured=True, error=response.error or "V4 read unavailable")
+
+        # A clean full read: classify measured full-drain vs measured residual.
+        # Empty ("") on any field would contradict success=True (the gateway
+        # populates them on success) — treat it as unmeasured rather than coerce.
+        try:
+            liquidity = int(response.liquidity) if response.liquidity != "" else None
+            owed0 = int(response.tokens_owed0) if response.tokens_owed0 != "" else None
+            owed1 = int(response.tokens_owed1) if response.tokens_owed1 != "" else None
+        except (ValueError, TypeError):
+            return V4ClosureRead(closed=False, unmeasured=True, error="unparseable V4 numeric fields")
+        if liquidity is None or owed0 is None or owed1 is None:
+            return V4ClosureRead(closed=False, unmeasured=True, error="V4 read missing liquidity / owed-fee fields")
+        if liquidity == 0 and owed0 == 0 and owed1 == 0:
+            return V4ClosureRead(closed=True)
+        return V4ClosureRead(
+            closed=False,
+            residual_liquidity=liquidity,
+            residual_owed0=owed0,
+            residual_owed1=owed1,
         )
 
 

@@ -54,6 +54,15 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v4.compiler",
         attribute="UniswapV4Compiler",
     ),
+    # VIB-5634: TD-14 on-chain closure verifier. Registered under the connector's
+    # slugs by the framework manifest loader; the LP_V4 primitive-label alias
+    # (registry-derived positions carry ``protocol='lp_v4'``) is added generically
+    # framework-side. Without this, a closed V4 LP had no post-condition and was
+    # mis-reported UNVERIFIED / FAILED instead of CHAIN_VERIFIED.
+    teardown_post_condition=ImportRef(
+        module="almanak.connectors.uniswap_v4.teardown_post_condition",
+        attribute="uniswap_v4_post_condition",
+    ),
     primitive=ImportRef(
         module="almanak.connectors.uniswap_v4.primitive",
         attribute="PRIMITIVE",
