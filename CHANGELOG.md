@@ -108,7 +108,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **Market data.** LWAP for all Uniswap V3 forks + Aerodrome Slipstream TWAP
+- **Backtesting sweep reliability.** `almanak strat backtest` subcommands no
+  longer crash at import on a base install — the `report_generator` re-export
+  is lazy and `jinja2` is declared in the `backtest` extra (VIB-5620). The
+  default async sweep mode no longer dies mid-run with "Connector is closed":
+  the engine only closes providers it owns
+  (`PnLBacktester.close_providers_on_finish`), and the sweep orchestration
+  closes the shared provider once per period (VIB-5621). A failing combo is
+  recorded as an error row instead of aborting the sweep and discarding
+  completed results (VIB-5622). Parallel workers refuse to silently
+  substitute a mock strategy when the real class cannot be re-imported —
+  they reload it from its source file (spawn-start platforms) or fail loudly
+  per-combo (VIB-5624). Sweeps where no combination traded now print a loud
+  warning instead of declaring a meaningless "Best combination" (VIB-5623).
   (#2977); tick-spacing-aware pool resolution and a SushiSwap V3 reader (#2976);
   Binance OHLCV + spot-price symbols resolved via a canonical `CEX_SYMBOL_MAP`
   (#2978); repaired DEX-volume subgraphs (SushiSwap/TraderJoe schemas + dead

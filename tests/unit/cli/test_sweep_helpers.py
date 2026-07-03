@@ -19,8 +19,8 @@ helpers. These tests pin the behavioural contracts that are load-bearing:
 
 from __future__ import annotations
 
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 import json
+import sys
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -53,6 +53,7 @@ from almanak.framework.cli.backtest.sweep import (
     _write_sweep_json,
     parse_param_ranges_from_config,
 )
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -1044,7 +1045,7 @@ class TestRunSweepOverPeriods:
                 ctx,
                 strategy_class=MagicMock(),
                 base_config={},
-                data_provider=MagicMock(),
+                data_provider=MagicMock(close=AsyncMock()),
                 parallel=False,
                 effective_workers=4,
             )
@@ -1068,7 +1069,7 @@ class TestRunSweepOverPeriods:
                 ctx,
                 strategy_class=MagicMock(),
                 base_config={"chain": "arbitrum"},
-                data_provider=MagicMock(),
+                data_provider=MagicMock(close=AsyncMock()),
                 parallel=True,
                 effective_workers=3,
             )
@@ -1095,7 +1096,7 @@ class TestRunSweepOverPeriods:
                 ctx,
                 strategy_class=MagicMock(),
                 base_config={},
-                data_provider=MagicMock(),
+                data_provider=MagicMock(close=AsyncMock()),
                 parallel=False,
                 effective_workers=2,
             )
@@ -1124,7 +1125,7 @@ class TestRunSweepOverPeriods:
                     ctx,
                     strategy_class=MagicMock(),
                     base_config={},
-                    data_provider=MagicMock(),
+                    data_provider=MagicMock(close=AsyncMock()),
                     parallel=False,
                     effective_workers=4,
                 )
@@ -1154,7 +1155,7 @@ class TestRunSweepOverPeriods:
                 ctx,
                 strategy_class=MagicMock(),
                 base_config={},
-                data_provider=MagicMock(),
+                data_provider=MagicMock(close=AsyncMock()),
                 parallel=False,
                 effective_workers=1,
             )
@@ -1176,7 +1177,7 @@ class TestRunSweepOverPeriods:
                 ctx,
                 strategy_class=MagicMock(),
                 base_config={},
-                data_provider=MagicMock(),
+                data_provider=MagicMock(close=AsyncMock()),
                 parallel=False,
                 effective_workers=1,
             )
@@ -1963,7 +1964,12 @@ class TestSweepTaskAndWorker:
         assert isinstance(result.sharpe_ratio, Decimal)
 
     def test_worker_import_error_falls_back_to_registry(self) -> None:
-        """When the FQCN module doesn't exist, fall back to `get_strategy`."""
+        """When the FQCN module doesn't exist, fall back to `get_strategy`.
+
+        VIB-5624: the registry fallback keys on the task's registered
+        strategy name (the CLI ``-s`` value), never on a transform of the
+        class name.
+        """
         from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
 
         backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
@@ -1973,6 +1979,7 @@ class TestSweepTaskAndWorker:
             pnl_config_dict=self._build_pnl_dict(),
             params={"a": "1"},
             task_index=0,
+            strategy_name="ghost_strategy",
         )
 
         class _RegisteredClass:
@@ -2009,49 +2016,85 @@ class TestSweepTaskAndWorker:
             result = _run_sweep_task_worker(task)
         assert result.params == {"a": "1"}
 
-    def test_worker_registry_value_error_falls_back_to_mock(self) -> None:
-        """Both importlib AND registry fail → MockWorkerStrategy fallback."""
+    def test_worker_unresolvable_class_raises_instead_of_mocking(self) -> None:
+        """Both importlib AND registry fail → RuntimeError, never a mock.
+
+        VIB-5624: silently substituting MockBacktestStrategy fabricated
+        sweep results. The raise is caught per-combo by the #1752 handler,
+        so the failure lands in the results table as an honest error row.
+        """
         from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
 
-        backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
         task = _SweepTask(
             strategy_class_name="no_such_mod.GhostStrategy",
             base_config={},
             pnl_config_dict=self._build_pnl_dict(),
             params={"a": "1"},
             task_index=0,
+            strategy_name="ghost_strategy",
         )
-
-        class _FakeStrategy:
-            deployment_id = "fake"
-            config: dict[str, Any] = {}
-
-        mock_backtester = MagicMock()
-        mock_backtester.backtest = AsyncMock(return_value=backtest_result)
 
         with (
             patch(
                 "almanak.framework.strategies.get_strategy",
                 side_effect=ValueError("not registered"),
             ),
-            patch(
-                "almanak.framework.cli.backtest.sweep._create_backtest_strategy",
-                return_value=_FakeStrategy(),
-            ),
-            patch(
-                "almanak.framework.cli.backtest.sweep.PnLBacktester",
-                return_value=mock_backtester,
-            ),
-            patch(
-                "almanak.framework.cli.backtest.sweep.CoinGeckoDataProvider",
-            ),
-            patch(
-                "almanak.framework.cli.run.get_default_chain",
-                return_value="arbitrum",
-            ),
+            pytest.raises(RuntimeError, match="VIB-5624"),
         ):
-            result = _run_sweep_task_worker(task)
-        assert result.params == {"a": "1"}
+            _run_sweep_task_worker(task)
+
+    def test_worker_reloads_strategy_from_module_file(self, tmp_path: Path) -> None:
+        """Spawn-child path: unimportable module + source file → file reload.
+
+        VIB-5624: spawn-started children inherit neither sys.modules nor the
+        parent's cwd discovery, so the task carries the strategy source file.
+        """
+        from almanak.framework.cli.backtest.sweep import (
+            _resolve_sweep_worker_strategy_class,
+        )
+
+        module_file = tmp_path / "strategy.py"
+        module_file.write_text("class FileStrategy:\n    deployment_id = 'from-file'\n")
+
+        task = _SweepTask(
+            strategy_class_name="_cwd_strategy_test_deadbeef.FileStrategy",
+            base_config={},
+            pnl_config_dict=self._build_pnl_dict(),
+            params={"a": "1"},
+            task_index=0,
+            strategy_module_file=str(module_file),
+        )
+        try:
+            resolved = _resolve_sweep_worker_strategy_class(task)
+            assert resolved.deployment_id == "from-file"
+            assert resolved.__name__ == "FileStrategy"
+        finally:
+            sys.modules.pop("_cwd_strategy_test_deadbeef", None)
+
+    def test_worker_reload_failure_chains_cause_and_cleans_sys_modules(self, tmp_path: Path) -> None:
+        """A strategy module that raises at exec time (any exception type)
+        must not leave a broken half-module in the reused pool worker, and
+        the final RuntimeError must chain the REAL error for diagnosis."""
+        from almanak.framework.cli.backtest.sweep import (
+            _resolve_sweep_worker_strategy_class,
+        )
+
+        module_file = tmp_path / "strategy.py"
+        module_file.write_text("raise ValueError('bad module-level config')\n")
+
+        task = _SweepTask(
+            strategy_class_name="_cwd_strategy_test_cafebabe.FileStrategy",
+            base_config={},
+            pnl_config_dict=self._build_pnl_dict(),
+            params={"a": "1"},
+            task_index=0,
+            strategy_module_file=str(module_file),
+        )
+        with pytest.raises(RuntimeError, match="VIB-5624") as exc_info:
+            _resolve_sweep_worker_strategy_class(task)
+        assert isinstance(exc_info.value.__cause__, ValueError)
+        assert "bad module-level config" in str(exc_info.value.__cause__)
+        assert "_cwd_strategy_test_cafebabe" not in sys.modules
 
     def test_worker_strips_computed_properties(self) -> None:
         """Worker removes computed properties (duration_*, estimated_ticks) before from_dict."""
@@ -2302,13 +2345,17 @@ class TestSweepTaskAndWorker:
         assert inst.deployment_id == "sweep-x1"
 
     def test_worker_mock_strategy_class_instantiable(self) -> None:
-        """MockWorkerStrategy fallback is instantiable with dict config."""
+        """Explicit mock passthrough is instantiable with dict config.
+
+        VIB-5624: the mock is rebuilt ONLY when the parent itself resolved
+        the demonstration mock (its dynamic subclass is not an importable
+        module attribute) — never as a fallback for a real strategy.
+        """
         from almanak.framework.cli.backtest.sweep import _run_sweep_task_worker
 
-        # Both importlib (no_such_mod) AND registry raise → MockWorkerStrategy path
         backtest_result = _make_result({"a": "1"}, sharpe=1.0).result
         task = _SweepTask(
-            strategy_class_name="no_such_mod.Strategy",
+            strategy_class_name="almanak.framework.backtesting.mock_strategy.MockBacktestStrategy_mock_sweep",
             base_config={},
             pnl_config_dict=self._build_pnl_dict(),
             params={"a": "1"},

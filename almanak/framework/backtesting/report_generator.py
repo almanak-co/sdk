@@ -29,7 +29,9 @@ from typing import TYPE_CHECKING, Any
 try:
     from jinja2 import Environment, FileSystemLoader
 except ImportError as e:
-    raise ImportError("Jinja2 is required for report generation. Install it with: pip install jinja2") from e
+    raise ImportError(
+        "Jinja2 is required for report generation. Install it with: pip install 'almanak[backtest]'"
+    ) from e
 
 from almanak.framework.backtesting.pnl.calculators import collision_safe_display_labels
 from almanak.framework.backtesting.templates import TEMPLATE_DIR

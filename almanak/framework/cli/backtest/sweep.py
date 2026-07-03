@@ -355,9 +355,54 @@ async def run_sweep_backtest(
         emit_ambiguity_warnings=emit_ambiguity_warnings,
     )
     _ensure_sweep_worker_deployment_id(strategy_instance, params)
-    backtester = PnLBacktester(data_provider=data_provider, fee_models={}, slippage_models={})
+    # The provider is shared across every combo in this sweep; its lifetime
+    # is owned by the sweep orchestration, not by any single backtest run.
+    # Without this flag the first combo to finish closes the shared aiohttp
+    # session mid-flight under the concurrent combos (VIB-5621).
+    backtester = PnLBacktester(
+        data_provider=data_provider,
+        fee_models={},
+        slippage_models={},
+        close_providers_on_finish=False,
+    )
     result = await backtester.backtest(strategy_instance, pnl_config)
     return _sweep_result_from_metrics(params, result)
+
+
+def _failed_sweep_result(
+    params: dict[str, str],
+    pnl_config: PnLBacktestConfig,
+    error: BaseException | str,
+) -> SweepResult:
+    """Build the synthetic SweepResult recorded for a failed combo.
+
+    Shared by the async path (VIB-5622) and the ``--parallel`` worker
+    handler (#1752): `BacktestResult.success` is a @property derived from
+    ``error is None``, so recording the failure means setting ``error`` and
+    letting ``success`` derive. Run metadata (chain, window) is propagated
+    from ``pnl_config`` so failed rows carry the same context as
+    successful ones.
+    """
+    return SweepResult(
+        params=params,
+        result=BacktestResult(
+            engine=BacktestEngine.PNL,
+            deployment_id="error",
+            start_time=pnl_config.start_time,
+            end_time=pnl_config.end_time,
+            metrics=BacktestMetrics(),
+            trades=[],
+            initial_portfolio_value_usd=Decimal("0"),
+            final_capital_usd=Decimal("0"),
+            chain=pnl_config.chain,
+            error=str(error),
+        ),
+        sharpe_ratio=Decimal("0"),
+        total_return_pct=Decimal("0"),
+        max_drawdown_pct=Decimal("0"),
+        win_rate=Decimal("0"),
+        total_trades=0,
+    )
 
 
 async def run_parallel_sweeps(
@@ -422,17 +467,26 @@ async def run_parallel_sweeps(
                         warned_ambiguous=shared_warned,
                         emit_warnings=True,
                     )
-            return await run_sweep_backtest(
-                strategy_class=strategy_class,
-                base_config=base_config,
-                pnl_config=pnl_config,
-                data_provider=data_provider,
-                params=params,
-                numeric_param_names=numeric_param_names,
-                # Inner call is always silent: we just emitted the warnings
-                # above (or the caller disabled them entirely).
-                emit_ambiguity_warnings=False,
-            )
+            # Per-combo isolation (VIB-5622): a failing combo must not abort
+            # the sweep and discard every completed result. Mirror the
+            # --parallel worker handler (#1752): record the failure as a
+            # synthetic SweepResult and keep going. CancelledError is a
+            # BaseException and still propagates, so task cancellation works.
+            try:
+                return await run_sweep_backtest(
+                    strategy_class=strategy_class,
+                    base_config=base_config,
+                    pnl_config=pnl_config,
+                    data_provider=data_provider,
+                    params=params,
+                    numeric_param_names=numeric_param_names,
+                    # Inner call is always silent: we just emitted the warnings
+                    # above (or the caller disabled them entirely).
+                    emit_ambiguity_warnings=False,
+                )
+            except Exception as e:
+                click.echo(f"  Error in sweep run for params {params}: {e}", err=True)
+                return _failed_sweep_result(params, pnl_config, e)
 
     # Create tasks for all combinations
     tasks = [run_with_semaphore(combo) for combo in combinations]
@@ -623,6 +677,21 @@ def _print_multi_period_results(
         click.echo()
 
 
+def _strategy_module_file(strategy_class: Any) -> str | None:
+    """Source file of the strategy class, for spawn-child reloads (VIB-5624).
+
+    Dynamically created classes (e.g. the demonstration mock) have no
+    retrievable source file; that is fine — they resolve via the explicit
+    mock passthrough instead.
+    """
+    import inspect
+
+    try:
+        return inspect.getfile(strategy_class)
+    except (TypeError, OSError):
+        return None
+
+
 def _run_parallel_sweep(
     strategy_class: Any,
     base_config: dict[str, Any],
@@ -631,6 +700,7 @@ def _run_parallel_sweep(
     workers: int,
     sweep_params: list[SweepParameter],
     *,
+    strategy_name: str = "",
     numeric_param_names: frozenset[str] = frozenset(),
     emit_ambiguity_warnings: bool = True,
 ) -> list[SweepResult]:
@@ -676,6 +746,7 @@ def _run_parallel_sweep(
     # Create tasks with all necessary data for worker processes. Workers
     # always receive `emit_ambiguity_warnings=False`: either this parent
     # just emitted the warnings, or the caller (CLI) already did.
+    parent_module_file = _strategy_module_file(strategy_class)
     tasks = [
         _SweepTask(
             strategy_class_name=strategy_class.__module__ + "." + strategy_class.__name__,
@@ -686,6 +757,8 @@ def _run_parallel_sweep(
             default_chain=parent_default_chain,
             numeric_param_names=numeric_param_names,
             emit_ambiguity_warnings=False,
+            strategy_name=strategy_name,
+            strategy_module_file=parent_module_file,
         )
         for i, combo in enumerate(combinations)
     ]
@@ -705,41 +778,11 @@ def _run_parallel_sweep(
                     result = future.result()
                     results.append(result)
                 except Exception as e:
-                    # Handle worker exceptions.
-                    # #1752: `BacktestResult.success` is a @property derived from
-                    # `error is None`, NOT a constructor field. Passing `success=False`
-                    # previously raised TypeError, meaning the error-handler itself
-                    # crashed and propagated rather than recording a failed SweepResult.
-                    # Correct pattern: set `error=str(e)` and let `success` derive from it.
-                    # Required BacktestResult fields (engine, deployment_id, start_time,
-                    # end_time, metrics) are populated explicitly, and the metadata
-                    # fields (chain and period) are propagated from pnl_config
-                    # so failed results carry the same run metadata as
-                    # successful ones rather than silently falling back to the
-                    # dataclass defaults.
+                    # Handle worker exceptions (#1752): record a synthetic
+                    # failed SweepResult and continue. Shared construction
+                    # with the async path lives in `_failed_sweep_result`.
                     click.echo(f"  Error in worker for params {task.params}: {e}", err=True)
-                    results.append(
-                        SweepResult(
-                            params=task.params,
-                            result=BacktestResult(
-                                engine=BacktestEngine.PNL,
-                                deployment_id="error",
-                                start_time=pnl_config.start_time,
-                                end_time=pnl_config.end_time,
-                                metrics=BacktestMetrics(),
-                                trades=[],
-                                initial_portfolio_value_usd=Decimal("0"),
-                                final_capital_usd=Decimal("0"),
-                                chain=pnl_config.chain,
-                                error=str(e),
-                            ),
-                            sharpe_ratio=Decimal("0"),
-                            total_return_pct=Decimal("0"),
-                            max_drawdown_pct=Decimal("0"),
-                            win_rate=Decimal("0"),
-                            total_trades=0,
-                        )
-                    )
+                    results.append(_failed_sweep_result(task.params, pnl_config, e))
                 pbar.update(1)
 
     return results
@@ -777,24 +820,83 @@ class _SweepTask:
     # at the pickle boundary and so old-pickle compatibility (defaulting to
     # False) keeps behaviour consistent with the hosted path.
     emit_ambiguity_warnings: bool = False
+    # VIB-5624: the registered strategy name (the CLI `-s` value) and the
+    # source file of the strategy class. cwd-discovered strategies live in a
+    # synthetic `_cwd_strategy_*` module that only fork-started children can
+    # re-import from inherited sys.modules; spawn-started children (macOS /
+    # Windows defaults) need the file path to reload the module, and the
+    # registered name as a registry fallback. Defaults keep old pickles valid.
+    strategy_name: str = ""
+    strategy_module_file: str | None = None
 
 
 def _resolve_sweep_worker_strategy_class(task: _SweepTask) -> Any:
+    """Resolve the strategy class inside a worker process.
+
+    Resolution order (VIB-5624):
+
+    1. Explicit mock passthrough — when the parent itself resolved the
+       demonstration mock, rebuild it (the dynamic subclass is not an
+       importable module attribute; #1701 pins the "mock-worker" id).
+    2. Direct import of the parent's module — works for installed modules
+       everywhere and for cwd-discovered `_cwd_strategy_*` modules in
+       fork-started children (inherited sys.modules).
+    3. Reload from the module's source file — covers spawn-started children
+       (macOS / Windows defaults), which inherit neither sys.modules nor the
+       parent's cwd discovery.
+    4. Registry lookup by the registered strategy name.
+
+    A worker that cannot resolve the REAL class raises instead of silently
+    substituting a mock: the #1752 handler records the failure per-combo, so
+    the sweep table shows an honest error rather than fabricated results.
+    """
     import importlib
+    import importlib.util
 
     module_name, class_name = task.strategy_class_name.rsplit(".", 1)
+
+    if module_name == "almanak.framework.backtesting.mock_strategy":
+        from ...backtesting import make_mock_strategy_class
+
+        return make_mock_strategy_class("mock-worker")
+
     try:
         module = importlib.import_module(module_name)
         return getattr(module, class_name)
     except (ImportError, AttributeError):
+        pass
+
+    reload_error: Exception | None = None
+    if task.strategy_module_file:
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, task.strategy_module_file)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+                return getattr(module, class_name)
+        except Exception as e:
+            # exec_module runs user strategy code, which can raise anything.
+            # Always evict the broken half-loaded module — pool workers are
+            # reused across tasks — then keep the error so the final raise
+            # chains the REAL cause instead of a bare "could not resolve".
+            sys.modules.pop(module_name, None)
+            reload_error = e
+
+    if task.strategy_name:
         from ...strategies import get_strategy
 
         try:
-            return get_strategy(class_name.lower().replace("strategy", ""))
+            return get_strategy(task.strategy_name)
         except ValueError:
-            from ...backtesting import make_mock_strategy_class
+            pass
 
-            return make_mock_strategy_class("mock-worker")
+    raise RuntimeError(
+        f"Sweep worker could not resolve strategy class {task.strategy_class_name!r} "
+        f"(source file: {task.strategy_module_file or 'unknown'}, registered name: "
+        f"{task.strategy_name or 'unknown'}). Refusing to substitute a mock strategy "
+        "(VIB-5624)."
+    ) from reload_error
 
 
 def _coerce_sweep_params_for_worker(task: _SweepTask) -> tuple[dict[str, Any], set[tuple[str, str]]]:
@@ -1347,6 +1449,40 @@ def _handle_sweep_dry_run(ctx: _SweepRunContext) -> bool:
     return True
 
 
+async def _run_period_sweeps_owning_provider(
+    *,
+    strategy_class: Any,
+    base_config: dict[str, Any],
+    pnl_config: PnLBacktestConfig,
+    data_provider: CoinGeckoDataProvider,
+    combinations: list[dict[str, str]],
+    parallel: int,
+    numeric_param_names: frozenset[str],
+) -> list[SweepResult]:
+    """Run one period's async sweep and close the shared provider afterwards.
+
+    The engine no longer closes caller-provided providers
+    (``close_providers_on_finish=False``, VIB-5621), so the sweep
+    orchestration owns the provider lifetime. The close must happen INSIDE
+    this period's event loop: aiohttp sessions cannot cross ``asyncio.run``
+    boundaries, and the provider lazily recreates a session for the next
+    period (``_get_session``).
+    """
+    try:
+        return await run_parallel_sweeps(
+            strategy_class=strategy_class,
+            base_config=base_config,
+            pnl_config=pnl_config,
+            data_provider=data_provider,
+            combinations=combinations,
+            parallel=parallel,
+            numeric_param_names=numeric_param_names,
+            emit_ambiguity_warnings=False,
+        )
+    finally:
+        await data_provider.close()
+
+
 def _run_sweep_over_periods(
     ctx: _SweepRunContext,
     *,
@@ -1398,12 +1534,13 @@ def _run_sweep_over_periods(
                     combinations=ctx.combinations,
                     workers=effective_workers,
                     sweep_params=ctx.sweep_params,
+                    strategy_name=ctx.strategy,
                     numeric_param_names=ctx.numeric_param_names,
                     emit_ambiguity_warnings=False,
                 )
             else:
                 period_results = asyncio.run(
-                    run_parallel_sweeps(
+                    _run_period_sweeps_owning_provider(
                         strategy_class=strategy_class,
                         base_config=base_config,
                         pnl_config=pnl_config,
@@ -1411,7 +1548,6 @@ def _run_sweep_over_periods(
                         combinations=ctx.combinations,
                         parallel=effective_workers,
                         numeric_param_names=ctx.numeric_param_names,
-                        emit_ambiguity_warnings=False,
                     )
                 )
 
@@ -1426,6 +1562,42 @@ def _run_sweep_over_periods(
     return all_results
 
 
+def _warn_if_sweep_results_inert(all_results: list[SweepResult]) -> None:
+    """Refuse to look successful when the sweep measured nothing (VIB-5623).
+
+    Two loud-but-non-fatal honesty checks before rendering the ranked table:
+
+    - failed combos exist: their rows rank with zeroed metrics, which is
+      indistinguishable from a real zero in the table — say so.
+    - EVERY combo finished with zero trades: the ranking is meaningless
+      (the published-2.20.0 missing-token_funding regression produced
+      exactly this shape while declaring a "Best combination").
+    """
+    if not all_results:
+        return
+    # `error is None` is the success contract (`BacktestResult.success`);
+    # truthiness would miss message-less exceptions whose str() is "".
+    failed = [r for r in all_results if getattr(r.result, "error", None) is not None]
+    if failed:
+        click.echo(
+            f"WARNING: {len(failed)}/{len(all_results)} sweep runs failed and rank "
+            f"with zeroed metrics. First error: {failed[0].result.error or '<no message>'}",
+            err=True,
+        )
+    # Zero-trade honesty check applies to runs that actually ran: failed
+    # combos always carry zero trades and are already reported above.
+    successful = [r for r in all_results if getattr(r.result, "error", None) is None]
+    if successful and all(r.total_trades == 0 for r in successful):
+        click.echo(
+            "WARNING: no parameter combination executed a single trade — the "
+            "ranking below is not meaningful. Common causes: missing "
+            "token_funding in the strategy config (the strategy sees an empty "
+            "portfolio), no price data for the window, or signals that never "
+            "trigger.",
+            err=True,
+        )
+
+
 def _display_sweep_results(
     ctx: _SweepRunContext,
     all_results: list[SweepResult],
@@ -1435,6 +1607,7 @@ def _display_sweep_results(
     For multi-period runs with more than one period the aggregated +
     per-period tables are emitted; otherwise the single-period results table.
     """
+    _warn_if_sweep_results_inert(all_results)
     if ctx.multi_period_mode and len(ctx.backtest_periods) > 1:
         aggregated = _aggregate_multi_period_results(all_results, ctx.combinations)
         _print_multi_period_results(all_results, aggregated, ctx.sweep_params)

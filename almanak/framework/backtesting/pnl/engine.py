@@ -61,7 +61,7 @@ Examples:
 import logging
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Note: There's a naming conflict between fee_models.py (module) and fee_models/ (package)
 # Python prefers the package, so we need to use an alternative import approach
@@ -1088,6 +1088,21 @@ class PnLBacktester:
             gas_provider=gas_provider,
         )
     """
+    close_providers_on_finish: bool = field(default=True, kw_only=True)
+    """Close the caller-provided data/gas providers when ``backtest()`` finishes.
+
+    Keyword-only so inserting it mid-dataclass cannot silently re-bind the
+    positional arguments of downstream callers (`data_config` keeps its
+    pre-existing position).
+
+    The default preserves the single-run CLI contract: one backtest per
+    process, and the engine closes the provider HTTP sessions so nothing
+    leaks past ``asyncio.run()``. Multi-run orchestrators that share one
+    provider across sequential or concurrent ``backtest()`` calls (sweep,
+    optimize) MUST pass False and close the provider once themselves —
+    otherwise the first run to finish closes the shared aiohttp session
+    mid-flight under every other run ("Connector is closed", VIB-5621).
+    """
     data_config: BacktestDataConfig | None = None
     """Optional BacktestDataConfig for controlling historical data providers.
 
@@ -2003,13 +2018,17 @@ class PnLBacktester:
         # validation (PreflightValidationError) can exit without closing the aiohttp
         # session, causing "RuntimeError: Event loop is closed" when GC collects the
         # leaked session after asyncio.run() shuts down the event loop.
+        # Cleanup is gated on close_providers_on_finish: orchestrators that share
+        # one provider across runs own its lifetime and close it themselves
+        # (VIB-5621).
         try:
             return await self._run_backtest(strategy, config, backtest_id, bt_logger, run_started_at)
         finally:
-            try:
-                await self.close()
-            except (OSError, RuntimeError):
-                logger.debug("Error during async resource cleanup", exc_info=True)
+            if self.close_providers_on_finish:
+                try:
+                    await self.close()
+                except (OSError, RuntimeError):
+                    logger.debug("Error during async resource cleanup", exc_info=True)
 
     async def _run_backtest(
         self,

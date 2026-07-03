@@ -45,6 +45,8 @@ Usage:
 
 # Shared models
 # LP Performance Tracking
+from typing import TYPE_CHECKING
+
 from .lp_performance import (
     LPPerformanceReport,
     LPPerformanceTracker,
@@ -103,12 +105,36 @@ from .pnl import (
     run_parallel_backtests_sync,
 )
 
-# Report generation
-from .report_generator import (
-    ReportResult,
-    generate_report,
-    generate_report_from_json,
+# Report generation is re-exported lazily via __getattr__ below:
+# report_generator hard-requires jinja2, which ships in the `backtest`
+# extra, not the base install. An eager import here made EVERY
+# `almanak strat backtest` subcommand crash on a base install (VIB-5620),
+# defeating the CLI lazy group's zero-import contract. The TYPE_CHECKING
+# block keeps the symbols resolvable for type checkers and IDEs without a
+# runtime import.
+if TYPE_CHECKING:
+    from .report_generator import (
+        ReportResult,
+        generate_report,
+        generate_report_from_json,
+    )
+
+_REPORT_GENERATOR_EXPORTS = frozenset(
+    {
+        "ReportResult",
+        "generate_report",
+        "generate_report_from_json",
+    }
 )
+
+
+def __getattr__(name: str):
+    if name in _REPORT_GENERATOR_EXPORTS:
+        from . import report_generator
+
+        return getattr(report_generator, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Crisis scenarios
 from .scenarios import (
