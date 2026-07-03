@@ -34,6 +34,13 @@ class _Reader:
             raise RuntimeError("rpc down")
         return self._debt
 
+    def get_reserve_position(
+        self, chain: str, token_address: str, wallet: str, **_k: Any
+    ) -> tuple[int | None, int | None]:
+        # Mirror the ProtocolBalanceReader ABC default (composes supply + debt),
+        # which is the method ``lending_position_balances`` now invokes (VIB-5418).
+        return (self.get_supply_balance(), self.get_debt_balance())
+
 
 def _wire(monkeypatch, snap: MarketSnapshot, reader: _Reader | None) -> None:
     monkeypatch.setattr(snap, "_resolve_token_address", lambda token, chain: "0xtoken")

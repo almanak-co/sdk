@@ -1020,6 +1020,125 @@ def test_vib5468_older_snapshot_without_balances_method_stays_conservative():
 
 
 # ---------------------------------------------------------------------------
+# VIB-5418: Morpho Blue collateral-only teardown on a cross-asset ISOLATED
+# market with EMPTY snapshot prices. The account-level USD read is unmeasured
+# (no price to value the cross-asset market); the fix reads the RAW per-market
+# position and — because the market is isolated (reserve debt == whole-position
+# debt) — KEEPS the zero-debt collateral withdraw_all. Non-isolated protocols
+# stay conservatively refused.
+# ---------------------------------------------------------------------------
+
+_MORPHO_MID = "0x" + "cd" * 32
+
+
+def _morpho_collateral_withdraw() -> Any:
+    """Collateral-only Morpho isolated-market withdraw_all (no REPAY leg)."""
+    return Intent.withdraw(
+        protocol="morpho_blue",
+        token="WETH",
+        amount=Decimal("0"),
+        withdraw_all=True,
+        market_id=_MORPHO_MID,
+        chain=_CHAIN,
+    )
+
+
+def test_vib5418_morpho_isolated_collateral_only_empty_prices_unmeasured_stub_drops():
+    """RED baseline (the production strand): Morpho isolated cross-asset collateral-only
+    supply at graceful teardown with EMPTY snapshot prices. ``position_health`` comes
+    back unmeasured (no price override to value the cross-asset market) AND the Morpho
+    reserve read is unmeasured (today's shares-based supply stub returns None) — so the
+    guard refuses the withdraw_all as unsafe, STRANDING the collateral. This documents
+    the truly-unmeasured path, which STAYS conservatively refused even after the fix."""
+    market = _ReserveMarket(
+        collateral_usd=None,
+        debt_usd=None,
+        reserve_supply_wei=None,  # today's Morpho stub: shares-based supply unreadable
+        reserve_debt_wei=None,
+        raise_on_health=True,  # empty prices → cross-asset read unmeasured
+    )
+    result = sanitize_lending_teardown_intents([_morpho_collateral_withdraw()], market)
+    assert result.intents == []
+    assert any("unmeasured exposure and no repay-first" in d for d in result.dropped)
+    assert result.degraded
+
+
+def test_vib5418_morpho_isolated_measured_reserve_zero_debt_keeps_withdraw():
+    """The flip (RED→GREEN): after the reader fix the raw Morpho per-market read is
+    MEASURED — positive collateral and ZERO borrow-shares (debt) — even though the
+    account-level USD read is unmeasured (empty prices). Because a Morpho market is
+    ISOLATED, that reserve debt IS the whole-position debt, so the guard KEEPS the
+    zero-debt collateral withdraw_all. The collateral is no longer stranded."""
+    market = _ReserveMarket(
+        collateral_usd=None,
+        debt_usd=None,
+        reserve_supply_wei=5_000_000_000_000_000_000,  # 5 wstETH collateral (raw uint128)
+        reserve_debt_wei=0,  # borrow_shares == 0 ⇒ no debt (isolated market)
+        raise_on_health=True,
+    )
+    result = sanitize_lending_teardown_intents([_morpho_collateral_withdraw()], market)
+    assert _types(result.intents) == ["WITHDRAW"]
+    assert market.balance_reads == 1  # the raw per-reserve read ran
+    assert result.degraded  # account read was unmeasured → still flagged
+
+
+def test_vib5418_morpho_isolated_measured_reserve_with_debt_still_refused():
+    """Isolated market, but the raw read shows the market carries debt (borrow-shares
+    > 0) — NOT a zero-debt position. The withdraw_all must still be refused (repay
+    first), preserving VIB-5139's purpose for isolated markets too."""
+    market = _ReserveMarket(
+        collateral_usd=None,
+        debt_usd=None,
+        reserve_supply_wei=5_000_000_000_000_000_000,
+        reserve_debt_wei=1_000_000,  # borrow_shares > 0 ⇒ open debt
+        raise_on_health=True,
+    )
+    result = sanitize_lending_teardown_intents([_morpho_collateral_withdraw()], market)
+    assert result.intents == []
+    assert any("unmeasured exposure and no repay-first" in d for d in result.dropped)
+
+
+def test_vib5418_morpho_isolated_measured_supply_unmeasured_debt_still_refused():
+    """Isolated market with MEASURED collateral but an UNMEASURED reserve debt (a
+    partial Morpho reader failure — supply decoded, debt leg did not). The keep gate
+    requires ``reserve_debt`` to be a *measured* zero, never inferred from an
+    unmeasured read (Empty ≠ Zero), so the withdraw_all stays REFUSED — the isolated
+    market cannot be proven debt-free (CodeRabbit)."""
+    market = _ReserveMarket(
+        collateral_usd=None,
+        debt_usd=None,
+        reserve_supply_wei=5_000_000_000_000_000_000,  # collateral measured
+        reserve_debt_wei=None,  # debt leg UNMEASURED — cannot prove zero
+        raise_on_health=True,
+    )
+    result = sanitize_lending_teardown_intents([_morpho_collateral_withdraw()], market)
+    assert result.intents == []
+    assert any("unmeasured exposure and no repay-first" in d for d in result.dropped)
+    assert result.degraded
+
+
+def test_vib5418_non_isolated_measured_reserve_zero_debt_still_refused():
+    """Compound V3 is per-market but MULTI-collateral against one base asset, so it is
+    NOT an isolated market: a zero collateral-reserve debt does NOT prove the account
+    owes no base debt. The isolated-market keep must NOT fire — the withdraw stays
+    conservatively refused under an unmeasured account read (guards against reusing
+    ``publishes_market_table`` as the isolated signal)."""
+    market = _ReserveMarket(
+        collateral_usd=None,
+        debt_usd=None,
+        reserve_supply_wei=5_000_000,
+        reserve_debt_wei=0,  # collateral-reserve debt is 0, but base debt is unseen here
+        raise_on_health=True,
+    )
+    withdraw = Intent.withdraw(
+        protocol="compound_v3", token="WETH", amount=Decimal("0"), withdraw_all=True, market_id="usdc", chain=_CHAIN
+    )
+    result = sanitize_lending_teardown_intents([withdraw], market)
+    assert result.intents == []
+    assert any("unmeasured exposure and no repay-first" in d for d in result.dropped)
+
+
+# ---------------------------------------------------------------------------
 # VIB-5493: token-keyed (Fluid fToken) positions are keyed PER TOKEN, while
 # account/vault-keyed protocols (Aave family, fluid_vault) stay grouped.
 # ---------------------------------------------------------------------------

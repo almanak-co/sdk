@@ -77,6 +77,8 @@ __all__ = [
     "build_compound_borrow_balance_calldata",
     "build_compound_collateral_balance_calldata",
     "build_compound_get_price_calldata",
+    "build_morpho_position_calldata",
+    "decode_morpho_position",
     "decode_uint_hex",
     "normalize_market_id_hex",
     "pad_address",
@@ -613,6 +615,47 @@ def normalize_market_id_hex(market_id: str) -> str:
     """
     raw = market_id.lower().replace("0x", "")
     return raw.zfill(64)
+
+
+def build_morpho_position_calldata(market_id: str, wallet_address: str) -> str:
+    """Calldata for Morpho ``position(bytes32 id, address user)`` (VIB-5418).
+
+    Connector-owned so the framework balance reader can issue the raw,
+    price-independent per-market position read without hardcoding Morpho's
+    selector / ABI (Gateway-boundary discipline: the framework routes the
+    ``eth_call`` but never owns the protocol encoding). Byte-identical to the
+    ``position`` leg of :func:`_build_morpho_account_state_calls`.
+    """
+    return _MORPHO_POSITION_SELECTOR + normalize_market_id_hex(market_id) + pad_address(wallet_address)
+
+
+def decode_morpho_position(result_hex: str) -> tuple[int, int] | None:
+    """Decode Morpho ``position(id, user)`` → ``(collateral_raw, borrow_shares)``.
+
+    Word layout is ``(uint256 supplyShares, uint128 borrowShares, uint128
+    collateral)`` — so word 1 is ``borrowShares`` and word 2 is ``collateral``,
+    both raw (no shares→assets conversion, no ``market(id)`` totals). Morpho
+    collateral is a raw ``uint128`` (NOT shares) and directly usable; and because
+    Morpho markets are ISOLATED (exactly one collateral + one loan token),
+    ``borrow_shares == 0`` iff the market's whole-position debt is zero. The
+    teardown keep-decision needs only "collateral present + no debt", so this raw
+    read is sufficient and avoids the rounding a shares→assets conversion would add.
+
+    Returns ``None`` on a missing / short / malformed blob (Empty ≠ Zero — an
+    unmeasured read is ``None``, never a fabricated zero).
+    """
+    if not isinstance(result_hex, str) or not result_hex:
+        return None
+    pos = result_hex[2:] if result_hex[:2].lower() == "0x" else result_hex
+    if len(pos) < 3 * 64:  # 3 words minimum
+        return None
+    try:
+        borrow_shares = decode_uint_hex(pos, 1)
+        collateral_raw = decode_uint_hex(pos, 2)
+    except (ValueError, ArithmeticError):
+        logger.debug("Failed to decode Morpho position hex", exc_info=True)
+        return None
+    return (collateral_raw, borrow_shares)
 
 
 def _build_morpho_account_state_calls(query: AccountStateQuery) -> list[EthCall]:

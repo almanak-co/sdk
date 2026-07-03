@@ -81,6 +81,24 @@ whole-position-debt proxy. VIB-5139's purpose is preserved: a withdraw with MEAS
 active debt and no repay-first is STILL refused, and an unconfirmable
 (still-unmeasured) read STILL degrades conservatively.
 
+Isolated markets (VIB-5418): a Morpho Blue collateral-only supply on a cross-asset
+market (e.g. wstETH/USDC) strands at graceful teardown when the snapshot has empty
+prices — ``position_health`` cannot value the cross-asset market (no price override
+for a collateral-only position, which carries no REPAY leg to source the debt price),
+so the account read is unmeasured, and the per-reserve fallback was itself unmeasured
+because Morpho's supply is shares-based. The fix is two-part: (1) the per-reserve read
+now returns Morpho's RAW ``position(marketId, user)`` collateral + borrow-shares
+(``MorphoBlueBalanceReader.get_reserve_position`` → ``MarketSnapshot.lending_position_balances``),
+which is price-independent and readable even with empty prices; and (2) because a
+Morpho market is ISOLATED (exactly one collateral + one loan token,
+``LendingReadRegistry.is_market_isolated``), that reserve's debt IS the whole-position
+debt — so ``_keep_withdraw`` may KEEP the zero-debt ``withdraw_all`` on a MEASURED
+``reserve_supply > 0 AND reserve_debt == 0`` even under an unmeasured account read.
+This is scoped to isolated markets: for a non-isolated protocol (the Aave family; or
+Compound V3, which is multi-collateral against one base) the reserve debt is NOT the
+whole-position debt, so the conservative account-aggregate keep above stays the only
+path and VIB-5468's cross-asset refusal is preserved.
+
 Ordering contract — DO NOT mangle an already-correct staircase (VIB-5139 P0):
 
   ``generate_lending_unwind`` emits an ORDER-SENSITIVE *interleaved*
@@ -297,6 +315,30 @@ def _is_token_keyed_protocol(protocol: str) -> bool:
         # still fail closed to the safe account-keyed default.
         logger.debug(
             "token-keyed lookup failed for protocol=%s; defaulting to account-keyed",
+            protocol,
+            exc_info=True,
+        )
+        return False
+
+
+def _is_market_isolated_protocol(protocol: str) -> bool:
+    """Whether ``protocol`` is an ISOLATED-market lender (VIB-5418).
+
+    Delegates to the manifest-declared ``LendingReadRegistry.is_market_isolated``
+    (``LendingReadDecl.market_isolated`` — Morpho Blue) so the isolated-market
+    distinction stays owned by the connector, not hardcoded here. An isolated
+    market has exactly one collateral + one loan token, so a per-market on-chain
+    read's debt IS the whole-position debt. Fails closed to ``False`` (the
+    conservative non-isolated keep) when the registry is unavailable — a registry
+    fault must NEVER raise out of the guard.
+    """
+    try:
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        return LendingReadRegistry.is_market_isolated(protocol)
+    except Exception:  # noqa: BLE001 — a registry fault must never raise out of the guard
+        logger.debug(
+            "market-isolated lookup failed for protocol=%s; defaulting to non-isolated",
             protocol,
             exc_info=True,
         )
@@ -539,23 +581,39 @@ def _keep_withdraw(
         # but the per-reserve read only sees the WITHDRAW token's OWN reserve, so
         # it can prove "nothing to withdraw" (a no-op drop) and confirm the aToken
         # is present, yet it CANNOT prove the ACCOUNT carries no debt.
-        supply, _reserve_debt = _read_reserve_balances(market, key, token)
+        supply, reserve_debt = _read_reserve_balances(market, key, token)
         if supply is not None and supply == 0:
             # Genuine no-op: no aToken to withdraw. Safe to drop regardless of debt
             # (avoids the ``withdraw(MAX_UINT256)`` → ``INVALID_AMOUNT`` revert).
             result.dropped.append(f"WITHDRAW {key}: zero on-chain aToken balance (nothing to withdraw)")
             return False
         # VIB-5468 (whole-position debt): KEEP a withdraw_all only when ACCOUNT-LEVEL
-        # debt is CONFIRMED zero. ``_reserve_debt`` is the withdraw TOKEN's reserve
+        # debt is CONFIRMED zero. ``reserve_debt`` is the withdraw TOKEN's reserve
         # debt, NOT the account aggregate — on Aave/Spark a ``WETH`` withdraw_all
         # reads WETH-reserve debt == 0 while the account still owes ``USDC`` on
         # another reserve, and withdrawing ALL collateral with outstanding account
         # debt reverts ``0x6679996d``. So the keep is gated on ``exposure.debt_is_zero``
         # (the account aggregate, reachable here when collateral was the unmeasured
-        # leg but debt read as a measured zero) — NEVER on ``_reserve_debt``. When the
-        # account debt is itself unmeasured we cannot confirm whole-position safety,
-        # so we fall through to the conservative refusal (VIB-5139's purpose).
+        # leg but debt read as a measured zero) — NEVER on ``reserve_debt``. When the
+        # account debt is itself unmeasured we fall through — UNLESS the market is
+        # isolated (below), where the reserve debt IS the whole-position debt.
         if supply is not None and supply > 0 and exposure.debt_is_zero:
+            return True
+        # VIB-5418 (isolated markets): for a one-collateral-one-loan-token market
+        # (Morpho Blue) the per-reserve read IS the whole-position read, so a
+        # MEASURED zero reserve debt with positive collateral is a whole-position-safe
+        # zero-debt withdraw_all even when the account-level USD aggregate is
+        # unmeasured (empty snapshot prices could not value the cross-asset market).
+        # This does NOT loosen non-isolated protocols (Aave family, Compound V3): their
+        # reserve debt is only the withdraw token's reserve, so the branch above stays
+        # the only keep for them and VIB-5468's cross-asset refusal is preserved.
+        if (
+            supply is not None
+            and supply > 0
+            and reserve_debt is not None
+            and reserve_debt == 0
+            and _is_market_isolated_protocol(key[0])
+        ):
             return True
         result.dropped.append(f"WITHDRAW {key}: unmeasured exposure and no repay-first — refusing unsafe withdraw_all")
         return False

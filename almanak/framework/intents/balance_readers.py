@@ -26,10 +26,61 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from abc import ABC, abstractmethod
 from typing import Any
 
 logger = logging.getLogger("almanak.framework.intents.balance_readers")
+
+
+def _gateway_eth_call(gateway_client: Any, chain: str, to: str, data: str) -> str | None:
+    """Execute an ``eth_call`` via the gateway RPC channel; ``None`` on any failure.
+
+    The gateway gRPC channel is the ONLY outbound path this module uses. The
+    connector supplies the ABI-encoded ``data`` (selector + args); this helper
+    never owns a protocol encoding, so the Gateway-boundary discipline holds
+    (framework routes the read, connector owns the ABI). Empty ≠ Zero: a failed
+    or empty read returns ``None``, never a fabricated result.
+    """
+    try:
+        from almanak.gateway.proto import gateway_pb2
+
+        rpc_stub = getattr(gateway_client, "_rpc_stub", None)
+        if rpc_stub is None:
+            return None
+        # Bound the RPC: a config with ``timeout=None`` (or a non-numeric / ≤0 /
+        # non-finite ``inf``/``nan``) value would pass an UNBOUNDED (or invalid)
+        # timeout to the gRPC Call and could hang a teardown read. Coerce anything
+        # that is not a positive FINITE number to a finite default (CodeRabbit). A
+        # disconnected client still fail-closes: the Call raises and the outer
+        # ``except`` returns None (unmeasured → the guard degrades conservatively),
+        # so no explicit is_connected pre-check is needed.
+        _cfg_timeout = getattr(getattr(gateway_client, "config", None), "timeout", None)
+        timeout = (
+            _cfg_timeout
+            if isinstance(_cfg_timeout, int | float)
+            and not isinstance(_cfg_timeout, bool)
+            and math.isfinite(_cfg_timeout)
+            and _cfg_timeout > 0
+            else 10
+        )
+        params_json = json.dumps([{"to": to, "data": data}, "latest"])
+        response = rpc_stub.Call(
+            gateway_pb2.RpcRequest(chain=chain, method="eth_call", params=params_json),
+            timeout=timeout,
+        )
+        if not response.success:
+            return None
+        if response.result:
+            # Empty ≠ Zero, and a well-formed eth_call result is a hex string;
+            # a malformed node reply could decode to bool/int/dict/list, so
+            # only return an actual string (else treat as unmeasured → None).
+            res = json.loads(response.result)
+            return res if isinstance(res, str) else None
+        return None
+    except Exception:
+        logger.debug("gateway eth_call failed (to=%s chain=%s)", to, chain, exc_info=True)
+        return None
 
 
 class ProtocolBalanceReader(ABC):
@@ -89,6 +140,40 @@ class ProtocolBalanceReader(ABC):
     def supported_protocols(self) -> list[str]:
         """Protocol identifiers this reader handles."""
         ...
+
+    def get_reserve_position(
+        self,
+        chain: str,
+        token_address: str,
+        wallet: str,
+        *,
+        protocol: str | None = None,
+        market_id: str | None = None,
+        gateway_client: Any = None,
+    ) -> tuple[int | None, int | None]:
+        """Raw per-reserve ``(supply_wei, debt_wei)`` for the teardown keep-decision.
+
+        Distinct from :meth:`get_supply_balance` / :meth:`get_debt_balance`, which
+        the ``amount="all"`` resolver consumes (and which Morpho deliberately leaves
+        ``None`` to force its shares-based ``withdraw_all`` path — never overload
+        those). This read is the price-independent on-chain position read the
+        lending teardown guard consults via
+        :meth:`~almanak.framework.market.snapshot.MarketSnapshot.lending_position_balances`.
+
+        The default composes the two balance readers, so Aave / Spark / Compound V3
+        keep their existing (VIB-5468 / VIB-5484) behaviour unchanged. A protocol
+        whose flat balance needs a bespoke raw read (Morpho Blue's
+        ``position(id, user)``) overrides this. Empty ≠ Zero: either leg is ``None``
+        when unmeasured.
+        """
+        return (
+            self.get_supply_balance(
+                chain, token_address, wallet, protocol=protocol, market_id=market_id, gateway_client=gateway_client
+            ),
+            self.get_debt_balance(
+                chain, token_address, wallet, protocol=protocol, market_id=market_id, gateway_client=gateway_client
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -185,27 +270,8 @@ class CompoundV3BalanceReader(ProtocolBalanceReader):
         return markets.get(market_id)
 
     def _eth_call(self, gateway_client: Any, chain: str, to: str, data: str) -> str | None:
-        """Make an eth_call via gateway RPC."""
-        try:
-            from almanak.gateway.proto import gateway_pb2
-
-            rpc_stub = getattr(gateway_client, "_rpc_stub", None)
-            if rpc_stub is None:
-                return None
-            timeout = getattr(getattr(gateway_client, "config", None), "timeout", 10)
-            params_json = json.dumps([{"to": to, "data": data}, "latest"])
-            response = rpc_stub.Call(
-                gateway_pb2.RpcRequest(chain=chain, method="eth_call", params=params_json),
-                timeout=timeout,
-            )
-            if not response.success:
-                return None
-            if response.result:
-                return json.loads(response.result)
-            return None
-        except Exception:
-            logger.debug("Compound V3 eth_call failed", exc_info=True)
-            return None
+        """Make an eth_call via gateway RPC (shared gateway-routed helper)."""
+        return _gateway_eth_call(gateway_client, chain, to, data)
 
     def _query_balance(
         self,
@@ -338,6 +404,53 @@ class MorphoBlueBalanceReader(ProtocolBalanceReader):
     ) -> int | None:
         # Same as supply — Morpho uses shares-based repayment
         return None
+
+    def get_reserve_position(
+        self,
+        chain: str,
+        token_address: str,  # noqa: ARG002 — Morpho position is keyed by (market_id, user), not the token
+        wallet: str,
+        *,
+        protocol: str | None = None,  # noqa: ARG002 — single-protocol reader; accepted for interface symmetry
+        market_id: str | None = None,
+        gateway_client: Any = None,
+    ) -> tuple[int | None, int | None]:
+        """Raw ``(collateral_wei, borrow_shares)`` from ``position(marketId, user)`` (VIB-5418).
+
+        Overrides the default (which composes the shares-blind supply/debt stubs
+        above and would return ``(None, None)``). Morpho collateral is a raw
+        ``uint128`` (NOT shares) and IS directly readable; ``borrow_shares == 0``
+        iff the whole-position debt is zero because Morpho markets are ISOLATED
+        (exactly one collateral + one loan token). The teardown keep-decision only
+        needs "collateral present + no debt", so no shares→assets conversion /
+        ``market(id)`` totals are needed (avoids rounding). ABI / selector are
+        connector-owned (``lending_read_base``); the gateway routes the read.
+
+        This does NOT change ``get_supply_balance`` / ``get_debt_balance`` (still
+        ``None``), so the ``amount="all"`` resolver keeps Morpho's shares-based
+        ``withdraw_all`` path (no regression). Empty ≠ Zero: ``(None, None)`` when
+        unmeasured (no client, no market id, no Morpho address on chain, or a
+        short / failed read).
+        """
+        if gateway_client is None or not market_id:
+            return (None, None)
+        from almanak.connectors._strategy_base.address_registry import AddressRegistry
+        from almanak.connectors._strategy_base.lending_read_base import (
+            build_morpho_position_calldata,
+            decode_morpho_position,
+        )
+
+        morpho = AddressRegistry.resolve_contract_address("morpho_blue", chain, ("morpho",))
+        if not morpho:
+            return (None, None)
+        result_hex = _gateway_eth_call(gateway_client, chain, morpho, build_morpho_position_calldata(market_id, wallet))
+        if not result_hex:
+            return (None, None)
+        decoded = decode_morpho_position(result_hex)
+        if decoded is None:
+            return (None, None)
+        collateral_raw, borrow_shares = decoded
+        return (collateral_raw, borrow_shares)
 
 
 # ---------------------------------------------------------------------------

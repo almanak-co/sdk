@@ -146,6 +146,9 @@ class _LendingDispatchMaps:
     # VIB-5493: set of canonical protocol keys that declare token_keyed=True
     # (supply-only, one-position-per-underlying-token, carry no market_id).
     token_keyed_protocols: frozenset[str]
+    # VIB-5418: set of canonical protocol keys that declare market_isolated=True
+    # (one collateral + one loan token per market — Morpho Blue).
+    market_isolated_protocols: frozenset[str]
 
 
 class LendingReadRegistry:
@@ -189,6 +192,7 @@ class LendingReadRegistry:
             aliases: dict[str, str] = {}
             collateral_flag_protocols: set[str] = set()
             token_keyed_protocols: set[str] = set()
+            market_isolated_protocols: set[str] = set()
             for connector_manifest in CONNECTOR_REGISTRY.with_lending_read():
                 decl = connector_manifest.lending_read
                 assert decl is not None
@@ -212,6 +216,8 @@ class LendingReadRegistry:
                     collateral_flag_protocols.add(key)
                 if decl.token_keyed:
                     token_keyed_protocols.add(key)
+                if decl.market_isolated:
+                    market_isolated_protocols.add(key)
             cls._dispatch_maps = _LendingDispatchMaps(
                 spec_loaders=spec_loaders,
                 account_state_loaders=account_state_loaders,
@@ -221,6 +227,7 @@ class LendingReadRegistry:
                 aliases=aliases,
                 collateral_flag_protocols=frozenset(collateral_flag_protocols),
                 token_keyed_protocols=frozenset(token_keyed_protocols),
+                market_isolated_protocols=frozenset(market_isolated_protocols),
             )
         return cls._dispatch_maps
 
@@ -890,6 +897,29 @@ class LendingReadRegistry:
         """
         canonical = cls.normalize_protocol(protocol)
         return bool(canonical) and canonical in cls._dispatch().token_keyed_protocols
+
+    @classmethod
+    def is_market_isolated(cls, protocol: str | None) -> bool:
+        """Return ``True`` when ``protocol`` is an ISOLATED-market lender (VIB-5418).
+
+        An isolated market has exactly one collateral token and one loan token
+        (Morpho Blue), so a per-market on-chain read's debt IS the whole-position
+        debt. The teardown lending guard
+        (``lending_unwind_guard._keep_withdraw``) uses this to KEEP a zero-debt
+        collateral ``withdraw_all`` on a measured per-reserve read even when the
+        account-level USD aggregate is unmeasured (empty snapshot prices for a
+        cross-asset market) — a false strand it otherwise refuses.
+
+        Deliberately NOT ``publishes_market_table``: Compound V3 publishes a
+        per-market table but is MULTI-collateral against one base asset, so a zero
+        collateral-reserve debt does not prove the account owes no base debt —
+        lumping it in would KEEP an unsafe withdraw.
+
+        Total by design: ``None`` / non-``str`` / unknown input normalises to
+        ``False`` so callers fail closed onto the conservative non-isolated keep.
+        """
+        canonical = cls.normalize_protocol(protocol)
+        return bool(canonical) and canonical in cls._dispatch().market_isolated_protocols
 
     @classmethod
     def reset_cache(cls) -> None:

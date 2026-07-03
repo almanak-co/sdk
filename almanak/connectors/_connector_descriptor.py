@@ -197,6 +197,22 @@ class LendingReadDecl:
     into one and silently drops the second. Set ``True`` exactly for supply-only
     token-keyed surfaces."""
 
+    market_isolated: bool = False
+    """When ``True``, this protocol's markets are ISOLATED: each market has exactly
+    one collateral token and one loan token (Morpho Blue). For an isolated market a
+    per-market on-chain read's debt IS the whole-position debt, so the teardown
+    lending guard (``lending_unwind_guard._keep_withdraw``, VIB-5418) may KEEP a
+    zero-debt collateral ``withdraw_all`` on a measured per-reserve read
+    (``reserve_supply > 0 AND reserve_debt == 0``) even when the account-level USD
+    aggregate is UNMEASURED (empty snapshot prices for a cross-asset market).
+
+    Deliberately NOT the same signal as ``market_table`` / ``publishes_market_table``:
+    Compound V3 publishes a per-market table but is MULTI-collateral against one base
+    asset, so a zero collateral-reserve debt does NOT prove the account owes no base
+    debt — treating it as isolated would KEEP an unsafe withdraw. Defaults to ``False``
+    (the conservative non-isolated keep, gated on the account aggregate). Set ``True``
+    only for one-collateral-one-loan isolated-market lenders."""
+
     def __post_init__(self) -> None:
         """Validate the declaration's import references and aliases."""
         for field_name in ("spec", "account_state", "market_table", "market_health", "backtest_provider"):
@@ -211,6 +227,8 @@ class LendingReadDecl:
             )
         if not isinstance(self.token_keyed, bool):
             raise ValueError(f"LendingReadDecl.token_keyed must be a bool, got {self.token_keyed!r}")
+        if not isinstance(self.market_isolated, bool):
+            raise ValueError(f"LendingReadDecl.market_isolated must be a bool, got {self.market_isolated!r}")
         _validate_decl_aliases("LendingReadDecl", self.aliases)
         if not isinstance(self.rate_history_chains, tuple):
             raise ValueError(

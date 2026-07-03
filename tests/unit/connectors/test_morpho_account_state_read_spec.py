@@ -23,6 +23,7 @@ no-debt sentinel, the missing-price / short-blob fail-closed paths, and the
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -406,3 +407,96 @@ def test_valuation_roles_names_both_legs_from_market_table() -> None:
     # registry names from the market table — not the intent.
     roles = LendingReadRegistry.valuation_roles("morpho_blue", _CHAIN, _MARKET_ID)
     assert roles == (("collateral_token", _COLLATERAL), ("loan_token", _LOAN))
+
+
+# ---------------------------------------------------------------------------
+# VIB-5418: raw price-independent position read used by the teardown lending
+# guard (``MarketSnapshot.lending_position_balances`` → the balance reader).
+# ``build_morpho_position_calldata`` / ``decode_morpho_position`` give the guard
+# ``(collateral_raw, borrow_shares)`` WITHOUT prices / ``market(id)`` totals; for
+# an ISOLATED Morpho market ``borrow_shares == 0`` iff whole-position debt is 0.
+# ---------------------------------------------------------------------------
+
+
+def test_build_morpho_position_calldata_matches_account_state_position_leg() -> None:
+    from almanak.connectors._strategy_base.lending_read_base import build_morpho_position_calldata
+
+    calldata = build_morpho_position_calldata(_MARKET_ID, _WALLET)
+    # Same selector + market id + padded wallet as the account-state ``position`` leg.
+    plan = MORPHO_BLUE_ACCOUNT_STATE_READ.build_calls(_spec_query())
+    assert calldata == plan[0].data
+    assert calldata.startswith(_MORPHO_POSITION_SELECTOR)
+
+
+def test_decode_morpho_position_returns_raw_collateral_and_borrow_shares() -> None:
+    from almanak.connectors._strategy_base.lending_read_base import decode_morpho_position
+
+    # position(id,user) = (supplyShares, borrowShares, collateral).
+    blob = _position_hex(supply_shares=0, borrow_shares=0, collateral=5 * 10**18)
+    assert decode_morpho_position(blob) == (5 * 10**18, 0)  # (collateral_raw, borrow_shares)
+
+    with_debt = _position_hex(supply_shares=0, borrow_shares=123_456, collateral=7 * 10**18)
+    assert decode_morpho_position(with_debt) == (7 * 10**18, 123_456)
+
+
+def test_decode_morpho_position_fails_closed_on_short_or_empty_blob() -> None:
+    from almanak.connectors._strategy_base.lending_read_base import decode_morpho_position
+
+    assert decode_morpho_position("") is None  # Empty != Zero
+    assert decode_morpho_position(None) is None  # type: ignore[arg-type]
+    assert decode_morpho_position("0x" + "00" * 64) is None  # only 2 words (< 3)
+
+
+def test_morpho_balance_reader_get_reserve_position_decodes_raw_position() -> None:
+    """The Morpho balance reader override returns raw (collateral, borrow_shares)
+    from a gateway-routed ``position(marketId, user)`` read — the price-independent
+    read the VIB-5418 teardown keep-decision needs. ``get_supply_balance`` /
+    ``get_debt_balance`` stay ``None`` (the amount='all' withdraw_all path)."""
+    from almanak.framework.intents.balance_readers import get_reader_for_protocol
+
+    reader = get_reader_for_protocol("morpho_blue")
+    assert reader is not None
+    # amount='all' resolver contract preserved (shares-based → withdraw_all path).
+    assert reader.get_supply_balance("ethereum", "0xtok", _WALLET) is None
+    assert reader.get_debt_balance("ethereum", "0xtok", _WALLET) is None
+
+    position_blob = _position_hex(supply_shares=0, borrow_shares=0, collateral=5 * 10**18)
+
+    class _RpcStub:
+        def Call(self, req: Any, timeout: Any = None) -> Any:  # noqa: N802 — gRPC stub name
+            import json
+
+            return SimpleNamespace(success=True, result=json.dumps(position_blob))
+
+    gateway = SimpleNamespace(_rpc_stub=_RpcStub(), config=SimpleNamespace(timeout=10))
+    supply, debt = reader.get_reserve_position(
+        "ethereum", "0xtok", _WALLET, protocol="morpho_blue", market_id=_MARKET_ID, gateway_client=gateway
+    )
+    assert supply == 5 * 10**18  # raw collateral present
+    assert debt == 0  # borrow_shares == 0 ⇒ no debt (isolated market)
+
+
+def test_morpho_balance_reader_get_reserve_position_unmeasured_without_market_id() -> None:
+    """Empty != Zero: no market id (or no gateway) ⇒ unmeasured (None, None)."""
+    from almanak.framework.intents.balance_readers import get_reader_for_protocol
+
+    reader = get_reader_for_protocol("morpho_blue")
+    assert reader is not None
+    assert reader.get_reserve_position("ethereum", "0xtok", _WALLET, market_id=None, gateway_client=object()) == (
+        None,
+        None,
+    )
+    assert reader.get_reserve_position(
+        "ethereum", "0xtok", _WALLET, market_id=_MARKET_ID, gateway_client=None
+    ) == (None, None)
+
+
+def test_registry_is_market_isolated_morpho_true_others_false() -> None:
+    """The manifest-declared isolated-market capability: Morpho is isolated; the
+    Aave family and Compound V3 (multi-collateral against one base) are not."""
+    assert LendingReadRegistry.is_market_isolated("morpho_blue") is True
+    assert LendingReadRegistry.is_market_isolated("morpho") is True  # alias
+    assert LendingReadRegistry.is_market_isolated("aave_v3") is False
+    assert LendingReadRegistry.is_market_isolated("compound_v3") is False
+    assert LendingReadRegistry.is_market_isolated(None) is False
+    assert LendingReadRegistry.is_market_isolated("not_a_protocol") is False

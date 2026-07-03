@@ -91,6 +91,12 @@ CONNECTOR = Connector(
         # Gate declared here so executor/ax can branch without naming the
         # protocol as a literal string.
         accepts_is_collateral=True,
+        # VIB-5418: Morpho markets are ISOLATED (one collateral + one loan token),
+        # so a per-market on-chain read's debt IS the whole-position debt. Lets the
+        # teardown lending guard KEEP a zero-debt collateral withdraw_all on a
+        # measured per-reserve read even when the account-level USD aggregate is
+        # unmeasured (empty snapshot prices for the cross-asset market).
+        market_isolated=True,
     ),
     yield_poke=YieldPokeDecl(
         chains=("ethereum",),

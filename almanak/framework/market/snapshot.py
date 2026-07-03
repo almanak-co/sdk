@@ -3249,9 +3249,12 @@ class MarketSnapshot:
 
         Args:
             protocol: Lending protocol identifier (e.g. ``"aave_v3"``, ``"spark"``,
-                ``"compound_v3"``). Protocols whose supply is shares-based and not
-                readable as a flat balance (Morpho Blue) return ``None`` for both
-                legs — the caller must rely on the USD/health read for those.
+                ``"compound_v3"``, ``"morpho_blue"``). Morpho Blue returns
+                ``(collateral_wei, borrow_shares)`` from a raw ``position(marketId,
+                user)`` read (VIB-5418) — its collateral is a raw ``uint128`` and its
+                ISOLATED market makes ``borrow_shares == 0`` equivalent to zero
+                whole-position debt, so the ``debt`` leg is share-denominated but
+                exact for the ``== 0`` teardown keep-decision.
             token: Reserve asset symbol or address.
             market_id: Optional protocol market id (e.g. the Compound Comet key);
                 ignored by whole-pool protocols (Aave family).
@@ -3261,7 +3264,10 @@ class MarketSnapshot:
             ``(supply_wei, debt_wei)`` — either element is ``None`` when that leg
             is **unmeasured** (no gateway, unresolvable token, unsupported protocol,
             or the read failed). Empty ≠ Zero: ``None`` is unmeasured, never a
-            fabricated ``0``.
+            fabricated ``0``. NOTE: for **Morpho Blue** the second element is
+            ``borrow_shares`` (share-denominated), NOT a wei amount — exact for the
+            ``== 0`` debt check but not directly comparable to an asset amount (see
+            the ``protocol`` arg above).
         """
         # A present-but-DISCONNECTED client must not reach the on-chain readers
         # (they would fault or return a stale/empty read that looks like measured
@@ -3285,15 +3291,14 @@ class MarketSnapshot:
         if reader is None:
             return (None, None)
         try:
-            supply = reader.get_supply_balance(
-                target_chain,
-                asset,
-                wallet,
-                protocol=protocol,
-                market_id=market_id,
-                gateway_client=self._gateway_client,
-            )
-            debt = reader.get_debt_balance(
+            # ``get_reserve_position`` is the price-independent raw per-reserve read
+            # (VIB-5418): the default composes get_supply_balance/get_debt_balance
+            # (Aave / Spark / Compound unchanged), while Morpho Blue overrides it with
+            # a raw ``position(marketId, user)`` read whose flat balance the shares-blind
+            # supply/debt stubs cannot serve. This keeps the ``amount="all"`` resolver's
+            # Morpho ``withdraw_all`` path (which relies on those stubs returning None)
+            # untouched.
+            supply, debt = reader.get_reserve_position(
                 target_chain,
                 asset,
                 wallet,
