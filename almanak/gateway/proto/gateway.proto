@@ -1913,6 +1913,19 @@ service PerpFillService {
 
   // Funding settlements (deltas) for a wallet over the same window.
   rpc GetUserFunding(UserFundingRequest) returns (UserFundingResponse);
+
+  // Status of a single submitted order, addressed by its client order id
+  // (cloid). Confirms whether a specific CoreWriter submission filled /
+  // partially filled / rests / was rejected. This is the reject-detection
+  // signal the fill-reconciliation pump needs: userFills alone cannot tell
+  // "not filled yet" (async lag) from "rejected" — both leave the fills book
+  // empty — so a genuinely rejected open would stall a continuous perp
+  // strategy in PENDING forever (VIB-5616). Empty != Zero: a transport / decode
+  // fault returns success=false (the read could not complete). An order the
+  // venue does not know (unknownOid) is a MEASURED response — success=true with
+  // an UNMEASURED status — so the pump stays PENDING but never fabricates a
+  // verdict.
+  rpc GetOrderStatus(OrderStatusRequest) returns (OrderStatusResponse);
 }
 
 message UserFillsRequest {
@@ -1985,6 +1998,42 @@ message UserFundingResponse {
   repeated PerpFundingDelta deltas = 1;
   bool success = 2;
   string error = 3;
+}
+
+message OrderStatusRequest {
+  // Venue name — one per perp connector registering a
+  // ``GatewayOrderStatusCapability``. Unknown values -> INVALID_ARGUMENT.
+  string venue = 1;
+  // Account that submitted the order (HyperCore is keyed by the EVM address).
+  string wallet_address = 2;
+  // Client order id (cloid) the CoreWriter order carried, as a decimal
+  // string of the uint128 value (keccak(intent_id)[:16]). Decimal-string so
+  // the full 128-bit range survives the wire (proto has no uint128); the
+  // servicer renders it to the API's 0x-padded hex. Required.
+  string cloid = 3;
+  // Chain hint for parity with on-chain venues (Hyperliquid is chain-agnostic).
+  string chain = 4;
+}
+
+message OrderStatusResponse {
+  // Reconciled fill verdict for the submission, as the connector's
+  // ``FillStatus`` string value: "filled" / "partially_filled" / "resting" /
+  // "rejected" / "unmeasured". On success=false this is left empty (the caller
+  // treats it as UNMEASURED). The strategy container never re-parses raw
+  // venue JSON — the gateway runs the connector's pure parser and returns the
+  // typed verdict here.
+  string status = 1;
+  // Base-asset size the venue reported filled, decimal-as-string. Empty =
+  // unmeasured (NEVER "0" unless the venue reported a measured zero).
+  string filled_size = 2;
+  // Average fill price the venue reported, decimal-as-string. Empty = unmeasured.
+  string avg_fill_price = 3;
+  // Human-readable detail (raw status string / error) for observability.
+  string detail = 4;
+  // True iff the read was measured. success=false -> UNMEASURED (Empty != Zero:
+  // never a fabricated fill or reject on a transport / decode fault).
+  bool success = 5;
+  string error = 6;
 }
 
 // =============================================================================

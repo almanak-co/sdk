@@ -37,6 +37,7 @@ from .addresses import (
     ACTION_CANCEL_ORDER_BY_CLOID,
     ACTION_CANCEL_ORDER_BY_OID,
     ACTION_LIMIT_ORDER,
+    ACTION_SPOT_SEND,
     ACTION_USD_CLASS_TRANSFER,
     CORE_WRITER_ENCODING_VERSION,
     PERP_PX_MAX_DECIMALS,
@@ -299,11 +300,93 @@ def encode_usd_class_transfer_action(ntl_usd: Decimal, *, to_perp: bool) -> byte
     return _action_header(ACTION_USD_CLASS_TRANSFER) + body
 
 
+def spot_wei(amount: Decimal, wei_decimals: int) -> int:
+    """Scale a human spot-token amount to its integer ``wei`` (10**weiDecimals).
+
+    HyperCore spot tokens carry their amount in the token's OWN ``weiDecimals``
+    (e.g. USDC on HyperCore is 8-decimal — NOT the 6-decimal EVM USDC ERC-20, and
+    NOT the 1e6 ``ntl`` scale ``usdClassTransfer`` uses). Confusing these scales
+    silently sends 100× / 0.01× the intended amount, so ``spot_send`` requires the
+    caller to pass the token's ``weiDecimals`` explicitly rather than inheriting a
+    hard-coded default (mirrors how :func:`size_to_wire` takes ``sz_decimals``).
+
+    Rounds DOWN so a computed amount never exceeds the caller's intent after
+    quantisation (under-send is safer than over-send). Fail-closed: a non-positive
+    amount or a resulting zero wei raises rather than sending a no-op / negative.
+    """
+    if amount <= 0:
+        raise ValueError(f"spot send amount must be positive, got {amount}")
+    if wei_decimals < 0:
+        raise ValueError(f"wei_decimals must be non-negative, got {wei_decimals}")
+    scaled = amount * (Decimal(10) ** wei_decimals)
+    wei = int(scaled.quantize(Decimal(1), rounding=ROUND_DOWN))
+    if wei <= 0:
+        raise ValueError(
+            f"amount {amount} rounds to zero wei at {wei_decimals} decimals — increase amount or check weiDecimals"
+        )
+    if wei >= _UINT64_MAX:
+        raise ValueError(f"spot send wei {wei} out of uint64 range")
+    return wei
+
+
+def encode_spot_send_action(destination: str, token: int, wei: int) -> bytes:
+    """Encode a spot-send action (id 6): transfer a HyperCore spot token.
+
+    CoreWriter ``spotSend`` body is ABI ``(address destination, uint64 token,
+    uint64 wei)`` — ``token`` is the HyperCore spot-token INDEX (e.g. USDC = 0),
+    ``wei`` is the amount in that token's ``weiDecimals`` (see :func:`spot_wei`).
+    Sending to a token's system address (``0x2000…00 | index``) is detected by
+    HyperCore as a HyperCore→HyperEVM bridge and credits the sender's EVM wallet;
+    sending to any other address is a plain spot transfer. A Safe (a contract
+    that cannot ECDSA-sign an L1 withdraw) uses this to move HyperCore funds
+    programmatically (VIB-5615).
+    """
+    dest = _check_address(destination)
+    _check_uint(token, _UINT64_MAX, "token", allow_zero=True)
+    _check_uint(wei, _UINT64_MAX, "wei", positive=True)
+    body = abi_encode(["address", "uint64", "uint64"], [dest, int(token), int(wei)])
+    return _action_header(ACTION_SPOT_SEND) + body
+
+
 def encode_send_raw_action_calldata(action_blob: bytes) -> bytes:
     """Wrap an action blob as ``CoreWriter.sendRawAction(bytes)`` calldata."""
     if not isinstance(action_blob, bytes | bytearray) or len(action_blob) < 4:
         raise ValueError("action_blob must be the versioned action bytes (>= 4 bytes)")
     return SELECTOR_SEND_RAW_ACTION + abi_encode(["bytes"], [bytes(action_blob)])
+
+
+def build_spot_send_calldata(destination: str, token: int, amount: Decimal, wei_decimals: int) -> bytes:
+    """Build full ``CoreWriter.sendRawAction`` calldata for a spot-token transfer.
+
+    Convenience over :func:`spot_wei` → :func:`encode_spot_send_action` →
+    :func:`encode_send_raw_action_calldata` for a human ``amount`` of a HyperCore
+    spot ``token`` (index) with the token's ``wei_decimals``. Returns the calldata
+    for a ``CoreWriter`` (``0x3333…3333``) call; the gateway signs and submits.
+    """
+    wei = spot_wei(amount, wei_decimals)
+    blob = encode_spot_send_action(destination, token, wei)
+    return encode_send_raw_action_calldata(blob)
+
+
+def build_usdc_withdraw_calldata(amount: Decimal) -> bytes:
+    """Build ``sendRawAction`` calldata to bridge USDC HyperCore→HyperEVM (VIB-5615).
+
+    A spot-send of USDC (token index 0, weiDecimals 8) to the USDC system address
+    (``0x2000…0000``) is detected by HyperCore as a bridge request and credits the
+    SENDER's HyperEVM wallet with the linked ERC-20 (funds appear in ~seconds).
+    This is the programmatic HyperCore→L1 withdraw path a Safe (which cannot
+    ECDSA-sign an L1 ``withdraw3``) uses to move parked HyperCore funds back
+    on-chain. Token index / weiDecimals / system address come from the connector's
+    own constants so calldata can't drift from a hand-typed literal.
+    """
+    from .addresses import USDC_SPOT_SYSTEM_ADDRESS, USDC_SPOT_TOKEN_INDEX, USDC_SPOT_WEI_DECIMALS
+
+    return build_spot_send_calldata(
+        USDC_SPOT_SYSTEM_ADDRESS,
+        USDC_SPOT_TOKEN_INDEX,
+        amount,
+        USDC_SPOT_WEI_DECIMALS,
+    )
 
 
 # =============================================================================
@@ -508,6 +591,8 @@ __all__ = [
     "AccountMarginSummary",
     "LimitOrderAction",
     "Position",
+    "build_spot_send_calldata",
+    "build_usdc_withdraw_calldata",
     "decode_account_margin_summary",
     "decode_limit_order_action",
     "decode_position",
@@ -520,10 +605,12 @@ __all__ = [
     "encode_perp_query",
     "encode_position_query",
     "encode_send_raw_action_calldata",
+    "encode_spot_send_action",
     "encode_usd_class_transfer_action",
     "market_limit_price",
     "price_to_wire",
     "round_perp_price",
     "round_size",
     "size_to_wire",
+    "spot_wei",
 ]

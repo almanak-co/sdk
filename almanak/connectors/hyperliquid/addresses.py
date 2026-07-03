@@ -94,6 +94,29 @@ SPOT_PX_MAX_DECIMALS: int = 8
 # CoreWriter wire fixed-point: limitPx and sz are round(human * 10**WIRE_DECIMALS).
 WIRE_DECIMALS: int = 8
 
+# HyperCore SPOT token registry (VIB-5615). CoreWriter ``spotSend`` (action 6)
+# addresses a spot token by its integer ``token`` index and carries the amount
+# as ``wei`` in that token's OWN ``weiDecimals`` — NOT the perp 1e6 USD ntl scale
+# that ``usdClassTransfer`` (action 7) uses. Confusing the two is the classic
+# spot-send scale bug, so the two conventions are kept explicitly separate here.
+#
+# USDC on HyperCore spot: token index 0, weiDecimals 8 (verified against the
+# Hyperliquid HyperCore token registry / bridging docs — HyperCore-side USDC is
+# 8-decimal, distinct from the 6-decimal EVM USDC ERC-20). The encoder takes
+# ``wei_decimals`` explicitly (mirroring how the limit-order encoder takes
+# ``sz_decimals``) so a non-USDC spot token supplies its own weiDecimals rather
+# than inheriting a hard-coded 8; these are the USDC defaults for the withdraw
+# helper only.
+USDC_SPOT_TOKEN_INDEX: int = 0
+USDC_SPOT_WEI_DECIMALS: int = 8
+
+# System destination for a HyperCore→HyperEVM USDC bridge. Sending a spotSend to
+# a token's system address ``0x2000…00 | token_index`` is detected by Hyperliquid
+# as a bridge request and credited to the sender's HyperEVM wallet as the linked
+# ERC-20 (verified against the HyperCore<>HyperEVM transfer docs). For USDC
+# (index 0) the system address is exactly ``0x2000…0000``.
+USDC_SPOT_SYSTEM_ADDRESS: str = "0x2000000000000000000000000000000000000000"
+
 # The chain this connector executes on.
 HYPEREVM_CHAIN: str = "hyperevm"
 
@@ -110,6 +133,7 @@ __all__ = [
     "ACTION_CANCEL_ORDER_BY_CLOID",
     "ACTION_CANCEL_ORDER_BY_OID",
     "ACTION_LIMIT_ORDER",
+    "ACTION_SPOT_SEND",
     "ACTION_USD_CLASS_TRANSFER",
     "ACTION_VAULT_TRANSFER",
     "CORE_WRITER_ADDRESS",
@@ -124,5 +148,8 @@ __all__ = [
     "PRECOMPILE_POSITION",
     "RAW_ACTION_EVENT_TOPIC",
     "SPOT_PX_MAX_DECIMALS",
+    "USDC_SPOT_SYSTEM_ADDRESS",
+    "USDC_SPOT_TOKEN_INDEX",
+    "USDC_SPOT_WEI_DECIMALS",
     "WIRE_DECIMALS",
 ]

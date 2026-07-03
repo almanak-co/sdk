@@ -419,3 +419,154 @@ async def test_processor_writes_perp_event_via_writer() -> None:
     assert isinstance(written, PerpAccountingEvent)
     assert written.realized_pnl_usd == Decimal("1.23")
     assert written.funding_paid_usd == Decimal("-0.0001")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# resolve_fill_status — fills → orderStatus reject-detection (VIB-5616)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _order_status_proto(raw: Any) -> Any:
+    """Build the real ``OrderStatusResponse`` the gateway would return for ``raw``.
+
+    Mirrors the live path exactly: the connector's pure parser turns the raw
+    payload into a neutral ``OrderStatusData`` (as the provider now does), then
+    the gateway maps that to proto — so the pump wiring is exercised end-to-end
+    without a real socket.
+    """
+    from almanak.connectors.hyperliquid.fill_reconciliation import parse_order_status_response
+    from almanak.gateway.services.perp_fill_service import OrderStatusData, _order_status_to_proto
+
+    outcome = parse_order_status_response(raw)
+    return _order_status_to_proto(
+        OrderStatusData(
+            status=str(outcome.status),
+            filled_size="" if outcome.filled_size is None else str(outcome.filled_size),
+            avg_fill_price="" if outcome.avg_fill_price is None else str(outcome.avg_fill_price),
+            detail=outcome.detail,
+        )
+    )
+
+
+def _mock_gateway(fills: list[Any], *, order_status_raw: Any = None, order_status_fault: bool = False) -> Any:
+    """Gateway mock supporting GetUserFills + GetOrderStatus for the pump."""
+    gw = MagicMock()
+    fills_resp = MagicMock()
+    fills_resp.success = True
+    fills_resp.fills = fills
+    gw.perp_fill.GetUserFills = MagicMock(return_value=fills_resp)
+
+    if order_status_fault:
+        gw.perp_fill.GetOrderStatus = MagicMock(side_effect=RuntimeError("gw down"))
+    elif order_status_raw is not None:
+        gw.perp_fill.GetOrderStatus = MagicMock(return_value=_order_status_proto(order_status_raw))
+    else:
+        # No orderStatus stubbed → a success=False envelope (unmeasured).
+        unmeasured = MagicMock()
+        unmeasured.success = False
+        unmeasured.status = ""
+        gw.perp_fill.GetOrderStatus = MagicMock(return_value=unmeasured)
+    return gw
+
+
+def _handle() -> Any:
+    from almanak.connectors.hyperliquid.runner_hooks import PendingFillHandle
+
+    return PendingFillHandle(protocol="hyperliquid", intent_type="PERP_OPEN", cloid_hex=_CLOID_HEX, coin="BTC")
+
+
+def _resolve(gw: Any) -> Any:
+    from almanak.connectors.hyperliquid.runner_hooks import HyperliquidRunnerHookConnector
+
+    return HyperliquidRunnerHookConnector().resolve_fill_status(
+        gateway_client=gw, wallet_address="0xabc", handle=_handle()
+    )
+
+
+def test_resolve_fill_beats_reject() -> None:
+    """FILLED precedence: a matching fill wins even if orderStatus would say rejected."""
+    from almanak.connectors.hyperliquid.fill_reconciliation import FillStatus
+
+    gw = _mock_gateway(
+        fills=[_fill(_CLOID_HEX, fee="0.02", closed_pnl="0", px="60000", sz="0.001")],
+        order_status_raw={"status": "order", "order": {"status": "rejected", "order": {}}},
+    )
+    verdict = _resolve(gw)
+    assert verdict is not None
+    assert str(verdict.status) == str(FillStatus.FILLED)
+    assert verdict.terminal is True
+    # FILLED short-circuits BEFORE the orderStatus query — reject is never consulted.
+    gw.perp_fill.GetOrderStatus.assert_not_called()
+
+
+def test_resolve_reject_is_terminal() -> None:
+    """No fill matched + orderStatus REJECTED → terminal REJECTED (clears PENDING)."""
+    from almanak.connectors.hyperliquid.fill_reconciliation import FillStatus
+
+    gw = _mock_gateway(
+        fills=[_fill("0xnotours", fee="1", closed_pnl="1")],  # no match for our cloid
+        order_status_raw={"status": "order", "order": {"status": "rejected", "order": {}}},
+    )
+    verdict = _resolve(gw)
+    assert verdict is not None
+    assert str(verdict.status) == str(FillStatus.REJECTED)
+    assert verdict.terminal is True
+    gw.perp_fill.GetOrderStatus.assert_called_once()
+
+
+def test_resolve_unmeasured_order_status_stays_pending() -> None:
+    """No fill + orderStatus unmeasured (success=False) → non-terminal (stays PENDING)."""
+    from almanak.connectors.hyperliquid.fill_reconciliation import FillStatus
+
+    gw = _mock_gateway(fills=[_fill("0xnotours")], order_status_fault=True)
+    verdict = _resolve(gw)
+    assert verdict is not None
+    assert str(verdict.status) == str(FillStatus.UNMEASURED)
+    assert verdict.terminal is False
+
+
+def test_resolve_resting_order_status_stays_pending() -> None:
+    """No fill + orderStatus RESTING → non-terminal (not a confirmed reject)."""
+    from almanak.connectors.hyperliquid.fill_reconciliation import FillStatus
+
+    gw = _mock_gateway(
+        fills=[_fill("0xnotours")],
+        order_status_raw={"status": "order", "order": {"status": "open", "order": {}}},
+    )
+    verdict = _resolve(gw)
+    assert verdict is not None
+    assert str(verdict.status) == str(FillStatus.UNMEASURED)
+    assert verdict.terminal is False
+
+
+def test_resolve_late_fill_via_order_status_is_terminal() -> None:
+    """No fill in the book yet, but orderStatus shows FILLED → terminal FILLED."""
+    from almanak.connectors.hyperliquid.fill_reconciliation import FillStatus
+
+    gw = _mock_gateway(
+        fills=[_fill("0xnotours")],
+        order_status_raw={
+            "status": "order",
+            "order": {"status": "filled", "order": {"filledSz": "0.001", "avgPx": "60000"}},
+        },
+    )
+    verdict = _resolve(gw)
+    assert verdict is not None
+    assert str(verdict.status) == str(FillStatus.FILLED)
+    assert verdict.terminal is True
+
+
+def test_resolve_fills_read_unavailable_stays_pending() -> None:
+    """A failed userFills read → UNMEASURED without ever consulting orderStatus."""
+    from almanak.connectors.hyperliquid.fill_reconciliation import FillStatus
+
+    gw = MagicMock()
+    bad = MagicMock()
+    bad.success = False
+    gw.perp_fill.GetUserFills = MagicMock(return_value=bad)
+    gw.perp_fill.GetOrderStatus = MagicMock()
+    verdict = _resolve(gw)
+    assert verdict is not None
+    assert str(verdict.status) == str(FillStatus.UNMEASURED)
+    assert verdict.terminal is False
+    gw.perp_fill.GetOrderStatus.assert_not_called()

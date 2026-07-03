@@ -3578,6 +3578,11 @@ class PerpFillServiceStub(object):
                 request_serializer=gateway__pb2.UserFundingRequest.SerializeToString,
                 response_deserializer=gateway__pb2.UserFundingResponse.FromString,
                 _registered_method=True)
+        self.GetOrderStatus = channel.unary_unary(
+                '/almanak.gateway.proto.PerpFillService/GetOrderStatus',
+                request_serializer=gateway__pb2.OrderStatusRequest.SerializeToString,
+                response_deserializer=gateway__pb2.OrderStatusResponse.FromString,
+                _registered_method=True)
 
 
 class PerpFillServiceServicer(object):
@@ -3621,6 +3626,23 @@ class PerpFillServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetOrderStatus(self, request, context):
+        """Status of a single submitted order, addressed by its client order id
+        (cloid). Confirms whether a specific CoreWriter submission filled /
+        partially filled / rests / was rejected. This is the reject-detection
+        signal the fill-reconciliation pump needs: userFills alone cannot tell
+        "not filled yet" (async lag) from "rejected" — both leave the fills book
+        empty — so a genuinely rejected open would stall a continuous perp
+        strategy in PENDING forever (VIB-5616). Empty != Zero: a transport / decode
+        fault returns success=false (the read could not complete). An order the
+        venue does not know (unknownOid) is a MEASURED response — success=true with
+        an UNMEASURED status — so the pump stays PENDING but never fabricates a
+        verdict.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_PerpFillServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -3633,6 +3655,11 @@ def add_PerpFillServiceServicer_to_server(servicer, server):
                     servicer.GetUserFunding,
                     request_deserializer=gateway__pb2.UserFundingRequest.FromString,
                     response_serializer=gateway__pb2.UserFundingResponse.SerializeToString,
+            ),
+            'GetOrderStatus': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetOrderStatus,
+                    request_deserializer=gateway__pb2.OrderStatusRequest.FromString,
+                    response_serializer=gateway__pb2.OrderStatusResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -3713,6 +3740,33 @@ class PerpFillService(object):
             '/almanak.gateway.proto.PerpFillService/GetUserFunding',
             gateway__pb2.UserFundingRequest.SerializeToString,
             gateway__pb2.UserFundingResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetOrderStatus(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.PerpFillService/GetOrderStatus',
+            gateway__pb2.OrderStatusRequest.SerializeToString,
+            gateway__pb2.OrderStatusResponse.FromString,
             options,
             channel_credentials,
             insecure,

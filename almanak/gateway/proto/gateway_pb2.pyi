@@ -5818,6 +5818,87 @@ class UserFundingResponse(_message.Message):
 Global___UserFundingResponse: _TypeAlias = UserFundingResponse  # noqa: Y015
 
 @_typing.final
+class OrderStatusRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    VENUE_FIELD_NUMBER: _builtins.int
+    WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    CLOID_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    venue: _builtins.str
+    """Venue name — one per perp connector registering a
+    ``GatewayOrderStatusCapability``. Unknown values -> INVALID_ARGUMENT.
+    """
+    wallet_address: _builtins.str
+    """Account that submitted the order (HyperCore is keyed by the EVM address)."""
+    cloid: _builtins.str
+    """Client order id (cloid) the CoreWriter order carried, as a decimal
+    string of the uint128 value (keccak(intent_id)[:16]). Decimal-string so
+    the full 128-bit range survives the wire (proto has no uint128); the
+    servicer renders it to the API's 0x-padded hex. Required.
+    """
+    chain: _builtins.str
+    """Chain hint for parity with on-chain venues (Hyperliquid is chain-agnostic)."""
+    def __init__(
+        self,
+        *,
+        venue: _builtins.str = ...,
+        wallet_address: _builtins.str = ...,
+        cloid: _builtins.str = ...,
+        chain: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "cloid", b"cloid", "venue", b"venue", "wallet_address", b"wallet_address"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___OrderStatusRequest: _TypeAlias = OrderStatusRequest  # noqa: Y015
+
+@_typing.final
+class OrderStatusResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    STATUS_FIELD_NUMBER: _builtins.int
+    FILLED_SIZE_FIELD_NUMBER: _builtins.int
+    AVG_FILL_PRICE_FIELD_NUMBER: _builtins.int
+    DETAIL_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    status: _builtins.str
+    """Reconciled fill verdict for the submission, as the connector's
+    ``FillStatus`` string value: "filled" / "partially_filled" / "resting" /
+    "rejected" / "unmeasured". On success=false this is left empty (the caller
+    treats it as UNMEASURED). The strategy container never re-parses raw
+    venue JSON — the gateway runs the connector's pure parser and returns the
+    typed verdict here.
+    """
+    filled_size: _builtins.str
+    """Base-asset size the venue reported filled, decimal-as-string. Empty =
+    unmeasured (NEVER "0" unless the venue reported a measured zero).
+    """
+    avg_fill_price: _builtins.str
+    """Average fill price the venue reported, decimal-as-string. Empty = unmeasured."""
+    detail: _builtins.str
+    """Human-readable detail (raw status string / error) for observability."""
+    success: _builtins.bool
+    """True iff the read was measured. success=false -> UNMEASURED (Empty != Zero:
+    never a fabricated fill or reject on a transport / decode fault).
+    """
+    error: _builtins.str
+    def __init__(
+        self,
+        *,
+        status: _builtins.str = ...,
+        filled_size: _builtins.str = ...,
+        avg_fill_price: _builtins.str = ...,
+        detail: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["avg_fill_price", b"avg_fill_price", "detail", b"detail", "error", b"error", "filled_size", b"filled_size", "status", b"status", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___OrderStatusResponse: _TypeAlias = OrderStatusResponse  # noqa: Y015
+
+@_typing.final
 class PoolAnalyticsRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 

@@ -11,12 +11,15 @@ from __future__ import annotations
 import inspect
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol, TypeVar, runtime_checkable
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 
 __all__ = [
     "STRATEGY_RUNNER_HOOK_REGISTRY",
+    "FillReconciliationVerdict",
+    "RunnerFillReconciliationCapability",
     "RunnerHookConnector",
     "RunnerHookRegistry",
     "RunnerHookRegistryError",
@@ -54,6 +57,70 @@ class RunnerResultEnrichmentCapability(Protocol):
     """
 
     def enrich_result(self, result: Any, *, gateway_client: Any, chain: str, wallet_address: str = "") -> None: ...
+
+
+@dataclass(frozen=True)
+class FillReconciliationVerdict:
+    """A connector-produced fill verdict for a pending async-settlement order (VIB-5614).
+
+    The framework stays vocabulary-free: it never inspects ``status`` (an opaque
+    ``FillStatus``-style value the strategy's ``reconcile_fill`` understands). It
+    only reads ``terminal`` to decide whether to drop the cached pending handle
+    (a confirmed fill / reject is terminal; UNMEASURED / RESTING is not, so the
+    handle is retained and re-pumped next tick).
+
+    Attributes:
+        status: The opaque fill-status value passed straight to
+            ``strategy.reconcile_fill(intent_type, status)``. A ``StrEnum`` member
+            (which IS a str) so the framework can hold it without importing the
+            connector's enum.
+        terminal: True iff the verdict resolved the submission (fill or reject) —
+            the runner clears the pending handle. False (UNMEASURED / RESTING)
+            keeps it pending. Empty ≠ Zero: an unmeasured read is NOT terminal.
+    """
+
+    status: Any
+    terminal: bool
+
+
+@runtime_checkable
+class RunnerFillReconciliationCapability(Protocol):
+    """Connector reconciles an async-settlement (submission ≠ fill) perp order (VIB-5614).
+
+    CoreWriter-style venues (Hyperliquid) settle orders off-EVM: a submit receipt
+    proves submission, not fill. A strategy submits ``PERP_OPEN`` → PENDING →
+    HOLDs until an observed fill promotes it (``strategy.reconcile_fill``). This
+    capability is the runner-agnostic seam that feeds that observation:
+
+    * ``extract_pending_fill_handle(result)`` — distil a just-executed result into
+      a small **serializable** correlation handle (carrying the owning
+      ``protocol`` + ``intent_type`` + the venue key, e.g. cloid) the runner
+      caches, or ``None`` when the result is not a pending open this connector
+      reconciles (a close, a non-venue result). Runs at execute time when the
+      result (and its cloid) is still in scope.
+    * ``resolve_fill_status(gateway_client, wallet_address, handle)`` — read the
+      venue fill signal for a cached handle and return a
+      :class:`FillReconciliationVerdict`, or ``None`` when the handle is not this
+      connector's. Best-effort + fail-closed: a failed / not-yet-settled read is a
+      NON-terminal UNMEASURED verdict (strategy stays PENDING), never a fabricated
+      fill or reject. All egress stays gateway-side (boundary rule).
+
+    **Invariant — one pending open per deployment.** The runner caches a SINGLE
+    handle per ``deployment_id`` (``StrategyRunner._pending_fill_handles``); a new
+    pending open OVERWRITES any prior un-reconciled one. The reference strategies
+    satisfy this — a single ``PHASE_PENDING_FILL`` / ``_fill_confirmed`` gate holds
+    the loop, so only one open is ever in flight. A connector/strategy that submits
+    multiple concurrent async opens before either settles would strand the earlier
+    handles in PENDING (teardown still covers the on-chain risk, but the phantom
+    bookkeeping never resolves). Before reusing this seam that way, generalize the
+    cache to key by cloid (a set/dict of handles pumped independently).
+    """
+
+    def extract_pending_fill_handle(self, result: Any) -> Any | None: ...
+
+    def resolve_fill_status(
+        self, *, gateway_client: Any, wallet_address: str, handle: Any
+    ) -> FillReconciliationVerdict | None: ...
 
 
 @runtime_checkable
@@ -105,6 +172,7 @@ class RunnerHookRegistry:
         if not (
             isinstance(connector, RunnerLPReceiptTopicCapability)
             or isinstance(connector, RunnerResultEnrichmentCapability)
+            or isinstance(connector, RunnerFillReconciliationCapability)
             or isinstance(connector, RunnerPoolKeyLookupCapability)
             or isinstance(connector, RunnerV4PositionStateCapability)
         ):
@@ -181,6 +249,63 @@ class RunnerHookRegistry:
                     exc_info=True,
                 )
 
+    def extract_pending_fill_handle(self, result: Any) -> Any | None:
+        """Return the first connector's pending-fill handle for ``result`` (VIB-5614).
+
+        Offered to every fill-reconciliation connector; the first to recognise the
+        result (return non-``None``) wins. The handle is protocol-tagged so the
+        pump can route :meth:`resolve_fill_status` back to the same connector.
+        Fail-open: a raising connector is skipped, not fatal.
+        """
+        for connector in self._connectors.values():
+            if not isinstance(connector, RunnerFillReconciliationCapability):
+                continue
+            try:
+                handle = connector.extract_pending_fill_handle(result)
+            except Exception:
+                logger.debug(
+                    "extract_pending_fill_handle failed for %s; continuing",
+                    type(connector).__qualname__,
+                    exc_info=True,
+                )
+                continue
+            if handle is not None:
+                return handle
+        return None
+
+    def resolve_fill_status(
+        self,
+        *,
+        protocol: ProtocolName,
+        gateway_client: Any,
+        wallet_address: str,
+        handle: Any,
+    ) -> FillReconciliationVerdict | None:
+        """Resolve the fill verdict for ``handle`` via the ``protocol`` connector (VIB-5614).
+
+        Routes to the connector registered under ``protocol`` (the handle carries
+        its owning protocol tag). Returns ``None`` when no such connector / it does
+        not implement the capability / the read produced nothing. Fail-closed: a
+        raising read yields ``None`` (the pump keeps the position PENDING), never a
+        fabricated verdict.
+        """
+        connector = self._connectors.get(protocol)
+        if not isinstance(connector, RunnerFillReconciliationCapability):
+            return None
+        try:
+            return connector.resolve_fill_status(
+                gateway_client=gateway_client,
+                wallet_address=wallet_address,
+                handle=handle,
+            )
+        except Exception:
+            logger.debug(
+                "resolve_fill_status failed for %s; treating as unmeasured",
+                type(connector).__qualname__,
+                exc_info=True,
+            )
+            return None
+
     def build_pool_key_lookup(self, gateway_client: Any) -> Any | None:
         """Build the first connector-provided pool-key lookup callback."""
         for connector in self._connectors.values():
@@ -216,6 +341,14 @@ class RunnerHookRegistry:
                 "enrich_result",
                 positional_count=1,
                 keyword_names=("gateway_client", "chain", "wallet_address"),
+            )
+        if isinstance(connector, RunnerFillReconciliationCapability):
+            cls._validate_method_signature(connector, "extract_pending_fill_handle", positional_count=1)
+            cls._validate_method_signature(
+                connector,
+                "resolve_fill_status",
+                positional_count=0,
+                keyword_names=("gateway_client", "wallet_address", "handle"),
             )
         if isinstance(connector, RunnerPoolKeyLookupCapability):
             cls._validate_method_signature(connector, "build_pool_key_lookup", positional_count=1)

@@ -25,7 +25,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | LifecycleService | 6 | Agent state management, heartbeat, and commands |
 | TeardownService | 23 | Hosted teardown state routing (V2 deployments): teardown requests, execution state, and operator approvals |
 | PositionService | 1 | Position registry reconciliation against on-chain truth (T24 / VIB-4210) |
-| PerpFillService | 2 | Executed perp fills and funding settlements for a wallet, used by the perp accounting path for realized fees, PnL, and funding (VIB-5595) |
+| PerpFillService | 3 | Executed perp fills, funding settlements, and single-order status (by cloid) for a wallet; backs the perp accounting path and the fill-reconciliation reject-detection pump (VIB-5595 / VIB-5616) |
 
 ## Health
 
@@ -2225,6 +2225,44 @@ message UserFundingResponse {
   repeated PerpFundingDelta deltas = 1;
   bool success = 2;
   string error = 3;
+}
+```
+
+### GetOrderStatus
+
+Status of a single submitted order, addressed by its client order id (`cloid`). This is the
+reject-detection signal the fill-reconciliation pump needs (VIB-5616): `userFills` alone
+cannot tell "not filled yet" (async settlement lag) from "rejected" — both leave the fills
+book empty — so a genuinely rejected open would otherwise stall a continuous perp strategy
+in PENDING until teardown. The gateway runs the connector's pure parser and returns the
+typed verdict; the strategy container never re-parses raw venue JSON. Empty≠Zero: a
+transport / decode fault returns `success=false` (the read could not complete); an order
+the venue does not know (`unknownOid`) is a **measured** response — `success=true` with an
+`UNMEASURED` status — so the pump stays PENDING but never fabricates a fill or reject.
+
+```protobuf
+rpc GetOrderStatus(OrderStatusRequest) returns (OrderStatusResponse)
+```
+
+**Request:**
+```protobuf
+message OrderStatusRequest {
+  string venue = 1;            // one per perp connector; unknown -> INVALID_ARGUMENT
+  string wallet_address = 2;   // account that submitted the order (EVM address)
+  string cloid = 3;            // client order id as a decimal uint128 string. Required
+  string chain = 4;            // chain hint (Hyperliquid is chain-agnostic)
+}
+```
+
+**Response:**
+```protobuf
+message OrderStatusResponse {
+  string status = 1;           // FillStatus: "filled"/"partially_filled"/"resting"/"rejected"/"unmeasured"
+  string filled_size = 2;      // base-asset size filled (decimal string; empty = unmeasured)
+  string avg_fill_price = 3;   // average fill price (decimal string; empty = unmeasured)
+  string detail = 4;           // human-readable note (raw status / error) for observability
+  bool success = 5;            // false -> UNMEASURED (never a fabricated verdict)
+  string error = 6;
 }
 ```
 

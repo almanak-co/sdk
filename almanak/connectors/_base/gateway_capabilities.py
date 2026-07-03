@@ -782,17 +782,24 @@ class GatewayOrderStatusCapability(Protocol):
     party HTTP correctly lives — gateway-boundary rule); strategy/framework code
     reads through the gateway. The connector's pure request-builder + response-
     parser live in the connector module (e.g.
-    ``almanak.connectors.hyperliquid.fill_reconciliation``); this method performs
-    only the transport.
+    ``almanak.connectors.hyperliquid.fill_reconciliation``); this method runs
+    that parser internally and returns an already-parsed, neutral gateway-side
+    verdict — so the gateway holds NO connector import (symmetric with
+    :meth:`GatewayPerpFillsCapability.fetch_user_fills` returning a typed
+    ``PerpFillResult``; blueprint 22 §connector self-containment).
 
     Contract:
 
     * ``order_status_venue() -> str`` — venue identifier, matching
       :meth:`GatewayFundingRateCapability.venue` for the same connector.
-    * ``fetch_order_status(servicer, *, wallet_address, cloid, chain) -> dict``
-      — the raw HyperCore ``orderStatus`` response JSON (the connector-side
-      parser turns it into a fill verdict). Raises on transport failure so the
-      caller fail-closes to ``UNMEASURED`` (Empty ≠ Zero — never assume filled).
+    * ``fetch_order_status(servicer, *, wallet_address, cloid, chain)`` — returns
+      a gateway-side ``OrderStatusData`` (``almanak.gateway.services.perp_fill_service``):
+      the connector fetches the raw HyperCore ``orderStatus`` payload, runs its
+      own pure parser, and returns the neutral verdict (``status`` +
+      Empty ≠ Zero ``filled_size`` / ``avg_fill_price`` strings). Raises on
+      transport failure so the caller fail-closes to ``UNMEASURED`` (Empty ≠ Zero
+      — never assume filled). Typed ``Any`` here to keep ``_base/`` free of the
+      gateway import, exactly like ``fetch_user_fills``.
     """
 
     def order_status_venue(self) -> str: ...

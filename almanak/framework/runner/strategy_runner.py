@@ -856,6 +856,18 @@ class StrategyRunner:
         # per process.
         self._resume_state_reconciled = False
 
+        # VIB-5614: pending async-settlement fill handles, keyed by deployment_id.
+        # A perp connector (Hyperliquid) submits PERP_OPEN → the position is
+        # PENDING (submission ≠ fill; CoreWriter settles off-EVM) → decide() HOLDs
+        # until an observed fill promotes it. When such an open executes we cache a
+        # connector-produced correlation handle here; the pre-decide pump
+        # (``_step_pump_fill_reconciliation``) re-reads the fill signal each tick
+        # and calls ``strategy.reconcile_fill(...)``, clearing the handle on a
+        # terminal verdict. In-memory / per-process: a restart mid-PENDING drops
+        # the handle, which is fail-closed (the strategy stays PENDING and teardown
+        # still covers a phantom position) — never a fabricated fill.
+        self._pending_fill_handles: dict[str, Any] = {}
+
         # Track recovered session tx_hashes to prevent duplicates
         self._recovered_tx_hashes: set[str] = set()
         self._recovered_nonces: dict[str, set[int]] = {}  # deployment_id -> set of nonces
@@ -1248,6 +1260,12 @@ class StrategyRunner:
             # Step 1.5: One-shot post-resume side-state reconciliation
             # (VIB-5155 / ALM-2719). Warn-only; never early-exits.
             await self._step_reconcile_resumed_state(state)
+
+            # Step 1.6: Pump the async-settlement fill signal into the strategy
+            # (VIB-5614) BEFORE decide() so a PENDING→live promotion is visible
+            # this tick. Warn-only; never early-exits; no-op unless a pending
+            # fill handle is cached for this deployment.
+            await self._step_pump_fill_reconciliation(state)
 
             # Step 2: Call strategy.decide() with timeout + overlap guard.
             early = await self._step_decide(state)
@@ -2749,6 +2767,12 @@ class StrategyRunner:
             except Exception as e:
                 logger.warning(f"Error in on_intent_executed callback: {e}")
 
+        # Step 3: capture the pending async-settlement fill handle (VIB-5614). On a
+        # successful open of an async-settlement perp, cache the connector-produced
+        # correlation handle so the pre-decide pump can reconcile the fill on later
+        # ticks. Gated so non-reconciling strategies are untouched. Warn-only.
+        self._maybe_capture_pending_fill_handle(strategy, intent, success, result)
+
     def _emit_execution_timeline_event(
         self,
         strategy: StrategyProtocol,
@@ -2957,6 +2981,123 @@ class StrategyRunner:
             position_id=position_id,
             close_timestamp=None,
         )
+
+    def _maybe_capture_pending_fill_handle(self, strategy: Any, intent: Any, success: bool, result: Any) -> None:
+        """Cache a pending async-settlement fill handle after a successful open (VIB-5614).
+
+        Gated tightly so ordinary strategies are inert: only when the intent
+        succeeded, the strategy exposes ``reconcile_fill``, and a registered
+        connector recognises the result as a pending open (returns a handle). A
+        successful non-open (e.g. PERP_CLOSE) opportunistically clears any cached
+        handle for this deployment — a close means no open is pending. Warn-only;
+        never propagates.
+        """
+        deployment_id = getattr(strategy, "deployment_id", "") or ""
+        if not deployment_id:
+            return
+        if not callable(getattr(strategy, "reconcile_fill", None)):
+            return
+        try:
+            from almanak.connectors._strategy_runner_hook_registry import (
+                STRATEGY_RUNNER_HOOK_REGISTRY,
+            )
+
+            if not success:
+                # A failed submission is not a pending fill; leave any prior handle
+                # in place (a distinct earlier open may still be pending).
+                return
+
+            handle = STRATEGY_RUNNER_HOOK_REGISTRY.extract_pending_fill_handle(result)
+            if handle is not None:
+                self._pending_fill_handles[deployment_id] = handle
+                logger.debug(
+                    "Cached pending fill handle for %s (protocol=%s, intent=%s)",
+                    deployment_id,
+                    getattr(handle, "protocol", "?"),
+                    getattr(handle, "intent_type", "?"),
+                )
+            else:
+                # No handle for this successful result. A reduce-only close returns
+                # None from the connector → drop any pending open for this
+                # deployment (the position is being closed, not awaited).
+                intent_type = getattr(getattr(intent, "intent_type", None), "value", None)
+                if intent_type in ("PERP_CLOSE",):
+                    self._pending_fill_handles.pop(deployment_id, None)
+        except Exception as exc:  # noqa: BLE001 — capture must never break the loop
+            logger.warning("Pending-fill handle capture raised for %s (ignored): %s", deployment_id, exc)
+
+    async def _step_pump_fill_reconciliation(self, state: RunIterationState) -> None:
+        """Pump the async-settlement fill signal into the strategy each tick (VIB-5614).
+
+        A perp connector (Hyperliquid) settles CoreWriter orders OFF the EVM: a
+        submit receipt proves submission, not fill. A strategy that submits
+        PERP_OPEN enters PENDING and HOLDs in ``decide()`` until an observed fill
+        promotes it via ``reconcile_fill(intent_type, status)``. Nothing else
+        drives that observation, so this guardrail — placed right before
+        ``_step_decide`` so a promotion is visible to the SAME tick's decide() —
+        reads the venue fill verdict for the cached pending handle through the
+        connector capability and calls ``reconcile_fill``.
+
+        Design (mirrors ``_step_reconcile_resumed_state``): fully wrapped,
+        warn-only, never early-exits, never changes ``state``. Gated on (1) a
+        cached handle for this deployment and (2) a callable ``reconcile_fill`` —
+        so every non-reconciling strategy is a no-op. Fail-closed / Empty ≠ Zero:
+        no gateway, no capability, or an UNMEASURED read leaves the position
+        PENDING (the handle is retained and re-pumped); only a TERMINAL verdict
+        (confirmed fill/reject) clears the handle.
+        """
+        deployment_id = state.deployment_id
+        handle = self._pending_fill_handles.get(deployment_id)
+        if handle is None:
+            return  # nothing pending — the gate that makes non-perp strategies inert
+
+        strategy = state.strategy
+        reconcile = getattr(strategy, "reconcile_fill", None)
+        if not callable(reconcile):
+            self._pending_fill_handles.pop(deployment_id, None)
+            return
+
+        gateway = self._get_gateway_client()
+        if gateway is None:
+            # paper / dry-run / not connected: cannot measure a fill → stay PENDING.
+            return
+
+        wallet_address = getattr(strategy, "wallet_address", "") or ""
+        try:
+            from almanak.connectors._base.types import ProtocolName
+            from almanak.connectors._strategy_runner_hook_registry import (
+                STRATEGY_RUNNER_HOOK_REGISTRY,
+            )
+
+            # resolve_fill_status is a SYNC blocking hook — it does up to two
+            # gateway RPCs (GetUserFills + GetOrderStatus, timeout≈10s each). Run
+            # it in a worker thread so a slow read can never block the event loop
+            # ahead of decide() (same offload as strategy.decide / market.price).
+            verdict = await asyncio.to_thread(
+                STRATEGY_RUNNER_HOOK_REGISTRY.resolve_fill_status,
+                protocol=ProtocolName(str(getattr(handle, "protocol", ""))),
+                gateway_client=gateway,
+                wallet_address=wallet_address,
+                handle=handle,
+            )
+        except Exception as exc:  # noqa: BLE001 — guardrail must never break the loop
+            logger.warning("Fill-reconciliation read raised for %s (ignored): %s", deployment_id, exc)
+            return
+
+        if verdict is None:
+            return  # no capability / nothing measured → stay PENDING
+
+        try:
+            reconcile(getattr(handle, "intent_type", ""), verdict.status)
+        except Exception as exc:  # noqa: BLE001 — guardrail must never break the loop
+            logger.warning("reconcile_fill pump raised for %s (ignored): %s", deployment_id, exc)
+            return
+
+        # Clear the handle ONLY on a terminal verdict (confirmed fill/reject).
+        # UNMEASURED / RESTING keep it cached so the next tick re-pumps.
+        if verdict.terminal:
+            self._pending_fill_handles.pop(deployment_id, None)
+            logger.info("Fill reconciled for %s (terminal verdict) — cleared pending handle", deployment_id)
 
     def _maybe_enrich_result_with_runner_hooks(self, result: Any, chain: str, wallet_address: str = "") -> None:
         """Run connector-owned best-effort result enrichment before ledger writes.

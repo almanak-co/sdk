@@ -18,6 +18,7 @@ from almanak.connectors.hyperliquid.gateway.provider import (
     OrderStatusUnavailable,
     _hyperliquid_post_order_status,
 )
+from almanak.gateway.services.perp_fill_service import OrderStatusData
 
 _WALLET = "0x1234567890123456789012345678901234567890"
 
@@ -91,6 +92,9 @@ class TestCapabilityMethod:
 
     @pytest.mark.asyncio
     async def test_fetch_order_status_uses_shared_session(self):
+        # The provider now parses the raw payload connector-side and returns a
+        # neutral gateway-side OrderStatusData (so the gateway holds no connector
+        # import). This rejected payload parses to a REJECTED verdict.
         payload = {"status": "order", "order": {"status": "rejected", "order": {}}}
         session = _FakeSession(_FakeResponse(200, payload))
         servicer = AsyncMock()
@@ -98,5 +102,8 @@ class TestCapabilityMethod:
 
         conn = HyperliquidGatewayConnector()
         out = await conn.fetch_order_status(servicer, wallet_address=_WALLET, cloid=0xABCD, chain="hyperevm")
-        assert out == payload
+        assert isinstance(out, OrderStatusData)
+        assert out.status == "rejected"
+        assert out.filled_size == ""  # Empty != Zero — venue reported no fill
+        assert out.avg_fill_price == ""
         servicer._get_http_session.assert_awaited_once()

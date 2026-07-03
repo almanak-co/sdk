@@ -333,4 +333,47 @@ def _read_user_funding(gateway_client: Any, *, wallet_address: str, coin: str) -
     return list(response.deltas)
 
 
-__all__ = ["build_perp_data_from_fills"]
+def read_order_status(gateway_client: Any, *, wallet_address: str, cloid_hex: str) -> Any | None:
+    """Read a single order's ``orderStatus`` by ``cloid`` via the gateway (VIB-5616).
+
+    Returns the ``OrderStatusResponse`` on a measured read (``success=True``), or
+    ``None`` when the read could not be measured (no stub, transport fault, or
+    ``success=False``). Empty ≠ Zero: an unmeasured read is ``None``, never a
+    fabricated verdict — the caller keeps the position PENDING.
+
+    ``cloid_hex`` is the submitted order's ``hex(uint128)`` cloid; the RPC wire
+    field is the decimal-string form of that uint128 (proto has no uint128).
+    """
+    from almanak.gateway.proto import gateway_pb2
+
+    try:
+        cloid_int = int(cloid_hex, 16)
+    except (TypeError, ValueError):
+        logger.debug("HL fill reconciliation: un-parseable cloid_hex %r", cloid_hex)
+        return None
+
+    try:
+        stub = gateway_client.perp_fill
+    except Exception:  # noqa: BLE001 — no stub / not connected
+        logger.debug("HL fill reconciliation: perp_fill stub unavailable", exc_info=True)
+        return None
+
+    request = gateway_pb2.OrderStatusRequest(
+        venue="hyperliquid",
+        wallet_address=wallet_address,
+        cloid=str(cloid_int),
+        chain="hyperevm",
+    )
+    try:
+        response = stub.GetOrderStatus(request, timeout=10.0)
+    except Exception:  # noqa: BLE001 — gateway/network fault → UNMEASURED
+        logger.debug("HL fill reconciliation: GetOrderStatus failed", exc_info=True)
+        return None
+
+    if not getattr(response, "success", False):
+        logger.debug("HL fill reconciliation: GetOrderStatus success=false (%s)", getattr(response, "error", ""))
+        return None
+    return response
+
+
+__all__ = ["build_perp_data_from_fills", "read_order_status"]

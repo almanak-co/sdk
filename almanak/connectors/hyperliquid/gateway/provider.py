@@ -584,15 +584,31 @@ class HyperliquidGatewayConnector(
         through the gateway. Reuses the servicer's shared aiohttp session so the
         rate-limit budget is shared with the funding lanes.
 
-        Returns the raw response JSON (parsed connector-side by
-        ``fill_reconciliation.parse_order_status_response``). Raises
-        ``OrderStatusUnavailable`` on any unmeasured read (Empty ≠ Zero).
+        Parses the raw response with the connector's own pure parser
+        (``fill_reconciliation.parse_order_status_response`` — single source of
+        truth for the venue status vocabulary) and returns the neutral,
+        gateway-side :class:`OrderStatusData` so the gateway holds NO connector
+        import (symmetric with :meth:`fetch_user_fills` returning
+        ``PerpFillResult``; blueprint 22 §connector self-containment). Empty ≠
+        Zero: ``filled_size`` / ``avg_fill_price`` the venue did not report map
+        to ``""`` (never ``"0"``). Raises ``OrderStatusUnavailable`` on any
+        unmeasured read so the servicer fail-closes to ``success=False``.
         """
+        from almanak.connectors.hyperliquid.fill_reconciliation import parse_order_status_response
+        from almanak.gateway.services.perp_fill_service import OrderStatusData
+
         session = await servicer._get_http_session()
-        return await _hyperliquid_post_order_status(
+        raw = await _hyperliquid_post_order_status(
             session,
             wallet_address=wallet_address,
             cloid=cloid,
+        )
+        outcome = parse_order_status_response(raw)
+        return OrderStatusData(
+            status=str(outcome.status),
+            filled_size="" if outcome.filled_size is None else str(outcome.filled_size),
+            avg_fill_price="" if outcome.avg_fill_price is None else str(outcome.avg_fill_price),
+            detail=outcome.detail,
         )
 
     # ---------------------------------------------------------------------

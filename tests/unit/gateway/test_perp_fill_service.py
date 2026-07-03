@@ -32,6 +32,7 @@ import pytest
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services import perp_fill_service as pfs
 from almanak.gateway.services.perp_fill_service import (
+    OrderStatusData,
     PerpFillData,
     PerpFillResult,
     PerpFillServiceServicer,
@@ -100,14 +101,57 @@ class _FakeConnector:
         return self._funding_result
 
 
+class _FakeOrderStatusConnector:
+    """Minimal ``GatewayOrderStatusCapability`` implementation (VIB-5616).
+
+    ``raw_result`` is the raw venue payload; ``fetch_order_status`` runs the real
+    connector parser + wraps it into an ``OrderStatusData`` (mirroring the real
+    provider — the servicer no longer parses). Set ``raw_result`` to an
+    ``Exception`` instance to make the fetch raise (unmeasured path).
+    """
+
+    def __init__(self, venue: str = "hyperliquid", raw_result: Any = None) -> None:
+        self._venue = venue
+        self._raw_result = raw_result
+        self.calls: list[dict[str, Any]] = []
+
+    def order_status_venue(self) -> str:
+        return self._venue
+
+    async def fetch_order_status(
+        self, service: Any, *, wallet_address: str, cloid: int, chain: str
+    ) -> Any:
+        from almanak.connectors.hyperliquid.fill_reconciliation import parse_order_status_response
+
+        self.calls.append({"wallet_address": wallet_address, "cloid": cloid, "chain": chain})
+        if isinstance(self._raw_result, Exception):
+            raise self._raw_result
+        outcome = parse_order_status_response(self._raw_result)
+        return OrderStatusData(
+            status=str(outcome.status),
+            filled_size="" if outcome.filled_size is None else str(outcome.filled_size),
+            avg_fill_price="" if outcome.avg_fill_price is None else str(outcome.avg_fill_price),
+            detail=outcome.detail,
+        )
+
+
 def _settings() -> SimpleNamespace:
     return SimpleNamespace(network="mainnet")
 
 
-def _servicer(monkeypatch: pytest.MonkeyPatch, *connectors: _FakeConnector) -> PerpFillServiceServicer:
-    """Build a servicer whose registry yields exactly ``connectors``."""
+def _servicer(monkeypatch: pytest.MonkeyPatch, *connectors: Any) -> PerpFillServiceServicer:
+    """Build a servicer whose registry yields exactly ``connectors``.
 
-    fake_registry = SimpleNamespace(capability_providers=lambda _cap: list(connectors))
+    Faithful to the real ``GATEWAY_REGISTRY.capability_providers(cap)``: the fake
+    filters by ``isinstance`` against the requested capability, so a connector
+    that only implements ``GatewayPerpFillsCapability`` is NOT offered to the
+    order-status loop (and vice versa) — matching production dispatch.
+    """
+
+    def _providers(cap: type) -> list[Any]:
+        return [c for c in connectors if isinstance(c, cap)]
+
+    fake_registry = SimpleNamespace(capability_providers=_providers)
     monkeypatch.setattr(pfs, "GATEWAY_REGISTRY", fake_registry)
     return PerpFillServiceServicer(_settings())  # type: ignore[arg-type]
 
@@ -308,6 +352,160 @@ async def test_get_funding_maps_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resp.deltas[0].coin == "ETH"
     assert resp.deltas[0].usdc == "-1.5"
     assert resp.deltas[0].funding_rate == "0.0001"
+
+
+# =========================================================================== #
+# GetOrderStatus (VIB-5616) — reject-detection lane
+# =========================================================================== #
+
+_HL_REJECTED = {"status": "order", "order": {"status": "rejected", "order": {}}}
+_HL_FILLED = {
+    "status": "order",
+    "order": {"status": "filled", "order": {"filledSz": "0.5", "avgPx": "65000"}},
+}
+# A late/ambiguous state the parser maps to UNMEASURED (never terminal).
+_HL_UNKNOWN_OID = {"status": "unknownOid"}
+
+
+def test_order_status_registry_resolves_venue(monkeypatch: pytest.MonkeyPatch) -> None:
+    servicer = _servicer(monkeypatch, _FakeOrderStatusConnector(venue="HyperLiquid"))
+    assert "hyperliquid" in servicer._order_status_providers
+    # A fills-only connector is NOT registered on the order-status lane.
+    assert servicer._fills_providers == {}
+
+
+def test_order_status_duplicate_venue_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(RuntimeError, match="Duplicate order-status provider"):
+        _servicer(
+            monkeypatch,
+            _FakeOrderStatusConnector(venue="hyperliquid"),
+            _FakeOrderStatusConnector(venue="hyperliquid"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_order_status_measured_reject(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _FakeOrderStatusConnector(venue="hyperliquid", raw_result=_HL_REJECTED)
+    servicer = _servicer(monkeypatch, conn)
+    ctx = _FakeContext()
+    resp = await servicer.GetOrderStatus(
+        gateway_pb2.OrderStatusRequest(venue="hyperliquid", wallet_address="0xabc", cloid="305"),
+        ctx,
+    )
+    assert resp.success is True  # the READ was measured
+    assert resp.status == "rejected"
+    assert ctx.code is None
+    # cloid decoded from the decimal wire string to the int the connector expects.
+    assert conn.calls == [{"wallet_address": "0xabc", "cloid": 305, "chain": ""}]
+
+
+@pytest.mark.asyncio
+async def test_get_order_status_measured_fill_carries_economics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    servicer = _servicer(monkeypatch, _FakeOrderStatusConnector(raw_result=_HL_FILLED))
+    ctx = _FakeContext()
+    resp = await servicer.GetOrderStatus(
+        gateway_pb2.OrderStatusRequest(venue="hyperliquid", wallet_address="0xabc", cloid="1"),
+        ctx,
+    )
+    assert resp.success is True
+    assert resp.status == "filled"
+    assert resp.filled_size == "0.5"
+    assert resp.avg_fill_price == "65000"
+
+
+@pytest.mark.asyncio
+async def test_get_order_status_unknown_oid_is_unmeasured_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The read succeeded (success=True) but the parser could not confirm a
+    # verdict → status="unmeasured", NOT a fabricated fill/reject. Empty≠Zero:
+    # filled_size / avg_fill_price stay empty (never "0").
+    servicer = _servicer(monkeypatch, _FakeOrderStatusConnector(raw_result=_HL_UNKNOWN_OID))
+    ctx = _FakeContext()
+    resp = await servicer.GetOrderStatus(
+        gateway_pb2.OrderStatusRequest(venue="hyperliquid", wallet_address="0xabc", cloid="9"),
+        ctx,
+    )
+    assert resp.success is True
+    assert resp.status == "unmeasured"
+    assert resp.filled_size == ""
+    assert resp.avg_fill_price == ""
+
+
+@pytest.mark.asyncio
+async def test_get_order_status_fetch_fault_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A transport/decode fault → UNAVAILABLE + success=False (UNMEASURED), never
+    # a fabricated verdict. This is the reject-vs-lag safety spine.
+    servicer = _servicer(
+        monkeypatch, _FakeOrderStatusConnector(raw_result=RuntimeError("info api down"))
+    )
+    ctx = _FakeContext()
+    resp = await servicer.GetOrderStatus(
+        gateway_pb2.OrderStatusRequest(venue="hyperliquid", wallet_address="0xabc", cloid="7"),
+        ctx,
+    )
+    assert resp.success is False
+    assert resp.status == ""
+    assert "info api down" in resp.error
+    assert ctx.code == grpc.StatusCode.UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_get_order_status_unknown_venue_is_invalid_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    servicer = _servicer(monkeypatch, _FakeOrderStatusConnector(venue="hyperliquid"))
+    ctx = _FakeContext()
+    resp = await servicer.GetOrderStatus(
+        gateway_pb2.OrderStatusRequest(venue="nope", wallet_address="0xabc", cloid="1"), ctx
+    )
+    assert resp.success is False
+    assert "Unknown venue" in resp.error
+    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
+
+
+@pytest.mark.asyncio
+async def test_get_order_status_missing_wallet_is_invalid_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    servicer = _servicer(monkeypatch, _FakeOrderStatusConnector(venue="hyperliquid"))
+    ctx = _FakeContext()
+    resp = await servicer.GetOrderStatus(
+        gateway_pb2.OrderStatusRequest(venue="hyperliquid", wallet_address="", cloid="1"), ctx
+    )
+    assert resp.success is False
+    assert "wallet_address is required" in resp.error
+    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
+
+
+@pytest.mark.asyncio
+async def test_get_order_status_bad_cloid_is_invalid_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _FakeOrderStatusConnector(venue="hyperliquid", raw_result=_HL_REJECTED)
+    servicer = _servicer(monkeypatch, conn)
+    ctx = _FakeContext()
+    resp = await servicer.GetOrderStatus(
+        gateway_pb2.OrderStatusRequest(venue="hyperliquid", wallet_address="0xabc", cloid="not-a-number"),
+        ctx,
+    )
+    assert resp.success is False
+    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
+    # The connector fetch is never reached on a malformed cloid (Empty≠Zero:
+    # never silently query cloid 0).
+    assert conn.calls == []
+
+
+def test_parse_cloid_range_and_shape() -> None:
+    assert pfs._parse_cloid("305") == (305, "")
+    assert pfs._parse_cloid("")[0] is None
+    assert pfs._parse_cloid("0x10")[0] is None  # hex not accepted on the wire
+    assert pfs._parse_cloid("0")[0] is None  # zero is not a valid cloid
+    assert pfs._parse_cloid(str(2**128))[0] is None  # out of uint128 range
 
 
 @pytest.mark.asyncio
