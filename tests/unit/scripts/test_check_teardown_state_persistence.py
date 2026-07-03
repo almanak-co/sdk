@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from scripts.ci import check_teardown_state_persistence as guard
 from scripts.ci.check_teardown_state_persistence import evaluate_dir, evaluate_module, main
 
 
@@ -371,3 +372,61 @@ def test_main_returns_one_on_violation(tmp_path: Path, capsys) -> None:
     rc = main(["--strategies-dir", str(tmp_path)])
     assert rc == 1
     assert "teardown-blind" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# VIB-5486 / TD-06c: multi-root scan + posture allowlist
+# ---------------------------------------------------------------------------
+
+
+def test_main_scans_multiple_roots(tmp_path: Path) -> None:
+    """--strategies-dir is repeatable; a violation in any scanned root fails."""
+    good_root = tmp_path / "good_root"
+    bad_root = tmp_path / "bad_root"
+    good_root.mkdir()
+    bad_root.mkdir()
+    (good_root / "good.py").write_text(_GOOD.strip(), encoding="utf-8")
+    (bad_root / "bad.py").write_text(_BAD.strip(), encoding="utf-8")
+    rc = main(["--strategies-dir", str(good_root), "--strategies-dir", str(bad_root)])
+    assert rc == 1
+
+
+def test_main_missing_root_among_present_roots_still_scans(tmp_path: Path, capsys) -> None:
+    """A missing root is a per-root no-op; present roots are still scanned."""
+    present = tmp_path / "present"
+    present.mkdir()
+    (present / "bad.py").write_text(_BAD.strip(), encoding="utf-8")
+    rc = main(["--strategies-dir", str(tmp_path / "missing"), "--strategies-dir", str(present)])
+    out = capsys.readouterr()
+    assert "no-op pass" in out.out
+    assert rc == 1
+
+
+def test_allowlisted_file_is_exempt_not_failed(tmp_path: Path, capsys, monkeypatch) -> None:
+    """A file whose rel_path is in _POSTURE_EXEMPT is reported EXEMPT, not FAIL."""
+    bad = tmp_path / "bad.py"
+    bad.write_text(_BAD.strip(), encoding="utf-8")
+    # rel_path for a file outside the repo root falls back to its absolute path.
+    monkeypatch.setitem(guard._POSTURE_EXEMPT, str(bad), "test exemption reason")
+    rc = main(["--strategies-dir", str(tmp_path), "--verbose"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "EXEMPT" in out.out
+    assert "test exemption reason" in out.out
+
+
+def test_unused_exempt_entry_warns_non_fatal(tmp_path: Path, capsys, monkeypatch) -> None:
+    """A _POSTURE_EXEMPT entry matching no failing scanned file (strategy fixed,
+    renamed, or path typo'd) is reported UNUSED-EXEMPT on stderr but does NOT fail
+    the build \u2014 keeps the allowlist from silently vouching for a dead entry."""
+    monkeypatch.setitem(
+        guard._POSTURE_EXEMPT, "strategies/incubating/ghost/strategy.py", "stale reason"
+    )
+    rc = main(["--strategies-dir", str(tmp_path)])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "UNUSED-EXEMPT strategies/incubating/ghost/strategy.py" in out.err
+
+
+def test_norm_rel_uses_posix_separators() -> None:
+    assert guard._norm_rel("strategies\\incubating\\x\\strategy.py") == "strategies/incubating/x/strategy.py"
