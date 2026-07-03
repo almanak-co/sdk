@@ -29,6 +29,7 @@ from almanak.framework.teardown.plan_a_reconciliation import (
     PositionReconciliation,
     ReconciliationReport,
     ReconciliationVerdict,
+    _lending_market_id,
     reconcile_known_positions_against_chain,
 )
 
@@ -59,6 +60,28 @@ def _lending(leg: PositionType, *, market_id: str = "0xmkt", symbol: str = "USDC
     )
 
 
+def _compound_v3_position(leg: PositionType, *, token: str = "WETH", market: str = "usdc") -> PositionInfo:
+    """A Compound V3 lending leg exactly as ``compound_v3_lifecycle`` (and every
+    sibling Compound V3 strategy) emits it from ``get_open_positions()``
+    (VIB-5518): ``position_id`` is a synthetic, human-readable label
+    (``compound-collateral-<token>-<chain>`` / ``compound-borrow-<token>-<chain>``),
+    never a valid Comet market key, and the real market key lives under the
+    ``"market"`` detail — not ``"market_id"``.
+    """
+    kind = "collateral" if leg is PositionType.SUPPLY else "borrow"
+    details: dict[str, str] = {"asset": token, "market": market}
+    if leg is PositionType.SUPPLY:
+        details["type"] = "collateral"
+    return PositionInfo(
+        position_type=leg,
+        position_id=f"compound-{kind}-{token}-base",
+        chain="base",
+        protocol="compound_v3",
+        value_usd=Decimal("0"),
+        details=details,
+    )
+
+
 def _summary(*positions: PositionInfo) -> TeardownPositionSummary:
     from datetime import UTC, datetime
 
@@ -82,6 +105,31 @@ class _FakeMarket:
     def position_health(self, protocol, market_id, *, collateral_price_usd=None, debt_price_usd=None):
         if self._raise_health:
             raise RuntimeError("gateway down")
+        return self._health
+
+    def price(self, token):  # pragma: no cover - amounts unused by the CHECK
+        raise KeyError(token)
+
+
+class _MarketKeyStrictMarket:
+    """Reproduces Compound V3's real ``position_health`` failure mode (VIB-5518).
+
+    ``PositionHealthProvider._get_market_health`` raises
+    ``ValueError(f"{protocol} market '{market_id}' not found on {self._chain}.")``
+    for any market key it does not recognize (``almanak/framework/data/
+    position_health.py``). This stub reproduces exactly that fail-closed
+    behaviour so the reconciliation test proves the FULL resolution path — not
+    just the ``_lending_market_id`` unit — rejects the synthetic
+    ``position_id`` and accepts only the real Comet market key.
+    """
+
+    def __init__(self, *, expected_market_id: str, health) -> None:
+        self._expected_market_id = expected_market_id
+        self._health = health
+
+    def position_health(self, protocol, market_id, *, collateral_price_usd=None, debt_price_usd=None):
+        if market_id != self._expected_market_id:
+            raise ValueError(f"{protocol} market {market_id!r} not found on base.")
         return self._health
 
     def price(self, token):  # pragma: no cover - amounts unused by the CHECK
@@ -289,6 +337,146 @@ async def test_lending_unverifiable_without_market():
         summary=_summary(_lending(PositionType.SUPPLY)), gateway_client=None, market=None
     )
     assert report.entries[0].verdict is ReconciliationVerdict.UNVERIFIABLE
+
+
+# ---------------------------------------------------------------------------
+# Compound V3 position-id -> market-key resolution (VIB-5518)
+# ---------------------------------------------------------------------------
+
+
+def test_lending_market_id_prefers_explicit_market_id():
+    """Registry-derived / Morpho-style ``market_id`` wins over ``position_id``."""
+    pos = PositionInfo(
+        position_type=PositionType.SUPPLY,
+        position_id="unrelated-label",
+        chain="ethereum",
+        protocol="morpho_blue",
+        value_usd=Decimal("0"),
+        details={"market_id": "0xbytes32mkt"},
+    )
+    assert _lending_market_id(pos) == "0xbytes32mkt"
+
+
+def test_lending_market_id_falls_back_to_market_key():
+    """Compound V3's convention (``details['market']``, no ``market_id``) resolves
+    to the real Comet key, NOT the synthetic ``position_id`` label."""
+    pos = _compound_v3_position(PositionType.SUPPLY, token="WETH", market="usdc")
+    assert pos.position_id == "compound-collateral-WETH-base"  # sanity: id is NOT a market key
+    assert _lending_market_id(pos) == "usdc"
+
+
+def test_lending_market_id_market_id_beats_market_when_both_present():
+    pos = PositionInfo(
+        position_type=PositionType.BORROW,
+        position_id="irrelevant",
+        chain="base",
+        protocol="compound_v3",
+        value_usd=Decimal("0"),
+        details={"market_id": "0xmkt", "market": "usdc"},
+    )
+    assert _lending_market_id(pos) == "0xmkt"
+
+
+def test_lending_market_id_last_resort_is_position_id():
+    """No known detail key at all -> unchanged legacy fallback (Aave-family: the
+    market id is ignored for whole-account protocols, so this stays harmless)."""
+    pos = PositionInfo(
+        position_type=PositionType.SUPPLY,
+        position_id="aave-supply-WETH-polygon",
+        chain="polygon",
+        protocol="aave_v3",
+        value_usd=Decimal("0"),
+        details={"asset": "WETH"},
+    )
+    assert _lending_market_id(pos) == "aave-supply-WETH-polygon"
+
+
+@pytest.mark.asyncio
+async def test_compound_v3_collateral_confirmed_open_via_market_detail():
+    """End-to-end (VIB-5518): a Compound V3 SUPPLY leg reconciles CONFIRMED_OPEN
+    using the real Comet market key resolved from ``details['market']``. Before
+    the fix, the synthetic ``position_id`` would have been sent as the market
+    key and ``_MarketKeyStrictMarket`` would raise -> UNVERIFIABLE forever."""
+    market = _MarketKeyStrictMarket(expected_market_id="usdc", health=_Health(Decimal("1000"), Decimal("0")))
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_compound_v3_position(PositionType.SUPPLY)), gateway_client=None, market=market
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.CONFIRMED_OPEN
+
+
+@pytest.mark.asyncio
+async def test_compound_v3_debt_diverged_closed_via_market_detail():
+    """A cleanly-closed Compound V3 BORROW leg (debt back to zero) resolves the
+    real market key and reconciles DIVERGED_CLOSED — the GOOD post-teardown
+    outcome — instead of being stuck UNVERIFIABLE by a bogus market key."""
+    market = _MarketKeyStrictMarket(expected_market_id="usdc", health=_Health(Decimal("0"), Decimal("0")))
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_compound_v3_position(PositionType.BORROW)), gateway_client=None, market=market
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.DIVERGED_CLOSED
+
+
+@pytest.mark.asyncio
+async def test_compound_v3_residual_debt_confirmed_open_flips_teardown_failed():
+    """The TD-15 fail-closed contract this ticket restores: a genuine residual
+    Compound V3 debt leg post-teardown must compose to FAILED, not be silently
+    swallowed as UNVERIFIABLE (which the pre-fix bug made unconditional)."""
+    market = _MarketKeyStrictMarket(expected_market_id="usdc", health=_Health(Decimal("0"), Decimal("500")))
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_compound_v3_position(PositionType.BORROW)), gateway_client=None, market=market
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.CONFIRMED_OPEN
+    assert report.has_confirmed_open
+    assert report.apply_post_teardown_to_verification_status(VerificationStatus.UNVERIFIED) is VerificationStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_compound_v3_bogus_position_id_market_key_reproduces_pre_fix_bug():
+    """Guards the regression itself: if the market key resolved to the synthetic
+    ``position_id`` (the pre-fix behaviour), the strict-market stub raises and
+    the CHECK degrades to UNVERIFIABLE. Pins the exact failure this ticket
+    fixes, so a future regression that reverts the fallback order is caught."""
+    market = _MarketKeyStrictMarket(expected_market_id="usdc", health=_Health(Decimal("1000"), Decimal("0")))
+    bogus = PositionInfo(
+        position_type=PositionType.SUPPLY,
+        position_id="compound-collateral-WETH-base",
+        chain="base",
+        protocol="compound_v3",
+        value_usd=Decimal("0"),
+        details={"asset": "WETH"},  # no market_id, no market -> forced to fall back to position_id
+    )
+    report = await reconcile_known_positions_against_chain(summary=_summary(bogus), gateway_client=None, market=market)
+    assert report.entries[0].verdict is ReconciliationVerdict.UNVERIFIABLE
+
+
+@pytest.mark.asyncio
+async def test_compound_v3_symbol_resolved_from_asset_detail_not_empty():
+    """VIB-5518 (secondary): the token symbol feeding the best-effort price
+    lookup is resolved from ``details['asset']`` — the key Compound V3 (and
+    Aave/Benqi) strategies use — never left empty. An empty symbol makes
+    ``market.price('')`` fire a doomed lookup that can block 15-30s per leg. The
+    CHECK verdict is unaffected either way (amounts unused), so this pins the
+    efficiency contract: the resolved symbol reaches the price read."""
+    priced: list[str] = []
+
+    class _SpyMarket:
+        def position_health(self, protocol, market_id, *, collateral_price_usd=None, debt_price_usd=None):
+            return _Health(Decimal("1000"), Decimal("0"))
+
+        def price(self, token):
+            priced.append(token)
+            return Decimal("2000")
+
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_compound_v3_position(PositionType.SUPPLY, token="WETH")),
+        gateway_client=None,
+        market=_SpyMarket(),
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.CONFIRMED_OPEN
+    # The real token symbol from details['asset'] reached the price read; the
+    # empty-string doomed lookup never happened.
+    assert "WETH" in priced
+    assert "" not in priced
 
 
 # ---------------------------------------------------------------------------

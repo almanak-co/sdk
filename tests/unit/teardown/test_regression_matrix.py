@@ -313,6 +313,56 @@ def _lending_summary(leg: PositionType) -> TeardownPositionSummary:
     return TeardownPositionSummary(deployment_id="deployment:matrix", timestamp=datetime.now(UTC), positions=[pos])
 
 
+def _compound_v3_lending_summary(leg: PositionType) -> TeardownPositionSummary:
+    """A KNOWN pre-execution Compound V3 lending leg, in the REAL ``details``
+    shape ``compound_v3_lifecycle`` (and every sibling Compound V3 strategy)
+    emits from ``get_open_positions()`` (VIB-5518): the Comet market key lives
+    under ``details['market']`` — NOT ``details['market_id']`` — and
+    ``position_id`` is a synthetic, human-readable label
+    (``compound-collateral-<token>-<chain>`` / ``compound-borrow-<token>-<chain>``),
+    never a valid market key.
+    """
+    is_borrow = leg is PositionType.BORROW
+    pos = PositionInfo(
+        position_type=leg,
+        position_id=f"compound-{'borrow' if is_borrow else 'collateral'}-{'USDC' if is_borrow else 'WETH'}-base",
+        chain="base",
+        protocol="compound_v3",
+        value_usd=Decimal("0"),
+        details={"asset": "USDC" if is_borrow else "WETH", "market": "usdc"},
+    )
+    return TeardownPositionSummary(deployment_id="deployment:matrix", timestamp=datetime.now(UTC), positions=[pos])
+
+
+class _CompoundV3StrictMarket:
+    """Reproduces the REAL Compound V3 ``position_health`` fail-closed error
+    (``PositionHealthProvider._get_market_health`` raises
+    ``ValueError(f"{protocol} market '{market_id}' not found on {chain}.")`` for
+    any market key it does not recognize) for every market id other than the
+    expected Comet key. Driving the seam with this stub proves the resolution
+    reaches ``position_health`` with the REAL Comet key resolved from
+    ``details['market']`` — not the synthetic ``position_id`` label — which is
+    exactly the VIB-5518 regression: before the fix, the synthetic
+    ``position_id`` was sent as the market key and this stub would raise on
+    EVERY call, permanently degrading the CHECK to UNVERIFIABLE regardless of
+    whether the position was actually residual or actually closed.
+    """
+
+    def __init__(self, *, expected_market_id: str, collateral_usd: Decimal, debt_usd: Decimal) -> None:
+        self._expected_market_id = expected_market_id
+        self._health = _Health(collateral_usd, debt_usd, Decimal("0.8"))
+
+    def position_health(
+        self, protocol: str, market_id: str, *, collateral_price_usd: Any = None, debt_price_usd: Any = None
+    ) -> Any:
+        if market_id != self._expected_market_id:
+            raise ValueError(f"{protocol} market {market_id!r} not found on base.")
+        return self._health
+
+    def price(self, token: str) -> Decimal:  # pragma: no cover - amounts unused by the CHECK
+        raise KeyError(token)
+
+
 def _reconciliation(verdict: ReconciliationVerdict) -> ReconciliationReport:
     """A one-entry Plan-A report carrying ``verdict`` — the unit TD-15 composes."""
     entry = PositionReconciliation(
@@ -721,6 +771,66 @@ def check_s6_failclosed_onchain_verify(primitive: str) -> None:
         )
         assert out.all_closed is False, "a residual lending debt leg must flip the teardown to not-closed"
         assert out.verification_status is VerificationStatus.FAILED, "residual on-chain risk must report FAILED"
+
+        # VIB-5518: the SAME fail-closed seam, driven with Compound V3's OWN
+        # position-id/market-key convention (``details['market']``, not
+        # ``details['market_id']``; ``position_id`` is a synthetic label, never
+        # a valid Comet market key). A still-open Compound V3 debt leg must flip
+        # FAILED exactly like Aave's — before the fix, the resolver sent the
+        # synthetic ``position_id`` as the market key, ``position_health`` raised
+        # "market not found", and the CHECK degraded to UNVERIFIABLE
+        # *unconditionally* — a genuine residual was never caught.
+        compound_residual = asyncio.run(
+            _verify_manager().verify_closure_against_chain(
+                _VerifyStrategy(),
+                verification=ClosureVerification(
+                    all_closed=True,
+                    positions_total=1,
+                    positions_closed=1,
+                    has_position_breakdown=True,
+                    verification_status=VerificationStatus.UNVERIFIED,
+                ),
+                pre_execution_positions=_compound_v3_lending_summary(PositionType.BORROW),
+                market=_CompoundV3StrictMarket(
+                    expected_market_id="usdc", collateral_usd=Decimal("0"), debt_usd=Decimal("500")
+                ),
+            )
+        )
+        assert compound_residual.all_closed is False, (
+            "a residual Compound V3 debt leg must flip the teardown to not-closed (VIB-5518)"
+        )
+        assert compound_residual.verification_status is VerificationStatus.FAILED, (
+            "Compound V3 residual on-chain risk must report FAILED (VIB-5518) — previously "
+            "swallowed as UNVERIFIABLE by the position-id/market-key resolution gap"
+        )
+
+        # Clean-close control: a genuinely closed Compound V3 debt leg resolves
+        # the REAL market key without raising (the CHECK is unblocked, not
+        # permanently UNVERIFIABLE). Hook-less lending correctly stays
+        # UNVERIFIED on a clean close — Aave/Morpho/Compound parity; VIB-5518
+        # fixes the resolver, not the hook-less confidence ceiling (that
+        # requires a registered TeardownPostCondition, a separate TD-14 seam).
+        compound_clean = asyncio.run(
+            _verify_manager().verify_closure_against_chain(
+                _VerifyStrategy(),
+                verification=ClosureVerification(
+                    all_closed=True,
+                    positions_total=1,
+                    positions_closed=1,
+                    has_position_breakdown=True,
+                    verification_status=VerificationStatus.UNVERIFIED,
+                ),
+                pre_execution_positions=_compound_v3_lending_summary(PositionType.BORROW),
+                market=_CompoundV3StrictMarket(
+                    expected_market_id="usdc", collateral_usd=Decimal("0"), debt_usd=Decimal("0")
+                ),
+            )
+        )
+        assert compound_clean.all_closed is True, "a genuinely closed Compound V3 debt leg must stay closed"
+        assert compound_clean.verification_status is VerificationStatus.UNVERIFIED, (
+            "a clean Compound V3 close resolves the real market key (no raise) and stays UNVERIFIED, "
+            "matching hook-less lending parity — not silently downgraded by an unresolved market"
+        )
         return
 
     if primitive == PENDLE:

@@ -286,14 +286,34 @@ class ReconciliationReport:
 def _lending_market_id(position: PositionInfo) -> str:
     """Resolve a lending position's market identifier for ``position_health``.
 
-    Registry-derived lending rows carry ``details['market_id']``; a strategy's
-    own ``PositionInfo`` may instead use ``position_id`` as the market anchor.
-    Prefer the explicit detail, fall back to the id.
+    Registry-derived lending rows carry ``details['market_id']``. Strategy-owned
+    ``get_open_positions()`` implementations use two different detail-key
+    conventions today (VIB-5518): Morpho Blue's lifecycle sets ``market_id``
+    directly (the bytes32 market id), matching the registry convention; every
+    Compound V3 strategy (``compound_v3_lifecycle`` and its per-chain/per-market
+    siblings) instead sets ``market`` — the Comet market key (``"usdc"``,
+    ``"weth"``, ``"usdc_e"``) that is the SAME string the strategy already threads
+    through its own ``Intent.supply(..., market_id=self.market, ...)`` /
+    ``Intent.borrow(..., market_id=self.market, ...)`` calls. Try both known
+    conventions before falling back to ``position_id``.
+
+    ``position_id`` is a **last-resort** fallback, not a market key. For
+    whole-account protocols (the Aave family) ``position_health`` ignores
+    ``market_id`` entirely, so an arbitrary ``position_id`` string is harmless
+    there. But for a per-market protocol whose position carries neither detail
+    key (e.g. a future connector, or Silo V2 / Euler V2 / BENQI's synthetic
+    ``"<col>"`` / ``"<col>/<loan>"`` ids, which are not surfaced via either key
+    today), ``position_health`` raises ``market '<position_id>' not found`` —
+    caught by :func:`~almanak.framework.teardown.live_position_reads.
+    redrive_lending_position` and surfaced as a fail-closed ``UNVERIFIABLE``
+    Plan-A verdict (Empty ≠ Zero: an unresolvable market never masquerades as a
+    confirmed reconciliation), never a wrong-market false verify.
     """
     details = position.details if isinstance(position.details, dict) else {}
-    market_id = details.get("market_id")
-    if market_id:
-        return str(market_id)
+    for key in ("market_id", "market"):
+        value = details.get(key)
+        if value:
+            return str(value)
     return str(position.position_id)
 
 
@@ -379,7 +399,15 @@ def _reconcile_lending(*, position: PositionInfo, market: MarketSnapshot | None)
     from almanak.framework.teardown.live_position_reads import redrive_lending_position
 
     details = position.details if isinstance(position.details, dict) else {}
-    symbol = str(details.get("asset_symbol") or "")
+    # Same detail-key-convention gap as _lending_market_id (VIB-5518): registry
+    # rows carry "asset_symbol", but strategy-owned lending PositionInfo (Compound
+    # V3, Aave, Benqi, ...) stores the token under "asset". Resolve either. The
+    # symbol only feeds the best-effort USD->token-amount conversion inside
+    # redrive_lending_position, which the CHECK never reads — but an empty symbol
+    # makes market.price("") fire a doomed lookup that can block 15-30s per leg
+    # before failing. Resolving the real symbol keeps the price lookup cheap;
+    # leaving it empty is still correct (amounts unused), just slow.
+    symbol = str(details.get("asset_symbol") or details.get("asset") or "")
     live = redrive_lending_position(
         market=market,
         protocol=position.protocol,
