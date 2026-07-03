@@ -307,6 +307,7 @@ These are saved by the runner without any strategy-author code:
 - **Use defensive `.get()` with defaults** in `load_persistent_state()` so older saved state doesn't crash when you add new fields.
 - **Store `Decimal` as strings** (`str(amount)`) and parse back (`Decimal(state["amount"])`) for safe JSON round-tripping.
 - **`on_intent_executed()` is the natural place to update state** after a trade (e.g., storing a position ID). `get_persistent_state()` then picks it up for the next save.
+- **Persist identity and phase, not market exposure.** Values that feed `decide()` triggers (debt, exposures, hedge deltas) should be re-read from the market snapshot each cycle — cached intent-derived amounts drift from on-chain reality as interest accrues and prices move.
 - **All values must be JSON-serializable.** The state dict is stored as a JSON blob in the database.
 
 !!! warning "Without these hooks, strategy state is lost on restart"

@@ -295,6 +295,7 @@ Without these hooks, your strategy will lose all internal state on restart. This
     - Use defensive `.get()` with defaults in `load_persistent_state()` so older state dicts don't crash on missing keys.
     - Store `Decimal` values as strings (`str(amount)`) and parse them back (`Decimal(state["amount"])`) for safe JSON round-tripping.
     - The `on_intent_executed()` callback is the natural place to update state after a trade (e.g., storing a new position ID), and `get_persistent_state()` then picks it up for saving.
+    - Persist identity and phase (position IDs, cooldowns, workflow step) — not market exposure. Values that feed `decide()` triggers (debt, exposures, hedge deltas) should be re-read from the market snapshot each cycle: cached intent-derived amounts drift from on-chain reality as interest accrues and prices move.
 
 ## Strategy Teardown (Required)
 
