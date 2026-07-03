@@ -67,16 +67,33 @@ class ReconciliationVerdict(StrEnum):
       position is already closed), so the teardown plans a harmless no-op for it —
       but the count the operator sees is optimistic, so TD-15 must not certify the
       teardown ``CHAIN_VERIFIED`` off a stale enumeration.
-    - ``UNVERIFIABLE`` — no per-position chain read is available for this position
-      (no gateway client, no market, an unsupported primitive in Plan-A scope, or
-      a transient read fault). ``None`` means *unknown*, never *closed* — the
-      position stays in the teardown set (Empty ≠ Zero), but the closure cannot be
-      proven, so TD-15 must not certify ``CHAIN_VERIFIED`` either.
+    - ``UNVERIFIABLE`` — a chain read WAS attempted for this position (the
+      primitive is in Plan-A scope) but came back inconclusive (no gateway
+      client, no market, a transient read fault). ``None`` means *unknown*,
+      never *closed* — the position stays in the teardown set (Empty ≠ Zero),
+      but the closure cannot be proven, so TD-15 must not certify
+      ``CHAIN_VERIFIED`` either.
+    - ``NOT_APPLICABLE`` — this Plan-A chain read is **structurally scoped to a
+      different position shape** and was never attempted (VIB-5522). The LP
+      reconciliation delegates to the NFT-only ``positions(tokenId)`` read
+      (``chain_verify_lp_open``), which can only answer for ERC-721 V3-family
+      LPs; a non-NFT LP position (TraderJoe V2 Liquidity Book's ERC-1155 bins,
+      Uniswap V4's distinct PositionManager, ...) can never be confirmed OR
+      denied by it — attempting it always resolves to "not found", which is
+      indistinguishable from a genuine read failure. ``NOT_APPLICABLE`` is
+      **not** the same signal as ``UNVERIFIABLE``: it carries zero information
+      about the position's open-ness either way, so — unlike ``UNVERIFIABLE`` —
+      it must never participate in TD-15's confidence-lowering
+      (:attr:`ReconciliationReport.has_unverifiable` excludes it). The
+      authoritative closure signal for a position this read cannot reach is its
+      own registered TD-14 post-condition (Surface A); a measured PASS there is
+      final, and this inapplicable Plan-A path is a no-op, never a downgrade.
     """
 
     CONFIRMED_OPEN = "confirmed_open"
     DIVERGED_CLOSED = "diverged_closed"
     UNVERIFIABLE = "unverifiable"
+    NOT_APPLICABLE = "not_applicable"
 
 
 @dataclass(frozen=True)
@@ -99,6 +116,16 @@ class PositionReconciliation:
     def unverifiable(self) -> bool:
         """True iff the chain could not confirm the WARM ledger's OPEN belief."""
         return self.verdict is ReconciliationVerdict.UNVERIFIABLE
+
+    @property
+    def not_applicable(self) -> bool:
+        """True iff this Plan-A read is structurally out of scope for this position.
+
+        VIB-5522: e.g. the NFT-only LP read attempted against a non-NFT
+        (ERC-1155) LP position. Deliberately distinct from
+        :attr:`unverifiable`: it must never feed TD-15's confidence-lowering.
+        """
+        return self.verdict is ReconciliationVerdict.NOT_APPLICABLE
 
     def to_dict(self) -> dict[str, Any]:
         """Structured form for logging / a future TD-15 persistence surface."""
@@ -147,13 +174,31 @@ class ReconciliationReport:
         return tuple(e for e in self.entries if e.unverifiable)
 
     @property
+    def not_applicable(self) -> tuple[PositionReconciliation, ...]:
+        """Positions this Plan-A read is structurally out of scope for (VIB-5522).
+
+        Kept separate from :attr:`unverifiable` for observability (both are
+        logged/reported), but — unlike ``unverifiable`` — never feeds
+        ``has_unverifiable`` / the TD-15 confidence-lowering it triggers.
+        """
+        return tuple(e for e in self.entries if e.not_applicable)
+
+    @property
     def has_divergence(self) -> bool:
         """True iff at least one KNOWN position diverged (ledger-open, chain-closed)."""
         return any(e.diverged for e in self.entries)
 
     @property
     def has_unverifiable(self) -> bool:
-        """True iff at least one KNOWN position could not be confirmed on-chain."""
+        """True iff at least one KNOWN position could not be confirmed on-chain.
+
+        Deliberately excludes ``NOT_APPLICABLE`` entries (VIB-5522): a
+        structurally out-of-scope read (the NFT-only LP check against a
+        non-NFT LP position) carries no information about openness either
+        way, so it must never trigger TD-15's fail-closed downgrade — that
+        downgrade is reserved for a read that COULD have answered but did
+        not (Empty ≠ Zero, generalised to read *applicability*).
+        """
         return any(e.unverifiable for e in self.entries)
 
     @property
@@ -232,6 +277,7 @@ class ReconciliationReport:
             "confirmed": len(self.confirmed),
             "diverged": len(self.diverged),
             "unverifiable": len(self.unverifiable),
+            "not_applicable": len(self.not_applicable),
             "has_divergence": self.has_divergence,
             "entries": [e.to_dict() for e in self.entries],
         }
@@ -251,10 +297,69 @@ def _lending_market_id(position: PositionInfo) -> str:
     return str(position.position_id)
 
 
+def _is_nft_lp_protocol(protocol: str) -> bool:
+    """True iff ``protocol`` is an NFT-based (ERC-721) V3-family LP position.
+
+    Sourced from the connector-owned ``AddressRegistry`` under
+    :attr:`AbiFamily.V3_NPM` — the SAME membership
+    ``teardown.discovery._NPM_PROTOCOLS`` uses to build the NPM walker
+    ``chain_verify_lp_open`` delegates to — so this module never hardcodes a
+    protocol slug and the applicability check can never drift out of sync
+    with what the NFT read actually covers (VIB-5522).
+
+    A non-member LP protocol (TraderJoe V2 Liquidity Book's ERC-1155 bins,
+    Uniswap V4's distinct ``PositionManager`` rather than the classic V3
+    NPM, and any future non-NFT LP shape) cannot be answered — confirmed OR
+    denied — by the NFT-scoped ``positions(tokenId)`` read: attempting it
+    always resolves to "not found on any registered NPM", which is
+    structurally indistinguishable from a genuine read failure. Callers must
+    treat a non-member as :attr:`ReconciliationVerdict.NOT_APPLICABLE`, never
+    ``UNVERIFIABLE`` — the two are different signals (see the enum docstring).
+
+    ``protocol`` is lower-cased before the membership test: registry slugs are
+    canonical lower-case, so a position carrying a mixed-case protocol (a custom
+    strategy / non-canonical registry entry) must not be mis-classified
+    ``NOT_APPLICABLE`` — that would skip the residual check for a genuine V3 LP.
+    """
+    from almanak.connectors._strategy_base.address_registry import AbiFamily, AddressRegistry
+
+    return protocol.lower() in AddressRegistry.protocols_with_abi(AbiFamily.V3_NPM)
+
+
 async def _reconcile_lp(
     *, position: PositionInfo, gateway_client: Any, network: str
 ) -> tuple[ReconciliationVerdict, str]:
-    """Protocol-scoped LP reconciliation via the gateway-routed TD-05 read."""
+    """Protocol-scoped LP reconciliation via the gateway-routed TD-05 read.
+
+    Scoped to NFT-based (ERC-721) V3-family LP protocols (VIB-5522): the
+    delegate read, ``chain_verify_lp_open``, can only answer
+    ``positions(tokenId).liquidity`` on a registered NonfungiblePositionManager.
+    A non-NFT LP position is ``NOT_APPLICABLE`` — this Plan-A NFT read is
+    skipped entirely (no wasted, guaranteed-null gateway round-trip) and the
+    verdict carries no confidence-lowering weight; that position's closure is
+    proven (or not) by its own registered TD-14 post-condition instead
+    (Surface A — e.g. ``traderjoe_v2_post_condition``).
+    """
+    protocol = str(position.protocol or "")
+    if not protocol:
+        # Empty ≠ Zero, fail-closed: an LP position whose protocol we cannot even
+        # determine is NOT ``NOT_APPLICABLE`` (which asserts "a known non-NFT LP,
+        # deferred to its own post-condition"). Without a protocol there may be no
+        # post-condition either — so NOT_APPLICABLE would leave it neither verified
+        # nor confidence-lowered (fail-open). An unknown protocol is genuinely
+        # UNVERIFIABLE — it must lower confidence via ``has_unverifiable``.
+        return (
+            ReconciliationVerdict.UNVERIFIABLE,
+            "LP position has no protocol — cannot determine reconciliation "
+            "applicability; fail-closed (UNVERIFIABLE, not NOT_APPLICABLE)",
+        )
+    if not _is_nft_lp_protocol(protocol):
+        return (
+            ReconciliationVerdict.NOT_APPLICABLE,
+            f"protocol {position.protocol!r} is not an NFT-based (ERC-721) LP position — "
+            "this Plan-A NFT read cannot verify it; deferring to its registered TD-14 "
+            "post-condition",
+        )
     if gateway_client is None:
         return ReconciliationVerdict.UNVERIFIABLE, "no gateway client to chain-verify LP"
     from almanak.framework.teardown.live_position_reads import chain_verify_lp_open
@@ -403,6 +508,19 @@ async def reconcile_known_positions_against_chain(
                 entry.chain,
                 entry.detail,
             )
+        elif entry.not_applicable:
+            # VIB-5522: NOT informative for TD-15 confidence — deliberately
+            # debug-level (not warning/error), since this is the expected,
+            # healthy shape for every non-NFT LP protocol, not an anomaly.
+            logger.debug(
+                "TD-08 reconciliation NOT_APPLICABLE: %s %s (%s) on %s is out of scope for this Plan-A "
+                "read — %s. Deferring to its own TD-14 post-condition (no confidence impact).",
+                entry.protocol,
+                entry.position_type,
+                entry.position_id,
+                entry.chain,
+                entry.detail,
+            )
 
     report = ReconciliationReport(
         deployment_id=str(getattr(summary, "deployment_id", "") or ""), entries=tuple(entries)
@@ -416,10 +534,12 @@ async def reconcile_known_positions_against_chain(
         )
     elif report.checked_count:
         logger.info(
-            "🛑 TD-08 Plan-A reconciliation: %d/%d known positions chain-confirmed open, %d unverifiable",
+            "🛑 TD-08 Plan-A reconciliation: %d/%d known positions chain-confirmed open, %d unverifiable, "
+            "%d not-applicable",
             len(report.confirmed),
             report.checked_count,
             len(report.unverifiable),
+            len(report.not_applicable),
         )
     return report
 

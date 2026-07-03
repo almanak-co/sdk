@@ -33,12 +33,16 @@ from almanak.framework.teardown.plan_a_reconciliation import (
 )
 
 
-def _lp(position_id: str = "12345", chain: str = "arbitrum") -> PositionInfo:
+def _lp(position_id: str = "12345", chain: str = "arbitrum", protocol: str = "uniswap_v3") -> PositionInfo:
+    # ``protocol="uniswap_v3"`` (an NFT-based, V3_NPM-family protocol) by
+    # default so these fixtures actually reach the NFT-scoped
+    # ``chain_verify_lp_open`` delegate the LP-reconciliation tests below
+    # exercise (VIB-5522 scopes that delegate to NFT-family protocols only).
     return PositionInfo(
         position_type=PositionType.LP,
         position_id=position_id,
         chain=chain,
-        protocol="lp",
+        protocol=protocol,
         value_usd=Decimal("0"),
         details={"source": "position_registry"},
     )
@@ -145,6 +149,107 @@ async def test_lp_read_raise_degrades_to_unverifiable(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# VIB-5522 — non-NFT (ERC-1155 / LB) LP positions are NOT_APPLICABLE to the
+# NFT-only Plan-A LP read, never folded into UNVERIFIABLE.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_lp_non_nft_protocol_is_not_applicable(monkeypatch):
+    """A TraderJoe V2 (Liquidity Book, ERC-1155) LP position can never be
+
+    confirmed OR denied by the NFT-only ``chain_verify_lp_open`` read, so it
+    must reconcile as NOT_APPLICABLE, and the doomed-to-fail NFT read must
+    never even be attempted (ALM-2807 repro root cause).
+    """
+
+    async def _boom(*, gateway_client, position, network=""):  # pragma: no cover - must not be called
+        raise AssertionError("chain_verify_lp_open must not be attempted for a non-NFT LP protocol")
+
+    monkeypatch.setattr(live_position_reads, "chain_verify_lp_open", _boom)
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_lp(position_id="traderjoe_crisis_lp_0", protocol="traderjoe_v2")),
+        gateway_client=object(),
+        market=None,
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.NOT_APPLICABLE
+    assert report.entries[0].not_applicable
+    assert not report.entries[0].unverifiable
+    # The critical distinction: NOT_APPLICABLE must NOT count toward the
+    # fail-closed ``has_unverifiable`` trigger TD-15 reads.
+    assert not report.has_unverifiable
+    assert not report.has_divergence
+    assert len(report.not_applicable) == 1
+
+
+@pytest.mark.asyncio
+async def test_lp_non_nft_protocol_not_applicable_even_without_gateway():
+    """NOT_APPLICABLE is decided by protocol membership alone — it must win
+
+    over (and short-circuit before) the "no gateway client" UNVERIFIABLE
+    branch, since the read would be structurally inapplicable regardless.
+    """
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_lp(position_id="traderjoe_crisis_lp_0", protocol="traderjoe_v2")),
+        gateway_client=None,
+        market=None,
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.NOT_APPLICABLE
+
+
+@pytest.mark.asyncio
+async def test_lp_missing_protocol_is_unverifiable_not_not_applicable(monkeypatch):
+    """An LP position with no resolvable protocol is fail-closed UNVERIFIABLE,
+
+    NOT NOT_APPLICABLE (Gemini HIGH, PR #3178). NOT_APPLICABLE asserts "a known
+    non-NFT LP, deferred to its own post-condition"; an unknown protocol may have
+    no post-condition either, so classifying it NOT_APPLICABLE would leave it
+    neither verified nor confidence-lowered (fail-open). It must lower confidence
+    via ``has_unverifiable``.
+    """
+
+    async def _boom(*, gateway_client, position, network=""):  # pragma: no cover - must not be called
+        raise AssertionError("chain_verify_lp_open must not be attempted for a protocol-less LP")
+
+    monkeypatch.setattr(live_position_reads, "chain_verify_lp_open", _boom)
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_lp(position_id="orphan_lp_0", protocol="")),
+        gateway_client=object(),
+        market=None,
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.UNVERIFIABLE
+    assert report.entries[0].unverifiable
+    assert not report.entries[0].not_applicable
+    # The fail-closed contract: an unidentifiable LP MUST trigger TD-15's downgrade.
+    assert report.has_unverifiable
+
+
+@pytest.mark.asyncio
+async def test_lp_mixed_case_nft_protocol_is_not_not_applicable(monkeypatch):
+    """A mixed-case NFT LP protocol slug (custom strategy / non-canonical entry)
+
+    must still be recognised as an NFT LP and go through the real read — not be
+    mis-classified NOT_APPLICABLE, which would skip its residual check (Gemini
+    MEDIUM, PR #3178). Membership is lower-cased before the registry test.
+    """
+    called = {"n": 0}
+
+    async def _verify(*, gateway_client, position, network=""):
+        called["n"] += 1
+        return False  # NPM reports liquidity == 0 → DIVERGED_CLOSED (real read ran)
+
+    monkeypatch.setattr(live_position_reads, "chain_verify_lp_open", _verify)
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_lp(position_id="99", protocol="Uniswap_V3")),
+        gateway_client=object(),
+        market=None,
+    )
+    assert called["n"] == 1  # the real NFT read WAS attempted (not short-circuited)
+    assert report.entries[0].verdict is ReconciliationVerdict.DIVERGED_CLOSED
+    assert report.entries[0].verdict is not ReconciliationVerdict.NOT_APPLICABLE
+
+
+# ---------------------------------------------------------------------------
 # Lending reconciliation
 # ---------------------------------------------------------------------------
 
@@ -238,6 +343,14 @@ def _report(verdict: ReconciliationVerdict) -> ReconciliationReport:
         # Divergence does not promote a non-chain-verified status.
         (ReconciliationVerdict.DIVERGED_CLOSED, VerificationStatus.UNVERIFIED, VerificationStatus.UNVERIFIED),
         (ReconciliationVerdict.DIVERGED_CLOSED, VerificationStatus.NOT_RUN, VerificationStatus.NOT_RUN),
+        # VIB-5522: NOT_APPLICABLE (a structurally-inapplicable Plan-A read,
+        # e.g. the NFT-only LP check against a non-NFT LP position) must NEVER
+        # downgrade a proposed CHAIN_VERIFIED — this is the ALM-2807 fix: a
+        # PASSED protocol post-condition is authoritative and an inapplicable
+        # reconciliation path is a no-op, not a downgrade.
+        (ReconciliationVerdict.NOT_APPLICABLE, VerificationStatus.CHAIN_VERIFIED, VerificationStatus.CHAIN_VERIFIED),
+        (ReconciliationVerdict.NOT_APPLICABLE, VerificationStatus.UNVERIFIED, VerificationStatus.UNVERIFIED),
+        (ReconciliationVerdict.NOT_APPLICABLE, VerificationStatus.NOT_RUN, VerificationStatus.NOT_RUN),
     ],
 )
 def test_apply_to_verification_status(verdict, proposed, expected):
@@ -265,6 +378,11 @@ def test_apply_to_verification_status(verdict, proposed, expected):
         # this must NOT drag a chain-verified close down to unverified.
         (ReconciliationVerdict.UNVERIFIABLE, VerificationStatus.CHAIN_VERIFIED, VerificationStatus.CHAIN_VERIFIED),
         (ReconciliationVerdict.UNVERIFIABLE, VerificationStatus.UNVERIFIED, VerificationStatus.UNVERIFIED),
+        # VIB-5522: NOT_APPLICABLE is likewise a no-op POST-teardown — it never
+        # carried information about openness either way, so it must not
+        # participate in the fail-closed AC-(a) trigger nor lower confidence.
+        (ReconciliationVerdict.NOT_APPLICABLE, VerificationStatus.CHAIN_VERIFIED, VerificationStatus.CHAIN_VERIFIED),
+        (ReconciliationVerdict.NOT_APPLICABLE, VerificationStatus.UNVERIFIED, VerificationStatus.UNVERIFIED),
     ],
 )
 def test_apply_post_teardown_to_verification_status(verdict, proposed, expected):

@@ -79,6 +79,7 @@ from almanak.framework.teardown.plan_a_reconciliation import (
     PositionReconciliation,
     ReconciliationReport,
     ReconciliationVerdict,
+    reconcile_known_positions_against_chain,
 )
 from almanak.framework.teardown.post_conditions import (
     get_teardown_post_condition,
@@ -279,6 +280,24 @@ def _verify_manager() -> TeardownManager:
 class _VerifyStrategy:
     deployment_id = "deployment:matrix"
     _gateway_network = _CHAIN
+
+
+def _traderjoe_lp_summary() -> TeardownPositionSummary:
+    """A KNOWN pre-execution LP position for a non-NFT (ERC-1155) LP protocol.
+
+    TraderJoe V2 Liquidity Book positions are NOT NFT-based (ERC-721) — the
+    Plan-A LP reconciliation's NFT-only ``chain_verify_lp_open`` delegate is
+    structurally inapplicable to them (VIB-5522 / ALM-2807).
+    """
+    pos = PositionInfo(
+        position_type=PositionType.LP,
+        position_id="traderjoe_crisis_lp_0",
+        chain=_CHAIN,
+        protocol="traderjoe_v2",
+        value_usd=Decimal("0"),
+        details={"source": "position_registry"},
+    )
+    return TeardownPositionSummary(deployment_id="deployment:matrix", timestamp=datetime.now(UTC), positions=[pos])
 
 
 def _lending_summary(leg: PositionType) -> TeardownPositionSummary:
@@ -641,6 +660,44 @@ def check_s6_failclosed_onchain_verify(primitive: str) -> None:
         # composition is in test_td15_post_teardown_verification.py).
         assert has_teardown_post_condition("uniswap_v3"), (
             "uniswap_v3 must register an on-chain teardown post-condition (LP closure authority)"
+        )
+
+        # VIB-5522 (ALM-2807): a non-NFT LP protocol (TraderJoe V2 Liquidity
+        # Book, ERC-1155) has its OWN registered TD-14 post-condition
+        # (traderjoe_v2_post_condition) and never rides the NFT-only Plan-A
+        # LP reconciliation. Drive the REAL TD-15 composition seam end to
+        # end: a PASSED post-condition (TD-14 reports CHAIN_VERIFIED) must
+        # stay CHAIN_VERIFIED even though the PRE-teardown Plan-A LP check
+        # cannot answer for it — the inapplicable NFT-only read must be a
+        # no-op, never a downgrade.
+        tj_summary = _traderjoe_lp_summary()
+        pre_report = asyncio.run(
+            reconcile_known_positions_against_chain(summary=tj_summary, gateway_client=object(), market=None)
+        )
+        assert pre_report.entries[0].verdict is ReconciliationVerdict.NOT_APPLICABLE, (
+            "a non-NFT LP protocol must reconcile NOT_APPLICABLE against the NFT-only Plan-A "
+            f"LP read, got {pre_report.entries[0].verdict}"
+        )
+        out = asyncio.run(
+            _verify_manager().verify_closure_against_chain(
+                _VerifyStrategy(),
+                verification=ClosureVerification(
+                    all_closed=True,
+                    positions_total=1,
+                    positions_closed=1,
+                    has_position_breakdown=True,
+                    # traderjoe_v2_post_condition measured a clean full drain (TD-14 PASS).
+                    verification_status=VerificationStatus.CHAIN_VERIFIED,
+                ),
+                pre_execution_positions=tj_summary,
+                market=None,
+                pre_teardown_reconciliation=pre_report,
+            )
+        )
+        assert out.all_closed is True
+        assert out.verification_status is VerificationStatus.CHAIN_VERIFIED, (
+            "a PASSED non-NFT LP post-condition must not be mislabelled by the structurally "
+            f"inapplicable NFT-only Plan-A reconciliation, got {out.verification_status}"
         )
         return
 
