@@ -538,3 +538,52 @@ def test_instantiate_applies_dataclass_config_defaults(monkeypatch: pytest.Monke
     assert strategy.config.pool == "WETH/USDC/3000"
     assert strategy.force_action == ""  # dataclass default applied
     assert strategy.position_id is None  # dataclass default applied
+
+
+def test_instantiate_falls_back_to_dict_wrapper_without_typed_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VIB-5489: a strategy with NO typed config dataclass (no ``__orig_bases__``
+    generic parameter) must still instantiate under ``teardown execute`` — the
+    ``coerce_strategy_config`` path degrades to ``DictConfigWrapper`` exactly as
+    the runner does. Guards the no-schema fallback branch of the VIB-5520 fix so
+    swapping ``DictConfigWrapper`` for ``coerce_strategy_config`` never regresses
+    schemaless strategies (attribute access + ``.get`` must both keep working)."""
+    from almanak.framework.cli import teardown_helpers as th
+    from almanak.framework.cli._strategy_config import DictConfigWrapper
+
+    class _SchemalessStrategy:
+        # No ``__orig_bases__`` generic → coerce_strategy_config resolves no
+        # dataclass and returns a DictConfigWrapper around the raw dict.
+        def __init__(self, config, chain: str, wallet_address: str) -> None:
+            self.config = config
+            self.chain = chain
+            self._chain = chain
+            # Attribute access (the DictConfigWrapper contract) still works for
+            # keys that ARE present in config.json.
+            self.pool = config.pool
+            # ``.get`` with a default is the schemaless way to read an optional
+            # field absent from config.json — must not raise.
+            self.force_action = config.get("force_action", "")
+            self._balance_provider = None
+            self._price_oracle = None
+            self._gateway_client = None
+
+    monkeypatch.setattr(
+        "almanak.framework.data.tokens.resolver.TokenResolver.set_gateway_channel",
+        lambda _self, _channel: None,
+    )
+
+    strategy = th.instantiate_strategy_with_state(
+        strategy_class=_SchemalessStrategy,
+        config_dict={"pool": "WETH/USDC/3000"},  # force_action omitted
+        chain="arbitrum",
+        wallet_address="0x0000000000000000000000000000000000000001",
+        gateway_client=SimpleNamespace(channel=None),
+        inject_balance_provider=lambda *a, **k: None,
+        restore_strategy_state=lambda **_kwargs: None,
+    )
+
+    assert isinstance(strategy.config, DictConfigWrapper)  # wrapper fallback taken
+    assert strategy.pool == "WETH/USDC/3000"
+    assert strategy.force_action == ""  # optional absent field via .get default
