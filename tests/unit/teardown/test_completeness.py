@@ -10,10 +10,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from almanak.framework.intents import Intent
-from almanak.framework.teardown.completeness import check_intent_coverage
+from almanak.framework.teardown.completeness import (
+    check_intent_coverage,
+    resolve_consolidation_noop_target,
+)
 from almanak.framework.teardown.models import (
     PositionInfo,
     PositionType,
+    TeardownAssetPolicy,
     TeardownPositionSummary,
 )
 
@@ -751,3 +755,375 @@ def test_non_pt_token_not_false_matched_by_pt_swap_VIB_5590():
         from_token="PT-stETH-30DEC2027", to_token="WSTETH", amount="all", protocol="pendle"
     )
     assert not check_intent_coverage(_summary([other]), [pt_swap]).complete
+
+
+# ---------------------------------------------------------------------------
+# VIB-5494 Item 1 — target-token no-op: full_close emits NO intent for a held
+# TOKEN/STAKE position whose token already equals the consolidation target
+# (nothing to swap). The coverage gate must credit that no-op close when the
+# target is threaded, instead of false-failing and looping the deployment on the
+# no-intents gate. Fail-SAFE: only credited when held token == final target AND
+# the position is a plain held/staked token (no vault/lending identity).
+# ---------------------------------------------------------------------------
+
+
+def _held_token(token: str, *, chain: str = "base", details: dict | None = None) -> PositionInfo:
+    return PositionInfo(
+        position_type=PositionType.TOKEN,
+        position_id=f"held-{token}",
+        chain=chain,
+        protocol="wallet",
+        value_usd=Decimal("100"),
+        details=details if details is not None else {"asset": token},
+    )
+
+
+def test_token_already_in_target_is_covered_no_op_VIB_5494():
+    """A held USDC TOKEN with target USDC needs no closing intent — full_close
+    no-ops it, and the wallet already holds exactly the target. With the target
+    threaded it is COVERED even with an empty intent list (no false FAILED)."""
+    pos = _held_token("USDC")
+    # Without the target threaded, it (correctly, pre-fix) reports uncovered.
+    assert not check_intent_coverage(_summary([pos]), []).complete
+    # With the consolidation target threaded, the no-op is credited.
+    report = check_intent_coverage(_summary([pos]), [], consolidation_target_token="USDC")
+    assert report.complete, f"held target-token position must be a no-op close; uncovered={report.uncovered}"
+    # It still counts toward the enforceable denominator (satisfied, not absent).
+    assert report.total_enforceable == 1
+
+
+def test_stake_already_in_target_is_covered_no_op_VIB_5494():
+    """A STAKE position denominated in the target (e.g. hold wstETH, target
+    wstETH) is likewise a no-op close."""
+    stake = PositionInfo(
+        position_type=PositionType.STAKE,
+        position_id="lido-wstETH",
+        chain="ethereum",
+        protocol="lido",
+        value_usd=Decimal("100"),
+        details={"asset": "wstETH"},
+    )
+    assert check_intent_coverage(_summary([stake]), [], consolidation_target_token="wstETH").complete
+    # Case-insensitive match.
+    assert check_intent_coverage(_summary([stake]), [], consolidation_target_token="WSTETH").complete
+
+
+def test_token_not_in_target_still_requires_a_close_VIB_5494():
+    """The no-op credit must NOT leak: a held WETH TOKEN with target USDC is a
+    real swap-close and stays uncovered when no intent targets it."""
+    pos = _held_token("WETH")
+    assert not check_intent_coverage(_summary([pos]), [], consolidation_target_token="USDC").complete
+
+
+def test_collateral_leg_typed_token_in_target_is_NOT_no_op_VIB_5494():
+    """False-NEGATIVE guard: a lending collateral leg reported as TOKEN whose
+    asset equals the target is STILL on-chain in the protocol after teardown —
+    the wallet does NOT hold the target — so it must NOT be credited a no-op.
+    A position carrying a lending/market identity is never no-op'd."""
+    # market_id marks it as a lending leg, not a plain held token.
+    leg = _held_token("USDC", details={"asset": "USDC", "market_id": "0xmkt", "leg": "collateral"})
+    report = check_intent_coverage(_summary([leg]), [], consolidation_target_token="USDC")
+    assert not report.complete, "a collateral-typed TOKEN in target must NOT be silently credited a no-op"
+
+
+def test_token_typed_vault_in_target_is_NOT_no_op_VIB_5494():
+    """A vault share reported as TOKEN (metamorpho demo) whose deposit token is
+    the target must NOT be no-op'd — it needs a VAULT_REDEEM, and its shares are
+    still on-chain until then."""
+    vault_token = PositionInfo(
+        position_type=PositionType.TOKEN,
+        position_id="metamorpho-base",
+        chain="base",
+        protocol="metamorpho",
+        value_usd=Decimal("50"),
+        details={"vault_address": _VAULT_ADDR, "deposit_token": "USDC"},
+    )
+    assert not check_intent_coverage(_summary([vault_token]), [], consolidation_target_token="USDC").complete
+
+
+def test_noop_target_mirrors_full_close_skip_VIB_5494():
+    """Drift-proof: full_close emits NO intent for a held target-token position,
+    and the coverage gate (with the same target threaded) credits that same
+    no-op — so builder and checker can never drift apart."""
+    from almanak.framework.teardown.full_close import full_close_intents
+
+    pos = _held_token("USDC")
+    built = full_close_intents([pos], target_token="USDC")
+    assert built == [], "full_close should emit NO intent for a held token already in the target"
+    assert check_intent_coverage([pos], built, consolidation_target_token="USDC").complete
+
+
+def test_resolve_consolidation_noop_target_policy_gating_VIB_5494():
+    """The no-op target is only defined for the TARGET_TOKEN policy; entry-token
+    and keep-outputs have no single 'already done' token → None (strict gate)."""
+    assert resolve_consolidation_noop_target(TeardownAssetPolicy.TARGET_TOKEN, "USDC") == "USDC"
+    assert resolve_consolidation_noop_target("target_token", None) == "USDC"  # default
+    assert resolve_consolidation_noop_target(TeardownAssetPolicy.ENTRY_TOKEN, "USDC") is None
+    assert resolve_consolidation_noop_target(TeardownAssetPolicy.KEEP_OUTPUTS, "USDC") is None
+    assert resolve_consolidation_noop_target(None, "USDC") is None
+
+
+def test_entry_token_policy_keeps_strict_behaviour_VIB_5494():
+    """Under entry-token policy the resolver returns None, so a held target-token
+    position is NOT credited a no-op (it may still need swapping to the entry
+    asset) — the gate stays strict/fail-safe."""
+    pos = _held_token("USDC")
+    noop = resolve_consolidation_noop_target(TeardownAssetPolicy.ENTRY_TOKEN, "USDC")
+    assert not check_intent_coverage(_summary([pos]), [], consolidation_target_token=noop).complete
+
+
+# ---------------------------------------------------------------------------
+# VIB-5494 Item 2 — multi-position disambiguation: when ≥2 positions of a
+# disambiguation-requiring type exist, a single under-specified intent must not
+# blanket-cover several distinct positions via a lenient default. Framework-built
+# closes always stamp id/market/protocol, so they stay covered.
+# ---------------------------------------------------------------------------
+
+
+def _lp(position_id: str, pool: str, *, chain: str = "base") -> PositionInfo:
+    return PositionInfo(
+        position_type=PositionType.LP,
+        position_id=position_id,
+        chain=chain,
+        protocol="uniswap_v3",
+        value_usd=Decimal("100"),
+        details={"pool": pool},
+    )
+
+
+def test_two_lps_bare_lp_close_no_longer_blanket_covers_VIB_5494():
+    """Two distinct LPs + ONE id-less/pool-less LP_CLOSE: pre-fix the bare close
+    leniently 'covered' BOTH (silently passing the second); post-fix a single
+    under-specified intent cannot disambiguate two LPs → both uncovered."""
+    lps = [_lp("111", "0xAAA"), _lp("222", "0xBBB")]
+    bare = {"intent_type": "LP_CLOSE"}  # no position_id, no pool
+    report = check_intent_coverage(_summary(lps), [bare])
+    assert not report.complete
+    assert {p.position_id for p in report.uncovered} == {"111", "222"}
+
+
+def test_two_lps_same_pool_pool_scoped_close_requires_id_VIB_5494():
+    """Two LP NFTs in the SAME pool + a pool-scoped (id-less) LP_CLOSE: the pool
+    match is lenient (cannot say WHICH NFT), so with two positions it no longer
+    blanket-covers — id disambiguation is required."""
+    lps = [_lp("111", "0xAAA"), _lp("222", "0xAAA")]  # same pool, distinct NFTs
+    pool_close = {"intent_type": "LP_CLOSE", "pool": "0xAAA"}  # no position_id
+    report = check_intent_coverage(_summary(lps), [pool_close])
+    assert not report.complete
+    assert {p.position_id for p in report.uncovered} == {"111", "222"}
+
+
+def test_two_lps_id_scoped_closes_are_covered_VIB_5494():
+    """Framework-built (id-scoped) closes for BOTH LPs still pass — the tightening
+    only rejects under-specified intents, never disambiguated ones."""
+    lps = [_lp("111", "0xAAA"), _lp("222", "0xAAA")]
+    closes = [
+        Intent.lp_close(position_id="111", protocol="uniswap_v3", chain="base"),
+        Intent.lp_close(position_id="222", protocol="uniswap_v3", chain="base"),
+    ]
+    assert check_intent_coverage(_summary(lps), closes).complete
+
+
+def test_two_lps_framework_full_close_no_false_positive_VIB_5494():
+    """The actual framework builder (full_close_intents) over two distinct LPs
+    produces id-scoped closes → the multi-position guard must NOT false-fail."""
+    from almanak.framework.teardown.full_close import full_close_intents
+
+    lps = [_lp("111", "0xAAA"), _lp("222", "0xBBB")]
+    built = full_close_intents(lps)
+    assert check_intent_coverage(lps, built).complete
+
+
+def test_single_lp_bare_close_still_lenient_VIB_5494():
+    """The tightening is scoped to ≥2 same-type positions: a single tracked LP is
+    still leniently covered by a bare LP_CLOSE (today's behaviour preserved)."""
+    lp = _lp("111", "0xAAA")
+    assert check_intent_coverage(_summary([lp]), [{"intent_type": "LP_CLOSE"}]).complete
+
+
+def test_two_perps_market_less_close_no_longer_blanket_covers_VIB_5494():
+    """Two distinct-market perps + ONE market-less PERP_CLOSE: pre-fix it
+    leniently covered both; post-fix a market-less close cannot disambiguate two
+    perps → both uncovered."""
+    perps = [
+        PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="eth",
+            chain="arbitrum",
+            protocol="gmx_v2",
+            value_usd=Decimal("500"),
+            details={"market": "ETH/USD"},
+        ),
+        PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="btc",
+            chain="arbitrum",
+            protocol="gmx_v2",
+            value_usd=Decimal("500"),
+            details={"market": "BTC/USD"},
+        ),
+    ]
+    market_less = {"intent_type": "PERP_CLOSE"}  # no market
+    report = check_intent_coverage(_summary(perps), [market_less])
+    assert not report.complete
+    assert {p.position_id for p in report.uncovered} == {"eth", "btc"}
+
+
+def test_two_perps_market_scoped_closes_are_covered_VIB_5494():
+    """Market-scoped closes for both perps still pass (framework stamps market)."""
+    perps = [
+        PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="eth",
+            chain="arbitrum",
+            protocol="gmx_v2",
+            value_usd=Decimal("500"),
+            details={"market": "ETH/USD", "collateral_token": "USDC", "is_long": True},
+        ),
+        PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="btc",
+            chain="arbitrum",
+            protocol="gmx_v2",
+            value_usd=Decimal("500"),
+            details={"market": "BTC/USD", "collateral_token": "USDC", "is_long": True},
+        ),
+    ]
+    closes = [
+        Intent.perp_close(market="ETH/USD", collateral_token="USDC", is_long=True, protocol="gmx_v2", chain="arbitrum"),
+        Intent.perp_close(market="BTC/USD", collateral_token="USDC", is_long=True, protocol="gmx_v2", chain="arbitrum"),
+    ]
+    assert check_intent_coverage(_summary(perps), closes).complete
+
+
+def test_two_supplies_protocol_less_repay_no_longer_blanket_covers_VIB_5494():
+    """Two same-token supplies on DIFFERENT protocols + a protocol-less WITHDRAW:
+    the withdraw omits the disambiguating protocol, so with two legs it cannot
+    blanket-cover — each leg needs a protocol-scoped close."""
+    supplies = [
+        PositionInfo(
+            position_type=PositionType.SUPPLY,
+            position_id="aave-usdc",
+            chain="ethereum",
+            protocol="aave_v3",
+            value_usd=Decimal("100"),
+            details={"asset": "USDC"},
+        ),
+        PositionInfo(
+            position_type=PositionType.SUPPLY,
+            position_id="morpho-usdc",
+            chain="ethereum",
+            protocol="morpho_blue",
+            value_usd=Decimal("100"),
+            details={"asset": "USDC"},
+        ),
+    ]
+    # A withdraw naming the token but NOT the protocol leniently covers both today.
+    protocol_less = {"intent_type": "WITHDRAW", "token": "USDC"}
+    report = check_intent_coverage(_summary(supplies), [protocol_less])
+    assert not report.complete
+    assert {p.position_id for p in report.uncovered} == {"aave-usdc", "morpho-usdc"}
+    # Protocol-scoped withdraws for BOTH legs pass (framework stamps protocol).
+    scoped = [
+        {"intent_type": "WITHDRAW", "token": "USDC", "protocol": "aave_v3"},
+        {"intent_type": "WITHDRAW", "token": "USDC", "protocol": "morpho_blue"},
+    ]
+    assert check_intent_coverage(_summary(supplies), scoped).complete
+
+
+# ---------------------------------------------------------------------------
+# VIB-5494 Empty≠Zero (Gemini review): a MEASURED integer id/market of 0 must be
+# treated as PRESENT, never coalesced to "absent". `str(X or "")` conflated a
+# valid 0 (ERC-721 token id / sequential-index lending market) with None, which
+# false-FAILED id-0 LPs and false-COVERED market-0 lending legs.
+# ---------------------------------------------------------------------------
+
+
+def test_lp_position_id_zero_is_a_measured_identity_VIB_5494():
+    """position_id 0 is a valid ERC-721 token id. An id-scoped LP_CLOSE(0) must
+    match the id-0 LP (not be coerced to 'absent'), and disambiguation still holds
+    across two positions — the id-0 leg is covered, the id-1 leg is not."""
+    lps = [
+        PositionInfo(
+            position_type=PositionType.LP,
+            position_id=0,  # measured token id 0
+            chain="base",
+            protocol="uniswap_v3",
+            value_usd=Decimal("100"),
+            details={"pool": "0xAAA"},
+        ),
+        PositionInfo(
+            position_type=PositionType.LP,
+            position_id=1,
+            chain="base",
+            protocol="uniswap_v3",
+            value_usd=Decimal("100"),
+            details={"pool": "0xAAA"},
+        ),
+    ]
+    close_zero = {"intent_type": "LP_CLOSE", "position_id": 0}
+    report = check_intent_coverage(_summary(lps), [close_zero])
+    # The id-0 LP is matched (no false-FAIL); the id-1 LP is genuinely uncovered.
+    assert {str(p.position_id) for p in report.uncovered} == {"1"}
+
+
+def test_two_lending_market_zero_not_blanket_covered_by_market_less_VIB_5494():
+    """market_id 0 is a measured isolated-market identity. Two same-protocol legs
+    (market_id 0 and 1) must NOT both be covered by a market-less WITHDRAW — the
+    market-0 leg must not be mistaken for 'market-less' (false-positive guard)."""
+    legs = [
+        PositionInfo(
+            position_type=PositionType.SUPPLY,
+            position_id="mkt0",
+            chain="ethereum",
+            protocol="morpho_blue",
+            value_usd=Decimal("100"),
+            details={"asset": "USDC", "market_id": 0},
+        ),
+        PositionInfo(
+            position_type=PositionType.SUPPLY,
+            position_id="mkt1",
+            chain="ethereum",
+            protocol="morpho_blue",
+            value_usd=Decimal("100"),
+            details={"asset": "USDC", "market_id": 1},
+        ),
+    ]
+    market_less = {"intent_type": "WITHDRAW", "token": "USDC", "protocol": "morpho_blue"}
+    report = check_intent_coverage(_summary(legs), [market_less])
+    assert not report.complete
+    assert {p.position_id for p in report.uncovered} == {"mkt0", "mkt1"}
+    # A market_id=0 WITHDRAW covers ONLY the market-0 leg (measured 0 matches).
+    scoped_zero = {"intent_type": "WITHDRAW", "token": "USDC", "protocol": "morpho_blue", "market_id": 0}
+    report2 = check_intent_coverage(_summary(legs), [scoped_zero])
+    assert {p.position_id for p in report2.uncovered} == {"mkt1"}
+
+
+def test_genuinely_market_less_lending_still_lenient_VIB_5494():
+    """A lending leg with NO market_id/market (both absent) keeps the lenient
+    protocol-only path — the Empty≠Zero fix must not change the absent case."""
+    legs = [
+        PositionInfo(
+            position_type=PositionType.SUPPLY,
+            position_id="aave-a",
+            chain="ethereum",
+            protocol="aave_v3",
+            value_usd=Decimal("100"),
+            details={"asset": "USDC"},  # no market_id/market → market-less
+        ),
+        PositionInfo(
+            position_type=PositionType.SUPPLY,
+            position_id="aave-b",
+            chain="ethereum",
+            protocol="aave_v3",
+            value_usd=Decimal("100"),
+            details={"asset": "DAI"},  # different token → own withdraw
+        ),
+    ]
+    # A protocol-scoped USDC withdraw (no market) still covers the market-less
+    # USDC leg via the lenient protocol-only path; the DAI leg needs its own.
+    intents = [
+        {"intent_type": "WITHDRAW", "token": "USDC", "protocol": "aave_v3"},
+        {"intent_type": "WITHDRAW", "token": "DAI", "protocol": "aave_v3"},
+    ]
+    assert check_intent_coverage(_summary(legs), intents).complete

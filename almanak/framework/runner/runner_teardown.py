@@ -367,7 +367,7 @@ async def _count_open_positions(strategy: Any) -> int | None:
         return None
 
 
-async def _check_no_intent_completeness(strategy: Any) -> Any:
+async def _check_no_intent_completeness(strategy: Any, request: Any = None) -> Any:
     """Completeness report for the no-intents teardown gate (TD-11 / VIB-5469).
 
     Reads the KNOWN open-position set (registry-reconciled enumeration, TD-01)
@@ -381,8 +381,14 @@ async def _check_no_intent_completeness(strategy: Any) -> Any:
     open position. The registry-unavailable case is NOT this path — it degrades
     cleanly inside ``resolve_open_positions_with_registry`` to a summary, so it
     returns a real report rather than ``None``.
+
+    ``request`` (the active :class:`TeardownRequest`) supplies the consolidation
+    target so a held STAKE/TOKEN position already denominated in the target — for
+    which ``full_close`` emits no swap — is credited a no-op close instead of
+    locking the deployment into a recurring failed-teardown loop on THIS gate
+    (VIB-5494 Item 1). Absent / non-target-token policies keep strict behaviour.
     """
-    from ..teardown.completeness import check_intent_coverage
+    from ..teardown.completeness import check_intent_coverage, resolve_consolidation_noop_target
     from ..teardown.registry_enumeration import resolve_open_positions_with_registry
 
     try:
@@ -394,7 +400,11 @@ async def _check_no_intent_completeness(strategy: Any) -> Any:
             exc_info=True,
         )
         return None
-    return check_intent_coverage(positions, [])
+    noop_target = resolve_consolidation_noop_target(
+        getattr(request, "asset_policy", None),
+        getattr(request, "target_token", None),
+    )
+    return check_intent_coverage(positions, [], consolidation_target_token=noop_target)
 
 
 async def reconcile_known_positions(runner: Any, strategy: Any, teardown_market: Any | None) -> Any:
@@ -1001,7 +1011,7 @@ async def execute_teardown(  # noqa: C901
         # success (VIB-5417: spark teardown returned []; ALM-2900: repaid but
         # never withdrew). Fail loud instead. Uses the durable known set, never a
         # wallet-wide sweep.
-        completeness = await _check_no_intent_completeness(strategy)
+        completeness = await _check_no_intent_completeness(strategy, request)
         if completeness is None:
             # The KNOWN open-position set could not be read — strategy
             # enumeration raised (``resolve_open_positions_with_registry``

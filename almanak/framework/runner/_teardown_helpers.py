@@ -589,7 +589,14 @@ async def execute_and_verify(
         # AFTER the TD-15 chain re-read so the coverage gap is the final, loudest
         # word — an uncovered KNOWN position FAILs regardless of what the chain
         # says about the positions that DID get a closing intent.
-        completeness = check_intent_coverage(positions, teardown_intents)
+        # VIB-5494 Item 1: thread the Phase-2 consolidation target so a held
+        # STAKE/TOKEN position already denominated in the target (for which
+        # full_close emits no swap) is credited a no-op close, not false-failed.
+        completeness = check_intent_coverage(
+            positions,
+            teardown_intents,
+            consolidation_target_token=teardown_mgr._consolidation_noop_target(),
+        )
         if not completeness.complete:
             # The uncovered positions are definitively NOT closed (no intent even
             # targeted them), so cap positions_closed so the persisted

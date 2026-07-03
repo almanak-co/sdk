@@ -34,7 +34,10 @@ if TYPE_CHECKING:
     from almanak.framework.teardown.runner_helpers import TeardownRunnerHelpers
 
 from almanak.framework.teardown.cancel_window import CancelWindowManager
-from almanak.framework.teardown.completeness import check_intent_coverage
+from almanak.framework.teardown.completeness import (
+    check_intent_coverage,
+    resolve_consolidation_noop_target,
+)
 from almanak.framework.teardown.config import TeardownConfig
 from almanak.framework.teardown.decision_log import TeardownDecisionPhase, log_teardown_decision
 from almanak.framework.teardown.error_taxonomy import Disposition, classify_teardown_failure
@@ -660,7 +663,9 @@ class TeardownManager:
             # distinct from on-chain verification (TD-15). Computed here; for the
             # intents-present path it is folded into the result AFTER execution so
             # the risk-reducing intents still run first (inverted semantics).
-            completeness = check_intent_coverage(positions, intents)
+            completeness = check_intent_coverage(
+                positions, intents, consolidation_target_token=self._consolidation_noop_target()
+            )
 
             if not intents:
                 if completeness.complete:
@@ -1209,6 +1214,23 @@ class TeardownManager:
             # so consent only ever reaches the consolidation swaps it was
             # stamped for.
             consolidation_consent=state.consolidation_consent,
+        )
+
+    def _consolidation_noop_target(self) -> str | None:
+        """The token Phase-2 consolidation swaps residual holdings INTO, threaded
+        into the TD-11 completeness gate (VIB-5494 Item 1).
+
+        Uses the SAME target expression ``run_token_consolidation`` resolves
+        (``token_consolidation.target_token or target_token``), gated to the
+        ``TARGET_TOKEN`` policy by :func:`resolve_consolidation_noop_target` so a
+        held STAKE/TOKEN position already denominated in that target is credited a
+        no-op close instead of false-failing the teardown. Returns ``None`` for
+        entry-token / keep-outputs policies (no single "already done" token).
+        """
+        cfg = self.config.token_consolidation
+        return resolve_consolidation_noop_target(
+            self.config.asset_policy,
+            (getattr(cfg, "target_token", None) or self.config.target_token),
         )
 
     async def run_token_consolidation(
