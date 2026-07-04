@@ -204,17 +204,18 @@ class MyStrategy(IntentStrategy):
 | `UnstakeIntent` | Deshacer staking de tokens |
 | `PerpOpenIntent` | Abrir posición de perpetuos |
 | `PerpCloseIntent` | Cerrar posición de perpetuos |
-| `FlashLoanIntent` | Operaciones de préstamo flash |
+| `FlashLoanIntent` | Operaciones de préstamo flash _(experimental — en pruebas; no listado en `almanak info matrix`)_ |
 | `CollectFeesIntent` | Recolectar comisiones de LP |
-| `PredictionBuyIntent` | Comprar acciones de mercado de predicción |
-| `PredictionSellIntent` | Vender acciones de mercado de predicción |
-| `PredictionRedeemIntent` | Canjear ganancias de mercado de predicción |
+| `PredictionBuyIntent` | Comprar acciones de mercado de predicción _(experimental — en pruebas; no listado en `almanak info matrix`)_ |
+| `PredictionSellIntent` | Vender acciones de mercado de predicción _(experimental — en pruebas; no listado en `almanak info matrix`)_ |
+| `PredictionRedeemIntent` | Canjear ganancias de mercado de predicción _(experimental — en pruebas; no listado en `almanak info matrix`)_ |
 | `VaultDepositIntent` | Depositar en una bóveda |
 | `VaultRedeemIntent` | Canjear desde una bóveda |
 | `WrapNativeIntent` | Envolver tokens nativos (ej: ETH a WETH). Factory: `Intent.wrap()` |
 | `UnwrapNativeIntent` | Desenvolver tokens nativos (ej: WETH a ETH). Factory: `Intent.unwrap()` |
 | `Intent.bridge()` | Transferir tokens entre cadenas (metodo factory que retorna un intent compuesto) |
 | `Intent.ensure_balance()` | Asegurar un saldo minimo de tokens en una cadena destino (metodo factory que se resuelve a bridge o hold) |
+| `Intent.sequence()` | Composite multi-paso atómico (`IntentSequence`) que ejecuta intents hijos en orden con semántica de reversión compartida |
 
 ## Persistencia de estado (requerido para estrategias con estado)
 

@@ -12,7 +12,7 @@ description: >-
   debugging strategy execution on Anvil forks. Do NOT use for general
   smart contract development, Solidity code, or non-strategy SDK internals.
 metadata:
-  version: "2.20.0"
+  version: "2.21.0"
   author: Almanak
   license: Apache-2.0
   type: documentation
@@ -425,10 +425,19 @@ Intent.lp_open(
     amount1=Decimal("2000"),         # Amount of token1
     range_lower=Decimal("1800"),     # Lower price bound
     range_upper=Decimal("2200"),     # Upper price bound
+    range_spec=None,                 # Typed range: PriceBand | TickBand (alternative to range_lower/range_upper)
     protocol="uniswap_v3",          # Default: uniswap_v3
     chain=None,                      # Optional override
+    coin_amounts=None,               # Multi-coin pools (e.g. Curve 3pool): per-coin amounts by pool index
+    max_slippage=None,               # Optional slippage bound on the deposit floor
 )
 ```
+
+> **Typed ranges (VIB-5555):** `range_spec` accepts `PriceBand(lower=..., upper=...)`
+> (human prices, token1-per-token0 — the portable default, converted to ticks by each
+> connector) or `TickBand(lower=..., upper=...)` (raw protocol ticks, escape hatch).
+> Import both from `almanak.framework.intents`. The legacy `range_lower`/`range_upper`
+> pair is still accepted and equivalent to a `PriceBand`; pass one form, not both.
 
 **Intent.lp_close** - Close an LP position
 
@@ -438,8 +447,17 @@ Intent.lp_close(
     pool="WETH/USDC",        # Optional pool identifier
     collect_fees=True,       # Collect accumulated fees
     protocol="uniswap_v3",
+    amount=None,             # "all" = chain off prior LP_OPEN's minted LP (fungible-LP allowlist, e.g. Pendle)
+    max_slippage=None,       # Optional slippage bound on withdrawal min-amounts (Curve; default 50 bps)
+    coin_index=None,         # Single-sided exit: withdraw all as one pool coin (Curve only, VIB-5437)
+    imbalanced_amounts=None, # Exact per-coin exit amounts, fail-closed max-burn (Curve StableSwap only, VIB-5438)
 )
 ```
+
+> **Curve exit selectors:** `coin_index` routes via `remove_liquidity_one_coin`;
+> `imbalanced_amounts` routes via `remove_liquidity_imbalance`. They are mutually
+> exclusive; leave both `None` for the proportional all-coin close. Only connectors
+> declaring the `lp_close_exit_selectors` capability (currently Curve) compile them.
 
 > `position_id` from `lp_open`'s result is the registry handle (VIB-4192 / T06b).
 > **Persist it in strategy state** (`self.state["lp_position_id"] = result.position_id`)
@@ -570,6 +588,16 @@ Intent.perp_withdraw(
     protocol="hyperliquid",
     chain="hyperevm",
     destination=None,            # defaults to the deployment wallet; the bridge always credits the sender
+)
+```
+
+**Intent.perp_cancel_order** - Cancel a pending (unfilled) perp order and recover its committed collateral and unspent execution fee (VIB-5568). Not a position open/close — a refund of committed-but-unspent collateral, e.g. to recover a stranded pending order discovered during teardown.
+
+```python
+Intent.perp_cancel_order(
+    order_key="0x...",           # bytes32 order key (0x-prefixed, 66 chars) from the open receipt or residual discovery
+    protocol="gmx_v2",           # Default: gmx_v2
+    chain=None,                  # Optional override
 )
 ```
 

@@ -34,17 +34,17 @@
 
 ---
 
-Almanak is an intent-based Python framework for developing, testing, and deploying autonomous DeFi strategies. Express trading logic as high-level intents - the framework handles compilation, execution, and state management across 18 chains and 41 protocol connectors.
+Almanak is an intent-based Python framework for developing, testing, and deploying autonomous DeFi strategies. Express trading logic as high-level intents - the framework handles compilation, execution, and state management across 18 chains and 46 protocol connectors.
 
 ## Features
 
 - **Intent-Based Architecture**: Express trading logic as high-level intents (Swap, LP, Borrow, etc.) - the framework handles compilation and execution
 - **Three-Tier State Management**: Automatic persistence with HOT/WARM/COLD tiers for reliability
 - **Comprehensive Backtesting**: PnL simulation, paper trading on Anvil forks, and parameter sweeps
-- **Multi-Chain Support**: 18 chains across EVM and SVM — Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Mantle, X-Layer, Monad, 0G, Solana, plus Sonic, Blast, Linea, Berachain, Plasma, HyperEVM (chain configs present; protocol coverage pending).
+- **Multi-Chain Support**: 18 chains across EVM and SVM — Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Mantle, X-Layer, Monad, 0G, Solana, HyperEVM, Linea, plus Sonic, Blast, Berachain, Plasma (chain configs present; protocol coverage pending).
 - **Protocol Integration**: Uniswap V3, Aave V3, Morpho Blue, GMX V2, Lido, Ethena, Polymarket, Kraken, and more
 - **Non-Custodial Design**: Full control over your funds through Safe smart accounts
-- **Agentic DeFAI Trading**: Build autonomous LLM-driven agents with 38 built-in tools and policy-enforced safety (BYO LLM API key)
+- **Agentic DeFAI Trading**: Build autonomous LLM-driven agents with 39 built-in tools and policy-enforced safety (BYO LLM API key)
 - **Production-Ready**: Built-in alerting, stuck detection, emergency management, and canary deployments
 
 ## Installation
@@ -268,10 +268,10 @@ almanak strat backtest run -d almanak/demo_strategies/morpho_looping # Leveraged
 - 0G *
 - Sonic
 - Blast
-- Linea
+- Linea *
 - Berachain
 - Plasma
-- HyperEVM
+- HyperEVM *
 
 **SVM**
 
@@ -281,14 +281,14 @@ For the authoritative per-protocol chain matrix, see the [connector reference](h
 
 ## Supported Protocols
 
-41 connectors are registered today (`ConnectorRegistry.all()`). See the [connector reference](https://sdk.docs.almanak.co/api/connectors/) for the full matrix of chains × intent types per connector.
+46 connectors are registered today (`ConnectorRegistry.all()`). See the [connector reference](https://sdk.docs.almanak.co/api/connectors/) for the full matrix of chains × intent types per connector.
 
 - **DEXs / AMMs**: Uniswap V3, Uniswap V4, SushiSwap V3, PancakeSwap V3, TraderJoe V2, Aerodrome, Camelot, Curve, Fluid, Pendle, Orca, Meteora, Raydium CLMM
 - **Swap aggregators**: Jupiter, Enso, LiFi
 - **Lending**: Aave V3, Morpho Blue, Compound V3, Spark, Euler V2, Fluid, BenQi, Silo V2, Curvance, Kamino
 - **Liquid Staking & yield-bearing assets**: Lido, Ethena, Gimo
 - **Yield tokenization**: Pendle
-- **Perpetuals**: GMX V2, Aster Perps, PancakeSwap Perps, Drift
+- **Perpetuals**: GMX V2, Hyperliquid, Aster Perps, PancakeSwap Perps, Drift
 - **CEX Integration**: Kraken
 - **Bridges**: Across, Stargate, LiFi
 - **Vaults**: Morpho Vault, Lagoon

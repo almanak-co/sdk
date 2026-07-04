@@ -30,7 +30,7 @@ The Almanak SDK provides a comprehensive framework for developing, testing, and 
 - **Intent-Based Architecture** - Express trading logic as high-level intents (Swap, LP, Borrow, etc.). The framework handles compilation and execution.
 - **Three-Tier State Management** - Automatic persistence with HOT/WARM/COLD tiers for reliability.
 - **Comprehensive Backtesting** - PnL simulation, paper trading on Anvil forks, and parameter sweeps.
-- **Multi-Chain Support** - Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Plasma, Blast, Linea, Mantle, Berachain, Solana, Monad, X-Layer, 0G Chain.
+- **Multi-Chain Support** - Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Plasma, Blast, Linea, Mantle, Berachain, Solana, Monad, X-Layer, 0G Chain, HyperEVM.
 - **Protocol Integration** - Uniswap V3/V4, PancakeSwap V3, SushiSwap V3, TraderJoe V2, Aerodrome, Curve, Aave V3, Morpho Blue, GMX V2, Compound V3, Pendle, Spark, Lido, Ethena, Enso, LiFi, Kraken, and [20+ more](api/connectors/index.md). _(Prediction markets (Polymarket) and flash loans (Balancer) are experimental and temporarily withheld from the supported matrix pending testing.)_
 - **Non-Custodial Design** - Full control over your funds through Safe smart accounts with automatic permission manifest generation for Zodiac Roles.
 - **Agentic DeFAI Trading** - Build autonomous LLM-driven agents with 39 built-in tools, policy-enforced safety, and support for OpenAI, MCP, and LangChain.

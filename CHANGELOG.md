@@ -6,6 +6,109 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.21.0] - 2026-07-04
+
+### Added
+
+- **Hyperliquid perps connector (HyperEVM CoreWriter).** `PERP_OPEN` /
+  `PERP_CLOSE` / `PERP_WITHDRAW` compiled onto HyperCore via the CoreWriter
+  precompile, with runner-pumped fill reconciliation + reject detection,
+  margin-aware valuation, min-order preflight, a Safe permission descriptor,
+  fill-economics accounting + fixture, and a demo. `PERP_WITHDRAW` moves free
+  USDC margin off the venue via perp→spot `usdClassTransfer` + spot→L1
+  `spotSend` (HyperCore→HyperEVM bridge). (#3148, #3168, #3173, #3175)
+- **HyperEVM chain (id 999).** Chain descriptor + gateway data layer:
+  HyperCore oracle prices, static symbol resolution, and perp dashboard
+  support. (#3134, #3165)
+- **Curve N-coin / metapool production vertical.** Metapool support (native
+  2-coin + underlying routing) (#3031) and 3-coin pools with a Curve 3pool
+  demo (#3030); single-sided closes via `LPCloseIntent.coin_index` →
+  `remove_liquidity_one_coin` with `calc_withdraw_one_coin` min-out (#3092);
+  imbalanced closes via `imbalanced_amounts` → `remove_liquidity_imbalance`
+  with a fail-closed max-burn ceiling (#3103); non-USD LP valuation (metapool
+  base-LP decomposition + crypto-numeraire) (#3105); gateway-backed dynamic
+  pool resolution (#3191) and live refresh-on-read of the pool registry
+  (#3095); oracle/MEV-aware swap min-out guard (#3069) + executed-swap floor
+  anchored to oracle vs atomic sandwich (#3126); LP_CLOSE leg-coin resolution
+  into fee + principal USD (#3109); bespoke `curve_lp` Accountant scorecard
+  profile (tick cells N/A, not FAIL) + tricrypto2 fixture (#3114, #3123).
+- **Teardown verification + recovery wave.** Plan-B emergency `--discover`
+  with a sharp attribution gate (#3067); Plan-A on-chain reconciliation as a
+  loud check (#3062); fail-closed on-chain post-teardown verification (#3066)
+  with authoritative on-chain-verified closure counts (#3059); structured
+  decision-log audit trail (#3077); position_registry cutovers for lending
+  (#3055), GMX perps (#3060), and Pendle LP (#3061) + WARM-read enumeration
+  (#3050); first-class HF-safe `generate_lending_unwind` primitive (#3064) +
+  HF-safe unwind staircase for under-funded borrows (#3042);
+  `PERP_CANCEL_ORDER` intent verb recovering stranded GMX V2 pending-order
+  collateral (#3138) + fail-closed pending-unfilled-order detection (#3130);
+  Pendle on-chain closure verifier (#3104); on-chain vault post-condition +
+  transient-revert deferred retry (#3147); boot-time on-chain strand
+  detection with loud halt (#3098); teardown completeness enforcement +
+  spark_lender unwind (#3071).
+- **Typed LP range spec.** `LPOpenIntent.range_spec` — a discriminated
+  `PriceBand` (portable human prices; the default UX) | `TickBand` (raw
+  protocol ticks; escape hatch) union, with a shared `price_band_to_ticks`
+  seam adopted by uniswap_v3. (#3121, #3122)
+- **Backtesting: address-native rollout + robustness.** Historical data,
+  portfolio, snapshots, and metric attribution keyed by token address
+  (#3085, #3086, #3087, #3090, #3091); preflight support matrix aborts
+  unsupported (strategy, protocol, chain) combos upfront (#3161);
+  unsupported intents are refused instead of silently costed as no-ops
+  (#3155); numeraire-canonical performance expression + per-tick price
+  series (#3162); PnL seeded from token funding (#3131); PnL providers are
+  connector-owned (#3145).
+- **Valuation integrity.** Stablecoin de-peg cross-check wired into spot +
+  lending USD marks (#3118); oracle-vs-pool de-peg cross-check for Curve LP
+  NAV (#3051); held-YT USD valuation via the gateway YT mark (#3028).
+- **CLI.** `almanak strat test` market-condition injection for
+  condition-triggered logic (#3111); `ax` runnable from any cwd via a
+  standalone gateway (#3110); uniform sub-level `--chain`/`-c` + liquidation
+  threshold in `ax lending-reserves` (#3183).
+- **Euler V2 chain expansion** to Base / Arbitrum / Ethereum, with a
+  borrow-path fix (#3057).
+- **Aerodrome routing.** Reachable `swap_params` + per-pair routing with
+  classic fallback (#3119).
+- **New demos.** `benqi_looping` leverage loop (#3011); `metamorpho`
+  yield-floor entry/exit gating (#3014); `traderjoe_lp` rebalance hysteresis
+  (deadband + cooldown) (#3024).
+
+### Changed
+
+- **Serialized chain values are canonical lowercase names.** `ActionBundle`
+  and `ResolvedToken` / `TokenRef` wire shapes (and their SQLite/disk-cache
+  rows) now write `"ethereum"` where they wrote the UPPERCASE enum value
+  (`"ETHEREUM"`). Read paths resolve case-insensitively **forever**, so
+  records persisted before this change keep deserializing (pinned by
+  dedicated compat tests). The MCP `chains` resource served by the
+  agent-tools adapter now reports lowercase, sorted names.
+
+- **Teardown eligibility is now an authoritative opt-in (VIB-5474 / TD-16,
+  resolves VIB-5370).** The runner gated teardown on
+  `hasattr(strategy, "get_open_positions")` — a presence-sniff that never gated
+  anything (the method is abstract on `IntentStrategy`, so it is always present)
+  while `supports_teardown()` was dead API: an author who returned `False` to
+  protect a strategy that must not be force-closed was torn down anyway. The
+  gate is now the authoritative `IntentStrategy.supports_teardown()` (single
+  source of truth: `runner_models.strategy_supports_teardown`). It defaults to
+  `True` (default-safe — a position-holding strategy is never silently made
+  ineligible; only a literal `supports_teardown() -> False` opts out, so a
+  forgotten `return` cannot strand funds). An explicit `False` is now honoured at
+  the runner teardown trigger (refused loudly once per deployment, request left
+  pending for manual recovery). Teardown eligibility and dashboard position
+  observability stay decoupled: an opted-out strategy's positions keep being
+  reported so the operator can monitor and recover them. Strategies with no
+  positions should extend `StatelessStrategy` rather than returning `False`.
+
+- **Flash loans and prediction markets are withheld pending validation.**
+  Flash-loan intents are disabled and the `balancer_flash_arb` demo is
+  parked; Polymarket + flash loans are no longer listed in
+  `almanak info matrix`. The connectors remain in the codebase and should be
+  treated as experimental until re-listed. (#3132, #3034)
+- **ERC-20 approval sequencing consolidated onto one shared primitive**
+  (VIB-5492) — all connectors route approvals through the same
+  allowance-aware sequencing (including USDT-style reset-to-zero). (#3136)
+
 ### Removed
 
 - **BREAKING: the `Chain` enum is removed (`almanak.Chain`,
@@ -42,32 +145,82 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `imbalanced_amounts`) are driven by the connector-declared
   `lp_close_exit_selectors` capability rather than a protocol-name check.
 
-### Changed
+### Fixed
 
-- **Serialized chain values are canonical lowercase names.** `ActionBundle`
-  and `ResolvedToken` / `TokenRef` wire shapes (and their SQLite/disk-cache
-  rows) now write `"ethereum"` where they wrote the UPPERCASE enum value
-  (`"ETHEREUM"`). Read paths resolve case-insensitively **forever**, so
-  records persisted before this change keep deserializing (pinned by
-  dedicated compat tests). The MCP `chains` resource served by the
-  agent-tools adapter now reports lowercase, sorted names.
-
-- **Teardown eligibility is now an authoritative opt-in (VIB-5474 / TD-16,
-  resolves VIB-5370).** The runner gated teardown on
-  `hasattr(strategy, "get_open_positions")` — a presence-sniff that never gated
-  anything (the method is abstract on `IntentStrategy`, so it is always present)
-  while `supports_teardown()` was dead API: an author who returned `False` to
-  protect a strategy that must not be force-closed was torn down anyway. The
-  gate is now the authoritative `IntentStrategy.supports_teardown()` (single
-  source of truth: `runner_models.strategy_supports_teardown`). It defaults to
-  `True` (default-safe — a position-holding strategy is never silently made
-  ineligible; only a literal `supports_teardown() -> False` opts out, so a
-  forgotten `return` cannot strand funds). An explicit `False` is now honoured at
-  the runner teardown trigger (refused loudly once per deployment, request left
-  pending for manual recovery). Teardown eligibility and dashboard position
-  observability stay decoupled: an opted-out strategy's positions keep being
-  reported so the operator can monitor and recover them. Strategies with no
-  positions should extend `StatelessStrategy` rather than returning `False`.
+- **Teardown correctness.** V4 LP_CLOSE post-close verification treats an
+  empty position read as CLOSED (+ `lp_v4` label bridge) (#3193);
+  target-token no-op close + multi-position disambiguation (#3190);
+  `--discover` LP_CLOSE populates the pool so the oracle warms real tokens
+  (#3189); V4-aware registry preflight + orphan-candidate recovery net for
+  atomic-commit failures (#3181); Compound V3 market-key resolution on the
+  Plan-A path flips residuals to FAILED instead of silently UNVERIFIED
+  (#3180); TraderJoe-V2 + V4 post-tx reads pinned to the receipt block
+  (#3179); Plan-A LP reconciliation scoped to NFT protocols so a PASSED
+  ERC-1155 post-condition isn't mislabelled UNVERIFIED (#3178); zero-debt
+  Morpho isolated-collateral withdraw proceeds on empty-price teardown
+  (#3166); Pendle PT teardown is chain-derived with a framework-owned close
+  (#3167), PT/YT prices are warmed so the placeholder-price guard doesn't
+  block it (#3116), and Pendle LP_CLOSE no longer runs out of gas
+  (LP-token resolution + closure verifier) (#3128); YT teardown strand
+  (#3035); NO_ACCOUNTING wallet tokens are no longer stranded at teardown
+  (Lido STAKE) (#3041) with measured-ledger reconcile for all NO_ACCOUNTING
+  acquisitions (#3063); successful lending teardown no longer reports
+  false-FAILED (#3102); Fluid lending positions are token-keyed so two
+  supplies don't collapse (#3076); the runner teardown loop latches after a
+  failed teardown so it can't re-enter (#3137); teardown signals are honored
+  within ~15s via an interruptible inter-iteration wait (#3107); exit
+  amounts resolve live per-position at execution (#3056) over a
+  live-reconciling read path (#3054); the lending guard no longer conflates
+  unmeasured prices with LTV=0 (stranding collateral) (#3070); lending
+  revert selectors are decoded for operator clarity (#3048); standalone
+  teardown execute is wired to the gateway price oracle (#3089); auto-mode
+  is derived (not trusted) + hard stop on placeholder prices (#3068).
+- **Accounting.** N-leg (>2-coin) reconciliation root cause fixed — the
+  snapshot carries the N-coin token universe and an N-complete principal
+  (#3172), proven on a VOLATILE tricrypto round-trip (#3177); Curve LP USD
+  valuation via `virtual_price` (#3033); falsely-excluded Curve USD-stable
+  pools are valued (#3036); Curve crypto-numeraire pools book per-event USD
+  (#3129); ERC4626 vault NAV scaled by asset decimals (#3018);
+  UNAVAILABLE-confidence snapshots skipped in the drawdown fold + dashboard
+  NAV (#3017); V4 LP_CLOSE registry close lands with a typed collision error
+  (#3027); Pendle teardown LP_CLOSE stamps `gas_usd` + `price_inputs_json`
+  (#3025); held Pendle PT marked at the discounted PT→SY price, not the
+  asset rate (#3022); TraderJoe LB LP_OPEN stamps `cost_basis` (#3127);
+  Spark lending repricer stamps unmeasured instead of $0-at-HIGH-confidence
+  (#3096); Morpho Blue fails loud instead of serving silent placeholder
+  prices (#3106); N-coin `all_amounts` sorted numerically across JSON
+  round-trips (#3125).
+- **Curve execution.** Dead am3pool registry address corrected (#3115);
+  on-chain `coins(i)` order validated before positional crypto-LP marks
+  (#3112); receipt parser migrated to tagged ExtractOk/Missing/Error
+  (#3047) with decodes for RemoveLiquidityOne / RemoveLiquidityImbalance
+  (#3093), CryptoSwap AddLiquidity + LP-open min-LP protection (#3073), and
+  3-coin CryptoSwap RemoveLiquidity (#3074); approvals seeded from on-chain
+  allowance with USDT reset-to-zero (#3075); LP/swap gas seeded from live
+  `eth_estimateGas` with conservative static fallback (#3139);
+  `estimate_slippage` falls back to a connector swap quote (#3032);
+  `intent.max_slippage` honored on LP open/close (#3037); demo E2E batch —
+  Curve min_lp, L1 gas floor, lending legs, rate providers (#3079).
+- **Backtesting.** Strategy symbols resolve through the engine's registered
+  token map (#3158); plain-symbol reads bridge onto address-native keys
+  (#3156); strategy-facing funding reads feed PnL snapshots (#3153);
+  gas-asset price resolves through registered token addresses (#3152);
+  address tokens threaded into platform PnL runs (#3083); parameter sweeps
+  survive real strategies end-to-end — lazy report import, provider
+  ownership on close, error rows instead of sweep aborts, no silent mock
+  substitution (#3174); stale demo `token_funding` entries migrated to the
+  TokenFunding schema (#3159).
+- **Market data / routing.** Shape-aware `pool_reserves()` routing for
+  Solidly (Aerodrome/Velodrome) and V2 pools with classification safety
+  (#3185); Aerodrome swaps enforce `max_price_impact` + LP ticks must
+  straddle the current tick (#3108); Aerodrome `get_cl_position` bounded
+  retry on transient RPC errors (#3113).
+- **Misc.** Sub-1% price-impact limits render correctly in error messages
+  (#3040); Pendle swap/redemption amount extraction returns tagged results
+  (#3015); teardown leg visibility consolidated + LB-pair balance handle
+  resolved (#3016); `ax` honours an inline key + V4 lp-close by id (#3049);
+  the backtest test-controller surfaces config schema errors as 400 instead
+  of an opaque 500 (#3100).
 
 ## [2.20.0] - 2026-06-24
 

@@ -200,17 +200,18 @@ class MyStrategy(IntentStrategy):
 | `UnstakeIntent` | 取消质押代币 |
 | `PerpOpenIntent` | 开设永续合约头寸 |
 | `PerpCloseIntent` | 关闭永续合约头寸 |
-| `FlashLoanIntent` | 闪电贷操作 |
+| `FlashLoanIntent` | 闪电贷操作 _（实验性 — 测试中；未列入 `almanak info matrix`）_ |
 | `CollectFeesIntent` | 收取 LP 费用 |
-| `PredictionBuyIntent` | 购买预测市场份额 |
-| `PredictionSellIntent` | 出售预测市场份额 |
-| `PredictionRedeemIntent` | 赎回预测市场收益 |
+| `PredictionBuyIntent` | 购买预测市场份额 _（实验性 — 测试中；未列入 `almanak info matrix`）_ |
+| `PredictionSellIntent` | 出售预测市场份额 _（实验性 — 测试中；未列入 `almanak info matrix`）_ |
+| `PredictionRedeemIntent` | 赎回预测市场收益 _（实验性 — 测试中；未列入 `almanak info matrix`）_ |
 | `VaultDepositIntent` | 存入金库 |
 | `VaultRedeemIntent` | 从金库赎回 |
 | `WrapNativeIntent` | 包装原生代币（例如 ETH 转 WETH）。工厂方法: `Intent.wrap()` |
 | `UnwrapNativeIntent` | 解包原生代币（例如 WETH 转 ETH）。工厂方法: `Intent.unwrap()` |
 | `Intent.bridge()` | 跨链桥接代币（工厂方法，返回复合意图） |
 | `Intent.ensure_balance()` | 确保目标链上的最低代币余额（工厂方法，解析为桥接或持有） |
+| `Intent.sequence()` | 原子多步复合意图（`IntentSequence`），按顺序执行子意图并共享回滚语义 |
 
 ## 状态持久化（有状态策略必需）
 
