@@ -27,6 +27,10 @@ POOL_READER_SPEC = PoolReaderSpec(
     factory_addresses={chain: addrs["cl_factory"] for chain, addrs in AERODROME.items() if "cl_factory" in addrs},
     known_pools=_KNOWN_POOLS,
     get_pool_selector="0x28af8d0b",
+    # Slipstream keys pools by TICK SPACING, not Uniswap fee tier. Snapshot of
+    # the Base CL factory's ``tickSpacings()`` (governance-extensible — keep
+    # in sync if it grows).
+    candidate_pool_keys=(1, 10, 50, 100, 200, 2000),
 )
 
 __all__ = ["POOL_READER_SPEC"]

@@ -20,6 +20,10 @@ class PoolReaderSpec:
     known_pools: KnownPoolsByChain = field(default_factory=dict)
     get_pool_selector: str = V3_GET_POOL_SELECTOR
     aliases: tuple[str, ...] = field(default_factory=tuple)
+    # ``factory.getPool()`` third-arg candidates swept by best-pool resolution
+    # (VIB-4924 C1): fee tiers for the uint24 v3 family, tick spacings for the
+    # int24 Slipstream family. Default = the canonical Uniswap fee tiers.
+    candidate_pool_keys: tuple[int, ...] = (100, 500, 3000, 10000)
 
     @property
     def keys(self) -> tuple[str, ...]:

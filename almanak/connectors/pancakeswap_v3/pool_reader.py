@@ -31,6 +31,8 @@ POOL_READER_SPEC = PoolReaderSpec(
     factory_addresses={chain: PANCAKESWAP_V3[chain]["factory"] for chain in _FACTORY_CHAINS},
     known_pools=_KNOWN_POOLS,
     get_pool_selector=V3_GET_POOL_SELECTOR,
+    # PancakeSwap V3 uses a 2500 (0.25%) tier where Uniswap uses 3000 (0.3%).
+    candidate_pool_keys=(100, 500, 2500, 10000),
 )
 
 __all__ = ["POOL_READER_SPEC"]

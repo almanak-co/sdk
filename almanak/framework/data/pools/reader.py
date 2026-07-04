@@ -35,6 +35,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.concentrated_liquidity_math import Q96
+from almanak.connectors._strategy_base.pool_reader import PoolReaderSpec
 from almanak.connectors._strategy_base.v3_pool_abi import (
     V3_FEE_SELECTOR,
     V3_GET_POOL_SELECTOR,
@@ -229,15 +230,18 @@ class UniswapV3PoolPriceReader:
         source_name: Source identifier for DataMeta (default "alchemy_rpc").
     """
 
-    # Protocol-specific config — overridden by subclasses
+    # Protocol-specific config — overridden by subclasses. Values are bound
+    # from the connector-owned manifest spec (VIB-5047): the class attributes
+    # exist as defaults for direct construction; registry-dispatched instances
+    # are additionally bound to their spec in ``__init__``.
     _factory_addresses: Mapping[str, str] = UNISWAP_V3_FACTORY
     _known_pools: Mapping[str, Mapping[tuple[str, str, int], str]] = _KNOWN_POOLS
     protocol_name: str = "uniswap_v3"
-    _get_pool_selector: str = GET_POOL_SELECTOR
+    _get_pool_selector: str = _UNISWAP_POOL_READER_SPEC.get_pool_selector
     # Discriminator values swept during pool resolution. For Uniswap-style DEXs
     # these are fee tiers (uint24); tick-spacing forks (Aerodrome Slipstream)
     # override with their tick spacings. Consumed by ``resolve_best_pool_address``.
-    _candidate_pool_keys: tuple[int, ...] = (100, 500, 3000, 10000)
+    _candidate_pool_keys: tuple[int, ...] = _UNISWAP_POOL_READER_SPEC.candidate_pool_keys
 
     def __init__(
         self,
@@ -245,11 +249,24 @@ class UniswapV3PoolPriceReader:
         token_resolver: Any | None = None,
         cache_ttl_seconds: float = 2.0,
         source_name: str = "alchemy_rpc",
+        spec: PoolReaderSpec | None = None,
     ) -> None:
         self._rpc_call = rpc_call
         self._token_resolver = token_resolver
         self._cache_ttl = cache_ttl_seconds
         self._source_name = source_name
+        if spec is not None:
+            # Registry dispatch binds the instance to its connector spec so a
+            # manifest-declared protocol with no dedicated framework subclass
+            # still reads with its own factories / selector / sweep keys
+            # (VIB-5047). For the framework subclasses below, spec values are
+            # identical to the class attributes (drift-guarded by
+            # tests/unit/data/test_pool_reader_manifest_dispatch.py).
+            self._factory_addresses = spec.factory_addresses
+            self._known_pools = spec.known_pools
+            self.protocol_name = spec.protocol
+            self._get_pool_selector = spec.get_pool_selector
+            self._candidate_pool_keys = spec.candidate_pool_keys
         # Cache: {(pool_address_lower, chain): (mono_time, envelope)}
         self._cache: dict[tuple[str, str], tuple[float, DataEnvelope[PoolPrice]]] = {}
 
@@ -613,11 +630,10 @@ class AerodromePoolReader(UniswapV3PoolPriceReader):
     _factory_addresses: Mapping[str, str] = AERODROME_CL_FACTORY
     _known_pools: Mapping[str, Mapping[tuple[str, str, int], str]] = _AERODROME_KNOWN_POOLS
     protocol_name: str = "aerodrome"
-    _get_pool_selector: str = "0x28af8d0b"  # int24 (tick_spacing), not v3 uint24 (fee_tier)
-    # Slipstream keys pools by TICK SPACING, not Uniswap fee tier — getPool's
-    # third arg is the tick spacing. Snapshot of the Base CL factory's
-    # ``tickSpacings()`` (governance-extensible — keep in sync if it grows).
-    _candidate_pool_keys: tuple[int, ...] = (1, 10, 50, 100, 200, 2000)
+    # int24 (tick_spacing) getPool variant + the tick-spacing sweep — both
+    # connector-owned on the manifest spec (see aerodrome/pool_reader.py).
+    _get_pool_selector: str = _AERODROME_POOL_READER_SPEC.get_pool_selector
+    _candidate_pool_keys: tuple[int, ...] = _AERODROME_POOL_READER_SPEC.candidate_pool_keys
 
 
 # ---------------------------------------------------------------------------
@@ -641,8 +657,9 @@ class PancakeSwapV3PoolReader(UniswapV3PoolPriceReader):
     _factory_addresses: Mapping[str, str] = PANCAKESWAP_V3_FACTORY
     _known_pools: Mapping[str, Mapping[tuple[str, str, int], str]] = _PANCAKESWAP_KNOWN_POOLS
     protocol_name: str = "pancakeswap_v3"
-    # PancakeSwap V3 uses a 2500 (0.25%) tier where Uniswap uses 3000 (0.3%).
-    _candidate_pool_keys: tuple[int, ...] = (100, 500, 2500, 10000)
+    # PancakeSwap's native tiers (incl. 2500 where Uniswap uses 3000) —
+    # connector-owned on the manifest spec (see pancakeswap_v3/pool_reader.py).
+    _candidate_pool_keys: tuple[int, ...] = _PANCAKESWAP_POOL_READER_SPEC.candidate_pool_keys
 
 
 # ---------------------------------------------------------------------------
@@ -673,13 +690,19 @@ class SushiSwapV3PoolReader(UniswapV3PoolPriceReader):
 # PoolReaderRegistry
 # ---------------------------------------------------------------------------
 
-# Default mapping of protocol names to reader classes
-_PROTOCOL_READER_CLASSES: dict[str, type[UniswapV3PoolPriceReader]] = {
-    "uniswap_v3": UniswapV3PoolPriceReader,
-    "aerodrome": AerodromePoolReader,  # legacy name used by existing demo strategies
-    "aerodrome_slipstream": AerodromePoolReader,  # canonical name used by executor / CLI
-    "pancakeswap_v3": PancakeSwapV3PoolReader,
-    "sushiswap_v3": SushiSwapV3PoolReader,
+# Framework reader classes keyed by CANONICAL protocol only. Dispatch keys —
+# including aliases like "aerodrome_slipstream" — and every per-protocol data
+# knob derive from the connector manifest specs (POOL_READER_REGISTRY); this
+# map associates a canonical protocol with the framework class implementing
+# its read shape (all current specs share the v3 slot0 family). A manifest
+# spec with no entry here dispatches the spec-bound base reader, so adding a
+# v3-family connector requires NO edit to this module (VIB-5047 / blueprint 05
+# "dispatch by manifest, not a hardcoded protocol-name set").
+_READER_CLASS_BY_PROTOCOL: dict[str, type[UniswapV3PoolPriceReader]] = {
+    UniswapV3PoolPriceReader.protocol_name: UniswapV3PoolPriceReader,
+    AerodromePoolReader.protocol_name: AerodromePoolReader,
+    PancakeSwapV3PoolReader.protocol_name: PancakeSwapV3PoolReader,
+    SushiSwapV3PoolReader.protocol_name: SushiSwapV3PoolReader,
 }
 
 
@@ -714,8 +737,17 @@ class PoolReaderRegistry:
         self._source_name = source_name
         # Lazy cache: {protocol_name: reader_instance}
         self._readers: dict[str, UniswapV3PoolPriceReader] = {}
-        # Registered protocol classes (copy defaults; can be extended)
-        self._protocol_classes: dict[str, type[UniswapV3PoolPriceReader]] = dict(_PROTOCOL_READER_CLASSES)
+        # Dispatch table derived from the connector manifest registry
+        # (VIB-5047): every spec key (canonical + aliases) maps to the
+        # framework class for the spec's protocol, falling back to the
+        # spec-bound base reader for manifest specs with no dedicated class.
+        self._protocol_classes: dict[str, type[UniswapV3PoolPriceReader]] = {}
+        self._protocol_specs: dict[str, PoolReaderSpec] = {}
+        for spec in POOL_READER_REGISTRY.all():
+            reader_cls = _READER_CLASS_BY_PROTOCOL.get(spec.protocol.lower(), UniswapV3PoolPriceReader)
+            for key in spec.keys:
+                self._protocol_classes[key.lower()] = reader_cls
+                self._protocol_specs[key.lower()] = spec
 
     def get_reader(self, chain: str, protocol: str) -> UniswapV3PoolPriceReader:
         """Get or create a pool reader for a given protocol.
@@ -741,11 +773,17 @@ class PoolReaderRegistry:
             available = ", ".join(sorted(self._protocol_classes))
             raise ValueError(f"Unknown protocol '{protocol}'. Available: {available}")
 
+        # Custom classes registered via register_protocol() may keep the
+        # pre-VIB-5047 constructor shape — only pass ``spec`` when a manifest
+        # binding exists (register_protocol drops it for custom overrides).
+        spec = self._protocol_specs.get(protocol_lower)
+        kwargs: dict[str, Any] = {} if spec is None else {"spec": spec}
         reader = reader_cls(
             rpc_call=self._rpc_call,
             token_resolver=self._token_resolver,
             cache_ttl_seconds=self._cache_ttl,
             source_name=self._source_name,
+            **kwargs,
         )
         self._readers[protocol_lower] = reader
         return reader
@@ -762,6 +800,9 @@ class PoolReaderRegistry:
             reader_class: Reader class (must be UniswapV3PoolPriceReader or subclass).
         """
         self._protocol_classes[protocol_name.lower()] = reader_class
+        # A custom class owns its config outright — drop any manifest spec
+        # binding so its class attributes are not overridden at instantiation.
+        self._protocol_specs.pop(protocol_name.lower(), None)
         # Clear cached instance if overriding
         self._readers.pop(protocol_name.lower(), None)
 
@@ -782,6 +823,9 @@ class PoolReaderRegistry:
         chain_lower = chain.lower()
         result = []
         for name, cls in self._protocol_classes.items():
-            if chain_lower in cls._factory_addresses or chain_lower in cls._known_pools:
+            spec = self._protocol_specs.get(name)
+            factories = spec.factory_addresses if spec is not None else getattr(cls, "_factory_addresses", {})
+            known_pools = spec.known_pools if spec is not None else getattr(cls, "_known_pools", {})
+            if chain_lower in factories or chain_lower in known_pools:
                 result.append(name)
         return sorted(result)
