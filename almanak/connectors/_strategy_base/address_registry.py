@@ -43,6 +43,7 @@ from typing import ClassVar
 
 from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
+from almanak.core.constants import canonical_chain_name
 
 __all__ = [
     "AbiFamily",
@@ -177,7 +178,16 @@ class AddressRegistry:
         table = cls._load_table(protocol.lower())
         if table is None:
             return {}
-        return table.get(chain.lower()) or table.get(chain) or {}
+        entry = table.get(chain.lower()) or table.get(chain)
+        if not entry:
+            # Alias fallback ("bnb" -> "bsc"): connector tables key on the
+            # canonical ChainRegistry name, but callers may pass a declared
+            # alias (VIB-5293 defect class). Raw lookup stays first so any
+            # table that (incorrectly) keys an alias keeps its behavior.
+            canonical = canonical_chain_name(chain)
+            if canonical != chain.lower():
+                entry = table.get(canonical)
+        return entry or {}
 
     @classmethod
     def address_supported_chains(cls, protocol: str) -> frozenset[str]:

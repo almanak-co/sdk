@@ -175,3 +175,20 @@ def test_address_chains_ordered_contract(monkeypatch):
         "avalanche",
         "bsc",
     )
+
+
+def test_addresses_for_resolves_chain_alias_to_canonical():
+    """A declared ChainRegistry alias ("bnb" -> "bsc") resolves the same table
+    entry as the canonical name instead of an empty dict (VIB-5293 class)."""
+    canonical = addresses_for("uniswap_v3", "bsc")
+    assert canonical, "uniswap_v3 must publish a bsc address table"
+    assert addresses_for("uniswap_v3", "bnb") == canonical
+    assert resolve_contract_address("uniswap_v3", "bnb", "factory") == canonical["factory"]
+    # aster_perps is the VIB-5293 reporter: manifest advertises "bnb", table keys "bsc".
+    assert addresses_for("aster_perps", "bnb") == addresses_for("aster_perps", "bsc")
+
+
+def test_addresses_for_unknown_chain_still_returns_empty():
+    """Unknown chain strings keep the fail-closed empty-dict contract."""
+    assert addresses_for("uniswap_v3", "not_a_chain") == {}
+    assert resolve_contract_address("uniswap_v3", "not_a_chain", "factory") is None

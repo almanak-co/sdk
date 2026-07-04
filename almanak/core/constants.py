@@ -143,6 +143,19 @@ def resolve_chain_name(chain: str) -> str:
     return canonical
 
 
+def canonical_chain_name(chain: str) -> str:
+    """Best-effort alias-to-canonical chain normalization ("bnb" -> "bsc").
+
+    The tolerant sibling of :func:`resolve_chain_name` for boundary seams that
+    must not raise on unknown input: a recognized name, alias, or CAIP-2 id
+    resolves to its canonical lowercase name; anything else passes through
+    UNCHANGED so the caller's own fail-closed / unsupported-chain path fires
+    with the original value (VIB-5293 defect class).
+    """
+    descriptor = ChainRegistry.try_resolve(chain)
+    return descriptor.name if descriptor is not None else chain
+
+
 def get_chain_id(chain: str | int) -> int:
     """Get the numeric chain ID (EIP-155) for a chain name string or int.
 

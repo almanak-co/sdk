@@ -1231,6 +1231,71 @@ class TestDefaultChainInjection:
 
 
 # ===========================================================================
+# Test 9b: Chain Alias Normalization (VIB-5293 defect class)
+# ===========================================================================
+
+
+class TestChainAliasNormalization:
+    """Chain aliases ("bnb") canonicalize once at dispatch ("bsc")."""
+
+    @pytest.fixture
+    def mock_gw(self):
+        gw = _make_mock_gateway()
+        _setup_observe_response(gw)
+        return gw
+
+    def test_default_chain_alias_canonicalized_at_init(self, mock_gw):
+        """An aliased default_chain is stored canonical, so handlers that use
+        self._default_chain directly never see the alias."""
+        executor = _make_executor(mock_gw)
+        assert executor._default_chain == "arbitrum"  # canonical passthrough
+        aliased = ToolExecutor(mock_gw, policy=AgentPolicy(), default_chain="bnb")
+        assert aliased._default_chain == "bsc"
+        from almanak.core.constants import canonical_chain_name
+
+        assert canonical_chain_name("bnb") == "bsc"
+        assert canonical_chain_name("eth") == "ethereum"
+        assert canonical_chain_name("eip155:56") == "bsc"  # CAIP-2 form
+        assert canonical_chain_name("not_a_chain") == "not_a_chain"  # tolerant passthrough
+
+    def test_canonicalize_chain_args_helper(self):
+        """The dispatch helper rewrites every chain-shaped field and keeps
+        dict identity when nothing needs rewriting."""
+        from almanak.framework.agent_tools.executor import _canonicalize_chain_args
+
+        args = {"chain": "bnb", "from_chain": "eth", "to_chain": "base", "token": "WBNB"}
+        out = _canonicalize_chain_args(args)
+        assert out == {"chain": "bsc", "from_chain": "ethereum", "to_chain": "base", "token": "WBNB"}
+        assert args["chain"] == "bnb"  # input not mutated
+
+        canonical = {"chain": "bsc", "destination_chain": "arbitrum"}
+        assert _canonicalize_chain_args(canonical) is canonical  # identity on no-op
+        assert _canonicalize_chain_args({"chain": ""}) == {"chain": ""}  # empty untouched
+        assert _canonicalize_chain_args({"chain": 42}) == {"chain": 42}  # non-str untouched
+
+    @pytest.mark.asyncio
+    async def test_alias_allowlist_still_permits_canonicalized_chain(self, mock_gw):
+        """An operator allowlist written with an alias ({"bnb"}) must keep
+        permitting requests for the same chain under either spelling."""
+        executor = _make_executor(mock_gw, allowed_chains=["bnb"])
+        _setup_price_response(mock_gw, price="565.75")
+        for spelling in ("bnb", "bsc"):
+            result = await executor.execute("get_price", {"token": "WBNB", "chain": spelling})
+            assert result.status == "success", f"denied for chain={spelling}: {result.error}"
+
+    @pytest.mark.asyncio
+    async def test_explicit_chain_alias_normalized_before_handlers(self, mock_gw):
+        """chain="bnb" reaches the gateway request as canonical "bsc"."""
+        executor = _make_executor(mock_gw, allowed_chains=["arbitrum", "bsc", "bnb"])
+        _setup_price_response(mock_gw, price="565.75")
+
+        result = await executor.execute("get_price", {"token": "WBNB", "chain": "bnb"})
+        assert result.status == "success"
+        request = mock_gw.market.GetPrice.call_args[0][0]
+        assert request.chain == "bsc"
+
+
+# ===========================================================================
 # Test 10: Dry Run Isolation
 # ===========================================================================
 

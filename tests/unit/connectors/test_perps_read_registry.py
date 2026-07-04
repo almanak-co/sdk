@@ -190,3 +190,26 @@ def test_seam_is_egress_free_and_lazily_imports_connectors():
         if stripped.startswith(("import ", "from ")):
             assert "almanak.connectors.gmx_v2" not in stripped
             assert "almanak.connectors.aster_perps" not in stripped
+
+
+def test_alias_chain_resolves_same_plan_as_canonical():
+    """VIB-5293: a manifest-advertised chain alias ("bnb") must materialise the
+    same read plan as the canonical name ("bsc") instead of an inert ``None``
+    (which would silently re-defeat position discovery for the venue)."""
+    wallet = "0x1111111111111111111111111111111111111111"
+    via_alias = PerpsReadRegistry.resolve_plan("aster_perps", PerpsPositionQuery(chain="bnb", wallet_address=wallet))
+    via_canonical = PerpsReadRegistry.resolve_plan("aster_perps", PerpsPositionQuery(chain="bsc", wallet_address=wallet))
+    assert via_canonical is not None
+    assert via_alias is not None
+    assert via_alias.query.chain == "bsc"
+    assert via_alias.query.targets == via_canonical.query.targets
+    assert via_alias.query.markets == via_canonical.query.markets
+    assert [(c.to, c.data) for c in via_alias.calls] == [(c.to, c.data) for c in via_canonical.calls]
+
+
+def test_canonical_chain_is_untouched_by_alias_normalization():
+    """Canonical inputs are a no-op (a venue's own chain normalizes to itself)."""
+    wallet = "0x1111111111111111111111111111111111111111"
+    plan = PerpsReadRegistry.resolve_plan("hyperliquid", PerpsPositionQuery(chain="hyperevm", wallet_address=wallet))
+    assert plan is not None
+    assert plan.query.chain == "hyperevm"

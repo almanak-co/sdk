@@ -38,6 +38,7 @@ from almanak.connectors._strategy_base.perps_read_base import (
     PerpsPositionValue,
     PerpsReadSpec,
 )
+from almanak.core.constants import canonical_chain_name
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,13 @@ class PerpsReadRegistry:
             logger.debug("No perps-read spec for protocol %s", protocol)
             return None
 
+        # Canonicalize the chain once at the seam ("bnb" -> "bsc") so a
+        # manifest-advertised alias resolves to the same plan as the canonical
+        # name instead of an inert None read (VIB-5293).
+        canonical_chain = canonical_chain_name(query.chain)
+        if canonical_chain != query.chain:
+            query = replace(query, chain=canonical_chain)
+
         targets: dict[str, str] = {}
         for role, kinds in spec.contract_kinds.items():
             address = AddressRegistry.resolve_contract_address(key, query.chain, kinds)
@@ -219,7 +227,7 @@ class PerpsReadRegistry:
         protocol is unknown or the market is unrecognised (callers fail closed).
         """
         spec = cls._load_spec(cls._normalize(protocol))
-        return spec.market_metadata(market_address, chain) if spec is not None else None
+        return spec.market_metadata(market_address, canonical_chain_name(chain)) if spec is not None else None
 
     @classmethod
     def value_position(cls, protocol: str, **kwargs: Any) -> PerpsPositionValue | None:

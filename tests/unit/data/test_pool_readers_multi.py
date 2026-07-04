@@ -525,11 +525,14 @@ class TestPoolReaderRegistry:
         assert "aerodrome" not in protos
 
     def test_protocols_for_chain_bsc(self):
-        """BSC supports PancakeSwap V3 only."""
+        """BSC dispatches the V3-family readers with a bsc factory (no CL/aerodrome)."""
         registry = PoolReaderRegistry(rpc_call=self._noop_rpc)
         protos = registry.protocols_for_chain("bsc")
         assert "pancakeswap_v3" in protos
-        assert "uniswap_v3" not in protos
+        assert "sushiswap_v3" in protos
+        # uniswap_v3 ships a bsc factory (addresses.py) and joined _FACTORY_CHAINS
+        # with the bnb/bsc alias-normalization fix (VIB-5293 class).
+        assert "uniswap_v3" in protos
         assert "aerodrome" not in protos
 
     def test_protocols_for_unknown_chain(self):

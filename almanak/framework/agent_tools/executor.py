@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from pydantic import ValidationError
 
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.core.constants import canonical_chain_name
 from almanak.framework.agent_tools.approval import (
     ApprovalConfig,
     ApprovalStatus,
@@ -53,6 +54,28 @@ if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
+
+
+def _canonicalize_chain_args(arguments: dict) -> dict:
+    """Return ``arguments`` with chain-shaped fields alias-canonicalized.
+
+    Rewrites ``chain`` / ``destination_chain`` / ``from_chain`` / ``to_chain``
+    (the same vocabulary ``PolicyEngine._check_chain_allowed`` inspects) to
+    their canonical ChainRegistry names ("bnb" -> "bsc") so per-tool handlers'
+    chain-keyed table lookups (factory addresses, PoolDataProvider configs,
+    token registries) never see an alias (VIB-5293 defect class). Unknown
+    values pass through for the handlers' own unsupported-chain errors.
+    Returns the original dict unchanged (same identity) when nothing rewrites.
+    """
+    updates: dict[str, str] = {}
+    for key in ("chain", "destination_chain", "from_chain", "to_chain"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value:
+            canonical = canonical_chain_name(value)
+            if canonical != value:
+                updates[key] = canonical
+    return {**arguments, **updates} if updates else arguments
+
 
 # Default protocol fallbacks for agent tools whose ``protocol`` request field
 # is optional. This is the one place a protocol literal is *semantically*
@@ -267,7 +290,7 @@ class ToolExecutor:
             default_wallet=wallet_address,
         )
         self._deployment_id = deployment_id
-        self._default_chain = default_chain
+        self._default_chain = canonical_chain_name(default_chain)
         # (chain, network) -> Multicall3 eth_getCode probe result (VIB-4951).
         self._multicall3_probe_cache: dict[tuple[str, str], bool] = {}
         self._alert_manager = alert_manager
@@ -613,6 +636,10 @@ class ToolExecutor:
         if "chain" not in arguments and hasattr(tool_def.request_schema, "model_fields"):
             if "chain" in tool_def.request_schema.model_fields:
                 arguments = {**arguments, "chain": self._default_chain}
+
+        # 1c. Canonicalize chain aliases ("bnb" -> "bsc") once at dispatch
+        # (VIB-5293 defect class).
+        arguments = _canonicalize_chain_args(arguments)
 
         # Normalize token0/token1 aliases for pool tools.
         # Reject conflicting values (e.g., token_a="WETH" and token0="USDC") rather than

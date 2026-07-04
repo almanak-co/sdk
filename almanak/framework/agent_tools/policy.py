@@ -21,6 +21,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.core.constants import canonical_chain_name
 from almanak.framework.agent_tools.catalog import RiskTier, ToolDefinition
 from almanak.framework.agent_tools.errors import RiskBlockedError
 
@@ -703,7 +704,10 @@ class PolicyEngine:
     def _check_chain_allowed(self, args: dict, violations: list[str], suggestions: list[str]) -> None:
         if self.policy.allowed_chains is None:
             return
-        allowed_lower = {c.lower() for c in self.policy.allowed_chains}
+        # Alias-insensitive on BOTH sides ("bnb" == "bsc"): an operator's
+        # allowlist entry and the request value may use different spellings
+        # of the same chain; neither may be spuriously denied.
+        allowed_canonical = {canonical_chain_name(c.lower()) for c in self.policy.allowed_chains}
         sorted_allowed = sorted(self.policy.allowed_chains)
         nested = self._get_nested_params(args)
         # Check all chain-like fields: chain, destination_chain, from_chain, to_chain
@@ -717,7 +721,7 @@ class PolicyEngine:
             # Fallback on missing OR invalid top-level type (compile_intent buries fields inside params)
             if not isinstance(value, str) or not value:
                 value = nested.get(key)
-            if isinstance(value, str) and value and value.lower() not in allowed_lower:
+            if isinstance(value, str) and value and canonical_chain_name(value.lower()) not in allowed_canonical:
                 violations.append(f"{label} '{value}' is not allowed.")
                 suggestions.append(f"Allowed chains: {sorted_allowed}")
 

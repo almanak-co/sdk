@@ -7,7 +7,7 @@ from almanak.connectors._strategy_base.v3_pool_abi import V3_GET_POOL_SELECTOR
 
 from .addresses import UNISWAP_V3
 
-_FACTORY_CHAINS = ("ethereum", "arbitrum", "optimism", "polygon", "base")
+_FACTORY_CHAINS = ("ethereum", "arbitrum", "optimism", "polygon", "base", "bsc")
 
 _KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
     "ethereum": {
