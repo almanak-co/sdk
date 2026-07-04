@@ -29,6 +29,10 @@ from almanak.connectors._strategy_base.agent_read_registry import (
     AgentReadCapability,
     AgentReadConnector,
 )
+from almanak.connectors._strategy_base.lending_reserve_read import (
+    LendingReserveDiscoveryPlan,
+    aave_fork_reserve_discovery_plan,
+)
 
 
 class AaveV3AgentReadConnector(AgentReadConnector, AgentReadCapability):
@@ -38,7 +42,7 @@ class AaveV3AgentReadConnector(AgentReadConnector, AgentReadCapability):
     kind: ClassVar[ProtocolKind] = ProtocolKind.LENDING
 
     def agent_read_keys(self) -> frozenset[str]:
-        return frozenset({"lending_account"})
+        return frozenset({"lending_account", "lending_reserves"})
 
     def factory_address(self, chain: str) -> str | None:
         return None
@@ -55,6 +59,14 @@ class AaveV3AgentReadConnector(AgentReadConnector, AgentReadCapability):
         from almanak.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
 
         return AAVE_V3_POOL_ADDRESSES.get(chain)
+
+    def lending_reserve_discovery_plan(self, chain: str) -> LendingReserveDiscoveryPlan | None:
+        from almanak.connectors._strategy_base.address_registry import AddressRegistry
+
+        provider = AddressRegistry.resolve_contract_address("aave_v3", chain, "pool_data_provider")
+        if not provider:
+            return None
+        return aave_fork_reserve_discovery_plan("aave_v3", provider)
 
 
 __all__ = ["AaveV3AgentReadConnector"]

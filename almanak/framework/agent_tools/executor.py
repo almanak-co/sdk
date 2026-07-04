@@ -268,6 +268,8 @@ class ToolExecutor:
         )
         self._deployment_id = deployment_id
         self._default_chain = default_chain
+        # (chain, network) -> Multicall3 eth_getCode probe result (VIB-4951).
+        self._multicall3_probe_cache: dict[tuple[str, str], bool] = {}
         self._alert_manager = alert_manager
         self._tracer = tracer or DecisionTracer()
         # Allowlist of known Safe addresses for execution_wallet validation.
@@ -2627,82 +2629,91 @@ class ToolExecutor:
         rest. *Enumeration* failure, by contrast, is fatal: a partial list
         would silently recreate the blind spot.
         """
-        from almanak.connectors._strategy_base.base.lending.aave_helpers import (
-            _AAVE_GET_ALL_RESERVES_TOKENS_SELECTOR,
-            _AAVE_GET_RESERVE_CONFIG_SELECTOR,
-            _resolve_pool_data_provider,
-            decode_all_reserves_tokens,
-            decode_reserve_configuration_data,
-        )
+        from almanak.connectors._strategy_agent_tool_registry import STRATEGY_AGENT_READ_REGISTRY
 
         chain = args.get("chain", self._default_chain)
         network = args.get("network", "")
         protocol = args.get("protocol", DEFAULT_LENDING_PROTOCOL)
         asset_filter = (args.get("asset") or "").strip()
 
-        # v1 is Aave-V3 / Aave-V2-fork shaped — they share the
-        # getAllReservesTokens / getReserveConfigurationData ABI.
-        if protocol != DEFAULT_LENDING_PROTOCOL:
+        # VIB-4951: dispatch through the connector-owned reserve-discovery
+        # capability — no protocol branches, no Aave imports in this handler.
+        cap = STRATEGY_AGENT_READ_REGISTRY.lookup(protocol)
+        if cap is None or "lending_reserves" not in cap.agent_read_keys():
+            supported = sorted(
+                c.protocol
+                for c in STRATEGY_AGENT_READ_REGISTRY.capabilities()
+                if "lending_reserves" in c.agent_read_keys()
+            )
             return ToolResponse(
                 status="error",
                 error=_error_dict(
                     AgentErrorCode.VALIDATION_ERROR,
-                    f"list_lending_reserves: unsupported protocol '{protocol}'. v1 supports: ['aave_v3']",
+                    f"list_lending_reserves: unsupported protocol '{protocol}'. Supported: {supported}",
                 ),
             )
 
-        provider = _resolve_pool_data_provider(chain, protocol)
-        if not provider:
+        plan = cap.lending_reserve_discovery_plan(chain)
+        if plan is None:
             return ToolResponse(
                 status="error",
                 error=_error_dict(
                     AgentErrorCode.UNSUPPORTED_CHAIN,
-                    f"{protocol} PoolDataProvider not configured on chain={chain}",
+                    f"{protocol} reserve discovery not configured on chain={chain}",
                 ),
             )
 
-        # Enumerate the live on-chain reserve set. Fatal on failure — falling
-        # back to a partial / curated list would silently reintroduce the
-        # discovery blind spot this tool exists to remove.
-        ok, raw = self._rpc_call(chain, provider, _AAVE_GET_ALL_RESERVES_TOKENS_SELECTOR, "aave_all_reserves", network)
-        if not ok:
-            return ToolResponse(
-                status="error",
-                error=_error_dict(AgentErrorCode.RPC_FAILED, f"getAllReservesTokens() failed: {raw}", recoverable=True),
-            )
-        tokens = decode_all_reserves_tokens(raw)
-        if tokens is None:
-            return ToolResponse(
-                status="error",
-                error=_error_dict(
-                    AgentErrorCode.RPC_FAILED, "could not decode getAllReservesTokens() response", recoverable=True
-                ),
-            )
+        # Enumerate the reserve set. Call-enumerated plans (Aave forks) read it
+        # live — fatal on failure, since a partial / curated list would silently
+        # reintroduce the discovery blind spot this tool exists to remove.
+        # Static-enumerated plans (Compound comets, Morpho markets) list the
+        # connector's catalogued markets directly.
+        if plan.enumeration_call is not None and plan.decode_enumeration is not None:
+            enum_call = plan.enumeration_call
+            ok, raw = self._rpc_call(chain, enum_call.to, enum_call.data, enum_call.id, network)
+            if not ok:
+                return ToolResponse(
+                    status="error",
+                    error=_error_dict(
+                        AgentErrorCode.RPC_FAILED, f"reserve enumeration failed: {raw}", recoverable=True
+                    ),
+                )
+            try:
+                entries = plan.decode_enumeration(raw)
+            except ValueError as exc:
+                return ToolResponse(
+                    status="error",
+                    error=_error_dict(
+                        AgentErrorCode.RPC_FAILED, f"could not decode reserve enumeration: {exc}", recoverable=True
+                    ),
+                )
+        else:
+            entries = list(plan.static_entries or ())
 
         # Optional single-reserve filter (case-insensitive symbol match).
         # Applied BEFORE the DOS cap so a filtered asset that sorts past the cap
         # boundary on a huge reserve set isn't wrongly reported as not-active;
-        # the "active reserves" hint also lists the full enumerated set.
+        # the "listed reserves" hint also lists the full enumerated set.
         if asset_filter:
-            filtered = [(s, a) for (s, a) in tokens if s.lower() == asset_filter.lower()]
+            filtered = [e for e in entries if e.symbol.lower() == asset_filter.lower()]
             if not filtered:
-                known = sorted(s for s, _ in tokens)
+                known = sorted({e.symbol for e in entries})
                 return ToolResponse(
                     status="error",
                     error=_error_dict(
                         AgentErrorCode.VALIDATION_ERROR,
                         # Pre-config-read we only know the symbol is listed by
-                        # getAllReservesTokens(), not that isActive==true.
+                        # the enumeration, not that isActive==true.
                         f"Asset '{asset_filter}' is not a listed reserve on {protocol} {chain}. Listed reserves: {known}",
                     ),
                 )
-            tokens = filtered
+            entries = filtered
 
         # DOS cap mirroring list_lp_positions: a hostile / buggy provider can't
         # make us issue an unbounded number of follow-up config reads. (After
         # the filter, so a single-asset query is never truncated.)
         _MAX_RESERVES = 512
-        total_matched = len(tokens)  # reserves matching the query before the cap
+        total_matched = len(entries)  # reserves matching the query before the cap
         truncated = total_matched > _MAX_RESERVES
         truncation_reason = "max_reserves" if truncated else ""
         if truncated:
@@ -2713,37 +2724,25 @@ class ToolExecutor:
                 total_matched,
                 _MAX_RESERVES,
             )
-            tokens = tokens[:_MAX_RESERVES]
+            entries = entries[:_MAX_RESERVES]
 
         # Bound total fan-out latency: short per-call timeout + an overall
         # wall-clock budget started after enumeration. On budget exhaustion we
         # stop early and flag truncation (latency_budget_exceeded) rather than
         # block a read-only discovery call for minutes on a slow gateway.
+        # Static-config rows are free (no RPC) and never consume the budget.
+        #
+        # Live config reads batch through Multicall3 aggregate3 when the
+        # contract is verified on the chain (eth_getCode probe, cached) and
+        # the read set is large enough to pay for the probe; otherwise (or on
+        # any batch-level failure) they fall back to the bounded serial path.
+        # Per-reserve fail-open is preserved in both lanes (VIB-4951).
         reserves: list[dict] = []
-        budget_start = time.monotonic()
-        for symbol, address in tokens:
-            # Hard bound: stop when the budget is spent, and clamp each call's
-            # timeout to the remaining budget so total wall-clock never exceeds
-            # _LENDING_RESERVES_LATENCY_BUDGET_S (a pre-call check alone could be
-            # overshot by up to one per-call timeout).
-            remaining = _LENDING_RESERVES_LATENCY_BUDGET_S - (time.monotonic() - budget_start)
-            if remaining <= 0:
-                truncated = True
-                truncation_reason = "latency_budget_exceeded"
-                logger.warning(
-                    "list_lending_reserves: %s %s exceeded %.0fs latency budget after %d/%d reserves; "
-                    "returning partial (truncated=true)",
-                    protocol,
-                    chain,
-                    _LENDING_RESERVES_LATENCY_BUDGET_S,
-                    len(reserves),
-                    total_matched,
-                )
-                break
-            call_timeout = min(_LENDING_RESERVES_PER_CALL_TIMEOUT_S, remaining)
+        pending: list[tuple[int, Any]] = []  # (row index, ReserveEntry with a live config_call)
+        for entry in entries:
             row: dict = {
-                "symbol": symbol,
-                "address": address.lower(),
+                "symbol": entry.symbol,
+                "address": entry.address.lower(),
                 "borrowing_enabled": None,
                 "usage_as_collateral_enabled": None,
                 "is_active": None,
@@ -2752,34 +2751,33 @@ class ToolExecutor:
                 "liquidation_threshold_bps": None,
                 "error": "",
             }
-            asset_padded = address.removeprefix("0x").lower().zfill(64)
-            ok, raw = self._rpc_call(
-                chain,
-                provider,
-                _AAVE_GET_RESERVE_CONFIG_SELECTOR + asset_padded,
-                f"aave_reserve_cfg:{symbol}",
-                network,
-                timeout=call_timeout,
-            )
-            if not ok:
-                row["error"] = raw
-                reserves.append(row)
-                continue
-            cfg = decode_reserve_configuration_data(raw)
-            if cfg is None:
-                raw_len = len(raw) if isinstance(raw, str) else 0
-                row["error"] = f"unexpected reserve-config payload (len={raw_len} hex chars)"
-                reserves.append(row)
-                continue
-            row.update(
-                borrowing_enabled=cfg.borrowing_enabled,
-                usage_as_collateral_enabled=cfg.usage_as_collateral_enabled,
-                is_active=cfg.is_active,
-                is_frozen=cfg.is_frozen,
-                ltv_bps=cfg.ltv,
-                liquidation_threshold_bps=cfg.liquidation_threshold,
-            )
             reserves.append(row)
+            if entry.static_config is not None:
+                self._apply_reserve_config(row, entry.static_config)
+            elif entry.config_call is None or plan.decode_config is None:
+                row["error"] = "no config source declared for reserve"
+            else:
+                pending.append((len(reserves) - 1, entry))
+
+        budget_start = time.monotonic()
+        if pending:
+            exhausted_at = self._resolve_reserve_configs(chain, network, plan, reserves, pending, budget_start)
+            if exhausted_at is not None:
+                # v1 semantics: budget exhaustion returns a PARTIAL list —
+                # everything from the first unresolved live row onward is
+                # dropped and the response flags truncation.
+                truncated = True
+                truncation_reason = "latency_budget_exceeded"
+                logger.warning(
+                    "list_lending_reserves: %s %s exceeded %.0fs latency budget after %d/%d reserves; "
+                    "returning partial (truncated=true)",
+                    protocol,
+                    chain,
+                    _LENDING_RESERVES_LATENCY_BUDGET_S,
+                    exhausted_at,
+                    total_matched,
+                )
+                reserves = reserves[:exhausted_at]
 
         return ToolResponse(
             status="success",
@@ -2787,7 +2785,7 @@ class ToolExecutor:
                 "schema_version": 1,
                 "chain": chain,
                 "protocol": protocol,
-                "pool_data_provider": provider,
+                "pool_data_provider": plan.provider_address,
                 "count": len(reserves),
                 "total_matched": total_matched,
                 "truncated": truncated,
@@ -2795,6 +2793,174 @@ class ToolExecutor:
                 "reserves": reserves,
             },
         )
+
+    @staticmethod
+    def _apply_reserve_config(row: dict, cfg: Any) -> None:
+        """Copy a decoded ReserveConfigRow onto a tool response row."""
+        row.update(
+            borrowing_enabled=cfg.borrowing_enabled,
+            usage_as_collateral_enabled=cfg.usage_as_collateral_enabled,
+            is_active=cfg.is_active,
+            is_frozen=cfg.is_frozen,
+            ltv_bps=cfg.ltv_bps,
+            liquidation_threshold_bps=cfg.liquidation_threshold_bps,
+        )
+        if cfg.extra:
+            row["detail"] = dict(cfg.extra)
+
+    def _resolve_reserve_configs(
+        self,
+        chain: str,
+        network: str,
+        plan: Any,
+        reserves: list[dict],
+        pending: list[tuple[int, Any]],
+        budget_start: float,
+    ) -> int | None:
+        """Resolve live per-reserve config reads, batched where possible.
+
+        Fills ``reserves`` rows in place. Returns ``None`` on completion, or
+        the row index of the first UNRESOLVED entry when the latency budget
+        ran out (the caller trims the list and flags truncation, preserving
+        the v1 partial-result contract).
+        """
+        from almanak.framework.agent_tools.multicall import MULTICALL3_MAX_BATCH
+
+        # The getCode probe costs one RPC — only worth it for larger read sets.
+        _MULTICALL3_MIN_BATCH = 8
+        use_multicall = len(pending) >= _MULTICALL3_MIN_BATCH and self._multicall3_available(chain, network)
+
+        cursor = 0
+        while cursor < len(pending):
+            remaining = _LENDING_RESERVES_LATENCY_BUDGET_S - (time.monotonic() - budget_start)
+            if remaining <= 0:
+                return pending[cursor][0]
+            if use_multicall:
+                chunk = pending[cursor : cursor + MULTICALL3_MAX_BATCH]
+                if self._resolve_chunk_via_multicall3(chain, network, plan, reserves, chunk, remaining):
+                    cursor += len(chunk)
+                    continue
+                # Batch lane failed (RPC error / undecodable blob) — degrade to
+                # serial for the rest rather than fabricating rows.
+                use_multicall = False
+                continue
+            row_index, entry = pending[cursor]
+            call_timeout = min(_LENDING_RESERVES_PER_CALL_TIMEOUT_S, remaining)
+            ok, raw = self._rpc_call(
+                chain,
+                entry.config_call.to,
+                entry.config_call.data,
+                entry.config_call.id,
+                network,
+                timeout=call_timeout,
+            )
+            row = reserves[row_index]
+            if not ok:
+                row["error"] = raw
+            else:
+                self._decode_config_into_row(plan, row, raw)
+            cursor += 1
+        return None
+
+    def _resolve_chunk_via_multicall3(
+        self,
+        chain: str,
+        network: str,
+        plan: Any,
+        reserves: list[dict],
+        chunk: list[tuple[int, Any]],
+        remaining: float,
+    ) -> bool:
+        """Resolve one aggregate3 chunk. True on success (rows filled,
+        including per-call fail-open); False to trigger serial fallback."""
+        from almanak.framework.agent_tools.multicall import (
+            MULTICALL3_ADDRESS,
+            decode_aggregate3,
+            encode_aggregate3,
+        )
+
+        try:
+            calldata = encode_aggregate3([(e.config_call.to, e.config_call.data) for _, e in chunk])
+        except Exception:  # noqa: BLE001 — malformed connector calldata degrades to serial, never crashes the tool
+            return False
+        ok, raw = self._rpc_call(
+            chain,
+            MULTICALL3_ADDRESS,
+            calldata,
+            f"multicall3_reserves:{chunk[0][0]}",
+            network,
+            timeout=min(10.0, remaining),
+        )
+        if not ok:
+            return False
+        results = decode_aggregate3(raw, expected=len(chunk))
+        if results is None:
+            return False
+        for (row_index, _entry), (call_ok, result_hex) in zip(chunk, results, strict=True):
+            row = reserves[row_index]
+            if not call_ok:
+                row["error"] = "execution reverted (multicall3 aggregate3 inner call)"
+                continue
+            self._decode_config_into_row(plan, row, result_hex)
+        return True
+
+    def _decode_config_into_row(self, plan: Any, row: dict, raw: str) -> None:
+        """Decode one config payload into a row, fail-open on decode error."""
+        try:
+            cfg = plan.decode_config(raw)
+        except ValueError:
+            raw_len = len(raw) if isinstance(raw, str) else 0
+            row["error"] = f"unexpected reserve-config payload (len={raw_len} hex chars)"
+            return
+        self._apply_reserve_config(row, cfg)
+
+    def _multicall3_available(self, chain: str, network: str) -> bool:
+        """Probe (and cache) whether Multicall3 is deployed on ``chain``.
+
+        Never assumes the canonical CREATE2 address exists everywhere —
+        verified via ``eth_getCode``; any probe failure means unavailable
+        (clean serial fallback, never a crash)."""
+        cache_key = (chain, network)
+        cached = self._multicall3_probe_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        from almanak.framework.agent_tools.multicall import MULTICALL3_ADDRESS
+
+        try:
+            from almanak.gateway.proto import gateway_pb2
+
+            response = self._client.rpc.Call(
+                gateway_pb2.RpcRequest(
+                    chain=chain,
+                    method="eth_getCode",
+                    params=json.dumps([MULTICALL3_ADDRESS, "latest"]),
+                    id="multicall3_getcode",
+                    network=network,
+                ),
+                timeout=5.0,
+            )
+        except Exception:  # noqa: BLE001 — probe FAULT = unavailable this call, never fatal
+            # Do NOT cache: a transient RPC failure is not a measurement of
+            # the chain (Empty != Zero applied to the cache). The next call
+            # re-probes instead of pinning the serial lane for the executor
+            # lifetime (codex review, PR #3197).
+            return False
+        # Mirror _rpc_call's result contract: gateway results are
+        # JSON-encoded. A JSON-RPC error envelope decodes to a dict —
+        # never treat it as bytecode (gemini review, PR #3197).
+        if not getattr(response, "success", False) or not response.result:
+            return False  # fault-shaped: unmeasured, not cached
+        try:
+            parsed = json.loads(response.result)
+        except (json.JSONDecodeError, TypeError):
+            return False  # malformed: unmeasured, not cached
+        if not isinstance(parsed, str) or not parsed.startswith("0x"):
+            return False  # error envelope / wrong shape: unmeasured, not cached
+        # MEASURED outcome — cache both directions: real bytecode => True,
+        # measurably empty code (contract genuinely absent) => False.
+        available = len(parsed.removeprefix("0x")) > 0
+        self._multicall3_probe_cache[cache_key] = available
+        return available
 
     # crap-allowlist: VIB-4801 mechanical NATIVE_TOKEN_SYMBOLS -> ChainRegistry cutover in pre-existing high-CRAP function (cc preserved at 29 by extracting _native_symbol_for_chain). Function was already over threshold on main (CRAP=49 at cc=29 / cov=71%); refactor of the broader function tracked in VIB-4139.
     async def _execute_get_portfolio(self, args: dict) -> ToolResponse:  # noqa: C901

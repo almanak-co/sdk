@@ -4,6 +4,14 @@ from almanak.core.chains import ChainRegistry
 
 ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
+# Multicall3's canonical CREATE2 deployment address (github.com/mds1/multicall3).
+# Chain-agnostic by construction (same address on 250+ chains) but NOT
+# universal — consumers MUST verify presence per chain via eth_getCode before
+# use (VIB-4951); known incorrect deployments exist. Lives here beside
+# ETH_ADDRESS as vital infra, not a per-protocol contract: pools/markets/
+# vaults still belong in connector AddressRegistry tables.
+MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11"
+
 # Known stablecoins pegged to ~$1 USD.
 # Single source of truth for stablecoin identification across the SDK.
 # Used by: IntentCompiler (price fallback), backtesting (price fallback),

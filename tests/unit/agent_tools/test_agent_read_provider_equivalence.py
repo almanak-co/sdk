@@ -108,7 +108,7 @@ def test_aave_v3_provider_matches_pool_table() -> None:
 
     cap = STRATEGY_AGENT_READ_REGISTRY.lookup("aave_v3")
     assert cap is not None
-    assert cap.agent_read_keys() == frozenset({"lending_account"})
+    assert cap.agent_read_keys() == frozenset({"lending_account", "lending_reserves"})  # VIB-4951
     for chain, pool in AAVE_V3_POOL_ADDRESSES.items():
         assert cap.lending_pool_address(chain) == pool
     # Not a CL DEX.

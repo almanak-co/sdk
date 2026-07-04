@@ -37,6 +37,11 @@ CONNECTOR = Connector(
         attribute="CompoundV3GatewayConnector",
         order=3,
     ),
+    agent_read_connector=ImportRef(
+        module="almanak.connectors.compound_v3.agent_read_provider",
+        attribute="CompoundV3AgentReadConnector",
+        order=6,
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.compound_v3.receipt_parser_provider",
         attribute="CompoundV3ReceiptParserConnector",

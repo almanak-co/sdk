@@ -25,6 +25,11 @@ CONNECTOR = Connector(
             attribute="SPARK",
         ),
     ),
+    agent_read_connector=ImportRef(
+        module="almanak.connectors.spark.agent_read_provider",
+        attribute="SparkAgentReadConnector",
+        order=6,
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.spark.receipt_parser_provider",
         attribute="SparkReceiptParserConnector",

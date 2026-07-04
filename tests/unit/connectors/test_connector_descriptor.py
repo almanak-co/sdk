@@ -622,6 +622,9 @@ EXPECTED_SWAP_CLASSIFICATION_ORDER = (
 
 EXPECTED_AGENT_READ_PROVIDER_MODULES = {
     "aave_v3": "almanak.connectors.aave_v3.agent_read_provider",
+    "compound_v3": "almanak.connectors.compound_v3.agent_read_provider",
+    "morpho_blue": "almanak.connectors.morpho_blue.agent_read_provider",
+    "spark": "almanak.connectors.spark.agent_read_provider",
     "aerodrome_slipstream": "almanak.connectors.aerodrome.agent_read_provider",
     "agni_finance": "almanak.connectors.uniswap_v3.agent_read_provider",
     "pancakeswap_v3": "almanak.connectors.pancakeswap_v3.agent_read_provider",
@@ -636,6 +639,9 @@ EXPECTED_AGENT_READ_PROVIDER_ORDER = (
     "pancakeswap_v3",
     "sushiswap_v3",
     "aave_v3",
+    "compound_v3",
+    "morpho_blue",
+    "spark",
 )
 
 EXPECTED_VAULT_TOOL_PROVIDER_MODULES = {

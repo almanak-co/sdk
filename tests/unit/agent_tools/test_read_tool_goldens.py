@@ -569,7 +569,7 @@ async def test_list_lending_reserves_enumeration_failure_is_fatal() -> None:
         {"chain": "polygon", "protocol": "aave_v3"},
     )
     assert result.status == "error"
-    assert "getAllReservesTokens" in result.error["message"]
+    assert "reserve enumeration failed" in result.error["message"]
 
 
 @pytest.mark.asyncio
@@ -579,10 +579,13 @@ async def test_list_lending_reserves_unsupported_protocol_returns_error() -> Non
     executor._policy_engine.policy.allowed_protocols = None  # reach the handler's own guard
     result = await executor.execute(
         "list_lending_reserves",
-        {"chain": "polygon", "protocol": "compound_v3"},
+        {"chain": "polygon", "protocol": "venus"},  # genuinely unregistered
     )
     assert result.status == "error"
     assert "unsupported protocol" in result.error["message"]
+    # VIB-4951: the supported list is registry-derived, not hardcoded.
+    for proto in ("aave_v3", "compound_v3", "morpho_blue", "spark"):
+        assert proto in result.error["message"]
 
 
 @pytest.mark.asyncio
@@ -610,3 +613,256 @@ def test_decode_all_reserves_tokens_roundtrip_and_garbage() -> None:
     # Oversized declared array length is rejected before the full eth_abi decode.
     oversized = (32).to_bytes(32, "big") + (10**9).to_bytes(32, "big")
     assert decode_all_reserves_tokens("0x" + oversized.hex()) is None
+
+
+def test_reserves_handler_has_no_aave_coupling() -> None:
+    """VIB-4951 static guard: the reserves path carries no Aave-specific
+    imports and no protocol literal branches — dispatch is registry-only."""
+    import inspect
+
+    src = inspect.getsource(ToolExecutor._execute_list_lending_reserves)
+    assert "aave_helpers" not in src
+    assert 'protocol != "aave_v3"' not in src and 'protocol == "aave_v3"' not in src
+    assert "STRATEGY_AGENT_READ_REGISTRY" in src
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_morpho_static_golden() -> None:
+    """Morpho Blue rows come from the static market catalogue — zero RPC."""
+    gateway = MagicMock()
+    executor = _make_reserves_executor(gateway)
+    executor._policy_engine.policy.allowed_protocols = None
+    result = await executor.execute(
+        "list_lending_reserves",
+        {"chain": "ethereum", "protocol": "morpho_blue"},
+    )
+    assert result.status == "success", result.error
+    gateway.rpc.Call.assert_not_called()
+    rows = {r["symbol"]: r for r in result.data["reserves"]}
+    wsteth_usdc = rows["wstETH/USDC"]
+    assert wsteth_usdc["ltv_bps"] == 8600
+    assert wsteth_usdc["liquidation_threshold_bps"] == 8600
+    assert wsteth_usdc["borrowing_enabled"] is True
+    assert wsteth_usdc["usage_as_collateral_enabled"] is True
+    assert wsteth_usdc["detail"]["loan_token"] == "USDC"
+    assert result.data["pool_data_provider"].lower().startswith("0xbbbbbbbbbb")
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_compound_comet_golden() -> None:
+    """Compound comet semantics: base row static (borrowable, not collateral);
+    collateral rows decode LIVE getAssetInfoByAddress factors to bps."""
+
+    def _asset_info_blob() -> str:
+        words = [0] * 8
+        words[2] = 0xDEAD  # priceFeed (nonzero)
+        words[4] = 825 * 10**15  # borrowCollateralFactor = 0.825e18
+        words[5] = 895 * 10**15  # liquidateCollateralFactor = 0.895e18
+        return "".join(f"{w:064x}" for w in words)
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        assert req.id.startswith("compound_asset_info:")
+        return _rpc_ok(_asset_info_blob())
+
+    gateway = MagicMock()
+    gateway.rpc.Call.side_effect = _call
+    executor = _make_reserves_executor(gateway)
+    executor._policy_engine.policy.allowed_protocols = None
+    result = await executor.execute(
+        "list_lending_reserves",
+        {"chain": "ethereum", "protocol": "compound_v3"},
+    )
+    assert result.status == "success", result.error
+    rows = result.data["reserves"]
+    base = next(r for r in rows if (r.get("detail") or {}).get("role") == "base" and r["symbol"] == "USDC")
+    assert base["borrowing_enabled"] is True
+    assert base["usage_as_collateral_enabled"] is False
+    assert base["ltv_bps"] is None  # not applicable to a comet base asset
+    collateral = next(r for r in rows if "role" not in (r.get("detail") or {}) and r["symbol"] == "WETH")
+    assert collateral["borrowing_enabled"] is False
+    assert collateral["usage_as_collateral_enabled"] is True
+    assert collateral["ltv_bps"] == 8250
+    assert collateral["liquidation_threshold_bps"] == 8950
+    # Codex review (PR #3197): comets present only in the address table are
+    # NOT omitted (blind spot) and aliased comet ids are NOT duplicated.
+    base_rows = [r for r in rows if (r.get("detail") or {}).get("role") == "base"]
+    assert {r["symbol"] for r in base_rows} >= {"USDC", "WETH", "USDT", "WSTETH", "USDS"}
+    comet_keys = [r["detail"]["comet"] for r in base_rows]
+    assert len(comet_keys) == len(set(comet_keys))
+    uncatalogued = next(r for r in base_rows if r["symbol"] == "WSTETH")
+    assert uncatalogued["detail"]["metadata"] == "uncatalogued"
+    assert uncatalogued["borrowing_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_spark_reuses_aave_fork_path() -> None:
+    """Spark (Aave fork) flows through the same enumeration + config decode."""
+    cfg_hex = _reserve_cfg_hex(ltv=7000, usage=True, borrow=True, active=True, frozen=False)
+    gateway = _reserves_gateway([("wstETH", "0x" + "11" * 20)], lambda s: cfg_hex)
+    executor = _make_reserves_executor(gateway)
+    executor._policy_engine.policy.allowed_protocols = None
+    result = await executor.execute(
+        "list_lending_reserves",
+        {"chain": "ethereum", "protocol": "spark"},
+    )
+    assert result.status == "success", result.error
+    row = result.data["reserves"][0]
+    assert row["symbol"] == "wstETH"
+    assert row["ltv_bps"] == 7000
+    assert row["borrowing_enabled"] is True
+    assert result.data["pool_data_provider"] == "0xFc21d6d146E6086B8359705C8b28512a983db0cb"
+
+
+# ---------------------------------------------------------------------------
+# VIB-4951 Multicall3 batching lane
+# ---------------------------------------------------------------------------
+
+
+def _mc3_enumeration(n: int) -> list[tuple[str, str]]:
+    return [(f"TOK{i}", "0x" + f"{i + 1:040x}") for i in range(n)]
+
+
+def _mc3_gateway(n: int, aggregate3_blob_for: Any, code: str = "0x60") -> tuple[Any, list[str]]:
+    """Scripted gateway for the batched lane; records every request id/method."""
+    from eth_abi import encode as _abi_encode  # noqa: F401 (used by callers)
+
+    seen: list[str] = []
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        if req.method == "eth_getCode":
+            seen.append("getcode")
+            return _rpc_ok(code.removeprefix("0x"))
+        seen.append(req.id)
+        if req.id == "aave_all_reserves":
+            return _rpc_ok(_all_reserves_hex(_mc3_enumeration(n)))
+        if req.id.startswith("multicall3_reserves:"):
+            return _rpc_ok(aggregate3_blob_for(req.id))
+        # serial per-reserve config fallback
+        return _rpc_ok(_reserve_cfg_hex(ltv=7000, usage=True, borrow=True, active=True, frozen=False))
+
+    gateway = MagicMock()
+    gateway.rpc.Call.side_effect = _call
+    return gateway, seen
+
+
+@pytest.mark.asyncio
+async def test_reserves_multicall3_batched_chunked_and_fail_open(monkeypatch: Any) -> None:
+    """A large read set batches via aggregate3 in bounded chunks; a reverted
+    inner call fail-opens its row only; no per-reserve serial calls happen."""
+    from eth_abi import encode as _abi_encode
+
+    from almanak.framework.agent_tools import multicall as _mc
+
+    monkeypatch.setattr(_mc, "MULTICALL3_MAX_BATCH", 4)
+    cfg = bytes.fromhex(_reserve_cfg_hex(ltv=7000, usage=True, borrow=True, active=True, frozen=False))
+
+    def _blob_for(req_id: str) -> str:
+        start = int(req_id.split(":", 1)[1])
+        size = min(4, 10 - start)
+        results = [(i != 5, cfg) for i in range(start, start + size)]  # global index 5 reverts
+        return _abi_encode(["(bool,bytes)[]"], [results]).hex()
+
+    gateway, seen = _mc3_gateway(10, _blob_for)
+    executor = _make_reserves_executor(gateway)
+    result = await executor.execute("list_lending_reserves", {"chain": "polygon", "protocol": "aave_v3"})
+    assert result.status == "success", result.error
+    assert seen == ["aave_all_reserves", "getcode", "multicall3_reserves:0", "multicall3_reserves:4", "multicall3_reserves:8"]
+    rows = result.data["reserves"]
+    assert len(rows) == 10
+    assert rows[5]["error"] == "execution reverted (multicall3 aggregate3 inner call)"
+    assert rows[5]["ltv_bps"] is None
+    assert all(r["ltv_bps"] == 7000 and r["error"] == "" for i, r in enumerate(rows) if i != 5)
+
+
+@pytest.mark.asyncio
+async def test_reserves_multicall3_absent_contract_uses_serial(monkeypatch: Any) -> None:
+    """eth_getCode returning empty code means no Multicall3 — clean serial path."""
+    gateway, seen = _mc3_gateway(10, lambda _id: "00", code="0x")
+    executor = _make_reserves_executor(gateway)
+    result = await executor.execute("list_lending_reserves", {"chain": "polygon", "protocol": "aave_v3"})
+    assert result.status == "success", result.error
+    assert "getcode" in seen
+    assert not any(i.startswith("multicall3_reserves") for i in seen)
+    assert sum(1 for i in seen if i.startswith("aave_reserve_cfg:")) == 10
+    assert all(r["ltv_bps"] == 7000 for r in result.data["reserves"])
+
+
+@pytest.mark.asyncio
+async def test_reserves_multicall3_bad_blob_falls_back_serial() -> None:
+    """An undecodable aggregate3 blob degrades to serial — rows still filled,
+    never fabricated from a malformed batch response."""
+    gateway, seen = _mc3_gateway(10, lambda _id: "deadbeef")
+    executor = _make_reserves_executor(gateway)
+    result = await executor.execute("list_lending_reserves", {"chain": "polygon", "protocol": "aave_v3"})
+    assert result.status == "success", result.error
+    assert any(i.startswith("multicall3_reserves") for i in seen)  # batch attempted
+    assert sum(1 for i in seen if i.startswith("aave_reserve_cfg:")) == 10  # serial completed
+    assert all(r["ltv_bps"] == 7000 and r["error"] == "" for r in result.data["reserves"])
+
+
+@pytest.mark.asyncio
+async def test_multicall3_probe_fault_is_not_cached(monkeypatch: Any) -> None:
+    """codex review (PR #3197): a TRANSIENT probe failure must not pin the
+    serial lane for the executor lifetime — only MEASURED outcomes cache."""
+    from eth_abi import encode as _abi_encode
+
+    from almanak.framework.agent_tools import multicall as _mc
+
+    monkeypatch.setattr(_mc, "MULTICALL3_MAX_BATCH", 100)
+    cfg = bytes.fromhex(_reserve_cfg_hex(ltv=7000, usage=True, borrow=True, active=True, frozen=False))
+    state = {"probe_calls": 0}
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        if req.method == "eth_getCode":
+            state["probe_calls"] += 1
+            if state["probe_calls"] == 1:
+                raise RuntimeError("transient gateway hiccup")
+            return _rpc_ok("60")
+        if req.id == "aave_all_reserves":
+            return _rpc_ok(_all_reserves_hex(_mc3_enumeration(10)))
+        if req.id.startswith("multicall3_reserves:"):
+            results = [(True, cfg)] * 10
+            return _rpc_ok(_abi_encode(["(bool,bytes)[]"], [results]).hex())
+        return _rpc_ok(_reserve_cfg_hex(ltv=7000, usage=True, borrow=True, active=True, frozen=False))
+
+    gateway = MagicMock()
+    gateway.rpc.Call.side_effect = _call
+    executor = _make_reserves_executor(gateway)
+
+    # Call 1: probe faults -> serial lane, fault NOT cached.
+    r1 = await executor.execute("list_lending_reserves", {"chain": "polygon", "protocol": "aave_v3"})
+    assert r1.status == "success" and all(x["ltv_bps"] == 7000 for x in r1.data["reserves"])
+    assert executor._multicall3_probe_cache == {}
+
+    # Call 2: probe retried, succeeds -> batched lane; POSITIVE outcome cached.
+    r2 = await executor.execute("list_lending_reserves", {"chain": "polygon", "protocol": "aave_v3"})
+    assert r2.status == "success"
+    assert state["probe_calls"] == 2
+    assert executor._multicall3_probe_cache == {("polygon", ""): True}
+
+    # Call 3: cache hit — probe NOT re-run.
+    await executor.execute("list_lending_reserves", {"chain": "polygon", "protocol": "aave_v3"})
+    assert state["probe_calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_multicall3_measured_empty_code_is_cached(monkeypatch: Any) -> None:
+    """A MEASURED empty-code miss (contract genuinely absent) caches False —
+    the probe is not re-run per call on chains without Multicall3."""
+    state = {"probe_calls": 0}
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        if req.method == "eth_getCode":
+            state["probe_calls"] += 1
+            return _rpc_ok("")  # 0x — measured: no contract
+        if req.id == "aave_all_reserves":
+            return _rpc_ok(_all_reserves_hex(_mc3_enumeration(10)))
+        return _rpc_ok(_reserve_cfg_hex(ltv=7000, usage=True, borrow=True, active=True, frozen=False))
+
+    gateway = MagicMock()
+    gateway.rpc.Call.side_effect = _call
+    executor = _make_reserves_executor(gateway)
+    await executor.execute("list_lending_reserves", {"chain": "polygon", "protocol": "aave_v3"})
+    await executor.execute("list_lending_reserves", {"chain": "polygon", "protocol": "aave_v3"})
+    assert state["probe_calls"] == 1
+    assert executor._multicall3_probe_cache == {("polygon", ""): False}

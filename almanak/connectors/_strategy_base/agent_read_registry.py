@@ -95,6 +95,7 @@ from __future__ import annotations
 from typing import ClassVar, Protocol, TypeVar, cast, runtime_checkable
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
+from almanak.connectors._strategy_base.lending_reserve_read import LendingReserveDiscoveryPlan
 
 __all__ = [
     "STRATEGY_AGENT_READ_REGISTRY",
@@ -141,11 +142,26 @@ class AgentReadCapability(Protocol):
       on ``chain`` for ``getUserAccountData(address)``; ``None`` for
       non-lending connectors.
 
+    * ``lending_reserve_discovery_plan(chain) ->
+      LendingReserveDiscoveryPlan | None`` — pure reserve-discovery plan
+      (call descriptors + decode callables) for the ``"lending_reserves"``
+      read family (VIB-4951); ``None`` when the connector has no lending
+      market on ``chain`` (or doesn't back reserve discovery). Default
+      implementation on :class:`AgentReadConnector` returns ``None``.
+
     Why descriptors, not decoders? The ABI-decode logic is identical across
     every v3 fork (same ``slot0()`` / ``positions()`` ABI) and across every
     Aave-V3 fork. The genuinely protocol-specific knowledge is *which
     address* and *which selector* — that is what moves here. The decode
     stays generic in the executor (byte-equivalent by construction).
+
+    VIB-4951 revision: reserve discovery is the one read family where the
+    decode is NOT fork-uniform (Aave reserve flags vs Compound comet
+    collateral factors vs Morpho market LLTV), so its plan carries
+    connector-owned *pure* decode callables alongside the call
+    descriptors. The boundary is unchanged where it matters: a plan
+    performs NO I/O — the executor still owns every RPC round-trip, the
+    safety cap, the latency budget, and truncation semantics.
 
     ``protocol`` is the canonical name the connector registers under; it is
     declared here so callers iterating the capability view
@@ -166,6 +182,8 @@ class AgentReadCapability(Protocol):
 
     def lending_pool_address(self, chain: str) -> str | None: ...
 
+    def lending_reserve_discovery_plan(self, chain: str) -> LendingReserveDiscoveryPlan | None: ...
+
 
 class AgentReadConnector:
     """Base class for strategy-side agent-read connector instances.
@@ -184,6 +202,12 @@ class AgentReadConnector:
 
     protocol: ClassVar[ProtocolName]
     kind: ClassVar[ProtocolKind]
+
+    def lending_reserve_discovery_plan(self, chain: str) -> LendingReserveDiscoveryPlan | None:  # noqa: ARG002
+        """Default: connector does not back the ``"lending_reserves"`` read
+        family (VIB-4951). Lending connectors override this with a pure plan
+        builder and add ``"lending_reserves"`` to ``agent_read_keys()``."""
+        return None
 
 
 T = TypeVar("T")
