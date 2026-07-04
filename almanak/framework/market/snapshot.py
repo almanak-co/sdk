@@ -3762,13 +3762,19 @@ class MarketSnapshot:
         """Get DEX pool reserves and state.
 
         Fetches the current state of a DEX liquidity pool from the blockchain.
+        The pool's AMM shape is auto-detected: Uniswap-V3-style concentrated
+        liquidity pools (``dex="uniswap_v3"``), Solidly classic pools —
+        Aerodrome / Velodrome volatile and stable (``dex="solidly_v2"``) — and
+        plain V2 pairs (``dex="uniswap_v2"``; ``fee_tier`` is None there — V2
+        fees are not on-chain readable) are all supported.
 
         Args:
             pool_address: Pool contract address.
             chain: Chain identifier. Defaults to this snapshot's chain.
 
         Returns:
-            PoolReserves dataclass with reserves, fee tier, sqrtPrice, etc.
+            PoolReserves dataclass with reserves, fee tier, and (for V3-shaped
+            pools) sqrtPrice / tick / liquidity.
 
         Raises:
             ValueError: If no pool reader is configured.

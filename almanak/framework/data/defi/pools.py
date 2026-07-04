@@ -1,7 +1,8 @@
 """DEX Pool Data Structures and Interfaces.
 
 This module provides data structures for DEX pool reserve data, supporting
-various AMM protocols including Uniswap V2, Uniswap V3, and SushiSwap.
+various AMM protocols including Uniswap V2, Uniswap V3, SushiSwap, and
+Solidly forks (Aerodrome / Velodrome, dex="solidly_v2").
 
 Key Components:
     - PoolReserves: Dataclass representing DEX pool state
@@ -66,11 +67,13 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 if TYPE_CHECKING:
     from ..tokens.models import ChainToken
 
-# Supported DEX protocols
-DexType = Literal["uniswap_v2", "uniswap_v3", "sushiswap"]
+# Supported DEX protocols. "solidly_v2" is the Solidly-fork AMM family
+# (Aerodrome on Base, Velodrome V2 on Optimism) — the same family key the
+# connector descriptors and backtesting providers use.
+DexType = Literal["uniswap_v2", "uniswap_v3", "sushiswap", "solidly_v2"]
 
 # Valid DEX types for validation
-VALID_DEX_TYPES: set[str] = {"uniswap_v2", "uniswap_v3", "sushiswap"}
+VALID_DEX_TYPES: set[str] = {"uniswap_v2", "uniswap_v3", "sushiswap", "solidly_v2"}
 
 
 @dataclass
@@ -82,12 +85,13 @@ class PoolReserves:
 
     Common fields (all DEX types):
         - pool_address: Contract address of the pool
-        - dex: DEX protocol type ('uniswap_v2', 'uniswap_v3', 'sushiswap')
+        - dex: DEX protocol type ('uniswap_v2', 'uniswap_v3', 'sushiswap', 'solidly_v2')
         - token0: First token in the pool pair
         - token1: Second token in the pool pair
         - reserve0: Reserve of token0 in human-readable units
         - reserve1: Reserve of token1 in human-readable units
-        - fee_tier: Pool fee in basis points (e.g., 3000 = 0.3%)
+        - fee_tier: Pool fee in hundredths of a basis point (e.g., 3000 = 0.3%);
+          None when the fee is not on-chain readable (plain V2 pairs)
         - tvl_usd: Total value locked in USD
         - last_updated: Timestamp when data was fetched
 
@@ -96,6 +100,10 @@ class PoolReserves:
         - tick: Current tick of the pool
         - liquidity: Current in-range liquidity
 
+    Solidly specific fields (Aerodrome / Velodrome):
+        - stable: True for stable-curve pools (x^3*y + x*y^3), False for
+          volatile constant-product pools. None for non-Solidly pools.
+
     Attributes:
         pool_address: Pool contract address (checksummed)
         dex: DEX protocol identifier
@@ -103,10 +111,13 @@ class PoolReserves:
         token1: ChainToken representing the second token
         reserve0: Reserve amount of token0 (human-readable Decimal)
         reserve1: Reserve amount of token1 (human-readable Decimal)
-        fee_tier: Pool fee in basis points (100 = 0.01%, 500 = 0.05%, 3000 = 0.3%, 10000 = 1%)
+        fee_tier: Pool fee in hundredths of a basis point (100 = 0.01%, 500 = 0.05%, 3000 = 0.3%, 10000 = 1%).
+            None = unmeasured (plain V2 pairs expose no on-chain fee getter and fork
+            fees differ, so the fee is never guessed — Empty != Zero)
         sqrt_price_x96: V3 sqrt price as Q64.96 (None for V2)
         tick: V3 current tick (None for V2)
         liquidity: V3 in-range liquidity (None for V2)
+        stable: Solidly pool-type flag (None for non-Solidly pools)
         tvl_usd: Total value locked in USD
         last_updated: When the data was observed
     """
@@ -117,12 +128,13 @@ class PoolReserves:
     token1: "ChainToken"
     reserve0: Decimal
     reserve1: Decimal
-    fee_tier: int
+    fee_tier: int | None
     tvl_usd: Decimal
     last_updated: datetime
     sqrt_price_x96: int | None = None
     tick: int | None = None
     liquidity: int | None = None
+    stable: bool | None = None
 
     def __post_init__(self) -> None:
         """Validate and normalize fields."""
@@ -134,9 +146,20 @@ class PoolReserves:
         if not self.pool_address:
             raise ValueError("pool_address cannot be empty")
 
-        # Validate fee tier is non-negative
-        if self.fee_tier < 0:
+        # Validate fee tier is non-negative (None = unmeasured, allowed)
+        if self.fee_tier is not None and self.fee_tier < 0:
             raise ValueError(f"fee_tier must be non-negative, got {self.fee_tier}")
+
+        # Enforce the Solidly stable contract: the stable-vs-volatile curve
+        # decides pricing, so a solidly_v2 pool must carry a real bool (a
+        # deserialized string like "false" is truthy and would silently pick
+        # the wrong curve), and non-Solidly pools must not carry one.
+        if self.stable is not None and not isinstance(self.stable, bool):
+            raise ValueError(f"stable must be a bool or None, got {self.stable!r}")
+        if self.is_solidly and self.stable is None:
+            raise ValueError("stable flag is required for solidly_v2 pools")
+        if not self.is_solidly and self.stable is not None:
+            raise ValueError(f"stable must be None for dex='{self.dex}'")
 
         # Convert numeric types to Decimal if needed
         for field_name in ("reserve0", "reserve1", "tvl_usd"):
@@ -171,8 +194,19 @@ class PoolReserves:
         return self.dex in ("uniswap_v2", "sushiswap")
 
     @property
-    def fee_percent(self) -> Decimal:
-        """Get fee as a percentage (e.g., 0.3 for 3000 basis points)."""
+    def is_solidly(self) -> bool:
+        """Check if this is a Solidly-fork pool (Aerodrome / Velodrome)."""
+        return self.dex == "solidly_v2"
+
+    @property
+    def fee_percent(self) -> Decimal | None:
+        """Get fee as a percentage (e.g., 0.3 for fee_tier=3000, i.e. 0.30%).
+
+        ``fee_tier`` is in hundredths of a basis point. Returns None when the
+        fee is unmeasured (plain V2 pairs).
+        """
+        if self.fee_tier is None:
+            return None
         return Decimal(self.fee_tier) / Decimal("10000")
 
     @property
@@ -184,8 +218,9 @@ class PoolReserves:
     def price_token0_in_token1(self) -> Decimal | None:
         """Calculate price of token0 in terms of token1.
 
-        For V2 pools: price = reserve1 / reserve0
+        For constant-product pools (V2 / Solidly volatile): price = reserve1 / reserve0
         For V3 pools: calculated from sqrt_price_x96
+        For Solidly stable pools: marginal price on the x^3*y + x*y^3 curve
 
         Returns:
             Price or None if reserves are zero
@@ -194,17 +229,23 @@ class PoolReserves:
             return None
 
         if self.is_v3 and self.sqrt_price_x96 is not None:
-            # For V3: price = (sqrt_price_x96 / 2^96)^2
-            # Adjusted for decimal differences
+            # For V3: price = (sqrt_price_x96 / 2^96)^2, which is
+            # token1_raw / token0_raw. Converting raw to human-readable units
+            # multiplies by 10^(token0_decimals - token1_decimals) — same
+            # formula as decode_sqrt_price_x96 in data/pools/reader.py.
             sqrt_price = Decimal(self.sqrt_price_x96) / Decimal(2**96)
             raw_price = sqrt_price * sqrt_price
 
-            # Adjust for decimal difference between tokens
-            decimal_diff = self.token1.decimals - self.token0.decimals
-            return raw_price * Decimal(10**decimal_diff)
-        else:
-            # For V2: simple ratio
-            return self.reserve1 / self.reserve0
+            decimal_diff = self.token0.decimals - self.token1.decimals
+            return raw_price * Decimal(10) ** decimal_diff
+        if self.is_solidly and self.stable:
+            # Stable pools use the x^3*y + x*y^3 = k invariant, so the reserve
+            # ratio is NOT the spot price. Marginal price is the curve
+            # derivative |dy/dx| = (3x^2*y + y^3) / (x^3 + 3x*y^2).
+            x, y = self.reserve0, self.reserve1
+            return (3 * x * x * y + y**3) / (x**3 + 3 * x * y * y)
+        # Constant-product pools (V2 forks / Solidly volatile): simple ratio
+        return self.reserve1 / self.reserve0
 
     @property
     def price_token1_in_token0(self) -> Decimal | None:
@@ -244,6 +285,9 @@ class PoolReserves:
             result["tick"] = self.tick
         if self.liquidity is not None:
             result["liquidity"] = self.liquidity
+        # Include Solidly pool-type flag if present
+        if self.stable is not None:
+            result["stable"] = self.stable
 
         return result
 
@@ -269,6 +313,7 @@ class PoolReserves:
             sqrt_price_x96=data.get("sqrt_price_x96"),
             tick=data.get("tick"),
             liquidity=data.get("liquidity"),
+            stable=data.get("stable"),
         )
 
 
