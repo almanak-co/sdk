@@ -17,9 +17,12 @@ WORKDIR /app
 RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock PYPI.md ./
+
+RUN uv sync --frozen --no-cache --no-dev --no-install-project --extra platform-runner
+
 COPY almanak ./almanak
 
-RUN uv sync --frozen --no-cache --extra platform-runner
+RUN uv sync --frozen --no-cache --no-dev --extra platform-runner
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime
