@@ -25,12 +25,12 @@ RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock PYPI.md ./
 
-RUN uv sync --frozen --no-cache --no-dev --no-install-project --extra backtest
+RUN uv sync --frozen --no-cache --no-dev --no-install-project --extra backtest --extra backtest-service
 
 COPY almanak ./almanak
 COPY strategies ./strategies
 
-RUN uv sync --frozen --no-cache --no-dev --extra backtest
+RUN uv sync --frozen --no-cache --no-dev --extra backtest --extra backtest-service
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime

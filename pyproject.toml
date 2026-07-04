@@ -105,6 +105,14 @@ backtest = [
     "jinja2>=3.1.0",
 ]
 
+# Standalone BacktestService HTTP images (almanak/services/backtest/Dockerfile,
+# deploy/docker/Dockerfile.backtest-service) and the `almanak backtest-service`
+# CLI command: uvicorn boots the FastAPI app in services/backtest/server.py
+# (fastapi itself is a base dependency).
+backtest-service = [
+    "uvicorn[standard]>=0.30.0",
+]
+
 # Cloud Run Job entrypoint for platform-triggered strategy PnL backtests.
 platform-runner = [
     "google-cloud-storage>=2.18.0,<4.0.0",
