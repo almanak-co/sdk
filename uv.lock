@@ -6,6 +6,20 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 
+[manifest]
+
+[[manifest.dependency-metadata]]
+name = "poly-eip712-structs"
+version = "0.0.1"
+requires-dist = ["eth-utils>=4.1.1", "pycryptodome>=3.20.0"]
+requires-python = ">=3.9.10"
+
+[[manifest.dependency-metadata]]
+name = "py-order-utils"
+version = "0.3.2"
+requires-dist = ["eth-utils>=4.1.1", "eth-account>=0.13.0", "poly-eip712-structs"]
+requires-python = ">=3.9.10"
+
 [[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
@@ -2796,7 +2810,6 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "eth-utils" },
     { name = "pycryptodome" },
-    { name = "pytest" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/39/18/9fc1be6ac78bff14f56b88dedd019b2a669a5ff570cc40f055dccef294fe/poly_eip712_structs-0.0.1.tar.gz", hash = "sha256:d9193766fde497b1ee01c79a50092733a34b7a94bed090deb5d3c1b1e41f6d8c", size = 18091, upload-time = "2024-07-18T18:33:24.84Z" }
 wheels = [
@@ -2920,7 +2933,6 @@ dependencies = [
     { name = "eth-account" },
     { name = "eth-utils" },
     { name = "poly-eip712-structs" },
-    { name = "pytest" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5b/b8/9125d3960748f4f2d41f0e10ae42c29e60f6d3a37b8a758df7375346bf01/py_order_utils-0.3.2.tar.gz", hash = "sha256:4c0ecb939f4ce0313cd8a4ca32f2ba9a72449a6fc9ee17b9ce1937f594662988", size = 10378, upload-time = "2024-07-29T22:54:36.932Z" }
 wheels = [

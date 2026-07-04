@@ -124,6 +124,40 @@ code = [
     "pyright>=1.1.390",
 ]
 
+# Polymarket's published wheels declare `pytest` in Requires-Dist as a RUNTIME
+# dependency (upstream packaging bug: py-order-utils 0.3.2 and
+# poly-eip712-structs 0.0.1, both pulled in by py-clob-client-v2). Neither
+# package imports pytest anywhere in its shipped sources, but without
+# correction every production image built from uv.lock ships pytest. The
+# entries below replace the upstream metadata verbatim minus pytest. A global
+# [tool.uv] override-dependencies never-marker is NOT usable here: it would
+# also rewrite the direct pytest requirement in [dependency-groups].dev and
+# strip pytest from the dev/test environment.
+#
+# Entries are version-pinned: bumping either package's resolved version falls
+# back to upstream metadata, and tests/unit/packaging/
+# test_runtime_dependency_graph.py fails the build if pytest re-enters the
+# runtime graph. Remove once upstream publishes metadata with pytest moved to
+# a test extra.
+[[tool.uv.dependency-metadata]]
+name = "py-order-utils"
+version = "0.3.2"
+requires-python = ">=3.9.10"
+requires-dist = [
+    "eth-utils>=4.1.1",
+    "eth-account>=0.13.0",
+    "poly-eip712-structs",
+]
+
+[[tool.uv.dependency-metadata]]
+name = "poly-eip712-structs"
+version = "0.0.1"
+requires-python = ">=3.9.10"
+requires-dist = [
+    "eth-utils>=4.1.1",
+    "pycryptodome>=3.20.0",
+]
+
 [tool.poetry]
 include = [
     { path = "almanak/bin/*", format = ["sdist", "wheel"] },
