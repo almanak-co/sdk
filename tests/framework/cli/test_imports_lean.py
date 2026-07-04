@@ -79,6 +79,20 @@ _FORBIDDEN_FRAMEWORK_SUBPACKAGES = (
     "almanak.framework.testing",
 )
 
+# Gateway modules the strategy container image deletes outright
+# (deploy/docker/Dockerfile.strategy removes server.py, services/, api/,
+# and middleware/ — a strategy container must not be able to run its own
+# gateway). If the CLI bootstrap eagerly reaches any of these, the
+# ``almanak`` CLI dies with ModuleNotFoundError inside that container.
+# Gateway *client* surfaces (proto stubs, data providers, settings) stay
+# in the image and are fine to load.
+_FORBIDDEN_GATEWAY_STRIPPED_SURFACE = (
+    "almanak.gateway.server",
+    "almanak.gateway.services",
+    "almanak.gateway.api",
+    "almanak.gateway.middleware",
+)
+
 
 def _import_cli_in_subprocess() -> set[str]:
     """Import the top-level ``almanak`` click group in a fresh subprocess
@@ -137,6 +151,7 @@ def test_cli_import_does_not_pull_heavy_modules() -> None:
     failures: list[str] = []
     failures.extend(_check_absent(loaded, _FORBIDDEN_THIRD_PARTY, "third-party"))
     failures.extend(_check_absent(loaded, _FORBIDDEN_FRAMEWORK_SUBPACKAGES, "framework subpackage"))
+    failures.extend(_check_absent(loaded, _FORBIDDEN_GATEWAY_STRIPPED_SURFACE, "gateway stripped-surface"))
 
     if failures:
         msg_lines = [

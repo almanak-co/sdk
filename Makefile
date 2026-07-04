@@ -595,11 +595,14 @@ docker-dashboard-up:
 docker-dashboard-logs:
 	docker-compose -f deploy/docker/docker-compose.yml logs -f dashboard
 
-# Network isolation tests - verifies strategy container cannot reach internet
+# Network isolation tests - verifies strategy container cannot reach internet.
+# Runs from deploy/docker: the compose file's seccomp profile path
+# (security_opt: seccomp=./seccomp-strategy.json) resolves relative to the
+# docker-compose CWD, not the compose file. `down` must run even when the
+# test run fails, so the exit status is captured and re-raised after cleanup.
 test-network-isolation:
-	docker-compose -f deploy/docker/docker-compose.test.yml build
-	docker-compose -f deploy/docker/docker-compose.test.yml run --rm strategy-test
-	docker-compose -f deploy/docker/docker-compose.test.yml down
+	cd deploy/docker && docker-compose -f docker-compose.test.yml build
+	cd deploy/docker && { status=0; docker-compose -f docker-compose.test.yml run --rm strategy-test || status=$$?; docker-compose -f docker-compose.test.yml down; exit $$status; }
 
 # Gateway unit tests (excludes docker-only network isolation tests)
 test-gateway:

@@ -7,12 +7,12 @@ These tests will SKIP when run on the host machine (outside Docker) since
 network isolation is only enforced inside the container.
 
 Usage:
-    # Build and run isolation tests in container
-    docker-compose -f deploy/docker/docker-compose.test.yml run --rm strategy-test
+    # Build and run isolation tests in container (from the repo root)
+    make test-network-isolation
 
-    # Or run specific test
-    docker-compose -f deploy/docker/docker-compose.test.yml run --rm strategy-test \
-        pytest tests/gateway/test_network_isolation.py -v
+    # Manual compose invocation — MUST run from deploy/docker/ so the
+    # seccomp profile path in the compose file resolves against the CWD
+    cd deploy/docker && docker-compose -f docker-compose.test.yml run --rm strategy-test
 
     # Running locally will skip all tests (expected behavior)
     pytest tests/gateway/test_network_isolation.py -v
@@ -187,13 +187,18 @@ class TestSubprocessNetworkAccess:
 
     def test_curl_fails(self):
         """curl command fails to reach external sites."""
-        result = subprocess.run(
-            ["curl", "-s", "-m", "5", "http://google.com"],
-            capture_output=True,
-            timeout=10,
-        )
-        # curl should fail (non-zero exit code)
-        assert result.returncode != 0, "curl should fail to reach external sites"
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "-m", "5", "http://google.com"],
+                capture_output=True,
+                timeout=10,
+            )
+            # curl should fail (non-zero exit code)
+            assert result.returncode != 0, "curl should fail to reach external sites"
+        except FileNotFoundError:
+            # No curl binary in the image at all — egress via curl is
+            # impossible, which is an even stronger guarantee.
+            pytest.skip("curl not installed in container")
 
     def test_wget_fails(self):
         """wget command fails to reach external sites."""
@@ -210,13 +215,18 @@ class TestSubprocessNetworkAccess:
 
     def test_ping_fails(self):
         """ping command fails to reach external IPs."""
-        result = subprocess.run(
-            ["ping", "-c", "1", "-W", "5", "8.8.8.8"],
-            capture_output=True,
-            timeout=10,
-        )
-        # ping should fail
-        assert result.returncode != 0, "ping should fail to reach external IPs"
+        try:
+            result = subprocess.run(
+                ["ping", "-c", "1", "-W", "5", "8.8.8.8"],
+                capture_output=True,
+                timeout=10,
+            )
+            # ping should fail
+            assert result.returncode != 0, "ping should fail to reach external IPs"
+        except FileNotFoundError:
+            # No ping binary in the image at all — egress via ping is
+            # impossible, which is an even stronger guarantee.
+            pytest.skip("ping not installed in container")
 
 
 class TestDataExfiltration:

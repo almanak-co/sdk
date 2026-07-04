@@ -60,11 +60,16 @@ from almanak.framework.data.tokens.exceptions import (
 from almanak.framework.data.tokens.exceptions import (
     TokenNotFoundError as FrameworkTokenNotFoundError,
 )
-from almanak.gateway.services.onchain_lookup import OnChainLookup
 from almanak.gateway.utils.indexer_lag import is_indexer_lag_error
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver
+
+    # OnChainLookup must stay out of the module-level import graph: the
+    # strategy container image deletes almanak/gateway/services/, and this
+    # module is reachable from the CLI bootstrap (framework/cli/run.py).
+    # Guarded by tests/framework/cli/test_imports_lean.py.
+    from almanak.gateway.services.onchain_lookup import OnChainLookup
 
 # EVM address pattern (0x + 40 hex chars). Used to decide whether to attempt
 # the on-chain ERC20 metadata fallback when static resolution misses.
@@ -946,8 +951,12 @@ class Web3BalanceProvider:
             is_native=metadata.is_native,
         )
 
-    def _get_onchain_lookup(self) -> OnChainLookup:
+    def _get_onchain_lookup(self) -> "OnChainLookup":
         """Return the lazy-built OnChainLookup for this provider's RPC."""
+        # Deferred import: almanak.gateway.services is absent in the stripped
+        # strategy container image; only the gateway process reaches this path.
+        from almanak.gateway.services.onchain_lookup import OnChainLookup
+
         if self._onchain_lookup is None:
             self._onchain_lookup = OnChainLookup(
                 rpc_url=self._rpc_url,
