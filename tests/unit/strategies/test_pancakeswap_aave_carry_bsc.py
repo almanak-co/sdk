@@ -1,15 +1,13 @@
 """Unit tests for the PancakeSwap V3 + Aave V3 Carry Trade on BSC demo strategy.
 
-Tests the T2 composition lifecycle:
-supply -> borrow -> swap -> swap_back -> repay -> withdraw.
+Tests the T2 composition: decide() establishes the carry (supply -> borrow -> swap)
+then HOLDs; the unwind is teardown-owned and routes through the HF-safe
+``generate_lending_unwind`` primitive (VIB-5637 / VIB-5448).
 """
 
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from almanak.framework.market import HealthUnavailableError
 from almanak.demo_strategies.pancakeswap_aave_carry_bsc.strategy import (
     BORROWED,
     BORROWING,
@@ -22,11 +20,9 @@ from almanak.demo_strategies.pancakeswap_aave_carry_bsc.strategy import (
     SWAP_BACK,
     SWAPPED,
     SWAPPING,
-    SWAPPING_BACK,
-    WITHDRAWING,
     PancakeswapAaveCarryBscStrategy,
 )
-
+from almanak.framework.market import HealthUnavailableError
 
 # =============================================================================
 # Fixtures
@@ -279,77 +275,57 @@ class TestEntryPhase:
 
 
 # =============================================================================
-# Lifecycle: Teardown Phase
+# Lifecycle: Carry established -> HOLD (unwind is teardown-owned, VIB-5637)
 # =============================================================================
 
 
-class TestTeardownPhase:
-    def test_swapped_emits_swap_back(self):
+class TestCarryHold:
+    """Once the carry is established, decide() HOLDs — it never hand-rolls the
+    unwind in the iteration lane (which bypassed the HF-safe primitive and stranded
+    the collateral on dust debt; VIB-5637 / VIB-5448)."""
+
+    def test_swapped_holds(self):
         strategy = _make_strategy()
         strategy._state = SWAPPED
         strategy._swapped_amount = Decimal("89.50")
 
         intent = strategy.decide(_make_market())
 
-        assert intent.intent_type.value == "SWAP"
-        assert strategy._state == SWAPPING_BACK
+        assert intent.intent_type.value == "HOLD"
+        assert "carry established" in intent.reason.lower()
 
-    def test_swap_back_from_usdt_to_usdc(self):
+    def test_swapped_never_emits_repay_or_withdraw(self):
+        """The dust-debt strand came from decide() emitting REPAY/WITHDRAW; it must
+        only ever HOLD once the carry is on."""
         strategy = _make_strategy()
         strategy._state = SWAPPED
         strategy._swapped_amount = Decimal("89.50")
-
-        intent = strategy.decide(_make_market())
-
-        assert intent.from_token == "USDT"
-        assert intent.to_token == "USDC"
-
-    def test_swap_back_emits_repay(self):
-        strategy = _make_strategy()
-        strategy._state = SWAP_BACK
         strategy._borrowed_amount = Decimal("90")
+        strategy._supplied_amount = Decimal("0.5")
 
         intent = strategy.decide(_make_market())
 
-        assert intent.intent_type.value == "REPAY"
-        assert strategy._state == REPAYING
+        assert intent.intent_type.value == "HOLD"
 
-    def test_repay_uses_repay_full(self):
-        strategy = _make_strategy()
-        strategy._state = SWAP_BACK
-        strategy._borrowed_amount = Decimal("90")
-
-        intent = strategy.decide(_make_market())
-
-        assert intent.repay_full is True
-
-    def test_repaid_emits_withdraw(self):
+    def test_legacy_teardown_state_holds(self):
+        """A state persisted by a pre-VIB-5637 build that unwound in decide() (e.g.
+        ``repaid``) degrades to HOLD — the unwind is now teardown-owned."""
         strategy = _make_strategy()
         strategy._state = REPAID
         strategy._supplied_amount = Decimal("0.5")
 
         intent = strategy.decide(_make_market())
 
-        assert intent.intent_type.value == "WITHDRAW"
-        assert strategy._state == WITHDRAWING
+        assert intent.intent_type.value == "HOLD"
+        assert "teardown-owned" in intent.reason.lower()
 
-    def test_withdraw_uses_withdraw_all(self):
-        strategy = _make_strategy()
-        strategy._state = REPAID
-        strategy._supplied_amount = Decimal("0.5")
-
-        intent = strategy.decide(_make_market())
-
-        assert intent.withdraw_all is True
-
-    def test_complete_holds(self):
+    def test_legacy_complete_state_holds(self):
         strategy = _make_strategy()
         strategy._state = COMPLETE
 
         intent = strategy.decide(_make_market())
 
         assert intent.intent_type.value == "HOLD"
-        assert "complete" in intent.reason.lower()
 
 
 # =============================================================================
@@ -389,7 +365,10 @@ class TestTransitionalRecovery:
 
         assert intent.intent_type.value == "SWAP"
 
-    def test_stuck_repaying_reverts_to_swap_back(self):
+    def test_stuck_legacy_repaying_reverts_then_holds(self):
+        """``repaying`` is a legacy (pre-VIB-5637) transitional state. Restored from
+        persisted state it reverts to its stable predecessor and then HOLDs — the
+        unwind is teardown-owned, decide() no longer re-emits a REPAY."""
         strategy = _make_strategy()
         strategy._state = REPAYING
         strategy._previous_stable = SWAP_BACK
@@ -397,7 +376,8 @@ class TestTransitionalRecovery:
 
         intent = strategy.decide(_make_market())
 
-        assert intent.intent_type.value == "REPAY"
+        assert intent.intent_type.value == "HOLD"
+        assert strategy._state == SWAP_BACK
 
 
 # =============================================================================
@@ -462,46 +442,28 @@ class TestOnIntentExecuted:
 
         assert strategy._swapped_amount == Decimal("89.50")
 
-    def test_swap_back_success(self):
-        strategy = _make_strategy()
-        strategy._state = SWAPPING_BACK
-        strategy._swapped_amount = Decimal("89.50")
+    def test_teardown_lane_intents_do_not_transition_entry_state(self):
+        """The unwind is teardown-owned; a REPAY/WITHDRAW/swap-back surfaced to this
+        hook must NOT advance the entry state machine (only entry SUPPLY/BORROW/SWAP
+        do). Guards against a teardown-lane intent spuriously mutating cached state."""
+        for intent_type_val, state in (("SWAP", SWAPPED), ("REPAY", SWAPPED), ("WITHDRAW", SWAPPED)):
+            strategy = _make_strategy()
+            strategy._state = state
+            strategy._borrowed_amount = Decimal("90")
+            strategy._supplied_amount = Decimal("0.5")
+            strategy._swapped_amount = Decimal("89.50")
 
-        mock_intent = MagicMock()
-        mock_intent.intent_type.value = "SWAP"
+            mock_intent = MagicMock()
+            mock_intent.intent_type.value = intent_type_val
 
-        strategy.on_intent_executed(mock_intent, success=True, result=None)
+            strategy.on_intent_executed(mock_intent, success=True, result=None)
 
-        assert strategy._state == SWAP_BACK
-        assert strategy._swapped_amount == Decimal("0")
+            # No entry transition fired; cached amounts untouched.
+            assert strategy._state == state
+            assert strategy._borrowed_amount == Decimal("90")
+            assert strategy._supplied_amount == Decimal("0.5")
 
-    def test_repay_success(self):
-        strategy = _make_strategy()
-        strategy._state = REPAYING
-        strategy._borrowed_amount = Decimal("90")
-
-        mock_intent = MagicMock()
-        mock_intent.intent_type.value = "REPAY"
-
-        strategy.on_intent_executed(mock_intent, success=True, result=None)
-
-        assert strategy._state == REPAID
-        assert strategy._borrowed_amount == Decimal("0")
-
-    def test_withdraw_success(self):
-        strategy = _make_strategy()
-        strategy._state = WITHDRAWING
-        strategy._supplied_amount = Decimal("0.5")
-
-        mock_intent = MagicMock()
-        mock_intent.intent_type.value = "WITHDRAW"
-
-        strategy.on_intent_executed(mock_intent, success=True, result=None)
-
-        assert strategy._state == COMPLETE
-        assert strategy._supplied_amount == Decimal("0")
-
-    def test_failure_reverts_to_previous_stable(self):
+    def test_entry_failure_reverts_to_previous_stable(self):
         strategy = _make_strategy()
         strategy._state = SWAPPING
         strategy._previous_stable = BORROWED
@@ -512,6 +474,20 @@ class TestOnIntentExecuted:
         strategy.on_intent_executed(mock_intent, success=False, result=None)
 
         assert strategy._state == BORROWED
+
+    def test_teardown_lane_failure_does_not_revert_entry_state(self):
+        """A failure of a non-entry (teardown-lane) intent must not revert the entry
+        state machine — the failure revert is scoped to entry transitional states."""
+        strategy = _make_strategy()
+        strategy._state = SWAPPED
+        strategy._previous_stable = BORROWED
+
+        mock_intent = MagicMock()
+        mock_intent.intent_type.value = "WITHDRAW"
+
+        strategy.on_intent_executed(mock_intent, success=False, result=None)
+
+        assert strategy._state == SWAPPED
 
 
 # =============================================================================
@@ -545,7 +521,10 @@ class TestTeardownInterface:
 
         assert len(positions.positions) == 3  # supply + borrow + swap
 
-    def test_teardown_generates_correct_order(self):
+    def test_teardown_closes_swap_leg_then_delegates_to_hf_safe_primitive(self):
+        """VIB-5637: the unwind is (1) close the swap leg, then (2) delegate the
+        lending unwind to the HF-safe ``generate_lending_unwind`` primitive with the
+        correct legs — never a hand-rolled repay_full/withdraw_all."""
         strategy = _make_strategy()
         strategy._state = SWAPPED
         strategy._supplied_amount = Decimal("0.5")
@@ -554,12 +533,47 @@ class TestTeardownInterface:
 
         from almanak.framework.teardown import TeardownMode
 
-        intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
+        sentinel = [MagicMock(name="hf_safe_unwind_intent")]
+        market = _make_market()
+        with patch(
+            "almanak.framework.teardown.generate_lending_unwind", return_value=sentinel
+        ) as mock_unwind:
+            intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=market)
 
-        assert len(intents) == 3
-        assert intents[0].intent_type.value == "SWAP"  # swap back
-        assert intents[1].intent_type.value == "REPAY"
-        assert intents[2].intent_type.value == "WITHDRAW"
+        # (1) leading intent closes the swap leg USDT -> USDC
+        assert intents[0].intent_type.value == "SWAP"
+        assert intents[0].from_token == "USDT"
+        assert intents[0].to_token == "USDC"
+        # (2) the rest is exactly the primitive's HF-safe staircase
+        assert intents[1:] == sentinel
+
+        mock_unwind.assert_called_once()
+        kwargs = mock_unwind.call_args.kwargs
+        assert kwargs["protocol"] == "aave_v3"
+        assert kwargs["collateral_token"] == "WBNB"
+        assert kwargs["borrow_token"] == "USDC"
+        assert kwargs["chain"] == "bsc"
+        assert kwargs["mode"] == TeardownMode.SOFT
+        assert kwargs["market"] is market
+        # The primitive's own collateral->debt swaps are pinned to this BSC venue,
+        # not the compiler's uniswap_v3 default (Codex review / robustness).
+        assert kwargs["swap_protocol"] == "pancakeswap_v3"
+
+    def test_teardown_never_hand_rolls_repay_or_withdraw(self):
+        """Regression guard for the VIB-5637 dust-debt strand: the demo must not emit
+        its own REPAY/WITHDRAW — those flow through the HF-safe primitive."""
+        strategy = _make_strategy()
+        strategy._state = SWAPPED
+        strategy._supplied_amount = Decimal("0.5")
+        strategy._borrowed_amount = Decimal("90")
+        strategy._swapped_amount = Decimal("89.50")
+
+        from almanak.framework.teardown import TeardownMode
+
+        with patch("almanak.framework.teardown.generate_lending_unwind", return_value=[]):
+            intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=_make_market())
+
+        assert all(i.intent_type.value not in ("REPAY", "WITHDRAW") for i in intents)
 
     def test_teardown_hard_mode_higher_slippage(self):
         strategy = _make_strategy()
@@ -570,7 +584,8 @@ class TestTeardownInterface:
 
         from almanak.framework.teardown import TeardownMode
 
-        intents = strategy.generate_teardown_intents(TeardownMode.HARD)
+        with patch("almanak.framework.teardown.generate_lending_unwind", return_value=[]):
+            intents = strategy.generate_teardown_intents(TeardownMode.HARD, market=_make_market())
 
         assert intents[0].max_slippage == Decimal("0.03")
 
@@ -583,18 +598,109 @@ class TestTeardownInterface:
 
         from almanak.framework.teardown import TeardownMode
 
-        intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
+        with patch("almanak.framework.teardown.generate_lending_unwind", return_value=[]):
+            intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=_make_market())
 
         assert intents[0].max_slippage == Decimal("0.005")
 
     def test_teardown_no_positions_empty(self):
+        """No swap leg, and the primitive (delegated to UNCONDITIONALLY — reference
+        pattern, robust to a cached/on-chain desync) returns [] when the live position
+        is flat, so the whole teardown is empty."""
         strategy = _make_strategy()
 
         from almanak.framework.teardown import TeardownMode
 
-        intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
+        with patch(
+            "almanak.framework.teardown.generate_lending_unwind", return_value=[]
+        ) as mock_unwind:
+            intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=_make_market())
 
-        assert len(intents) == 0
+        assert intents == []
+        # Delegated unconditionally so a crash-desync (on-chain position, cached
+        # amounts == 0) still unwinds live state rather than stranding.
+        mock_unwind.assert_called_once()
+
+    def test_teardown_low_hf_falls_back_to_risk_reducing_repay(self):
+        """When the primitive cannot size a collateral-sourced unwind from the
+        pre-swap snapshot (HF too low -> LendingUnwindError), teardown degrades to a
+        risk-reducing repay_full (never a reverting withdraw_all), funded by the
+        close-leg swap. Teardown's first job is removing on-chain risk (Codex P1)."""
+        strategy = _make_strategy()
+        strategy._state = SWAPPED
+        strategy._supplied_amount = Decimal("0.5")
+        strategy._borrowed_amount = Decimal("90")
+        strategy._swapped_amount = Decimal("89.50")
+
+        from almanak.framework.teardown import LendingUnwindError, TeardownMode
+
+        with patch(
+            "almanak.framework.teardown.generate_lending_unwind",
+            side_effect=LendingUnwindError("health factor too low"),
+        ):
+            intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=_make_market())
+
+        # Close-leg SWAP still emitted; lending unwind degrades to repay_full only.
+        assert intents[0].intent_type.value == "SWAP"
+        repays = [i for i in intents if i.intent_type.value == "REPAY"]
+        assert len(repays) == 1
+        assert repays[0].repay_full is True
+        assert repays[0].token == "USDC"
+        # NO withdraw_all is emitted while HF is too low (that is the revert we avoid).
+        assert all(i.intent_type.value != "WITHDRAW" for i in intents)
+
+    def test_teardown_lending_only_no_swap_leg_delegates_to_primitive(self):
+        """A borrow with no held swap_to_token (e.g. already swapped back) emits no
+        swap leg and delegates straight to the HF-safe primitive."""
+        strategy = _make_strategy()
+        strategy._state = SWAPPED
+        strategy._supplied_amount = Decimal("0.5")
+        strategy._borrowed_amount = Decimal("90")
+        strategy._swapped_amount = Decimal("0")  # nothing held to swap back
+
+        from almanak.framework.teardown import TeardownMode
+
+        sentinel = [MagicMock(name="hf_safe_unwind_intent")]
+        with patch(
+            "almanak.framework.teardown.generate_lending_unwind", return_value=sentinel
+        ) as mock_unwind:
+            intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=_make_market())
+
+        assert intents == sentinel
+        mock_unwind.assert_called_once()
+
+    def test_on_teardown_completed_success_clears_tracked_amounts(self):
+        """After a successful teardown, the cached amounts are cleared so
+        get_open_positions() no longer reports stale positions (Gemini review)."""
+        strategy = _make_strategy()
+        strategy._state = SWAPPED
+        strategy._supplied_amount = Decimal("0.5")
+        strategy._borrowed_amount = Decimal("90")
+        strategy._swapped_amount = Decimal("89.50")
+
+        strategy.on_teardown_completed(success=True, recovered_usd=Decimal("100"))
+
+        assert strategy._supplied_amount == Decimal("0")
+        assert strategy._borrowed_amount == Decimal("0")
+        assert strategy._swapped_amount == Decimal("0")
+        assert strategy._state == COMPLETE
+        # No stale positions reported after a clean teardown.
+        assert len(strategy.get_open_positions().positions) == 0
+
+    def test_on_teardown_completed_failure_keeps_amounts_for_retry(self):
+        """A failed teardown leaves tracked amounts intact so a retry still sees the
+        open position (does not silently zero it out)."""
+        strategy = _make_strategy()
+        strategy._state = SWAPPED
+        strategy._supplied_amount = Decimal("0.5")
+        strategy._borrowed_amount = Decimal("90")
+        strategy._swapped_amount = Decimal("89.50")
+
+        strategy.on_teardown_completed(success=False, recovered_usd=Decimal("0"))
+
+        assert strategy._supplied_amount == Decimal("0.5")
+        assert strategy._borrowed_amount == Decimal("90")
+        assert strategy._swapped_amount == Decimal("89.50")
 
 
 # =============================================================================
