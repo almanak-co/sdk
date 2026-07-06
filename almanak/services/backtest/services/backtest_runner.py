@@ -447,7 +447,11 @@ class SpecBacktestStrategy:
         )
 
 
-def create_backtester(token_addresses: TokenAddressMap | None = None) -> PnLBacktester:
+def create_backtester(
+    token_addresses: TokenAddressMap | None = None,
+    *,
+    close_providers_on_finish: bool = True,
+) -> PnLBacktester:
     """Create a PnLBacktester wired with the full engine capabilities.
 
     Wires:
@@ -467,6 +471,12 @@ def create_backtester(token_addresses: TokenAddressMap | None = None) -> PnLBack
     The CoinGecko provider works standalone (no gateway required). It reads
     COINGECKO_API_KEY from the environment for the pro tier; falls back to the
     free tier when the key is absent.
+
+    ``close_providers_on_finish`` is forwarded to ``PnLBacktester``. The
+    default keeps the single-run contract (the engine closes the provider when
+    ``backtest()`` finishes); orchestrators that reuse one backtester across
+    sequential runs (e.g. the platform sweep runner) pass False and own the
+    provider lifetime themselves (VIB-5621).
     """
     data_provider = CoinGeckoDataProvider(token_addresses=token_addresses)
 
@@ -495,6 +505,7 @@ def create_backtester(token_addresses: TokenAddressMap | None = None) -> PnLBack
         strategy_type="auto",
         data_config=data_config,
         token_addresses=token_addresses,
+        close_providers_on_finish=close_providers_on_finish,
     )
 
 
