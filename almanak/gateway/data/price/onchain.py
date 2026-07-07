@@ -38,7 +38,7 @@ from almanak.core.chainlink import (
     TOKEN_TO_ETH_PAIR,
     TOKEN_TO_PAIR,
 )
-from almanak.core.chains import DEFAULT_CHAIN
+from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.framework.data.interfaces import (
     BasePriceSource,
     DataSourceUnavailable,
@@ -50,6 +50,21 @@ from almanak.gateway.utils import get_rpc_url
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_chain(chain: object | None) -> str | None:
+    """Canonical lowercase chain name for cross-chain comparison, or ``None``.
+
+    Canonicalizes aliases (e.g. ``"bnb"`` -> ``"bsc"``) via the ChainRegistry so
+    a ``ResolvedToken.chain`` can be compared apples-to-apples against a source's
+    bound chain. Unknown chains pass through lowercased. Mirrors the resolution
+    ``DexScreenerPriceSource._resolve_chain_for_call`` performs (VIB-5651).
+    """
+    if not chain:
+        return None
+    desc = ChainRegistry.try_resolve(str(chain).lower())
+    return desc.name if desc is not None else str(chain).lower()
+
 
 # Chainlink feed decimals -- most USD feeds use 8 decimals.
 # Override here for any feeds that differ.
@@ -230,6 +245,21 @@ class OnChainPriceSource(BasePriceSource):
         Raises:
             DataSourceUnavailable: If token cannot be priced on-chain
         """
+        # Chain-correctness guard (VIB-5651): this instance is bound to
+        # ``self._chain`` at construction and holds only that chain's Chainlink
+        # feeds. If the caller tags the request with a DIFFERENT chain, answering
+        # with this chain's price would be silent cross-chain corruption — miss
+        # instead (the aggregator treats DataSourceUnavailable as a skip). The
+        # per-chain aggregator routing is the primary guarantee; this guard makes
+        # a mis-route unrepresentable rather than merely unlikely.
+        if resolved_token is not None:
+            rt_chain = _canonical_chain(getattr(resolved_token, "chain", None))
+            if rt_chain and rt_chain != _canonical_chain(self._chain):
+                raise DataSourceUnavailable(
+                    source=self.source_name,
+                    reason=f"chain_mismatch:{rt_chain}!={self._chain}",
+                )
+
         if quote.upper() != "USD":
             raise DataSourceUnavailable(
                 source=self.source_name,

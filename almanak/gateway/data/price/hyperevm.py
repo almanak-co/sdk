@@ -55,6 +55,7 @@ from almanak.connectors._base.gateway_capabilities import (
     OraclePriceQuery,
 )
 from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+from almanak.core.chains import ChainRegistry
 from almanak.framework.data.interfaces import (
     BasePriceSource,
     DataSourceUnavailable,
@@ -67,6 +68,19 @@ logger = logging.getLogger(__name__)
 
 # HyperEVM chain name (ChainRegistry descriptor / gateway chain string).
 _HYPEREVM_CHAIN = "hyperevm"
+
+
+def _canonical_chain(chain: object | None) -> str | None:
+    """Canonical lowercase chain name for cross-chain comparison, or ``None``.
+
+    Canonicalizes aliases via the ChainRegistry so a ``ResolvedToken.chain`` can
+    be compared apples-to-apples against ``_HYPEREVM_CHAIN`` (VIB-5651).
+    """
+    if not chain:
+        return None
+    desc = ChainRegistry.try_resolve(str(chain).lower())
+    return desc.name if desc is not None else str(chain).lower()
+
 
 # HyperEVM stablecoins that peg to $1.00 (verified on-chain, 6 decimals). We
 # return the peg directly rather than round-tripping an external API — matching
@@ -174,6 +188,21 @@ class HypercoreOraclePriceSource(BasePriceSource):
             DataSourceUnavailable: On an unknown symbol, missing RPC, or an
                 empty / zero / failed precompile read (Empty≠Zero — never a 0).
         """
+        # Chain-correctness guard (VIB-5651): this source only serves HyperEVM /
+        # HyperCore. If the caller tags the request with a different chain,
+        # answering with the venue oracle would be a cross-chain answer — miss
+        # instead (the aggregator treats DataSourceUnavailable as a skip). Venue
+        # majors are global so the numeric risk is low, but a non-hyperevm request
+        # must never be answered here. Routing is the primary guarantee; this makes
+        # a mis-route unrepresentable.
+        if resolved_token is not None:
+            rt_chain = _canonical_chain(getattr(resolved_token, "chain", None))
+            if rt_chain and rt_chain != _HYPEREVM_CHAIN:
+                raise DataSourceUnavailable(
+                    source=self.source_name,
+                    reason=f"chain_mismatch:{rt_chain}!={_HYPEREVM_CHAIN}",
+                )
+
         if quote.upper() != "USD":
             raise DataSourceUnavailable(
                 source=self.source_name,

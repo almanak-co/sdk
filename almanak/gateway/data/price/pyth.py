@@ -32,6 +32,7 @@ from almanak.framework.data.interfaces import (
     PriceResult,
 )
 from almanak.gateway.utils.ssl_context import build_ssl_context
+from almanak.gateway.validation import is_solana_chain
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,20 @@ class PythPriceSource(BasePriceSource):
         Raises:
             DataSourceUnavailable: If Pyth is unreachable and no cache exists
         """
+        # Chain-correctness guard (VIB-5651): Pyth is provisioned as a Solana
+        # chain's source. If the caller tags the request with a non-Solana chain,
+        # answering from the Solana feed table would be a cross-chain answer —
+        # miss instead (the aggregator treats DataSourceUnavailable as a skip).
+        # Low risk (Pyth is only referenced by Solana sub-aggregators), added for
+        # consistency with the on-chain / venue guards.
+        if resolved_token is not None:
+            rt_chain = getattr(resolved_token, "chain", None)
+            if rt_chain and not is_solana_chain(str(rt_chain)):
+                raise DataSourceUnavailable(
+                    source=self.source_name,
+                    reason=f"chain_mismatch:{rt_chain}!=solana",
+                )
+
         if quote.upper() != "USD":
             raise DataSourceUnavailable(
                 source=self.source_name,

@@ -39,6 +39,13 @@ from almanak.gateway.validation import (
 # Pattern for detecting EVM contract addresses in price requests.
 _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
+# Sentinel map key for a gateway started WITHOUT --chains (CoinGecko-only
+# aggregator). Pricing is keyed by chain in ``_price_aggregators`` (VIB-5651);
+# a no-chain gateway keeps a single entry under this sentinel so
+# ``_aggregator_for`` always has a valid primary key to fall back to. It is not
+# a real chain name, so it can never collide with an entry in ``settings.chains``.
+_NO_CHAIN_KEY = "__no_chain__"
+
 
 class MultiChainAmbiguousPriceRequest(Exception):
     """Raised when a multi-chain gateway receives an EVM-address price lookup
@@ -131,6 +138,57 @@ def _chain_has_venue_oracle(chain: str) -> bool:
         if provider.oracle_price_chain() == chain:
             return True
     return False
+
+
+class _SharedPriceSources:
+    """Lazily-built, chain-agnostic price sources shared by every per-chain
+    sub-aggregator (VIB-5651 §5, no O(N) duplication).
+
+    Binance / CoinGecko / Pyth are chain-agnostic: instantiating exactly one of
+    each and referencing it from every per-chain ``PriceAggregator`` keeps
+    provisioning O(1) in those clients regardless of how many chains a gateway
+    serves. Each accessor constructs its source on first use and memoises it, so
+    a gateway with (say) two EVM chains shares a single Binance client, and one
+    with two Solana chains shares a single Pyth client.
+
+    Lifecycle: these instances are referenced by multiple aggregators, so
+    ``MarketService`` dedup-closes every distinct source by ``id()`` (lead
+    decision 2) rather than closing each aggregator — a shared instance is
+    therefore never closed twice.
+    """
+
+    def __init__(self, *, coingecko_api_key: str | None) -> None:
+        self._coingecko_api_key = coingecko_api_key
+        self._coingecko: Any = None
+        self._binance: Any = None
+        self._pyth: Any = None
+
+    def coingecko(self) -> Any:
+        """The shared CoinGecko source (global fallback tier — every chain uses it)."""
+        if self._coingecko is None:
+            from almanak.gateway.data.price.coingecko import CoinGeckoPriceSource
+
+            self._coingecko = CoinGeckoPriceSource(
+                api_key=self._coingecko_api_key if self._coingecko_api_key is not None else "",
+                cache_ttl=30,
+            )
+        return self._coingecko
+
+    def binance(self) -> Any:
+        """The shared Binance source (EVM chains' secondary spot tier)."""
+        if self._binance is None:
+            from almanak.gateway.data.price.binance import BinancePriceSource
+
+            self._binance = BinancePriceSource(cache_ttl=30, request_timeout=5.0)
+        return self._binance
+
+    def pyth(self) -> Any:
+        """The shared Pyth source (Solana chains' primary tier)."""
+        if self._pyth is None:
+            from almanak.gateway.data.price.pyth import PythPriceSource
+
+            self._pyth = PythPriceSource(cache_ttl=15)
+        return self._pyth
 
 
 def _block_pin_unsupported_reason(chain: str, block_tag: int | None) -> str | None:
@@ -382,7 +440,15 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             settings: Gateway settings with API keys and configuration.
         """
         self.settings = settings
-        self._price_aggregator: Any = None
+        # Per-chain price aggregators (VIB-5651). Keyed by canonical chain name;
+        # a no-chain gateway keeps a single entry under ``_NO_CHAIN_KEY``. This is
+        # the source of truth for pricing; ``_price_aggregator`` (below) is a
+        # back-compat property returning the primary chain's aggregator.
+        self._price_aggregators: dict[str, Any] = {}
+        # Always a str: a real chain name after _do_initialize, else the
+        # sentinel (_NO_CHAIN_KEY) — never None, so it is a valid dict key for
+        # _price_aggregators throughout (VIB-5651).
+        self._primary_chain: str = _NO_CHAIN_KEY
         # Last-resort price fallback (populated by _do_initialize). Consulted
         # by GetPrice only when the primary aggregator raises AllDataSourcesFailed.
         self._manual_price_override: Any = None
@@ -416,10 +482,101 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         self._pool_key_cache: PoolKeyCacheProtocol | None = None
         self._pool_key_cache_lock = asyncio.Lock()
 
+    # Class-level default so a servicer built via ``__new__`` (some unit tests
+    # skip ``__init__`` and inject ``_price_aggregator`` directly to mock the
+    # pricing seam) still has a valid primary-chain key for the property
+    # accessors below. ``__init__`` overwrites this per-instance. Immutable, so
+    # sharing the class attribute is safe; the mutable ``_price_aggregators`` map
+    # is NEVER a class default — it is lazily created per-instance in the setter.
+    _primary_chain: str = _NO_CHAIN_KEY
+
+    @property
+    def _price_aggregator(self) -> Any:
+        """Primary-chain price aggregator (back-compat accessor).
+
+        The per-chain map ``_price_aggregators`` is the source of truth
+        (VIB-5651); this returns the primary chain's aggregator so pre-existing
+        single-aggregator references (warmup, tests, etc.) keep working. Returns
+        ``None`` before ``_do_initialize`` has run (or on a ``__new__``-built
+        instance that has no map yet).
+        """
+        return getattr(self, "_price_aggregators", {}).get(self._primary_chain)
+
+    @_price_aggregator.setter
+    def _price_aggregator(self, aggregator: Any) -> None:
+        """Back-compat setter: assign the primary chain's aggregator.
+
+        Production provisioning writes ``_price_aggregators`` directly through
+        ``_do_initialize``; this setter exists so any caller that injects a single
+        aggregator via ``servicer._price_aggregator = ...`` (notably unit tests
+        that mock the pricing seam) still targets the primary slot that
+        ``_aggregator_for`` falls back to. If no chain has been resolved yet, the
+        aggregator is stored under the no-chain sentinel and becomes primary.
+        """
+        # _primary_chain is always a str (class-default sentinel before init), so
+        # it is the target slot directly. Lazily create the map for a
+        # ``__new__``-built instance that skipped ``__init__``.
+        if not hasattr(self, "_price_aggregators"):
+            self._price_aggregators = {}
+        self._price_aggregators[self._primary_chain] = aggregator
+
+    @_price_aggregator.deleter
+    def _price_aggregator(self) -> None:
+        """Back-compat deleter: drop the primary chain's aggregator.
+
+        Completes the property's descriptor protocol so ``unittest.mock.patch``
+        can restore the seam on teardown (it ``delattr``s a non-instance-local
+        attribute). Removes the primary entry from the per-chain map.
+        """
+        getattr(self, "_price_aggregators", {}).pop(self._primary_chain, None)
+
+    def _aggregator_for(self, chain: str | None) -> Any:
+        """Route a price request to the aggregator for ``chain``.
+
+        A configured chain gets its own chain-correct aggregator. A bare symbol
+        with no chain, or a chain the gateway wasn't provisioned for, falls back
+        to the primary aggregator (lead decision 1 — preserves today's lenient
+        bare-symbol behaviour; address requests are still gated strictly upstream
+        in ``GetPrice``).
+        """
+        if chain and chain in self._price_aggregators:
+            return self._price_aggregators[chain]
+        return self._price_aggregators[self._primary_chain]
+
+    @staticmethod
+    async def _close_aggregator_sources(aggregators: dict[str, Any]) -> None:
+        """Close every distinct price source across ``aggregators`` exactly once,
+        keyed by ``id()`` (VIB-5651 lead decision 2).
+
+        Shared chain-agnostic sources (Binance / CoinGecko / Pyth) are referenced
+        by multiple sub-aggregators; closing each aggregator would close them N
+        times. Per-source ``close()`` is idempotent as a backstop, but explicit
+        ownership is the contract. Operates on the passed-in map ONLY — it does
+        not touch ``self._price_aggregators`` — so a caller can rebuild the live
+        map first and then close the OLD sources without ever exposing an empty
+        map (see ``reinitialize``).
+        """
+        seen: set[int] = set()
+        for aggregator in aggregators.values():
+            for source in getattr(aggregator, "sources", []):
+                if id(source) in seen:
+                    continue
+                seen.add(id(source))
+                if not hasattr(source, "close"):
+                    continue
+                try:
+                    await source.close()
+                except Exception as e:
+                    logger.warning("Error closing price source %s: %s", getattr(source, "source_name", source), e)
+
+    async def _close_price_sources(self) -> None:
+        """Close the live per-chain sources and clear the map (shutdown path)."""
+        await self._close_aggregator_sources(self._price_aggregators)
+        self._price_aggregators = {}
+
     async def close(self) -> None:
         """Close resources held by MarketService (HTTP sessions, etc.)."""
-        if self._price_aggregator is not None and hasattr(self._price_aggregator, "close"):
-            await self._price_aggregator.close()
+        await self._close_price_sources()
         for provider in self._balance_providers.values():
             if hasattr(provider, "close"):
                 await provider.close()
@@ -451,27 +608,89 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             self._do_initialize()
 
     def _do_initialize(self) -> None:
-        """Build price sources and aggregator based on current settings.chains.
+        """Build one price aggregator per configured chain (VIB-5651).
 
-        Must be called while holding self._init_lock.
+        Must be called while holding self._init_lock. Each configured chain gets
+        its own ``PriceAggregator`` whose source composition is chain-correct by
+        construction — the median for a chain is computed only from that chain's
+        valid sources, so a hyperevm request can never be answered by an arbitrum
+        Chainlink read. Chain-agnostic sources (Binance / CoinGecko / Pyth) are
+        instantiated once via ``_SharedPriceSources`` and referenced by every
+        sub-aggregator; only chain-scoped sources are built per chain.
         """
-        from almanak.framework.data.interfaces import BasePriceSource
         from almanak.gateway.data.price.aggregator import PriceAggregator
-        from almanak.gateway.data.price.coingecko import CoinGeckoPriceSource
         from almanak.gateway.data.price.manual_override import ManualPriceOverrideSource
-        from almanak.gateway.data.price.onchain import OnChainPriceSource
-        from almanak.gateway.validation import is_solana_chain
 
-        # Determine primary chain for on-chain pricing.
+        chains = list(self.settings.chains or [])
         # IMPORTANT: Never default to a hardcoded chain -- that silently gives wrong
         # Chainlink oracle data for strategies running on a different chain (QA #4/#7/#8).
-        chain = self.settings.chains[0] if self.settings.chains else None
+        # A no-chain gateway serves a single CoinGecko-only aggregator under the sentinel.
+        self._primary_chain = chains[0] if chains else _NO_CHAIN_KEY
 
-        # Create price sources
-        cg_source = CoinGeckoPriceSource(
-            api_key=self.settings.coingecko_api_key if self.settings.coingecko_api_key is not None else "",
-            cache_ttl=30,
-        )
+        # Chain-agnostic sources built once and shared across every sub-aggregator
+        # (no O(N) client duplication as chain count grows — VIB-5651 §5).
+        shared = _SharedPriceSources(coingecko_api_key=self.settings.coingecko_api_key)
+
+        # Map key -> chain passed to the source builder. Real chains map to
+        # themselves; a no-chain gateway keeps one entry under the sentinel key,
+        # built with chain=None (the CoinGecko-only branch).
+        chain_by_key: dict[str, str | None] = {c: c for c in chains} or {_NO_CHAIN_KEY: None}
+
+        # VIB-4841 / FR-5002 stablecoin peg fast-path + VIB-5375 (RC-3) bounded
+        # per-source/global timeouts, shared by every sub-aggregator. getattr with
+        # defaults keeps older Settings shapes (and test stubs) working without
+        # the new fields. Built via a local factory (not **kwargs) so the typed
+        # PriceAggregator signature is preserved for mypy.
+        def _make_aggregator(sources: list) -> PriceAggregator:
+            return PriceAggregator(
+                sources=sources,
+                stablecoin_verify=getattr(self.settings, "stablecoin_verify", False),
+                stablecoin_chainlink_check_interval=getattr(self.settings, "stablecoin_chainlink_check_interval", 50),
+                per_source_timeout_seconds=getattr(self.settings, "price_source_timeout_seconds", 10.0),
+                global_timeout_seconds=getattr(self.settings, "price_aggregator_timeout_seconds", 15.0),
+            )
+
+        self._price_aggregators = {
+            key: _make_aggregator(self._build_sources_for_chain(chain, shared=shared))
+            for key, chain in chain_by_key.items()
+        }
+
+        # Last-resort manual override source — reads ALMANAK_PRICE_OVERRIDE_<TOKEN>
+        # env vars. Kept OUT of the aggregator's median vote because
+        # PriceAggregator computes a plain median without weighting by
+        # confidence (a live $0.20 + override $0.12 would yield a corrupt
+        # $0.16). Consulted only in GetPrice when the aggregator raises
+        # AllDataSourcesFailed. Added for Bug 3 of the 0G DogFooding report
+        # (2026-04-16). Off by default — a mis-set env var could corrupt
+        # teardown/slippage decisions, so operators must explicitly opt in.
+        if getattr(self.settings, "enable_manual_price_overrides", False):
+            self._manual_price_override = ManualPriceOverrideSource()
+            logger.info(
+                "MarketService: manual price override fallback ENABLED. "
+                "ALMANAK_PRICE_OVERRIDE_<TOKEN> env vars will be consulted "
+                "if every primary oracle source fails for a given token."
+            )
+        else:
+            self._manual_price_override = None
+
+        self._initialized = True
+
+    def _build_sources_for_chain(self, chain: str | None, *, shared: _SharedPriceSources) -> list:
+        """Build the ordered price-source list for a single chain (VIB-5651).
+
+        Extracted verbatim from the four mutually-exclusive branches the flat
+        provisioning used: no-chain (CoinGecko only), Solana (Pyth primary),
+        venue-oracle (HyperCore primary), and the default EVM 4-source stack
+        (Chainlink + Binance + DexScreener + CoinGecko). Chain-agnostic sources
+        come from ``shared`` so they are instantiated once regardless of chain
+        count; chain-scoped sources (on-chain / venue oracle + a chain-bound
+        DexScreener) are built per chain. Preserves single-chain behaviour
+        byte-for-byte (one-entry map → identical source set).
+        """
+        from almanak.framework.data.interfaces import BasePriceSource
+        from almanak.gateway.validation import is_solana_chain
+
+        cg_source = shared.coingecko()
 
         sources: list[BasePriceSource]
         if not chain:
@@ -487,9 +706,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             # Solana: Pyth (primary) + DexScreener (secondary) + CoinGecko (fallback)
             # OnChainPriceSource is EVM-only (Chainlink), skip it for Solana
             from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
-            from almanak.gateway.data.price.pyth import PythPriceSource
 
-            pyth_source = PythPriceSource(cache_ttl=15)
+            pyth_source = shared.pyth()
             # Solana-only gateway: keep a default chain so tokens arriving
             # without a ResolvedToken still dispatch to the right platform.
             dexscreener_source = DexScreenerPriceSource(default_chain_id="solana", cache_ttl=30)
@@ -517,11 +735,11 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             # median with outlier detection. Sources that don't support a token
             # raise DataSourceUnavailable, which the aggregator handles gracefully.
             from almanak.framework.data.tokens import get_token_resolver
-            from almanak.gateway.data.price.binance import BinancePriceSource
             from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
+            from almanak.gateway.data.price.onchain import OnChainPriceSource
 
             onchain_source = OnChainPriceSource(chain=chain, network=self.settings.network)
-            binance_source = BinancePriceSource(cache_ttl=30, request_timeout=5.0)
+            binance_source = shared.binance()
             # Keep the primary chain as the default so bare-symbol requests
             # (no ResolvedToken) still dispatch correctly. Multi-chain price
             # requests carry a ResolvedToken whose .chain overrides this.
@@ -530,69 +748,43 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 cache_ttl=30,
                 token_resolver=get_token_resolver(),
             )
-
             sources = [onchain_source, binance_source, dexscreener_source, cg_source]
             logger.info(
                 "MarketService: 4-source EVM pricing (Chainlink + Binance + DexScreener + CoinGecko), chain=%s",
                 chain,
             )
-
-        # VIB-4841 / FR-5002: pass the stablecoin peg fast-path config from
-        # gateway settings. VIB-5375 (RC-3): pass the bounded per-source + global
-        # aggregator timeouts. getattr with defaults keeps older Settings shapes
-        # (and test stubs) working without the new fields.
-        self._price_aggregator = PriceAggregator(
-            sources=sources,
-            stablecoin_verify=getattr(self.settings, "stablecoin_verify", False),
-            stablecoin_chainlink_check_interval=getattr(self.settings, "stablecoin_chainlink_check_interval", 50),
-            per_source_timeout_seconds=getattr(self.settings, "price_source_timeout_seconds", 10.0),
-            global_timeout_seconds=getattr(self.settings, "price_aggregator_timeout_seconds", 15.0),
-        )
-        # Last-resort manual override source — reads ALMANAK_PRICE_OVERRIDE_<TOKEN>
-        # env vars. Kept OUT of the aggregator's median vote because
-        # PriceAggregator computes a plain median without weighting by
-        # confidence (a live $0.20 + override $0.12 would yield a corrupt
-        # $0.16). Consulted only in GetPrice when the aggregator raises
-        # AllDataSourcesFailed. Added for Bug 3 of the 0G DogFooding report
-        # (2026-04-16). Off by default — a mis-set env var could corrupt
-        # teardown/slippage decisions, so operators must explicitly opt in.
-        if getattr(self.settings, "enable_manual_price_overrides", False):
-            self._manual_price_override = ManualPriceOverrideSource()
-            logger.info(
-                "MarketService: manual price override fallback ENABLED. "
-                "ALMANAK_PRICE_OVERRIDE_<TOKEN> env vars will be consulted "
-                "if every primary oracle source fails for a given token."
-            )
-        else:
-            self._manual_price_override = None
-
-        self._initialized = True
+        return sources
 
     async def reinitialize(self, chain: str) -> None:
         """Re-initialize price sources with full pricing stack for the given chain.
 
         Called by RegisterChains when chain info becomes available after startup.
-        Upgrades from CoinGecko-only to the full 4-source stack.
+        Upgrades from CoinGecko-only to the full per-chain stack.
         """
         async with self._init_lock:
-            if self._price_aggregator is not None and hasattr(self._price_aggregator, "close"):
-                try:
-                    await self._price_aggregator.close()
-                except Exception as e:
-                    logger.warning("Error closing old price aggregator during reinit: %s", e)
-                self._price_aggregator = None
-
             if not self.settings.chains:
                 self.settings.chains = [chain]
-            else:
-                # Always ensure the requested chain is at index 0 (primary),
-                # since _do_initialize uses chains[0] for on-chain pricing.
-                if chain in self.settings.chains:
-                    self.settings.chains.remove(chain)
-                self.settings.chains.insert(0, chain)
+            elif chain not in self.settings.chains:
+                # Pricing is keyed by chain, not list index (VIB-5651 lead
+                # decision 4): we no longer force the requested chain to index 0.
+                # Just ensure it is present so its aggregator gets built and the
+                # request is served — the observable outcome the old reordering
+                # was protecting.
+                self.settings.chains.append(chain)
 
-            self._initialized = False
+            # Rebuild-then-close (audit-3195 Important #1): capture the old
+            # aggregators, let ``_do_initialize`` atomically rebind
+            # ``_price_aggregators`` to the fresh map (its dict-comprehension
+            # assignment has no ``await`` inside), THEN close the old sources.
+            # ``_initialized`` stays True throughout, so a concurrent GetPrice
+            # that early-returns from ``_ensure_initialized`` always reads a
+            # non-empty map (old before the rebind, new after) — never the empty
+            # map the close-then-rebuild order briefly exposed. The old
+            # ``_SharedPriceSources`` instances are distinct from the freshly
+            # built ones, so closing them can't touch the live sources.
+            old_aggregators = dict(self._price_aggregators)
             self._do_initialize()
+            await self._close_aggregator_sources(old_aggregators)
 
         logger.info("MarketService re-initialized with chain=%s", chain)
 
@@ -608,15 +800,23 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         """
         await self._ensure_initialized()
 
-        # Warm price sources by fetching a common token price.
-        # This forces HTTP connection setup, API auth, and cache population
-        # so the first strategy price() call doesn't block for 30s+.
-        if self._price_aggregator is not None:
+        # Warm EVERY configured chain's aggregator concurrently (VIB-5651 lead
+        # decision 3). The smoke that motivated this change failed on latency:
+        # leaving a non-primary venue-oracle chain cold reintroduces exactly the
+        # first-call slowness we are fixing. Chain counts are small (1:1
+        # gateway↔strategy), so warming all is cheap and each fetch is already
+        # bounded by the aggregator's own per-source/global gather budget.
+        # Forces HTTP connection setup, API auth, and cache population so the
+        # first strategy price() call doesn't block for 30s+.
+        async def _warm(chain_key: str, aggregator: Any) -> None:
             try:
-                await self._price_aggregator.get_aggregated_price("ETH", "USD")
-                logger.info("Price cache pre-warmed (ETH/USD fetched)")
+                await aggregator.get_aggregated_price("ETH", "USD")
+                logger.info("Price cache pre-warmed for %s (ETH/USD fetched)", chain_key)
             except Exception as e:
-                logger.warning("Price cache warmup failed (will retry on first call): %s", e)
+                logger.warning("Price cache warmup failed for %s (will retry on first call): %s", chain_key, e)
+
+        if self._price_aggregators:
+            await asyncio.gather(*(_warm(key, agg) for key, agg in self._price_aggregators.items()))
 
         # Pre-warm balance provider for the configured chain if a wallet is available
         chain = self.settings.chains[0] if self.settings.chains else None
@@ -897,9 +1097,17 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.PriceResponse()
 
+        # Route to the chain-correct aggregator (VIB-5651). Prefer the explicit
+        # request chain; fall back to the resolved token's chain (address path);
+        # a bare symbol with neither routes to the primary aggregator. The SAME
+        # aggregator serves the alias fallback below so ``get_last_details`` reads
+        # the matching source metadata.
+        target_chain = requested_chain or (getattr(resolved_token, "chain", None) if resolved_token else None)
+        aggregator = self._aggregator_for(target_chain)
+
         try:
-            result = await self._price_aggregator.get_aggregated_price(token, quote, resolved_token=resolved_token)
-            details = self._price_aggregator.get_last_details(token, quote)
+            result = await aggregator.get_aggregated_price(token, quote, resolved_token=resolved_token)
+            details = aggregator.get_last_details(token, quote)
 
             response = gateway_pb2.PriceResponse(
                 price=str(result.price),
@@ -921,7 +1129,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             alias = NATIVE_PRICE_ALIASES.get(token.upper())
             if alias:
                 try:
-                    result = await self._price_aggregator.get_aggregated_price(alias, quote, resolved_token=None)
+                    result = await aggregator.get_aggregated_price(alias, quote, resolved_token=None)
                     logger.info(f"GetPrice: {token} resolved via alias {alias}")
                     response = gateway_pb2.PriceResponse(
                         price=str(result.price),
@@ -930,7 +1138,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                         confidence=result.confidence,
                         stale=result.stale,
                     )
-                    details = self._price_aggregator.get_last_details(alias, quote)
+                    details = aggregator.get_last_details(alias, quote)
                     if details:
                         response.sources_ok.extend(details.get("sources_ok", []))
                         for k, v in details.get("sources_failed", {}).items():
@@ -1436,7 +1644,9 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             resolved_token = None
 
         try:
-            return await self._price_aggregator.get_aggregated_price(token, "USD", resolved_token=resolved_token)
+            # Route to the chain-correct aggregator (VIB-5651) — improves PT/YT
+            # underlying pricing on non-primary chains.
+            return await self._aggregator_for(chain).get_aggregated_price(token, "USD", resolved_token=resolved_token)
         except (AllDataSourcesFailed, DataSourceUnavailable) as e:
             raise _UnpriceableUnderlying(str(e)) from e
 
@@ -1620,10 +1830,15 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                     else await provider.get_balance(token)
                 )
 
-            # Get USD value if available
+            # Get USD value if available. Route to the chain-correct aggregator
+            # (VIB-5651 native-gas-fold fix): on a venue-oracle chain (e.g.
+            # hyperevm) native ETH must be priced by that chain's aggregator, not
+            # the primary — otherwise balance_usd is stamped price_missing and the
+            # accounting fold halts.
             balance_usd = ""
+            price_aggregator = self._aggregator_for(chain)
             try:
-                price_result = await self._price_aggregator.get_aggregated_price(token, "USD")
+                price_result = await price_aggregator.get_aggregated_price(token, "USD")
                 balance_usd = str(result.balance * price_result.price)
             except Exception:
                 # USD conversion optional. Try the native->wrapped alias (e.g.
@@ -1632,7 +1847,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 alias = NATIVE_PRICE_ALIASES.get(token.upper())
                 if alias:
                     try:
-                        price_result = await self._price_aggregator.get_aggregated_price(alias, "USD")
+                        price_result = await price_aggregator.get_aggregated_price(alias, "USD")
                         balance_usd = str(result.balance * price_result.price)
                     except Exception:
                         pass
@@ -1727,16 +1942,19 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                         else await provider.get_balance(token)
                     )
 
+                # Route to the chain-correct aggregator (VIB-5651 native-gas-fold
+                # fix) — the batched balance's chain, not the primary.
                 balance_usd = ""
+                price_aggregator = self._aggregator_for(chain)
                 try:
-                    price_result = await self._price_aggregator.get_aggregated_price(token, "USD")
+                    price_result = await price_aggregator.get_aggregated_price(token, "USD")
                     balance_usd = str(result.balance * price_result.price)
                 except Exception:
                     # Try native->wrapped alias (MATIC/POL -> WMATIC) before giving up.
                     alias = NATIVE_PRICE_ALIASES.get(token.upper())
                     if alias:
                         try:
-                            price_result = await self._price_aggregator.get_aggregated_price(alias, "USD")
+                            price_result = await price_aggregator.get_aggregated_price(alias, "USD")
                             balance_usd = str(result.balance * price_result.price)
                         except Exception:
                             pass
