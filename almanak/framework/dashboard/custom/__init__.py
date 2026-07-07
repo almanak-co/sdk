@@ -11,6 +11,7 @@ from .api_client import (
     DashboardAPIClient,
     create_api_client,
 )
+from .basic import render_basic_dashboard
 from .discoverer import (
     CustomDashboardInfo,
     discover_custom_dashboards,
@@ -36,5 +37,6 @@ __all__ = [
     "get_dashboard_render_function",
     "DashboardLoadError",
     "DashboardInterfaceError",
+    "render_basic_dashboard",
     "render_custom_dashboard_safe",
 ]
