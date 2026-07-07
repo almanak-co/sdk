@@ -353,7 +353,17 @@ class LagoonVaultSDK:
         version_hex = raw[128 : 128 + length * 2]
         on_chain_version = bytes.fromhex(version_hex).decode("utf-8")
 
-        if on_chain_version != expected_version.value:
+        # Lagoon vault contracts return a 'v'-prefixed semver string (e.g.
+        # "v0.5.0"), while the VaultVersion enum is canonical bare semver
+        # ("0.5.0"). Normalise the on-chain value (trim whitespace, strip a
+        # single leading 'v'/'V') before comparison so a genuinely deployed
+        # v0.5.0 vault matches its enum member instead of failing preflight
+        # on every settlement.
+        normalized = on_chain_version.strip()
+        if normalized[:1] in ("v", "V"):
+            normalized = normalized[1:]
+
+        if normalized != expected_version.value:
             raise ValueError(
                 f"Vault version mismatch: on-chain '{on_chain_version}' != expected '{expected_version.value}'"
             )

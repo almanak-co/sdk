@@ -212,19 +212,39 @@ class LagoonVaultDeployer:
         )
 
     @staticmethod
-    def parse_deploy_receipt(receipt: dict[str, Any]) -> VaultDeployResult:
+    def parse_deploy_receipt(receipt: Any) -> VaultDeployResult:
         """Parse a deployment transaction receipt to extract the vault address.
 
         Looks for ProxyDeployed event in logs. The vault address is in the
         event data (first 32 bytes), not in topics.
 
         Args:
-            receipt: Transaction receipt dict with 'logs', 'transactionHash', 'status'.
+            receipt: Transaction receipt. Either a raw dict (with ``logs`` /
+                ``transactionHash`` / ``status``) or the framework's
+                ``TransactionReceipt`` dataclass (or any object exposing
+                ``to_dict()``), which is normalised to a dict here. The
+                dataclass path is what the CLI auto-deploy flow passes in.
 
         Returns:
             VaultDeployResult with extracted vault address.
         """
-        tx_hash = receipt.get("transactionHash") or receipt.get("transaction_hash")
+        # Normalise the framework TransactionReceipt dataclass (attribute access,
+        # field named ``tx_hash``, HexBytes logs) into the dict shape this parser
+        # expects. Raw-dict callers pass through unchanged.
+        if not isinstance(receipt, dict) and hasattr(receipt, "to_dict"):
+            receipt = receipt.to_dict()
+
+        # Defensive contract: an unparseable receipt must yield a loud, typed
+        # failure result (never an AttributeError). A deploy is money-critical,
+        # so an unexpected receipt shape is treated as a failed deploy, not a
+        # crash the caller has to interpret.
+        if not isinstance(receipt, dict):
+            return VaultDeployResult(
+                success=False,
+                error=f"Unsupported receipt type: {type(receipt).__name__}",
+            )
+
+        tx_hash = receipt.get("transactionHash") or receipt.get("transaction_hash") or receipt.get("tx_hash")
         status = receipt.get("status")
 
         # Check tx status (handle both int and hex)

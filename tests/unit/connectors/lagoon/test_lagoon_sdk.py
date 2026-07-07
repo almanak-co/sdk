@@ -342,6 +342,25 @@ class TestVerifyVersion:
 
         sdk.verify_version(VAULT_ADDRESS, VaultVersion.V1_0_0)
 
+    def test_succeeds_on_v_prefixed_onchain_version(self, sdk, mock_gateway_client):
+        """Regression: real Lagoon v0.5.0 vaults return a 'v'-prefixed semver
+        ("v0.5.0") from version(), while the VaultVersion enum is bare
+        ("0.5.0"). The 'v' prefix must be normalised away or preflight fails on
+        every settlement against a genuinely deployed vault (VIB-5644 E2E)."""
+        hex_result = self._encode_abi_string("v0.5.0")
+        mock_gateway_client.rpc.Call.return_value = _make_rpc_response(hex_result)
+
+        # Should not raise despite the 'v' prefix.
+        sdk.verify_version(VAULT_ADDRESS, VaultVersion.V0_5_0)
+
+    def test_v_prefixed_mismatch_still_raises(self, sdk, mock_gateway_client):
+        """Normalising the 'v' prefix must not mask a genuine version mismatch."""
+        hex_result = self._encode_abi_string("v0.3.0")
+        mock_gateway_client.rpc.Call.return_value = _make_rpc_response(hex_result)
+
+        with pytest.raises(ValueError, match="Vault version mismatch"):
+            sdk.verify_version(VAULT_ADDRESS, VaultVersion.V0_5_0)
+
     def test_raises_on_short_response(self, sdk, mock_gateway_client):
         mock_gateway_client.rpc.Call.return_value = _make_rpc_response("0x1234")
 

@@ -178,7 +178,7 @@ class TestCalldata:
         """ABI-decode the calldata back and verify all fields."""
         tx = deployer.build_deploy_vault_tx(base_params)
         # Strip selector (4 bytes = 8 hex chars + "0x" prefix)
-        raw = bytes.fromhex(tx["data"][len(CREATE_VAULT_PROXY_SELECTOR):])
+        raw = bytes.fromhex(tx["data"][len(CREATE_VAULT_PROXY_SELECTOR) :])
 
         decoded = abi_decode(
             ["address", "address", "uint256", INIT_STRUCT_ABI_TYPE, "bytes32"],
@@ -211,7 +211,7 @@ class TestCalldata:
         custom = "0x5555555555555555555555555555555555555555"
         base_params.valuation_manager_address = custom
         tx = deployer.build_deploy_vault_tx(base_params)
-        raw = bytes.fromhex(tx["data"][len(CREATE_VAULT_PROXY_SELECTOR):])
+        raw = bytes.fromhex(tx["data"][len(CREATE_VAULT_PROXY_SELECTOR) :])
         decoded = abi_decode(
             ["address", "address", "uint256", INIT_STRUCT_ABI_TYPE, "bytes32"],
             raw,
@@ -369,6 +369,66 @@ class TestDeployReceiptParsing:
         result = LagoonVaultDeployer.parse_deploy_receipt(receipt)
         assert result.success is False
 
+    def test_framework_transaction_receipt_dataclass(self):
+        """Regression: the CLI auto-deploy flow passes the framework
+        ``TransactionReceipt`` dataclass (attribute access, ``tx_hash`` field,
+        no ``.get()``), not a raw dict. Parsing must normalise it rather than
+        crash with ``AttributeError: 'TransactionReceipt' object has no
+        attribute 'get'`` (VIB: Lagoon vault Anvil auto-deploy).
+        """
+        from almanak.framework.execution.interfaces import TransactionReceipt
+
+        vault_padded = "000000000000000000000000" + VAULT_ADDRESS[2:]
+        deployer_padded = "000000000000000000000000" + DEPLOYER_ADDRESS[2:]
+        receipt = TransactionReceipt(
+            tx_hash="0xdeadbeef",
+            block_number=48150023,
+            block_hash="0xblock",
+            gas_used=1_581_985,
+            effective_gas_price=1_000_000_000,
+            status=1,
+            logs=[
+                {
+                    "topics": [PROXY_DEPLOYED_TOPIC],
+                    "data": "0x" + vault_padded + deployer_padded,
+                }
+            ],
+        )
+        result = LagoonVaultDeployer.parse_deploy_receipt(receipt)
+        assert result.success is True
+        assert result.vault_address == VAULT_ADDRESS
+        assert result.transaction_hash == "0xdeadbeef"
+
+    def test_framework_transaction_receipt_reverted(self):
+        """A reverted TransactionReceipt dataclass parses to a clean failure,
+        not a crash."""
+        from almanak.framework.execution.interfaces import TransactionReceipt
+
+        receipt = TransactionReceipt(
+            tx_hash="0xrevert",
+            block_number=1,
+            block_hash="0xb",
+            gas_used=21000,
+            effective_gas_price=1,
+            status=0,
+            logs=[],
+        )
+        result = LagoonVaultDeployer.parse_deploy_receipt(receipt)
+        assert result.success is False
+        assert result.error == "Transaction reverted"
+        assert result.transaction_hash == "0xrevert"
+
+    def test_unsupported_receipt_type_returns_failure(self):
+        """A receipt that is neither a dict nor exposes ``to_dict()`` (e.g.
+        ``None`` or an unexpected object) must yield a loud, typed failure
+        result rather than crash with ``AttributeError`` on ``.get()``. A
+        deploy is money-critical: an unparseable receipt is a failed deploy,
+        not a caller-facing crash."""
+        for bad in (None, 12345, "0xnot-a-receipt", ["logs"]):
+            result = LagoonVaultDeployer.parse_deploy_receipt(bad)
+            assert result.success is False
+            assert "Unsupported receipt type" in result.error
+
 
 # --- Approve Underlying Tests ---
 
@@ -387,13 +447,13 @@ class TestApproveUnderlying:
 
     def test_spender_is_vault(self):
         tx = LagoonVaultDeployer.build_approve_underlying_tx(UNDERLYING_TOKEN, VAULT_ADDRESS, SAFE_ADDRESS)
-        calldata = tx["data"][len(ERC20_APPROVE_SELECTOR):]
+        calldata = tx["data"][len(ERC20_APPROVE_SELECTOR) :]
         spender = calldata[0:64]
         assert VAULT_ADDRESS.lower()[2:] in spender
 
     def test_amount_is_max_uint256(self):
         tx = LagoonVaultDeployer.build_approve_underlying_tx(UNDERLYING_TOKEN, VAULT_ADDRESS, SAFE_ADDRESS)
-        calldata = tx["data"][len(ERC20_APPROVE_SELECTOR):]
+        calldata = tx["data"][len(ERC20_APPROVE_SELECTOR) :]
         amount = int(calldata[64:128], 16)
         assert amount == MAX_UINT256
 
@@ -487,7 +547,7 @@ class TestGetDefaultLogic:
         )
         tx = deployer.build_deploy_vault_tx(params)
         # Decode and verify logic is zero address
-        raw = bytes.fromhex(tx["data"][len(CREATE_VAULT_PROXY_SELECTOR):])
+        raw = bytes.fromhex(tx["data"][len(CREATE_VAULT_PROXY_SELECTOR) :])
         decoded = abi_decode(
             ["address", "address", "uint256", INIT_STRUCT_ABI_TYPE, "bytes32"],
             raw,
