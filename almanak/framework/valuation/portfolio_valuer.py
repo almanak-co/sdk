@@ -43,6 +43,27 @@ from almanak.framework.valuation.fungible_lp_position_reader import FungibleLpPo
 from almanak.framework.valuation.lending_position_reader import LendingPositionReader
 from almanak.framework.valuation.lending_valuer import value_lending_position
 from almanak.framework.valuation.lp_position_reader import LPPositionReader
+from almanak.framework.valuation.lp_repricer import (
+    default_decimals_fn as _shared_default_decimals_fn,
+)
+from almanak.framework.valuation.lp_repricer import (
+    extract_token_id as _shared_extract_token_id,
+)
+from almanak.framework.valuation.lp_repricer import (
+    looks_like_evm_address as _shared_looks_like_evm_address,
+)
+from almanak.framework.valuation.lp_repricer import (
+    price_ratio_to_tick as _shared_price_ratio_to_tick,
+)
+from almanak.framework.valuation.lp_repricer import (
+    reprice_lp_position as _shared_reprice_lp_position,
+)
+from almanak.framework.valuation.lp_repricer import (
+    resolve_lp_pool_address_from_details as _shared_resolve_lp_pool_address_from_details,
+)
+from almanak.framework.valuation.lp_repricer import (
+    resolve_token_symbol as _shared_resolve_token_symbol,
+)
 from almanak.framework.valuation.lp_valuer import value_lp_position
 from almanak.framework.valuation.peg_divergence import (
     DEFAULT_DEPEG_THRESHOLD_BPS,
@@ -101,23 +122,12 @@ def _looks_like_evm_address(value: object) -> bool:
     """Return True iff ``value`` is the 42-char ``0x``-prefixed hex shape.
 
     VIB-4274 — ``position.details["pool"]`` is type-overloaded across the
-    codebase: some producers stash an actual pool contract address
-    (``"0x..."``), others stash a human descriptor (``"WETH/USDC/500"``).
-    The descriptor shape silently slipped into ``eth_call`` for slot0 reads
-    and triggered ``-32602 odd number of digits`` warnings every snapshot
-    (hidden by the price-ratio-tick fallback so the 21-cell Accountant Test
-    still passed, but the ``in_range`` flag would silently lie on mainnet).
-
-    Mirrors the VIB-3943 guard at
-    ``almanak/framework/teardown/post_conditions.py:209`` so the two consumer
-    sites stay aligned. Any drift here should be paired with a drift there.
+    codebase. Delegates to the canonical ``lp_repricer.looks_like_evm_address``
+    (VIB-5664 single-source-of-truth extraction) so the guard cannot drift
+    between the valuer and the snapshot repricing path. Mirrors the VIB-3943
+    guard at ``almanak/framework/teardown/post_conditions.py:209``.
     """
-    return (
-        isinstance(value, str)
-        and value.startswith("0x")
-        and len(value) == 42
-        and all(c in "0123456789abcdefABCDEF" for c in value[2:])
-    )
+    return _shared_looks_like_evm_address(value)
 
 
 def _resolve_lp_pool_address_from_details(position: Any) -> str | None:
@@ -138,11 +148,11 @@ def _resolve_lp_pool_address_from_details(position: Any) -> str | None:
 
     Returns the validated 42-char ``0x``-prefixed hex address, or ``None``
     when no usable address is available.
+
+    Delegates to the canonical ``lp_repricer.resolve_lp_pool_address_from_details``
+    (VIB-5664) so the two LP repricing paths stay aligned automatically.
     """
-    pool_address = position.details.get("pool_address") or position.details.get("pool")
-    if pool_address and not _looks_like_evm_address(pool_address):
-        return None
-    return pool_address or None
+    return _shared_resolve_lp_pool_address_from_details(position)
 
 
 @dataclass(frozen=True)
@@ -3018,103 +3028,21 @@ class PortfolioValuer:
         chain: str,
         market: MarketDataSource,
     ) -> tuple[Decimal, dict[str, Any]] | None:
-        """Re-price LP and return enriched details for snapshot persistence."""
-        try:
-            token_id = self._extract_token_id(position)
-            if token_id is None:
-                return None
+        """Re-price LP and return enriched details for snapshot persistence.
 
-            on_chain = self._lp_reader.read_position(chain=chain, token_id=token_id, protocol=position.protocol)
-            if on_chain is None:
-                return None
-
-            if on_chain.liquidity == 0 and on_chain.tokens_owed0 == 0 and on_chain.tokens_owed1 == 0:
-                return Decimal("0"), {"position_id": str(token_id), "liquidity": "0"}
-
-            token0_symbol = self._resolve_token_symbol(on_chain.token0, position, "token0")
-            token1_symbol = self._resolve_token_symbol(on_chain.token1, position, "token1")
-            if not token0_symbol or not token1_symbol:
-                return None
-
-            try:
-                token0_price = Decimal(str(market.price(token0_symbol)))
-                token1_price = Decimal(str(market.price(token1_symbol)))
-            except Exception:
-                return None
-
-            if token0_price <= 0 or token1_price <= 0:
-                return None
-
-            token0_decimals = self._get_token_decimals(token0_symbol, chain)
-            token1_decimals = self._get_token_decimals(token1_symbol, chain)
-            if token0_decimals is None or token1_decimals is None:
-                return None
-
-            # VIB-4274 — see ``_resolve_lp_pool_address_from_details`` for
-            # the prefer-pool_address + hex-shape guard. Descriptor-shaped
-            # values would slip into ``eth_call`` and trip
-            # ``-32602 odd number of digits``; the price-ratio fallback
-            # below masks the warning but the ``in_range`` flag would
-            # silently lie on mainnet.
-            pool_address = _resolve_lp_pool_address_from_details(position)
-            current_tick: int | None = None
-            sqrt_price_x96: int | None = None
-            if pool_address:
-                slot0 = self._lp_reader.read_pool_slot0(chain, pool_address)
-                if slot0:
-                    current_tick = slot0.tick
-                    sqrt_price_x96 = slot0.sqrt_price_x96
-
-            if current_tick is None:
-                current_tick = self._price_ratio_to_tick(token0_price, token1_price, token0_decimals, token1_decimals)
-
-            lp_value = value_lp_position(
-                liquidity=on_chain.liquidity,
-                tick_lower=on_chain.tick_lower,
-                tick_upper=on_chain.tick_upper,
-                current_tick=current_tick,
-                token0_price_usd=token0_price,
-                token1_price_usd=token1_price,
-                token0_decimals=token0_decimals,
-                token1_decimals=token1_decimals,
-                sqrt_price_x96=sqrt_price_x96,
-            )
-
-            fees_usd = Decimal("0")
-            fees0_human = Decimal("0")
-            fees1_human = Decimal("0")
-            if on_chain.tokens_owed0 > 0:
-                fees0_human = Decimal(on_chain.tokens_owed0) / Decimal(10**token0_decimals)
-                fees_usd += fees0_human * token0_price
-            if on_chain.tokens_owed1 > 0:
-                fees1_human = Decimal(on_chain.tokens_owed1) / Decimal(10**token1_decimals)
-                fees_usd += fees1_human * token1_price
-
-            total = lp_value.value_usd + fees_usd
-
-            enriched = {
-                "position_id": str(token_id),
-                "amount0": str(lp_value.amount0),
-                "amount1": str(lp_value.amount1),
-                "token0_value_usd": str(lp_value.token0_value_usd),
-                "token1_value_usd": str(lp_value.token1_value_usd),
-                "in_range": lp_value.in_range,
-                "tick_lower": on_chain.tick_lower,
-                "tick_upper": on_chain.tick_upper,
-                "liquidity": str(on_chain.liquidity),
-                "fees0": str(fees0_human),
-                "fees1": str(fees1_human),
-                "fees_usd": str(fees_usd),
-                "token0_symbol": token0_symbol,
-                "token1_symbol": token1_symbol,
-                "valuation_source": "on_chain",
-            }
-
-            return total, enriched
-
-        except Exception:
-            logger.debug("LP enriched re-pricing failed for %s", position.position_id, exc_info=True)
-            return None
+        VIB-5664 — the repricing body now lives in the shared
+        ``lp_repricer.reprice_lp_position`` engine so this valuer and
+        ``MarketSnapshot.lp_position_value`` cannot diverge. This wrapper only
+        binds the valuer's collaborators (its ``LPPositionReader``,
+        ``market.price``, and decimals resolver). Behaviour-identical.
+        """
+        return _shared_reprice_lp_position(
+            self._lp_reader,
+            position,
+            chain,
+            market.price,
+            self._get_token_decimals,
+        )
 
     def _reprice_v4_lp_enriched(
         self,
@@ -5389,29 +5317,11 @@ class PortfolioValuer:
 
     @staticmethod
     def _extract_token_id(position: "PositionInfo") -> int | None:
-        """Extract numeric NFT token ID from position data."""
-        pid = position.position_id
-        if not pid:
-            return None
+        """Extract numeric NFT token ID from position data.
 
-        # Try direct numeric parse
-        try:
-            token_id = int(pid)
-            if token_id >= 0:
-                return token_id
-        except (ValueError, TypeError):
-            pass
-
-        # Check details dict
-        for key in ("token_id", "tokenId", "nft_id"):
-            val = position.details.get(key)
-            if val is not None:
-                try:
-                    return int(val)
-                except (ValueError, TypeError):
-                    pass
-
-        return None
+        Delegates to the canonical ``lp_repricer.extract_token_id`` (VIB-5664).
+        """
+        return _shared_extract_token_id(position)
 
     @staticmethod
     def _resolve_token_symbol(
@@ -5421,48 +5331,20 @@ class PortfolioValuer:
     ) -> str | None:
         """Resolve a token address to a symbol.
 
-        Prefers the authoritative on-chain address via TokenResolver,
-        then falls back to strategy-reported metadata.
+        Delegates to the canonical ``lp_repricer.resolve_token_symbol``
+        (VIB-5664): authoritative on-chain resolution first, then
+        strategy-reported metadata, then the token0/token1 list.
         """
-        # Primary: resolve from on-chain address (authoritative)
-        try:
-            from almanak.framework.data.tokens import get_token_resolver
-
-            resolver = get_token_resolver()
-            resolved = resolver.resolve(token_address, position.chain)
-            if resolved and resolved.symbol:
-                return resolved.symbol
-        except Exception:
-            pass
-
-        # Fallback: strategy-reported metadata
-        symbol = position.details.get(field_name)
-        if symbol:
-            return symbol
-
-        # Fallback: tokens list (LP-specific — only valid for token0/token1)
-        if field_name in ("token0", "token1"):
-            tokens = position.details.get("tokens", [])
-            idx = 0 if field_name == "token0" else 1
-            if len(tokens) > idx:
-                return tokens[idx]
-
-        return None
+        return _shared_resolve_token_symbol(token_address, position, field_name)
 
     @staticmethod
     def _get_token_decimals(symbol: str, chain: str) -> int | None:
         """Get token decimals. Returns None if unknown (never defaults to 18).
 
-        Per codebase rules: "NEVER default to 18 decimals -- always raise
-        TokenNotFoundError if decimals unknown."
+        Delegates to the canonical ``lp_repricer.default_decimals_fn``
+        (VIB-5664). Per codebase rules: "NEVER default to 18 decimals."
         """
-        try:
-            from almanak.framework.data.tokens import get_token_resolver
-
-            resolver = get_token_resolver()
-            return resolver.get_decimals(chain, symbol)
-        except Exception:
-            return None
+        return _shared_default_decimals_fn(symbol, chain)
 
     def _enrich_position_pnl(
         self,
@@ -5895,21 +5777,7 @@ class PortfolioValuer:
     ) -> int:
         """Derive approximate V3 tick from USD prices and decimals.
 
-        V3 price = token1_amount / token0_amount (in wei terms).
-        tick = log(price) / log(1.0001)
+        Delegates to the canonical ``lp_repricer.price_ratio_to_tick``
+        (VIB-5664).
         """
-        import math
-
-        if token0_price <= 0 or token1_price <= 0:
-            return 0
-
-        # V3 price is token1/token0 in wei terms
-        # price = (token0_price / token1_price) * (10^token1_decimals / 10^token0_decimals)
-        price_ratio = float(token0_price / token1_price) * (10**token1_decimals / 10**token0_decimals)
-
-        if price_ratio <= 0:
-            return 0
-
-        # tick = log(price) / log(1.0001)
-        tick = math.log(price_ratio) / math.log(1.0001)
-        return int(tick)
+        return _shared_price_ratio_to_tick(token0_price, token1_price, token0_decimals, token1_decimals)

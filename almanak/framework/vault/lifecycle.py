@@ -134,21 +134,47 @@ class VaultLifecycleManager:
         """Check if settlement is needed before the strategy's decide() call.
 
         Args:
-            strategy: The IntentStrategy instance (unused in this method,
-                      but passed for consistency with the hook interface).
+            strategy: The IntentStrategy instance. Consulted for the optional
+                ``vault_settlement_allowed()`` interleave gate (VIB-5664).
 
         Returns:
             VaultAction indicating what the lifecycle manager should do.
         """
         vault_state = self.get_vault_state()
 
-        # Check for interrupted settlements first
+        # Check for interrupted settlements first. An in-flight settlement must
+        # ALWAYS resume to completion — never gated — or a partially-proposed
+        # NAV would be stranded on-chain.
         if vault_state.settlement_phase != SettlementPhase.IDLE:
             logger.info(
                 "Vault settlement interrupted in phase %s, resuming",
                 vault_state.settlement_phase.value,
             )
             return VaultAction.RESUME_SETTLE
+
+        # Settlement/rebalance interleave guard (VIB-5664). Before STARTING a
+        # fresh settlement, honour the strategy's optional
+        # ``vault_settlement_allowed()`` gate: a strategy that is mid-rebalance
+        # (position closed but not yet reopened) must not have a NAV snapshotted
+        # from its transient, cash-only state — that would understate NAV and
+        # crater the vault share price. The gate only defers a fresh start; it
+        # never blocks resuming an in-flight settlement (handled above).
+        allowed = getattr(strategy, "vault_settlement_allowed", None)
+        if callable(allowed):
+            try:
+                if not allowed():
+                    logger.info(
+                        "Strategy deferred settlement (vault_settlement_allowed()=False); holding until a stable phase"
+                    )
+                    return VaultAction.HOLD
+            except Exception:
+                # A raising gate is a strategy bug, not a licence to snapshot a
+                # possibly-transient NAV. Fail safe: defer this cycle.
+                logger.warning(
+                    "vault_settlement_allowed() raised; deferring settlement this cycle",
+                    exc_info=True,
+                )
+                return VaultAction.HOLD
 
         # Check if settlement interval has elapsed
         if vault_state.last_valuation_time is None:

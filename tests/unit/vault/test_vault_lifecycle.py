@@ -365,3 +365,57 @@ class TestVaultStatePersistence:
 
         assert state.settlement_phase == SettlementPhase.IDLE
         assert state.initialized is False
+
+
+class TestPreDecideHookSettlementGate:
+    """VIB-5664 — the settlement/rebalance interleave gate.
+
+    A strategy exposing ``vault_settlement_allowed()`` defers a FRESH settlement
+    while it is mid-rebalance, but an in-flight settlement always resumes.
+    """
+
+    def _due_state(self) -> VaultState:
+        return VaultState(
+            last_valuation_time=datetime.now(UTC) - timedelta(minutes=61),
+            settlement_phase=SettlementPhase.IDLE,
+            initialized=True,
+        )
+
+    def test_gate_false_defers_fresh_settlement(self):
+        manager = _make_manager(vault_config=_make_config(settlement_interval_minutes=60))
+        manager._vault_state = self._due_state()
+        strategy = SimpleNamespace(vault_settlement_allowed=lambda: False)
+        assert manager.pre_decide_hook(strategy=strategy) == VaultAction.HOLD
+
+    def test_gate_true_allows_fresh_settlement(self):
+        manager = _make_manager(vault_config=_make_config(settlement_interval_minutes=60))
+        manager._vault_state = self._due_state()
+        strategy = SimpleNamespace(vault_settlement_allowed=lambda: True)
+        assert manager.pre_decide_hook(strategy=strategy) == VaultAction.SETTLE
+
+    def test_in_flight_settlement_resumes_even_if_gate_false(self):
+        """An interrupted settlement must NEVER be gated (would strand a proposal)."""
+        manager = _make_manager()
+        manager._vault_state = VaultState(
+            last_valuation_time=datetime.now(UTC),
+            settlement_phase=SettlementPhase.PROPOSING,
+            initialized=True,
+        )
+        strategy = SimpleNamespace(vault_settlement_allowed=lambda: False)
+        assert manager.pre_decide_hook(strategy=strategy) == VaultAction.RESUME_SETTLE
+
+    def test_raising_gate_defers_fail_safe(self):
+        manager = _make_manager(vault_config=_make_config(settlement_interval_minutes=60))
+        manager._vault_state = self._due_state()
+
+        def _boom() -> bool:
+            raise RuntimeError("gate bug")
+
+        strategy = SimpleNamespace(vault_settlement_allowed=_boom)
+        assert manager.pre_decide_hook(strategy=strategy) == VaultAction.HOLD
+
+    def test_no_gate_method_settles_as_before(self):
+        manager = _make_manager(vault_config=_make_config(settlement_interval_minutes=60))
+        manager._vault_state = self._due_state()
+        strategy = SimpleNamespace()  # no vault_settlement_allowed attribute
+        assert manager.pre_decide_hook(strategy=strategy) == VaultAction.SETTLE

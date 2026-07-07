@@ -3165,6 +3165,91 @@ class MarketSnapshot:
         self._position_health_cache[cache_key] = health
         return health
 
+    def lp_position_value(
+        self,
+        position_id: str,
+        protocol: str,
+        pool_address: str | None = None,
+        *,
+        token0_symbol: str | None = None,
+        token1_symbol: str | None = None,
+    ) -> Any:
+        """Value an open concentrated-liquidity LP position live on-chain.
+
+        Sibling of :meth:`position_health`: builds an ``LPPositionReader`` from
+        this snapshot's gateway client and reuses the SAME shared repricing
+        engine (``lp_repricer.reprice_lp_position``) the portfolio valuer uses —
+        no bespoke tick / liquidity math. Reads ``positions(tokenId)`` and the
+        pool ``slot0``, prices each token via this snapshot's oracle
+        (``self.price``), and adds uncollected fees.
+
+        Scope: this is the **concentrated-liquidity / V3-family** valuation path
+        (Slipstream, Uniswap V3). The "shares one engine with the portfolio
+        valuer" guarantee holds for that family; the valuer's own
+        family-dispatch routes V4 / Curve / fungible-LP positions through
+        specialized readers this method does not invoke. For a non-CL protocol
+        the underlying position-manager role resolves to ``None`` and this
+        returns ``None`` (fail-closed, Empty ≠ Zero) rather than a wrong number.
+
+        Args:
+            position_id: The NFT ``tokenId`` of the LP position.
+            protocol: Protocol slug (e.g. ``"aerodrome_slipstream"``,
+                ``"uniswap_v3"``) — selects the position-manager address and the
+                Slipstream-vs-V3 struct layout.
+            pool_address: The pool contract address for the exact-price
+                ``slot0`` read. When omitted, valuation falls back to the
+                oracle-price-ratio tick (less precise ``in_range`` near the
+                boundary), so callers that have it should pass it.
+            token0_symbol / token1_symbol: Optional symbol hints threaded into
+                ``position.details`` so symbol resolution has a fallback when
+                the on-chain token address is not in the token registry.
+
+        Returns:
+            ``LPPositionValueResult`` (``.value_usd``, ``.fees_usd``,
+            ``.total_usd``, ``.in_range``, ``.amount0/1``, ...), or ``None``
+            when the position cannot be measured (Empty ≠ Zero — an unmeasured
+            read is NEVER a fabricated ``$0``). A genuinely empty position
+            (zero liquidity, zero fees) returns an all-zero measured result.
+        """
+        from almanak.framework.teardown.models import PositionInfo, PositionType
+        from almanak.framework.valuation.lp_position_reader import LPPositionReader
+        from almanak.framework.valuation.lp_repricer import (
+            build_lp_position_value_result,
+            default_decimals_fn,
+            reprice_lp_position,
+        )
+
+        if self._gateway_client is None:
+            # No gateway wired ⇒ cannot read on-chain ⇒ unmeasured, not zero.
+            return None
+
+        details: dict[str, Any] = {}
+        if pool_address:
+            details["pool_address"] = pool_address
+        if token0_symbol:
+            details["token0"] = token0_symbol
+        if token1_symbol:
+            details["token1"] = token1_symbol
+
+        position = PositionInfo(
+            position_type=PositionType.LP,
+            position_id=str(position_id),
+            chain=self._chain,
+            protocol=protocol,
+            value_usd=Decimal("0"),
+            details=details,
+        )
+
+        reader = LPPositionReader(self._gateway_client)
+        reprice_output = reprice_lp_position(
+            reader,
+            position,
+            self._chain,
+            self.price,
+            default_decimals_fn,
+        )
+        return build_lp_position_value_result(reprice_output)
+
     def invalidate_position_health(self, protocol: str | None = None, market_id: str | None = None) -> None:
         """Evict memoized ``position_health`` results so the next call re-reads on-chain.
 
