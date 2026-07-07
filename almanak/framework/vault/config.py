@@ -12,13 +12,28 @@ from almanak.core.models.config import VaultVersion
 
 
 class SettlementPhase(Enum):
-    """Phases of the vault settlement cycle."""
+    """Phases of the vault settlement cycle.
+
+    The base flow settles deposits:
+    ``IDLE -> PROPOSING -> PROPOSED -> SETTLING -> SETTLED -> IDLE``.
+
+    Lagoon v0.5.0 consumes a valuation proposal on each settle call
+    (``updateNewTotalAssets`` is single-use, reset to ``type(uint256).max``).
+    Because ``settleDeposit`` already spends the first proposal, settling any
+    remaining redeem shares requires a *fresh* proposal. The redeem leg therefore
+    has its own resumable sub-phases:
+    ``... -> PROPOSING_REDEEM -> PROPOSED_REDEEM -> SETTLING_REDEEM -> SETTLED``.
+    """
 
     IDLE = "idle"
     PROPOSING = "proposing"
     PROPOSED = "proposed"
     SETTLING = "settling"
     SETTLED = "settled"
+    # Redeem leg (second proposal) -- Lagoon v0.5.0 single-use-proposal recovery.
+    PROPOSING_REDEEM = "proposing_redeem"
+    PROPOSED_REDEEM = "proposed_redeem"
+    SETTLING_REDEEM = "settling_redeem"
 
 
 class VaultAction(Enum):

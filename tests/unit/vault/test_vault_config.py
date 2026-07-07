@@ -163,9 +163,12 @@ class TestSettlementPhase:
         assert SettlementPhase.PROPOSED.value == "proposed"
         assert SettlementPhase.SETTLING.value == "settling"
         assert SettlementPhase.SETTLED.value == "settled"
+        assert SettlementPhase.PROPOSING_REDEEM.value == "proposing_redeem"
+        assert SettlementPhase.PROPOSED_REDEEM.value == "proposed_redeem"
+        assert SettlementPhase.SETTLING_REDEEM.value == "settling_redeem"
 
     def test_phase_count(self):
-        assert len(SettlementPhase) == 5
+        assert len(SettlementPhase) == 8
 
 
 class TestVaultAction:

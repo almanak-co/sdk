@@ -67,6 +67,13 @@ def _make_manager(
     sdk.get_valuation_manager.return_value = config.valuator_address
     sdk.get_curator.return_value = "0x3333333333333333333333333333333333333333"
 
+    # Redeem-gate / spent-proposal defaults (Lagoon v0.5.0). Default: proposals are
+    # live and NO redeem shares are waiting in the silo (deposits-only path), so the
+    # redeem leg is skipped unless a test opts in with a non-zero silo balance.
+    sdk.has_live_proposal.return_value = True
+    sdk.get_silo_address.return_value = "0x2222222222222222222222222222222222222222"
+    sdk.get_underlying_balance.return_value = 0
+
     manager = VaultLifecycleManager(
         vault_config=config,
         vault_sdk=sdk,
@@ -183,7 +190,7 @@ class TestSuccessfulSettlementCycle:
         assert settle_params.total_assets == 5_000_000
 
     def test_settle_redeems_called_when_auto_settle_enabled(self):
-        """When auto_settle_redeems is True, settle_redeem bundle is built."""
+        """When auto_settle_redeems is True AND redeem shares remain, settle_redeem is built."""
         manager = _make_manager(
             vault_config=_make_config(auto_settle_redeems=True),
             vault_state=VaultState(
@@ -199,6 +206,9 @@ class TestSuccessfulSettlementCycle:
         strategy.create_market_snapshot.return_value = market
         strategy.valuate.return_value = Decimal("10")
 
+        # Redeem shares are waiting in the silo -> redeem leg runs.
+        manager._vault_sdk.get_underlying_balance.return_value = 5_000_000
+
         manager._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
 
         with patch("almanak.framework.vault.lifecycle.get_token_resolver") as mock_resolver:
@@ -206,6 +216,10 @@ class TestSuccessfulSettlementCycle:
             asyncio.run(manager.run_settlement_cycle(strategy))
 
         assert manager._vault_adapter.build_settle_redeem_bundle.called
+        # settleRedeem must be fed a FRESH proposal (Lagoon v0.5.0 single-use): the redeem
+        # leg re-proposes, so build_propose_valuation_bundle is called twice, never reusing
+        # the deposit proposal.
+        assert manager._vault_adapter.build_propose_valuation_bundle.call_count == 2
 
     def test_settle_redeems_not_called_when_disabled(self):
         """When auto_settle_redeems is False, settle_redeem is skipped."""
@@ -767,10 +781,14 @@ class TestSignerMismatchGuard:
 
 
 class TestRedeemFailureFatal:
-    """Tests for configurable redeem failure fatality (C2)."""
+    """Tests for configurable redeem failure fatality (C2).
+
+    v0.5.0: deposits commit before the redeem leg runs (settleDeposit spends the first
+    proposal), so a redeem failure can no longer roll back to PROPOSED / undo deposits.
+    """
 
     def test_redeem_failure_fatal_returns_failure(self):
-        """When redeem_failure_fatal=True (default), redeem failure aborts settlement."""
+        """When redeem_failure_fatal=True (default), a redeem failure surfaces as failure."""
         manager = _make_manager(
             vault_config=_make_config(auto_settle_redeems=True, redeem_failure_fatal=True),
             vault_state=VaultState(
@@ -786,21 +804,62 @@ class TestRedeemFailureFatal:
         strategy.create_market_snapshot.return_value = market
         strategy.valuate.return_value = Decimal("10")
 
-        # Propose succeeds, settle deposit succeeds, settle redeem fails
+        # Redeem shares remain -> redeem leg runs.
+        manager._vault_sdk.get_underlying_balance.return_value = 5_000_000
+
+        # propose #1 ok, settleDeposit ok, propose #2 ok, settleRedeem fails.
         propose_ok = _make_execution_result(success=True)
         settle_ok = _make_execution_result(success=True)
+        propose2_ok = _make_execution_result(success=True)
         redeem_fail = _make_execution_result(success=False, error="redeem reverted")
-        manager._execution_orchestrator.execute = AsyncMock(side_effect=[propose_ok, settle_ok, redeem_fail])
+        manager._execution_orchestrator.execute = AsyncMock(
+            side_effect=[propose_ok, settle_ok, propose2_ok, redeem_fail]
+        )
 
         with patch("almanak.framework.vault.lifecycle.get_token_resolver") as mock_resolver:
             mock_resolver.return_value.get_decimals.return_value = 6
             result = asyncio.run(manager.run_settlement_cycle(strategy))
 
         assert result.success is False
-        assert manager.get_vault_state().settlement_phase == SettlementPhase.PROPOSED
+        # Parked at a redeem-leg-retry phase, NOT rolled back to PROPOSED (deposits stand).
+        assert manager.get_vault_state().settlement_phase == SettlementPhase.PROPOSED_REDEEM
+
+    def test_redeem_failure_does_not_roll_back_deposits(self):
+        """A fatal redeem failure never reverts to PROPOSED (which would retry settleDeposit)."""
+        manager = _make_manager(
+            vault_config=_make_config(auto_settle_redeems=True, redeem_failure_fatal=True),
+            vault_state=VaultState(
+                initialized=True,
+                last_total_assets=10_000_000,
+                settlement_phase=SettlementPhase.IDLE,
+                last_valuation_time=datetime.now(UTC) - timedelta(hours=2),
+            ),
+        )
+
+        strategy = _make_strategy()
+        market = _make_market()
+        strategy.create_market_snapshot.return_value = market
+        strategy.valuate.return_value = Decimal("10")
+
+        manager._vault_sdk.get_underlying_balance.return_value = 5_000_000
+
+        # propose #1 ok, settleDeposit ok, propose #2 FAILS.
+        propose_ok = _make_execution_result(success=True)
+        settle_ok = _make_execution_result(success=True)
+        propose2_fail = _make_execution_result(success=False, error="propose2 reverted")
+        manager._execution_orchestrator.execute = AsyncMock(side_effect=[propose_ok, settle_ok, propose2_fail])
+
+        with patch("almanak.framework.vault.lifecycle.get_token_resolver") as mock_resolver:
+            mock_resolver.return_value.get_decimals.return_value = 6
+            result = asyncio.run(manager.run_settlement_cycle(strategy))
+
+        assert result.success is False
+        phase = manager.get_vault_state().settlement_phase
+        assert phase != SettlementPhase.PROPOSED
+        assert phase == SettlementPhase.PROPOSING_REDEEM
 
     def test_redeem_failure_non_fatal_continues(self):
-        """When redeem_failure_fatal=False, redeem failure is non-fatal."""
+        """When redeem_failure_fatal=False, redeem failure finalizes deposits and carries over."""
         manager = _make_manager(
             vault_config=_make_config(auto_settle_redeems=True, redeem_failure_fatal=False),
             vault_state=VaultState(
@@ -816,17 +875,22 @@ class TestRedeemFailureFatal:
         strategy.create_market_snapshot.return_value = market
         strategy.valuate.return_value = Decimal("10")
 
-        # Propose succeeds, settle deposit succeeds, settle redeem fails
+        manager._vault_sdk.get_underlying_balance.return_value = 5_000_000
+
+        # propose #1 ok, settleDeposit ok, propose #2 ok, settleRedeem fails.
         propose_ok = _make_execution_result(success=True)
         settle_ok = _make_execution_result(success=True)
+        propose2_ok = _make_execution_result(success=True)
         redeem_fail = _make_execution_result(success=False, error="redeem reverted")
-        manager._execution_orchestrator.execute = AsyncMock(side_effect=[propose_ok, settle_ok, redeem_fail])
+        manager._execution_orchestrator.execute = AsyncMock(
+            side_effect=[propose_ok, settle_ok, propose2_ok, redeem_fail]
+        )
 
         with patch("almanak.framework.vault.lifecycle.get_token_resolver") as mock_resolver:
             mock_resolver.return_value.get_decimals.return_value = 6
             result = asyncio.run(manager.run_settlement_cycle(strategy))
 
-        # Non-fatal: settlement still succeeds
+        # Non-fatal: deposits stand, cycle finalizes; redeem shares carry to next cycle.
         assert result.success is True
         assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE
 
@@ -1029,3 +1093,108 @@ class TestMultiChainGuard:
             result = asyncio.run(manager.run_settlement_cycle(strategy))
 
         assert result.success is True
+
+
+class TestRedeemLegGating:
+    """Redeem-leg gating on the silo balance (VIB-5645 deadlock fix)."""
+
+    def _run_first_settlement(self, silo_balance: int) -> VaultLifecycleManager:
+        manager = _make_manager(
+            vault_config=_make_config(version="0.5.0", auto_settle_redeems=True),
+            vault_state=VaultState(initialized=False, settlement_phase=SettlementPhase.IDLE),
+        )
+        strategy = _make_strategy()
+        market = _make_market()
+        strategy.create_market_snapshot.return_value = market
+        strategy.valuate.return_value = Decimal("10")
+        manager._vault_sdk.get_underlying_balance.return_value = silo_balance
+        manager._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
+        with patch("almanak.framework.vault.lifecycle.get_token_resolver") as mock_resolver:
+            mock_resolver.return_value.get_decimals.return_value = 6
+            result = asyncio.run(manager.run_settlement_cycle(strategy))
+        assert result.success is True
+        return manager
+
+    def test_first_settlement_issues_no_settle_redeem(self):
+        """First settlement (silo empty) must NOT call settleRedeem -- the exact deadlock case."""
+        manager = self._run_first_settlement(silo_balance=0)
+        assert not manager._vault_adapter.build_settle_redeem_bundle.called
+        # Only the deposit proposal is issued (no fresh redeem proposal).
+        assert manager._vault_adapter.build_propose_valuation_bundle.call_count == 1
+        assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE
+        assert manager.get_vault_state().initialized is True
+
+    def test_deposits_only_issues_no_settle_redeem(self):
+        """A deposits-only cycle (no redeem shares) skips settleRedeem entirely."""
+        manager = _make_manager(
+            vault_config=_make_config(auto_settle_redeems=True),
+            vault_state=VaultState(
+                initialized=True,
+                last_total_assets=10_000_000,
+                settlement_phase=SettlementPhase.IDLE,
+                last_valuation_time=datetime.now(UTC) - timedelta(hours=2),
+            ),
+        )
+        strategy = _make_strategy()
+        market = _make_market()
+        strategy.create_market_snapshot.return_value = market
+        strategy.valuate.return_value = Decimal("10")
+        manager._vault_sdk.get_underlying_balance.return_value = 0  # no redeem shares
+        manager._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
+        with patch("almanak.framework.vault.lifecycle.get_token_resolver") as mock_resolver:
+            mock_resolver.return_value.get_decimals.return_value = 6
+            result = asyncio.run(manager.run_settlement_cycle(strategy))
+        assert result.success is True
+        assert not manager._vault_adapter.build_settle_redeem_bundle.called
+
+    def test_redeem_leg_issues_fresh_proposal_before_settle_redeem(self):
+        """With redeem shares present, a FRESH proposal precedes settleRedeem (never reuse #1)."""
+        manager = _make_manager(
+            vault_config=_make_config(auto_settle_redeems=True),
+            vault_state=VaultState(
+                initialized=True,
+                last_total_assets=10_000_000,
+                settlement_phase=SettlementPhase.IDLE,
+                last_valuation_time=datetime.now(UTC) - timedelta(hours=2),
+            ),
+        )
+        strategy = _make_strategy()
+        market = _make_market()
+        strategy.create_market_snapshot.return_value = market
+        strategy.valuate.return_value = Decimal("10")
+        manager._vault_sdk.get_underlying_balance.return_value = 5_000_000
+
+        call_order: list[str] = []
+
+        def _track(bundle, wallet_address=None):
+            call_order.append(getattr(bundle, "_kind", "?"))
+            return _make_execution_result(success=True)
+
+        def _propose(params):
+            b = MagicMock()
+            b._kind = "propose"
+            return b
+
+        def _settle_deposit(params):
+            b = MagicMock()
+            b._kind = "settle_deposit"
+            return b
+
+        def _settle_redeem(params):
+            b = MagicMock()
+            b._kind = "settle_redeem"
+            return b
+
+        manager._vault_adapter.build_propose_valuation_bundle.side_effect = _propose
+        manager._vault_adapter.build_settle_deposit_bundle.side_effect = _settle_deposit
+        manager._vault_adapter.build_settle_redeem_bundle.side_effect = _settle_redeem
+        manager._execution_orchestrator.execute = AsyncMock(side_effect=_track)
+
+        with patch("almanak.framework.vault.lifecycle.get_token_resolver") as mock_resolver:
+            mock_resolver.return_value.get_decimals.return_value = 6
+            result = asyncio.run(manager.run_settlement_cycle(strategy))
+
+        assert result.success is True
+        # Exactly: propose #1 -> settleDeposit -> propose #2 -> settleRedeem.
+        assert call_order == ["propose", "settle_deposit", "propose", "settle_redeem"]
+        assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE

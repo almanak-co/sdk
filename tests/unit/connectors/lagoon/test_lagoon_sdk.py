@@ -12,6 +12,7 @@ from almanak.connectors.lagoon.sdk import (
     CONVERT_TO_ASSETS_SELECTOR,
     PENDING_DEPOSIT_REQUEST_SELECTOR,
     PENDING_REDEEM_REQUEST_SELECTOR,
+    PROPOSAL_CONSUMED,
     PROPOSED_TOTAL_ASSETS_SLOT,
     SETTLE_DEPOSIT_SELECTOR,
     SETTLE_REDEEM_SELECTOR,
@@ -271,6 +272,44 @@ class TestGetProposedTotalAssets:
 
         with pytest.raises(RuntimeError, match="eth_getStorageAt failed"):
             sdk.get_proposed_total_assets(VAULT_ADDRESS)
+
+
+class TestHasLiveProposal:
+    """Spent-proposal detection via the type(uint256).max sentinel (VIB-5645)."""
+
+    def test_consumed_sentinel_is_not_live(self, sdk, mock_gateway_client):
+        """newTotalAssets == type(uint256).max means the proposal was consumed -> not live."""
+        hex_result = "0x" + _encode_uint256(PROPOSAL_CONSUMED)
+        mock_gateway_client.rpc.Call.return_value = _make_rpc_response(hex_result)
+
+        # Sentinel decodes to exactly (1<<256)-1, and is treated as "no live proposal".
+        assert sdk.get_proposed_total_assets(VAULT_ADDRESS) == PROPOSAL_CONSUMED
+        assert PROPOSAL_CONSUMED == (1 << 256) - 1
+        assert sdk.has_live_proposal(VAULT_ADDRESS) is False
+        assert sdk.has_live_proposal(VAULT_ADDRESS, expected=1_000_000) is False
+
+    def test_live_proposal_without_expected(self, sdk, mock_gateway_client):
+        """A non-sentinel slot value is a live proposal when no expected value is given."""
+        hex_result = "0x" + _encode_uint256(2_000_000)
+        mock_gateway_client.rpc.Call.return_value = _make_rpc_response(hex_result)
+
+        assert sdk.has_live_proposal(VAULT_ADDRESS) is True
+
+    def test_live_proposal_matches_expected(self, sdk, mock_gateway_client):
+        """With an expected value, live requires the slot to equal it."""
+        hex_result = "0x" + _encode_uint256(2_000_000)
+        mock_gateway_client.rpc.Call.return_value = _make_rpc_response(hex_result)
+
+        assert sdk.has_live_proposal(VAULT_ADDRESS, expected=2_000_000) is True
+        assert sdk.has_live_proposal(VAULT_ADDRESS, expected=9_999_999) is False
+
+    def test_zero_slot_is_live_but_mismatches_nonzero_expected(self, sdk, mock_gateway_client):
+        """A zero slot (never proposed / proposal of 0) is not the sentinel -> 'live' by slot."""
+        mock_gateway_client.rpc.Call.return_value = _make_rpc_response("0x" + "0" * 64)
+
+        assert sdk.has_live_proposal(VAULT_ADDRESS) is True
+        assert sdk.has_live_proposal(VAULT_ADDRESS, expected=0) is True
+        assert sdk.has_live_proposal(VAULT_ADDRESS, expected=1) is False
 
 
 class TestGetSiloAddress:

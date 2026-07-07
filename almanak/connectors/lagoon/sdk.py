@@ -48,6 +48,12 @@ REQUEST_DEPOSIT_SELECTOR = "0x85b77f45"  # requestDeposit(uint256,address,addres
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
 MAX_UINT256 = (1 << 256) - 1
 
+# Lagoon v0.5.0 resets ``newTotalAssets`` to ``type(uint256).max`` after a valuation
+# proposal is consumed by a settle call. Reading this sentinel from the proposal slot
+# means "no live proposal" -- a fresh ``updateNewTotalAssets`` is required before the
+# next settle, otherwise the settle reverts ``NewTotalAssetsMissing()`` (0x87d895da).
+PROPOSAL_CONSUMED = MAX_UINT256
+
 # ERC-7201 namespaced storage slots (Lagoon v0.5.0, hopperlabsxyz/lagoon-v0)
 # Namespace: keccak256(abi.encode(uint256(keccak256("hopper.storage.ERC7540")) - 1)) & ~bytes32(uint256(0xff))
 # Base slot: 0x5c74d456014b1c0eb4368d944667a568313858a3029a650ff0cb7b56f8b57a00
@@ -244,6 +250,31 @@ class LagoonVaultSDK:
             request_id="lagoon_proposed_total_assets",
         )
         return _decode_uint256(result)
+
+    def has_live_proposal(self, vault_address: str, expected: int | None = None) -> bool:
+        """Return whether the vault currently holds a live (unconsumed) valuation proposal.
+
+        Lagoon v0.5.0 makes ``updateNewTotalAssets`` single-use: a settle call consumes
+        the proposal and resets the ``newTotalAssets`` slot to ``type(uint256).max``
+        (``PROPOSAL_CONSUMED``). This read distinguishes "proposal still pending" from
+        "proposal already spent", which the settlement state machine needs to avoid
+        re-issuing a settle against a consumed proposal (which would revert
+        ``NewTotalAssetsMissing()``).
+
+        Args:
+            vault_address: The vault contract address.
+            expected: If provided, additionally require the live proposal to equal this
+                value (guards against confirming a stale or unrelated proposal).
+
+        Returns:
+            True if a live proposal exists (and matches ``expected`` when given).
+        """
+        proposed = self.get_proposed_total_assets(vault_address)
+        if proposed == PROPOSAL_CONSUMED:
+            return False
+        if expected is not None:
+            return proposed == expected
+        return True
 
     def get_silo_address(self, vault_address: str) -> str:
         """Read the silo contract address via direct storage slot read.

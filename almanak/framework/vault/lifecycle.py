@@ -37,6 +37,12 @@ class VaultSDKHandle(Protocol):
 
     def get_pending_deposits(self, vault_address: str) -> int: ...
 
+    def has_live_proposal(self, vault_address: str, expected: int | None = None) -> bool: ...
+
+    def get_silo_address(self, vault_address: str) -> str: ...
+
+    def get_underlying_balance(self, vault_address: str, wallet_address: str) -> int: ...
+
 
 class VaultAdapterHandle(Protocol):
     """Runtime adapter surface the vault lifecycle manager consumes."""
@@ -217,28 +223,30 @@ class VaultLifecycleManager:
             )
             total_assets_raw = vault_state.last_proposed_total_assets
             on_chain_total_assets = self._vault_sdk.get_total_assets(self._config.vault_address)
-            # Only skip if value matches AND this is from the current nonce (not a prior epoch)
+            # Only treat the deposit leg as landed if value matches AND this is from the
+            # current nonce (not a prior epoch).
             if (
                 on_chain_total_assets == total_assets_raw
                 and (total_assets_raw > 0 or not vault_state.initialized)
                 and vault_state.settlement_nonce > 0
             ):
                 logger.info(
-                    "Settle already confirmed on-chain (total_assets=%d, nonce=%d), advancing",
+                    "settleDeposit already confirmed on-chain (total_assets=%d, nonce=%d), evaluating redeem gate",
                     on_chain_total_assets,
                     vault_state.settlement_nonce,
                 )
-                vault_state.settlement_phase = SettlementPhase.SETTLED
-                self.save_vault_state()
-                return self._finalize_settlement(vault_state)
-            # Otherwise retry settle
-            return await self._execute_settle(strategy, vault_state, total_assets_raw)
+                # The deposit landed; the proposal that fed it is now spent. Do NOT retry
+                # settleDeposit -- evaluate whether redeem shares remain instead.
+                return await self._resume_after_deposit_settled(strategy, vault_state, total_assets_raw)
+            # Deposit not confirmed. Route through the spent-proposal-aware PROPOSED
+            # resume so we never retry settleDeposit against a consumed proposal.
+            return await self._resume_from_proposed(strategy, vault_state, total_assets_raw)
 
-        # --- Resume from PROPOSED: skip propose, go to settle ---
+        # --- Resume from PROPOSED: settle, but guard against a spent proposal ---
         if phase == SettlementPhase.PROPOSED:
-            logger.info("Resuming from PROPOSED phase, proceeding to settle")
+            logger.info("Resuming from PROPOSED phase")
             total_assets_raw = vault_state.last_proposed_total_assets
-            return await self._execute_settle(strategy, vault_state, total_assets_raw)
+            return await self._resume_from_proposed(strategy, vault_state, total_assets_raw)
 
         # --- Resume from PROPOSING: check if propose already succeeded on-chain ---
         if phase == SettlementPhase.PROPOSING:
@@ -262,6 +270,14 @@ class VaultLifecycleManager:
                 return await self._execute_settle(strategy, vault_state, total_assets_raw)
             # Otherwise retry propose
             return await self._execute_propose_and_settle(strategy, vault_state, total_assets_raw)
+
+        # --- Resume redeem leg (Lagoon v0.5.0 second-proposal path) ---
+        if phase in (
+            SettlementPhase.PROPOSING_REDEEM,
+            SettlementPhase.PROPOSED_REDEEM,
+            SettlementPhase.SETTLING_REDEEM,
+        ):
+            return await self._resume_redeem_leg(strategy, vault_state, phase)
 
         # --- Start fresh from IDLE ---
         computed_assets = self._compute_total_assets(strategy, vault_state)
@@ -426,30 +442,275 @@ class VaultLifecycleManager:
 
         deposits_received, shares_minted = self._parse_settle_deposit_receipt(settle_deposit_result)
 
-        # Settle redeems (if configured)
-        if self._config.auto_settle_redeems:
-            settle_redeem_bundle = self._vault_adapter.build_settle_redeem_bundle(
-                SettleRedeemParams(
-                    vault_address=self._config.vault_address,
-                    safe_address=strategy.wallet_address,
-                    total_assets=total_assets_raw,
-                )
+        # Deposits are now committed on-chain and the proposal that fed settleDeposit is
+        # spent (Lagoon v0.5.0: updateNewTotalAssets is single-use). settleDeposit already
+        # honoured any redeem shares the safe could cover in the same call. If redeem shares
+        # still remain in the pending silo AND auto-settle is enabled, the redeem leg needs
+        # its OWN fresh proposal before settleRedeem -- reusing the spent one reverts
+        # NewTotalAssetsMissing(). Otherwise (first settlement, deposits-only, or disabled)
+        # we finalize directly -- the old unconditional settleRedeem was the deadlock.
+        if not self._config.auto_settle_redeems or not self._has_pending_redeem_shares():
+            vault_state.settlement_phase = SettlementPhase.SETTLED
+            self.save_vault_state()
+            return self._finalize_settlement(
+                vault_state,
+                deposits_received=deposits_received,
+                shares_minted=shares_minted,
             )
-            settle_redeem_result = await self._execution_orchestrator.execute(
-                settle_redeem_bundle,
-                wallet_address=strategy.wallet_address,
+
+        return await self._execute_redeem_settle(
+            strategy,
+            vault_state,
+            total_assets_raw,
+            deposits_received=deposits_received,
+            shares_minted=shares_minted,
+        )
+
+    def _has_pending_redeem_shares(self) -> bool:
+        """Return True if redeem shares are waiting in the pending silo.
+
+        Lagoon v0.5.0 parks requested-redeem shares in the pending silo until a
+        ``settleRedeem`` covers them. The correct "are there redeem shares to settle"
+        signal is the vault-share balance of the silo (``vault.balanceOf(silo)``), NOT
+        ``pendingRedeemRequest(0, vault)`` -- the latter passes the vault as controller
+        and always returns 0.
+        """
+        silo = self._vault_sdk.get_silo_address(self._config.vault_address)
+        # NOTE: get_underlying_balance returns the raw vault-SHARE balance of the silo
+        # (vault.balanceOf(silo)), not an underlying-asset amount. It is only used here as
+        # a boolean "shares parked?" gate -- never as a money quantity. (Rename tracked as
+        # a follow-up.)
+        remaining_shares = self._vault_sdk.get_underlying_balance(self._config.vault_address, silo)
+        return remaining_shares > 0
+
+    async def _resume_from_proposed(
+        self, strategy: Any, vault_state: VaultState, total_assets_raw: int
+    ) -> SettlementResult:
+        """Resume the deposit leg from PROPOSED, guarding against a spent proposal.
+
+        A crash between settleDeposit landing and the phase advancing leaves the state
+        at PROPOSED while the on-chain proposal is already consumed. Blindly retrying
+        settleDeposit against a spent proposal reverts NewTotalAssetsMissing(), which
+        used to roll back to PROPOSED and deadlock. This detects the three cases:
+
+        - proposal still live -> settleDeposit as normal;
+        - proposal spent AND deposit already landed -> skip to the redeem gate / finalize;
+        - proposal spent AND deposit never landed -> re-propose from scratch.
+        """
+        proposal_live = self._vault_sdk.has_live_proposal(self._config.vault_address, total_assets_raw)
+        if proposal_live and (total_assets_raw > 0 or not vault_state.initialized):
+            return await self._execute_settle(strategy, vault_state, total_assets_raw)
+
+        on_chain_total = self._vault_sdk.get_total_assets(self._config.vault_address)
+        deposit_landed = on_chain_total == total_assets_raw and (total_assets_raw > 0 or not vault_state.initialized)
+        if deposit_landed:
+            logger.info(
+                "PROPOSED resume: proposal spent and settleDeposit already landed "
+                "(total_assets=%d); skipping settleDeposit retry",
+                on_chain_total,
             )
-            if not settle_redeem_result.success:
-                if self._config.redeem_failure_fatal:
-                    logger.error("Settle redeem transaction failed (fatal): %s", settle_redeem_result.error)
-                    vault_state.settlement_phase = SettlementPhase.PROPOSED
-                    self.save_vault_state()
-                    return SettlementResult(success=False)
-                logger.warning("Settle redeem transaction failed (non-fatal): %s", settle_redeem_result.error)
+            return await self._resume_after_deposit_settled(strategy, vault_state, total_assets_raw)
+
+        logger.info("PROPOSED resume: proposal spent but settleDeposit did not land; re-proposing")
+        return await self._execute_propose_and_settle(strategy, vault_state, total_assets_raw)
+
+    async def _resume_after_deposit_settled(
+        self, strategy: Any, vault_state: VaultState, total_assets_raw: int
+    ) -> SettlementResult:
+        """Evaluate the redeem gate after the deposit leg is known to have settled.
+
+        Used by resume paths where the receipt is unavailable, so deposit/share hints
+        are unknown (0). Mirrors the tail of :meth:`_execute_settle`.
+        """
+        if not self._config.auto_settle_redeems or not self._has_pending_redeem_shares():
+            vault_state.settlement_phase = SettlementPhase.SETTLED
+            self.save_vault_state()
+            return self._finalize_settlement(vault_state)
+        return await self._execute_redeem_settle(strategy, vault_state, total_assets_raw)
+
+    async def _resume_redeem_leg(
+        self, strategy: Any, vault_state: VaultState, phase: SettlementPhase
+    ) -> SettlementResult:
+        """Resume the redeem leg (proposal #2 -> settleRedeem) after a crash.
+
+        Handles PROPOSING_REDEEM / PROPOSED_REDEEM / SETTLING_REDEEM. Deposits are
+        already committed on-chain at this point, so every path here either settles the
+        remaining redeem shares or finalizes and carries them to the next cycle -- it
+        never touches the deposit leg.
+        """
+        total_assets_raw = vault_state.last_proposed_total_assets
+
+        if phase == SettlementPhase.PROPOSING_REDEEM:
+            logger.info(
+                "Resuming from PROPOSING_REDEEM phase, checking proposal #2 (nonce=%d)",
+                vault_state.settlement_nonce,
+            )
+            proposal_live = self._vault_sdk.has_live_proposal(self._config.vault_address, total_assets_raw)
+            if (
+                proposal_live
+                and (total_assets_raw > 0 or not vault_state.initialized)
+                and vault_state.settlement_nonce > 0
+            ):
+                logger.info("Redeem proposal #2 confirmed on-chain, proceeding to settleRedeem")
+                vault_state.settlement_phase = SettlementPhase.PROPOSED_REDEEM
+                self.save_vault_state()
+                return await self._execute_settle_redeem_tx(strategy, vault_state, total_assets_raw)
+            # Proposal #2 not (yet) live -- re-issue it.
+            return await self._execute_redeem_settle(strategy, vault_state, total_assets_raw)
+
+        if phase == SettlementPhase.PROPOSED_REDEEM:
+            logger.info("Resuming from PROPOSED_REDEEM phase, proceeding to settleRedeem")
+            return await self._execute_settle_redeem_tx(strategy, vault_state, total_assets_raw)
+
+        # SETTLING_REDEEM
+        logger.info("Resuming from SETTLING_REDEEM phase, checking on-chain redeem state")
+        if not self._has_pending_redeem_shares():
+            # Silo drained -> settleRedeem landed. Finalize.
+            logger.info("settleRedeem confirmed on-chain (silo drained), finalizing")
+            vault_state.settlement_phase = SettlementPhase.SETTLED
+            self.save_vault_state()
+            return self._finalize_settlement(vault_state)
+        # Shares still in the silo. If proposal #2 is still live, the settleRedeem tx
+        # reverted -> retry it. If it was consumed, settleRedeem ran but the safe could
+        # not honour every share (illiquidity); one attempt per cycle -> finalize and
+        # carry the remaining shares to the next cycle.
+        proposal_live = self._vault_sdk.has_live_proposal(self._config.vault_address, total_assets_raw)
+        if proposal_live and (total_assets_raw > 0 or not vault_state.initialized):
+            return await self._execute_settle_redeem_tx(strategy, vault_state, total_assets_raw)
+        logger.info("settleRedeem consumed proposal but shares remain (safe illiquidity); carrying over")
+        vault_state.settlement_phase = SettlementPhase.SETTLED
+        self.save_vault_state()
+        return self._finalize_settlement(vault_state)
+
+    async def _execute_redeem_settle(
+        self,
+        strategy: Any,
+        vault_state: VaultState,
+        total_assets_raw: int,
+        deposits_received: int = 0,
+        shares_minted: int = 0,
+    ) -> SettlementResult:
+        """Settle remaining redeem shares with a FRESH proposal (Lagoon v0.5.0).
+
+        settleDeposit consumed the first proposal, so settleRedeem needs a brand-new
+        ``updateNewTotalAssets`` (proposal #2). Exactly one redeem attempt per cycle:
+        any shares the safe still cannot cover carry over to the next settlement.
+        """
+        vault_state.settlement_phase = SettlementPhase.PROPOSING_REDEEM
+        vault_state.settlement_nonce += 1
+        self.save_vault_state()
+
+        propose_bundle = self._vault_adapter.build_propose_valuation_bundle(
+            UpdateTotalAssetsParams(
+                vault_address=self._config.vault_address,
+                valuator_address=self._config.valuator_address,
+                new_total_assets=total_assets_raw,
+                pending_deposits=vault_state.last_pending_deposits,
+            )
+        )
+        propose_result = await self._execution_orchestrator.execute(
+            propose_bundle,
+            wallet_address=self._config.valuator_address,
+        )
+        if not propose_result.success:
+            return self._handle_redeem_leg_failure(
+                vault_state,
+                SettlementPhase.PROPOSING_REDEEM,
+                "propose #2",
+                propose_result.error,
+                deposits_received,
+                shares_minted,
+            )
+
+        vault_state.settlement_phase = SettlementPhase.PROPOSED_REDEEM
+        self.save_vault_state()
+
+        return await self._execute_settle_redeem_tx(
+            strategy,
+            vault_state,
+            total_assets_raw,
+            deposits_received=deposits_received,
+            shares_minted=shares_minted,
+        )
+
+    async def _execute_settle_redeem_tx(
+        self,
+        strategy: Any,
+        vault_state: VaultState,
+        total_assets_raw: int,
+        deposits_received: int = 0,
+        shares_minted: int = 0,
+    ) -> SettlementResult:
+        """Execute settleRedeem against the fresh proposal, then finalize the cycle."""
+        vault_state.settlement_phase = SettlementPhase.SETTLING_REDEEM
+        self.save_vault_state()
+
+        settle_redeem_bundle = self._vault_adapter.build_settle_redeem_bundle(
+            SettleRedeemParams(
+                vault_address=self._config.vault_address,
+                safe_address=strategy.wallet_address,
+                total_assets=total_assets_raw,
+            )
+        )
+        settle_redeem_result = await self._execution_orchestrator.execute(
+            settle_redeem_bundle,
+            wallet_address=strategy.wallet_address,
+        )
+        if not settle_redeem_result.success:
+            # settleRedeem reverted -> proposal #2 is NOT consumed and is still live, so
+            # retry the settleRedeem tx (not the propose) on the next resume.
+            return self._handle_redeem_leg_failure(
+                vault_state,
+                SettlementPhase.PROPOSED_REDEEM,
+                "settleRedeem",
+                settle_redeem_result.error,
+                deposits_received,
+                shares_minted,
+            )
 
         vault_state.settlement_phase = SettlementPhase.SETTLED
         self.save_vault_state()
+        return self._finalize_settlement(
+            vault_state,
+            deposits_received=deposits_received,
+            shares_minted=shares_minted,
+        )
 
+    def _handle_redeem_leg_failure(
+        self,
+        vault_state: VaultState,
+        retry_phase: SettlementPhase,
+        leg_name: str,
+        error: Any,
+        deposits_received: int,
+        shares_minted: int,
+    ) -> SettlementResult:
+        """Handle a failure in the redeem leg.
+
+        Deposits are already committed on-chain and the first proposal is spent, so we
+        must NEVER roll back to PROPOSED (retrying settleDeposit would revert forever).
+        ``redeem_failure_fatal`` therefore no longer aborts/undoes the whole cycle -- it
+        only governs whether an unrecoverable redeem-leg error surfaces as
+        ``SettlementResult(success=False)``:
+
+        - fatal (default): park at ``retry_phase`` (a redeem-leg-retry phase) and return
+          failure; the next resume retries only the redeem leg;
+        - non-fatal: finalize the cycle (deposits stand) and carry remaining redeem
+          shares to the next settlement.
+        """
+        if self._config.redeem_failure_fatal:
+            logger.error("Vault redeem leg %s failed (fatal): %s", leg_name, error)
+            vault_state.settlement_phase = retry_phase
+            self.save_vault_state()
+            return SettlementResult(success=False)
+
+        logger.warning(
+            "Vault redeem leg %s failed (non-fatal): %s; finalizing deposits, carrying redeem over",
+            leg_name,
+            error,
+        )
+        vault_state.settlement_phase = SettlementPhase.SETTLED
+        self.save_vault_state()
         return self._finalize_settlement(
             vault_state,
             deposits_received=deposits_received,

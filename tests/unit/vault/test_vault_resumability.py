@@ -65,6 +65,12 @@ def _make_manager(
     sdk.get_valuation_manager.return_value = config.valuator_address
     sdk.get_curator.return_value = "0x3333333333333333333333333333333333333333"
 
+    # Redeem-gate / spent-proposal defaults (Lagoon v0.5.0). Default: proposals are
+    # live and NO redeem shares are waiting in the silo (deposits-only path).
+    sdk.has_live_proposal.return_value = True
+    sdk.get_silo_address.return_value = "0x2222222222222222222222222222222222222222"
+    sdk.get_underlying_balance.return_value = 0
+
     manager = VaultLifecycleManager(
         vault_config=config,
         vault_sdk=sdk,
@@ -608,3 +614,191 @@ class TestCrashRecoveryNonce:
 
         assert result.success is True
         assert manager.get_vault_state().settlement_nonce == 0
+
+
+class TestResumeFromProposedSpentProposal:
+    """PROPOSED resume must not retry settleDeposit against a spent proposal (VIB-5645)."""
+
+    def test_spent_proposal_deposit_landed_finalizes_without_retry(self):
+        """Spent proposal + settleDeposit already landed -> finalize, never retry settleDeposit."""
+        manager = _make_manager(
+            vault_state=VaultState(
+                initialized=True,
+                last_total_assets=10_000_000,
+                last_proposed_total_assets=10_500_000,
+                settlement_phase=SettlementPhase.PROPOSED,
+                last_valuation_time=datetime.now(UTC) - timedelta(hours=2),
+                settlement_nonce=1,
+            ),
+        )
+
+        strategy = _make_strategy()
+
+        # Proposal already consumed (sentinel) and deposit already landed on-chain.
+        manager._vault_sdk.has_live_proposal.return_value = False
+        manager._vault_sdk.get_total_assets.return_value = 10_500_000
+        manager._vault_sdk.get_underlying_balance.return_value = 0  # no redeem shares
+
+        manager._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
+
+        result = asyncio.run(manager.run_settlement_cycle(strategy))
+
+        assert result.success is True
+        # CRITICAL: settleDeposit must NOT be retried against the spent proposal.
+        assert not manager._vault_adapter.build_settle_deposit_bundle.called
+        assert not manager._vault_adapter.build_propose_valuation_bundle.called
+        assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE
+
+    def test_spent_proposal_deposit_not_landed_re_proposes(self):
+        """Spent proposal but settleDeposit never landed -> re-propose from scratch."""
+        manager = _make_manager(
+            vault_state=VaultState(
+                initialized=True,
+                last_total_assets=10_000_000,
+                last_proposed_total_assets=10_500_000,
+                settlement_phase=SettlementPhase.PROPOSED,
+                last_valuation_time=datetime.now(UTC) - timedelta(hours=2),
+                settlement_nonce=1,
+            ),
+        )
+
+        strategy = _make_strategy()
+
+        # Proposal consumed, but deposit did not land (on-chain total unchanged).
+        manager._vault_sdk.has_live_proposal.return_value = False
+        manager._vault_sdk.get_total_assets.return_value = 10_000_000
+        manager._vault_sdk.get_underlying_balance.return_value = 0
+
+        manager._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
+
+        result = asyncio.run(manager.run_settlement_cycle(strategy))
+
+        assert result.success is True
+        # Re-proposed (fresh cycle) then settled.
+        assert manager._vault_adapter.build_propose_valuation_bundle.called
+        assert manager._vault_adapter.build_settle_deposit_bundle.called
+
+    def test_live_proposal_settles_as_normal(self):
+        """A still-live proposal at PROPOSED settles the deposit leg as normal."""
+        manager = _make_manager(
+            vault_state=VaultState(
+                initialized=True,
+                last_total_assets=10_000_000,
+                last_proposed_total_assets=10_500_000,
+                settlement_phase=SettlementPhase.PROPOSED,
+                last_valuation_time=datetime.now(UTC) - timedelta(hours=2),
+                settlement_nonce=1,
+            ),
+        )
+
+        strategy = _make_strategy()
+        manager._vault_sdk.has_live_proposal.return_value = True
+        manager._vault_sdk.get_underlying_balance.return_value = 0
+
+        manager._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
+
+        result = asyncio.run(manager.run_settlement_cycle(strategy))
+
+        assert result.success is True
+        assert manager._vault_adapter.build_settle_deposit_bundle.called
+        assert not manager._vault_adapter.build_propose_valuation_bundle.called
+        assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE
+
+
+class TestResumeRedeemLeg:
+    """Crash recovery from the redeem-leg sub-phases (Lagoon v0.5.0 second proposal)."""
+
+    def _base_state(self, phase: SettlementPhase, nonce: int = 2) -> VaultState:
+        return VaultState(
+            initialized=True,
+            last_total_assets=10_000_000,
+            last_proposed_total_assets=10_500_000,
+            settlement_phase=phase,
+            last_valuation_time=datetime.now(UTC) - timedelta(hours=2),
+            settlement_nonce=nonce,
+        )
+
+    def test_proposing_redeem_live_proposal_settles_redeem(self):
+        """PROPOSING_REDEEM with a live proposal #2 -> settleRedeem, no re-propose."""
+        manager = _make_manager(vault_state=self._base_state(SettlementPhase.PROPOSING_REDEEM))
+        strategy = _make_strategy()
+        manager._vault_sdk.has_live_proposal.return_value = True
+        manager._vault_sdk.get_underlying_balance.return_value = 0  # drained after redeem
+        manager._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
+
+        result = asyncio.run(manager.run_settlement_cycle(strategy))
+
+        assert result.success is True
+        assert manager._vault_adapter.build_settle_redeem_bundle.called
+        assert not manager._vault_adapter.build_propose_valuation_bundle.called
+        assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE
+
+    def test_proposing_redeem_no_live_proposal_reproposes(self):
+        """PROPOSING_REDEEM with no live proposal #2 -> re-issue proposal #2 then settleRedeem."""
+        manager = _make_manager(vault_state=self._base_state(SettlementPhase.PROPOSING_REDEEM))
+        strategy = _make_strategy()
+        manager._vault_sdk.has_live_proposal.return_value = False
+        manager._vault_sdk.get_underlying_balance.return_value = 0
+        manager._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
+
+        result = asyncio.run(manager.run_settlement_cycle(strategy))
+
+        assert result.success is True
+        assert manager._vault_adapter.build_propose_valuation_bundle.called  # proposal #2 re-issued
+        assert manager._vault_adapter.build_settle_redeem_bundle.called
+
+    def test_proposed_redeem_executes_settle_redeem(self):
+        """PROPOSED_REDEEM -> settleRedeem directly (skip propose)."""
+        manager = _make_manager(vault_state=self._base_state(SettlementPhase.PROPOSED_REDEEM))
+        strategy = _make_strategy()
+        manager._vault_sdk.get_underlying_balance.return_value = 0
+        manager._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
+
+        result = asyncio.run(manager.run_settlement_cycle(strategy))
+
+        assert result.success is True
+        assert manager._vault_adapter.build_settle_redeem_bundle.called
+        assert not manager._vault_adapter.build_propose_valuation_bundle.called
+        assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE
+
+    def test_settling_redeem_silo_drained_finalizes(self):
+        """SETTLING_REDEEM with a drained silo -> finalize, no tx."""
+        manager = _make_manager(vault_state=self._base_state(SettlementPhase.SETTLING_REDEEM))
+        strategy = _make_strategy()
+        manager._vault_sdk.get_underlying_balance.return_value = 0  # silo drained
+
+        result = asyncio.run(manager.run_settlement_cycle(strategy))
+
+        assert result.success is True
+        assert not manager._execution_orchestrator.execute.called
+        assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE
+
+    def test_settling_redeem_shares_remain_live_proposal_retries(self):
+        """SETTLING_REDEEM, shares remain + proposal #2 live (tx reverted) -> retry settleRedeem."""
+        manager = _make_manager(vault_state=self._base_state(SettlementPhase.SETTLING_REDEEM))
+        strategy = _make_strategy()
+        # Shares still parked; proposal #2 still live -> the settleRedeem tx reverted.
+        manager._vault_sdk.get_underlying_balance.side_effect = [5_000_000, 0]
+        manager._vault_sdk.has_live_proposal.return_value = True
+        manager._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
+
+        result = asyncio.run(manager.run_settlement_cycle(strategy))
+
+        assert result.success is True
+        assert manager._vault_adapter.build_settle_redeem_bundle.called
+
+    def test_settling_redeem_shares_remain_spent_proposal_carries_over(self):
+        """SETTLING_REDEEM, shares remain + proposal #2 spent (safe illiquidity) -> finalize + carry."""
+        manager = _make_manager(vault_state=self._base_state(SettlementPhase.SETTLING_REDEEM))
+        strategy = _make_strategy()
+        # Shares remain but proposal #2 was consumed -> settleRedeem ran, safe illiquid.
+        manager._vault_sdk.get_underlying_balance.return_value = 5_000_000
+        manager._vault_sdk.has_live_proposal.return_value = False
+        manager._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
+
+        result = asyncio.run(manager.run_settlement_cycle(strategy))
+
+        assert result.success is True
+        # One attempt per cycle: do NOT retry settleRedeem; carry remaining shares over.
+        assert not manager._vault_adapter.build_settle_redeem_bundle.called
+        assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE
