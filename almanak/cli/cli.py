@@ -20,6 +20,7 @@ from almanak.core.redaction import install_redaction
 from almanak.framework.cli import backtest as framework_backtest_group
 from almanak.framework.cli import new_strategy as framework_new_strategy_cmd
 from almanak.framework.cli.ax import ax as framework_ax_group
+from almanak.framework.cli.capability_matrix import capability_matrix_command as framework_capability_matrix_cmd
 from almanak.framework.cli.chain_resolution import cli_chain_choices
 from almanak.framework.cli.check import check as framework_check_cmd
 from almanak.framework.cli.demo import demo as framework_demo_cmd
@@ -576,6 +577,7 @@ def info():
 
 
 info.add_command(framework_support_matrix_cmd, name="matrix")
+info.add_command(framework_capability_matrix_cmd, name="capabilities")
 
 
 @almanak.group()
