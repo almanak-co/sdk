@@ -131,7 +131,7 @@ def _make_market():
             return price_map[token]
         raise ValueError(f"no price for {token}")
 
-    def _balance(token):  # empty wallet → measured zero
+    def _balance(token, protocol=None, *, chain=None, price=None):  # empty wallet → measured zero
         result = MagicMock()
         result.balance = Decimal("0")
         return result

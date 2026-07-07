@@ -412,12 +412,12 @@ class TestPortfolioValuerLPRepricing:
         _prices = prices or {}
         _balances = balances or {}
 
-        def mock_price(token, quote="USD"):
+        def mock_price(token, quote="USD", *, chain=None):
             if token in _prices:
                 return _prices[token]
             raise ValueError(f"No price for {token}")
 
-        def mock_balance(token):
+        def mock_balance(token, protocol=None, *, chain=None, price=None):
             return _balances.get(token, Decimal("0"))
 
         market.price.side_effect = mock_price

@@ -67,12 +67,12 @@ def make_strategy(tracked=("WBTC", "USDC"), positions=None) -> MagicMock:
 def make_market(prices, balances) -> MagicMock:
     m = MagicMock()
 
-    def _price(t: str, quote: str = "USD"):
+    def _price(t: str, quote: str = "USD", *, chain: str | None = None):
         if t in prices:
             return prices[t]
         raise ValueError(f"no price for {t}")
 
-    def _bal(t: str):
+    def _bal(t: str, protocol: str | None = None, *, chain: str | None = None, price=None):
         if t in balances:
             r = MagicMock()
             r.balance = balances[t]

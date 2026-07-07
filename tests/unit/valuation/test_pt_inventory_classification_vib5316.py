@@ -66,14 +66,14 @@ def make_market(*, pt_price: PtPriceData | None, balances=None) -> MagicMock:
     balances = balances or {"USDC": Decimal("100")}
     m = MagicMock()
 
-    def _price(t: str, quote: str = "USD"):
+    def _price(t: str, quote: str = "USD", *, chain: str | None = None):
         if t in ("ETH", "WETH"):
             return Decimal("2000")  # gas token priceable → snapshot stays HIGH
         if t == "USDC":
             return Decimal("1")
         raise ValueError(f"no price for {t}")
 
-    def _bal(t: str):
+    def _bal(t: str, protocol: str | None = None, *, chain: str | None = None, price=None):
         r = MagicMock()
         r.balance = balances.get(t, Decimal("0"))
         return r

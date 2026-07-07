@@ -248,12 +248,16 @@ def _make_market(prices=None, balances=None):
     _prices = prices or {}
     _balances = balances or {}
 
-    def mock_price(token, quote="USD"):
+    # VIB-5636: mirror the real ``MarketSnapshot`` signature which accepts a
+    # keyword-only ``chain=`` (the valuer now threads it for multi-chain
+    # correctness). A double that rejects ``chain`` would spuriously surface
+    # every read as failed.
+    def mock_price(token, quote="USD", *, chain=None):
         if token in _prices:
             return _prices[token]
         raise ValueError(f"No price for {token}")
 
-    def mock_balance(token):
+    def mock_balance(token, protocol=None, *, chain=None, price=None):
         if token in _balances:
             result = MagicMock()
             result.balance = _balances[token]
@@ -754,7 +758,7 @@ class TestPortfolioValuerEdgeCases:
         strategy = _make_strategy(tracked_tokens=["ETH", "USDC"])
 
         # ETH balance fails, USDC works
-        def mock_balance(token):
+        def mock_balance(token, protocol=None, *, chain=None, price=None):
             if token == "USDC":
                 result = MagicMock()
                 result.balance = Decimal("1000")
@@ -783,6 +787,106 @@ class TestPortfolioValuerEdgeCases:
 
         snapshot = valuer.value(strategy, market)
         assert snapshot.value_confidence == ValueConfidence.UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# VIB-5636: multi-chain snapshot valuation — the valuer must thread the
+# strategy's primary chain into every MarketSnapshot.balance/price read.
+# A multi-chain snapshot raises AmbiguousChainError for any chain=None read
+# (PRD §4.2 R1); before this fix the tracked-token loop AND _resolve_native_gas
+# both read chain-less, so every token failed (wallet valued empty / ESTIMATED)
+# and native-gas stamped price_missing → a hard live-mode ACCOUNTING halt.
+# ---------------------------------------------------------------------------
+
+
+def _multichain_market(prices, balances, chains=("arbitrum", "hyperevm")):
+    """MarketSnapshot double that behaves like a MULTI-chain snapshot: any
+    balance/price read with chain=None (the default) raises AmbiguousChainError
+    and only resolves when the caller threads an explicit chain= that is in the
+    configured set. This pins the valuer's obligation to pass chain= through.
+    """
+    from almanak.framework.market.errors import AmbiguousChainError
+
+    market = MagicMock()
+
+    def _price(token, quote="USD", *, chain=None):
+        if chain is None:
+            raise AmbiguousChainError(chains=chains)
+        if chain not in chains:
+            raise ValueError(f"chain {chain} not configured")
+        if token in prices:
+            return prices[token]
+        raise ValueError(f"No price for {token}")
+
+    def _balance(token, protocol=None, *, chain=None, price=None):
+        if chain is None:
+            raise AmbiguousChainError(chains=chains)
+        if chain not in chains:
+            raise ValueError(f"chain {chain} not configured")
+        result = MagicMock()
+        result.balance = balances.get(token, Decimal("0"))
+        return result
+
+    market.price = _price
+    market.balance = _balance
+    return market
+
+
+class TestMultiChainValuationVib5636:
+    """The valuer values a multi-chain strategy's wallet without AmbiguousChainError."""
+
+    def test_multichain_tracked_tokens_resolve_on_primary_chain(self):
+        valuer = PortfolioValuer()
+        strategy = _make_strategy(chain="arbitrum", tracked_tokens=["WETH", "USDC"])
+        market = _multichain_market(
+            prices={"WETH": Decimal("3500"), "USDC": Decimal("1"), "ETH": Decimal("3500")},
+            balances={"WETH": Decimal("2"), "USDC": Decimal("1000"), "ETH": Decimal("0.5")},
+        )
+
+        snapshot = valuer.value(strategy, market)
+
+        # Before VIB-5636 every read raised AmbiguousChainError → empty wallet,
+        # ESTIMATED. Now the primary chain is threaded → tokens resolve, HIGH.
+        assert snapshot.value_confidence == ValueConfidence.HIGH
+        wallet = {b.symbol: b for b in snapshot.wallet_balances}
+        assert wallet["WETH"].balance == Decimal("2")
+        assert wallet["USDC"].balance == Decimal("1000")
+        # WETH 2*3500 + USDC 1000*1 + native ETH 0.5*3500 = 7000 + 1000 + 1750
+        assert snapshot.wallet_total_value_usd == Decimal("9750")
+
+    def test_multichain_native_gas_priced_on_primary_chain(self):
+        """_resolve_native_gas must stamp 'ok' (not price_missing) on multi-chain."""
+        valuer = PortfolioValuer()
+        strategy = _make_strategy(chain="arbitrum", tracked_tokens=[])
+        market = _multichain_market(
+            prices={"ETH": Decimal("3500")},
+            balances={"ETH": Decimal("0")},  # measured zero
+        )
+
+        snapshot = valuer.value(strategy, market)
+
+        assert snapshot.value_confidence == ValueConfidence.HIGH
+        assert snapshot.snapshot_metadata.get("gas_native_status") == "ok"
+        native = [b for b in snapshot.wallet_balances if b.symbol == "ETH"]
+        assert len(native) == 1
+        assert native[0].balance == Decimal("0")  # Empty != Zero: measured zero row
+
+    def test_resolve_native_gas_threads_chain_kwarg(self):
+        """Direct unit: _resolve_native_gas passes chain= to both reads."""
+        balances: dict = {}
+        prices: dict = {}
+        market = _multichain_market(prices={"ETH": Decimal("3500")}, balances={"ETH": Decimal("1")})
+        status, row = PortfolioValuer._resolve_native_gas("arbitrum", market, balances, prices)
+        assert status == "ok"
+        assert row is not None and row.symbol == "ETH"
+
+    def test_resolve_native_gas_empty_chain_is_unknown_not_price_missing(self):
+        """A falsy chain short-circuits to 'unknown_chain' (parity with the
+        intent_strategy fallback) rather than crashing into price_missing."""
+        market = _multichain_market(prices={"ETH": Decimal("3500")}, balances={"ETH": Decimal("1")})
+        status, row = PortfolioValuer._resolve_native_gas("", market, {}, {})
+        assert status == "unknown_chain"
+        assert row is None
 
 
 # ---------------------------------------------------------------------------

@@ -109,7 +109,7 @@ def _discovered_perp(*, is_long: bool = True) -> PositionInfo:
 
 def _market_at(eth_price: Decimal) -> MagicMock:
     market = MagicMock()
-    market.price.side_effect = lambda token: {"ETH": eth_price, "USDC": Decimal("1")}.get(token, Decimal("0"))
+    market.price.side_effect = lambda token, *a, **k: {"ETH": eth_price, "USDC": Decimal("1")}.get(token, Decimal("0"))
     market.balance.return_value = MagicMock(balance=Decimal("0"))
     return market
 

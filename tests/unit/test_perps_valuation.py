@@ -243,7 +243,7 @@ class TestPortfolioValuerPerpsIntegration:
     @staticmethod
     def _market_at(eth_price: Decimal):
         market = MagicMock()
-        market.price.side_effect = lambda token: {
+        market.price.side_effect = lambda token, *a, **k: {
             "ETH": eth_price,
             "USDC": Decimal("1"),
         }.get(token, Decimal("0"))
@@ -442,7 +442,7 @@ class TestPortfolioValuerPerpsIntegration:
 
         # market.price("ETH") -> 0 => mark_price <= 0 guard trips.
         market = MagicMock()
-        market.price.side_effect = lambda token: {"ETH": Decimal("0"), "USDC": Decimal("1")}.get(token, Decimal("0"))
+        market.price.side_effect = lambda token, *a, **k: {"ETH": Decimal("0"), "USDC": Decimal("1")}.get(token, Decimal("0"))
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(PortfolioValuer, "_resolve_token_symbol", lambda self, addr, p, k: "USDC")
             mp.setattr(PortfolioValuer, "_get_token_decimals", lambda self, sym, chain: 6)
@@ -460,7 +460,7 @@ class TestPortfolioValuerPerpsIntegration:
 
         # ETH prices fine, USDC collateral price is 0 => collateral guard trips.
         market = MagicMock()
-        market.price.side_effect = lambda token: {"ETH": Decimal("2200"), "USDC": Decimal("0")}.get(token, Decimal("0"))
+        market.price.side_effect = lambda token, *a, **k: {"ETH": Decimal("2200"), "USDC": Decimal("0")}.get(token, Decimal("0"))
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(PortfolioValuer, "_resolve_token_symbol", lambda self, addr, p, k: "USDC")
             mp.setattr(PortfolioValuer, "_get_token_decimals", lambda self, sym, chain: 6)

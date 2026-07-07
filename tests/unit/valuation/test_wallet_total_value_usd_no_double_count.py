@@ -80,12 +80,12 @@ def _make_market(
     _prices = prices or {}
     _balances = balances or {}
 
-    def mock_price(token: str, quote: str = "USD") -> Decimal:
+    def mock_price(token: str, quote: str = "USD", *, chain: str | None = None) -> Decimal:
         if token in _prices:
             return _prices[token]
         raise ValueError(f"No price for {token}")
 
-    def mock_balance(token: str) -> MagicMock:
+    def mock_balance(token: str, protocol: str | None = None, *, chain: str | None = None, price: Decimal | None = None) -> MagicMock:
         if token in _balances:
             result = MagicMock()
             result.balance = _balances[token]

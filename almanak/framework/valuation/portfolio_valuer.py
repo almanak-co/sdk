@@ -897,8 +897,10 @@ class MarketDataSource(Protocol):
     the data-layer MarketSnapshot.
     """
 
-    def price(self, token: str, quote: str = "USD") -> Decimal: ...
-    def balance(self, token: str) -> Any: ...
+    # ``chain`` is keyword-only and optional, matching MarketSnapshot.price/balance
+    # (PRD §4.2 R1). Required on multi-chain snapshots; None on single-chain.
+    def price(self, token: str, quote: str = "USD", *, chain: str | None = None) -> Decimal: ...
+    def balance(self, token: str, *, chain: str | None = None) -> Any: ...
 
 
 @runtime_checkable
@@ -1049,6 +1051,53 @@ class PortfolioValuer:
         """
         self._drain_barrier_incomplete = incomplete
 
+    @staticmethod
+    def _fetch_wallet_balances_and_prices(
+        chain: str,
+        market: MarketDataSource,
+        tracked_tokens: list[str],
+    ) -> tuple[dict[str, Decimal], dict[str, Decimal], bool]:
+        """Fetch wallet balances + prices for ``tracked_tokens`` on ``chain``.
+
+        Returns ``(balances, prices, wallet_data_incomplete)``. A balance/price
+        read that raises, or a held token whose price fails to resolve, flips
+        ``wallet_data_incomplete`` (Empty≠Zero — the token is dropped from
+        ``balances`` rather than priced at $0).
+
+        VIB-5636: passes the strategy's primary chain explicitly. On a
+        multi-chain snapshot ``MarketSnapshot.balance/price`` with an implicit
+        ``chain=None`` raises ``AmbiguousChainError`` for EVERY token
+        (PRD §4.2 R1), which would leave ``balances``/``prices`` empty and
+        mis-value the wallet. ``chain or None`` is behaviour-neutral for
+        single-chain strategies: ``_resolve_chain`` returns the only configured
+        chain whether it is passed explicitly or resolved from ``None``. Same
+        parity fix already applied to
+        ``intent_strategy._append_native_gas_to_wallet``.
+        """
+        balances: dict[str, Decimal] = {}
+        prices: dict[str, Decimal] = {}
+        wallet_data_incomplete = False
+        chain_arg = chain or None
+        for token in tracked_tokens:
+            try:
+                balance_result = market.balance(token, chain=chain_arg)
+                # MarketSnapshot.balance() returns TokenBalance or Decimal
+                bal = balance_result.balance if hasattr(balance_result, "balance") else Decimal(str(balance_result))
+                if bal > 0:
+                    balances[token] = bal
+            except Exception:
+                wallet_data_incomplete = True
+                logger.debug("Could not fetch balance for %s", token)
+
+            try:
+                price = market.price(token, chain=chain_arg)
+                prices[token] = Decimal(str(price))
+            except Exception:
+                if token in balances:
+                    wallet_data_incomplete = True
+                logger.debug("Could not fetch price for %s", token)
+        return balances, prices, wallet_data_incomplete
+
     def value(
         self,
         strategy: StrategyLike,
@@ -1107,32 +1156,12 @@ class PortfolioValuer:
             # silently priced at $0 (``value_tokens`` drops unpriced tokens).
             tracked_tokens = self._union_tracked_with_position_coins(strategy._get_tracked_tokens())
 
-            # Step 2: Fetch wallet balances and prices via gateway
-            balances: dict[str, Decimal] = {}
-            prices: dict[str, Decimal] = {}
-            wallet_data_incomplete = False
-
-            for token in tracked_tokens:
-                try:
-                    balance_result = market.balance(token)
-                    # MarketSnapshot.balance() returns TokenBalance or Decimal
-                    if hasattr(balance_result, "balance"):
-                        bal = balance_result.balance
-                    else:
-                        bal = Decimal(str(balance_result))
-                    if bal > 0:
-                        balances[token] = bal
-                except Exception:
-                    wallet_data_incomplete = True
-                    logger.debug("Could not fetch balance for %s", token)
-
-                try:
-                    price = market.price(token)
-                    prices[token] = Decimal(str(price))
-                except Exception:
-                    if token in balances:
-                        wallet_data_incomplete = True
-                    logger.debug("Could not fetch price for %s", token)
+            # Step 2: Fetch wallet balances and prices via gateway. Extracted to
+            # ``_fetch_wallet_balances_and_prices`` (VIB-5636) — chain-aware for
+            # multi-chain snapshots; keeps ``value`` under the complexity gate.
+            balances, prices, wallet_data_incomplete = self._fetch_wallet_balances_and_prices(
+                chain, market, tracked_tokens
+            )
 
             # VIB-4225 ACC-02 — append the chain's NATIVE gas-token to the
             # wallet so wallet-method PnL captures gas spend (G6 reconciliation).
@@ -2003,6 +2032,16 @@ class PortfolioValuer:
         if not native_symbol:
             return ("unknown_chain", None)
 
+        # VIB-5636: ``native_token_for_chain`` defaults to "ETH" for an
+        # empty/None chain, so a falsy ``chain`` slips past the guard above.
+        # Reading balance/price with ``chain=None`` on a multi-chain snapshot
+        # would then raise ``AmbiguousChainError`` and be misclassified as
+        # ``balance_failed`` / ``price_missing`` (a hard live-mode halt). An
+        # unresolved chain is honestly ``unknown_chain``. Mirrors the parity
+        # guard in ``intent_strategy._append_native_gas_to_wallet``.
+        if not chain:
+            return ("unknown_chain", None)
+
         canon = native_symbol.upper()
         # Case-insensitive dedupe — a strategy that already tracks the native
         # symbol (rare) keeps its single entry.
@@ -2032,8 +2071,10 @@ class PortfolioValuer:
         # helper truly fail-open: malformed shape surfaces as
         # ``balance_failed`` / ``price_missing`` instead of an
         # unhandled exception.
+        # VIB-5636: thread ``chain`` explicitly — see the empty-chain guard
+        # above and the tracked-tokens loop for the multi-chain rationale.
         try:
-            balance_result = market.balance(native_symbol)
+            balance_result = market.balance(native_symbol, chain=chain)
             raw_balance = balance_result.balance if hasattr(balance_result, "balance") else balance_result
             bal = Decimal(str(raw_balance))
         except Exception as e:  # noqa: BLE001 — typed status path
@@ -2041,7 +2082,7 @@ class PortfolioValuer:
             return ("balance_failed", None)
 
         try:
-            price = market.price(native_symbol)
+            price = market.price(native_symbol, chain=chain)
             if price is None:
                 return ("price_missing", None)
             price_d = Decimal(str(price))

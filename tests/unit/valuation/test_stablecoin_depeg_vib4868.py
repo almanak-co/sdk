@@ -38,12 +38,12 @@ def _make_strategy(tracked_tokens, deployment_id="depeg-strat", chain="arbitrum"
 def _make_market(prices, balances):
     market = MagicMock()
 
-    def mock_price(token, quote="USD"):
+    def mock_price(token, quote="USD", *, chain=None):
         if token in prices:
             return prices[token]
         raise ValueError(f"No price for {token}")
 
-    def mock_balance(token):
+    def mock_balance(token, protocol=None, *, chain=None, price=None):
         if token in balances:
             result = MagicMock()
             result.balance = balances[token]

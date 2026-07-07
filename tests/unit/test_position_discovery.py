@@ -775,7 +775,7 @@ class TestPortfolioValuerFullIntegration:
         market = MagicMock()
         eth_stub = MagicMock()
         eth_stub.balance = Decimal("0")
-        market.balance.side_effect = lambda sym: eth_stub
+        market.balance.side_effect = lambda sym, *a, **k: eth_stub
         market.price.side_effect = lambda sym, *a, **kw: Decimal("0")
 
         # Force the LP reader's read_position to return None for the unknown
@@ -816,7 +816,7 @@ class TestPortfolioValuerFullIntegration:
         balance_stub.balance = Decimal("100")
         eth_stub = MagicMock()
         eth_stub.balance = Decimal("0")
-        market.balance.side_effect = lambda sym: eth_stub if sym == "ETH" else balance_stub
+        market.balance.side_effect = lambda sym, *a, **k: eth_stub if sym == "ETH" else balance_stub
         market.price.side_effect = lambda sym, *a, **kw: (
             Decimal("3500") if sym == "ETH" else Decimal("1.0")
         )
