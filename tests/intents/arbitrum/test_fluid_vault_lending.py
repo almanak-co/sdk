@@ -87,6 +87,21 @@ ADD_COLLATERAL_ETH = Decimal("0.5")
 PARTIAL_REPAY_USDC = Decimal("200")
 WITHDRAW_SLICE_ETH = Decimal("0.2")
 
+# Tolerance for comparing the Fluid resolver's reported collateral against the
+# real on-chain amount. The resolver returns supply as an EXCHANGE-PRICE-SCALED
+# token amount (report note 4): reading a deposited collateral back is the
+# fixed-point round-trip ``floor(floor(col·P/EP)·EP/P)`` (P = EXCHANGE_PRICES_
+# PRECISION, EP = supply exchange price), whose truncation loss is bounded by
+# ``ceil(EP/P)+1`` wei — INDEPENDENT of the collateral size and drifting upward
+# as the vault's supply exchange price accrues interest over time. On the
+# unpinned "latest" Arbitrum fork the observed dust ranges ~2–16 wei and grows
+# with the fork block, so the original fixed 16-wei bound was too tight and
+# flaked once EP accrued past it (VIB-5674 fork-drift class). 1024 wei gives
+# multi-year headroom for further accrual while remaining ~1e-15 of a 1 ETH
+# position — any REAL collateral shortfall is orders of magnitude larger and
+# still caught.
+RESOLVER_SUPPLY_DUST_WEI = 1024
+
 
 # =============================================================================
 # Helpers
@@ -386,7 +401,11 @@ class TestFluidVaultLifecycle:
 
         # On-chain position state via the resolver (typed decode).
         position, _ = sdk.position_by_nft_id(nft_id)
-        assert position.supply >= col_wei - 16, "resolver supply ~ collateral (big-number rounding dust)"
+        assert position.supply >= col_wei - RESOLVER_SUPPLY_DUST_WEI, (
+            f"resolver supply must equal collateral within exchange-price round-trip dust "
+            f"(<= {RESOLVER_SUPPLY_DUST_WEI} wei): col_wei={col_wei}, supply={position.supply}, "
+            f"delta={col_wei - position.supply}"
+        )
         assert position.borrow >= borrow_wei, "resolver borrow >= borrow (round-up + accrual)"
 
         # Layer 5 — exactly ONE BORROW row, both envelopes moved, NO synthetic SUPPLY.
@@ -654,8 +673,11 @@ class TestFluidVaultLifecycle:
         assert eth_after - eth_before == true_withdrawn - gas_wei, (
             "wallet ETH delta must equal the receipt-truth withdrawal exactly (gas-accounted)"
         )
-        assert true_withdrawn >= remaining_collateral - 16, (
-            "wallet must recover >= remaining collateral minus big-number rounding dust"
+        assert true_withdrawn >= remaining_collateral - RESOLVER_SUPPLY_DUST_WEI, (
+            f"wallet must recover >= resolver-reported remaining collateral minus exchange-price "
+            f"round-trip dust (<= {RESOLVER_SUPPLY_DUST_WEI} wei): remaining_collateral="
+            f"{remaining_collateral}, true_withdrawn={true_withdrawn}, "
+            f"delta={remaining_collateral - true_withdrawn}"
         )
 
         # Position empty after close — post-state reads pinned to the receipt block.

@@ -518,7 +518,9 @@ class TestFluidSupplyIntent:
 
         An assets-based exit path that rounds against the user strands dust
         shares; the full exit must redeem the EXACT share balance and return
-        at least the originally supplied USDC minus 1 base-unit rounding.
+        at least the originally supplied USDC minus up to 2 base-units of
+        ERC-4626 double-floor rounding (deposit assets->shares, then redeem
+        shares->assets), which the vault retains for the remaining depositors.
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc = tokens["USDC"]
@@ -582,8 +584,18 @@ class TestFluidSupplyIntent:
         usdc_received = usdc_after - usdc_before
         print(f"USDC received on exit: {format_token_amount(usdc_received, decimals)}")
         assert usdc_received == decoded_assets, "wallet delta must match the decoded Withdraw assets exactly"
-        assert usdc_received >= supply_base_units - 1, (
-            f"full exit must return at least the supplied amount minus 1 base-unit rounding. "
+        # ERC-4626 round-trip dust: a supply then full redeem floors TWICE — once
+        # minting shares (deposit: assets->shares, rounds down) and once burning
+        # them (redeem: shares->assets, rounds down) — so up to 2 base units are
+        # retained by the vault for the remaining depositors. This is standard
+        # share-math dust in the vault's favour, NOT a value leak: nothing is
+        # stranded on the wallet and no third party captures it. The exact loss
+        # (1 or 2 units) depends on the fToken exchange rate at the live fork
+        # block, so the tolerance is the 2-unit double-floor bound, not 1.
+        # (Mirrors the arbitrum sibling fixed in #3227 — cross-chain consistency.)
+        assert usdc_received >= supply_base_units - 2, (
+            f"full exit must return at least the supplied amount minus 2 base-units of "
+            f"ERC-4626 double-floor rounding (deposit + redeem). "
             f"Supplied: {supply_base_units}, Got: {usdc_received}"
         )
 

@@ -85,6 +85,19 @@ FLUID_LIQUIDITY = "0x52Aa899454998Be5b000Ad077a46Bbe360F4e497"
 SUPPLY_SUSDAI = Decimal("100")
 BORROW_USDC = Decimal("20")  # far under the 88% CF on a ~$105 collateral
 
+# Tolerance for comparing the Fluid resolver's reported collateral against the
+# real on-chain amount. The resolver returns supply as an EXCHANGE-PRICE-SCALED
+# token amount: reading a deposited collateral back is the fixed-point round-trip
+# ``floor(floor(col·P/EP)·EP/P)`` (P = EXCHANGE_PRICES_PRECISION, EP = supply
+# exchange price), whose truncation loss is bounded by ``ceil(EP/P)+1`` wei —
+# INDEPENDENT of the collateral size and drifting upward as the vault's supply
+# exchange price accrues interest over time. On the unpinned "latest" fork this
+# dust drifts with the fork block, so a fixed 16-wei bound is too tight (VIB-5674
+# fork-drift class; mirrors the arbitrum sibling). 1024 wei gives multi-year
+# headroom while remaining ~1e-17 of the supplied collateral — any REAL shortfall
+# is orders of magnitude larger and still caught.
+RESOLVER_SUPPLY_DUST_WEI = 1024
+
 APPROVE_SELECTOR = "0x095ea7b3"
 OPERATE_SELECTOR = "0x032d2276"
 
@@ -347,7 +360,11 @@ class TestFluidVaultSupplyFirstBase:
         assert susdai_before - susdai_after == supply_wei, "wallet sUSDai delta must be exactly -supply"
 
         position, _ = sdk.position_by_nft_id(nft_id)
-        assert position.supply >= supply_wei - 16, "resolver supply ~ collateral (rounding dust)"
+        assert position.supply >= supply_wei - RESOLVER_SUPPLY_DUST_WEI, (
+            f"resolver supply must equal collateral within exchange-price round-trip dust "
+            f"(<= {RESOLVER_SUPPLY_DUST_WEI} wei): supply_wei={supply_wei}, "
+            f"supply={position.supply}, delta={supply_wei - position.supply}"
+        )
         assert position.borrow == 0
 
         # Layer 5 — exactly ONE SUPPLY row, base-chain position key.
