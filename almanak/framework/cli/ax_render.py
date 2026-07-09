@@ -77,14 +77,21 @@ def render_result(response: ToolResponse, *, json_output: bool = False, title: s
 
 
 def render_error(message: str, *, json_output: bool = False) -> None:
-    """Render an error message to stderr.
+    """Render an error message.
+
+    In ``--json`` mode the structured error document goes to STDOUT — the
+    machine-readable payload stream — so scripted callers that pipe stdout
+    always receive exactly one JSON document (the non-zero exit code still
+    signals failure). This matches the success path (:func:`_render_json`)
+    and the ``resolve`` command's structured ``not_found`` / ``error``
+    payloads. Human-readable errors go to stderr, keeping stdout clean.
 
     Args:
         message: Error message.
-        json_output: If True, output as JSON object.
+        json_output: If True, output as JSON object on stdout.
     """
     if json_output:
-        click.echo(json.dumps({"status": "error", "message": message}), err=True)
+        click.echo(json.dumps({"status": "error", "message": message}))
     else:
         click.echo(click.style(f"Error: {message}", fg="red"), err=True)
 

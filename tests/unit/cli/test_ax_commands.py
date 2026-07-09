@@ -1525,3 +1525,71 @@ class TestUsesIsolatedMarkets:
 
         assert not _uses_isolated_markets("definitely_not_a_protocol")
         assert not _uses_isolated_markets("")
+
+
+class TestAxJsonStreamRouting:
+    """Under ``--json`` the payload — success OR structured error — must land
+    on STDOUT so scripted callers can pipe it; stderr carries only human/log
+    noise. Regression guard: ``ax --json`` error documents were emitted to
+    stderr, leaving stdout empty on failure.
+
+    ``CliRunner(mix_stderr=False)`` separates the two streams so each
+    assertion pins the exact stream, not just the merged output.
+    """
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_json_success_payload_on_stdout_only(self, mock_get_exec):
+        import json
+
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        response = ToolResponse(status="success", data={"token": "ETH", "price_usd": 2500.0})
+
+        async def mock_execute(tool_name, args):
+            return response
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner(mix_stderr=False)
+        result = runner.invoke(almanak, ["ax", "--json", "price", "ETH"])
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)  # stdout is exactly one JSON document
+        assert payload["status"] == "success"
+        assert payload["data"]["price_usd"] == 2500.0
+        assert "price_usd" not in result.stderr
+
+    def test_json_error_payload_on_stdout_not_stderr(self):
+        """``ax run <unknown tool>`` reaches the shared render_error seam
+        offline (catalog lookup, no gateway) — the structured error document
+        must be parseable from stdout with a non-zero exit code."""
+        import json
+
+        runner = CliRunner(mix_stderr=False)
+        result = runner.invoke(almanak, ["ax", "--json", "run", "definitely_not_a_tool", "{}"])
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert "definitely_not_a_tool" in payload["message"]
+        assert '"status"' not in result.stderr
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_json_exception_error_on_stdout(self, mock_get_exec):
+        """A runtime failure inside a subcommand (executor raises) routes
+        through the same render_error seam — JSON error on stdout, exit 1."""
+        import json
+
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        async def mock_execute(tool_name, args):
+            raise RuntimeError("gateway exploded")
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner(mix_stderr=False)
+        result = runner.invoke(almanak, ["ax", "--json", "price", "ETH"])
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout)
+        assert payload == {"status": "error", "message": "gateway exploded"}
+        assert "gateway exploded" not in result.stderr

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -83,16 +84,21 @@ class TestRenderResult:
 
 
 class TestRenderError:
-    def test_json_error(self, capsys):
+    def test_json_error_goes_to_stdout_not_stderr(self, capsys):
+        """Regression guard: --json errors must land on stdout — the
+        machine-readable payload stream — not stderr, so scripted callers
+        piping stdout always get exactly one JSON document."""
         render_error("Something failed", json_output=True)
-        output = capsys.readouterr().err
-        assert '"status": "error"' in output
-        assert "Something failed" in output
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert payload == {"status": "error", "message": "Something failed"}
+        assert captured.err == ""
 
-    def test_human_error(self, capsys):
+    def test_human_error_goes_to_stderr(self, capsys):
         render_error("Something failed", json_output=False)
-        output = capsys.readouterr().err
-        assert "Something failed" in output
+        captured = capsys.readouterr()
+        assert "Something failed" in captured.err
+        assert captured.out == ""
 
 
 class TestRenderSimulation:
