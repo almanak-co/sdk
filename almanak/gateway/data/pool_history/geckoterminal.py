@@ -1,4 +1,4 @@
-"""CoinGecko Onchain pool-history provider (POOL-5 / VIB-4753) — LAST RESORT, all resolutions.
+"""CoinGecko Onchain pool-history provider (VIB-4753) — LAST RESORT, all resolutions.
 
 Uses CoinGecko's Onchain OHLCV endpoint
 ``/onchain/networks/{network}/pools/{address}/ohlcv/{timeframe}`` with
@@ -19,6 +19,10 @@ from typing import Any
 
 import aiohttp
 
+from almanak.gateway.data._history_common import (
+    coingecko_onchain_api_base,
+    coingecko_onchain_headers,
+)
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
 
@@ -33,9 +37,6 @@ from ._base import (
 )
 
 logger = logging.getLogger(__name__)
-
-_CG_ONCHAIN_FREE_API = "https://api.coingecko.com/api/v3/onchain"
-_CG_ONCHAIN_PRO_API = "https://pro-api.coingecko.com/api/v3/onchain"
 
 #: CoinGecko Onchain OHLCV per-call row limit. Windows longer than this MUST be
 #: fetched across multiple backward-paginated calls (audit blocker #1) — a
@@ -196,14 +197,11 @@ class GeckoTerminalPoolHistoryProvider:
 
     @property
     def _api_base(self) -> str:
-        return _CG_ONCHAIN_PRO_API if self._api_key else _CG_ONCHAIN_FREE_API
+        return coingecko_onchain_api_base(self._api_key)
 
     @property
     def _headers(self) -> dict[str, str]:
-        headers = {"Accept": "application/json", "User-Agent": "Almanak-Gateway/1.0"}
-        if self._api_key:
-            headers["x-cg-pro-api-key"] = self._api_key
-        return headers
+        return coingecko_onchain_headers(self._api_key)
 
 
 def _ohlcv_to_snapshots(

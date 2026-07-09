@@ -1,11 +1,16 @@
 """Shared chain-name maps + Solana-family helper for the two off-chain
-pool-history / pool-analytics gateway services (VIB-4727 + POOL-5 / VIB-4753).
+pool-history / pool-analytics gateway services (VIB-4727 / VIB-4753).
 
 Single home for the DefiLlama / CoinGecko Onchain chain-spelling tables so the
 ``PoolAnalyticsService`` handler (``almanak/gateway/services/pool_analytics_service.py``)
 and the ``PoolHistoryDispatcher`` providers (``almanak/gateway/data/pool_history/``)
 agree on chain spelling without duplicating the literals. Previously each
 service owned its own copy of these maps.
+
+Also the single home for the CoinGecko Onchain API base URLs and header
+construction — the pool-analytics servicer and the
+pool-history OHLCV provider previously each carried their own copies of
+the free/pro base-URL pair and the ``x-cg-pro-api-key`` header logic.
 
 The canonical home for these chain-string spellings is now the per-chain
 ``ChainDescriptor.external_ids`` mapping on the registry — these module-level
@@ -43,6 +48,28 @@ _CHAIN_TO_GT_NETWORK: Mapping[str, str] = MappingProxyType(vendor_chain_map("gec
 _CHAIN_TO_LLAMA_DISPLAY: Mapping[str, str] = MappingProxyType(vendor_chain_map("defillama_display"))
 
 
+#: CoinGecko Onchain API bases. The org runs the paid CoinGecko key
+#: (CoinGecko acquired GeckoTerminal; Onchain is the same data behind paid
+#: limits) — keyed requests go to the pro host, keyless fall back to the
+#: free host (pool endpoints there reject keyless calls, which surfaces as
+#: an honest provider error naming the env var).
+_CG_ONCHAIN_FREE_API = "https://api.coingecko.com/api/v3/onchain"
+_CG_ONCHAIN_PRO_API = "https://pro-api.coingecko.com/api/v3/onchain"
+
+
+def coingecko_onchain_api_base(api_key: str | None) -> str:
+    """Return the CoinGecko Onchain API base for ``api_key`` (pro when keyed)."""
+    return _CG_ONCHAIN_PRO_API if api_key else _CG_ONCHAIN_FREE_API
+
+
+def coingecko_onchain_headers(api_key: str | None) -> dict[str, str]:
+    """Standard CoinGecko Onchain request headers (+ pro key when present)."""
+    headers = {"Accept": "application/json", "User-Agent": "Almanak-Gateway/1.0"}
+    if api_key:
+        headers["x-cg-pro-api-key"] = api_key
+    return headers
+
+
 def is_solana_family(chain: str) -> bool:
     """Return True when ``chain`` resolves to the SOLANA family.
 
@@ -57,7 +84,11 @@ def is_solana_family(chain: str) -> bool:
 
 
 __all__ = [
+    "_CG_ONCHAIN_FREE_API",
+    "_CG_ONCHAIN_PRO_API",
     "_CHAIN_TO_GT_NETWORK",
     "_CHAIN_TO_LLAMA_DISPLAY",
+    "coingecko_onchain_api_base",
+    "coingecko_onchain_headers",
     "is_solana_family",
 ]

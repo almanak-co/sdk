@@ -1,10 +1,10 @@
 """Gateway-side PoolAnalyticsService tests (VIB-4727).
 
-Covers the gateway-servicer half of the UAT card
-``docs/internal/uat-cards/VIB-4727.md`` (D1.S1, D2.M1, D2.M2, D2.M4,
-D3.F2, D3.F6). Tests patch the upstream provider seams
-(``_query_defillama_pools``, ``_query_geckoterminal_pool``) with recorded
-JSON fixtures from
+CoinGecko Onchain is the sole external pool-analytics lane (the legacy
+catalog-matching lane was structurally dead — its upstream catalog keys
+pools by opaque UUIDs, never by address — and was deleted).
+Tests patch the upstream provider seam (``_query_coingecko_onchain_pool``)
+with recorded JSON fixtures from
 ``tests/gateway/services/fixtures/pool_analytics/`` — no live external API
 is reached. Patching at this seam (the function returning the parsed JSON
 dict) is the "equivalent in-test HTTP mocking" the UAT card permits
@@ -14,6 +14,7 @@ in lieu of ``aioresponses`` (which is not a project dependency).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 from pathlib import Path
@@ -28,7 +29,7 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.pool_analytics_service import (
     PoolAnalyticsServiceServicer,
-    _parse_gt_pool,
+    _parse_coingecko_onchain_pool,
 )
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "pool_analytics"
@@ -39,10 +40,6 @@ _ETH_USDC_WETH = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"  # USDC/WETH 0.05%
 def _load_fixture(name: str) -> Any:
     with (_FIXTURES / name).open("r") as f:
         return json.load(f)
-
-
-def _llama_pools(name: str) -> list[dict[str, Any]]:
-    return _load_fixture(name)["data"]
 
 
 class _MockContext:
@@ -77,35 +74,42 @@ def _request(
 
 
 # ============================================================================
-# D1.S1 — Arbitrum univ3 happy path through DefiLlama
+# D1.S1 — Arbitrum univ3 happy path through CoinGecko Onchain (primary lane)
 # ============================================================================
 
 
 def test_get_pool_analytics_arbitrum_univ3():
-    """D1.S1: returns string-decimal envelope for a known Arbitrum univ3 pool."""
+    """D1.S1: returns string-decimal envelope for a known Arbitrum univ3 pool.
+
+    Exact APR math from the fixture: fee_apr = volume_24h * fee * 365 /
+    tvl * 100 = 820000 * 0.0005 * 365 / 1185000 * 100.
+    """
     servicer = _make_servicer()
-    pools = _llama_pools("defillama_arbitrum_univ3.json")
+    payload = _load_fixture("geckoterminal_arbitrum_univ3.json")
     ctx = _MockContext()
     before = int(time.time())
 
     with patch.object(
         servicer,
-        "_query_defillama_pools",
-        new=AsyncMock(return_value=pools),
+        "_query_coingecko_onchain_pool",
+        new=AsyncMock(return_value=payload),
     ):
         response = asyncio.run(servicer.GetPoolAnalytics(_request(), ctx))
 
     after = int(time.time())
 
     assert response.success is True
-    assert response.tvl_usd == "1210000.0"
-    assert response.fee_apr == "12.5"
-    assert response.source == "defillama"
+    assert response.tvl_usd == "1185000.0"
+    assert response.volume_24h_usd == "820000.0"
+    expected_apr = 820000.0 * 0.0005 * 365 / 1185000.0 * 100
+    assert response.fee_apr == str(expected_apr) == "12.628691983122362"
+    assert response.source == "coingecko_onchain"
     assert response.chain == "arbitrum"
     assert response.protocol == "uniswap_v3"
     assert before <= response.observed_at <= after + 1
     # gRPC OK = no code set on the mock context.
     assert ctx.code is None
+    assert servicer.health()["coingecko_onchain"]["successes"] == 1
 
 
 def _coingecko_pool_payload(attrs: dict[str, Any]) -> dict[str, Any]:
@@ -114,7 +118,7 @@ def _coingecko_pool_payload(attrs: dict[str, Any]) -> dict[str, Any]:
 
 def test_parse_coingecko_pool_fee_percentage_is_percent_units():
     """pool_fee_percentage is percent units, so 0.3 means a 0.003 fee rate."""
-    record = _parse_gt_pool(
+    record = _parse_coingecko_onchain_pool(
         _coingecko_pool_payload(
             {
                 "reserve_in_usd": "10000",
@@ -134,7 +138,7 @@ def test_parse_coingecko_pool_fee_percentage_is_percent_units():
 
 def test_parse_coingecko_pool_fee_fraction_remains_direct_rate():
     """Legacy pool_fee is already a fraction, so 0.003 is used as-is."""
-    record = _parse_gt_pool(
+    record = _parse_coingecko_onchain_pool(
         _coingecko_pool_payload(
             {
                 "reserve_in_usd": "10000",
@@ -152,7 +156,7 @@ def test_parse_coingecko_pool_fee_fraction_remains_direct_rate():
 
 def test_parse_coingecko_pool_fee_missing_stays_unmeasured():
     """Missing fee data is unmeasured, not silently substituted into APR."""
-    record = _parse_gt_pool(
+    record = _parse_coingecko_onchain_pool(
         _coingecko_pool_payload({"reserve_in_usd": "10000", "volume_usd": {"h24": "1000"}}),
         pool_address=_ETH_USDC_WETH,
         chain="ethereum",
@@ -162,76 +166,72 @@ def test_parse_coingecko_pool_fee_missing_stays_unmeasured():
     assert record.fee_apr == ""
 
 
+# ============================================================================
+# API-key resolution — gateway-canonical name wins; bare name stays valid
+# ============================================================================
+
+
 def test_pool_analytics_uses_bare_coingecko_api_key_fallback(monkeypatch: pytest.MonkeyPatch):
     """Bare COINGECKO_API_KEY remains valid for local gateway operators."""
+    monkeypatch.delenv("ALMANAK_GATEWAY_COINGECKO_API_KEY", raising=False)
     monkeypatch.setenv("COINGECKO_API_KEY", "bare-key")
     servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings())
 
     assert servicer._coingecko_api_key == "bare-key"
 
 
-# ============================================================================
-# D2.M1 — Chain matrix (Arbitrum / Ethereum) — provider name-mapping divergence
-# ============================================================================
+def test_pool_analytics_prefers_gateway_canonical_coingecko_key(monkeypatch: pytest.MonkeyPatch):
+    """When both env vars are set, ALMANAK_GATEWAY_COINGECKO_API_KEY wins."""
+    monkeypatch.setenv("ALMANAK_GATEWAY_COINGECKO_API_KEY", "gateway-key")
+    monkeypatch.setenv("COINGECKO_API_KEY", "bare-key")
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings())
+
+    assert servicer._coingecko_api_key == "gateway-key"
 
 
-@pytest.mark.parametrize(
-    "chain, pool_address, fixture_name, expected_pool_chain, expected_tvl",
-    [
-        ("arbitrum", _ANTONIS_POOL, "defillama_arbitrum_univ3.json", "Arbitrum", "1210000.0"),
-        ("ethereum", _ETH_USDC_WETH, "defillama_ethereum_univ3.json", "Ethereum", "215000000.0"),
-    ],
-)
-def test_chain_matrix_arbitrum_and_ethereum(
-    chain: str,
-    pool_address: str,
-    fixture_name: str,
-    expected_pool_chain: str,
-    expected_tvl: str,
-):
-    """D2.M1: Arbitrum + Ethereum both map cleanly through DefiLlama; only
-    the chain-matching pool is selected from the same fixture list."""
-    servicer = _make_servicer()
-    pools = _llama_pools(fixture_name)
+def test_missing_coingecko_key_is_nonfatal_and_names_env_vars(monkeypatch: pytest.MonkeyPatch):
+    """Key absent → honest UNAVAILABLE (not a crash) naming both env vars."""
+    monkeypatch.delenv("ALMANAK_GATEWAY_COINGECKO_API_KEY", raising=False)
+    monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings())
+    assert servicer._coingecko_api_key is None
     ctx = _MockContext()
 
-    with patch.object(
-        servicer,
-        "_query_defillama_pools",
-        new=AsyncMock(return_value=pools),
-    ):
-        response = asyncio.run(
-            servicer.GetPoolAnalytics(
-                _request(pool_address=pool_address, chain=chain),
-                ctx,
-            ),
-        )
+    # No HTTP seam patched: the key check must trip BEFORE any session /
+    # URL construction, so this test would fail loudly if a network call
+    # were attempted (no aiohttp session exists to answer it).
+    response = asyncio.run(servicer.GetPoolAnalytics(_request(), ctx))
 
-    assert response.success is True, response.error
-    assert response.chain == chain
-    assert response.tvl_usd == expected_tvl
-    # Verify the right candidate row was picked (chain mapping):
-    selected = next(p for p in pools if pool_address in p["pool"].lower() and p["chain"] == expected_pool_chain)
-    assert str(selected["tvlUsd"]) == response.tvl_usd.rstrip("0").rstrip(".") or response.tvl_usd == f"{selected['tvlUsd']}"
+    assert response.success is False
+    assert ctx.code == grpc.StatusCode.UNAVAILABLE
+    assert "COINGECKO_API_KEY" in response.error
+    assert "ALMANAK_GATEWAY_COINGECKO_API_KEY" in response.error
+    assert servicer.health()["coingecko_onchain"]["failures"] == 1
+
+
+# ============================================================================
+# D2.M1 — Chain matrix (Arbitrum / Ethereum) — network slug mapping
+# ============================================================================
 
 
 def test_chain_matrix_coingecko_onchain_url_includes_correct_network():
-    """D2.M1 (cont.): CoinGecko Onchain fallback URL embeds the per-chain
-    network slug (``arbitrum`` for arbitrum, ``eth`` for ethereum)."""
+    """D2.M1: the CoinGecko Onchain URL embeds the per-chain network slug
+    (``arbitrum`` for arbitrum, ``eth`` for ethereum)."""
     servicer = _make_servicer()
     captured_networks: list[str] = []
-    gt_fixture = _load_fixture("geckoterminal_arbitrum_univ3.json")
+    fixtures = {
+        "arbitrum": _load_fixture("geckoterminal_arbitrum_univ3.json"),
+        "ethereum": _load_fixture("geckoterminal_ethereum_univ3.json"),
+    }
+    expected_tvl = {"arbitrum": "1185000.0", "ethereum": "210000000.0"}
 
-    async def fake_gt(network: str, pool_address: str) -> dict[str, Any]:
-        captured_networks.append(network)
-        return gt_fixture
+    for chain in ("arbitrum", "ethereum"):
 
-    # Force DefiLlama to miss so the fallback path runs.
-    with (
-        patch.object(servicer, "_query_defillama_pools", new=AsyncMock(return_value=[])),
-        patch.object(servicer, "_query_geckoterminal_pool", new=fake_gt),
-    ):
-        for chain in ("arbitrum", "ethereum"):
+        async def fake_cg(network: str, pool_address: str, *, _chain: str = chain) -> dict[str, Any]:
+            captured_networks.append(network)
+            return fixtures[_chain]
+
+        with patch.object(servicer, "_query_coingecko_onchain_pool", new=fake_cg):
             ctx = _MockContext()
             # Use a different pool address per chain so the cache doesn't short-circuit.
             pool = _ANTONIS_POOL if chain == "arbitrum" else _ETH_USDC_WETH
@@ -243,44 +243,28 @@ def test_chain_matrix_coingecko_onchain_url_includes_correct_network():
             )
             assert response.success is True, response.error
             assert response.source == "coingecko_onchain"
+            assert response.tvl_usd == expected_tvl[chain]
 
-    # ``arbitrum`` maps to GT network slug ``arbitrum``;
-    # ``ethereum`` maps to GT network slug ``eth``.
+    # ``arbitrum`` maps to network slug ``arbitrum``;
+    # ``ethereum`` maps to network slug ``eth``.
     assert captured_networks == ["arbitrum", "eth"]
 
 
-# ============================================================================
-# D2.M2 — Provider fallback (DefiLlama -> CoinGecko Onchain)
-# ============================================================================
-
-
-def test_provider_fallback_defillama_to_coingecko_onchain():
-    """D2.M2: DefiLlama HTTP failure routes to CoinGecko Onchain; metrics
-    record one failure on DefiLlama and one success on CoinGecko Onchain."""
+def test_unsupported_chain_returns_invalid_argument():
+    """A chain outside the CoinGecko Onchain network map fails fast."""
     servicer = _make_servicer()
-    gt_fixture = _load_fixture("geckoterminal_arbitrum_univ3.json")
     ctx = _MockContext()
 
-    with (
-        patch.object(
-            servicer,
-            "_query_defillama_pools",
-            new=AsyncMock(side_effect=aiohttp.ClientError("upstream 503")),
+    response = asyncio.run(
+        servicer.GetPoolAnalytics(
+            _request(chain="not-a-real-chain"),
+            ctx,
         ),
-        patch.object(
-            servicer,
-            "_query_geckoterminal_pool",
-            new=AsyncMock(return_value=gt_fixture),
-        ),
-    ):
-        response = asyncio.run(servicer.GetPoolAnalytics(_request(), ctx))
+    )
 
-    assert response.success is True
-    assert response.source == "coingecko_onchain"
-    assert ctx.code is None
-    metrics = servicer.health()
-    assert metrics["defillama"]["failures"] == 1
-    assert metrics["coingecko_onchain"]["successes"] == 1
+    assert response.success is False
+    assert "unsupported chain" in response.error
+    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
 
 
 # ============================================================================
@@ -290,35 +274,20 @@ def test_provider_fallback_defillama_to_coingecko_onchain():
 
 
 def test_cache_hit_skips_upstream_http():
-    """D2.M4: second identical request does not re-hit the upstream;
-    a third request with a *different* protocol exercises a fresh
-    per-pool match against the cached catalog (proves protocol is in
-    the per-pool cache key).
-
-    Architecture note (Important #4 from PR #2389 audit): the upstream
-    DefiLlama /pools catalog is amortized across all per-pool callers
-    via `_get_defillama_catalog`, so the upstream HTTP-call count is NOT
-    a 1:1 proxy for per-pool cache misses. The per-pool cache key
-    (chain, pool, protocol) is still protocol-sensitive — proven below
-    by the third request producing a fresh `is_live_data=True` envelope
-    (cache miss on the per-pool key) while the catalog query is reused.
-    """
+    """D2.M4: second identical request does not re-hit the upstream; a
+    third request with a *different* protocol misses the per-pool cache
+    (proves protocol is in the cache key) and re-fetches."""
     servicer = _make_servicer()
-    pools = _llama_pools("defillama_arbitrum_univ3.json")
+    payload = _load_fixture("geckoterminal_arbitrum_univ3.json")
     call_count = 0
 
-    async def counting_query() -> list[dict[str, Any]]:
+    async def counting_query(network: str, pool_address: str) -> dict[str, Any]:
         nonlocal call_count
         call_count += 1
-        return pools
+        return payload
 
-    with (
-        patch.object(servicer, "_query_defillama_pools", new=counting_query),
-        # Stub CoinGecko Onchain too so the 3rd-call fallback (when the DefiLlama
-        # protocol filter rejects the uniswap_v3 fixture) doesn't touch real HTTP.
-        patch.object(servicer, "_query_geckoterminal_pool", new=AsyncMock(return_value=None)),
-    ):
-        # 1st call — fresh per-pool cache miss + fresh catalog fetch.
+    with patch.object(servicer, "_query_coingecko_onchain_pool", new=counting_query):
+        # 1st call — fresh per-pool cache miss.
         r1 = asyncio.run(servicer.GetPoolAnalytics(_request(), _MockContext()))
         assert r1.success is True
         assert r1.is_live_data is True
@@ -332,59 +301,103 @@ def test_cache_hit_skips_upstream_http():
         assert call_count == 1, "second identical call must NOT re-fetch"
 
         # 3rd call — different protocol. Per-pool cache key (chain, pool,
-        # 'aerodrome') is DIFFERENT from the cached (chain, pool, 'uniswap_v3'),
-        # so the per-pool cache misses. The catalog cache absorbs the
-        # upstream fetch (call_count stays at 1) — this is the amortization
-        # win from Important #4 of the PR #2389 audit. The aerodrome
-        # project filter rejects the uniswap_v3 fixture, so the response
-        # is a not-found UNAVAILABLE; the load-bearing assertion is that
-        # the per-pool cache did NOT serve a uniswap_v3 record under the
-        # aerodrome key.
+        # 'aerodrome') is DIFFERENT from the cached (chain, pool,
+        # 'uniswap_v3'), so the per-pool cache misses and the upstream is
+        # re-queried. The caller-supplied protocol is echoed back — the
+        # cached uniswap_v3 record must NOT be served under the aerodrome
+        # key.
         r3 = asyncio.run(
             servicer.GetPoolAnalytics(
                 _request(protocol="aerodrome"),
                 _MockContext(),
             ),
         )
-        assert r3.success is False, "different protocol must not serve uniswap_v3 cache record"
-        assert call_count == 1, "catalog cache should absorb the upstream fetch"
+        assert r3.success is True
+        assert r3.is_live_data is True
+        assert r3.protocol == "aerodrome"
+        assert call_count == 2, "different protocol must be a per-pool cache miss"
 
 
 # ============================================================================
-# D3.F2 — All providers fail -> gRPC UNAVAILABLE, success=False
+# D3.F2 — Provider fails -> gRPC UNAVAILABLE, success=False
 # ============================================================================
 
 
-def test_all_providers_unavailable():
-    """D3.F2 (gateway side): both providers raise -> response is
-    success=False with gRPC status UNAVAILABLE and error mentions both."""
+def test_provider_unavailable():
+    """D3.F2 (gateway side): the provider raises -> response is
+    success=False with gRPC status UNAVAILABLE and error names the lane."""
     servicer = _make_servicer()
     ctx = _MockContext()
 
-    with (
-        patch.object(
-            servicer,
-            "_query_defillama_pools",
-            new=AsyncMock(side_effect=aiohttp.ClientError("llama down")),
-        ),
-        patch.object(
-            servicer,
-            "_query_geckoterminal_pool",
-            new=AsyncMock(side_effect=aiohttp.ClientError("gt down")),
-        ),
+    with patch.object(
+        servicer,
+        "_query_coingecko_onchain_pool",
+        new=AsyncMock(side_effect=aiohttp.ClientError("upstream 503")),
     ):
         response = asyncio.run(servicer.GetPoolAnalytics(_request(), ctx))
 
     assert response.success is False
-    assert "defillama" in response.error
+    assert "coingecko_onchain" in response.error
+    assert "upstream 503" in response.error
+    assert ctx.code == grpc.StatusCode.UNAVAILABLE
+    assert servicer.health()["coingecko_onchain"]["failures"] == 1
+
+
+def test_malformed_json_body_surfaces_as_provider_error():
+    """A 200 response with a malformed body makes ``response.json()`` raise
+    ``json.JSONDecodeError`` (a ``ValueError``). That garbage payload is a
+    provider failure, not an unhandled server error: it must be mapped into
+    the ``_ProviderError`` taxonomy so GetPoolAnalytics returns its structured
+    UNAVAILABLE envelope rather than crashing the gRPC call with UNKNOWN.
+
+    Drives the real ``_query_coingecko_onchain_pool`` (and thus the real
+    ``response.json()``) via a fake HTTP session, so the assertion fails
+    loudly if the ``ValueError`` catch is ever dropped from the seam."""
+
+    class _FakeResponse:
+        status = 200
+
+        async def json(self) -> Any:
+            raise json.JSONDecodeError("Expecting value", "<not json>", 0)
+
+        async def text(self) -> str:
+            return "<not json>"
+
+    class _FakeGetCtx:
+        async def __aenter__(self) -> _FakeResponse:
+            return _FakeResponse()
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+    class _FakeSession:
+        def get(self, _url: str, headers: dict[str, str] | None = None) -> _FakeGetCtx:
+            return _FakeGetCtx()
+
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+    ctx = _MockContext()
+
+    with patch.object(servicer, "_get_http_session", new=AsyncMock(return_value=_FakeSession())):
+        response = asyncio.run(servicer.GetPoolAnalytics(_request(), ctx))
+
+    assert response.success is False
     assert "coingecko_onchain" in response.error
     assert ctx.code == grpc.StatusCode.UNAVAILABLE
+    assert servicer.health()["coingecko_onchain"]["failures"] == 1
 
 
-# ============================================================================
-# D3.F6 — Silent-error guard: pool not found must NEVER yield a
-#         success=True zero-filled envelope.
-# ============================================================================
+def test_local_rate_limit_surfaces_as_provider_error():
+    """An empty local token bucket is a provider-side 'rate limited'
+    failure (pre-existing CoinGecko-lane semantics)."""
+    servicer = _make_servicer()
+    servicer._rate_limiter_cg._tokens = 0.0
+    ctx = _MockContext()
+
+    response = asyncio.run(servicer.GetPoolAnalytics(_request(), ctx))
+
+    assert response.success is False
+    assert "coingecko_onchain: rate limited" in response.error
+    assert ctx.code == grpc.StatusCode.UNAVAILABLE
 
 
 # ============================================================================
@@ -411,10 +424,27 @@ def test_invalid_evm_pool_address_returns_invalid_argument():
     assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
 
 
+def test_short_address_prefix_rejected_as_invalid_argument():
+    """A short address prefix (e.g. an attacker probing with ``0xc696``)
+    fails syntactic validation — it can never reach the upstream URL."""
+    servicer = _make_servicer()
+    ctx = _MockContext()
+
+    response = asyncio.run(
+        servicer.GetPoolAnalytics(
+            _request(pool_address="0xc696"),
+            ctx,
+        ),
+    )
+
+    assert response.success is False
+    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
+
+
 def test_solana_pool_address_preserves_case():
     """Blocker #1: Solana base58 addresses are case-sensitive. Lowercasing
-    them produces a different address. The PR includes ``solana`` in the
-    CoinGecko Onchain chain map, so the case-preservation contract must hold
+    them produces a different address. ``solana`` is in the CoinGecko
+    Onchain chain map, so the case-preservation contract must hold
     end-to-end."""
     servicer = _make_servicer()
     # Real-looking Solana base58 address with mixed case.
@@ -423,17 +453,11 @@ def test_solana_pool_address_preserves_case():
     # Stub the CoinGecko Onchain seam to capture the address it receives.
     captured_addresses: list[str] = []
 
-    async def fake_gt(network: str, pool_address: str) -> dict[str, Any]:
+    async def fake_cg(network: str, pool_address: str) -> dict[str, Any]:
         captured_addresses.append(pool_address)
         return _load_fixture("geckoterminal_arbitrum_univ3.json")
 
-    with (
-        # Stub DefiLlama too so the test doesn't accidentally hit the
-        # live /pools endpoint when DefiLlama's `solana` chain branch
-        # runs. CodeRabbit PR #2389 review thread.
-        patch.object(servicer, "_query_defillama_pools", new=AsyncMock(return_value=[])),
-        patch.object(servicer, "_query_geckoterminal_pool", new=fake_gt),
-    ):
+    with patch.object(servicer, "_query_coingecko_onchain_pool", new=fake_cg):
         asyncio.run(
             servicer.GetPoolAnalytics(
                 _request(pool_address=solana_addr, chain="solana"),
@@ -443,72 +467,17 @@ def test_solana_pool_address_preserves_case():
 
     # Case preserved end-to-end; would have been lowercased pre-fix.
     assert captured_addresses == [solana_addr]
-    assert "j" not in solana_addr.lower() or any(c.isupper() for c in captured_addresses[0])
-
-
-def test_defillama_matcher_uses_address_equality_not_substring():
-    """Important #6: a short attacker-controlled prefix must NOT match an
-    unrelated pool whose DefiLlama id happens to contain that prefix."""
-    servicer = _make_servicer()
-    # Fixture pool address is ``0xc6962004...`` for the legit row.
-    # An attacker passes a 4-char prefix that's a substring of the legit
-    # pool's id but would have to match the full address segment to
-    # actually pin a pool. Post-fix this MUST return INVALID_ARGUMENT
-    # (validation rejects the malformed short address) — proving the
-    # substring collision path is gone.
-    ctx = _MockContext()
-    response = asyncio.run(
-        servicer.GetPoolAnalytics(
-            _request(pool_address="0xc696"),
-            ctx,
-        ),
-    )
-    assert response.success is False
-    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
-
-
-def test_defillama_catalog_amortized_across_per_pool_callers():
-    """Important #4: the multi-MB DefiLlama /pools catalog must be
-    fetched once per TTL and shared across per-pool callers — N strategies
-    polling N different pools must NOT trigger N catalog fetches per
-    minute."""
-    servicer = _make_servicer()
-    pools = _llama_pools("defillama_arbitrum_univ3.json") + _llama_pools(
-        "defillama_ethereum_univ3.json",
-    )
-    fetch_count = 0
-
-    async def counting_catalog() -> list[dict[str, Any]]:
-        nonlocal fetch_count
-        fetch_count += 1
-        return pools
-
-    with patch.object(servicer, "_query_defillama_pools", new=counting_catalog):
-        # 3 DIFFERENT per-pool calls — same chain or different — must
-        # share the catalog fetch.
-        for pool_addr, chain in [
-            (_ANTONIS_POOL, "arbitrum"),
-            (_ETH_USDC_WETH, "ethereum"),
-            (_ANTONIS_POOL, "arbitrum"),  # cache hit on per-pool key
-        ]:
-            asyncio.run(
-                servicer.GetPoolAnalytics(
-                    _request(pool_address=pool_addr, chain=chain),
-                    _MockContext(),
-                ),
-            )
-
-    assert fetch_count == 1, "catalog must be fetched once and reused across per-pool callers"
+    assert any(c.isupper() for c in captured_addresses[0])
 
 
 def test_per_pool_cache_evicts_expired_on_write_and_caps_size():
-    """CodeRabbit PR #2389: unique-key traffic over long uptime must not
+    """Unique-key traffic over long uptime must not
     leak memory. Each ``_cache_put`` evicts expired entries and a hard
     cap caps the dict at ``_CACHE_MAX_ENTRIES``."""
     from almanak.gateway.services import pool_analytics_service as svc_mod
 
     servicer = _make_servicer()
-    pools = _llama_pools("defillama_arbitrum_univ3.json")
+    payload = _load_fixture("geckoterminal_arbitrum_univ3.json")
 
     # Pre-seed many "expired" entries so the eviction logic has work to do.
     expired_at = time.monotonic() - svc_mod._CACHE_TTL_SECONDS - 10
@@ -516,108 +485,42 @@ def test_per_pool_cache_evicts_expired_on_write_and_caps_size():
         key = ("arbitrum", f"0x{'0' * 38}{i:02x}", "uniswap_v3")
         servicer._public_cache[key] = svc_mod._CacheEntry(
             record=svc_mod._PoolAnalyticsRecord(
-                pool_address=key[1], chain=key[0], protocol=key[2],
+                pool_address=key[1],
+                chain=key[0],
+                protocol=key[2],
             ),
             cached_at=expired_at,
         )
     assert len(servicer._public_cache) == 50
 
     # A live put triggers eviction → all 50 expired entries dropped.
-    with patch.object(servicer, "_query_defillama_pools", new=AsyncMock(return_value=pools)):
+    with patch.object(servicer, "_query_coingecko_onchain_pool", new=AsyncMock(return_value=payload)):
         asyncio.run(servicer.GetPoolAnalytics(_request(), _MockContext()))
 
     # Old expired keys gone; only the fresh one remains.
-    assert all(
-        k[1] == _ANTONIS_POOL
-        for k in servicer._public_cache.keys()
-    ), f"expired entries should have been evicted; got {list(servicer._public_cache)}"
+    assert all(k[1] == _ANTONIS_POOL for k in servicer._public_cache.keys()), (
+        f"expired entries should have been evicted; got {list(servicer._public_cache)}"
+    )
 
 
-def test_defillama_local_rate_limit_skip_is_not_a_not_found_miss():
-    """CodeRabbit PR #2389: a local rate-limit skip must NOT be conflated
-    with "fetched-and-no-match". The error string must not contain
-    'defillama: not found' when the local bucket was empty."""
-    from almanak.gateway.services import pool_analytics_service as svc_mod
-
-    servicer = _make_servicer()
-    # Force the rate-limit bucket empty.
-    servicer._rate_limiter_llama._tokens = 0.0
-    ctx = _MockContext()
-
-    with patch.object(
-        servicer,
-        "_query_geckoterminal_pool",
-        new=AsyncMock(return_value=None),
-    ):
-        response = asyncio.run(servicer.GetPoolAnalytics(_request(), ctx))
-
-    # CoinGecko Onchain returned not-found, but defillama should NOT appear in
-    # the error string (the skip was local, not a miss).
-    assert response.success is False
-    assert "defillama: not found" not in response.error
-    # The sentinel propagated through; no DefiLlama failure tallied.
-    assert servicer.health()["defillama"]["failures"] == 0
-    # And the sentinel is the documented module symbol callers can check.
-    assert isinstance(svc_mod._NOT_ATTEMPTED, svc_mod._NotAttempted)
-
-
-def test_concurrent_cold_cache_callers_share_one_catalog_fetch():
-    """CodeRabbit PR #2389: N concurrent callers landing on an empty
-    catalog must result in ONE upstream /pools fetch, not N. Without the
-    in-flight dedup the rate limiter would burst at TTL boundaries."""
-    servicer = _make_servicer()
-    pools = _llama_pools("defillama_arbitrum_univ3.json")
-    fetch_count = 0
-    fetch_started = asyncio.Event()
-    fetch_continue = asyncio.Event()
-
-    async def slow_fetch() -> list[dict[str, Any]]:
-        nonlocal fetch_count
-        fetch_count += 1
-        fetch_started.set()
-        # Hold the fetch open so the other concurrent callers race in.
-        await fetch_continue.wait()
-        return pools
-
-    async def run() -> None:
-        with patch.object(servicer, "_query_defillama_pools", new=slow_fetch):
-            # Kick 5 concurrent GetPoolAnalytics calls with the same key —
-            # the per-pool cache would normally serve subsequent hits, so
-            # force unique per-pool keys to drive them all through the
-            # catalog code path.
-            tasks = [
-                asyncio.create_task(
-                    servicer.GetPoolAnalytics(
-                        _request(pool_address=f"0xc6962004f452be9203591991d15f6b388e09e8d{i:1x}"),
-                        _MockContext(),
-                    ),
-                )
-                for i in range(5)
-            ]
-            await fetch_started.wait()
-            fetch_continue.set()
-            await asyncio.gather(*tasks)
-
-    asyncio.run(run())
-    assert fetch_count == 1, "all concurrent cold-cache callers must share ONE upstream fetch"
+# ============================================================================
+# D3.F6 — Silent-error guard: pool not found must NEVER yield a
+#         success=True zero-filled envelope.
+# ============================================================================
 
 
 def test_pool_not_found_does_not_return_zero_envelope(caplog):
-    """D3.F6: deterministic "not found" from both providers (DefiLlama list
-    contains only the pool on a different chain; CoinGecko Onchain 404) must
+    """D3.F6: deterministic "not found" (CoinGecko Onchain 404) must
     surface as success=False UNAVAILABLE — never as a zero-filled
     success=True envelope."""
     import logging
 
     servicer = _make_servicer()
-    # Wrong-chain-only DefiLlama fixture -> chain-filter rejects -> not found.
-    pools = _llama_pools("defillama_wrong_chain_only.json")
     ctx = _MockContext()
 
     with (
-        patch.object(servicer, "_query_defillama_pools", new=AsyncMock(return_value=pools)),
         # CoinGecko Onchain returns None on 404 (per servicer convention).
-        patch.object(servicer, "_query_geckoterminal_pool", new=AsyncMock(return_value=None)),
+        patch.object(servicer, "_query_coingecko_onchain_pool", new=AsyncMock(return_value=None)),
         caplog.at_level(logging.WARNING, logger="almanak.gateway.services.pool_analytics_service"),
     ):
         response = asyncio.run(servicer.GetPoolAnalytics(_request(), ctx))
@@ -629,3 +532,63 @@ def test_pool_not_found_does_not_return_zero_envelope(caplog):
     assert "not found" in response.error.lower()
     # User-visible audit-log signal.
     assert any("not found" in record.getMessage().lower() for record in caplog.records)
+
+
+# ============================================================================
+# The structurally-dead catalog-matcher lane is GONE from
+# this module, and the shared registry infrastructure it used to consume
+# is untouched (other lanes still own it).
+# ============================================================================
+
+
+def test_dead_catalog_matcher_lane_removed_from_module():
+    """Source guard: no DefiLlama matcher path survives in this module.
+
+    The matcher was structurally dead (upstream catalog ids are UUIDs, not
+    addresses — an address-equality match can never hit) and misleading:
+    it burned a fetch of a multi-MB catalog per TTL for zero data. Any
+    reappearance of the lane in this module is a regression.
+    """
+    from almanak.gateway.services import pool_analytics_service as svc_mod
+
+    source = inspect.getsource(svc_mod).lower()
+    assert "defillama" not in source
+    assert "llama" not in source
+    assert "yields.llama.fi" not in source
+
+    for dead_symbol in (
+        "_fetch_from_defillama",
+        "_get_defillama_catalog",
+        "_refresh_catalog",
+        "_query_defillama_pools",
+        "_parse_llama_pool",
+        "_PROTOCOL_TO_LLAMA",
+        "_LazyProtocolToLlama",
+        "_build_protocol_to_llama",
+        "_NOT_ATTEMPTED",
+    ):
+        assert not hasattr(svc_mod, dead_symbol), f"dead matcher symbol resurfaced: {dead_symbol}"
+
+    servicer = _make_servicer()
+    assert set(servicer.health()) == {"coingecko_onchain"}
+    assert not hasattr(servicer, "_catalog_cache")
+    assert not hasattr(servicer, "_rate_limiter_llama")
+
+
+def test_shared_defillama_infrastructure_untouched():
+    """The matcher was deleted FROM THIS SERVICE ONLY: the shared
+    DefiLlama slug capability + chain map are still owned and consumed by
+    the pool-history lanes and must keep resolving."""
+    from almanak.connectors._base.gateway_capabilities import (
+        GatewayDefillamaSlugCapability,
+    )
+    from almanak.gateway.data._history_common import _CHAIN_TO_LLAMA_DISPLAY
+    from almanak.gateway.data.pool_history.dispatcher import (
+        _defillama_slug_table,
+        _resolve_defillama_slug,
+    )
+
+    assert GatewayDefillamaSlugCapability is not None
+    assert "ethereum" in _CHAIN_TO_LLAMA_DISPLAY
+    assert _resolve_defillama_slug("uniswap_v3") == "uniswap-v3"
+    assert _defillama_slug_table()["uniswap_v3"] == "uniswap-v3"

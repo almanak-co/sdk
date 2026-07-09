@@ -1,16 +1,16 @@
 """``GatewayDefillamaSlugCapability`` contract tests (VIB-4811 / Phase 3).
 
-The pool-analytics matcher unions every registered connector's
+The pool-history dispatcher unions every registered connector's
 ``defillama_slug()`` + ``defillama_slug_aliases()`` into the live
-``protocol -> slug`` dispatch dict. Tests pin:
+``protocol -> slug`` dispatch dict (the pool-analytics service no longer
+consumes DefiLlama slugs). Tests pin:
 
 * ``isinstance(connector, GatewayDefillamaSlugCapability)`` is True iff
   the connector defines both ``defillama_slug`` and
   ``defillama_slug_aliases``.
 * The registered ``uniswap_v3``, ``aerodrome``, ``aave_v3`` and
   ``compound_v3`` connectors contribute the expected slugs.
-* The derived ``_PROTOCOL_TO_LLAMA`` matches the legacy hardcoded
-  dispatch dict.
+* The derived slug table matches the legacy hardcoded dispatch dict.
 """
 
 from __future__ import annotations
@@ -65,10 +65,13 @@ def test_defillama_slug_returns_canonical_and_aliases() -> None:
 
 
 def test_defillama_slug_table_matches_legacy_dict() -> None:
-    """The registry-derived ``_PROTOCOL_TO_LLAMA`` matches the Phase-2 hardcoded dict."""
-    from almanak.gateway.services.pool_analytics_service import (
-        _PROTOCOL_TO_LLAMA,
-    )
+    """The registry-derived slug table matches the Phase-2 hardcoded dict.
+
+    The derivation now lives on the pool-history dispatcher — the
+    pool-analytics service no longer consumes DefiLlama slugs (its
+    structurally-dead matcher lane was deleted).
+    """
+    from almanak.gateway.data.pool_history.dispatcher import _defillama_slug_table
 
     expected = {
         "uniswap_v3": "uniswap-v3",
@@ -79,7 +82,7 @@ def test_defillama_slug_table_matches_legacy_dict() -> None:
         "morpho": "morpho-blue",
         "compound_v3": "compound-v3",
     }
-    assert _PROTOCOL_TO_LLAMA == expected
+    assert _defillama_slug_table() == expected
 
 
 def test_registered_connectors_advertise_defillama_slug() -> None:
