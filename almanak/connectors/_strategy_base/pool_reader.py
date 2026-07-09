@@ -10,6 +10,10 @@ from almanak.connectors._strategy_base.v3_pool_abi import V3_GET_POOL_SELECTOR
 KnownPoolKey = tuple[str, str, int]
 KnownPoolsByChain = Mapping[str, Mapping[KnownPoolKey, str]]
 
+# Canonical Uniswap fee tiers — the ``candidate_pool_keys`` fallback for any
+# v3-family protocol whose spec (or connector) does not declare its own set.
+DEFAULT_CANDIDATE_POOL_KEYS: tuple[int, ...] = (100, 500, 3000, 10000)
+
 
 @dataclass(frozen=True)
 class PoolReaderSpec:
@@ -23,7 +27,7 @@ class PoolReaderSpec:
     # ``factory.getPool()`` third-arg candidates swept by best-pool resolution
     # (VIB-4924 C1): fee tiers for the uint24 v3 family, tick spacings for the
     # int24 Slipstream family. Default = the canonical Uniswap fee tiers.
-    candidate_pool_keys: tuple[int, ...] = (100, 500, 3000, 10000)
+    candidate_pool_keys: tuple[int, ...] = DEFAULT_CANDIDATE_POOL_KEYS
     # Read-shape discriminator: which framework reader implementation can read
     # this protocol's pools. ``"v3_slot0"`` is the Uniswap-V3 slot0() family
     # (all v3 forks + Slipstream); protocols with a different on-chain shape
@@ -39,4 +43,4 @@ class PoolReaderSpec:
         return (self.protocol, *self.aliases)
 
 
-__all__ = ["KnownPoolKey", "KnownPoolsByChain", "PoolReaderSpec"]
+__all__ = ["DEFAULT_CANDIDATE_POOL_KEYS", "KnownPoolKey", "KnownPoolsByChain", "PoolReaderSpec"]

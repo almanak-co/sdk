@@ -135,10 +135,18 @@
             "type": "string"
           },
           "fee_tier": {
-            "default": 3000,
-            "description": "Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000)",
-            "title": "Fee Tier",
-            "type": "integer"
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000); tick spacing for Slipstream-family DEXs. Omit to sweep the protocol's native tiers and use the deepest pool.",
+            "title": "Fee Tier"
           },
           "pool_address": {
             "default": "",
@@ -1854,10 +1862,18 @@
               "type": "string"
             },
             "fee_tier": {
-              "default": 3000,
-              "description": "Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000)",
-              "title": "Fee Tier",
-              "type": "integer"
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000); tick spacing for Slipstream-family DEXs. Omit to sweep the protocol's native tiers and use the deepest pool.",
+              "title": "Fee Tier"
             },
             "pool_address": {
               "default": "",

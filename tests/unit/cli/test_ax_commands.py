@@ -1156,6 +1156,52 @@ class TestAxReadCommands:
         assert captured["args"]["protocol"] == "aerodrome"
 
     @patch("almanak.framework.cli.ax._get_executor")
+    def test_pool_title_renders_swept_fee_tier(self, mock_get_exec):
+        """No --fee-tier -> the CLI forwards fee_tier=None (the executor sweeps
+        the protocol's native tiers) and the title renders the tier the sweep
+        actually selected — not a fabricated 3000 default."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        captured: dict = {}
+
+        async def mock_execute(tool_name, args):
+            captured["args"] = args
+            return ToolResponse(
+                status="success",
+                data={"pool_address": "0xabc", "fee_tier": 2500, "fee_tier_source": "sweep"},
+            )
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "pool", "WBNB", "USDT", "--protocol", "pancakeswap_v3"])
+        assert result.exit_code == 0
+        assert captured["args"]["fee_tier"] is None
+        # 2500 (Pancake-native tier) rendered as 0.25% in the title.
+        assert "0.25%" in result.output
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_pool_error_without_tier_omits_title_suffix(self, mock_get_exec):
+        """An error response with no explicit --fee-tier has no measured tier;
+        the title must omit the suffix rather than fabricate one."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        async def mock_execute(tool_name, args):
+            return ToolResponse(
+                status="error",
+                error={"error_code": "empty_pool", "message": "Pool not found", "recoverable": False},
+            )
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "pool", "WETH", "USDC"])
+        assert result.exit_code == 1
+        assert "WETH/USDC (" not in result.output
+
+    @patch("almanak.framework.cli.ax._get_executor")
     def test_lending_reserves_human_table(self, mock_get_exec):
         """Human (non-JSON) output renders a scannable column table, not a flat repr."""
         mock_executor, mock_client = _mock_executor_and_client()

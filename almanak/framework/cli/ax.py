@@ -2133,12 +2133,15 @@ def _pool_title_suffix(protocol: str, fee_tier: int) -> str:
     render ``tick_spacing=<N>``; every other protocol renders a percentage.
     The raw CLI value is normalized first so aliases ("aerodrome-slipstream",
     "Aerodrome Slipstream") resolve the same way the registry keys are stored
-    (CodeRabbit, PR #2778). Shared with the unit test so production and test
+    (CodeRabbit, PR #2778), then widened through the pool-reader manifest key
+    set so connector-declared slug aliases ("aerodrome") share their canonical
+    key's family membership. Shared with the unit test so production and test
     exercise one code path.
 
     Function-scope boot import satisfies the strategy-side lean-import
     contract (pattern: compiler_constants.py:533).
     """
+    from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
     from almanak.connectors._strategy_protocol_family_registry import (
         PROTOCOL_FAMILY_REGISTRY,
         ProtocolFamily,
@@ -2146,7 +2149,10 @@ def _pool_title_suffix(protocol: str, fee_tier: int) -> str:
     from almanak.framework.agent_tools.schemas import _normalize_protocol_key
 
     normalized_protocol = _normalize_protocol_key(protocol)
-    if normalized_protocol in PROTOCOL_FAMILY_REGISTRY.members(ProtocolFamily.TICK_SPACING_FEE_DISPLAY):
+    reader_spec = POOL_READER_REGISTRY.lookup(normalized_protocol)
+    family_keys = reader_spec.keys if reader_spec is not None else (normalized_protocol,)
+    members = PROTOCOL_FAMILY_REGISTRY.members(ProtocolFamily.TICK_SPACING_FEE_DISPLAY)
+    if any(key in members for key in family_keys):
         return f"tick_spacing={fee_tier}"
     return f"{fee_tier / 10000:.2f}%"
 
@@ -2157,8 +2163,12 @@ def _pool_title_suffix(protocol: str, fee_tier: int) -> str:
 @click.option(
     "--fee-tier",
     type=int,
-    default=3000,
-    help="Pool fee tier in hundredths of a bip (default: 3000 = 0.3%).",
+    default=None,
+    help=(
+        "Pool fee tier in hundredths of a bip (e.g. 500, 3000; tick spacing for "
+        "Slipstream-family DEXs). Omit to sweep the protocol's native tiers and "
+        "use the deepest pool."
+    ),
 )
 @click.option(
     "--protocol",
@@ -2170,12 +2180,14 @@ def _pool_title_suffix(protocol: str, fee_tier: int) -> str:
 def pool(ctx, token_a, token_b, fee_tier, protocol):
     """Get details about a liquidity pool.
 
-    Shows current price, tick, liquidity, volume, fees, and TVL.
+    Shows current price, tick, liquidity, volume, fees, and TVL. Without
+    --fee-tier the protocol's native fee tiers are swept and the deepest
+    pool is used.
 
     \b
     Examples:
-        almanak ax pool WBTC WETH                      # WBTC-WETH pool info
-        almanak ax pool USDC ETH --fee-tier 500         # 0.05% fee tier
+        almanak ax pool WBTC WETH                      # deepest WBTC-WETH pool
+        almanak ax pool USDC ETH --fee-tier 500         # exactly the 0.05% tier
         almanak ax pool WBTC WETH --json                # JSON output
     """
     from almanak.framework.cli.ax_render import render_error, render_result
@@ -2193,11 +2205,20 @@ def pool(ctx, token_a, token_b, fee_tier, protocol):
                 "protocol": protocol,
             },
         )
-        title_suffix = _pool_title_suffix(protocol, fee_tier)
+        # No explicit --fee-tier -> the executor swept the protocol's candidate
+        # tiers; render the tier it actually selected. On an error response
+        # (or explicit-address reads with no measured tier) there is no tier
+        # to render — omit the suffix rather than fabricate one.
+        resolved_fee_tier = fee_tier
+        if resolved_fee_tier is None and response.status == "success" and isinstance(response.data, dict):
+            resolved_fee_tier = response.data.get("fee_tier")
+        title = f"Pool: {token_a.upper()}/{token_b.upper()}"
+        if resolved_fee_tier is not None:
+            title += f" ({_pool_title_suffix(protocol, resolved_fee_tier)})"
         render_result(
             response,
             json_output=json_output,
-            title=f"Pool: {token_a.upper()}/{token_b.upper()} ({title_suffix})",
+            title=title,
         )
         if response.status == "error":
             sys.exit(1)

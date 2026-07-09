@@ -31,9 +31,16 @@ class TestPoolFeeTierDisplayTitle:
 
     def test_aerodrome_slipstream_alias_normalized_before_membership(self) -> None:
         """Hyphen/space/case CLI aliases normalize to the registry key before the
-        family membership check (CodeRabbit, PR #2778)."""
+        family membership check."""
         for alias in ("aerodrome-slipstream", "Aerodrome Slipstream", "AERODROME_SLIPSTREAM"):
             assert _compute_title_suffix(alias, fee_tier=100) == "tick_spacing=100"
+
+    def test_aerodrome_manifest_alias_shares_family_membership(self) -> None:
+        """``aerodrome`` (the pool-reader manifest's canonical key) is
+        widened through the manifest key set to its sibling key
+        ``aerodrome_slipstream``, which carries TICK_SPACING_FEE_DISPLAY."""
+        assert _compute_title_suffix("aerodrome", fee_tier=100) == "tick_spacing=100"
+        assert _compute_title_suffix("Aerodrome", fee_tier=200) == "tick_spacing=200"
 
     def test_uniswap_v3_uses_percentage_suffix(self) -> None:
         """uniswap_v3 is NOT in TICK_SPACING_FEE_DISPLAY -> percent format."""
@@ -51,7 +58,7 @@ class TestPoolFeeTierDisplayTitle:
         suffix = _compute_title_suffix("velodrome_slipstream", fee_tier=200)
         # velodrome_slipstream deliberately excluded from the family -- old literal
         # only covered aerodrome_slipstream. Exact assertion catches format/math
-        # regressions, not just family membership (CodeRabbit, PR #2778).
+        # regressions, not just family membership.
         assert suffix == "0.02%"
 
     def test_unknown_protocol_uses_percentage_suffix(self) -> None:

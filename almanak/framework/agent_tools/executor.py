@@ -245,6 +245,51 @@ def _error_dict(code: AgentErrorCode, message: str, *, recoverable: bool = False
     }
 
 
+def _resolve_pool_state_capability(chain: str, raw_protocol: str) -> tuple[Any, str, Any]:
+    """Resolve a user-supplied protocol slug to its pool-state read capability.
+
+    Normalizes chain-scoped aliases first, then consults the connector-owned
+    pool-reader manifest (VIB-5047) so every spec key — canonical AND alias
+    (e.g. ``aerodrome`` / ``aerodrome_slipstream``) — dispatches to the same
+    agent-read descriptors. No hardcoded slug list: the accepted key set is
+    exactly what the registries declare.
+
+    Returns ``(capability | None, resolved_protocol_key, reader_spec | None)``.
+    When no capability backs ``pool_state`` for any key the capability is
+    ``None`` and the resolved key is the normalized input (for error text).
+    """
+    from almanak.connectors._strategy_agent_tool_registry import STRATEGY_AGENT_READ_REGISTRY
+    from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
+    from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+
+    protocol = normalize_protocol(chain, raw_protocol)
+    reader_spec = POOL_READER_REGISTRY.lookup(protocol)
+    lookup_keys = reader_spec.keys if reader_spec is not None else (protocol,)
+    for key in lookup_keys:
+        cap = STRATEGY_AGENT_READ_REGISTRY.lookup(key)
+        if cap is not None and "pool_state" in cap.agent_read_keys():
+            return cap, key, reader_spec
+    return None, protocol, reader_spec
+
+
+def _pool_state_supported_keys() -> list[str]:
+    """Every protocol key accepted for pool-state reads.
+
+    Registry-derived: the agent-read canonical names backing ``pool_state``,
+    plus any pool-reader manifest keys (aliases) that dispatch to one of them.
+    """
+    from almanak.connectors._strategy_agent_tool_registry import STRATEGY_AGENT_READ_REGISTRY
+    from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+
+    supported: set[str] = {
+        str(c.protocol) for c in STRATEGY_AGENT_READ_REGISTRY.capabilities() if "pool_state" in c.agent_read_keys()
+    }
+    for spec in POOL_READER_REGISTRY.all():
+        if any(key in supported for key in spec.keys):
+            supported.update(spec.keys)
+    return sorted(supported)
+
+
 class _TeardownContext:
     """Mutable shared state threaded through the vault teardown state machine.
 
@@ -2029,34 +2074,250 @@ class ToolExecutor:
 
     # ── POOL / POSITION READ TOOLS ─────────────────────────────────────
 
-    # crap-allowlist: pre-existing RPC surface complexity
+    def _factory_get_pool(
+        self,
+        chain: str,
+        factory_address: str,
+        get_pool_selector: str,
+        token_a_address: str,
+        token_b_address: str,
+        pool_key: int,
+    ) -> tuple[str | None, str | None]:
+        """One ``factory.getPool()`` eth_call via gateway RPC.
+
+        ``pool_key`` is the fork's third getPool argument — a uint24 fee tier
+        for the v3 family, an int24 tick spacing for the Slipstream family.
+
+        Returns ``(pool_address, None)`` on a hit, ``(None, None)`` when the
+        factory returned the zero address (pool measured as absent), and
+        ``(None, rpc_error)`` when the RPC itself failed — never conflating
+        "could not measure" with "no pool".
+        """
+        from almanak.connectors._strategy_base.v3_pool_abi import encode_get_pool
+        from almanak.gateway.proto import gateway_pb2
+
+        # Canonical getPool encoder, shared with the pool-reader registry
+        # (framework/data/pools/reader.py): it right-aligns the fee tier / tick
+        # spacing into a 32-byte word via two's complement, so a negative int24
+        # pool_key is sign-extended rather than corrupting the calldata the way
+        # plain ``hex()`` slicing would.
+        calldata = encode_get_pool(get_pool_selector, token_a_address, token_b_address, pool_key)
+        resp = self._client.rpc.Call(
+            gateway_pb2.RpcRequest(
+                chain=chain,
+                method="eth_call",
+                params=json.dumps([{"to": factory_address, "data": calldata}, "latest"]),
+                id="factory_get_pool",
+            ),
+            timeout=30.0,
+        )
+        if not resp.success:
+            return None, str(resp.error)
+        # A malformed / empty / non-string eth_call payload is "could not
+        # measure", not "no pool" — surface it as an RPC error so the sweep
+        # never conflates an undecodable response with a measured zero address.
+        try:
+            decoded = json.loads(resp.result)
+        except (ValueError, TypeError) as e:
+            return None, f"malformed eth_call result: {e}"
+        if not isinstance(decoded, str):
+            return None, f"unexpected eth_call result type: {type(decoded).__name__}"
+        raw_pool = decoded.removeprefix("0x")
+        # Result is 32 bytes (64 hex chars); pool address is the last 20 bytes (40 hex chars)
+        pool_address = "0x" + raw_pool[-40:] if len(raw_pool) >= 40 else "0x" + "0" * 40
+        if pool_address == "0x" + "0" * 40:
+            return None, None
+        return pool_address, None
+
+    def _read_pool_liquidity(self, chain: str, pool_address: str) -> int | None:
+        """Read a CL pool's in-range ``liquidity()``; ``None`` = unmeasured."""
+        from almanak.connectors._strategy_base.v3_pool_abi import V3_LIQUIDITY_SELECTOR
+        from almanak.gateway.proto import gateway_pb2
+
+        resp = self._client.rpc.Call(
+            gateway_pb2.RpcRequest(
+                chain=chain,
+                method="eth_call",
+                params=json.dumps([{"to": pool_address, "data": V3_LIQUIDITY_SELECTOR}, "latest"]),
+                id="pool_liquidity",
+            ),
+            timeout=30.0,
+        )
+        if not resp.success:
+            return None
+        try:
+            decoded = json.loads(resp.result)
+            if not isinstance(decoded, str):
+                return None  # non-string payload (null / int) = unmeasured, not zero
+            liq_hex = decoded.removeprefix("0x")
+            return int(liq_hex, 16) if liq_hex else None
+        except (ValueError, TypeError):
+            return None
+
+    def _sweep_best_pool(
+        self,
+        chain: str,
+        factory_address: str,
+        get_pool_selector: str,
+        token_a_address: str,
+        token_b_address: str,
+        candidate_keys: tuple[int, ...],
+    ) -> tuple[str | None, int | None, list[str]]:
+        """Resolve the deepest pool across the spec's candidate pool keys.
+
+        Mirrors ``resolve_best_pool_address`` (VIB-4924 C1): every candidate
+        key from the connector's pool-reader spec is resolved via
+        ``factory.getPool()``; readable candidates are ranked by in-range
+        liquidity, a resolved-but-unreadable pool is kept only as a last
+        resort, and ties keep the first key in spec order.
+
+        Returns ``(pool_address, selected_key, rpc_errors)``.
+        """
+        best_addr: str | None = None
+        best_key: int | None = None
+        best_liquidity = -1
+        rpc_errors: list[str] = []
+        for key in candidate_keys:
+            pool_address, rpc_error = self._factory_get_pool(
+                chain, factory_address, get_pool_selector, token_a_address, token_b_address, key
+            )
+            if rpc_error is not None:
+                rpc_errors.append(rpc_error)
+                continue
+            if pool_address is None:
+                continue
+            liquidity = self._read_pool_liquidity(chain, pool_address)
+            rank = -1 if liquidity is None else liquidity  # unreadable pool = last-resort candidate
+            if best_addr is None or rank > best_liquidity:
+                best_addr, best_key, best_liquidity = pool_address, key, rank
+        return best_addr, best_key, rpc_errors
+
+    def _resolve_pool_state_address(
+        self,
+        *,
+        chain: str,
+        protocol: str,
+        cap: Any,
+        reader_spec: Any,
+        token_a: Any,
+        token_b: Any,
+        token_a_sym: str,
+        token_b_sym: str,
+        fee_tier: int | None,
+    ) -> tuple[str, int | None] | ToolResponse:
+        """Resolve the pool address for a pool-state read (no explicit address).
+
+        Explicit ``fee_tier`` → single ``factory.getPool()`` lookup honoring
+        the tier exactly (honest zero-address error). ``fee_tier is None`` →
+        sweep the connector spec's ``candidate_pool_keys`` and pick the
+        deepest pool (fix for the blind default-3000 lookup that missed
+        protocols' native tiers, e.g. PancakeSwap's 500/2500).
+
+        Returns ``(pool_address, resolved_fee_tier)`` or an error ToolResponse.
+        """
+        from almanak.connectors._strategy_base.pool_reader import DEFAULT_CANDIDATE_POOL_KEYS
+
+        factory_address = cap.factory_address(chain)
+        if not factory_address:
+            return ToolResponse(
+                status="error",
+                error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"No {protocol} factory on {chain}"),
+            )
+        # getPool selector: uint24 (fee_tier) for v3-family, int24 (tick_spacing) for Slipstream.
+        get_pool_selector = cap.get_pool_selector()
+
+        if fee_tier is not None:
+            pool_address, rpc_error = self._factory_get_pool(
+                chain, factory_address, get_pool_selector, token_a.address, token_b.address, fee_tier
+            )
+            if rpc_error is not None:
+                return ToolResponse(
+                    status="error",
+                    error=_error_dict(
+                        AgentErrorCode.RPC_FAILED,
+                        f"factory.getPool() failed: {rpc_error}",
+                        recoverable=True,
+                    ),
+                )
+            if pool_address is None:
+                return ToolResponse(
+                    status="error",
+                    error=_error_dict(
+                        AgentErrorCode.EMPTY_POOL,
+                        f"Pool not found: {protocol} {token_a_sym}/{token_b_sym} fee={fee_tier} on {chain}. "
+                        f"The factory returned a zero address — the pool may not exist.",
+                    ),
+                )
+            return pool_address, fee_tier
+
+        candidate_keys = reader_spec.candidate_pool_keys if reader_spec is not None else DEFAULT_CANDIDATE_POOL_KEYS
+        pool_address, selected_key, rpc_errors = self._sweep_best_pool(
+            chain, factory_address, get_pool_selector, token_a.address, token_b.address, candidate_keys
+        )
+        if pool_address is None:
+            # Any candidate left unmeasured by an RPC error means we cannot
+            # honestly claim "no pool" — the pair could exist on a tier we never
+            # read (Empty ≠ Zero applies to error reporting too). Report a
+            # recoverable RPC failure and, on a partial failure, disclose the
+            # measured-empty vs. unmeasured split so it is never misreported as
+            # "zero address for every tier".
+            if rpc_errors:
+                n_total = len(candidate_keys)
+                n_unmeasured = len(rpc_errors)
+                split_note = (
+                    f" ({n_total - n_unmeasured} of {n_total} tiers returned a zero address; "
+                    f"{n_unmeasured} were unmeasured due to RPC errors)"
+                    if n_unmeasured < n_total
+                    else ""
+                )
+                return ToolResponse(
+                    status="error",
+                    error=_error_dict(
+                        AgentErrorCode.RPC_FAILED,
+                        f"factory.getPool() failed for {protocol} {token_a_sym}/{token_b_sym} on {chain}: "
+                        f"{rpc_errors[0]}{split_note}",
+                        recoverable=True,
+                    ),
+                )
+            return ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.EMPTY_POOL,
+                    f"Pool not found: {protocol} {token_a_sym}/{token_b_sym} on {chain} at any candidate "
+                    f"fee tier {list(candidate_keys)}. The factory returned a zero address for every "
+                    f"tier — the pair may not have a pool on this protocol.",
+                ),
+            )
+        return pool_address, selected_key
+
     async def _execute_get_pool_state(self, args: dict) -> ToolResponse:
-        """Read Uniswap V3 pool state via slot0() and liquidity() RPC calls."""
-        from almanak.connectors._strategy_agent_tool_registry import STRATEGY_AGENT_READ_REGISTRY
-        from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
+        """Read CL pool state via slot0() and liquidity() RPC calls.
+
+        Protocol slugs resolve through the connector-owned pool-reader
+        manifest (canonical + aliases, VIB-5047); when the caller does not
+        pin a ``fee_tier`` the spec's ``candidate_pool_keys`` are swept for
+        the deepest pool instead of assuming the Uniswap 3000 default.
+        """
         from almanak.framework.data.tokens import get_token_resolver
         from almanak.gateway.proto import gateway_pb2
 
         chain = args.get("chain", self._default_chain)
         token_a_sym = args["token_a"]
         token_b_sym = args["token_b"]
-        fee_tier = args.get("fee_tier", 3000)
-        # Normalize protocol to canonical name (e.g., "uniswap_v3" on Mantle -> "agni_finance")
-        protocol = normalize_protocol(chain, args.get("protocol", DEFAULT_LP_PROTOCOL))
+        # None = caller did not pin a tier — sweep the spec's candidate keys.
+        fee_tier = args.get("fee_tier")
 
         # Resolve the connector's on-chain read descriptors (factory address +
-        # getPool selector) from the strategy-side registry. The connector owns
-        # "which address / which selector"; the executor owns the RPC + decode.
-        cap = STRATEGY_AGENT_READ_REGISTRY.lookup(protocol)
-        if cap is None or "pool_state" not in cap.agent_read_keys():
-            supported = sorted(
-                c.protocol for c in STRATEGY_AGENT_READ_REGISTRY.capabilities() if "pool_state" in c.agent_read_keys()
-            )
+        # getPool selector) through the pool-reader manifest key set so alias
+        # slugs dispatch too. The connector owns "which address / which
+        # selector"; the executor owns the RPC + decode.
+        cap, protocol, reader_spec = _resolve_pool_state_capability(chain, args.get("protocol", DEFAULT_LP_PROTOCOL))
+        if cap is None:
             return ToolResponse(
                 status="error",
                 error=_error_dict(
                     AgentErrorCode.VALIDATION_ERROR,
-                    f"Unsupported protocol '{protocol}' for pool lookup. Supported: {supported}",
+                    f"Unsupported protocol '{protocol}' for pool lookup. Supported: {_pool_state_supported_keys()}",
                     recoverable=True,
                 ),
             )
@@ -2070,49 +2331,27 @@ class ToolExecutor:
         # Using getPool() instead of CREATE2 derivation handles forks with different init_code_hash
         # values (e.g., Agni Finance on Mantle).
         pool_address = args.get("pool_address")
+        if fee_tier is not None:
+            fee_tier_source = "explicit"
+        elif pool_address:
+            fee_tier_source = "unspecified"  # explicit pool address; tier not measured
+        else:
+            fee_tier_source = "sweep"
         if not pool_address:
-            factory_address = cap.factory_address(chain)
-            if not factory_address:
-                return ToolResponse(
-                    status="error",
-                    error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"No {protocol} factory on {chain}"),
-                )
-            # getPool selector: uint24 (fee_tier) for v3-family, int24 (tick_spacing) for Slipstream.
-            get_pool_selector = cap.get_pool_selector()
-            addr_a_padded = token_a.address.lower().removeprefix("0x").zfill(64)
-            addr_b_padded = token_b.address.lower().removeprefix("0x").zfill(64)
-            fee_padded = hex(fee_tier)[2:].zfill(64)
-            get_pool_calldata = get_pool_selector + addr_a_padded + addr_b_padded + fee_padded
-            get_pool_resp = self._client.rpc.Call(
-                gateway_pb2.RpcRequest(
-                    chain=chain,
-                    method="eth_call",
-                    params=json.dumps([{"to": factory_address, "data": get_pool_calldata}, "latest"]),
-                    id="factory_get_pool",
-                ),
-                timeout=30.0,
+            resolved = self._resolve_pool_state_address(
+                chain=chain,
+                protocol=protocol,
+                cap=cap,
+                reader_spec=reader_spec,
+                token_a=token_a,
+                token_b=token_b,
+                token_a_sym=token_a_sym,
+                token_b_sym=token_b_sym,
+                fee_tier=fee_tier,
             )
-            if not get_pool_resp.success:
-                return ToolResponse(
-                    status="error",
-                    error=_error_dict(
-                        AgentErrorCode.RPC_FAILED,
-                        f"factory.getPool() failed: {get_pool_resp.error}",
-                        recoverable=True,
-                    ),
-                )
-            raw_pool = json.loads(get_pool_resp.result).removeprefix("0x")
-            # Result is 32 bytes (64 hex chars); pool address is the last 20 bytes (40 hex chars)
-            pool_address = "0x" + raw_pool[-40:] if len(raw_pool) >= 40 else "0x" + "0" * 40
-            if pool_address == "0x" + "0" * 40:
-                return ToolResponse(
-                    status="error",
-                    error=_error_dict(
-                        AgentErrorCode.EMPTY_POOL,
-                        f"Pool not found: {protocol} {token_a_sym}/{token_b_sym} fee={fee_tier} on {chain}. "
-                        f"The factory returned a zero address — the pool may not exist.",
-                    ),
-                )
+            if isinstance(resolved, ToolResponse):
+                return resolved
+            pool_address, fee_tier = resolved
 
         # Read slot0: sqrtPriceX96 (uint160), tick (int24), ...
         slot0_selector = "0x3850c7bd"
@@ -2148,22 +2387,10 @@ class ToolExecutor:
         sqrt_price_x96 = int(slot0_hex[0:64], 16)
         tick = _decode_int24(slot0_hex[64:128])
 
-        # Read liquidity
-        liq_selector = "0x1a686502"
-        liq_resp = self._client.rpc.Call(
-            gateway_pb2.RpcRequest(
-                chain=chain,
-                method="eth_call",
-                params=json.dumps([{"to": pool_address, "data": liq_selector}, "latest"]),
-                id="pool_liquidity",
-            ),
-            timeout=30.0,
-        )
-        liquidity = 0
-        if liq_resp.success:
-            liq_hex = json.loads(liq_resp.result).removeprefix("0x")
-            if liq_hex:
-                liquidity = int(liq_hex, 16)
+        # Read liquidity (None = unmeasured; historic behaviour reports 0)
+        liquidity = self._read_pool_liquidity(chain, pool_address)
+        if liquidity is None:
+            liquidity = 0
 
         # Compute human price from sqrtPriceX96
         # Raw price = (sqrtPriceX96 / 2^96)^2 gives token1/token0 in raw units.
@@ -2195,7 +2422,10 @@ class ToolExecutor:
                 "tick": tick,
                 "liquidity": str(liquidity),
                 "sqrt_price_x96": str(sqrt_price_x96),
+                # None only when an explicit pool_address was given without a
+                # tier (unmeasured — never fabricated).
                 "fee_tier": fee_tier,
+                "fee_tier_source": fee_tier_source,
                 "token0": token0.symbol if hasattr(token0, "symbol") else str(token0.address),
                 "token1": token1.symbol if hasattr(token1, "symbol") else str(token1.address),
                 "token0_decimals": token0.decimals,

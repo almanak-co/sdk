@@ -73,6 +73,7 @@ def _make_executor(gateway: Any) -> ToolExecutor:
     policy = AgentPolicy(
         allowed_protocols={
             "uniswap_v3",
+            "aerodrome",
             "aerodrome_slipstream",
             "pancakeswap_v3",
             "sushiswap_v3",
@@ -326,6 +327,442 @@ def test_sanitize_analytics_field_contract() -> None:
     assert _sanitize_analytics_field("Infinity") == ""
     assert _sanitize_analytics_field("1e16") == ""  # at the absurdity ceiling
     assert _sanitize_analytics_field("9999999999999999") == "9999999999999999"  # just below
+
+
+# ---------------------------------------------------------------------------
+# get_pool_state — protocol slug aliases + fee-tier sweep.
+# The slug set and the candidate pool keys are DERIVED from the pool-reader
+# manifest (VIB-5047), never hardcoded: these tests pin that coupling.
+# ---------------------------------------------------------------------------
+
+_ZERO_WORD = _hex_word(0)
+
+
+def _calldata_of(req: Any) -> tuple[str, str]:
+    """Extract (to, data) from a scripted eth_call RpcRequest."""
+    payload = json.loads(req.params)[0]
+    return payload["to"].lower(), payload["data"]
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_aerodrome_alias_slug_accepted() -> None:
+    """``protocol="aerodrome"`` (pool-reader manifest canonical key) must
+    dispatch to the ``aerodrome_slipstream`` agent-read capability instead of
+    being rejected. The Slipstream int24 getPool selector in the
+    factory calldata proves the right capability was resolved."""
+    pool_addr = "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"
+    factory_calls: list[str] = []
+
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        _to, data = _calldata_of(req)
+        if req.id == "factory_get_pool":
+            factory_calls.append(data)
+            return _rpc_ok(_addr_word(pool_addr))
+        if req.id == "pool_slot0":
+            return _rpc_ok(_slot0_hex(2**96, 0))
+        if req.id == "pool_liquidity":
+            return _rpc_ok(_hex_word(42))
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_pool_state",
+        {
+            "token_a": "WETH",
+            "token_b": "USDC",
+            "fee_tier": 100,  # Slipstream tick spacing
+            "chain": "base",
+            "protocol": "aerodrome",
+        },
+    )
+
+    assert result.status == "success", result.error
+    assert result.data["pool_address"] == pool_addr
+    assert result.data["fee_tier"] == 100
+    assert result.data["fee_tier_source"] == "explicit"
+    # Explicit tier -> exactly one factory lookup, with the Slipstream
+    # (int24 tick-spacing) getPool selector — not the uint24 V3 one.
+    assert len(factory_calls) == 1
+    assert factory_calls[0].startswith("0x28af8d0b")
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_sweep_selects_deepest_native_tier() -> None:
+    """No ``fee_tier`` -> the handler sweeps the connector spec's
+    ``candidate_pool_keys`` and picks the deepest pool. PancakeSwap V3
+    keys pools at 2500 where Uniswap uses 3000 — the old blind default-3000
+    lookup returned a zero address here."""
+    pool_500 = "0x1111111111111111111111111111111111111111"
+    pool_2500 = "0x2222222222222222222222222222222222222222"
+    swept_keys: list[int] = []
+
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        to, data = _calldata_of(req)
+        if req.id == "factory_get_pool":
+            key = int(data[-64:], 16)
+            swept_keys.append(key)
+            if key == 500:
+                return _rpc_ok(_addr_word(pool_500))
+            if key == 2500:
+                return _rpc_ok(_addr_word(pool_2500))
+            return _rpc_ok(_ZERO_WORD)
+        if req.id == "pool_liquidity":
+            # 2500-tier pool is the deepest.
+            return _rpc_ok(_hex_word(999_000 if to == pool_2500 else 10))
+        if req.id == "pool_slot0":
+            assert to == pool_2500, "slot0 must be read on the sweep winner"
+            return _rpc_ok(_slot0_hex(2**96, 0))
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_pool_state",
+        {
+            "token_a": "USDC",
+            "token_b": "WETH",
+            "chain": "ethereum",
+            "protocol": "pancakeswap_v3",
+        },
+    )
+
+    assert result.status == "success", result.error
+    assert result.data["pool_address"] == pool_2500
+    assert result.data["fee_tier"] == 2500
+    assert result.data["fee_tier_source"] == "sweep"
+    # The swept keys are exactly the connector spec's candidate keys, in spec
+    # order — including the Pancake-native 2500 the Uniswap default set lacks.
+    from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+
+    spec = POOL_READER_REGISTRY.require("pancakeswap_v3")
+    assert tuple(swept_keys) == spec.candidate_pool_keys
+    assert 2500 in swept_keys and 3000 not in swept_keys
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_explicit_fee_tier_honored_with_honest_error() -> None:
+    """An explicit ``--fee-tier`` is looked up exactly once and a zero-address
+    result stays an honest EMPTY_POOL error — no silent sweep fallback."""
+    factory_calls: list[str] = []
+
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        if req.id == "factory_get_pool":
+            factory_calls.append(req.id)
+            return _rpc_ok(_ZERO_WORD)
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_pool_state",
+        {
+            "token_a": "USDC",
+            "token_b": "WETH",
+            "fee_tier": 3000,  # not a Pancake-native tier
+            "chain": "ethereum",
+            "protocol": "pancakeswap_v3",
+        },
+    )
+
+    assert result.status == "error"
+    message = (result.error or {}).get("message", "")
+    assert "fee=3000" in message
+    assert "zero address" in message
+    assert len(factory_calls) == 1, "explicit tier must not trigger a sweep"
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_sweep_no_pool_any_tier_lists_candidates() -> None:
+    """When no candidate tier resolves, the error names every swept key so
+    the operator sees which tiers were tried (not a bare fee=3000 miss)."""
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        if req.id == "factory_get_pool":
+            return _rpc_ok(_ZERO_WORD)
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_pool_state",
+        {
+            "token_a": "USDC",
+            "token_b": "WETH",
+            "chain": "ethereum",
+            "protocol": "pancakeswap_v3",
+        },
+    )
+
+    assert result.status == "error"
+    message = (result.error or {}).get("message", "")
+    assert "[100, 500, 2500, 10000]" in message
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_sweep_uses_slipstream_tick_spacings() -> None:
+    """The sweep's candidate set is the connector's own discriminator set:
+    tick spacings for Slipstream, not the Uniswap fee-tier list."""
+    swept_keys: list[int] = []
+
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        if req.id == "factory_get_pool":
+            _to, data = _calldata_of(req)
+            swept_keys.append(int(data[-64:], 16))
+            return _rpc_ok(_ZERO_WORD)
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_pool_state",
+        {
+            "token_a": "WETH",
+            "token_b": "USDC",
+            "chain": "base",
+            "protocol": "aerodrome",
+        },
+    )
+
+    assert result.status == "error"  # scripted all-zero factory
+    from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+
+    spec = POOL_READER_REGISTRY.require("aerodrome")
+    assert tuple(swept_keys) == spec.candidate_pool_keys
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_sweep_partial_rpc_failure_is_recoverable() -> None:
+    """When some candidate tiers error at the RPC layer while others return a
+    zero address, the sweep must NOT report "zero address for every tier"
+    (a false "no pool"). It returns a recoverable RPC_FAILED that honestly
+    discloses the measured-empty vs. unmeasured split (PR #3212 review)."""
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        if req.id == "factory_get_pool":
+            _to, data = _calldata_of(req)
+            key = int(data[-64:], 16)
+            # First native tier (100) errors at the RPC layer; the rest are
+            # measured as a genuine zero address.
+            if key == 100:
+                resp = MagicMock()
+                resp.success = False
+                resp.error = "boom: upstream 503"
+                return resp
+            return _rpc_ok(_ZERO_WORD)
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_pool_state",
+        {"token_a": "USDC", "token_b": "WETH", "chain": "ethereum", "protocol": "pancakeswap_v3"},
+    )
+
+    assert result.status == "error"
+    err = result.error or {}
+    assert err.get("error_code") == "rpc_failed"  # retryable, not a hard EMPTY_POOL
+    assert err.get("recoverable") is True
+    message = err.get("message", "")
+    assert "unmeasured" in message
+    assert "zero address for every" not in message  # the dishonest phrasing is gone
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_sweep_malformed_result_is_unmeasured_not_no_pool() -> None:
+    """A non-string / undecodable eth_call payload must not crash the tool and
+    must be classified as unmeasured (RPC error), never silently treated as a
+    zero-address "no pool" (PR #3212 review, Empty ≠ Zero)."""
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        if req.id == "factory_get_pool":
+            resp = MagicMock()
+            resp.success = True
+            resp.result = json.dumps(None)  # RPC returned JSON null, not a hex string
+            resp.error = ""
+            return resp
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_pool_state",
+        {"token_a": "USDC", "token_b": "WETH", "chain": "ethereum", "protocol": "pancakeswap_v3"},
+    )
+
+    # No crash; every tier was unmeasured -> recoverable RPC failure, not EMPTY_POOL.
+    assert result.status == "error"
+    err = result.error or {}
+    assert err.get("error_code") == "rpc_failed"
+    assert err.get("recoverable") is True
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_explicit_tier_rpc_error_and_zero_address() -> None:
+    """Explicit ``fee_tier`` paths: an RPC-layer factory failure surfaces as a
+    recoverable RPC_FAILED (never conflated with "no pool"), and a measured
+    zero address surfaces as EMPTY_POOL naming the tier."""
+    gateway = MagicMock()
+
+    def _rpc_error_call(req: Any, **kwargs: Any) -> Any:
+        resp = MagicMock()
+        resp.success = False
+        resp.error = "eth_call timeout"
+        return resp
+
+    gateway.rpc.Call.side_effect = _rpc_error_call
+    executor = _make_executor(gateway)
+    args = {"token_a": "USDC", "token_b": "WETH", "chain": "ethereum", "protocol": "uniswap_v3", "fee_tier": 500}
+
+    result = await executor.execute("get_pool_state", dict(args))
+    assert result.status == "error"
+    err = result.error or {}
+    assert err.get("error_code") == "rpc_failed"
+    assert err.get("recoverable") is True
+
+    gateway.rpc.Call.side_effect = lambda req, **kwargs: _rpc_ok(_ZERO_WORD)
+    result = await executor.execute("get_pool_state", dict(args))
+    assert result.status == "error"
+    err = result.error or {}
+    assert err.get("error_code") == "empty_pool"
+    assert "fee=500" in err.get("message", "")
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_malformed_factory_payload_is_rpc_error() -> None:
+    """A non-JSON factory eth_call result is "could not measure", never a
+    measured zero address — the sweep reports recoverable RPC_FAILED."""
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        resp = MagicMock()
+        resp.success = True
+        resp.result = "not-json{{"
+        resp.error = ""
+        return resp
+
+    gateway.rpc.Call.side_effect = _call
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_pool_state",
+        {"token_a": "USDC", "token_b": "WETH", "chain": "ethereum", "protocol": "uniswap_v3"},
+    )
+    assert result.status == "error"
+    err = result.error or {}
+    assert err.get("error_code") == "rpc_failed"
+    assert "malformed eth_call result" in err.get("message", "")
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_explicit_pool_address_unmeasured_tier_and_liquidity() -> None:
+    """Explicit ``pool_address``: no factory lookup runs, ``fee_tier_source``
+    is "unspecified", and a failing/garbled ``liquidity()`` read fails open to
+    the historic "0" while the core slot0 decode still succeeds."""
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        if req.id == "pool_slot0":
+            return _rpc_ok(_slot0_hex(2**96, -100))
+        if req.id == "pool_liquidity":
+            resp = MagicMock()
+            resp.success = True
+            resp.result = json.dumps(None)  # non-string payload -> unmeasured
+            resp.error = ""
+            return resp
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+    executor = _make_executor(gateway)
+    result = await executor.execute(
+        "get_pool_state",
+        {
+            "token_a": "USDC",
+            "token_b": "WETH",
+            "chain": "arbitrum",
+            "protocol": "uniswap_v3",
+            "pool_address": _POOL_ADDR,
+        },
+    )
+    assert result.status == "success", result.error
+    assert result.data["fee_tier_source"] == "unspecified"
+    assert result.data["fee_tier"] is None  # not measured — never fabricated
+    assert result.data["liquidity"] == "0"
+    assert result.data["tick"] == -100
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_slot0_failures_fail_closed() -> None:
+    """slot0 RPC failure -> recoverable RPC_FAILED; short slot0 payload ->
+    EMPTY_POOL (uninitialized), never a garbage decode."""
+    gateway = MagicMock()
+
+    def _slot0_rpc_fail(req: Any, **kwargs: Any) -> Any:
+        resp = MagicMock()
+        resp.success = False
+        resp.error = "boom"
+        return resp
+
+    gateway.rpc.Call.side_effect = _slot0_rpc_fail
+    executor = _make_executor(gateway)
+    args = {
+        "token_a": "USDC",
+        "token_b": "WETH",
+        "chain": "arbitrum",
+        "protocol": "uniswap_v3",
+        "pool_address": _POOL_ADDR,
+    }
+    result = await executor.execute("get_pool_state", dict(args))
+    assert result.status == "error"
+    assert (result.error or {}).get("error_code") == "rpc_failed"
+
+    gateway.rpc.Call.side_effect = lambda req, **kwargs: _rpc_ok(_hex_word(0)[:32])  # < 128 hex chars
+    result = await executor.execute("get_pool_state", dict(args))
+    assert result.status == "error"
+    assert (result.error or {}).get("error_code") == "empty_pool"
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_rejects_non_positive_fee_tier() -> None:
+    """A zero / negative ``fee_tier`` is invalid for every DEX family and is
+    rejected at the schema boundary before any RPC is issued (PR #3212 review).
+    ``execute`` never raises to the agent — the rejection surfaces as a
+    validation_error ToolResponse."""
+    gateway = MagicMock()
+    gateway.rpc.Call.side_effect = AssertionError("no RPC must be issued for an invalid fee_tier")
+    executor = _make_executor(gateway)
+
+    for bad_tier in (0, -500):
+        result = await executor.execute(
+            "get_pool_state",
+            {
+                "token_a": "USDC",
+                "token_b": "WETH",
+                "chain": "ethereum",
+                "protocol": "pancakeswap_v3",
+                "fee_tier": bad_tier,
+            },
+        )
+        assert result.status == "error", bad_tier
+        assert (result.error or {}).get("error_code") == "validation_error", bad_tier
+        gateway.rpc.Call.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

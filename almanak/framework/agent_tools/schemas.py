@@ -171,7 +171,14 @@ class GetPoolStateRequest(BaseModel):
 
     token_a: str = Field(description="First token symbol")
     token_b: str = Field(description="Second token symbol")
-    fee_tier: int = Field(default=3000, description="Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000)")
+    fee_tier: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000); tick spacing for "
+            "Slipstream-family DEXs. Omit to sweep the protocol's native tiers and use the deepest pool."
+        ),
+    )
     chain: str = Field(default=DEFAULT_CHAIN)
     protocol: str = Field(default="uniswap_v3")
     pool_address: str = Field(default="", description="Explicit pool contract address (bypasses computed address)")
@@ -182,6 +189,12 @@ class GetPoolStateResponse(BaseModel):
     current_price: str = ""
     tick: int = 0
     liquidity: str = ""
+    fee_tier: int | None = Field(
+        default=None, description="Resolved fee tier (tick spacing for Slipstream-family DEXs); None = not measured"
+    )
+    fee_tier_source: str = Field(
+        default="", description="How the fee tier was chosen: 'explicit', 'sweep', or 'unspecified'"
+    )
     volume_24h_usd: str = ""
     fee_apr: str = ""
     tvl_usd: str = ""
