@@ -225,9 +225,18 @@ class GatewayMarketPriceAggregator(PriceAggregator):
                 quote_addr = reader._resolve_to_address(token_b, chain_lower)
             for fee_tier in fee_tiers:
                 addr = reader.resolve_pool_address(token_a, token_b, chain_lower, fee_tier)
-                if addr and addr.lower() not in seen:
-                    seen.add(addr.lower())
-                    pool_addresses.append(addr)
+                if not addr or addr.lower() in seen:
+                    continue
+                # The gateway LWAP read is slot0()-based against POOL CONTRACT
+                # addresses. Synthetic Uniswap V4 PoolIds (bytes32 — 64 hex
+                # chars, not 40) have no contract to slot0-read, so forwarding
+                # them would only add guaranteed-dead reads to the batch. Skip
+                # exactly those; V4 participates in the direct framework-side
+                # aggregator instead.
+                if len(addr.removeprefix("0x")) == 64:
+                    continue
+                seen.add(addr.lower())
+                pool_addresses.append(addr)
 
         if not pool_addresses:
             raise PoolPriceUnavailableError(pair, f"No pools resolved for {pair} on {chain_lower}")

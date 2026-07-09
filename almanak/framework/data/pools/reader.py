@@ -59,6 +59,13 @@ from almanak.connectors._strategy_base.v3_pool_abi import (
     V3_TOKEN1_SELECTOR,
     encode_get_pool,
 )
+from almanak.connectors._strategy_base.v4_pool_abi import (
+    V4_DEFAULT_TICK_SPACING,
+    V4_ZERO_ADDRESS,
+    compute_v4_pool_id,
+    encode_get_liquidity,
+    encode_get_slot0,
+)
 from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
 from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.models import (
@@ -66,6 +73,7 @@ from almanak.framework.data.models import (
     DataEnvelope,
     DataMeta,
 )
+from almanak.framework.data.tokens.defaults import WRAPPED_NATIVE
 
 logger = logging.getLogger(__name__)
 
@@ -982,6 +990,313 @@ class CurvePoolReader(UniswapV3PoolPriceReader):
 
 
 # ---------------------------------------------------------------------------
+# UniswapV4PoolReader
+# ---------------------------------------------------------------------------
+
+
+class UniswapV4PoolReader(UniswapV3PoolPriceReader):
+    """Reads live prices from Uniswap V4 pools via the StateView periphery.
+
+    V4 has NO per-pool contracts: pool state lives in the PoolManager
+    singleton, keyed by ``bytes32 PoolId = keccak256(abi.encode(PoolKey))``,
+    and is read through the per-chain StateView contract (carried in the
+    spec's ``factory_addresses`` — the honest chain gate). Consequences:
+
+    - **pool "address"**: a SYNTHETIC identifier — the 0x-hex PoolId (66
+      chars). Consumers treat pool addresses as opaque strings (cache keys /
+      envelope fields), so the id flows through unchanged. It is a one-way
+      hash: ``read_pool_price`` can only serve ids this reader minted via
+      ``resolve_pool_address`` (the PoolKey is memoized per (chain, id));
+      an unknown id fails closed with an actionable error rather than
+      guessing currencies. (Follow-up: wire the gateway PoolKey lookup the
+      V4 receipt parser already uses to serve externally-sourced ids.)
+    - **resolution**: derives the PoolId offline from the pair + fee tier
+      using the canonical fee->tick-spacing map and NO hooks (vanilla pools),
+      then verifies on-chain initialization via ``getSlot0`` (sqrtPriceX96
+      == 0 -> not a pool -> None, mirroring the v3 zero-address check).
+      Hooked pools / nonstandard spacings need an explicit PoolKey and are
+      out of scope here. Nonstandard fee tiers return None (no spacing can
+      be derived). Native ETH is currency zero-address; the ``0xeeee...``
+      placeholder is normalized to it.
+    - **price / tick**: ``getSlot0`` returns the same Q64.96 sqrtPriceX96 and
+      tick as v3 slot0 — decoding REUSES the shared v3 helpers.
+    - **liquidity**: ``StateView.getLiquidity(poolId)`` (in-range L, same
+      semantics as v3 ``liquidity()``).
+    - **fee_tier**: ``getSlot0``'s lpFee — already in the v3 1e-6 unit; for
+      dynamic-fee pools this is the CURRENT fee, measured not assumed.
+    """
+
+    # No class-level spec attributes and no protocol literal: KIND-dispatched
+    # (``reader_kind="uniswap_v4_stateview"``), so the registry always
+    # constructs it with its connector manifest spec and the base ``__init__``
+    # binds identity/StateView-table/sweep-keys from that spec. Naming the
+    # protocol here would re-couple the framework to a connector name
+    # (blueprint 22; chain/protocol coupling ratchet).
+
+    def __init__(
+        self,
+        rpc_call: RpcCallFn,
+        token_resolver: Any | None = None,
+        cache_ttl_seconds: float = 2.0,
+        source_name: str = "alchemy_rpc",
+        spec: PoolReaderSpec | None = None,
+    ) -> None:
+        if spec is None:
+            # Without a spec this instance would silently inherit the BASE
+            # class defaults (the v3 family's factories / selector / identity)
+            # and read the wrong ABI shape — fail loudly instead.
+            raise ValueError(
+                "UniswapV4PoolReader is kind-dispatched and must be constructed "
+                "with its connector PoolReaderSpec (use PoolReaderRegistry.get_reader)."
+            )
+        super().__init__(rpc_call, token_resolver, cache_ttl_seconds, source_name, spec=spec)
+        # PoolIds are one-way hashes: remember every id this reader minted so
+        # read_pool_price can recover (currency0, currency1) for decimals.
+        # Keys are (chain, pool_id_lower); a pool's key is immutable, so the
+        # memo never goes stale.
+        self._pool_keys_by_id: dict[tuple[str, str], tuple[str, str, int, int]] = {}
+
+    # ----- public API -----
+
+    def read_pool_price(
+        self,
+        pool_address: str,
+        chain: str,
+        block_number: int | None = None,
+        finality: str = "latest",
+    ) -> DataEnvelope[PoolPrice]:
+        """Read the current price for a V4 PoolId (see class docstring)."""
+        chain_lower = chain.lower()
+        pool_id_lower = pool_address.lower()
+        cache_key = (pool_id_lower, chain_lower)
+
+        cached_envelope = self._cache_lookup(cache_key)
+        if cached_envelope is not None:
+            return cached_envelope
+
+        start_time = time.monotonic()
+
+        pool_key = self._pool_keys_by_id.get((chain_lower, pool_id_lower))
+        if pool_key is None:
+            raise DataUnavailableError(
+                data_type="pool_price",
+                instrument=pool_address,
+                reason=(
+                    f"Unknown Uniswap V4 poolId {pool_address} on {chain_lower}: V4 pool ids are "
+                    "one-way hashes, so the reader can only serve ids it resolved itself. "
+                    "Resolve the pair first (resolve_pool_address / pool_price_by_pair)."
+                ),
+            )
+        currency0, currency1, _fee, _tick_spacing = pool_key
+
+        state_view = self._factory_addresses.get(chain_lower)
+        if state_view is None:
+            raise DataUnavailableError(
+                data_type="pool_price",
+                instrument=pool_address,
+                reason=f"No Uniswap V4 StateView deployed on chain '{chain_lower}'",
+            )
+
+        try:
+            slot0_data = self._rpc_call(chain_lower, state_view, encode_get_slot0(pool_id_lower))
+            sqrt_price_x96, tick = decode_slot0(slot0_data)
+            if sqrt_price_x96 == 0:
+                raise DataUnavailableError(
+                    data_type="pool_price",
+                    instrument=pool_address,
+                    reason=f"V4 pool {pool_address} uninitialized on {chain_lower} (sqrtPriceX96=0)",
+                )
+            lp_fee = self._decode_lp_fee(slot0_data, pool_address, chain_lower)
+
+            liquidity = decode_uint(self._rpc_call(chain_lower, state_view, encode_get_liquidity(pool_id_lower)))
+
+            token0_decimals = self._v4_currency_decimals(currency0, chain_lower)
+            token1_decimals = self._v4_currency_decimals(currency1, chain_lower)
+            price = decode_sqrt_price_x96(sqrt_price_x96, token0_decimals, token1_decimals)
+        except DataUnavailableError:
+            raise
+        except Exception as e:
+            raise DataUnavailableError(
+                data_type="pool_price",
+                instrument=pool_address,
+                reason=f"StateView read failed for V4 pool {pool_address} on {chain_lower}: {e}",
+            ) from e
+
+        latency_ms = int((time.monotonic() - start_time) * 1000)
+        observed_at = datetime.now(UTC)
+        effective_block = block_number or 0
+
+        pool_price = PoolPrice(
+            price=price,
+            tick=tick,
+            liquidity=liquidity,
+            fee_tier=lp_fee,
+            block_number=effective_block,
+            timestamp=observed_at,
+            pool_address=pool_address,
+            token0_decimals=token0_decimals,
+            token1_decimals=token1_decimals,
+        )
+
+        envelope = DataEnvelope(
+            value=pool_price,
+            meta=DataMeta(
+                source=self._source_name,
+                observed_at=observed_at,
+                block_number=effective_block if effective_block > 0 else None,
+                finality=finality,
+                staleness_ms=0,
+                latency_ms=latency_ms,
+                confidence=1.0,
+                cache_hit=False,
+            ),
+            classification=DataClassification.EXECUTION_GRADE,
+        )
+
+        self._cache[cache_key] = (time.monotonic(), envelope)
+
+        logger.debug(
+            "uniswap_v4_pool_price_read",
+            extra={
+                "pool_id": pool_address,
+                "chain": chain_lower,
+                "price": str(price),
+                "tick": tick,
+                "latency_ms": latency_ms,
+            },
+        )
+
+        return envelope
+
+    def resolve_pool_address(
+        self,
+        token_a: str,
+        token_b: str,
+        chain: str,
+        fee_tier: int = 3000,
+    ) -> str | None:
+        """Resolve a vanilla V4 pool for a pair; returns the synthetic PoolId.
+
+        Derives the PoolId offline (canonical tick spacing for the fee tier,
+        no hooks) and verifies the pool is initialized on-chain before
+        returning it. Returns ``None`` for nonstandard fee tiers (no spacing
+        derivable), chains without StateView, unresolvable tokens, and
+        uninitialized pools.
+        """
+        chain_lower = chain.lower()
+
+        state_view = self._factory_addresses.get(chain_lower)
+        if state_view is None:
+            return None
+
+        tick_spacing = V4_DEFAULT_TICK_SPACING.get(fee_tier)
+        if tick_spacing is None:
+            return None
+
+        addr_a = self._resolve_to_address(token_a, chain_lower)
+        addr_b = self._resolve_to_address(token_b, chain_lower)
+        if addr_a is None or addr_b is None:
+            return None
+        currency_a = self._normalize_v4_currency(addr_a, chain_lower)
+        currency_b = self._normalize_v4_currency(addr_b, chain_lower)
+        if currency_a == currency_b:
+            return None
+
+        pool_id = compute_v4_pool_id(currency_a, currency_b, fee_tier, tick_spacing)
+
+        # Existence check — the v4 analogue of the factory zero-address check:
+        # an uninitialized PoolId reads back sqrtPriceX96 == 0.
+        try:
+            slot0_data = self._rpc_call(chain_lower, state_view, encode_get_slot0(pool_id))
+            sqrt_price_x96, _tick = decode_slot0(slot0_data)
+        except Exception:
+            logger.debug(
+                "Failed to verify V4 pool for %s/%s (fee=%s) on %s",
+                token_a,
+                token_b,
+                fee_tier,
+                chain_lower,
+            )
+            return None
+        if sqrt_price_x96 == 0:
+            return None
+
+        c0, c1 = (currency_a, currency_b) if int(currency_a, 16) < int(currency_b, 16) else (currency_b, currency_a)
+        self._pool_keys_by_id[(chain_lower, pool_id.lower())] = (c0, c1, fee_tier, tick_spacing)
+        return pool_id
+
+    # ----- internal helpers -----
+
+    def _get_pool_metadata(self, pool_address: str, chain: str) -> tuple[int, int, int]:
+        """V4-shaped metadata: currency decimals from the memoized PoolKey + lpFee."""
+        chain_lower = chain.lower()
+        pool_key = self._pool_keys_by_id.get((chain_lower, pool_address.lower()))
+        if pool_key is None:
+            raise DataUnavailableError(
+                data_type="pool_price",
+                instrument=pool_address,
+                reason=f"Unknown Uniswap V4 poolId {pool_address} on {chain_lower}; resolve the pair first",
+            )
+        currency0, currency1, _fee, _tick_spacing = pool_key
+        state_view = self._factory_addresses.get(chain_lower)
+        if state_view is None:
+            raise DataUnavailableError(
+                data_type="pool_price",
+                instrument=pool_address,
+                reason=f"No Uniswap V4 StateView deployed on chain '{chain_lower}'",
+            )
+        slot0_data = self._rpc_call(chain_lower, state_view, encode_get_slot0(pool_address))
+        lp_fee = self._decode_lp_fee(slot0_data, pool_address, chain_lower)
+        return (
+            self._v4_currency_decimals(currency0, chain_lower),
+            self._v4_currency_decimals(currency1, chain_lower),
+            lp_fee,
+        )
+
+    @staticmethod
+    def _decode_lp_fee(slot0_data: bytes, pool_address: str, chain: str) -> int:
+        """Decode lpFee (word 3 of getSlot0: sqrtPriceX96, tick, protocolFee, lpFee)."""
+        if len(slot0_data) < 128:
+            raise DataUnavailableError(
+                data_type="pool_price",
+                instrument=pool_address,
+                reason=(
+                    f"V4 getSlot0 response too short for {pool_address} on {chain}: "
+                    f"{len(slot0_data)} bytes (need >= 128)"
+                ),
+            )
+        return decode_uint(slot0_data[96:128])
+
+    @staticmethod
+    def _normalize_v4_currency(address: str, chain: str) -> str:
+        """Map native-asset spellings to V4's zero-address currency.
+
+        Two spellings normalize: the ``0xeeee...`` placeholder, and the
+        chain's WRAPPED-native token (WETH / WBNB / ...). The wrapped mapping
+        matters because ``MarketSnapshot`` canonicalizes native symbols to
+        their wrapped form (``ETH`` -> ``WETH``) before this reader sees
+        them, while the flagship (deep-liquidity) V4 pools are NATIVE-currency
+        pools — hashing the WETH PoolKey would report those pools missing.
+        This mirrors the V4 connector SDK's own quoting behaviour
+        (``uniswap_v4.sdk`` maps wrapped -> ``NATIVE_CURRENCY`` before pool
+        selection), so read-side and execution-side pool identity agree.
+        """
+        lowered = address.lower()
+        if lowered == _NATIVE_COIN_PLACEHOLDER:
+            return V4_ZERO_ADDRESS
+        wrapped = WRAPPED_NATIVE.get(chain)
+        if wrapped is not None and lowered == wrapped.lower():
+            return V4_ZERO_ADDRESS
+        return lowered
+
+    def _v4_currency_decimals(self, currency: str, chain: str) -> int:
+        """Currency decimals; the zero address is native (18 on all V4 chains)."""
+        if currency.lower() == V4_ZERO_ADDRESS:
+            return _NATIVE_COIN_DECIMALS
+        return self._get_token_decimals(currency, chain)
+
+
+# ---------------------------------------------------------------------------
 # PoolReaderRegistry
 # ---------------------------------------------------------------------------
 
@@ -1013,6 +1328,7 @@ _READER_CLASS_BY_PROTOCOL: dict[str, type[UniswapV3PoolPriceReader]] = {
 _READER_CLASS_BY_KIND: dict[str, type[UniswapV3PoolPriceReader]] = {
     "v3_slot0": UniswapV3PoolPriceReader,
     "curve_pool": CurvePoolReader,
+    "uniswap_v4_stateview": UniswapV4PoolReader,
 }
 
 

@@ -22,6 +22,7 @@ from almanak.framework.data.pools.reader import (
     CurvePoolReader,
     PoolReaderRegistry,
     UniswapV3PoolPriceReader,
+    UniswapV4PoolReader,
 )
 
 
@@ -119,6 +120,7 @@ def test_kind_map_pins_default_and_curve() -> None:
     """
     assert _READER_CLASS_BY_KIND["v3_slot0"] is UniswapV3PoolPriceReader
     assert _READER_CLASS_BY_KIND["curve_pool"] is CurvePoolReader
+    assert _READER_CLASS_BY_KIND["uniswap_v4_stateview"] is UniswapV4PoolReader
     default_kind = PoolReaderSpec(protocol="x", factory_addresses={}).reader_kind
     assert default_kind == "v3_slot0"
 
@@ -222,6 +224,35 @@ def test_new_curve_shaped_spec_needs_only_a_manifest(monkeypatch: pytest.MonkeyP
     assert reader._known_pools is fake.known_pools
     assert "fakecurve" in registry.protocols_for_chain("ethereum")
     assert "fakecurve" not in registry.protocols_for_chain("base")
+
+
+def test_uniswap_v4_dispatches_via_kind_map_not_protocol_map() -> None:
+    """V4 binds its StateView reader via reader_kind; chain gate = StateView table."""
+    assert "uniswap_v4" not in _READER_CLASS_BY_PROTOCOL
+    registry = PoolReaderRegistry(rpc_call=_noop_rpc)
+    reader = registry.get_reader("base", "uniswap_v4")
+    assert type(reader) is UniswapV4PoolReader
+
+    spec = POOL_READER_REGISTRY.require("uniswap_v4")
+    assert spec.reader_kind == "uniswap_v4_stateview"
+    # Drift guard: instance identity binds from the connector spec (the class
+    # carries NO spec attributes / protocol literal — coupling ratchet), and
+    # bare construction without a spec fails loudly instead of inheriting the
+    # v3 base defaults.
+    assert reader.protocol_name == spec.protocol
+    assert reader._factory_addresses is spec.factory_addresses
+    assert reader._known_pools is spec.known_pools
+    assert reader._candidate_pool_keys == spec.candidate_pool_keys
+    with pytest.raises(ValueError, match="kind-dispatched"):
+        UniswapV4PoolReader(rpc_call=_noop_rpc)
+    # Chain gating comes from the per-chain StateView deployments, and the
+    # gate values ARE the StateView addresses from the connector table.
+    from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
+
+    for chain, addrs in UNISWAP_V4.items():
+        assert spec.factory_addresses[chain] == addrs["state_view"], chain
+        assert "uniswap_v4" in registry.protocols_for_chain(chain), chain
+    assert "uniswap_v4" not in registry.protocols_for_chain("solana")
 
 
 def test_register_protocol_custom_class_keeps_legacy_constructor_contract() -> None:

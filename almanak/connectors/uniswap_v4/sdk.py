@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 
 from almanak.connectors._strategy_base import concentrated_liquidity_math as cl_math
 from almanak.connectors._strategy_base.rpc import eth_call, eth_call_hex
+from almanak.connectors._strategy_base.v4_pool_abi import V4_DEFAULT_TICK_SPACING
 
 from .addresses import UNISWAP_V4
 
@@ -58,14 +59,10 @@ MAX_TICK = cl_math.MAX_TICK
 MIN_SQRT_PRICE = 4295128739
 MAX_SQRT_PRICE = 1461446703485210103287273052203988822378723970342
 
-# Default tick spacing per fee tier in V4
-# V4 allows custom tick spacing, but these are common defaults
-TICK_SPACING: dict[int, int] = {
-    100: 1,  # 0.01%
-    500: 10,  # 0.05%
-    3000: 60,  # 0.3%
-    10000: 200,  # 1%
-}
+# Default tick spacing per fee tier in V4. Canonical map lives in
+# ``_strategy_base.v4_pool_abi`` (shared with the framework pool reader);
+# re-exported here so connector callers keep their import path.
+TICK_SPACING: dict[int, int] = V4_DEFAULT_TICK_SPACING
 
 FEE_TIERS: list[int] = [100, 500, 3000, 10000]
 

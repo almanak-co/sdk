@@ -40,13 +40,11 @@ from dataclasses import dataclass
 from web3 import Web3
 
 from almanak.connectors._strategy_base.base import HexDecoder
+from almanak.connectors._strategy_base.v4_pool_abi import compute_v4_pool_id, encode_get_slot0
 from almanak.connectors.uniswap_v4.sdk import (
     NATIVE_CURRENCY,
     TICK_SPACING,
     PoolKey,
-    _pad_address,
-    _pad_int24,
-    _pad_uint24,
 )
 
 logger = logging.getLogger(__name__)
@@ -428,25 +426,23 @@ def compute_pool_id(pool_key: PoolKey) -> str:
     The pool ID is used to identify pools in the PoolManager. It's the
     keccak256 hash of abi.encode(currency0, currency1, fee, tickSpacing, hooks).
 
+    Delegates to the canonical implementation in
+    ``_strategy_base.v4_pool_abi.compute_v4_pool_id`` (shared with the
+    framework pool reader — one implementation, never two).
+
     Args:
         pool_key: The pool key to hash.
 
     Returns:
         Pool ID as hex string with 0x prefix.
     """
-    # ABI-encode the PoolKey struct (5 words, each 32 bytes)
-    encoded = (
-        _pad_address(pool_key.currency0)
-        + _pad_address(pool_key.currency1)
-        + _pad_uint24(pool_key.fee)
-        + _pad_int24(pool_key.tick_spacing)
-        + _pad_address(pool_key.hooks)
+    return compute_v4_pool_id(
+        pool_key.currency0,
+        pool_key.currency1,
+        pool_key.fee,
+        pool_key.tick_spacing,
+        pool_key.hooks,
     )
-
-    # Ethereum keccak256 (NOT hashlib.sha3_256 which is NIST SHA3-256)
-    encoded_bytes = bytes.fromhex(encoded)
-    pool_id = Web3.keccak(encoded_bytes).hex()
-    return "0x" + pool_id
 
 
 def _pack_int24(value: int) -> str:
@@ -533,14 +529,10 @@ def build_get_slot0_calldata(pool_key: PoolKey) -> str:
     Returns:
         Hex-encoded calldata with 0x prefix.
     """
-    # Selector: keccak256("getSlot0(bytes32)")[:4] == 0xc815641c
-    selector = Web3.keccak(text="getSlot0(bytes32)").hex()[:8]  # first 4 bytes (HexBytes.hex() has no 0x prefix)
-
-    # Argument: the bytes32 PoolId == keccak256(abi.encode(PoolKey)). compute_pool_id
-    # ABI-encodes the same 5 PoolKey words, so this is byte-identical to the on-chain id.
-    pool_id = compute_pool_id(pool_key).removeprefix("0x")
-
-    return "0x" + selector + pool_id
+    # Selector + bytes32 PoolId argument — canonical encoding shared with the
+    # framework pool reader (``_strategy_base.v4_pool_abi``): the PoolId is
+    # keccak256(abi.encode(PoolKey)), byte-identical to the on-chain id.
+    return encode_get_slot0(compute_pool_id(pool_key))
 
 
 def decode_slot0_response(data: str) -> PoolState:

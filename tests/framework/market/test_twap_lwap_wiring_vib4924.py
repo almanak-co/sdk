@@ -663,3 +663,54 @@ def test_twap_inverts_source_contributions_too():
     env = snap.twap("WETH/USDC")
     assert env.value.sources  # twap carries one contribution
     assert env.value.sources[0].price == Decimal(1) / Decimal("0.00033")
+
+
+# --------------------------------------------------------------------------- #
+# 10. V4 bytes32 PoolIds never reach the gateway slot0 LWAP batch
+# --------------------------------------------------------------------------- #
+
+
+def test_lwap_skips_bytes32_v4_pool_ids_but_forwards_contract_addresses():
+    # uniswap_v4 resolve returns a synthetic bytes32 PoolId — no contract to
+    # slot0-read, so it must be dropped from the gateway batch. The 20-byte
+    # V3 pool (and any non-bytes32 identifier) still forwards unchanged.
+    v4_pool_id = "0x" + "ab" * 32  # 64 hex chars
+    reader = MagicMock()
+    reader.resolve_pool_address.side_effect = lambda a, b, c, fee: {500: "0xpool500", 3000: v4_pool_id}.get(fee)
+    reader._resolve_to_address.side_effect = _stub_resolve
+    registry = MagicMock()
+    registry.reader_kind.return_value = "v3_slot0"
+    registry.protocols_for_chain.return_value = ["uniswap_v3"]
+    registry.get_reader.return_value = reader
+
+    rh = _FakeRateHistory(lwap_response=_lwap_resp(price="2500.5", pool_count=1, source="gateway_rpc"))
+    agg = GatewayMarketPriceAggregator(
+        gateway_client=_FakeGatewayClient(rate_history=rh),
+        pool_registry=registry,
+        rpc_call=lambda *a: b"",
+    )
+    agg.lwap("WETH", "USDC", "base")
+
+    forwarded = list(rh.last_lwap_request.pool_addresses)
+    assert "0xpool500" in forwarded
+    assert v4_pool_id not in forwarded
+
+
+def test_lwap_all_candidates_bytes32_raises_no_pools():
+    # If every resolved candidate is a synthetic PoolId, the gateway batch is
+    # empty and lwap must fail loudly, not issue guaranteed-dead reads.
+    reader = MagicMock()
+    reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0x" + "cd" * 32
+    reader._resolve_to_address.side_effect = _stub_resolve
+    registry = MagicMock()
+    registry.reader_kind.return_value = "v3_slot0"
+    registry.protocols_for_chain.return_value = ["uniswap_v3"]
+    registry.get_reader.return_value = reader
+
+    agg = GatewayMarketPriceAggregator(
+        gateway_client=_FakeGatewayClient(rate_history=_FakeRateHistory(lwap_response=_lwap_resp())),
+        pool_registry=registry,
+        rpc_call=lambda *a: b"",
+    )
+    with pytest.raises(PoolPriceUnavailableError, match="No pools resolved"):
+        agg.lwap("WETH", "USDC", "base")
