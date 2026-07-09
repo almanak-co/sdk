@@ -191,9 +191,9 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
 # * ``bsc`` / ``bnb``: The framework's chain-default pair on bsc resolves
 #   to (USDC, WETH-bridged) which has no TJv2 LBPair — the canonical
 #   liquid pair is (USDT, WBNB). Registered under both ``"bsc"`` (the
-#   SDK canonical name, used by the compiler and intent runtime) AND
-#   ``"bnb"`` (the user-facing alias used by ConnectorRegistry /
-#   ``almanak ax`` / CLI surfaces). The dispatch below is a literal
+#   SDK canonical name, also the ConnectorRegistry /
+#   manifest vocabulary) AND ``"bnb"`` (the ChainRegistry alias a
+#   caller such as ``almanak ax`` may still pass). The dispatch below is a literal
 #   ``dict.get(chain)`` against whatever string the caller passes, with
 #   no alias normalisation upstream — omitting either key would leave
 #   the corresponding call site falling back to the default and

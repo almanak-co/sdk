@@ -25,7 +25,7 @@ CONNECTOR = Connector(
         attribute="LiFiDeferredRefreshConnector",
     ),
     strategy_intents=("SWAP", "BRIDGE"),
-    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb"),
+    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc"),
     # Aggregators render as aggregator rows instead of generic swap/bridge rows.
     strategy_matrix_entries=(
         StrategyMatrixEntry(

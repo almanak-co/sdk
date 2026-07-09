@@ -55,6 +55,7 @@ from almanak.connectors._strategy_base.teardown_residual_discovery import (
     has_teardown_residual_discovery,
     registered_residual_discovery_protocols,
 )
+from almanak.core.constants import canonical_chain_name
 from almanak.framework.teardown.models import PositionInfo, PositionType
 
 logger = logging.getLogger(__name__)
@@ -93,7 +94,12 @@ def _register_manifest_teardown_residual_discoveries() -> None:
         name = connector_manifest.name.lower()
         _register_teardown_residual_discovery(connector_manifest.name, hook)
         chains = connector_manifest.strategy_chains
-        _DISCOVERY_CHAINS[name] = tuple(c.lower() for c in chains) if chains else ()
+        # Canonicalize declared chains (alias → ChainRegistry canonical name,
+        # e.g. "bnb" → "bsc") so the deployment-chain intersection below can
+        # never silently miss on an alias/canonical vocabulary split — a miss
+        # here skips the residual sweep for that (connector, chain) entirely
+        # (VIB-5293 defect class).
+        _DISCOVERY_CHAINS[name] = tuple(canonical_chain_name(str(c)).lower() for c in chains) if chains else ()
         intents = connector_manifest.strategy_intents
         _DISCOVERY_INTENTS[name] = frozenset(i.upper() for i in intents) if intents else frozenset()
 
@@ -173,15 +179,20 @@ def _unmeasured_sentinel(protocol: str, chain: str, error: str | None) -> Positi
 
 
 def _deployment_chains(strategy: Any) -> list[str]:
-    """The lower-cased chains this deployment operates on (best-effort)."""
+    """The canonical lower-cased chains this deployment operates on (best-effort).
+
+    Values are alias-normalized through :func:`canonical_chain_name` (e.g. a
+    config-supplied ``"bnb"`` → ``"bsc"``) so the intersection with
+    ``_DISCOVERY_CHAINS`` — also canonical — compares one vocabulary.
+    """
     chains: list[str] = []
     raw = getattr(strategy, "chains", None)
     if isinstance(raw, list | tuple):
-        chains = [str(c).lower() for c in raw if c]
+        chains = [canonical_chain_name(str(c)).lower() for c in raw if c]
     if not chains:
         primary = getattr(strategy, "chain", None)
         if primary:
-            chains = [str(primary).lower()]
+            chains = [canonical_chain_name(str(primary)).lower()]
     return chains
 
 

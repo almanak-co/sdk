@@ -28,7 +28,7 @@ CONNECTOR = Connector(
         attribute="AsterPerpsCompiler",
     ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
-    strategy_chains=("bnb",),
+    strategy_chains=("bsc",),
 )
 
 __all__ = ["CONNECTOR"]

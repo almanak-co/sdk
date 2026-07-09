@@ -82,15 +82,16 @@ def build_discovery_vectors(
     ``UNISWAP_V4`` membership (the same registry the adapter resolves its
     contracts from), so a chain without V4 contracts emits nothing.
     """
-    # ``chain`` here is the SDK chain name, NOT the user-facing venue alias: the
-    # whole discovery pipeline (``_get_token_pair``, ``UNISWAP_V4``, the V4
-    # compiler) is keyed on SDK names, so BSC arrives as ``"bsc"`` — never
-    # ``"bnb"`` (the KNOWN_VENUES alias used only in ``strategy_chains``).
-    # Returning ``None`` for a non-SDK string is the framework-consistent
-    # behaviour (every connector's token resolution is bsc-keyed too); we do NOT
-    # alias bnb→bsc here because ``ctx.usdc``/``ctx.weth`` would still be the
-    # wrong (fallback) tokens for a ``"bnb"`` caller, yielding a broken partial
-    # manifest instead of a clean empty one.
+    # ``chain`` here is the SDK canonical chain name: the whole discovery
+    # pipeline (``_get_token_pair``, ``UNISWAP_V4``, the V4 compiler) is keyed
+    # on canonical names, so BSC arrives as ``"bsc"`` — never ``"bnb"`` (a
+    # ChainRegistry alias; ``strategy_chains`` declarations canonicalize at
+    # the registry boundary too). Returning ``None`` for a non-SDK
+    # string is the framework-consistent behaviour (every connector's token
+    # resolution is bsc-keyed too); we do NOT alias bnb→bsc here because
+    # ``ctx.usdc``/``ctx.weth`` would still be the wrong (fallback) tokens for
+    # a ``"bnb"`` caller, yielding a broken partial manifest instead of a
+    # clean empty one.
     if chain not in UNISWAP_V4:
         return None
 

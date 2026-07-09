@@ -67,7 +67,7 @@ CONNECTOR = Connector(
         attribute="PRIMITIVE",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
-    strategy_chains=("avalanche", "arbitrum", "bnb", "ethereum"),
+    strategy_chains=("avalanche", "arbitrum", "bsc", "ethereum"),
 )
 
 __all__ = ["CONNECTOR"]

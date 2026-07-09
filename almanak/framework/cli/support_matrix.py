@@ -87,12 +87,14 @@ SUPPORTED_CATEGORIES: tuple[str, ...] = (
 def _matrix_chain(chain: str) -> str:
     """Normalise a manifest chain name to the matrix's canonical form.
 
-    The strategy-side :data:`KNOWN_VENUES` uses ``"bnb"`` (the historical
-    strategy registry key for BNB Chain), but the matrix has rendered
-    ``"bsc"`` since inception so downstream Edge / CI consumers match on
-    that string. Normalising via :class:`~almanak.core.chains.ChainRegistry`
-    keeps both surfaces consistent without changing the strategy-side contract,
-    and ensures new aliases flow automatically. Unknown chains pass through.
+    The strategy registry canonicalizes ``ConnectorManifest.chains``
+    at construction (``"bnb"`` → ``"bsc"``), so manifest-derived rows arrive
+    already canonical and this is a no-op for them. It stays as the tolerant
+    rendering backstop for declarative ``matrix_entries`` (which are not
+    registry-canonicalized) and for any alias that slips in via routing
+    tables, so downstream Edge / CI consumers always match on the canonical
+    string. Normalising via :class:`~almanak.core.chains.ChainRegistry`
+    ensures new aliases flow automatically. Unknown chains pass through.
     """
     descriptor = ChainRegistry.try_resolve(chain)
     return descriptor.name if descriptor is not None else chain

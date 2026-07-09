@@ -18,7 +18,7 @@ import click
 
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.framework.anvil.accounts import anvil_default_address
-from almanak.framework.cli.chain_resolution import cli_chain_choices
+from almanak.framework.cli.chain_params import ChainChoice
 
 
 class StrategyTemplate(StrEnum):
@@ -5265,9 +5265,12 @@ def list_strategies() -> list[str]:
 @click.option(
     "--chain",
     "-c",
-    type=click.Choice(cli_chain_choices()),
+    # Registry-derived canonical choices; registered aliases (e.g. "bnb")
+    # are accepted and converted to the canonical name so the scaffolded
+    # config.json always carries the vocabulary every runtime seam expects.
+    type=ChainChoice(),
     default=DEFAULT_CHAIN,
-    help="Target blockchain network",
+    help="Target blockchain network (canonical name or registered alias)",
 )
 @click.option(
     "--output-dir",

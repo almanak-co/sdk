@@ -69,12 +69,16 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
 
+# Chains use ChainRegistry canonical names (``bsc``, not the ``bnb`` alias),
+# mirroring the connector manifests' canonical vocabulary; validate_config
+# canonicalizes the configured chain before comparing so alias-shaped configs
+# (``"chain": "bnb"``) still validate.
 SUPPORTED_PROTOCOL_CHAINS: dict[str, tuple[str, ...]] = {
-    "uniswap_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "monad"),
-    "traderjoe_v2": ("avalanche", "arbitrum", "bnb", "ethereum"),
+    "uniswap_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "monad"),
+    "traderjoe_v2": ("avalanche", "arbitrum", "bsc", "ethereum"),
     "aerodrome": ("base", "optimism"),
-    "pancakeswap_v3": ("bnb", "ethereum", "arbitrum", "base"),
-    "sushiswap_v3": ("ethereum", "arbitrum", "base", "optimism", "polygon", "bnb"),
+    "pancakeswap_v3": ("bsc", "ethereum", "arbitrum", "base"),
+    "sushiswap_v3": ("ethereum", "arbitrum", "base", "optimism", "polygon", "bsc"),
 }
 
 SUPPORTED_SWAP_PROTOCOLS = tuple(SUPPORTED_PROTOCOL_CHAINS)
@@ -295,7 +299,12 @@ class UniswapRSIStrategy(IntentStrategy):
                 f"supported protocols: {', '.join(SUPPORTED_SWAP_PROTOCOLS)}",
                 field="protocol",
             )
-        if self.chain not in SUPPORTED_PROTOCOL_CHAINS[protocol]:
+        # Canonicalize the configured chain (alias → canonical, e.g.
+        # "bnb" → "bsc") so the membership check compares one vocabulary.
+        from almanak.core.constants import canonical_chain_name
+
+        chain = canonical_chain_name(str(self.chain))
+        if chain not in SUPPORTED_PROTOCOL_CHAINS[protocol]:
             supported = ", ".join(SUPPORTED_PROTOCOL_CHAINS[protocol])
             raise ConfigValidationError(
                 f"protocol {protocol!r} does not support chain {self.chain!r}; supported chains: {supported}",

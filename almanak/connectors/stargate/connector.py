@@ -25,7 +25,7 @@ CONNECTOR = Connector(
         attribute="BridgeCompiler",
     ),
     strategy_intents=("BRIDGE",),
-    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb"),
+    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc"),
 )
 
 __all__ = ["CONNECTOR"]

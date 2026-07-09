@@ -49,7 +49,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.enso.supported_chains",
     ),
     strategy_intents=("SWAP",),
-    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb"),
+    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc"),
     # Aggregators render as aggregator rows instead of generic swap rows.
     strategy_matrix_entries=(
         StrategyMatrixEntry(

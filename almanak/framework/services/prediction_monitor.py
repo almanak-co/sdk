@@ -33,13 +33,16 @@ def _polymarket_chain() -> str:
     the connector registry must not load at module import time.
     """
     from almanak.connectors._connector import CONNECTOR_REGISTRY
+    from almanak.core.constants import canonical_chain_name
 
     manifest = CONNECTOR_REGISTRY.get("polymarket")
     if manifest is None or not manifest.strategy_chains:
         # Manifest discovery is static — this is a registry regression, and
         # failing loud beats silently monitoring the wrong chain.
         raise RuntimeError("polymarket connector manifest is missing or declares no strategy_chains")
-    return manifest.strategy_chains[0]
+    # Canonicalize the declared chain (alias → ChainRegistry canonical name)
+    # so the monitor always keys on the runtime vocabulary.
+    return canonical_chain_name(manifest.strategy_chains[0])
 
 
 class PredictionEvent(StrEnum):

@@ -282,3 +282,28 @@ def test_provider_literal_lockstep(gate):
         f"don't match PROVIDER_TO_CONNECTOR keys {sorted(table_keys)!r}. "
         f"Update PROVIDER_TO_CONNECTOR in check_intent_coverage.py."
     )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# _canon_chain — alias/case normalization of the two alias-shaped inputs
+# (directory name + excused-YAML chain) into the canonical-lowercase vocab
+# the required-set / KNOWN_VENUES comparisons use.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def test_canon_chain_resolves_registry_alias(gate):
+    # Registry alias → canonical lowercase name (bnb → bsc).
+    assert gate._canon_chain("bnb") == "bsc"
+    assert gate._canon_chain("BNB") == "bsc"
+
+
+def test_canon_chain_case_folds_non_registry_venue(gate):
+    # Non-registry venues (solana, hyperliquid) pass through canonicalization
+    # verbatim; mixed case must still fold to the lowercase KNOWN_VENUES form
+    # so directory/YAML values like "Solana" don't silently miss coverage
+    # attribution.
+    assert gate._canon_chain("Solana") == "solana"
+    assert gate._canon_chain("HyperLiquid") == "hyperliquid"
+    # Already-canonical inputs are unchanged (case-fold is a no-op on them).
+    assert gate._canon_chain("solana") == "solana"
+    assert gate._canon_chain("ethereum") == "ethereum"

@@ -88,7 +88,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.pancakeswap_v3.supported_chains",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
-    strategy_chains=("bnb", "ethereum", "arbitrum", "base"),
+    strategy_chains=("bsc", "ethereum", "arbitrum", "base"),
 )
 
 __all__ = ["CONNECTOR"]

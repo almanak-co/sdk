@@ -120,7 +120,7 @@ CONNECTOR = Connector(
     # needed, use a 1-wei supply with prior approval.
     backtest_risk=_BACKTEST_RISK,
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
-    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "mantle", "xlayer"),
+    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "mantle", "xlayer"),
     # Matrix output stays lending-only for now; Aave flash-loan support exists
     # but historically has not rendered as its own support-matrix row.
     strategy_matrix_entries=(

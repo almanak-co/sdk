@@ -27,14 +27,18 @@ from dataclasses import dataclass, field
 from almanak.connectors._connector import CONNECTOR_REGISTRY as CONNECTOR_DESCRIPTOR_REGISTRY
 from almanak.connectors._connector import Connector as ConnectorDescriptor
 from almanak.connectors._connector import StrategyMatrixEntry
+from almanak.core.constants import canonical_chain_name
 from almanak.framework.intents.vocabulary import IntentType
 
-# Strategy registry venue identifiers a connector may declare. EVM connectors
-# currently use the historical strategy-side BNB Chain key (``bnb``); runtime
-# chain inputs canonicalize through ``resolve_chain_name`` to ``bsc`` and
-# matrix rendering normalizes at that boundary. Solana protocols use
-# ``solana``; non-EVM L1s with their own chain-like semantics (Hyperliquid)
-# live here as first-class venues.
+# Strategy registry venue identifiers a connector may declare, keyed by the
+# ChainRegistry CANONICAL lowercase name (``bsc``, not the historical ``bnb``
+# alias — VIB-5293). ``ConnectorManifest``
+# canonicalizes declared chains through ``canonical_chain_name`` BEFORE this
+# set is checked, so a connector declaring a registered alias still validates
+# and downstream consumers always observe canonical names. Solana protocols
+# use ``solana``; non-EVM L1s with their own chain-like semantics
+# (Hyperliquid) live here as first-class venues (not ChainRegistry entries —
+# canonicalization passes them through verbatim).
 # Off-chain venues (centralized exchanges like Kraken) do NOT appear in
 # this set — they register with ``chains=None`` instead.
 KNOWN_VENUES: frozenset[str] = frozenset(
@@ -44,7 +48,7 @@ KNOWN_VENUES: frozenset[str] = frozenset(
         "base",
         "optimism",
         "polygon",
-        "bnb",
+        "bsc",
         "avalanche",
         "linea",
         "mantle",
@@ -121,10 +125,11 @@ class MatrixEntry:
       declares this directly so ``support_matrix.py`` does not need a
       hardcoded intent → category dispatch.
     * ``chains`` — frozenset of chain canonical names where this
-      ``(matrix_name, category)`` row is live. Uses the matrix's
-      canonical chain names (``"bsc"`` not ``"bnb"``; the strategy
-      manifest's ``chains`` field uses ``"bnb"`` for its own contracts
-      but matrix rendering normalises to ``"bsc"``).
+      ``(matrix_name, category)`` row is live. Uses ChainRegistry
+      canonical chain names (``"bsc"`` not ``"bnb"``) — the same
+      vocabulary the strategy manifest's ``chains`` field canonicalizes
+      to; matrix rendering additionally alias-normalises as a tolerant
+      backstop.
     """
 
     matrix_name: str
@@ -167,7 +172,10 @@ class ConnectorManifest:
     * ``chains`` — either a non-empty tuple of strings from
       :data:`KNOWN_VENUES` (no duplicates), or ``None`` for off-chain
       venues (centralized exchanges, etc.). An empty tuple is rejected as
-      ambiguous between "no chains" and "not filled in yet".
+      ambiguous between "no chains" and "not filled in yet". Values are
+      canonicalized through :func:`canonical_chain_name` at construction
+      (``"bnb"`` → ``"bsc"``), so consumers always read ChainRegistry
+      canonical names.
     * ``matrix_entries`` — optional explicit ``MatrixEntry`` tuple
       describing every ``(matrix_name, category, chains)`` row the
       connector emits into ``almanak info matrix``. When ``None`` (the
@@ -195,9 +203,32 @@ class ConnectorManifest:
         if not isinstance(self.name, str) or not self.name.strip():
             raise ValueError(f"ConnectorManifest.name must be a non-empty string, got {self.name!r}")
 
+        self._canonicalize_chains()
         self._validate_intents()
         self._validate_chains()
         self._validate_matrix_entries()
+
+    def _canonicalize_chains(self) -> None:
+        """Rewrite ``chains`` to ChainRegistry canonical names (VIB-5293 root).
+
+        The registry boundary is the single seam where connector-declared
+        chain vocabulary becomes the machine-readable (connector, intent,
+        chain) universe, so canonicalization happens HERE — before
+        validation — rather than in every consumer. A registered alias
+        (``"bnb"``) both validates against the canonical
+        :data:`KNOWN_VENUES` vocabulary and never leaks downstream; venues
+        the chain registry does not model (``"hyperliquid"``) and
+        non-string junk pass through verbatim for :meth:`_validate_chains`
+        to report. Runs on the frozen dataclass via ``object.__setattr__``
+        because it is part of construction, not later mutation.
+        """
+        if not isinstance(self.chains, tuple):
+            return
+        object.__setattr__(
+            self,
+            "chains",
+            tuple(canonical_chain_name(chain) if isinstance(chain, str) else chain for chain in self.chains),
+        )
 
     def _validate_intents(self) -> None:
         if not isinstance(self.intents, tuple) or not self.intents:

@@ -59,7 +59,7 @@ Usage: almanak strat new [OPTIONS]
 
 
 * `chain`:
-    * Type: Choice(['arbitrum', 'avalanche', 'base', 'berachain', 'blast', 'bsc', 'ethereum', 'hyperevm', 'linea', 'mantle', 'monad', 'optimism', 'plasma', 'polygon', 'solana', 'sonic', 'xlayer', 'zerog'])
+    * Type: <almanak.framework.cli.chain_params.ChainChoice object at 0x7ff0d20cbbc0>
     * Default: `arbitrum`
     * Usage: `--chain
 -c`

@@ -155,11 +155,11 @@ EXPECTED_ALIASES = {
 MIGRATED_STRATEGY_REGISTRATION = {
     "aave_v3": (
         ("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
-        ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "mantle", "xlayer"),
+        ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "mantle", "xlayer"),
     ),
     "across": (("BRIDGE",), ("ethereum", "arbitrum", "base", "optimism", "polygon", "linea")),
     "aerodrome": (("SWAP", "LP_OPEN", "LP_CLOSE"), ("base", "optimism")),
-    "aster_perps": (("PERP_OPEN", "PERP_CLOSE"), ("bnb",)),
+    "aster_perps": (("PERP_OPEN", "PERP_CLOSE"), ("bsc",)),
     "balancer_v2": (("FLASH_LOAN",), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche")),
     "benqi": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("avalanche",)),
     "camelot": (("SWAP",), ("arbitrum",)),
@@ -167,7 +167,7 @@ MIGRATED_STRATEGY_REGISTRATION = {
     "curvance": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("monad",)),
     "curve": (("SWAP", "LP_OPEN", "LP_CLOSE"), ("ethereum", "arbitrum", "optimism", "polygon", "base")),
     "drift": (("PERP_OPEN", "PERP_CLOSE"), ("solana",)),
-    "enso": (("SWAP",), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb")),
+    "enso": (("SWAP",), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc")),
     "ethena": (("STAKE", "UNSTAKE"), ("ethereum",)),
     "euler_v2": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("ethereum", "avalanche", "base", "arbitrum")),
     "fluid": (("SWAP", "SUPPLY", "WITHDRAW"), ("arbitrum", "base", "ethereum", "polygon")),
@@ -179,7 +179,7 @@ MIGRATED_STRATEGY_REGISTRATION = {
     "kraken": (("SWAP",), None),
     "lagoon": (("VAULT_DEPOSIT", "VAULT_REDEEM"), ("ethereum", "base")),
     "lido": (("STAKE", "UNSTAKE"), ("ethereum",)),
-    "lifi": (("SWAP", "BRIDGE"), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb")),
+    "lifi": (("SWAP", "BRIDGE"), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc")),
     "meteora": (("LP_OPEN", "LP_CLOSE"), ("solana",)),
     "morpho_blue": (
         ("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
@@ -187,31 +187,31 @@ MIGRATED_STRATEGY_REGISTRATION = {
     ),
     "morpho_vault": (("VAULT_DEPOSIT", "VAULT_REDEEM"), ("ethereum", "base")),
     "orca": (("LP_OPEN", "LP_CLOSE"), ("solana",)),
-    "pancakeswap_perps": (("PERP_OPEN", "PERP_CLOSE"), ("bnb",)),
-    "pancakeswap_v3": (("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"), ("bnb", "ethereum", "arbitrum", "base")),
+    "pancakeswap_perps": (("PERP_OPEN", "PERP_CLOSE"), ("bsc",)),
+    "pancakeswap_v3": (("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"), ("bsc", "ethereum", "arbitrum", "base")),
     "pendle": (("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"), ("arbitrum", "ethereum")),
     "polymarket": (("PREDICTION_BUY", "PREDICTION_SELL", "PREDICTION_REDEEM"), ("polygon",)),
     "raydium": (("LP_OPEN", "LP_CLOSE"), ("solana",)),
     "silo_v2": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("avalanche",)),
     "spark": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("ethereum",)),
-    "stargate": (("BRIDGE",), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb")),
+    "stargate": (("BRIDGE",), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc")),
     "sushiswap_v3": (
         ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
-        ("ethereum", "arbitrum", "base", "optimism", "polygon", "bnb"),
+        ("ethereum", "arbitrum", "base", "optimism", "polygon", "bsc"),
     ),
     "traderjoe_v2": (
         ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
-        ("avalanche", "arbitrum", "bnb", "ethereum"),
+        ("avalanche", "arbitrum", "bsc", "ethereum"),
     ),
     "uniswap_v3": (
         ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
-        ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "monad"),
+        ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "monad"),
     ),
     "uniswap_v4": (
         ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
         # VIB-4421: extended to the full deployed set (matches UNISWAP_V4 +
-        # the 28 on-chain intent tests). "bnb" is the venue-name alias.
-        ("ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bnb"),
+        # the 28 on-chain intent tests). Canonical "bsc".
+        ("ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc"),
     ),
 }
 

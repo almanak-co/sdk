@@ -123,12 +123,48 @@ def test_known_venues_includes_hyperliquid_and_solana() -> None:
     assert "solana" in KNOWN_VENUES
 
 
-def test_known_venues_uses_bnb_not_bsc() -> None:
-    # The strategy registry still uses the historical "bnb" venue key for
-    # BNB Chain; runtime chain inputs and matrix output normalize to "bsc"
-    # at their own boundaries.
-    assert "bnb" in KNOWN_VENUES
-    assert "bsc" not in KNOWN_VENUES
+def test_known_venues_uses_canonical_bsc_not_bnb_alias() -> None:
+    # VIB-5293: the strategy registry venue
+    # vocabulary IS the ChainRegistry canonical vocabulary. "bnb" is an
+    # alias, tolerated at the manifest boundary via canonicalization —
+    # never a registry key.
+    assert "bsc" in KNOWN_VENUES
+    assert "bnb" not in KNOWN_VENUES
+
+
+def test_chains_alias_canonicalizes_at_construction() -> None:
+    # A registered ChainRegistry alias ("bnb") is accepted and rewritten to
+    # its canonical name, so every downstream consumer of
+    # ConnectorManifest.chains reads one vocabulary.
+    m = ConnectorManifest(
+        name="x",
+        intents=(IntentType.SWAP,),
+        chains=("bnb", "ethereum"),
+    )
+    assert m.chains == ("bsc", "ethereum")
+
+
+def test_chains_non_registry_venue_passes_through() -> None:
+    # Venues the chain registry does not model (Hyperliquid L1) are
+    # first-class KNOWN_VENUES entries and must survive canonicalization
+    # verbatim.
+    m = ConnectorManifest(
+        name="x",
+        intents=(IntentType.PERP_OPEN,),
+        chains=("hyperliquid",),
+    )
+    assert m.chains == ("hyperliquid",)
+
+
+def test_chains_alias_and_canonical_duplicate_rejected() -> None:
+    # Declaring both the alias and the canonical name is a duplicate after
+    # canonicalization — fail loud rather than silently deduping.
+    with pytest.raises(ValueError, match=r"chains contains duplicates"):
+        ConnectorManifest(
+            name="x",
+            intents=(IntentType.SWAP,),
+            chains=("bnb", "bsc"),
+        )
 
 
 def test_register_connector_keyword_only() -> None:
