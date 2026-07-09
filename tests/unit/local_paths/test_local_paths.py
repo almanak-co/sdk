@@ -23,11 +23,13 @@ from almanak.framework.local_paths import (
     LocalDbLockError,
     LocalPathError,
     acquire_local_db_lock,
+    acquire_local_db_lock_with_utility_fallback,
     local_db_path,
     local_log_path,
     local_strategy_db_path,
     release_local_db_lock,
     set_strategy_folder,
+    utility_db_path,
     warn_if_legacy_cwd_db_exists,
 )
 
@@ -189,6 +191,248 @@ def test_t_3761_10_second_acquire_blocks(clean_env, tmp_path) -> None:
     # After release, another acquire works.
     second = acquire_local_db_lock(db_path)
     release_local_db_lock(second)
+
+
+# ---------------------------------------------------------------------------
+# VIB-5550: utility-DB flock contention tolerance
+# ---------------------------------------------------------------------------
+def test_vib_5550_retry_succeeds_when_lock_released_within_budget(clean_env, tmp_path) -> None:
+    """A bounded-retry acquire succeeds once the holder releases.
+
+    Simulated contention: one handle holds the lock; a timer thread
+    releases it mid-budget; the retrying acquire must succeed within
+    the budget instead of dying on the first attempt.
+    """
+    import threading
+    import time as _time
+
+    db_path = tmp_path / "retry.db"
+    holder = acquire_local_db_lock(db_path)
+    threading.Timer(0.3, release_local_db_lock, args=(holder,)).start()
+
+    start = _time.monotonic()
+    handle = acquire_local_db_lock(db_path, timeout=3.0, poll_interval=0.05)
+    elapsed = _time.monotonic() - start
+    try:
+        assert handle is not None
+        assert elapsed < 3.0, f"retry should succeed within budget, took {elapsed:.2f}s"
+    finally:
+        release_local_db_lock(handle)
+
+
+def test_vib_5550_retry_exhausted_still_raises(clean_env, tmp_path) -> None:
+    """An exhausted retry budget still raises LocalDbLockError — never
+    silently proceed without the lock."""
+    import time as _time
+
+    db_path = tmp_path / "exhaust.db"
+    holder = acquire_local_db_lock(db_path)
+    try:
+        start = _time.monotonic()
+        with pytest.raises(LocalDbLockError, match=r"Another gateway already holds"):
+            acquire_local_db_lock(db_path, timeout=0.3, poll_interval=0.05)
+        assert _time.monotonic() - start >= 0.3
+    finally:
+        release_local_db_lock(holder)
+
+
+def test_vib_5550_default_acquire_remains_single_attempt(clean_env, tmp_path) -> None:
+    """timeout=0.0 default preserves the original fail-fast semantics
+    (strategy-DB callers must not wait — two gateways on one strategy DB
+    is a hard invariant violation)."""
+    import time as _time
+
+    db_path = tmp_path / "failfast.db"
+    holder = acquire_local_db_lock(db_path)
+    try:
+        start = _time.monotonic()
+        with pytest.raises(LocalDbLockError):
+            acquire_local_db_lock(db_path)
+        assert _time.monotonic() - start < 0.5
+    finally:
+        release_local_db_lock(holder)
+
+
+def test_vib_5550_non_blocking_path_never_sleeps(clean_env, tmp_path, monkeypatch) -> None:
+    """A non-positive ``timeout`` must be *structurally* single-attempt.
+
+    Gemini review (PR #3213): the retry loop must never reach ``time.sleep``
+    on the ``timeout<=0`` path — coarse ``monotonic`` resolution or a future
+    ``>=``→``>`` edit must not be able to turn the fail-fast default into a
+    poll/wait. Assert ``time.sleep`` is never invoked when the lock is
+    contended at ``timeout=0.0``. A positive budget, by contrast, DOES sleep
+    between attempts.
+    """
+    sleep_spy = MagicMock()
+    monkeypatch.setattr("almanak.framework.local_paths.time.sleep", sleep_spy)
+
+    db_path = tmp_path / "nonblocking.db"
+    holder = acquire_local_db_lock(db_path)
+    try:
+        with pytest.raises(LocalDbLockError):
+            acquire_local_db_lock(db_path)  # timeout=0.0 default
+        sleep_spy.assert_not_called()
+
+        # Sanity: a positive budget takes the retry branch and DOES sleep, so
+        # the assertion above is meaningful (not vacuously true because the
+        # loop can never sleep at all).
+        with pytest.raises(LocalDbLockError):
+            acquire_local_db_lock(db_path, timeout=0.05, poll_interval=0.01)
+        assert sleep_spy.called
+    finally:
+        release_local_db_lock(holder)
+
+
+def test_vib_5550_utility_fallback_allocates_session_db(clean_env, tmp_path) -> None:
+    """Contended canonical utility DB → per-session fallback DB.
+
+    The fallback must: land under utility/sessions/, hold its own lock,
+    export ALMANAK_GATEWAY_DB_PATH so later lenient resolution follows,
+    and warn loudly (never silent).
+    """
+    clean_env.setenv("XDG_DATA_HOME", str(tmp_path))
+    canonical = utility_db_path()
+    holder = acquire_local_db_lock(canonical)
+    log = MagicMock()
+    try:
+        handle, effective = acquire_local_db_lock_with_utility_fallback(canonical, log, retry_budget_s=0.05)
+        try:
+            assert effective != canonical
+            assert effective.parent.parent == canonical.parent / "sessions"
+            assert os.environ["ALMANAK_GATEWAY_DB_PATH"] == str(effective)
+            # Lenient resolution now follows the session DB (with the
+            # ALMANAK_GATEWAY_DB_PATH branch's .resolve() applied).
+            assert local_db_path() == effective.resolve()
+            log.warning.assert_called_once()
+            # The session lock is genuinely held.
+            with pytest.raises(LocalDbLockError):
+                acquire_local_db_lock(effective)
+        finally:
+            release_local_db_lock(handle)
+    finally:
+        release_local_db_lock(holder)
+        os.environ.pop("ALMANAK_GATEWAY_DB_PATH", None)
+
+
+def test_vib_5550_utility_uncontended_keeps_canonical(clean_env, tmp_path) -> None:
+    """No contention → the canonical utility DB is used and no env export
+    happens (warm per-user caches preserved for the common case)."""
+    clean_env.setenv("XDG_DATA_HOME", str(tmp_path))
+    canonical = utility_db_path()
+    log = MagicMock()
+    handle, effective = acquire_local_db_lock_with_utility_fallback(canonical, log, retry_budget_s=0.05)
+    try:
+        assert effective == canonical
+        assert "ALMANAK_GATEWAY_DB_PATH" not in os.environ
+        log.warning.assert_not_called()
+    finally:
+        release_local_db_lock(handle)
+
+
+def test_vib_5550_pinned_path_never_falls_back(clean_env, tmp_path) -> None:
+    """A non-utility (explicitly pinned) path keeps hard-fail semantics —
+    two gateways sharing a pinned path IS the invariant violation."""
+    clean_env.setenv("XDG_DATA_HOME", str(tmp_path))
+    pinned = tmp_path / "pinned" / LOCAL_DB_FILENAME
+    holder = acquire_local_db_lock(pinned)
+    log = MagicMock()
+    try:
+        with pytest.raises(LocalDbLockError, match=r"Another gateway already holds"):
+            acquire_local_db_lock_with_utility_fallback(pinned, log, retry_budget_s=0.05)
+        assert "ALMANAK_GATEWAY_DB_PATH" not in os.environ
+        log.warning.assert_not_called()
+    finally:
+        release_local_db_lock(holder)
+
+
+def test_vib_5550_env_pinned_to_canonical_path_never_falls_back(clean_env, tmp_path) -> None:
+    """An env var explicitly pinned to a path that HAPPENS to equal the
+    canonical utility DB is still a pin — contention must hard-fail, not
+    silently reroute the operator's chosen path to a session DB."""
+    clean_env.setenv("XDG_DATA_HOME", str(tmp_path))
+    canonical = utility_db_path()
+    clean_env.setenv("ALMANAK_GATEWAY_DB_PATH", str(canonical))
+    holder = acquire_local_db_lock(canonical)
+    log = MagicMock()
+    try:
+        with pytest.raises(LocalDbLockError, match=r"Another gateway already holds"):
+            acquire_local_db_lock_with_utility_fallback(canonical, log, retry_budget_s=0.05)
+        assert os.environ["ALMANAK_GATEWAY_DB_PATH"] == str(canonical)  # untouched
+        log.warning.assert_not_called()
+    finally:
+        release_local_db_lock(holder)
+
+
+def test_vib_5550_concurrent_fallbacks_get_distinct_session_dbs(clean_env, tmp_path) -> None:
+    """Two contenders falling back concurrently must not collide with
+    each other — every session DB path is unique.
+
+    The env export is process-scoped in production; simulate the second
+    contender's separate process by clearing the first export before the
+    second call (in-process, the export IS the pin — a restarting managed
+    gateway resolves straight to its own session DB, no second fallback).
+    """
+    clean_env.setenv("XDG_DATA_HOME", str(tmp_path))
+    canonical = utility_db_path()
+    holder = acquire_local_db_lock(canonical)
+    log = MagicMock()
+    try:
+        h1, p1 = acquire_local_db_lock_with_utility_fallback(canonical, log, retry_budget_s=0.05)
+        os.environ.pop("ALMANAK_GATEWAY_DB_PATH", None)  # contender #2 = fresh process env
+        h2, p2 = acquire_local_db_lock_with_utility_fallback(canonical, log, retry_budget_s=0.05)
+        try:
+            assert p1 != p2
+            assert p1 != canonical and p2 != canonical
+        finally:
+            release_local_db_lock(h1)
+            release_local_db_lock(h2)
+    finally:
+        release_local_db_lock(holder)
+        os.environ.pop("ALMANAK_GATEWAY_DB_PATH", None)
+
+
+def test_vib_5550_stale_session_dirs_are_swept(clean_env, tmp_path) -> None:
+    """Session dirs whose owner exited (lock acquirable) are GC'd on the
+    next utility acquisition; live and freshly created sessions are left
+    alone (the age guard protects a contender mid-boot whose flock isn't
+    taken yet)."""
+    import time as _time
+
+    clean_env.setenv("XDG_DATA_HOME", str(tmp_path))
+    canonical = utility_db_path()
+    sessions = canonical.parent / "sessions"
+
+    # Stale session: dir + lock file exist, nobody holds the lock, old
+    # enough to clear the anti-race age guard.
+    stale = sessions / "gw-99999-deadbeef"
+    stale.mkdir(parents=True)
+    (stale / LOCAL_DB_FILENAME).touch()
+    (stale / f"{LOCAL_DB_FILENAME}.gw.lock").touch()
+    backdated = _time.time() - 3600
+    os.utime(stale, (backdated, backdated))
+
+    # Fresh session: unheld lock but created just now — mid-boot window.
+    fresh = sessions / "gw-88888-feedface"
+    fresh.mkdir(parents=True)
+    (fresh / f"{LOCAL_DB_FILENAME}.gw.lock").touch()
+
+    # Live session: its lock is held (backdated so only the flock saves it).
+    live_db = sessions / "gw-11111-cafecafe" / LOCAL_DB_FILENAME
+    live_holder = acquire_local_db_lock(live_db)
+    os.utime(live_db.parent, (backdated, backdated))
+
+    log = MagicMock()
+    try:
+        handle, effective = acquire_local_db_lock_with_utility_fallback(canonical, log, retry_budget_s=0.05)
+        try:
+            assert effective == canonical  # uncontended canonical
+            assert not stale.exists(), "stale session dir should be GC'd"
+            assert fresh.exists(), "fresh session dir must survive (age guard)"
+            assert live_db.parent.exists(), "live session dir must survive the sweep"
+        finally:
+            release_local_db_lock(handle)
+    finally:
+        release_local_db_lock(live_holder)
 
 
 # ---------------------------------------------------------------------------

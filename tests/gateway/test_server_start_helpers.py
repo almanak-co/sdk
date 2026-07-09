@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from almanak.gateway._server_start_helpers import (
+    acquire_local_db_flock,
     build_interceptors,
     build_reflection_service_names,
     initialize_instance_registry,
@@ -564,3 +565,90 @@ class TestValidateDeploymentInvariants:
             "validate_deployment_invariants must run BEFORE build_interceptors. "
             f"Found invariant at offset {invariant_pos}, interceptors at {interceptors_pos}."
         )
+
+
+# ---------------------------------------------------------------------------
+# acquire_local_db_flock — VIB-5550 single-writer flock + utility fallback
+#
+# The RPC-level characterization test patches this helper out wholesale, so
+# its branch selection (hosted no-op / strategy-pinned plain lock / standalone
+# utility-fallback) and the PR #3213 review fix — propagating a fallback
+# session DB into ``settings.gateway_db_path`` so the operational stores
+# (timeline / registry / lifecycle) follow the state backend onto the session
+# DB — are only covered here.
+# ---------------------------------------------------------------------------
+class TestAcquireLocalDbFlock:
+    def _patch_lock_helpers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        resolved,
+        plain=None,
+        fallback=None,
+        hosted: bool = False,
+    ) -> None:
+        monkeypatch.setattr("almanak.framework.deployment.is_hosted", lambda: hosted)
+        monkeypatch.setattr(
+            "almanak.framework.local_paths.warn_if_legacy_cwd_db_exists",
+            MagicMock(),
+        )
+        monkeypatch.setattr(
+            "almanak.gateway._server_start_helpers.resolve_gateway_local_db_path",
+            lambda _settings: resolved,
+        )
+        if plain is not None:
+            monkeypatch.setattr("almanak.framework.local_paths.acquire_local_db_lock", plain)
+        if fallback is not None:
+            monkeypatch.setattr(
+                "almanak.framework.local_paths.acquire_local_db_lock_with_utility_fallback",
+                fallback,
+            )
+
+    def test_hosted_mode_is_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("almanak.framework.deployment.is_hosted", lambda: True)
+        assert acquire_local_db_flock(_settings(standalone=True)) is None
+
+    def test_strategy_pinned_uses_plain_lock(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        resolved = tmp_path / "strat" / "almanak_state.db"
+        plain = MagicMock(return_value=4242)
+        fallback = MagicMock()
+        self._patch_lock_helpers(monkeypatch, resolved=resolved, plain=plain, fallback=fallback)
+        s = _settings(standalone=False, gateway_db_path="/tmp/gw.db")
+
+        handle = acquire_local_db_flock(s)
+
+        assert handle == 4242
+        plain.assert_called_once_with(resolved)
+        fallback.assert_not_called()
+        # Strategy-pinned never touches the operational-store path.
+        assert s.gateway_db_path == "/tmp/gw.db"
+
+    def test_standalone_uncontended_keeps_gateway_db_path(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        resolved = tmp_path / "utility" / "almanak_state.db"
+        # No contention → the fallback returns the SAME (canonical) path.
+        fallback = MagicMock(return_value=(777, resolved))
+        plain = MagicMock()
+        self._patch_lock_helpers(monkeypatch, resolved=resolved, plain=plain, fallback=fallback)
+        s = _settings(standalone=True, gateway_db_path="/tmp/gw.db")
+
+        handle = acquire_local_db_flock(s)
+
+        assert handle == 777
+        plain.assert_not_called()
+        assert fallback.call_args.args[0] == resolved
+        # Effective path == resolved ⇒ no rebind (warm shared gateway.db kept).
+        assert s.gateway_db_path == "/tmp/gw.db"
+
+    def test_standalone_fallback_pins_session_db(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        resolved = tmp_path / "utility" / "almanak_state.db"
+        session = tmp_path / "utility" / "sessions" / "gw-1-abcd" / "almanak_state.db"
+        fallback = MagicMock(return_value=(999, session))
+        self._patch_lock_helpers(monkeypatch, resolved=resolved, fallback=fallback)
+        s = _settings(standalone=True, gateway_db_path="/tmp/gw.db")
+
+        handle = acquire_local_db_flock(s)
+
+        assert handle == 999
+        # Fallback fired (effective != resolved) ⇒ operational stores follow
+        # the state backend onto the private session DB.
+        assert s.gateway_db_path == str(session)

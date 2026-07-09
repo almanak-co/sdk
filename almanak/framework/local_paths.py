@@ -32,7 +32,10 @@ from __future__ import annotations
 
 import errno
 import os
+import secrets
 import shlex
+import shutil
+import time
 from pathlib import Path
 
 LOCAL_DB_FILENAME = "almanak_state.db"
@@ -447,18 +450,28 @@ def _lock_file_path(db_path: Path) -> Path:
     return db_path.with_suffix(db_path.suffix + ".gw.lock")
 
 
-def acquire_local_db_lock(db_path: Path) -> int:
-    """Acquire an exclusive, non-blocking flock on the gateway DB path.
+def acquire_local_db_lock(db_path: Path, *, timeout: float = 0.0, poll_interval: float = 0.05) -> int:
+    """Acquire an exclusive flock on the gateway DB path.
 
     Returns the underlying file descriptor (an ``int``) the caller must
     keep alive for the gateway lifetime. Released by closing the
     descriptor (e.g., garbage collection at process exit, or explicit
     ``release_local_db_lock``).
 
-    Raises :class:`LocalDbLockError` if another gateway already holds
-    the lock — this is the OS-level enforcement of the 1 strategy = 1 DB
-    = 1 gateway invariant. The error message names the conflicting path
-    so the operator can locate the other process.
+    ``timeout`` (VIB-5550) is a *bounded* retry budget in seconds: when
+    the lock is contended, re-attempt every ``poll_interval`` seconds
+    until the budget elapses. The default ``0.0`` preserves the original
+    single-attempt, non-blocking semantics — strategy-DB callers keep
+    failing fast, because two gateways on one strategy DB is a hard
+    invariant violation that waiting must never mask. Only utility-mode
+    callers (see :func:`acquire_local_db_lock_with_utility_fallback`)
+    opt in to a non-zero budget to absorb transient lock-release races
+    between back-to-back CLI sessions.
+
+    Raises :class:`LocalDbLockError` if another gateway still holds the
+    lock after the budget — this is the OS-level enforcement of the
+    1 strategy = 1 DB = 1 gateway invariant. The error message names the
+    conflicting path so the operator can locate the other process.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = _lock_file_path(db_path)
@@ -470,19 +483,28 @@ def acquire_local_db_lock(db_path: Path) -> int:
         # that don't actually call this function).
         import fcntl
 
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
-                os.close(fd)
-                raise LocalDbLockError(
-                    f"Another gateway already holds the lock on {db_path}. "
-                    "Plan §B requires 1 strategy = 1 DB = 1 gateway. "
-                    "Stop the other gateway or use a different "
-                    "ALMANAK_STRATEGY_FOLDER / ALMANAK_GATEWAY_DB_PATH."
-                ) from exc
-            os.close(fd)
-            raise
+        # ``timeout <= 0`` (the strategy-DB default) is strictly
+        # single-attempt: ``deadline is None`` makes the ``time.sleep`` below
+        # structurally unreachable, so a contended lock raises on the first
+        # failed attempt and can never wait — waiting on a strategy DB would
+        # mask a 1-DB-1-gateway violation. Only a positive budget (the utility
+        # fallback) retries, every ``poll_interval`` until it elapses.
+        deadline = time.monotonic() + timeout if timeout > 0.0 else None
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    raise
+                if deadline is None or time.monotonic() >= deadline:
+                    raise LocalDbLockError(
+                        f"Another gateway already holds the lock on {db_path}. "
+                        "Plan §B requires 1 strategy = 1 DB = 1 gateway. "
+                        "Stop the other gateway or use a different "
+                        "ALMANAK_STRATEGY_FOLDER / ALMANAK_GATEWAY_DB_PATH."
+                    ) from exc
+                time.sleep(max(poll_interval, 0.01))
     except Exception:
         try:
             os.close(fd)
@@ -495,6 +517,164 @@ def acquire_local_db_lock(db_path: Path) -> int:
     except OSError:
         pass
     return fd  # caller owns; release via release_local_db_lock(fd)
+
+
+# ---------------------------------------------------------------------------
+# Utility-DB contention policy (VIB-5550)
+# ---------------------------------------------------------------------------
+# The 1 strategy = 1 DB = 1 gateway flock is absolute for strategy DBs, but
+# utility / standalone sessions (``almanak ax``, intent tests) all fall back
+# to the SAME per-user utility DB — so N concurrent ax processes serialized
+# on one implicit default and N-1 of them died with LocalDbLockError. The
+# documented workaround was a hand-set per-process ALMANAK_GATEWAY_DB_PATH;
+# the helpers below automate exactly that: first contender keeps the
+# canonical utility DB (warm caches preserved), later contenders get a
+# private per-session utility DB. Explicitly pinned paths (ALMANAK_STATE_DB,
+# strategy folders, operator-set ALMANAK_GATEWAY_DB_PATH) NEVER fall back —
+# a pinned path shared by two gateways is the real invariant violation the
+# flock exists to catch, and it still fails loudly.
+UTILITY_LOCK_RETRY_BUDGET_S = 2.0
+_UTILITY_SESSIONS_DIRNAME = "sessions"
+_UTILITY_SESSION_SWEEP_LIMIT = 50
+_UTILITY_SESSION_MIN_AGE_S = 300.0
+
+
+def _utility_sessions_root() -> Path:
+    """Parent directory for per-session utility DBs (VIB-5550)."""
+    return _utility_data_dir() / _UTILITY_SESSIONS_DIRNAME
+
+
+def _utility_db_reached_implicitly(db_path: Path) -> bool:
+    """True when ``db_path`` is the canonical utility DB reached via the
+    resolver's *implicit* fallback branch — i.e. no env var pinned it.
+
+    Replays the :func:`_resolve_db_path` ladder: if ``ALMANAK_STATE_DB``,
+    a resolvable ``ALMANAK_STRATEGY_FOLDER``, or ``ALMANAK_GATEWAY_DB_PATH``
+    is set, an earlier branch won (or the operator pinned a path that merely
+    *happens* to equal the utility default) — either way the path is pinned
+    and contention on it must keep the hard-fail semantics.
+    """
+    if db_path != utility_db_path():
+        return False
+    explicit = os.environ.get("ALMANAK_STATE_DB")
+    if explicit and explicit.strip():
+        return False
+    if _strategy_folder() is not None:
+        return False
+    explicit_gw = os.environ.get("ALMANAK_GATEWAY_DB_PATH")
+    if explicit_gw and explicit_gw.strip():
+        return False
+    return True
+
+
+def _sweep_stale_utility_sessions() -> None:
+    """Best-effort GC of per-session utility DB dirs whose owner is gone.
+
+    A session dir is provably stale when its ``.gw.lock`` can be flocked:
+    the owning gateway held that lock for its whole lifetime, so an
+    acquirable lock means the owner exited (or crashed). Session dir names
+    are unique per boot (pid + random token), so no new gateway ever locks
+    an existing session dir — deleting while holding its flock is safe.
+
+    Dirs younger than ``_UTILITY_SESSION_MIN_AGE_S`` are skipped: a
+    contender mid-boot has created its session dir but may not have taken
+    the flock yet, and flocking that window would both kill the contender
+    and delete its fresh DB. Age is an anti-race guard only — the flock
+    stays the correctness check for anything old enough to sweep.
+
+    Everything is wrapped best-effort: a failed sweep only leaks disk, it
+    must never block a gateway boot.
+    """
+    root = _utility_sessions_root()
+    if not root.is_dir():
+        return
+    import fcntl
+
+    try:
+        entries = sorted(root.iterdir())[:_UTILITY_SESSION_SWEEP_LIMIT]
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        try:
+            if time.time() - entry.stat().st_mtime < _UTILITY_SESSION_MIN_AGE_S:
+                continue  # too fresh — may belong to a contender mid-boot
+        except OSError:
+            continue
+        lock_path = _lock_file_path(entry / LOCAL_DB_FILENAME)
+        try:
+            fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+        except OSError:
+            continue
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                continue  # live owner — leave it alone
+            shutil.rmtree(entry, ignore_errors=True)
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def acquire_local_db_lock_with_utility_fallback(
+    db_path: Path,
+    logger,
+    *,
+    retry_budget_s: float = UTILITY_LOCK_RETRY_BUDGET_S,
+) -> tuple[int, Path]:
+    """Acquire the local-DB flock for a *standalone / utility* session.
+
+    Behaviour by path (VIB-5550):
+
+    * ``db_path`` is NOT the *implicitly reached* canonical utility DB
+      (strategy folder, ``ALMANAK_STATE_DB``, operator-set
+      ``ALMANAK_GATEWAY_DB_PATH`` — even one pinned to the utility path):
+      delegate to :func:`acquire_local_db_lock` unchanged — contention on
+      an explicitly pinned path still raises :class:`LocalDbLockError`
+      immediately, because that IS the 1 DB = 1 gateway violation.
+    * ``db_path`` IS the canonical utility DB (the implicit per-user
+      default nobody pinned): retry briefly (absorbs the lock-release race
+      between back-to-back CLI sessions), then fall back to a fresh
+      per-session utility DB under ``utility/sessions/`` and export
+      ``ALMANAK_GATEWAY_DB_PATH`` so every later lenient resolution in
+      this process (state backend, logs, deferred accounting log) lands on
+      the same session DB. The fallback is logged as a WARNING naming both
+      paths — never silent. The session DB starts empty; that is the same
+      contract as the documented per-process ``ALMANAK_GATEWAY_DB_PATH``
+      workaround this replaces (utility-DB contents are per-session caches
+      and scratch state, never strategy accounting — strategy-scoped
+      writers use the strict resolver, which refuses utility paths).
+
+    Returns ``(lock_fd, effective_db_path)``. A genuine failure to lock
+    ANY path still raises — the caller never proceeds without a lock.
+    """
+    if not _utility_db_reached_implicitly(db_path):
+        return acquire_local_db_lock(db_path), db_path
+
+    try:
+        _sweep_stale_utility_sessions()
+    except Exception:  # noqa: BLE001 — GC is best-effort by design
+        pass
+
+    try:
+        return acquire_local_db_lock(db_path, timeout=retry_budget_s), db_path
+    except LocalDbLockError:
+        session_db = _utility_sessions_root() / f"gw-{os.getpid()}-{secrets.token_hex(4)}" / LOCAL_DB_FILENAME
+        handle = acquire_local_db_lock(session_db)
+        os.environ["ALMANAK_GATEWAY_DB_PATH"] = str(session_db)
+        logger.warning(
+            "Utility DB %s is locked by another gateway; using per-session "
+            "utility DB %s instead (VIB-5550). This session starts with a "
+            "fresh cache. Exported ALMANAK_GATEWAY_DB_PATH so this process "
+            "resolves all local paths to the session DB.",
+            db_path,
+            session_db,
+        )
+        return handle, session_db
 
 
 def release_local_db_lock(handle: int | None) -> None:

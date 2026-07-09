@@ -281,6 +281,14 @@ def acquire_local_db_flock(settings: GatewaySettings) -> int | None:
     OS-level enforcement of the 1 strategy = 1 DB = 1 gateway invariant.
     No-op in hosted mode (Postgres has its own concurrency model).
 
+    Standalone / utility sessions (VIB-5550): when the resolved path is the
+    implicit per-user utility DB and another gateway already holds its lock,
+    fall back to a fresh per-session utility DB instead of dying — N
+    concurrent ``almanak ax`` processes were all funnelled onto one implicit
+    default. Strategy-pinned gateways and explicitly pinned paths keep the
+    original hard-fail semantics; the invariant is untouched where it
+    matters.
+
     Also emits a one-time operator instruction when a legacy
     ``./almanak_state.db`` is detected in cwd (plan §7 R1 — instructions
     only, no auto-mv).
@@ -300,12 +308,38 @@ def acquire_local_db_flock(settings: GatewaySettings) -> int | None:
 
     from almanak.framework.local_paths import (
         acquire_local_db_lock,
+        acquire_local_db_lock_with_utility_fallback,
         warn_if_legacy_cwd_db_exists,
     )
 
     warn_if_legacy_cwd_db_exists(logger)
     db_path = resolve_gateway_local_db_path(settings)
-    handle = acquire_local_db_lock(db_path)
+    if settings.standalone:
+        # Utility-mode contention tolerance (VIB-5550). The helper only
+        # falls back when db_path is the canonical utility DB; a standalone
+        # gateway pinned to a strategy folder / explicit path still
+        # hard-fails on contention.
+        handle, effective_path = acquire_local_db_lock_with_utility_fallback(db_path, logger)
+        if effective_path != db_path:
+            # Fallback fired: the canonical utility DB was contended and we
+            # locked a fresh per-session DB instead. The fallback exports
+            # ALMANAK_GATEWAY_DB_PATH so resolver-based consumers (the state
+            # backend via ``resolve_gateway_local_db_path``, logs, the
+            # deferred accounting log) follow it — but the gateway's own
+            # operational stores (timeline / instance registry / lifecycle)
+            # read ``settings.gateway_db_path``, which that env export does
+            # NOT feed. Pin it explicitly (the field is mutable and no boot
+            # phase before this one reads it) so a fallback gateway is fully
+            # self-contained on its session DB. Without this, standalone
+            # gateways — now able to coexist because the fallback stops them
+            # dying on the flock — would interleave registry / lifecycle /
+            # timeline writes on the shared ~/.config/almanak/gateway.db, and
+            # each boot's reconcile-stale would mark the others' RUNNING rows
+            # STALE.
+            settings.gateway_db_path = str(effective_path)
+        db_path = effective_path
+    else:
+        handle = acquire_local_db_lock(db_path)
     mode = "STANDALONE" if settings.standalone else "STRATEGY-PINNED"
     logger.info("Local DB flock acquired on %s (%s, single-writer guard)", db_path, mode)
     return handle
