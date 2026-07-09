@@ -91,6 +91,57 @@ def is_gateway_running(port: int = TEST_GATEWAY_PORT) -> bool:
 # =============================================================================
 
 
+def _pin_chain_clock_to_fork_time(rpc_url: str, chain: str) -> None:
+    """Pin the Anvil node clock to the fork block's timestamp (deterministic CI).
+
+    The intent-test workflow pins the fork BLOCK (``resolve-fork-block.sh``),
+    but the node clock kept following the runner's wall clock — so every mined
+    block and every ``eth_call`` context carried ``now``, hours past the pinned
+    block once the CI pin aged. Time-dependent on-chain math then drifts with
+    wall clock even with ZERO trades: Curve CryptoSwap's internal EMA price
+    oracle extrapolates with ``block.timestamp`` when READ (measured ~5 bps of
+    executed-floor drift over ~6 days of clock skew on tricrypto2 — a real,
+    second-order nondeterminism vector; the dominant vector for the 2026-07-04
+    repo-wide red was live-CoinGecko-vs-frozen-fork price skew, fixed in the
+    affected test's fork-derived ``price_oracle`` override).
+
+    Pinning time completes the block pin: chain time ≈ fork time for the whole
+    session (subsequent blocks stamp parent+1 because the clock stays behind
+    the chain head). Tests that genuinely need real time (the Across bridge
+    tests' deadline checks) already set FORWARD timestamps explicitly via
+    ``evm_setNextBlockTimestamp``, which remains legal.
+
+    Best-effort by design: a failed pin must never fail the boot — the
+    calibrated tests' own assertions are the backstop, and the warning below
+    makes the cause obvious in the job log.
+    """
+    try:
+        w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
+        fork_tip_ts = int(w3.eth.get_block("latest")["timestamp"])
+        # make_request returns JSON-RPC errors as payloads (no raise) — check
+        # them, and verify the pin actually TOOK, so a rejected/unsupported RPC
+        # can never masquerade as success.
+        for method, params in (("evm_setTime", [fork_tip_ts + 1]), ("evm_mine", [])):
+            resp = w3.provider.make_request(method, params)
+            if isinstance(resp, dict) and resp.get("error"):
+                raise RuntimeError(f"{method} rejected: {resp['error']}")
+        pinned_ts = int(w3.eth.get_block("latest")["timestamp"])
+        # The mined block must carry ~the fork-tip timestamp, not wall clock.
+        # Allow a small tolerance for anvil's own clock granularity.
+        if abs(pinned_ts - (fork_tip_ts + 1)) > 5:
+            raise RuntimeError(
+                f"pin did not take effect: mined block ts={pinned_ts}, expected ~{fork_tip_ts + 1} "
+                f"(wall clock {int(time.time())})"
+            )
+        wall = int(time.time())
+        logger.info(
+            f"Anvil clock pinned to fork time for {chain}: chain ts={pinned_ts}, "
+            f"wall clock={wall} (delta {wall - pinned_ts}s frozen out)"
+        )
+    except Exception as e:  # noqa: BLE001 — determinism pin is best-effort, never blocks boot
+        logger.warning(f"Could not pin Anvil clock to fork time for {chain}: {e}")
+
+
 class AnvilFixture:
     """Manages an Anvil fork instance for testing.
 
@@ -173,6 +224,7 @@ class AnvilFixture:
             self._restore_anvil_port_env()
             raise RuntimeError(f"Anvil for {self.chain} failed to start: {self._error}")
 
+        _pin_chain_clock_to_fork_time(self.get_rpc_url(), self.chain)
         logger.info(f"Anvil fixture started: chain={self.chain}, port={self.port}")
 
     def stop(self) -> None:
@@ -332,6 +384,7 @@ class AnvilFixture:
                 self.stop()
                 return False
 
+            _pin_chain_clock_to_fork_time(self.get_rpc_url(), self.chain)
             logger.info(f"Anvil fixture restarted: chain={self.chain}, port={self.port}")
             return True
         except Exception as e:
@@ -375,9 +428,8 @@ class AnvilFixture:
             if self.fork_block_number is not None:
                 fork_block_number = self.fork_block_number
             else:
-                fork_block_env = (
-                    os.environ.get(f"ANVIL_FORK_BLOCK_{chain_for_manager.upper()}")
-                    or os.environ.get("ANVIL_FORK_BLOCK")
+                fork_block_env = os.environ.get(f"ANVIL_FORK_BLOCK_{chain_for_manager.upper()}") or os.environ.get(
+                    "ANVIL_FORK_BLOCK"
                 )
                 fork_block_number = int(fork_block_env) if fork_block_env else None
 

@@ -91,6 +91,65 @@ ADVERSE_DUMP = Decimal("65000")  # ≈ 400 bps drift (> 200 residual → victim 
 _USDT_FUNDING = Decimal("80000000")  # 80M USDT: covers victim + the largest dump
 
 
+# Minimal ABI for the tricrypto get_dy quote used to derive fork-state prices.
+_GET_DY_ABI = [
+    {
+        "name": "get_dy",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [
+            {"name": "i", "type": "uint256"},
+            {"name": "j", "type": "uint256"},
+            {"name": "dx", "type": "uint256"},
+        ],
+        "outputs": [{"name": "", "type": "uint256"}],
+    }
+]
+
+# Small probe (1k USDT) — negligible-impact spot read used ONLY to derive the
+# fork-consistent price ratio below; executed as an eth_call (no state change).
+_PRICE_PROBE_USDT = 1_000
+
+
+@pytest.fixture(scope="module")
+def price_oracle(web3: Web3, _eoa_funded_wallet: str) -> dict[str, Decimal]:
+    """Fork-state-derived prices — overrides the session live-CoinGecko oracle.
+
+    Depends on ``_eoa_funded_wallet`` explicitly: that module fixture reverts
+    the shared fork to session-pristine state, and the probe below MUST read
+    the pristine pool — not whatever a prior module left behind. Without the
+    explicit edge the ordering rests on test-signature parameter order, which
+    is the same implicit-nondeterminism class this override exists to remove.
+
+    THE determinism fix for this module (repo-wide CI red, 2026-07-04/05): the
+    session ``price_oracle`` fixture fetches LIVE CoinGecko prices, but this
+    test executes against a pool FROZEN at the pinned fork block. The swap
+    oracle guard anchors the executed floor to the oracle price, so the moment
+    the real market drifts from the pin-era price the oracle branch starts
+    binding and the calibrated ``min_out == quote × (1 − 200 bps)`` assertion
+    breaks — green at a fresh pin (fork ≈ live market), red hours/days later,
+    monotonically worse as the market trends away. Same block, same code, only
+    the wall-market moved.
+
+    Deriving the oracle input from the pool's own frozen spot makes the anchor
+    agree with the world the test actually runs in: the RESIDUAL branch (the
+    thing under test) is the binding constraint at ANY fork pin and ANY market,
+    forever. USDT is the numeraire (≈$1); WETH is priced by a negligible-impact
+    ``get_dy`` eth_call on the pool itself.
+    """
+    pool = web3.eth.contract(address=Web3.to_checksum_address(POOL_ADDRESS), abi=_GET_DY_ABI)
+    dx = _PRICE_PROBE_USDT * 10**6  # USDT: 6 decimals
+    dy = pool.functions.get_dy(0, 2, dx).call()  # USDT (i=0) -> WETH (j=2)
+    assert dy > 0, "fork-state price probe returned zero WETH — pool unreadable"
+    weth_usd = (Decimal(dx) / Decimal(10**6)) / (Decimal(dy) / Decimal(10**18))
+    return {
+        "USDT": Decimal("1"),
+        "USDC": Decimal("1"),
+        "WETH": weth_usd,
+        "ETH": weth_usd,
+    }
+
+
 def _snapshot(web3: Web3) -> str:
     return web3.provider.make_request("evm_snapshot", [])["result"]
 
