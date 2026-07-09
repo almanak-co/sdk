@@ -17,7 +17,9 @@ import almanak.framework.data.pools.reader as reader_module
 from almanak.connectors._strategy_base.pool_reader import PoolReaderSpec
 from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
 from almanak.framework.data.pools.reader import (
+    _READER_CLASS_BY_KIND,
     _READER_CLASS_BY_PROTOCOL,
+    CurvePoolReader,
     PoolReaderRegistry,
     UniswapV3PoolPriceReader,
 )
@@ -100,6 +102,126 @@ def test_spec_without_dedicated_class_uses_spec_bound_base(monkeypatch: pytest.M
     assert reader._factory_addresses is fake.factory_addresses
     assert "fakeswap_v3" in registry.protocols_for_chain("ethereum")
     assert "fakeswap_v3" not in registry.protocols_for_chain("base")
+
+
+# ---------------------------------------------------------------------------
+# reader_kind dispatch (Curve — non-slot0 read shapes)
+# ---------------------------------------------------------------------------
+
+
+def test_kind_map_pins_default_and_curve() -> None:
+    """The kind map owns read-shape dispatch: v3_slot0 -> base, curve_pool -> Curve.
+
+    The default kind MUST stay the spec-bound base reader (that is what the
+    fakeswap guard above relies on), and Curve's shape must never regress to
+    a slot0 read — a slot0 call on a Curve pool reverts, and a "successful"
+    wrong-ABI decode would be a garbage price on a money path.
+    """
+    assert _READER_CLASS_BY_KIND["v3_slot0"] is UniswapV3PoolPriceReader
+    assert _READER_CLASS_BY_KIND["curve_pool"] is CurvePoolReader
+    default_kind = PoolReaderSpec(protocol="x", factory_addresses={}).reader_kind
+    assert default_kind == "v3_slot0"
+
+
+def test_registry_reader_kind_accessor() -> None:
+    """Consumers gate v3-only lanes on ``reader_kind`` (slippage tick sim,
+    gateway slot0 LWAP profile) — pin the accessor's contract: manifest kinds
+    surface as declared, custom-registered classes (no manifest spec, v3-family
+    by ``register_protocol``'s contract) report the v3 default."""
+    registry = PoolReaderRegistry(rpc_call=_noop_rpc)
+    assert registry.reader_kind("curve") == "curve_pool"
+    assert registry.reader_kind("uniswap_v3") == "v3_slot0"
+    registry.register_protocol("customswap", UniswapV3PoolPriceReader)
+    assert registry.reader_kind("customswap") == "v3_slot0"
+
+
+def test_curve_dispatches_via_kind_map_not_protocol_map() -> None:
+    """Curve has NO dedicated protocol-map entry — its class binds via reader_kind."""
+    assert "curve" not in _READER_CLASS_BY_PROTOCOL
+    registry = PoolReaderRegistry(rpc_call=_noop_rpc)
+    reader = registry.get_reader("ethereum", "curve")
+    assert type(reader) is CurvePoolReader
+
+
+def test_curve_reader_binds_its_manifest_spec() -> None:
+    """Drift guard (kind-map analogue of the protocol-map guard above).
+
+    CurvePoolReader carries NO class-level spec attributes and no protocol
+    literal (coupling ratchet, blueprint 22) — identity binds per-instance
+    from the connector spec at registry construction. Bare construction
+    without a spec must fail loudly, never silently inherit the v3 base
+    defaults.
+    """
+    spec = POOL_READER_REGISTRY.require("curve")
+    assert spec.reader_kind == "curve_pool"
+    registry = PoolReaderRegistry(rpc_call=_noop_rpc)
+    reader = registry.get_reader("ethereum", "curve")
+    assert reader.protocol_name == spec.protocol
+    assert reader._factory_addresses is spec.factory_addresses
+    assert reader._known_pools is spec.known_pools
+    assert reader._candidate_pool_keys == spec.candidate_pool_keys
+    # No fee-tier discriminator: the best-pool sweep must be a single lookup.
+    assert spec.candidate_pool_keys == (0,)
+    with pytest.raises(ValueError, match="kind-dispatched"):
+        CurvePoolReader(rpc_call=_noop_rpc)
+
+
+def test_curve_chain_gating_comes_from_curated_pools() -> None:
+    """Curve is claimed exactly on chains with curated pools (no factory table)."""
+    registry = PoolReaderRegistry(rpc_call=_noop_rpc)
+    spec = POOL_READER_REGISTRY.require("curve")
+    assert spec.factory_addresses == {}
+    for chain in ("ethereum", "arbitrum", "optimism", "polygon", "base"):
+        assert "curve" in registry.protocols_for_chain(chain), chain
+        assert spec.known_pools.get(chain), f"no curated pools gate {chain}"
+    assert "curve" not in registry.protocols_for_chain("solana")
+
+
+def test_unknown_reader_kind_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spec declaring a shape the framework cannot read must fail at build.
+
+    Silently falling back to the slot0 base reader would read a foreign ABI
+    as a price — the registry must refuse to construct instead.
+    """
+    bogus = PoolReaderSpec(
+        protocol="mysteryswap",
+        factory_addresses={"ethereum": "0x000000000000000000000000000000000000dEaD"},
+        reader_kind="balancer_weighted",
+    )
+    real_all = POOL_READER_REGISTRY.all
+
+    def _all_with_bogus() -> tuple[Any, ...]:
+        return (*real_all(), bogus)
+
+    monkeypatch.setattr(POOL_READER_REGISTRY, "all", _all_with_bogus)
+    with pytest.raises(ValueError, match="unknown reader_kind 'balancer_weighted'"):
+        PoolReaderRegistry(rpc_call=_noop_rpc)
+
+
+def test_new_curve_shaped_spec_needs_only_a_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A NEW curve-shaped connector binds CurvePoolReader via kind — zero framework edits."""
+    fake = PoolReaderSpec(
+        protocol="fakecurve",
+        factory_addresses={},
+        known_pools={"ethereum": {("0xaa", "0xbb", 0): "0x000000000000000000000000000000000000dEaD"}},
+        candidate_pool_keys=(0,),
+        reader_kind="curve_pool",
+    )
+    real_all = POOL_READER_REGISTRY.all
+
+    def _all_with_fake() -> tuple[Any, ...]:
+        return (*real_all(), fake)
+
+    monkeypatch.setattr(POOL_READER_REGISTRY, "all", _all_with_fake)
+    registry = PoolReaderRegistry(rpc_call=_noop_rpc)
+
+    assert "fakecurve" not in _READER_CLASS_BY_PROTOCOL
+    reader = registry.get_reader("ethereum", "fakecurve")
+    assert type(reader) is CurvePoolReader
+    assert reader.protocol_name == "fakecurve"
+    assert reader._known_pools is fake.known_pools
+    assert "fakecurve" in registry.protocols_for_chain("ethereum")
+    assert "fakecurve" not in registry.protocols_for_chain("base")
 
 
 def test_register_protocol_custom_class_keeps_legacy_constructor_contract() -> None:

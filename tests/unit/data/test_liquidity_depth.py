@@ -639,6 +639,7 @@ class TestSlippageEstimatorV3:
             reader.resolve_best_pool_address.return_value = None
 
         registry.protocols_for_chain.return_value = ["uniswap_v3"]
+        registry.reader_kind.return_value = "v3_slot0"
         registry.get_reader.return_value = reader
 
         return registry

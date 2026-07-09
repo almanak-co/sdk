@@ -1140,6 +1140,19 @@ class SlippageEstimator:
 
     # ----- internal helpers -----
 
+    def _is_tick_simulatable(self, protocol: str) -> bool:
+        """True when the protocol's pools speak the v3 slot0/tick ABI.
+
+        The estimator's pool lane is the V3 tick-walk simulation; any other
+        ``reader_kind`` (Curve's get_dy shape, and every future non-slot0
+        kind automatically) is excluded so those protocols route through the
+        connector swap-quote fallback instead. Registries without a
+        ``reader_kind`` accessor (e.g. the backtest null registry) predate
+        non-slot0 kinds and are all-v3 by construction.
+        """
+        kind_of = getattr(self._pool_reader_registry, "reader_kind", None)
+        return kind_of is None or kind_of(protocol) == "v3_slot0"
+
     def _resolve_pool(
         self,
         token_in: str,
@@ -1155,6 +1168,12 @@ class SlippageEstimator:
         resolved by sweeping each protocol's candidate keys — fee tiers for
         Uniswap-style DEXs, tick spacings for Aerodrome Slipstream — so a blind
         ``fee_tier=3000`` no longer wrongly fails tick-spacing-keyed pools.
+
+        Only ``v3_slot0``-kind protocols participate in resolution: the
+        estimator's downstream math is the V3 tick-walk simulation, and a
+        resolved non-slot0 pool (e.g. Curve, ``tick=None``) would be fed into
+        the tick reads INSTEAD of reaching the connector swap-quote fallback
+        (ALM-2896), which only engages when no pool resolves here.
         """
         if self._pool_reader_registry is None:
             return None
@@ -1163,6 +1182,8 @@ class SlippageEstimator:
 
         for proto in protocols:
             try:
+                if not self._is_tick_simulatable(proto):
+                    continue
                 reader = self._pool_reader_registry.get_reader(chain, proto)
                 if fee_tier is None:
                     addr = reader.resolve_best_pool_address(token_in, token_out, chain)
@@ -1189,11 +1210,16 @@ class SlippageEstimator:
                 reason="No pool reader registry available",
             )
 
-        # Try all protocols for the chain
+        # Try all protocols for the chain. Same v3_slot0 gate as
+        # _resolve_pool: the returned PoolPrice feeds the tick-walk
+        # simulation, so a non-slot0 reader's envelope (tick=None) must
+        # never be served here even for an explicitly passed pool address.
         protocols = [protocol] if protocol else self._pool_reader_registry.protocols_for_chain(chain)
 
         for proto in protocols:
             try:
+                if not self._is_tick_simulatable(proto):
+                    continue
                 reader = self._pool_reader_registry.get_reader(chain, proto)
                 return reader.read_pool_price(pool_address, chain)
             except Exception:

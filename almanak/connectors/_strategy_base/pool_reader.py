@@ -13,7 +13,7 @@ KnownPoolsByChain = Mapping[str, Mapping[KnownPoolKey, str]]
 
 @dataclass(frozen=True)
 class PoolReaderSpec:
-    """Static inputs needed to build a generic CL pool reader for a protocol."""
+    """Static inputs needed to build a generic pool reader for a protocol."""
 
     protocol: str
     factory_addresses: Mapping[str, str]
@@ -24,6 +24,14 @@ class PoolReaderSpec:
     # (VIB-4924 C1): fee tiers for the uint24 v3 family, tick spacings for the
     # int24 Slipstream family. Default = the canonical Uniswap fee tiers.
     candidate_pool_keys: tuple[int, ...] = (100, 500, 3000, 10000)
+    # Read-shape discriminator: which framework reader implementation can read
+    # this protocol's pools. ``"v3_slot0"`` is the Uniswap-V3 slot0() family
+    # (all v3 forks + Slipstream); protocols with a different on-chain shape
+    # (e.g. Curve's get_dy/coins ABI) declare their own kind and the framework
+    # maps each kind to a reader class. A spec whose kind the framework does
+    # not know fails loudly at registry construction — it is a manifest bug,
+    # never a silent mis-read.
+    reader_kind: str = "v3_slot0"
 
     @property
     def keys(self) -> tuple[str, ...]:

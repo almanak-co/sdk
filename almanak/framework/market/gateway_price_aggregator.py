@@ -196,14 +196,21 @@ class GatewayMarketPriceAggregator(PriceAggregator):
 
         # Resolve candidate pools across protocols × fee tiers (known-pools +
         # factory.getPool over the gateway eth_call proxy). The gateway read is
-        # protocol-agnostic (slot0/liquidity), so all resolved pools go in one
-        # call under the uniswap_v3 read profile (the registered LWAP-capable
-        # dex); unreadable pools are skipped server-side.
+        # protocol-agnostic ACROSS THE SLOT0 FAMILY (slot0/liquidity), so all
+        # resolved pools go in one call under the uniswap_v3 read profile (the
+        # registered LWAP-capable dex); unreadable pools are skipped
+        # server-side. Non-slot0 reader kinds (e.g. Curve's get_dy shape) are
+        # excluded up front — their pools cannot be read under this profile,
+        # so shipping them would only add doomed server-side reads; the
+        # framework PriceAggregator.lwap lane covers those protocols with
+        # their own reader.
         pool_addresses: list[str] = []
         seen: set[str] = set()
         base_addr: str | None = None
         quote_addr: str | None = None
         for protocol in protocols:
+            if self._registry.reader_kind(protocol) != "v3_slot0":
+                continue
             try:
                 reader = self._registry.get_reader(chain_lower, protocol)
             except ValueError:

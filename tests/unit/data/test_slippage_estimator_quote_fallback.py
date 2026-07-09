@@ -82,11 +82,24 @@ _CURVE = {
 }
 
 
-def _estimator(*, swap_quote_registry=None, quote_ctx=None, token_resolver=None):
+class _StubRegistryTokenResolver:
+    """Pool-reader-registry-side resolver (duck type: ``.resolve`` -> ``.address``).
+
+    Mirrors the live builder wiring, where the PoolReaderRegistry carries a
+    TokenResolver — the configuration under which the curated Curve 2pool
+    actually resolves for the USDC.e/USDT pair.
+    """
+
+    def resolve(self, token: str, chain: str) -> _StubResolved:  # noqa: ARG002
+        addr, dec = _StubTokenResolver._MAP[token.upper()]
+        return _StubResolved(addr, dec)
+
+
+def _estimator(*, swap_quote_registry=None, quote_ctx=None, token_resolver=None, pool_registry=None):
     reader = LiquidityDepthReader(rpc_call=lambda *a: b"\x00" * 32)
     return SlippageEstimator(
         liquidity_reader=reader,
-        pool_reader_registry=PoolReaderRegistry(rpc_call=lambda *a: b"\x00" * 32),
+        pool_reader_registry=pool_registry or PoolReaderRegistry(rpc_call=lambda *a: b"\x00" * 32),
         swap_quote_registry=swap_quote_registry,
         quote_ctx=quote_ctx,
         token_resolver=token_resolver,
@@ -133,6 +146,56 @@ def test_curve_with_quote_fallback_returns_estimate():
     assert estimate.recommended_max_size > 0
     # The strategy gate divides price_impact_bps by 10000 -> finite slippage -> LP_OPEN.
     assert Decimal(estimate.price_impact_bps) / Decimal("10000") == Decimal("0.001")
+
+
+def test_curve_pool_resolution_does_not_hijack_quote_fallback():
+    """PR #3204 (codex P1): with the Curve pool reader manifest registered AND
+    a TokenResolver on the pool-reader registry (the live builder wiring), the
+    curated Curve 2pool resolves for USDC.e/USDT on arbitrum. That pool must
+    NOT be fed into the V3 tick-walk lane (its PoolPrice has tick=None) —
+    protocol='curve' still routes through the connector swap-quote fallback.
+    Without the reader_kind gate this exact call regressed back to the
+    permanent-HOLD DataUnavailableError this file exists to prevent.
+    """
+    pool_registry = PoolReaderRegistry(
+        rpc_call=lambda *a: b"\x00" * 32,
+        token_resolver=_StubRegistryTokenResolver(),
+    )
+    # Guard the guard: with the resolver wired, the Curve reader DOES resolve
+    # the curated pool — the estimator must skip it by reader_kind, not
+    # accidentally by failed resolution.
+    curve_reader = pool_registry.get_reader("arbitrum", "curve")
+    assert curve_reader.resolve_pool_address("USDC.e", "USDT", "arbitrum") is not None
+
+    quote_registry = _FakeSwapQuoteRegistry(registered=True, result=_FakeQuoteResult(amount_out=4_995_000))
+    est = _estimator(
+        swap_quote_registry=quote_registry,
+        quote_ctx=object(),
+        token_resolver=_StubTokenResolver(),
+        pool_registry=pool_registry,
+    )
+
+    envelope = est.estimate_slippage(**_CURVE)
+
+    assert quote_registry.call_count == 1
+    assert envelope.value.price_impact_bps == 10
+
+
+def test_protocol_sweep_never_returns_non_v3_pool():
+    """The protocol=None sweep must never resolve a non-slot0 pool into the
+    tick lane: ``protocols_for_chain`` sorts 'curve' ahead of the v3 forks, so
+    an ungated sweep would return the curated Curve pool first for its
+    curated pairs."""
+    pool_registry = PoolReaderRegistry(
+        rpc_call=lambda *a: b"\x00" * 32,
+        token_resolver=_StubRegistryTokenResolver(),
+    )
+    est = _estimator(pool_registry=pool_registry)
+
+    resolved = est._resolve_pool("USDC.e", "USDT", "arbitrum", None, None)
+
+    curve_2pool = "0x7f90122BF0700F9E7e1F688fe926940E8839F353"
+    assert resolved is None or resolved.lower() != curve_2pool.lower()
 
 
 def test_favourable_quote_floored_at_zero_impact():

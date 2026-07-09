@@ -34,7 +34,6 @@ from almanak.framework.market.errors import PoolPriceUnavailableError
 from almanak.framework.market.gateway_price_aggregator import GatewayMarketPriceAggregator
 from almanak.framework.market.snapshot import MarketSnapshot
 
-
 # --------------------------------------------------------------------------- #
 # Fakes
 # --------------------------------------------------------------------------- #
@@ -242,6 +241,7 @@ def test_snapshot_twap_resolves_best_pool_then_calls_gateway():
     reader = MagicMock()
     reader.resolve_best_pool_address.return_value = "0xbest"
     registry = MagicMock()
+    registry.reader_kind.return_value = "v3_slot0"
     registry.get_reader.return_value = reader
 
     rh = _FakeRateHistory(response=_twap_resp(price="2500", source="on_chain"))
@@ -271,6 +271,7 @@ def test_snapshot_twap_unsupported_protocol_via_gateway_success_false():
     reader = MagicMock()
     reader.resolve_best_pool_address.return_value = "0xpool"
     registry = MagicMock()
+    registry.reader_kind.return_value = "v3_slot0"
     registry.get_reader.return_value = reader
 
     rh = _FakeRateHistory(response=_twap_resp(success=False, error="dex 'aerodrome' not TWAP-capable"))
@@ -304,6 +305,7 @@ def test_lwap_routes_through_gateway_getdexlwap():
     reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xpool500" if fee == 500 else None
     reader._resolve_to_address.side_effect = _stub_resolve
     registry = MagicMock()
+    registry.reader_kind.return_value = "v3_slot0"
     registry.protocols_for_chain.return_value = ["uniswap_v3"]
     registry.get_reader.return_value = reader
 
@@ -334,6 +336,7 @@ def test_lwap_no_pools_resolved_raises():
     reader.resolve_pool_address.return_value = None  # nothing resolves
     reader._resolve_to_address.side_effect = _stub_resolve
     registry = MagicMock()
+    registry.reader_kind.return_value = "v3_slot0"
     registry.protocols_for_chain.return_value = ["uniswap_v3"]
     registry.get_reader.return_value = reader
 
@@ -351,6 +354,7 @@ def test_lwap_gateway_success_false_raises():
     reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xpool500" if fee == 500 else None
     reader._resolve_to_address.side_effect = _stub_resolve
     registry = MagicMock()
+    registry.reader_kind.return_value = "v3_slot0"
     registry.protocols_for_chain.return_value = ["uniswap_v3"]
     registry.get_reader.return_value = reader
 
@@ -375,6 +379,7 @@ def test_lwap_pinned_aerodrome_slipstream_dispatches_uniswap_v3_profile():
     reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xslip100" if fee == 100 else None
     reader._resolve_to_address.side_effect = _stub_resolve
     registry = MagicMock()
+    registry.reader_kind.return_value = "v3_slot0"
     registry.protocols_for_chain.return_value = ["uniswap_v3", "aerodrome_slipstream"]
     registry.get_reader.return_value = reader
 
@@ -401,6 +406,7 @@ def test_lwap_default_sweep_covers_aerodrome_tick_spacings():
     reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xspacing200" if fee == 200 else None
     reader._resolve_to_address.side_effect = _stub_resolve
     registry = MagicMock()
+    registry.reader_kind.return_value = "v3_slot0"
     registry.protocols_for_chain.return_value = ["aerodrome_slipstream"]
     registry.get_reader.return_value = reader
 
@@ -415,6 +421,39 @@ def test_lwap_default_sweep_covers_aerodrome_tick_spacings():
     req = rh.last_lwap_request
     assert "0xspacing200" in list(req.pool_addresses)  # 200 = tick spacing, not uni fee tier
     assert req.dex == "uniswap_v3"
+
+
+def test_lwap_excludes_non_slot0_reader_kinds():
+    """PR #3204 (codex P1): GetDexLwap reads slot0()+liquidity(), so pools of a
+    non-slot0 reader kind (Curve's get_dy shape) must never be shipped in
+    pool_addresses — they are unreadable under the uniswap_v3 profile. The
+    framework PriceAggregator lane covers those protocols with their own
+    reader."""
+    v3_reader = MagicMock()
+    v3_reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xpool500" if fee == 500 else None
+    v3_reader._resolve_to_address.side_effect = _stub_resolve
+    curve_reader = MagicMock()
+    curve_reader.resolve_pool_address.return_value = "0xcurvepool"
+    curve_reader._resolve_to_address.side_effect = _stub_resolve
+    registry = MagicMock()
+    registry.protocols_for_chain.return_value = ["curve", "uniswap_v3"]  # sorted() puts curve first
+    registry.reader_kind.side_effect = lambda p: "curve_pool" if p == "curve" else "v3_slot0"
+    registry.get_reader.side_effect = lambda chain, proto: curve_reader if proto == "curve" else v3_reader
+
+    rh = _FakeRateHistory(lwap_response=_lwap_resp(price="2500.5", pool_count=1, source="gateway_rpc"))
+    agg = GatewayMarketPriceAggregator(
+        gateway_client=_FakeGatewayClient(rate_history=rh),
+        pool_registry=registry,
+        rpc_call=lambda *a: b"",
+    )
+
+    agg.lwap("WETH", "USDC", "base")
+
+    req = rh.last_lwap_request
+    assert "0xpool500" in list(req.pool_addresses)
+    assert "0xcurvepool" not in list(req.pool_addresses)
+    # The curve reader is skipped before resolution — no doomed server-side reads.
+    curve_reader.resolve_pool_address.assert_not_called()
 
 
 def test_snapshot_lwap_normalizes_protocols_without_registry():
@@ -456,9 +495,7 @@ def test_for_pnl_backtest_state_injects_null_twap_lwap():
 
 def test_for_paper_fork_injects_null_twap_lwap():
     fork = SimpleNamespace(get_rpc_url=lambda: "http://fork", current_block=123)
-    snap = MarketSnapshotBuilder.for_paper_fork(
-        chain="base", wallet_address="0x" + "0" * 40, fork_manager=fork
-    )
+    snap = MarketSnapshotBuilder.for_paper_fork(chain="base", wallet_address="0x" + "0" * 40, fork_manager=fork)
     assert isinstance(snap._price_aggregator, NullPriceAggregator)
     assert isinstance(snap._pool_reader_registry, NullPoolReaderRegistry)
 
@@ -573,6 +610,7 @@ def _orient_snapshot(chain, *, twap_price=None, lwap_price=None):
     reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xpool500" if fee == 500 else None
     reader._resolve_to_address.side_effect = _stub_resolve
     registry = MagicMock()
+    registry.reader_kind.return_value = "v3_slot0"
     registry.get_reader.return_value = reader
     registry.protocols_for_chain.return_value = ["uniswap_v3"]
     rh = _FakeRateHistory(

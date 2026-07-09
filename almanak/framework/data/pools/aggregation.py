@@ -404,6 +404,12 @@ class PriceAggregator:
 
         # Collect pool prices from all protocols and fee tiers
         pool_prices: list[tuple[PoolPrice, str]] = []  # (pool_price, protocol)
+        # Dedupe by pool address (mirrors GatewayPriceAggregator.lwap): a
+        # protocol whose resolution ignores the fee-tier discriminator (Curve
+        # pools are not fee-tier-keyed) resolves the SAME pool for every swept
+        # tier, and without this guard that one pool would be multi-counted —
+        # multiplying its weight in the liquidity-weighted average.
+        seen_pools: set[str] = set()
 
         for protocol in protocols:
             try:
@@ -413,8 +419,9 @@ class PriceAggregator:
 
             for fee_tier in fee_tiers:
                 pool_addr = reader.resolve_pool_address(token_a, token_b, chain_lower, fee_tier)
-                if pool_addr is None:
+                if pool_addr is None or pool_addr.lower() in seen_pools:
                     continue
+                seen_pools.add(pool_addr.lower())
 
                 try:
                     envelope = reader.read_pool_price(pool_addr, chain_lower)

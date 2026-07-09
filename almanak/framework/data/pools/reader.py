@@ -1,11 +1,12 @@
 """Pool price readers for the Quant Data Layer.
 
-Reads live prices from concentrated-liquidity DEX pool contracts (Uniswap V3,
-Aerodrome CL, PancakeSwap V3) by decoding slot0() responses and converting
-sqrtPriceX96 to human-readable prices using token decimals from TokenResolver.
-
-All readers share the same slot0()-based ABI and differ only in factory
-addresses and known pool registries.
+Reads live prices from DEX pool contracts. The v3 slot0 family (Uniswap V3,
+Aerodrome CL, PancakeSwap V3, SushiSwap V3) decodes slot0() responses and
+converts sqrtPriceX96 to human-readable prices using token decimals from
+TokenResolver; those readers share one ABI and differ only in factory
+addresses and known pool registries. Non-slot0 AMMs bind their own reader
+class via the connector spec's ``reader_kind`` (Curve: ``CurvePoolReader``,
+quoting get_dy on the pool's leading coin pair).
 
 All returns are wrapped in DataEnvelope[PoolPrice] with provenance metadata
 including block number, finality, and source identification.
@@ -35,6 +36,19 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.concentrated_liquidity_math import Q96
+from almanak.connectors._strategy_base.curve_pool_abi import (
+    CURVE_BALANCES_INT128_SELECTOR,
+    CURVE_BALANCES_UINT256_SELECTOR,
+    CURVE_COINS_INT128_SELECTOR,
+    CURVE_COINS_UINT256_SELECTOR,
+    CURVE_FEE_SCALE_TO_V3_UNITS,
+    CURVE_FEE_SELECTOR,
+    CURVE_GET_DY_INT128_SELECTOR,
+    CURVE_GET_DY_UINT256_SELECTOR,
+    CURVE_POOL_KEY,
+    encode_get_dy,
+    encode_index_call,
+)
 from almanak.connectors._strategy_base.pool_reader import PoolReaderSpec
 from almanak.connectors._strategy_base.v3_pool_abi import (
     V3_FEE_SELECTOR,
@@ -71,6 +85,12 @@ _AERODROME_POOL_READER_SPEC = POOL_READER_REGISTRY.require("aerodrome")
 _PANCAKESWAP_POOL_READER_SPEC = POOL_READER_REGISTRY.require("pancakeswap_v3")
 _SUSHISWAP_POOL_READER_SPEC = POOL_READER_REGISTRY.require("sushiswap_v3")
 
+# Native-asset placeholder some Curve pools use as a coin address (e.g. the
+# mainnet steth pool's coins(0)). It is not an ERC-20 — decimals() cannot be
+# read on-chain — but the value is a chain constant: native ETH is 18.
+_NATIVE_COIN_PLACEHOLDER = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+_NATIVE_COIN_DECIMALS = 18  # decimal-policy-exempt: native ETH is a protocol invariant (18), not a fallback — the 0xeee... placeholder has no decimals() to read
+
 # Historical module-level aliases are preserved for tests and callers that
 # imported them directly. The data is connector-owned and manifest-loaded.
 UNISWAP_V3_FACTORY = _UNISWAP_POOL_READER_SPEC.factory_addresses
@@ -98,9 +118,12 @@ class PoolPrice:
 
     Attributes:
         price: Human-readable price of token0 in terms of token1.
-        tick: Current pool tick from slot0.
-        liquidity: Current in-range liquidity from the pool.
-        fee_tier: Pool fee in basis points (e.g. 500 = 0.05%).
+        tick: Current pool tick from slot0. ``None`` for AMMs with no tick
+            concept (e.g. Curve) — never fabricated as 0 (Empty != Zero).
+        liquidity: Current in-range liquidity from the pool (v3 family), or
+            the reader-documented depth proxy for non-tick AMMs (Curve: the
+            pool's coin0 reserve, raw units).
+        fee_tier: Pool fee in v3 units (1e-6 fractions, e.g. 500 = 0.05%).
         block_number: Block at which the data was read.
         timestamp: UTC datetime of the observation.
         pool_address: Address of the pool contract.
@@ -109,7 +132,7 @@ class PoolPrice:
     """
 
     price: Decimal
-    tick: int
+    tick: int | None
     liquidity: int
     fee_tier: int
     block_number: int
@@ -301,27 +324,9 @@ class UniswapV3PoolPriceReader:
         pool_lower = pool_address.lower()
         cache_key = (pool_lower, chain_lower)
 
-        # Check cache
-        now = time.monotonic()
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            cached_time, cached_envelope = cached
-            if now - cached_time < self._cache_ttl:
-                # Return cached with updated cache_hit flag
-                return DataEnvelope(
-                    value=cached_envelope.value,
-                    meta=DataMeta(
-                        source=cached_envelope.meta.source,
-                        observed_at=cached_envelope.meta.observed_at,
-                        block_number=cached_envelope.meta.block_number,
-                        finality=cached_envelope.meta.finality,
-                        staleness_ms=int((now - cached_time) * 1000),
-                        latency_ms=0,
-                        confidence=cached_envelope.meta.confidence,
-                        cache_hit=True,
-                    ),
-                    classification=DataClassification.EXECUTION_GRADE,
-                )
+        cached_envelope = self._cache_lookup(cache_key)
+        if cached_envelope is not None:
+            return cached_envelope
 
         start_time = time.monotonic()
 
@@ -526,6 +531,35 @@ class UniswapV3PoolPriceReader:
 
     # ----- internal helpers -----
 
+    def _cache_lookup(self, cache_key: tuple[str, str]) -> DataEnvelope[PoolPrice] | None:
+        """Return a fresh cached envelope (cache_hit=True, staleness updated), or None.
+
+        Shared by every read shape (v3 slot0 and Curve get_dy) so cache
+        semantics — TTL check against ``time.monotonic`` and the re-stamped
+        provenance — stay identical across reader families.
+        """
+        now = time.monotonic()
+        cached = self._cache.get(cache_key)
+        if cached is None:
+            return None
+        cached_time, cached_envelope = cached
+        if now - cached_time >= self._cache_ttl:
+            return None
+        return DataEnvelope(
+            value=cached_envelope.value,
+            meta=DataMeta(
+                source=cached_envelope.meta.source,
+                observed_at=cached_envelope.meta.observed_at,
+                block_number=cached_envelope.meta.block_number,
+                finality=cached_envelope.meta.finality,
+                staleness_ms=int((now - cached_time) * 1000),
+                latency_ms=0,
+                confidence=cached_envelope.meta.confidence,
+                cache_hit=True,
+            ),
+            classification=DataClassification.EXECUTION_GRADE,
+        )
+
     def _get_pool_metadata(
         self,
         pool_address: str,
@@ -687,6 +721,267 @@ class SushiSwapV3PoolReader(UniswapV3PoolPriceReader):
 
 
 # ---------------------------------------------------------------------------
+# CurvePoolReader
+# ---------------------------------------------------------------------------
+
+
+class CurvePoolReader(UniswapV3PoolPriceReader):
+    """Reads live prices from Curve pool contracts (reader_kind ``curve_pool``).
+
+    Curve pools have no slot0()/tick/fee-tier machinery, so this reader
+    derives everything from the pool's own state via the injected
+    ``rpc_call`` (gateway-boundary safe — no direct network access):
+
+    - **price**: ``get_dy(0, 1, 10^dec0)`` scaled by coin decimals — the
+      pool's own execution quote for one whole unit of ``coins(0)`` in terms
+      of ``coins(1)``. It INCLUDES the pool fee (marginally below mid), which
+      is the honest execution-grade number; the quote is never synthesized
+      from reserves or oracles. StableSwap pools answer the ``int128`` get_dy
+      form, CryptoSwap/Tricrypto the ``uint256`` form — probed in that order.
+    - **orientation**: token0/token1 are the pool's ``coins(0)``/``coins(1)``
+      (pool-native, mirroring the v3 readers' token0-in-token1 convention).
+      Pairs at coin index >= 2 of multi-coin pools are NOT served — the
+      connector spec only registers leading pairs, so such requests miss
+      honestly instead of returning a wrong-pair price.
+    - **tick**: ``None`` — Curve has no ticks; 0 would fabricate a
+      measurement (Empty != Zero).
+    - **liquidity**: the pool's coin0 reserve (``balances(0)``, raw units) —
+      a measured depth proxy consistent with the LWAP liquidity filter's
+      ``10^token0_decimals`` normalization.
+    - **fee_tier**: on-chain ``fee()`` (1e10-scaled) converted to the v3
+      1e-6 unit so the field means the same thing across reader families.
+
+    Pool resolution is curated-only (``CURVE_POOLS`` via the connector spec):
+    Curve has no pairwise ``factory.getPool``, so unknown pairs return
+    ``None``. ``fee_tier`` arguments are accepted (total function) and
+    ignored — Curve pools are not fee-tier-keyed. ``candidate_pool_keys``
+    is ``(0,)``, making ``resolve_best_pool_address`` a single total lookup
+    that still verifies readability before returning the pool.
+
+    Any required read that fails (revert, empty return, zero coin address,
+    non-positive quote) raises :class:`DataUnavailableError` — values are
+    never fabricated.
+    """
+
+    # No class-level spec attributes and no protocol literal: this class is
+    # KIND-dispatched (``reader_kind="curve_pool"``), so the registry always
+    # constructs it with its connector manifest spec, and the base ``__init__``
+    # binds identity/factories/known-pools/sweep-keys from that spec. Naming
+    # the protocol here would re-couple the framework to a connector name
+    # (blueprint 22; enforced by the chain/protocol coupling ratchet).
+
+    def __init__(
+        self,
+        rpc_call: RpcCallFn,
+        token_resolver: Any | None = None,
+        cache_ttl_seconds: float = 2.0,
+        source_name: str = "alchemy_rpc",
+        spec: PoolReaderSpec | None = None,
+    ) -> None:
+        if spec is None:
+            # Without a spec this instance would silently inherit the BASE
+            # class defaults (the v3 family's factories / selector / identity)
+            # and read the wrong ABI shape — fail loudly instead.
+            raise ValueError(
+                "CurvePoolReader is kind-dispatched and must be constructed "
+                "with its connector PoolReaderSpec (use PoolReaderRegistry.get_reader)."
+            )
+        super().__init__(rpc_call, token_resolver, cache_ttl_seconds, source_name, spec=spec)
+
+    # ----- public API -----
+
+    def read_pool_price(
+        self,
+        pool_address: str,
+        chain: str,
+        block_number: int | None = None,
+        finality: str = "latest",
+    ) -> DataEnvelope[PoolPrice]:
+        """Read the current price from a Curve pool (see class docstring)."""
+        chain_lower = chain.lower()
+        pool_lower = pool_address.lower()
+        cache_key = (pool_lower, chain_lower)
+
+        cached_envelope = self._cache_lookup(cache_key)
+        if cached_envelope is not None:
+            return cached_envelope
+
+        start_time = time.monotonic()
+
+        try:
+            index_uint256, coin0, coin1 = self._read_leading_coins(pool_address, chain_lower)
+            token0_decimals = self._curve_coin_decimals(coin0, chain_lower)
+            token1_decimals = self._curve_coin_decimals(coin1, chain_lower)
+            amount_out = self._quote_get_dy(pool_address, chain_lower, 10**token0_decimals)
+            price = Decimal(amount_out) / (Decimal(10) ** token1_decimals)
+
+            fee_raw = decode_uint(self._rpc_call(chain_lower, pool_address, CURVE_FEE_SELECTOR))
+            fee_tier = fee_raw // CURVE_FEE_SCALE_TO_V3_UNITS
+
+            balances_selector = CURVE_BALANCES_UINT256_SELECTOR if index_uint256 else CURVE_BALANCES_INT128_SELECTOR
+            liquidity = decode_uint(self._rpc_call(chain_lower, pool_address, encode_index_call(balances_selector, 0)))
+        except DataUnavailableError:
+            raise
+        except Exception as e:
+            raise DataUnavailableError(
+                data_type="pool_price",
+                instrument=pool_address,
+                reason=f"Curve pool read failed for {pool_address} on {chain_lower}: {e}",
+            ) from e
+
+        latency_ms = int((time.monotonic() - start_time) * 1000)
+        observed_at = datetime.now(UTC)
+        effective_block = block_number or 0
+
+        pool_price = PoolPrice(
+            price=price,
+            tick=None,
+            liquidity=liquidity,
+            fee_tier=fee_tier,
+            block_number=effective_block,
+            timestamp=observed_at,
+            pool_address=pool_address,
+            token0_decimals=token0_decimals,
+            token1_decimals=token1_decimals,
+        )
+
+        envelope = DataEnvelope(
+            value=pool_price,
+            meta=DataMeta(
+                source=self._source_name,
+                observed_at=observed_at,
+                block_number=effective_block if effective_block > 0 else None,
+                finality=finality,
+                staleness_ms=0,
+                latency_ms=latency_ms,
+                confidence=1.0,
+                cache_hit=False,
+            ),
+            classification=DataClassification.EXECUTION_GRADE,
+        )
+
+        self._cache[cache_key] = (time.monotonic(), envelope)
+
+        logger.debug(
+            "curve_pool_price_read",
+            extra={
+                "pool": pool_address,
+                "chain": chain_lower,
+                "price": str(price),
+                "latency_ms": latency_ms,
+            },
+        )
+
+        return envelope
+
+    def resolve_pool_address(
+        self,
+        token_a: str,
+        token_b: str,
+        chain: str,
+        fee_tier: int = 3000,
+    ) -> str | None:
+        """Resolve a curated Curve pool for a token pair.
+
+        ``fee_tier`` is accepted for interface compatibility and IGNORED —
+        Curve pools are not fee-tier-keyed, so any value resolves the same
+        pool (a total function; sweeps cannot multi-key one pool). Only
+        curated leading pairs resolve; there is no factory fallback.
+        """
+        chain_lower = chain.lower()
+
+        addr_a = self._resolve_to_address(token_a, chain_lower)
+        addr_b = self._resolve_to_address(token_b, chain_lower)
+        if addr_a is None or addr_b is None:
+            return None
+
+        a_lower, b_lower = addr_a.lower(), addr_b.lower()
+        sorted_a, sorted_b = (a_lower, b_lower) if a_lower < b_lower else (b_lower, a_lower)
+        return self._known_pools.get(chain_lower, {}).get((sorted_a, sorted_b, CURVE_POOL_KEY))
+
+    # ----- internal helpers -----
+
+    def _get_pool_metadata(self, pool_address: str, chain: str) -> tuple[int, int, int]:
+        """Curve-shaped metadata read: (coin0 decimals, coin1 decimals, fee_tier).
+
+        Overrides the v3 token0()/token1()/fee() ABI with coins(0)/coins(1)
+        and Curve's 1e10-scaled fee() (converted to v3 units).
+        """
+        _, coin0, coin1 = self._read_leading_coins(pool_address, chain)
+        fee_raw = decode_uint(self._rpc_call(chain, pool_address, CURVE_FEE_SELECTOR))
+        return (
+            self._curve_coin_decimals(coin0, chain),
+            self._curve_coin_decimals(coin1, chain),
+            fee_raw // CURVE_FEE_SCALE_TO_V3_UNITS,
+        )
+
+    def _read_leading_coins(self, pool_address: str, chain: str) -> tuple[bool, str, str]:
+        """Read ``coins(0)`` / ``coins(1)``, probing the index-ABI family.
+
+        Returns ``(index_uint256, coin0, coin1)`` where ``index_uint256``
+        records which family answered (modern ``uint256`` vs legacy Vyper
+        ``int128``) so subsequent index reads (``balances``) use the same one.
+
+        Raises:
+            DataUnavailableError: If neither family answers, or a coin
+                address decodes to zero (not a Curve pool).
+        """
+        for index_uint256, selector in (
+            (True, CURVE_COINS_UINT256_SELECTOR),
+            (False, CURVE_COINS_INT128_SELECTOR),
+        ):
+            try:
+                coin0 = decode_address(self._rpc_call(chain, pool_address, encode_index_call(selector, 0)))
+                coin1 = decode_address(self._rpc_call(chain, pool_address, encode_index_call(selector, 1)))
+            except Exception:  # noqa: BLE001 — probe the other index family
+                continue
+            zero = "0x" + "0" * 40
+            if coin0 == zero or coin1 == zero:
+                # Answered with zero coins: legacy Vyper fallbacks can return
+                # empty data for an unknown selector instead of reverting, so
+                # a zero here may just mean "wrong index-ABI family" — keep
+                # probing the other family before declaring not-a-Curve-pool.
+                continue
+            return index_uint256, coin0, coin1
+        raise DataUnavailableError(
+            data_type="pool_price",
+            instrument=pool_address,
+            reason=f"coins(0)/coins(1) unreadable on {pool_address} ({chain}); not a Curve pool?",
+        )
+
+    def _quote_get_dy(self, pool_address: str, chain: str, dx: int) -> int:
+        """Quote ``get_dy(0, 1, dx)``, probing StableSwap then crypto ABI.
+
+        Raises:
+            DataUnavailableError: If neither ABI family answers or the quote
+                is non-positive (an empty/broken pool must fail closed, never
+                surface a zero price).
+        """
+        for selector in (CURVE_GET_DY_INT128_SELECTOR, CURVE_GET_DY_UINT256_SELECTOR):
+            try:
+                amount_out = decode_uint(self._rpc_call(chain, pool_address, encode_get_dy(selector, 0, 1, dx)))
+            except Exception:  # noqa: BLE001 — probe the other get_dy family
+                continue
+            if amount_out > 0:
+                return amount_out
+        raise DataUnavailableError(
+            data_type="pool_price",
+            instrument=pool_address,
+            reason=f"get_dy(0, 1, {dx}) returned no positive quote on {pool_address} ({chain})",
+        )
+
+    def _curve_coin_decimals(self, coin_address: str, chain: str) -> int:
+        """Coin decimals, handling the native-asset placeholder coin.
+
+        The placeholder (``0xeeee…eeee``) is not an ERC-20 — ``decimals()``
+        reverts — but native ETH's 18 is a chain constant, not a fabrication.
+        """
+        if coin_address.lower() == _NATIVE_COIN_PLACEHOLDER:
+            return _NATIVE_COIN_DECIMALS
+        return self._get_token_decimals(coin_address, chain)
+
+
+# ---------------------------------------------------------------------------
 # PoolReaderRegistry
 # ---------------------------------------------------------------------------
 
@@ -694,15 +989,30 @@ class SushiSwapV3PoolReader(UniswapV3PoolPriceReader):
 # including aliases like "aerodrome_slipstream" — and every per-protocol data
 # knob derive from the connector manifest specs (POOL_READER_REGISTRY); this
 # map associates a canonical protocol with the framework class implementing
-# its read shape (all current specs share the v3 slot0 family). A manifest
-# spec with no entry here dispatches the spec-bound base reader, so adding a
-# v3-family connector requires NO edit to this module (VIB-5047 / blueprint 05
-# "dispatch by manifest, not a hardcoded protocol-name set").
+# its read shape (the entries here are all v3 slot0-family subclasses that
+# differ only in data). A manifest spec with no entry here dispatches by its
+# ``reader_kind`` through ``_READER_CLASS_BY_KIND`` below, so adding a
+# connector for any KNOWN read shape requires NO edit to this module
+# (VIB-5047 / blueprint 05 "dispatch by manifest, not a hardcoded
+# protocol-name set").
 _READER_CLASS_BY_PROTOCOL: dict[str, type[UniswapV3PoolPriceReader]] = {
     UniswapV3PoolPriceReader.protocol_name: UniswapV3PoolPriceReader,
     AerodromePoolReader.protocol_name: AerodromePoolReader,
     PancakeSwapV3PoolReader.protocol_name: PancakeSwapV3PoolReader,
     SushiSwapV3PoolReader.protocol_name: SushiSwapV3PoolReader,
+}
+
+# Read-shape (``PoolReaderSpec.reader_kind``) -> framework reader class.
+# Consulted when a spec's protocol has no dedicated class entry above:
+# ``"v3_slot0"`` (the default) keeps dispatching the spec-bound base reader
+# exactly as before; non-slot0 shapes (Curve's get_dy/coins ABI) bind their
+# own class. An UNKNOWN kind fails loudly at registry construction — a
+# manifest that declares a shape the framework cannot read is a connector
+# bug, and silently reading it with the wrong ABI would produce garbage
+# prices on a money path.
+_READER_CLASS_BY_KIND: dict[str, type[UniswapV3PoolPriceReader]] = {
+    "v3_slot0": UniswapV3PoolPriceReader,
+    "curve_pool": CurvePoolReader,
 }
 
 
@@ -740,11 +1050,24 @@ class PoolReaderRegistry:
         # Dispatch table derived from the connector manifest registry
         # (VIB-5047): every spec key (canonical + aliases) maps to the
         # framework class for the spec's protocol, falling back to the
-        # spec-bound base reader for manifest specs with no dedicated class.
+        # class for the spec's declared ``reader_kind`` (the "v3_slot0"
+        # default -> spec-bound base reader) for manifest specs with no
+        # dedicated class. An unknown kind fails loudly here — never a
+        # silent wrong-ABI read.
         self._protocol_classes: dict[str, type[UniswapV3PoolPriceReader]] = {}
         self._protocol_specs: dict[str, PoolReaderSpec] = {}
         for spec in POOL_READER_REGISTRY.all():
-            reader_cls = _READER_CLASS_BY_PROTOCOL.get(spec.protocol.lower(), UniswapV3PoolPriceReader)
+            reader_cls = _READER_CLASS_BY_PROTOCOL.get(spec.protocol.lower())
+            if reader_cls is None:
+                reader_cls = _READER_CLASS_BY_KIND.get(spec.reader_kind)
+            if reader_cls is None:
+                known_kinds = ", ".join(sorted(_READER_CLASS_BY_KIND))
+                raise ValueError(
+                    f"Pool reader spec '{spec.protocol}' declares unknown reader_kind "
+                    f"'{spec.reader_kind}' (known kinds: {known_kinds}). The framework "
+                    "has no reader for this on-chain shape — fix the connector manifest "
+                    "or add a reader class + kind mapping."
+                )
             for key in spec.keys:
                 self._protocol_classes[key.lower()] = reader_cls
                 self._protocol_specs[key.lower()] = spec
@@ -810,6 +1133,20 @@ class PoolReaderRegistry:
     def supported_protocols(self) -> list[str]:
         """List of registered protocol names."""
         return sorted(self._protocol_classes)
+
+    def reader_kind(self, protocol: str) -> str:
+        """Read-shape kind for a registered protocol (``PoolReaderSpec.reader_kind``).
+
+        Consumers whose downstream math only works for one shape (e.g. the
+        V3 tick-walk swap simulator, the gateway slot0 LWAP profile) gate
+        their protocol sweeps on this instead of hardcoding protocol names,
+        so any future non-slot0 kind is excluded automatically. Custom
+        classes registered via ``register_protocol()`` carry no manifest
+        spec; they are v3-family subclasses by that method's contract, so
+        they report the ``"v3_slot0"`` default.
+        """
+        spec = self._protocol_specs.get(protocol.lower())
+        return spec.reader_kind if spec is not None else "v3_slot0"
 
     def protocols_for_chain(self, chain: str) -> list[str]:
         """List protocols that have factory addresses for a given chain.
