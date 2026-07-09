@@ -937,6 +937,26 @@ def discover_positions(
 
     from ..teardown.registry_enumeration import resolve_open_positions_with_registry
 
+    # VIB-5679: self-resolve + stamp the canonical deployment_id BEFORE the
+    # deployment-scoped ``position_registry`` WARM read, exactly as the Plan-B
+    # branch above does. Without this, a COLD ``teardown execute`` (no live
+    # runner, no config or stamped ``strategy.deployment_id``) leaves it empty,
+    # so the WARM read is scoped to "" and returns zero rows even when the
+    # registry holds an ``open`` row — a silent "no open positions … Exiting 0"
+    # false-success on a live position (VIB-5456 Path-1). ``_resolve_teardown_
+    # deployment_id`` prefers an already-stamped id (hosted-safe) and only
+    # self-resolves ``deployment:sha256(wallet:chain)[:12]`` — the SAME id the
+    # runner mints at boot — when blank. The Plan-A read is deployment-scoped
+    # (never wallet-wide), so no attribution gate is required here.
+    try:
+        deployment_id = _resolve_teardown_deployment_id(strategy=strategy, wallet_address=wallet_address, chain=chain)
+    except click.ClickException as exc:
+        # The shared helper's resolve-failure message says "Teardown --discover …";
+        # in the Plan-A (no --discover) path that flag reference misleads the
+        # operator, so keep the message flag-agnostic here.
+        raise click.ClickException(str(exc.message).replace("Teardown --discover", "Teardown")) from exc
+    _ensure_strategy_deployment_id(strategy, deployment_id, gateway_client)
+
     try:
         return asyncio.run(resolve_open_positions_with_registry(strategy))
     except Exception as e:

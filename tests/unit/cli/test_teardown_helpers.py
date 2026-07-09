@@ -112,9 +112,7 @@ class TestResolveTeardownDeploymentId:
         strat = SimpleNamespace(deployment_id="")
         runner = CliRunner()
         with runner.isolation() as (out, _err):
-            resolved = th._resolve_teardown_deployment_id(
-                strategy=strat, wallet_address="0xWALLET", chain="ethereum"
-            )
+            resolved = th._resolve_teardown_deployment_id(strategy=strat, wallet_address="0xWALLET", chain="ethereum")
         # Deterministic: matches resolve_deployment_id over the same key.
         from almanak.framework.runner.identity import resolve_deployment_id
 
@@ -170,8 +168,11 @@ class TestApplyPlanBAttributionGate:
         runner = CliRunner()
         with runner.isolation() as (out, _err):
             scoped = th._apply_plan_b_attribution_gate(
-                full=full, deployment_id="deployment:abc123", chain="ethereum",
-                gateway_client=object(), wallet_wide=False,
+                full=full,
+                deployment_id="deployment:abc123",
+                chain="ethereum",
+                gateway_client=object(),
+                wallet_wide=False,
             )
         ids = {p.position_id for p in scoped.positions}
         assert ids == {"lp1"}
@@ -187,8 +188,11 @@ class TestApplyPlanBAttributionGate:
         with runner.isolation() as (out, _err):
             with pytest.raises(click.ClickException) as exc:
                 th._apply_plan_b_attribution_gate(
-                    full=full, deployment_id="deployment:abc123", chain="ethereum",
-                    gateway_client=object(), wallet_wide=False,
+                    full=full,
+                    deployment_id="deployment:abc123",
+                    chain="ethereum",
+                    gateway_client=object(),
+                    wallet_wide=False,
                 )
             assert "Attribution UNPROVABLE" in out.getvalue().decode()
         assert "NONE are provably owned" in str(exc.value.message)
@@ -201,8 +205,11 @@ class TestApplyPlanBAttributionGate:
         runner = CliRunner()
         with runner.isolation() as (out, _err):
             scoped = th._apply_plan_b_attribution_gate(
-                full=full, deployment_id="deployment:abc123", chain="ethereum",
-                gateway_client=object(), wallet_wide=True,
+                full=full,
+                deployment_id="deployment:abc123",
+                chain="ethereum",
+                gateway_client=object(),
+                wallet_wide=True,
             )
         assert {p.position_id for p in scoped.positions} == {"lp1", "lp2"}
         assert "BREAK-GLASS" in out.getvalue().decode()
@@ -213,8 +220,11 @@ class TestApplyPlanBAttributionGate:
         runner = CliRunner()
         with runner.isolation() as (out, _err):
             scoped = th._apply_plan_b_attribution_gate(
-                full=full, deployment_id="deployment:abc123", chain="ethereum",
-                gateway_client=object(), wallet_wide=False,
+                full=full,
+                deployment_id="deployment:abc123",
+                chain="ethereum",
+                gateway_client=object(),
+                wallet_wide=False,
             )
         assert {p.position_id for p in scoped.positions} == {"lp1", "lp3"}
         assert "Refusing 1 position(s)" in out.getvalue().decode()
@@ -229,8 +239,11 @@ class TestApplyPlanBAttributionGate:
         with runner.isolation():
             with pytest.raises(click.ClickException) as exc:
                 th._apply_plan_b_attribution_gate(
-                    full=full, deployment_id="deployment:abc123", chain="ethereum",
-                    gateway_client=object(), wallet_wide=False,
+                    full=full,
+                    deployment_id="deployment:abc123",
+                    chain="ethereum",
+                    gateway_client=object(),
+                    wallet_wide=False,
                 )
         assert "fail-closed" in str(exc.value.message).lower()
 
@@ -1131,3 +1144,117 @@ class TestCleanupTeardownResources:
         )
 
         assert calls == ["channel=None", "disconnect"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Plan-A discover_positions: cold execute self-resolves + stamps deployment_id
+# so the deployment-scoped position_registry WARM read is scoped correctly
+# (VIB-5679 — the unclosed Path-1 of VIB-5456).
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestPlanAColdDeploymentIdStamp:
+    """A COLD ``teardown execute`` (no --discover, no config or stamped id) must
+    self-resolve the canonical deployment_id BEFORE the registry WARM read.
+    Pre-fix the read was scoped to "" → a silent "no open positions ... Exiting 0"
+    false-success on a live position."""
+
+    def _make_strategy(self):
+        strat = SimpleNamespace(deployment_id="")
+
+        def _set_state_manager(_state_manager, deployment_id):
+            strat.deployment_id = deployment_id
+
+        strat.set_state_manager = _set_state_manager
+        return strat
+
+    def test_plan_a_stamps_self_resolved_deployment_id_before_registry_read(self, monkeypatch):
+        from almanak.framework.runner.identity import resolve_deployment_id
+
+        recorded = {}
+
+        async def _fake_resolve(strategy):
+            # capture the id the registry WARM read will be scoped to
+            recorded["deployment_id"] = strategy.deployment_id
+            return SimpleNamespace(positions=[])
+
+        # neutralise the real GatewayStateManager construction inside
+        # _ensure_strategy_deployment_id (our mock ignores the state manager arg)
+        monkeypatch.setattr(
+            "almanak.framework.state.gateway_state_manager.GatewayStateManager",
+            lambda *_a, **_k: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "almanak.framework.teardown.registry_enumeration.resolve_open_positions_with_registry",
+            _fake_resolve,
+        )
+
+        strat = self._make_strategy()
+        th.discover_positions(
+            strategy=strat,
+            strategy_class=type(strat),
+            discover=False,  # Plan A
+            include_empty=False,
+            gateway_client=MagicMock(),
+            chain="ethereum",
+            wallet_address="0xWALLET",
+            wallet_wide=False,
+        )
+
+        expected = resolve_deployment_id(wallet_address="0xWALLET", chain="ethereum")
+        # The registry WARM read saw the canonical id, NOT "" (the pre-fix bug).
+        assert recorded["deployment_id"] == expected
+        assert recorded["deployment_id"], "deployment_id must not be blank on a cold execute"
+        assert strat.deployment_id == expected
+
+    def test_plan_a_preserves_existing_deployment_id(self, monkeypatch):
+        """Hosted-safe: an already-stamped id is preserved, never overwritten by
+        the wallet:chain self-resolve."""
+        recorded = {}
+
+        async def _fake_resolve(strategy):
+            recorded["deployment_id"] = strategy.deployment_id
+            return SimpleNamespace(positions=[])
+
+        monkeypatch.setattr(
+            "almanak.framework.state.gateway_state_manager.GatewayStateManager",
+            lambda *_a, **_k: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "almanak.framework.teardown.registry_enumeration.resolve_open_positions_with_registry",
+            _fake_resolve,
+        )
+
+        strat = self._make_strategy()
+        strat.deployment_id = "deployment:hostedaaaa11"
+        th.discover_positions(
+            strategy=strat,
+            strategy_class=type(strat),
+            discover=False,
+            include_empty=False,
+            gateway_client=MagicMock(),
+            chain="ethereum",
+            wallet_address="0xWALLET",
+            wallet_wide=False,
+        )
+        assert recorded["deployment_id"] == "deployment:hostedaaaa11"
+
+    def test_plan_a_resolve_failure_message_is_flag_agnostic(self, monkeypatch):
+        """A Plan-A (no --discover) resolve failure must NOT mention --discover
+        (the shared helper's message is --discover-flavoured; gemini review on #3230)."""
+        monkeypatch.delenv("ALMANAK_IS_HOSTED", raising=False)
+        strat = self._make_strategy()  # blank deployment_id, no wallet/chain to resolve from
+        with pytest.raises(click.ClickException) as exc:
+            th.discover_positions(
+                strategy=strat,
+                strategy_class=type(strat),
+                discover=False,
+                include_empty=False,
+                gateway_client=MagicMock(),
+                chain="",
+                wallet_address="",
+                wallet_wide=False,
+            )
+        msg = str(exc.value.message)
+        assert "--discover" not in msg
+        assert "could not resolve a deployment_id" in msg

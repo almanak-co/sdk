@@ -96,6 +96,10 @@ def test_execute_teardown_restores_state_before_position_detection(
         def set_state_manager(self, _state_manager, deployment_id: str) -> None:
             self.events.append(f"set_state_manager:{deployment_id}")
             self.state_manager_deployment_ids.append(deployment_id)
+            # Mirror the real IntentStrategy.set_state_manager, which stamps
+            # ``_deployment_id`` — so the cold-execute self-resolve (VIB-5679)
+            # correctly sees an already-stamped id and stays a no-op here.
+            self.deployment_id = deployment_id
 
         def load_state(self) -> bool:
             self.events.append("load_state")
