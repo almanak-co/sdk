@@ -239,9 +239,28 @@ async def chain_verify_lp_open(
     The per-KNOWN-position chain-verify capability TD-06 needs to eventually
     trust the ``position_registry`` instead of unioning it with the legacy
     enumeration. Given one LP :class:`PositionInfo` whose ``position_id`` is the
-    NFT ``token_id``, read ``positions(tokenId).liquidity`` on the
-    NonfungiblePositionManager(s) registered for the position's chain (reusing
-    the gateway-routed :mod:`teardown.discovery` primitive — no new egress).
+    NFT ``token_id``, read the position's liquidity on the
+    NonfungiblePositionManager **of the position's own protocol** via the
+    gateway's typed ``QueryPositionLiquidity`` RPC (no new egress, no new proto).
+
+    **Protocol-scoped, never a cross-NPM walk (VIB-5631).** NPM token ids are
+    per-contract monotonic counters: the SAME uint exists independently on every
+    V3-fork NPM deployed to a chain. Walking all registered NPMs for a bare
+    token id (the pre-VIB-5631 shape) matched a foreign protocol's
+    identically-numbered, unrelated position — a burned sushiswap_v3 NFT read
+    back as "STILL OPEN" off uniswap_v3's NPM, flipping a provably-clean
+    teardown to FAILED. The read is now scoped to the single NPM
+    ``position.protocol`` resolves to; a position whose protocol has no
+    registered NPM on the chain is ``None`` (unverifiable here), never probed
+    against other protocols' NPMs.
+
+    **Tri-state, Empty ≠ Zero (mirrors VIB-5634 for V4).** The gateway read
+    distinguishes a MEASURED closure from a read fault: a burned NFT's
+    ``positions(tokenId)`` revert ("Invalid token ID") is folded by
+    ``query_position_liquidity`` into ``liquidity = 0`` — a measurement — while
+    a gateway/RPC fault returns ``None`` (unmeasured). A burned position is
+    therefore ``False`` (measured-closed), never conflated with "not found /
+    read failed".
 
     This is deliberately **per-position**, never a wallet scan: it reads one
     known ``token_id`` and answers "is *this* position still open?", so it can
@@ -253,21 +272,25 @@ async def chain_verify_lp_open(
 
     Args:
         gateway_client: A connected :class:`GatewayClient` (gateway-routed RPC).
-        position: The LP position to verify. Only ``position_id`` (NFT token id)
-            and ``chain`` are read.
-        network: Gateway network override; ``""`` (default) uses the gateway's
-            configured network — which on a managed Anvil run is the fork, not
-            the live chain.
+        position: The LP position to verify. Only ``position_id`` (NFT token
+            id), ``protocol`` and ``chain`` are read.
+        network: Accepted for signature stability. The underlying
+            ``QueryPositionLiquidity`` RPC always targets the gateway's
+            configured network — identical to the ``""`` every production
+            caller passes (``_gateway_network`` is never populated); a
+            non-empty override cannot be honoured and is logged at DEBUG.
 
     Returns:
-        ``True``  — the NFT was found and reports ``liquidity > 0`` (open).
-        ``False`` — the NFT was found with ``liquidity == 0`` (burned / fully
-                    withdrawn → closed).
-        ``None``  — UNVERIFIABLE: no gateway, no V3-family NPM on the chain, the
-                    token id is not a uint, the NFT was not found on any
-                    registered NPM (e.g. a UniV4 ``lp_v4`` position, which is on a
-                    different position manager), or every read errored. ``None``
-                    means *unknown* — the caller MUST NOT treat it as closed.
+        ``True``  — the position's own NPM reports ``liquidity > 0`` (open).
+        ``False`` — MEASURED closed: the position's own NPM reports
+                    ``liquidity == 0`` — either the burned-NFT path (the
+                    canonical "Invalid token ID" revert, folded to 0 by the
+                    gateway read) or a fully-decreased, unburned NFT shell.
+        ``None``  — UNVERIFIABLE: no gateway, the position's protocol has no
+                    registered NPM on the chain (non-V3-family LP, e.g. a UniV4
+                    ``lp_v4`` position on a different position manager), the
+                    token id is not a uint, or the read faulted. ``None`` means
+                    *unknown* — the caller MUST NOT treat it as closed.
 
     Never raises — verification must never fault the teardown lane.
     """
@@ -284,46 +307,59 @@ async def chain_verify_lp_open(
     except (ValueError, TypeError):
         # Composite / pool-prefixed id, or no bare token id ⇒ not verifiable here.
         return None
+    if network:
+        logger.debug(
+            "chain_verify_lp_open: network override %r ignored — QueryPositionLiquidity "
+            "targets the gateway's configured network",
+            network,
+        )
 
     # The import + NPM-registry resolution can raise (ImportError / registry
     # lookup faults); the docstring promises this never faults the teardown lane,
-    # so guard them. The per-NPM read inside the loop is already individually
-    # guarded so one blip can't mask the others.
+    # so guard them.
+    protocol = str(getattr(position, "protocol", "") or "")
     try:
-        from almanak.framework.teardown.discovery import _npms_for_chain, _read_position
+        from almanak.framework.teardown.discovery import npm_for_protocol
 
-        npms = _npms_for_chain(chain)
+        npm = npm_for_protocol(protocol, chain)
     except Exception:  # noqa: BLE001 — verification must never raise into teardown
-        logger.debug("chain_verify_lp_open: NPM resolution failed for chain %s", chain, exc_info=True)
+        logger.debug(
+            "chain_verify_lp_open: NPM resolution failed for protocol %s on chain %s",
+            protocol,
+            chain,
+            exc_info=True,
+        )
         return None
-    if not npms:
+    if not npm:
+        # Not an NFT-based V3-family protocol, or no NPM deployment on this
+        # chain. This read cannot answer — and MUST NOT guess by probing other
+        # protocols' NPMs (VIB-5631: a foreign NPM's identically-numbered token
+        # is a different position).
         return None
 
-    found_closed = False
-    for protocol, npm in npms:
-        try:
-            discovered = await _read_position(gateway_client, chain, npm, token_id, network=network, protocol=protocol)
-        except Exception:  # noqa: BLE001 — try the next NPM; one blip must not mask others
-            logger.debug(
-                "chain_verify_lp_open: read failed on %s/%s for token %s",
-                protocol,
-                npm,
-                token_id,
-                exc_info=True,
-            )
-            continue
-        if discovered is None:
-            continue  # not minted on this NPM — try the next registered one
-        if discovered.liquidity > 0:
-            return True
-        # Found on this NPM with zero liquidity ⇒ closed. A token id is minted on
-        # exactly one NPM, so this is authoritative; finish the loop only to be
-        # robust to a (pathological) duplicate hit reporting liquidity elsewhere.
-        found_closed = True
-
-    if found_closed:
-        return False
-    return None
+    # Gateway-routed, protocol-scoped, tri-state read. query_position_liquidity
+    # folds the burned-NFT "Invalid token ID" revert into liquidity=0 (a MEASURED
+    # closure) and returns None on a gateway/RPC fault (unmeasured) — the same
+    # read the TD-14 post-condition hook trusts, so the two lanes cannot
+    # contradict each other on a burned position.
+    try:
+        liquidity = gateway_client.query_position_liquidity(
+            chain=chain,
+            position_manager=npm,
+            token_id=token_id,
+        )
+    except Exception:  # noqa: BLE001 — verification must never raise into teardown
+        logger.debug(
+            "chain_verify_lp_open: query_position_liquidity raised for %s token %s on %s",
+            protocol,
+            token_id,
+            chain,
+            exc_info=True,
+        )
+        return None
+    if liquidity is None:
+        return None  # read FAULT — unknown, never "closed" (Empty ≠ Zero)
+    return bool(liquidity > 0)
 
 
 __all__ = [

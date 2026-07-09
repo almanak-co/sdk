@@ -386,10 +386,16 @@ async def _reconcile_lp(
 
     verdict = await chain_verify_lp_open(gateway_client=gateway_client, position=position, network=network)
     if verdict is True:
-        return ReconciliationVerdict.CONFIRMED_OPEN, "NPM reports liquidity > 0"
+        return ReconciliationVerdict.CONFIRMED_OPEN, "own-protocol NPM reports liquidity > 0"
     if verdict is False:
-        return ReconciliationVerdict.DIVERGED_CLOSED, "NPM reports liquidity == 0 (closed/burned)"
-    return ReconciliationVerdict.UNVERIFIABLE, "LP NFT not found on a registered NPM / read unavailable"
+        return (
+            ReconciliationVerdict.DIVERGED_CLOSED,
+            "own-protocol NPM reports liquidity == 0 (measured closed/burned)",
+        )
+    return (
+        ReconciliationVerdict.UNVERIFIABLE,
+        "no NPM registered for the position's protocol on this chain / read faulted",
+    )
 
 
 def _reconcile_lending(*, position: PositionInfo, market: MarketSnapshot | None) -> tuple[ReconciliationVerdict, str]:

@@ -291,6 +291,29 @@ def _npms_for_chain(chain: str) -> list[tuple[str, str]]:
     return found
 
 
+def npm_for_protocol(protocol: str, chain: str) -> str | None:
+    """Resolve the NonfungiblePositionManager for ONE V3-fork protocol on a chain.
+
+    The protocol-scoped counterpart of :func:`_npms_for_chain`, for reads that
+    verify a *single KNOWN position*. NPM token ids are per-contract monotonic
+    counters — the SAME uint exists independently on every V3-fork NPM deployed
+    to a chain (e.g. ethereum has uniswap_v3, sushiswap_v3 AND pancakeswap_v3
+    NPMs) — so a per-known-position read MUST be scoped to the position's own
+    protocol NPM. Walking all registered NPMs (the wallet-scan discovery shape,
+    where token ids come FROM each NPM via ``tokenOfOwnerByIndex``) matches a
+    foreign protocol's identically-numbered, unrelated position and reports a
+    burned position as still open (VIB-5631: the false-FAILED teardown verdict).
+
+    Returns ``None`` when ``protocol`` is not an :attr:`AbiFamily.V3_NPM` member
+    or has no NPM registered on ``chain`` — callers treat ``None`` as
+    "cannot verify here", never as a licence to probe other protocols' NPMs.
+    """
+    slug = str(protocol or "").lower()
+    if slug not in _NPM_PROTOCOLS:
+        return None
+    return AddressRegistry.resolve_contract_address(slug, chain, _NPM_ADDRESS_KEYS)
+
+
 async def _call_with_retries(
     label: str,
     fn,
@@ -551,5 +574,6 @@ __all__ = [
     "DiscoveredPosition",
     "DiscoveryIncomplete",
     "discover_lp_positions",
+    "npm_for_protocol",
     "to_teardown_summary",
 ]

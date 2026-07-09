@@ -159,22 +159,59 @@ def test_redrive_price_override_takes_precedence() -> None:
 
 # ---------------------------------------------------------------------------
 # chain_verify_lp_open
+#
+# VIB-5631: the read is PROTOCOL-SCOPED (the position's own NPM only) and
+# TRI-STATE via the gateway's QueryPositionLiquidity (burned NFT folds to a
+# MEASURED liquidity=0; a read fault is None/unmeasured). NPM token ids are
+# per-contract counters, so probing OTHER protocols' NPMs for the same uint
+# matches an unrelated position — the false-FAILED teardown bug.
 # ---------------------------------------------------------------------------
 
 
-def _lp(position_id: str = "555", chain: str = "arbitrum") -> PositionInfo:
+def _lp(position_id: str = "555", chain: str = "arbitrum", protocol: str = "uniswap_v3") -> PositionInfo:
     return PositionInfo(
         position_type=PositionType.LP,
         position_id=position_id,
         chain=chain,
-        protocol="uniswap_v3",
+        protocol=protocol,
         value_usd=Decimal("0"),
     )
 
 
-class _Discovered:
-    def __init__(self, liquidity: int) -> None:
-        self.liquidity = liquidity
+def _npm(protocol: str, chain: str) -> str:
+    """Resolve a connector-registered NPM address (single source: AddressRegistry)."""
+    from almanak.connectors._strategy_base.address_registry import AddressRegistry
+
+    address = AddressRegistry.resolve_contract_address(protocol, chain, ("position_manager", "nft"))
+    assert address, f"expected a registered NPM for {protocol} on {chain}"
+    return address
+
+
+class _FakeGatewayClient:
+    """GatewayClient double for the protocol-scoped tri-state liquidity read.
+
+    ``liquidity_by_npm`` maps a lowercased NPM address to the liquidity the
+    gateway would report for the queried token id (``None`` = read fault). Any
+    NPM NOT in the map fails the test loudly — the read must never consult a
+    foreign protocol's NPM.
+    """
+
+    is_connected = True
+
+    def __init__(self, liquidity_by_npm: dict[str, int | None], *, raises: Exception | None = None):
+        self._by_npm = {k.lower(): v for k, v in liquidity_by_npm.items()}
+        self._raises = raises
+        self.queried_npms: list[str] = []
+
+    def query_position_liquidity(self, *, chain, position_manager, token_id, block=None):
+        self.queried_npms.append(position_manager.lower())
+        if self._raises is not None:
+            raise self._raises
+        assert position_manager.lower() in self._by_npm, (
+            f"query_position_liquidity consulted an unexpected NPM {position_manager} — "
+            "the read must be scoped to the position's own protocol NPM (VIB-5631)"
+        )
+        return self._by_npm[position_manager.lower()]
 
 
 @pytest.mark.asyncio
@@ -184,55 +221,76 @@ async def test_chain_verify_none_without_gateway() -> None:
 
 @pytest.mark.asyncio
 async def test_chain_verify_none_for_non_int_token_id() -> None:
-    client = object()
+    client = _FakeGatewayClient({})
     assert await chain_verify_lp_open(gateway_client=client, position=_lp("pool0xABC:555")) is None
+    assert client.queried_npms == []
 
 
 @pytest.mark.asyncio
-async def test_chain_verify_open_when_liquidity_positive(monkeypatch) -> None:
-    import almanak.framework.teardown.discovery as discovery
-
-    monkeypatch.setattr(discovery, "_npms_for_chain", lambda chain: [("uniswap_v3", "0xNPM")])
-
-    async def _read(client, chain, npm, token_id, network="", protocol="uniswap_v3"):
-        return _Discovered(liquidity=12345)
-
-    monkeypatch.setattr(discovery, "_read_position", _read)
-    assert await chain_verify_lp_open(gateway_client=object(), position=_lp("555")) is True
+async def test_chain_verify_open_when_liquidity_positive() -> None:
+    client = _FakeGatewayClient({_npm("uniswap_v3", "arbitrum"): 12345})
+    assert await chain_verify_lp_open(gateway_client=client, position=_lp("555")) is True
 
 
 @pytest.mark.asyncio
-async def test_chain_verify_closed_when_liquidity_zero(monkeypatch) -> None:
-    import almanak.framework.teardown.discovery as discovery
-
-    monkeypatch.setattr(discovery, "_npms_for_chain", lambda chain: [("uniswap_v3", "0xNPM")])
-
-    async def _read(client, chain, npm, token_id, network="", protocol="uniswap_v3"):
-        return _Discovered(liquidity=0)
-
-    monkeypatch.setattr(discovery, "_read_position", _read)
-    assert await chain_verify_lp_open(gateway_client=object(), position=_lp("555")) is False
+async def test_chain_verify_measured_closed_when_liquidity_zero() -> None:
+    """liquidity == 0 is a MEASURED closure: the gateway folds the burned-NFT
+    'Invalid token ID' revert into 0, and a fully-decreased unburned shell also
+    reads 0 — both are the closed signal, never conflated with a read fault."""
+    client = _FakeGatewayClient({_npm("uniswap_v3", "arbitrum"): 0})
+    assert await chain_verify_lp_open(gateway_client=client, position=_lp("555")) is False
 
 
 @pytest.mark.asyncio
-async def test_chain_verify_none_when_not_found_on_any_npm(monkeypatch) -> None:
-    import almanak.framework.teardown.discovery as discovery
-
-    monkeypatch.setattr(discovery, "_npms_for_chain", lambda chain: [("uniswap_v3", "0xNPM")])
-
-    async def _read(client, chain, npm, token_id, network="", protocol="uniswap_v3"):
-        return None  # e.g. a UniV4 lp_v4 token id — not on a V3 NPM
-
-    monkeypatch.setattr(discovery, "_read_position", _read)
-    assert await chain_verify_lp_open(gateway_client=object(), position=_lp("555")) is None
+async def test_chain_verify_read_fault_is_none_not_closed() -> None:
+    # query_position_liquidity returns None on a gateway/RPC fault — unknown,
+    # never 'closed' (Empty != Zero).
+    client = _FakeGatewayClient({_npm("uniswap_v3", "arbitrum"): None})
+    assert await chain_verify_lp_open(gateway_client=client, position=_lp("555")) is None
 
 
 @pytest.mark.asyncio
-async def test_chain_verify_none_when_no_npm_on_chain(monkeypatch) -> None:
-    import almanak.framework.teardown.discovery as discovery
+async def test_chain_verify_read_raise_is_none_not_closed() -> None:
+    client = _FakeGatewayClient({}, raises=RuntimeError("gateway exploded"))
+    assert await chain_verify_lp_open(gateway_client=client, position=_lp("555")) is None
 
-    monkeypatch.setattr(discovery, "_npms_for_chain", lambda chain: [])
-    assert await chain_verify_lp_open(gateway_client=object(), position=_lp("555", chain="zzz")) is None
+
+@pytest.mark.asyncio
+async def test_chain_verify_none_for_non_npm_protocol() -> None:
+    """A non-V3-family LP (e.g. a UniV4 lp_v4 / registry 'lp' label) has no NPM
+    to scope to — unverifiable HERE, and no other protocol's NPM is probed."""
+    client = _FakeGatewayClient({})
+    assert await chain_verify_lp_open(gateway_client=client, position=_lp("555", protocol="lp_v4")) is None
+    assert client.queried_npms == []
+
+
+@pytest.mark.asyncio
+async def test_chain_verify_none_when_protocol_has_no_npm_on_chain() -> None:
+    # agni_finance is a V3_NPM family member but deploys on mantle, not ethereum.
+    client = _FakeGatewayClient({})
+    position = _lp("555", chain="ethereum", protocol="agni_finance")
+    assert await chain_verify_lp_open(gateway_client=client, position=position) is None
+    assert client.queried_npms == []
+
+
+@pytest.mark.asyncio
+async def test_chain_verify_scopes_to_own_npm_never_foreign_vib5631() -> None:
+    """THE VIB-5631 regression: a burned sushiswap_v3 NFT (own NPM measures 0)
+    must verify MEASURED-CLOSED even while uniswap_v3's / pancakeswap_v3's
+    ethereum NPMs hold unrelated, live positions under the SAME token id.
+    Pre-fix, the all-NPM walk returned True off the foreign NPM and the
+    teardown was flipped to FAILED on a provably-closed position."""
+    sushi_npm = _npm("sushiswap_v3", "ethereum")
+    client = _FakeGatewayClient(
+        {
+            sushi_npm: 0,  # burned: gateway folds 'Invalid token ID' -> 0
+            _npm("uniswap_v3", "ethereum"): 999_999,  # a stranger's live token 3014
+            _npm("pancakeswap_v3", "ethereum"): 777,  # ditto
+        }
+    )
+    position = _lp("3014", chain="ethereum", protocol="sushiswap_v3")
+    assert await chain_verify_lp_open(gateway_client=client, position=position) is False
+    assert client.queried_npms == [sushi_npm.lower()]
 
 
 def test_live_lending_position_dust_threshold() -> None:
