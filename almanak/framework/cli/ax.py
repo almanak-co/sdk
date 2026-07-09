@@ -1626,9 +1626,12 @@ def lending_reserves(ctx, protocol, asset):
 def _render_reserves_table(response, *, protocol: str, chain: str) -> None:
     """Human-readable column table for `ax lending-reserves` (VIB-4925).
 
-    Columns: SYMBOL ADDRESS BORROW COLLAT ACTIVE FROZEN LTV% LT%. A reserve
-    whose config read failed shows ``err`` in the flag columns and its error
-    text on a trailing line, so a single dead reserve is visible, not hidden.
+    Columns: SYMBOL ADDRESS BORROW COLLAT ACTIVE FROZEN LTV% LT% SUPPLY-CAP
+    BORROW-CAP EMODE PAUSED. A reserve whose config read failed shows ``err``
+    in the flag columns and its error text on a trailing line, so a single
+    dead reserve is visible, not hidden. Risk-context notes (e.g.
+    collateral-enabled rows with base LTV zero) render as trailing
+    lines, so a misleading row is annotated where the operator reads it.
     """
     data = response.data or {}
     reserves = data.get("reserves", [])
@@ -1651,6 +1654,14 @@ def _render_reserves_table(response, *, protocol: str, chain: str) -> None:
         # 0.0%); only None / unmeasured renders as "—".
         return "—" if v is None else f"{v / 100:.1f}%"
 
+    def _cap(v) -> str:
+        # Whole-token units as the provider reports them. A measured 0 means
+        # "no cap" in Aave semantics — render that meaning, not a bare 0 that
+        # reads like a hard-stopped market; "—" stays reserved for unmeasured.
+        if v is None:
+            return "—"
+        return "uncapped" if v == 0 else f"{v:,}"
+
     rows = []
     for r in reserves:
         rows.append(
@@ -1663,9 +1674,26 @@ def _render_reserves_table(response, *, protocol: str, chain: str) -> None:
                 "err" if r.get("error") else _flag(r.get("is_frozen")),
                 "—" if r.get("error") else _ltv(r.get("ltv_bps")),
                 "—" if r.get("error") else _ltv(r.get("liquidation_threshold_bps")),
+                _cap(r.get("supply_cap")),
+                _cap(r.get("borrow_cap")),
+                "—" if r.get("emode_category") is None else str(r.get("emode_category")),
+                _flag(r.get("is_paused")),
             )
         )
-    headers = ("SYMBOL", "ADDRESS", "BORROW", "COLLAT", "ACTIVE", "FROZEN", "LTV", "LT")
+    headers = (
+        "SYMBOL",
+        "ADDRESS",
+        "BORROW",
+        "COLLAT",
+        "ACTIVE",
+        "FROZEN",
+        "LTV",
+        "LT",
+        "SUPPLY-CAP",
+        "BORROW-CAP",
+        "EMODE",
+        "PAUSED",
+    )
     widths = [
         max(len(headers[i]), *(len(row[i]) for row in rows)) if rows else len(headers[i]) for i in range(len(headers))
     ]
@@ -1677,6 +1705,12 @@ def _render_reserves_table(response, *, protocol: str, chain: str) -> None:
     for r in reserves:
         if r.get("error"):
             click.echo(click.style(f"  ! {r.get('symbol', '?')}: {r['error']}", fg="yellow"))
+    # Surface risk-context notes below the table — a
+    # collateral-enabled row with base LTV zero is misleading without them.
+    for r in reserves:
+        note = (r.get("detail") or {}).get("risk_note")
+        if note:
+            click.echo(click.style(f"  ! {r.get('symbol', '?')}: {note}", fg="yellow"))
 
 
 @ax.command("portfolio")

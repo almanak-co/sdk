@@ -2655,6 +2655,15 @@ class ToolExecutor:
         the pre-flight, so one dead reserve doesn't blind the operator to the
         rest. *Enumeration* failure, by contrast, is fatal: a partial list
         would silently recreate the blind spot.
+
+        A plan may declare per-reserve *supplementary* reads (e.g. Aave
+        caps / eMode category / paused). Those are strictly
+        fail-open: any RPC failure, inner-call revert, or decode mismatch
+        leaves the declared fields ``None`` (unmeasured) and never touches the
+        row ``error``. After resolution the plan's ``annotate_row`` hook may
+        add ``detail`` notes (e.g. a ``risk_note`` for collateral-enabled rows
+        whose base LTV is zero) — protocol semantics stay in the plan; this
+        handler stays generic.
         """
         from almanak.connectors._strategy_agent_tool_registry import STRATEGY_AGENT_READ_REGISTRY
 
@@ -2764,27 +2773,7 @@ class ToolExecutor:
         # the read set is large enough to pay for the probe; otherwise (or on
         # any batch-level failure) they fall back to the bounded serial path.
         # Per-reserve fail-open is preserved in both lanes (VIB-4951).
-        reserves: list[dict] = []
-        pending: list[tuple[int, Any]] = []  # (row index, ReserveEntry with a live config_call)
-        for entry in entries:
-            row: dict = {
-                "symbol": entry.symbol,
-                "address": entry.address.lower(),
-                "borrowing_enabled": None,
-                "usage_as_collateral_enabled": None,
-                "is_active": None,
-                "is_frozen": None,
-                "ltv_bps": None,
-                "liquidation_threshold_bps": None,
-                "error": "",
-            }
-            reserves.append(row)
-            if entry.static_config is not None:
-                self._apply_reserve_config(row, entry.static_config)
-            elif entry.config_call is None or plan.decode_config is None:
-                row["error"] = "no config source declared for reserve"
-            else:
-                pending.append((len(reserves) - 1, entry))
+        reserves, pending = self._build_reserve_rows(plan, entries)
 
         budget_start = time.monotonic()
         if pending:
@@ -2806,6 +2795,8 @@ class ToolExecutor:
                 )
                 reserves = reserves[:exhausted_at]
 
+        self._annotate_reserve_rows(plan, reserves, protocol)
+
         return ToolResponse(
             status="success",
             data={
@@ -2822,6 +2813,64 @@ class ToolExecutor:
         )
 
     @staticmethod
+    def _build_reserve_rows(plan: Any, entries: list[Any]) -> tuple[list[dict], list[tuple[int, Any, bool]]]:
+        """Seed one tool row per enumerated reserve and collect live reads.
+
+        ``pending`` is a flat, row-ordered list of unit eth_calls:
+        ``(row index, ReserveCall, is_config)``. The primary config read comes
+        first for its row, then that row's supplementary calls, so budget
+        exhaustion still trims on a clean row boundary (first row with any
+        unresolved call). Supplementary fields declared by the plan are seeded
+        ``None`` on EVERY row — uniform shape; None = unmeasured (Empty != Zero).
+        """
+        reserves: list[dict] = []
+        pending: list[tuple[int, Any, bool]] = []
+        for entry in entries:
+            row: dict = {
+                "symbol": entry.symbol,
+                "address": entry.address.lower(),
+                "borrowing_enabled": None,
+                "usage_as_collateral_enabled": None,
+                "is_active": None,
+                "is_frozen": None,
+                "ltv_bps": None,
+                "liquidation_threshold_bps": None,
+                **dict.fromkeys(plan.supplementary_fields),
+                "error": "",
+            }
+            reserves.append(row)
+            row_index = len(reserves) - 1
+            if entry.static_config is not None:
+                ToolExecutor._apply_reserve_config(row, entry.static_config)
+            elif entry.config_call is None or plan.decode_config is None:
+                row["error"] = "no config source declared for reserve"
+            else:
+                pending.append((row_index, entry.config_call, True))
+            if plan.decode_supplementary is not None:
+                pending.extend((row_index, call, False) for call in entry.supplementary_calls)
+        return reserves, pending
+
+    @staticmethod
+    def _annotate_reserve_rows(plan: Any, reserves: list[dict], protocol: str) -> None:
+        """Plan-owned annotation pass: runs after all resolution
+        (and after any truncation trim) over the measured rows. Fail-open —
+        an annotation bug never breaks a read-only discovery response."""
+        if plan.annotate_row is None:
+            return
+        for row in reserves:
+            try:
+                notes = plan.annotate_row(row)
+            except Exception:  # noqa: BLE001 — annotation is best-effort context, never row-fatal
+                logger.debug("annotate_row failed for %s %s", protocol, row.get("symbol"), exc_info=True)
+                continue
+            if notes:
+                detail = row.get("detail")
+                if not isinstance(detail, dict):
+                    detail = {}
+                    row["detail"] = detail
+                detail.update(notes)
+
+    @staticmethod
     def _apply_reserve_config(row: dict, cfg: Any) -> None:
         """Copy a decoded ReserveConfigRow onto a tool response row."""
         row.update(
@@ -2835,25 +2884,52 @@ class ToolExecutor:
         if cfg.extra:
             row["detail"] = dict(cfg.extra)
 
+    @staticmethod
+    def _truncation_row(pending: list[tuple[int, Any, bool]], cursor: int) -> int | None:
+        """Row index to trim to on latency-budget exhaustion.
+
+        Returns the first row whose PRIMARY config read is still unresolved
+        (calls at/after ``cursor``). Rows before it already decoded their
+        config, so they are kept even when their optional supplementary
+        caps/eMode/paused calls never ran (those fields stay ``None`` —
+        Empty != Zero). A budget that expires with only supplementary calls
+        left drops NO row (returns ``None``): supplementary context is
+        fail-open and must never be row-fatal (the earlier
+        ``pending[cursor][0]`` dropped a fully-decoded reserve whenever the
+        budget ran out mid-supplementary).
+        """
+        for row_index, _call, is_config in pending[cursor:]:
+            if is_config:
+                return row_index
+        return None
+
     def _resolve_reserve_configs(
         self,
         chain: str,
         network: str,
         plan: Any,
         reserves: list[dict],
-        pending: list[tuple[int, Any]],
+        pending: list[tuple[int, Any, bool]],
         budget_start: float,
     ) -> int | None:
-        """Resolve live per-reserve config reads, batched where possible.
+        """Resolve live per-reserve reads (config + supplementary), batched
+        where possible.
 
-        Fills ``reserves`` rows in place. Returns ``None`` on completion, or
-        the row index of the first UNRESOLVED entry when the latency budget
-        ran out (the caller trims the list and flags truncation, preserving
-        the v1 partial-result contract).
+        ``pending`` holds row-ordered unit calls ``(row_index, ReserveCall,
+        is_config)``. Fills ``reserves`` rows in place. Returns ``None`` on
+        completion, or the row index of the first row with an UNRESOLVED call
+        when the latency budget ran out (the caller trims the list and flags
+        truncation, preserving the v1 partial-result contract).
+
+        Failure semantics differ by call kind: a failed *config* read sets the
+        row ``error`` (flags stay ``None``); a failed *supplementary* read is
+        silent fail-open — its fields stay ``None``, the row ``error`` stays
+        ``""``.
         """
         from almanak.framework.agent_tools.multicall import MULTICALL3_MAX_BATCH
 
-        # The getCode probe costs one RPC — only worth it for larger read sets.
+        # The getCode probe costs one RPC — only worth it for larger read sets
+        # (unit calls, not reserves: 2 Aave reserves already carry 8 calls).
         _MULTICALL3_MIN_BATCH = 8
         use_multicall = len(pending) >= _MULTICALL3_MIN_BATCH and self._multicall3_available(chain, network)
 
@@ -2861,31 +2937,28 @@ class ToolExecutor:
         while cursor < len(pending):
             remaining = _LENDING_RESERVES_LATENCY_BUDGET_S - (time.monotonic() - budget_start)
             if remaining <= 0:
-                return pending[cursor][0]
+                return self._truncation_row(pending, cursor)
             if use_multicall:
                 chunk = pending[cursor : cursor + MULTICALL3_MAX_BATCH]
-                if self._resolve_chunk_via_multicall3(chain, network, plan, reserves, chunk, remaining):
+                if self._resolve_chunk_via_multicall3(chain, network, plan, reserves, chunk, remaining, cursor):
                     cursor += len(chunk)
                     continue
                 # Batch lane failed (RPC error / undecodable blob) — degrade to
                 # serial for the rest rather than fabricating rows.
                 use_multicall = False
                 continue
-            row_index, entry = pending[cursor]
+            row_index, call, is_config = pending[cursor]
             call_timeout = min(_LENDING_RESERVES_PER_CALL_TIMEOUT_S, remaining)
-            ok, raw = self._rpc_call(
-                chain,
-                entry.config_call.to,
-                entry.config_call.data,
-                entry.config_call.id,
-                network,
-                timeout=call_timeout,
-            )
+            ok, raw = self._rpc_call(chain, call.to, call.data, call.id, network, timeout=call_timeout)
             row = reserves[row_index]
             if not ok:
-                row["error"] = raw
-            else:
+                if is_config:
+                    row["error"] = raw
+                # Supplementary failure: fields stay None, error stays "".
+            elif is_config:
                 self._decode_config_into_row(plan, row, raw)
+            else:
+                self._decode_supplementary_into_row(plan, row, call.id, raw)
             cursor += 1
         return None
 
@@ -2895,11 +2968,17 @@ class ToolExecutor:
         network: str,
         plan: Any,
         reserves: list[dict],
-        chunk: list[tuple[int, Any]],
+        chunk: list[tuple[int, Any, bool]],
         remaining: float,
+        cursor: int,
     ) -> bool:
         """Resolve one aggregate3 chunk. True on success (rows filled,
-        including per-call fail-open); False to trigger serial fallback."""
+        including per-call fail-open); False to trigger serial fallback.
+
+        The trace id carries the chunk's position in the flat pending list
+        (``cursor``) — unique per chunk even when a row's calls straddle a
+        chunk boundary (a row index alone no longer is, with multiple calls
+        per reserve)."""
         from almanak.framework.agent_tools.multicall import (
             MULTICALL3_ADDRESS,
             decode_aggregate3,
@@ -2907,14 +2986,14 @@ class ToolExecutor:
         )
 
         try:
-            calldata = encode_aggregate3([(e.config_call.to, e.config_call.data) for _, e in chunk])
+            calldata = encode_aggregate3([(call.to, call.data) for _, call, _ in chunk])
         except Exception:  # noqa: BLE001 — malformed connector calldata degrades to serial, never crashes the tool
             return False
         ok, raw = self._rpc_call(
             chain,
             MULTICALL3_ADDRESS,
             calldata,
-            f"multicall3_reserves:{chunk[0][0]}",
+            f"multicall3_reserves:{cursor}",
             network,
             timeout=min(10.0, remaining),
         )
@@ -2923,12 +3002,17 @@ class ToolExecutor:
         results = decode_aggregate3(raw, expected=len(chunk))
         if results is None:
             return False
-        for (row_index, _entry), (call_ok, result_hex) in zip(chunk, results, strict=True):
+        for (row_index, call, is_config), (call_ok, result_hex) in zip(chunk, results, strict=True):
             row = reserves[row_index]
             if not call_ok:
-                row["error"] = "execution reverted (multicall3 aggregate3 inner call)"
+                if is_config:
+                    row["error"] = "execution reverted (multicall3 aggregate3 inner call)"
+                # Supplementary inner revert: fields stay None, error stays "".
                 continue
-            self._decode_config_into_row(plan, row, result_hex)
+            if is_config:
+                self._decode_config_into_row(plan, row, result_hex)
+            else:
+                self._decode_supplementary_into_row(plan, row, call.id, result_hex)
         return True
 
     def _decode_config_into_row(self, plan: Any, row: dict, raw: str) -> None:
@@ -2940,6 +3024,22 @@ class ToolExecutor:
             row["error"] = f"unexpected reserve-config payload (len={raw_len} hex chars)"
             return
         self._apply_reserve_config(row, cfg)
+
+    @staticmethod
+    def _decode_supplementary_into_row(plan: Any, row: dict, call_id: str, raw: str) -> None:
+        """Decode one supplementary payload into a row — strictly fail-open.
+
+        A decode mismatch (``ValueError``) leaves the declared fields ``None``
+        and the row ``error`` untouched (supplementary context
+        must never degrade the primary flags contract). Only keys declared in
+        ``plan.supplementary_fields`` are merged, so every row keeps the
+        uniform seeded shape and a plan bug cannot clobber core columns.
+        """
+        try:
+            fields = plan.decode_supplementary(call_id, raw)
+            row.update({k: v for k, v in fields.items() if k in plan.supplementary_fields})
+        except Exception:  # noqa: BLE001 — supplementary context is best-effort, never row-fatal
+            logger.debug("supplementary decode failed for %s", call_id, exc_info=True)
 
     def _multicall3_available(self, chain: str, network: str) -> bool:
         """Probe (and cache) whether Multicall3 is deployed on ``chain``.

@@ -1221,6 +1221,73 @@ class TestAxReadCommands:
         assert "DAI" in result.output and "execution reverted" in result.output
 
     @patch("almanak.framework.cli.ax._get_executor")
+    def test_lending_reserves_table_risk_context(self, mock_get_exec):
+        """Risk-context columns: caps (whole tokens; measured 0 renders as
+        'uncapped', unmeasured as '—'), eMode category, paused flag — and the
+        risk_note detail renders as a trailing annotation line so a
+        collateral-enabled / LTV-0 row is not misleading in the human table."""
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        async def mock_execute(tool_name, args):
+            return ToolResponse(
+                status="success",
+                data={
+                    "schema_version": 1,
+                    "chain": "polygon",
+                    "protocol": "aave_v3",
+                    "pool_data_provider": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
+                    "count": 2,
+                    "total_matched": 2,
+                    "truncated": False,
+                    "reserves": [
+                        {
+                            "symbol": "ezETH",
+                            "address": "0x" + "e1" * 20,
+                            "borrowing_enabled": False,
+                            "usage_as_collateral_enabled": True,
+                            "is_active": True,
+                            "is_frozen": False,
+                            "ltv_bps": 0,
+                            "liquidation_threshold_bps": 10,
+                            "supply_cap": 450000,
+                            "borrow_cap": 0,  # measured 0 = no cap (Aave semantics)
+                            "emode_category": 3,
+                            "is_paused": False,
+                            "detail": {"risk_note": "base LTV zero — collateral counts only inside eMode category 3"},
+                            "error": "",
+                        },
+                        {
+                            "symbol": "USDC",
+                            "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+                            "borrowing_enabled": True,
+                            "usage_as_collateral_enabled": True,
+                            "is_active": True,
+                            "is_frozen": False,
+                            "ltv_bps": 7500,
+                            "liquidation_threshold_bps": 7800,
+                            "supply_cap": None,  # unmeasured — must render "—", never 0
+                            "borrow_cap": None,
+                            "emode_category": None,
+                            "is_paused": None,
+                            "error": "",
+                        },
+                    ],
+                },
+            )
+
+        mock_executor.execute = mock_execute
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--chain", "polygon", "lending-reserves"])
+        assert result.exit_code == 0
+        assert "SUPPLY-CAP" in result.output and "EMODE" in result.output and "PAUSED" in result.output
+        assert "450,000" in result.output  # whole-token supply cap, formatted
+        assert "uncapped" in result.output  # measured 0 = no cap, not a bare 0
+        assert "—" in result.output  # unmeasured caps/eMode stay em-dash
+        # The misleading row carries its risk note as a trailing line.
+        assert "ezETH: base LTV zero — collateral counts only inside eMode category 3" in result.output
+
+    @patch("almanak.framework.cli.ax._get_executor")
     def test_portfolio_parses_token_list(self, mock_get_exec):
         """--tokens 'USDC,WETH' should split into a list before dispatch."""
         mock_executor, mock_client = _mock_executor_and_client()

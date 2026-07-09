@@ -305,6 +305,31 @@ class LendingReserveSummary(BaseModel):
     liquidation_threshold_bps: int | None = Field(
         default=None, description="Liquidation threshold in basis points; None when unknown."
     )
+    supply_cap: int | None = Field(
+        default=None,
+        description=(
+            "Supply cap in WHOLE-TOKEN units as the PoolDataProvider reports it "
+            "(unscaled by decimals); 0 = no cap (Aave semantics); None = unmeasured."
+        ),
+    )
+    borrow_cap: int | None = Field(
+        default=None,
+        description=(
+            "Borrow cap in WHOLE-TOKEN units as the PoolDataProvider reports it "
+            "(unscaled by decimals); 0 = no cap (Aave semantics); None = unmeasured."
+        ),
+    )
+    emode_category: int | None = Field(
+        default=None, description="Aave eMode category id (0 = none); None = unmeasured."
+    )
+    is_paused: bool | None = Field(default=None, description="Reserve paused flag; None = unmeasured.")
+    detail: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Protocol-specific context (e.g. Morpho market ids, Compound comet role, or a "
+            "'risk_note' flagging collateral-enabled reserves whose base LTV is zero)."
+        ),
+    )
     error: str = Field(default="", description="Per-reserve read error, when the config could not be fetched.")
 
 

@@ -646,6 +646,8 @@ async def test_list_lending_reserves_morpho_static_golden() -> None:
     assert wsteth_usdc["usage_as_collateral_enabled"] is True
     assert wsteth_usdc["detail"]["loan_token"] == "USDC"
     assert result.data["pool_data_provider"].lower().startswith("0xbbbbbbbbbb")
+    # Supplementary risk context is Aave-fork-only: Morpho rows carry NO caps/eMode/paused keys.
+    assert "supply_cap" not in wsteth_usdc and "emode_category" not in wsteth_usdc
 
 
 @pytest.mark.asyncio
@@ -692,6 +694,8 @@ async def test_list_lending_reserves_compound_comet_golden() -> None:
     uncatalogued = next(r for r in base_rows if r["symbol"] == "WSTETH")
     assert uncatalogued["detail"]["metadata"] == "uncatalogued"
     assert uncatalogued["borrowing_enabled"] is True
+    # Supplementary risk context is Aave-fork-only: comet rows carry NO caps/eMode/paused keys.
+    assert "supply_cap" not in base and "emode_category" not in collateral
 
 
 @pytest.mark.asyncio
@@ -711,6 +715,194 @@ async def test_list_lending_reserves_spark_reuses_aave_fork_path() -> None:
     assert row["ltv_bps"] == 7000
     assert row["borrowing_enabled"] is True
     assert result.data["pool_data_provider"] == "0xFc21d6d146E6086B8359705C8b28512a983db0cb"
+
+
+# ---------------------------------------------------------------------------
+# Aave reserve risk context: caps / eMode / paused supplementary
+# reads + the risk_note annotation for collateral-enabled rows with LTV 0.
+# ---------------------------------------------------------------------------
+
+
+def _risk_context_gateway(enumeration: list[tuple[str, str]], responses: dict[str, str]) -> Any:
+    """Scripted gateway keyed on the FULL per-reserve call id
+    (``aave_reserve_{cfg,caps,emode,paused}:SYMBOL``). ``responses[req_id]``
+    is a result-hex string or the literal ``"FAIL"`` (RPC failure). The
+    Multicall3 getCode probe is answered with empty code so the test runs the
+    deterministic serial lane; the batched lane has its own tests below."""
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        if req.method == "eth_getCode":
+            return _rpc_ok("")
+        if req.id == "aave_all_reserves":
+            return _rpc_ok(_all_reserves_hex(enumeration))
+        out = responses[req.id]
+        if out == "FAIL":
+            resp = MagicMock()
+            resp.success = False
+            resp.error = "execution reverted"
+            return resp
+        return _rpc_ok(out)
+
+    gateway = MagicMock()
+    gateway.rpc.Call.side_effect = _call
+    return gateway
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_risk_context_golden() -> None:
+    """Risk-context golden: caps (whole-token units), eMode category, and paused
+    flag are decoded per reserve, and a collateral-enabled row with base LTV 0
+    carries a measured risk_note — the exact shape that previously rendered as
+    a misleading "collateral yes / LTV 0.0%" row with no context."""
+    _EZETH = "0x" + "e1" * 20
+    _DPI = "0x" + "d1" * 20
+    _RSETH = "0x" + "a1" * 20
+    enumeration = [("ezETH", _EZETH), ("DPI", _DPI), ("USDC", _USDC_POLYGON), ("rsETH", _RSETH)]
+
+    ltv0_cfg = _reserve_cfg_hex(ltv=0, usage=True, borrow=False, active=True, frozen=False)
+    responses = {
+        # ezETH: eMode-only collateral — LTV 0 but eMode category 3.
+        "aave_reserve_cfg:ezETH": ltv0_cfg,
+        "aave_reserve_caps:ezETH": _hex_word(0) + _hex_word(450_000),  # (borrowCap, supplyCap)
+        "aave_reserve_emode:ezETH": _hex_word(3),
+        "aave_reserve_paused:ezETH": _hex_word(0),
+        # DPI: offboarded — LTV 0 and eMode category 0.
+        "aave_reserve_cfg:DPI": _reserve_cfg_hex(ltv=0, usage=True, borrow=False, active=True, frozen=True),
+        "aave_reserve_caps:DPI": _hex_word(0) + _hex_word(10_000),
+        "aave_reserve_emode:DPI": _hex_word(0),
+        "aave_reserve_paused:DPI": _hex_word(0),
+        # USDC: healthy borrowable reserve — measured caps, NO risk note.
+        "aave_reserve_cfg:USDC": _reserve_cfg_hex(ltv=7500, usage=True, borrow=True, active=True, frozen=False),
+        "aave_reserve_caps:USDC": _hex_word(45_000_000) + _hex_word(50_000_000),
+        "aave_reserve_emode:USDC": _hex_word(1),
+        "aave_reserve_paused:USDC": _hex_word(1),  # paused mid-incident, still no LTV note
+        # rsETH: LTV-0 collateral whose caps + eMode reads FAIL → unmeasured
+        # fields stay None, row error stays '', note says "unmeasured".
+        "aave_reserve_cfg:rsETH": ltv0_cfg,
+        "aave_reserve_caps:rsETH": "FAIL",
+        "aave_reserve_emode:rsETH": "FAIL",
+        "aave_reserve_paused:rsETH": _hex_word(0),
+    }
+    executor = _make_reserves_executor(_risk_context_gateway(enumeration, responses))
+    result = await executor.execute("list_lending_reserves", {"chain": "polygon", "protocol": "aave_v3"})
+
+    assert result.status == "success", result.error
+    assert result.data["schema_version"] == 1  # additive fields — same schema version
+    by_symbol = {r["symbol"]: r for r in result.data["reserves"]}
+
+    ezeth = by_symbol["ezETH"]
+    assert ezeth["supply_cap"] == 450_000  # whole-token units, verbatim from the provider
+    assert ezeth["borrow_cap"] == 0  # measured 0 = no cap (Aave semantics), NOT None
+    assert ezeth["emode_category"] == 3
+    assert ezeth["is_paused"] is False
+    assert ezeth["error"] == ""
+    assert ezeth["detail"]["risk_note"] == "base LTV zero — collateral counts only inside eMode category 3"
+
+    dpi = by_symbol["DPI"]
+    assert dpi["emode_category"] == 0
+    assert dpi["detail"]["risk_note"] == (
+        "base LTV zero and eMode category 0 — no borrowing power (typical offboarding state)"
+    )
+
+    usdc = by_symbol["USDC"]
+    assert usdc["supply_cap"] == 50_000_000
+    assert usdc["borrow_cap"] == 45_000_000
+    assert usdc["emode_category"] == 1
+    assert usdc["is_paused"] is True
+    assert "detail" not in usdc  # LTV > 0 → no risk note fabricated
+
+    rseth = by_symbol["rsETH"]
+    assert rseth["supply_cap"] is None and rseth["borrow_cap"] is None  # unmeasured, not 0
+    assert rseth["emode_category"] is None
+    assert rseth["is_paused"] is False
+    assert rseth["error"] == ""  # supplementary failures never set the row error
+    assert rseth["detail"]["risk_note"] == (
+        "base LTV zero — collateral only via eMode or offboarded (eMode category unmeasured)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_lending_reserves_supplementary_mismatch_fails_open() -> None:
+    """PARITY PROPERTY: a legacy scripted gateway that answers
+    ANY per-symbol call with a 10-word config blob produces a decode mismatch
+    on every supplementary read (strict word-count decoders) → caps / eMode /
+    paused stay None (unmeasured — Empty != Zero) and the row error stays ''.
+    This is why every golden predating the supplementary reads passes byte-identically."""
+    enumeration = [("WMATIC", _WMATIC_POLYGON), ("USDC", _USDC_POLYGON)]
+    gateway = _reserves_gateway(
+        enumeration,
+        lambda sym: _reserve_cfg_hex(ltv=6800, usage=True, borrow=False, active=True, frozen=False),
+    )
+    executor = _make_reserves_executor(gateway)
+    result = await executor.execute("list_lending_reserves", {"chain": "polygon", "protocol": "aave_v3"})
+    assert result.status == "success", result.error
+    assert len(result.data["reserves"]) == 2
+    for row in result.data["reserves"]:
+        assert row["ltv_bps"] == 6800  # primary config decode unaffected
+        assert row["error"] == ""
+        assert row["supply_cap"] is None  # mismatch → unmeasured, never fabricated
+        assert row["borrow_cap"] is None
+        assert row["emode_category"] is None
+        assert row["is_paused"] is None
+        assert "detail" not in row  # ltv > 0 → no risk note either
+
+
+def test_aave_plan_supplementary_contract() -> None:
+    """Plan-level contract: stable call-id prefixes, strict
+    (byte-exact) supplementary decoders, measured-only annotation, and the
+    dataclass invariant tying supplementary_fields to decode_supplementary."""
+    from almanak.connectors._strategy_base.lending_reserve_read import (
+        LendingReserveDiscoveryPlan,
+        aave_fork_reserve_discovery_plan,
+    )
+
+    plan = aave_fork_reserve_discovery_plan("aave_v3", "0x" + "aa" * 20)
+    assert plan.supplementary_fields == ("supply_cap", "borrow_cap", "emode_category", "is_paused")
+
+    entries = plan.decode_enumeration("0x" + _all_reserves_hex([("USDC", _USDC_POLYGON)]))
+    ids = [c.id for c in entries[0].supplementary_calls]
+    assert ids == ["aave_reserve_caps:USDC", "aave_reserve_emode:USDC", "aave_reserve_paused:USDC"]
+
+    # Strict decode: exactly the advertised word counts.
+    assert plan.decode_supplementary("aave_reserve_caps:USDC", _hex_word(7) + _hex_word(9)) == {
+        "borrow_cap": 7,
+        "supply_cap": 9,
+    }
+    assert plan.decode_supplementary("aave_reserve_emode:USDC", _hex_word(2)) == {"emode_category": 2}
+    assert plan.decode_supplementary("aave_reserve_paused:USDC", _hex_word(1)) == {"is_paused": True}
+    cfg_blob = _reserve_cfg_hex(ltv=0, usage=True, borrow=False, active=True, frozen=False)
+    for call_id in ids:  # a 10-word config blob mismatches every decoder
+        with pytest.raises(ValueError):
+            plan.decode_supplementary(call_id, cfg_blob)
+    with pytest.raises(ValueError):  # non-canonical bool word is not coerced
+        plan.decode_supplementary("aave_reserve_paused:USDC", _hex_word(2))
+    with pytest.raises(ValueError):  # unknown call id
+        plan.decode_supplementary("bogus:USDC", _hex_word(0))
+
+    # annotate_row reports the measured case only — never guesses which.
+    base = {"usage_as_collateral_enabled": True, "ltv_bps": 0}
+    assert "eMode category 3" in plan.annotate_row({**base, "emode_category": 3})["risk_note"]
+    assert "offboarding" in plan.annotate_row({**base, "emode_category": 0})["risk_note"]
+    assert "unmeasured" in plan.annotate_row({**base, "emode_category": None})["risk_note"]
+    assert plan.annotate_row({"usage_as_collateral_enabled": True, "ltv_bps": 6800, "emode_category": 3}) == {}
+    assert plan.annotate_row({"usage_as_collateral_enabled": False, "ltv_bps": 0, "emode_category": 3}) == {}
+    assert plan.annotate_row({"usage_as_collateral_enabled": None, "ltv_bps": None}) == {}
+
+    # Dataclass invariant: fields and decoder must come together.
+    with pytest.raises(ValueError):
+        LendingReserveDiscoveryPlan(
+            protocol="x",
+            provider_address="0x0",
+            static_entries=(),
+            supplementary_fields=("a",),
+        )
+    with pytest.raises(ValueError):
+        LendingReserveDiscoveryPlan(
+            protocol="x",
+            provider_address="0x0",
+            static_entries=(),
+            decode_supplementary=lambda _id, _raw: {},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -747,31 +939,60 @@ def _mc3_gateway(n: int, aggregate3_blob_for: Any, code: str = "0x60") -> tuple[
 
 @pytest.mark.asyncio
 async def test_reserves_multicall3_batched_chunked_and_fail_open(monkeypatch: Any) -> None:
-    """A large read set batches via aggregate3 in bounded chunks; a reverted
-    inner call fail-opens its row only; no per-reserve serial calls happen."""
+    """A large read set batches via aggregate3 in bounded chunks — now 4 unit
+    calls per Aave reserve (config + caps + eMode + paused). A
+    reverted CONFIG inner call error-flags its row only; a reverted
+    SUPPLEMENTARY inner call leaves just its fields None with the row error
+    staying ''; no per-reserve serial calls happen."""
     from eth_abi import encode as _abi_encode
 
     from almanak.framework.agent_tools import multicall as _mc
 
-    monkeypatch.setattr(_mc, "MULTICALL3_MAX_BATCH", 4)
+    monkeypatch.setattr(_mc, "MULTICALL3_MAX_BATCH", 8)  # 2 reserves per chunk
     cfg = bytes.fromhex(_reserve_cfg_hex(ltv=7000, usage=True, borrow=True, active=True, frozen=False))
+    caps = bytes.fromhex(_hex_word(1_000) + _hex_word(2_000))  # (borrowCap, supplyCap)
+    emode = bytes.fromhex(_hex_word(1))
+    paused = bytes.fromhex(_hex_word(0))
+    per_reserve = [cfg, caps, emode, paused]  # flat pending order per row
 
     def _blob_for(req_id: str) -> str:
-        start = int(req_id.split(":", 1)[1])
-        size = min(4, 10 - start)
-        results = [(i != 5, cfg) for i in range(start, start + size)]  # global index 5 reverts
+        cursor = int(req_id.split(":", 1)[1])  # chunk id = flat-list cursor
+        size = min(8, 40 - cursor)
+        results = []
+        for pos in range(cursor, cursor + size):
+            reserve, kind = divmod(pos, 4)
+            # Reserve 5's CONFIG call and reserve 7's PAUSED call revert.
+            ok = not (reserve == 5 and kind == 0) and not (reserve == 7 and kind == 3)
+            results.append((ok, per_reserve[kind]))
         return _abi_encode(["(bool,bytes)[]"], [results]).hex()
 
     gateway, seen = _mc3_gateway(10, _blob_for)
     executor = _make_reserves_executor(gateway)
     result = await executor.execute("list_lending_reserves", {"chain": "polygon", "protocol": "aave_v3"})
     assert result.status == "success", result.error
-    assert seen == ["aave_all_reserves", "getcode", "multicall3_reserves:0", "multicall3_reserves:4", "multicall3_reserves:8"]
+    # 10 reserves * 4 calls = 40 units chunk at 8 → exactly 5 aggregate3 calls.
+    assert seen == ["aave_all_reserves", "getcode"] + [f"multicall3_reserves:{c}" for c in range(0, 40, 8)]
     rows = result.data["reserves"]
     assert len(rows) == 10
+    # Config inner revert → row error, flags None; supplementary reads of the
+    # same row are independent and still measured.
     assert rows[5]["error"] == "execution reverted (multicall3 aggregate3 inner call)"
     assert rows[5]["ltv_bps"] is None
-    assert all(r["ltv_bps"] == 7000 and r["error"] == "" for i, r in enumerate(rows) if i != 5)
+    assert rows[5]["supply_cap"] == 2_000 and rows[5]["borrow_cap"] == 1_000
+    # Supplementary inner revert → only its fields stay None, error stays ''.
+    assert rows[7]["error"] == ""
+    assert rows[7]["is_paused"] is None
+    assert rows[7]["ltv_bps"] == 7000 and rows[7]["emode_category"] == 1
+    ok_rows = [r for i, r in enumerate(rows) if i not in (5, 7)]
+    assert all(
+        r["ltv_bps"] == 7000
+        and r["error"] == ""
+        and r["supply_cap"] == 2_000
+        and r["borrow_cap"] == 1_000
+        and r["emode_category"] == 1
+        and r["is_paused"] is False
+        for r in ok_rows
+    )
 
 
 @pytest.mark.asyncio
@@ -866,3 +1087,76 @@ async def test_multicall3_measured_empty_code_is_cached(monkeypatch: Any) -> Non
     await executor.execute("list_lending_reserves", {"chain": "polygon", "protocol": "aave_v3"})
     assert state["probe_calls"] == 1
     assert executor._multicall3_probe_cache == {("polygon", ""): False}
+
+
+def test_truncation_never_drops_a_config_decoded_row() -> None:
+    """PR #3206 review: budget exhaustion after a
+    row's PRIMARY config resolved but before its optional supplementary calls
+    must NOT drop that row — supplementary context is fail-open (fields stay
+    None), and truncation trims only at the first row whose CONFIG is still
+    unresolved. All-supplementary remainders drop no rows at all."""
+    call = object()
+    # Budget dies with only row 1's supplementary calls left → keep everything.
+    assert ToolExecutor._truncation_row([(0, call, True), (1, call, True), (1, call, False)], 2) is None
+    # Budget dies before row 1's config → trim from row 1 (row 0 kept).
+    assert ToolExecutor._truncation_row([(0, call, True), (0, call, False), (1, call, True)], 1) == 1
+    # Mixed remainder: row 0's supplementary is skippable, row 2's config is not.
+    assert ToolExecutor._truncation_row([(0, call, True), (0, call, False), (2, call, True)], 1) == 2
+    assert ToolExecutor._truncation_row([], 0) is None
+
+
+def test_annotate_rows_tolerates_detail_none_and_merges_dict() -> None:
+    """PR #3206 review: a row whose ``detail`` key is present but None
+    (or non-dict) must not crash the annotation pass — the note replaces it;
+    an existing dict detail is merged into, not clobbered."""
+    plan = MagicMock()
+    plan.annotate_row = lambda row: {"risk_note": "x"}
+    rows = [{"detail": None}, {"detail": {"kept": 1}}, {}]
+    ToolExecutor._annotate_reserve_rows(plan, rows, "aave_v3")
+    assert rows[0]["detail"] == {"risk_note": "x"}
+    assert rows[1]["detail"] == {"kept": 1, "risk_note": "x"}
+    assert rows[2]["detail"] == {"risk_note": "x"}
+
+
+def test_decode_supplementary_fail_open_beyond_valueerror() -> None:
+    """PR #3206 review: a plan decoder that raises a NON-ValueError or
+    returns a non-mapping must still be fail-open — fields stay None, no raise."""
+    row = {"supply_cap": None, "error": ""}
+    plan = MagicMock()
+    plan.supplementary_fields = ("supply_cap",)
+    plan.decode_supplementary = MagicMock(side_effect=TypeError("boom"))
+    ToolExecutor._decode_supplementary_into_row(plan, row, "aave_reserve_caps:X", "0x")
+    assert row == {"supply_cap": None, "error": ""}
+    plan.decode_supplementary = MagicMock(return_value="not-a-mapping")
+    ToolExecutor._decode_supplementary_into_row(plan, row, "aave_reserve_caps:X", "0x")
+    assert row == {"supply_cap": None, "error": ""}
+
+
+def test_annotate_row_near_zero_liquidation_threshold_and_bool_guards() -> None:
+    """PR #3206 review: the OTHER
+    implausible shape — collateral-enabled with liquidationThreshold <= 10 bps
+    while LTV is non-zero — now carries a risk_note; and bool values never
+    masquerade as measured ints (False == 0 must not trigger the LTV-0 note,
+    emode=False reads as unmeasured)."""
+    from almanak.connectors._strategy_base.lending_reserve_read import aave_fork_reserve_discovery_plan
+
+    plan = aave_fork_reserve_discovery_plan("aave_v3", "0x" + "aa" * 20)
+    lt_note = plan.annotate_row({"usage_as_collateral_enabled": True, "ltv_bps": 6000, "liquidation_threshold_bps": 10})
+    assert "liquidation threshold near zero (10 bps)" in lt_note["risk_note"]
+    # Healthy thresholds: no note.
+    assert (
+        plan.annotate_row({"usage_as_collateral_enabled": True, "ltv_bps": 6000, "liquidation_threshold_bps": 8000})
+        == {}
+    )
+    # Unmeasured threshold: no note (Empty != Zero).
+    assert (
+        plan.annotate_row({"usage_as_collateral_enabled": True, "ltv_bps": 6000, "liquidation_threshold_bps": None})
+        == {}
+    )
+    # bool guards: False is not a measured 0 — neither branch may fire on it.
+    assert (
+        plan.annotate_row({"usage_as_collateral_enabled": True, "ltv_bps": False, "liquidation_threshold_bps": False})
+        == {}
+    )
+    emode_bool = plan.annotate_row({"usage_as_collateral_enabled": True, "ltv_bps": 0, "emode_category": False})
+    assert "unmeasured" in emode_bool["risk_note"]
