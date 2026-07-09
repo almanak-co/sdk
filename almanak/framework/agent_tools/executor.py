@@ -12,7 +12,7 @@ import json
 import logging
 import time
 import uuid
-from decimal import Decimal, localcontext
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import ValidationError
@@ -96,6 +96,39 @@ DEFAULT_LENDING_PROTOCOL = "aave_v3"
 _LENDING_RESERVES_PER_CALL_TIMEOUT_S = 3.0
 _LENDING_RESERVES_LATENCY_BUDGET_S = 25.0
 
+# get_pool_state analytics enrichment: gRPC deadline for the gateway's
+# PoolAnalyticsService, sized to ONE upstream HTTP-provider budget (the
+# gateway's aiohttp total=15s in ``pool_analytics_service.py``).
+#
+# The gateway can run TWO sequential provider lanes per call — DefiLlama
+# primary then CoinGecko Onchain fallback — each bounded by that 15s HTTP
+# timeout, so its worst-case internal path is ~30s when the primary is slow
+# (cold catalog + a hung DefiLlama GET) rather than fast-failing. This 15s
+# client deadline can therefore expire mid-primary, before the fallback lane
+# runs (Codex PR #3207 review). That is a DELIBERATE cap, not an oversight:
+# ``pool_analytics`` is a synchronous gRPC stub called from the async
+# ``_execute_get_pool_state``, so this deadline is also the ceiling on an
+# event-loop stall. Analytics are strictly best-effort/informational garnish
+# on the core on-chain pool read — holding that read (and the loop) hostage
+# for ~30s to reach a fallback is the wrong trade. When the deadline fires
+# first the fields come back "" (unmeasured — Empty != Zero, never wrong
+# data), exactly as the fail-open contract already allows for any
+# unavailability. The narrow window this leaves open (slow-not-failing
+# DefiLlama + healthy CoinGecko) is closed structurally by PR #3208, which
+# deletes the DefiLlama lane and collapses the worst case to the single
+# CoinGecko lane this 15s deadline already fully covers; the more complete
+# alternative, if that window ever proves material before #3208 lands, is a
+# shorter gateway-side per-provider budget so both lanes fit under 15s — not
+# a larger client deadline.
+_POOL_ANALYTICS_TIMEOUT_S = 15.0
+
+# Plausibility ceiling for analytics decimal-strings coming back from the
+# gateway (USD amounts and APR percentages). Total DeFi TVL is ~1e11 USD and
+# world GDP is ~1e14; anything at or above 1e16 is provider garbage, not a
+# measurement. Garbage maps to "" (unmeasured — Empty != Zero), never to a
+# clamped or zeroed number.
+_ANALYTICS_ABSURD_CEILING = Decimal("1e16")
+
 # The vault connector the vault tools (deploy/settle/state/approve/deposit/
 # teardown) construct their SDK/deployer/adapter from. Lagoon is the only
 # vault protocol today; the vault tools are not protocol-parameterized, so
@@ -172,6 +205,29 @@ def _decode_int24(word_hex: str) -> int:
     """
     value = int(word_hex[-6:], 16)  # extract low 3 bytes
     return value - (1 << 24) if value >= (1 << 23) else value
+
+
+def _sanitize_analytics_field(value: object) -> str:
+    """Validate one analytics decimal-string field from the gateway wire.
+
+    Returns the original wire string when it parses to a finite,
+    non-negative :class:`Decimal` below ``_ANALYTICS_ABSURD_CEILING``;
+    otherwise ``""`` (unmeasured — Empty != Zero per AGENTS.md Accounting).
+    Never fabricates ``0`` and never clamps: a garbage provider value is
+    reported as unmeasured, not as a plausible-looking number.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text:
+        return ""
+    try:
+        parsed = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return ""
+    if not parsed.is_finite() or parsed < 0 or parsed >= _ANALYTICS_ABSURD_CEILING:
+        return ""
+    return text
 
 
 def _error_dict(code: AgentErrorCode, message: str, *, recoverable: bool = False) -> dict:
@@ -2123,6 +2179,13 @@ class ToolExecutor:
         decimal_adjustment = 10 ** (token0.decimals - token1.decimals)
         adjusted_price = raw_price * decimal_adjustment
 
+        # Off-chain analytics (24h volume / fee APR / TVL) via the gateway's
+        # existing PoolAnalyticsService (VIB-4727: DefiLlama primary,
+        # CoinGecko Onchain fallback). Strictly best-effort: any
+        # unavailability leaves the three fields "" (unmeasured), exactly as
+        # before this enrichment existed.
+        analytics = self._fetch_pool_analytics(chain=chain, pool_address=pool_address, protocol=protocol)
+
         return ToolResponse(
             status="success",
             data={
@@ -2137,11 +2200,77 @@ class ToolExecutor:
                 "token1": token1.symbol if hasattr(token1, "symbol") else str(token1.address),
                 "token0_decimals": token0.decimals,
                 "token1_decimals": token1.decimals,
-                "volume_24h_usd": "",
-                "fee_apr": "",
-                "tvl_usd": "",
+                "volume_24h_usd": analytics["volume_24h_usd"],
+                "fee_apr": analytics["fee_apr"],
+                "tvl_usd": analytics["tvl_usd"],
             },
         )
+
+    def _fetch_pool_analytics(self, *, chain: str, pool_address: str, protocol: str) -> dict[str, str]:
+        """Best-effort off-chain pool analytics via the gateway's PoolAnalyticsService.
+
+        Fills the ``volume_24h_usd`` / ``fee_apr`` / ``tvl_usd`` fields of the
+        ``get_pool_state`` response from the gateway's existing
+        ``GetPoolAnalytics`` RPC. The gateway owns the provider egress and the
+        ``fee_apr`` math (DefiLlama ``apyBase`` or the CoinGecko Onchain
+        volume·fee/TVL annualization) — this method only passes validated
+        decimal-strings through. The protocol hint is the same canonical name
+        the registry resolved for the on-chain read, so provider matching can
+        disambiguate same-address candidates across projects.
+
+        STRICT fail-open: analytics are informational — any unavailability
+        (gateway not connected, provider outage, unsupported chain, garbage
+        payload) returns all-empty fields. ``""`` means unmeasured
+        (Empty != Zero); this method never substitutes ``0`` and never lets
+        the core on-chain pool read fail because analytics did.
+        """
+        empty = {"volume_24h_usd": "", "fee_apr": "", "tvl_usd": ""}
+        import grpc
+
+        from almanak.gateway.proto import gateway_pb2
+
+        try:
+            response = self._client.pool_analytics.GetPoolAnalytics(
+                gateway_pb2.PoolAnalyticsRequest(
+                    pool_address=pool_address,
+                    chain=chain,
+                    protocol=protocol,
+                ),
+                timeout=_POOL_ANALYTICS_TIMEOUT_S,
+            )
+        except grpc.RpcError as e:
+            # UNAVAILABLE (providers exhausted), INVALID_ARGUMENT
+            # (unsupported chain / address shape), DEADLINE_EXCEEDED, ...
+            logger.debug("pool analytics unavailable for %s on %s: %s", pool_address, chain, e)
+            return empty
+        except RuntimeError as e:
+            # GatewayClient.pool_analytics raises RuntimeError when the
+            # gRPC channel is not connected.
+            logger.debug("pool analytics skipped (gateway not connected): %s", e)
+            return empty
+        except Exception as e:  # noqa: BLE001 - analytics is best-effort/informational
+            # STRICT fail-open catch-all (matches _lookup_token_price /
+            # _record_tool_event / _fire_alert in this file). The two branches
+            # above name the *expected* failures; this covers everything the
+            # docstring promises we still swallow — a missing ``pool_analytics``
+            # attribute (older client / mock), a protobuf decode error, an
+            # unexpected stub-construction failure — so an analytics fault can
+            # never propagate out of _execute_get_pool_state and break the core
+            # on-chain pool read.
+            logger.debug("pool analytics unexpectedly failed for %s on %s: %s", pool_address, chain, e)
+            return empty
+
+        # Exact-bool check doubles as a wire-shape guard: a real proto
+        # response carries success=True/False; anything else is not a
+        # PoolAnalyticsResponse and must not populate financial fields.
+        if getattr(response, "success", False) is not True:
+            return empty
+
+        return {
+            "volume_24h_usd": _sanitize_analytics_field(getattr(response, "volume_24h_usd", "")),
+            "fee_apr": _sanitize_analytics_field(getattr(response, "fee_apr", "")),
+            "tvl_usd": _sanitize_analytics_field(getattr(response, "tvl_usd", "")),
+        }
 
     # crap-allowlist: pre-existing RPC surface complexity
     async def _execute_get_lp_position(self, args: dict) -> ToolResponse:  # noqa: C901

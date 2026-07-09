@@ -27,6 +27,7 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
 
+import grpc
 import pytest
 
 from almanak.framework.agent_tools.executor import ToolExecutor
@@ -166,6 +167,165 @@ async def test_get_pool_state_unsupported_protocol_returns_error() -> None:
     assert result.status == "error"
     # Proves the handler's registry guard produced the error, not policy.
     assert "Unsupported protocol" in (result.error or {}).get("message", "")
+
+
+# ---------------------------------------------------------------------------
+# get_pool_state analytics enrichment — the three off-chain fields
+# (volume_24h_usd / fee_apr / tvl_usd) come from the gateway's
+# PoolAnalyticsService and are STRICTLY fail-open: any unavailability or
+# garbage payload leaves them "" (unmeasured — Empty != Zero) while the core
+# on-chain decode still succeeds.
+# ---------------------------------------------------------------------------
+
+
+def _pool_state_gateway() -> Any:
+    """Scripted gateway answering the slot0/liquidity reads for _POOL_ADDR."""
+    gateway = MagicMock()
+
+    def _call(req: Any, **kwargs: Any) -> Any:
+        if req.id == "pool_slot0":
+            return _rpc_ok(_slot0_hex(1_500_000_000_000_000_000_000_000_000_000, -201_000))
+        if req.id == "pool_liquidity":
+            return _rpc_ok(_hex_word(123_456_789_000_000))
+        raise AssertionError(f"unexpected rpc id {req.id}")
+
+    gateway.rpc.Call.side_effect = _call
+    return gateway
+
+
+_POOL_STATE_ARGS = {
+    "token_a": "USDC",
+    "token_b": "WETH",
+    "fee_tier": 500,
+    "chain": "arbitrum",
+    "protocol": "uniswap_v3",
+    "pool_address": _POOL_ADDR,
+}
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_analytics_populated_golden() -> None:
+    """Gateway analytics success -> the wire decimal-strings pass through verbatim."""
+    gateway = _pool_state_gateway()
+    analytics_resp = MagicMock()
+    analytics_resp.success = True
+    analytics_resp.volume_24h_usd = "42391284.51"
+    analytics_resp.fee_apr = "12.3456"
+    analytics_resp.tvl_usd = "125000000.5"
+    gateway.pool_analytics.GetPoolAnalytics.return_value = analytics_resp
+
+    executor = _make_executor(gateway)
+    result = await executor.execute("get_pool_state", dict(_POOL_STATE_ARGS))
+
+    assert result.status == "success", result.error
+    d = result.data
+    # Pass-through contract: EXACT wire strings, no reformatting.
+    assert d["volume_24h_usd"] == "42391284.51"
+    assert d["fee_apr"] == "12.3456"
+    assert d["tvl_usd"] == "125000000.5"
+    # The RPC carried the resolved pool identity, not the raw user input.
+    req = gateway.pool_analytics.GetPoolAnalytics.call_args.args[0]
+    assert req.pool_address == _POOL_ADDR
+    assert req.chain == "arbitrum"
+    assert req.protocol == "uniswap_v3"
+    # Core on-chain decode is untouched by the enrichment.
+    assert d["tick"] == -201_000
+    assert d["liquidity"] == str(123_456_789_000_000)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "side_effect",
+    [
+        pytest.param(grpc.RpcError("providers exhausted"), id="grpc-unavailable"),
+        pytest.param(RuntimeError("Gateway client not connected"), id="not-connected"),
+        # Broadened fail-open catch-all (PR #3207 review): the strict
+        # fail-open contract must also swallow unexpected faults so an
+        # analytics error never breaks the core on-chain read.
+        pytest.param(AttributeError("'GatewayClient' has no attribute 'pool_analytics'"), id="missing-attr"),
+        pytest.param(ValueError("protobuf decode failed"), id="unexpected-decode"),
+    ],
+)
+async def test_get_pool_state_analytics_fail_open_golden(side_effect: Exception) -> None:
+    """Analytics unavailability leaves the fields "" and the tool still succeeds."""
+    gateway = _pool_state_gateway()
+    gateway.pool_analytics.GetPoolAnalytics.side_effect = side_effect
+
+    executor = _make_executor(gateway)
+    result = await executor.execute("get_pool_state", dict(_POOL_STATE_ARGS))
+
+    assert result.status == "success", result.error
+    d = result.data
+    assert d["volume_24h_usd"] == ""
+    assert d["fee_apr"] == ""
+    assert d["tvl_usd"] == ""
+    # Core decode still delivered.
+    assert d["tick"] == -201_000
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_analytics_garbage_is_unmeasured_golden() -> None:
+    """Implausible provider values map to "" per-field; valid siblings survive.
+
+    Negative, non-numeric, and absurd (>= 1e16) values must never reach the
+    response as numbers — and must never be substituted with 0 (Empty != Zero).
+    """
+    gateway = _pool_state_gateway()
+    analytics_resp = MagicMock()
+    analytics_resp.success = True
+    analytics_resp.volume_24h_usd = "-5"  # negative -> unmeasured
+    analytics_resp.fee_apr = "12.5"  # plausible -> survives
+    analytics_resp.tvl_usd = "1e30"  # absurd -> unmeasured
+    gateway.pool_analytics.GetPoolAnalytics.return_value = analytics_resp
+
+    executor = _make_executor(gateway)
+    result = await executor.execute("get_pool_state", dict(_POOL_STATE_ARGS))
+
+    assert result.status == "success", result.error
+    d = result.data
+    assert d["volume_24h_usd"] == ""
+    assert d["fee_apr"] == "12.5"
+    assert d["tvl_usd"] == ""
+
+
+@pytest.mark.asyncio
+async def test_get_pool_state_analytics_non_proto_response_is_unmeasured() -> None:
+    """A non-proto analytics response (e.g. a bare Mock) never populates fields.
+
+    ``success`` must be exactly ``True`` (proto bool) and each field must be a
+    validated decimal-string — a truthy Mock satisfies neither, so all three
+    fields stay "" instead of leaking Mock reprs into the tool response.
+    """
+    gateway = _pool_state_gateway()  # GetPoolAnalytics returns a bare MagicMock
+
+    executor = _make_executor(gateway)
+    result = await executor.execute("get_pool_state", dict(_POOL_STATE_ARGS))
+
+    assert result.status == "success", result.error
+    d = result.data
+    assert d["volume_24h_usd"] == ""
+    assert d["fee_apr"] == ""
+    assert d["tvl_usd"] == ""
+
+
+def test_sanitize_analytics_field_contract() -> None:
+    """Pure sanitizer: pass-through vs unmeasured decisions."""
+    from almanak.framework.agent_tools.executor import _sanitize_analytics_field
+
+    # Pass-through: original wire string, untouched formatting.
+    assert _sanitize_analytics_field("0") == "0"  # measured zero survives
+    assert _sanitize_analytics_field("125000000.50") == "125000000.50"
+    # Unmeasured / garbage -> "".
+    assert _sanitize_analytics_field("") == ""
+    assert _sanitize_analytics_field("   ") == ""
+    assert _sanitize_analytics_field(None) == ""
+    assert _sanitize_analytics_field(12.5) == ""  # non-string wire value
+    assert _sanitize_analytics_field("garbage") == ""
+    assert _sanitize_analytics_field("-0.01") == ""
+    assert _sanitize_analytics_field("NaN") == ""
+    assert _sanitize_analytics_field("Infinity") == ""
+    assert _sanitize_analytics_field("1e16") == ""  # at the absurdity ceiling
+    assert _sanitize_analytics_field("9999999999999999") == "9999999999999999"  # just below
 
 
 # ---------------------------------------------------------------------------
