@@ -34,6 +34,28 @@ if TYPE_CHECKING:
 
 
 # =============================================================================
+# Price-source provenance
+# =============================================================================
+# A health factor is only as trustworthy as the prices it was computed from, so
+# the result must STATE where those prices came from — an oracle-defaulted HF
+# must never be silently indistinguishable from an override-computed one.
+
+#: Caller-supplied ``collateral_price_usd`` / ``debt_price_usd`` overrides.
+PRICE_SOURCE_OVERRIDE = "override"
+#: The market's OWN liquidation oracle (exact — the price the protocol
+#: liquidates against), with the loan leg's USD conversion from the wired
+#: price oracle / stablecoin table.
+PRICE_SOURCE_MARKET_ORACLE = "market_oracle"
+#: Generic USD price oracle for both legs (approximate — may deviate from the
+#: protocol's own liquidation oracle).
+PRICE_SOURCE_USD_ORACLE = "usd_oracle"
+#: Same-asset market with no override: a unit placeholder price is injected
+#: (the price cancels in the HF, so the HF is exact; the USD-denominated value
+#: fields are token-denominated).
+PRICE_SOURCE_SAME_ASSET_UNIT = "same_asset_unit"
+
+
+# =============================================================================
 # Data Classes
 # =============================================================================
 
@@ -51,6 +73,10 @@ class PositionHealth:
         max_borrow_usd: Additional USD borrowable before liquidation.
         protocol: Protocol name ("morpho_blue", "aave_v3").
         market_id: Protocol-specific market identifier.
+        price_source: Provenance of the prices the health computation used —
+            one of the ``PRICE_SOURCE_*`` constants, or ``""`` when the
+            protocol's valuation is native (Aave-family USD-denominated reads,
+            BENQI's on-chain price legs) and no external price was injected.
     """
 
     health_factor: Decimal
@@ -60,6 +86,7 @@ class PositionHealth:
     max_borrow_usd: Decimal = Decimal("0")
     protocol: str = ""
     market_id: str = ""
+    price_source: str = ""
 
     @property
     def is_healthy(self) -> bool:
@@ -89,6 +116,7 @@ class PositionHealth:
             "is_critical": self.is_critical,
             "protocol": self.protocol,
             "market_id": self.market_id,
+            "price_source": self.price_source,
         }
 
 
@@ -250,9 +278,14 @@ class PositionHealthProvider:
                 "usdc", "weth"); Silo V2 / Euler V2 / BENQI their synthetic
                 ``"<col>"`` / ``"<col>/<loan>"`` ids.
             user_address: Wallet address holding the position
-            collateral_price_usd: Optional override for collateral price
-                (required, with ``debt_price_usd``, for cross-asset markets on
-                non-USD-native protocols).
+            collateral_price_usd: Optional override for collateral price on
+                cross-asset markets of non-USD-native protocols. When BOTH
+                overrides are omitted, the framework defaults to the market's
+                own liquidation oracle (exact — connector-declared, e.g. Morpho
+                Blue), then to the wired USD price oracle; it fails closed when
+                neither source answers. The result's ``price_source`` states
+                which source valued the position. Supply both overrides or
+                neither — a partial pair is ambiguous and raises.
             debt_price_usd: Optional override for debt token price
 
         Returns:
@@ -276,13 +309,14 @@ class PositionHealthProvider:
             raise ValueError(f"Unsupported protocol for health monitoring: {protocol}")
 
         price_oracle: dict[str, Decimal] | None = None
+        price_source = ""
         if LendingReadRegistry.publishes_market_table(protocol_lower):
             # Per-market protocol (Morpho Blue, Silo V2, Euler V2, BENQI): the
             # caller's market id scopes the read, and the legacy collateral/debt
             # price overrides are translated onto the connector-declared
             # valuation roles via ``_build_price_oracle_dict`` (``None`` for a
             # USD-native per-market protocol that declares no roles).
-            price_oracle = self._build_price_oracle_dict(
+            price_oracle, price_source = self._build_price_oracle_dict(
                 protocol_lower, market_id, collateral_price_usd, debt_price_usd
             )
 
@@ -290,7 +324,7 @@ class PositionHealthProvider:
         # table) fall through with no oracle dict; ``_read_account_state``
         # drops the informational market id for them.
         state = self._read_account_state(protocol_lower, market_id, user_address, price_oracle=price_oracle)
-        return self._to_position_health(state, protocol=protocol_lower, market_id=market_id)
+        return self._to_position_health(state, protocol=protocol_lower, market_id=market_id, price_source=price_source)
 
     def get_pt_position_health(
         self,
@@ -404,6 +438,7 @@ class PositionHealthProvider:
             max_borrow_usd=base_health.max_borrow_usd,
             protocol=base_health.protocol,
             market_id=base_health.market_id,
+            price_source=base_health.price_source,
             implied_apy=implied_apy,
             pt_discount_pct=pt_discount_pct,
             days_to_maturity=days_to_maturity,
@@ -470,6 +505,7 @@ class PositionHealthProvider:
         state: "LendingAccountState",
         protocol: str,
         market_id: str,
+        price_source: str = "",
     ) -> PositionHealth:
         """Adapt a seam :class:`LendingAccountState` to a :class:`PositionHealth`.
 
@@ -533,6 +569,7 @@ class PositionHealthProvider:
             max_borrow_usd=max_borrow,
             protocol=protocol,
             market_id=market_id,
+            price_source=price_source,
         )
 
     def _build_price_oracle_dict(
@@ -541,29 +578,38 @@ class PositionHealthProvider:
         market_id: str,
         collateral_price_usd: Decimal | None,
         debt_price_usd: Decimal | None,
-    ) -> dict[str, Decimal] | None:
-        """Translate legacy price overrides into the seam's oracle dict.
+    ) -> tuple[dict[str, Decimal] | None, str]:
+        """Resolve the seam's oracle dict from overrides, else oracle defaults.
 
         Non-USD-native per-market protocols (Morpho Blue, Silo V2, Euler V2)
         are valued from a ``{token_symbol: USD price}`` map. This method maps
         the legacy ``collateral_price_usd`` / ``debt_price_usd`` Decimal
         overrides onto that shape, keyed by the symbols the connector's
         valuation roles name (``collateral_token`` / ``loan_token`` — the
-        ``AccountStateQuery`` field-name convention every spec declares),
-        preserving the pre-refactor Morpho semantics exactly:
+        ``AccountStateQuery`` field-name convention every spec declares).
+        Returns ``(prices, price_source)`` — the injected map plus the
+        ``PRICE_SOURCE_*`` provenance the result must carry.
 
         * **Same-asset market** (collateral symbol == loan symbol): one symbol, one
           price -- use whichever override is supplied (else ``Decimal("1")``). The
           HF is price-independent here (the price cancels), so a single consistent
           key is correct and avoids a duplicate-key override drop.
-        * **Cross-asset market** with a missing override: RAISE ``ValueError``
-          (message contains ``"Price overrides required"``) -- never default to
-          1:1 across differing assets.
+        * **Cross-asset market, both overrides supplied**: the overrides win
+          unconditionally (absolute precedence) — no oracle is consulted.
+        * **Cross-asset market, no overrides**: default to the
+          market's OWN liquidation oracle when the connector declares one
+          (exact — the price the protocol liquidates against), else to the
+          wired USD price oracle for both legs; RAISE ``ValueError`` (message
+          contains ``"Price overrides required"``) when neither source answers
+          -- never default to 1:1 across differing assets.
+        * **Cross-asset market, exactly one override**: RAISE — a partial pair
+          is ambiguous, and silently completing it with a different-provenance
+          default could produce an HF the caller never intended.
         * **Off-catalogue market** (``market_params`` is ``None``): fail closed
           consistently with a ``ValueError`` -- we cannot name the legs to value.
 
         A USD-native per-market protocol that declares no valuation roles
-        (BENQI — its qiToken reads price legs on-chain) returns ``None``:
+        (BENQI — its qiToken reads price legs on-chain) returns ``(None, "")``:
         there is nothing to inject.
         """
         from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
@@ -589,7 +635,7 @@ class PositionHealthProvider:
                     f"{protocol} market {market_id} on {self._chain} has no collateral/loan "
                     f"token symbols; cannot value the position."
                 )
-            return None
+            return None, ""
 
         collateral_symbol = roles.get("collateral_token")
         loan_symbol = roles.get("loan_token")
@@ -607,24 +653,127 @@ class PositionHealthProvider:
             # is price-independent here (the price cancels), so build a single-key
             # dict -- a two-key ``{loan, collateral}`` literal would collapse to one
             # entry and silently drop a lone ``debt_price_usd`` override.
-            price = (
-                collateral_price_usd
-                if collateral_price_usd is not None
-                else debt_price_usd
-                if debt_price_usd is not None
-                else Decimal("1")
-            )
-            return {collateral_symbol: price}
+            if collateral_price_usd is not None:
+                return {collateral_symbol: collateral_price_usd}, PRICE_SOURCE_OVERRIDE
+            if debt_price_usd is not None:
+                return {collateral_symbol: debt_price_usd}, PRICE_SOURCE_OVERRIDE
+            return {collateral_symbol: Decimal("1")}, PRICE_SOURCE_SAME_ASSET_UNIT
 
-        # Cross-asset: distinct tokens require distinct, explicit prices -- never
-        # default to 1:1 across differing assets. Checked here (after the same-asset
-        # branch) so both values narrow to non-None for the return.
-        if collateral_price_usd is None or debt_price_usd is None:
+        # Cross-asset with both overrides: caller-supplied prices win
+        # unconditionally (absolute precedence — no oracle is consulted).
+        if collateral_price_usd is not None and debt_price_usd is not None:
+            return {collateral_symbol: collateral_price_usd, loan_symbol: debt_price_usd}, PRICE_SOURCE_OVERRIDE
+
+        # Cross-asset with a PARTIAL override: ambiguous — the caller clearly
+        # intended to control pricing but named only one leg. Completing the
+        # pair with a different-provenance default could silently produce an
+        # HF they never intended, so fail closed (pre-existing contract preserved).
+        if collateral_price_usd is not None or debt_price_usd is not None:
             raise ValueError(
-                f"Price overrides required for cross-asset {protocol} market {market_id}. "
-                f"Collateral and debt tokens differ -- cannot default to 1:1."
+                f"Price overrides required for cross-asset {protocol} market {market_id}: "
+                f"exactly one of collateral_price_usd / debt_price_usd was provided. "
+                f"Pass both, or neither (to value from the market's own oracle)."
             )
-        return {collateral_symbol: collateral_price_usd, loan_symbol: debt_price_usd}
+
+        # Cross-asset with NO overrides: default to the market's own
+        # liquidation oracle, else the wired USD oracle; fail closed when neither
+        # answers -- never default to 1:1 across differing assets.
+        defaults = self._default_cross_asset_prices(protocol, market_id, collateral_symbol, loan_symbol)
+        if defaults is not None:
+            prices, source = defaults
+            logger.info(
+                "%s market %s on %s: no price overrides provided; valuing position from %s (%s=%s USD, %s=%s USD)",
+                protocol,
+                market_id,
+                self._chain,
+                source,
+                collateral_symbol,
+                prices[collateral_symbol],
+                loan_symbol,
+                prices[loan_symbol],
+            )
+            return prices, source
+
+        raise ValueError(
+            f"Price overrides required for cross-asset {protocol} market {market_id}. "
+            f"Collateral and debt tokens differ -- cannot default to 1:1, the market's "
+            f"own oracle could not be read, and no USD price source answered for both "
+            f"legs. Pass collateral_price_usd / debt_price_usd, or wire a price oracle."
+        )
+
+    def _default_cross_asset_prices(
+        self,
+        protocol: str,
+        market_id: str,
+        collateral_symbol: str,
+        loan_symbol: str,
+    ) -> tuple[dict[str, Decimal], str] | None:
+        """Build the default cross-asset price map when no overrides were given.
+
+        Source order:
+
+        1. **The market's OWN liquidation oracle** (connector-declared via
+           ``MarketOraclePriceSpec``; gateway-routed read). Exact by
+           construction — it returns the collateral price denominated in the
+           loan token, THE price the protocol computes liquidation against, so
+           the resulting HF matches the on-chain health check. The loan leg's
+           USD conversion comes from the wired price oracle / stablecoin table;
+           it scales both value fields identically, so the HF stays exact even
+           if that USD quote drifts (it cancels in the ratio).
+        2. **The wired USD price oracle for both legs** — approximate (may
+           deviate from the protocol's own oracle), used only when the market
+           oracle cannot be read.
+
+        Returns ``(prices, source)`` or ``None`` when neither source answers
+        (the caller then fails closed — Empty ≠ Zero, never 1:1 across
+        differing assets).
+        """
+        from almanak.framework.accounting.lending_reads import read_market_oracle_price
+
+        if self._gateway_client is not None and getattr(self._gateway_client, "is_connected", False):
+            collateral_in_loan = read_market_oracle_price(
+                protocol=protocol,
+                chain=self._chain,
+                market_id=market_id,
+                gateway_client=self._gateway_client,
+            )
+            if collateral_in_loan is not None and collateral_in_loan > 0:
+                loan_usd = self._try_resolve_usd_price(loan_symbol)
+                if loan_usd is not None and loan_usd > 0:
+                    return (
+                        {collateral_symbol: collateral_in_loan * loan_usd, loan_symbol: loan_usd},
+                        PRICE_SOURCE_MARKET_ORACLE,
+                    )
+                logger.warning(
+                    "%s market %s on %s: market oracle priced %s at %s %s, but no USD "
+                    "price source answered for %s; falling back to the USD oracle for both legs.",
+                    protocol,
+                    market_id,
+                    self._chain,
+                    collateral_symbol,
+                    collateral_in_loan,
+                    loan_symbol,
+                    loan_symbol,
+                )
+
+        collateral_usd = self._try_resolve_usd_price(collateral_symbol)
+        loan_usd = self._try_resolve_usd_price(loan_symbol)
+        if collateral_usd is not None and collateral_usd > 0 and loan_usd is not None and loan_usd > 0:
+            return {collateral_symbol: collateral_usd, loan_symbol: loan_usd}, PRICE_SOURCE_USD_ORACLE
+        return None
+
+    def _try_resolve_usd_price(self, symbol: str) -> Decimal | None:
+        """Best-effort USD price via :meth:`_resolve_base_price` (``None`` on failure).
+
+        The default-pricing path needs "answered / did not answer" rather than
+        the raising contract ``_resolve_base_price`` keeps for the Compound V3
+        market-health read — a missing quote here falls through to the next
+        source or to the fail-closed override error.
+        """
+        try:
+            return self._resolve_base_price(symbol)
+        except ValueError:
+            return None
 
     # Market-health base tokens that are USD-pegged stablecoins. These are the
     # *only* symbols for which it is safe to assume price == $1 when no external
@@ -663,7 +812,11 @@ class PositionHealthProvider:
             ) from e
 
     def _resolve_base_price(self, symbol: str) -> Decimal:
-        """Resolve USD price for a market-health base token (Compound V3 today).
+        """Resolve a token's USD price from the wired oracle / stablecoin table.
+
+        Used by the Compound V3 market-health read (base/borrow token) and, via
+        the non-raising :meth:`_try_resolve_usd_price` wrapper, by the
+        cross-asset default-pricing path.
 
         Price-source protocol, in order:
           1. ``price_oracle`` supports ``.get_aggregated_price(symbol, quote)``
@@ -881,8 +1034,10 @@ def get_health_factor(
             For Compound V3 this is the Comet market key (e.g. "usdc").
         rpc_url: HTTP RPC endpoint (when not using gateway).
         gateway_client: Optional gateway client (preferred in production).
-        price_oracle: Optional callable ``symbol -> Decimal`` used by the
-            Compound V3 path for base-token pricing.
+        price_oracle: Optional callable ``symbol -> Decimal`` (or async
+            PriceOracle) used by the Compound V3 path for base-token pricing
+            and by the cross-asset default-pricing path for USD
+            conversion when no per-call overrides are supplied.
 
     Returns:
         ``Decimal`` health factor (``Infinity`` if no debt).
@@ -902,6 +1057,10 @@ def get_health_factor(
 
 
 __all__ = [
+    "PRICE_SOURCE_MARKET_ORACLE",
+    "PRICE_SOURCE_OVERRIDE",
+    "PRICE_SOURCE_SAME_ASSET_UNIT",
+    "PRICE_SOURCE_USD_ORACLE",
     "DeleverageTrigger",
     "HealthFactorProvider",
     "PTPositionHealth",

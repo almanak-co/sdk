@@ -3116,13 +3116,19 @@ class MarketSnapshot:
             rpc_url: Optional explicit RPC URL. Strategies should leave this None
                 so the gateway-routed path is used. Paper-trading code may pass
                 a local anvil URL.
-            collateral_price_usd: Optional override for collateral price (Morpho
-                cross-asset markets require this).
+            collateral_price_usd: Optional override for collateral price on
+                cross-asset markets. When both overrides are omitted, the
+                framework defaults to the market's own liquidation oracle
+                (exact, e.g. Morpho Blue), then to the wired price oracle; it
+                fails closed when neither answers. Supply both overrides or
+                neither — a partial pair raises. The result's ``price_source``
+                states which source valued the position.
             debt_price_usd: Optional override for debt-token price (same).
 
         Returns:
             PositionHealth with .health_factor (Decimal), .collateral_value_usd,
-            .debt_value_usd, .max_borrow_usd, .protocol, .market_id.
+            .debt_value_usd, .max_borrow_usd, .protocol, .market_id,
+            .price_source.
 
         Raises:
             ValueError: If health data cannot be retrieved.

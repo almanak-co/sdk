@@ -60,6 +60,7 @@ from almanak.connectors._strategy_base.lending_read_base import (
     LendingAccountState,
     LendingPositionOnChain,
     LendingReadSpec,
+    MarketOraclePriceSpec,
 )
 
 logger = logging.getLogger(__name__)
@@ -716,6 +717,23 @@ class LendingReadRegistry:
         if spec is None:
             return None
         return spec.query_inputs_from_intent(intent)
+
+    @classmethod
+    def market_oracle_price_spec(cls, protocol: str) -> MarketOraclePriceSpec | None:
+        """Resolve the connector-declared market-own-oracle price read, if any.
+
+        Isolated-market protocols (Morpho Blue) may declare a
+        :class:`~almanak.connectors._strategy_base.lending_read_base.MarketOraclePriceSpec`
+        on their account-state spec — the pure description of how to read the
+        market's OWN liquidation oracle. The framework's position-health
+        default-pricing path
+        (:func:`~almanak.framework.accounting.lending_reads.read_market_oracle_price`)
+        dispatches through this accessor so it never hardcodes a protocol's
+        oracle selector or scaling. Returns ``None`` when the protocol is
+        unknown or declares no such read — callers fall back / fail closed.
+        """
+        spec = cls._load_account_state_spec(cls._normalize(protocol))
+        return spec.market_oracle_price if spec is not None else None
 
     @classmethod
     def resolve_account_state_plan(

@@ -500,3 +500,139 @@ def test_registry_is_market_isolated_morpho_true_others_false() -> None:
     assert LendingReadRegistry.is_market_isolated("compound_v3") is False
     assert LendingReadRegistry.is_market_isolated(None) is False
     assert LendingReadRegistry.is_market_isolated("not_a_protocol") is False
+
+
+# ---------------------------------------------------------------------------
+# Market-own-oracle price read
+# ---------------------------------------------------------------------------
+
+# The REAL Ethereum wstETH/USDC catalogue oracle — build_calls must target the
+# catalogue entry, not a hand-typed literal, so catalogue drift is caught here.
+_MARKET_ORACLE = "0x48F7E36EB6B826B2dF4B2E630B62Cd25e89E40e2"
+_ORACLE_PRICE_SELECTOR = "0xa035b1fe"  # IOracle.price()
+_DECIMALS = {_COLLATERAL: _COLLATERAL_DECIMALS, _LOAN: _LOAN_DECIMALS}
+
+
+def _price_blob(price_raw: int) -> str:
+    """ABI-encode an ``IOracle.price()`` return blob (1 uint256 word)."""
+    return "0x" + _word(price_raw)
+
+
+class TestMorphoMarketOraclePriceSpec:
+    """Pure contract of the connector-declared ``MarketOraclePriceSpec``."""
+
+    def _spec(self) -> Any:
+        spec = MORPHO_BLUE_ACCOUNT_STATE_READ.market_oracle_price
+        assert spec is not None, "Morpho must declare its market-own-oracle read"
+        return spec
+
+    def _real_market_params(self) -> dict[str, Any]:
+        from almanak.connectors.morpho_blue.addresses import MORPHO_MARKETS
+
+        return MORPHO_MARKETS[_CHAIN][_MARKET_ID]
+
+    def test_build_calls_targets_the_catalogue_oracle(self) -> None:
+        calls = self._spec().build_calls(self._real_market_params())
+        assert calls == (EthCall(to=_MARKET_ORACLE, data=_ORACLE_PRICE_SELECTOR),)
+
+    def test_build_calls_fails_closed_without_oracle(self) -> None:
+        assert self._spec().build_calls({"collateral_token": "wstETH", "loan_token": "USDC"}) == ()
+
+    def test_reduce_applies_morpho_scaling_18_6(self) -> None:
+        # wstETH (18 dec) priced in USDC (6 dec): scale = 1e(36 + 6 - 18) = 1e24.
+        # 3000 USDC/wstETH => raw 3000e24.
+        price = self._spec().reduce_calls(self._real_market_params(), _DECIMALS, [_price_blob(3000 * 10**24)])
+        assert price == Decimal("3000")
+
+    def test_reduce_applies_morpho_scaling_18_18(self) -> None:
+        # weETH (18) priced in WETH (18): scale = 1e36. 1.05 WETH/weETH => raw 1.05e36.
+        params = {"collateral_token": "weETH", "loan_token": "WETH"}
+        price = self._spec().reduce_calls(params, {"weETH": 18, "WETH": 18}, [_price_blob(105 * 10**34)])
+        assert price == Decimal("1.05")
+
+    def test_reduce_fails_closed_on_zero_price(self) -> None:
+        # A zero price is a broken oracle: reporting it would compute HF=0 and
+        # trigger a false deleverage (Empty != Zero).
+        assert self._spec().reduce_calls(self._real_market_params(), _DECIMALS, [_price_blob(0)]) is None
+
+    def test_reduce_fails_closed_on_missing_or_malformed_blob(self) -> None:
+        spec = self._spec()
+        params = self._real_market_params()
+        assert spec.reduce_calls(params, _DECIMALS, [None]) is None
+        assert spec.reduce_calls(params, _DECIMALS, []) is None
+        assert spec.reduce_calls(params, _DECIMALS, ["0x1234"]) is None  # short
+        assert spec.reduce_calls(params, _DECIMALS, [123456]) is None  # non-str
+
+    def test_reduce_fails_closed_on_missing_decimals(self) -> None:
+        assert self._spec().reduce_calls(self._real_market_params(), {"wstETH": 18}, [_price_blob(10**24)]) is None
+
+
+class TestReadMarketOraclePriceExecutor:
+    """Framework executor: gateway round-trip + decimals injection + fail-closed."""
+
+    def _gateway(self, blob: str | None) -> Any:
+        class _G:
+            is_connected = True
+            calls: list[tuple[str, str]] = []
+
+            def eth_call(self, chain: str, to: str, data: str, block: Any = None) -> str | None:
+                self.calls.append((to, data))
+                assert data.startswith(_ORACLE_PRICE_SELECTOR)
+                return blob
+
+        return _G()
+
+    def test_reads_the_catalogue_oracle_via_the_gateway(self) -> None:
+        from almanak.framework.accounting.lending_reads import read_market_oracle_price
+
+        gateway = self._gateway(_price_blob(3500 * 10**24))
+        price = read_market_oracle_price(
+            protocol="morpho_blue", chain=_CHAIN, market_id=_MARKET_ID, gateway_client=gateway
+        )
+        assert price == Decimal("3500")
+        assert gateway.calls == [(_MARKET_ORACLE, _ORACLE_PRICE_SELECTOR)]
+
+    def test_fails_closed_without_gateway(self) -> None:
+        from almanak.framework.accounting.lending_reads import read_market_oracle_price
+
+        assert (
+            read_market_oracle_price(protocol="morpho_blue", chain=_CHAIN, market_id=_MARKET_ID, gateway_client=None)
+            is None
+        )
+        disconnected = MagicMock()
+        disconnected.is_connected = False
+        assert (
+            read_market_oracle_price(
+                protocol="morpho_blue", chain=_CHAIN, market_id=_MARKET_ID, gateway_client=disconnected
+            )
+            is None
+        )
+
+    def test_fails_closed_for_protocol_without_spec(self) -> None:
+        from almanak.framework.accounting.lending_reads import read_market_oracle_price
+
+        gateway = self._gateway(_price_blob(10**36))
+        assert (
+            read_market_oracle_price(protocol="silo_v2", chain="arbitrum", market_id="wsteth/usdc", gateway_client=gateway)
+            is None
+        )
+
+    def test_fails_closed_on_failed_read(self) -> None:
+        from almanak.framework.accounting.lending_reads import read_market_oracle_price
+
+        gateway = self._gateway(None)
+        assert (
+            read_market_oracle_price(protocol="morpho_blue", chain=_CHAIN, market_id=_MARKET_ID, gateway_client=gateway)
+            is None
+        )
+
+    def test_fails_closed_for_off_catalogue_market(self) -> None:
+        from almanak.framework.accounting.lending_reads import read_market_oracle_price
+
+        gateway = self._gateway(_price_blob(10**36))
+        assert (
+            read_market_oracle_price(
+                protocol="morpho_blue", chain=_CHAIN, market_id="0x" + "ab" * 32, gateway_client=gateway
+            )
+            is None
+        )

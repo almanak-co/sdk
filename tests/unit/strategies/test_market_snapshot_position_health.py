@@ -222,3 +222,70 @@ class TestInvalidatePositionHealth:
 
         # Eviction forces a second provider read (vs the cache-hit test above).
         assert mock_cls.return_value.get_health.call_count == 2
+
+
+class TestMorphoCrossAssetDefaultPricing:
+    """Regression: ``market.position_health("morpho_blue", ...)``
+    must return a numeric HF for a catalogued cross-asset market WITHOUT the
+    strategy injecting price overrides.
+
+    Reconstructs the morpho lifecycle failure end-to-end against the
+    REAL Ethereum wstETH/USDC ``MORPHO_MARKETS`` catalogue entry and the real
+    seam (registry -> account-state spec -> reducer). The ONLY fake is the
+    gateway, which scripts the three chain reads: the market's own
+    ``IOracle.price()``, Morpho ``position(id, user)``, and ``market(id)``.
+    Pre-fix this exact call raised ``HealthUnavailableError("... Price
+    overrides required for cross-asset morpho_blue market ...")`` on EVERY
+    catalogued market (they are all cross-asset), making the read unusable by
+    default (ALM-2895 HOLD loop; VIB-5527 gated only pre-deploy coverage).
+    """
+
+    # Real Ethereum wstETH/USDC market (86% LLTV) + its catalogue oracle.
+    _MARKET_ID = "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc"
+    _ORACLE = "0x48F7E36EB6B826B2dF4B2E630B62Cd25e89E40e2"
+    _PRICE_SELECTOR = "0xa035b1fe"
+    _POSITION_SELECTOR = "0x93c52062"
+    _MARKET_SELECTOR = "0x5c60e39a"
+
+    def _scripted_gateway(self) -> MagicMock:
+        word = lambda v: format(v, "064x")  # noqa: E731
+        # 2 wstETH collateral; 3000 USDC debt (shares 1:1); price 3000 USDC/wstETH.
+        position_blob = "0x" + word(0) + word(3000 * 10**6) + word(2 * 10**18)
+        market_blob = "0x" + "".join(word(w) for w in (0, 0, 10_000 * 10**6, 10_000 * 10**6, 0, 0))
+        price_blob = "0x" + word(3000 * 10**24)
+
+        def _eth_call(chain: str, to: str, data: str, block=None) -> str:
+            assert chain == "ethereum"
+            if data.startswith(self._PRICE_SELECTOR):
+                assert to.lower() == self._ORACLE.lower()  # the catalogue oracle
+                return price_blob
+            if data.startswith(self._POSITION_SELECTOR):
+                return position_blob
+            if data.startswith(self._MARKET_SELECTOR):
+                return market_blob
+            raise AssertionError(f"unexpected selector: {data[:10]}")
+
+        gateway = MagicMock()
+        gateway.is_connected = True
+        gateway.eth_call = _eth_call
+        return gateway
+
+    def test_audit_scenario_numeric_hf_without_overrides(self):
+        from almanak.framework.data.position_health import PRICE_SOURCE_MARKET_ORACLE
+
+        market = MarketSnapshot(
+            chain="ethereum",
+            wallet_address="0xABCDEF0123456789abcdef0123456789ABCDEF01",
+            gateway_client=self._scripted_gateway(),
+        )
+
+        # Pre-fix: HealthUnavailableError("Position health unavailable: Price
+        # overrides required for cross-asset morpho_blue market ...").
+        health = market.position_health(protocol="morpho_blue", market_id=self._MARKET_ID)
+
+        # HF = (2 * 3000 * 0.86) / 3000 = 1.72 exactly (86% catalogue LLTV).
+        assert health.health_factor == Decimal("1.72")
+        assert health.collateral_value_usd == Decimal("6000")
+        assert health.debt_value_usd == Decimal("3000")
+        # Provenance: oracle-defaulted, distinguishable from override-computed.
+        assert health.price_source == PRICE_SOURCE_MARKET_ORACLE

@@ -689,23 +689,29 @@ class TestMorphoHealthFactorProvider:
 
     def test_build_price_oracle_dict_same_asset_defaults_to_one(self):
         """Same-asset market with no overrides defaults the single token to $1."""
+        from almanak.framework.data.position_health import PRICE_SOURCE_SAME_ASSET_UNIT
+
         provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
         with patch(
             self._MARKET_PARAMS_TARGET,
             return_value={"collateral_token": "WETH", "loan_token": "WETH"},
         ):
-            oracle = provider._build_price_oracle_dict("morpho_blue", "0xmarket", None, None)
+            oracle, source = provider._build_price_oracle_dict("morpho_blue", "0xmarket", None, None)
         assert oracle == {"WETH": Decimal("1")}
+        assert source == PRICE_SOURCE_SAME_ASSET_UNIT
 
     def test_build_price_oracle_dict_cross_asset_with_overrides(self):
         """Cross-asset market keys each leg's symbol to its override price."""
+        from almanak.framework.data.position_health import PRICE_SOURCE_OVERRIDE
+
         provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
         with patch(
             self._MARKET_PARAMS_TARGET,
             return_value={"collateral_token": "wstETH", "loan_token": "USDC"},
         ):
-            oracle = provider._build_price_oracle_dict("morpho_blue", "0xmarket", Decimal("2500"), Decimal("1"))
+            oracle, source = provider._build_price_oracle_dict("morpho_blue", "0xmarket", Decimal("2500"), Decimal("1"))
         assert oracle == {"USDC": Decimal("1"), "wstETH": Decimal("2500")}
+        assert source == PRICE_SOURCE_OVERRIDE
 
     def test_build_price_oracle_dict_off_catalogue_fails_closed(self):
         """An off-catalogue market (no params) fails closed rather than guessing."""
@@ -1375,3 +1381,192 @@ class TestMarketScopedHealthSeam:
         # error (rather than the account-state read) proves the routing.
         with pytest.raises(ValueError, match="GatewayClient is required to read compound_v3 health"):
             provider.get_health("compound_v3", "usdc", "0xabc")
+
+
+class TestMorphoOracleDefaultPricing:
+    """Cross-asset Morpho markets are priceable WITHOUT overrides.
+
+    Every catalogued ``MORPHO_MARKETS`` entry is cross-asset (wstETH/USDC,
+    WBTC/USDC, ...), so the pre-fix contract — raise ``"Price overrides
+    required"`` unless the strategy injects both prices — made
+    ``position_health(protocol="morpho_blue")`` unusable by default (the
+    ALM-2895 "Position health unavailable" HOLD loop; VIB-5527 only gated
+    pre-deploy coverage, leaving the runtime read fail-closed). The runtime
+    default order is now: strategy overrides (absolute precedence) → the
+    market's OWN liquidation oracle (exact) → the wired USD price oracle →
+    fail closed. These tests script the gateway ``eth_call``s (oracle
+    ``price()`` + Morpho ``position``/``market``) end-to-end through the REAL
+    seam — only the market catalogue lookup is patched — and pin exact
+    hand-computed health-factor math plus the ``price_source`` provenance.
+    """
+
+    _MARKET_PARAMS_TARGET = "almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.market_params"
+    _MARKET_ID = "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc"
+    _ORACLE = "0x48F7E36EB6B826B2dF4B2E630B62Cd25e89E40e2"
+    # Selectors: IOracle.price(); Morpho position(id,user) / market(id).
+    _PRICE_SELECTOR = "0xa035b1fe"
+    _POSITION_SELECTOR = "0x93c52062"
+    _MARKET_SELECTOR = "0x5c60e39a"
+
+    def _market_params(self) -> dict:
+        # Shape-identical to the real Ethereum wstETH/USDC MORPHO_MARKETS entry.
+        return {
+            "collateral_token": "wstETH",
+            "loan_token": "USDC",
+            "oracle": self._ORACLE,
+            "lltv": 860000000000000000,  # 86%
+        }
+
+    @staticmethod
+    def _word(value: int) -> str:
+        return format(value, "064x")
+
+    def _scripted_gateway(
+        self,
+        *,
+        oracle_price_raw: int | None,
+        collateral_raw: int,
+        borrow_shares: int,
+        total_borrow_assets: int,
+        total_borrow_shares: int,
+    ) -> MagicMock:
+        """Gateway whose ``eth_call`` routes by selector to crafted blobs.
+
+        ``oracle_price_raw=None`` scripts an oracle fault (the ``price()`` read
+        raises, which ``_gateway_eth_call`` maps to ``None`` -- a failed read).
+        """
+        position_blob = "0x" + self._word(0) + self._word(borrow_shares) + self._word(collateral_raw)
+        market_blob = "0x" + "".join(
+            self._word(w) for w in (0, 0, total_borrow_assets, total_borrow_shares, 0, 0)
+        )
+        calls: list[tuple[str, str]] = []
+
+        def _eth_call(chain: str, to: str, data: str, block=None) -> str:
+            calls.append((to, data[:10]))
+            if data.startswith(self._PRICE_SELECTOR):
+                if oracle_price_raw is None:
+                    raise RuntimeError("scripted oracle fault")
+                assert to == self._ORACLE  # must target the catalogue oracle
+                return "0x" + self._word(oracle_price_raw)
+            if data.startswith(self._POSITION_SELECTOR):
+                return position_blob
+            if data.startswith(self._MARKET_SELECTOR):
+                return market_blob
+            raise AssertionError(f"unexpected selector: {data[:10]}")
+
+        gateway = MagicMock()
+        gateway.is_connected = True
+        gateway.eth_call = _eth_call
+        gateway.scripted_calls = calls
+        return gateway
+
+    def test_no_overrides_defaults_to_market_oracle_exact_hf(self):
+        """Cross-asset market, no overrides -> numeric HF.
+
+        Hand-computed: 2 wstETH collateral, oracle price 3000 USDC/wstETH
+        (raw 3000e24, scale 1e(36+6-18)), debt 3000 USDC (shares 1:1), USDC
+        loan leg -> $1 via the stablecoin table (no price oracle wired).
+        HF = (2 * 3000 * 0.86) / 3000 = 1.72 exactly.
+        """
+        from almanak.framework.data.position_health import PRICE_SOURCE_MARKET_ORACLE
+
+        gateway = self._scripted_gateway(
+            oracle_price_raw=3000 * 10**24,
+            collateral_raw=2 * 10**18,
+            borrow_shares=3000 * 10**6,
+            total_borrow_assets=10_000 * 10**6,
+            total_borrow_shares=10_000 * 10**6,
+        )
+        with patch(self._MARKET_PARAMS_TARGET, return_value=self._market_params()):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=gateway)
+            health = provider.get_health("morpho_blue", self._MARKET_ID, "0xabc")
+
+        assert health.health_factor == Decimal("1.72")
+        assert health.collateral_value_usd == Decimal("6000")
+        assert health.debt_value_usd == Decimal("3000")
+        assert health.lltv == Decimal("0.86")
+        assert health.price_source == PRICE_SOURCE_MARKET_ORACLE
+        assert health.to_dict()["price_source"] == PRICE_SOURCE_MARKET_ORACLE
+
+    def test_overrides_keep_absolute_precedence_over_the_oracle(self):
+        """Both overrides supplied -> the market oracle is NEVER read."""
+        from almanak.framework.data.position_health import PRICE_SOURCE_OVERRIDE
+
+        gateway = self._scripted_gateway(
+            oracle_price_raw=3000 * 10**24,  # would give a different HF if consulted
+            collateral_raw=2 * 10**18,
+            borrow_shares=4000 * 10**6,
+            total_borrow_assets=10_000 * 10**6,
+            total_borrow_shares=10_000 * 10**6,
+        )
+        with patch(self._MARKET_PARAMS_TARGET, return_value=self._market_params()):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=gateway)
+            health = provider.get_health(
+                "morpho_blue",
+                self._MARKET_ID,
+                "0xabc",
+                collateral_price_usd=Decimal("2000"),
+                debt_price_usd=Decimal("1"),
+            )
+
+        # HF = (2 * 2000 * 0.86) / 4000 = 0.86 exactly -- override-priced.
+        assert health.health_factor == Decimal("0.86")
+        assert health.price_source == PRICE_SOURCE_OVERRIDE
+        # The oracle price() read must not have happened (absolute precedence).
+        assert all(sel != self._PRICE_SELECTOR for _to, sel in gateway.scripted_calls)
+
+    def test_oracle_fault_falls_back_to_usd_oracle(self):
+        """Market oracle unreadable -> the wired USD oracle prices both legs."""
+        from almanak.framework.data.position_health import PRICE_SOURCE_USD_ORACLE
+
+        gateway = self._scripted_gateway(
+            oracle_price_raw=None,  # scripted oracle fault
+            collateral_raw=3 * 10**18,
+            borrow_shares=3000 * 10**6,
+            total_borrow_assets=10_000 * 10**6,
+            total_borrow_shares=10_000 * 10**6,
+        )
+        usd_quotes = {"wstETH": Decimal("2000"), "USDC": Decimal("1")}
+        with patch(self._MARKET_PARAMS_TARGET, return_value=self._market_params()):
+            provider = PositionHealthProvider(
+                chain="ethereum",
+                gateway_client=gateway,
+                price_oracle=lambda symbol: usd_quotes[symbol],
+            )
+            health = provider.get_health("morpho_blue", self._MARKET_ID, "0xabc")
+
+        # HF = (3 * 2000 * 0.86) / 3000 = 1.72 exactly -- USD-oracle priced.
+        assert health.health_factor == Decimal("1.72")
+        assert health.price_source == PRICE_SOURCE_USD_ORACLE
+
+    def test_fails_closed_when_no_price_source_answers(self):
+        """Oracle fault + no wired USD source -> fail closed (never 1:1)."""
+        gateway = self._scripted_gateway(
+            oracle_price_raw=None,
+            collateral_raw=2 * 10**18,
+            borrow_shares=3000 * 10**6,
+            total_borrow_assets=10_000 * 10**6,
+            total_borrow_shares=10_000 * 10**6,
+        )
+        with patch(self._MARKET_PARAMS_TARGET, return_value=self._market_params()):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=gateway)
+            # USDC resolves via the stablecoin table, but wstETH has no USD
+            # source -> the default chain must fail closed.
+            with pytest.raises(ValueError, match="Price overrides required"):
+                provider.get_health("morpho_blue", self._MARKET_ID, "0xabc")
+
+    def test_partial_override_still_fails_closed(self):
+        """Exactly one override is ambiguous -> raise, never mix provenance."""
+        gateway = self._scripted_gateway(
+            oracle_price_raw=3000 * 10**24,
+            collateral_raw=2 * 10**18,
+            borrow_shares=3000 * 10**6,
+            total_borrow_assets=10_000 * 10**6,
+            total_borrow_shares=10_000 * 10**6,
+        )
+        with patch(self._MARKET_PARAMS_TARGET, return_value=self._market_params()):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=gateway)
+            with pytest.raises(ValueError, match="Price overrides required"):
+                provider.get_health(
+                    "morpho_blue", self._MARKET_ID, "0xabc", collateral_price_usd=Decimal("3000")
+                )

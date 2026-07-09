@@ -375,6 +375,83 @@ def _resolve_oracle_price(price_oracle: dict | None, asset: str) -> Decimal | No
         return None
 
 
+def read_market_oracle_price(
+    *,
+    protocol: str,
+    chain: str,
+    market_id: str,
+    gateway_client: Any,
+    block: int | str | None = None,
+) -> Decimal | None:
+    """Read a market's OWN liquidation-oracle price for one catalogued market.
+
+    The default price source for a cross-asset isolated market
+    (Morpho Blue) when a strategy injects no price overrides. The connector
+    declares *how* to read its market oracle (selector, target, scaling) via
+    :class:`~almanak.connectors._strategy_base.lending_read_base.MarketOraclePriceSpec`
+    on its account-state spec; this function keeps the two framework
+    responsibilities the spec must stay pure of (Gateway-boundary rule):
+
+    1. **The gateway round-trip** — each planned
+       :class:`~almanak.connectors._strategy_base.lending_read_base.EthCall`
+       executes via :func:`_gateway_eth_call` (block pinning + legacy-signature
+       fallback preserved).
+    2. **Decimals resolution** — the connector's declared valuation-role tokens
+       are resolved through the token resolver and injected so the pure reducer
+       can apply the protocol's scaling convention.
+
+    Returns the price of ONE collateral token denominated in the loan token
+    (human units) — the exact price the protocol liquidates against — or
+    ``None`` (fail closed, Empty ≠ Zero) when: the gateway is missing or
+    disconnected; the protocol declares no market-oracle read; the market is
+    off-catalogue or names no oracle; a valued token's decimals cannot be
+    resolved; or the read/decode fails.
+
+    Args:
+        protocol: Protocol identifier (e.g. ``"morpho_blue"``) — resolved
+            through the registry.
+        chain: Chain identifier (e.g. ``"ethereum"``).
+        market_id: Per-market id (the Morpho bytes32 market id).
+        gateway_client: Gateway client exposing ``eth_call(chain, to, data, block=...)``.
+        block: Optional block to pin the read to. ``None`` → ``"latest"``.
+    """
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+    from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+    from almanak.framework.data.tokens.resolver import get_token_resolver
+
+    if gateway_client is None or not getattr(gateway_client, "is_connected", False):
+        return None
+    try:
+        spec = LendingReadRegistry.market_oracle_price_spec(protocol)
+        if spec is None:
+            return None
+        params = LendingReadRegistry.market_params(protocol, chain, market_id)
+        if not params:
+            return None
+        calls = spec.build_calls(params)
+        if not calls:
+            return None
+        decimals: dict[str, int] = {}
+        resolver = get_token_resolver()
+        for _query_field, symbol in LendingReadRegistry.valuation_roles(protocol, chain, market_id):
+            try:
+                token_info = resolver.resolve(symbol, chain=chain)
+            except TokenNotFoundError:
+                return None
+            if token_info is None:
+                return None
+            decimals[symbol] = token_info.decimals
+        if not decimals:
+            # A market-oracle read is only meaningful for a protocol that names
+            # valued legs; no resolvable roles ⇒ nothing to scale against.
+            return None
+        results = [_gateway_eth_call(gateway_client, chain, call.to, call.data, block=block) for call in calls]
+        return spec.reduce_calls(params, decimals, results)
+    except Exception:
+        logger.debug("read_market_oracle_price failed for protocol=%s chain=%s", protocol, chain, exc_info=True)
+        return None
+
+
 def read_lending_market_health(
     *,
     protocol: str,

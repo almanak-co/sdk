@@ -73,6 +73,7 @@ __all__ = [
     "LendingAccountState",
     "LendingPositionOnChain",
     "LendingReadSpec",
+    "MarketOraclePriceSpec",
     "build_compound_asset_info_calldata",
     "build_compound_borrow_balance_calldata",
     "build_compound_collateral_balance_calldata",
@@ -370,6 +371,39 @@ class AccountStateQuery:
 
 
 @dataclass(frozen=True)
+class MarketOraclePriceSpec:
+    """Connector-published descriptor for reading a market's own price oracle.
+
+    Isolated-market lending protocols (Morpho Blue) liquidate against a
+    per-market oracle whose address lives in the connector's market catalogue.
+    Reading THAT oracle is the exact way to value a position's collateral leg —
+    it is by definition the price the protocol computes liquidation against, so
+    a health factor derived from it matches the on-chain ``_isHealthy`` check
+    (a generic USD oracle is only an approximation of it).
+
+    Pure, like every spec in this module: ``build_calls`` emits the reads from
+    the connector's own ``market_params`` catalogue entry, and ``reduce_calls``
+    decodes the return blobs — the gateway-routed ``eth_call`` that executes
+    them stays in the framework reader
+    (:func:`~almanak.framework.accounting.lending_reads.read_market_oracle_price`).
+
+    Attributes:
+        build_calls: ``market_params -> tuple[EthCall, ...]`` planner. Pure:
+            emits the ordered oracle reads (empty tuple when the catalogue entry
+            names no oracle — the framework fails over / closed on no calls).
+        reduce_calls: ``(market_params, decimals_by_symbol, results) ->
+            Decimal | None`` reducer. Pure: decodes the return blobs (in
+            ``build_calls`` order; ``None`` for a failed read) into the price of
+            ONE collateral token denominated in the loan token (human units,
+            protocol scaling already applied), or ``None`` when the blobs are
+            missing/malformed/zero so the framework fails closed (Empty ≠ Zero).
+    """
+
+    build_calls: Callable[[Mapping[str, Any]], tuple[EthCall, ...]]
+    reduce_calls: Callable[[Mapping[str, Any], Mapping[str, int], list[str | None]], Decimal | None]
+
+
+@dataclass(frozen=True)
 class AccountStateReadSpec:
     """Connector-published descriptor for an aggregate account-state read.
 
@@ -417,6 +451,11 @@ class AccountStateReadSpec:
     # ``contract_kinds`` (above) signals a *market-scoped* read target (the per-market
     # Comet), which the registry binds from the market table rather than AddressRegistry.
     query_inputs_fn: Callable[[Any], dict[str, Any]] | None = None
+    # Connector-declared read of the market's OWN price oracle — the price the
+    # protocol itself liquidates against (VIB-5527 follow-up). ``None``
+    # for protocols that publish no such read; the framework's position-health
+    # default-pricing path then falls back to a generic USD oracle or fails closed.
+    market_oracle_price: MarketOraclePriceSpec | None = None
 
     def query_inputs_from_intent(self, intent: Any) -> dict[str, Any]:
         """Extract the per-read query inputs this protocol needs from an intent.
@@ -784,6 +823,68 @@ def _reduce_morpho_account_state(
     )
 
 
+# IOracle.price() — every Morpho Blue market's oracle exposes this single read;
+# it is THE price ``Morpho._isHealthy`` computes liquidation against.
+_MORPHO_ORACLE_PRICE_SELECTOR = "0xa035b1fe"
+# Morpho oracle convention: ``price()`` returns the price of 1 collateral asset
+# quoted in loan assets, scaled by ``1e(36 + loanDecimals - collateralDecimals)``
+# (so ``collateral_raw * price / 1e36`` is the collateral value in raw loan units).
+_MORPHO_ORACLE_PRICE_EXP_BASE = 36
+
+
+def _build_morpho_oracle_price_calls(market_params: Mapping[str, Any]) -> tuple[EthCall, ...]:
+    """Emit the single ``IOracle.price()`` read for a catalogued Morpho market.
+
+    The oracle address comes from the connector's own ``MORPHO_MARKETS`` entry
+    (it is one of the five keccak inputs that define the market id, so the
+    catalogue value is authoritative). Fails closed (empty tuple) when the
+    entry names no oracle — the framework then falls back / fails closed
+    instead of calling a garbage target.
+    """
+    oracle = market_params.get("oracle")
+    if not isinstance(oracle, str) or not oracle:
+        return ()
+    return (EthCall(to=oracle, data=_MORPHO_ORACLE_PRICE_SELECTOR),)
+
+
+def _reduce_morpho_oracle_price(
+    market_params: Mapping[str, Any],
+    decimals: Mapping[str, int],
+    results: list[str | None],
+) -> Decimal | None:
+    """Decode ``IOracle.price()`` into loan-token-per-collateral-token (human units).
+
+    Applies the Morpho scaling convention: ``price_raw / 10**(36 + loanDecimals
+    - collateralDecimals)``. Fails closed (returns ``None``) on a missing /
+    short / malformed blob, missing token decimals, or a zero price — a broken
+    oracle must surface as "unpriced", never as a fabricated 0 (Empty ≠ Zero;
+    a zero collateral price would report HF=0 and trigger a false deleverage).
+    """
+    collateral_symbol = market_params.get("collateral_token")
+    loan_symbol = market_params.get("loan_token")
+    if not isinstance(collateral_symbol, str) or not isinstance(loan_symbol, str):
+        return None
+    collateral_decimals = decimals.get(collateral_symbol)
+    loan_decimals = decimals.get(loan_symbol)
+    if collateral_decimals is None or loan_decimals is None:
+        return None
+    blob = results[0] if results else None
+    if not isinstance(blob, str) or not blob:
+        return None
+    raw = blob[2:] if blob[:2].lower() == "0x" else blob
+    if len(raw) < 64:  # 1 uint256 word minimum
+        return None
+    try:
+        price_raw = decode_uint_hex(raw, 0)
+    except (ValueError, ArithmeticError):
+        logger.debug("Failed to decode Morpho oracle price hex", exc_info=True)
+        return None
+    if price_raw <= 0:
+        return None
+    exponent = _MORPHO_ORACLE_PRICE_EXP_BASE + loan_decimals - collateral_decimals
+    return Decimal(price_raw) / (Decimal(10) ** exponent)
+
+
 #: Aggregate account-state read for Morpho Blue (VIB-4929 PR-3a).
 #: Morpho deploys a single per-chain singleton (contract kind ``morpho``, owned
 #: by ``morpho_blue/addresses.py``) that holds every market's per-user position
@@ -802,6 +903,15 @@ MORPHO_BLUE_ACCOUNT_STATE_READ = AccountStateReadSpec(
     valuation_role_keys=(
         ("collateral_token", "collateral_token"),
         ("loan_token", "loan_token"),
+    ),
+    # The market's own liquidation oracle (from the same catalogue
+    # entry) is the default price source when a strategy injects no overrides —
+    # exact by construction, because it is the price the protocol liquidates
+    # against. Declared here so the framework's default-pricing path stays
+    # capability-driven (no Morpho selector / scaling knowledge in the framework).
+    market_oracle_price=MarketOraclePriceSpec(
+        build_calls=_build_morpho_oracle_price_calls,
+        reduce_calls=_reduce_morpho_oracle_price,
     ),
 )
 
