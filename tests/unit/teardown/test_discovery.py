@@ -24,12 +24,13 @@ import pytest
 from almanak.framework.teardown.discovery import (
     DiscoveredPosition,
     DiscoveryIncomplete,
+    PositionReadFailure,
     _decode_int24,
+    _read_position,
     discover_lp_positions,
     to_teardown_summary,
 )
 from almanak.framework.teardown.models import PositionType
-
 
 # ---------------------------------------------------------------------------
 # Fake gateway RPC harness
@@ -514,6 +515,132 @@ class TestMaxPositionsCap:
             )
         # Truncated indices are reported as missing
         assert exc.value.missing == [_MAX_POSITIONS_PER_NPM]
+
+
+class _ErrorRpc:
+    """Rpc stub whose positions(tokenId) fails a configurable way."""
+
+    def __init__(self, *, error: str = "", raises: Exception | None = None, result: str | None = None):
+        self._error = error
+        self._raises = raises
+        self._result = result
+        self.calls = 0
+
+    def Call(self, request, timeout=15.0):  # noqa: ARG002
+        self.calls += 1
+        if self._raises is not None:
+            raise self._raises
+        if self._result is not None:
+            return _rpc_response(self._result)
+        return _rpc_response(success=False, error=self._error)
+
+
+class TestTypedPositionRead:
+    """VIB-5631 — ``_read_position`` is tri-state: a node-MEASURED burned-NFT
+    revert (``PositionReadFailure.REVERTED``) is distinguished from an
+    UNMEASURED transport/gateway/decode fault (``PositionReadFailure.FAULT``),
+    mirroring the VIB-5631 semantics of the gateway's typed
+    ``QueryPositionLiquidity`` read (Empty != Zero)."""
+
+    NPM = "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72"
+
+    def _read(self, rpc) -> DiscoveredPosition | PositionReadFailure:
+        client = MagicMock()
+        client.rpc = rpc
+        return asyncio.run(_read_position(client, "zerog", self.NPM, 42))
+
+    def test_burned_nft_revert_is_measured_reverted(self):
+        """The canonical NPM burn signal, as RpcService surfaces it: a
+        JSON-encoded JSON-RPC error whose message carries 'Invalid token ID'."""
+        error = json.dumps({"code": 3, "message": "execution reverted: Invalid token ID"})
+        assert self._read(_ErrorRpc(error=error)) is PositionReadFailure.REVERTED
+
+    def test_position_not_found_revert_is_measured_reverted(self):
+        """The second marker the gateway client folds to a measured 0
+        (query_position_tokens_owed) — same fold here so lanes agree."""
+        error = json.dumps({"code": -32000, "message": "position not found"})
+        assert self._read(_ErrorRpc(error=error)) is PositionReadFailure.REVERTED
+
+    def test_plain_string_revert_marker_is_measured_reverted(self):
+        """A non-JSON error payload still matches on raw text."""
+        assert self._read(_ErrorRpc(error="execution reverted: Invalid token ID")) is (
+            PositionReadFailure.REVERTED
+        )
+
+    def test_transport_error_is_fault_not_reverted(self):
+        error = json.dumps({"code": -32603, "message": "HTTP 502: bad gateway"})
+        assert self._read(_ErrorRpc(error=error)) is PositionReadFailure.FAULT
+
+    def test_unrecognized_revert_text_is_fault_fail_safe(self):
+        """An unknown revert reason is NEVER promoted to a burned-position
+        measurement — fail-safe to unmeasured."""
+        error = json.dumps({"code": 3, "message": "execution reverted: some custom reason"})
+        assert self._read(_ErrorRpc(error=error)) is PositionReadFailure.FAULT
+
+    def test_grpc_raise_is_fault(self):
+        assert self._read(_ErrorRpc(raises=RuntimeError("channel down"))) is PositionReadFailure.FAULT
+
+    def test_empty_returndata_is_fault(self):
+        assert self._read(_ErrorRpc(result="0x")) is PositionReadFailure.FAULT
+
+    def test_short_returndata_is_fault(self):
+        assert self._read(_ErrorRpc(result="0x" + "ab" * 32)) is PositionReadFailure.FAULT
+
+    def test_success_still_parses_position(self):
+        encoded = _encode_positions("0xaa" + "0" * 38, "0xbb" + "0" * 38, 3000, -100, 100, 777)
+        result = self._read(_ErrorRpc(result=encoded))
+        assert isinstance(result, DiscoveredPosition)
+        assert result.token_id == 42
+        assert result.liquidity == 777
+
+
+class TestWalkOutcomesUnchangedByTypedRead:
+    """Call-site choice: the wallet-scan walk folds BOTH typed failures
+    back to skip/missing — a mid-scan burn (revert) means the index
+    enumeration is stale, so strict mode still raises DiscoveryIncomplete
+    (loud re-run) exactly as before the typed read existed."""
+
+    WALLET = "0xaaaa000000000000000000000000000000000000"
+
+    def _rpc_with_reverting_position(self):
+        from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
+
+        npm = UNISWAP_V3["zerog"]["position_manager"].lower()
+        encoded = _encode_positions("0xaa" + "0" * 38, "0xbb" + "0" * 38, 3000, 0, 100, 111)
+
+        class _RevertingPosition(_FakeRpcMultiNpm):
+            def Call(self, request, timeout=15.0):  # noqa: ARG002
+                parsed = json.loads(request.params)
+                calldata = parsed[0]["data"]
+                if calldata.startswith("0x99fbab88"):
+                    token_id = int(calldata[-64:], 16)
+                    if token_id == 2001:  # burned mid-scan
+                        return _rpc_response(
+                            success=False,
+                            error=json.dumps(
+                                {"code": 3, "message": "execution reverted: Invalid token ID"}
+                            ),
+                        )
+                return super().Call(request, timeout)
+
+        return _RevertingPosition(
+            {npm: {"balance": 2, "token_ids": [2000, 2001], "positions": {2000: encoded}}}
+        )
+
+    def test_mid_scan_revert_still_raises_discovery_incomplete_in_strict(self):
+        client = MagicMock()
+        client.rpc = self._rpc_with_reverting_position()
+        with pytest.raises(DiscoveryIncomplete) as exc:
+            asyncio.run(discover_lp_positions(client=client, chain="zerog", wallet=self.WALLET))
+        assert exc.value.missing == [1]  # index 1 = the reverting tokenId 2001
+
+    def test_mid_scan_revert_non_strict_returns_partial(self):
+        client = MagicMock()
+        client.rpc = self._rpc_with_reverting_position()
+        result = asyncio.run(
+            discover_lp_positions(client=client, chain="zerog", wallet=self.WALLET, strict=False)
+        )
+        assert [p.token_id for p in result] == [2000]
 
 
 class TestToTeardownSummary:

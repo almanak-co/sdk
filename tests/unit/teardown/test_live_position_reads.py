@@ -168,13 +168,19 @@ def test_redrive_price_override_takes_precedence() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _lp(position_id: str = "555", chain: str = "arbitrum", protocol: str = "uniswap_v3") -> PositionInfo:
+def _lp(
+    position_id: str = "555",
+    chain: str = "arbitrum",
+    protocol: str = "uniswap_v3",
+    details: dict | None = None,
+) -> PositionInfo:
     return PositionInfo(
         position_type=PositionType.LP,
         position_id=position_id,
         chain=chain,
         protocol=protocol,
         value_usd=Decimal("0"),
+        details=details or {},
     )
 
 
@@ -202,9 +208,11 @@ class _FakeGatewayClient:
         self._by_npm = {k.lower(): v for k, v in liquidity_by_npm.items()}
         self._raises = raises
         self.queried_npms: list[str] = []
+        self.queried_token_ids: list[int] = []
 
     def query_position_liquidity(self, *, chain, position_manager, token_id, block=None):
         self.queried_npms.append(position_manager.lower())
+        self.queried_token_ids.append(token_id)
         if self._raises is not None:
             raise self._raises
         assert position_manager.lower() in self._by_npm, (
@@ -291,6 +299,141 @@ async def test_chain_verify_scopes_to_own_npm_never_foreign_vib5631() -> None:
     position = _lp("3014", chain="ethereum", protocol="sushiswap_v3")
     assert await chain_verify_lp_open(gateway_client=client, position=position) is False
     assert client.queried_npms == [sushi_npm.lower()]
+
+
+# ---------------------------------------------------------------------------
+# Plan-A / TD-14 NFT-id resolution PARITY (VIB-5631 follow-up).
+#
+# chain_verify_lp_open must resolve the NFT tokenId with the SAME shared rule
+# the TD-14 post-condition hooks use (resolve_nft_token_id): details keys
+# (nft_position_id / nft_id / token_id / position_id) first, then the bare
+# position_id attribute. Pre-fix, Plan-A only parsed a numeric position_id, so
+# a strategy carrying a human-readable id ("my-lp-1") with the NFT id in
+# details verified fine in TD-14 but reconciled UNVERIFIABLE in Plan-A.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("detail_key", ["nft_position_id", "nft_id", "token_id", "position_id"])
+async def test_chain_verify_resolves_nft_id_from_details_parity(detail_key: str) -> None:
+    """Human-readable position_id + numeric NFT id in details → Plan-A verifies
+    (every detail-key convention TD-14 honours), instead of UNVERIFIABLE."""
+    client = _FakeGatewayClient({_npm("uniswap_v3", "arbitrum"): 12345})
+    position = _lp("my-lp-1", details={detail_key: 555})
+    assert await chain_verify_lp_open(gateway_client=client, position=position) is True
+    assert client.queried_token_ids == [555]  # the DETAILS id, not int("my-lp-1")
+
+
+@pytest.mark.asyncio
+async def test_chain_verify_human_readable_id_measured_closed_via_details() -> None:
+    """The burned-position direction of the same parity case: details-resolved
+    token measures liquidity 0 → MEASURED closed (False), never None."""
+    client = _FakeGatewayClient({_npm("uniswap_v3", "arbitrum"): 0})
+    position = _lp("my-lp-1", details={"nft_position_id": "555"})
+    assert await chain_verify_lp_open(gateway_client=client, position=position) is False
+
+
+@pytest.mark.asyncio
+async def test_chain_verify_numeric_attribute_id_unchanged() -> None:
+    """Byte-identical numeric-id behaviour: no detail keys → the attribute id
+    is used exactly as before this change."""
+    client = _FakeGatewayClient({_npm("uniswap_v3", "arbitrum"): 12345})
+    position = _lp("555", details={"pool": "0xPOOL", "source": "position_registry"})
+    assert await chain_verify_lp_open(gateway_client=client, position=position) is True
+    assert client.queried_token_ids == [555]
+
+
+@pytest.mark.asyncio
+async def test_chain_verify_details_take_precedence_like_td14() -> None:
+    """Same precedence rule as the TD-14 hook: a details id wins over the
+    attribute, so the two lanes can never read different NFTs."""
+    client = _FakeGatewayClient({_npm("uniswap_v3", "arbitrum"): 1})
+    position = _lp("555", details={"nft_position_id": 777})
+    assert await chain_verify_lp_open(gateway_client=client, position=position) is True
+    assert client.queried_token_ids == [777]
+
+
+@pytest.mark.asyncio
+async def test_chain_verify_malformed_detail_id_is_unverifiable_not_crash() -> None:
+    """Non-numeric detail value + non-numeric attribute → None (UNVERIFIABLE),
+    no NPM ever queried, no exception."""
+    client = _FakeGatewayClient({})
+    position = _lp("my-lp-1", details={"nft_position_id": "not-a-number"})
+    assert await chain_verify_lp_open(gateway_client=client, position=position) is None
+    assert client.queried_npms == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_value", [True, 1.5])
+async def test_chain_verify_bool_float_detail_id_is_unverifiable(bad_value) -> None:
+    """bool/float ids are rejected, never coerced into a WRONG tokenId
+    (int(True)==1, int(1.5)==1 would query someone else's position)."""
+    client = _FakeGatewayClient({})
+    position = _lp("my-lp-1", details={"token_id": bad_value})
+    assert await chain_verify_lp_open(gateway_client=client, position=position) is None
+    assert client.queried_npms == []
+
+
+@pytest.mark.asyncio
+async def test_chain_verify_non_dict_details_falls_back_to_attribute() -> None:
+    """A malformed (non-dict) details payload contributes nothing — the numeric
+    attribute id still resolves (degrade, never crash)."""
+    from types import SimpleNamespace
+
+    client = _FakeGatewayClient({_npm("uniswap_v3", "arbitrum"): 12345})
+    position = SimpleNamespace(position_id="555", chain="arbitrum", protocol="uniswap_v3", details="not-a-dict")
+    assert await chain_verify_lp_open(gateway_client=client, position=position) is True
+    assert client.queried_token_ids == [555]
+
+
+# ---------------------------------------------------------------------------
+# resolve_nft_token_id — the shared pure helper itself
+# ---------------------------------------------------------------------------
+
+
+class TestResolveNftTokenId:
+    def _pos(self, position_id="my-lp-1", details=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(position_id=position_id, details=details if details is not None else {})
+
+    def test_detail_key_priority_order(self) -> None:
+        from almanak.connectors._strategy_base.teardown_post_condition import resolve_nft_token_id
+
+        details = {"nft_position_id": 1, "nft_id": 2, "token_id": 3, "position_id": 4}
+        assert resolve_nft_token_id(self._pos(details=details)) == 1
+        del details["nft_position_id"]
+        assert resolve_nft_token_id(self._pos(details=details)) == 2
+        del details["nft_id"]
+        assert resolve_nft_token_id(self._pos(details=details)) == 3
+        del details["token_id"]
+        assert resolve_nft_token_id(self._pos(details=details)) == 4
+
+    def test_empty_and_none_detail_values_are_skipped(self) -> None:
+        from almanak.connectors._strategy_base.teardown_post_condition import resolve_nft_token_id
+
+        assert resolve_nft_token_id(self._pos(details={"nft_position_id": "", "nft_id": None, "token_id": 9})) == 9
+
+    def test_attribute_fallback_for_numeric_id(self) -> None:
+        from almanak.connectors._strategy_base.teardown_post_condition import resolve_nft_token_id
+
+        assert resolve_nft_token_id(self._pos(position_id="555")) == 555
+        assert resolve_nft_token_id(self._pos(position_id=555)) == 555
+
+    def test_unresolvable_returns_none_never_raises(self) -> None:
+        from almanak.connectors._strategy_base.teardown_post_condition import resolve_nft_token_id
+
+        assert resolve_nft_token_id(self._pos()) is None  # human-readable id, no details
+        assert resolve_nft_token_id(self._pos(position_id=None)) is None
+        assert resolve_nft_token_id(self._pos(details={"token_id": "abc"})) is None
+        assert resolve_nft_token_id(self._pos(details="not-a-dict")) is None
+        assert resolve_nft_token_id(object()) is None  # no attributes at all
+
+    def test_bool_and_float_are_rejected_not_coerced(self) -> None:
+        from almanak.connectors._strategy_base.teardown_post_condition import resolve_nft_token_id
+
+        assert resolve_nft_token_id(self._pos(details={"token_id": True})) is None
+        assert resolve_nft_token_id(self._pos(details={"token_id": 1.5})) is None
 
 
 def test_live_lending_position_dust_threshold() -> None:

@@ -30,12 +30,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from almanak.connectors._strategy_base.teardown_post_condition import ClosureCheckResult
-
-# tokenId key conventions the framework verifier / strategies use, in priority
-# order (mirrors the V3 hook): the numeric NFT id may live under any of these in
-# ``position.details`` before falling back to the bare ``position_id``.
-_NFT_ID_KEYS = ("nft_position_id", "nft_id", "token_id", "position_id")
+from almanak.connectors._strategy_base.teardown_post_condition import (
+    NFT_ID_DETAIL_KEYS,
+    ClosureCheckResult,
+    resolve_nft_token_id,
+)
 
 
 def uniswap_v4_post_condition(
@@ -83,36 +82,15 @@ def uniswap_v4_post_condition(
             error="Uniswap V4 post-condition needs position.chain; none found",
         )
 
-    # Resolve the numeric NFT tokenId — same key conventions the V3 hook tries.
-    details = getattr(position, "details", None) or {}
-    raw_nft_id: Any = None
-    for key in _NFT_ID_KEYS:
-        candidate = details.get(key)
-        if candidate is not None and candidate != "":
-            raw_nft_id = candidate
-            break
-    if raw_nft_id is None:
-        raw_nft_id = position_id
-    # Reject bool/float BEFORE int(): int(True)==1 and int(1.5)==1 would coerce a
-    # bad id into a valid-looking-but-WRONG tokenId, querying the wrong position
-    # on-chain. A tokenId is a base-10 integer or its string form only; anything
-    # else is UNMEASURED (fail-safe -> UNVERIFIED), never treated as closed.
-    # (``bool`` is checked explicitly because it is a subclass of ``int``.)
-    if isinstance(raw_nft_id, bool | float) or not isinstance(raw_nft_id, int | str):
-        return ClosureCheckResult(
-            closed=False,
-            unmeasured=True,
-            protocol=protocol,
-            position_id=position_id,
-            error=(
-                f"Uniswap V4 post-condition: NFT tokenId has non-integer type "
-                f"{type(raw_nft_id).__name__} ({raw_nft_id!r}); refusing to coerce it to a "
-                f"tokenId (would query the wrong position); cannot verify on-chain closure"
-            ),
-        )
-    try:
-        token_id = int(raw_nft_id)
-    except (TypeError, ValueError):
+    # Resolve the numeric NFT tokenId via the SHARED rule: detail keys
+    # first, then the bare ``position_id`` — the same ``resolve_nft_token_id``
+    # every verification lane uses. The helper carries this hook's type
+    # discipline: bool / float are rejected BEFORE ``int()`` (``int(True)==1``,
+    # ``int(1.5)==1`` would coerce a bad id into a valid-looking-but-WRONG
+    # tokenId that queries the wrong position on-chain) — UNMEASURED
+    # (fail-safe -> UNVERIFIED), never treated as closed.
+    token_id = resolve_nft_token_id(position)
+    if token_id is None:
         return ClosureCheckResult(
             closed=False,
             unmeasured=True,
@@ -120,8 +98,9 @@ def uniswap_v4_post_condition(
             position_id=position_id,
             error=(
                 f"Uniswap V4 post-condition: could not resolve a numeric NFT tokenId "
-                f"(details keys {' / '.join(_NFT_ID_KEYS)} were empty or non-numeric, "
-                f"position_id={position_id!r}); cannot verify on-chain closure"
+                f"(details keys {' / '.join(NFT_ID_DETAIL_KEYS)} were empty, non-numeric, "
+                f"or of a non-integer type; position_id={position_id!r}); "
+                f"cannot verify on-chain closure"
             ),
         )
 

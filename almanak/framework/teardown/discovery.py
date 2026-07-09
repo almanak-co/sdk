@@ -27,7 +27,8 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from enum import Enum
+from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.address_registry import AbiFamily, AddressRegistry
 from almanak.framework.teardown.models import PositionInfo, PositionType, TeardownPositionSummary
@@ -100,6 +101,64 @@ class DiscoveredPosition:
     liquidity: int
 
 
+class PositionReadFailure(Enum):
+    """Typed failure sentinel for the raw ``positions(tokenId)`` read.
+
+    ``_read_position`` can fail two structurally different ways, and the
+    difference is a measurement (Empty ≠ Zero — the tri-state semantics
+    VIB-5631 established for the gateway's typed ``QueryPositionLiquidity``
+    read, mirrored here for the raw wallet-scan read):
+
+    - ``REVERTED`` — the node EXECUTED the call and it reverted with a
+      recognized burned-NFT marker (the canonical NPM ``positions()`` has a
+      single ``require(..., 'Invalid token ID')``). The token id does not
+      exist on this NPM: a MEASURED burned/closed signal.
+    - ``FAULT`` — the read could not be completed (gRPC/transport error,
+      gateway config / rate-limit error, an unrecognized RPC error, or
+      unparsable / short returndata). Nothing was measured about the
+      position: UNMEASURED, never a closure signal.
+
+    Only the marker set the gateway client already folds to a measured
+    ``liquidity = 0`` (``query_position_liquidity`` /
+    ``query_position_tokens_owed``) counts as ``REVERTED`` — any other error,
+    including an unrecognized revert message, is ``FAULT`` (fail-safe: an
+    unknown error is never promoted to a measurement).
+    """
+
+    REVERTED = "reverted"
+    FAULT = "fault"
+
+
+# Burned-NFT revert markers — the SAME set the gateway client folds to a
+# measured value-0 response in ``query_position_liquidity`` (``"invalid token
+# id"``) and ``query_position_tokens_owed`` (adds ``"position not found"``), so
+# the wallet-scan lane and the per-KNOWN-position lanes cannot disagree on what
+# a burned position looks like.
+_MEASURED_REVERT_MARKERS: tuple[str, ...] = ("invalid token id", "position not found")
+
+
+def _classify_call_failure(error_payload: str) -> PositionReadFailure:
+    """Classify a failed gateway ``eth_call`` as MEASURED revert vs FAULT.
+
+    ``RpcService.Call`` surfaces failures as a JSON-encoded JSON-RPC error dict
+    (``{"code": ..., "message": "execution reverted: Invalid token ID", ...}``
+    for a node-measured revert; ``-32603`` HTTP / network wrappers for
+    transport faults). Match the burned-NFT markers against the error message;
+    everything unrecognized is :attr:`PositionReadFailure.FAULT` (unmeasured).
+    """
+    text = error_payload or ""
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        parsed = None
+    if isinstance(parsed, dict):
+        text = str(parsed.get("message", "")) or text
+    lowered = text.lower()
+    if any(marker in lowered for marker in _MEASURED_REVERT_MARKERS):
+        return PositionReadFailure.REVERTED
+    return PositionReadFailure.FAULT
+
+
 def _pad_address(address: str) -> str:
     """Left-pad a 20-byte address to a 32-byte word (hex without 0x)."""
     return address.lower().replace("0x", "").zfill(64)
@@ -126,19 +185,23 @@ def _decode_int24(word_hex: str) -> int:
     return low_24
 
 
-async def _eth_call(
+async def _eth_call_classified(
     client: GatewayClient,
     chain: str,
     to: str,
     data: str,
     network: str = "",
     timeout: float = 15.0,
-) -> str | None:
-    """Issue an ``eth_call`` via the gateway RpcService.
+) -> tuple[str | None, PositionReadFailure | None]:
+    """Issue an ``eth_call`` via the gateway RpcService, classifying failures.
 
-    Returns the hex result (with ``0x`` prefix) on success, or ``None`` on
-    failure. All errors are logged at DEBUG so callers can iterate over
-    multiple NPMs without a single per-chain failure masking others.
+    Returns ``(hex_result, None)`` on success, or ``(None, failure)`` where
+    ``failure`` distinguishes a node-MEASURED revert
+    (:attr:`PositionReadFailure.REVERTED`, burned-NFT markers only) from an
+    UNMEASURED transport / gateway / decode fault
+    (:attr:`PositionReadFailure.FAULT`) — the tri-state alignment. All
+    errors are logged at DEBUG so callers can iterate over multiple NPMs
+    without a single per-chain failure masking others.
 
     ``network`` is passed through to RpcService verbatim. Empty string means
     "use the gateway's configured network", which is what we want in the
@@ -157,15 +220,35 @@ async def _eth_call(
         response = client.rpc.Call(request, timeout=timeout)
     except Exception as e:  # noqa: BLE001
         logger.debug("eth_call failed for %s on %s: %s", to, chain, e)
-        return None
+        return None, PositionReadFailure.FAULT
     if not response.success:
         logger.debug("eth_call returned error for %s on %s: %s", to, chain, response.error)
-        return None
+        return None, _classify_call_failure(response.error)
     try:
-        return json.loads(response.result)
+        return json.loads(response.result), None
     except (ValueError, json.JSONDecodeError):
         logger.debug("eth_call returned unparsable result for %s on %s", to, chain)
-        return None
+        return None, PositionReadFailure.FAULT
+
+
+async def _eth_call(
+    client: GatewayClient,
+    chain: str,
+    to: str,
+    data: str,
+    network: str = "",
+    timeout: float = 15.0,
+) -> str | None:
+    """Issue an ``eth_call`` via the gateway RpcService (untyped failure).
+
+    Thin wrapper over :func:`_eth_call_classified` for readers that do not
+    need the revert-vs-fault distinction (``balanceOf`` /
+    ``tokenOfOwnerByIndex`` never legitimately revert for an enumerated
+    wallet): returns the hex result (with ``0x`` prefix) on success, or
+    ``None`` on any failure.
+    """
+    raw, _ = await _eth_call_classified(client, chain, to, data, network=network, timeout=timeout)
+    return raw
 
 
 async def _balance_of(client: GatewayClient, chain: str, npm: str, wallet: str, network: str = "") -> int | None:
@@ -237,20 +320,33 @@ async def _read_position(
     token_id: int,
     network: str = "",
     protocol: str = "uniswap_v3",
-) -> DiscoveredPosition | None:
-    """Query ``positions(tokenId)`` and parse the 12-tuple struct.
+) -> DiscoveredPosition | PositionReadFailure:
+    """Query ``positions(tokenId)`` and parse the 12-tuple struct (tri-state).
 
-    Returns None if the position is missing / malformed. Liquidity-zero
-    positions are still returned so operators can see them and decide
-    whether to burn.
+    Returns:
+        - :class:`DiscoveredPosition` — the struct parsed. Liquidity-zero
+          positions are still returned so operators can see them and decide
+          whether to burn.
+        - :attr:`PositionReadFailure.REVERTED` — the node MEASURED the call
+          reverting with a burned-NFT marker ("Invalid token ID"): the token
+          id does not exist on this NPM (burned/closed) — a measurement, not
+          an error (Empty ≠ Zero, mirroring the VIB-5631 tri-state
+          semantics of the gateway's typed read).
+        - :attr:`PositionReadFailure.FAULT` — the read could not be completed
+          (transport/gateway fault, unrecognized error, empty or short
+          returndata, decode failure): UNMEASURED, never a closure signal.
     """
     calldata = _SELECTOR_POSITIONS + _pad_uint256(token_id)
-    raw = await _eth_call(client, chain, npm, calldata, network=network)
+    raw, failure = await _eth_call_classified(client, chain, npm, calldata, network=network)
     if not raw:
-        return None
+        # A successful-but-empty response ("0x" / "") means the contract
+        # returned no data (e.g. no positions() implementation) — nothing was
+        # measured about the position, so it folds to FAULT like a transport
+        # failure. A classified revert keeps its REVERTED measurement.
+        return failure if failure is not None else PositionReadFailure.FAULT
     hex_data = raw.removeprefix("0x")
     if len(hex_data) < 12 * 64:  # need 12 words: nonce, op, t0, t1, fee, tL, tU, L, fgi0, fgi1, ow0, ow1
-        return None
+        return PositionReadFailure.FAULT
     words = [hex_data[i * 64 : (i + 1) * 64] for i in range(12)]
     try:
         return DiscoveredPosition(
@@ -266,7 +362,35 @@ async def _read_position(
             liquidity=int(words[7], 16),
         )
     except ValueError:
+        return PositionReadFailure.FAULT
+
+
+async def _read_position_for_walk(*args: Any, **kwargs: Any) -> DiscoveredPosition | None:
+    """Wallet-scan adapter: fold BOTH typed failures back to ``None`` (skip).
+
+    Call-site choice, documented here: the wallet-scan walk
+    (:func:`discover_lp_positions`) keeps its pre-typed-read behaviour
+    byte-for-byte — ``REVERTED`` and ``FAULT`` are both folded to ``None`` so
+    ``_call_with_retries`` retries them and an exhausted read lands in
+    ``missing_indices`` (→ :class:`DiscoveryIncomplete` in strict mode).
+
+    Why ``REVERTED`` is NOT treated as "measured closed → silently skip" here:
+    in this walk the token id came from ``tokenOfOwnerByIndex(wallet, i)``
+    moments earlier, so a burned-NFT revert can only mean the wallet's NFT set
+    changed mid-scan (a close/burn raced the walk). The index enumeration is
+    then stale — indices may have shifted and OTHER positions can be silently
+    missed — so the only safe outcome is the loud one the walker already has:
+    mark the index unreadable and (strict) raise ``DiscoveryIncomplete`` so
+    the operator re-runs discovery against settled state. Silently dropping
+    the token would trade a loud re-run for a potentially incomplete
+    enumeration — the Bug 2 failure mode this module exists to prevent. The
+    typed sentinel exists for per-KNOWN-position callers, where a revert IS
+    the closure signal.
+    """
+    result = await _read_position(*args, **kwargs)
+    if isinstance(result, PositionReadFailure):
         return None
+    return result
 
 
 # Connectors record the NonfungiblePositionManager under one of two keys:
@@ -477,7 +601,7 @@ async def discover_lp_positions(
 
             position, _ = await _call_with_retries(
                 f"positions({token_id}) on {protocol}/{chain}",
-                _read_position,
+                _read_position_for_walk,
                 client,
                 chain,
                 npm,
@@ -573,6 +697,7 @@ def to_teardown_summary(
 __all__ = [
     "DiscoveredPosition",
     "DiscoveryIncomplete",
+    "PositionReadFailure",
     "discover_lp_positions",
     "npm_for_protocol",
     "to_teardown_summary",

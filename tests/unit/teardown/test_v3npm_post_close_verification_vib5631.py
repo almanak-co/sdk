@@ -1,6 +1,6 @@
 """VIB-5631 — V3-NPM post-close verification: burned NPM position is measured-closed.
 
-The reproduced contradiction (sushiswap_v3 / ethereum, NPM
+The observed contradiction (sushiswap_v3 / ethereum, NPM
 tokenId 3014): the position was PROVABLY closed on-chain — burn tx confirmed,
 the TD-14 post-condition passed via the gateway's QueryPositionLiquidity
 ("invalid token id" folded to a MEASURED liquidity=0) — yet the POST-teardown
@@ -172,13 +172,14 @@ class _Strategy:
     _gateway_network = ""
 
 
-def _lp_position(protocol: str, chain: str, position_id: str = "3014") -> PositionInfo:
+def _lp_position(protocol: str, chain: str, position_id: str = "3014", details: dict | None = None) -> PositionInfo:
     return PositionInfo(
         position_type=PositionType.LP,
         position_id=position_id,
         chain=chain,
         protocol=protocol,
         value_usd=Decimal("0"),
+        details=details or {},
     )
 
 
@@ -189,7 +190,7 @@ def _summary(*positions: PositionInfo) -> TeardownPositionSummary:
 
 
 def _td14_passed(total: int = 1) -> ClosureVerification:
-    """The reproduced TD-14 verdict: 1 position passed on-chain
+    """The TD-14 verdict from the incident: 1 position passed on-chain
     post-condition checks → all_closed=True, CHAIN_VERIFIED."""
     return ClosureVerification(
         all_closed=True,
@@ -257,3 +258,82 @@ async def test_read_fault_keeps_td14_verdict_never_failed() -> None:
     )
     assert out.all_closed is True
     assert out.verification_status is VerificationStatus.CHAIN_VERIFIED
+
+
+# ---------------------------------------------------------------------------
+# VIB-5631 — id-resolution PARITY at the same verification seam: a strategy that
+# uses a human-readable position_id with the numeric NFT id in details must
+# get the SAME Plan-A verdicts as one storing the numeric id directly (TD-14
+# already resolved the details keys; pre-fix Plan-A did not, so the re-read
+# was UNVERIFIABLE and blind in both directions).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_human_readable_id_with_details_nft_id_is_read_not_blind() -> None:
+    """Burned position, human-readable id: the Plan-A re-read must resolve the
+    NFT id from details and actually consult the own-protocol NPM (pre-fix it
+    read nothing at all — queried_npms stayed empty)."""
+    own_npm = _npm("sushiswap_v3", "ethereum")
+    gateway = _FakeGatewayClient({own_npm: 0})  # burned: measured 0
+    position = _lp_position(
+        "sushiswap_v3",
+        "ethereum",
+        position_id="sushi-lp-WETH-USDC-1",
+        details={"nft_position_id": 3014},
+    )
+    out = await _mgr(gateway).verify_closure_against_chain(
+        _Strategy(),
+        verification=_td14_passed(),
+        pre_execution_positions=_summary(position),
+        market=None,
+    )
+    assert out.all_closed is True
+    assert out.verification_status is VerificationStatus.CHAIN_VERIFIED
+    assert set(gateway.queried_npms) == {own_npm.lower()}  # the re-read RAN
+
+
+@pytest.mark.asyncio
+async def test_human_readable_id_residual_still_fails_closed() -> None:
+    """The fail-closed direction this change restores: a position STILL open on-chain
+    under a human-readable id is now MEASURED open by Plan-A (details-resolved
+    NFT id) → FAILED. Pre-fix the re-read was UNVERIFIABLE (a post-teardown
+    no-op) and the residual was invisible to this lane."""
+    gateway = _FakeGatewayClient({_npm("sushiswap_v3", "ethereum"): 7_982_551})
+    position = _lp_position(
+        "sushiswap_v3",
+        "ethereum",
+        position_id="sushi-lp-WETH-USDC-1",
+        details={"nft_position_id": 3014},
+    )
+    out = await _mgr(gateway).verify_closure_against_chain(
+        _Strategy(),
+        verification=_td14_passed(),
+        pre_execution_positions=_summary(position),
+        market=None,
+    )
+    assert out.all_closed is False
+    assert out.verification_status is VerificationStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_id_stays_unverifiable_no_crash() -> None:
+    """No numeric id anywhere (malformed details + symbolic position_id) —
+    Plan-A must stay UNVERIFIABLE (keep the TD-14 verdict), never crash and
+    never query an NPM with a guessed id."""
+    gateway = _FakeGatewayClient({})
+    position = _lp_position(
+        "sushiswap_v3",
+        "ethereum",
+        position_id="sushi-lp-WETH-USDC-1",
+        details={"nft_position_id": "not-a-number"},
+    )
+    out = await _mgr(gateway).verify_closure_against_chain(
+        _Strategy(),
+        verification=_td14_passed(),
+        pre_execution_positions=_summary(position),
+        market=None,
+    )
+    assert out.all_closed is True
+    assert out.verification_status is VerificationStatus.CHAIN_VERIFIED
+    assert gateway.queried_npms == []

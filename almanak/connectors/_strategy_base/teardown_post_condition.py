@@ -67,6 +67,79 @@ class TeardownPostCondition(Protocol):
     ) -> ClosureCheckResult: ...
 
 
+# NFT tokenId key conventions, in priority order. Strategies that store a
+# human-readable ``position_id`` (e.g. ``"sushiswap-v3-lp-WETH-USDC-bsc"``) put
+# the actual numeric NFT id in ``position.details``. Three key conventions
+# exist across the demo / incubating tree (no canonical name today):
+#
+#   * ``nft_position_id`` — sushiswap_v3, uniswap_v3 LP lifecycle,
+#     pancakeswap_v3 (most common shape)
+#   * ``nft_id`` — morpho_univ3_leveraged_lp, agni_lp_mantle,
+#     aave_uniswap_yield_stack, sushiswap_v3_optimism
+#   * ``position_id`` / ``token_id`` — strategies that mirror the attribute
+#     name into details for their own bookkeeping
+NFT_ID_DETAIL_KEYS: tuple[str, ...] = ("nft_position_id", "nft_id", "token_id", "position_id")
+
+
+def resolve_nft_token_id(position: Any) -> int | None:
+    """Resolve the numeric ERC-721 NFT tokenId for an NFT-based LP position.
+
+    THE single id-resolution rule for every lane that reads a position's NFT
+    tokenId back from chain — the TD-14 post-condition hooks (the framework V3
+    family hook and connector-owned hooks such as Uniswap V4's) AND the Plan-A
+    per-KNOWN-position reconciliation read
+    (``almanak.framework.teardown.live_position_reads.chain_verify_lp_open``).
+    Before this helper each lane had its own copy: Plan-A resolved only a
+    numeric ``position.position_id`` while TD-14 also read the detail keys, so
+    a strategy using a human-readable position id (``"my-lp-1"``) with the NFT
+    id in ``details`` verified fine in TD-14 but reconciled UNVERIFIABLE in
+    Plan-A — the two lanes disagreed about the same position (the
+    VIB-5631 parity follow-up).
+
+    Resolution order:
+
+    1. ``position.details[key]`` for the first key in
+       :data:`NFT_ID_DETAIL_KEYS` holding a non-``None``, non-empty value.
+       A non-dict / missing ``details`` contributes nothing (malformed
+       payloads must degrade to "unresolvable", never crash a verifier).
+    2. Fallback: the ``position.position_id`` attribute (string-coerced) for
+       strategies that store the numeric NFT id directly on the attribute.
+
+    Type discipline (mirrors the Uniswap V4 hook): a tokenId is a base-10
+    integer or its string form ONLY. ``bool`` / ``float`` are rejected before
+    ``int()`` — ``int(True) == 1`` and ``int(1.5) == 1`` would coerce a bad id
+    into a valid-looking-but-WRONG tokenId that queries someone else's
+    position on-chain.
+
+    Returns:
+        The numeric tokenId, or ``None`` when no numeric id can be resolved —
+        callers MUST treat ``None`` as *unresolvable / unmeasured* (TD-14:
+        ``unmeasured=True`` → UNVERIFIED; Plan-A: ``None`` → UNVERIFIABLE),
+        never as "closed" (Empty ≠ Zero).
+
+    Pure and never raises — both consuming lanes promise they never fault the
+    teardown verification path.
+    """
+    details = getattr(position, "details", None)
+    if not isinstance(details, dict):
+        details = {}
+    raw: Any = None
+    for key in NFT_ID_DETAIL_KEYS:
+        candidate = details.get(key)
+        if candidate is not None and candidate != "":
+            raw = candidate
+            break
+    if raw is None:
+        raw = str(getattr(position, "position_id", "") or "")
+    # ``bool`` is checked explicitly because it is a subclass of ``int``.
+    if isinstance(raw, bool | float) or not isinstance(raw, int | str):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 _REGISTRY: dict[str, TeardownPostCondition] = {}
 
 
@@ -102,8 +175,10 @@ def has_teardown_post_condition(protocol: str) -> bool:
 
 
 __all__ = [
+    "NFT_ID_DETAIL_KEYS",
     "ClosureCheckResult",
     "TeardownPostCondition",
     "get_teardown_post_condition",
     "has_teardown_post_condition",
+    "resolve_nft_token_id",
 ]

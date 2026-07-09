@@ -43,11 +43,13 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import CONNECTOR_REGISTRY, ConnectorDiscoveryError
 from almanak.connectors._strategy_base.address_registry import AbiFamily, AddressRegistry
 from almanak.connectors._strategy_base.teardown_post_condition import (
+    NFT_ID_DETAIL_KEYS,
     ClosureCheckResult,
     TeardownPostCondition,
     _register_teardown_post_condition,
     get_teardown_post_condition,
     has_teardown_post_condition,
+    resolve_nft_token_id,
 )
 from almanak.connectors._strategy_base.vault_post_condition import (
     erc4626_vault_teardown_post_condition,
@@ -272,35 +274,15 @@ def _uniswap_v3_post_condition(
             error="Uniswap V3 post-condition needs position.chain; none found",
         )
 
-    # NFT tokenId resolution: strategies that store a human-readable
-    # ``position_id`` (e.g. ``"sushiswap-v3-lp-WETH-USDC-bsc"``) put the
-    # actual numeric NFT id in ``position.details``.  Three key conventions
-    # exist across the demo / incubating tree (no canonical name today):
-    #
-    #   * ``nft_position_id`` — sushiswap_v3, uniswap_v3 LP lifecycle,
-    #     pancakeswap_v3 (most common shape)
-    #   * ``nft_id`` — morpho_univ3_leveraged_lp, agni_lp_mantle,
-    #     aave_uniswap_yield_stack, sushiswap_v3_optimism
-    #   * ``position_id`` / ``token_id`` — strategies that mirror the
-    #     attribute name into details for their own bookkeeping
-    #
-    # We try all four keys, then fall back to ``position.position_id`` for
-    # strategies that store the numeric NFT id directly on the attribute.
-    # Adding the lookup at the verifier layer keeps the fix one-edit
-    # instead of editing every strategy.
-    details = getattr(position, "details", None) or {}
-    _NFT_ID_KEYS = ("nft_position_id", "nft_id", "token_id", "position_id")
-    raw_nft_id: Any = None
-    for key in _NFT_ID_KEYS:
-        candidate = details.get(key)
-        if candidate is not None and candidate != "":
-            raw_nft_id = candidate
-            break
-    if raw_nft_id is None:
-        raw_nft_id = position_id
-    try:
-        token_id = int(raw_nft_id)
-    except (TypeError, ValueError):
+    # NFT tokenId resolution: the SHARED rule (VIB-5631 parity) —
+    # detail keys (``NFT_ID_DETAIL_KEYS``) first, then the ``position_id``
+    # attribute. ``resolve_nft_token_id`` is the single source both this TD-14
+    # hook and the Plan-A reconciliation read (``chain_verify_lp_open``) use,
+    # so the two verification lanes can never again disagree about which NFT a
+    # position refers to. Resolving at the verifier layer keeps the fix
+    # one-edit instead of editing every strategy.
+    token_id = resolve_nft_token_id(position)
+    if token_id is None:
         return ClosureCheckResult(
             closed=False,
             unmeasured=True,
@@ -308,7 +290,7 @@ def _uniswap_v3_post_condition(
             position_id=position_id,
             error=(
                 f"Uniswap V3 post-condition: could not resolve a numeric NFT "
-                f"tokenId (details keys {' / '.join(_NFT_ID_KEYS)} were "
+                f"tokenId (details keys {' / '.join(NFT_ID_DETAIL_KEYS)} were "
                 f"empty or non-numeric, position_id={position_id!r}); "
                 f"cannot verify on-chain closure"
             ),

@@ -48,6 +48,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base.teardown_post_condition import resolve_nft_token_id
+
 if TYPE_CHECKING:
     from almanak.framework.market import MarketSnapshot
     from almanak.framework.teardown.models import PositionInfo
@@ -272,8 +274,10 @@ async def chain_verify_lp_open(
 
     Args:
         gateway_client: A connected :class:`GatewayClient` (gateway-routed RPC).
-        position: The LP position to verify. Only ``position_id`` (NFT token
-            id), ``protocol`` and ``chain`` are read.
+        position: The LP position to verify. Only ``position_id``, ``details``
+            (NFT tokenId resolution — the SAME shared rule the TD-14 hooks
+            use, ``resolve_nft_token_id``), ``protocol`` and ``chain`` are
+            read.
         network: Accepted for signature stability. The underlying
             ``QueryPositionLiquidity`` RPC always targets the gateway's
             configured network — identical to the ``""`` every production
@@ -302,10 +306,18 @@ async def chain_verify_lp_open(
     chain = str(getattr(position, "chain", "") or "").lower()
     if not chain:
         return None
-    try:
-        token_id = int(str(getattr(position, "position_id", "")))
-    except (ValueError, TypeError):
-        # Composite / pool-prefixed id, or no bare token id ⇒ not verifiable here.
+    # SHARED NFT-id resolution (VIB-5631 parity): identical rule to the
+    # TD-14 post-condition hooks — ``details`` keys (nft_position_id / nft_id /
+    # token_id / position_id) first, then the ``position_id`` attribute. Before
+    # this, Plan-A only parsed a numeric ``position_id``, so a strategy using a
+    # human-readable id ("my-lp-1") with the NFT id in ``details`` verified
+    # fine in TD-14 but reconciled UNVERIFIABLE here — the two lanes
+    # contradicted each other on the same position. Numeric attribute ids
+    # resolve exactly as before.
+    token_id = resolve_nft_token_id(position)
+    if token_id is None:
+        # Composite / pool-prefixed id with no numeric detail key, or no bare
+        # token id anywhere ⇒ not verifiable here (never a guess).
         return None
     if network:
         logger.debug(
