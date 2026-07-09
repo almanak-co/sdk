@@ -39,7 +39,7 @@ from almanak.connectors.uniswap_v4.hooks import (
     discover_pool,
     warn_empty_hook_data,
 )
-from almanak.framework.intents import Intent
+from almanak.framework.intents import AnyIntent, Intent
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_token_amount_human, format_usd
@@ -507,7 +507,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[AnyIntent]:
         if not self._current_position_id:
             return []
 

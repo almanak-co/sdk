@@ -77,7 +77,7 @@ from typing import Any
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
 
 # Intent is what your strategy returns - describes what action to take
-from almanak.framework.intents import Intent, IntentType
+from almanak.framework.intents import AnyIntent, Intent, IntentType
 
 # Core strategy framework imports
 from almanak.framework.market import MarketSnapshot
@@ -1243,7 +1243,7 @@ class MorphoLoopingStrategy(IntentStrategy):
             return Decimal("0"), pending_wallet_collateral + pending_swap
         return Decimal("0"), pending_wallet_collateral
 
-    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:  # noqa: F821
+    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[AnyIntent]:  # noqa: F821
         """Unwind the looped position via the health-factor-aware staircase.
 
         The wallet holds no borrow_token after looping, so a plain repay-then-

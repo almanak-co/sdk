@@ -54,7 +54,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 # Intent is what your strategy returns - a high-level action description
-from almanak.framework.intents import Intent
+from almanak.framework.intents import AnyIntent, Intent
 
 # Core strategy framework imports
 from almanak.framework.market import MarketSnapshot
@@ -827,7 +827,7 @@ class UniswapRSIStrategy(IntentStrategy):
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[AnyIntent]:
         """Generate intents to close all positions.
 
         For swap strategies, teardown means:
@@ -841,7 +841,7 @@ class UniswapRSIStrategy(IntentStrategy):
         """
         from almanak.framework.teardown import TeardownMode
 
-        intents: list[Intent] = []
+        intents: list[AnyIntent] = []
 
         # Determine slippage based on mode
         if mode == TeardownMode.HARD:

@@ -59,11 +59,19 @@ Usage: almanak strat new [OPTIONS]
 
 
 * `chain`:
-    * Type: <almanak.framework.cli.chain_params.ChainChoice object at 0x7ff0d20cbbc0>
+    * Type: <almanak.framework.cli.chain_params.ChainChoice object at 0x7f81830e8080>
     * Default: `arbitrum`
     * Usage: `--chain
 -c`
     Target blockchain network (default: arbitrum)
+
+
+* `protocol`:
+    * Type: STRING
+    * Default: `None`
+    * Usage: `--protocol
+-p`
+    Protocol slug rendered into the scaffold (decorator metadata and the template's config protocol defaults), e.g. aerodrome_slipstream, morpho_blue, hyperliquid. Defaults to the template's canonical protocol.
 
 
 * `help`:
@@ -107,6 +115,12 @@ Options:
   -c, --chain [arbitrum|avalanche|base|berachain|blast|bsc|ethereum|hyperevm|linea|mantle|monad|optimism|plasma|polygon|solana|sonic|xlayer|zerog]
                                   Target blockchain network (default:
                                   arbitrum)
+  -p, --protocol TEXT             Protocol slug rendered into the scaffold
+                                  (decorator metadata and the template's
+                                  config protocol defaults), e.g.
+                                  aerodrome_slipstream, morpho_blue,
+                                  hyperliquid. Defaults to the template's
+                                  canonical protocol.
   --help                          Show this message and exit.
 ```
 

@@ -55,7 +55,7 @@ from almanak.framework.intents import Intent
 from almanak.framework.teardown.models import PositionInfo, PositionType, TeardownPositionSummary
 
 if TYPE_CHECKING:
-    from almanak.framework.intents.base import BaseIntent
+    from almanak.framework.intents.vocabulary import AnyIntent
 
 logger = logging.getLogger("almanak.framework.teardown.full_close")
 
@@ -97,7 +97,7 @@ def _perp_close_or_cancel_intent(
     *,
     protocol: str,
     chain: str,
-) -> BaseIntent | None:
+) -> AnyIntent | None:
     """Map a PERP position OR a pending-order residual to its risk-reducing intent.
 
     A pending (unfilled) order residual (VIB-5116 discovery) is NOT a position: it
@@ -141,7 +141,7 @@ def _close_intent_for_position(
     *,
     target_token: str,
     max_slippage: Decimal,
-) -> BaseIntent | None:
+) -> AnyIntent | None:
     """Map ONE known position to its live-resolving full-close intent.
 
     Returns ``None`` (caller logs + skips) when the position type is not
@@ -254,7 +254,7 @@ def full_close_intents(
     *,
     target_token: str = "USDC",
     max_slippage: Decimal = _DEFAULT_SWAP_SLIPPAGE,
-) -> list[BaseIntent]:
+) -> list[AnyIntent]:
     """Build live-resolving "close fully" intents for a set of KNOWN positions.
 
     Args:
@@ -278,7 +278,7 @@ def full_close_intents(
     # Risk-ordered close (PERP -> BORROW -> SUPPLY -> VAULT -> LP -> STAKE -> ...).
     ordered = sorted(pos_list, key=lambda p: p.position_type.priority)
 
-    intents: list[BaseIntent] = []
+    intents: list[AnyIntent] = []
     for position in ordered:
         try:
             intent = _close_intent_for_position(

@@ -1604,7 +1604,7 @@ def test_perps_scaffold_teardown_uses_direction() -> None:
 def test_perps_scaffold_callbacks_persist_direction() -> None:
     """on_intent_executed / persistent state must pin the open position's direction.
 
-    Guards against the footgun flagged by Gemini: if the user changes the
+    Guards against the footgun: if the user changes the
     config.json 'direction' while a position is open and restarts the strategy,
     the restored state must reflect the actually-opened side, not the newly
     configured one. Otherwise PnL math and teardown close the wrong side.
@@ -2413,7 +2413,7 @@ def _assert_base_status_shape(status: dict, *, expected_chain: str = "arbitrum")
 def _assert_json_serializable(status: dict) -> None:
     """The full status dict must round-trip through json WITHOUT a custom encoder.
 
-    CodeRabbit audit fix: the prior version passed ``default=lambda o: None``,
+    The prior version passed ``default=lambda o: None``,
     which silently replaced any non-JSON-safe value (Decimal, datetime, Enum)
     with ``null`` and let the test pass. That defeated the test's purpose —
     the generated ``get_status()`` could emit raw Decimals and still "round
@@ -2452,8 +2452,8 @@ def test_get_status_lending_loop_exposes_state_and_health_fields() -> None:
     inst.collateral_token = "WETH"
     inst.borrow_token = "USDC"
     # Use real Decimals in the snapshot (not pre-stringified strings) so the
-    # generated get_status()'s ``_safe`` helper is actually exercised. Before
-    # CodeRabbit's audit the templates dropped snapshot values in raw, which
+    # generated get_status()'s ``_safe`` helper is actually exercised. Previously
+    # the templates dropped snapshot values in raw, which
     # would have crashed ``json.dumps(status)`` on this fixture. The strings
     # in the asserts below are what ``_safe`` should convert Decimals into.
     inst._last_position_snapshot = {
@@ -2890,3 +2890,650 @@ def _seed_minimum_status_attrs(inst, template: StrategyTemplate) -> None:
         inst._open_trades = []
         inst.action_types = []
     # BLANK needs nothing.
+
+
+# ---------------------------------------------------------------------------
+# Scaffold correctness: slipstream tick bounds, protocol rendering across
+# decorator/config/init, IntentStrategy annotations, force_action cleanliness,
+# and per-chain token_funding addresses.
+# ---------------------------------------------------------------------------
+
+
+def _exec_scaffold_class(code: str):
+    """Exec generated strategy code and return the emitted IntentStrategy subclass."""
+    from almanak.framework.strategies import IntentStrategy as _Base
+
+    ns: dict = {}
+    exec(compile(code, "<scaffold>", "exec"), ns)  # noqa: S102
+    return next(v for v in ns.values() if isinstance(v, type) and issubclass(v, _Base) and v is not _Base)
+
+
+class _LpBalance:
+    def __init__(self, balance, balance_usd):
+        self.balance = balance
+        self.balance_usd = balance_usd
+
+
+class _LpMarket:
+    """Balanced-inventory market: WETH=$<base_price>, USDC=$1, $3000 per side."""
+
+    def __init__(self, base_price: str = "3000"):
+        from decimal import Decimal
+
+        self._base_price = Decimal(base_price)
+
+    def price(self, token):
+        from decimal import Decimal
+
+        return self._base_price if token == "WETH" else Decimal("1")
+
+    def balance(self, token):
+        from decimal import Decimal
+
+        if token == "WETH":
+            return _LpBalance(Decimal("1"), Decimal("3000"))
+        return _LpBalance(Decimal("3000"), Decimal("3000"))
+
+
+def _make_slipstream_lp_strategy():
+    """Scaffold dynamic_lp and re-point it at aerodrome_slipstream via config only.
+
+    Mirrors the reported flow (VIB-5557): scaffold with the default
+    protocol, then flip ``protocol``/``pool`` in config — the emitted decide()
+    must keep compiling without hand-surgery.
+    """
+    from decimal import Decimal
+
+    code = generate_strategy_file(
+        name="Slipstream Probe",
+        template=StrategyTemplate.DYNAMIC_LP,
+        chain="base",
+        output_dir=Path("/tmp"),
+    )
+    cls = _exec_scaffold_class(code)
+    strat = cls.__new__(cls)
+    strat._chain = "base"
+    strat.pool = "WETH/USDC/200"
+    strat.protocol = "aerodrome_slipstream"
+    strat.range_width_pct = 5.0
+    strat.rebalance_threshold_pct = 80.0
+    strat.min_position_usd = Decimal("500")
+    strat.base_token = "WETH"
+    strat.quote_token = "USDC"
+    strat._position_id = None
+    strat._range_lower = None
+    strat._range_upper = None
+    return strat
+
+
+def test_dynamic_lp_slipstream_open_emits_spacing_aligned_integer_ticks() -> None:
+    """Config-only switch to aerodrome_slipstream must produce a TickBand LP_OPEN.
+
+    The slipstream compiler rejects price-denominated bounds ("tick bounds must
+    be integers", VIB-5557); the emitted band must be integer, aligned to the
+    pool's tick spacing, and straddle the tick of the current oracle price
+    (the compiler's ALM-2891 straddle gate).
+    """
+    from decimal import Decimal
+
+    from almanak.framework.intents import TickBand, price_to_tick
+
+    strat = _make_slipstream_lp_strategy()
+    intent = strat.decide(_LpMarket())
+
+    assert intent.intent_type.value == "LP_OPEN", f"expected LP_OPEN, got {intent}"
+    assert isinstance(intent.range_spec, TickBand), f"expected TickBand, got {intent.range_spec!r}"
+    # Integer, spacing-aligned, ordered — the compiler's exact bound gates.
+    assert int(intent.range_lower) == intent.range_lower
+    assert int(intent.range_upper) == intent.range_upper
+    assert int(intent.range_lower) % 200 == 0
+    assert int(intent.range_upper) % 200 == 0
+    assert intent.range_lower < intent.range_upper
+    # Straddle: WETH(18)/USDC(6) on base -> current tick from the same public helper.
+    current_tick = price_to_tick(Decimal("3000"), decimals0=18, decimals1=6)
+    assert int(intent.range_lower) <= current_tick < int(intent.range_upper), (
+        f"band [{intent.range_lower}, {intent.range_upper}] does not straddle tick {current_tick}"
+    )
+
+
+def test_dynamic_lp_slipstream_band_passes_compiler_bound_gate() -> None:
+    """The emitted intent must clear the actual slipstream compiler tick gate.
+
+    ``_validate_slipstream_tick_bounds`` is the exact check that guards
+    the tick bounds; a tuple result means the bounds were accepted.
+    """
+    from almanak.connectors.aerodrome.compiler import _validate_slipstream_tick_bounds
+
+    strat = _make_slipstream_lp_strategy()
+    intent = strat.decide(_LpMarket())
+
+    result = _validate_slipstream_tick_bounds(intent, 200)
+    assert isinstance(result, tuple), f"compiler rejected the scaffold's tick bounds: {result.error}"
+
+
+def test_dynamic_lp_slipstream_in_range_holds_and_out_of_range_closes() -> None:
+    """With a tick band stored, the in-range check must compare in tick space.
+
+    Comparing a USD price against raw ticks (the pre-fix behaviour) makes every
+    iteration look massively out of range and close the position immediately.
+    """
+    strat = _make_slipstream_lp_strategy()
+    opened = strat.decide(_LpMarket())
+    strat._position_id = "42"
+    strat._range_lower = opened.range_lower
+    strat._range_upper = opened.range_upper
+
+    held = strat.decide(_LpMarket())
+    assert held.intent_type.value == "HOLD", f"in-range position must HOLD, got {held}"
+
+    moved = strat.decide(_LpMarket(base_price="4000"))
+    assert moved.intent_type.value == "LP_CLOSE", f"out-of-range position must LP_CLOSE, got {moved}"
+
+
+def test_dynamic_lp_default_protocol_still_emits_price_band() -> None:
+    """Regression guard: the uniswap_v3 default path keeps price-denominated bounds."""
+    from decimal import Decimal
+
+    from almanak.framework.intents import PriceBand
+
+    code = generate_strategy_file(
+        name="Uni LP Probe",
+        template=StrategyTemplate.DYNAMIC_LP,
+        chain="base",
+        output_dir=Path("/tmp"),
+    )
+    cls = _exec_scaffold_class(code)
+    strat = cls.__new__(cls)
+    strat._chain = "base"
+    strat.pool = "WETH/USDC/3000"
+    strat.protocol = "uniswap_v3"
+    strat.range_width_pct = 5.0
+    strat.rebalance_threshold_pct = 80.0
+    strat.min_position_usd = Decimal("500")
+    strat.base_token = "WETH"
+    strat.quote_token = "USDC"
+    strat._position_id = None
+    strat._range_lower = None
+    strat._range_upper = None
+
+    intent = strat.decide(_LpMarket())
+    assert intent.intent_type.value == "LP_OPEN"
+    assert isinstance(intent.range_spec, PriceBand)
+    assert intent.range_lower == Decimal("3000") * Decimal("0.95")
+    assert intent.range_upper == Decimal("3000") * Decimal("1.05")
+
+
+# ---------------------------------------------------------------------------
+# Protocol rendering: the generator renders the chosen protocol (decorator + config + init)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("template", "protocol", "config_key", "chain"),
+    [
+        (StrategyTemplate.DYNAMIC_LP, "aerodrome_slipstream", "protocol", "base"),
+        (StrategyTemplate.MULTI_STEP, "pancakeswap_v3", "protocol", "bsc"),
+        (StrategyTemplate.LENDING_LOOP, "morpho_blue", "lending_protocol", "base"),
+        (StrategyTemplate.PERPS, "hyperliquid", "protocol", "arbitrum"),
+        (StrategyTemplate.BASIS_TRADE, "hyperliquid", "protocol", "arbitrum"),
+        (StrategyTemplate.VAULT_YIELD, "metamorpho", "protocol", "ethereum"),
+        (StrategyTemplate.STAKING, "lido", "staking_protocol", "ethereum"),
+    ],
+    ids=lambda v: v.value if isinstance(v, StrategyTemplate) else str(v),
+)
+def test_scaffold_renders_chosen_protocol_everywhere(
+    template: StrategyTemplate, protocol: str, config_key: str, chain: str
+) -> None:
+    """--protocol must reach the decorator metadata, init default, and config.json."""
+    code = generate_strategy_file(
+        name=f"Choice {template.value} Probe",
+        template=template,
+        chain=chain,
+        output_dir=Path("/tmp"),
+        protocol=protocol,
+    )
+    cls = _exec_scaffold_class(code)
+    assert cls.STRATEGY_METADATA.supported_protocols == [protocol]
+    assert f'get_config("{config_key}", "{protocol}")' in code
+
+    cfg = json.loads(generate_config_json(f"Choice {template.value} Probe", template, chain, protocol))
+    assert cfg[config_key] == protocol
+
+
+def test_scaffold_perps_has_no_hardcoded_protocol_literals() -> None:
+    """The perps scaffold must consume config protocol, not hardcode gmx_v2."""
+    code = generate_strategy_file(
+        name="Perp Literal Probe",
+        template=StrategyTemplate.PERPS,
+        chain="arbitrum",
+        output_dir=Path("/tmp"),
+        protocol="hyperliquid",
+    )
+    assert "gmx_v2" not in code, "stale hardcoded gmx_v2 literal in perps scaffold"
+    assert "protocol=self.protocol" in code
+
+
+@pytest.mark.parametrize("template", ALL_TEMPLATES, ids=lambda t: t.value)
+def test_scaffold_decorator_defaults_to_template_protocol(template: StrategyTemplate) -> None:
+    """Without --protocol the decorator keeps the template's canonical protocol."""
+    from almanak.framework.cli.new_strategy import TEMPLATE_CONFIGS
+
+    chain = "ethereum" if template == StrategyTemplate.STAKING else "arbitrum"
+    code = generate_strategy_file(
+        name=f"Default {template.value} Probe",
+        template=template,
+        chain=chain,
+        output_dir=Path("/tmp"),
+    )
+    expected = TEMPLATE_CONFIGS[template].default_protocol
+    assert f'supported_protocols=["{expected}"]' in code
+
+
+def test_slipstream_choice_defaults_pool_to_tick_spacing_form() -> None:
+    """Choosing aerodrome_slipstream flips the LP pool default to tick-spacing form."""
+    cfg = json.loads(
+        generate_config_json("Aero Pool Probe", StrategyTemplate.DYNAMIC_LP, "base", "aerodrome_slipstream")
+    )
+    assert cfg["pool"] == "WETH/USDC/200"
+    assert cfg["protocol"] == "aerodrome_slipstream"
+
+    # And the default stays on the fee-tier form.
+    cfg_default = json.loads(generate_config_json("Uni Pool Probe", StrategyTemplate.DYNAMIC_LP, "base"))
+    assert cfg_default["pool"] == "WETH/USDC/3000"
+    assert cfg_default["protocol"] == "uniswap_v3"
+
+
+def test_new_strategy_cli_accepts_protocol_option(tmp_path: Path) -> None:
+    """End-to-end CLI: --protocol lands in strategy.py and config.json."""
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    target = tmp_path / "aero_cli_probe"
+    runner = CliRunner()
+    result = runner.invoke(
+        new_strategy,
+        [
+            "--template",
+            "dynamic_lp",
+            "--name",
+            "aero_cli_probe",
+            "--chain",
+            "base",
+            "--protocol",
+            "aerodrome_slipstream",
+            "--output-dir",
+            str(target),
+        ],
+        env={"CI": ""},
+    )
+    assert result.exit_code == 0, result.output
+
+    code = (target / "strategy.py").read_text()
+    assert 'supported_protocols=["aerodrome_slipstream"]' in code
+    cfg = json.loads((target / "config.json").read_text())
+    assert cfg["protocol"] == "aerodrome_slipstream"
+    assert cfg["pool"] == "WETH/USDC/200"
+
+
+def test_new_strategy_cli_canonicalizes_hyphenated_protocol_alias(tmp_path: Path) -> None:
+    """--protocol aerodrome-slipstream (hyphenated alias) must emit the CANONICAL slug.
+
+    The slug regex permits hyphens, but the generated tick-logic compares
+    ``self.protocol`` against canonical underscore literals — an emitted
+    hyphenated value would silently route decide() down the price-band path
+    and fail Slipstream tick validation on the first LP_OPEN (the exact bug
+    this scaffold batch fixes). CodeRabbit PR #3216 review.
+    """
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    target = tmp_path / "aero_alias_probe"
+    runner = CliRunner()
+    result = runner.invoke(
+        new_strategy,
+        [
+            "--template",
+            "dynamic_lp",
+            "--name",
+            "aero_alias_probe",
+            "--chain",
+            "base",
+            "--protocol",
+            "aerodrome-slipstream",
+            "--output-dir",
+            str(target),
+        ],
+        env={"CI": ""},
+    )
+    assert result.exit_code == 0, result.output
+
+    code = (target / "strategy.py").read_text()
+    assert 'supported_protocols=["aerodrome_slipstream"]' in code
+    assert "aerodrome-slipstream" not in code
+    cfg = json.loads((target / "config.json").read_text())
+    assert cfg["protocol"] == "aerodrome_slipstream"
+    # The tick-spacing pool default follows the canonical slug too.
+    assert cfg["pool"] == "WETH/USDC/200"
+
+
+def test_new_strategy_cli_rejects_malformed_protocol(tmp_path: Path) -> None:
+    """A protocol that is not a plausible slug aborts before writing anything."""
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    target = tmp_path / "bad_protocol_probe"
+    runner = CliRunner()
+    result = runner.invoke(
+        new_strategy,
+        [
+            "--template",
+            "dynamic_lp",
+            "--name",
+            "bad_protocol_probe",
+            "--chain",
+            "base",
+            "--protocol",
+            "not a slug!",
+            "--output-dir",
+            str(target),
+        ],
+        env={"CI": ""},
+    )
+    assert result.exit_code != 0
+    assert not (target / "strategy.py").exists()
+
+
+# ---------------------------------------------------------------------------
+# Annotations: rendered annotations match the IntentStrategy base contract
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("template", ALL_TEMPLATES, ids=lambda t: t.value)
+def test_scaffold_decide_annotation_matches_base_contract(template: StrategyTemplate) -> None:
+    """decide() must annotate DecideResult (the base contract), not Optional[Intent].
+
+    ``Intent`` is the factory class — never an instance type — so
+    ``Optional[Intent]`` was a type-level lie that made every fresh scaffold an
+    incompatible override under Pyright.
+    """
+    chain = "ethereum" if template == StrategyTemplate.STAKING else "arbitrum"
+    code = generate_strategy_file(
+        name=f"Annot {template.value} Probe",
+        template=template,
+        chain=chain,
+        output_dir=Path("/tmp"),
+    )
+    assert "def decide(self, market: MarketSnapshot) -> DecideResult:" in code
+    assert "Optional[Intent]" not in code
+    assert "DecideResult," in code  # imported from almanak.framework.strategies
+
+
+@pytest.mark.parametrize("template", ALL_TEMPLATES, ids=lambda t: t.value)
+def test_scaffold_decide_carries_no_force_action_note(template: StrategyTemplate) -> None:
+    """Scaffolds stay clean of
+    force_action commentary — Almanak Code owns that guidance when it
+    generates strategies. Negative guard so the note cannot creep back."""
+    chain = "ethereum" if template == StrategyTemplate.STAKING else "arbitrum"
+    code = generate_strategy_file(
+        name=f"Force {template.value} Probe",
+        template=template,
+        chain=chain,
+        output_dir=Path("/tmp"),
+    )
+    assert "force_action" not in code
+    assert "strat test --actions" not in code
+
+
+# ---------------------------------------------------------------------------
+# Token funding: token_funding carries real per-chain addresses from the token registry
+# ---------------------------------------------------------------------------
+
+_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+
+@pytest.mark.parametrize("chain", ["arbitrum", "base", "ethereum"])
+def test_config_json_token_funding_resolves_real_addresses(chain: str) -> None:
+    """token_funding addresses must come from the token registry, never 0x000…0.
+
+    Asserted against the registry itself (not literals) so the test cannot
+    drift from the table it is meant to pin.
+    """
+    from almanak.framework.data.tokens import get_token_resolver
+
+    resolver = get_token_resolver()
+    cfg = json.loads(generate_config_json("Funding Probe", StrategyTemplate.PERPS, chain))
+    token_funding = cfg["token_funding"]
+    assert token_funding, "expected token_funding entries for a registry-known chain"
+
+    symbols = {entry["symbol"] for entry in token_funding}
+    assert symbols == {"WETH", "USDC"}
+    for entry in token_funding:
+        assert entry["address"] != _ZERO_ADDRESS
+        expected = resolver.resolve(entry["symbol"], chain, skip_gateway=True).address
+        assert entry["address"] == expected, (
+            f"{entry['symbol']} on {chain}: scaffold emitted {entry['address']}, registry says {expected}"
+        )
+
+
+@pytest.mark.parametrize(
+    "template",
+    [t for t in ALL_TEMPLATES if t != StrategyTemplate.COPY_TRADER],
+    ids=lambda t: t.value,
+)
+def test_config_json_never_emits_zero_address_token_funding(template: StrategyTemplate) -> None:
+    """No template may ship 0x000…0 token_funding placeholders."""
+    chain = "ethereum" if template == StrategyTemplate.STAKING else "arbitrum"
+    cfg = json.loads(generate_config_json(f"Zero {template.value} Probe", template, chain))
+    for entry in cfg.get("token_funding", []):
+        assert entry["address"] != _ZERO_ADDRESS, f"{template.value} emitted a placeholder token_funding address"
+
+
+@pytest.mark.parametrize("template", ALL_TEMPLATES, ids=lambda t: t.value)
+def test_teardown_annotations_use_anyintent_not_factory(template: StrategyTemplate) -> None:
+    """The Intent FACTORY class is never rendered as a type.
+
+    ``Intent`` (vocabulary factory) has no instances — ``Intent.swap()``
+    returns ``SwapIntent`` etc., so ``list[Intent]`` / ``Optional[Intent]``
+    fail Pyright in every generated strategy. Teardown must render the
+    ``AnyIntent`` vocabulary union and import it at runtime (generated files
+    evaluate annotations at class-creation time — no ``__future__`` import).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        code = generate_strategy_file(
+            name="Annotations Guard",
+            template=template,
+            chain="arbitrum",
+            output_dir=Path(tmpdir),
+        )
+        assert "list[Intent]" not in code
+        assert "Optional[Intent]" not in code
+        assert "-> list[AnyIntent]" in code
+        assert "from almanak.framework.intents import AnyIntent, Intent" in code
+
+
+def test_anyintent_is_publicly_importable() -> None:
+    """Scaffolds import AnyIntent at runtime — the package export is load-bearing."""
+    from almanak.framework.intents import AnyIntent  # noqa: F401
+
+
+# ---------------------------------------------------------------------------
+# PR #3216 review: defensive guards + honest scaffold-time rejection
+# ---------------------------------------------------------------------------
+
+
+class _BadQuoteMarket:
+    """Market whose quote-token price is non-positive / missing (base stays valid)."""
+
+    def __init__(self, quote_price):
+        self._quote_price = quote_price
+
+    def price(self, token):
+        from decimal import Decimal
+
+        return Decimal("3000") if token == "WETH" else self._quote_price
+
+
+def test_slipstream_pool_tick_rejects_nonpositive_base_price() -> None:
+    """_pool_tick_for_price must fail loud when the base USD price is non-positive.
+
+    A zero/negative ``price_usd`` would either divide to zero or feed
+    ``price_to_tick`` a non-positive ratio (log domain error -> garbage tick).
+    The generated guard raises ValueError instead (PR #3216 review).
+    """
+    from decimal import Decimal
+
+    strat = _make_slipstream_lp_strategy()
+    with pytest.raises(ValueError, match="Non-positive price"):
+        strat._pool_tick_for_price(_LpMarket(), Decimal("0"))
+
+
+@pytest.mark.parametrize("quote_price", ["0", "-1"], ids=["zero", "negative"])
+def test_slipstream_pool_tick_rejects_nonpositive_quote_price(quote_price: str) -> None:
+    """A non-positive quote price (the divisor for a base=token0 pool) must raise
+    ValueError, not ZeroDivisionError (PR #3216 review)."""
+    from decimal import Decimal
+
+    strat = _make_slipstream_lp_strategy()
+    with pytest.raises(ValueError, match="Non-positive price"):
+        strat._pool_tick_for_price(_BadQuoteMarket(Decimal(quote_price)), Decimal("3000"))
+
+
+def test_slipstream_pool_tick_rejects_missing_quote_price() -> None:
+    """A ``None`` quote price (oracle returned nothing) must raise ValueError, not
+    TypeError from the division (PR #3216 review)."""
+    from decimal import Decimal
+
+    strat = _make_slipstream_lp_strategy()
+    with pytest.raises(ValueError, match="Non-positive price"):
+        strat._pool_tick_for_price(_BadQuoteMarket(None), Decimal("3000"))
+
+
+def test_default_token_funding_degrades_on_unexpected_resolver_error(monkeypatch) -> None:
+    """A resolver failure that is NOT TokenResolutionError (e.g. ValueError from an
+    unsupported chain, or a helper bug) must omit the symbol, never crash the
+    scaffold (PR #3216 review)."""
+    import almanak.framework.data.tokens as tokens_mod
+    from almanak.framework.cli.new_strategy import _default_token_funding
+
+    class _BoomResolver:
+        def resolve(self, *args, **kwargs):
+            raise ValueError("unsupported chain")
+
+    monkeypatch.setattr(tokens_mod, "get_token_resolver", lambda: _BoomResolver())
+    assert _default_token_funding("arbitrum") == []
+
+
+@pytest.mark.parametrize("resolved", [None, "addressless"], ids=["none", "addressless"])
+def test_default_token_funding_omits_unmeasured_resolution(monkeypatch, resolved) -> None:
+    """Empty ≠ Zero: a resolver returning nothing, or a record without an address,
+    must omit the symbol -- never fabricate a placeholder (PR #3216 review)."""
+    import almanak.framework.data.tokens as tokens_mod
+    from almanak.framework.cli.new_strategy import _default_token_funding
+
+    class _Addressless:
+        address = None
+
+    payload = None if resolved is None else _Addressless()
+
+    class _Resolver:
+        def resolve(self, *args, **kwargs):
+            return payload
+
+    monkeypatch.setattr(tokens_mod, "get_token_resolver", lambda: _Resolver())
+    assert _default_token_funding("arbitrum") == []
+
+
+def test_new_strategy_cli_rejects_multi_step_slipstream(tmp_path: Path) -> None:
+    """multi_step + a tick-spacing protocol must abort before writing files.
+
+    multi_step opens LPs with price-denominated ranges; a Slipstream-style pool
+    needs spacing-aligned integer ticks, so the first LP_OPEN would fail the
+    Aerodrome compiler. The scaffold rejects it and points at dynamic_lp
+    (PR #3216 review)."""
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    target = tmp_path / "ms_slip_probe"
+    runner = CliRunner()
+    result = runner.invoke(
+        new_strategy,
+        [
+            "--template",
+            "multi_step",
+            "--name",
+            "ms_slip_probe",
+            "--chain",
+            "base",
+            "--protocol",
+            "aerodrome_slipstream",
+            "--output-dir",
+            str(target),
+        ],
+        env={"CI": ""},
+    )
+    assert result.exit_code != 0
+    assert "dynamic_lp" in result.output
+    assert not (target / "strategy.py").exists()
+
+
+def test_new_strategy_cli_rejects_multi_step_slipstream_alias(tmp_path: Path) -> None:
+    """The rejection normalizes aliases: ``aerodrome-slipstream`` (hyphen) is the
+    same tick-spacing protocol and must also abort (PR #3216 review)."""
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    target = tmp_path / "ms_slip_alias_probe"
+    runner = CliRunner()
+    result = runner.invoke(
+        new_strategy,
+        [
+            "--template",
+            "multi_step",
+            "--name",
+            "ms_slip_alias_probe",
+            "--chain",
+            "base",
+            "--protocol",
+            "aerodrome-slipstream",
+            "--output-dir",
+            str(target),
+        ],
+        env={"CI": ""},
+    )
+    assert result.exit_code != 0
+    assert "dynamic_lp" in result.output
+    assert not (target / "strategy.py").exists()
+
+
+def test_new_strategy_cli_allows_multi_step_fee_tier_protocol(tmp_path: Path) -> None:
+    """The gate is narrow: multi_step with a fee-tier protocol (uniswap_v3) still
+    scaffolds -- only tick-spacing protocols are rejected (PR #3216 review)."""
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    target = tmp_path / "ms_uni_probe"
+    runner = CliRunner()
+    result = runner.invoke(
+        new_strategy,
+        [
+            "--template",
+            "multi_step",
+            "--name",
+            "ms_uni_probe",
+            "--chain",
+            "base",
+            "--protocol",
+            "uniswap_v3",
+            "--output-dir",
+            str(target),
+        ],
+        env={"CI": ""},
+    )
+    assert result.exit_code == 0, result.output
+    assert (target / "strategy.py").exists()

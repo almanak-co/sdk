@@ -143,7 +143,7 @@ class IntentStrategy(Protocol):
         """Get all open positions."""
         ...
 
-    def generate_teardown_intents(self, mode: TeardownMode, market: Any = None) -> list[Intent]:
+    def generate_teardown_intents(self, mode: TeardownMode, market: Any = None) -> list[Any]:
         """Generate intents to close all positions."""
         ...
 

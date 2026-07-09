@@ -60,7 +60,7 @@ from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.framework.intents import Intent
+from almanak.framework.intents import AnyIntent, Intent
 from almanak.framework.market import HealthUnavailableError, MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_token_amount_human, format_usd
@@ -465,7 +465,7 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[AnyIntent]:
         """Unwind the carry HF-safely on a teardown signal.
 
         (1) Close the swap leg: swap any held ``swap_to_token`` (USDT) back to the
@@ -497,7 +497,7 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
         effective_state = self._previous_stable if self._state in TRANSITIONAL_STATES else self._state
         slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
 
-        intents: list[Intent] = []
+        intents: list[AnyIntent] = []
 
         # (1) Close the swap leg — recover the held swap_to_token into the borrow
         #     token (``amount="all"`` so it sweeps whatever is actually on-chain, not

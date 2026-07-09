@@ -127,7 +127,7 @@ def validate_lending_loop_template(supply_protocol: str, borrow_protocol: str | 
         )
     elif normalized_borrow.lower() != normalized_supply.lower():
         # Case-insensitive equality so "AAVE_V3" and "aave_v3" don't trip the
-        # cross-protocol warning (CodeRabbit-flagged regression).
+        # cross-protocol warning.
         warnings.append(
             f"{LENDING_LOOP_CROSS_PROTOCOL}: lending_loop template loops supply "
             "and borrow on a single protocol, but the scaffold input asks for a "
@@ -136,6 +136,67 @@ def validate_lending_loop_template(supply_protocol: str, borrow_protocol: str | 
             "to express cross-protocol lending arbitrage."
         )
     return warnings
+
+
+def _normalize_and_validate_scaffold_protocol(template_enum: StrategyTemplate, protocol: str | None) -> str | None:
+    """Normalize the ``--protocol`` choice and reject incompatible combinations.
+
+    Returns the normalized (``strip().lower()``) protocol slug, or ``None`` when
+    the caller passed nothing. Raises ``click.Abort`` (after echoing to stderr)
+    for a malformed slug, or for a ``multi_step`` scaffold paired with a
+    tick-spacing protocol.
+
+    ``multi_step`` still opens LPs with price-denominated ``range_lower`` /
+    ``range_upper``; only ``dynamic_lp`` emits spacing-aligned integer ticks
+    today (VIB-5557 follow-up). A tick-spacing protocol (Aerodrome Slipstream)
+    would feed a price band into the Aerodrome compiler's
+    ``_validate_slipstream_tick_bounds`` and fail the first ``LP_OPEN`` at
+    compile time — so reject it at scaffold time and point at ``dynamic_lp``
+    rather than generating code that cannot compile.
+    """
+    if protocol is not None:
+        protocol = protocol.strip().lower() or None
+    if protocol is None:
+        return None
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_.\-]*", protocol):
+        click.echo(
+            f"Error: invalid --protocol {protocol!r}: expected a protocol slug like "
+            "aerodrome_slipstream, morpho_blue, or hyperliquid.",
+            err=True,
+        )
+        raise click.Abort()
+
+    from almanak.framework.agent_tools.schemas import _normalize_protocol_key
+
+    # Canonicalize the RETURNED slug, not just the gate check below: the value
+    # is emitted verbatim into the generated strategy (config.json + decorator
+    # + ``self.protocol``), and the generated tick-logic compares against
+    # canonical underscore literals (e.g. ``self.protocol ==
+    # "aerodrome_slipstream"``). Returning a hyphenated alias would pass the
+    # slug regex here yet silently route the scaffold's first LP_OPEN down the
+    # price-band path and fail Slipstream tick validation at compile time —
+    # the exact failure this scaffold batch exists to prevent.
+    protocol = _normalize_protocol_key(protocol)
+
+    if template_enum == StrategyTemplate.MULTI_STEP:
+        from almanak.connectors._strategy_protocol_family_registry import (
+            PROTOCOL_FAMILY_REGISTRY,
+            ProtocolFamily,
+        )
+
+        tick_spacing_protocols = PROTOCOL_FAMILY_REGISTRY.members(ProtocolFamily.TICK_SPACING_FEE_DISPLAY)
+        if _normalize_protocol_key(protocol) in tick_spacing_protocols:
+            click.echo(
+                f"Error: the multi_step template cannot scaffold a tick-spacing protocol "
+                f"({protocol}). multi_step opens LPs with price-denominated ranges, but "
+                f"Slipstream-style pools require spacing-aligned integer ticks -- the first "
+                f"LP_OPEN would fail to compile. Use --template dynamic_lp for {protocol}.",
+                err=True,
+            )
+            raise click.Abort()
+
+    return protocol
 
 
 @dataclass
@@ -162,12 +223,53 @@ _CHAIN_NATIVE_FUNDING: dict[str, dict[str, object]] = {
 
 _DEFAULT_ANVIL_FUNDING: dict[str, object] = {"ETH": 10, "WETH": 5, "USDC": 10000}
 
-# Default token_funding example — strategy authors should replace the placeholder
-# addresses with the correct on-chain addresses for their target chain.
-_DEFAULT_TOKEN_FUNDING: list[dict[str, str]] = [
-    {"symbol": "WETH", "address": "0x0000000000000000000000000000000000000000", "amount": "1", "amount_type": "token"},
-    {"symbol": "USDC", "address": "0x0000000000000000000000000000000000000000", "amount": "5000", "amount_type": "usd"},
-]
+# Default token_funding entries as (symbol, amount, amount_type). Addresses are
+# resolved per-chain at scaffold time from the static token registry — the
+# generator knows the chain, so it must never emit zero-address placeholders
+# that users have to hand-replace.
+_DEFAULT_TOKEN_FUNDING_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("WETH", "1", "token"),
+    ("USDC", "5000", "usd"),
+)
+
+
+def _default_token_funding(chain: str) -> list[dict[str, str]]:
+    """Build the default ``token_funding`` list with real per-chain addresses.
+
+    Resolves each default symbol through the token registry's static layers
+    (``get_token_resolver`` with ``skip_gateway=True`` — no gateway runs at
+    scaffold time). Symbols the registry does not know on *chain* are omitted
+    entirely: an unmeasured address must never be fabricated as ``0x000…0``
+    (Empty ≠ Zero).
+    """
+    from almanak.framework.data.tokens import get_token_resolver
+
+    resolver = get_token_resolver()
+    entries: list[dict[str, str]] = []
+    for symbol, amount, amount_type in _DEFAULT_TOKEN_FUNDING_SPECS:
+        # Best-effort cosmetic default: any resolver failure (not just the
+        # documented TokenResolutionError — an unsupported chain surfaces as
+        # ValueError/KeyError from the normalizer, and helper bugs can raise
+        # anything) must degrade to "omit this symbol", never abort scaffolding.
+        try:
+            resolved = resolver.resolve(symbol, chain, log_errors=False, skip_gateway=True)
+        except Exception:  # noqa: BLE001 — scaffold-time best-effort default
+            continue
+        # Empty ≠ Zero: a resolver that returns nothing (or an addressless
+        # record) leaves the symbol unmeasured — never fabricate a 0x000…0
+        # placeholder the user would have to hand-replace.
+        if resolved is None or not getattr(resolved, "address", None):
+            continue
+        entries.append(
+            {
+                "symbol": symbol,
+                "address": resolved.address,
+                "amount": amount,
+                "amount_type": amount_type,
+            }
+        )
+    return entries
+
 
 # Template configurations with sensible defaults
 TEMPLATE_CONFIGS: dict[StrategyTemplate, TemplateConfig] = {
@@ -544,9 +646,16 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             # If we have an open position, check if rebalance needed
             if self._position_id is not None:
                 rebalance_pct = Decimal(str(self.rebalance_threshold_pct)) / Decimal("100")
-                if self._range_lower and self._range_upper:
+                if self._range_lower is not None and self._range_upper is not None:
+                    # Tick-ranged protocols (Aerodrome Slipstream) store the band
+                    # in raw ticks -- measure the current position in tick space
+                    # so the in-range math compares like units.
+                    if self._uses_tick_ranges():
+                        current = Decimal(self._pool_tick_for_price(market, base_price))
+                    else:
+                        current = base_price
                     range_size = self._range_upper - self._range_lower
-                    dist_from_lower = base_price - self._range_lower
+                    dist_from_lower = current - self._range_lower
                     position_in_range = dist_from_lower / range_size if range_size > 0 else Decimal("0.5")
                     lower_bound = (Decimal("1") - rebalance_pct) / Decimal("2")
                     upper_bound = (Decimal("1") + rebalance_pct) / Decimal("2")
@@ -622,10 +731,33 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             # open (gas + swap fee + slippage), so add hysteresis before running
             # this on a choppy pair with real funds.
             logger.info(f"Opening LP: {lower_price:.2f} - {upper_price:.2f}")
+            amount_base = base_balance.balance * Decimal("0.95")
+            amount_quote = quote_balance.balance * Decimal("0.95")
+            if self._uses_tick_ranges():
+                # Slipstream's compiler consumes RAW INTEGER TICKS aligned to
+                # the pool's tick spacing (pool format
+                # "TOKEN0/TOKEN1/<tick_spacing>"), not price bounds (VIB-5557).
+                # It also does NOT reorder amounts: amount0 always funds the
+                # pool string's first token.
+                from almanak.framework.intents import TickBand
+
+                tick_lower, tick_upper = self._tick_band_for_prices(market, lower_price, upper_price)
+                logger.info(f"Tick band for {self.protocol}: [{tick_lower}, {tick_upper}]")
+                if self.pool.split("/")[0].upper() == self.quote_token.upper():
+                    amount0, amount1 = amount_quote, amount_base
+                else:
+                    amount0, amount1 = amount_base, amount_quote
+                return Intent.lp_open(
+                    pool=self.pool,
+                    amount0=amount0,
+                    amount1=amount1,
+                    range_spec=TickBand(lower=tick_lower, upper=tick_upper),
+                    protocol=self.protocol,
+                )
             return Intent.lp_open(
                 pool=self.pool,
-                amount0=base_balance.balance * Decimal("0.95"),
-                amount1=quote_balance.balance * Decimal("0.95"),
+                amount0=amount_base,
+                amount1=amount_quote,
                 range_lower=lower_price,
                 range_upper=upper_price,
                 protocol=self.protocol,
@@ -897,7 +1029,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             if self._trade_state == BasisTradeState.IDLE:
                 # Check funding rate before entering -- only trade when funding is attractive
                 try:
-                    funding = market.funding_rate("gmx_v2", self.perp_market)
+                    funding = market.funding_rate(self.protocol, self.perp_market)
                     hourly_rate = funding.rate_hourly
                     logger.info(f"Funding rate for {self.perp_market}: {hourly_rate:.6f}/hr")
                 except Exception as e:
@@ -940,13 +1072,13 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     size_usd=self.spot_size_usd * self.hedge_ratio,
                     is_long=False,
                     leverage=Decimal("10"),
-                    protocol="gmx_v2",
+                    protocol=self.protocol,
                 )
 
             elif self._trade_state == BasisTradeState.HEDGED:
                 # Monitor funding rate -- exit if it drops below threshold
                 try:
-                    funding = market.funding_rate("gmx_v2", self.perp_market)
+                    funding = market.funding_rate(self.protocol, self.perp_market)
                     hourly_rate = funding.rate_hourly
                 except Exception as e:
                     logger.warning(f"Cannot fetch funding rate: {e}")
@@ -965,7 +1097,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                         is_long=False,
                         size_usd=self.spot_size_usd * self.hedge_ratio,
                         max_slippage=Decimal("0.005"),
-                        protocol="gmx_v2",
+                        protocol=self.protocol,
                     )
 
                 return Intent.hold(
@@ -1041,7 +1173,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 deposit_amount = min(self.deposit_amount, max_deposit)
                 logger.info(f"DEPOSIT: {deposit_amount} {self.deposit_token} into vault")
                 return Intent.vault_deposit(
-                    protocol="metamorpho",
+                    protocol=self.protocol,
                     vault_address=self.vault_address,
                     amount=deposit_amount,
                     chain=self.chain,
@@ -1080,7 +1212,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     size_usd=self.position_size_usd,
                     is_long=self._is_long,
                     leverage=self.leverage,
-                    protocol="gmx_v2",
+                    protocol=self.protocol,
                 )
 
             elif self._position_state == PerpsState.OPEN:
@@ -1096,7 +1228,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                             collateral_token=self.collateral_token,
                             is_long=self._is_long,
                             size_usd=self.position_size_usd,
-                            protocol="gmx_v2",
+                            protocol=self.protocol,
                         )
                     elif pnl_pct <= -self.stop_loss_pct:
                         logger.info(f"Stop loss hit ({self.direction}): {pnl_pct:.2%}")
@@ -1105,7 +1237,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                             collateral_token=self.collateral_token,
                             is_long=self._is_long,
                             size_usd=self.position_size_usd,
-                            protocol="gmx_v2",
+                            protocol=self.protocol,
                         )
                 msg = f"Position open, PnL: {pnl_pct:.2%}" if self._entry_price else "Position open"
                 return Intent.hold(reason=msg)
@@ -1278,9 +1410,16 @@ def _get_template_teardown(
     template: StrategyTemplate,
     config: TemplateConfig,
     strategy_name: str,
+    protocol: str | None = None,
 ) -> str:
-    """Generate template-specific get_open_positions() and generate_teardown_intents() implementations."""
+    """Generate template-specific get_open_positions() and generate_teardown_intents() implementations.
+
+    ``protocol`` is the scaffold-time protocol choice (defaults to the
+    template's canonical protocol); it is rendered into position metadata for
+    templates without a runtime ``self.protocol``-style attribute.
+    """
     teardown_comment = _get_teardown_comment(template)
+    protocol = protocol or config.default_protocol
 
     if template == StrategyTemplate.BLANK:
         return f'''    # -------------------------------------------------------------------------
@@ -1307,7 +1446,7 @@ def _get_template_teardown(
             positions=[],
         )
 
-    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode=None, market=None) -> list[AnyIntent]:
         """Generate intents to close all positions.
 
         Teardown goal: {teardown_comment}
@@ -1361,7 +1500,7 @@ def _get_template_teardown(
                     position_type=PositionType.TOKEN,
                     position_id="{strategy_name}_base_token",
                     chain=self.chain,
-                    protocol="{config.default_protocol}",
+                    protocol="{protocol}",
                     value_usd=Decimal("0"),  # Will be enriched by framework
                     details={{"asset": self.base_token, "quote": self.quote_token}},
                 )
@@ -1373,7 +1512,7 @@ def _get_template_teardown(
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode=None, market=None) -> list[AnyIntent]:
         """Generate intents to close all positions.
 
         Teardown goal: {teardown_comment}
@@ -1393,7 +1532,7 @@ def _get_template_teardown(
                 f"using cached holding flag: {{e}}"
             )
 
-        intents: list[Intent] = []
+        intents: list[AnyIntent] = []
 
         if self._holding_base:
             max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
@@ -1443,8 +1582,8 @@ def _get_template_teardown(
                     value_usd=Decimal("0"),  # Will be enriched by framework
                     details={{
                         "pool": self.pool,
-                        "range_lower": str(self._range_lower) if self._range_lower else None,
-                        "range_upper": str(self._range_upper) if self._range_upper else None,
+                        "range_lower": str(self._range_lower) if self._range_lower is not None else None,
+                        "range_upper": str(self._range_upper) if self._range_upper is not None else None,
                     }},
                 )
             )
@@ -1455,14 +1594,14 @@ def _get_template_teardown(
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode=None, market=None) -> list[AnyIntent]:
         """Generate intents to close all positions.
 
         Teardown goal: {teardown_comment}
         """
         from almanak.framework.teardown import TeardownMode
 
-        intents: list[Intent] = []
+        intents: list[AnyIntent] = []
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
 
         if self._position_id is not None:
@@ -1561,7 +1700,7 @@ def _get_template_teardown(
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode=None, market=None) -> list[AnyIntent]:
         """Health-factor-aware unwind: {teardown_comment}
 
         Delegates to the framework's first-class lending unwind primitive, which
@@ -1615,7 +1754,7 @@ def _get_template_teardown(
                     position_type=PositionType.PERP,
                     position_id="{strategy_name}_short_perp",
                     chain=self.chain,
-                    protocol="gmx_v2",
+                    protocol=self.protocol,
                     value_usd=self.spot_size_usd * self.hedge_ratio,
                     details={{
                         "market": self.perp_market,
@@ -1629,7 +1768,7 @@ def _get_template_teardown(
                     position_type=PositionType.TOKEN,
                     position_id="{strategy_name}_spot",
                     chain=self.chain,
-                    protocol="{config.default_protocol}",
+                    protocol=self.protocol,
                     value_usd=self.spot_size_usd,
                     details={{"asset": self.base_token}},
                 )
@@ -1641,7 +1780,7 @@ def _get_template_teardown(
                     position_type=PositionType.TOKEN,
                     position_id="{strategy_name}_spot",
                     chain=self.chain,
-                    protocol="{config.default_protocol}",
+                    protocol=self.protocol,
                     value_usd=self.spot_size_usd,
                     details={{"asset": self.base_token}},
                 )
@@ -1653,7 +1792,7 @@ def _get_template_teardown(
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode=None, market=None) -> list[AnyIntent]:
         """Generate intents to close all positions.
 
         Teardown goal: {teardown_comment}
@@ -1662,7 +1801,7 @@ def _get_template_teardown(
         """
         from almanak.framework.teardown import TeardownMode
 
-        intents: list[Intent] = []
+        intents: list[AnyIntent] = []
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
 
         # 1. Close short perp (if hedged)
@@ -1674,7 +1813,7 @@ def _get_template_teardown(
                     is_long=False,
                     size_usd=self.spot_size_usd * self.hedge_ratio,
                     max_slippage=max_slippage,
-                    protocol="gmx_v2",
+                    protocol=self.protocol,
                 )
             )
 
@@ -1726,7 +1865,7 @@ def _get_template_teardown(
                     position_type=PositionType.SUPPLY,
                     position_id="{strategy_name}_vault",
                     chain=self.chain,
-                    protocol="metamorpho",
+                    protocol=self.protocol,
                     value_usd=Decimal("0"),  # Will be enriched by framework
                     details={{
                         "vault_address": self.vault_address,
@@ -1741,17 +1880,17 @@ def _get_template_teardown(
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode=None, market=None) -> list[AnyIntent]:
         """Generate intents to close all positions.
 
         Teardown goal: {teardown_comment}
         """
-        intents: list[Intent] = []
+        intents: list[AnyIntent] = []
 
         if self._state == VaultYieldState.DEPOSITED:
             intents.append(
                 Intent.vault_redeem(
-                    protocol="metamorpho",
+                    protocol=self.protocol,
                     vault_address=self.vault_address,
                     shares="all",
                     chain=self.chain,
@@ -1812,7 +1951,7 @@ def _get_template_teardown(
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode=None, market=None) -> list[AnyIntent]:
         """Generate intents to close all positions.
 
         Teardown goal: {teardown_comment}
@@ -1821,7 +1960,7 @@ def _get_template_teardown(
         """
         from almanak.framework.teardown import TeardownMode
 
-        intents: list[Intent] = []
+        intents: list[AnyIntent] = []
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
 
         # Process in reverse order (last opened = first closed)
@@ -1916,7 +2055,7 @@ def _get_template_teardown(
                     position_type=PositionType.PERP,
                     position_id=f"{strategy_name}_perp_{{self.direction.lower()}}",
                     chain=self.chain,
-                    protocol="gmx_v2",
+                    protocol=self.protocol,
                     value_usd=self.position_size_usd,
                     details={{
                         "market": self.perp_market,
@@ -1934,14 +2073,14 @@ def _get_template_teardown(
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode=None, market=None) -> list[AnyIntent]:
         """Generate intents to close all positions.
 
         Teardown goal: {teardown_comment}
         """
         from almanak.framework.teardown import TeardownMode
 
-        intents: list[Intent] = []
+        intents: list[AnyIntent] = []
 
         if self._position_state == PerpsState.OPEN:
             max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
@@ -1952,7 +2091,7 @@ def _get_template_teardown(
                     is_long=self._is_long,
                     size_usd=self.position_size_usd,
                     max_slippage=max_slippage,
-                    protocol="gmx_v2",
+                    protocol=self.protocol,
                 )
             )
 
@@ -2005,14 +2144,14 @@ def _get_template_teardown(
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode=None, market=None) -> list[AnyIntent]:
         """Generate intents to close all positions.
 
         Teardown goal: {teardown_comment}
         """
         from almanak.framework.teardown import TeardownMode
 
-        intents: list[Intent] = []
+        intents: list[AnyIntent] = []
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
 
         if self._position_id is not None:
@@ -2083,14 +2222,14 @@ def _get_template_teardown(
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode=None, market=None) -> list[AnyIntent]:
         """Generate intents to close all positions.
 
         Teardown goal: {teardown_comment}
         """
         from almanak.framework.teardown import TeardownMode
 
-        intents: list[Intent] = []
+        intents: list[AnyIntent] = []
 
         if self._stake_state == StakingState.STAKED:
             intents.append(
@@ -2131,14 +2270,46 @@ def _get_template_teardown(
             positions=[],
         )
 
-    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode=None, market=None) -> list[AnyIntent]:
         return []
 
 '''
 
 
-def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig) -> str:
-    """Generate template-specific __init__ parameter extraction."""
+def _default_lp_pool(protocol: str) -> str:
+    """Default symbolic pool for the LP templates, per protocol.
+
+    Tick-spacing protocols (e.g. Aerodrome Slipstream) address pools as
+    ``TOKEN0/TOKEN1/<tick_spacing>`` (200 is the canonical WETH/USDC CL pool on
+    Base); fee-tier protocols use ``TOKEN0/TOKEN1/<fee_bps>``. Family membership
+    is resolved through ``PROTOCOL_FAMILY_REGISTRY`` rather than a hardcoded
+    protocol literal, so new tick-spacing connectors are picked up automatically.
+    """
+    from almanak.connectors._strategy_protocol_family_registry import (
+        PROTOCOL_FAMILY_REGISTRY,
+        ProtocolFamily,
+    )
+    from almanak.framework.agent_tools.schemas import _normalize_protocol_key
+
+    tick_spacing_protocols = PROTOCOL_FAMILY_REGISTRY.members(ProtocolFamily.TICK_SPACING_FEE_DISPLAY)
+    if _normalize_protocol_key(protocol) in tick_spacing_protocols:
+        return "WETH/USDC/200"
+    return "WETH/USDC/3000"
+
+
+def _get_template_init_params(
+    template: StrategyTemplate,
+    config: TemplateConfig,
+    protocol: str | None = None,
+) -> str:
+    """Generate template-specific __init__ parameter extraction.
+
+    ``protocol`` is the scaffold-time protocol choice; it becomes the
+    ``get_config(...)`` default for the template's protocol attribute so the
+    generated code, config.json, and decorator metadata all agree. Falls
+    back to the template's canonical protocol.
+    """
+    protocol = protocol or config.default_protocol
     if template == StrategyTemplate.TA_SWAP:
         return """
         # Indicator mode: "rsi", "bollinger", or "rsi_bb" (combined)
@@ -2184,10 +2355,12 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self._last_signal = 'neutral'"""
 
     elif template == StrategyTemplate.DYNAMIC_LP:
-        return """
-        # LP parameters
-        self.pool = get_config("pool", "WETH/USDC/3000")
-        self.protocol = get_config("protocol", "uniswap_v3")
+        default_pool = _default_lp_pool(protocol)
+        return f"""
+        # LP parameters. For aerodrome_slipstream the pool's 3rd component is
+        # the TICK SPACING (e.g. WETH/USDC/200), not a fee tier.
+        self.pool = get_config("pool", "{default_pool}")
+        self.protocol = get_config("protocol", "{protocol}")
         self.range_width_pct = float(get_config("range_width_pct", 5))
         self.rebalance_threshold_pct = float(get_config("rebalance_threshold_pct", 80))
         self.min_position_usd = Decimal(str(get_config("min_position_usd", "500")))
@@ -2202,7 +2375,10 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self._range_upper = None"""
 
     elif template == StrategyTemplate.LENDING_LOOP:
-        return """
+        # Plain string (not an f-string): the block embeds runtime f-strings
+        # whose braces must reach the scaffold verbatim. The scaffold-time
+        # protocol choice is spliced in via the placeholder below.
+        lending_init = """
         # Lending parameters
         self.supply_amount = Decimal(str(get_config("supply_amount", "1")))
         self.borrow_amount = Decimal(str(get_config("borrow_amount", "500")))
@@ -2228,7 +2404,7 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         # Protocol / market for health-factor dispatch.
         # For aave_v3 market_id is informational; for morpho_blue set the bytes32 market id;
         # for compound_v3 set the Comet market key (e.g. "usdc", "weth").
-        self.lending_protocol = get_config("lending_protocol", "aave_v3")
+        self.lending_protocol = get_config("lending_protocol", "__SCAFFOLD_PROTOCOL__")
         self.lending_market = get_config("lending_market", "")
 
         # Token configuration
@@ -2247,9 +2423,10 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         # the loop re-supplied the debt token and the wallet holds collateral.
         self._total_borrowed = Decimal("0")
         self._total_collateral = Decimal("0")"""
+        return lending_init.replace("__SCAFFOLD_PROTOCOL__", protocol)
 
     elif template == StrategyTemplate.BASIS_TRADE:
-        return """
+        return f"""
         # Basis trade parameters
         self.spot_size_usd = Decimal(str(get_config("spot_size_usd", "10000")))
         self.hedge_ratio = Decimal(str(get_config("hedge_ratio", "1.0")))
@@ -2257,6 +2434,9 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         # Funding rate thresholds (hourly rate, e.g. 0.0001 = 0.01%/hr)
         self.funding_entry_threshold = Decimal(str(get_config("funding_entry_threshold", "0.0001")))
         self.funding_exit_threshold = Decimal(str(get_config("funding_exit_threshold", "-0.00005")))
+
+        # Perp venue for the hedge leg (funding-rate reads + perp intents)
+        self.protocol = get_config("protocol", "{protocol}")
 
         # Token configuration
         self.base_token = get_config("base_token", "WETH")
@@ -2292,8 +2472,9 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self._open_trades = []"""
 
     elif template == StrategyTemplate.VAULT_YIELD:
-        return """
+        return f"""
         # Vault parameters
+        self.protocol = get_config("protocol", "{protocol}")
         self.vault_address = get_config("vault_address", "0x0000000000000000000000000000000000000000")
         if self.vault_address == "0x0000000000000000000000000000000000000000":
             logger.warning("vault_address is zero address -- strategy will HOLD every iteration. Update config.json.")
@@ -2306,8 +2487,11 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self._state = VaultYieldState.IDLE"""
 
     elif template == StrategyTemplate.PERPS:
-        return """
+        # Plain string (not an f-string): the block embeds runtime f-strings
+        # whose braces must reach the scaffold verbatim.
+        perps_init = """
         # Perps parameters
+        self.protocol = get_config("protocol", "__SCAFFOLD_PROTOCOL__")  # perp venue
         self.perp_market = get_config("perp_market", "ETH/USD")
         self.collateral_token = get_config("collateral_token", "USDC")
         self.collateral_amount = Decimal(str(get_config("collateral_amount", "100")))
@@ -2344,12 +2528,15 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self._entry_price = None
         self._position_is_long = None
         self._position_direction = None"""
+        return perps_init.replace("__SCAFFOLD_PROTOCOL__", protocol)
 
     elif template == StrategyTemplate.MULTI_STEP:
-        return """
-        # Multi-step LP parameters
-        self.pool = get_config("pool", "WETH/USDC/3000")
-        self.protocol = get_config("protocol", "uniswap_v3")
+        default_pool = _default_lp_pool(protocol)
+        return f"""
+        # Multi-step LP parameters. For aerodrome_slipstream the pool's 3rd
+        # component is the TICK SPACING (e.g. WETH/USDC/200), not a fee tier.
+        self.pool = get_config("pool", "{default_pool}")
+        self.protocol = get_config("protocol", "{protocol}")
         self.range_width_pct = float(get_config("range_width_pct", 5))
         # rebalance_drift_pct is configured as a percentage (e.g. 3 = 3% price drift)
         # and divided by 100 here to convert to a decimal fraction for comparison
@@ -2366,11 +2553,11 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self._range_upper = None"""
 
     elif template == StrategyTemplate.STAKING:
-        return """
+        return f"""
         # Staking parameters (stake_amount is the canonical amount)
         self.stake_token = get_config("stake_token", "ETH")
         self.stake_amount = Decimal(str(get_config("stake_amount", "1")))
-        self.staking_protocol = get_config("staking_protocol", "lido")
+        self.staking_protocol = get_config("staking_protocol", "{protocol}")
         self.quote_token = get_config("quote_token", "USDC")
         self.swap_before_stake = get_config("swap_before_stake", True)
 
@@ -2638,8 +2825,10 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             '        """Save position state for crash recovery."""\n'
             "        return {\n"
             '            "position_id": self._position_id,\n'
-            '            "range_lower": str(self._range_lower) if self._range_lower else None,\n'
-            '            "range_upper": str(self._range_upper) if self._range_upper else None,\n'
+            "            # `is not None` guards: Slipstream tick bounds are raw ticks and a\n"
+            "            # tick of 0 is a legitimate bound that a truthiness check would drop.\n"
+            '            "range_lower": str(self._range_lower) if self._range_lower is not None else None,\n'
+            '            "range_upper": str(self._range_upper) if self._range_upper is not None else None,\n'
             "        }\n"
             "\n"
             "    def load_persistent_state(self, state):\n"
@@ -2649,8 +2838,69 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            self._position_id = str(pid) if pid is not None else None\n"
             '            rl = state.get("range_lower")\n'
             '            ru = state.get("range_upper")\n'
-            "            self._range_lower = Decimal(rl) if rl else None\n"
-            "            self._range_upper = Decimal(ru) if ru else None\n"
+            '            # `in (None, "")` guards: a Slipstream tick bound of 0 must\n'
+            "            # round-trip (truthiness would drop it) while a legacy empty\n"
+            "            # string still reads as unmeasured.\n"
+            '            self._range_lower = Decimal(rl) if rl not in (None, "") else None\n'
+            '            self._range_upper = Decimal(ru) if ru not in (None, "") else None\n'
+            "\n"
+            "    # ------------------------------------------------------------------\n"
+            "    # Aerodrome Slipstream tick helpers (VIB-5557)\n"
+            "    # ------------------------------------------------------------------\n"
+            "    # Slipstream's compiler consumes raw integer ticks aligned to the\n"
+            '    # pool\'s tick spacing (pool format "TOKEN0/TOKEN1/<tick_spacing>").\n'
+            "    # The price->tick conversion lives here so a config-only switch to\n"
+            "    # protocol=aerodrome_slipstream keeps this scaffold compiling.\n"
+            "\n"
+            "    def _uses_tick_ranges(self) -> bool:\n"
+            '        """True when the configured protocol addresses LP ranges in raw ticks."""\n'
+            '        return self.protocol == "aerodrome_slipstream"\n'
+            "\n"
+            "    def _pool_tick_for_price(self, market, price_usd):\n"
+            '        """Convert a USD price of ``base_token`` into the pool\'s native tick.\n'
+            "\n"
+            "        Ticks are defined on the pool's canonical token0/token1 pair\n"
+            "        (ordered by address; the compiler rejects non-canonical pool\n"
+            '        strings), so the USD price is rebased to "token1 per token0"\n'
+            "        before conversion. Token decimals come from the token registry --\n"
+            "        never guessed (a wrong decimals pair shifts the tick by ~276k).\n"
+            '        """\n'
+            "        from almanak.framework.data.tokens import get_token_resolver\n"
+            "        from almanak.framework.intents import price_to_tick\n"
+            "\n"
+            '        token0, token1 = self.pool.split("/")[0], self.pool.split("/")[1]\n'
+            "        resolver = get_token_resolver()\n"
+            "        decimals0 = resolver.get_decimals(self.chain, token0)\n"
+            "        decimals1 = resolver.get_decimals(self.chain, token1)\n"
+            "        quote_price = market.price(self.quote_token)\n"
+            "        # Both prices divide below; a None / zero / negative price would\n"
+            "        # raise TypeError / ZeroDivisionError or feed price_to_tick a\n"
+            "        # non-positive ratio (log domain error -> garbage tick). Fail loud.\n"
+            "        if not quote_price or quote_price <= 0 or not price_usd or price_usd <= 0:\n"
+            "            raise ValueError(\n"
+            "                f'Non-positive price for tick conversion: '\n"
+            "                f'base={price_usd}, quote={quote_price}'\n"
+            "            )\n"
+            "        if token0.upper() == self.base_token.upper():\n"
+            "            pool_price = price_usd / quote_price  # token1 per token0\n"
+            "        else:\n"
+            "            pool_price = quote_price / price_usd  # base is token1 -> invert\n"
+            "        return price_to_tick(pool_price, decimals0=decimals0, decimals1=decimals1)\n"
+            "\n"
+            "    def _tick_band_for_prices(self, market, lower_price, upper_price):\n"
+            '        """Convert a USD price band into a spacing-aligned (tick_lower, tick_upper)."""\n'
+            "        import math\n"
+            "\n"
+            '        tick_spacing = int(self.pool.split("/")[2])\n'
+            "        tick_a = self._pool_tick_for_price(market, lower_price)\n"
+            "        tick_b = self._pool_tick_for_price(market, upper_price)\n"
+            "        # Inverted pairs (base token is pool token1) flip the band direction.\n"
+            "        tick_lower, tick_upper = min(tick_a, tick_b), max(tick_a, tick_b)\n"
+            "        tick_lower = math.floor(tick_lower / tick_spacing) * tick_spacing\n"
+            "        tick_upper = math.floor(tick_upper / tick_spacing) * tick_spacing\n"
+            "        if tick_upper <= tick_lower:\n"
+            "            tick_upper = tick_lower + tick_spacing\n"
+            "        return tick_lower, tick_upper\n"
             "\n"
         )
 
@@ -3148,14 +3398,22 @@ def _build_strategy_content(
     template: StrategyTemplate,
     chain: str,
     output_dir: Path,
+    protocol: str | None = None,
 ) -> str:
-    """Build the strategy.py file content for v2 IntentStrategy."""
+    """Build the strategy.py file content for v2 IntentStrategy.
+
+    ``protocol`` is the scaffold-time protocol choice; it is rendered into the
+    decorator metadata, the class docstring, and every template protocol
+    default so nothing in the scaffold hardcodes a protocol the user did not
+    choose. Defaults to the template's canonical protocol.
+    """
     class_name = to_pascal_case(name) + "Strategy"
     strategy_name = to_snake_case(name)
     config = TEMPLATE_CONFIGS[template]
+    protocol = protocol or config.default_protocol
 
     # Get template-specific code
-    init_params = _get_template_init_params(template, config)
+    init_params = _get_template_init_params(template, config, protocol)
     decide_logic = _get_template_decide_logic(template, config)
     callbacks_str = _get_template_callbacks(template)
     get_status_block = _get_template_get_status(template, strategy_name)
@@ -3192,7 +3450,7 @@ def _build_strategy_content(
         StrategyTemplate.STAKING: '["STAKE", "UNSTAKE", "SWAP", "HOLD"]',
     }
 
-    teardown_code = _get_template_teardown(template, config, strategy_name)
+    teardown_code = _get_template_teardown(template, config, strategy_name, protocol)
 
     quote_asset_line = _quote_asset_decorator_line(template, chain)
 
@@ -3217,12 +3475,13 @@ Strategy Pattern:
 import logging
 from datetime import date, datetime
 from decimal import ROUND_DOWN, Decimal  # noqa: F401 - ROUND_DOWN used by lending template only
-{enum_import}from typing import Any, Optional
+{enum_import}from typing import Any
 
 # Core strategy framework imports
-from almanak.framework.intents import Intent
+from almanak.framework.intents import AnyIntent, Intent
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import (
+    DecideResult,
     IntentStrategy,
     almanak_strategy,
 )
@@ -3259,7 +3518,7 @@ def _safe(v: Any) -> Any:
     author="Generated",
     tags=["generated", "{template.value}"],
     supported_chains=["{chain}"],
-    supported_protocols=["{config.default_protocol}"],
+    supported_protocols=["{protocol}"],
     intent_types={intent_types[template]},
     default_chain="{chain}",
     {quote_asset_line}
@@ -3269,7 +3528,7 @@ class {class_name}(IntentStrategy):
     {config.description}
 
     Chain: {chain}
-    Protocol: {config.default_protocol}
+    Protocol: {protocol}
 
     Configuration Parameters:
     -------------------------
@@ -3296,7 +3555,7 @@ class {class_name}(IntentStrategy):
 
         logger.info(f"{class_name} initialized on {{self.chain}}")
 
-    def decide(self, market: MarketSnapshot) -> Optional[Intent]:
+    def decide(self, market: MarketSnapshot) -> DecideResult:
         """
         Make a trading decision based on current market conditions.
 
@@ -3312,9 +3571,10 @@ class {class_name}(IntentStrategy):
                 - market.wallet_address: Current wallet
 
         Returns:
-            Intent: What action to take
+            DecideResult: What action to take
                 - Intent.swap(...): Execute a swap
                 - Intent.hold(...): Do nothing
+                - Intent.sequence([...]): Execute dependent intents in order
                 - None: Also means hold
         """
         try:{decide_logic}
@@ -3346,15 +3606,21 @@ def generate_strategy_file(
     template: StrategyTemplate,
     chain: str,
     output_dir: Path,
+    protocol: str | None = None,
 ) -> str:
-    """Generate the main strategy.py file content for v2 IntentStrategy."""
-    return _build_strategy_content(name, template, chain, output_dir)
+    """Generate the main strategy.py file content for v2 IntentStrategy.
+
+    ``protocol`` optionally overrides the template's canonical protocol; it is
+    rendered into decorator metadata and template protocol defaults.
+    """
+    return _build_strategy_content(name, template, chain, output_dir, protocol)
 
 
 def generate_config_json(
     name: str,
     template: StrategyTemplate,
     chain: str,
+    protocol: str | None = None,
 ) -> str:
     """Generate config.json content for the strategy.
 
@@ -3364,8 +3630,13 @@ def generate_config_json(
     importing the strategy module. At runtime it acts as an explicit override
     of the @almanak_strategy decorator's default_chain (priority order set in
     ``almanak/framework/cli/run.py``).
+
+    ``protocol`` optionally overrides the template's canonical protocol; the
+    emitted protocol keys always match the generated strategy.py defaults.
     """
     import json
+
+    protocol = protocol or TEMPLATE_CONFIGS[template].default_protocol
 
     # Chain first, then tunable template parameters.
     data: dict[str, object] = {"chain": chain}
@@ -3403,8 +3674,8 @@ def generate_config_json(
     elif template == StrategyTemplate.DYNAMIC_LP:
         data.update(
             {
-                "pool": "WETH/USDC/3000",
-                "protocol": "uniswap_v3",
+                "pool": _default_lp_pool(protocol),
+                "protocol": protocol,
                 "base_token": "WETH",
                 "quote_token": "USDC",
                 "range_width_pct": 5,
@@ -3424,7 +3695,7 @@ def generate_config_json(
                 "min_health_factor": "1.5",
                 "emergency_threshold": "1.2",
                 "partial_repay_pct": "0.25",
-                "lending_protocol": "aave_v3",
+                "lending_protocol": protocol,
                 # Morpho Blue: set the bytes32 market id here; Compound V3: set
                 # the Comet market key (e.g. "usdc", "weth"); Aave V3: leave blank.
                 "lending_market": "",
@@ -3434,6 +3705,7 @@ def generate_config_json(
     elif template == StrategyTemplate.BASIS_TRADE:
         data.update(
             {
+                "protocol": protocol,
                 "base_token": "WETH",
                 "quote_token": "USDC",
                 "perp_market": "ETH/USD",
@@ -3446,6 +3718,7 @@ def generate_config_json(
     elif template == StrategyTemplate.VAULT_YIELD:
         data.update(
             {
+                "protocol": protocol,
                 "vault_address": "0x0000000000000000000000000000000000000000",
                 "deposit_token": "USDC",
                 "deposit_amount": 1000,
@@ -3466,6 +3739,7 @@ def generate_config_json(
     elif template == StrategyTemplate.PERPS:
         data.update(
             {
+                "protocol": protocol,
                 "perp_market": "ETH/USD",
                 "collateral_token": "USDC",
                 "collateral_amount": 100,
@@ -3480,8 +3754,8 @@ def generate_config_json(
     elif template == StrategyTemplate.MULTI_STEP:
         data.update(
             {
-                "pool": "WETH/USDC/3000",
-                "protocol": "uniswap_v3",
+                "pool": _default_lp_pool(protocol),
+                "protocol": protocol,
                 "base_token": "WETH",
                 "quote_token": "USDC",
                 "range_width_pct": 5,
@@ -3494,7 +3768,7 @@ def generate_config_json(
             {
                 "stake_token": "ETH",
                 "stake_amount": 1,
-                "staking_protocol": "lido",
+                "staking_protocol": protocol,
                 "quote_token": "USDC",
                 "swap_before_stake": True,
             }
@@ -3508,10 +3782,14 @@ def generate_config_json(
             }
         )
 
-    # Add token_funding example for all templates (except COPY_TRADER which discovers tokens dynamically).
-    # Strategy authors should replace placeholder addresses with correct on-chain addresses.
+    # Add token_funding for all templates (except COPY_TRADER which discovers
+    # tokens dynamically). Addresses are resolved from the static token registry
+    # for the scaffold's chain; unresolvable symbols are omitted rather than
+    # emitted as placeholders.
     if template != StrategyTemplate.COPY_TRADER and "token_funding" not in data:
-        data["token_funding"] = _DEFAULT_TOKEN_FUNDING
+        token_funding = _default_token_funding(chain)
+        if token_funding:
+            data["token_funding"] = token_funding
 
     # Add anvil_funding for all templates (unless already set).
     # This ensures `almanak strat run --network anvil` funds the wallet automatically.
@@ -5273,6 +5551,16 @@ def list_strategies() -> list[str]:
     help="Target blockchain network (canonical name or registered alias)",
 )
 @click.option(
+    "--protocol",
+    "-p",
+    default=None,
+    help=(
+        "Protocol slug rendered into the scaffold (decorator metadata and the "
+        "template's config protocol defaults), e.g. aerodrome_slipstream, "
+        "morpho_blue, hyperliquid. Defaults to the template's canonical protocol."
+    ),
+)
+@click.option(
     "--output-dir",
     "-o",
     type=click.Path(exists=False),
@@ -5307,6 +5595,7 @@ def new_strategy(
     template: str,
     name: str,
     chain: str,
+    protocol: str | None,
     output_dir: str | None,
     supply_protocol: str | None,
     borrow_protocol: str | None,
@@ -5334,6 +5623,10 @@ def new_strategy(
         click.echo(f"Error: {exc}", err=True)
         raise click.Abort() from exc
     snake_name = to_snake_case(name)
+
+    # Normalize + validate the scaffold-time protocol choice (PR #3216
+    # multi_step tick-spacing gate).
+    protocol = _normalize_and_validate_scaffold_protocol(template_enum, protocol)
 
     # Validate template-chain compatibility
     if template_enum == StrategyTemplate.STAKING and chain != "ethereum":
@@ -5395,6 +5688,7 @@ def new_strategy(
     click.echo(f"Creating strategy: {snake_name}")
     click.echo(f"Template: {template_enum.value}")
     click.echo(f"Chain: {chain}")
+    click.echo(f"Protocol: {protocol or TEMPLATE_CONFIGS[template_enum].default_protocol}")
     click.echo(f"Output: {strategy_dir}")
     click.echo()
 
@@ -5410,14 +5704,14 @@ def new_strategy(
 
         # strategy.py
         strategy_file = strategy_dir / "strategy.py"
-        strategy_content = generate_strategy_file(name, template_enum, chain, strategy_dir)
+        strategy_content = generate_strategy_file(name, template_enum, chain, strategy_dir, protocol)
         with open(strategy_file, "w") as fh:
             fh.write(strategy_content)
         files_created.append("strategy.py")
 
         # config.json (runtime config read by load_strategy_config)
         config_json_file = strategy_dir / "config.json"
-        config_json_content = generate_config_json(name, template_enum, chain)
+        config_json_content = generate_config_json(name, template_enum, chain, protocol)
         with open(config_json_file, "w") as fh:
             fh.write(config_json_content)
         files_created.append("config.json")

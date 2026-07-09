@@ -73,8 +73,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.framework.intents.base import BaseIntent
-from almanak.framework.intents.vocabulary import Intent
+from almanak.framework.intents.vocabulary import AnyIntent, Intent, RepayIntent, SwapIntent, WithdrawIntent
 
 if TYPE_CHECKING:  # pragma: no cover
     from almanak.framework.teardown.models import TeardownMode
@@ -145,7 +144,7 @@ def generate_lending_unwind(
     max_rounds: int = 12,
     swap_protocol: str | None = None,
     consolidate_to: str | None = None,
-) -> list[BaseIntent]:
+) -> list[AnyIntent]:
     """Build a health-factor-aware unwind for any lending borrow / leverage loop.
 
     Sizes every leg from the LIVE on-chain position — ``variableDebt`` and supply
@@ -217,7 +216,7 @@ def generate_lending_unwind(
     debt_usd = Decimal(str(health.debt_value_usd))
     lltv = Decimal(str(health.lltv))
 
-    intents: list[BaseIntent] = []
+    intents: list[AnyIntent] = []
 
     if debt_usd <= _DUST_USD:
         if collateral_usd > _DUST_USD:
@@ -385,7 +384,7 @@ def _withdraw(
     withdraw_all: bool = False,
     market_id: str | None,
     chain: str | None,
-) -> BaseIntent:
+) -> WithdrawIntent:
     kwargs: dict[str, Any] = {
         "protocol": protocol,
         "token": token,
@@ -399,7 +398,7 @@ def _withdraw(
     return Intent.withdraw(**kwargs)
 
 
-def _repay_full(protocol: str, token: str, *, market_id: str | None, chain: str | None) -> BaseIntent:
+def _repay_full(protocol: str, token: str, *, market_id: str | None, chain: str | None) -> RepayIntent:
     kwargs: dict[str, Any] = {"protocol": protocol, "token": token, "repay_full": True}
     if market_id:
         kwargs["market_id"] = market_id
@@ -408,7 +407,7 @@ def _repay_full(protocol: str, token: str, *, market_id: str | None, chain: str 
     return Intent.repay(**kwargs)
 
 
-def _repay(protocol: str, token: str, *, amount: Decimal, market_id: str | None, chain: str | None) -> BaseIntent:
+def _repay(protocol: str, token: str, *, amount: Decimal, market_id: str | None, chain: str | None) -> RepayIntent:
     kwargs: dict[str, Any] = {"protocol": protocol, "token": token, "amount": amount, "repay_full": False}
     if market_id:
         kwargs["market_id"] = market_id
@@ -424,7 +423,7 @@ def _swap(
     slippage: Decimal,
     chain: str | None,
     protocol: str | None = None,
-) -> BaseIntent:
+) -> SwapIntent:
     return Intent.swap(
         from_token=from_token,
         to_token=to_token,
@@ -441,7 +440,7 @@ def _swap_all(
     slippage: Decimal,
     chain: str | None,
     protocol: str | None = None,
-) -> BaseIntent:
+) -> SwapIntent:
     return Intent.swap(
         from_token=from_token,
         to_token=to_token,

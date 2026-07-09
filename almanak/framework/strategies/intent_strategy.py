@@ -21,7 +21,7 @@ Example:
         version="1.0.0",
     )
     class SimpleDCAStrategy(IntentStrategy):
-        def decide(self, market: MarketSnapshot) -> Optional[Intent]:
+        def decide(self, market: MarketSnapshot) -> DecideResult:
             if market.price("ETH") < Decimal("2000"):
                 return Intent.swap("USDC", "ETH", amount_usd=Decimal("100"))
             return Intent.hold(reason="Price too high")
@@ -37,7 +37,6 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from ..data.wallet_activity import WalletActivityProvider
-    from ..intents.base import BaseIntent
     from ..portfolio.models import PortfolioSnapshot
     from ..teardown.models import (
         TeardownMode,
@@ -161,7 +160,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
     Example:
         @almanak_strategy(name="simple_strategy")
         class SimpleStrategy(IntentStrategy):
-            def decide(self, market: MarketSnapshot) -> Optional[Intent]:
+            def decide(self, market: MarketSnapshot) -> DecideResult:
                 if market.rsi("ETH").is_oversold:
                     return Intent.swap("USDC", "ETH", amount_usd=Decimal("100"))
                 return Intent.hold()
@@ -1991,7 +1990,9 @@ class IntentStrategy(StrategyBase[ConfigT]):
         ...
 
     @abstractmethod
-    def generate_teardown_intents(self, mode: "TeardownMode", market: "MarketSnapshot | None" = None) -> list[Intent]:
+    def generate_teardown_intents(
+        self, mode: "TeardownMode", market: "MarketSnapshot | None" = None
+    ) -> list[AnyIntent]:
         """Generate intents to close all positions.
 
         Return intents in the correct execution order:
@@ -2016,8 +2017,8 @@ class IntentStrategy(StrategyBase[ConfigT]):
         Example:
             from almanak.framework.teardown import TeardownMode
 
-            def generate_teardown_intents(self, mode: TeardownMode, market=None) -> list[Intent]:
-                intents = []
+            def generate_teardown_intents(self, mode: TeardownMode, market=None) -> list[AnyIntent]:
+                intents: list[AnyIntent] = []
 
                 # Get current positions
                 positions = self.get_open_positions()
@@ -2053,7 +2054,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         *,
         target_token: str = "USDC",
         max_slippage: "Decimal | None" = None,
-    ) -> "list[BaseIntent]":
+    ) -> "list[AnyIntent]":
         """Build live-resolving "close fully" intents for KNOWN positions (VIB-5465).
 
         Framework helper that lets a strategy stop hardcoding teardown exit

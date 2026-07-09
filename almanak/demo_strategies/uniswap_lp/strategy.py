@@ -67,7 +67,7 @@ from typing import Any
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
 
 # Intent is what your strategy returns - describes what action to take
-from almanak.framework.intents import Intent
+from almanak.framework.intents import AnyIntent, Intent
 
 # Core strategy framework imports
 from almanak.framework.market import MarketSnapshot
@@ -701,7 +701,7 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[AnyIntent]:
         """
         Generate intents to close all LP positions.
 
@@ -716,7 +716,7 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
         Returns:
             List of LP_CLOSE intents (empty if no position in state)
         """
-        intents: list[Intent] = []
+        intents: list[AnyIntent] = []
 
         position_id = self._current_position_id or self.position_id
         if not position_id:

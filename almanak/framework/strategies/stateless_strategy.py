@@ -6,7 +6,14 @@ track. Provides default empty implementations of get_open_positions() and
 generate_teardown_intents() so you only need to implement decide().
 """
 
+from typing import TYPE_CHECKING
+
+from ..intents.vocabulary import AnyIntent
 from .intent_strategy import IntentStrategy
+
+if TYPE_CHECKING:
+    from ..market import MarketSnapshot
+    from ..teardown.models import TeardownMode
 
 
 class StatelessStrategy(IntentStrategy):
@@ -24,6 +31,8 @@ class StatelessStrategy(IntentStrategy):
 
         return TeardownPositionSummary.empty(self._require_deployment_id("get_open_positions"))
 
-    def generate_teardown_intents(self, mode=None, market=None):
+    def generate_teardown_intents(
+        self, mode: "TeardownMode | None" = None, market: "MarketSnapshot | None" = None
+    ) -> list[AnyIntent]:
         """Return empty list (no positions to close)."""
         return []

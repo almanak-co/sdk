@@ -55,7 +55,7 @@ from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.data import MarketSnapshotError, PriceUnavailableError
-from almanak.framework.intents import Intent
+from almanak.framework.intents import AnyIntent, Intent
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_token_amount_human, format_usd
@@ -394,7 +394,7 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[AnyIntent]:
         """Generate intents to unwind positions: repay -> withdraw collateral."""
         intents = []
 

@@ -1170,8 +1170,18 @@ def dashboard(port, gateway_host, gateway_port, no_browser):
     default=DEFAULT_CHAIN,
     help="Target blockchain network (default: arbitrum)",
 )
+@click.option(
+    "--protocol",
+    "-p",
+    default=None,
+    help=(
+        "Protocol slug rendered into the scaffold (decorator metadata and the "
+        "template's config protocol defaults), e.g. aerodrome_slipstream, "
+        "morpho_blue, hyperliquid. Defaults to the template's canonical protocol."
+    ),
+)
 @click.pass_context
-def new(ctx, name, working_dir, template, chain):
+def new(ctx, name, working_dir, template, chain, protocol):
     """Create a new strategy from template.
 
     \b
@@ -1203,6 +1213,7 @@ def new(ctx, name, working_dir, template, chain):
             name=strategy_name,
             template=template,
             chain=chain,
+            protocol=protocol,
             output_dir=working_dir,
         )
 

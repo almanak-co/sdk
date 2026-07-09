@@ -67,7 +67,7 @@ from decimal import Decimal
 from typing import Any
 
 # Intent is what your strategy returns - describes what action to take
-from almanak.framework.intents import Intent
+from almanak.framework.intents import AnyIntent, Intent
 
 # Core strategy framework imports
 from almanak.framework.market import MarketSnapshot
@@ -382,7 +382,7 @@ class SparkLenderStrategy(IntentStrategy):
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode=None, market=None) -> list[AnyIntent]:
         """Close the Spark supply position fully at the LIVE on-chain size.
 
         VIB-5465 / VIB-5417: delegates to the framework's per-KNOWN-position

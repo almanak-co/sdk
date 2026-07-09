@@ -41,7 +41,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.framework.intents import Intent
+from almanak.framework.intents import AnyIntent, Intent
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
@@ -294,7 +294,7 @@ class MorphoBlueCollateralRotatorStrategy(IntentStrategy):
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode: "TeardownMode", market: MarketSnapshot | None = None) -> list[Intent]:
+    def generate_teardown_intents(self, mode: "TeardownMode", market: MarketSnapshot | None = None) -> list[AnyIntent]:
         if self._state != "supplied":
             return []
         return [

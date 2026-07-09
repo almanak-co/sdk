@@ -62,7 +62,7 @@ from typing import TYPE_CHECKING, Any
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
 
 # Intent is what your strategy returns - describes what action to take
-from almanak.framework.intents import Intent
+from almanak.framework.intents import AnyIntent, Intent
 
 # Core strategy framework imports
 from almanak.framework.market import MarketSnapshot
@@ -532,9 +532,9 @@ class Curve3poolLPStrategy(IntentStrategy[Curve3poolLPConfig]):
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[AnyIntent]:
         """Generate intents to close the 3pool LP position."""
-        intents: list[Intent] = []
+        intents: list[AnyIntent] = []
 
         if self._has_position:
             logger.info("Generating teardown intent for Curve 3pool position (mode=%s)", mode.value)

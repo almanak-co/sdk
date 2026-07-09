@@ -109,6 +109,7 @@ from .tick_utils import (
 # is still mid-execution, producing a partial-module ImportError on cold
 # boot.
 from .vocabulary import (
+    AnyIntent,
     BorrowIntent,
     BundledCollateralBorrowError,
     ChainedAmount,
@@ -194,6 +195,7 @@ __all__ = [
     "FlashLoanIntent",
     "HoldIntent",
     "IntentSequence",
+    "AnyIntent",
     "DecideResult",
     # Vault Intents (MetaMorpho ERC-4626)
     "VaultDepositIntent",

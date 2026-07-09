@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from almanak.framework.teardown.models import TeardownMode, TeardownPositionSummary
 
 from almanak.framework.data import BalanceUnavailableError, MarketSnapshotError, PriceUnavailableError
-from almanak.framework.intents import Intent
+from almanak.framework.intents import AnyIntent, Intent
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
@@ -370,7 +370,7 @@ class MantleMntAccumulator(IntentStrategy):
             ],
         )
 
-    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[AnyIntent]:
         from almanak.framework.teardown import TeardownMode
 
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else self.max_slippage

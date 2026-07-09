@@ -59,7 +59,7 @@ from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.data import MarketSnapshotError, PriceUnavailableError
-from almanak.framework.intents import Intent
+from almanak.framework.intents import AnyIntent, Intent
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_token_amount_human, format_usd
@@ -573,7 +573,7 @@ class BenqiLoopingStrategy(IntentStrategy):
             )
         return TeardownPositionSummary(deployment_id=self.STRATEGY_NAME, timestamp=datetime.now(UTC), positions=positions)
 
-    def generate_teardown_intents(self, mode: "TeardownMode", market: Any = None) -> list[Intent]:
+    def generate_teardown_intents(self, mode: "TeardownMode", market: Any = None) -> list[AnyIntent]:
         """Unwind the levered position via the same HF-aware staircase as the live path.
 
         Computed up front from tracked amounts + live prices: N x
@@ -586,7 +586,7 @@ class BenqiLoopingStrategy(IntentStrategy):
         market = market if market is not None else self.create_market_snapshot()
         avax_price, usdc_price = self._prices(market)
 
-        intents: list[Intent] = []
+        intents: list[AnyIntent] = []
         collateral_avax = self._collateral_avax
         debt_usd = self._debt_usdc * usdc_price
 

@@ -319,11 +319,11 @@ def test_emitted_tests_catch_missing_teardown_method() -> None:
         strategy_py = target / "strategy.py"
         src = strategy_py.read_text()
         broken = src.replace(
-            "def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:",
+            "def generate_teardown_intents(self, mode=None, market=None) -> list[AnyIntent]:",
             "def generate_teardown_intents(self, mode=None, market=None):",
             1,
         ).replace(
-            "        intents: list[Intent] = []",
+            "        intents: list[AnyIntent] = []",
             '        return "not a list"  # intentional break for testing',
             1,
         )
