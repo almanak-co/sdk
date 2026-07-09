@@ -610,6 +610,40 @@ class LendingReadRegistry:
         return key if key in cls._dispatch().backtest_provider_loaders else None
 
     @classmethod
+    def backtest_provider_chains(cls, protocol: str | None) -> tuple[str, ...]:
+        """Chains the connector's backtest ``HistoricalAPYProvider`` can serve.
+
+        Resolved from the provider module's public ``SUPPORTED_CHAINS`` (its
+        historical-subgraph coverage). This is the honest gate for the backtest
+        lending-APY lane and is DELIBERATELY DISTINCT from
+        :meth:`rate_history_chains` (the LIVE gateway rate lane): the on-chain
+        ``getReserveData`` read can serve chains the historical subgraph does
+        not index (e.g. ``aave_v3`` on ``bsc``, ``morpho_blue`` on
+        ``arbitrum``), so the live lane is legitimately WIDER. A backtest that
+        asked for historical APY on such a chain would silently degrade to
+        fallback rates, so the support matrix must gate on this set, not the
+        live one.
+
+        Returns an empty tuple when the protocol declares no backtest provider,
+        or when the provider module publishes no ``SUPPORTED_CHAINS`` (treated
+        as "chain-agnostic" by the support matrix, matching the pre-existing
+        ``not rate_chains`` fallthrough). Lazy import of the provider module
+        (never at derivation time — the VIB-4928 hazard).
+        """
+        key = cls.backtest_provider_key(protocol)
+        if key is None:
+            return ()
+        entry = cls._dispatch().backtest_provider_loaders.get(key)
+        if entry is None:
+            return ()
+        module_path, _attribute = entry
+        module = importlib.import_module(module_path)
+        chains = getattr(module, "SUPPORTED_CHAINS", None)
+        if not isinstance(chains, list | tuple):
+            return ()
+        return tuple(chains)
+
+    @classmethod
     def market_health_inputs(cls, protocol: str, chain: str, market_id: str) -> dict[str, object] | None:
         """Resolve the multi-collateral health-read inputs for ``(protocol, chain, market_id)``.
 

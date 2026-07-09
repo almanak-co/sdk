@@ -437,7 +437,27 @@ class TestLendingApyLane:
         assert "APY" in lane.detail
 
     def test_provider_chain_gap_is_degraded(self) -> None:
-        """morpho_blue declares APY history for ethereum/base only."""
+        """The lane gates on the backtest provider's subgraph coverage, so a
+        chain the provider does not index (monad) degrades to defaults."""
+        report = evaluate_backtest_support(
+            _config(chain="monad"),
+            strategy_config={"protocol": "morpho_blue"},
+            explicit_strategy_type="lending",
+        )
+
+        lane = _lane(report, LANE_LENDING_APY, "morpho_blue")
+        assert lane.status == "degraded"
+        assert "monad" in lane.detail
+
+    def test_live_rate_lane_chain_without_subgraph_is_degraded(self) -> None:
+        """The LIVE rate lane is wider than the backtest historical subgraph.
+
+        ``morpho_blue`` joined the arbitrum LIVE rate lane (``rate_history_chains``),
+        but ``MorphoBlueAPYProvider`` still indexes only
+        ethereum/base — so a BACKTEST asking for arbitrum historical APY degrades
+        to defaults. The support matrix must report that honestly (P1 regression
+        fix for PR #3210), not advertise it as supported off the live-lane list.
+        """
         report = evaluate_backtest_support(
             _config(chain="arbitrum"),
             strategy_config={"protocol": "morpho_blue"},
@@ -447,6 +467,24 @@ class TestLendingApyLane:
         lane = _lane(report, LANE_LENDING_APY, "morpho_blue")
         assert lane.status == "degraded"
         assert "arbitrum" in lane.detail
+        # The degrade names the provider's REAL (subgraph) coverage, not the
+        # wider live rate lane.
+        assert "ethereum" in lane.detail
+        assert "base" in lane.detail
+
+    def test_aave_bsc_backtest_history_is_degraded(self) -> None:
+        """aave_v3 gained bsc on the LIVE rate lane, but the historical subgraph
+        provider (AaveV3APYProvider) has no bsc source — backtest history degrades.
+        """
+        report = evaluate_backtest_support(
+            _config(chain="bsc"),
+            strategy_config={"protocol": "aave_v3"},
+            explicit_strategy_type="lending",
+        )
+
+        lane = _lane(report, LANE_LENDING_APY, "aave_v3")
+        assert lane.status == "degraded"
+        assert "bsc" in lane.detail
 
 
 # =============================================================================

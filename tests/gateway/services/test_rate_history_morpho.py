@@ -157,6 +157,63 @@ def test_morpho_blue_borrow_selects_borrow_side() -> None:
     assert abs(Decimal(response.point.borrow_apy_pct) - Decimal("8")) < Decimal("0.001")
 
 
+def test_morpho_blue_arbitrum_served_from_market_catalogue() -> None:
+    """Arbitrum is served straight from
+    MORPHO_MARKETS['arbitrum'] (wstETH/USDC + WBTC/USDC lend USDC) against
+    the chain-specific Morpho singleton."""
+    from almanak.connectors.morpho_blue.addresses import MORPHO_BLUE
+
+    market_hex = _encode_market_struct(total_supply_assets=10**12, total_borrow_assets=6 * 10**11)
+    borrow_rate_wad = int((Decimal("1.06").ln() / Decimal(_SECONDS_PER_YEAR)) * Decimal(10**18))
+    borrow_rate_hex = "0x" + f"{borrow_rate_wad:064x}"
+
+    captured: list[dict[str, Any]] = []
+
+    def _router(payload: dict[str, Any]) -> str:
+        captured.append(payload)
+        return market_hex if payload.get("id") == 1 else borrow_rate_hex
+
+    servicer = _make_servicer(_router)
+    with patch("almanak.gateway.utils.get_rpc_url", return_value="http://rpc.test"):
+        request = gateway_pb2.GetLendingRateCurrentRequest(
+            protocol="morpho_blue", chain="arbitrum", asset_symbol="USDC", side="supply"
+        )
+        ctx = _MockContext()
+        response = asyncio.run(servicer.GetLendingRateCurrent(request, ctx))  # type: ignore[arg-type]
+
+    assert response.success is True, response.error
+    assert ctx.code is None
+    assert response.point.supply_apy_pct != ""
+    assert Decimal(response.point.supply_apy_pct) > Decimal("0")
+    assert Decimal(response.point.utilization_pct) == Decimal("60")
+    # market() reads target the Arbitrum-specific singleton, NOT the
+    # universal vanity address (which has no code on Arbitrum).
+    market_calls = [p for p in captured if p.get("id") == 1]
+    assert market_calls, captured
+    for payload in market_calls:
+        assert payload["params"][0]["to"] == MORPHO_BLUE["arbitrum"]["morpho"]
+
+
+def test_morpho_blue_polygon_served_from_market_catalogue() -> None:
+    """Polygon is served from the rate lane (WBTC/USDC lends USDC)."""
+    market_hex = _encode_market_struct(total_supply_assets=10**12, total_borrow_assets=4 * 10**11)
+    borrow_rate_wad = int((Decimal("1.05").ln() / Decimal(_SECONDS_PER_YEAR)) * Decimal(10**18))
+    borrow_rate_hex = "0x" + f"{borrow_rate_wad:064x}"
+
+    servicer = _make_servicer(lambda p: market_hex if p.get("id") == 1 else borrow_rate_hex)
+    with patch("almanak.gateway.utils.get_rpc_url", return_value="http://rpc.test"):
+        request = gateway_pb2.GetLendingRateCurrentRequest(
+            protocol="morpho_blue", chain="polygon", asset_symbol="USDC", side="borrow"
+        )
+        ctx = _MockContext()
+        response = asyncio.run(servicer.GetLendingRateCurrent(request, ctx))  # type: ignore[arg-type]
+
+    assert response.success is True, response.error
+    assert response.point.borrow_apy_pct != ""
+    assert abs(Decimal(response.point.borrow_apy_pct) - Decimal("5")) < Decimal("0.001")
+    assert response.point.supply_apy_pct == ""  # unselected side stays unmeasured
+
+
 def test_morpho_blue_unknown_asset_yields_success_false() -> None:
     """An asset no registered market lends surfaces success=False, never 0%."""
     servicer = _make_servicer(lambda p: "0x")

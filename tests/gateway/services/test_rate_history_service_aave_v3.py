@@ -206,6 +206,41 @@ def test_aave_v3_borrow_selects_variable_borrow_rate() -> None:
 
 
 # =============================================================================
+# Happy path: bsc on the rate lane
+# =============================================================================
+
+
+def test_aave_v3_bsc_targets_bsc_data_provider() -> None:
+    """bsc is servable: the eth_call goes to the bsc PoolDataProvider with
+    the curated bsc USDC address (AAVE_V3_TOKENS)."""
+    from almanak.connectors.aave_v3.addresses import AAVE_V3, AAVE_V3_TOKENS
+
+    supply_ray = 3 * 10**25  # 3%
+
+    servicer, captured = _make_servicer_with_mock_rpc(_encode_aave_reserve_data(supply_ray, 4 * 10**25))
+
+    with patch("almanak.gateway.utils.get_rpc_url", return_value="http://rpc.test"):
+        request = gateway_pb2.GetLendingRateCurrentRequest(
+            protocol="aave_v3",
+            chain="bsc",
+            asset_symbol="USDC",
+            side="supply",
+        )
+        ctx = _MockContext()
+        response = asyncio.run(servicer.GetLendingRateCurrent(request, ctx))  # type: ignore[arg-type]
+
+    assert ctx.code is None
+    assert response.success is True, response.error
+    assert response.chain == "bsc"
+    assert Decimal(response.point.supply_apy_pct) == Decimal("3")
+
+    assert len(captured) == 1
+    call_params = captured[0]["params"][0]
+    assert call_params["to"] == AAVE_V3["bsc"]["pool_data_provider"]
+    assert call_params["data"].endswith(AAVE_V3_TOKENS["bsc"]["USDC"][2:].lower())
+
+
+# =============================================================================
 # Failure: all-zero struct (token resolves but isn't an Aave reserve)
 # =============================================================================
 

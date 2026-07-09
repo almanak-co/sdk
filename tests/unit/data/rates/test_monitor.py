@@ -45,6 +45,12 @@ def arbitrum_monitor() -> RateMonitor:
 
 
 @pytest.fixture
+def avalanche_monitor() -> RateMonitor:
+    """Create a RateMonitor for Avalanche (a chain without a Morpho rate lane)."""
+    return RateMonitor(chain="avalanche")
+
+
+@pytest.fixture
 def mocked_monitor() -> RateMonitor:
     """Create a RateMonitor with mocked rates."""
     monitor = RateMonitor(chain="ethereum")
@@ -90,7 +96,15 @@ class TestRateMonitorInit:
         protocols = arbitrum_monitor.protocols
         assert "aave_v3" in protocols
         assert "compound_v3" in protocols
-        # Morpho Blue not on Arbitrum
+        # Morpho Blue is on the Arbitrum rate lane
+        # (MORPHO_MARKETS had catalogued Arbitrum markets all along).
+        assert "morpho_blue" in protocols
+
+    def test_protocols_on_avalanche(self, avalanche_monitor: RateMonitor) -> None:
+        """Test protocols available on Avalanche."""
+        protocols = avalanche_monitor.protocols
+        assert "aave_v3" in protocols
+        # No Morpho Blue market catalogue on Avalanche.
         assert "morpho_blue" not in protocols
 
     def test_custom_protocols(self) -> None:
@@ -178,6 +192,27 @@ class TestRateFetching:
         assert rate.apy_percent > Decimal("0")
 
     @pytest.mark.asyncio
+    async def test_get_spark_rate(self, ethereum_monitor: RateMonitor) -> None:
+        """Spark is on the rate lane; with no gateway the offline
+        placeholder must return the manifest-declared default APY rather than
+        raising TokenNotSupportedError (P2 fix, PR #3210). Spark's manifest
+        default supply APY is 0.05 (=5%)."""
+        rate = await ethereum_monitor.get_lending_rate("spark", "USDC", RateSide.SUPPLY)
+
+        assert rate.protocol == "spark"
+        assert rate.token == "USDC"
+        assert rate.apy_percent == Decimal("5")
+
+    @pytest.mark.asyncio
+    async def test_spark_manifest_default_for_any_token(self, ethereum_monitor: RateMonitor) -> None:
+        """Spark ships no curated token table, so the manifest-derived offline
+        placeholder serves the same declared default for any symbol (0.055 borrow)."""
+        rate = await ethereum_monitor.get_lending_rate("spark", "WETH", RateSide.BORROW)
+
+        assert rate.protocol == "spark"
+        assert rate.apy_percent == Decimal("5.5")
+
+    @pytest.mark.asyncio
     async def test_get_borrow_rate(self, ethereum_monitor: RateMonitor) -> None:
         """Test fetching borrow rate."""
         rate = await ethereum_monitor.get_lending_rate("aave_v3", "USDC", RateSide.BORROW)
@@ -200,10 +235,10 @@ class TestRateFetching:
             await ethereum_monitor.get_lending_rate("compound_v3", "UNKNOWN_TOKEN", RateSide.SUPPLY)
 
     @pytest.mark.asyncio
-    async def test_protocol_not_on_chain(self, arbitrum_monitor: RateMonitor) -> None:
+    async def test_protocol_not_on_chain(self, avalanche_monitor: RateMonitor) -> None:
         """Test error for protocol not available on chain."""
         with pytest.raises(ProtocolNotSupportedError):
-            await arbitrum_monitor.get_lending_rate("morpho_blue", "USDC", RateSide.SUPPLY)
+            await avalanche_monitor.get_lending_rate("morpho_blue", "USDC", RateSide.SUPPLY)
 
 
 # =============================================================================
@@ -286,14 +321,16 @@ class TestBestRate:
 
     @pytest.mark.asyncio
     async def test_all_rates_returned(self, mocked_monitor: RateMonitor) -> None:
-        """Test that all protocol rates are returned."""
+        """Test that all protocol rates are returned (spark is on the Ethereum
+        lane and contributes its offline placeholder rate)."""
         result = await mocked_monitor.get_best_lending_rate("USDC", RateSide.SUPPLY)
 
-        assert len(result.all_rates) == 3
+        assert len(result.all_rates) == 4
         protocols = {r.protocol for r in result.all_rates}
         assert "aave_v3" in protocols
         assert "morpho_blue" in protocols
         assert "compound_v3" in protocols
+        assert "spark" in protocols
 
     @pytest.mark.asyncio
     async def test_filter_protocols(self, mocked_monitor: RateMonitor) -> None:
@@ -344,10 +381,10 @@ class TestProtocolRates:
         assert supply_rate.apy_percent == Decimal("4.5")
 
     @pytest.mark.asyncio
-    async def test_unsupported_protocol_rates(self, arbitrum_monitor: RateMonitor) -> None:
+    async def test_unsupported_protocol_rates(self, avalanche_monitor: RateMonitor) -> None:
         """Test error for unsupported protocol."""
         with pytest.raises(ProtocolNotSupportedError):
-            await arbitrum_monitor.get_protocol_rates("morpho_blue")
+            await avalanche_monitor.get_protocol_rates("morpho_blue")
 
 
 # =============================================================================
@@ -431,11 +468,12 @@ class TestConstants:
 
     def test_protocol_chains(self) -> None:
         """Test protocol availability per chain."""
-        # Ethereum has all protocols
-        assert len(PROTOCOL_CHAINS["ethereum"]) == 3
+        # Ethereum has all protocols (including spark)
+        assert PROTOCOL_CHAINS["ethereum"] == ["aave_v3", "compound_v3", "morpho_blue", "spark"]
 
-        # Arbitrum has fewer
-        assert "morpho_blue" not in PROTOCOL_CHAINS["arbitrum"]
+        # Arbitrum has fewer (no spark; morpho_blue is present)
+        assert "morpho_blue" in PROTOCOL_CHAINS["arbitrum"]
+        assert "spark" not in PROTOCOL_CHAINS["arbitrum"]
 
         # Polygon has compound_v3 (VIB-2250: was missing, causing nightly failure)
         assert "compound_v3" in PROTOCOL_CHAINS["polygon"]
@@ -479,7 +517,11 @@ class TestRateMonitorIntegration:
         # Sort by APY
         sorted_rates = sorted(result.all_rates, key=lambda r: r.apy_percent, reverse=True)
 
-        # Verify order: Morpho (5.5%) > Compound (5.0%) > Aave (4.5%)
+        # Morpho (5.5%) is best; compound + spark tie at 5.0% (spark takes its
+        # manifest default now that it joined the lane); Aave (4.5%) is last.
         assert sorted_rates[0].protocol == "morpho_blue"
-        assert sorted_rates[1].protocol == "compound_v3"
-        assert sorted_rates[2].protocol == "aave_v3"
+        assert sorted_rates[0].apy_percent == Decimal("5.5")
+        assert {sorted_rates[1].protocol, sorted_rates[2].protocol} == {"compound_v3", "spark"}
+        assert sorted_rates[1].apy_percent == Decimal("5.0")
+        assert sorted_rates[2].apy_percent == Decimal("5.0")
+        assert sorted_rates[3].protocol == "aave_v3"

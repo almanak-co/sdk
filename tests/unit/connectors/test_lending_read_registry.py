@@ -427,3 +427,41 @@ class TestIsTokenKeyed:
         # Loosely typed / missing strategy metadata must never crash; it
         # normalises to a non-token-keyed (False) answer so callers fail closed.
         assert LendingReadRegistry.is_token_keyed(protocol) is False
+
+
+# ---------------------------------------------------------------------------
+# backtest_provider_chains — the honest backtest-history gate (PR #3210 P1).
+# ---------------------------------------------------------------------------
+
+
+class TestBacktestProviderChains:
+    """The backtest lending-APY lane must gate on the provider's OWN subgraph
+    coverage, NOT the (wider) live gateway rate lane (``rate_history_chains``)."""
+
+    def test_matches_provider_supported_chains(self) -> None:
+        from almanak.connectors.aave_v3.backtest_apy import SUPPORTED_CHAINS as AAVE_CHAINS
+
+        chains = LendingReadRegistry.backtest_provider_chains("aave_v3")
+        assert set(chains) == set(AAVE_CHAINS)
+
+    def test_narrower_than_live_rate_lane(self) -> None:
+        # The live lane gained bsc / arbitrum / polygon (on-chain getReserveData),
+        # but the historical subgraph providers do not index them — so the
+        # backtest set must be a strict subset, never advertise the extra chains.
+        for protocol, extra in (("aave_v3", "bsc"), ("morpho_blue", "arbitrum"), ("morpho_blue", "polygon")):
+            provider_chains = set(LendingReadRegistry.backtest_provider_chains(protocol))
+            rate_chains = set(LendingReadRegistry.rate_history_chains(protocol))
+            assert extra in rate_chains
+            assert extra not in provider_chains
+            assert provider_chains < rate_chains
+
+    def test_alias_resolves(self) -> None:
+        # The ``aave`` alias folds onto aave_v3's provider coverage.
+        assert LendingReadRegistry.backtest_provider_chains("aave") == LendingReadRegistry.backtest_provider_chains(
+            "aave_v3"
+        )
+
+    @pytest.mark.parametrize("protocol", [None, "", "benqi", "not_a_protocol", 123])
+    def test_no_provider_returns_empty(self, protocol) -> None:
+        # benqi declares no backtest provider; junk / None fail closed to ().
+        assert LendingReadRegistry.backtest_provider_chains(protocol) == ()

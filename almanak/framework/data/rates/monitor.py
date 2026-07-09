@@ -510,6 +510,38 @@ _PLACEHOLDER_PROFILES: dict[str, _PlaceholderProfile] = {
 }
 
 
+def _manifest_default_placeholder(protocol: str, token: str, side: str, chain: str) -> "LendingRate":
+    """Offline placeholder derived from the connector's manifest default APY.
+
+    Rate-lane protocols that ship no curated per-token placeholder table above
+    (e.g. spark — an Aave V3 fork that carries no ``AAVE_V3_TOKENS``-style
+    catalogue and resolves symbols through the global ``TokenResolver``) fall
+    back to their manifest-declared ``backtest_default_{supply,borrow}_apy``
+    when the gateway is unreachable, instead of raising
+    ``TokenNotSupportedError``. The manifest is the single source of truth for
+    the sanctioned offline default (Empty != Zero: a venue that declares no
+    default still fails loud rather than backtesting at a fabricated rate).
+
+    Manifest APYs are decimal fractions (``"0.05"`` = 5%); the placeholder API
+    speaks percentages, so scale by 100.
+    """
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    supply, borrow = LendingReadRegistry.backtest_default_apys(protocol)
+    fraction = supply if side == "supply" else borrow
+    if fraction is None:
+        raise TokenNotSupportedError(token, protocol, chain)
+    apy_percent = Decimal(fraction) * Decimal("100")
+    return LendingRate(
+        protocol=protocol,
+        token=token,
+        side=side,
+        apy_ray=apy_percent * RAY / Decimal("100"),
+        apy_percent=apy_percent,
+        chain=chain,
+    )
+
+
 def _placeholder_rate(protocol: str, token: str, side: str, chain: str) -> LendingRate:
     """Return a placeholder LendingRate when the gateway is unreachable.
 
@@ -521,7 +553,9 @@ def _placeholder_rate(protocol: str, token: str, side: str, chain: str) -> Lendi
     """
     profile = _PLACEHOLDER_PROFILES.get(protocol)
     if profile is None:
-        raise TokenNotSupportedError(token, protocol, chain)
+        # No curated per-token table for this rate-lane venue (e.g. spark):
+        # fall back to the manifest-declared default APY rather than crashing.
+        return _manifest_default_placeholder(protocol, token, side, chain)
 
     table = profile.supply if side == "supply" else profile.borrow
     apy_percent = table.get(token)

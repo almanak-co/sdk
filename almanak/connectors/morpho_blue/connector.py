@@ -79,7 +79,10 @@ CONNECTOR = Connector(
     # values come from interest.py's existing hardcoded behavior (0.035 / 0.04) so net
     # simulation behavior is unchanged — this merely moves the literals to the manifest.
     lending_read=LendingReadDecl(
-        rate_history_chains=("ethereum", "base"),
+        # arbitrum + polygon included — MORPHO_MARKETS catalogues
+        # markets on both, and the gateway provider derives its servable set
+        # from that catalogue (VIB-5040 had scoped itself to ethereum+base).
+        rate_history_chains=("ethereum", "base", "arbitrum", "polygon"),
         backtest_default_supply_apy="0.035",
         backtest_default_borrow_apy="0.04",
         backtest_provider=ImportRef(

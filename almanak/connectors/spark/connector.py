@@ -30,6 +30,11 @@ CONNECTOR = Connector(
         attribute="SparkAgentReadConnector",
         order=6,
     ),
+    gateway_connector=ImportRef(
+        module="almanak.connectors.spark.gateway.provider",
+        attribute="SparkGatewayConnector",
+        order=29,
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.spark.receipt_parser_provider",
         attribute="SparkReceiptParserConnector",
@@ -55,6 +60,9 @@ CONNECTOR = Connector(
     # backtest_default_supply_apy / borrow_apy moved from interest.py (plan 022);
     # values verbatim from the pre-rewire hardcoded dict (0.05 / 0.055).
     lending_read=LendingReadDecl(
+        # Gateway rate lane: served by SparkGatewayConnector's
+        # GatewayLendingRateHistoryCapability via the fork-shared pipeline.
+        rate_history_chains=("ethereum",),
         backtest_default_supply_apy="0.05",
         backtest_default_borrow_apy="0.055",
         backtest_provider=ImportRef(

@@ -98,7 +98,9 @@ CONNECTOR = Connector(
     ),
     # Aave-family reads (VIB-4929): whole-wallet account state; 'aave' alias is lending-scoped.
     lending_read=LendingReadDecl(
-        rate_history_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche"),
+        # bsc included: position_health already worked there and
+        # addresses.py ships the bsc pool + pool_data_provider.
+        rate_history_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc"),
         backtest_default_supply_apy="0.03",
         backtest_default_borrow_apy="0.05",
         backtest_provider=ImportRef(

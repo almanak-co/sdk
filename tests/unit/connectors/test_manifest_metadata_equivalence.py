@@ -463,25 +463,33 @@ def test_dex_volume_decls_pin_liquidity_subgraph_ids() -> None:
 
 # almanak/framework/data/rates/monitor.py + backtesting/pnl/providers/
 # lending_apy.py legacy tables as of 2026-06-10, frozen verbatim (VIB-4851
-# Phase D / D5). Deliberate widening, acknowledged here: lending_apy's
-# legacy SUPPORTED_PROTOCOLS was ["aave_v3", "compound_v3"]; morpho_blue
-# joins because its gateway rate lane has existed since W7 — the client
-# gate was the only thing excluding it.
-FROZEN_LENDING_RATE_PROTOCOLS = ("aave_v3", "compound_v3", "morpho_blue")
+# Phase D / D5). Deliberate widenings, acknowledged here:
+#
+# * lending_apy's legacy SUPPORTED_PROTOCOLS was ["aave_v3", "compound_v3"];
+#   morpho_blue joined because its gateway rate lane has existed since W7 —
+#   the client gate was the only thing excluding it.
+# * spark joins (new SparkGatewayConnector on the
+#   fork-shared getReserveData pipeline); morpho_blue widens to
+#   arbitrum + polygon (MORPHO_MARKETS catalogues markets there and the
+#   gateway provider already served every catalogue chain); aave_v3 gains
+#   bsc (addresses.py had shipped the bsc pool_data_provider all along).
+FROZEN_LENDING_RATE_PROTOCOLS = ("aave_v3", "compound_v3", "morpho_blue", "spark")
 FROZEN_LENDING_RATE_CHAINS = {
-    "aave_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche"),
+    "aave_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc"),
     "compound_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base"),
-    "morpho_blue": ("ethereum", "base"),
+    "morpho_blue": ("ethereum", "base", "arbitrum", "polygon"),
+    "spark": ("ethereum",),
 }
 # monitor.py PROTOCOL_CHAINS rows (values now sorted; legacy insertion order
 # ["aave_v3", "morpho_blue", "compound_v3"] carried no semantics).
 FROZEN_LENDING_PROTOCOL_CHAINS = {
-    "ethereum": ["aave_v3", "compound_v3", "morpho_blue"],
-    "arbitrum": ["aave_v3", "compound_v3"],
+    "ethereum": ["aave_v3", "compound_v3", "morpho_blue", "spark"],
+    "arbitrum": ["aave_v3", "compound_v3", "morpho_blue"],
     "optimism": ["aave_v3", "compound_v3"],
-    "polygon": ["aave_v3", "compound_v3"],
+    "polygon": ["aave_v3", "compound_v3", "morpho_blue"],
     "base": ["aave_v3", "compound_v3", "morpho_blue"],
     "avalanche": ["aave_v3"],
+    "bsc": ["aave_v3"],
 }
 FROZEN_LENDING_DEFAULT_APYS = {
     "aave_v3": ("0.03", "0.05"),
@@ -490,6 +498,8 @@ FROZEN_LENDING_DEFAULT_APYS = {
     # InterestCalculator had hardcoded all along, consciously overturning
     # VIB-5040's deliberate omission — see the PR body for the rationale.
     "morpho_blue": ("0.035", "0.04"),
+    # Plan 022: values verbatim from the pre-rewire hardcoded interest.py dict.
+    "spark": ("0.05", "0.055"),
 }
 
 
@@ -510,20 +520,26 @@ def test_lending_rate_chains_subset_of_gateway_capability() -> None:
     Subset (not equality) is the contract: the gateway sets derive from
     address registries and may serve more chains than the framework
     consumers declare; everything declared must be servable.
+
+    Registry-driven drift guard: EVERY connector that
+    declares ``rate_history_chains`` must ship a gateway provider whose
+    ``lending_supported_chains()`` covers the declaration — keyed by the
+    provider's ``protocol`` ClassVar so a new rate-lane connector is
+    covered automatically instead of silently skipped by a name map.
     """
     from almanak.connectors._base.gateway_capabilities import (
         GatewayLendingRateHistoryCapability,
     )
     from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
 
-    gateway_chains: dict[str, frozenset[str]] = {}
-    for provider in GATEWAY_REGISTRY.capability_providers(GatewayLendingRateHistoryCapability):  # type: ignore[type-abstract]
-        name = type(provider).__name__.replace("GatewayConnector", "")
-        key = {"AaveV3": "aave_v3", "CompoundV3": "compound_v3", "MorphoBlue": "morpho_blue"}.get(name)
-        if key is not None:
-            gateway_chains[key] = frozenset(provider.lending_supported_chains())
-    assert set(gateway_chains) == set(FROZEN_LENDING_RATE_PROTOCOLS)
-    for protocol in FROZEN_LENDING_RATE_PROTOCOLS:
+    gateway_chains: dict[str, frozenset[str]] = {
+        str(provider.protocol): frozenset(provider.lending_supported_chains())
+        for provider in GATEWAY_REGISTRY.capability_providers(GatewayLendingRateHistoryCapability)  # type: ignore[type-abstract]
+    }
+    rate_lane_protocols = LendingReadRegistry.rate_history_protocols()
+    assert rate_lane_protocols == FROZEN_LENDING_RATE_PROTOCOLS
+    for protocol in rate_lane_protocols:
+        assert protocol in gateway_chains, f"{protocol} declares rate_history_chains but has no gateway rate provider"
         declared = set(LendingReadRegistry.rate_history_chains(protocol))
         assert declared <= gateway_chains[protocol], (protocol, declared - gateway_chains[protocol])
 

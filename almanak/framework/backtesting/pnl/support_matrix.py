@@ -536,8 +536,14 @@ def _check_lending_apy_lane(
             continue
         provider_key = LendingReadRegistry.backtest_provider_key(protocol)
         if provider_key is not None:
-            rate_chains = LendingReadRegistry.rate_history_chains(protocol)
-            if not rate_chains or chain in rate_chains:
+            # Gate on the backtest provider's OWN (historical-subgraph) coverage,
+            # not the live gateway rate lane (``rate_history_chains``). The live
+            # lane can be wider — the on-chain ``getReserveData`` read serves
+            # chains the historical subgraph does not index (e.g. aave_v3/bsc,
+            # morpho_blue/arbitrum) — and advertising those as historical-APY
+            # "supported" would mask a silent degrade to fallback rates.
+            provider_chains = LendingReadRegistry.backtest_provider_chains(protocol)
+            if not provider_chains or chain in provider_chains:
                 report.lanes.append(
                     LaneSupport(
                         lane=LANE_LENDING_APY,
@@ -547,13 +553,13 @@ def _check_lending_apy_lane(
                     )
                 )
                 continue
-            declared = ", ".join(rate_chains)
+            declared = ", ".join(sorted(provider_chains))
             report.lanes.append(
                 LaneSupport(
                     lane=LANE_LENDING_APY,
                     status="degraded",
                     detail=(
-                        f"'{protocol}' declares APY history for [{declared}], not '{chain}' — "
+                        f"'{provider_key}' historical APY provider covers [{declared}], not '{chain}' — "
                         "static default APYs are used instead of historical rates"
                     ),
                     protocol=protocol,

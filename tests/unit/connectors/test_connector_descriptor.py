@@ -386,6 +386,7 @@ EXPECTED_GATEWAY_PROVIDER_MODULES = {
     "pendle": "almanak.connectors.pendle.gateway.provider",
     "polymarket": "almanak.connectors.polymarket.gateway.provider",
     "raydium": "almanak.connectors.raydium.gateway.provider",
+    "spark": "almanak.connectors.spark.gateway.provider",
     "sushiswap_v3": "almanak.connectors.sushiswap_v3.gateway.provider",
     "traderjoe_v2": "almanak.connectors.traderjoe_v2.gateway.provider",
     "uniswap_v3": "almanak.connectors.uniswap_v3.gateway.provider",
@@ -422,6 +423,7 @@ EXPECTED_GATEWAY_PROVIDER_ORDER = (
     "agni_finance",
     "morpho_blue",
     "aster_perps",
+    "spark",
 )
 
 EXPECTED_GATEWAY_SETTINGS_MODULES = {
