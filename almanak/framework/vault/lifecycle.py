@@ -110,12 +110,19 @@ class VaultLifecycleManager:
         persistence_callback: Callable[[dict], None] | None = None,
         receipt_parser_protocol: str | None = None,
         receipt_parser: VaultReceiptParserHandle | None = None,
+        execution_mode: str = "live",
     ) -> None:
         self._config = vault_config
         self._vault_sdk = vault_sdk
         self._vault_adapter = vault_adapter
         self._execution_orchestrator = execution_orchestrator
         self._deployment_id = deployment_id
+        # Execution-mode label ("live" / "paper" / "dry_run"). Governs the
+        # share-backed AUM guard's failure semantics (VIB-5672): live REFUSES a
+        # mis-priced propose; paper / dry_run log ERROR and continue (mirroring the
+        # accounting layer's mode-aware writes). Defaults to the strictest mode so an
+        # unset / unknown value fails safe.
+        self._execution_mode = (execution_mode or "live").strip().lower()
         self._initial_vault_state = initial_vault_state
         self._vault_state: VaultState | None = None
         self._persistence_callback = persistence_callback
@@ -315,6 +322,16 @@ class VaultLifecycleManager:
         if not self._validate_bounds(vault_state, total_assets_raw):
             return SettlementResult(success=False)
 
+        # Share-backed AUM invariant (VIB-5672, vault ship-gate #1). Refuse to
+        # propose a NAV that materially exceeds the share-backed base = on-chain
+        # totalAssets + pending deposit assets. This runs on every FRESH settlement
+        # (IDLE start), including the very first one (boot-time coverage), and
+        # BEFORE updateNewTotalAssets is submitted -- the whole point is to never
+        # propose a mis-priced NAV. Resume paths re-propose an already-validated
+        # value and are intentionally not re-checked, mirroring _validate_bounds.
+        if not self._validate_share_backed_aum(vault_state, total_assets_raw):
+            return SettlementResult(success=False)
+
         # Execute full propose -> settle flow
         vault_state.last_proposed_total_assets = total_assets_raw
         return await self._execute_propose_and_settle(strategy, vault_state, total_assets_raw)
@@ -411,6 +428,129 @@ class VaultLifecycleManager:
             vault_state.settlement_phase = SettlementPhase.IDLE
             self.save_vault_state()
             return False
+        return True
+
+    def _is_live_guard_mode(self) -> bool:
+        """Return True when the share-backed AUM guard must fail closed (refuse).
+
+        Live mode refuses a mis-priced propose (real funds at stake). Paper /
+        dry_run modes log the violation and continue, mirroring the accounting
+        layer's mode-aware writes (blueprint 27). Any unrecognised label fails
+        safe as live.
+        """
+        return self._execution_mode not in ("paper", "dry_run")
+
+    def _share_backed_base(self) -> int | None:
+        """Read the share-backed base = on-chain totalAssets + pending deposits.
+
+        Both legs are the ONLY capital the vault has minted (or is about to mint)
+        shares against: ``totalAssets`` is settled AUM, pending deposits are
+        depositor capital in-flight through requestDeposit that will settle into
+        shares. Read-only: does NOT mutate vault_state (version-aware pending-deposit
+        accounting stays owned by ``_compute_total_assets``). Returns None if either
+        on-chain read fails -- Empty != Zero: an unreadable value is an error, never
+        a silent 0.
+        """
+        try:
+            total_assets = self._vault_sdk.get_total_assets(self._config.vault_address)
+            pending_deposits = self._vault_sdk.get_pending_deposits(self._config.vault_address)
+        except Exception:
+            logger.error(
+                "Share-backed AUM guard: could not read on-chain totalAssets / pending "
+                "deposits for vault %s; cannot validate the invariant",
+                self._config.vault_address,
+                exc_info=True,
+            )
+            return None
+        # Defensive Empty != Zero: a None from a stubbed / degraded SDK is unmeasured,
+        # not a measured 0. Treat it as an unreadable value rather than base += 0.
+        if total_assets is None or pending_deposits is None:
+            logger.error(
+                "Share-backed AUM guard: on-chain totalAssets (%r) or pending deposits "
+                "(%r) unreadable for vault %s; cannot validate the invariant",
+                total_assets,
+                pending_deposits,
+                self._config.vault_address,
+            )
+            return None
+        return total_assets + pending_deposits
+
+    def _validate_share_backed_aum(self, vault_state: VaultState, proposed_total_assets: int) -> bool:
+        """Refuse to propose a NAV that materially exceeds share-backed AUM (VIB-5672).
+
+        The vault share price = ``totalAssets / totalSupply``; shares are only minted
+        for capital that flowed through ``requestDeposit`` -> settle. If the Safe also
+        holds non-depositor capital, the default ``valuate()``-of-the-whole-Safe inflates
+        the proposed NAV, letting depositors' shares be priced against -- and redeemed
+        for -- capital they do not own, and minting fee-shares against phantom AUM
+        (irreversible). Operating rule (Option A, ratified): the vault Safe holds ONLY
+        share-backed AUM; the manager gets skin-in-the-game by depositing like anyone
+        else. See ``docs/internal/blueprints/24-vault-integration.md`` §Share-Backed AUM.
+
+        The invariant, in raw asset units::
+
+            proposed <= (totalAssets + pending_deposits) * (1 + tol_bps/1e4) + abs_floor
+
+        A material excess implies commingled non-depositor capital that never flowed
+        through the deposit lane. Failure semantics are mode-aware: live REFUSES (returns
+        False, settlement does not proceed, state machine stays resumable at IDLE);
+        paper / dry_run log ERROR and continue (return True). An unreadable on-chain base
+        is likewise a refusal in live mode.
+
+        Returns:
+            True to proceed with the propose, False to refuse it (live mode).
+        """
+        base = self._share_backed_base()
+        if base is None:
+            # Unreadable base -> cannot validate. Fail safe (refuse in live).
+            return self._resolve_guard_failure(
+                vault_state,
+                "share-backed base unreadable (on-chain totalAssets / pending deposits)",
+            )
+
+        tol_bps = self._config.nav_share_backed_tolerance_bps
+        abs_floor = self._config.nav_share_backed_abs_floor
+        allowed_max = base + (base * tol_bps) // 10000 + abs_floor
+
+        if proposed_total_assets <= allowed_max:
+            logger.debug(
+                "Share-backed AUM guard passed: proposed=%d <= allowed=%d (base=%d, tol=%d bps, floor=%d)",
+                proposed_total_assets,
+                allowed_max,
+                base,
+                tol_bps,
+                abs_floor,
+            )
+            return True
+
+        excess = proposed_total_assets - base
+        reason = (
+            f"proposed NAV {proposed_total_assets} exceeds share-backed base {base} "
+            f"(totalAssets + pending deposits) by {excess} > tolerance "
+            f"({tol_bps} bps + floor {abs_floor}); allowed_max={allowed_max}. "
+            f"Non-depositor capital appears commingled in the vault Safe -- the Safe "
+            f"must hold ONLY share-backed AUM (VIB-5672)"
+        )
+        return self._resolve_guard_failure(vault_state, reason)
+
+    def _resolve_guard_failure(self, vault_state: VaultState, reason: str) -> bool:
+        """Apply mode-aware failure semantics for a share-backed AUM guard violation.
+
+        Live mode: log ERROR, reset to IDLE (state machine stays safe / resumable),
+        refuse the propose (return False). Paper / dry_run: log ERROR and continue
+        (return True) so a mis-priced propose is surfaced loudly but does not halt a
+        simulation where no real funds move.
+        """
+        if self._is_live_guard_mode():
+            logger.error("Share-backed AUM invariant violated (refusing settlement): %s", reason)
+            vault_state.settlement_phase = SettlementPhase.IDLE
+            self.save_vault_state()
+            return False
+        logger.error(
+            "Share-backed AUM invariant violated (%s mode: continuing): %s",
+            self._execution_mode,
+            reason,
+        )
         return True
 
     async def _execute_propose_and_settle(

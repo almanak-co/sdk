@@ -74,6 +74,13 @@ def _make_manager(
     sdk.get_silo_address.return_value = "0x2222222222222222222222222222222222222222"
     sdk.get_underlying_balance.return_value = 0
 
+    # Share-backed AUM guard defaults (VIB-5672). Default the on-chain reads to a
+    # share-backed base far above any test valuation, so the invariant is a no-op for
+    # state-machine tests. Dedicated guard tests (TestShareBackedAumGuard) set small
+    # bases to exercise the refuse / continue paths.
+    sdk.get_total_assets.return_value = 10**30
+    sdk.get_pending_deposits.return_value = 0
+
     manager = VaultLifecycleManager(
         vault_config=config,
         vault_sdk=sdk,
@@ -491,8 +498,11 @@ class TestVersionAwareAccounting:
             result = asyncio.run(manager.run_settlement_cycle(strategy))
 
         assert result.new_total_assets == 10_000_000
-        # Should NOT have called get_pending_deposits
-        assert not manager._vault_sdk.get_pending_deposits.called
+        # V0.5.0 NAV excludes pending deposits: the proposed value equals valuate()
+        # directly (10 USDC), NOT valuate() + pending. (The share-backed AUM guard
+        # (VIB-5672) does read pending deposits for its invariant base, so the old
+        # "get_pending_deposits never called" assertion no longer holds -- assert the
+        # accounting *value* excludes pending instead of the read count.)
 
     def test_pre_v050_adds_pending_deposits(self):
         """Pre-V0.5.0: Pending deposits are added to total assets."""
@@ -1198,3 +1208,223 @@ class TestRedeemLegGating:
         # Exactly: propose #1 -> settleDeposit -> propose #2 -> settleRedeem.
         assert call_order == ["propose", "settle_deposit", "propose", "settle_redeem"]
         assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE
+
+
+class TestShareBackedAumGuard:
+    """Share-backed AUM invariant (VIB-5672, vault ship-gate #1).
+
+    The vault Safe must hold ONLY share-backed AUM. The settlement-time guard refuses
+    to propose a NAV that materially exceeds the share-backed base = on-chain
+    ``totalAssets`` + pending deposits. Failure semantics are mode-aware: live REFUSES,
+    paper / dry_run log ERROR and continue.
+    """
+
+    @staticmethod
+    def _idle_state(last_total_assets: int) -> VaultState:
+        """A vault that has settled at least once and is now IDLE, interval elapsed."""
+        return VaultState(
+            initialized=True,
+            last_total_assets=last_total_assets,
+            settlement_phase=SettlementPhase.IDLE,
+            last_valuation_time=datetime.now(UTC) - timedelta(hours=2),
+        )
+
+    @staticmethod
+    def _run(manager, strategy):
+        with patch("almanak.framework.vault.lifecycle.get_token_resolver") as mock_resolver:
+            mock_resolver.return_value.get_decimals.return_value = 6
+            return asyncio.run(manager.run_settlement_cycle(strategy))
+
+    def test_commingled_manager_seed_refused_in_live_mode(self):
+        """The exact VIB-5667 E2E: 200,000 USDC manager seed + 2,000 USDC depositor.
+
+        On-chain settled obligations are 2,000 USDC but valuate()-of-the-whole-Safe
+        proposes 202,000. The guard must FIRE (refuse the propose) in live mode.
+        """
+        # Generous bounds isolate the share-backed guard from the change-bps bounds.
+        manager = _make_manager(
+            vault_config=_make_config(version="0.5.0", max_valuation_change_up_bps=100_000_000),
+            vault_state=self._idle_state(last_total_assets=2_000_000_000),  # 2,000 USDC
+        )
+        # Share-backed base: only 2,000 USDC of depositor capital, no pending deposits.
+        manager._vault_sdk.get_total_assets.return_value = 2_000_000_000
+        manager._vault_sdk.get_pending_deposits.return_value = 0
+
+        strategy = _make_strategy()
+        strategy.create_market_snapshot.return_value = _make_market(underlying_price=Decimal("1.0"))
+        strategy.valuate.return_value = Decimal("202000")  # 200k seed + 2k depositor
+
+        result = self._run(manager, strategy)
+
+        assert result.success is False
+        # Refused BEFORE any on-chain propose was submitted.
+        manager._execution_orchestrator.execute.assert_not_called()
+        # State machine stays safe / resumable at IDLE.
+        assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE
+
+    def test_legitimate_pnl_within_tolerance_passes(self):
+        """2% inter-settlement PnL is legitimate growth and must NOT fire the guard."""
+        manager = _make_manager(
+            vault_config=_make_config(version="0.5.0"),
+            vault_state=self._idle_state(last_total_assets=2_000_000_000),
+        )
+        manager._vault_sdk.get_total_assets.return_value = 2_000_000_000  # 2,000 USDC base
+        manager._vault_sdk.get_pending_deposits.return_value = 0
+        manager._execution_orchestrator.execute = AsyncMock(
+            return_value=_make_execution_result(success=True)
+        )
+
+        strategy = _make_strategy()
+        strategy.create_market_snapshot.return_value = _make_market(underlying_price=Decimal("1.0"))
+        strategy.valuate.return_value = Decimal("2040")  # +2% PnL, within 5% default tolerance
+
+        result = self._run(manager, strategy)
+
+        assert result.success is True
+        manager._execution_orchestrator.execute.assert_called()  # propose proceeded
+
+    def test_pending_deposits_counted_in_base_no_false_fire(self):
+        """A deposit in-flight lifts the base; a NAV covered by totalAssets + pending passes.
+
+        Without counting pending deposits the proposed NAV would exceed the tolerance and
+        fire; counting them keeps a legitimate deposit-in-flight from false-firing.
+        """
+        manager = _make_manager(
+            vault_config=_make_config(version="0.5.0", max_valuation_change_up_bps=100_000_000),
+            vault_state=self._idle_state(last_total_assets=2_000_000_000),
+        )
+        manager._vault_sdk.get_total_assets.return_value = 2_000_000_000  # 2,000 settled
+        manager._vault_sdk.get_pending_deposits.return_value = 1_000_000_000  # 1,000 in-flight
+        manager._execution_orchestrator.execute = AsyncMock(
+            return_value=_make_execution_result(success=True)
+        )
+
+        strategy = _make_strategy()
+        strategy.create_market_snapshot.return_value = _make_market(underlying_price=Decimal("1.0"))
+        # 2,900 USDC: exceeds 2,000 * 1.05 (would fire), but <= (2,000 + 1,000) * 1.05.
+        strategy.valuate.return_value = Decimal("2900")
+
+        result = self._run(manager, strategy)
+
+        assert result.success is True
+        manager._vault_sdk.get_pending_deposits.assert_called()
+        manager._execution_orchestrator.execute.assert_called()
+
+    def test_commingled_seed_paper_mode_logs_and_continues(self, caplog):
+        """Paper mode surfaces the violation loudly but does NOT halt the settlement."""
+        manager = _make_manager(
+            vault_config=_make_config(version="0.5.0", max_valuation_change_up_bps=100_000_000),
+            vault_state=self._idle_state(last_total_assets=2_000_000_000),
+        )
+        manager._execution_mode = "paper"
+        manager._vault_sdk.get_total_assets.return_value = 2_000_000_000
+        manager._vault_sdk.get_pending_deposits.return_value = 0
+        manager._execution_orchestrator.execute = AsyncMock(
+            return_value=_make_execution_result(success=True)
+        )
+
+        strategy = _make_strategy()
+        strategy.create_market_snapshot.return_value = _make_market(underlying_price=Decimal("1.0"))
+        strategy.valuate.return_value = Decimal("202000")
+
+        with caplog.at_level("ERROR"):
+            result = self._run(manager, strategy)
+
+        # Continued despite the violation (no real funds move in paper mode).
+        assert result.success is True
+        manager._execution_orchestrator.execute.assert_called()
+        assert any("Share-backed AUM invariant violated" in r.message for r in caplog.records)
+
+    def test_tolerance_bps_config_plumbing(self):
+        """A higher configured tolerance admits a proposal a tighter tolerance rejects."""
+        base = 2_000_000_000
+        # 15% over base: fires at the 5% default, passes at a 2000 bps (20%) tolerance.
+        proposed_usd = Decimal("2300")
+
+        tight = _make_manager(
+            vault_config=_make_config(version="0.5.0", max_valuation_change_up_bps=100_000_000),
+            vault_state=self._idle_state(last_total_assets=base),
+        )
+        tight._vault_sdk.get_total_assets.return_value = base
+        tight._vault_sdk.get_pending_deposits.return_value = 0
+        tight._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
+        strategy_t = _make_strategy()
+        strategy_t.create_market_snapshot.return_value = _make_market(underlying_price=Decimal("1.0"))
+        strategy_t.valuate.return_value = proposed_usd
+        assert self._run(tight, strategy_t).success is False  # default 500 bps -> refuse
+
+        loose = _make_manager(
+            vault_config=_make_config(
+                version="0.5.0",
+                max_valuation_change_up_bps=100_000_000,
+                nav_share_backed_tolerance_bps=2000,
+            ),
+            vault_state=self._idle_state(last_total_assets=base),
+        )
+        loose._vault_sdk.get_total_assets.return_value = base
+        loose._vault_sdk.get_pending_deposits.return_value = 0
+        loose._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
+        strategy_l = _make_strategy()
+        strategy_l.create_market_snapshot.return_value = _make_market(underlying_price=Decimal("1.0"))
+        strategy_l.valuate.return_value = proposed_usd
+        assert self._run(loose, strategy_l).success is True  # 2000 bps -> allowed
+
+    def test_abs_floor_config_plumbing_covers_dust_on_zero_base(self):
+        """abs_floor cushions a tiny proposal when the share-backed base is zero."""
+        # No settled AUM and no pending deposits -> base 0. A tiny proposal would fire on
+        # relative tolerance alone (0 * anything = 0); abs_floor lets dust through.
+        manager = _make_manager(
+            vault_config=_make_config(
+                version="0.5.0",
+                max_valuation_change_up_bps=100_000_000,
+                nav_share_backed_abs_floor=1_000_000,  # 1 USDC dust floor
+            ),
+            # last_total_assets=0 skips the change-bps bounds check, isolating the
+            # share-backed guard's abs_floor behaviour on a zero base.
+            vault_state=self._idle_state(last_total_assets=0),
+        )
+        manager._vault_sdk.get_total_assets.return_value = 0
+        manager._vault_sdk.get_pending_deposits.return_value = 0
+        manager._execution_orchestrator.execute = AsyncMock(return_value=_make_execution_result(success=True))
+
+        strategy = _make_strategy()
+        strategy.create_market_snapshot.return_value = _make_market(underlying_price=Decimal("1.0"))
+        strategy.valuate.return_value = Decimal("0.5")  # 500,000 raw <= 1,000,000 floor
+
+        assert self._run(manager, strategy).success is True
+
+    def test_empty_not_zero_unreadable_total_assets_refuses_in_live(self):
+        """Empty != Zero: an on-chain read that RAISES is an error, never a silent 0."""
+        manager = _make_manager(
+            vault_config=_make_config(version="0.5.0", max_valuation_change_up_bps=100_000_000),
+            vault_state=self._idle_state(last_total_assets=2_000_000_000),
+        )
+        manager._vault_sdk.get_total_assets.side_effect = RuntimeError("RPC down")
+
+        strategy = _make_strategy()
+        strategy.create_market_snapshot.return_value = _make_market(underlying_price=Decimal("1.0"))
+        strategy.valuate.return_value = Decimal("2040")  # would pass if base read as 0/ok
+
+        result = self._run(manager, strategy)
+
+        assert result.success is False
+        manager._execution_orchestrator.execute.assert_not_called()
+        assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE
+
+    def test_empty_not_zero_none_pending_deposits_refuses_in_live(self):
+        """Empty != Zero: a None from a degraded SDK is unmeasured, not a measured 0."""
+        manager = _make_manager(
+            vault_config=_make_config(version="0.5.0", max_valuation_change_up_bps=100_000_000),
+            vault_state=self._idle_state(last_total_assets=2_000_000_000),
+        )
+        manager._vault_sdk.get_total_assets.return_value = 2_000_000_000
+        manager._vault_sdk.get_pending_deposits.return_value = None  # unmeasured
+
+        strategy = _make_strategy()
+        strategy.create_market_snapshot.return_value = _make_market(underlying_price=Decimal("1.0"))
+        strategy.valuate.return_value = Decimal("2040")
+
+        result = self._run(manager, strategy)
+
+        assert result.success is False
+        manager._execution_orchestrator.execute.assert_not_called()

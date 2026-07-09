@@ -71,6 +71,12 @@ def _make_manager(
     sdk.get_silo_address.return_value = "0x2222222222222222222222222222222222222222"
     sdk.get_underlying_balance.return_value = 0
 
+    # Share-backed AUM guard defaults (VIB-5672). Base far above any test valuation so
+    # the invariant is a no-op for the resumability state-machine tests. SETTLING-resume
+    # tests override get_total_assets explicitly for their own on-chain checks.
+    sdk.get_total_assets.return_value = 10**30
+    sdk.get_pending_deposits.return_value = 0
+
     manager = VaultLifecycleManager(
         vault_config=config,
         vault_sdk=sdk,

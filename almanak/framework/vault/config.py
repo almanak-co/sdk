@@ -68,6 +68,39 @@ class VaultConfig(BaseModel):
     auto_settle_redeems: bool = Field(default=True)
     redeem_failure_fatal: bool = Field(default=True)
 
+    # --- Share-backed AUM invariant (VIB-5672, vault ship-gate #1) ---
+    # The vault Safe must hold ONLY share-backed AUM: capital that flowed through
+    # requestDeposit -> settle (Option A, ratified). ``valuate()`` sums the whole
+    # Safe, so any non-depositor capital commingled there (a manager seed, working
+    # capital) inflates the proposed NAV, mis-prices every depositor's shares, and
+    # mints fee-shares against phantom AUM (an irreversible fund-loss path). The
+    # settlement-time guard refuses to propose a NAV that materially exceeds the
+    # share-backed base = on-chain ``totalAssets`` + pending deposit assets.
+    #
+    # NAV legitimately grows with strategy PnL between settlements, so the guard
+    # targets UNEXPLAINED excess only. The tolerance is generous enough to never
+    # fire on plausible inter-settlement PnL, while the 100x commingling case in
+    # the VIB-5667 E2E (200k seed alongside 2k of depositor capital) always fires.
+    nav_share_backed_tolerance_bps: int = Field(
+        default=500,
+        ge=0,
+        description=(
+            "Relative tolerance (basis points) for the share-backed AUM invariant. "
+            "Proposed NAV may exceed on-chain totalAssets + pending deposits by up to "
+            "this fraction before the guard fires; sized to absorb legitimate "
+            "inter-settlement PnL (default 500 bps = 5%)."
+        ),
+    )
+    nav_share_backed_abs_floor: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Absolute floor (RAW underlying token units) added on top of the relative "
+            "tolerance for the share-backed AUM invariant. Cushions dust / rounding on "
+            "a small share-backed base. Decimal-dependent (e.g. 10 USDC = 10_000_000)."
+        ),
+    )
+
 
 @dataclass
 class VaultState:

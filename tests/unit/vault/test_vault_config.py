@@ -52,6 +52,31 @@ class TestVaultConfig:
         assert config.min_valuation_change_down_bps == 500
         assert config.max_valuation_change_up_bps == 1000
         assert config.auto_settle_redeems is True
+        # Share-backed AUM invariant defaults (VIB-5672).
+        assert config.nav_share_backed_tolerance_bps == 500
+        assert config.nav_share_backed_abs_floor == 0
+
+    def test_share_backed_aum_custom_values(self):
+        config = VaultConfig(
+            vault_address="0x1234567890abcdef1234567890abcdef12345678",
+            valuator_address="0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            underlying_token="USDC",
+            nav_share_backed_tolerance_bps=1500,
+            nav_share_backed_abs_floor=10_000_000,
+        )
+        assert config.nav_share_backed_tolerance_bps == 1500
+        assert config.nav_share_backed_abs_floor == 10_000_000
+
+    def test_share_backed_aum_negative_values_rejected(self):
+        base = {
+            "vault_address": "0x1234567890abcdef1234567890abcdef12345678",
+            "valuator_address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            "underlying_token": "USDC",
+        }
+        with pytest.raises(Exception):
+            VaultConfig(**base, nav_share_backed_tolerance_bps=-1)
+        with pytest.raises(Exception):
+            VaultConfig(**base, nav_share_backed_abs_floor=-1)
 
     def test_custom_values(self):
         config = VaultConfig(

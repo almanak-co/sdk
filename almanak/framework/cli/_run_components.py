@@ -1142,6 +1142,10 @@ def _maybe_auto_deploy_vault(
         initial_vault_state=initial_vault_state,
         persistence_callback=_persist_vault_state,
         receipt_parser_protocol=vault_protocol,
+        # Mode-aware failure semantics for the share-backed AUM guard (VIB-5672):
+        # dry-run surfaces a violation loudly but continues; live refuses. The local
+        # CLI exposes only dry-run here; live is the safe default for real runs.
+        execution_mode="dry_run" if effective_dry_run else "live",
     )
     click.echo(
         f"  Vault lifecycle initialized: "
