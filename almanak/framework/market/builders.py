@@ -128,14 +128,33 @@ class MarketSnapshotBuilder:
         # All four route through the gateway (no strategy-container egress). A
         # strategy may inject its own via the private attribute; otherwise these
         # are built from the wired gateway_client and the shared pool registry.
-        # pool_history_reader is deliberately NOT wired here — VIB-4755 D-4 gates
-        # the live cut-over on VIB-4730 (hosted egress) + VIB-4863 (TheGraph API
-        # key); the accessor stays raising "not configured" until those land.
-        # yield_opportunities() stays deferred too — there is no gateway Yield
-        # service in the proto (a new service, tracked separately).
+        # yield_opportunities() stays deferred — there is no gateway Yield
+        # service in the proto (a new service, tracked separately) and the
+        # framework YieldAggregator owns direct HTTP egress, which the gateway
+        # boundary forbids in the strategy container. The accessor raises a
+        # documented "not configured" error naming the live alternatives.
         pool_reserve_reader, liquidity_depth_reader, slippage_estimator, rate_history_reader = (
             _build_gateway_rpc_readers(strategy, gateway_client, pool_reader_registry)
         )
+
+        # pool_history() is now live (VIB-4757). The reader is a thin gRPC
+        # client over the gateway's PoolHistoryService. All upstream egress
+        # (The Graph / DefiLlama / CoinGecko Onchain) happens gateway-side —
+        # same boundary posture as pool_analytics_reader above. The VIB-4755
+        # D-4 gate is resolved: GetPoolHistory was exercised for every
+        # registry-registered (chain, protocol) pair and each returned rows
+        # via the CoinGecko Onchain provider using the gateway's existing
+        # COINGECKO_API_KEY — the same key + egress class the always-on
+        # PoolAnalyticsService already uses, so no new hosted egress opens.
+        # (Repeatable harness: tests/smoke/test_pool_history_live.py.)
+        # A strategy may inject its own reader via `_pool_history_reader`
+        # (e.g. for tests); when no gateway_client is available the reader
+        # stays None so the accessor raises a clear "not configured" error.
+        pool_history_reader = getattr(strategy, "_pool_history_reader", None)
+        if pool_history_reader is None and gateway_client is not None:
+            from almanak.framework.data.pools.history import PoolHistoryReader
+
+            pool_history_reader = PoolHistoryReader(gateway_client=gateway_client)
 
         # T3-B (VIB-4844): stateless calculators are pure Python — no gateway,
         # no egress, no secrets. Construct them directly so the documented
@@ -161,6 +180,7 @@ class MarketSnapshotBuilder:
                 aave_health_factor_provider=aave_health_factor_provider
                 or getattr(strategy, "_aave_health_factor_provider", None),
                 pool_analytics_reader=pool_analytics_reader,
+                pool_history_reader=pool_history_reader,
                 price_aggregator=price_aggregator,
                 pool_reader_registry=pool_reader_registry,
                 pool_reader=pool_reserve_reader,
@@ -194,6 +214,7 @@ class MarketSnapshotBuilder:
             funding_rate_provider=getattr(strategy, "funding_rate_provider", None)
             or getattr(strategy, "_funding_rate_provider", None),
             pool_analytics_reader=pool_analytics_reader,
+            pool_history_reader=pool_history_reader,
             price_aggregator=price_aggregator,
             pool_reader_registry=pool_reader_registry,
             pool_reader=pool_reserve_reader,
@@ -231,9 +252,9 @@ class MarketSnapshotBuilder:
 
         VIB-4728 / POOL-7 (VIB-4755) extends the same pattern to pool
         history: ``NullPoolHistoryReader`` is injected for the same
-        determinism reason. ``for_strategy_runner`` does NOT auto-construct
-        the live ``PoolHistoryReader`` (per VIB-4755 D-4: the cut-over is
-        gated on VIB-4730 hosted-egress + VIB-4863 TheGraph API key landing).
+        determinism reason. ``for_strategy_runner`` wires the live
+        ``PoolHistoryReader`` (VIB-4757); the Null reader here keeps
+        backtests deterministic regardless.
         """
         from almanak.framework.data.null_readers import (
             NullLiquidityDepthReader,

@@ -288,11 +288,11 @@ If your `.env` contains `ALMANAK_MAX_GAS_PRICE_GWEI=...`:
 
 ## Pool History Service
 
-Operator tunables for the gateway's historical-pool snapshots service. The service is feature-flagged off by default — see the [PoolHistoryService section in the Gateway API reference](gateway/api-reference.md#poolhistoryservice) for behavior and provider order.
+Operator tunables for the gateway's historical-pool snapshots service. The service ships disabled by default; hosted operators enable it as deployment config once provider egress and keys are provisioned — see the [PoolHistoryService section in the Gateway API reference](gateway/api-reference.md#poolhistoryservice) for behavior and provider order.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED` | Kill-switch (VIB-4728 / POOL-2). Default `false` until POOL-5 wires real providers. When `false`, `GetPoolHistory` returns `UNAVAILABLE`. | `false` |
+| `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED` | Enablement flag (VIB-4728). When `false` (the default), `GetPoolHistory` returns `UNAVAILABLE`; hosted rollout flips it via deployment config after VIB-4730 + VIB-4863. | `false` |
 | `ALMANAK_GATEWAY_POOL_HISTORY_MAX_DAYS_1H` | Soft cap (days) on 1h-resolution requests. Non-positive overrides fall back to the default. | `90` |
 | `ALMANAK_GATEWAY_POOL_HISTORY_MAX_DAYS_4H` | Soft cap (days) on 4h-resolution requests. | `180` |
 | `ALMANAK_GATEWAY_POOL_HISTORY_MAX_DAYS_1D` | Soft cap (days) on 1d-resolution requests. | `730` |

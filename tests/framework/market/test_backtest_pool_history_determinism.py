@@ -70,10 +70,17 @@ def test_for_paper_fork_injects_null_reader():
     assert isinstance(snap._pool_history_reader, NullPoolHistoryReader)
 
 
-def test_for_strategy_runner_does_not_autowire_pool_history_reader():
-    """D-4 lock: for_strategy_runner does NOT auto-construct the live
-    PoolHistoryReader. The cut-over is gated on VIB-4730 hosted-egress +
-    VIB-4863 TheGraph API key landing."""
+def test_for_strategy_runner_without_gateway_client_leaves_reader_unwired():
+    """for_strategy_runner DOES auto-construct the live PoolHistoryReader
+    (VIB-4757) — but only from a wired
+    gateway_client (the reader is a thin gRPC client; all provider egress
+    stays gateway-side). Without a gateway_client no reader exists and the
+    accessor raises the clear "not configured" error — never a silent
+    degrade and never a strategy-container egress path.
+
+    The live-wiring positive case is pinned in
+    ``test_rpc_grpc_provider_wiring_vib4845.py::test_pool_history_wired_on_live_runner``.
+    """
 
     class _Strategy:
         chain = "base"
@@ -82,9 +89,6 @@ def test_for_strategy_runner_does_not_autowire_pool_history_reader():
     snap = MarketSnapshotBuilder.for_strategy_runner(strategy=_Strategy())
     assert snap._pool_history_reader is None
 
-    # Calling .pool_history() on it raises the existing ValueError —
-    # proving the escape hatch is preserved and the hosted-egress path
-    # is NOT silently opened.
     with pytest.raises(ValueError, match=r"No pool history reader configured"):
         snap.pool_history(
             pool_address=_BASE_UNIV3_POOL,

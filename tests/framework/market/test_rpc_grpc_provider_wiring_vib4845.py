@@ -12,9 +12,12 @@ The epic's acceptance is a parametrized sweep: the LIVE path returns real data
 (mock the gateway stub / eth_call) and the BACKTEST path raises
 ``DataSourceUnavailable``. Both halves are asserted here.
 
-Also covers the two explicitly-deferred accessors:
-  - pool_history()        — stays NOT wired (VIB-4755 D-4 / VIB-4730 / VIB-4863).
-  - yield_opportunities() — stays NOT wired (no gateway Yield service in proto).
+Also covers the adjacent accessor wiring:
+  - pool_history()        — LIVE since VIB-4757: for_strategy_runner wires
+    the gateway-backed PoolHistoryReader when a gateway_client is present.
+  - yield_opportunities() — stays NOT wired (no gateway Yield service in
+    proto; the framework YieldAggregator owns direct HTTP egress which the
+    gateway boundary forbids in the strategy container).
 """
 
 from __future__ import annotations
@@ -585,27 +588,62 @@ def test_backtest_pool_reserves_classifies_as_data_unavailable():
 
 
 # --------------------------------------------------------------------------- #
-# 6. Explicitly-deferred accessors stay NOT configured
+# 6. pool_history() is live; yield_opportunities() stays NOT configured
 # --------------------------------------------------------------------------- #
 
 
-def test_pool_history_stays_deferred_on_live_runner():
-    # VIB-4755 D-4: live cut-over gated on VIB-4730 + VIB-4863. for_strategy_runner
-    # injects nothing -> the accessor raises "not configured".
+def test_pool_history_wired_on_live_runner():
+    # VIB-4757: for_strategy_runner wires the gateway-backed
+    # PoolHistoryReader whenever a gateway_client is present —
+    # same boundary posture as pool_analytics_reader (all provider egress is
+    # gateway-side; the framework reader is a thin gRPC client).
+    from almanak.framework.data.pools.history import PoolHistoryReader
+
     strategy = SimpleNamespace(chain="base", wallet_address="0x" + "0" * 40)
     gw = _FakeGatewayClient(eth_call_fn=_crafted_eth_call)
     snap = MarketSnapshotBuilder.for_strategy_runner(strategy=strategy, gateway_client=gw, chain="base")
+    assert isinstance(snap._pool_history_reader, PoolHistoryReader)
+    assert snap._pool_history_reader._gateway_client is gw
+
+
+def test_pool_history_not_configured_without_gateway_client():
+    # No gateway_client -> no reader -> the accessor raises a clear
+    # "not configured" error instead of silently degrading.
+    strategy = SimpleNamespace(chain="base", wallet_address="0x" + "0" * 40)
+    snap = MarketSnapshotBuilder.for_strategy_runner(strategy=strategy, gateway_client=None, chain="base")
     assert snap._pool_history_reader is None
     with pytest.raises(ValueError, match="No pool history reader configured"):
         snap.pool_history("0xpool", protocol="uniswap_v3")
 
 
+def test_pool_history_honors_injected_reader():
+    # A strategy-injected reader (tests / research harnesses) wins over the
+    # auto-constructed one — mirrors the _pool_analytics_reader contract.
+    injected = MagicMock()
+    strategy = SimpleNamespace(
+        chain="base",
+        wallet_address="0x" + "0" * 40,
+        _pool_history_reader=injected,
+    )
+    gw = _FakeGatewayClient(eth_call_fn=_crafted_eth_call)
+    snap = MarketSnapshotBuilder.for_strategy_runner(strategy=strategy, gateway_client=gw, chain="base")
+    assert snap._pool_history_reader is injected
+
+
 def test_yield_opportunities_stays_deferred_on_live_runner():
     # No gateway Yield service in the proto -> no aggregator wired -> accessor
-    # raises "not configured" (tracked as a follow-up new-service ticket).
+    # raises a structured "not configured" error naming the live alternatives
+    # (tracked as a follow-up new-service ticket).
     strategy = SimpleNamespace(chain="base", wallet_address="0x" + "0" * 40)
     gw = _FakeGatewayClient(eth_call_fn=_crafted_eth_call)
     snap = MarketSnapshotBuilder.for_strategy_runner(strategy=strategy, gateway_client=gw, chain="base")
     assert snap._yield_aggregator is None
-    with pytest.raises(ValueError, match="No yield aggregator configured"):
+    with pytest.raises(ValueError, match="No yield aggregator configured") as excinfo:
         snap.yield_opportunities("USDC")
+    # The error must name what IS available so a strategy author can
+    # instantly re-route (pool analytics / lending rates / funding rates).
+    message = str(excinfo.value)
+    assert "not gateway-served yet" in message
+    assert "pool_analytics()" in message
+    assert "lending_rate()" in message
+    assert "funding_rate()" in message

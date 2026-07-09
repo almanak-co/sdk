@@ -4234,6 +4234,12 @@ class MarketSnapshot:
     ) -> DataEnvelope[list[PoolSnapshot]]:
         """Get historical pool state snapshots for backtesting and analytics.
 
+        Live runners route through the gateway's ``PoolHistoryService``:
+        all upstream provider egress happens gateway-side
+        and the envelope's ``meta.source`` names the provider that actually
+        served the rows. Backtest surfaces inject ``NullPoolHistoryReader``
+        so the call fails deterministically under replay.
+
         Args:
             pool_address: Pool contract address.
             chain: Chain name. Defaults to this snapshot's chain.
@@ -4472,6 +4478,19 @@ class MarketSnapshot:
     ) -> DataEnvelope[list[YieldOpportunity]]:
         """Find yield opportunities for a token across protocols and chains.
 
+        .. warning::
+            **Not gateway-served yet.** No runtime surface wires a yield
+            aggregator: the gateway proto has no Yield service, and the
+            framework ``YieldAggregator`` performs direct HTTP egress, which
+            the gateway boundary forbids in the strategy container. Until a
+            gateway Yield service exists, calling this on a runner-built
+            snapshot raises ``ValueError`` naming the live alternatives:
+            ``pool_analytics()`` / ``best_pool()`` (LP APY + TVL),
+            ``lending_rate()`` / ``lending_rate_history()`` (lending APRs),
+            and ``funding_rate()`` / ``funding_rate_history()`` (perp
+            funding). Tests / research harnesses may inject an aggregator
+            via the ``yield_aggregator`` constructor parameter.
+
         Args:
             token: Token symbol.
             chains: Optional list of chains to filter. None means all.
@@ -4482,13 +4501,24 @@ class MarketSnapshot:
             DataEnvelope[list[YieldOpportunity]] sorted by chosen metric.
 
         Raises:
-            ValueError: If no yield aggregator is configured.
-            YieldOpportunitiesUnavailableError: If data cannot be retrieved.
+            ValueError: Always, on runner-built snapshots — no yield
+                aggregator is configured (capability not gateway-served yet;
+                see warning above).
+            YieldOpportunitiesUnavailableError: If an injected aggregator
+                fails to retrieve data.
         """
         from almanak.framework.data.market_snapshot import YieldOpportunitiesUnavailableError
 
         if self._yield_aggregator is None:
-            raise ValueError("No yield aggregator configured for MarketSnapshot")
+            raise ValueError(
+                "No yield aggregator configured for MarketSnapshot: "
+                "yield_opportunities() is not gateway-served yet (the gateway "
+                "has no Yield service, and the strategy container cannot make "
+                "direct HTTP calls). Live alternatives on this snapshot: "
+                "pool_analytics()/best_pool() for LP APY+TVL, "
+                "lending_rate()/lending_rate_history() for lending APRs, "
+                "funding_rate()/funding_rate_history() for perp funding.",
+            )
 
         try:
             return self._yield_aggregator.get_yield_opportunities(

@@ -17,7 +17,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | FundingRateService | 2 | Perpetual funding rates and spreads |
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
 | PoolAnalyticsService | 1 | DEX pool analytics (TVL, volume, fees) for risk-adjusted decisions |
-| PoolHistoryService | 1 | Historical pool snapshots (TVL, volume, fees over time). Feature-flagged off by default; enable via `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true` |
+| PoolHistoryService | 1 | Historical pool snapshots (TVL, volume, fees over time). Disabled by default; hosted rollout enables via `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true` deployment config |
 | RateHistoryService | 8 | Lending APY (live + historical), perp funding history, DEX TWAP (single + series), DEX LWAP (liquidity-weighted spot), DEX volume history, and gas prices (VIB-4859 / W7, VIB-4948). Strategy-side `RateMonitor` / backtesting rate providers are thin gRPC clients of this service. |
 | PolymarketService | 20 | Polymarket CLOB API proxy (market data, orders, positions, price history, trade tape) |
 | EnsoService | 4 | Enso Finance routing and bundling |
@@ -1400,11 +1400,12 @@ rpc GetPoolAnalytics(PoolAnalyticsRequest) returns (PoolAnalyticsResponse)
 Historical pool snapshots — TVL, volume, fee revenue, and per-token reserves
 over time at 1h / 4h / 1d resolution.
 
-The service is **feature-flagged off by default** (`pool_history_enabled=False`
-in `GatewaySettings`). Set `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true` on the
-gateway to enable. When the flag is off the handler returns `UNAVAILABLE` with
-a message pointing at VIB-4728; when the flag is on but providers are not yet
-wired (POOL-2 → POOL-5 window) it returns `UNIMPLEMENTED`.
+The service is **disabled by default** (`pool_history_enabled=False` in
+`GatewaySettings`): the hosted rollout enables it via
+`ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true` as deployment config once
+provider egress and keys are provisioned (VIB-4730 + VIB-4863). When the
+flag is off the handler returns `UNAVAILABLE` with a message pointing at
+VIB-4728.
 
 ### GetPoolHistory
 

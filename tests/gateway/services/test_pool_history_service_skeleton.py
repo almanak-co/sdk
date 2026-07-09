@@ -53,12 +53,12 @@ def _request() -> gateway_pb2.PoolHistoryRequest:
 
 
 # ============================================================================
-# Kill-switch: default-disabled -> UNAVAILABLE
+# Kill-switch: disabled -> UNAVAILABLE
 # ============================================================================
 
 
 def test_killswitch_off_returns_unavailable_with_vib_pointer():
-    """ALMANAK_GATEWAY_POOL_HISTORY_ENABLED default false: every call
+    """ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=false: every call
     returns UNAVAILABLE with a message pointing at the umbrella epic."""
     settings = GatewaySettings(pool_history_enabled=False)
     servicer = PoolHistoryServiceServicer(settings)
@@ -80,9 +80,14 @@ def test_killswitch_off_returns_unavailable_with_vib_pointer():
     assert len(response.snapshots) == 0
 
 
-def test_killswitch_default_is_false():
-    """GatewaySettings.pool_history_enabled MUST default to false. POOL-9
-    flips this; if it flips earlier by accident, this test catches it."""
+def test_killswitch_default_is_false(monkeypatch):
+    """GatewaySettings.pool_history_enabled defaults to FALSE: the hosted
+    rollout contract (vib4730-coordination-evidence.md) gates the flip on
+    VIB-4730 + VIB-4863 (TheGraph egress allowlist + key provisioning) —
+    SRE enables via ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true as
+    deployment config, never a code default. This pin catches an
+    accidental enabled-by-default flip landing ahead of provisioning."""
+    monkeypatch.delenv("ALMANAK_GATEWAY_POOL_HISTORY_ENABLED", raising=False)
     settings = GatewaySettings()
     assert settings.pool_history_enabled is False
 

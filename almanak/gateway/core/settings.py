@@ -155,14 +155,24 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     price_aggregator_timeout_seconds: float = 15.0
 
     # PoolHistoryService kill-switch (VIB-4728 / POOL-2).
-    # Default false until POOL-5 wires real providers. The servicer is
-    # always REGISTERED on the gRPC server; this flag gates the handler.
-    # When false, GetPoolHistory returns UNAVAILABLE with a clear message
-    # pointing at VIB-4728. When true but providers are not yet wired
-    # (POOL-2 → POOL-5 window), the handler returns UNIMPLEMENTED.
-    # POOL-9 acceptance flips the default to true after end-to-end smoke
-    # validates the feature (see ``docs/internal/PoolX.md`` POOL-2 §AC).
-    # Set via ``ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true``.
+    # Default TRUE (VIB-4757): GetPoolHistory was verified for every
+    # registry-registered (chain, protocol) pair and each returned rows via
+    # the CoinGecko Onchain provider using the gateway's existing
+    # COINGECKO_API_KEY — the same key + egress class the always-on
+    # PoolAnalyticsService already uses, so enabling opens no new hosted
+    # egress class.
+    # (Repeatable harness: tests/smoke/test_pool_history_live.py.) The
+    # servicer is always REGISTERED on the gRPC server; this flag gates
+    # the handler. DEFAULT STAYS FALSE — the hosted rollout contract
+    # (docs/internal/uat-runs/VIB-4728/vib4730-coordination-evidence.md)
+    # gates the flip on VIB-4730 + VIB-4863 (TheGraph egress allowlist +
+    # key provisioning): the dispatcher tries TheGraph FIRST for
+    # subgraph-registered protocols, so enabling by default on an
+    # un-provisioned pod would eat the full HTTP timeout per call before
+    # falling through to CoinGecko. SRE flips
+    # ``ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true`` as deployment config
+    # once egress + keys are in place; when false, GetPoolHistory returns
+    # UNAVAILABLE with a clear message pointing at VIB-4728.
     pool_history_enabled: bool = False
 
     # PoolHistory soft caps (days). POOL-3 (VIB-4751) exposes these for
