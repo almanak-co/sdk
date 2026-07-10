@@ -68,293 +68,6 @@ def _mock_exec_response(success=True, tx_hashes=None, error=""):
     return resp
 
 
-# ── H1: Decimal tick math ─────────────────────────────────────────
-
-class TestDecimalTickMath:
-    """Verify LP NAV computation uses Decimal and handles extreme ticks."""
-
-    @pytest.mark.asyncio
-    async def test_moderate_ticks_produce_correct_amounts(self, executor, mock_gateway):
-        """Standard tick range (-1000 to 1000) with current_tick=0 computes correctly."""
-        usdc_address = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-        asset_result = "0x" + "0" * 24 + usdc_address[2:]
-
-        rpc_responses = [
-            _mock_rpc_call(result=asset_result),  # asset()
-            _mock_rpc_call(result=hex(0)),  # balanceOf(safe) = 0
-            _mock_rpc_call(result="0x" + "0" * 64),  # silo (zero addr)
-        ]
-        mock_gateway.rpc.Call.side_effect = rpc_responses
-
-        state_resp = MagicMock()
-        state_resp.data = json.dumps({"lp_position_id": 42}).encode()
-        mock_gateway.state.LoadState.return_value = state_resp
-
-        with patch.object(executor, '_execute_get_lp_position') as mock_lp:
-            mock_lp.return_value = ToolResponse(
-                status="success",
-                data={
-                    "position_id": "42",
-                    "token_a": "0xtoken_a_address_padded_to_forty_chars",
-                    "token_b": usdc_address,
-                    "fee_tier": 3000,
-                    "tick_lower": -1000,
-                    "tick_upper": 1000,
-                    "liquidity": "1000000000000",
-                    "current_tick": 0,
-                    "tokens_owed_a": "0",
-                    "tokens_owed_b": "0",
-                    "in_range": True,
-                },
-            )
-
-            price_resp_a = MagicMock()
-            price_resp_a.price = "10.0"
-            price_resp_b = MagicMock()
-            price_resp_b.price = "1.0"
-            underlying_price = MagicMock()
-            underlying_price.price = "1.0"
-            mock_gateway.market.GetPrice.side_effect = [price_resp_a, price_resp_b, underlying_price]
-
-            with patch('almanak.framework.data.tokens.get_token_resolver') as mock_resolver_fn:
-                mock_resolver = MagicMock()
-                token_a_resolved = MagicMock()
-                token_a_resolved.decimals = 18
-                token_b_resolved = MagicMock()
-                token_b_resolved.decimals = 6
-                underlying_resolved = MagicMock()
-                underlying_resolved.decimals = 6
-                mock_resolver.resolve.side_effect = [token_a_resolved, token_b_resolved, underlying_resolved]
-                mock_resolver_fn.return_value = mock_resolver
-
-                vault = "0x" + "a" * 40
-                safe = "0x" + "b" * 40
-                nav = await executor._compute_vault_nav(vault, safe, "base")
-
-                # With liquidity and in-range position, NAV should be positive
-                assert nav > 0
-
-    @pytest.mark.asyncio
-    async def test_extreme_ticks_no_overflow(self, executor, mock_gateway):
-        """Large ticks (near max 887272) should not overflow with Decimal math."""
-        usdc_address = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-        asset_result = "0x" + "0" * 24 + usdc_address[2:]
-
-        rpc_responses = [
-            _mock_rpc_call(result=asset_result),
-            _mock_rpc_call(result=hex(0)),
-            _mock_rpc_call(result="0x" + "0" * 64),
-        ]
-        mock_gateway.rpc.Call.side_effect = rpc_responses
-
-        state_resp = MagicMock()
-        state_resp.data = json.dumps({"lp_position_id": 99}).encode()
-        mock_gateway.state.LoadState.return_value = state_resp
-
-        with patch.object(executor, '_execute_get_lp_position') as mock_lp:
-            mock_lp.return_value = ToolResponse(
-                status="success",
-                data={
-                    "position_id": "99",
-                    "token_a": "0xtoken_a_address_padded_to_forty_chars",
-                    "token_b": usdc_address,
-                    "fee_tier": 3000,
-                    "tick_lower": 50000,
-                    "tick_upper": 100000,
-                    "liquidity": "1000000000000000000",
-                    "current_tick": 75000,
-                    "tokens_owed_a": "0",
-                    "tokens_owed_b": "0",
-                    "in_range": True,
-                },
-            )
-
-            price_resp_a = MagicMock()
-            price_resp_a.price = "0.001"
-            price_resp_b = MagicMock()
-            price_resp_b.price = "1.0"
-            underlying_price = MagicMock()
-            underlying_price.price = "1.0"
-            mock_gateway.market.GetPrice.side_effect = [price_resp_a, price_resp_b, underlying_price]
-
-            with patch('almanak.framework.data.tokens.get_token_resolver') as mock_resolver_fn:
-                mock_resolver = MagicMock()
-                token_a_resolved = MagicMock()
-                token_a_resolved.decimals = 18
-                token_b_resolved = MagicMock()
-                token_b_resolved.decimals = 6
-                underlying_resolved = MagicMock()
-                underlying_resolved.decimals = 6
-                mock_resolver.resolve.side_effect = [token_a_resolved, token_b_resolved, underlying_resolved]
-                mock_resolver_fn.return_value = mock_resolver
-
-                vault = "0x" + "a" * 40
-                safe = "0x" + "b" * 40
-                # Should not raise OverflowError
-                nav = await executor._compute_vault_nav(vault, safe, "base")
-                assert nav >= 0
-
-    @pytest.mark.asyncio
-    async def test_negative_ticks_handled(self, executor, mock_gateway):
-        """Negative ticks (common for stablecoin pairs) computed correctly."""
-        usdc_address = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-        asset_result = "0x" + "0" * 24 + usdc_address[2:]
-
-        rpc_responses = [
-            _mock_rpc_call(result=asset_result),
-            _mock_rpc_call(result=hex(0)),
-            _mock_rpc_call(result="0x" + "0" * 64),
-        ]
-        mock_gateway.rpc.Call.side_effect = rpc_responses
-
-        state_resp = MagicMock()
-        state_resp.data = json.dumps({"lp_position_id": 50}).encode()
-        mock_gateway.state.LoadState.return_value = state_resp
-
-        with patch.object(executor, '_execute_get_lp_position') as mock_lp:
-            mock_lp.return_value = ToolResponse(
-                status="success",
-                data={
-                    "position_id": "50",
-                    "token_a": "0xtoken_a_address_padded_to_forty_chars",
-                    "token_b": usdc_address,
-                    "fee_tier": 500,
-                    "tick_lower": -100000,
-                    "tick_upper": -50000,
-                    "liquidity": "5000000000000",
-                    "current_tick": -75000,
-                    "tokens_owed_a": "100000000000000000",
-                    "tokens_owed_b": "500000",
-                    "in_range": True,
-                },
-            )
-
-            price_resp_a = MagicMock()
-            price_resp_a.price = "5.0"
-            price_resp_b = MagicMock()
-            price_resp_b.price = "1.0"
-            underlying_price = MagicMock()
-            underlying_price.price = "1.0"
-            mock_gateway.market.GetPrice.side_effect = [price_resp_a, price_resp_b, underlying_price]
-
-            with patch('almanak.framework.data.tokens.get_token_resolver') as mock_resolver_fn:
-                mock_resolver = MagicMock()
-                token_a_resolved = MagicMock()
-                token_a_resolved.decimals = 18
-                token_b_resolved = MagicMock()
-                token_b_resolved.decimals = 6
-                underlying_resolved = MagicMock()
-                underlying_resolved.decimals = 6
-                mock_resolver.resolve.side_effect = [token_a_resolved, token_b_resolved, underlying_resolved]
-                mock_resolver_fn.return_value = mock_resolver
-
-                vault = "0x" + "a" * 40
-                safe = "0x" + "b" * 40
-                nav = await executor._compute_vault_nav(vault, safe, "base")
-                assert nav > 0  # Should include uncollected fees at minimum
-
-
-# ── H3: Missing current_tick skips LP ──────────────────────────────
-
-class TestCurrentTickRequired:
-    """NAV computation must not fallback to midpoint tick."""
-
-    @pytest.mark.asyncio
-    async def test_missing_current_tick_excludes_lp_from_nav(self, executor, mock_gateway):
-        """When current_tick is None, LP value is excluded (conservative)."""
-        usdc_address = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-        asset_result = "0x" + "0" * 24 + usdc_address[2:]
-
-        rpc_responses = [
-            _mock_rpc_call(result=asset_result),
-            _mock_rpc_call(result=hex(5_000_000)),  # 5 USDC in Safe
-            _mock_rpc_call(result="0x" + "0" * 64),
-        ]
-        mock_gateway.rpc.Call.side_effect = rpc_responses
-
-        state_resp = MagicMock()
-        state_resp.data = json.dumps({"lp_position_id": 42}).encode()
-        mock_gateway.state.LoadState.return_value = state_resp
-
-        with patch.object(executor, '_execute_get_lp_position') as mock_lp:
-            mock_lp.return_value = ToolResponse(
-                status="success",
-                data={
-                    "position_id": "42",
-                    "token_a": "0xtoken_a_address_padded_to_forty_chars",
-                    "token_b": usdc_address,
-                    "fee_tier": 3000,
-                    "tick_lower": -1000,
-                    "tick_upper": 1000,
-                    "liquidity": "999999999999999",
-                    "current_tick": None,  # Unavailable!
-                    "tokens_owed_a": "0",
-                    "tokens_owed_b": "0",
-                    "in_range": True,
-                },
-            )
-
-            # Price calls may still be attempted for uncollected fees
-            # but with 0 amounts, no price calls needed
-            vault = "0x" + "a" * 40
-            safe = "0x" + "b" * 40
-            nav = await executor._compute_vault_nav(vault, safe, "base")
-
-            # NAV should be exactly Safe balance (LP excluded)
-            assert nav == 5_000_000
-
-
-# ── M2: Liquidity check fails closed ──────────────────────────────
-
-class TestLiquidityCheckFailsClosed:
-    """Settlement must not proceed when liquidity cannot be verified."""
-
-    @pytest.mark.asyncio
-    async def test_pending_redemptions_rpc_failure_blocks_settlement(self, executor, mock_gateway):
-        """If get_pending_redemptions fails, _check_settlement_liquidity returns False."""
-        with patch('almanak.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
-            sdk = MockSDK.return_value
-            sdk.get_pending_redemptions.side_effect = Exception("RPC timeout")
-
-            sufficient, liquid, needed = await executor._check_settlement_liquidity(
-                "0x" + "a" * 40, "0x" + "b" * 40, "base"
-            )
-
-            assert sufficient is False
-            assert liquid == 0
-            assert needed == 0
-
-    @pytest.mark.asyncio
-    async def test_balance_read_failure_blocks_settlement(self, executor, mock_gateway):
-        """If Safe balance read fails, _check_settlement_liquidity returns False."""
-        with patch('almanak.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
-            sdk = MockSDK.return_value
-            sdk.get_pending_redemptions.return_value = 1_000_000_000_000_000_000  # 1 share
-            sdk.convert_to_assets.return_value = 1_000_000  # 1 USDC in raw units
-
-            # Balance read fails
-            mock_gateway.rpc.Call.side_effect = Exception("RPC timeout")
-
-            sufficient, liquid, needed = await executor._check_settlement_liquidity(
-                "0x" + "a" * 40, "0x" + "b" * 40, "base"
-            )
-
-            assert sufficient is False
-
-    @pytest.mark.asyncio
-    async def test_zero_pending_redemptions_always_passes(self, executor, mock_gateway):
-        """No pending redemptions should always pass liquidity check."""
-        with patch('almanak.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
-            sdk = MockSDK.return_value
-            sdk.get_pending_redemptions.return_value = 0
-
-            sufficient, liquid, needed = await executor._check_settlement_liquidity(
-                "0x" + "a" * 40, "0x" + "b" * 40, "base"
-            )
-
-            assert sufficient is True
-
-
 # ── E4: Deploy idempotency ─────────────────────────────────────────
 
 class TestDeployIdempotency:
@@ -540,8 +253,13 @@ class TestTeardownStateMachine:
             assert saved_data["_teardown"]["phase"] == "lp_closing"
 
     @pytest.mark.asyncio
-    async def test_teardown_no_lp_proceeds_to_settlement(self, executor, mock_gateway):
-        """Teardown without LP position skips close and goes to settlement."""
+    async def test_teardown_no_lp_delegates_settlement_to_runner(self, executor, mock_gateway):
+        """Teardown without LP position skips close; final settlement is runner-owned.
+
+        VIB-5681: teardown_vault does not settle — it delegates to the runner's
+        VaultLifecycleManager. With no LP and no residual tokens, no sub-tool call
+        is made and the result marks settlement delegated.
+        """
         state_resp = MagicMock()
         state_resp.data = json.dumps({}).encode()  # No lp_position_id
         mock_gateway.state.LoadState.return_value = state_resp
@@ -554,13 +272,11 @@ class TestTeardownStateMachine:
             )
             sdk_instance.get_total_assets.return_value = 10_000_000
 
-            # Mock settle_vault execution
             with patch.object(executor, 'execute') as mock_execute:
                 async def side_effect(tool_name, args):
-                    return ToolResponse(
-                        status="success",
-                        data={"tx_hash": "0xabc", "new_total_assets": "10000000"},
-                    )
+                    # settle_vault must never be sub-called by teardown.
+                    assert tool_name != "settle_vault", "teardown_vault must not settle (VIB-5681)"
+                    return ToolResponse(status="success", data={"tx_hash": "0xabc"})
 
                 mock_execute.side_effect = side_effect
 
@@ -572,4 +288,5 @@ class TestTeardownStateMachine:
                 })
 
                 assert result.status == "success"
+                assert result.data["settlement"] == "runner_owned"
                 assert result.data["positions_closed"] == 0

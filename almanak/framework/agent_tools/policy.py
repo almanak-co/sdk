@@ -88,12 +88,13 @@ _VAULT_LIFECYCLE_TOOLS = frozenset(
 # When allowed_tools is configured, all of these must be permitted for
 # teardown to succeed. Pre-validated at the start of _execute_teardown_vault
 # to give clear errors instead of cryptic mid-teardown failures.
+# settle_vault is intentionally NOT required: final settlement is runner-owned
+# (VaultLifecycleManager), so teardown_vault no longer sub-calls it (VIB-5681).
 TEARDOWN_REQUIRED_TOOLS = frozenset(
     {
         "close_lp_position",
         "swap_tokens",
         "get_balance",
-        "settle_vault",
     }
 )
 

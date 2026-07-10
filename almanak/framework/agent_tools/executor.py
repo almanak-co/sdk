@@ -12,7 +12,7 @@ import json
 import logging
 import time
 import uuid
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import ValidationError
@@ -429,14 +429,6 @@ class ToolExecutor:
 
         # State version tracking for optimistic locking
         self._state_versions: dict[str, int] = {}
-
-        # Vault settlement crash-recovery state (A2)
-        # Mirrors SettlementPhase from vault/config.py but tracked independently
-        # for the agent executor path. Persisted in agent state.
-        self._settlement_phase: str = "idle"  # idle|proposing|proposed|settling|settled
-        self._settlement_proposed_assets: int = 0
-        self._settlement_nonce: int = 0
-        self._vault_epoch_counter: int = 0
 
     def get_filtered_openai_tools(self) -> list[dict]:
         """Return OpenAI tool definitions filtered by the policy's allowed_tools.
@@ -1145,7 +1137,7 @@ class ToolExecutor:
         if tool_name == "deploy_vault":
             return await self._execute_deploy_vault(args)
         if tool_name == "settle_vault":
-            return await self._execute_settle_vault(args)
+            return self._settlement_owned_by_runner("settle_vault")
         if tool_name == "approve_vault_underlying":
             return await self._execute_approve_vault_underlying(args)
         if tool_name == "deposit_vault":
@@ -2051,15 +2043,6 @@ class ToolExecutor:
                         vault_address = deploy_result.vault_address
             except Exception as e:
                 logger.warning("Failed to parse deploy receipt: %s", e)
-
-        # Reset settlement state for the new vault (clear stale data from prior vaults)
-        if not dry_run and vault_address:
-            self._settlement_phase = "idle"
-            self._settlement_nonce = 0
-            self._settlement_proposed_assets = 0
-            self._vault_epoch_counter = 0
-            self._save_settlement_state("idle")
-            logger.info("deploy_vault: reset settlement state for new vault %s", vault_address[:10])
 
         status = "simulated" if dry_run else "success"
         return ToolResponse(
@@ -4351,739 +4334,35 @@ class ToolExecutor:
             },
         )
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
-    async def _compute_vault_nav(self, vault_address: str, safe_address: str, chain: str) -> int:  # noqa: C901
-        """Compute deterministic NAV for a vault by summing Safe's assets.
+    def _settlement_owned_by_runner(self, tool_name: str) -> ToolResponse:
+        """Refuse vault settlement from the agent-tool surface (VIB-5681).
 
-        Sums:
-        1. Safe's underlying token balance
-        2. Silo contract's underlying token balance (pending deposits)
-        3. USD value of LP position tokens (if lp_position_id in agent state)
+        The executor-private settlement state machine was deleted to enforce
+        the single-writer invariant: the propose -> settle-deposit -> settle-redeem
+        cycle (nonce/epoch tracked and crash-resumable) is owned solely by the
+        runner's ``VaultLifecycleManager`` (``almanak/framework/vault/lifecycle.py``).
+        Two settlement implementations driving one on-chain vault nonce/phase is
+        the bug class the ratified vault design eliminates.
 
-        Returns total in raw underlying token units.
+        Returns a typed, stable refusal (``VAULT_SETTLEMENT_UNSUPPORTED``) so an
+        LLM/tool caller gets a parseable answer rather than an unknown-tool
+        failure. Manual operator intervention (force-settle, top-up-then-settle)
+        is being delivered through the ``ax vault`` CLI in a later ticket
+        (VIB-5694); until then the runner settles automatically each interval.
         """
-        from almanak.gateway.proto import gateway_pb2
-
-        sdk = self._vault_capability().build_sdk(self._client, chain)
-
-        # Get underlying token address from vault
-        try:
-            underlying_token = sdk.get_underlying_token_address(vault_address)
-        except Exception as e:
-            logger.warning("Failed to read vault underlying token: %s", e)
-            # Fallback to current total assets
-            return sdk.get_total_assets(vault_address)
-
-        # 1. Read Safe's underlying token balance
-        balance_calldata = "0x70a08231" + safe_address.lower().removeprefix("0x").zfill(64)
-
-        balance_resp = self._client.rpc.Call(
-            gateway_pb2.RpcRequest(
-                chain=chain,
-                method="eth_call",
-                params=json.dumps([{"to": underlying_token, "data": balance_calldata}, "latest"]),
-                id="nav_underlying_balance",
-            ),
-            timeout=30.0,
-        )
-
-        underlying_balance = 0
-        if balance_resp.success:
-            raw = json.loads(balance_resp.result)
-            underlying_balance = int(raw, 16) if raw and raw != "0x" else 0
-
-        # 2. Read silo balance (pending deposits held by vault's silo contract)
-        silo_balance = 0
-        try:
-            silo_address = sdk.get_silo_address(vault_address)
-            if silo_address and silo_address != "0x" + "0" * 40:
-                silo_resp = self._client.rpc.Call(
-                    gateway_pb2.RpcRequest(
-                        chain=chain,
-                        method="eth_call",
-                        params=json.dumps(
-                            [
-                                {
-                                    "to": underlying_token,
-                                    "data": "0x70a08231" + silo_address.lower().removeprefix("0x").zfill(64),
-                                },
-                                "latest",
-                            ]
-                        ),
-                        id="nav_silo_balance",
-                    ),
-                    timeout=30.0,
-                )
-                if silo_resp.success:
-                    raw = json.loads(silo_resp.result)
-                    silo_balance = int(raw, 16) if raw and raw != "0x" else 0
-        except Exception:
-            logger.warning("Could not read silo balance; NAV may understate vault value")
-
-        total_nav = underlying_balance + silo_balance
-
-        # 3. If there's an LP position, add its token values
-        try:
-            deployment_id = self._deployment_id
-            state_resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(deployment_id=deployment_id))
-            agent_state = json.loads(state_resp.data) if state_resp.data else {}
-            lp_position_id = agent_state.get("lp_position_id")
-
-            if lp_position_id:
-                lp_result = await self._execute_get_lp_position(
-                    {
-                        "position_id": str(lp_position_id),
-                        "chain": chain,
-                    }
-                )
-                if lp_result.status == "success" and lp_result.data:
-                    lp_data = lp_result.data
-                    # Get token prices and compute USD value
-                    token_a = lp_data.get("token_a", "")
-                    token_b = lp_data.get("token_b", "")
-
-                    # Compute principal token amounts from liquidity + tick range
-                    lp_usd_value = Decimal("0")
-                    liquidity_raw = int(lp_data.get("liquidity", "0"))
-                    tick_lower = int(lp_data.get("tick_lower", 0))
-                    tick_upper = int(lp_data.get("tick_upper", 0))
-
-                    # current_tick is required for accurate LP valuation --
-                    # a midpoint fallback would produce silently wrong NAV.
-                    current_tick = lp_data.get("current_tick")
-                    if current_tick is not None:
-                        current_tick = int(current_tick)
-                    else:
-                        logger.warning(
-                            "current_tick unavailable for LP position %s; skipping LP value in NAV (conservative)",
-                            lp_position_id,
-                        )
-
-                    # Compute Uni V3 principal amounts using Decimal to avoid
-                    # float precision loss at extreme ticks.
-                    amount0_raw = 0
-                    amount1_raw = 0
-                    if liquidity_raw > 0 and tick_upper > tick_lower and current_tick is not None:
-                        try:
-                            with localcontext() as ctx:
-                                ctx.prec = 40
-                                base = Decimal("1.0001")
-                                liq = Decimal(liquidity_raw)
-                                sqrt_lower = (base**tick_lower).sqrt()
-                                sqrt_upper = (base**tick_upper).sqrt()
-                                sqrt_current = (base**current_tick).sqrt()
-
-                                if current_tick < tick_lower:
-                                    amount0_raw = int(liq * (1 / sqrt_lower - 1 / sqrt_upper))
-                                elif current_tick >= tick_upper:
-                                    amount1_raw = int(liq * (sqrt_upper - sqrt_lower))
-                                else:
-                                    amount0_raw = int(liq * (1 / sqrt_current - 1 / sqrt_upper))
-                                    amount1_raw = int(liq * (sqrt_current - sqrt_lower))
-                        except ArithmeticError as e:
-                            logger.warning("Could not compute LP principal amounts from tick math: %s", e)
-
-                    # Add uncollected fees to principal amounts
-                    amount0_raw += int(lp_data.get("tokens_owed_a", "0"))
-                    amount1_raw += int(lp_data.get("tokens_owed_b", "0"))
-
-                    # Price both token amounts
-                    for token_addr, amount_raw in [(token_a, amount0_raw), (token_b, amount1_raw)]:
-                        if not token_addr or amount_raw <= 0:
-                            continue
-                        try:
-                            price_resp = self._client.market.GetPrice(
-                                gateway_pb2.PriceRequest(token=token_addr, quote="USD", chain=chain)
-                            )
-                            token_price = Decimal(str(price_resp.price))
-                            if token_price > 0:
-                                from almanak.framework.data.tokens import get_token_resolver
-
-                                resolved = get_token_resolver().resolve(token_addr, chain)
-                                amount_human = Decimal(amount_raw) / Decimal(10**resolved.decimals)
-                                lp_usd_value += amount_human * token_price
-                        except Exception:
-                            logger.warning("Could not price LP token %s for NAV", token_addr[:10])
-
-                    # Convert LP USD value to underlying units
-                    if lp_usd_value > 0:
-                        try:
-                            underlying_price_resp = self._client.market.GetPrice(
-                                gateway_pb2.PriceRequest(token=underlying_token, quote="USD", chain=chain)
-                            )
-                            underlying_price = Decimal(str(underlying_price_resp.price))
-                            if underlying_price > 0:
-                                from almanak.framework.data.tokens import get_token_resolver
-
-                                underlying_resolved = get_token_resolver().resolve(underlying_token, chain)
-                                lp_in_underlying = int(
-                                    lp_usd_value / underlying_price * Decimal(10**underlying_resolved.decimals)
-                                )
-                                total_nav += lp_in_underlying
-                        except Exception:
-                            logger.warning("Could not convert LP value to underlying units; LP excluded from NAV")
-
-        except Exception:
-            logger.warning("Could not load agent state for LP position; LP excluded from NAV")
-
-        logger.info(
-            "Computed vault NAV: underlying_balance=%d, silo=%d, total=%d",
-            underlying_balance,
-            silo_balance,
-            total_nav,
-        )
-        return total_nav
-
-    async def _check_settlement_liquidity(
-        self, vault_address: str, safe_address: str, chain: str
-    ) -> tuple[bool, int, int]:
-        """Check if the Safe has enough liquid underlying to cover pending redemptions.
-
-        Returns:
-            Tuple of (sufficient, liquid_balance, needed_amount).
-        """
-        from almanak.gateway.proto import gateway_pb2
-
-        sdk = self._vault_capability().build_sdk(self._client, chain)
-
-        try:
-            pending_redeems = sdk.get_pending_redemptions(vault_address)
-        except Exception:
-            logger.warning("Cannot verify pending redemptions; failing closed for safety")
-            return False, 0, 0
-
-        if pending_redeems == 0:
-            return True, 0, 0
-
-        # Convert redeem shares to underlying via on-chain convertToAssets.
-        # Uses the ERC-4626 function directly to avoid precision loss from
-        # intermediate share_price division (shares are 18 decimals but
-        # underlying may be 6, e.g. USDC).
-        try:
-            needed = sdk.convert_to_assets(vault_address, pending_redeems)
-        except (RuntimeError, ValueError, TypeError) as exc:
-            logger.warning("Cannot convert pending redemptions to assets; failing closed: %s", exc)
-            return False, 0, 0
-
-        # Read Safe's underlying balance
-        try:
-            underlying_token = sdk.get_underlying_token_address(vault_address)
-            balance_calldata = "0x70a08231" + safe_address.lower().removeprefix("0x").zfill(64)
-            balance_resp = self._client.rpc.Call(
-                gateway_pb2.RpcRequest(
-                    chain=chain,
-                    method="eth_call",
-                    params=json.dumps([{"to": underlying_token, "data": balance_calldata}, "latest"]),
-                    id="liquidity_check_balance",
-                ),
-                timeout=30.0,
-            )
-            liquid = 0
-            if balance_resp.success:
-                raw = json.loads(balance_resp.result)
-                liquid = int(raw, 16) if raw and raw != "0x" else 0
-        except Exception:
-            logger.warning("Cannot read Safe balance for liquidity check; failing closed")
-            return False, 0, needed
-
-        return liquid >= needed, liquid, needed
-
-    def _load_settlement_state(self) -> None:
-        """Load settlement crash-recovery state from persisted agent state."""
-        from almanak.gateway.proto import gateway_pb2
-
-        try:
-            resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(deployment_id=self._deployment_id))
-            agent_state = json.loads(resp.data) if resp.data else {}
-            settle_state = agent_state.get("_vault_settlement", {})
-            self._settlement_phase = settle_state.get("phase", "idle")
-            self._settlement_proposed_assets = settle_state.get("proposed_assets", 0)
-            self._settlement_nonce = settle_state.get("nonce", 0)
-            self._vault_epoch_counter = settle_state.get("epoch_counter", 0)
-        except Exception:
-            logger.debug("Could not load settlement state (using defaults)")
-
-    def _save_settlement_state(self, phase: str, proposed_assets: int | None = None) -> None:
-        """Persist settlement crash-recovery state into agent state.
-
-        Raises on failure for pre-propose phases (proposing) since we must not
-        submit irreversible on-chain transactions without durable state.
-        Post-propose failures are logged but non-fatal.
-        """
-        from almanak.gateway.proto import gateway_pb2
-
-        self._settlement_phase = phase
-        if proposed_assets is not None:
-            self._settlement_proposed_assets = proposed_assets
-
-        try:
-            # Load current state, merge settlement state, save back
-            try:
-                resp = self._client.state.LoadState(gateway_pb2.LoadStateRequest(deployment_id=self._deployment_id))
-                agent_state = json.loads(resp.data) if resp.data else {}
-            except Exception as load_err:
-                import grpc
-
-                if isinstance(load_err, grpc.RpcError) and load_err.code() == grpc.StatusCode.NOT_FOUND:
-                    agent_state = {}
-                elif "NOT_FOUND" in str(load_err):
-                    agent_state = {}
-                else:
-                    raise
-            agent_state["_vault_settlement"] = {
-                "phase": self._settlement_phase,
-                "proposed_assets": self._settlement_proposed_assets,
-                "nonce": self._settlement_nonce,
-                "epoch_counter": self._vault_epoch_counter,
-            }
-            self._client.state.SaveState(
-                gateway_pb2.SaveStateRequest(
-                    deployment_id=self._deployment_id,
-                    data=json.dumps(agent_state).encode(),
-                    schema_version=1,
-                )
-            )
-        except Exception:
-            if phase in ("proposing", "settling"):
-                # Pre-irreversible-action: must not proceed without durable state
-                raise
-            logger.warning("Failed to persist settlement state (phase=%s, non-fatal)", phase)
-
-    def _vault_preflight_checks(
-        self, sdk: Any, vault_address: str, safe_address: str, valuator_address: str
-    ) -> str | None:
-        """Run on-chain preflight checks before settlement.
-
-        Verifies that the on-chain valuation manager and curator match the
-        provided addresses. This mirrors the lifecycle manager's preflight
-        checks to prevent settlement with misconfigured vault parameters.
-
-        Returns:
-            None if all checks pass, or an error message string.
-        """
-        try:
-            on_chain_valuator = sdk.get_valuation_manager(vault_address)
-            if on_chain_valuator.lower() != valuator_address.lower():
-                return (
-                    f"Preflight failed: on-chain valuation manager {on_chain_valuator} "
-                    f"!= provided valuator {valuator_address}"
-                )
-        except Exception as e:
-            return f"Preflight failed: could not verify valuation manager: {e}"
-
-        try:
-            on_chain_curator = sdk.get_curator(vault_address)
-            if on_chain_curator.lower() != safe_address.lower():
-                return f"Preflight failed: on-chain curator {on_chain_curator} != provided safe {safe_address}"
-        except Exception as e:
-            return f"Preflight failed: could not verify curator: {e}"
-
-        return None
-
-    async def _execute_settle_vault(self, args: dict) -> ToolResponse:
-        """Run a vault settlement cycle with crash-recovery state machine.
-
-        Phases: IDLE -> PROPOSING -> PROPOSED -> SETTLING -> SETTLED -> IDLE
-
-        On entry, loads persisted settlement phase and resumes from the
-        interrupted point. This prevents orphaned vault state if the process
-        crashes between propose and settle.
-        """
-        from almanak.core.models.params import UpdateTotalAssetsParams
-        from almanak.gateway.proto import gateway_pb2
-
-        cap = self._vault_capability()
-        chain = args.get("chain", self._default_chain)
-        vault_address = args["vault_address"]
-        safe_address = args["safe_address"]
-        valuator_address = args["valuator_address"]
-        dry_run = args.get("dry_run", False)
-
-        sdk = cap.build_sdk(self._client, chain)
-        adapter = cap.build_adapter(sdk)
-
-        # Preflight: verify on-chain vault config matches provided args
-        preflight_error = self._vault_preflight_checks(sdk, vault_address, safe_address, valuator_address)
-        if preflight_error:
-            logger.error("settle_vault preflight failed: %s", preflight_error)
-            return ToolResponse(
-                status="error",
-                error=_error_dict(
-                    AgentErrorCode.PREFLIGHT_FAILED,
-                    preflight_error,
-                ),
-            )
-
-        # Load crash-recovery state
-        self._load_settlement_state()
-        phase = self._settlement_phase
-
-        logger.info(
-            "settle_vault entry: phase=%s, nonce=%d, epoch=%d", phase, self._settlement_nonce, self._vault_epoch_counter
-        )
-
-        # --- Resume from SETTLED: just finalize ---
-        if phase == "settled":
-            logger.info("Resuming from SETTLED phase, finalizing")
-            return self._finalize_executor_settlement(dry_run)
-
-        # --- Resume from SETTLING: check if settle already succeeded on-chain ---
-        if phase == "settling":
-            proposed = self._settlement_proposed_assets
-            on_chain_total = sdk.get_total_assets(vault_address)
-            if on_chain_total == proposed and self._settlement_nonce > 0:
-                logger.info(
-                    "Settle already confirmed on-chain (total_assets=%d, nonce=%d)",
-                    on_chain_total,
-                    self._settlement_nonce,
-                )
-                self._save_settlement_state("settled")
-                return self._finalize_executor_settlement(dry_run)
-            # Otherwise retry settle
-            logger.info("Retrying settle (on-chain=%d, proposed=%d)", on_chain_total, proposed)
-            return await self._do_settle_deposit_and_redeem(
-                args,
-                sdk,
-                adapter,
-                vault_address,
-                safe_address,
-                valuator_address,
-                proposed,
-                chain,
-                dry_run,
-            )
-
-        # --- Resume from PROPOSED: skip propose, go to settle ---
-        if phase == "proposed":
-            proposed = self._settlement_proposed_assets
-            logger.info("Resuming from PROPOSED phase, proceeding to settle (proposed=%d)", proposed)
-            return await self._do_settle_deposit_and_redeem(
-                args,
-                sdk,
-                adapter,
-                vault_address,
-                safe_address,
-                valuator_address,
-                proposed,
-                chain,
-                dry_run,
-            )
-
-        # --- Resume from PROPOSING: check if propose already succeeded on-chain ---
-        if phase == "proposing":
-            proposed = self._settlement_proposed_assets
-            on_chain_proposed = sdk.get_proposed_total_assets(vault_address)
-            if on_chain_proposed == proposed and self._settlement_nonce > 0:
-                logger.info(
-                    "Propose already confirmed on-chain (proposed=%d, nonce=%d)",
-                    on_chain_proposed,
-                    self._settlement_nonce,
-                )
-                self._save_settlement_state("proposed")
-                return await self._do_settle_deposit_and_redeem(
-                    args,
-                    sdk,
-                    adapter,
-                    vault_address,
-                    safe_address,
-                    valuator_address,
-                    proposed,
-                    chain,
-                    dry_run,
-                )
-            # Otherwise retry from propose
-            logger.info("Retrying propose (on-chain=%d, intended=%d)", on_chain_proposed, proposed)
-
-        # --- Start fresh from IDLE (or retry from PROPOSING) ---
-
-        # Only compute NAV for fresh starts (idle), not for proposing retries
-        if phase in ("idle", "proposing"):
-            new_total_assets = await self._determine_nav(args, sdk, vault_address, safe_address, chain)
-        else:
-            new_total_assets = self._settlement_proposed_assets
-
-        # For freshly deployed vaults, pendingDepositRequest may revert before
-        # the first settlement initializes the vault. Default to 0 in that case.
-        try:
-            pending_deposits = sdk.get_pending_deposits(vault_address)
-        except Exception as e:
-            logger.warning("get_pending_deposits failed (vault may be uninitialized): %s", e)
-            pending_deposits = 0
-
-        # Check settlement liquidity (can Safe cover pending redemptions?)
-        sufficient, liquid, needed = await self._check_settlement_liquidity(vault_address, safe_address, chain)
-        if not sufficient:
-            logger.warning(
-                "Insufficient liquidity for settlement: liquid=%d, needed=%d, shortfall=%d",
-                liquid,
-                needed,
-                needed - liquid,
-            )
-            self._fire_alert(
-                f"Vault settlement blocked: insufficient liquidity (have {liquid}, need {needed})",
-                severity="critical",
-            )
-            return ToolResponse(
-                status="error",
-                error=_error_dict(
-                    AgentErrorCode.INSUFFICIENT_LIQUIDITY,
-                    f"Safe has {liquid} underlying but {needed} needed for pending redemptions",
-                    recoverable=True,
-                ),
-                decision_hints={
-                    "action_needed": "close_lp_position",
-                    "shortfall": str(needed - liquid),
-                    "liquid_balance": str(liquid),
-                    "needed_amount": str(needed),
-                },
-            )
-
-        # Phase: PROPOSING -- propose valuation (from valuator/EOA)
-        self._settlement_nonce += 1
-        self._save_settlement_state("proposing", proposed_assets=new_total_assets)
-
-        propose_params = UpdateTotalAssetsParams(
-            vault_address=vault_address,
-            valuator_address=valuator_address,
-            new_total_assets=new_total_assets,
-            pending_deposits=pending_deposits,
-        )
-        propose_bundle = adapter.build_propose_valuation_bundle(propose_params)
-        propose_bytes = json.dumps(propose_bundle.to_dict()).encode()
-
-        logger.info(
-            "settle_vault: propose (valuator=%s, total_assets=%s, pending=%s, nonce=%d)",
-            valuator_address[:10],
-            new_total_assets,
-            pending_deposits,
-            self._settlement_nonce,
-        )
-
-        # C6 fix: propose tx comes from valuator EOA, not Safe -- don't force is_safe_wallet
-        propose_resp = self._client.execution.Execute(
-            gateway_pb2.ExecuteRequest(
-                action_bundle=propose_bytes,
-                dry_run=dry_run,
-                simulation_enabled=self._resolve_simulation_flag(valuator_address, tool_name="settle_vault.propose"),
-                deployment_id=self._deployment_id,
-                chain=chain,
-                wallet_address=valuator_address,
-            )
-        )
-
-        logger.info(
-            "settle_vault propose result: success=%s, tx_hashes=%s, error=%s",
-            propose_resp.success,
-            list(propose_resp.tx_hashes) if propose_resp.tx_hashes else [],
-            propose_resp.error[:100] if propose_resp.error else "none",
-        )
-
-        if not propose_resp.success and not dry_run:
-            self._save_settlement_state("idle")
-            self._fire_alert(
-                f"Vault propose NAV failed: {propose_resp.error[:200] if propose_resp.error else 'unknown'}",
-                severity="critical",
-            )
-            raise ExecutionFailedError(
-                f"Vault propose failed: {propose_resp.error}",
-                tool_name="settle_vault",
-            )
-
-        # Phase: PROPOSED
-        self._save_settlement_state("proposed")
-
-        return await self._do_settle_deposit_and_redeem(
-            args,
-            sdk,
-            adapter,
-            vault_address,
-            safe_address,
-            valuator_address,
-            new_total_assets,
-            chain,
-            dry_run,
-        )
-
-    async def _determine_nav(self, args: dict, sdk: Any, vault_address: str, safe_address: str, chain: str) -> int:
-        """Determine NAV for settlement: compute or validate LLM-provided value."""
-        computed_nav = await self._compute_vault_nav(vault_address, safe_address, chain)
-
-        if args.get("new_total_assets"):
-            new_total_assets = int(args["new_total_assets"])
-
-            # Initialization settlement: brand new vault with totalAssets=0 on-chain.
-            # Accept new_total_assets=0 without NAV guard -- Safe may hold pre-existing
-            # funds that aren't part of this vault.
-            if new_total_assets == 0:
-                on_chain_total = sdk.get_total_assets(vault_address)
-                if on_chain_total == 0:
-                    logger.info("settle_vault: initialization settlement (on-chain totalAssets=0), accepting NAV=0")
-                    return 0
-
-            if computed_nav > 0:
-                delta_bps = abs(new_total_assets - computed_nav) * 10000 // computed_nav if computed_nav else 0
-                logger.info(
-                    "settle_vault NAV cross-check: llm=%d, computed=%d, delta=%d bps",
-                    new_total_assets,
-                    computed_nav,
-                    delta_bps,
-                )
-                from almanak.framework.vault.lifecycle import validate_nav_change_bps
-
-                ok, reason = validate_nav_change_bps(computed_nav, new_total_assets)
-                if not ok:
-                    raise RiskBlockedError(
-                        f"NAV update rejected: LLM proposed {new_total_assets} but computed NAV is {computed_nav}. {reason}",
-                        tool_name="settle_vault",
-                        suggestion="Omit new_total_assets to use the deterministic computed value.",
-                    )
-            else:
-                # computed_nav == 0: reject LLM override -- cannot validate without independent computation
-                logger.warning(
-                    "settle_vault: rejecting LLM-provided new_total_assets=%d because computed NAV is 0 "
-                    "(cannot validate). Falling back to on-chain total assets.",
-                    new_total_assets,
-                )
-                return sdk.get_total_assets(vault_address)
-            return new_total_assets
-
-        new_total_assets = computed_nav if computed_nav > 0 else sdk.get_total_assets(vault_address)
-        logger.info("settle_vault using computed NAV: %d", new_total_assets)
-        return new_total_assets
-
-    async def _do_settle_deposit_and_redeem(
-        self,
-        _args: dict,
-        sdk: Any,
-        adapter: Any,
-        vault_address: str,
-        safe_address: str,
-        _valuator_address: str,
-        new_total_assets: int,
-        chain: str,
-        dry_run: bool,
-    ) -> ToolResponse:
-        """Execute settle-deposit (and optionally settle-redeem) transactions."""
-        from almanak.core.models.params import SettleDepositParams, SettleRedeemParams
-        from almanak.gateway.proto import gateway_pb2
-
-        # Phase: SETTLING
-        self._save_settlement_state("settling")
-
-        settle_params = SettleDepositParams(
-            vault_address=vault_address,
-            safe_address=safe_address,
-            total_assets=new_total_assets,
-        )
-        settle_bundle = adapter.build_settle_deposit_bundle(settle_params)
-        settle_bytes = json.dumps(settle_bundle.to_dict()).encode()
-
-        logger.info(
-            "settle_vault: settle_deposit (safe=%s, total_assets=%s)",
-            safe_address[:10],
-            new_total_assets,
-        )
-
-        settle_resp = self._client.execution.Execute(
-            gateway_pb2.ExecuteRequest(
-                action_bundle=settle_bytes,
-                dry_run=dry_run,
-                simulation_enabled=self._resolve_simulation_flag(
-                    safe_address, tool_name="settle_vault.settle", is_safe_wallet=True
-                ),
-                deployment_id=self._deployment_id,
-                chain=chain,
-                wallet_address=safe_address,
-            )
-        )
-
-        logger.info(
-            "settle_vault settle_deposit result: success=%s, tx_hashes=%s, error=%s",
-            settle_resp.success,
-            list(settle_resp.tx_hashes) if settle_resp.tx_hashes else [],
-            settle_resp.error[:100] if settle_resp.error else "none",
-        )
-
-        if not settle_resp.success and not dry_run:
-            # Revert to PROPOSED so next call retries settle (not propose)
-            self._save_settlement_state("proposed")
-            self._fire_alert(
-                f"Vault settleDeposit failed: {settle_resp.error[:200] if settle_resp.error else 'unknown'}",
-                severity="critical",
-            )
-            raise ExecutionFailedError(
-                f"Vault settlement failed: {settle_resp.error}",
-                tool_name="settle_vault",
-            )
-
-        tx_hashes = list(settle_resp.tx_hashes) if settle_resp.tx_hashes else []
-
-        # C6 fix: settle redeems if pending
-        try:
-            pending_redeems = sdk.get_pending_redemptions(vault_address)
-        except Exception as e:
-            logger.warning("Could not read pending redemptions after settlement: %s (defaulting to 0)", e)
-            pending_redeems = 0
-
-        if pending_redeems > 0:
-            logger.info("settle_vault: settling %d pending redemptions", pending_redeems)
-            redeem_params = SettleRedeemParams(
-                vault_address=vault_address,
-                safe_address=safe_address,
-                total_assets=new_total_assets,
-            )
-            redeem_bundle = adapter.build_settle_redeem_bundle(redeem_params)
-            redeem_bytes = json.dumps(redeem_bundle.to_dict()).encode()
-
-            redeem_resp = self._client.execution.Execute(
-                gateway_pb2.ExecuteRequest(
-                    action_bundle=redeem_bytes,
-                    dry_run=dry_run,
-                    simulation_enabled=self._resolve_simulation_flag(
-                        safe_address, tool_name="settle_vault.redeem", is_safe_wallet=True
-                    ),
-                    deployment_id=self._deployment_id,
-                    chain=chain,
-                    wallet_address=safe_address,
-                )
-            )
-            if redeem_resp.success:
-                if redeem_resp.tx_hashes:
-                    tx_hashes.extend(list(redeem_resp.tx_hashes))
-                logger.info("settle_vault: settle_redeem succeeded")
-            else:
-                logger.warning(
-                    "settle_vault: settle_redeem failed: %s",
-                    redeem_resp.error[:100] if redeem_resp.error else "unknown",
-                )
-
-        # Phase: SETTLED -> finalize
-        self._save_settlement_state("settled")
-        return self._finalize_executor_settlement(dry_run, tx_hashes=tx_hashes)
-
-    def _finalize_executor_settlement(self, dry_run: bool, tx_hashes: list[str] | None = None) -> ToolResponse:
-        """Finalize settlement: increment epoch, reset phase to idle, return response."""
-        self._vault_epoch_counter += 1
-        new_total_assets = self._settlement_proposed_assets
-        epoch_id = self._vault_epoch_counter
-
-        # Reset state to idle
-        self._settlement_nonce = 0
-        self._save_settlement_state("idle")
-
-        status = "simulated" if dry_run else "success"
-        tx_hash = tx_hashes[0] if tx_hashes else None
-
         return ToolResponse(
-            status=status,
-            data={
-                "status": status,
-                "new_total_assets": str(new_total_assets),
-                "epoch_id": epoch_id,
-                "tx_hash": tx_hash,
-                "tx_hashes": tx_hashes or [],
-                "message": f"Settlement complete. Total assets: {new_total_assets}, epoch: {epoch_id}",
-            },
+            status="error",
+            error=_error_dict(
+                AgentErrorCode.VAULT_SETTLEMENT_UNSUPPORTED,
+                (
+                    f"'{tool_name}' is not available from the agent-tool surface. "
+                    "Vault settlement is owned by the runner's VaultLifecycleManager, "
+                    "which settles automatically each interval (single-writer invariant, "
+                    "VIB-5681). A second settlement implementation here would corrupt the "
+                    "vault's on-chain nonce/phase. Manual intervention (force-settle) is "
+                    "coming via the 'ax vault' CLI (VIB-5694)."
+                ),
+            ),
         )
 
     # ------------------------------------------------------------------ #
@@ -5228,7 +4507,7 @@ class ToolExecutor:
                 )
             return None
 
-        if ctx.teardown_phase in ("lp_closed", "swapping", "swapped", "settling"):
+        if ctx.teardown_phase in ("lp_closed", "swapping", "swapped", "settling", "settling_done"):
             # LP already closed in a previous attempt. Restore both the
             # counter AND the pre-close LP id so the swap phase can still
             # discover its token pair. If the swap phase already finished in
@@ -5336,33 +4615,31 @@ class ToolExecutor:
             pre_close_lp_position_id=ctx.pre_close_lp_position_id,
         )
 
-    async def _teardown_settle_phase(self, ctx: _TeardownContext) -> bool:
-        """Run final settlement. Returns True if settlement failed."""
+    def _teardown_delegate_settlement(self, ctx: _TeardownContext) -> None:
+        """Delegate final settlement to the runner; teardown_vault does NOT settle.
+
+        VIB-5681 single-writer invariant: settlement (the propose -> settle-deposit
+        -> settle-redeem cycle, nonce/epoch tracked and crash-resumable) is owned
+        solely by the runner's ``VaultLifecycleManager``
+        (``almanak/framework/vault/lifecycle.py``). teardown_vault's job is to
+        REMOVE ON-CHAIN RISK — close LP positions and swap residual tokens to the
+        underlying — which the earlier phases already did. It must not run a second
+        settlement implementation.
+
+        This records the delegated outcome and is intentionally a no-op beyond a
+        progress marker: it performs no on-chain action and never reports a
+        settlement failure. Final settlement is left to the runner (automatic each
+        interval); a manual operator path arrives via the ``ax vault`` CLI
+        (VIB-5694).
+        """
         if ctx.teardown_phase in ("settling_done", "torn_down"):
-            return False
-        self._teardown_save_progress(ctx, "settling")
-        try:
-            settle_result = await self.execute(
-                "settle_vault",
-                {
-                    "vault_address": ctx.vault_address,
-                    "safe_address": ctx.safe_address,
-                    "valuator_address": ctx.valuator_address,
-                    "chain": ctx.chain,
-                    "dry_run": ctx.dry_run,
-                },
-            )
-            if settle_result.status == "success" and settle_result.data:
-                if settle_result.data.get("tx_hash"):
-                    ctx.tx_hashes.append(settle_result.data["tx_hash"])
-                return False
-            if settle_result.status != "success":
-                logger.warning("teardown_vault: final settlement failed: %s", settle_result.error)
-                return True
-            return False
-        except Exception as e:
-            logger.warning("teardown_vault: final settlement error: %s", e)
-            return True
+            return
+        logger.info(
+            "teardown_vault: on-chain risk removed (LP closed + swapped); final "
+            "settlement is runner-owned (VaultLifecycleManager) for vault %s",
+            ctx.vault_address[:10],
+        )
+        self._teardown_save_progress(ctx, "settling_done")
 
     def _teardown_read_final_nav(self, sdk: Any, vault_address: str) -> int:
         """Read the vault's final NAV; swallow any read error and return 0."""
@@ -5372,19 +4649,22 @@ class ToolExecutor:
             logger.warning("Failed to read final NAV during teardown: %s", e)
             return 0
 
-    def _teardown_finalize_status(self, ctx: _TeardownContext, settle_failed: bool) -> str:
-        """Determine final status + fire partial-failure alert + persist terminal state."""
+    def _teardown_finalize_status(self, ctx: _TeardownContext) -> str:
+        """Persist terminal state and return the teardown status.
+
+        teardown_vault owns risk removal (LP close + swap). Reaching here means
+        those steps succeeded — an LP-close failure early-returns a typed error
+        before this, and swap failures are tolerated. Final settlement is
+        runner-owned (see ``_teardown_delegate_settlement``), so this returns a
+        success-of-what-it-did outcome: ``"simulated"`` on dry-run, else
+        ``"success"``. No teardown path emits ``partial_failure`` anymore — the
+        settlement step that produced it is delegated, and owned-step failures
+        surface as typed errors before this point.
+        """
         from almanak.gateway.proto import gateway_pb2
 
         if ctx.dry_run:
             return "simulated"
-        if settle_failed:
-            self._teardown_save_progress(ctx, "settling", error="settlement failed")
-            self._fire_alert(
-                f"Vault teardown partial failure: final settlement failed for vault {ctx.vault_address[:10]}",
-                severity="critical",
-            )
-            return "partial_failure"
 
         # Success: promote to torn_down and clear the _teardown sub-state.
         ctx.agent_state["phase"] = "torn_down"
@@ -5405,9 +4685,14 @@ class ToolExecutor:
     async def _execute_teardown_vault(self, args: dict) -> ToolResponse:
         """Deterministic vault teardown with crash-recovery state machine.
 
-        Phases: lp_closing -> swapping -> settling -> torn_down
+        Phases: lp_closing -> swapping -> settling_done -> torn_down
         Progress is persisted after each phase so partial failures resume
         from the interrupted step instead of retrying from scratch.
+
+        teardown_vault removes on-chain risk (close LP positions + swap residual
+        tokens to the underlying). Final settlement is NOT performed here — it is
+        runner-owned (``VaultLifecycleManager``), per the VIB-5681 single-writer
+        invariant. The ``settling_done`` phase records that delegation.
         """
         # Phase 0: policy preflight.
         preflight = self._teardown_check_sub_tool_policy()
@@ -5447,24 +4732,29 @@ class ToolExecutor:
             underlying_token = None
         await self._teardown_swap_phase(ctx, underlying_token)
 
-        # Phase 4: final settlement (records failure, does not short-circuit).
-        settle_failed = await self._teardown_settle_phase(ctx)
+        # Phase 4: settlement is runner-owned — record the delegation, never settle.
+        self._teardown_delegate_settlement(ctx)
 
         # Phase 5: final NAV + status determination + terminal state save.
         final_nav = self._teardown_read_final_nav(sdk, ctx.vault_address)
-        status = self._teardown_finalize_status(ctx, settle_failed)
+        status = self._teardown_finalize_status(ctx)
 
         return ToolResponse(
             status=status,
             data={
                 "status": status,
+                # Typed step-outcome marker: teardown_vault delegates final
+                # settlement to the runner's VaultLifecycleManager (VIB-5681).
+                "settlement": "runner_owned",
                 "positions_closed": ctx.positions_closed,
                 "swaps_executed": ctx.swaps_executed,
                 "final_nav": str(final_nav),
                 "tx_hashes": ctx.tx_hashes,
                 "message": (
-                    f"Teardown {status}. Closed {ctx.positions_closed} positions, "
-                    f"{ctx.swaps_executed} swaps. Final NAV: {final_nav}"
+                    f"Teardown {status}: closed {ctx.positions_closed} positions, "
+                    f"{ctx.swaps_executed} swaps (final NAV {final_nav}). Final settlement "
+                    "is runner-owned (VaultLifecycleManager, runs each interval); a manual "
+                    "operator path arrives via the 'ax vault' CLI (VIB-5694)."
                 ),
             },
         )

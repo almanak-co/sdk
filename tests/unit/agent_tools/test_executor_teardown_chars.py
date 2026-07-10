@@ -7,7 +7,13 @@ silently regressing crash-recovery semantics for vault teardown - a fund-loss
 path if broken.
 
 State machine phases (persisted under agent_state["_teardown"]["phase"]):
-    start -> lp_closing -> lp_closed -> swapping -> swapped -> settling -> torn_down
+    start -> lp_closing -> lp_closed -> swapping -> swapped -> settling_done -> torn_down
+
+Final settlement is NOT a teardown_vault step: it is runner-owned
+(VaultLifecycleManager) per the VIB-5681 single-writer invariant. teardown_vault
+removes on-chain risk (LP close + swap) and delegates settlement; the
+``settling_done`` phase records that delegation and the result carries
+``settlement == "runner_owned"``.
 
 Resume matrix:
     - on "start" or "lp_closing" -> replays LP close if lp_position_id present
@@ -104,7 +110,12 @@ def _saved_states(mock_gateway) -> list[dict]:
 
 
 class TestHappyPath:
-    """Full happy-path teardown: LP close -> swap -> settle -> torn_down."""
+    """Full happy-path teardown: LP close -> swap -> settlement delegated -> torn_down.
+
+    Final settlement is runner-owned (VIB-5681): teardown_vault must NOT call
+    settle_vault. These tests pin that the risk-reducing steps still run fully and
+    the result marks settlement as delegated.
+    """
 
     @pytest.mark.asyncio
     async def test_happy_path_full_flow_with_lp_and_swap(self, executor, mock_gateway):
@@ -128,8 +139,7 @@ class TestHappyPath:
                 return ToolResponse(status="success", data={"balance": "10", "balance_usd": "10"})
             if name == "swap_tokens":
                 return ToolResponse(status="success", data={"tx_hash": "0xswap"})
-            if name == "settle_vault":
-                return ToolResponse(status="success", data={"tx_hash": "0xsettle", "new_total_assets": "2000"})
+            # settle_vault must never be invoked — settlement is runner-owned.
             return ToolResponse(status="error", error={"message": "unmocked"})
 
         lp_info = ToolResponse(
@@ -145,6 +155,9 @@ class TestHappyPath:
 
         assert result.status == "success"
         assert result.data["status"] == "success"
+        # Final settlement is delegated to the runner — never attempted here.
+        assert result.data["settlement"] == "runner_owned"
+        assert "settle_vault" not in [name for name, _ in calls]
         assert result.data["positions_closed"] == 1
         # Both token_a and token_b are non-underlying, so two swaps.
         assert result.data["swaps_executed"] == 2
@@ -154,11 +167,12 @@ class TestHappyPath:
         # down the "close -> get_lp_position -> get_balance -> swap" flow.
         get_lp_position.assert_awaited_once()
         assert get_lp_position.await_args.args[0]["position_id"] == "42"
-        # tx_hashes include close + 2 swaps + settle
-        assert set(result.data["tx_hashes"]) >= {"0xclose", "0xswap", "0xsettle"}
+        # tx_hashes include close + 2 swaps; NO settle tx (settlement delegated).
+        assert set(result.data["tx_hashes"]) >= {"0xclose", "0xswap"}
+        assert "0xsettle" not in result.data["tx_hashes"]
 
         # Verify state transitions were persisted: lp_closing -> lp_closed ->
-        # swapping -> swapped -> settling -> torn_down (final phase is the
+        # swapping -> swapped -> settling_done -> torn_down (final phase is the
         # outer agent_state phase, not the _teardown sub-state).
         saved = _saved_states(mock_gateway)
         phases = [s.get("_teardown", {}).get("phase") for s in saved]
@@ -166,19 +180,21 @@ class TestHappyPath:
         assert "lp_closed" in phases
         assert "swapping" in phases
         assert "swapped" in phases
-        assert "settling" in phases
+        assert "settling_done" in phases
         # Final save should wipe _teardown and mark torn_down
         assert saved[-1]["phase"] == "torn_down"
         assert saved[-1]["lp_position_id"] is None
         assert "_teardown" not in saved[-1]
 
     @pytest.mark.asyncio
-    async def test_happy_path_no_lp_no_swap_just_settle(self, executor, mock_gateway):
+    async def test_happy_path_no_lp_no_swap_delegates_settlement(self, executor, mock_gateway):
         _set_state(mock_gateway, {"phase": "running"})  # no lp_position_id, no tokens
 
+        calls: list[str] = []
+
         async def fake_execute(name, args):
-            if name == "settle_vault":
-                return ToolResponse(status="success", data={"tx_hash": "0xsettle"})
+            calls.append(name)
+            # No LP, no tokens, and settlement is runner-owned -> nothing to call.
             return ToolResponse(status="error", error={"message": "unmocked"})
 
         with (
@@ -188,9 +204,12 @@ class TestHappyPath:
             result = await executor._execute_teardown_vault(_args())
 
         assert result.status == "success"
+        assert result.data["settlement"] == "runner_owned"
         assert result.data["positions_closed"] == 0
         assert result.data["swaps_executed"] == 0
-        assert result.data["tx_hashes"] == ["0xsettle"]
+        # No settlement call and therefore no settle tx hash.
+        assert "settle_vault" not in calls
+        assert result.data["tx_hashes"] == []
 
 
 class TestAlreadyTornDown:
@@ -268,10 +287,10 @@ class TestResumeFromLpClosed:
 
 
 class TestResumeFromSettling:
-    """Resume where only final settlement remains."""
+    """Resume from a legacy 'settling' phase: no LP close, settlement delegated."""
 
     @pytest.mark.asyncio
-    async def test_resume_from_settling_skips_lp_close_still_runs_swap_and_settle(
+    async def test_resume_from_settling_completes_without_settle_call(
         self, executor, mock_gateway
     ):
         _set_state(
@@ -287,8 +306,49 @@ class TestResumeFromSettling:
 
         async def fake_execute(name, args):
             calls.append(name)
-            if name == "settle_vault":
-                return ToolResponse(status="success", data={"tx_hash": "0xsettle"})
+            if name == "close_lp_position":
+                raise AssertionError("must not rerun close")
+            # settle_vault must never be invoked — settlement is runner-owned.
+            return ToolResponse(status="error", error={"message": "unmocked"})
+
+        with (
+            patch.object(executor, "execute", side_effect=fake_execute),
+            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
+        ):
+            result = await executor._execute_teardown_vault(_args())
+
+        assert result.status == "success"
+        assert result.data["settlement"] == "runner_owned"
+        assert "close_lp_position" not in calls
+        assert "settle_vault" not in calls
+
+
+class TestResumeFromSettlingDone:
+    """Resume after a crash that landed exactly on the 'settling_done' save."""
+
+    @pytest.mark.asyncio
+    async def test_resume_from_settling_done_restores_counters(self, executor, mock_gateway):
+        # Crash happened right after _teardown_delegate_settlement persisted
+        # "settling_done"; the counters from the earlier "swapped" save are
+        # still in teardown_state and must survive into the final response.
+        _set_state(
+            mock_gateway,
+            {
+                "phase": "running",
+                "lp_position_id": None,
+                "_teardown": {
+                    "phase": "settling_done",
+                    "positions_closed": 1,
+                    "swaps_executed": 2,
+                    "pre_close_lp_position_id": "42",
+                },
+            },
+        )
+
+        calls: list[str] = []
+
+        async def fake_execute(name, args):
+            calls.append(name)
             if name == "close_lp_position":
                 raise AssertionError("must not rerun close")
             return ToolResponse(status="error", error={"message": "unmocked"})
@@ -300,8 +360,12 @@ class TestResumeFromSettling:
             result = await executor._execute_teardown_vault(_args())
 
         assert result.status == "success"
+        assert result.data["settlement"] == "runner_owned"
+        # Counters restored, not zeroed, on resume from settling_done.
+        assert result.data["positions_closed"] == 1
+        assert result.data["swaps_executed"] == 2
         assert "close_lp_position" not in calls
-        assert "settle_vault" in calls
+        assert "settle_vault" not in calls
 
 
 class TestLpCloseFailure:
@@ -411,16 +475,28 @@ class TestSwapFailureIsTolerated:
         assert result.data["swaps_executed"] == 0
 
 
-class TestSettlementFailure:
-    """Final settlement failure: partial_failure status + critical alert."""
+class TestSettlementDelegated:
+    """Settlement is runner-owned (VIB-5681): teardown_vault never settles.
+
+    Inverse of the old 'settlement failure -> partial_failure' contract: because
+    teardown_vault no longer performs settlement, a run whose owned steps (LP
+    close + swap) all succeed terminates in a success-of-what-it-did status with
+    ``settlement == "runner_owned"``, attempts no settle call, and fires no
+    settlement-related critical alert. partial_failure is NOT produced by the
+    (delegated) settlement step.
+    """
 
     @pytest.mark.asyncio
-    async def test_settle_returns_error_yields_partial_failure(self, executor, mock_gateway):
+    async def test_owned_steps_succeed_yields_runner_owned_success(self, executor, mock_gateway):
         _set_state(mock_gateway, {"phase": "running", "lp_position_id": None})
 
+        calls: list[str] = []
+
         async def fake_execute(name, args):
+            calls.append(name)
+            # A hostile settle_vault response would be here — it must never be reached.
             if name == "settle_vault":
-                return ToolResponse(status="error", error={"message": "valuator offline"})
+                raise AssertionError("teardown_vault must not call settle_vault (VIB-5681)")
             return ToolResponse(status="error", error={"message": "unmocked"})
 
         with (
@@ -430,35 +506,18 @@ class TestSettlementFailure:
         ):
             result = await executor._execute_teardown_vault(_args())
 
-        assert result.status == "partial_failure"
-        assert result.data["status"] == "partial_failure"
-        fire_alert.assert_called_once()
-        assert fire_alert.call_args.kwargs["severity"] == "critical"
+        assert result.status == "success"
+        assert result.data["status"] == "success"
+        assert result.data["settlement"] == "runner_owned"
+        assert "settle_vault" not in calls
+        # No settlement failure -> no critical settlement alert.
+        fire_alert.assert_not_called()
 
-        # Partial failure does NOT promote to torn_down.
+        # Owned steps done -> promoted to torn_down, _teardown sub-state cleared.
         saved = _saved_states(mock_gateway)
         last = saved[-1]
-        assert last.get("phase") != "torn_down"
-        assert last["_teardown"]["phase"] == "settling"
-        assert last["_teardown"].get("error") == "settlement failed"
-
-    @pytest.mark.asyncio
-    async def test_settle_exception_also_yields_partial_failure(self, executor, mock_gateway):
-        _set_state(mock_gateway, {"phase": "running", "lp_position_id": None})
-
-        async def fake_execute(name, args):
-            if name == "settle_vault":
-                raise RuntimeError("rpc dead")
-            return ToolResponse(status="error", error={"message": "unmocked"})
-
-        with (
-            patch.object(executor, "execute", side_effect=fake_execute),
-            patch.object(executor, "_fire_alert"),
-            patch("almanak.connectors.lagoon.sdk.LagoonVaultSDK", return_value=_make_sdk()),
-        ):
-            result = await executor._execute_teardown_vault(_args())
-
-        assert result.status == "partial_failure"
+        assert last["phase"] == "torn_down"
+        assert "_teardown" not in last
 
 
 class TestDryRun:

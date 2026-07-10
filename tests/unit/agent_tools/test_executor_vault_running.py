@@ -77,77 +77,6 @@ def _mock_exec_response(success=True, tx_hashes=None, error=""):
     resp.error = error
     resp.receipts = b"[]"
     return resp
-
-
-# ── P1: Settle with pending deposits ────────────────────────────
-
-class TestSettleWithPendingDeposits:
-    """P1 scenario: vault has pending deposits, agent settles to process them."""
-
-    @pytest.mark.asyncio
-    async def test_settle_auto_computes_nav_and_processes_deposits(self, executor, mock_gateway):
-        """settle_vault without new_total_assets computes NAV from Safe balance."""
-        usdc_address = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-        asset_result = "0x" + "0" * 24 + usdc_address[2:]
-        vault = "0x" + "a" * 40
-        safe = "0x" + "b" * 40
-        valuator = "0x1234567890abcdef1234567890abcdef12345678"
-
-        rpc_responses = [
-            # Preflight: getRolesStorage (valuation manager check)
-            _roles_storage_rpc(valuator, safe),
-            # Preflight: getRolesStorage (curator check)
-            _roles_storage_rpc(valuator, safe),
-            # NAV computation: asset(), balanceOf(safe), silo
-            _mock_rpc_call(result=asset_result),
-            _mock_rpc_call(result=hex(20_000_000)),  # 20 USDC in Safe
-            _mock_rpc_call(result="0x" + "0" * 64),  # silo = zero addr
-            # pending_deposits check
-            _mock_rpc_call(result=hex(5_000_000)),  # 5 USDC pending
-            # liquidity check: pending_redemptions
-            _mock_rpc_call(result=hex(0)),  # no pending redeems
-        ]
-        mock_gateway.rpc.Call.side_effect = rpc_responses
-
-        # No LP in agent state
-        state_resp = MagicMock()
-        state_resp.data = json.dumps({}).encode()
-        mock_gateway.state.LoadState.return_value = state_resp
-
-        # Execution succeeds (propose + settle)
-        mock_gateway.execution.Execute.return_value = _mock_exec_response()
-
-        result = await executor.execute("settle_vault", {
-            "vault_address": vault,
-            "safe_address": safe,
-            "valuator_address": "0x1234567890abcdef1234567890abcdef12345678",
-            "chain": "base",
-        })
-
-        assert result.status == "success"
-        assert result.data["new_total_assets"] == "20000000"
-
-    @pytest.mark.asyncio
-    async def test_settle_with_pending_redeems_checks_liquidity(self, executor, mock_gateway):
-        """settle_vault blocks when Safe doesn't have enough for pending redeems."""
-        with patch('almanak.connectors.lagoon.sdk.LagoonVaultSDK') as MockSDK:
-            sdk = MockSDK.return_value
-            sdk.get_underlying_token_address.return_value = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-            sdk.get_pending_redemptions.return_value = 50_000_000_000_000_000_000  # 50 shares
-            sdk.convert_to_assets.return_value = 50_000_000  # 50 USDC in raw units
-
-            # Safe only has 10 USDC but needs 50
-            mock_gateway.rpc.Call.return_value = _mock_rpc_call(result=hex(10_000_000))
-
-            sufficient, liquid, needed = await executor._check_settlement_liquidity(
-                "0x" + "a" * 40, "0x" + "b" * 40, "base"
-            )
-
-            assert sufficient is False
-            assert liquid == 10_000_000
-            assert needed == 50_000_000
-
-
 # ── P1: get_vault_state ────────────────────────────────────────
 
 class TestGetVaultState:
@@ -488,56 +417,6 @@ class TestAlertingOnFailures:
             default_chain="base",
             alert_manager=alert_mgr,
         )
-
-    @pytest.mark.asyncio
-    async def test_propose_failure_fires_alert(self, executor_with_alerts, mock_gateway):
-        """Propose NAV failure triggers critical alert."""
-        usdc_address = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-        asset_result = "0x" + "0" * 24 + usdc_address[2:]
-        safe = "0x" + "b" * 40
-        valuator = "0x1234567890abcdef1234567890abcdef12345678"
-
-        rpc_responses = [
-            # Preflight: getRolesStorage (valuation manager + curator)
-            _roles_storage_rpc(valuator, safe),
-            _roles_storage_rpc(valuator, safe),
-            # NAV computation
-            _mock_rpc_call(result=asset_result),
-            _mock_rpc_call(result=hex(10_000_000)),
-            _mock_rpc_call(result="0x" + "0" * 64),
-            # pending_deposits
-            _mock_rpc_call(result=hex(0)),
-            # liquidity check
-            _mock_rpc_call(result=hex(0)),
-        ]
-        mock_gateway.rpc.Call.side_effect = rpc_responses
-
-        state_resp = MagicMock()
-        state_resp.data = json.dumps({}).encode()
-        mock_gateway.state.LoadState.return_value = state_resp
-
-        # Propose fails
-        mock_gateway.execution.Execute.return_value = _mock_exec_response(
-            success=False, error="execution reverted"
-        )
-
-        # Save settlement state
-        save_resp = MagicMock()
-        save_resp.success = True
-        save_resp.new_version = 1
-        save_resp.checksum = "x"
-        mock_gateway.state.SaveState.return_value = save_resp
-
-        result = await executor_with_alerts.execute("settle_vault", {
-            "vault_address": "0x" + "a" * 40,
-            "safe_address": "0x" + "b" * 40,
-            "valuator_address": "0x1234567890abcdef1234567890abcdef12345678",
-            "chain": "base",
-        })
-
-        # execute() catches ExecutionFailedError and wraps in ToolResponse
-        assert result.status == "error"
-        assert "propose failed" in result.explanation.lower()
 
     @pytest.mark.asyncio
     async def test_teardown_lp_failure_fires_alert(self, executor_with_alerts, mock_gateway):

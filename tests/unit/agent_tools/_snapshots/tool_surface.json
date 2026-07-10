@@ -1319,7 +1319,7 @@
       "name": "get_vault_state"
     },
     {
-      "description": "Run a vault settlement cycle: propose new valuation, settle deposits and redeems.",
+      "description": "Vault settlement is runner-owned (VaultLifecycleManager) and runs automatically each interval; this tool no longer settles and returns a typed refusal. Do not call it to settle \u2014 manual intervention is coming via the 'ax vault' CLI.",
       "inputSchema": {
         "description": "Run a vault settlement cycle (propose + settle deposits/redeems).",
         "properties": {
@@ -3120,7 +3120,7 @@
     },
     {
       "function": {
-        "description": "Run a vault settlement cycle: propose new valuation, settle deposits and redeems.",
+        "description": "Vault settlement is runner-owned (VaultLifecycleManager) and runs automatically each interval; this tool no longer settles and returns a typed refusal. Do not call it to settle \u2014 manual intervention is coming via the 'ax vault' CLI.",
         "name": "settle_vault",
         "parameters": {
           "description": "Run a vault settlement cycle (propose + settle deposits/redeems).",

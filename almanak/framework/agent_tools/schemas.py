@@ -1023,6 +1023,14 @@ class TeardownVaultRequest(BaseModel):
 
 class TeardownVaultResponse(BaseModel):
     status: str = ""
+    settlement: str = Field(
+        default="",
+        description=(
+            "Outcome of the final-settlement step. 'runner_owned' means teardown_vault "
+            "delegated settlement to the runner's VaultLifecycleManager (VIB-5681 "
+            "single-writer invariant); teardown_vault removes on-chain risk but does not settle."
+        ),
+    )
     positions_closed: int = Field(default=0, description="Number of LP positions closed")
     swaps_executed: int = Field(default=0, description="Number of token swaps to underlying")
     final_nav: str = Field(default="0", description="Final NAV after teardown")

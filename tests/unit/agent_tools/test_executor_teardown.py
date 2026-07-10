@@ -76,9 +76,12 @@ class TestTeardownSubToolValidation:
         })
         assert result.status == "error"
         assert result.error["error_code"] == "teardown_missing_sub_tools"
+        # The remaining required teardown sub-tools are still policy-enforced.
         assert "close_lp_position" in result.error["message"]
         assert "swap_tokens" in result.error["message"]
-        assert "settle_vault" in result.error["message"]
+        # settle_vault is NO LONGER a required teardown sub-tool: final settlement
+        # is runner-owned, so teardown_vault does not sub-call it (VIB-5681).
+        assert "settle_vault" not in result.error["message"]
 
     @pytest.mark.asyncio
     async def test_teardown_succeeds_when_all_sub_tools_in_allowed_tools(self, mock_gateway):

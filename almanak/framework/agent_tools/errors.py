@@ -62,6 +62,9 @@ class AgentErrorCode(StrEnum):
     VAULT_VERIFICATION_FAILED = "vault_verification_failed"
     PREFLIGHT_FAILED = "preflight_failed"
     INSUFFICIENT_LIQUIDITY = "insufficient_liquidity"
+    # Settlement is owned by the runner's VaultLifecycleManager (single-writer
+    # invariant, VIB-5681). The agent-tool surface no longer runs settlement.
+    VAULT_SETTLEMENT_UNSUPPORTED = "vault_settlement_unsupported"
 
     # -- Teardown-specific errors -------------------------------------------
     TEARDOWN_MISSING_SUB_TOOLS = "teardown_missing_sub_tools"
@@ -124,6 +127,9 @@ ERROR_CATEGORIES: dict[AgentErrorCode, ErrorCategory] = {
     AgentErrorCode.UNSUPPORTED_CHAIN: ErrorCategory.CONFIGURATION,
     AgentErrorCode.TEARDOWN_MISSING_SUB_TOOLS: ErrorCategory.CONFIGURATION,
     AgentErrorCode.PREFLIGHT_FAILED: ErrorCategory.CONFIGURATION,
+    # Settlement is not something the agent can retry or reconfigure into
+    # existence -- it is owned by the runner. Route the operator to it.
+    AgentErrorCode.VAULT_SETTLEMENT_UNSUPPORTED: ErrorCategory.REQUIRES_HUMAN,
 }
 
 

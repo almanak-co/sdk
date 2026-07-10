@@ -456,7 +456,11 @@ _BUILTIN_TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="settle_vault",
-        description="Run a vault settlement cycle: propose new valuation, settle deposits and redeems.",
+        description=(
+            "Vault settlement is runner-owned (VaultLifecycleManager) and runs automatically "
+            "each interval; this tool no longer settles and returns a typed refusal. Do not "
+            "call it to settle — manual intervention is coming via the 'ax vault' CLI."
+        ),
         category=ToolCategory.ACTION,
         risk_tier=RiskTier.MEDIUM,
         request_schema=schemas.SettleVaultRequest,
