@@ -112,13 +112,13 @@ CONNECTOR = Connector(
     ),
     backtest_risk=_BACKTEST_RISK,
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
-    strategy_chains=("ethereum", "base", "arbitrum", "polygon", "monad"),
+    strategy_chains=("ethereum", "base", "arbitrum", "polygon", "monad", "robinhood"),
     # Matrix output stays lending-only even though flash-loan intent is registered.
     strategy_matrix_entries=(
         StrategyMatrixEntry(
             matrix_name="morpho_blue",
             category="lending",
-            chains=frozenset(("ethereum", "base", "arbitrum", "polygon", "monad")),
+            chains=frozenset(("ethereum", "base", "arbitrum", "polygon", "monad", "robinhood")),
         ),
     ),
 )

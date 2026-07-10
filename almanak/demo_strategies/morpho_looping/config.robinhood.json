@@ -1,0 +1,32 @@
+{
+    "chain": "robinhood",
+    "quote_asset": {
+        "type": "token",
+        "chain_id": 4663,
+        "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+    },
+    "token_funding": [
+        {
+            "symbol": "USDe",
+            "address": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+            "chain": "robinhood",
+            "amount": "50",
+            "amount_type": "usd"
+        }
+    ],
+    "market_id": "0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6",
+    "collateral_token": "USDe",
+    "borrow_token": "USDG",
+    "lltv": "0.915",
+    "initial_collateral": "20",
+    "target_loops": 2,
+    "target_ltv": "0.50",
+    "target_min_hf": "1.10",
+    "min_health_factor": "1.5",
+    "swap_slippage": "0.005",
+    "anvil_funding": {
+        "ETH": 100,
+        "USDe": 200,
+        "USDG": 200
+    }
+}

@@ -118,6 +118,20 @@ UNISWAP_V3: dict[str, dict[str, str]] = {
         "position_manager": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",
         "quoter_v2": "0xd00883722cECAD3A1c60bCA611f09e1851a0bE02",
     },
+    "robinhood": {
+        # Robinhood Chain (4663, Arbitrum Orbit L2) — NON-canonical deployment.
+        # Verified on-chain 2026-07-09 @ block 5,610,000: SwapRouter02.factory(),
+        # NonfungiblePositionManager.factory(), and QuoterV2.factory() all return
+        # the factory below. NOTE: WETH9() REVERTS on NPM + SwapRouter02 here, so
+        # WETH is resolved from the chain descriptor's wrapped_address, never from
+        # the periphery. Source: Blockscout + on-chain factory() cross-check
+        # (never a name-search hit — the explorer has same-named fork contracts).
+        "swap_router": "0xCaf681a66D020601342297493863E78C959E5cb2",  # SwapRouter02
+        "swap_router_02": "0xCaf681a66D020601342297493863E78C959E5cb2",
+        "factory": "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA",
+        "position_manager": "0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3",
+        "quoter_v2": "0x33e885eD0Ec9bF04EcfB19341582aADCb4c8A9E7",
+    },
 }
 
 UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
@@ -223,6 +237,17 @@ UNISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
         # 0G Chain tokens (verified on-chain)
         "A0GI": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
         "W0G": "0x1Cd0690fF9a693f5EF2dD976660a8dAFc81A109c",
+    },
+    "robinhood": {
+        # Robinhood Chain (4663) tokens — verified on-chain @ block 5,610,000.
+        # The chain's canonical stable is USDG (Global Dollar, Paxos, 6 dec) —
+        # there is NO real Circle-USDC / Tether-USDT with liquidity on 4663.
+        # WETH is the EIP-1967 proxy over Arbitrum aeWETH (explains WETH9() revert
+        # on the periphery). Only WETH/USDG are declared: they are the only pair
+        # with a real (>$3M TVL) V3 pool used by the intent tests + demos.
+        "ETH": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+        "WETH": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+        "USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
     },
 }
 

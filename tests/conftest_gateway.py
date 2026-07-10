@@ -552,11 +552,19 @@ class GatewayServerThread:
 # =============================================================================
 
 
-def _create_anvil_fixture(chain: str, public_rpc_fallback: str | None = None):
+def _create_anvil_fixture(
+    chain: str,
+    public_rpc_fallback: str | None = None,
+    fork_block_number: int | None = None,
+):
     """Factory function to create Anvil fixtures for each chain.
 
     Args:
         chain: Chain name (e.g., "arbitrum", "base")
+        fork_block_number: Optional explicit block to pin the fork to. Used for
+            newly-added chains whose intent-test pool/liquidity facts were
+            verified at a specific calibrated block (e.g. robinhood @ 5,610,000)
+            rather than tracking the weekly CI head pin.
         public_rpc_fallback: Optional public RPC URL to use if the chain is not
             yet enabled on the user's Alchemy app. Seeded into ``<CHAIN>_RPC_URL``
             env var so ``get_rpc_url`` picks it up via the chain-specific override.
@@ -592,7 +600,7 @@ def _create_anvil_fixture(chain: str, public_rpc_fallback: str | None = None):
                 pytest.skip(f"Cannot start Anvil for {chain}: {e}")
                 return
 
-            anvil = AnvilFixture(chain=chain, fork_rpc_url=fork_rpc_url)
+            anvil = AnvilFixture(chain=chain, fork_rpc_url=fork_rpc_url, fork_block_number=fork_block_number)
 
             try:
                 anvil.start()
@@ -629,6 +637,14 @@ anvil_mantle = _create_anvil_fixture("mantle")
 anvil_monad = _create_anvil_fixture("monad", public_rpc_fallback="https://rpc.monad.xyz")
 anvil_xlayer = _create_anvil_fixture("xlayer")
 anvil_zerog = _create_anvil_fixture("zerog")
+# Robinhood Chain (4663, Arbitrum Orbit L2). Pinned to the calibrated block
+# 5,610,000 where the WETH/USDG V3 pool liquidity was verified (VIB-5709).
+# Public RPC fallback for local runs without an Alchemy robinhood-mainnet app.
+anvil_robinhood = _create_anvil_fixture(
+    "robinhood",
+    public_rpc_fallback="https://rpc.mainnet.chain.robinhood.com",
+    fork_block_number=5_610_000,
+)
 
 
 # =============================================================================

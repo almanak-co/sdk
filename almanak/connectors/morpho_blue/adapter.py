@@ -65,8 +65,13 @@ logger = logging.getLogger(__name__)
 # Morpho Blue contract addresses per chain (derived from centralized registry)
 MORPHO_BLUE_ADDRESSES: dict[str, str] = {chain: addrs["morpho"] for chain, addrs in _MORPHO_BLUE_REGISTRY.items()}
 
-# Bundler addresses per chain (for batched operations, derived from centralized registry)
-MORPHO_BUNDLER_ADDRESSES: dict[str, str] = {chain: addrs["bundler"] for chain, addrs in _MORPHO_BLUE_REGISTRY.items()}
+# Bundler addresses per chain (for batched operations, derived from centralized registry).
+# ``bundler`` is optional: it is not used by any supply/borrow/repay/withdraw path, so a
+# chain whose Bundler3 deployment is unresolved (e.g. robinhood) may omit the key entirely.
+# ``.get(config.chain)`` on the consumer side already tolerates the resulting absence/None.
+MORPHO_BUNDLER_ADDRESSES: dict[str, str] = {
+    chain: bundler for chain, addrs in _MORPHO_BLUE_REGISTRY.items() if (bundler := addrs.get("bundler")) is not None
+}
 
 # Morpho Blue function selectors
 # Note: MarketParams struct is encoded as tuple (address,address,address,address,uint256)

@@ -18,6 +18,7 @@
 | [Monad](../../chains/monad.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 | [Optimism](../../chains/optimism.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 | [Polygon](../../chains/polygon.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
+| [Robinhood](../../chains/robinhood.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 
 ## API Reference
 

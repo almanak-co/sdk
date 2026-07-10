@@ -107,8 +107,10 @@ logger = logging.getLogger(__name__)
     author="Almanak",
     # Tags
     tags=["demo", "tutorial", "lending", "leverage", "looping", "morpho", "yield"],
-    # Supported chains (Morpho Blue is on Ethereum and Base)
-    supported_chains=["ethereum", "base"],
+    # Supported chains (Morpho Blue is on Ethereum, Base, and Robinhood).
+    # Robinhood is a stable-stable loop (USDe collateral / USDG debt) — see
+    # config.robinhood.json; run it with `-c config.robinhood.json`.
+    supported_chains=["ethereum", "base", "robinhood"],
     # Protocols used
     supported_protocols=["morpho_blue", "uniswap_v3"],
     # Intent types this strategy may emit

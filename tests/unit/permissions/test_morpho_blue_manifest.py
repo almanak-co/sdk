@@ -136,7 +136,7 @@ class TestMorphoBlueManifestCoverage:
             assert sel in selectors, f"Full LEND manifest missing selector {sel}"
 
     @pytest.mark.parametrize(
-        "chain", ["ethereum", "arbitrum", "base", "polygon", "monad"]
+        "chain", ["ethereum", "arbitrum", "base", "polygon", "monad", "robinhood"]
     )
     def test_supply_manifest_covers_both_flag_variants_on_every_chain(
         self, chain: str
@@ -166,7 +166,7 @@ class TestMorphoBlueManifestCoverage:
         )
 
     @pytest.mark.parametrize(
-        "chain", ["ethereum", "arbitrum", "base", "polygon"]
+        "chain", ["ethereum", "arbitrum", "base", "polygon", "robinhood"]
     )
     def test_borrow_manifest_authorises_chain_specific_collateral_approve(
         self, chain: str

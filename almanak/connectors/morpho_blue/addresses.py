@@ -32,9 +32,16 @@ from __future__ import annotations
 from typing import Any
 
 # Default Morpho Blue deployment address, used on chains where Morpho deployed via the
-# vanity-address factory. Not universal: Monad / Arbitrum / Polygon each deployed at
-# a distinct address. Always look the per-chain address up in MORPHO_BLUE[chain]["morpho"]
-# rather than relying on this constant directly.
+# vanity-address factory. Not universal: Monad / Arbitrum / Polygon / Robinhood each
+# deployed at a distinct address. Always look the per-chain address up in
+# MORPHO_BLUE[chain]["morpho"] rather than relying on this constant directly.
+#
+# Per-chain NON-vanity singletons (the vanity 0xBBBB…FFCb has ZERO code on these chains —
+# using it makes every compile fail "Unknown market"):
+#   - arbitrum: 0x6c247b1F6182318877311737BaC0844bAa518F5e
+#   - polygon:  0x1bF0c2541F820E775182832f06c0B7Fc27A25f67
+#   - monad:    0xD5D960E8C380B724a48AC59E2DfF1b2CB4a1eAee
+#   - robinhood:0x9D53d5E3bd5E8d4Cbfa6DB1ca238AEA02E651010 (verified via eth_getCode 2026-07-09)
 MORPHO_BLUE_ADDRESS = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
 
 MORPHO_BLUE: dict[str, dict[str, str]] = {
@@ -76,6 +83,17 @@ MORPHO_BLUE: dict[str, dict[str, str]] = {
         # Bundler3 variant — equivalent to the universal Bundler on other chains.
         "morpho": "0xD5D960E8C380B724a48AC59E2DfF1b2CB4a1eAee",
         "bundler": "0x82b684483e844422FD339df0b67b3B111F02c66E",
+    },
+    "robinhood": {
+        # Robinhood Chain (4663, Arbitrum Orbit L2). NON-vanity singleton: the
+        # universal 0xBBBB…FFCb vanity address has ZERO bytes of code here
+        # (verified via eth_getCode 2026-07-09) — using it makes every compile
+        # fail "Unknown market". Source: docs.morpho.org + on-chain verification.
+        # Morpho is ~73% of Robinhood TVL (powers the Earn product).
+        "morpho": "0x9D53d5E3bd5E8d4Cbfa6DB1ca238AEA02E651010",
+        # Bundler3 is not published on Morpho's Robinhood address page and is not
+        # used by any supply/borrow/repay/withdraw path, so it is deliberately
+        # omitted rather than invented (MORPHO_BUNDLER_ADDRESSES tolerates absence).
     },
 }
 
@@ -134,6 +152,17 @@ MORPHO_BLUE_TOKENS: dict[str, dict[str, str]] = {
         "wstETH": "0x10Aeaf63194db8d453d4D85a06E5eFE1dd0b5417",
         "weETH": "0xA3D68b74bF0528fdD07263c60d6488749044914b",
         "AUSD": "0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a",
+    },
+    "robinhood": {
+        # All verified on-chain at block 5_610_000 (2026-07-09). USDG (Global Dollar,
+        # Paxos, 6 dec) is the loan asset of EVERY Robinhood Morpho market; USDe
+        # (Ethena, 18 dec) is the deepest collateral. syrupUSDG backs the secondary
+        # market. No real Circle-USDC / Tether-USDT exists on 4663 (the 6-dec ones are
+        # dead, ~11 holders) — deliberately omitted, not invented.
+        "WETH": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+        "USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+        "USDe": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+        "syrupUSDG": "0x40858070814a57FdF33a613ae84fE0a8b4a874f7",
     },
 }
 
@@ -389,6 +418,37 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
             "oracle": "0xda77Cf67fFEECC7fc64a4767837D1fFEad1Bc73C",
             "irm": "0x09475a3D6eA8c314c592b1a3799bDE044E2F400F",
             "lltv": 860000000000000000,  # 86%
+        },
+    },
+    "robinhood": {
+        # Robinhood Chain Morpho markets (verified on-chain at block 5_610_000, 2026-07-09).
+        # Every market on 4663 uses USDG (Global Dollar) as the loan asset and the single
+        # AdaptiveCurveIRM 0x2BD3d5965B26B51814AC95127B2b80dD6CcC0fa1 (chain-specific —
+        # never copy Ethereum's). There is NO WETH-collateral market on 4663, so the
+        # looping demo is a stable-stable loop (USDe collateral / USDG debt).
+        #
+        # USDe/USDG market — the deep one powering Robinhood Earn: $75.5M supplied /
+        # $68.9M borrowed (util 0.91). The looping demo targets this market.
+        "0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6": {
+            "name": "USDe/USDG",
+            "loan_token": "USDG",
+            "loan_token_address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+            "collateral_token": "USDe",
+            "collateral_token_address": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+            "oracle": "0xE64849bd4AD03DfaBbe02bb521de19997a19055f",
+            "irm": "0x2BD3d5965B26B51814AC95127B2b80dD6CcC0fa1",
+            "lltv": 915000000000000000,  # 91.5%
+        },
+        # syrupUSDG/USDG market — secondary, ~$9M supplied. Same loan asset + IRM.
+        "0x919a9b6b94dae7c86620eaf7a08e597aae8a4c3a9e9c7671771fbaf62b6b61c7": {
+            "name": "syrupUSDG/USDG",
+            "loan_token": "USDG",
+            "loan_token_address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+            "collateral_token": "syrupUSDG",
+            "collateral_token_address": "0x40858070814a57FdF33a613ae84fE0a8b4a874f7",
+            "oracle": "0x152c638fad68913739Ee19Ba8eF47fAEB09DCa91",
+            "irm": "0x2BD3d5965B26B51814AC95127B2b80dD6CcC0fa1",
+            "lltv": 915000000000000000,  # 91.5%
         },
     },
 }

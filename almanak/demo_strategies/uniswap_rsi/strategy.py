@@ -74,7 +74,7 @@ if TYPE_CHECKING:
 # canonicalizes the configured chain before comparing so alias-shaped configs
 # (``"chain": "bnb"``) still validate.
 SUPPORTED_PROTOCOL_CHAINS: dict[str, tuple[str, ...]] = {
-    "uniswap_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "monad"),
+    "uniswap_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "monad", "robinhood"),
     "traderjoe_v2": ("avalanche", "arbitrum", "bsc", "ethereum"),
     "aerodrome": ("base", "optimism"),
     "pancakeswap_v3": ("bsc", "ethereum", "arbitrum", "base"),

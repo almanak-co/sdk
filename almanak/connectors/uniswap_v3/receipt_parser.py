@@ -76,6 +76,7 @@ POSITION_MANAGER_ADDRESSES: dict[str, str] = {
     "monad": "0x7197E214c0b767cFB76Fb734ab638E2c192F4E53",
     "xlayer": "0x315e413A11AB0df498eF83873012430ca36638Ae",  # Non-canonical (Governance Proposal 67)
     "zerog": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",  # JAINE DEX NPM (Uniswap V3 fork)
+    "robinhood": "0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3",  # Non-canonical (Orbit L2, verified factory() cross-check)
 }
 
 # Zero address for detecting mints

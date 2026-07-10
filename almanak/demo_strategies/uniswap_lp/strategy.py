@@ -170,7 +170,7 @@ class UniswapLPConfig:
     # Tags for categorization
     tags=["demo", "tutorial", "lp", "liquidity", "uniswap-v3", "arbitrum"],
     # Supported blockchains
-    supported_chains=["arbitrum", "ethereum", "base", "optimism"],
+    supported_chains=["arbitrum", "ethereum", "base", "optimism", "robinhood"],
     # Protocols this strategy interacts with
     supported_protocols=["uniswap_v3"],
     # Types of intents this strategy may return

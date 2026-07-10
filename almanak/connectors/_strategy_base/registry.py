@@ -55,6 +55,7 @@ KNOWN_VENUES: frozenset[str] = frozenset(
         "xlayer",
         "monad",
         "zerog",
+        "robinhood",
         "solana",
         "hyperliquid",
         "hyperevm",

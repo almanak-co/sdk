@@ -15,6 +15,7 @@
 | [Ethereum](../../chains/ethereum.md) | EVM | ``BORROW``, ``FLASH_LOAN``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 | [Monad](../../chains/monad.md) | EVM | ``BORROW``, ``FLASH_LOAN``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 | [Polygon](../../chains/polygon.md) | EVM | ``BORROW``, ``FLASH_LOAN``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
+| [Robinhood](../../chains/robinhood.md) | EVM | ``BORROW``, ``FLASH_LOAN``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 
 ## API Reference
 

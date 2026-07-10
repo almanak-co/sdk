@@ -82,6 +82,7 @@ EXPECTED_PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     },
     "xlayer": {"uniswap_v3": "0x4f0C28f5926AFDA16bf2506D5D9e57Ea190f9bcA"},
     "zerog": {"uniswap_v3": "0x8B598A7C136215A95ba0282b4d832B9f9801f2e2"},
+    "robinhood": {"uniswap_v3": "0xCaf681a66D020601342297493863E78C959E5cb2"},
 }
 
 EXPECTED_LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
@@ -142,6 +143,7 @@ EXPECTED_LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
     },
     "xlayer": {"uniswap_v3": "0x315e413A11AB0df498eF83873012430ca36638Ae"},
     "zerog": {"uniswap_v3": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72"},
+    "robinhood": {"uniswap_v3": "0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3"},
 }
 
 EXPECTED_SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
@@ -183,6 +185,7 @@ EXPECTED_SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
     },
     "xlayer": {"uniswap_v3": "0x976183AC3d09840D243A88c0268BADb3B3e3259f"},
     "zerog": {"uniswap_v3": "0xd00883722cECAD3A1c60bCA611f09e1851a0bE02"},
+    "robinhood": {"uniswap_v3": "0x33e885eD0Ec9bF04EcfB19341582aADCb4c8A9E7"},
     "bnb": {
         "uniswap_v3": "0x78D78E420Da98ad378D7799bE8f4AF69033EB077",
         "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",

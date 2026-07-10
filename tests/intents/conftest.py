@@ -966,6 +966,32 @@ CHAIN_CONFIGS = {
         # Tests that need ERC20 acquire it by swapping from native via Jaine.
         "balance_slots": {},
     },
+    "robinhood": {
+        # Robinhood Chain (4663, Arbitrum Orbit L2). Uniswap V3 WETH/USDG intent
+        # tests pin the fork to block 5,610,000 (see anvil_robinhood fixture),
+        # the block at which the WETH/USDG fee-500 pool liquidity was verified.
+        # USDG (Global Dollar, Paxos, 6 dec) is the chain's canonical stable —
+        # there is NO Circle-USDC / Tether-USDT with real liquidity on 4663.
+        "rpc_url": "https://rpc.mainnet.chain.robinhood.com",
+        "chain_id": 4663,
+        "alchemy_key": "robinhood",  # robinhood-mainnet.g.alchemy.com (verified live)
+        "tokens": {
+            "WETH": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+            "USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+            # USDe (Ethena, 18 dec) — collateral of the Morpho USDe/USDG market
+            # exercised by test_morpho_blue_lending.py.
+            "USDe": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+        },
+        # Balance slots verified on-chain @ block 5,610,000 (VIB-5706 AnvilProfile):
+        # WETH & USDG are EIP-1967 proxies, so the storage write targets the proxy
+        # address; standard keccak(abi.encode(holder, slot)) mapping. WETH also
+        # funds via WETH9 deposit() (handled by the _NATIVE_WRAPPERS path).
+        "balance_slots": {
+            "WETH": 51,
+            "USDG": 1,
+            "USDe": 5,
+        },
+    },
 }
 # Import Anvil fixtures and constants from shared gateway conftest.
 # Note: We do NOT import CHAIN_CONFIGS from conftest_gateway to avoid conflict with local definition
@@ -983,6 +1009,7 @@ from tests.conftest_gateway import (
     anvil_monad,
     anvil_optimism,
     anvil_polygon,
+    anvil_robinhood,
     anvil_xlayer,
     anvil_zerog,
     get_anvil_rpc_url,
@@ -1000,6 +1027,7 @@ __all__ = [
     "anvil_monad",
     "anvil_optimism",
     "anvil_polygon",
+    "anvil_robinhood",
     "anvil_xlayer",
     "anvil_zerog",
     # Price oracle fixtures (session-scoped per chain)
@@ -1014,6 +1042,7 @@ __all__ = [
     "price_oracle_optimism",
     "price_oracle_polygon",
     "price_oracle_xlayer",
+    "price_oracle_robinhood",
     # Utilities
     "fund_native_token",
     "fund_erc20_token",
@@ -2339,6 +2368,7 @@ price_oracle_polygon = _create_price_oracle_fixture("polygon")
 price_oracle_linea = _create_price_oracle_fixture("linea")
 price_oracle_monad = _create_price_oracle_fixture("monad")
 price_oracle_xlayer = _create_price_oracle_fixture("xlayer")
+price_oracle_robinhood = _create_price_oracle_fixture("robinhood")
 
 
 # =============================================================================
@@ -2377,6 +2407,7 @@ def price_oracle(chain_name: str, request) -> dict[str, Decimal]:
         "polygon": "price_oracle_polygon",
         "linea": "price_oracle_linea",
         "xlayer": "price_oracle_xlayer",
+        "robinhood": "price_oracle_robinhood",
     }
 
     fixture_name = fixture_map.get(chain_name)

@@ -33,6 +33,7 @@ SUPPORTED_CHAINS_BY_PROTOCOL: dict[str, frozenset[str]] = {
             "monad",
             "xlayer",
             "zerog",  # JAINE DEX (Uniswap V3 fork on 0G Chain)
+            "robinhood",  # Robinhood Chain (4663, Arbitrum Orbit L2)
         }
     ),
     # Agni Finance (Uniswap V3 fork, primary DEX on Mantle).

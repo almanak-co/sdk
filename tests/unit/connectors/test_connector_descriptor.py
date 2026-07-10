@@ -183,7 +183,7 @@ MIGRATED_STRATEGY_REGISTRATION = {
     "meteora": (("LP_OPEN", "LP_CLOSE"), ("solana",)),
     "morpho_blue": (
         ("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
-        ("ethereum", "base", "arbitrum", "polygon", "monad"),
+        ("ethereum", "base", "arbitrum", "polygon", "monad", "robinhood"),
     ),
     "morpho_vault": (("VAULT_DEPOSIT", "VAULT_REDEEM"), ("ethereum", "base")),
     "orca": (("LP_OPEN", "LP_CLOSE"), ("solana",)),
@@ -205,7 +205,7 @@ MIGRATED_STRATEGY_REGISTRATION = {
     ),
     "uniswap_v3": (
         ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
-        ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "monad"),
+        ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "monad", "robinhood"),
     ),
     "uniswap_v4": (
         ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
@@ -282,7 +282,7 @@ EXPECTED_STRATEGY_MATRIX_ENTRIES = {
         StrategyMatrixEntry(
             matrix_name="morpho_blue",
             category="lending",
-            chains=frozenset(("ethereum", "base", "arbitrum", "polygon", "monad")),
+            chains=frozenset(("ethereum", "base", "arbitrum", "polygon", "monad", "robinhood")),
         ),
     ),
     "pendle": (

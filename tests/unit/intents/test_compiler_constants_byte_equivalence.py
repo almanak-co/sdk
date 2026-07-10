@@ -470,6 +470,7 @@ class TestNftPositionManagerDerivedViews:
         "mantle": "0x218bf598D1453383e2F4AA7b14fFB9BfB102D637",
         "xlayer": "0x315e413A11AB0df498eF83873012430ca36638Ae",
         "zerog": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",
+        "robinhood": "0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3",
         "bnb": "0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613",
     }
 
