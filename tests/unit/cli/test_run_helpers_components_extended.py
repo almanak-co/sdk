@@ -587,8 +587,15 @@ class TestBuildOrchestratorExtras:
             )
 
     def test_multi_chain_with_set_multi_chain_providers(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Multi-chain calls set_multi_chain_providers on strategies that expose it (1592-1596)."""
-        _patch_component_factories(monkeypatch)
+        """Multi-chain calls set_multi_chain_providers on strategies that expose it (1592-1596).
+
+        VIB-5663 regression: the call must include the price oracle. Passing only
+        the balance provider leaves _multi_chain_price_oracle=None, so the
+        multi-chain MarketSnapshot is built with price_oracle=None and every
+        market.price(..., chain=...) raises "Cannot determine price", halting the
+        runner on the accounting native-gas fold.
+        """
+        mocks = _patch_component_factories(monkeypatch)
         strategy_instance = _make_strategy_instance()
         strategy_instance.set_multi_chain_providers = MagicMock()
 
@@ -613,6 +620,9 @@ class TestBuildOrchestratorExtras:
                 config_chain=None,
             )
         strategy_instance.set_multi_chain_providers.assert_called_once()
+        call_kwargs = strategy_instance.set_multi_chain_providers.call_args.kwargs
+        assert call_kwargs["price_oracle"] is mocks["GatewayPriceOracle"].return_value
+        assert call_kwargs["balance_provider"] is mocks["MultiChainGatewayBalanceProvider"].return_value
         assert "Multi-chain providers set" in out.getvalue().decode()
 
     def test_multi_chain_rate_monitor_wired(self, monkeypatch: pytest.MonkeyPatch) -> None:

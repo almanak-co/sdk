@@ -616,9 +616,15 @@ def _build_orchestrator_and_providers(  # noqa: C901
             chain_wallets=chain_wallets or None,
         )
 
-        # Set multi-chain providers on strategy if it's an IntentStrategy
+        # Set multi-chain providers on strategy if it's an IntentStrategy.
+        # VIB-5663: wire the price oracle too — without it the multi-chain
+        # MarketSnapshot is built with price_oracle=None (builders.py) and every
+        # market.price(..., chain=...) raises "Cannot determine price", halting
+        # the runner on the accounting native-gas fold. GatewayPriceOracle.price
+        # is chain-aware and routes per-chain through the gateway.
         if hasattr(strategy_instance, "set_multi_chain_providers"):
             strategy_instance.set_multi_chain_providers(
+                price_oracle=price_oracle,
                 balance_provider=multi_chain_balance_provider,
             )
             click.echo("  Multi-chain providers set on strategy")
