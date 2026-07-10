@@ -35,15 +35,17 @@ from tests.fixtures.accounting._generate_baselines import (  # noqa: E402
     generate_lp_fixture,
     generate_looping_fixture,
     generate_perp_fixture,
+    generate_settlement_fixture,
 )
 
 _PRIMITIVE_VERSION_MAP = {
     "lp": Primitive.LP,
     "looping": Primitive.LENDING,
     "perp": Primitive.PERP,
+    "settlement": Primitive.SETTLEMENT,
 }
 
-_LEDGER_ROW_COUNT = {"lp": 4, "looping": 6, "perp": 4}
+_LEDGER_ROW_COUNT = {"lp": 4, "looping": 6, "perp": 4, "settlement": 4}
 
 
 def _emit(primitive: str, generator) -> None:
@@ -78,6 +80,7 @@ def main() -> None:
     _emit("lp", generate_lp_fixture)
     _emit("looping", generate_looping_fixture)
     _emit("perp", generate_perp_fixture)
+    _emit("settlement", generate_settlement_fixture)
 
 
 if __name__ == "__main__":

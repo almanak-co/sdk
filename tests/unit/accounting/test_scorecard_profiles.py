@@ -23,6 +23,7 @@ from almanak.framework.primitives.taxonomy import (
     _LENDING_LIFECYCLE,
     _LP_LIFECYCLE,
     _PERP_LIFECYCLE,
+    _SETTLEMENT_LIFECYCLE,
 )
 from almanak.framework.primitives.types import Primitive
 
@@ -38,6 +39,9 @@ _TAXONOMY_LIFECYCLE_BY_PRIMITIVE = {
     # lifecycle is empty; the PT buy→sell round-trip is enforced by the PEN cell
     # pack, not the intent_type lifecycle guard (both legs are SWAP in the ledger).
     Primitive.SWAP: (),
+    # Vault SETTLEMENT (Lagoon operator side) — VIB-5682. The two capital-moving
+    # legs; the NO_ACCOUNTING SETTLE_PROPOSE leg is not a lifecycle step.
+    Primitive.SETTLEMENT: _SETTLEMENT_LIFECYCLE,
 }
 
 

@@ -1,0 +1,25 @@
+{
+  "accounting_events_row_count": 2,
+  "cells": {
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "FAIL",
+    "G14": "XFAIL",
+    "G15": "XFAIL",
+    "G2": "PASS",
+    "G3": "FAIL",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L5_22": "XFAIL",
+    "SETTLE_DEPOSIT": "PASS",
+    "SETTLE_REDEEM": "PASS"
+  },
+  "ledger_row_count": 4,
+  "matching_policy_version": 1
+}

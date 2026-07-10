@@ -48,6 +48,7 @@ from almanak.framework.accounting.scorecard_profiles import (
     ScorecardProfile,
 )
 from almanak.framework.primitives.taxonomy import (
+    _SETTLEMENT_LIFECYCLE,
     TAXONOMY,
     UnknownIntentTypeError,
     materializer_primitive_for,
@@ -77,7 +78,7 @@ CLOSE_EVENT_TYPES: tuple[str, ...] = tuple(
 # ``Primitive`` via ``SCORECARD_PROFILES`` (assembled below). ``Primitive`` is
 # kept as a back-compat alias: it is exported in ``__all__`` and referenced by
 # annotations throughout this module.
-ProfileName = Literal["lp", "looping", "perp", "pendle_pt", "pendle_lp", "curve_lp"]
+ProfileName = Literal["lp", "looping", "perp", "pendle_pt", "pendle_lp", "curve_lp", "settlement"]
 Primitive = ProfileName
 CellStatus = Literal["PASS", "FAIL", "XFAIL", "SKIP"]
 
@@ -3820,6 +3821,116 @@ def _cells_curve_lp(
     return out
 
 
+# ─── Vault SETTLEMENT cells (VIB-5682) ────────────────────────────────────
+#
+# The settlement scorecard scores the vault operator-side propose→settle two-phase
+# boundary as its own accounting primitive (``Primitive.SETTLEMENT``): a
+# ``settleDeposit`` issues shares against pending depositor capital, a
+# ``settleRedeem`` burns redeem shares and returns assets. Both are CAPITAL events,
+# NOT strategy returns — the ``SettlementAccountingEvent`` deliberately carries no
+# ``realized_pnl_usd`` / ``principal_delta_usd`` / ``cost_basis_usd``
+# (``settlement_accounting.py``), so no PnL fold reads a depositor inflow as profit
+# or a redemption as loss. These two cells assert exactly that discipline per leg:
+# the typed event exists, its receipt-measured magnitudes are MEASURED (Empty ≠
+# Zero — an unmeasured ``None`` never satisfies the cell), the version stamps are
+# present, the payload is PnL-inert, and the event carries its ledger linkage
+# (``tx_hash`` + ``ledger_entry_id``) so the ledger↔event join holds.
+#
+# Distinct cells (not folded into an LP/lending/vault pack): folding settlement
+# into an existing cell would hide the two-phase propose→settle boundary and the
+# share issuance/redemption that mutates AUM composition — the exact seams
+# VIB-5682 exists to score.
+
+# Keys whose presence would mean a settlement leaked into the PnL fold. A
+# settlement is capital in/out, never a return; the ``SettlementAccountingEvent``
+# must never carry any of these (capital-event discipline, ``settlement_accounting.py``).
+_SETTLEMENT_PNL_LEAK_KEYS: frozenset[str] = frozenset(
+    {"realized_pnl_usd", "principal_delta_usd", "cost_basis_usd", "unrealized_pnl", "net_pnl_usd"}
+)
+
+
+def _settlement_leg_cell(
+    cell_id: str,
+    event_type: str,
+    acct_events: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    payload_errors: dict[Any, str],
+) -> CellResult:
+    """Score one settlement leg (``SETTLE_DEPOSIT`` / ``SETTLE_REDEEM``).
+
+    PASS requires ALL of, on at least one event of ``event_type``:
+
+    1. the typed event exists;
+    2. ``assets_delta`` AND ``shares_delta`` are MEASURED (Empty ≠ Zero: an
+       unmeasured ``None`` never satisfies) and finite — and non-zero, since a
+       real settlement moved capital and issued/burned shares;
+    3. ``schema_version`` AND ``primitive_version`` version stamps present;
+    4. PnL-inert — no capital/return leak key in the payload;
+    5. ledger linkage present — ``tx_hash`` AND ``ledger_entry_id`` non-empty.
+
+    Any single failing check yields FAIL with a diagnostic naming the first
+    non-conformant reason across the candidate events.
+    """
+    desc = f"{event_type} typed capital event (measured, version-stamped, PnL-inert, ledger-linked)"
+    rows = [r for r in acct_events if r.get("event_type") == event_type]
+    if not rows:
+        return CellResult(cell_id, desc, "FAIL", f"no {event_type} accounting event")
+    blocked = _payload_block_cell(cell_id, desc, rows, payload_errors)
+    if blocked is not None:
+        return blocked
+
+    reasons: list[str] = []
+    for r in rows:
+        p = acct_payloads.get(r.get("id")) or {}
+        assets = _dec(p.get("assets_delta"))
+        shares = _dec(p.get("shares_delta"))
+        if assets is None or shares is None:
+            reasons.append("assets_delta/shares_delta unmeasured (None — Empty ≠ Zero)")
+            continue
+        if not (assets.is_finite() and shares.is_finite()):
+            reasons.append("assets_delta/shares_delta non-finite")
+            continue
+        if assets <= 0 or shares <= 0:
+            reasons.append(f"non-positive capital magnitude (assets={assets}, shares={shares})")
+            continue
+        if p.get("schema_version") is None or p.get("primitive_version") is None:
+            reasons.append("missing schema_version / primitive_version stamp")
+            continue
+        pnl_leak = sorted(k for k in _SETTLEMENT_PNL_LEAK_KEYS if p.get(k) is not None)
+        if pnl_leak:
+            reasons.append(f"PnL-leak key(s) present: {pnl_leak}")
+            continue
+        if not (r.get("tx_hash") or "") or not (r.get("ledger_entry_id") or ""):
+            reasons.append("missing ledger linkage (tx_hash / ledger_entry_id)")
+            continue
+        return CellResult(
+            cell_id,
+            desc,
+            "PASS",
+            f"{event_type}: assets_delta={assets} shares_delta={shares} "
+            f"stamps(schema={p.get('schema_version')},primitive={p.get('primitive_version')}) "
+            "PnL-inert, ledger-linked",
+        )
+    return CellResult(cell_id, desc, "FAIL", "; ".join(reasons) or f"{event_type} event not conformant")
+
+
+def _cells_settlement(
+    acct_events: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    payload_errors: dict[Any, str],
+) -> list[CellResult]:
+    """SETTLE_DEPOSIT + SETTLE_REDEEM — the vault-settlement scorecard (VIB-5682).
+
+    Two cells, one per capital-moving leg. Reads the raw (non-v1) settlement
+    payload pass-through from ``acct_payloads`` (``SettlementAccountingEvent`` is
+    not in the v1 Pydantic surface, so the decoded dict is preserved verbatim).
+    """
+    return [
+        _settlement_leg_cell("SETTLE_DEPOSIT", "SETTLE_DEPOSIT", acct_events, acct_payloads, payload_errors),
+        _settlement_leg_cell("SETTLE_REDEEM", "SETTLE_REDEEM", acct_events, acct_payloads, payload_errors),
+    ]
+
+
 # ─── Scorecard profile registry (G-A foundation) ─────────────────────────
 #
 # One declarative table replaces the former per-primitive if/elif ladders (the
@@ -3960,6 +4071,30 @@ SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
             ctx.acct_payloads,
             ctx.payload_errors,
             ctx.position_state_rows,
+        ),
+    ),
+    # Vault SETTLEMENT (Lagoon ERC-7540 operator side) — VIB-5682. Its own
+    # canonical ``Primitive.SETTLEMENT`` (F3/VIB-5666): the propose→settle
+    # two-phase boundary and the share issuance/redemption that mutates AUM
+    # composition are seams no LP/lending/perp cell scores. The ledger lifecycle
+    # is the two capital-moving legs (``SETTLE_DEPOSIT`` / ``SETTLE_REDEEM``); the
+    # NO_ACCOUNTING ``SETTLE_PROPOSE`` leg moves no capital and is not a lifecycle
+    # step. ε reuses the LP tolerance on ``notional_traded`` — settlement is a
+    # capital event, not a position round-trip, so the generic G6 reconciliation
+    # does not gate on it (the SETTLE cells carry the real per-leg assertions).
+    # The lot-matching ``matching_policy_version`` is UNCHANGED (settlement does no
+    # lot matching): ``MATCHING_POLICY_VERSIONS[Primitive.SETTLEMENT]`` stays the
+    # F3 value; this profile only adds scoring.
+    "settlement": ScorecardProfile(
+        name="settlement",
+        canonical_primitive=_TaxonomyPrimitive.SETTLEMENT,
+        required_lifecycle=_SETTLEMENT_LIFECYCLE,
+        eps_pct=Decimal("0.0025"),
+        eps_scaling=lambda b: (b.notional_traded, "notional_traded"),
+        cells=lambda ctx: _cells_settlement(
+            ctx.acct_events,
+            ctx.acct_payloads,
+            ctx.payload_errors,
         ),
     ),
 }

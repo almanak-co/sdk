@@ -37,8 +37,10 @@ from pathlib import Path
 from almanak.framework.accounting.payload_schemas import (
     FORMULA_VERSION,
     MATCHING_POLICY_VERSION as _GLOBAL_MATCHING_POLICY_VERSION,
+    PRIMITIVE_VERSIONS,
     SCHEMA_VERSION,
 )
+from almanak.framework.primitives.types import Primitive
 
 # Per-primitive map only exists post-T2; fall back to the global value at
 # precursor time so the same generator can produce both baselines.
@@ -341,8 +343,15 @@ def _insert_acct_event(
     tx_hash: str,
     payload: dict,
     primitive_name: str,
+    stamp: bool = True,
 ) -> None:
-    stamped = _stamp_payload(payload, primitive_name)
+    # ``stamp=False`` inserts the payload verbatim — used by the settlement
+    # fixture, whose ``SettlementAccountingEvent`` carries ``schema_version`` +
+    # ``primitive_version`` but (as a capital event, no lot matching) NEITHER
+    # ``formula_version`` NOR ``matching_policy_version``. ``_stamp_payload`` would
+    # inject those two and mis-shape the row vs. the real event
+    # (settlement_accounting.py::to_payload_json).
+    stamped = _stamp_payload(payload, primitive_name) if stamp else dict(payload)
     conn.execute(
         """
         INSERT INTO accounting_events
@@ -1160,8 +1169,203 @@ def generate_perp_fixture(db_path: str | Path) -> None:
         conn.close()
 
 
+# ─── Settlement fixture (Lagoon ERC-7540 operator side) — VIB-5682 ────────
+def generate_settlement_fixture(db_path: str | Path) -> None:
+    """Generate the canonical vault-SETTLEMENT fixture.
+
+    Shape-faithful to the VIB-5666 real-fork settlement proof
+    (``tests/reports/vib-5666-realfork-settlement-proof.md``) and to what
+    ``runner/settlement_commit.py`` + ``category_handlers/settlement_handler.py``
+    actually produce:
+
+    * 4 ``transaction_ledger`` rows — a ``SETTLE_PROPOSE`` (NO_ACCOUNTING gas/tx
+      row, no typed event), a ``SETTLE_DEPOSIT`` (ledger + typed event), a second
+      ``SETTLE_PROPOSE`` (redeem valuation, NO_ACCOUNTING), and a ``SETTLE_REDEEM``
+      (ledger + typed event). The propose legs carry the settlement outputs on
+      NEITHER leg — they move no capital.
+    * 2 ``accounting_events`` — the ``SETTLE_DEPOSIT`` / ``SETTLE_REDEEM``
+      ``SettlementAccountingEvent`` rows: receipt-measured ``assets_delta`` /
+      ``shares_delta`` (positive magnitudes), post-settle ``new_total_assets``,
+      ``assets_usd``, version stamps (``schema_version`` + ``primitive_version``,
+      NO ``formula_version`` / ``matching_policy_version`` — settlement does no lot
+      matching), and NO PnL keys (capital-event discipline).
+
+    The redeem leg is constructed synthetically (the share-backed guard blocks the
+    epoch-2 redeem on the live demo today), but its row shape is derived from the
+    commit-pipeline code, not imagination.
+    """
+    db_path = Path(db_path)
+    conn = _connect(db_path)
+    try:
+        cycle_dep = "settlement-1"
+        cycle_red = "settlement-2"
+        chain = "base"
+        protocol = "lagoon"
+        vault = "0x6c347d32ef555f034ff22ce7a84fc8019dcbfb67"
+        position_key = f"settlement:{chain}:{protocol}:{_WALLET}:{vault}"
+
+        def _settlement_payload(event_type: str, assets: str, shares: str, nta: str, usd: str, epoch: int) -> dict:
+            # Verbatim SettlementAccountingEvent.to_payload_json shape (capital
+            # event: schema_version + primitive_version, no lot-matching stamps,
+            # no PnL keys).
+            return {
+                "event_type": event_type,
+                "position_key": position_key,
+                "vault_address": vault,
+                "asset_token": "USDC",
+                "assets_delta": assets,
+                "shares_delta": shares,
+                "new_total_assets": nta,
+                "fee_shares": None,
+                "assets_usd": usd,
+                "epoch_id": epoch,
+                "confidence": "HIGH",
+                "unavailable_reason": "",
+                "schema_version": SCHEMA_VERSION,
+                "primitive_version": PRIMITIVE_VERSIONS[Primitive.SETTLEMENT],
+            }
+
+        # T0: SETTLE_PROPOSE (updateNewTotalAssets, deposit valuation) — no capital,
+        # NO_ACCOUNTING ledger-only row (gas/tx visibility so the books tie).
+        _insert_ledger(
+            conn,
+            row_id=_stable_id("tl-settle", 1),
+            cycle_id=cycle_dep,
+            timestamp=_ts(0),
+            intent_type="SETTLE_PROPOSE",
+            token_in="",
+            amount_in="",
+            token_out="",
+            amount_out="",
+            chain=chain,
+            protocol=protocol,
+            tx_hash="0xs1",
+        )
+
+        # T1: SETTLE_DEPOSIT — assets flowed IN (1000 USDC), shares minted (1000).
+        ledger_deposit = _stable_id("tl-settle", 2)
+        _insert_ledger(
+            conn,
+            row_id=ledger_deposit,
+            cycle_id=cycle_dep,
+            timestamp=_ts(30),
+            intent_type="SETTLE_DEPOSIT",
+            token_in="USDC",
+            amount_in="1000",
+            token_out="",
+            amount_out="",
+            chain=chain,
+            protocol=protocol,
+            tx_hash="0xs2",
+            extracted={
+                "settlement": {
+                    "leg": "deposit",
+                    "assets": "1000",
+                    "shares": "1000",
+                    "new_total_assets": "0",
+                    "fee_shares": None,
+                    "assets_usd": "1000.00",
+                    "epoch_id": 1,
+                }
+            },
+        )
+        _insert_acct_event(
+            conn,
+            row_id=_stable_id("ae-settle", 1),
+            cycle_id=cycle_dep,
+            timestamp=_ts(30),
+            chain=chain,
+            protocol=protocol,
+            event_type="SETTLE_DEPOSIT",
+            position_key=position_key,
+            ledger_entry_id=ledger_deposit,
+            tx_hash="0xs2",
+            payload=_settlement_payload("SETTLE_DEPOSIT", "1000", "1000", "0", "1000.00", 1),
+            primitive_name="settlement",
+            stamp=False,
+        )
+
+        # T2: SETTLE_PROPOSE #2 (redeem valuation) — Lagoon v0.5.0 needs a fresh
+        # proposal per settleRedeem. NO_ACCOUNTING ledger-only row.
+        _insert_ledger(
+            conn,
+            row_id=_stable_id("tl-settle", 3),
+            cycle_id=cycle_red,
+            timestamp=_ts(60),
+            intent_type="SETTLE_PROPOSE",
+            token_in="",
+            amount_in="",
+            token_out="",
+            amount_out="",
+            chain=chain,
+            protocol=protocol,
+            tx_hash="0xs3",
+        )
+
+        # T3: SETTLE_REDEEM — assets flowed OUT (500 USDC), shares burned (500).
+        ledger_redeem = _stable_id("tl-settle", 4)
+        _insert_ledger(
+            conn,
+            row_id=ledger_redeem,
+            cycle_id=cycle_red,
+            timestamp=_ts(90),
+            intent_type="SETTLE_REDEEM",
+            token_in="USDC",
+            amount_in="500",
+            token_out="",
+            amount_out="",
+            chain=chain,
+            protocol=protocol,
+            tx_hash="0xs4",
+            extracted={
+                "settlement": {
+                    "leg": "redeem",
+                    "assets": "500",
+                    "shares": "500",
+                    "new_total_assets": "500",
+                    "fee_shares": None,
+                    "assets_usd": "500.00",
+                    "epoch_id": 2,
+                }
+            },
+        )
+        _insert_acct_event(
+            conn,
+            row_id=_stable_id("ae-settle", 2),
+            cycle_id=cycle_red,
+            timestamp=_ts(90),
+            chain=chain,
+            protocol=protocol,
+            event_type="SETTLE_REDEEM",
+            position_key=position_key,
+            ledger_entry_id=ledger_redeem,
+            tx_hash="0xs4",
+            payload=_settlement_payload("SETTLE_REDEEM", "500", "500", "500", "500.00", 2),
+            primitive_name="settlement",
+            stamp=False,
+        )
+
+        # Snapshots + metrics so the generic G4/G5/G8 cells have >0 rows.
+        for i, (cyc, offset) in enumerate(((cycle_dep, 0), (cycle_dep, 30), (cycle_red, 60), (cycle_red, 90)), start=1):
+            _insert_portfolio_snapshot(
+                conn,
+                cycle_id=cyc,
+                iteration_number=i,
+                timestamp=_ts(offset),
+                total_value_usd=str(Decimal("1000") + Decimal(i)),
+                available_cash_usd="1000.0",
+                deployed_capital_usd="0",
+                chain=chain,
+            )
+
+        _insert_portfolio_metrics(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def main() -> None:
-    """Generate all three fixtures + their expected_cells.json into the
+    """Generate all fixtures + their expected_cells.json into the
     canonical directory layout. Used both by ``_freeze_pre_t2_baseline.py``
     (precursor) and by the T2 commit author when re-baselining.
     """
@@ -1169,6 +1373,7 @@ def main() -> None:
     generate_lp_fixture(base / "lp" / "expected_baseline.sqlite")
     generate_looping_fixture(base / "looping" / "expected_baseline.sqlite")
     generate_perp_fixture(base / "perp" / "expected_baseline.sqlite")
+    generate_settlement_fixture(base / "settlement" / "expected_baseline.sqlite")
 
 
 if __name__ == "__main__":

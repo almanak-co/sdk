@@ -81,6 +81,13 @@ _LP_LIFECYCLE_WITH_FEES: tuple[str, ...] = ("LP_OPEN", "LP_COLLECT_FEES", "LP_CL
 _PERP_LIFECYCLE: tuple[str, ...] = ("PERP_OPEN", "PERP_CLOSE")
 _LENDING_LIFECYCLE: tuple[str, ...] = ("SUPPLY", "BORROW", "REPAY", "WITHDRAW")
 _VAULT_LIFECYCLE: tuple[str, ...] = ("VAULT_DEPOSIT", "VAULT_REDEEM")
+# VIB-5682: vault SETTLEMENT (Lagoon operator side) canonical lifecycle — the two
+# capital-moving legs. The propose leg (updateNewTotalAssets → SETTLE_PROPOSE) is
+# NO_ACCOUNTING and moves no capital, so it is NOT a lifecycle step. Distinct from
+# _VAULT_LIFECYCLE (depositor-facing VAULT_DEPOSIT/VAULT_REDEEM); settlement is the
+# operator side that issues/burns shares. Source of truth for the Accountant Test's
+# ``settlement`` scorecard profile required_lifecycle.
+_SETTLEMENT_LIFECYCLE: tuple[str, ...] = ("SETTLE_DEPOSIT", "SETTLE_REDEEM")
 _STAKING_LIFECYCLE: tuple[str, ...] = ("STAKE", "UNSTAKE")
 _PREDICTION_LIFECYCLE: tuple[str, ...] = (
     "PREDICTION_BUY",
@@ -286,6 +293,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.SETTLEMENT,
             position_type=None,
             event_kind=EventKind.NONE,
+            required_lifecycle=_SETTLEMENT_LIFECYCLE,
         ),
         _record(
             "SETTLE_REDEEM",
@@ -293,6 +301,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.SETTLEMENT,
             position_type=None,
             event_kind=EventKind.NONE,
+            required_lifecycle=_SETTLEMENT_LIFECYCLE,
         ),
         # ──────────────────────────────────────────────────────────────────
         # Staking
