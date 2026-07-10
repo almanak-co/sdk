@@ -540,6 +540,20 @@ class PerpData:
         funding_fee_usd: Accumulated funding fees in USD at close (VIB-3497).
             None = unavailable (parser has not yet implemented extraction).
             Decimal("0") = measured zero funding (position held for <1 funding period).
+        venue_leverage: The leverage the VENUE actually applied to the position,
+            observed on-venue after the fill (VIB-5724). Distinct from
+            ``leverage_requested``: a venue that cannot honour the requested
+            leverage (e.g. Hyperliquid CoreWriter has no set-leverage action, so
+            it opens at the account's existing per-asset leverage) records the
+            truth here. ``None`` = unmeasured (Empty≠Zero — never defaulted to
+            the requested value, never ``0``).
+        venue_margin_mode: The margin mode the VENUE actually used —
+            ``"isolated"`` or ``"cross"`` (VIB-5724), observed on-venue after the
+            fill. ``None`` = unmeasured.
+        leverage_requested: The leverage the INTENT asked for (VIB-5724). Pure
+            metadata for divergence forensics; it is NEVER the venue truth. Kept
+            separate so no field that reads as venue truth ever carries the
+            requested value.
     """
 
     position_id: str | int | None = None
@@ -551,6 +565,11 @@ class PerpData:
     realized_pnl: Decimal | None = None
     fees_paid: int | None = None
     funding_fee_usd: Decimal | None = None
+    # VIB-5724 — venue-observed truth vs the intent's request. All default to
+    # None (unmeasured) so an absent venue read never fabricates a value.
+    venue_leverage: Decimal | None = None
+    venue_margin_mode: str | None = None
+    leverage_requested: Decimal | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -564,6 +583,11 @@ class PerpData:
             "realized_pnl": str(self.realized_pnl) if self.realized_pnl else None,
             "fees_paid": str(self.fees_paid) if self.fees_paid else None,
             "funding_fee_usd": str(self.funding_fee_usd) if self.funding_fee_usd is not None else None,
+            # Empty≠Zero: serialize measured values (including a measured 0) as-is;
+            # only an unmeasured (None) venue read serializes to null.
+            "venue_leverage": str(self.venue_leverage) if self.venue_leverage is not None else None,
+            "venue_margin_mode": self.venue_margin_mode if self.venue_margin_mode else None,
+            "leverage_requested": str(self.leverage_requested) if self.leverage_requested is not None else None,
         }
 
 

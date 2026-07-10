@@ -38,6 +38,10 @@ from almanak.connectors.hyperliquid.runner_hooks import (
 from tests.unit.connectors.hyperliquid.test_fill_accounting import (
     _CLOID_HEX,
     _CLOID_INT,
+    _VENUE_WALLET,
+    _encode_position_hex,
+    _fill,
+    _gateway_with_fills_and_position,
     _make_hl_result,
     _mock_gateway_with_fills,
 )
@@ -79,6 +83,69 @@ def test_enrich_result_noop_when_no_settled_fill() -> None:
     gw = _mock_gateway_with_fills(fills=[], funding=[])
     _hook().enrich_result(result, gateway_client=gw, chain="hyperevm", wallet_address="0xabc")
     assert result.extracted_data.get("perp_data") is None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# VIB-5724 — enrich propagates venue leverage/margin-mode + divergence warning
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_enrich_open_propagates_venue_leverage_and_warns(caplog: object) -> None:
+    """(a)+(b) A confirmed OPEN stamps venue leverage/margin-mode onto perp_data,
+    and the requested-vs-venue divergence is logged as a WARNING with both values."""
+    import logging
+    from decimal import Decimal
+
+    from almanak.framework.execution.extracted_data import PerpData
+
+    result = _make_hl_result(reduce_only=False)
+    result.extracted_data = {"leverage_requested": "2"}  # runner-stamped request
+    gw = _gateway_with_fills_and_position(
+        fills=[_fill(_CLOID_HEX, px="60000", sz="0.001")],
+        funding=[],
+        position_hex=_encode_position_hex(szi=100000, leverage=20, is_isolated=False),
+    )
+    with caplog.at_level(logging.WARNING, logger="almanak.connectors.hyperliquid.fill_accounting"):
+        _hook().enrich_result(result, gateway_client=gw, chain="hyperevm", wallet_address=_VENUE_WALLET)
+
+    perp = result.extracted_data.get("perp_data")
+    assert isinstance(perp, PerpData)
+    assert perp.venue_leverage == Decimal("20")
+    assert perp.venue_margin_mode == "cross"
+    assert perp.leverage == Decimal("20")  # canonical field = venue truth
+    # (d) requested-leverage metadata is preserved untouched.
+    assert result.extracted_data["leverage_requested"] == "2"
+    assert perp.leverage_requested == Decimal("2")
+    assert [r for r in caplog.records if "leverage divergence" in r.getMessage()]
+
+
+def test_enrich_open_venue_unmeasured_leaves_fields_none() -> None:
+    """(c) A failed venue read leaves the venue fields None — never defaulted."""
+    from decimal import Decimal
+
+    result = _make_hl_result(reduce_only=False)
+    result.extracted_data = {"leverage_requested": "2"}
+    gw = _gateway_with_fills_and_position(
+        fills=[_fill(_CLOID_HEX, px="60000", sz="0.001")], funding=[], position_hex=None
+    )
+    _hook().enrich_result(result, gateway_client=gw, chain="hyperevm", wallet_address=_VENUE_WALLET)
+    perp = result.extracted_data.get("perp_data")
+    assert perp is not None
+    assert perp.venue_leverage is None
+    assert perp.venue_margin_mode is None
+    assert perp.leverage is None  # not defaulted to requested 2
+    assert perp.leverage_requested == Decimal("2")
+
+
+def test_requested_leverage_parser_empty_not_zero() -> None:
+    """Empty ≠ Zero: absent / unparseable requested-leverage → None (no fabricated 0)."""
+    hook = _hook()
+    assert hook._requested_leverage({}) is None
+    assert hook._requested_leverage({"leverage_requested": ""}) is None
+    assert hook._requested_leverage({"leverage_requested": "not-a-number"}) is None
+    from decimal import Decimal
+
+    assert hook._requested_leverage({"leverage_requested": "2"}) == Decimal("2")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

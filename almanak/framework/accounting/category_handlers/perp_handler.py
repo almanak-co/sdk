@@ -51,6 +51,21 @@ def _market_from_position_key(position_key: str) -> str:
     return position_key.rsplit(":", 1)[-1]
 
 
+def _venue_truth_fields(perp_data: Any) -> tuple[Decimal | None, str | None, Decimal | None]:
+    """``(venue_leverage, venue_margin_mode, requested_leverage)`` from PerpData (VIB-5724).
+
+    Venue-observed truth vs the intent's request. Empty ≠ Zero: an unmeasured
+    venue read stays ``None`` — never defaulted to the requested value.
+    """
+    if perp_data is None:
+        return (None, None, None)
+    return (
+        _safe_decimal(getattr(perp_data, "venue_leverage", None)),
+        getattr(perp_data, "venue_margin_mode", None) or None,
+        _safe_decimal(getattr(perp_data, "leverage_requested", None)),
+    )
+
+
 def handle_perp(
     outbox_row: dict[str, Any],
     ledger_row: dict[str, Any],
@@ -125,6 +140,7 @@ def handle_perp(
         funding_fee_raw = getattr(perp_data, "funding_fee_usd", None)
         if funding_fee_raw is not None:
             funding_paid_usd = _safe_decimal(funding_fee_raw)
+    venue_leverage, venue_margin_mode, requested_leverage = _venue_truth_fields(perp_data)
 
     # ── Identity / ID ────────────────────────────────────────────────────────
     _id_seed = tx_hash or ledger_entry_id or position_key
@@ -156,6 +172,9 @@ def handle_perp(
         funding_paid_usd=funding_paid_usd,
         confidence=AccountingConfidence.ESTIMATED,
         unavailable_reason="entry_price and realized_pnl require perp receipt parser (pending)",
+        venue_leverage=venue_leverage,
+        venue_margin_mode=venue_margin_mode,
+        requested_leverage=requested_leverage,
     )
 
 

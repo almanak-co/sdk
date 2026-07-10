@@ -50,6 +50,12 @@ class PerpAccountingEvent:
         funding_paid_usd: Decimal | None,
         confidence: AccountingConfidence,
         unavailable_reason: str = "",
+        # VIB-5724 — venue-observed truth vs the intent's request. Optional +
+        # default None so this is an additive, back-compatible payload extension
+        # (Empty ≠ Zero: an unmeasured venue read stays None, never defaulted).
+        venue_leverage: Decimal | None = None,
+        venue_margin_mode: str | None = None,
+        requested_leverage: Decimal | None = None,
     ) -> None:
         self.identity = identity
         self.event_type = event_type.value
@@ -65,6 +71,15 @@ class PerpAccountingEvent:
         self.funding_paid_usd = funding_paid_usd
         self.confidence = confidence
         self.unavailable_reason = unavailable_reason
+        # VIB-5724 — the LEVERAGE the venue actually applied ("cross"/"isolated"
+        # margin mode too), observed on-venue. ``leverage`` (above) already
+        # carries the venue value for CoreWriter perps; these expose it
+        # explicitly plus the margin mode, and ``requested_leverage`` keeps the
+        # intent's request as metadata for divergence forensics — never as venue
+        # truth.
+        self.venue_leverage = venue_leverage
+        self.venue_margin_mode = venue_margin_mode
+        self.requested_leverage = requested_leverage
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -87,6 +102,12 @@ class PerpAccountingEvent:
                 "entry_price": _enc(self.entry_price),
                 "realized_pnl_usd": _enc(self.realized_pnl_usd),
                 "funding_paid_usd": _enc(self.funding_paid_usd),
+                # VIB-5724 — venue-observed leverage / margin mode + the intent's
+                # requested leverage (metadata). Emitted only when measured so
+                # unaugmented readers see null rather than a fabricated value.
+                "venue_leverage": _enc(self.venue_leverage),
+                "venue_margin_mode": self.venue_margin_mode,
+                "requested_leverage": _enc(self.requested_leverage),
                 "confidence": str(self.confidence),
                 "unavailable_reason": self.unavailable_reason,
                 "schema_version": self.schema_version,

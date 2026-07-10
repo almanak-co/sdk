@@ -90,6 +90,11 @@ class HyperliquidRunnerHookConnector(
             gateway_client=gateway_client,
             wallet_address=wallet_address,
             is_open=is_open,
+            chain=chain,
+            # VIB-5724 — the runner stamps the intent's requested leverage here
+            # (perp opens only) so we can record it as metadata and warn loudly
+            # when the venue-observed leverage/margin-mode diverges from it.
+            leverage_requested=self._requested_leverage(extracted),
         )
         if bundle is None:
             return
@@ -102,6 +107,25 @@ class HyperliquidRunnerHookConnector(
         # attribution. Only stamp when we MEASURED a fee (Empty ≠ Zero) and the
         # result does not already carry protocol fees.
         self._maybe_stamp_fee(result, bundle.fee_usd)
+
+    @staticmethod
+    def _requested_leverage(extracted: dict[str, Any]) -> Any:
+        """Parse the runner-stamped ``leverage_requested`` into a Decimal (VIB-5724).
+
+        The runner stamps ``extracted_data['leverage_requested']`` from the intent
+        for perp opens (the only surface that carries the requested leverage into
+        the enrich seam). Empty ≠ Zero: an absent / unparseable value → ``None``,
+        so the divergence check simply does not fire rather than fabricating one.
+        """
+        from decimal import Decimal, InvalidOperation
+
+        raw = extracted.get("leverage_requested")
+        if raw is None or raw == "":
+            return None
+        try:
+            return Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
 
     @staticmethod
     def _is_open_result(result: Any, extracted: dict[str, Any]) -> bool:

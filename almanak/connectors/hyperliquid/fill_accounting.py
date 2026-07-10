@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 # closing fills carry a non-zero ``closedPnl``; opening fills carry ``"0.0"``.
 _CLOSE_DIR_HINTS = ("close", "long > short", "short > long")
 
+# VIB-5724 — leverage is an integer on-venue (``uint32``); a sub-0.01 gap is only
+# a Decimal-representation artefact of the requested value, not a real divergence.
+_LEVERAGE_DIVERGENCE_TOLERANCE = Decimal("0.01")
+
 
 def _to_decimal(value: Any) -> Decimal | None:
     """Parse a wire string to Decimal, Empty ≠ Zero.
@@ -197,12 +201,109 @@ def _sum_funding(deltas: list[Any]) -> Decimal | None:
     return total
 
 
+def read_venue_leverage(
+    gateway_client: Any,
+    *,
+    wallet_address: str,
+    asset_index: int,
+    chain: str,
+) -> tuple[Decimal | None, str | None]:
+    """Read the VENUE-observed leverage + margin mode for an open position (VIB-5724).
+
+    CoreWriter has no set-leverage / margin-mode action (the action set is IDs
+    1-13,15,16 — ``updateLeverage`` lives only on the L1 EIP-712 exchange
+    endpoint), so a submitted ``leverage`` is NOT applied on-venue: the position
+    opens at the account's existing per-asset leverage and margin mode. This
+    reads the ``0x0800`` position precompile — where the venue leverage
+    (``uint32``) and ``isIsolated`` (``bool``) are decoded — so accounting can
+    record the truth the venue used rather than the value the intent requested.
+
+    Returns ``(venue_leverage, venue_margin_mode)`` where ``venue_margin_mode`` is
+    ``"isolated"`` / ``"cross"``. Empty ≠ Zero: a failed/unavailable read, a flat
+    read (``szi == 0`` — no position to describe), or a malformed
+    ``leverage == 0`` all yield ``(None, None)`` — NEVER a fabricated ``0`` and
+    NEVER the requested value. The egress is the gateway ``eth_call`` (the same
+    channel ``perps_read`` uses); this stays a pure caller of that boundary.
+    """
+    from .addresses import PRECOMPILE_POSITION
+    from .sdk import decode_position, encode_position_query
+
+    if not wallet_address or not chain:
+        return (None, None)
+    try:
+        eth_call = gateway_client.eth_call
+    except AttributeError:
+        logger.debug("HL venue leverage: gateway has no eth_call; unmeasured", exc_info=True)
+        return (None, None)
+
+    try:
+        data = "0x" + encode_position_query(wallet_address, int(asset_index)).hex()
+        raw = eth_call(chain, PRECOMPILE_POSITION, data)
+    except Exception:  # noqa: BLE001 — any gateway/encode fault → UNMEASURED
+        logger.debug("HL venue leverage: position eth_call failed", exc_info=True)
+        return (None, None)
+
+    if not isinstance(raw, str) or not raw:
+        # Empty≠Zero: an unmeasured / non-hex read is not a position at 0x leverage.
+        return (None, None)
+
+    try:
+        pos = decode_position(raw)
+        # A flat read (no position) or a malformed leverage carries no venue
+        # truth. Property access + Decimal coercion stay INSIDE the try: this
+        # helper promises never to raise into the fill-accounting path, so a
+        # malformed decode result (missing attribute, None leverage) must
+        # degrade to unmeasured, not propagate.
+        if not pos.is_open or pos.leverage is None or pos.leverage <= 0:
+            return (None, None)
+        venue_margin_mode = "isolated" if pos.is_isolated else "cross"
+        return (Decimal(pos.leverage), venue_margin_mode)
+    except Exception:  # noqa: BLE001 — a bad blob is unmeasured, not a fabricated read
+        logger.debug("HL venue leverage: could not decode position blob", exc_info=True)
+        return (None, None)
+
+
+def _warn_on_leverage_divergence(
+    *,
+    venue_leverage: Decimal | None,
+    venue_margin_mode: str | None,
+    leverage_requested: Decimal | None,
+    position_id: str,
+    coin: str,
+) -> None:
+    """Log a loud WARNING when the venue truth diverges from the intent request (VIB-5724).
+
+    The compile-time warning already flags that leverage cannot be set on-venue;
+    this is the *observed* confirmation that it wasn't. Never raises / halts (the
+    position is already open) — it only surfaces the divergence with BOTH values
+    and the position identity so an operator can reconcile the on-venue risk.
+    """
+    if venue_leverage is None or leverage_requested is None:
+        return  # cannot compare — at least one side unmeasured (Empty≠Zero)
+    if abs(venue_leverage - leverage_requested) <= _LEVERAGE_DIVERGENCE_TOLERANCE:
+        return  # venue honoured the request (within rounding) — nothing to flag
+    logger.warning(
+        "HL leverage divergence: intent requested leverage=%s but venue opened "
+        "leverage=%s margin_mode=%s (cloid=%s coin=%s). CoreWriter cannot set "
+        "leverage/margin-mode; the position uses the account's per-asset default. "
+        "Accounting records the venue truth (venue_leverage/venue_margin_mode); "
+        "the requested value is kept as metadata only.",
+        leverage_requested,
+        venue_leverage,
+        venue_margin_mode or "?",
+        position_id,
+        coin or "?",
+    )
+
+
 def build_perp_data_from_fills(
     result: Any,
     *,
     gateway_client: Any,
     wallet_address: str,
     is_open: bool,
+    chain: str = "",
+    leverage_requested: Decimal | None = None,
 ) -> Any | None:
     """Build a :class:`PerpData` from HyperCore fills, correlated by cloid.
 
@@ -215,6 +316,14 @@ def build_perp_data_from_fills(
     ``is_open`` selects which fields we populate: opens carry ``entry_price`` +
     ``fee``; closes carry ``exit_price`` + ``realized_pnl`` + ``fee`` +
     ``funding_fee_usd``. Both are best-effort and honest (Empty ≠ Zero).
+
+    VIB-5724: on an OPEN, once the fill is confirmed, also read the VENUE-observed
+    leverage + margin mode from the position precompile and stamp them on the
+    ``PerpData`` (``venue_leverage`` / ``venue_margin_mode``), setting the
+    canonical ``leverage`` field to the venue truth too. ``leverage_requested``
+    (the intent's requested value) is carried as metadata only, and a divergence
+    between the two is logged loudly. A failed venue read leaves the venue fields
+    ``None`` (Empty ≠ Zero) — never defaulted to the requested value.
     """
     from almanak.framework.execution.extracted_data import PerpData
 
@@ -249,6 +358,26 @@ def build_perp_data_from_fills(
         if funding_deltas is not None:
             funding_usd = _sum_funding(list(funding_deltas))
 
+    # VIB-5724 — on an OPEN, propagate the VENUE-observed leverage + margin mode.
+    # A close flattens the position, so its post-close leverage carries no truth;
+    # only opens read the venue leverage. Empty≠Zero: an unmeasured read stays None.
+    venue_leverage: Decimal | None = None
+    venue_margin_mode: str | None = None
+    if is_open:
+        venue_leverage, venue_margin_mode = read_venue_leverage(
+            gateway_client,
+            wallet_address=wallet_address,
+            asset_index=order.asset_index,
+            chain=chain,
+        )
+        _warn_on_leverage_divergence(
+            venue_leverage=venue_leverage,
+            venue_margin_mode=venue_margin_mode,
+            leverage_requested=leverage_requested,
+            position_id=order.cloid_hex,
+            coin=coin,
+        )
+
     perp = PerpData(
         position_id=order.cloid_hex,
         entry_price=agg.avg_price if is_open else None,
@@ -256,6 +385,13 @@ def build_perp_data_from_fills(
         realized_pnl=agg.realized_pnl_usd if not is_open else None,
         fees_paid=None,  # fees carried in USD below; raw-int fees_paid stays unmeasured
         funding_fee_usd=funding_usd,
+        # Venue truth (Empty≠Zero when unread). The canonical ``leverage`` field
+        # carries the venue value — never the requested one — so any reader of
+        # ``leverage`` sees on-venue reality.
+        leverage=venue_leverage,
+        venue_leverage=venue_leverage,
+        venue_margin_mode=venue_margin_mode,
+        leverage_requested=leverage_requested,
     )
     # ``PerpData`` has no dedicated USD-fee field; the perp handler reads
     # ``fee``-style economics through ``funding_fee_usd`` / ``realized_pnl`` /
@@ -376,4 +512,4 @@ def read_order_status(gateway_client: Any, *, wallet_address: str, cloid_hex: st
     return response
 
 
-__all__ = ["build_perp_data_from_fills", "read_order_status"]
+__all__ = ["build_perp_data_from_fills", "read_order_status", "read_venue_leverage"]

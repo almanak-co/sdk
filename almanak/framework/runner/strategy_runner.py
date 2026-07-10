@@ -3271,6 +3271,32 @@ class StrategyRunner:
             self._pending_fill_handles.pop(deployment_id, None)
             logger.info("Fill reconciled for %s (terminal verdict) — cleared pending handle", deployment_id)
 
+    @staticmethod
+    def _stamp_perp_requested_leverage(result: Any, intent: Any) -> None:
+        """Stamp a perp-open intent's requested leverage onto ``extracted_data`` (VIB-5724).
+
+        The connector enrich hook has no access to the intent, but it needs the
+        requested leverage to detect divergence from the venue-observed leverage.
+        This is the single seam where both the intent and the result are in scope,
+        so the request is copied here (perp opens only) and read back by the hook.
+        Pure metadata: it is never written into a field that reads as venue truth.
+        No-op for non-perp intents, a missing leverage, or a non-dict
+        ``extracted_data``. ``setdefault`` so a value already present wins.
+        """
+        it = getattr(intent, "intent_type", None)
+        if it is None:
+            return
+        it_str = it.value if hasattr(it, "value") else str(it)
+        if it_str not in ("PERP_OPEN", "PERP_INCREASE"):
+            return
+        leverage = getattr(intent, "leverage", None)
+        if leverage is None:
+            return
+        extracted = getattr(result, "extracted_data", None)
+        if not isinstance(extracted, dict):
+            return
+        extracted.setdefault("leverage_requested", str(leverage))
+
     def _maybe_enrich_result_with_runner_hooks(self, result: Any, chain: str, wallet_address: str = "") -> None:
         """Run connector-owned best-effort result enrichment before ledger writes.
 
@@ -3372,6 +3398,15 @@ class StrategyRunner:
             # Net effect: the LP accounting payload (built later from the
             # ledger row) showed ``in_range=None`` on every production
             # swap-then-mint-across-cycles run.
+            # VIB-5724: stamp the intent's REQUESTED leverage onto extracted_data
+            # (perp opens only) BEFORE the connector enrich hook runs, so the hook
+            # can (1) record it as metadata and (2) warn loudly when the venue
+            # applies a different leverage/margin-mode than requested. Kept off any
+            # field that reads as venue truth — this is the request, not the venue.
+            # Class-qualified (not self.): commit-path tests drive this method with
+            # duck-typed runner doubles that don't carry the staticmethod.
+            StrategyRunner._stamp_perp_requested_leverage(result, intent)
+
             self._maybe_enrich_result_with_runner_hooks(
                 result,
                 eff_chain,

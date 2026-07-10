@@ -205,7 +205,7 @@ def _make_hl_result(*, reduce_only: bool) -> Any:
 
     from almanak.connectors.hyperliquid.addresses import CORE_WRITER_ADDRESS, RAW_ACTION_EVENT_TOPIC
     from almanak.connectors.hyperliquid.markets import resolve_market
-    from almanak.connectors.hyperliquid.sdk import LimitOrderAction, TIF_IOC, encode_limit_order_action
+    from almanak.connectors.hyperliquid.sdk import TIF_IOC, LimitOrderAction, encode_limit_order_action
 
     market = resolve_market("BTC")
     order = LimitOrderAction(
@@ -318,6 +318,234 @@ def test_runner_hook_noop_off_chain() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# VIB-5724 — venue-observed leverage + margin mode propagation
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+# A valid 42-char EVM address — the venue position query ABI-encodes the wallet,
+# so (unlike the userFills path) it must pass address validation.
+_VENUE_WALLET = "0x1111111111111111111111111111111111111111"
+
+
+def _encode_position_hex(*, szi: int, leverage: int, is_isolated: bool, entry_ntl: int = 1_000_000) -> str:
+    """Encode a ``0x0800`` position precompile return (the shape decode_position reads)."""
+    from eth_abi import encode as abi_encode
+
+    blob = abi_encode(
+        ["int64", "uint64", "int64", "uint32", "bool"],
+        [szi, entry_ntl, 0, leverage, is_isolated],
+    )
+    return "0x" + blob.hex()
+
+
+def _gateway_with_fills_and_position(*, fills: list[Any], funding: list[Any], position_hex: Any) -> Any:
+    gw = _mock_gateway_with_fills(fills=fills, funding=funding)
+    gw.eth_call = MagicMock(return_value=position_hex)
+    return gw
+
+
+def test_read_venue_leverage_returns_cross_20x() -> None:
+    """A cross 20x position → (Decimal(20), "cross")."""
+    from almanak.connectors.hyperliquid.fill_accounting import read_venue_leverage
+
+    gw = MagicMock()
+    gw.eth_call = MagicMock(return_value=_encode_position_hex(szi=100000, leverage=20, is_isolated=False))
+    lev, mode = read_venue_leverage(gw, wallet_address=_VENUE_WALLET, asset_index=0, chain="hyperevm")
+    assert lev == Decimal("20")
+    assert mode == "cross"
+
+
+def test_read_venue_leverage_isolated() -> None:
+    from almanak.connectors.hyperliquid.fill_accounting import read_venue_leverage
+
+    gw = MagicMock()
+    gw.eth_call = MagicMock(return_value=_encode_position_hex(szi=-100000, leverage=2, is_isolated=True))
+    lev, mode = read_venue_leverage(gw, wallet_address=_VENUE_WALLET, asset_index=0, chain="hyperevm")
+    assert lev == Decimal("2")
+    assert mode == "isolated"
+
+
+def test_read_venue_leverage_unmeasured_on_failed_read() -> None:
+    """Empty ≠ Zero: eth_call returning None → (None, None), never a fabricated 0."""
+    from almanak.connectors.hyperliquid.fill_accounting import read_venue_leverage
+
+    gw = MagicMock()
+    gw.eth_call = MagicMock(return_value=None)
+    assert read_venue_leverage(gw, wallet_address=_VENUE_WALLET, asset_index=0, chain="hyperevm") == (None, None)
+
+
+def test_read_venue_leverage_unmeasured_on_flat_position() -> None:
+    """A flat read (szi=0 → no position) carries no venue truth → (None, None)."""
+    from almanak.connectors.hyperliquid.fill_accounting import read_venue_leverage
+
+    gw = MagicMock()
+    gw.eth_call = MagicMock(return_value=_encode_position_hex(szi=0, leverage=20, is_isolated=False))
+    assert read_venue_leverage(gw, wallet_address=_VENUE_WALLET, asset_index=0, chain="hyperevm") == (None, None)
+
+
+def test_read_venue_leverage_unmeasured_without_chain() -> None:
+    from almanak.connectors.hyperliquid.fill_accounting import read_venue_leverage
+
+    gw = MagicMock()
+    gw.eth_call = MagicMock(return_value=_encode_position_hex(szi=1, leverage=20, is_isolated=False))
+    assert read_venue_leverage(gw, wallet_address=_VENUE_WALLET, asset_index=0, chain="") == (None, None)
+    gw.eth_call.assert_not_called()
+
+
+def test_build_perp_open_propagates_venue_leverage_and_margin_mode() -> None:
+    """(a) A confirmed OPEN propagates venue leverage + margin mode into PerpData,
+    with the canonical ``leverage`` field carrying the venue value (not the request)."""
+    from almanak.connectors.hyperliquid.fill_accounting import build_perp_data_from_fills
+
+    result = _make_hl_result(reduce_only=False)
+    gw = _gateway_with_fills_and_position(
+        fills=[_fill(_CLOID_HEX, fee="0.01", px="60000", sz="0.001")],
+        funding=[],
+        position_hex=_encode_position_hex(szi=100000, leverage=20, is_isolated=False),
+    )
+    bundle = build_perp_data_from_fills(
+        result,
+        gateway_client=gw,
+        wallet_address=_VENUE_WALLET,
+        is_open=True,
+        chain="hyperevm",
+        leverage_requested=Decimal("2"),
+    )
+    assert bundle is not None
+    assert bundle.perp.venue_leverage == Decimal("20")
+    assert bundle.perp.venue_margin_mode == "cross"
+    # (d) requested-leverage metadata is carried, NOT written over venue truth.
+    assert bundle.perp.leverage_requested == Decimal("2")
+    # Canonical ``leverage`` field reads the venue truth, never the request.
+    assert bundle.perp.leverage == Decimal("20")
+
+
+def test_build_perp_open_venue_unmeasured_leaves_fields_none() -> None:
+    """(c) A failed venue read leaves venue fields None — never defaulted to the
+    requested value (Empty ≠ Zero) — while the requested metadata is still kept."""
+    from almanak.connectors.hyperliquid.fill_accounting import build_perp_data_from_fills
+
+    result = _make_hl_result(reduce_only=False)
+    gw = _gateway_with_fills_and_position(
+        fills=[_fill(_CLOID_HEX, fee="0.01", px="60000", sz="0.001")],
+        funding=[],
+        position_hex=None,  # venue read unavailable
+    )
+    bundle = build_perp_data_from_fills(
+        result,
+        gateway_client=gw,
+        wallet_address=_VENUE_WALLET,
+        is_open=True,
+        chain="hyperevm",
+        leverage_requested=Decimal("2"),
+    )
+    assert bundle is not None
+    assert bundle.perp.venue_leverage is None
+    assert bundle.perp.venue_margin_mode is None
+    assert bundle.perp.leverage is None  # NOT defaulted to the requested 2
+    assert bundle.perp.leverage_requested == Decimal("2")
+
+
+def test_build_perp_close_does_not_read_venue_leverage() -> None:
+    """A CLOSE flattens the position, so no venue leverage is read (fields stay None)."""
+    from almanak.connectors.hyperliquid.fill_accounting import build_perp_data_from_fills
+
+    result = _make_hl_result(reduce_only=True)
+    gw = _gateway_with_fills_and_position(
+        fills=[_fill(_CLOID_HEX, fee="0.01", closed_pnl="1.0", px="60000", sz="0.001")],
+        funding=[],
+        position_hex=_encode_position_hex(szi=100000, leverage=20, is_isolated=False),
+    )
+    bundle = build_perp_data_from_fills(
+        result, gateway_client=gw, wallet_address=_VENUE_WALLET, is_open=False, chain="hyperevm"
+    )
+    assert bundle is not None
+    assert bundle.perp.venue_leverage is None
+    assert bundle.perp.venue_margin_mode is None
+    gw.eth_call.assert_not_called()
+
+
+def test_build_perp_open_regression_flip_without_propagation() -> None:
+    """Regression guard: the venue fields are only populated because the OPEN
+    path reads them — a CLOSE (no read) leaves them None. This asymmetry is what
+    would break if the propagation were reverted."""
+    from almanak.connectors.hyperliquid.fill_accounting import build_perp_data_from_fills
+
+    pos_hex = _encode_position_hex(szi=100000, leverage=20, is_isolated=False)
+    open_gw = _gateway_with_fills_and_position(
+        fills=[_fill(_CLOID_HEX, px="60000", sz="0.001")], funding=[], position_hex=pos_hex
+    )
+    open_bundle = build_perp_data_from_fills(
+        _make_hl_result(reduce_only=False), gateway_client=open_gw, wallet_address=_VENUE_WALLET,
+        is_open=True, chain="hyperevm",
+    )
+    assert open_bundle is not None and open_bundle.perp.venue_leverage == Decimal("20")
+
+
+def test_build_perp_open_warns_on_divergence(caplog: Any) -> None:
+    """(b) Divergence (requested 2 vs venue 20 cross) logs a WARNING naming both."""
+    import logging
+
+    from almanak.connectors.hyperliquid.fill_accounting import build_perp_data_from_fills
+
+    result = _make_hl_result(reduce_only=False)
+    gw = _gateway_with_fills_and_position(
+        fills=[_fill(_CLOID_HEX, px="60000", sz="0.001")],
+        funding=[],
+        position_hex=_encode_position_hex(szi=100000, leverage=20, is_isolated=False),
+    )
+    with caplog.at_level(logging.WARNING, logger="almanak.connectors.hyperliquid.fill_accounting"):
+        build_perp_data_from_fills(
+            result, gateway_client=gw, wallet_address=_VENUE_WALLET, is_open=True,
+            chain="hyperevm", leverage_requested=Decimal("2"),
+        )
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "leverage divergence" in r.message]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "requested leverage=2" in msg and "leverage=20" in msg and "cross" in msg
+
+
+def test_build_perp_open_no_warning_when_leverage_matches(caplog: Any) -> None:
+    """No divergence warning when the venue honoured the requested leverage."""
+    import logging
+
+    from almanak.connectors.hyperliquid.fill_accounting import build_perp_data_from_fills
+
+    result = _make_hl_result(reduce_only=False)
+    gw = _gateway_with_fills_and_position(
+        fills=[_fill(_CLOID_HEX, px="60000", sz="0.001")],
+        funding=[],
+        position_hex=_encode_position_hex(szi=100000, leverage=2, is_isolated=True),
+    )
+    with caplog.at_level(logging.WARNING, logger="almanak.connectors.hyperliquid.fill_accounting"):
+        build_perp_data_from_fills(
+            result, gateway_client=gw, wallet_address=_VENUE_WALLET, is_open=True,
+            chain="hyperevm", leverage_requested=Decimal("2"),
+        )
+    assert not [r for r in caplog.records if "leverage divergence" in r.getMessage()]
+
+
+def test_build_perp_open_no_warning_when_requested_unmeasured(caplog: Any) -> None:
+    """Empty ≠ Zero: with no requested leverage, the divergence check cannot fire."""
+    import logging
+
+    from almanak.connectors.hyperliquid.fill_accounting import build_perp_data_from_fills
+
+    result = _make_hl_result(reduce_only=False)
+    gw = _gateway_with_fills_and_position(
+        fills=[_fill(_CLOID_HEX, px="60000", sz="0.001")],
+        funding=[],
+        position_hex=_encode_position_hex(szi=100000, leverage=20, is_isolated=False),
+    )
+    with caplog.at_level(logging.WARNING, logger="almanak.connectors.hyperliquid.fill_accounting"):
+        build_perp_data_from_fills(
+            result, gateway_client=gw, wallet_address=_VENUE_WALLET, is_open=True,
+            chain="hyperevm", leverage_requested=None,
+        )
+    assert not [r for r in caplog.records if "leverage divergence" in r.getMessage()]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Layer 3 — end-to-end: serialized PerpData → PerpAccountingEvent via handle_perp
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -374,6 +602,48 @@ def test_handle_perp_reads_measured_fill_economics() -> None:
     assert event.event_type == PerpEventType.PERP_CLOSE.value
     assert event.realized_pnl_usd == Decimal("1.23")
     assert event.funding_paid_usd == Decimal("-0.0001")
+
+
+def test_handle_perp_carries_venue_leverage_and_margin_mode() -> None:
+    """VIB-5724 — a serialized OPEN PerpData with venue truth flows through
+    handle_perp into the PerpAccountingEvent (and its payload JSON), keeping the
+    requested value strictly as metadata."""
+
+    from almanak.framework.accounting.category_handlers.perp_handler import handle_perp
+    from almanak.framework.execution.extracted_data import PerpData
+
+    perp = PerpData(
+        position_id=_CLOID_HEX,
+        entry_price=Decimal("60000"),
+        leverage=Decimal("20"),  # canonical field carries venue truth
+        venue_leverage=Decimal("20"),
+        venue_margin_mode="cross",
+        leverage_requested=Decimal("2"),
+    )
+    extracted_json = _serialize_perp_data(perp)
+    led_id = str(uuid.uuid4())
+    outbox_row = {
+        "id": str(uuid.uuid4()), "deployment_id": "dep-1", "cycle_id": "cycle-1",
+        "wallet_address": "0xabc", "position_key": "perp:hyperliquid:hyperevm:0xabc:btc", "market_id": "BTC",
+    }
+    ledger_row = {
+        "id": led_id, "deployment_id": "dep-1", "cycle_id": "cycle-1", "execution_mode": "live",
+        "timestamp": datetime.now(UTC).isoformat(), "intent_type": "PERP_OPEN", "token_in": "USDC",
+        "amount_in": "0", "tx_hash": "0xfeed", "chain": "hyperevm", "protocol": "hyperliquid",
+        "success": True, "extracted_data_json": extracted_json,
+    }
+
+    event = handle_perp(outbox_row, ledger_row)
+    assert event is not None
+    assert event.venue_leverage == Decimal("20")
+    assert event.venue_margin_mode == "cross"
+    assert event.leverage == Decimal("20")  # venue truth, not the requested 2
+    assert event.requested_leverage == Decimal("2")
+
+    payload = json.loads(event.to_payload_json())
+    assert payload["venue_leverage"] == "20"
+    assert payload["venue_margin_mode"] == "cross"
+    assert payload["requested_leverage"] == "2"
 
 
 @pytest.mark.asyncio
@@ -479,7 +749,7 @@ def _resolve(gw: Any) -> Any:
     from almanak.connectors.hyperliquid.runner_hooks import HyperliquidRunnerHookConnector
 
     return HyperliquidRunnerHookConnector().resolve_fill_status(
-        gateway_client=gw, wallet_address="0xabc", handle=_handle()
+        gateway_client=gw, wallet_address=_VENUE_WALLET, handle=_handle()
     )
 
 

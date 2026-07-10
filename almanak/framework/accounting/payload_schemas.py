@@ -522,6 +522,16 @@ class PerpOpenEventPayload(_Versioned):
     open_fee_usd: Decimal | None = None
     price_impact_usd: Decimal | None = None
     cost_basis_usd: Decimal | None = None
+    # VIB-5724 — venue-observed truth vs the intent's request. Additive optional
+    # fields (default None) so pre-5724 payloads round-trip unchanged and the
+    # version tuple is untouched: these are informational divergence fields — they
+    # do NOT alter a lifecycle state or a financial invariant (PnL / cost basis),
+    # so per blueprint 27 they do not warrant a primitive_version bump. ``leverage``
+    # above continues to carry the venue value for CoreWriter perps; these expose
+    # the margin mode and keep the intent's request as explicit metadata.
+    venue_leverage: Decimal | None = None
+    venue_margin_mode: str | None = None
+    requested_leverage: Decimal | None = None
     confidence: ConfidenceLiteral
     unavailable_reason: str | None = None
 
