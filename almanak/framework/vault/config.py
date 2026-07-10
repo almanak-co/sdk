@@ -128,3 +128,8 @@ class SettlementResult:
     shares_burned: int = 0
     fee_shares_minted: int = 0
     epoch_id: int = 0
+    # VIB-5666 — True when any settlement tx's commit/accounting write degraded
+    # (loud ERROR + deferred-write log). The on-chain settlement still succeeded;
+    # this only signals the books did not fully tie for this cycle and an operator
+    # / reconcile pass should replay the deferred writes. Never blocks settlement.
+    accounting_degraded: bool = False

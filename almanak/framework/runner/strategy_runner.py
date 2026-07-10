@@ -818,6 +818,12 @@ class StrategyRunner:
         self.config = config or RunnerConfig()
         self._session_store = session_store
         self._vault_lifecycle = vault_lifecycle
+        # VIB-5666 — the runner-owned settlement-commit callable threaded into the
+        # VaultLifecycleManager so each settlement tx routes through the
+        # commit/accounting pipeline (ledger → outbox+fire → sidecar). Built
+        # lazily on first vault-settlement (only for vault deployments — a
+        # non-vault runner never constructs it and executes zero new code).
+        self._settlement_commit_fn: Any = None
         self._circuit_breaker = circuit_breaker
         self._stuck_detector = stuck_detector
         self._operator_card_generator = operator_card_generator
@@ -1725,7 +1731,17 @@ class StrategyRunner:
                 vault_action = self._vault_lifecycle.pre_decide_hook(strategy)
                 if vault_action in (VaultAction.SETTLE, VaultAction.RESUME_SETTLE):
                     logger.info("Vault settlement triggered (%s), running settlement cycle", vault_action.value)
-                    settlement = await self._vault_lifecycle.run_settlement_cycle(strategy)
+                    # VIB-5666 — thread the runner-owned settlement-commit callable
+                    # so every settleDeposit / settleRedeem / propose tx routes
+                    # through the commit/accounting pipeline (books must tie).
+                    # Built lazily + cached: only vault deployments ever reach here.
+                    if self._settlement_commit_fn is None:
+                        from .settlement_commit import build_settlement_commit
+
+                        self._settlement_commit_fn = build_settlement_commit(self)
+                    settlement = await self._vault_lifecycle.run_settlement_cycle(
+                        strategy, settlement_commit=self._settlement_commit_fn
+                    )
                     if settlement.success:
                         try:
                             if hasattr(strategy, "on_vault_settled"):
@@ -6495,6 +6511,20 @@ class StrategyRunner:
                 vault_address = (getattr(intent, "vault_address", "") or "").lower()
                 position_key = (
                     f"vault:{protocol}:{chain.lower()}:{wallet_address.lower()}:{vault_address}"
+                    if vault_address
+                    else ""
+                )
+                return position_key, vault_address
+
+            # Vault SETTLEMENT (SETTLE_DEPOSIT / SETTLE_REDEEM) — VIB-5666. Keyed
+            # per (protocol, chain, wallet, vault_address) so the settlement
+            # handler resolves the vault from the outbox ``market_id`` (a
+            # settlement is not a strategy position — position_type is None — but
+            # the row still needs a stable vault identity for grouping/audit).
+            if t in {"SETTLE_DEPOSIT", "SETTLE_REDEEM"}:
+                vault_address = (getattr(intent, "vault_address", "") or "").lower()
+                position_key = (
+                    f"settlement:{protocol}:{chain.lower()}:{wallet_address.lower()}:{vault_address}"
                     if vault_address
                     else ""
                 )

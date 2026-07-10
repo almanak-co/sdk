@@ -778,6 +778,10 @@ class TestResumeRedeemLeg:
         assert result.success is True
         assert not manager._execution_orchestrator.execute.called
         assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE
+        # The settleRedeem tx landed in the PRE-CRASH run; whether that run
+        # emitted its SETTLE_REDEEM commit is unverifiable (receipt gone), so a
+        # resume-only finalize must surface accounting_degraded (VIB-5666).
+        assert result.accounting_degraded is True
 
     def test_settling_redeem_shares_remain_live_proposal_retries(self):
         """SETTLING_REDEEM, shares remain + proposal #2 live (tx reverted) -> retry settleRedeem."""
@@ -808,3 +812,5 @@ class TestResumeRedeemLeg:
         # One attempt per cycle: do NOT retry settleRedeem; carry remaining shares over.
         assert not manager._vault_adapter.build_settle_redeem_bundle.called
         assert manager.get_vault_state().settlement_phase == SettlementPhase.IDLE
+        # Pre-crash settleRedeem consumed the proposal; its commit is unverifiable.
+        assert result.accounting_degraded is True

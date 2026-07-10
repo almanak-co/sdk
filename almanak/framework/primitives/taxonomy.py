@@ -264,6 +264,37 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             required_lifecycle=_VAULT_LIFECYCLE,
         ),
         # ──────────────────────────────────────────────────────────────────
+        # Vault SETTLEMENT (Lagoon ERC-7540 operator side) — VIB-5666
+        #
+        # Payload-only event types (NOT IntentType members — settlement is
+        # lifecycle-owned and pre-``decide()``, never a first-class Intent verb;
+        # design doc §Pillar-1). Emitted by ``settlement_handler`` when the
+        # runner-owned settlement-commit pipeline routes a settleDeposit /
+        # settleRedeem tx. ``event_kind=NONE`` because a settlement is a CAPITAL
+        # event, not a position OPEN/CLOSE — the augment chokepoint must NOT
+        # stamp a ``position_reference`` and no ``position_events`` row is emitted
+        # (depositor capital is not a strategy position). ``AccountingCategory.
+        # SETTLEMENT`` routes to the dedicated ``settlement_handler``;
+        # ``Primitive.SETTLEMENT`` isolates the version streams. Present in
+        # ``ALL_ACCOUNTING_EVENT_TYPES`` (via ``SettlementEventType``) so
+        # ``test_taxonomy_has_no_extra_rows`` accepts these non-IntentType rows
+        # and the augment chokepoint can resolve their per-primitive version.
+        # ──────────────────────────────────────────────────────────────────
+        _record(
+            "SETTLE_DEPOSIT",
+            Primitive.SETTLEMENT,
+            AccountingCategory.SETTLEMENT,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+        _record(
+            "SETTLE_REDEEM",
+            Primitive.SETTLEMENT,
+            AccountingCategory.SETTLEMENT,
+            position_type=None,
+            event_kind=EventKind.NONE,
+        ),
+        # ──────────────────────────────────────────────────────────────────
         # Staking
         # ──────────────────────────────────────────────────────────────────
         _record(

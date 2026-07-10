@@ -126,6 +126,23 @@ class VaultLifecycleManager:
         self._initial_vault_state = initial_vault_state
         self._vault_state: VaultState | None = None
         self._persistence_callback = persistence_callback
+        # VIB-5666 — runner-owned settlement-commit callable. Injected per cycle
+        # via ``run_settlement_cycle(strategy, settlement_commit=...)`` so every
+        # settleDeposit / settleRedeem / propose tx routes through the
+        # commit/accounting pipeline (ledger → outbox+fire → sidecar). ``None``
+        # (the default) makes every commit call a no-op — legacy callers, unit
+        # tests, and any non-runner driver keep working with zero accounting
+        # side-effects, and a non-vault deployment never constructs this manager.
+        self._settlement_commit: Any = None
+        # Underlying USD price captured at ``_compute_total_assets`` time (fresh
+        # settlements only) so the commit can price ``assets_usd``. ``None`` on
+        # resume paths → assets_usd stays unmeasured (Empty ≠ Zero).
+        self._last_underlying_price: Decimal | None = None
+        # Cached (underlying_decimals, share_decimals) for raw→human scaling.
+        self._settlement_decimals: tuple[int | None, int | None] | None = None
+        # Set True when any per-tx commit reports accounting_degraded; stamped
+        # onto the SettlementResult at finalize and reset at cycle start.
+        self._settlement_accounting_degraded = False
         self._preflight_done = False
         self._preflight_interval = 10  # Re-run every N settlements
         self._settlements_since_preflight = 0
@@ -200,7 +217,7 @@ class VaultLifecycleManager:
 
         return VaultAction.HOLD
 
-    async def run_settlement_cycle(self, strategy: Any) -> SettlementResult:
+    async def run_settlement_cycle(self, strategy: Any, settlement_commit: Any = None) -> SettlementResult:
         """Execute the full propose-settle settlement cycle with crash recovery.
 
         Supports resumption from any phase if the process crashed mid-settlement.
@@ -216,9 +233,24 @@ class VaultLifecycleManager:
             strategy: The IntentStrategy instance with valuate() and
                 create_market_snapshot() methods.
 
+        Args (cont.):
+            settlement_commit: Optional runner-owned async callable that routes
+                each settlement tx through the commit/accounting pipeline
+                (VIB-5666). ``None`` (default) → settlement executes exactly as
+                before with no accounting side-effects (legacy / test / non-runner
+                callers). When supplied it is stored for the duration of the cycle
+                and invoked after every successful ``orchestrator.execute``.
+
         Returns:
             SettlementResult describing the outcome of the settlement.
         """
+        # VIB-5666 — bind the commit callable for this cycle. Persist across the
+        # call (resume paths re-enter without re-supplying it) but let a fresh
+        # explicit value win.
+        if settlement_commit is not None:
+            self._settlement_commit = settlement_commit
+        self._settlement_accounting_degraded = False
+
         # Run preflight checks (once on first settlement, then periodically)
         if not self._preflight_done or self._settlements_since_preflight >= self._preflight_interval:
             try:
@@ -396,6 +428,10 @@ class VaultLifecycleManager:
         if underlying_price <= 0:
             logger.error("Invalid underlying token price: %s", underlying_price)
             return None
+
+        # VIB-5666 — stash the settlement-time underlying USD price so the
+        # settlement commit can value ``assets_usd`` for the deposit/redeem legs.
+        self._last_underlying_price = underlying_price
 
         decimals = get_token_resolver().get_decimals(strategy.chain, self._config.underlying_token)
         total_assets_raw = int(total_usd / underlying_price * Decimal(10) ** decimals)
@@ -582,6 +618,10 @@ class VaultLifecycleManager:
         vault_state.settlement_phase = SettlementPhase.PROPOSED
         self.save_vault_state()
 
+        # VIB-5666 — the propose (updateNewTotalAssets) tx moves no capital; book a
+        # ledger row (gas / tx visibility so the books tie) with no typed event.
+        await self._emit_settlement_commit(strategy, vault_state, leg="propose", result=propose_result)
+
         return await self._execute_settle(strategy, vault_state, total_assets_raw)
 
     async def _execute_settle(self, strategy: Any, vault_state: VaultState, total_assets_raw: int) -> SettlementResult:
@@ -606,7 +646,23 @@ class VaultLifecycleManager:
             self.save_vault_state()
             return SettlementResult(success=False)
 
-        deposits_received, shares_minted = self._parse_settle_deposit_receipt(settle_deposit_result)
+        deposits_measured, shares_measured = self._parse_settle_deposit_receipt(settle_deposit_result)
+
+        # VIB-5666 — settleDeposit confirmed: assets flowed IN, shares minted.
+        # Route through the commit/accounting pipeline (SETTLE_DEPOSIT event).
+        # None = unmeasured (Empty ≠ Zero) — the commit lands an unmeasured delta.
+        await self._emit_settlement_commit(
+            strategy,
+            vault_state,
+            leg="deposit",
+            result=settle_deposit_result,
+            assets_raw=deposits_measured,
+            shares_raw=shares_measured,
+            new_total_assets_raw=total_assets_raw,
+        )
+        # SettlementResult display fields are plain ints: unmeasured → 0 here only.
+        deposits_received = deposits_measured or 0
+        shares_minted = shares_measured or 0
 
         # Deposits are now committed on-chain and the proposal that fed settleDeposit is
         # spent (Lagoon v0.5.0: updateNewTotalAssets is single-use). settleDeposit already
@@ -680,6 +736,23 @@ class VaultLifecycleManager:
         logger.info("PROPOSED resume: proposal spent but settleDeposit did not land; re-proposing")
         return await self._execute_propose_and_settle(strategy, vault_state, total_assets_raw)
 
+    def _mark_resume_leg_unverifiable(self, leg: str) -> None:
+        """Surface accounting-degraded for a leg that landed in the pre-crash run.
+
+        On crash-resume the tx receipt is gone, so whether the pre-crash run
+        emitted its ``SETTLE_*`` commit before dying is unverifiable — and
+        re-emitting here could double-book the event. Conservatively mark the
+        cycle ``accounting_degraded`` (loud-but-never-blocking) so an operator
+        reconciles the ledger row for this epoch; a false alarm when the
+        pre-crash run did commit is acceptable, a silently missing row is not.
+        """
+        logger.error(
+            "Settlement resume: %s leg landed pre-crash; its accounting commit is "
+            "unverifiable — marking cycle accounting_degraded for reconciliation",
+            leg,
+        )
+        self._settlement_accounting_degraded = True
+
     async def _resume_after_deposit_settled(
         self, strategy: Any, vault_state: VaultState, total_assets_raw: int
     ) -> SettlementResult:
@@ -688,6 +761,7 @@ class VaultLifecycleManager:
         Used by resume paths where the receipt is unavailable, so deposit/share hints
         are unknown (0). Mirrors the tail of :meth:`_execute_settle`.
         """
+        self._mark_resume_leg_unverifiable("settleDeposit")
         if not self._config.auto_settle_redeems or not self._has_pending_redeem_shares():
             vault_state.settlement_phase = SettlementPhase.SETTLED
             self.save_vault_state()
@@ -733,6 +807,7 @@ class VaultLifecycleManager:
         if not self._has_pending_redeem_shares():
             # Silo drained -> settleRedeem landed. Finalize.
             logger.info("settleRedeem confirmed on-chain (silo drained), finalizing")
+            self._mark_resume_leg_unverifiable("settleRedeem")
             vault_state.settlement_phase = SettlementPhase.SETTLED
             self.save_vault_state()
             return self._finalize_settlement(vault_state)
@@ -744,6 +819,7 @@ class VaultLifecycleManager:
         if proposal_live and (total_assets_raw > 0 or not vault_state.initialized):
             return await self._execute_settle_redeem_tx(strategy, vault_state, total_assets_raw)
         logger.info("settleRedeem consumed proposal but shares remain (safe illiquidity); carrying over")
+        self._mark_resume_leg_unverifiable("settleRedeem")
         vault_state.settlement_phase = SettlementPhase.SETTLED
         self.save_vault_state()
         return self._finalize_settlement(vault_state)
@@ -791,6 +867,10 @@ class VaultLifecycleManager:
         vault_state.settlement_phase = SettlementPhase.PROPOSED_REDEEM
         self.save_vault_state()
 
+        # VIB-5666 — proposal #2 (redeem valuation) moves no capital; book a
+        # ledger row for gas / tx visibility with no typed event.
+        await self._emit_settlement_commit(strategy, vault_state, leg="propose", result=propose_result)
+
         return await self._execute_settle_redeem_tx(
             strategy,
             vault_state,
@@ -834,12 +914,31 @@ class VaultLifecycleManager:
                 shares_minted,
             )
 
+        # VIB-5666 — settleRedeem confirmed: assets flowed OUT, shares burned.
+        # Route through the commit/accounting pipeline (SETTLE_REDEEM event).
+        # None = unmeasured (Empty ≠ Zero) — the commit lands an unmeasured delta.
+        redemptions_measured, burned_measured = self._parse_settle_redeem_receipt(settle_redeem_result)
+        await self._emit_settlement_commit(
+            strategy,
+            vault_state,
+            leg="redeem",
+            result=settle_redeem_result,
+            assets_raw=redemptions_measured,
+            shares_raw=burned_measured,
+            new_total_assets_raw=total_assets_raw,
+        )
+        # SettlementResult display fields are plain ints: unmeasured → 0 here only.
+        redemptions_processed = redemptions_measured or 0
+        shares_burned = burned_measured or 0
+
         vault_state.settlement_phase = SettlementPhase.SETTLED
         self.save_vault_state()
         return self._finalize_settlement(
             vault_state,
             deposits_received=deposits_received,
             shares_minted=shares_minted,
+            redemptions_processed=redemptions_processed,
+            shares_burned=shares_burned,
         )
 
     def _handle_redeem_leg_failure(
@@ -883,12 +982,38 @@ class VaultLifecycleManager:
             shares_minted=shares_minted,
         )
 
-    def _parse_settle_deposit_receipt(self, settle_deposit_result: Any) -> tuple[int, int]:
-        """Parse settle-deposit accounting hints from the connector receipt parser."""
-        receipt = getattr(settle_deposit_result, "receipt", None)
-        if not receipt:
-            return 0, 0
+    def _settlement_leg_receipts(self, result: Any) -> list[dict[str, Any]]:
+        """Parseable receipt dicts for a settlement leg, in priority order.
 
+        ``ExecutionResult`` has NO top-level ``.receipt`` — per-tx receipts live
+        in ``transaction_results[i].receipt`` (VIB-5666 real-fork finding: the
+        old top-level read meant the connector parser never ran and every
+        settlement leg booked zero deltas). A top-level ``.receipt`` is still
+        honoured first for injected doubles. ``TransactionReceipt`` dataclasses
+        are normalized via ``to_dict()`` — the connector parser consumes
+        log-bearing dicts.
+        """
+        candidates: list[Any] = []
+        top = getattr(result, "receipt", None)
+        if top:
+            candidates.append(top)
+        for tx in getattr(result, "transaction_results", None) or []:
+            tx_receipt = getattr(tx, "receipt", None)
+            if tx_receipt:
+                candidates.append(tx_receipt)
+        receipts: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                receipts.append(candidate)
+            elif hasattr(candidate, "to_dict"):
+                try:
+                    receipts.append(candidate.to_dict())
+                except Exception:  # noqa: BLE001 — accounting hint, never block settlement
+                    logger.warning("Settlement receipt could not be serialized for parsing", exc_info=True)
+        return receipts
+
+    def _resolve_settlement_receipt_parser(self, leg_name: str) -> Any | None:
+        """Resolve the connector receipt parser for settlement accounting hints."""
         parser = self._receipt_parser
         if parser is None:
             from almanak.framework.execution.receipt_registry import ReceiptParserRegistry
@@ -897,31 +1022,55 @@ class VaultLifecycleManager:
                 parser = ReceiptParserRegistry().get(self._receipt_parser_protocol)
             except Exception as exc:
                 logger.warning(
-                    "Could not resolve receipt parser %r for settle_deposit accounting: %s",
+                    "Could not resolve receipt parser %r for %s accounting: %s",
+                    self._receipt_parser_protocol,
+                    leg_name,
+                    exc,
+                    exc_info=True,
+                )
+                return None
+        if parser is None:
+            logger.warning("No receipt parser found for protocol %r", self._receipt_parser_protocol)
+        return parser
+
+    def _parse_settle_deposit_receipt(self, settle_deposit_result: Any) -> tuple[int | None, int | None]:
+        """Parse settle-deposit accounting hints from the connector receipt parser.
+
+        Returns ``(assets_deposited, shares_minted)`` raw ints, or ``(None, None)``
+        when the leg is unmeasurable (no receipt / parser / event) — Empty ≠ Zero:
+        an unparseable leg lands as an unmeasured accounting delta, never a
+        fabricated measured zero.
+        """
+        receipts = self._settlement_leg_receipts(settle_deposit_result)
+        if not receipts:
+            return None, None
+
+        parser = self._resolve_settlement_receipt_parser("settle_deposit")
+        if parser is None:
+            return None, None
+
+        settle_deposits: list[Any] = []
+        for receipt in receipts:
+            try:
+                parsed = parser.parse_receipt(receipt)
+            except Exception as exc:
+                logger.warning(
+                    "Could not parse settle_deposit receipt for accounting with parser %r: %s",
                     self._receipt_parser_protocol,
                     exc,
                     exc_info=True,
                 )
-                return 0, 0
-
-        if parser is None:
-            logger.warning("No receipt parser found for protocol %r", self._receipt_parser_protocol)
-            return 0, 0
-
-        try:
-            parsed = parser.parse_receipt(receipt)
-            settle_deposits = parsed.settle_deposits
-        except Exception as exc:
-            logger.warning(
-                "Could not parse settle_deposit receipt for accounting with parser %r: %s",
-                self._receipt_parser_protocol,
-                exc,
-                exc_info=True,
-            )
-            return 0, 0
+                continue
+            if parsed.settle_deposits:
+                settle_deposits = parsed.settle_deposits
+                break
 
         if not settle_deposits:
-            return 0, 0
+            logger.warning(
+                "No SettleDeposit event found in %d receipt(s); deposit leg accounting is unmeasured",
+                len(receipts),
+            )
+            return None, None
 
         try:
             settle_deposit = settle_deposits[0]
@@ -933,7 +1082,161 @@ class VaultLifecycleManager:
                 exc,
                 exc_info=True,
             )
-            return 0, 0
+            return None, None
+
+    def _parse_settle_redeem_receipt(self, settle_redeem_result: Any) -> tuple[int | None, int | None]:
+        """Parse settle-redeem accounting hints (assets_withdrawn, shares_burned).
+
+        Twin of :meth:`_parse_settle_deposit_receipt` for the redeem leg. Returns
+        ``(None, None)`` when the leg is unmeasurable — Empty ≠ Zero: the commit
+        must land an unmeasured delta, never a fabricated measured zero.
+        """
+        receipts = self._settlement_leg_receipts(settle_redeem_result)
+        if not receipts:
+            return None, None
+
+        parser = self._resolve_settlement_receipt_parser("settle_redeem")
+        if parser is None:
+            return None, None
+
+        settle_redeems: list[Any] = []
+        for receipt in receipts:
+            try:
+                parsed = parser.parse_receipt(receipt)
+            except Exception as exc:
+                logger.warning(
+                    "Could not parse settle_redeem receipt for accounting with parser %r: %s",
+                    self._receipt_parser_protocol,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+            if parsed.settle_redeems:
+                settle_redeems = parsed.settle_redeems
+                break
+
+        if not settle_redeems:
+            logger.warning(
+                "No SettleRedeem event found in %d receipt(s); redeem leg accounting is unmeasured",
+                len(receipts),
+            )
+            return None, None
+
+        try:
+            settle_redeem = settle_redeems[0]
+            return settle_redeem.assets_withdrawn, settle_redeem.shares_burned
+        except (AttributeError, IndexError, TypeError) as exc:
+            logger.warning(
+                "Could not extract settle_redeem accounting fields with parser %r: %s",
+                self._receipt_parser_protocol,
+                exc,
+                exc_info=True,
+            )
+            return None, None
+
+    def _resolve_settlement_decimals(self, strategy: Any) -> tuple[int | None, int | None]:
+        """Resolve (underlying_decimals, share_decimals), cached per manager.
+
+        The vault's own address IS its ERC-20 share token, so its ``decimals()``
+        gives the share scale. Both reads go through the gateway-backed token
+        resolver. On failure a leg's decimals stays ``None`` → the commit scales
+        that amount to ``None`` (unmeasured), never a fabricated human value.
+        """
+        if self._settlement_decimals is not None:
+            return self._settlement_decimals
+        chain = getattr(strategy, "chain", "") or ""
+        resolver = get_token_resolver()
+        underlying_decimals: int | None = None
+        share_decimals: int | None = None
+        try:
+            underlying_decimals = resolver.get_decimals(chain, self._config.underlying_token)
+        except Exception:
+            logger.warning(
+                "Settlement accounting: could not resolve underlying decimals for %s on %s",
+                self._config.underlying_token,
+                chain,
+                exc_info=True,
+            )
+        try:
+            share_decimals = resolver.get_decimals(chain, self._config.vault_address)
+        except Exception:
+            logger.warning(
+                "Settlement accounting: could not resolve vault share decimals for %s on %s",
+                self._config.vault_address,
+                chain,
+                exc_info=True,
+            )
+        # Cache only a fully-resolved pair. The manager is long-lived: caching a
+        # partial/failed resolution (transient RPC error on the first cycle)
+        # would pin every later settlement event to unmeasured deltas. Unresolved
+        # legs stay None for THIS cycle (Empty ≠ Zero) and retry next cycle.
+        if underlying_decimals is not None and share_decimals is not None:
+            self._settlement_decimals = (underlying_decimals, share_decimals)
+        return (underlying_decimals, share_decimals)
+
+    async def _emit_settlement_commit(
+        self,
+        strategy: Any,
+        vault_state: VaultState,
+        *,
+        leg: str,
+        result: Any,
+        assets_raw: int | None = None,
+        shares_raw: int | None = None,
+        new_total_assets_raw: int | None = None,
+        fee_shares_raw: int | None = None,
+    ) -> None:
+        """Route one confirmed settlement tx through the runner's commit pipeline.
+
+        No-op when no ``settlement_commit`` callable was injected (legacy / test /
+        non-runner callers). LOUD-BUT-NEVER-BLOCK (blueprint 27 §Teardown inverted
+        semantics): the share-moving tx has already confirmed on-chain, so an
+        accounting-write failure must be surfaced (ERROR + degraded flag) but must
+        NEVER raise into the settlement state machine — halting a half-settled
+        epoch would strand depositor capital. ``commit_settlement_intent`` already
+        swallows its own failures into ``accounting_degraded``; this wrapper is the
+        belt-and-suspenders backstop for anything upstream (decimals resolution, a
+        misbehaving injected callable).
+        """
+        if self._settlement_commit is None:
+            return
+        epoch = vault_state.last_settlement_epoch + 1
+        try:
+            underlying_decimals, share_decimals = self._resolve_settlement_decimals(strategy)
+            outcome = await self._settlement_commit(
+                strategy,
+                leg=leg,
+                execution_result=result,
+                settlement_cycle_id=f"settlement-{epoch}",
+                vault_address=self._config.vault_address,
+                underlying_token=self._config.underlying_token,
+                assets_raw=assets_raw,
+                shares_raw=shares_raw,
+                new_total_assets_raw=new_total_assets_raw,
+                fee_shares_raw=fee_shares_raw,
+                epoch_id=epoch,
+                underlying_decimals=underlying_decimals,
+                share_decimals=share_decimals,
+                underlying_price=self._last_underlying_price,
+            )
+            if getattr(outcome, "accounting_degraded", False):
+                self._settlement_accounting_degraded = True
+                logger.error(
+                    "Settlement accounting degraded for %s leg (epoch %d): %s",
+                    leg,
+                    epoch,
+                    getattr(outcome, "degraded_reason", None),
+                )
+        except Exception:
+            # The on-chain settle stands; never block the state machine.
+            self._settlement_accounting_degraded = True
+            logger.error(
+                "Settlement commit raised for %s leg (epoch %d); on-chain tx stands, "
+                "continuing settlement state machine",
+                leg,
+                epoch,
+                exc_info=True,
+            )
 
     def _finalize_settlement(
         self,
@@ -966,6 +1269,9 @@ class VaultLifecycleManager:
             shares_minted=shares_minted,
             redemptions_processed=redemptions_processed,
             shares_burned=shares_burned,
+            # VIB-5666 — surface whether any per-tx commit degraded this cycle so
+            # the runner logs it and an operator can replay the deferred writes.
+            accounting_degraded=self._settlement_accounting_degraded,
         )
 
         logger.info(

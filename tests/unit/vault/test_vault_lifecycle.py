@@ -200,6 +200,53 @@ class TestSettleDepositReceiptParsing:
 
         assert manager._parse_settle_deposit_receipt(settle_result) == (200_000, 100_000)
 
+    def test_parse_settle_deposit_reads_per_tx_receipts(self):
+        """ExecutionResult has NO top-level .receipt — per-tx receipts must be read.
+
+        Real-fork finding (VIB-5666 proof run): the old top-level read meant the
+        parser never ran on real ExecutionResults, so every settlement leg booked
+        zero deltas despite real capital moving on-chain.
+        """
+        manager = _make_manager(receipt_parser_protocol="lagoon")
+        # Realistic shape: receipts live per transaction; the settle tx is not
+        # necessarily first (e.g. preceded by an eventless approve).
+        eventless = {"transactionHash": "0xapprove", "status": 1, "logs": []}
+        settle_result = SimpleNamespace(
+            transaction_results=[
+                SimpleNamespace(receipt=eventless),
+                SimpleNamespace(receipt=_settle_deposit_receipt()),
+            ],
+        )
+
+        assert manager._parse_settle_deposit_receipt(settle_result) == (200_000, 100_000)
+
+    def test_parse_settle_deposit_dataclass_receipt_normalized(self):
+        """TransactionReceipt-style objects are normalized via to_dict() for the parser."""
+        manager = _make_manager(receipt_parser_protocol="lagoon")
+        raw = _settle_deposit_receipt()
+
+        class _ReceiptObj:
+            def to_dict(self):
+                return raw
+
+        settle_result = SimpleNamespace(transaction_results=[SimpleNamespace(receipt=_ReceiptObj())])
+
+        assert manager._parse_settle_deposit_receipt(settle_result) == (200_000, 100_000)
+
+    def test_parse_settle_deposit_no_event_is_unmeasured(self, caplog):
+        """Receipts parse fine but carry no SettleDeposit event -> (None, None), not 0."""
+        manager = _make_manager(receipt_parser_protocol="lagoon")
+        eventless = {"transactionHash": "0xother", "status": 1, "logs": []}
+        settle_result = SimpleNamespace(transaction_results=[SimpleNamespace(receipt=eventless)])
+
+        with caplog.at_level("WARNING"):
+            assert manager._parse_settle_deposit_receipt(settle_result) == (None, None)
+        assert "unmeasured" in caplog.text
+
+    def test_parse_settle_deposit_no_receipts_is_unmeasured(self):
+        manager = _make_manager(receipt_parser_protocol="lagoon")
+        assert manager._parse_settle_deposit_receipt(SimpleNamespace()) == (None, None)
+
     def test_parse_settle_deposit_receipt_prefers_injected_parser(self):
         parser = MagicMock()
         parser.parse_receipt.return_value = SimpleNamespace(
@@ -224,7 +271,7 @@ class TestSettleDepositReceiptParsing:
         settle_result = SimpleNamespace(receipt=_settle_deposit_receipt())
 
         with caplog.at_level("WARNING"):
-            assert manager._parse_settle_deposit_receipt(settle_result) == (0, 0)
+            assert manager._parse_settle_deposit_receipt(settle_result) == (None, None)
         assert "Could not resolve receipt parser" in caplog.text
 
     def test_parse_settle_deposit_receipt_warns_on_malformed_settle_deposit(self, caplog):
@@ -234,7 +281,7 @@ class TestSettleDepositReceiptParsing:
         settle_result = SimpleNamespace(receipt=_settle_deposit_receipt())
 
         with caplog.at_level("WARNING"):
-            assert manager._parse_settle_deposit_receipt(settle_result) == (0, 0)
+            assert manager._parse_settle_deposit_receipt(settle_result) == (None, None)
         assert "Could not extract settle_deposit accounting fields" in caplog.text
 
 

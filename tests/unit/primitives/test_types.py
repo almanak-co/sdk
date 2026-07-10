@@ -103,7 +103,7 @@ def test_types_module_docstring_forbids_growth() -> None:
     "enum_cls,expected_member_count_at_least",
     [
         (Primitive, 10),
-        (AccountingCategory, 8),  # 7 generic + TRANSFER; PENDLE_LP/PENDLE_PT moved to connector treatment (VIB-4931)
+        (AccountingCategory, 9),  # 7 generic + TRANSFER + SETTLEMENT (VIB-5666); PENDLE_LP/PENDLE_PT are connector treatment (VIB-4931)
         (PositionKind, 6),
         (LifecyclePhase, 4),
         (EventKind, 6),

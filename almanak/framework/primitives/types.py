@@ -58,6 +58,19 @@ class Primitive(StrEnum):
     LIQUIDATION = "liquidation"
     PERP = "perp"
     VAULT = "vault"
+    # VIB-5666: vault SETTLEMENT is its own primitive, split from VAULT. A
+    # depositor-facing ``VAULT_DEPOSIT``/``VAULT_REDEEM`` (the strategy putting
+    # capital INTO some ERC-4626) is a position the strategy opens; a vault
+    # SETTLEMENT (the strategy IS the Lagoon vault, running
+    # ``settleDeposit``/``settleRedeem`` to issue/burn shares against DEPOSITOR
+    # capital) is a two-phase propose→settle lifecycle that mutates AUM
+    # composition and accrues fee-shares. Folding it into VAULT would hide the
+    # propose/settle boundary and let a depositor inflow be mis-priced as a
+    # VAULT position. A dedicated primitive keeps its ``primitive_version`` /
+    # ``matching_policy_version`` streams isolated (design doc §Accounting
+    # taxonomy; ship-gate #3). Settlement events are CAPITAL events, never
+    # returns — they carry no ``principal_delta_usd`` / ``realized_pnl_usd``.
+    SETTLEMENT = "settlement"
     STAKING = "staking"
     BRIDGE = "bridge"
     PREDICTION = "prediction"
@@ -82,6 +95,10 @@ class AccountingCategory(StrEnum):
     LP = "lp"
     PERP = "perp"
     VAULT = "vault"
+    # VIB-5666: routes vault SETTLE_DEPOSIT / SETTLE_REDEEM events to
+    # ``settlement_handler`` (distinct from ``vault_handler``, which builds the
+    # depositor-facing VaultAccountingEvent). See ``Primitive.SETTLEMENT``.
+    SETTLEMENT = "settlement"
     SWAP = "swap"
     PREDICTION = "prediction"
     TRANSFER = "transfer"

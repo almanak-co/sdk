@@ -47,6 +47,7 @@ from almanak.framework.accounting.models import (
     PerpEventType,
     PredictionAccountingEvent,
     PredictionEventType,
+    SettlementEventType,
     SwapAccountingEvent,
     SwapEventType,
     TransferAccountingEvent,
@@ -61,6 +62,7 @@ from almanak.framework.accounting.payload_schemas import (
     PRIMITIVE_VERSIONS,
 )
 from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
+from almanak.framework.accounting.settlement_accounting import SettlementAccountingEvent
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
 from almanak.framework.accounting.writer import (
     AccountingEvent,
@@ -84,7 +86,7 @@ _TYPED_CLASSES_WITH_SERDE = (
     SwapAccountingEvent,
     TransferAccountingEvent,
 )
-_DUCK_TYPED_CLASSES = (LPAccountingEvent, PerpAccountingEvent, VaultAccountingEvent)
+_DUCK_TYPED_CLASSES = (LPAccountingEvent, PerpAccountingEvent, VaultAccountingEvent, SettlementAccountingEvent)
 _ALL_EVENT_CLASSES = _TYPED_CLASSES_WITH_SERDE + _DUCK_TYPED_CLASSES
 
 
@@ -250,6 +252,23 @@ def _build_event(cls: type, *, primitive_version: int = 1) -> object:
         )
         evt.primitive_version = primitive_version
         return evt
+    if cls is SettlementAccountingEvent:
+        evt = SettlementAccountingEvent(
+            identity=_identity(event_type_str="SETTLE_DEPOSIT"),
+            event_type=SettlementEventType.SETTLE_DEPOSIT,
+            position_key="settlement:lagoon:arbitrum:wallet:0xvault",
+            vault_address="0xvault",
+            asset_token="USDC",
+            assets_delta=Decimal("1000"),
+            shares_delta=Decimal("999"),
+            new_total_assets=Decimal("1000"),
+            fee_shares=None,
+            assets_usd=Decimal("1000"),
+            epoch_id=1,
+            confidence=AccountingConfidence.HIGH,
+        )
+        evt.primitive_version = primitive_version
+        return evt
     raise AssertionError(f"unhandled class {cls!r}")
 
 
@@ -306,6 +325,8 @@ def test_primitive_versions_explicit_per_primitive_pinning() -> None:
         # the SY-denominated value separately.
         Primitive.SWAP: 6,
         Primitive.VAULT: 1,
+        # VIB-5666: vault SETTLEMENT primitive (greenfield, v1).
+        Primitive.SETTLEMENT: 1,
         Primitive.STAKING: 1,
         Primitive.BRIDGE: 1,
         # #2146: bumped 1→2 — PredictionAccountingEvent payload now carries

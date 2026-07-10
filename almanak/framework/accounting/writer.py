@@ -40,6 +40,7 @@ from almanak.framework.accounting.position_reference import (
     build_legacy_position_reference,
     build_registry_position_reference,
 )
+from almanak.framework.accounting.settlement_accounting import SettlementAccountingEvent
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
 from almanak.framework.primitives.taxonomy import (
     UnknownIntentTypeError,
@@ -63,6 +64,7 @@ AccountingEvent = (
     | LPAccountingEvent
     | PerpAccountingEvent
     | VaultAccountingEvent
+    | SettlementAccountingEvent
     | PredictionAccountingEvent
     | SwapAccountingEvent
     | TransferAccountingEvent

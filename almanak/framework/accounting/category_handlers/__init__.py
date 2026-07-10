@@ -111,6 +111,7 @@ from almanak.framework.accounting.category_handlers import (  # noqa: E402, F401
     lp_handler,
     perp_handler,
     prediction_handler,
+    settlement_handler,
     swap_handler,
     transfer_handler,
     vault_handler,

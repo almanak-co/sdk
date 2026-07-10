@@ -1,6 +1,6 @@
 """Tests for vault lifecycle integration in StrategyRunner."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -88,7 +88,9 @@ class TestSettlementRunsWhenDue:
 
         result = await runner.run_iteration(strategy)
 
-        vault_lifecycle.run_settlement_cycle.assert_called_once_with(strategy)
+        # The runner threads its bound settlement-commit callable (VIB-5666) so
+        # every confirmed settlement leg books ledger + accounting rows.
+        vault_lifecycle.run_settlement_cycle.assert_called_once_with(strategy, settlement_commit=ANY)
         # decide() should still be called after settlement
         strategy.decide.assert_called_once()
         assert result.status == IterationStatus.HOLD
@@ -106,7 +108,9 @@ class TestSettlementRunsWhenDue:
 
         result = await runner.run_iteration(strategy)
 
-        vault_lifecycle.run_settlement_cycle.assert_called_once_with(strategy)
+        # The runner threads its bound settlement-commit callable (VIB-5666) so
+        # every confirmed settlement leg books ledger + accounting rows.
+        vault_lifecycle.run_settlement_cycle.assert_called_once_with(strategy, settlement_commit=ANY)
         strategy.decide.assert_called_once()
 
     @pytest.mark.asyncio

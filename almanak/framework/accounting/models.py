@@ -77,6 +77,25 @@ class VaultEventType(StrEnum):
     VAULT_SNAPSHOT = "VAULT_SNAPSHOT"
 
 
+class SettlementEventType(StrEnum):
+    """Lifecycle events for vault SETTLEMENT (Lagoon operator side) — VIB-5666.
+
+    ``SETTLE_DEPOSIT`` — a ``settleDeposit`` issued shares against pending
+    depositor capital (assets flowed IN, shares minted).
+    ``SETTLE_REDEEM`` — a ``settleRedeem`` burned redeem shares and returned
+    assets (assets flowed OUT, shares burned).
+
+    These are CAPITAL events, not returns: the model
+    (:class:`~almanak.framework.accounting.settlement_accounting.SettlementAccountingEvent`)
+    deliberately carries no ``principal_delta_usd`` / ``realized_pnl_usd`` /
+    ``cost_basis_usd`` field, so no position/portfolio PnL fold can read a
+    depositor inflow as profit or a redemption as loss.
+    """
+
+    SETTLE_DEPOSIT = "SETTLE_DEPOSIT"
+    SETTLE_REDEEM = "SETTLE_REDEEM"
+
+
 class SwapEventType(StrEnum):
     SWAP = "SWAP"
 
@@ -147,6 +166,7 @@ ALL_ACCOUNTING_EVENT_TYPES: frozenset[str] = frozenset(
         LPEventType,
         PerpEventType,
         VaultEventType,
+        SettlementEventType,
         SwapEventType,
         PredictionEventType,
         TransferEventType,

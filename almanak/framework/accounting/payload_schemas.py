@@ -154,6 +154,10 @@ MATCHING_POLICY_VERSIONS: dict[Primitive, int] = {
     # contract already tolerated by the reader), so the shared slot stays at v4.
     Primitive.SWAP: 4,
     Primitive.VAULT: 1,
+    # VIB-5666: vault SETTLEMENT primitive (greenfield). Settlement events carry
+    # exact receipt-measured assets/shares deltas — there is no lot-matching
+    # algorithm to version yet (capital events, no realized-PnL matching), so v1.
+    Primitive.SETTLEMENT: 1,
     Primitive.STAKING: 1,
     Primitive.BRIDGE: 1,
     # #2146 (v1→v2): the prediction replay path now reconstructs the VIB-3710
@@ -242,6 +246,10 @@ PRIMITIVE_VERSIONS: dict[Primitive, int] = {
     # no backfill obligation — Blueprint 27 §10.6.)
     Primitive.SWAP: 6,
     Primitive.VAULT: PRIMITIVE_VERSION_DEFAULT,
+    # VIB-5666: vault SETTLEMENT primitive contract v1 — SettlementAccountingEvent
+    # emits {assets_delta, shares_delta, new_total_assets, fee_shares} for the
+    # SETTLE_DEPOSIT / SETTLE_REDEEM legs.
+    Primitive.SETTLEMENT: PRIMITIVE_VERSION_DEFAULT,
     Primitive.STAKING: PRIMITIVE_VERSION_DEFAULT,
     Primitive.BRIDGE: PRIMITIVE_VERSION_DEFAULT,
     # #2146 (v1→v2): PredictionAccountingEvent payload contract extended with
