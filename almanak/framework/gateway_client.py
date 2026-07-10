@@ -972,6 +972,10 @@ class GatewayClient:
         to: str,
         data: str,
         block: int | str | None = None,
+        *,
+        from_address: str | None = None,
+        value: int = 0,
+        raise_on_error: bool = False,
     ) -> str | None:
         """Perform a raw eth_call via the gateway's RPC proxy.
 
@@ -979,6 +983,22 @@ class GatewayClient:
             chain: Chain identifier (e.g., "base", "arbitrum")
             to: Contract address to call
             data: Hex-encoded calldata (with 0x prefix)
+            from_address: Optional caller address for the simulated call
+                (VIB-5716). Rides the existing ``RpcRequest`` proto unchanged —
+                ``params`` is a generic JSON-encoded array, so a ``"from"`` key
+                in the call object needs no gateway change. Used by
+                caller-state-dependent probes (e.g. the Curve LP deployability
+                probe); omitted from the call object when ``None``, keeping
+                every existing caller's wire params byte-identical.
+            value: Optional native value (wei) for the simulated call; only
+                included in the call object when positive.
+            raise_on_error: When ``True``, a failed call raises ``ValueError``
+                carrying the gateway's error payload — which preserves the
+                upstream node's JSON-RPC error, including revert reasons like
+                ``execution reverted: !wl`` — instead of logging and returning
+                ``None``. Probe callers need that reason to classify a revert;
+                the ``False`` default keeps the legacy log-and-``None``
+                contract for every existing caller.
             block: Optional block reference. ``None`` (default) uses the
                 ``"latest"`` block tag — backwards-compatible behaviour.
                 An ``int`` is encoded as the standard JSON-RPC hex string
@@ -1030,8 +1050,14 @@ class GatewayClient:
         else:
             block_param = block
 
+        call_obj: dict[str, str] = {"to": to, "data": data}
+        if from_address is not None:
+            call_obj["from"] = from_address
+        if value and value > 0:  # tolerate a None-typed caller (CodeRabbit #3236)
+            call_obj["value"] = hex(value)
+
         try:
-            params = json.dumps([{"to": to, "data": data}, block_param])
+            params = json.dumps([call_obj, block_param])
             response = self._rpc_stub.Call(
                 gateway_pb2.RpcRequest(
                     chain=chain,
@@ -1041,12 +1067,21 @@ class GatewayClient:
                 timeout=self.config.timeout,
             )
             if not response.success:
+                if raise_on_error:
+                    # response.error is the JSON-encoded upstream JSON-RPC error
+                    # object — for a revert it carries the node's reason string
+                    # (and often the raw revert ``data``), which probe callers
+                    # classify. Marked "error" (not "transport") so callers can
+                    # distinguish an answered failure from a dropped channel.
+                    raise ValueError(f"Gateway eth_call error for {to} on {chain}: {response.error}")
                 logger.warning(f"eth_call failed: {response.error}")
                 return None
             if response.result:
                 return json.loads(response.result)
             return None
         except grpc.RpcError as e:
+            if raise_on_error:
+                raise ValueError(f"Gateway eth_call transport error for {to} on {chain}: {e}") from e
             logger.warning(f"eth_call RPC error: {e}")
             return None
 

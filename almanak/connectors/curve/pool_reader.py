@@ -13,12 +13,17 @@ tricrypto) onto a leading-pair read would return a price for the WRONG pair.
 Pairs at coin index >= 2 therefore resolve to ``None`` (an honest miss, never
 a wrong price); a pair-aware (i, j) read API is a documented follow-up.
 
-There is no pairwise ``factory.getPool``-style resolver for Curve, so
-``factory_addresses`` is empty and chain support is gated by curated-pool
-presence — exactly the chains where resolution can actually succeed.
-``candidate_pool_keys=(0,)``: with no fee-tier discriminator, best-pool
-resolution is a single total lookup, and sweeps can never multi-count one
-pool under several tiers.
+Curve DOES have a pairwise ``factory.getPool``-style resolver — the
+MetaRegistry's ``find_pool_for_coins`` (used by the compile lane's dynamic
+pair resolution, ``pair_resolver.py`` / VIB-5716) — but it is a registry
+contract resolved live via the AddressProvider, not a static factory
+address, so it does not fit the ``factory_addresses`` slot; wiring
+MetaRegistry-backed pair resolution into this reader lane is a documented
+follow-up (VIB-5716 scope note). Until then ``factory_addresses`` is empty
+and chain support is gated by curated-pool presence — exactly the chains
+where resolution can actually succeed. ``candidate_pool_keys=(0,)``: with
+no fee-tier discriminator, best-pool resolution is a single total lookup,
+and sweeps can never multi-count one pool under several tiers.
 
 Note on the Polygon aave-type 3pool: its curated ``coin_addresses`` are the
 UNDERLYING tokens (DAI/USDC.e/...), while the pool's native ``coins(i)`` are
@@ -73,8 +78,9 @@ def _build_known_pools() -> dict[str, dict[tuple[str, str, int], str]]:
 POOL_READER_SPEC = PoolReaderSpec(
     protocol="curve",
     reader_kind="curve_pool",
-    # No pairwise pool factory exists for Curve — resolution is curated-only,
-    # and chain gating comes from curated-pool presence in ``known_pools``.
+    # Curve's pairwise resolver (MetaRegistry find_pool_for_coins) is a live
+    # registry lookup, not a static factory address — so this slot stays empty
+    # and reader-lane resolution is curated-only (see module docstring).
     factory_addresses={},
     known_pools=_build_known_pools(),
     # Single total sweep: Curve has no fee-tier discriminator.

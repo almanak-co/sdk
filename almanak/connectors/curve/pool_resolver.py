@@ -89,7 +89,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["CurvePoolMetadata", "resolve_pool_metadata"]
+__all__ = ["CurvePoolMetadata", "resolution_is_definitive", "resolve_pool_metadata"]
 
 # Universal Curve AddressProvider — the SAME deployment on every EVM chain
 # (documented in ``CURVE_ADDRESSES[*]["address_provider"]``; kept here as a
@@ -166,6 +166,20 @@ _METADATA_CACHE: dict[tuple[str, str], CurvePoolMetadata | None] = {}
 def _clear_cache() -> None:
     """Test hook — drop the per-process resolution memo."""
     _METADATA_CACHE.clear()
+
+
+def resolution_is_definitive(chain: str, pool_address: str) -> bool:
+    """Whether ``resolve_pool_metadata``'s last answer for this pool is DEFINITIVE.
+
+    The memo stores ONLY definitive outcomes (a resolved shape, or a
+    transport-confirmed not-a-pool ``None``); a transient blip is never
+    written. So after a ``resolve_pool_metadata(...) is None``, this
+    distinguishes "confirmed: not a plain Curve pool" (cached ⇒ ``True``)
+    from "unknown: the read blipped" (uncached ⇒ ``False``) — callers that
+    screen candidates must treat the latter as indeterminate, never as a
+    determinate rejection (VIB-5716 audit finding).
+    """
+    return (chain, pool_address.lower()) in _METADATA_CACHE
 
 
 def _pad_address(addr: str) -> str:

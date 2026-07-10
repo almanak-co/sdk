@@ -87,6 +87,8 @@ def eth_call(
     chain: str | None = None,
     gateway_client: GatewayClient | None = None,
     raise_errors: bool = False,
+    from_address: str | None = None,
+    value: int = 0,
 ) -> bytes | None:
     """Perform an eth_call via gateway when available, otherwise direct JSON-RPC.
 
@@ -100,14 +102,41 @@ def eth_call(
         raise_errors: When True, raise ``ValueError`` on gateway or direct-RPC
             failures. When False, the default, suppress those failures and
             return ``None`` so callers can treat the read as unavailable.
+        from_address: Optional caller address for the simulated call
+            (VIB-5716). Caller-state-dependent probes (e.g. the Curve LP
+            deployability probe) set it; when ``None`` the call object is
+            byte-identical to the legacy form.
+        value: Optional native value (wei) for the simulated call; only
+            included in the call object when positive.
 
     Returns:
         Raw result bytes, or ``None`` when the call returns no data or fails
         while ``raise_errors`` is False.
     """
+    call_obj: dict[str, str] = {"to": to, "data": data}
+    if from_address is not None:
+        call_obj["from"] = from_address
+    if value and value > 0:  # tolerate a None-typed caller (CodeRabbit #3236)
+        call_obj["value"] = hex(value)
+
     if gateway_client is not None and getattr(gateway_client, "is_connected", False) and chain:
         try:
-            result = gateway_client.eth_call(chain=chain, to=to, data=data)
+            # The probe-only kwargs are passed ONLY when probing, so duck-typed
+            # gateway clients (test fakes with a narrower eth_call signature)
+            # and the legacy call shape stay byte-identical for plain reads.
+            if from_address is not None:
+                result = gateway_client.eth_call(
+                    chain=chain,
+                    to=to,
+                    data=data,
+                    from_address=from_address,
+                    value=value or 0,
+                    # Surface the upstream error (with any revert reason) to
+                    # probe callers; a plain read keeps log-and-None.
+                    raise_on_error=raise_errors,
+                )
+            else:
+                result = gateway_client.eth_call(chain=chain, to=to, data=data)
             if not result or result == "0x":
                 return None
             return bytes.fromhex(result.removeprefix("0x"))
@@ -127,7 +156,7 @@ def eth_call(
             json={
                 "jsonrpc": "2.0",
                 "method": "eth_call",
-                "params": [{"to": to, "data": data}, "latest"],
+                "params": [call_obj, "latest"],
                 "id": 1,
             },
             timeout=timeout,

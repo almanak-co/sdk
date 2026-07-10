@@ -7,6 +7,8 @@ from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from almanak.connectors.curve.adapter import CurveAdapter, LiquidityResult
 
 from almanak.connectors._strategy_base.base.compiler import (
@@ -364,6 +366,322 @@ def _resolve_dynamic_pool(ctx: BaseCompilerContext, pool_address: str) -> tuple[
     return info.name, info.to_dict()
 
 
+def _ctx_usd_price(ctx: BaseCompilerContext) -> Callable[[str], Decimal | None]:
+    """Symbol → USD price lookup for the pair-resolver liquidity floor.
+
+    Tolerant wrapper over ``require_token_price`` (the same oracle path the
+    swap guard uses): an unpriceable symbol is ``None``, never an exception —
+    the pair resolver treats it as "cannot rank", not a compile crash.
+    """
+
+    def lookup(symbol: str) -> Decimal | None:
+        try:
+            price = ctx.services.require_token_price(symbol)
+        except Exception:  # noqa: BLE001 — unpriceable coin is a screening signal, not an error
+            return None
+        return price if price and price > 0 else None
+
+    return lookup
+
+
+def _split_pair_addresses(ctx: BaseCompilerContext, pool: str) -> tuple[str, str] | None:
+    """Resolve a two-token pair string (``"CRVUSD/WBTC"``) to coin addresses.
+
+    Returns ``None`` (caller falls through to the legacy miss path) unless the
+    string is EXACTLY two resolvable tokens — 3+-token asset sets stay
+    curated-only (``find_pool_for_coins`` is pairwise), and unresolvable
+    symbols cannot be enumerated.
+    """
+    tokens = [t.strip() for t in pool.split("/") if t.strip()]
+    if len(tokens) != 2:
+        return None
+    addresses: list[str] = []
+    for token in tokens:
+        try:
+            resolved = ctx.services.resolve_token(token)
+        except Exception:  # noqa: BLE001 — unresolvable token → legacy miss path
+            return None
+        address = getattr(resolved, "address", None) if resolved is not None else None
+        if not isinstance(address, str) or not _is_pool_address(address):
+            return None
+        addresses.append(address)
+    if addresses[0].lower() == addresses[1].lower():
+        return None
+    return addresses[0], addresses[1]
+
+
+# Per-coin dust deposit for the deployability probe: 0.001 units (or 1 base
+# unit for 0-decimals coins). The probe is a static call — the amounts never
+# need to be affordable — but must be large enough that the crypto-pool
+# min-LP quote stays positive (the adapter refuses min_lp=0, VIB-5441).
+_PROBE_DUST_EXPONENT = 3
+
+
+def _probe_lp_open_deployability(
+    ctx: BaseCompilerContext,
+    pool_address: str,
+    *,
+    provenance_suspect: bool,
+) -> tuple[bool, str]:
+    """Static-call a REAL adapter-built ``add_liquidity`` from the wallet (VIB-5716).
+
+    Builds a dust-amount bundle through the production adapter — so the probed
+    calldata can never drift from what would execute — and classifies the
+    outcome via :func:`pair_resolver.classify_add_liquidity_probe` (allowance /
+    balance-shaped reverts are the EXPECTED pre-approval state and pass;
+    explicit gates like Yield Basis ``!wl`` disqualify; inconclusive outcomes
+    defer to the MetaRegistry provenance tell). Returns ``(deployable, detail)``.
+    """
+    from almanak.connectors._strategy_base.rpc import StaticCallProbe, eth_call_static_probe
+    from almanak.connectors.curve.adapter import CurveAdapter, CurveConfig
+    from almanak.connectors.curve.pair_resolver import classify_add_liquidity_probe
+
+    def inconclusive(detail: str) -> tuple[bool, str]:
+        return classify_add_liquidity_probe(
+            StaticCallProbe(outcome="transport", error=detail),
+            provenance_suspect=provenance_suspect,
+        )
+
+    # A malformed/unsupported candidate must cost only ITSELF (inconclusive →
+    # provenance decides), never crash the compile while other viable
+    # candidates remain in the ranked list (CodeRabbit #3236).
+    try:
+        adapter = CurveAdapter(
+            CurveConfig(
+                chain=ctx.chain,
+                wallet_address=ctx.wallet_address,
+                rpc_url=ctx.rpc_url,
+                gateway_client=ctx.gateway_client,
+            )
+        )
+        pool_info = adapter.get_pool_info(pool_address)
+        if pool_info is None:
+            return inconclusive("pool shape unavailable for probe")
+        decimals = pool_info.coin_decimals or [18] * pool_info.n_coins
+        dust = [Decimal(1).scaleb(-min(_PROBE_DUST_EXPONENT, d)) for d in decimals]
+        liq_result = adapter.add_liquidity(pool_address=pool_address, amounts=dust)
+    except Exception as exc:  # noqa: BLE001 — per-candidate isolation, classified below
+        return inconclusive(f"probe bundle build raised ({exc})")
+    if not liq_result.success:
+        return inconclusive(f"probe bundle build failed ({liq_result.error})")
+    add_txs = [tx for tx in liq_result.transactions if tx.tx_type == "add_liquidity"]
+    if not add_txs:
+        return inconclusive("probe bundle has no add_liquidity transaction")
+    tx = add_txs[-1]
+
+    probe = eth_call_static_probe(
+        chain=ctx.chain,
+        to=tx.to,
+        data=tx.data,
+        from_address=ctx.wallet_address,
+        value=tx.value,
+        rpc_url=ctx.rpc_url,
+        gateway_client=ctx.gateway_client,
+        timeout=ctx.rpc_timeout,
+    )
+    return classify_add_liquidity_probe(probe, provenance_suspect=provenance_suspect)
+
+
+def _align_pair_open_amounts(
+    intent: LPOpenIntent, pool_data: dict[str, Any], pair: tuple[str, str]
+) -> LPOpenIntent | None:
+    """Map ``amount0``/``amount1`` from PAIR-STRING order onto POOL-COIN order.
+
+    The user wrote the amounts against the pair string ("CRVUSD/WBTC" ⇒
+    ``amount0`` is crvUSD) but ``_resolve_lp_open_amounts`` maps them
+    positionally to pool coin indices — and an uncurated pool's coin order is
+    unknowable in advance. The exact-pair screen guarantees the pool's coins
+    are exactly the pair, so the mapping is either identity or a swap.
+    Returns the (possibly copied-and-swapped) intent, or ``None`` when the
+    resolved pool's coins unexpectedly do not match the pair (defensive —
+    caller must fail rather than deposit into the wrong coins). A pair-string
+    intent carrying ``coin_amounts`` never reaches here — the pair lane
+    rejects that combination up front (pool-coin indexing is undefined when
+    the framework picks the pool).
+    """
+    coins = [str(c).lower() for c in pool_data.get("coin_addresses") or []]
+    ordered = [pair[0].lower(), pair[1].lower()]
+    if coins == ordered:
+        return intent
+    if coins != list(reversed(ordered)):
+        return None
+    return intent.model_copy(update={"amount0": intent.amount1, "amount1": intent.amount0})
+
+
+def _resolve_pair_pool_for_open(
+    ctx: BaseCompilerContext, intent: LPOpenIntent
+) -> tuple[str, dict[str, Any], LPOpenIntent] | CompilationResult | None:
+    """Resolve an UNCURATED pair string to a deployable pool for LP_OPEN (VIB-5716).
+
+    MetaRegistry enumeration → exact-pair + liquidity-floor screening →
+    deployability probe on the ranked survivors, best-liquidity first, stopping
+    at the first pool that passes. Returns ``(pool_name, pool_data, intent)``
+    where ``intent`` is amount-aligned to the pool's coin order (see
+    ``_align_pair_open_amounts``), a FAILED ``CompilationResult`` carrying the
+    honest-miss reason when the pair determinately resolves to nothing
+    deployable, or ``None`` when pair resolution does not apply / cannot run
+    (caller keeps its legacy miss path).
+    """
+    from almanak.connectors.curve.pair_resolver import build_pair_candidates, format_pair_miss
+
+    pair = _split_pair_addresses(ctx, intent.pool)
+    if pair is None:
+        return None
+    # coin_amounts is documented POOL-COIN-indexed — but with a pair string
+    # the pool identity (and thus its on-chain coin order) is resolved by the
+    # framework, so the user cannot have indexed it. Passing it through would
+    # deposit into the wrong coins on ~half of pools (audit blocker); refuse
+    # loudly instead of guessing.
+    if intent.coin_amounts is not None:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"coin_amounts is pool-coin-indexed and cannot be combined with the pair string "
+                f"{intent.pool!r} (the resolved pool's coin order is unknowable in advance). "
+                f"Pass amount0/amount1 with the pair string, or an explicit pool address with coin_amounts."
+            ),
+            intent_id=intent.intent_id,
+        )
+    candidate_set = build_pair_candidates(
+        ctx.chain,
+        intent.pool,
+        pair[0],
+        pair[1],
+        gateway_client=ctx.gateway_client,
+        rpc_url=ctx.rpc_url,
+        usd_price=_ctx_usd_price(ctx),
+        timeout=ctx.rpc_timeout,
+    )
+    if candidate_set.indeterminate:
+        return None
+
+    probe_rejections: list[tuple[str, str]] = []
+    for candidate in candidate_set.ranked:
+        deployable, detail = _probe_lp_open_deployability(
+            ctx, candidate.address, provenance_suspect=candidate.provenance_suspect
+        )
+        if not deployable:
+            probe_rejections.append((candidate.address, detail))
+            continue
+        dynamic = _resolve_dynamic_pool(ctx, candidate.address)
+        if dynamic is None:
+            probe_rejections.append((candidate.address, "adapter could not build pool info"))
+            continue
+        aligned_intent = _align_pair_open_amounts(intent, dynamic[1], pair)
+        if aligned_intent is None:
+            probe_rejections.append((candidate.address, "resolved pool coins do not match the requested pair"))
+            continue
+        logger.info(
+            "Curve pair %r resolved dynamically to %s on %s (liquidity ~$%s; %s)",
+            intent.pool,
+            candidate.address,
+            ctx.chain,
+            f"{candidate.liquidity_usd:,.0f}" if candidate.liquidity_usd is not None else "?",
+            detail,
+        )
+        return dynamic[0], dynamic[1], aligned_intent
+
+    return CompilationResult(
+        status=CompilationStatus.FAILED,
+        error=format_pair_miss(candidate_set, probe_rejections),
+        intent_id=intent.intent_id,
+    )
+
+
+def _resolve_pair_pool_for_close(
+    ctx: BaseCompilerContext, intent: LPCloseIntent
+) -> tuple[str, dict[str, Any]] | CompilationResult | None:
+    """Resolve an UNCURATED pair string for LP_CLOSE by wallet LP holdings (VIB-5716).
+
+    Close-lane selection is by POSITION, not by pool quality: among the
+    MetaRegistry candidates, the right pool is the one whose LP token the
+    wallet actually holds. No liquidity floor and no add_liquidity probe —
+    closing must never be blocked by a screen meant for opens (a position in a
+    dust or gated pool still has to be closeable). Ambiguity (holdings in 2+
+    candidate pools) fails loudly rather than auto-picking; unreadable balances
+    fall through to the legacy miss path rather than claiming "no position".
+    """
+    from almanak.connectors.curve.pair_resolver import build_pair_candidates, format_pair_miss
+
+    pool_label = intent.pool
+    if not pool_label:
+        return None
+    pair = _split_pair_addresses(ctx, pool_label)
+    if pair is None:
+        return None
+    # Same positional-indexing hazard as the open lane (audit blocker):
+    # imbalanced_amounts and coin_index are pool-coin-indexed, but with a pair
+    # string the resolved pool's coin order is unknowable in advance — a
+    # flipped pool would withdraw the wrong per-coin amounts / into the wrong
+    # coin. Refuse loudly; proportional close (the default) is order-free.
+    if intent.imbalanced_amounts is not None or intent.coin_index is not None:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"imbalanced_amounts / coin_index are pool-coin-indexed and cannot be combined with "
+                f"the pair string {pool_label!r} (the resolved pool's coin order is unknowable in "
+                f"advance). Pass an explicit pool address for a shaped exit, or omit them for a "
+                f"proportional close."
+            ),
+            intent_id=intent.intent_id,
+        )
+    candidate_set = build_pair_candidates(
+        ctx.chain,
+        pool_label,
+        pair[0],
+        pair[1],
+        gateway_client=ctx.gateway_client,
+        rpc_url=ctx.rpc_url,
+        usd_price=_ctx_usd_price(ctx),
+        # Disable the open-lane liquidity screen: every shape-resolvable
+        # candidate is eligible — the wallet's LP balance decides.
+        liquidity_floor_usd=Decimal(0),
+        timeout=ctx.rpc_timeout,
+    )
+    if candidate_set.indeterminate:
+        return None
+
+    holders: list[str] = []
+    any_unreadable = False
+    for candidate in candidate_set.ranked:
+        if candidate.metadata is None:
+            continue
+        balance = ctx.services.query_erc20_balance(candidate.metadata.lp_token, ctx.wallet_address)
+        if balance is None:
+            any_unreadable = True
+        elif balance > 0:
+            holders.append(candidate.address)
+
+    if len(holders) == 1:
+        return _resolve_dynamic_pool(ctx, holders[0])
+    if len(holders) > 1:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Ambiguous Curve LP_CLOSE for {intent.pool!r} on {ctx.chain}: wallet holds LP tokens "
+                f"in multiple matching pools {holders}. Pass the explicit pool address as intent.pool."
+            ),
+            intent_id=intent.intent_id,
+        )
+    if any_unreadable:
+        # A balance read failed — "no holdings" cannot be asserted. Fall back
+        # to the legacy miss path instead of returning a false honest-miss.
+        return None
+    return CompilationResult(
+        status=CompilationStatus.FAILED,
+        error=(
+            format_pair_miss(candidate_set)
+            if not candidate_set.ranked
+            else (
+                f"No Curve LP position found for {intent.pool!r} on {ctx.chain}: MetaRegistry matched "
+                f"{len(candidate_set.ranked) + len(candidate_set.rejected)} pool(s) but the wallet holds "
+                f"no LP tokens in any of them. Pass the explicit pool address if the position lives elsewhere."
+            )
+        ),
+        intent_id=intent.intent_id,
+    )
+
+
 class _ClosePool(NamedTuple):
     """Resolved Curve pool for an LP_CLOSE compile (VIB-5438 decomposition).
 
@@ -636,14 +954,101 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
 
         return result
 
+    def _resolve_open_pool(
+        self, ctx: BaseCompilerContext, intent: LPOpenIntent
+    ) -> tuple[str, dict[str, Any], LPOpenIntent] | CompilationResult:
+        """Resolve the LP_OPEN target pool (VIB-5716 decomposition, mirrors
+        ``_resolve_close_pool``).
+
+        Resolution order: static registry by name → static by address →
+        curated asset-set fallback (VIB-3946) → dynamic ADDRESS via the
+        MetaRegistry with the VIB-5716 deployability gate → dynamic PAIR via
+        MetaRegistry ``find_pool_for_coins`` (liquidity-ranked, probed).
+        Returns ``(pool_name, pool_data, intent)`` on success — ``intent`` is
+        the caller's intent except on the dynamic-PAIR path, where the deposit
+        amounts are re-aligned to the resolved pool's coin order — or the
+        FAILED ``CompilationResult`` (unsupported chain / gated pool / honest
+        miss / the legacy unknown-pool error).
+        """
+        from almanak.connectors.curve.adapter import CURVE_ADDRESSES, CURVE_POOLS
+
+        if ctx.chain not in CURVE_ADDRESSES:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Curve is not supported on {ctx.chain}. Supported chains: {list(CURVE_ADDRESSES.keys())}",
+                intent_id=intent.intent_id,
+            )
+
+        chain_pools = CURVE_POOLS.get(ctx.chain, {})
+
+        if intent.pool in chain_pools:
+            return intent.pool, chain_pools[intent.pool], intent
+        for name, data in chain_pools.items():
+            if data["address"].lower() == intent.pool.lower():
+                return name, data, intent
+
+        if "/" in intent.pool:
+            # Asset-set fallback (e.g. "USDT/USDC", "USDT/USDC/DAI") — the LP
+            # analogue of the SWAP pool resolver. VIB-3946.
+            asset_match = _resolve_pool_by_asset_set(intent.pool, chain_pools, ctx)
+            if asset_match is not None:
+                return asset_match[0], asset_match[1], intent
+
+        # VIB-5628: static + asset-set miss on an ADDRESS -> resolve the
+        # UNCURATED pool live from the on-chain MetaRegistry. VIB-5716 adds
+        # the deployability gate: an uncurated pool whose add_liquidity is
+        # deposit-gated (e.g. Yield Basis '!wl') used to compile SUCCESS and
+        # die on-chain — now it is a clean compile FAIL naming the gate.
+        if _is_pool_address(intent.pool):
+            dynamic = _resolve_dynamic_pool(ctx, intent.pool)
+            if dynamic is not None:
+                from almanak.connectors.curve.pair_resolver import pool_provenance_suspect
+
+                deployable, detail = _probe_lp_open_deployability(
+                    ctx,
+                    dynamic[1]["address"],
+                    provenance_suspect=pool_provenance_suspect(
+                        ctx.chain,
+                        dynamic[1]["address"],
+                        gateway_client=ctx.gateway_client,
+                        rpc_url=ctx.rpc_url,
+                        timeout=ctx.rpc_timeout,
+                    ),
+                )
+                if not deployable:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=(
+                            f"Curve pool {intent.pool} on {ctx.chain} is not LP-deployable for this wallet: {detail}"
+                        ),
+                        intent_id=intent.intent_id,
+                    )
+                return dynamic[0], dynamic[1], intent
+
+        # VIB-5716: static + asset-set miss on a two-token PAIR string ->
+        # resolve via MetaRegistry find_pool_for_coins (liquidity-ranked,
+        # deployability-probed). A determinate miss returns the honest-miss
+        # FAILED result naming why each candidate was rejected.
+        elif "/" in intent.pool:
+            pair_resolved = _resolve_pair_pool_for_open(ctx, intent)
+            if pair_resolved is not None:
+                return pair_resolved
+
+        available = {name: d["address"] for name, d in chain_pools.items()}
+        coins_by_pool = {name: d.get("coins") for name, d in chain_pools.items()}
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Unknown Curve pool: {intent.pool} on {ctx.chain}. "
+                f"Available pools: {available}. "
+                f"Pool asset sets (pass as e.g. 'USDT/USDC'): {coins_by_pool}"
+            ),
+            intent_id=intent.intent_id,
+        )
+
     def compile_lp_open(self, ctx: BaseCompilerContext, intent: LPOpenIntent) -> CompilationResult:
         """Compile LP_OPEN intent for Curve Finance."""
-        from almanak.connectors.curve.adapter import (
-            CURVE_ADDRESSES,
-            CURVE_POOLS,
-            CurveAdapter,
-            CurveConfig,
-        )
+        from almanak.connectors.curve.adapter import CurveAdapter, CurveConfig
 
         result = CompilationResult(
             status=CompilationStatus.SUCCESS,
@@ -652,60 +1057,13 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         transactions: list[Any] = []
 
         try:
-            if ctx.chain not in CURVE_ADDRESSES:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=f"Curve is not supported on {ctx.chain}. Supported chains: {list(CURVE_ADDRESSES.keys())}",
-                    intent_id=intent.intent_id,
-                )
-
-            chain_pools = CURVE_POOLS.get(ctx.chain, {})
-
-            pool_name: str = ""
-            pool_address: str = intent.pool
-            pool_data: dict[str, Any] | None = None
-
-            if intent.pool in chain_pools:
-                pool_name = intent.pool
-                pool_data = chain_pools[intent.pool]
-                pool_address = pool_data["address"]
-            else:
-                for name, data in chain_pools.items():
-                    if data["address"].lower() == intent.pool.lower():
-                        pool_name = name
-                        pool_data = data
-                        pool_address = data["address"]
-                        break
-
-            if pool_data is None and "/" in intent.pool:
-                # Asset-set fallback (e.g. "USDT/USDC", "USDT/USDC/DAI") — the LP
-                # analogue of the SWAP pool resolver. VIB-3946.
-                asset_match = _resolve_pool_by_asset_set(intent.pool, chain_pools, ctx)
-                if asset_match is not None:
-                    pool_name, pool_data = asset_match
-                    pool_address = pool_data["address"]
-
-            # VIB-5628: static + asset-set miss on an ADDRESS -> resolve the
-            # UNCURATED pool live from the on-chain MetaRegistry.
-            if pool_data is None and _is_pool_address(intent.pool):
-                dynamic = _resolve_dynamic_pool(ctx, intent.pool)
-                if dynamic is not None:
-                    dyn_name, pool_data = dynamic
-                    pool_name = pool_name or dyn_name
-                    pool_address = pool_data["address"]
-
-            if pool_data is None:
-                available = {name: d["address"] for name, d in chain_pools.items()}
-                coins_by_pool = {name: d.get("coins") for name, d in chain_pools.items()}
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=(
-                        f"Unknown Curve pool: {intent.pool} on {ctx.chain}. "
-                        f"Available pools: {available}. "
-                        f"Pool asset sets (pass as e.g. 'USDT/USDC'): {coins_by_pool}"
-                    ),
-                    intent_id=intent.intent_id,
-                )
+            resolved = self._resolve_open_pool(ctx, intent)
+            if isinstance(resolved, CompilationResult):
+                return resolved
+            # The dynamic-PAIR path may return an amount-aligned intent copy
+            # (deposit amounts permuted to the resolved pool's coin order).
+            pool_name, pool_data, intent = resolved
+            pool_address = pool_data["address"]
 
             n_coins = pool_data["n_coins"]
 
@@ -846,10 +1204,24 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
 
         # VIB-5628: static + asset-set miss on an ADDRESS -> resolve the UNCURATED
         # pool live from the MetaRegistry so an uncurated LP position can be closed.
+        # Deliberately NO deployability gate here (unlike LP_OPEN): closing must
+        # never be blocked by a screen — a position in a gated pool must remain
+        # closeable.
         if pool_data is None and _is_pool_address(intent.pool):
             dynamic = _resolve_dynamic_pool(ctx, intent.pool)
             if dynamic is not None:
                 dyn_name, pool_data = dynamic
+                pool_name = pool_name or dyn_name
+                pool_address = pool_data["address"]
+
+        # VIB-5716: static + asset-set miss on a two-token PAIR string -> resolve
+        # via MetaRegistry, selecting by the wallet's actual LP-token holdings.
+        if pool_data is None and not _is_pool_address(intent.pool) and "/" in intent.pool:
+            pair_resolved = _resolve_pair_pool_for_close(ctx, intent)
+            if isinstance(pair_resolved, CompilationResult):
+                return pair_resolved
+            if pair_resolved is not None:
+                dyn_name, pool_data = pair_resolved
                 pool_name = pool_name or dyn_name
                 pool_address = pool_data["address"]
 

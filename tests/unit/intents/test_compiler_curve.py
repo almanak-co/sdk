@@ -610,6 +610,11 @@ class TestCurveLPAssetSetResolver:
 
     @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    # Pin the STATIC resolver contract: disable the VIB-5716 dynamic pair lane,
+    # which would otherwise reach the live MetaRegistry whenever the test
+    # environment supplies a default RPC (the lane has its own deterministic
+    # suite in tests/unit/connectors/curve/test_compiler_pair_dynamic.py).
+    @patch("almanak.connectors.curve.compiler._resolve_pair_pool_for_open", new=lambda ctx, intent: None)
     def test_lp_open_unknown_asset_set_errors_clearly(self, compiler):
         """An asset set with no exact pool match still fails with a clear error.
 
@@ -634,6 +639,8 @@ class TestCurveLPAssetSetResolver:
 
     @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    # Static-resolver contract only — see test_lp_open_unknown_asset_set_errors_clearly.
+    @patch("almanak.connectors.curve.compiler._resolve_pair_pool_for_open", new=lambda ctx, intent: None)
     def test_lp_open_partial_asset_set_does_not_match_superset(self, compiler):
         """``USDC/DAI`` must NOT resolve to 3pool (which also contains USDT).
 
