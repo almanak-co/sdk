@@ -243,18 +243,23 @@ class TestPrimaryValuerPath:
 
 class TestMultiChainFallback:
     @pytest.mark.asyncio
-    async def test_multi_chain_skips_valuer_and_uses_strategy_fallback(self):
+    async def test_multi_chain_now_uses_canonical_valuer(self):
+        # VIB-5722: the multi-chain gate is lifted — multi-chain strategies now
+        # run the canonical (chain-aware) PortfolioValuer instead of falling
+        # straight to the strategy's degraded get_portfolio_snapshot (which
+        # stamped $0.00 at HIGH after a real multi-chain mint).
         runner = _make_runner(is_multi_chain=True)
+        runner._portfolio_valuer.value.return_value = _make_snapshot(total_value_usd="2500.00")
         strategy = _make_strategy()
-        fallback_snap = _make_snapshot(total_value_usd="2500.00")
+        fallback_snap = _make_snapshot(total_value_usd="0.00")
         strategy.get_portfolio_snapshot = MagicMock(return_value=fallback_snap)
 
         result = await capture_portfolio_snapshot(runner, strategy, iteration_number=3)
 
-        assert result is fallback_snap
-        runner._portfolio_valuer.value.assert_not_called()
-        # iteration_number propagates to fallback snapshot
-        assert fallback_snap.iteration_number == 3
+        assert result is not None
+        assert result.total_value_usd == Decimal("2500.00")
+        runner._portfolio_valuer.value.assert_called_once()
+        strategy.get_portfolio_snapshot.assert_not_called()
 
 
 # =============================================================================

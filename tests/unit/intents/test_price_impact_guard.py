@@ -13,6 +13,26 @@ import pytest
 from almanak import IntentCompiler, IntentCompilerConfig, SwapIntent
 from almanak.framework.intents.compiler import CompilationStatus
 
+
+@pytest.fixture(autouse=True)
+def _pin_framework_swap_path():
+    """Pin swap compilation to the framework ``_compile_swap`` path (VIB-5731).
+
+    These tests characterize the FRAMEWORK compiler's price-impact guard. When
+    the global connector-compiler registry happens to be populated by earlier
+    tests on the same xdist worker (import-order dependent), ``compile()``
+    dispatches uniswap_v3 swaps to the connector-owned compiler instead — a
+    different code path with its own guard (and a deliberate local-Anvil skip)
+    — flipping these tests' verdicts on CI while passing locally. Forcing the
+    dispatch probe to None makes the path under test deterministic; the
+    connector path's guard has its own suite.
+    """
+    with patch(
+        "almanak.framework.intents.compiler.get_connector_compiler",
+        return_value=None,
+    ):
+        yield
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -50,7 +70,25 @@ def _make_compiler(
         wallet_address="0x1234567890123456789012345678901234567890",
         config=config,
         price_oracle=price_oracle,
+        # Hermetic resolver (VIB-5731): without an explicit instance the
+        # compiler falls back to the get_token_resolver() SINGLETON, which
+        # other suites sharing the xdist worker reset/mutate — a mis-resolved
+        # token decimal silently rescales oracle_estimate and flips the guard
+        # verdict these tests exist to pin.
+        token_resolver=_hermetic_resolver(),
     )
+
+
+def _hermetic_resolver():
+    """A fresh, singleton-independent TokenResolver with an isolated disk cache."""
+    import os
+    import tempfile
+
+    from almanak.framework.data.tokens.resolver import TokenResolver
+
+    fd, cache_path = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    return TokenResolver(cache_file=cache_path)
 
 
 def _make_mock_adapter(

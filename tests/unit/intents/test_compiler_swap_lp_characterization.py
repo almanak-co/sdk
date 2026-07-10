@@ -85,7 +85,25 @@ def _make_compiler(
         wallet_address="0x1111111111111111111111111111111111111111",
         config=config,
         price_oracle=price_oracle if price_oracle is not None else _DEFAULT_PRICES,
+        # Hermetic resolver (VIB-5731): without an explicit instance the
+        # compiler falls back to the get_token_resolver() SINGLETON, which
+        # other suites sharing the xdist worker reset/mutate — a mis-resolved
+        # token decimal silently rescales oracle_estimate and flips the
+        # price-impact-guard verdicts these tests pin.
+        token_resolver=_hermetic_resolver(),
     )
+
+
+def _hermetic_resolver():
+    """A fresh, singleton-independent TokenResolver with an isolated disk cache."""
+    import os
+    import tempfile
+
+    from almanak.framework.data.tokens.resolver import TokenResolver
+
+    fd, cache_path = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    return TokenResolver(cache_file=cache_path)
 
 
 def _make_mock_swap_adapter(
@@ -255,6 +273,24 @@ class TestCompileSwapHappyPaths:
 class TestCompileSwapPriceImpactGuard:
     """The price impact guard is one of the highest-value branches."""
 
+    @pytest.fixture(autouse=True)
+    def _pin_framework_swap_path(self):
+        """Pin swap compilation to the framework ``_compile_swap`` path (VIB-5731).
+
+        These tests characterize the FRAMEWORK guard. When the global
+        connector-compiler registry is populated by earlier tests on the same
+        xdist worker (import-order dependent), ``compile()`` dispatches
+        uniswap_v3 swaps to the connector-owned compiler — a different code
+        path with its own guard (and a deliberate local-Anvil skip) — flipping
+        these verdicts on CI while passing locally. The connector path's guard
+        has its own suite; here the dispatch probe is forced off.
+        """
+        with patch(
+            "almanak.framework.intents.compiler.get_connector_compiler",
+            return_value=None,
+        ):
+            yield
+
     @patch(SWAP_ADAPTER_CLS)
     def test_price_impact_guard_trips_on_low_quoter(self, mock_adapter_cls: MagicMock) -> None:
         """Quoter returning a fraction of oracle => FAILED with clear error."""
@@ -266,12 +302,35 @@ class TestCompileSwapPriceImpactGuard:
         )
         compiler = _make_compiler()
 
-        with patch(REGISTRY_QUOTE, return_value=200_000_000_000_000):
+        # Diagnostic spy (VIB-5731): this test flips FAILED→SUCCESS on some CI
+        # shard orderings but has never reproduced locally. Record the exact
+        # inputs check_price_impact received so a CI failure names the polluted
+        # value (oracle_estimate scaling vs placeholder-mode vs quoter miss)
+        # instead of only the verdict.
+        from almanak.framework.intents import compiler as compiler_mod
+
+        guard_calls: list[dict] = []
+        real_check = compiler_mod.check_price_impact
+
+        def _spy(**kwargs):
+            guard_calls.append(dict(kwargs))
+            return real_check(**kwargs)
+
+        with (
+            patch(REGISTRY_QUOTE, return_value=200_000_000_000_000),
+            patch.object(compiler_mod, "check_price_impact", side_effect=_spy),
+        ):
             result = compiler.compile(_make_swap_intent())
 
-        assert result.status == CompilationStatus.FAILED
-        assert "Price impact too high" in (result.error or "")
-        assert "insufficient liquidity" in (result.error or "")
+        diag = (
+            f"guard_calls={guard_calls!r} "
+            f"using_placeholders={getattr(compiler, '_using_placeholders', '?')!r} "
+            f"price_oracle={getattr(compiler, 'price_oracle', '?')!r} "
+            f"error={result.error!r}"
+        )
+        assert result.status == CompilationStatus.FAILED, diag
+        assert "Price impact too high" in (result.error or ""), diag
+        assert "insufficient liquidity" in (result.error or ""), diag
 
     @patch(SWAP_ADAPTER_CLS)
     def test_none_quoter_fails_closed(self, mock_adapter_cls: MagicMock) -> None:

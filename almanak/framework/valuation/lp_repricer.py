@@ -141,26 +141,40 @@ def resolve_lp_pool_address_from_details(position: Any) -> str | None:
 
 
 def extract_token_id(position: Any) -> int | None:
-    """Extract the numeric NFT token id from position data (or ``None``)."""
-    pid = position.position_id
-    if not pid:
-        return None
+    """Extract the numeric NFT token id from position data (or ``None``).
 
-    try:
-        token_id = int(pid)
-        if token_id >= 0:
-            return token_id
-    except (ValueError, TypeError):
-        pass
+    Delegates to :func:`resolve_nft_token_id` — THE single id-resolution rule
+    shared by teardown (TD-14), Plan-A reconciliation, and the union dedupe — so
+    every lane agrees on the same tokenId for a given position (VIB-5722). That
+    rule reads the ``nft_position_id`` / ``nft_id`` / ``token_id`` /
+    ``position_id`` detail keys and the bare-numeric ``position_id`` attribute.
+    Crucially it covers the FRAMEWORK's own composite position-id shape —
+    ``uniswap_v3-WETH/USDC/500-<token_id>`` with the bare id in
+    ``details["position_id"]`` — which the previous local extractor missed
+    (int() on the composite string failed and it never read ``position_id`` from
+    details), silently un-repricing a freshly minted multi-chain LP → whole
+    snapshot UNAVAILABLE → $0.00-at-HIGH fallback (the DN-LP Anvil finding).
 
-    for key in ("token_id", "tokenId", "nft_id"):
-        val = position.details.get(key)
-        if val is not None:
+    A legacy camelCase ``tokenId`` detail key (not in the shared rule's key set)
+    is kept as an extra fallback for full back-compat. Negative ids are rejected.
+    """
+    from almanak.connectors._strategy_base.teardown_post_condition import resolve_nft_token_id
+
+    token_id = resolve_nft_token_id(position)
+    if token_id is not None and token_id >= 0:
+        return token_id
+
+    # Legacy camelCase detail key the shared rule's NFT_ID_DETAIL_KEYS omits.
+    details = getattr(position, "details", None)
+    if isinstance(details, dict):
+        val = details.get("tokenId")
+        if val is not None and not isinstance(val, bool | float):
             try:
-                return int(val)
+                tid = int(val)
+                if tid >= 0:
+                    return tid
             except (ValueError, TypeError):
                 pass
-
     return None
 
 
@@ -266,35 +280,91 @@ def reprice_lp_position(
         A genuinely empty position (zero liquidity and zero fees) returns
         ``(Decimal("0"), {"position_id": ..., "liquidity": "0"})``.
     """
+    pid = getattr(position, "position_id", "?")
     try:
         token_id = extract_token_id(position)
         if token_id is None:
+            # VIB-5722: make the silent miss visible. This is the branch that hid
+            # the DN-LP composite-id ($0.00-at-HIGH) regression from run logs.
+            logger.warning(
+                "LP reprice miss for %s on %s: could not resolve NFT token id (details keys=%s)",
+                pid,
+                chain,
+                sorted((getattr(position, "details", None) or {}).keys()),
+            )
             return None
 
         on_chain = lp_reader.read_position(chain=chain, token_id=token_id, protocol=position.protocol)
         if on_chain is None:
+            logger.warning(
+                "LP reprice miss for %s on %s: lp_reader.read_position(token_id=%s) returned None",
+                pid,
+                chain,
+                token_id,
+            )
             return None
 
         if on_chain.liquidity == 0 and on_chain.tokens_owed0 == 0 and on_chain.tokens_owed1 == 0:
+            # Not a miss — a MEASURED empty position (Empty ≠ Zero).
+            logger.debug("LP %s on %s is empty (zero liquidity + zero fees) → measured $0", token_id, chain)
             return Decimal("0"), {"position_id": str(token_id), "liquidity": "0"}
 
         token0_symbol = resolve_token_symbol(on_chain.token0, position, "token0")
         token1_symbol = resolve_token_symbol(on_chain.token1, position, "token1")
         if not token0_symbol or not token1_symbol:
+            logger.warning(
+                "LP reprice miss for %s (token_id=%s) on %s: unresolved token symbol(s) (token0=%r→%r, token1=%r→%r)",
+                pid,
+                token_id,
+                chain,
+                on_chain.token0,
+                token0_symbol,
+                on_chain.token1,
+                token1_symbol,
+            )
             return None
 
         try:
             token0_price = Decimal(str(price_fn(token0_symbol)))
             token1_price = Decimal(str(price_fn(token1_symbol)))
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "LP reprice miss for %s (token_id=%s) on %s: price fetch raised for %s/%s: %s",
+                pid,
+                token_id,
+                chain,
+                token0_symbol,
+                token1_symbol,
+                e,
+            )
             return None
 
         if token0_price <= 0 or token1_price <= 0:
+            logger.warning(
+                "LP reprice miss for %s (token_id=%s) on %s: non-positive price (%s=%s, %s=%s)",
+                pid,
+                token_id,
+                chain,
+                token0_symbol,
+                token0_price,
+                token1_symbol,
+                token1_price,
+            )
             return None
 
         token0_decimals = decimals_fn(token0_symbol, chain)
         token1_decimals = decimals_fn(token1_symbol, chain)
         if token0_decimals is None or token1_decimals is None:
+            logger.warning(
+                "LP reprice miss for %s (token_id=%s) on %s: unmeasured decimals (%s=%s, %s=%s)",
+                pid,
+                token_id,
+                chain,
+                token0_symbol,
+                token0_decimals,
+                token1_symbol,
+                token1_decimals,
+            )
             return None
 
         # VIB-4274 — prefer a real pool_address (hex-shape guarded); a
@@ -357,5 +427,5 @@ def reprice_lp_position(
         return total, enriched
 
     except Exception:
-        logger.debug("LP enriched re-pricing failed for %s", getattr(position, "position_id", "?"), exc_info=True)
+        logger.warning("LP enriched re-pricing failed for %s", getattr(position, "position_id", "?"), exc_info=True)
         return None

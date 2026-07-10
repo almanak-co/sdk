@@ -628,7 +628,10 @@ class _StubMarket:
     def __init__(self, prices: dict[str, Decimal | None]) -> None:
         self._prices = {k.upper(): v for k, v in prices.items()}
 
-    def price(self, token: str) -> Decimal:
+    def price(self, token: str, quote: str = "USD", *, chain: str | None = None) -> Decimal:
+        # Mirrors the real MarketSnapshot.price signature (chain keyword-only,
+        # VIB-5722): the chain-threaded ``_price_curve_coins`` passes chain=. The
+        # stub prices by symbol and ignores chain — behaviour unchanged.
         value = self._prices.get(str(token).upper())
         if value is None:
             raise KeyError(token)
@@ -1013,17 +1016,17 @@ def test_price_curve_coins_real_address_eth_does_not_proxy_weth() -> None:
     # WETH price in the oracle, it stays unpriced (None), never mis-priced as WETH.
     valuer = PortfolioValuer(_StubGatewayClient({}))
     real_eth_token = "0x1111111111111111111111111111111111111111"  # NOT a native sentinel
-    prices = valuer._price_curve_coins(["ETH"], [real_eth_token], _StubMarket({"WETH": Decimal("3000")}))
+    prices = valuer._price_curve_coins(["ETH"], [real_eth_token], "ethereum", _StubMarket({"WETH": Decimal("3000")}))
     assert prices == [None]  # no proxy — real-address token doesn't borrow the WETH price
 
 
 def test_price_curve_coins_sentinel_eth_proxies_weth() -> None:
     # A native-sentinel-address ETH leg DOES proxy to WETH.
     valuer = PortfolioValuer(_StubGatewayClient({}))
-    prices = valuer._price_curve_coins(["ETH"], [ETH_NATIVE], _StubMarket({"WETH": Decimal("3000")}))
+    prices = valuer._price_curve_coins(["ETH"], [ETH_NATIVE], "ethereum", _StubMarket({"WETH": Decimal("3000")}))
     assert prices == [Decimal("3000")]
     # A missing/empty address also proxies (genuinely unknown native leg).
-    prices_empty = valuer._price_curve_coins(["ETH"], [""], _StubMarket({"WETH": Decimal("3000")}))
+    prices_empty = valuer._price_curve_coins(["ETH"], [""], "ethereum", _StubMarket({"WETH": Decimal("3000")}))
     assert prices_empty == [Decimal("3000")]
 
 
@@ -1050,7 +1053,7 @@ def test_value_curve_crypto_length_mismatch_fails_closed_no_path() -> None:
     valuer = PortfolioValuer(_StubGatewayClient({}))
     on_chain = _crypto_position_obj(coin_decimals=[18])  # 1 decimal for 2 coins
     market = _StubMarket({"ETH": Decimal("3000"), "STETH": Decimal("2990"), "WETH": Decimal("3000")})
-    value_usd, details = valuer._value_curve_crypto(_steth_position(), on_chain, market)  # type: ignore[misc]
+    value_usd, details = valuer._value_curve_crypto(_steth_position(), on_chain, "ethereum", market)  # type: ignore[misc]
     assert value_usd == Decimal("0")
     assert details["valuation_status"] == "no_path"
     assert details["unavailable_reason"] == "curve_spot_reserves_read_incomplete"
@@ -1061,7 +1064,7 @@ def test_value_curve_crypto_nonpositive_fails_closed_no_path() -> None:
     valuer = PortfolioValuer(_StubGatewayClient({}))
     on_chain = _crypto_position_obj(reserves_wei=[0, 0])
     market = _StubMarket({"ETH": Decimal("3000"), "STETH": Decimal("2990"), "WETH": Decimal("3000")})
-    value_usd, details = valuer._value_curve_crypto(_steth_position(), on_chain, market)  # type: ignore[misc]
+    value_usd, details = valuer._value_curve_crypto(_steth_position(), on_chain, "ethereum", market)  # type: ignore[misc]
     assert value_usd == Decimal("0")
     assert details["valuation_status"] == "no_path"
     assert details["unavailable_reason"] == "curve_spot_reserves_nonpositive"

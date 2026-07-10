@@ -82,7 +82,9 @@ def _patch_resolver(symbol_by_addr: dict[str, tuple[str, int]]):
 def _market(prices: dict[str, Decimal]):
     market = MagicMock()
 
-    def _price(token, quote="USD"):
+    def _price(token, quote="USD", *, chain=None):
+        # Matches the real MarketSnapshot.price signature (chain is keyword-only,
+        # VIB-5722): the valuer threads chain= into every price read.
         if token in prices:
             return prices[token]
         raise ValueError(f"No price for {token}")

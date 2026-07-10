@@ -733,7 +733,7 @@ def test_fungible_valuer_prices_legs_by_address():
 
     priced_keys: list[str] = []
 
-    def _price(token: str, quote: str = "USD") -> Decimal:
+    def _price(token: str, quote: str = "USD", *, chain: str | None = None) -> Decimal:
         priced_keys.append(token)
         # Only the ADDRESS resolves (the exotic symbol does NOT) — mirrors the
         # gateway, which builds a ResolvedToken only for address-form inputs.
@@ -783,7 +783,7 @@ def test_fungible_valuer_nonpositive_address_price_falls_back_to_symbol():
     reader = MagicMock()
     reader.read_position.return_value = pos
 
-    def _price(token: str, quote: str = "USD") -> Decimal:
+    def _price(token: str, quote: str = "USD", *, chain: str | None = None) -> Decimal:
         # Address path returns 0 (miss) for sUSDai; symbol path has a real price.
         by_addr = {SUSDAI.lower(): Decimal("0"), USDC.lower(): Decimal("1")}
         by_sym = {"susdai": Decimal("1.02")}

@@ -52,7 +52,10 @@ def _perps(positions: list[PositionInfo]) -> list[PositionInfo]:
 
 def _merge(strategy_positions, discovered, perp_protocols_ok):
     valuer = PortfolioValuer(gateway_client=None)
-    return valuer._merge_position_sources(strategy_positions, discovered, "bnb", perp_protocols_ok)
+    # VIB-5722: perp_protocols_ok is now (chain, protocol)-scoped. These cases are
+    # all single-chain "bnb", so scope each venue to "bnb".
+    scoped = None if perp_protocols_ok is None else {("bnb", p) for p in perp_protocols_ok}
+    return valuer._merge_position_sources(strategy_positions, discovered, "bnb", scoped)
 
 
 class TestAsterMergeVenueAgnostic:

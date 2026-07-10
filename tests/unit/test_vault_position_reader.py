@@ -155,7 +155,7 @@ class _StaticMarket:
     def __init__(self, prices: dict[str, Decimal]) -> None:
         self._prices = prices
 
-    def price(self, token: str, quote: str = "USD") -> Decimal:  # noqa: ARG002
+    def price(self, token: str, quote: str = "USD", *, chain: str | None = None) -> Decimal:  # noqa: ARG002
         return self._prices[token]
 
     def balance(self, token: str) -> Decimal:  # noqa: ARG002
@@ -218,3 +218,127 @@ class TestPortfolioValuerVaultRouting:
         market = _StaticMarket({})
         value = valuer._reprice_position(position, "base", market)
         assert value == Decimal("123.45")
+
+
+# ---------------------------------------------------------------------------
+# _reprice_vault_on_chain_enriched branch coverage (VIB-5722 CRAP gate)
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+
+def _vault_on_chain(
+    *,
+    is_active: bool = True,
+    asset_address: str = "0x" + "c" * 40,
+    asset_decimals: int = 6,
+    asset_amount_wei: int = 2_100_000,
+    shares_wei: int = 2_000_000,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        is_active=is_active,
+        asset_address=asset_address,
+        asset_decimals=asset_decimals,
+        asset_amount_wei=asset_amount_wei,
+        shares_wei=shares_wei,
+    )
+
+
+class _StubVaultReader:
+    def __init__(self, result: SimpleNamespace | None, *, raises: bool = False) -> None:
+        self._result = result
+        self._raises = raises
+
+    def read_position(self, *, protocol, chain, vault_address, wallet_address):  # noqa: ANN001, ARG002
+        if self._raises:
+            raise RuntimeError("reader boom")
+        return self._result
+
+
+def _vault_position(details: dict | None = None) -> PositionInfo:
+    return PositionInfo(
+        position_type=PositionType.VAULT,
+        position_id="v1",
+        chain="base",
+        protocol="metamorpho",
+        value_usd=Decimal("0"),
+        details=details
+        if details is not None
+        else {"vault_address": "0x" + "a" * 40, "wallet_address": "0x" + "b" * 40, "asset": "USDC"},
+    )
+
+
+def _valuer_with_reader(result, *, raises=False, symbol="USDC", decimals=None):  # noqa: ANN001
+    v = PortfolioValuer(gateway_client=None)
+    v._vault_reader = _StubVaultReader(result, raises=raises)
+    v._resolve_token_symbol = lambda addr, pos, field: symbol  # type: ignore[assignment]
+    if decimals is not None:
+        v._get_token_decimals = lambda sym, chain: decimals  # type: ignore[assignment]
+    return v
+
+
+class TestRepriceVaultEnrichedBranches:
+    """Direct branch coverage for _reprice_vault_on_chain_enriched (CRAP gate)."""
+
+    def test_happy_path_values_and_details(self):
+        v = _valuer_with_reader(_vault_on_chain())
+        res = v._reprice_vault_on_chain_enriched(_vault_position(), "base", _StaticMarket({"USDC": Decimal("1")}))
+        assert res is not None
+        value, details = res
+        assert value == Decimal("2.10")  # 2.1 USDC @ $1
+        assert details["asset_symbol"] == "USDC"
+        assert details["asset_amount"] == "2.1"
+        assert details["asset_price_usd"] == "1"
+
+    def test_missing_vault_address_returns_none(self):
+        v = _valuer_with_reader(_vault_on_chain())
+        pos = _vault_position(details={"wallet_address": "0x" + "b" * 40})  # no vault_address
+        assert v._reprice_vault_on_chain_enriched(pos, "base", _StaticMarket({})) is None
+
+    def test_reader_none_returns_none(self):
+        v = _valuer_with_reader(None)
+        assert v._reprice_vault_on_chain_enriched(_vault_position(), "base", _StaticMarket({})) is None
+
+    def test_inactive_vault_is_measured_zero(self):
+        # Empty≠Zero: a fully-redeemed (inactive) vault is a MEASURED $0, not None.
+        v = _valuer_with_reader(_vault_on_chain(is_active=False))
+        res = v._reprice_vault_on_chain_enriched(_vault_position(), "base", _StaticMarket({}))
+        assert res is not None
+        value, details = res
+        assert value == Decimal("0")
+        assert details["shares_wei"] == "0"
+
+    def test_asset_symbol_from_details_fallback(self):
+        # On-chain resolver returns None → fall back to details["asset"].
+        v = _valuer_with_reader(_vault_on_chain(), symbol=None)
+        res = v._reprice_vault_on_chain_enriched(_vault_position(), "base", _StaticMarket({"USDC": Decimal("1")}))
+        assert res is not None and res[0] == Decimal("2.10")
+
+    def test_unresolvable_asset_symbol_returns_none(self):
+        v = _valuer_with_reader(_vault_on_chain(), symbol=None)
+        pos = _vault_position(details={"vault_address": "0x" + "a" * 40, "wallet_address": "0x" + "b" * 40})
+        assert v._reprice_vault_on_chain_enriched(pos, "base", _StaticMarket({})) is None
+
+    def test_price_fetch_raises_returns_none(self):
+        v = _valuer_with_reader(_vault_on_chain())
+        # market has no USDC price → KeyError inside the price read.
+        assert v._reprice_vault_on_chain_enriched(_vault_position(), "base", _StaticMarket({})) is None
+
+    def test_nonpositive_price_returns_none(self):
+        v = _valuer_with_reader(_vault_on_chain())
+        assert v._reprice_vault_on_chain_enriched(_vault_position(), "base", _StaticMarket({"USDC": Decimal("0")})) is None
+
+    def test_zero_on_chain_decimals_falls_back_to_resolver(self):
+        v = _valuer_with_reader(_vault_on_chain(asset_decimals=0), decimals=6)
+        res = v._reprice_vault_on_chain_enriched(_vault_position(), "base", _StaticMarket({"USDC": Decimal("1")}))
+        assert res is not None and res[0] == Decimal("2.10")
+
+    def test_zero_decimals_and_unresolvable_returns_none(self):
+        # Empty≠Zero: unmeasured decimals → None, never a fabricated value.
+        v = _valuer_with_reader(_vault_on_chain(asset_decimals=0), decimals=None)
+        v._get_token_decimals = lambda sym, chain: None  # type: ignore[assignment]
+        assert v._reprice_vault_on_chain_enriched(_vault_position(), "base", _StaticMarket({"USDC": Decimal("1")})) is None
+
+    def test_reader_raises_returns_none(self):
+        v = _valuer_with_reader(None, raises=True)
+        assert v._reprice_vault_on_chain_enriched(_vault_position(), "base", _StaticMarket({"USDC": Decimal("1")})) is None

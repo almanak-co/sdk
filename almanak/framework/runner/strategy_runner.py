@@ -11261,6 +11261,15 @@ class StrategyRunner:
             except Exception as e:
                 logger.debug(f"Failed to get tracked tokens for pre-warming: {e}")
 
+        # VIB-5722: on a multi-chain snapshot a chain-less ``price(token)`` raises
+        # AmbiguousChainError every iteration (debug spam) and warms nothing. Warm
+        # each token + each chain's native ON that chain instead. Single-chain
+        # keeps the byte-neutral chain-less pre-warm below.
+        prewarm_chains = list(getattr(market, "chains", None) or ())
+        if len(prewarm_chains) > 1:
+            await self._pre_warm_prices_multichain(market, tokens, prewarm_chains)
+            return
+
         # VIB-4843 FR-5004: the native gas token is priced every iteration by
         # the portfolio valuer (VIB-4225 G6 reconciliation requires it, and
         # live mode HALTS if it's missing — so we cannot defer it on HOLD).
@@ -11282,6 +11291,31 @@ class StrategyRunner:
                 await asyncio.to_thread(market.price, token)
             except Exception as e:
                 logger.debug(f"Price pre-warm failed for {token}: {e}")
+
+    async def _pre_warm_prices_multichain(self, market, tokens: list[str], chains: list[str]) -> None:
+        """Pre-warm each tracked token + each chain's native, per chain (VIB-5722).
+
+        Best-effort like the single-chain path — every read is chain-scoped and
+        swallows failures (a token not configured on a chain simply misses). This
+        keeps the multi-chain valuation lane's per-chain reads warm and off the
+        decide() timeout, and stops the AmbiguousChainError debug spam.
+        """
+        from almanak.framework.accounting.gas_pricing import native_token_for_chain
+
+        # Sequential iteration is intentional — _price_cache is not thread-safe
+        for chain in chains:
+            chain_tokens = list(tokens)
+            try:
+                native = native_token_for_chain(chain)
+            except Exception:  # noqa: BLE001 — best-effort pre-warm
+                native = None
+            if native and native.upper() not in {t.upper() for t in chain_tokens}:
+                chain_tokens.append(native)
+            for token in chain_tokens:
+                try:
+                    await asyncio.to_thread(market.price, token, chain=chain)
+                except Exception as e:
+                    logger.debug(f"Price pre-warm failed for {token} on {chain}: {e}")
 
     @staticmethod
     def _native_gas_token_for_prewarm(strategy) -> str | None:

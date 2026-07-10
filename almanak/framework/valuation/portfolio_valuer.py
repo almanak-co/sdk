@@ -118,6 +118,19 @@ _V4_POOL_ID_HEX_LEN = 64
 _RAY_SCALE = Decimal("1e27")
 
 
+def _chain_key(chain: str | None) -> str | None:
+    """Normalize a possibly-empty chain to the ``MarketSnapshot`` ``chain=`` argument.
+
+    ``_resolve_chain`` treats ``None`` as "resolve the single configured chain /
+    ``AmbiguousChainError`` on multi-chain" but checks ``is None`` specifically —
+    an empty string would misroute to ``ChainNotConfiguredError``. Centralized
+    (VIB-5722) so the coercion does not add a boolean-or branch at every read
+    site (CRAP): ``market.price(sym, chain=_chain_key(chain))`` is behaviour-
+    identical to the inline ``chain or None`` but keeps the caller's cc flat.
+    """
+    return chain or None
+
+
 def _looks_like_evm_address(value: object) -> bool:
     """Return True iff ``value`` is the 42-char ``0x``-prefixed hex shape.
 
@@ -1063,31 +1076,45 @@ class PortfolioValuer:
 
     @staticmethod
     def _fetch_wallet_balances_and_prices(
+        chains: list[str],
+        market: MarketDataSource,
+        tracked_tokens: list[str],
+    ) -> tuple[dict[str, Decimal], dict[str, Decimal], bool]:
+        """Fetch wallet balances + prices for ``tracked_tokens`` across ``chains``.
+
+        Returns ``(balances, prices, wallet_data_incomplete)`` keyed by token
+        SYMBOL. A balance/price read that raises, or a held token whose price
+        fails to resolve, flips ``wallet_data_incomplete`` (Empty≠Zero — the
+        token is dropped from ``balances`` rather than priced at $0).
+
+        VIB-5722: dispatch on the configured chain set. Single-chain keeps the
+        VIB-5636 body byte-for-byte (one explicit-chain pass). Multi-chain reads
+        each token on EVERY configured chain and AGGREGATES by symbol — a token
+        held on two chains sums into one balance (same asset, same USD price), so
+        cross-chain holdings do not collide or vanish. A ``ChainNotConfiguredError``
+        (the token is simply not on that chain) is NOT an incomplete signal; any
+        other read failure is.
+        """
+        if len(chains) <= 1:
+            return PortfolioValuer._fetch_wallet_single_chain(chains[0] if chains else "", market, tracked_tokens)
+        return PortfolioValuer._fetch_wallet_multi_chain(chains, market, tracked_tokens)
+
+    @staticmethod
+    def _fetch_wallet_single_chain(
         chain: str,
         market: MarketDataSource,
         tracked_tokens: list[str],
     ) -> tuple[dict[str, Decimal], dict[str, Decimal], bool]:
-        """Fetch wallet balances + prices for ``tracked_tokens`` on ``chain``.
+        """Single-chain wallet read (VIB-5636 body, preserved byte-for-byte).
 
-        Returns ``(balances, prices, wallet_data_incomplete)``. A balance/price
-        read that raises, or a held token whose price fails to resolve, flips
-        ``wallet_data_incomplete`` (Empty≠Zero — the token is dropped from
-        ``balances`` rather than priced at $0).
-
-        VIB-5636: passes the strategy's primary chain explicitly. On a
-        multi-chain snapshot ``MarketSnapshot.balance/price`` with an implicit
-        ``chain=None`` raises ``AmbiguousChainError`` for EVERY token
-        (PRD §4.2 R1), which would leave ``balances``/``prices`` empty and
-        mis-value the wallet. ``chain or None`` is behaviour-neutral for
-        single-chain strategies: ``_resolve_chain`` returns the only configured
-        chain whether it is passed explicitly or resolved from ``None``. Same
-        parity fix already applied to
-        ``intent_strategy._append_native_gas_to_wallet``.
+        ``chain or None`` is behaviour-neutral for single-chain strategies:
+        ``_resolve_chain`` returns the only configured chain whether it is passed
+        explicitly or resolved from ``None``.
         """
         balances: dict[str, Decimal] = {}
         prices: dict[str, Decimal] = {}
         wallet_data_incomplete = False
-        chain_arg = chain or None
+        chain_arg = _chain_key(chain)
         for token in tracked_tokens:
             try:
                 balance_result = market.balance(token, chain=chain_arg)
@@ -1107,6 +1134,124 @@ class PortfolioValuer:
                     wallet_data_incomplete = True
                 logger.debug("Could not fetch price for %s", token)
         return balances, prices, wallet_data_incomplete
+
+    @staticmethod
+    def _fetch_wallet_multi_chain(
+        chains: list[str],
+        market: MarketDataSource,
+        tracked_tokens: list[str],
+    ) -> tuple[dict[str, Decimal], dict[str, Decimal], bool]:
+        """Multi-chain wallet read — aggregate each token across ``chains`` (VIB-5722).
+
+        A tracked token in a multi-chain strategy typically lives on ONE of the
+        chains (DN-LP: USDC on arbitrum, WETH on hyperevm). Reading it on a chain
+        where it is not held raises from the provider — so a per-chain balance
+        failure is benign *as long as the token resolved on at least one chain*.
+        Balances that DO resolve are summed by symbol (same asset, same USD price
+        → cross-chain holdings aggregate instead of colliding).
+
+        Two honest degrades keep this NO LESS strict than the single-chain path
+        (Empty≠Zero — never silently under-count at HIGH):
+
+        * **All-chains-failed** — a tracked token whose balance read RAISED on
+          EVERY configured chain (RPC down / misconfigured) was never measured
+          anywhere → flip ``wallet_data_incomplete``. This matches single-chain
+          semantics (the only chain failing flips it). A token that reads fine but
+          is zero everywhere is a MEASURED zero (``accumulated == 0``), NOT
+          incomplete.
+        * **Held-but-unpriceable** — a positive balance with no price resolvable
+          on any chain is unmeasured value → flip ``wallet_data_incomplete`` and
+          drop it from equity (never mark $0).
+
+        The per-chain fail-closed native-gas guard (``_resolve_native_gas_multi``)
+        remains the hard live-halt signal.
+        """
+        balances: dict[str, Decimal] = {}
+        prices: dict[str, Decimal] = {}
+        wallet_data_incomplete = False
+        for token in tracked_tokens:
+            accumulated: Decimal | None = None  # None = never measured on any chain
+            priced_any = False
+            held_price_failed = False  # a chain with a POSITIVE balance whose OWN price read failed
+            for chain in chains:
+                try:
+                    balance_result = market.balance(token, chain=chain)
+                    bal = balance_result.balance if hasattr(balance_result, "balance") else Decimal(str(balance_result))
+                    accumulated = (accumulated or Decimal("0")) + bal
+                except Exception:
+                    # Token not readable on this chain (absent, or unconfigured) —
+                    # it may live on another chain; skip the price read here (a
+                    # chain with no balance has no meaningful price for this
+                    # token). All-chains-failed is caught after the loop.
+                    logger.debug("Could not fetch balance for %s on %s", token, chain)
+                    continue
+
+                positive_here = bal > 0
+                try:
+                    price = market.price(token, chain=chain)
+                    prices[token] = Decimal(str(price))
+                    priced_any = True
+                except Exception:
+                    logger.debug("Could not fetch price for %s on %s", token, chain)
+                    if positive_here:
+                        # This chain HOLDS the token but its OWN-chain price read
+                        # failed — held-but-unpriceable-on-its-own-chain.
+                        held_price_failed = True
+
+            if accumulated is not None and accumulated > 0:
+                balances[token] = accumulated
+            # A tracked token whose balance read RAISED on every configured chain
+            # was never measured anywhere — degrade (matches single-chain; kills
+            # the silent under-count when an RPC is down on all chains). A token
+            # that read fine but zero everywhere is measured (accumulated == 0).
+            if accumulated is None:
+                wallet_data_incomplete = True
+            # A HELD token we could not price on any chain is unmeasured value —
+            # degrade honestly (Empty≠Zero); never silently mark it $0.
+            if token in balances and not priced_any:
+                wallet_data_incomplete = True
+            # VIB-5722 review: even under the same-symbol⇒same-USD-price fungibility
+            # assumption (a zero-balance chain may supply the price), a chain that
+            # HOLDS a positive balance but could not price it on ITS OWN chain is an
+            # honest gap — degrade rather than trust a cross-chain price proxy at HIGH.
+            if held_price_failed:
+                wallet_data_incomplete = True
+        return balances, prices, wallet_data_incomplete
+
+    @staticmethod
+    def _valuation_chains(strategy: "StrategyLike", market: MarketDataSource, primary_chain: str) -> list[str]:
+        """Ordered, de-duplicated chain set the valuer must price across (VIB-5722).
+
+        The ``MarketSnapshot``'s configured ``chains`` is authoritative — it is
+        exactly the set for which ``price``/``balance`` reads resolve rather than
+        raise ``AmbiguousChainError`` / ``ChainNotConfiguredError``. The primary
+        chain is placed first so single-chain returns ``[primary_chain]`` and
+        every downstream per-chain loop collapses to the current single pass
+        (byte-neutral). Falls back to the strategy's supported chains, then to
+        ``[primary_chain]`` when nothing else is discoverable.
+        """
+        configured: tuple[str, ...] | list[str] = ()
+        market_chains = getattr(market, "chains", None)
+        if market_chains:
+            configured = market_chains
+        else:
+            get_supported = getattr(strategy, "get_supported_chains", None)
+            if callable(get_supported):
+                try:
+                    configured = get_supported() or ()
+                except Exception:  # noqa: BLE001 — best-effort; fall back to primary
+                    configured = ()
+
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for candidate in (primary_chain, *configured):
+            c = candidate or ""
+            if c and c not in seen:
+                seen.add(c)
+                ordered.append(c)
+        if not ordered and primary_chain:
+            ordered = [primary_chain]
+        return ordered
 
     def value(
         self,
@@ -1143,6 +1288,10 @@ class PortfolioValuer:
         try:
             deployment_id = strategy.deployment_id
             chain = strategy.chain
+            # VIB-5722: resolve the full configured chain set once. Primary chain
+            # first; single-chain reduces to ``[chain]`` so every downstream
+            # per-chain loop collapses to the byte-neutral single pass.
+            chains = self._valuation_chains(strategy, market, chain)
             # VIB-5420: cache the strategy wallet so on-chain repricers (Curve LP)
             # can read ``balanceOf`` for strategy-reported positions whose details
             # omit a wallet. Cleared in the finally so a stale wallet never leaks.
@@ -1170,7 +1319,7 @@ class PortfolioValuer:
             # ``_fetch_wallet_balances_and_prices`` (VIB-5636) — chain-aware for
             # multi-chain snapshots; keeps ``value`` under the complexity gate.
             balances, prices, wallet_data_incomplete = self._fetch_wallet_balances_and_prices(
-                chain, market, tracked_tokens
+                chains, market, tracked_tokens
             )
 
             # VIB-4225 ACC-02 — append the chain's NATIVE gas-token to the
@@ -1179,7 +1328,7 @@ class PortfolioValuer:
             # snapshot.snapshot_metadata after construction below; runner-level
             # ``_enforce_native_gas_status_in_live`` then halts in live mode if
             # the status is non-ok / non-already_tracked.
-            gas_native_status, native_row = self._resolve_native_gas(chain or "", market, balances, prices)
+            gas_native_status, native_rows = self._resolve_native_gas_rows(chains, market, balances, prices)
 
             # pr-auditor finding #4: when the gas helper reports a non-success
             # status, the snapshot's value_confidence MUST drop to ESTIMATED
@@ -1210,12 +1359,13 @@ class PortfolioValuer:
             # Append the native row directly — value_tokens filters
             # ``balance <= 0`` so a measured-zero native would otherwise be
             # silently dropped and re-introduce empty-vs-zero ambiguity.
-            if native_row is not None and not any(tb.symbol == native_row.symbol for tb in wallet_balances):
-                wallet_balances.append(native_row)
+            for native_row in native_rows:
+                if not any(tb.symbol == native_row.symbol for tb in wallet_balances):
+                    wallet_balances.append(native_row)
             wallet_value = total_value(wallet_balances)
 
             # Step 4: Get non-wallet positions (LP, lending, perps) if available
-            positions, position_value, positions_unavailable = self._get_positions(strategy, market, prices)
+            positions, position_value, positions_unavailable = self._get_positions(strategy, market, prices, chains)
 
             # Step 4a (VIB-5057): classify open FIFO swap-inventory lots as
             # DEPLOYED capital. The synthetic rows join ``positions`` before
@@ -2119,6 +2269,125 @@ class PortfolioValuer:
         return ("ok", native_row)
 
     @staticmethod
+    def _resolve_native_gas_rows(
+        chains: list[str],
+        market: Any,
+        balances: dict[str, Decimal],
+        prices: dict[str, Decimal],
+    ) -> tuple[str, list[TokenBalance]]:
+        """Fold every configured chain's native gas-token into the wallet (VIB-5722).
+
+        Returns ``(gas_native_status, native_rows)``. The status is the SINGLE
+        string the runner enforcer (``_enforce_native_gas_status_in_live``)
+        inspects: ``"ok"`` only when EVERY chain is ok/already_tracked, otherwise
+        the FIRST failing chain's status. Single-chain delegates to
+        ``_resolve_native_gas`` byte-for-byte and wraps its row in a list.
+        """
+        if len(chains) <= 1:
+            status, row = PortfolioValuer._resolve_native_gas(chains[0] if chains else "", market, balances, prices)
+            return status, ([row] if row is not None else [])
+        return PortfolioValuer._resolve_native_gas_multi(chains, market, balances, prices)
+
+    @staticmethod
+    def _resolve_native_gas_multi(
+        chains: list[str],
+        market: Any,
+        balances: dict[str, Decimal],
+        prices: dict[str, Decimal],
+    ) -> tuple[str, list[TokenBalance]]:
+        """Per-chain native gas fold, aggregated by native symbol (VIB-5722).
+
+        DELIBERATE contract extension: this extends the live-mode fail-closed
+        native-gas halt to SECONDARY-chain native reads. A secondary chain whose
+        native balance/price cannot be read yields ``balance_failed`` /
+        ``price_missing``, which the runner halts on in live mode — correctness
+        over uptime (accounting contract: live raises). Native symbols are folded
+        by symbol so two chains sharing a native (e.g. ETH on both) sum into one
+        wallet row rather than colliding. A symbol already surfaced by the
+        multi-chain tracked-tokens loop is treated as ``already_tracked`` (its
+        balance already includes every chain's native under that symbol).
+        """
+        from almanak.framework.accounting.gas_pricing import native_token_for_chain
+
+        native_added: dict[str, TokenBalance] = {}
+        statuses: list[str] = []
+        for chain in chains:
+            if not chain:
+                statuses.append("unknown_chain")
+                continue
+            try:
+                native_symbol = native_token_for_chain(chain)
+            except Exception as e:  # noqa: BLE001 — typed status path
+                logger.debug("native gas-token chain resolve failed for %s: %s", chain, e)
+                statuses.append("unknown_chain")
+                continue
+            if not native_symbol:
+                statuses.append("unknown_chain")
+                continue
+            canon = native_symbol.upper()
+
+            # ALWAYS read THIS chain's native balance + price for the STATUS
+            # (the live-mode halt signal). A same-symbol tracked-token read on a
+            # DIFFERENT chain must never mask a failed secondary-chain native read
+            # (the ``already_tracked`` bypass — VIB-5722 review): symbol-presence
+            # in ``balances`` may suppress double-ADDING the value, never the read
+            # or the status.
+            try:
+                balance_result = market.balance(native_symbol, chain=chain)
+                raw_balance = balance_result.balance if hasattr(balance_result, "balance") else balance_result
+                bal = Decimal(str(raw_balance))
+            except Exception as e:  # noqa: BLE001 — typed status path
+                logger.debug("native gas-token balance fetch failed for %s: %s", chain, e)
+                statuses.append("balance_failed")
+                continue
+
+            try:
+                price = market.price(native_symbol, chain=chain)
+                if price is None:
+                    statuses.append("price_missing")
+                    continue
+                price_d = Decimal(str(price))
+            except Exception as e:  # noqa: BLE001 — typed status path
+                logger.debug("native gas-token price fetch failed for %s: %s", chain, e)
+                statuses.append("price_missing")
+                continue
+
+            # Value-add suppression (NOT status suppression): if this native symbol
+            # was already surfaced by the tracked-tokens wallet loop (whose
+            # multi-chain balance already sums every chain's native under this
+            # symbol), record status only and do NOT double-add. ``canon in
+            # native_added`` means a PRIOR chain in THIS loop folded it → that is a
+            # legitimate cross-chain native sum, so fall through and accumulate.
+            if any((tok or "").upper() == canon for tok in balances) and canon not in native_added:
+                statuses.append("already_tracked")
+                continue
+
+            prior = native_added.get(canon)
+            total_bal = (prior.balance if prior is not None else Decimal("0")) + bal
+            native_added[canon] = TokenBalance(
+                symbol=canon,
+                balance=total_bal,
+                value_usd=total_bal * price_d,
+                price_usd=price_d,
+            )
+            # Mirror into balances/prices so downstream price-records + confidence
+            # calc see the native symbol; a measured-zero total is carried by the
+            # row (Empty≠Zero) rather than added to ``balances``.
+            if total_bal > 0:
+                balances[canon] = total_bal
+            prices[canon] = price_d
+            statuses.append("ok")
+
+        first_bad = next((s for s in statuses if s not in ("ok", "already_tracked")), None)
+        if first_bad is not None:
+            agg_status = first_bad
+        elif statuses and all(s == "already_tracked" for s in statuses):
+            agg_status = "already_tracked"
+        else:
+            agg_status = "ok"
+        return agg_status, list(native_added.values())
+
+    @staticmethod
     def _build_token_price_records(
         chain: str,
         prices: dict[str, Decimal],
@@ -2169,6 +2438,7 @@ class PortfolioValuer:
         strategy: StrategyLike,
         market: MarketDataSource,
         prices: dict[str, Decimal],
+        chains: list[str] | None = None,
     ) -> tuple[list[PositionValue], Decimal, bool]:
         """Discover and value non-wallet positions.
 
@@ -2197,17 +2467,46 @@ class PortfolioValuer:
         # Source 2: Framework discovery (on-chain scanning)
         discovered_positions: list[PositionInfo] = []
         discovery_had_errors = False
-        # Perp venues whose on-chain book discovery read successfully (VIB-5252):
-        # for these, discovery is the complete authoritative set and a strategy's
-        # notional perp stub is redundant. Empty when discovery did not run.
-        perp_protocols_ok: set[str] = set()
-        discovery_config = self._build_discovery_config(strategy, strategy_positions)
-        if discovery_config:
+        # Perp (chain, venue) pairs whose on-chain book discovery read
+        # successfully (VIB-5252): for these, discovery is the complete
+        # authoritative set and a strategy's notional perp stub ON THAT CHAIN is
+        # redundant. VIB-5722: scoped by chain — discovery succeeding for a venue
+        # on chain A must NOT drop a same-venue stub on chain B whose discovery
+        # failed (that would silently remove a real position from NAV). Empty
+        # when discovery did not run.
+        perp_protocols_ok: set[tuple[str, str]] = set()
+        # VIB-5722: run discovery once per configured chain and merge. Each chain
+        # gets its own wallet (Safe wallets share an address cross-chain, but a
+        # per-chain wallet registry may differ) and only that chain's strategy
+        # positions seed its LP/perp scan. Single-chain (``chains`` is None or a
+        # single entry) runs the historical single discovery pass unchanged.
+        discovery_chains: list[str | None] = list(chains) if chains and len(chains) > 1 else [None]
+        for discovery_chain in discovery_chains:
+            wallet_override = None
+            if discovery_chain is not None:
+                get_wallet = getattr(strategy, "get_wallet_for_chain", None)
+                if callable(get_wallet):
+                    try:
+                        wallet_override = get_wallet(discovery_chain)
+                    except Exception:  # noqa: BLE001 — fall back to default wallet
+                        wallet_override = None
+            discovery_config = self._build_discovery_config(
+                strategy,
+                strategy_positions,
+                chain_override=discovery_chain,
+                wallet_override=wallet_override,
+            )
+            if not discovery_config:
+                continue
             discovered = self._discovery.discover(discovery_config)
             if discovered.errors:
                 discovery_had_errors = True
-            discovered_positions = list(discovered.positions)
-            perp_protocols_ok = set(discovered.perp_protocols_ok)
+            discovered_positions.extend(discovered.positions)
+            # Scope each venue's ok-scan to the chain it was scanned on
+            # (``discovery_chain`` is None only on the single-chain pass → the
+            # primary chain).
+            scanned_chain = discovery_chain or strategy.chain
+            perp_protocols_ok |= {(scanned_chain, proto) for proto in discovered.perp_protocols_ok}
 
         # Merge the two sources by canonical identity (VIB-4838): discovery is
         # authoritative for value + on-chain details, the strategy for
@@ -2231,7 +2530,16 @@ class PortfolioValuer:
         # snapshot. market_id is None for whole-account protocols (Aave family).
         account_state_cache: dict[tuple[str, str, str, str | None], Any] = {}
         for p in merged_positions:
-            value_usd, enriched_details, repriced = self._reprice_position_enriched(p, strategy.chain, market)
+            # VIB-5722: dispatch with the POSITION's own chain (falling back to
+            # the strategy's primary chain), never the primary chain flat. On a
+            # multi-chain snapshot every ``market.price/balance`` inside the
+            # repricers is chain-scoped; passing the primary chain for a
+            # secondary-chain position raises ``ChainNotConfiguredError`` (or, on
+            # the primary, mis-prices a same-symbol token on the wrong chain).
+            # Byte-neutral single-chain: ``p.chain`` equals the only configured
+            # chain (or is empty → falls back to it).
+            position_chain = p.chain or strategy.chain
+            value_usd, enriched_details, repriced = self._reprice_position_enriched(p, position_chain, market)
             if not repriced:
                 any_unrepriced = True
                 # VIB-4584 / F3.1 — surface the per-position signal on the
@@ -2258,7 +2566,7 @@ class PortfolioValuer:
             try:
                 enriched_details = self._enrich_lending_trackc_fields(
                     p,
-                    strategy.chain,
+                    position_chain,
                     enriched_details,
                     account_state_cache,
                     market,
@@ -2284,7 +2592,7 @@ class PortfolioValuer:
                 details=merged_details,
             )
             # VIB-3424: populate cost_basis / pnl fields from accounting events
-            self._enrich_position_pnl(pos, p, strategy.chain)
+            self._enrich_position_pnl(pos, p, position_chain)
             positions.append(pos)
 
         position_value = sum((p.value_usd for p in positions), Decimal("0"))
@@ -2313,14 +2621,22 @@ class PortfolioValuer:
         self,
         strategy: StrategyLike,
         strategy_positions: list["PositionInfo"],
+        chain_override: str | None = None,
+        wallet_override: str | None = None,
     ) -> DiscoveryConfig | None:
         """Build discovery config from strategy metadata.
 
         Returns None if we don't have enough information to discover anything.
+
+        VIB-5722: ``chain_override`` / ``wallet_override`` pin discovery to a
+        specific chain + its wallet for the multi-chain per-chain loop. When
+        ``chain_override`` is set, only strategy positions on that chain (or with
+        no chain stamped) seed the LP/perp scan so a chain-A position never seeds
+        chain-B discovery. Both ``None`` (the single-chain path) is unchanged.
         """
         try:
-            chain = strategy.chain
-            wallet = strategy.wallet_address
+            chain = chain_override or strategy.chain
+            wallet = wallet_override or strategy.wallet_address
             if not chain or not wallet:
                 return None
 
@@ -2342,6 +2658,24 @@ class PortfolioValuer:
             lp_protocol = "uniswap_v3"
             for p in strategy_positions:
                 from almanak.framework.teardown.models import PositionType as PT
+
+                # VIB-5722: in the multi-chain per-chain loop, a position seeds a
+                # chain's discovery only when it belongs to that chain. A STAMPED
+                # chain must match ``chain_override``. A blank/None chain is NOT
+                # chain-agnostic: V3 tokenIds are sequential per-NPM-per-chain and
+                # ``_discover_lp`` does no ownership check, so seeding every chain
+                # with a blank-chain stub could discover a same-id FOREIGN NFT on a
+                # secondary chain and reprice it into NAV (silent over-count). A
+                # blank-chain position therefore seeds ONLY the primary chain
+                # (``strategy.chain``), preserving the pre-PR single-config
+                # behaviour; participating in secondary-chain discovery requires a
+                # stamped chain.
+                if chain_override is not None:
+                    if p.chain:
+                        if p.chain != chain_override:
+                            continue
+                    elif chain_override != strategy.chain:
+                        continue
 
                 if p.position_type == PT.LP:
                     token_id = self._extract_token_id(p)
@@ -2408,7 +2742,12 @@ class PortfolioValuer:
         """
         from almanak.framework.teardown.models import PositionType
 
-        chain_l = (chain or position.chain or "").lower()
+        # VIB-5722: the POSITION's own chain wins over the passed default so two
+        # cross-chain positions sharing protocol + token_id (e.g. the same LP
+        # tokenId minted on arbitrum and base) never collapse into one row.
+        # Byte-neutral single-chain: ``position.chain`` equals the only chain (or
+        # is empty → falls back to the passed default).
+        chain_l = (position.chain or chain or "").lower()
         protocol_l = _normalize_protocol_for_dedup(position.protocol)
 
         if position.position_type in (PositionType.SUPPLY, PositionType.BORROW):
@@ -2471,13 +2810,14 @@ class PortfolioValuer:
             return False
 
         protocol_l = _normalize_protocol_for_dedup(stub.protocol)
-        chain_l = (chain or stub.chain or "").lower()
+        # VIB-5722: position-chain-first (see ``_canonical_position_key``).
+        chain_l = (stub.chain or chain or "").lower()
         same_group = [
             d
             for d in discovery_positions
             if d.position_type == stub.position_type
             and _normalize_protocol_for_dedup(d.protocol) == protocol_l
-            and (chain or d.chain or "").lower() == chain_l
+            and (d.chain or chain or "").lower() == chain_l
         ]
         return bool(same_group)
 
@@ -2486,7 +2826,7 @@ class PortfolioValuer:
         strategy_positions: list["PositionInfo"],
         discovered_positions: list["PositionInfo"],
         chain: str,
-        perp_protocols_ok: set[str] | None = None,
+        perp_protocols_ok: set[tuple[str, str]] | None = None,
     ) -> list["PositionInfo"]:
         """Dedup strategy + discovery positions by canonical identity (VIB-4838).
 
@@ -2529,9 +2869,17 @@ class PortfolioValuer:
         # returns the complete book, so a discovered perp for a venue means any
         # same-venue stub is either that position (deduped) or an unfilled one
         # (correctly dropped). In production (a) always implies (b)'s superset.
-        perp_drop_protocols = {_normalize_protocol_for_dedup(p) for p in (perp_protocols_ok or set())}
-        perp_drop_protocols |= {
-            _normalize_protocol_for_dedup(d.protocol) for d in discovered_positions if d.position_type == _PT.PERP
+        # VIB-5722: (chain, protocol)-scoped so a venue scanned ok on one chain
+        # never drops a same-venue stub on a DIFFERENT chain. ``perp_protocols_ok``
+        # already carries the scanned chain; the (b) discovered-perp fallback marks
+        # each discovered perp's OWN chain.
+        perp_drop_scoped: set[tuple[str, str]] = {
+            ((c or chain or "").lower(), _normalize_protocol_for_dedup(p)) for (c, p) in (perp_protocols_ok or set())
+        }
+        perp_drop_scoped |= {
+            ((d.chain or chain or "").lower(), _normalize_protocol_for_dedup(d.protocol))
+            for d in discovered_positions
+            if d.position_type == _PT.PERP
         }
 
         # Index discovery by canonical key (discovery wins on collision).
@@ -2572,15 +2920,17 @@ class PortfolioValuer:
             # in step 2; an empty ok-scan means the perp is flat). The stub only
             # carries notional and cannot reprice, so drop it — never let it
             # masquerade as equity.
-            if sp.position_type == _PT.PERP and _normalize_protocol_for_dedup(sp.protocol) in perp_drop_protocols:
-                logger.debug(
-                    "VIB-5252: dropping notional perp stub (position_id=%s) — "
-                    "discovery authoritatively scanned protocol=%s on %s",
-                    sp.position_id,
-                    sp.protocol,
-                    chain,
-                )
-                continue
+            if sp.position_type == _PT.PERP:
+                stub_chain = (sp.chain or chain or "").lower()
+                if (stub_chain, _normalize_protocol_for_dedup(sp.protocol)) in perp_drop_scoped:
+                    logger.debug(
+                        "VIB-5252/5722: dropping notional perp stub (position_id=%s) — "
+                        "discovery authoritatively scanned protocol=%s on chain=%s",
+                        sp.position_id,
+                        sp.protocol,
+                        stub_chain,
+                    )
+                    continue
             # No canonical match. Drop only true phantom duplicates.
             if self._is_degenerate_stub(sp, discovered_positions, chain):
                 logger.debug(
@@ -2812,7 +3162,7 @@ class PortfolioValuer:
         # KNOWN_UNPRICEABLE in the spot oracle, so it is dropped from the wallet
         # balance valuation — its USD value enters NAV ONLY here, no double-count.
         try:
-            bal = market.balance(symbol)
+            bal = market.balance(symbol, chain=_chain_key(chain))
             yt_amount = bal.balance if hasattr(bal, "balance") else Decimal(str(bal))
         except Exception as e:  # noqa: BLE001 — fail to unmeasured, never crash the snapshot
             logger.warning("yield-token reprice: balance(%s) failed (%s); cannot size YT position", symbol, e)
@@ -2937,7 +3287,7 @@ class PortfolioValuer:
         # KNOWN_UNPRICEABLE in the spot oracle, so it is dropped from the wallet
         # balance valuation — its USD value enters NAV ONLY here, no double-count.
         try:
-            bal = market.balance(symbol)
+            bal = market.balance(symbol, chain=_chain_key(chain))
             pt_amount = bal.balance if hasattr(bal, "balance") else Decimal(str(bal))
         except Exception as e:  # noqa: BLE001 — fail to unmeasured, never crash the snapshot
             logger.warning("principal-token reprice: balance(%s) failed (%s); cannot size PT position", symbol, e)
@@ -3034,13 +3384,20 @@ class PortfolioValuer:
         ``lp_repricer.reprice_lp_position`` engine so this valuer and
         ``MarketSnapshot.lp_position_value`` cannot diverge. This wrapper only
         binds the valuer's collaborators (its ``LPPositionReader``,
-        ``market.price``, and decimals resolver). Behaviour-identical.
+        ``market.price``, and decimals resolver).
+
+        VIB-5722 — the shared engine's ``price_fn`` is chain-less, so bind the
+        position's chain here (``chain or None`` is byte-neutral single-chain).
+        Without this, a V3 LP price read on a multi-chain snapshot raises
+        ``AmbiguousChainError`` → swallowed → the LP silently un-reprices → the
+        whole snapshot collapses to the $0.00-at-HIGH fallback (the DN-LP Anvil
+        finding). The decimals resolver already threads ``chain``.
         """
         return _shared_reprice_lp_position(
             self._lp_reader,
             position,
             chain,
-            market.price,
+            lambda symbol: market.price(symbol, chain=_chain_key(chain)),
             self._get_token_decimals,
         )
 
@@ -3100,8 +3457,8 @@ class PortfolioValuer:
                 return self._v4_no_path(position)
 
             try:
-                token0_price = Decimal(str(market.price(token0_symbol)))
-                token1_price = Decimal(str(market.price(token1_symbol)))
+                token0_price = Decimal(str(market.price(token0_symbol, chain=_chain_key(chain))))
+                token1_price = Decimal(str(market.price(token1_symbol, chain=_chain_key(chain))))
             except Exception:
                 return self._v4_no_path(position)
             if token0_price <= 0 or token1_price <= 0:
@@ -3195,8 +3552,8 @@ class PortfolioValuer:
                 return None
 
             try:
-                token0_price = Decimal(str(market.price(token0_symbol)))
-                token1_price = Decimal(str(market.price(token1_symbol)))
+                token0_price = Decimal(str(market.price(token0_symbol, chain=_chain_key(chain))))
+                token1_price = Decimal(str(market.price(token1_symbol, chain=_chain_key(chain))))
             except Exception:
                 return None
             if token0_price <= 0 or token1_price <= 0:
@@ -3609,7 +3966,7 @@ class PortfolioValuer:
                 return None
 
             try:
-                token_price = Decimal(str(market.price(token_symbol)))
+                token_price = Decimal(str(market.price(token_symbol, chain=_chain_key(chain))))
             except Exception:
                 return None
 
@@ -3911,7 +4268,7 @@ class PortfolioValuer:
                 php = PositionHealthProvider(
                     chain=chain,
                     gateway_client=None,
-                    price_oracle=(lambda s: market.price(s)) if market is not None else None,
+                    price_oracle=(lambda s: market.price(s, chain=_chain_key(chain))) if market is not None else None,
                 )
                 return read_lending_market_health(
                     protocol=protocol,
@@ -3982,7 +4339,7 @@ class PortfolioValuer:
         oracle: dict[str, Any] = {}
         for _query_field, symbol in roles:
             try:
-                price = market.price(symbol)
+                price = market.price(symbol, chain=_chain_key(chain))
             except Exception:
                 continue
             if price is None:
@@ -4106,7 +4463,7 @@ class PortfolioValuer:
                 return None
 
             try:
-                mark_price = Decimal(str(market.price(meta.index_token_symbol)))
+                mark_price = Decimal(str(market.price(meta.index_token_symbol, chain=_chain_key(chain))))
             except Exception:
                 logger.debug("Could not get mark price for %s", meta.index_token_symbol)
                 return None
@@ -4119,7 +4476,7 @@ class PortfolioValuer:
                 return None
 
             try:
-                collateral_price = Decimal(str(market.price(collateral_symbol)))
+                collateral_price = Decimal(str(market.price(collateral_symbol, chain=_chain_key(chain))))
             except Exception:
                 logger.debug("Could not get collateral price for %s", collateral_symbol)
                 return None
@@ -4297,8 +4654,8 @@ class PortfolioValuer:
             return None
 
         try:
-            token0_price = Decimal(str(market.price(token0_symbol)))
-            token1_price = Decimal(str(market.price(token1_symbol)))
+            token0_price = Decimal(str(market.price(token0_symbol, chain=_chain_key(chain))))
+            token1_price = Decimal(str(market.price(token1_symbol, chain=_chain_key(chain))))
         except Exception:
             logger.debug("Could not get prices for LP tokens %s/%s", token0_symbol, token1_symbol)
             return None
@@ -4428,7 +4785,7 @@ class PortfolioValuer:
 
             # Get live price
             try:
-                token_price = Decimal(str(market.price(token_symbol)))
+                token_price = Decimal(str(market.price(token_symbol, chain=_chain_key(chain))))
             except Exception:
                 logger.debug("Could not get price for lending token %s", token_symbol)
                 return None
@@ -4622,7 +4979,7 @@ class PortfolioValuer:
                     if not key:
                         continue
                     try:
-                        priced = Decimal(str(market.price(key)))
+                        priced = Decimal(str(market.price(key, chain=_chain_key(chain))))
                     except Exception:  # noqa: BLE001 — try the next key, else None
                         continue
                     # Fail closed on a non-positive price (≤ 0): a real token leg
@@ -4750,8 +5107,8 @@ class PortfolioValuer:
             # metapool both mark off virtual_price × $1 (depeg-checked); crypto /
             # non-USD pools mark from spot reserves × independent oracle prices.
             if on_chain.family == "crypto":
-                return self._value_curve_crypto(position, on_chain, market)
-            return self._value_curve_pegged(position, on_chain, market)
+                return self._value_curve_crypto(position, on_chain, chain, market)
+            return self._value_curve_pegged(position, on_chain, chain, market)
         except Exception:
             logger.debug("Curve-LP on-chain re-pricing failed for %s", position.position_id, exc_info=True)
             return None
@@ -4760,6 +5117,7 @@ class PortfolioValuer:
         self,
         position: "PositionInfo",
         on_chain: CurveLpPosition,
+        chain: str,
         market: MarketDataSource,
     ) -> tuple[Decimal, dict[str, Any]] | None:
         """Mark a USD-pegged Curve pool (USD-stable or USD metapool) at par.
@@ -4787,7 +5145,7 @@ class PortfolioValuer:
             check_addresses = on_chain.coin_addresses
 
         threshold_bps = self._resolve_curve_depeg_threshold_bps(position)
-        coin_prices = self._price_curve_coins(check_coins, check_addresses, market)
+        coin_prices = self._price_curve_coins(check_coins, check_addresses, chain, market)
         peg = check_peg_divergence(coin_prices, threshold_bps=threshold_bps, expected_peg_usd=Decimal("1"))
         if not peg.ok:
             reason = (
@@ -4867,6 +5225,7 @@ class PortfolioValuer:
         self,
         position: "PositionInfo",
         on_chain: CurveLpPosition,
+        chain: str,
         market: MarketDataSource,
     ) -> tuple[Decimal, dict[str, Any]] | None:
         """Mark a crypto / non-USD Curve pool from spot reserves (VIB-5428).
@@ -4893,7 +5252,7 @@ class PortfolioValuer:
         if len(on_chain.reserves_wei) != len(on_chain.coins) or len(on_chain.coin_decimals) != len(on_chain.coins):
             return self._curve_crypto_unavailable(position, on_chain, "curve_spot_reserves_read_incomplete")
 
-        prices = self._price_curve_coins(on_chain.coins, on_chain.coin_addresses, market)
+        prices = self._price_curve_coins(on_chain.coins, on_chain.coin_addresses, chain, market)
         if any(p is None for p in prices):
             return self._curve_crypto_unavailable(position, on_chain, "curve_oracle_price_unavailable")
 
@@ -5157,6 +5516,7 @@ class PortfolioValuer:
         self,
         coins: list[str],
         coin_addresses: list[str],
+        chain: str,
         market: MarketDataSource,
     ) -> list[Decimal | None]:
         """Price each given coin in USD via the INDEPENDENT gateway oracle.
@@ -5199,7 +5559,7 @@ class PortfolioValuer:
                 if not key:
                     continue
                 try:
-                    candidate = Decimal(str(market.price(key)))
+                    candidate = Decimal(str(market.price(key, chain=_chain_key(chain))))
                 except Exception:  # noqa: BLE001 — try the next key, else None (Empty ≠ Zero)
                     continue
                 # Fail closed on a non-positive price: a real coin is never worth
@@ -5257,7 +5617,7 @@ class PortfolioValuer:
                 return None
 
             try:
-                asset_price = Decimal(str(market.price(asset_symbol)))
+                asset_price = Decimal(str(market.price(asset_symbol, chain=_chain_key(chain))))
             except Exception:
                 logger.debug("Could not get price for vault asset %s", asset_symbol)
                 return None

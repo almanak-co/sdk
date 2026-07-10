@@ -86,6 +86,29 @@ async def test_pre_warm_calls_price_for_tracked_tokens():
 
 
 @pytest.mark.asyncio
+async def test_pre_warm_multichain_prices_per_chain():
+    """VIB-5722: on a multi-chain snapshot, pre-warm each token + each chain's
+    native ON that chain (chain=), instead of chain-less reads that spam
+    AmbiguousChainError and warm nothing."""
+    runner = _make_runner()
+    strategy, market = _make_strategy(tracked_tokens=["USDC"])
+    market.chains = ("arbitrum", "hyperevm")
+
+    await runner._pre_warm_prices(market, strategy)
+
+    calls = market.price.call_args_list
+    assert calls, "expected per-chain price pre-warm calls"
+    # Every read is chain-scoped.
+    assert all("chain" in c.kwargs for c in calls)
+    assert {c.kwargs["chain"] for c in calls} == {"arbitrum", "hyperevm"}
+    tokens_used = {c.args[0] for c in calls}
+    assert "USDC" in tokens_used
+    # Native gas per chain: ETH (arbitrum) + HYPE (hyperevm).
+    assert "ETH" in tokens_used
+    assert "HYPE" in tokens_used
+
+
+@pytest.mark.asyncio
 async def test_pre_warm_failure_is_silent():
     """If a price fetch fails during pre-warming, it should not raise."""
     runner = _make_runner()

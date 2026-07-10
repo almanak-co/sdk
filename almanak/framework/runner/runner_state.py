@@ -479,13 +479,20 @@ def _value_via_portfolio_valuer(
 ) -> PortfolioSnapshot | None:
     """Run the framework-owned ``PortfolioValuer`` primary valuation path.
 
-    Returns ``None`` when the valuer is not applicable (multi-chain, strategy
-    lacks the required hooks), when it raises, or when it returns an
-    ``UNAVAILABLE`` snapshot -- all of which require the caller to try the
-    strategy's own ``get_portfolio_snapshot`` fallback.
+    Returns ``None`` when the valuer is not applicable (strategy lacks the
+    required hooks), when it raises, or when it returns an ``UNAVAILABLE``
+    snapshot -- all of which require the caller to try the strategy's own
+    ``get_portfolio_snapshot`` fallback.
+
+    VIB-5722: multi-chain strategies now use the canonical valuer too. It was
+    previously gated off for them, so multi-chain valuation fell to
+    ``intent_strategy.get_portfolio_snapshot`` — which cannot reprice positions
+    and did chain-less wallet reads, stamping ``total_value_usd=$0.00`` at HIGH
+    confidence after a real multi-chain mint (field-proven on DN-LP). The valuer
+    is now chain-aware end to end (per-position reprice, per-chain discovery,
+    per-chain native gas + wallet reads); the strategy fallback still exists for
+    a genuine valuer failure / UNAVAILABLE.
     """
-    if runner._is_multi_chain:
-        return None
     if not (hasattr(strategy, "_get_tracked_tokens") and hasattr(strategy, "create_market_snapshot")):
         return None
 

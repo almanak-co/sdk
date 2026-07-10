@@ -28,7 +28,9 @@ from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 def _make_market(prices):
     market = MagicMock()
 
-    def mock_price(token, quote="USD"):
+    def mock_price(token, quote="USD", *, chain=None):
+        # Matches the real MarketSnapshot.price signature (chain keyword-only,
+        # VIB-5722): the valuer wrapper now threads chain= into the LP price read.
         if token in prices:
             return prices[token]
         raise ValueError(f"No price for {token}")

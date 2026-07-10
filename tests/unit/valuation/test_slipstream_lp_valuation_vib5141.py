@@ -216,7 +216,9 @@ class TestSlipstreamEndToEndValuation:
         )
 
         market = MagicMock()
-        market.price = MagicMock(side_effect=lambda sym: {"WETH": 3500.0, "USDC": 1.0}[sym])
+        # chain= is keyword-only on the real MarketSnapshot.price; the valuer
+        # threads it into the LP price read (VIB-5722), so the double must accept it.
+        market.price = MagicMock(side_effect=lambda sym, quote="USD", *, chain=None: {"WETH": 3500.0, "USDC": 1.0}[sym])
 
         value_usd, enriched, repriced = valuer._reprice_position_enriched(position, "base", market)
 

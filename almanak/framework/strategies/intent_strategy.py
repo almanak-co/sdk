@@ -134,6 +134,9 @@ logger = logging.getLogger(__name__)
 # such deep imports remain DISCOURAGED — use ``from almanak import MarketSnapshot``
 # or ``from almanak.framework.market import MarketSnapshot`` instead.
 from ..market import MarketSnapshot  # noqa: F401  (re-export for deep-import callers)
+from ..market.errors import (
+    ChainNotConfiguredError as MarketChainNotConfiguredError,
+)
 from ..market.snapshot import (
     DEFAULT_TIMEFRAME,
 )
@@ -1668,25 +1671,61 @@ class IntentStrategy(StrategyBase[ConfigT]):
             wallet_value = Decimal("0")
 
             tracked_tokens = self._get_tracked_tokens()
+            # VIB-5722: read each tracked token per configured chain. Single-chain
+            # keeps the chain-less read (``[None]`` → ``market.balance(token)``)
+            # byte-for-byte; multi-chain iterates every configured chain so wallet
+            # balances are captured on secondary chains instead of raising
+            # ``AmbiguousChainError`` and silently valuing the wallet at $0. A
+            # ``ChainNotConfiguredError`` (token not on that chain) is skipped and
+            # is NOT a failure; any OTHER read failure flips ``wallet_reads_failed``
+            # so the snapshot degrades to ESTIMATED rather than stamping a
+            # partial total at HIGH (Empty≠Zero).
+            snapshot_chains = list(getattr(market, "chains", None) or ())
+            wallet_read_chains: list[str | None] = snapshot_chains if len(snapshot_chains) > 1 else [None]
+            wallet_reads_failed = False
             for token in tracked_tokens:
-                try:
-                    balance_data = market.balance(token)
-                    # balance_data is TokenBalance with .balance attribute
-                    if balance_data.balance > 0:
-                        price = market.price(token)
-                        value_usd = balance_data.balance * price
-                        wallet_value += value_usd
-                        wallet_balances.append(
-                            TokenBalance(
-                                symbol=token,
-                                balance=balance_data.balance,
-                                value_usd=value_usd,
-                                price_usd=price,
-                            )
+                # VIB-5722: AGGREGATE this token across chains into ONE wallet row
+                # keyed by symbol (same asset, same USD price → sum balances/values),
+                # mirroring the canonical valuer. Emitting one row per (token, chain)
+                # would let a symbol-keyed downstream consumer collapse the rows into
+                # an under-count. Single-chain (``[None]``) yields exactly one
+                # contribution → byte-identical to the pre-aggregation row.
+                total_balance = Decimal("0")
+                total_value_usd = Decimal("0")
+                last_price: Decimal | None = None
+                for chain_arg in wallet_read_chains:
+                    try:
+                        balance_data = (
+                            market.balance(token) if chain_arg is None else market.balance(token, chain=chain_arg)
                         )
-                except Exception as e:  # noqa: BLE001  # Intentional graceful degradation
-                    logger.debug(f"Could not get balance/price for {token}: {e}")
-                    continue
+                        # balance_data is TokenBalance with .balance attribute
+                        if balance_data.balance > 0:
+                            price = market.price(token) if chain_arg is None else market.price(token, chain=chain_arg)
+                            total_balance += balance_data.balance
+                            total_value_usd += balance_data.balance * price
+                            last_price = price
+                    except (MarketChainNotConfiguredError, ChainNotConfiguredError):
+                        # Token simply not configured on this chain — not a failure.
+                        # ``MarketSnapshot.balance/price`` raise the ``market.errors``
+                        # class; the ``.multichain`` re-export (a DISTINCT class, kept
+                        # for public API) is caught too so a multichain-provider path
+                        # can't slip through into the generic handler and spuriously
+                        # flip ``wallet_reads_failed`` (VIB-5722 review).
+                        continue
+                    except Exception as e:  # noqa: BLE001  # Intentional graceful degradation
+                        wallet_reads_failed = True
+                        logger.debug(f"Could not get balance/price for {token} on {chain_arg}: {e}")
+                        continue
+                if total_balance > 0 and last_price is not None:
+                    wallet_value += total_value_usd
+                    wallet_balances.append(
+                        TokenBalance(
+                            symbol=token,
+                            balance=total_balance,
+                            value_usd=total_value_usd,
+                            price_usd=last_price,
+                        )
+                    )
 
             # VIB-3937 / VIB-4225 (ACC-02) — append the chain's NATIVE gas-token
             # to wallet_balances. Strategy stays fail-open: the runner inspects
@@ -1710,12 +1749,15 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 # tracked in VIB-5278, pre-existing and out of scope here.
                 total_value_usd=position_value,
                 available_cash_usd=wallet_value,
-                # Degrade to ESTIMATED when positions could not be read OR a perp
-                # leg's net equity was excluded from the total (VIB-5252) — the
-                # number is a best-effort partial, not a fully-measured HIGH total.
+                # Degrade to ESTIMATED when positions could not be read, a perp
+                # leg's net equity was excluded from the total (VIB-5252), OR a
+                # wallet balance/price read RAISED (VIB-5722) — the number is a
+                # best-effort partial, not a fully-measured HIGH total. A raised
+                # read is distinct from a measured zero balance (Empty≠Zero): only
+                # the former degrades confidence.
                 value_confidence=(
                     ValueConfidence.ESTIMATED
-                    if (positions_unavailable or perp_notional_excluded)
+                    if (positions_unavailable or perp_notional_excluded or wallet_reads_failed)
                     else ValueConfidence.HIGH
                 ),
                 positions=positions,
