@@ -39,6 +39,7 @@ class TestGeckoTerminalNetworkMap:
             "sonic",
             "solana",
             "mantle",
+            "robinhood",
         }
         assert set(_CHAIN_TO_GT_NETWORK) == expected
         assert _CHAIN_TO_GT_NETWORK["mantle"] == "mantle"  # the gained key

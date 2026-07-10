@@ -90,6 +90,7 @@ FROZEN_DASHBOARD_EXPLORERS: dict[str, str] = {
     "monad": "https://explorer.monad.xyz/tx/",
     "plasma": "https://plasmascan.io/tx/",
     "hyperevm": "https://hyperevmscan.io/tx/",
+    "robinhood": "https://robinhoodchain.blockscout.com/tx/",
 }
 
 FROZEN_TIMELINE_CHAINS = frozenset(

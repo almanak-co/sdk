@@ -1593,6 +1593,7 @@ class MyStrategy(IntentStrategy):
 | X-Layer | `xlayer` |
 | 0G Chain | `zerog` |
 | HyperEVM | `hyperevm` |
+| Robinhood Chain | `robinhood` |
 | Solana | `solana` |
 
 <!-- almanak-sdk-end: supported-chains -->

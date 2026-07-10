@@ -25,6 +25,7 @@ FROZEN_CHAIN_NAMES = frozenset(
         "optimism",
         "plasma",
         "polygon",
+        "robinhood",
         "solana",
         "sonic",
         "xlayer",

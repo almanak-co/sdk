@@ -64,6 +64,7 @@ HISTORICAL_CHAIN_IDS = {
     "xlayer": 196,
     "zerog": 16661,
     "hyperevm": 999,
+    "robinhood": 4663,
     "solana": 0,
 }
 
@@ -87,6 +88,7 @@ HISTORICAL_ALLOWED_CHAINS = frozenset(
         "xlayer",
         "zerog",
         "hyperevm",
+        "robinhood",
     }
 )
 
@@ -220,6 +222,7 @@ HISTORICAL_NATIVE_TOKEN_SYMBOLS = {
     "xlayer": "OKB",
     "zerog": "A0GI",
     "hyperevm": "HYPE",
+    "robinhood": "ETH",
     "solana": "SOL",
 }
 
@@ -260,6 +263,7 @@ HISTORICAL_CHAIN_NATIVE_SYMBOL = {
     "xlayer": "OKB",
     "zerog": "A0GI",
     "hyperevm": "HYPE",
+    "robinhood": "ETH",
 }
 
 

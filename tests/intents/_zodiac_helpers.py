@@ -463,6 +463,7 @@ _CHAIN_ID_TO_MULTISEND_KEY: dict[int, str] = {
     100: "gnosis",
     137: "polygon",
     196: "xlayer",
+    4663: "robinhood",
     5000: "mantle",
     8453: "base",
     42161: "arbitrum",

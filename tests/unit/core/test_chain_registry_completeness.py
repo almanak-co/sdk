@@ -50,6 +50,7 @@ ALL_CHAINS: list[str] = [
     "optimism",
     "plasma",
     "polygon",
+    "robinhood",
     "solana",
     "sonic",
     "xlayer",

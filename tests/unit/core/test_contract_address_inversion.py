@@ -159,6 +159,9 @@ MULTISEND_CREATE2 = "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"
 # "hyperevm" declares the full Safe/Zodiac stack via safe_stack_contracts()
 # (VIB-5606): canonical CREATE2 addresses, on-chain-verified live on chain 999,
 # so it is in BOTH the multisend set and the full safe-stack set.
+# "robinhood" (4663) likewise declares the full stack via safe_stack_contracts()
+# (VIB-5708): the Zodiac ModuleProxyFactory + Roles v2 mastercopy were deployed
+# at canonical CREATE2 addresses on 2026-07-09, so it is in BOTH sets too.
 FROZEN_MULTISEND_CHAINS = frozenset(
     {
         "ethereum",
@@ -172,6 +175,7 @@ FROZEN_MULTISEND_CHAINS = frozenset(
         "mantle",
         "xlayer",
         "hyperevm",
+        "robinhood",
     }
 )
 FROZEN_SAFE_STACK_CHAINS = FROZEN_MULTISEND_CHAINS - {"gnosis", "mantle", "xlayer"}
@@ -341,6 +345,20 @@ class TestSafeSignerAddressInversion:
         # No Enso delegate registered on hyperevm (would force DELEGATECALL).
         assert "hyperevm" not in contract_address_map("enso_delegate_primary")
         assert "hyperevm" not in contract_address_map("enso_delegate_secondary")
+
+    def test_robinhood_resolves_full_safe_stack_without_enso(self) -> None:
+        """VIB-5708: Robinhood Chain (4663) registers the canonical Safe/Zodiac
+        stack so the Safe-wallet execution path resolves on chain 4663, but
+        declares NO Enso delegate (Enso isn't deployed there)."""
+        from almanak.framework.execution.signer.safe.constants import get_multisend_address
+
+        # MultiSend + every Safe/Zodiac signer contract resolves for robinhood.
+        assert get_multisend_address("robinhood") == MULTISEND_CREATE2
+        for key, expected in FROZEN_SAFE_SIGNER_CONTRACTS.items():
+            assert contract_address_map(key).get("robinhood") == expected
+        # No Enso delegate registered on robinhood (would force DELEGATECALL).
+        assert "robinhood" not in contract_address_map("enso_delegate_primary")
+        assert "robinhood" not in contract_address_map("enso_delegate_secondary")
 
     def test_enso_delegate_operation_decision_derives_from_descriptor_contracts(self) -> None:
         from almanak.framework.execution.signer.safe.constants import (

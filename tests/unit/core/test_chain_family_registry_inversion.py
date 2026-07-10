@@ -59,6 +59,7 @@ FROZEN_ANVIL_CHAINS = frozenset(
         "zerog",
         "plasma",
         "hyperevm",
+        "robinhood",
     }
 )
 

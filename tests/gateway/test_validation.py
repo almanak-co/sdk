@@ -106,11 +106,16 @@ class TestAllowedChainsTrustBoundary:
             "xlayer",
             "zerog",
             "hyperevm",
+            "robinhood",
         }
     )
 
     def test_allowed_chains_matches_historical_snapshot(self):
-        """ALLOWED_CHAINS must be byte-identical to the pre-VIB-4801 set.
+        """ALLOWED_CHAINS must be byte-identical to the reviewed baseline.
+
+        The snapshot began as the pre-VIB-4801 set and is extended only by
+        deliberate, reviewed chain additions (e.g. hyperevm VIB-5606,
+        robinhood VIB-5706).
 
         If this test fails it means a chain was added or removed from the
         registry without an explicit update here. Adding a chain to the
@@ -121,7 +126,7 @@ class TestAllowedChainsTrustBoundary:
         added = ALLOWED_CHAINS - self.HISTORICAL_ALLOWED_CHAINS
         removed = self.HISTORICAL_ALLOWED_CHAINS - ALLOWED_CHAINS
         assert ALLOWED_CHAINS == self.HISTORICAL_ALLOWED_CHAINS, (
-            f"ALLOWED_CHAINS drifted from the pre-VIB-4801 snapshot. "
+            f"ALLOWED_CHAINS drifted from the reviewed baseline snapshot. "
             f"Added: {sorted(added)}; removed: {sorted(removed)}. "
             f"Adding a chain widens the gateway trust boundary — review "
             f"the new chain's descriptor and update HISTORICAL_ALLOWED_CHAINS "

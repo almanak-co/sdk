@@ -192,7 +192,7 @@ def test_native_token_rejects_negative_slip44() -> None:
 
 
 def test_eth_native_chains_carry_slip44_60() -> None:
-    for chain in ("ethereum", "arbitrum", "optimism", "base", "blast", "linea"):
+    for chain in ("ethereum", "arbitrum", "optimism", "base", "blast", "linea", "robinhood"):
         assert ChainRegistry.get(chain).native.slip44 == 60
     assert ChainRegistry.get("solana").native.slip44 == 501
 
@@ -228,6 +228,7 @@ def test_every_registered_chain_has_slip44_coverage() -> None:
         "sonic",
         "monad",
         "hyperevm",
+        "robinhood",
     }
     covered_without_slip44 = {"xlayer", "mantle", "plasma", "zerog"}
     all_registered = {descriptor.name for descriptor in ChainRegistry.all()}

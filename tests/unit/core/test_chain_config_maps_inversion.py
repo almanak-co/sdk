@@ -117,6 +117,7 @@ class TestAlchemyRpcUrlTemplate:
             "linea",
             "monad",
             "plasma",
+            "robinhood",
             "sonic",
             "xlayer",
         }

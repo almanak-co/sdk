@@ -550,6 +550,7 @@ class TestMappings:
             "sonic",
             "solana",
             "mantle",
+            "robinhood",
         }
         assert expected == set(_CHAIN_TO_NETWORK.keys())
 

@@ -46,6 +46,7 @@ FROZEN_COMPILER_MAP: dict[str, frozenset[str]] = {
     "xlayer": frozenset({"OKB"}),
     "zerog": frozenset({"A0GI"}),
     "hyperevm": frozenset({"HYPE"}),
+    "robinhood": frozenset({"ETH"}),
     "solana": frozenset({"SOL"}),
 }
 
@@ -125,7 +126,7 @@ def test_market_service_map_matches_registry_after_reconciliation() -> None:
     # The derive additionally covers a registered chain the legacy map missed
     # (zerog) — a strict improvement, not a regression. Pin it so the delta is
     # explicit rather than a mystery diff.
-    assert set(derived) - set(expected) == {"zerog", "hyperevm"}
+    assert set(derived) - set(expected) == {"zerog", "hyperevm", "robinhood"}
 
 
 def test_market_reconciliation_deltas_are_real() -> None:

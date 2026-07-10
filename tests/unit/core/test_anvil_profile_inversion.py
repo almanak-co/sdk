@@ -129,6 +129,11 @@ FROZEN_TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
         "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
         "WBTC": "0xEA034fb02eB1808C2cc3adbC15f447B93CbE08e1",
     },
+    "robinhood": {
+        "WETH": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+        "USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+        "USDe": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+    },
 }
 
 FROZEN_KNOWN_BALANCE_SLOTS: dict[str, dict[str, int]] = {
@@ -199,6 +204,11 @@ FROZEN_KNOWN_BALANCE_SLOTS: dict[str, dict[str, int]] = {
     "xlayer": {
         "USDT0": 51,
     },
+    "robinhood": {
+        "WETH": 51,
+        "USDG": 1,
+        "USDe": 5,
+    },
 }
 
 FROZEN_WHALE_FUNDED_TOKENS: dict[str, dict[str, str]] = {
@@ -207,6 +217,11 @@ FROZEN_WHALE_FUNDED_TOKENS: dict[str, dict[str, str]] = {
     },
     "base": {
         "CBBTC": "0xBdb9300b7CDE636d9cD4AFF00f6F009fFBBc8EE6",
+    },
+    "robinhood": {
+        "WETH": "0x07aE8551Be970cB1cCa11Dd7a11F47Ae82e70E67",
+        "USDG": "0x2d4d2A025b10C09BDbd794B4FCe4F7ea8C7d7bB4",
+        "USDE": "0x70aC345AB736ce145E0D4B5deCEd7A8bcB0E4033",
     },
 }
 
@@ -221,6 +236,7 @@ FROZEN_WRAPPED_NATIVE_TOKENS: dict[str, str] = {
     "bsc": "WBNB",
     "sonic": "WS",
     "mantle": "WMNT",
+    "robinhood": "WETH",
 }
 
 FROZEN_CHAIN_BLOCK_GAS_LIMITS: dict[str, int] = {

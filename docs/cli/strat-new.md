@@ -59,7 +59,7 @@ Usage: almanak strat new [OPTIONS]
 
 
 * `chain`:
-    * Type: <almanak.framework.cli.chain_params.ChainChoice object at 0x7f157a193890>
+    * Type: <almanak.framework.cli.chain_params.ChainChoice object at 0x7f02d5fac2c0>
     * Default: `arbitrum`
     * Usage: `--chain
 -c`
@@ -112,7 +112,7 @@ Options:
                                   Defaults to current directory.
   -t, --template [blank|ta_swap|dynamic_lp|lending_loop|basis_trade|vault_yield|copy_trader|perps|multi_step|staking]
                                   Strategy template to use (default: blank)
-  -c, --chain [arbitrum|avalanche|base|berachain|blast|bsc|ethereum|hyperevm|linea|mantle|monad|optimism|plasma|polygon|solana|sonic|xlayer|zerog]
+  -c, --chain [arbitrum|avalanche|base|berachain|blast|bsc|ethereum|hyperevm|linea|mantle|monad|optimism|plasma|polygon|robinhood|solana|sonic|xlayer|zerog]
                                   Target blockchain network (default:
                                   arbitrum)
   -p, --protocol TEXT             Protocol slug rendered into the scaffold

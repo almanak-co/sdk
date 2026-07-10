@@ -90,11 +90,14 @@ class TestL2ConstantsDerivationParity:
     """Derived L2_CHAINS and L2_GAS_ORACLE_ADDRESSES must equal the historical literals."""
 
     # Historical literals (verbatim from gas.py before Plan 026).
-    _HISTORICAL_L2_CHAINS = {"arbitrum", "optimism", "base"}
+    _HISTORICAL_L2_CHAINS = {"arbitrum", "optimism", "base", "robinhood"}
     _HISTORICAL_L2_GAS_ORACLE_ADDRESSES = {
         "optimism": "0x420000000000000000000000000000000000000F",
         "base": "0x420000000000000000000000000000000000000F",
         "arbitrum": "0x000000000000000000000000000000000000006C",
+        # Robinhood Chain (4663) — Arbitrum Orbit L2, ArbGasInfo precompile
+        # verified responding on-chain (VIB-5706).
+        "robinhood": "0x000000000000000000000000000000000000006C",
     }
 
     def test_l2_chains_set_equals_historical(self) -> None:

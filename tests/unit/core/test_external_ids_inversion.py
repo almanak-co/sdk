@@ -79,6 +79,7 @@ FROZEN_COINGECKO: dict[str, str] = {
     "blast": "blast",
     "plasma": "plasma",
     "hyperevm": "hyperevm",
+    "robinhood": "robinhood",
 }
 
 # 2. DexScreener CHAIN_TO_DEXSCREENER_PLATFORM (carries the "bnb" alias).
@@ -102,6 +103,7 @@ FROZEN_DEXSCREENER_PLATFORM: dict[str, str] = {
     "zerog": "zerog",
     "solana": "solana",
     "hyperevm": "hyperevm",
+    "robinhood": "robinhood",
 }
 
 # 3. DexScreener CHAIN_SLUG_MAP (no "bnb"; same "dexscreener" vendor as #2).
@@ -124,6 +126,7 @@ FROZEN_DEXSCREENER_SLUG: dict[str, str] = {
     "plasma": "plasma",
     "solana": "solana",
     "hyperevm": "hyperevm",
+    "robinhood": "robinhood",
 }
 
 # 4. GeckoTerminal _CHAIN_TO_NETWORK (has mantle).
@@ -138,6 +141,7 @@ FROZEN_GECKOTERMINAL_NETWORK: dict[str, str] = {
     "sonic": "sonic",
     "solana": "solana",
     "mantle": "mantle",
+    "robinhood": "robinhood",
 }
 
 # 5. GeckoTerminal _CHAIN_TO_GT_NETWORK (no mantle; same "geckoterminal" vendor).
@@ -163,6 +167,7 @@ FROZEN_DEFILLAMA: dict[str, str] = {
     "avalanche": "avax",
     "bsc": "bsc",
     "sonic": "sonic",
+    "robinhood": "robinhood-chain",
 }
 
 # 7. DeFiLlama display (Capitalised) — _history_common.
@@ -381,7 +386,7 @@ def test_dexscreener_collapse_keeps_all_canonical_chains() -> None:
     assert external_id_for("optimism", "dexscreener") == "optimism"
     expected = (set(FROZEN_DEXSCREENER_PLATFORM) | set(FROZEN_DEXSCREENER_SLUG)) - ALIAS_KEYS
     assert set(vendor_chain_map("dexscreener")) == expected
-    assert len(expected) == 18
+    assert len(expected) == 19
 
 
 def test_geckoterminal_collapse_is_union_with_mantle() -> None:
