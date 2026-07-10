@@ -436,11 +436,14 @@ async def test_resolve_degrades_to_strategy_enumeration_without_registry() -> No
 
 @pytest.mark.asyncio
 async def test_dedup_namespace_matches_bare_nft_token_id_univ3_and_v4() -> None:
-    """`reconcile_lp_with_registry` dedups by `str(position_id)`, and the registry
+    """`reconcile_lp_with_registry` keys a cut-over LP by its source-independent
+    identity (`_lp_identity`, VIB-5723): the resolved numeric NFT token id when
+    one is recoverable (via `resolve_nft_token_id` — details keys first, then a
+    numeric `position_id`), else the raw `position_id` string. The registry
     side keys by the bare NFT `token_id` (`payload['token_id']`). The union is
-    only *clean* (no double-listing of the same open position) because the
-    strategy's `get_open_positions()` ALSO keys a UniV3 / UniV4 LP by the bare
-    NFT token id:
+    *clean* (no double-listing of the same open position) when the strategy's
+    `get_open_positions()` keys a UniV3 / UniV4 LP by the bare NFT token id —
+    directly or via a `details` mirror:
 
     - UniV3 demo (`uniswap_lp`, `primitive='lp'`):
       `PositionInfo(position_id=str(self._current_position_id))`, and
@@ -484,10 +487,13 @@ async def test_dedup_namespace_matches_bare_nft_token_id_univ3_and_v4() -> None:
     assert ids.count("777") == 1  # V4: deduped, not double-listed
     assert len(merged.positions) == 2  # registry adds nothing net-new
 
-    # MISMATCH (canary): if the strategy ever keyed a cut-over LP by anything but
-    # the bare NFT token id (pool-prefixed / composite), the bare-NFT registry
-    # rows are NOT recognised as the same position and ARE appended — the same
-    # open position double-lists. This asserts divergence is observable.
+    # MISMATCH (canary): if the strategy keys a cut-over LP by an id from which
+    # NO numeric NFT token id is recoverable (opaque composite, no `details`
+    # mirror — resolve_nft_token_id → None), the bare-NFT registry rows are NOT
+    # recognised as the same position and ARE appended — the same open position
+    # double-lists. This asserts divergence is observable rather than silently
+    # masked. (A composite id WITH the bare id mirrored in `details` DOES
+    # collapse since VIB-5723 — see the test_vib5723_* cases.)
     strat_diverged = TeardownPositionSummary(
         deployment_id=DEPLOYMENT_ID,
         timestamp=datetime.now(UTC),
@@ -1065,3 +1071,143 @@ async def test_resolve_unions_lp_lending_perp_and_keeps_strategy_positions() -> 
         (str(PositionType.SUPPLY), "usdc"),  # registry lending collateral
         (str(PositionType.PERP), "0xpp"),  # registry perp
     }
+
+
+# ---------------------------------------------------------------------------
+# VIB-5723 — source-independent LP identity: the same physical NFT position
+# must not double-count across enumeration sources (registry bare token id vs
+# strategy composite position key). Field repro: DN-LP mainnet + Anvil runs
+# reported positions_closed=2 for 1 physical LP (see the ticket and
+# tests/reports/dnlp-mainnet-vib5670-proof.md Finding #4).
+# ---------------------------------------------------------------------------
+
+
+def _dnlp_strategy_lp(token_id: str = "5580510", chain: str = "arbitrum") -> PositionInfo:
+    """The exact strategy-reported shape from the mainnet repro: composite
+    ``position_id`` (framework position-key format) with the bare NFT id
+    mirrored in ``details['position_id']``."""
+    return PositionInfo(
+        position_type=PositionType.LP,
+        position_id=f"uniswap_v3-WETH/USDC/500-{token_id}",
+        chain=chain,
+        protocol="uniswap_v3",
+        value_usd=Decimal("0"),
+        details={"pool": "WETH/USDC/500", "position_id": token_id},
+    )
+
+
+@pytest.mark.asyncio
+async def test_vib5723_composite_strategy_id_dedupes_against_registry_bare_token_id() -> None:
+    """1 physical LP, two sources → 1 union entry (the strategy's richer copy)."""
+    sm = _FakeRegistrySM({"lp": [_v3_row("5580510")], "lp_v4": []})
+    registry_positions, available = await read_open_lp_positions_from_registry(
+        state_manager=sm, deployment_id=DEPLOYMENT_ID
+    )
+    assert available is True
+
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[_dnlp_strategy_lp("5580510")],
+    )
+    merged = reconcile_lp_with_registry(
+        strategy_summary=strat,
+        registry_positions=registry_positions,
+        registry_available=True,
+    )
+    assert len(merged.positions) == 1
+    # The strategy's copy (the one that can build closing intents) is retained.
+    assert merged.positions[0].protocol == "uniswap_v3"
+
+
+@pytest.mark.asyncio
+async def test_vib5723_dedup_stays_chain_scoped_for_composite_ids() -> None:
+    """Fund-safety guard: the NFT-identity collapse must NOT suppress the same
+    token id on a DIFFERENT chain (registry row on base ≠ strategy LP on
+    arbitrum) — the cross-chain non-suppression invariant survives the fix."""
+    sm = _FakeRegistrySM(
+        {
+            "lp": [
+                {
+                    "chain": "base",
+                    "primitive": "lp",
+                    "accounting_category": "lp",
+                    "status": "open",
+                    "payload": {"token_id": "5580510", "pool_address": "0xB"},
+                }
+            ],
+            "lp_v4": [],
+        }
+    )
+    registry_positions, _ = await read_open_lp_positions_from_registry(state_manager=sm, deployment_id=DEPLOYMENT_ID)
+
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[_dnlp_strategy_lp("5580510", chain="arbitrum")],
+    )
+    merged = reconcile_lp_with_registry(
+        strategy_summary=strat,
+        registry_positions=registry_positions,
+        registry_available=True,
+    )
+    assert len(merged.positions) == 2  # base registry row appended, never suppressed
+
+
+def test_vib5723_non_nft_ids_keep_raw_string_identity() -> None:
+    """LP entries with no recoverable numeric NFT id (non-NFT venues, opaque
+    ids) keep the raw ``position_id`` key — two distinct opaque ids never
+    collapse, and an opaque id never matches a bare token id."""
+    strat = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[_lp("lb-bins-25/26/27", protocol="traderjoe_v2")],
+    )
+    merged = reconcile_lp_with_registry(
+        strategy_summary=strat,
+        registry_positions=[_lp("42", protocol="lp")],
+        registry_available=True,
+    )
+    assert {p.position_id for p in merged.positions} == {"lb-bins-25/26/27", "42"}
+
+
+@pytest.mark.asyncio
+async def test_vib5723_completeness_check_matches_composite_id_no_false_absent() -> None:
+    """The completeness check must recognise the composite-id strategy LP as
+    PRESENT in the registry (no chain read, no false "ABSENT" warning). Before
+    the fix this logged "open on-chain but ABSENT from position_registry" for a
+    position whose registry row existed."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from almanak.framework.teardown.registry_enumeration import _verify_lp_enumeration_completeness
+
+    read = RegistryReadResult(
+        positions=[
+            PositionInfo(
+                position_type=PositionType.LP,
+                position_id="5580510",
+                chain="arbitrum",
+                protocol="lp",
+                value_usd=Decimal("0"),
+                details={"source": "position_registry"},
+            )
+        ],
+        available=True,
+        failed_primitives=(),
+    )
+    strategy = MagicMock()
+    strategy._gateway_client = MagicMock()
+    strategy._gateway_network = ""
+    summary = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[_dnlp_strategy_lp("5580510")],
+    )
+    with patch(
+        "almanak.framework.teardown.live_position_reads.chain_verify_lp_open",
+        new=AsyncMock(return_value=True),
+    ) as verify:
+        await _verify_lp_enumeration_completeness(strategy=strategy, strategy_summary=summary, read=read)
+    # Matched via the source-independent identity → the discrepancy set is
+    # empty → zero chain reads (and therefore no false ABSENT warning).
+    verify.assert_not_called()

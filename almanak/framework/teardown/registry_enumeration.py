@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from almanak.connectors._strategy_base.teardown_post_condition import resolve_nft_token_id
 from almanak.framework.teardown.models import (
     PositionInfo,
     PositionType,
@@ -54,6 +55,39 @@ from almanak.framework.teardown.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _lp_identity(position: PositionInfo) -> str:
+    """Source-independent identity discriminator for one LP position (VIB-5723).
+
+    The same physical NFT position reaches the union under different
+    ``position_id`` formats depending on which enumeration source produced it:
+    a registry row carries the bare token id (``"5580510"``) while a strategy
+    that echoes the framework's composite position key reports
+    ``"uniswap_v3-WETH/USDC/500-5580510"`` (with the bare id mirrored in
+    ``details``). Keying the union on the raw ``position_id`` string counted
+    that one position twice (``positions_closed=2`` for 1 physical LP) and made
+    the completeness check log a false "ABSENT from position_registry".
+
+    Resolution is delegated to :func:`resolve_nft_token_id` — THE single
+    id-resolution rule shared with the TD-14 post-condition hooks and the
+    Plan-A chain-verify — so the union agrees with the verifying lanes about
+    which position is which. When a numeric NFT id resolves, it IS the identity
+    (prefixed to keep it disjoint from raw-string keys); otherwise the raw
+    ``position_id`` remains the key (non-NFT LP venues, e.g. Liquidity Book).
+
+    The protocol label is deliberately NOT part of the key: registry rows are
+    labelled with the registry primitive (``lp`` / ``lp_v4``), never a real
+    connector slug, so including it would re-split the pair this key exists to
+    collapse. A cross-protocol numeric collision (two NFT venues minting the
+    same token id to the same deployment on the same chain) would at worst
+    suppress a registry-derived row — a visibility/count entry that never
+    builds closing intents (see :func:`_position_info_from_registry_row`).
+    """
+    token_id = resolve_nft_token_id(position)
+    if token_id is not None:
+        return f"nft:{token_id}"
+    return str(position.position_id)
 
 
 @dataclass(frozen=True)
@@ -688,6 +722,11 @@ def reconcile_lp_with_registry(
             market_id_str = "" if market_id_val is None else str(market_id_val).lower()
             discriminator = market_id_str or asset
             return (chain, ptype, str(position.protocol or "").lower(), discriminator)
+        if position.position_type == PositionType.LP:
+            # VIB-5723: collapse the same physical NFT position across sources
+            # (registry bare token id vs strategy composite key) — see
+            # ``_lp_identity``.
+            return (chain, ptype, _lp_identity(position))
         return (chain, ptype, str(position.position_id))
 
     seen = {_dedupe_key(p) for p in strategy_summary.positions}
@@ -867,8 +906,13 @@ async def resolve_open_positions_with_registry(strategy: Any) -> TeardownPositio
 
 
 def _registry_open_keys(read: RegistryReadResult) -> set[tuple[str, str]]:
-    """``(chain, token_id)`` keys for the registry-reported OPEN LP positions."""
-    return {(str(p.chain or "").lower(), str(p.position_id)) for p in read.positions}
+    """``(chain, identity)`` keys for the registry-reported OPEN LP positions.
+
+    Keyed on the source-independent LP identity (VIB-5723) so a strategy LP
+    reported under the composite position-key format still matches its own
+    registry row instead of logging a false "ABSENT from position_registry".
+    """
+    return {(str(p.chain or "").lower(), _lp_identity(p)) for p in read.positions}
 
 
 async def _verify_lp_enumeration_completeness(
@@ -930,7 +974,7 @@ async def _verify_lp_enumeration_completeness(
     network = str(getattr(strategy, "_gateway_network", "") or "")
 
     for position in strategy_lp:
-        key = (str(position.chain or "").lower(), str(position.position_id))
+        key = (str(position.chain or "").lower(), _lp_identity(position))
         absent_from_registry = key not in registry_keys
         # Only verify the discrepancy set: a strategy LP the registry already
         # confirms (matched) needs no chain read unless its primitive's read
