@@ -343,6 +343,13 @@ class ExecutionProgress:
         serialized_intents: Serialized intent data for resumption
         failed_at_step_index: Index of the step that failed (None if no failure)
         failure_error: Error message from the failed step
+        accounting_pending_step_index: Index of a step whose broadcast is confirmed
+            on-chain but whose accounting write did not complete (VIB-5670,
+            multi-chain / bridge lane only). Means "broadcast confirmed on-chain,
+            accounting write incomplete — do NOT re-broadcast on resume." Mutually
+            exclusive per step with ``failed_at_step_index`` (which means the step
+            never broadcast and must be re-executed). Never set on the single-chain
+            lane (single-intent iterations never build an ExecutionProgress).
     """
 
     execution_id: str
@@ -356,6 +363,7 @@ class ExecutionProgress:
     serialized_intents: list[dict[str, Any]] | None = None
     failed_at_step_index: int | None = None
     failure_error: str | None = None
+    accounting_pending_step_index: int | None = None
 
     @property
     def is_stuck(self) -> bool:
@@ -363,8 +371,36 @@ class ExecutionProgress:
         return self.failed_at_step_index is not None
 
     @property
+    def is_accounting_pending(self) -> bool:
+        """True when a broadcast-confirmed step has an incomplete accounting write.
+
+        VIB-5670: distinct from ``is_stuck`` — the broadcast already landed
+        on-chain, so the step must NOT be re-executed/re-broadcast; only its
+        deferred accounting write remains.
+        """
+        return self.accounting_pending_step_index is not None
+
+    @property
     def next_step_to_execute(self) -> int:
-        """Get the index of the next step to execute (failed step or next after completed)."""
+        """Get the index of the next step to execute.
+
+        VIB-5670: an accounting-pending step already broadcast successfully on
+        chain, so it is DONE for broadcast purposes — advance PAST it and never
+        re-execute (re-broadcasting would duplicate the on-chain money-move).
+        The two markers are mutually exclusive per step, but a RESUME can run
+        steps past a still-set pending marker (it is kept for operator replay
+        visibility): ``completed_step_index`` may then exceed the pending index,
+        so the floor is the max of both — never point back at a step that
+        already broadcast (pending) or completed. A ``failed_at_step_index`` at
+        or above that floor is a genuinely re-executable later step and retains
+        its re-execute semantics; below the floor it can only reference an
+        already-broadcast step and must not win.
+        """
+        if self.accounting_pending_step_index is not None:
+            floor = max(self.accounting_pending_step_index, self.completed_step_index) + 1
+            if self.failed_at_step_index is not None and self.failed_at_step_index >= floor:
+                return self.failed_at_step_index
+            return floor
         if self.failed_at_step_index is not None:
             return self.failed_at_step_index
         return self.completed_step_index + 1
@@ -385,6 +421,7 @@ class ExecutionProgress:
             "serialized_intents": self.serialized_intents,
             "failed_at_step_index": self.failed_at_step_index,
             "failure_error": self.failure_error,
+            "accounting_pending_step_index": self.accounting_pending_step_index,
         }
 
     @classmethod
@@ -403,6 +440,7 @@ class ExecutionProgress:
             serialized_intents=data.get("serialized_intents"),
             failed_at_step_index=data.get("failed_at_step_index"),
             failure_error=data.get("failure_error"),
+            accounting_pending_step_index=data.get("accounting_pending_step_index"),
         )
 
 

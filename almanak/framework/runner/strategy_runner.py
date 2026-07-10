@@ -683,6 +683,10 @@ class BridgeWaitState:
     error_message: str | None = None
     failed_result: Any | None = None
     callback_fired: bool = False
+    # Per-leg TransactionResults collected by ``_persist_executed_leg`` calls
+    # (VIB-5670 Stage 3) so ``_bridge_wait_finalize`` can attach a summary-only
+    # aggregate ``ExecutionResult`` to the returned ``IterationResult``.
+    leg_tx_results: list[Any] = field(default_factory=list)
     # Tracks the intent currently being processed so the finalization block
     # can fire ``on_intent_executed`` for break-exit paths that did not fire
     # the callback inline.
@@ -900,6 +904,10 @@ class StrategyRunner:
 
         # Optional explicit gateway client (set via set_gateway_client for multi-chain)
         self._gateway_client: Any | None = None
+        # VIB-5670: cache of per-chain gateway-backed balance providers for
+        # multi-chain per-leg reconciliation, keyed by lower-cased chain name.
+        # The primary chain never lands here — it reuses ``self.balance_provider``.
+        self._leg_balance_providers: dict[str, Any] = {}
         # Track pause log state to avoid repetitive per-iteration info spam.
         self._logged_paused_deployment_ids: set[str] = set()
 
@@ -1002,6 +1010,113 @@ class StrategyRunner:
         from .runner_gateway import get_gateway_client
 
         return get_gateway_client(self)
+
+    @property
+    def _primary_chain_lower(self) -> str | None:
+        """Lower-cased primary chain this runner's default provider reads (VIB-5670).
+
+        Resolves from the execution orchestrator's ``primary_chain`` (multi-chain)
+        or the balance provider's bound ``chain`` (single-chain). ``None`` when
+        neither exposes a chain (e.g. paper / dry-run providers) — in which case
+        no leg is treated as "primary" and every leg builds its own provider.
+        """
+        chain = getattr(self.execution_orchestrator, "primary_chain", None) or getattr(
+            self.balance_provider, "chain", None
+        )
+        return chain.lower() if isinstance(chain, str) and chain else None
+
+    def _multichain_wallet_for(self, chain: str) -> str | None:
+        """Resolve the per-chain wallet address for ``chain`` (VIB-5670).
+
+        Reads the multi-chain orchestrator's chain→wallet registry when present
+        (keys are lower-cased by convention); otherwise falls back to the
+        orchestrator's uniform ``wallet_address`` (Safe wallets share one CREATE2
+        address across EVM chains) and finally the balance provider's wallet.
+        Minimal by design — Stage 0 only needs a correct address to bind the
+        per-leg ``GatewayBalanceProvider``.
+        """
+        c = (chain or "").lower()
+        orchestrator = self.execution_orchestrator
+        chain_wallets = getattr(orchestrator, "chain_wallets", None)
+        if chain_wallets and c in chain_wallets:
+            return chain_wallets[c]
+        return getattr(orchestrator, "wallet_address", None) or getattr(self.balance_provider, "wallet_address", None)
+
+    def _balance_provider_for_chain(self, chain: str) -> Any:
+        """Return a ``BalanceProvider`` bound to ``chain`` (VIB-5670).
+
+        Gateway-boundary-safe (AGENTS.md §Gateway boundary): every per-leg recon
+        read routes through a ``GatewayBalanceProvider`` on the gateway gRPC
+        channel — this NEVER constructs a ``Web3``/``HTTPProvider``.
+
+        - Primary chain → reuse ``self.balance_provider`` (single-chain neutral).
+        - Non-primary chain → a cached per-chain ``GatewayBalanceProvider`` built
+          from this runner's gateway client.
+        - No gateway client for a non-primary leg → mode-aware:
+          * hosted / live mode → raise ``ConfigurationError`` (fail-closed: a
+            missing gateway in a live multi-chain deployment is a
+            misconfiguration, never a silent recon degrade);
+          * local / config mode → return ``None`` so the caller degrades to
+            legacy post-only recon (Empty≠Zero — never a false-clean verdict).
+        """
+        c = (chain or "").lower()
+        primary = self._primary_chain_lower
+        if c and c == primary and self.balance_provider is not None:
+            return self.balance_provider
+
+        cached = self._leg_balance_providers.get(c)
+        if cached is not None:
+            return cached
+
+        client = self._get_gateway_client()
+        if client is None:
+            from almanak.framework.deployment import is_hosted
+
+            if is_hosted():
+                from almanak.config.runtime import ConfigurationError
+
+                raise ConfigurationError(
+                    field="gateway_client",
+                    reason=(
+                        f"No gateway client available for non-primary chain '{chain}' in "
+                        "hosted/live multi-chain mode; per-leg reconciliation cannot run "
+                        "gateway-backed. This is a deployment misconfiguration."
+                    ),
+                )
+            # Local/config mode: degrade to legacy post-only recon (never false-clean).
+            return None
+
+        wallet = self._multichain_wallet_for(c)
+        if wallet is None:
+            # No resolvable wallet identity for this chain — same mode-aware
+            # treatment as a missing gateway client: a live multi-chain
+            # deployment without a per-chain wallet is a misconfiguration
+            # (fail-closed); locally, degrade to legacy post-only recon
+            # (unmeasured, never false-clean).
+            from almanak.framework.deployment import is_hosted
+
+            if is_hosted():
+                from almanak.config.runtime import ConfigurationError
+
+                raise ConfigurationError(
+                    field="wallet_address",
+                    reason=(
+                        f"No wallet address resolvable for non-primary chain '{chain}' in "
+                        "hosted/live multi-chain mode; per-leg reconciliation cannot bind "
+                        "a balance provider. This is a deployment misconfiguration."
+                    ),
+                )
+            return None
+
+        from almanak.framework.data.balance.gateway_provider import GatewayBalanceProvider
+
+        provider = GatewayBalanceProvider(
+            client=client,
+            wallet_address=wallet,
+            chain=c,
+        )
+        self._leg_balance_providers[c] = provider
+        return provider
 
     def _build_pool_key_lookup(self) -> Any | None:
         """Build a sync ``(pool_id_hex, chain) -> PoolKey | None`` callable.
@@ -3184,6 +3299,11 @@ class StrategyRunner:
         lp_open_native_amounts: tuple[int | None, int | None] | None = None,
         v4_lp_close_native_principal: tuple[int | None, int | None] | None = None,
         lp_close_native_amounts: tuple[int | None, int | None] | None = None,
+        # VIB-5670: explicit per-leg chain / wallet for the multi-chain accounting
+        # lane. ``None`` (single-chain default) falls back to the existing
+        # ``strategy``/``config`` derivation → byte-identical to the pre-5670 path.
+        chain: str | None = None,
+        wallet_address: str | None = None,
     ) -> str | None:
         """Returns the persisted LedgerEntry.id on success, None on non-live failure."""
         """Write a structured trade record to the transaction ledger.
@@ -3218,7 +3338,15 @@ class StrategyRunner:
             from ..observability.ledger import build_ledger_entry
 
             cycle_id = get_cycle_id() or ""
-            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
+            # VIB-5670: prefer the explicit per-leg chain / wallet when the
+            # multi-chain lane supplies them; fall back to the single-chain
+            # ``strategy``/``config`` derivation otherwise (byte-identical path).
+            eff_chain = (
+                chain if chain is not None else (getattr(strategy, "chain", "") or getattr(self.config, "chain", ""))
+            )
+            eff_wallet = (
+                wallet_address if wallet_address is not None else (getattr(strategy, "wallet_address", "") or "")
+            )
 
             # VIB-3893 / VIB-3940: connector-owned enrichment must run BEFORE
             # ``build_ledger_entry`` serializes ``result.extracted_data``
@@ -3230,8 +3358,8 @@ class StrategyRunner:
             # swap-then-mint-across-cycles run.
             self._maybe_enrich_result_with_runner_hooks(
                 result,
-                chain,
-                wallet_address=getattr(strategy, "wallet_address", "") or "",
+                eff_chain,
+                wallet_address=eff_wallet,
             )
 
             entry = build_ledger_entry(
@@ -3239,7 +3367,7 @@ class StrategyRunner:
                 cycle_id=cycle_id,
                 intent=intent,
                 result=result,
-                chain=chain,
+                chain=eff_chain,
                 success=success,
                 error=error,
                 price_oracle=price_oracle,
@@ -3299,6 +3427,8 @@ class StrategyRunner:
                     success=success,
                     entry=entry,
                     post_state=post_state,
+                    chain=chain,
+                    wallet_address=wallet_address,
                 )
                 if not used_atomic:
                     await self.state_manager.save_ledger_entry(entry)
@@ -3325,13 +3455,14 @@ class StrategyRunner:
                     intent=intent,
                     result=result,
                     entry=entry,
-                    chain=chain,
+                    chain=eff_chain,
                     deployment_id=deployment_id,
                     execution_mode=execution_mode,
                     cycle_id=cycle_id,
                     price_oracle=price_oracle,
                     post_state=post_state,
                     pre_state=pre_state,
+                    wallet_address=eff_wallet,
                 )
 
             # Signal that this iteration executed a trade — forces snapshot
@@ -3394,6 +3525,8 @@ class StrategyRunner:
         strategy: StrategyProtocol,
         intent_type_str: str,
         protocol: str = "",
+        *,
+        chain: str | None = None,
     ) -> tuple[str, str] | None:
         """Resolve ``(chain, nft_manager_addr)`` from the strategy.
 
@@ -3411,8 +3544,12 @@ class StrategyRunner:
         """
         from almanak.framework.migration.backfill import _nft_manager_for_protocol_chain
 
-        chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
-        chain = (chain or "").lower()
+        # VIB-5670: explicit per-leg chain wins; single-chain callers pass
+        # ``None`` and fall back to the strategy/config derivation (identical).
+        eff_chain = (
+            chain if chain is not None else (getattr(strategy, "chain", "") or getattr(self.config, "chain", ""))
+        )
+        chain = (eff_chain or "").lower()
         protocol_norm = (protocol or "").lower()
         nft_manager = _nft_manager_for_protocol_chain(protocol_norm, chain)
         if not nft_manager:
@@ -4191,8 +4328,15 @@ class StrategyRunner:
         success: bool,
         entry: Any,
         post_state: dict | None = None,
+        chain: str | None = None,
+        wallet_address: str | None = None,
     ) -> bool:
         """Route UniV3 LP_OPEN / LP_CLOSE through ``save_ledger_and_registry``.
+
+        VIB-5670: ``chain`` / ``wallet_address`` are the explicit per-leg
+        identity supplied by the multi-chain accounting lane. Single-chain
+        callers pass ``None`` and every downstream derivation falls back to the
+        ``strategy``/``config`` value → byte-identical to the pre-5670 path.
 
         VIB-4198 / T12 — registry-mode atomic write hook. Returns ``True``
         if the call routed through the atomic primitive (ledger + registry
@@ -4261,6 +4405,8 @@ class StrategyRunner:
                 success=success,
                 entry=entry,
                 intent_type_str=intent_type_str,
+                chain=chain,
+                wallet_address=wallet_address,
             )
         # TD-04 (VIB-5462): lending family has its own isolated cutover stream
         # (Primitive.LENDING / 'lending'). Delegate SUPPLY/BORROW/WITHDRAW/REPAY
@@ -4275,6 +4421,8 @@ class StrategyRunner:
                 entry=entry,
                 intent_type_str=intent_type_str,
                 post_state=post_state,
+                chain=chain,
+                wallet_address=wallet_address,
             )
         # TD-02 (VIB-5460): perp family has its own isolated cutover stream
         # (Primitive.PERP / 'perp'). Delegate PERP_OPEN/PERP_CLOSE to the
@@ -4288,6 +4436,8 @@ class StrategyRunner:
                 success=success,
                 entry=entry,
                 intent_type_str=intent_type_str,
+                chain=chain,
+                wallet_address=wallet_address,
             )
         if intent_type_str not in ("LP_OPEN", "LP_CLOSE"):
             return False
@@ -4310,6 +4460,8 @@ class StrategyRunner:
                 entry=entry,
                 intent_type_str=intent_type_str,
                 protocol=protocol,
+                chain=chain,
+                wallet_address=wallet_address,
             )
 
         # Path-applicability gate — boot guard, protocol family, chain truth
@@ -4323,7 +4475,7 @@ class StrategyRunner:
         # to ``False`` on miss with an INFO log inside the helper. Protocol
         # is threaded through so Slipstream forks select the correct NPM
         # address AND the correct receipt parser class (VIB-4305).
-        chain_resolved = self._registry_resolve_chain_and_nft_manager(strategy, intent_type_str, protocol)
+        chain_resolved = self._registry_resolve_chain_and_nft_manager(strategy, intent_type_str, protocol, chain=chain)
         if chain_resolved is None:
             return False
         chain, nft_manager = chain_resolved
@@ -4401,8 +4553,16 @@ class StrategyRunner:
         entry: Any,
         intent_type_str: str,
         protocol: str,
+        chain: str | None = None,
+        wallet_address: str | None = None,
     ) -> bool:
         """Route a Uniswap V4 LP_OPEN / LP_CLOSE through ``save_ledger_and_registry``.
+
+        VIB-5670: ``chain`` / ``wallet_address`` are the explicit per-leg identity
+        from the multi-chain lane; ``None`` (single-chain) falls back to the
+        strategy/config derivation (byte-identical). The V4 registry identity is
+        keyed on chain + PositionManager + pool_id, so ``wallet_address`` is
+        accepted for lane-call uniformity but not consumed here.
 
         VIB-4583 — the V4 sibling of :meth:`_maybe_save_ledger_with_registry`.
         Structurally identical: gate on the V4 cutover (``Primitive.LP_V4`` /
@@ -4424,18 +4584,21 @@ class StrategyRunner:
         from almanak.framework.primitives.types import Primitive
         from almanak.framework.runner.cutover import is_cutover_active
 
+        # ``wallet_address`` is accepted for multi-chain lane-call uniformity but
+        # the V4 registry identity does not key on it (forwarded, not consumed).
+        _ = wallet_address
         if not is_cutover_active(self, Primitive.LP_V4, "lp_v4"):
             return False
 
         # Resolve chain + V4 PositionManager. ``_nft_manager_for_protocol_chain``
         # has a V4 branch (membership-gated) returning the per-chain
         # PositionManager, or ``None`` (fail-closed) for an unknown chain.
-        chain_resolved = self._registry_resolve_chain_and_nft_manager(strategy, intent_type_str, protocol)
+        chain_resolved = self._registry_resolve_chain_and_nft_manager(strategy, intent_type_str, protocol, chain=chain)
         if chain_resolved is None:
             # Missing-PositionManager fallback: skip the registry row, WARN, and
             # continue (the helper already INFO-logged the (protocol, chain) miss;
             # emit the V4-specific structured WARN for observability).
-            chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
+            chain = (chain or getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
             logger.warning(
                 "v4_registry_no_position_manager: no V4 PositionManager known for "
                 "chain=%r (deployment_id=%s); skipping registry row, continuing on "
@@ -4567,8 +4730,16 @@ class StrategyRunner:
         entry: Any,
         intent_type_str: str,
         post_state: dict | None = None,
+        chain: str | None = None,
+        wallet_address: str | None = None,
     ) -> bool:
         """Route a lending SUPPLY / BORROW / WITHDRAW / REPAY through ``save_ledger_and_registry``.
+
+        VIB-5670: ``chain`` / ``wallet_address`` are the explicit per-leg identity
+        from the multi-chain lane; ``None`` (single-chain) falls back to the
+        strategy/config derivation (byte-identical). The lending registry identity
+        is keyed on chain + protocol + market + leg, so ``wallet_address`` is
+        accepted for lane-call uniformity but not consumed here.
 
         TD-04 (VIB-5462) — the lending sibling of
         :meth:`_maybe_save_ledger_with_registry`. Persists the on-chain
@@ -4605,8 +4776,10 @@ class StrategyRunner:
             return False
         # ``success`` is forwarded only for telemetry; do NOT gate on it (audit
         # P1: slippage / reconciliation can flip it False post-confirmation, but
-        # the registry must still record the landed state).
+        # the registry must still record the landed state). ``wallet_address``
+        # (VIB-5670) is accepted for lane-call uniformity but not consumed here.
         _ = success
+        _ = wallet_address
         if not is_cutover_active(self, Primitive.LENDING, "lending"):
             return False
         protocol = (getattr(intent, "protocol", "") or "").lower()
@@ -4625,7 +4798,7 @@ class StrategyRunner:
             )
             return False
 
-        chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
+        chain = (chain or getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
         if not chain:
             return False
         token = self._lending_intent_market_token(intent, intent_type_str)
@@ -4826,8 +4999,16 @@ class StrategyRunner:
         success: bool,
         entry: Any,
         intent_type_str: str,
+        chain: str | None = None,
+        wallet_address: str | None = None,
     ) -> bool:
         """Route a Pendle PT / LP action through ``save_ledger_and_registry``.
+
+        VIB-5670: ``chain`` / ``wallet_address`` are the explicit per-leg identity
+        from the multi-chain lane; ``None`` (single-chain) falls back to the
+        strategy/config derivation (byte-identical). The Pendle registry identity
+        is keyed on chain + anchor + kind, so ``wallet_address`` is accepted for
+        lane-call uniformity but not consumed here.
 
         TD-03 (VIB-5461) — the Pendle sibling of
         :meth:`_maybe_save_ledger_with_registry`. Persists the on-chain
@@ -4860,12 +5041,14 @@ class StrategyRunner:
             return False
         # ``success`` is forwarded only for telemetry; do NOT gate on it (audit
         # P1: slippage / reconciliation can flip it False post-confirmation, but
-        # the registry must still record the landed state).
+        # the registry must still record the landed state). ``wallet_address``
+        # (VIB-5670) is accepted for lane-call uniformity but not consumed here.
         _ = success
+        _ = wallet_address
         if not is_cutover_active(self, Primitive.SWAP, "pendle"):
             return False
 
-        chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
+        chain = (chain or getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
         if not chain:
             return False
 
@@ -5029,8 +5212,16 @@ class StrategyRunner:
         success: bool,
         entry: Any,
         intent_type_str: str,
+        chain: str | None = None,
+        wallet_address: str | None = None,
     ) -> bool:
         """Route a perp PERP_OPEN / PERP_CLOSE through ``save_ledger_and_registry``.
+
+        VIB-5670: ``chain`` / ``wallet_address`` are the explicit per-leg identity
+        from the multi-chain lane; ``None`` (single-chain) falls back to the
+        strategy/config derivation (byte-identical). The perp registry identity is
+        keyed on chain + protocol + venue position key, so ``wallet_address`` is
+        accepted for lane-call uniformity but not consumed here.
 
         TD-02 (VIB-5460) — the perp sibling of
         :meth:`_maybe_save_ledger_with_registry` /
@@ -5062,8 +5253,10 @@ class StrategyRunner:
             return False
         # ``success`` is forwarded only for telemetry; do NOT gate on it (audit
         # P1: slippage / reconciliation can flip it False post-confirmation, but
-        # the registry must still record the landed state).
+        # the registry must still record the landed state). ``wallet_address``
+        # (VIB-5670) is accepted for lane-call uniformity but not consumed here.
         _ = success
+        _ = wallet_address
         if not is_cutover_active(self, Primitive.PERP, "perp"):
             return False
         protocol = (getattr(intent, "protocol", "") or "").lower()
@@ -5078,7 +5271,7 @@ class StrategyRunner:
             )
             return False
 
-        chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
+        chain = (chain or getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
         if not chain:
             return False
         position_key = self._perp_position_key(result, intent)
@@ -5538,6 +5731,7 @@ class StrategyRunner:
         price_oracle: dict | None,
         post_state: dict | None,
         pre_state: dict | None = None,
+        wallet_address: str | None = None,
     ) -> None:
         """VIB-2775 / VIB-3919 / VIB-4085 — build a position_event from a
         successful intent result and persist it, then run the OPEN/CLOSE
@@ -5556,10 +5750,17 @@ class StrategyRunner:
             # runtime config first (the runner-side source of truth) and
             # fall back to the strategy's declared wallet so dry-run /
             # paper paths still produce a deterministic position_id.
-            wallet_address = (
-                getattr(getattr(self, "_runtime_config", None), "wallet_address", "")
-                or getattr(strategy, "wallet_address", "")
-                or ""
+            # VIB-5670 — an explicit per-leg ``wallet_address`` (multi-chain
+            # lane) wins; ``None`` (single-chain default) preserves the existing
+            # runtime-config → strategy precedence byte-for-byte.
+            eff_wallet = (
+                wallet_address
+                if wallet_address is not None
+                else (
+                    getattr(getattr(self, "_runtime_config", None), "wallet_address", "")
+                    or getattr(strategy, "wallet_address", "")
+                    or ""
+                )
             )
 
             # VIB-4839 — durable-storage fallback for LP_CLOSE column
@@ -5611,7 +5812,7 @@ class StrategyRunner:
                 # VIB-4493: lending CLOSE value_usd derives pre-close
                 # balance from pre_state (post-state is 0 at CLOSE).
                 pre_state=pre_state,
-                wallet_address=wallet_address,
+                wallet_address=eff_wallet,
             )
             if pos_event is None:
                 return
@@ -5720,6 +5921,9 @@ class StrategyRunner:
         intent: "AnyIntent",
         ledger_entry_id: str,
         resolved_pool: str | None = None,
+        *,
+        chain: str | None = None,
+        wallet_address: str | None = None,
     ) -> None:
         """Write accounting_outbox row and fire asyncio task to drain it (VIB-3467).
 
@@ -5749,8 +5953,16 @@ class StrategyRunner:
             if not intent_type_str:
                 return
 
-            chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
-            wallet_address = getattr(strategy, "wallet_address", "") or ""
+            # VIB-5670: explicit per-leg chain / wallet from the multi-chain lane;
+            # ``None`` (single-chain) falls back to the strategy/config derivation
+            # so the outbox row + position_key are byte-identical to the pre-5670
+            # path.
+            chain = (
+                chain if chain is not None else (getattr(strategy, "chain", "") or getattr(self.config, "chain", ""))
+            )
+            wallet_address = (
+                wallet_address if wallet_address is not None else (getattr(strategy, "wallet_address", "") or "")
+            )
             deployment_id = strategy.deployment_id
             cycle_id = get_cycle_id() or ""
 
@@ -5819,6 +6031,332 @@ class StrategyRunner:
                 ) from e
             # VIB-3762 §C2: lift non-live outbox failures to ERROR.
             logger.error("_write_outbox_and_fire_processor failed (non-live)", exc_info=True)
+
+    def _adapt_leg_to_execution_result(self, leg: Any) -> tuple[ExecutionResult, list[TransactionResult]]:
+        """Normalize a multi-chain leg result to the single-chain shape (VIB-5670).
+
+        The multi-chain lane produces per-leg
+        :class:`~almanak.framework.execution.multichain.IntentExecutionResult`
+        objects whose ``tx_result`` is either a ``GatewayExecutionResult``
+        (gateway orchestrator) or a ``TransactionExecutionResult`` (local
+        chain executor). Every shared accounting surface — the enricher, the
+        ledger builder, the outbox, position events — consumes the single-chain
+        :class:`ExecutionResult` shape, so this adapts both leg shapes into it
+        and returns ``(execution_result, transaction_results)``.
+
+        - ``GatewayExecutionResult`` already exposes a ``transaction_results``
+          property (receipts → ``TransactionResult`` with logs), so it is reused
+          verbatim; gas is taken from its ``total_gas_used`` /
+          ``total_gas_cost_wei`` (the derived Σ that feeds ``gas_usd``).
+        - ``TransactionExecutionResult`` is a single confirmed tx; it is wrapped
+          into one ``TransactionResult`` carrying its receipt + gas.
+
+        Only success-path legs are adapted here (Stage 2/3 gate on
+        ``leg.success`` before calling); the built ``ExecutionResult`` is stamped
+        ``success=True`` / ``phase=COMPLETE`` so the enricher's fail-closed path
+        reads the receipts. Raises ``TypeError`` on an unrecognised
+        ``tx_result`` shape (never silently fabricates an empty result).
+        """
+        from ..execution.chain_executor import TransactionExecutionResult
+        from ..execution.gateway_orchestrator import GatewayExecutionResult
+
+        tx_result = getattr(leg, "tx_result", None)
+
+        if isinstance(tx_result, GatewayExecutionResult):
+            tx_results = list(tx_result.transaction_results)
+            execution_result = ExecutionResult(
+                success=True,
+                phase=ExecutionPhase.COMPLETE,
+                transaction_results=tx_results,
+                total_gas_used=int(getattr(tx_result, "total_gas_used", 0) or 0),
+                total_gas_cost_wei=int(getattr(tx_result, "total_gas_cost_wei", 0) or 0),
+            )
+            return execution_result, tx_results
+
+        if isinstance(tx_result, TransactionExecutionResult):
+            tr = TransactionResult(
+                tx_hash=tx_result.tx_hash,
+                success=True,
+                receipt=tx_result.receipt,
+                gas_used=int(getattr(tx_result, "gas_used", 0) or 0),
+                gas_cost_wei=int(getattr(tx_result, "gas_cost_wei", 0) or 0),
+            )
+            execution_result = ExecutionResult(
+                success=True,
+                phase=ExecutionPhase.COMPLETE,
+                transaction_results=[tr],
+                total_gas_used=tr.gas_used,
+                total_gas_cost_wei=tr.gas_cost_wei,
+            )
+            return execution_result, [tr]
+
+        raise TypeError(
+            "_adapt_leg_to_execution_result: unsupported leg tx_result type "
+            f"{type(tx_result).__name__!r} (expected GatewayExecutionResult or "
+            "TransactionExecutionResult)"
+        )
+
+    def _leg_slippage_error(self, intent: "AnyIntent", result: Any | None) -> str:
+        """Return a slippage-breach message for a leg, or ``""`` when within limits.
+
+        Mirrors ``_single_chain_slippage_guard``'s breach detection over the
+        enriched result's ``swap_amounts``, but returns a string rather than
+        steering an ``IterationResult`` — the multi-chain lane persists per leg
+        and does not emit an iteration verdict. ``""`` when the leg is not a swap,
+        has no realized slippage, or is within the configured limit.
+        """
+        swap_amounts = getattr(result, "swap_amounts", None)
+        if not swap_amounts:
+            return ""
+        tx_risk_cfg = getattr(self.execution_orchestrator, "tx_risk_config", None)
+        if tx_risk_cfg:
+            max_slippage = tx_risk_cfg.max_slippage_bps
+        else:
+            intent_slippage = getattr(intent, "max_slippage", None)
+            if isinstance(intent_slippage, int | float | Decimal):
+                max_slippage = int(Decimal(str(intent_slippage)) * 10000)
+            else:
+                max_slippage = 0
+        actual_slippage = swap_amounts.slippage_bps
+        if max_slippage > 0 and actual_slippage is not None and actual_slippage > max_slippage:
+            return (
+                f"Slippage circuit breaker: actual slippage {actual_slippage} bps "
+                f"exceeds limit {max_slippage} bps "
+                f"(swap: {swap_amounts.token_in} -> {swap_amounts.token_out})"
+            )
+        return ""
+
+    def _leg_recon_error(self, recon: dict[str, Any] | None, *, chain: str, deployment_id: str) -> str:
+        """Triage a per-leg reconciliation report into a downgrade marker (VIB-5670).
+
+        Mirrors the single-chain gate: an ENFORCED, non-degraded incident
+        returns the enforcement marker (the leg is downgraded); a DEGRADED
+        incident is never enforced (VIB-3350 — an unpinned/no-receipt read
+        cannot distinguish a real breach from a lagging read); default
+        observation mode warns loudly and returns ``""``.
+        """
+        if not (recon and recon.get("incident")):
+            return ""
+        recon_degraded = bool(recon.get("reconciliation_degraded"))
+        if self.config.reconciliation_enforcement and recon_degraded:
+            logger.error(
+                "Reconciliation incident on a DEGRADED report for %s (multi-chain leg, chain=%s) — "
+                "NOT enforcing (unpinned/no-receipt read cannot distinguish a real breach from a "
+                "lagging read): %s",
+                deployment_id,
+                chain,
+                self._format_reconciliation_error(recon),
+            )
+            return ""
+        if self.config.reconciliation_enforcement:
+            recon_error = f"Reconciliation incident (enforced): {self._format_reconciliation_error(recon)}"
+            logger.error(
+                "Reconciliation incident on multi-chain leg (ENFORCED, chain=%s): %s",
+                chain,
+                recon_error,
+            )
+            return recon_error
+        logger.warning(
+            "Reconciliation incident detected on multi-chain leg (observation mode, "
+            "enforcement disabled, chain=%s): %s",
+            chain,
+            self._format_reconciliation_error(recon),
+        )
+        return ""
+
+    async def _persist_executed_leg(
+        self,
+        *,
+        strategy: "StrategyProtocol",
+        intent: "AnyIntent",
+        chain: str,
+        wallet_address: str,
+        execution_result: ExecutionResult,
+        execution_context: Any,
+        settlement_status: Literal["settled", "degraded", "failed"] = "settled",
+        run_recon: bool = True,
+        run_slippage_guard: bool = True,
+        record_metrics: bool = False,
+        bundle_metadata: dict[str, Any] | None = None,
+        price_oracle: dict | None = None,
+        pre_snapshot: Any | None = None,
+    ) -> str:
+        """Run the shared accounting sequence for one executed multi-chain leg (VIB-5670).
+
+        This is the multi-chain lane's OWN orchestration — the parameterized
+        analogue of ``_single_chain_handle_success``'s post-execution body
+        (enrich → recon → ledger → outbox+fire → sidecar → notify), threaded with
+        an explicit per-leg ``chain`` / ``wallet_address`` so each leg's rows land
+        under the chain it executed on. ``_single_chain_handle_success`` is NOT
+        routed through here and is left byte-for-byte untouched.
+
+        Stage 1 defines + unit-tests this helper; it is NOT yet wired into
+        ``_execute_multi_chain`` / the bridge-wait path (Stage 2/3).
+
+        Sequence:
+
+        1. Enrich the leg's ``ExecutionResult`` via ``ResultEnricher`` (same
+           construction shape as the single-chain success path — pool-key + Curve
+           pool-meta lookups bound to this runner's gateway client). A
+           ``CriticalAccountingError`` propagates (fail-closed); other enrichment
+           errors degrade to a WARNING.
+        2. POST reconciliation only when a ``pre_snapshot`` is supplied (Stage 2
+           captures it before broadcast). No pre-snapshot ⇒ skip recon — Empty ≠
+           Zero, never a fabricated false-clean verdict. The recon reads bind to
+           the leg's own chain via ``_balance_provider_for_chain(chain)``.
+        3. ``_write_ledger_entry(..., chain=chain, wallet_address=wallet_address)``
+           — fail-closed in live mode exactly as today (``AccountingPersistenceError``
+           is NOT swallowed; it propagates).
+        4. ``_write_outbox_and_fire_processor(..., chain=chain, wallet_address=...)``.
+        5. Sidecar append with the per-leg ``chain``.
+        6. ``_notify_intent_executed`` fired exactly once with the ENRICHED result.
+        7. ``_record_success`` only when ``record_metrics`` (the lane records once
+           per iteration, not per leg).
+
+        ``settlement_status`` handling: when not ``"settled"`` (Stage 3 bridge legs
+        whose destination settlement degraded / failed), the ledger row is stamped
+        with a settlement-degraded marker (``success=False`` + ``error``) and the
+        user-facing success callback is NOT fired — but ``framework_success=True``
+        is passed so framework trackers still reflect on-chain reality (the source
+        leg landed). A per-leg slippage breach downgrades the same way, and so does
+        an ENFORCED reconciliation incident (``reconciliation_enforcement=True`` +
+        a non-degraded incident report — mirroring the single-chain gate at
+        ``_single_chain_handle_success``; a DEGRADED incident is never enforced,
+        VIB-3350, and observation mode only warns).
+
+        Returns the downgrade marker (``""`` when the leg is a clean user-facing
+        success). Callers use it for lane-level flow control: the same-chain lane
+        fail-stops the remaining legs on any downgrade (design v3 #3 — "fail-stops
+        on incident/breach"); the bridge lane logs and continues (its sequence-halt
+        interaction with ``failed_at_step_index`` re-execution semantics is
+        deferred — a halt marker there would instruct a re-broadcast on resume).
+        """
+        settled = settlement_status == "settled"
+
+        # 1. Enrich — mirror _single_chain_handle_success's enricher construction
+        # (do NOT modify that method; this replicates its call shape per-leg).
+        if execution_result is not None and execution_context is not None:
+            try:
+                pool_key_lookup = self._build_pool_key_lookup()
+                curve_pool_meta_lookup = self._build_curve_pool_meta_lookup()
+                enricher = ResultEnricher(
+                    live_mode=self._is_live_mode(),
+                    pool_key_lookup=pool_key_lookup,
+                    pool_meta_lookup=curve_pool_meta_lookup,
+                )
+                execution_result = enricher.enrich(
+                    execution_result,
+                    intent,
+                    execution_context,
+                    bundle_metadata=bundle_metadata,
+                )
+            except CriticalAccountingError:
+                # Fail-closed (VIB-3180): a receipt-parse failure is
+                # accounting-broken; let run_iteration convert it upstream.
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Result enrichment failed (multi-chain leg): {e}")
+
+        # 2. Post-execution reconciliation — only when a pre-snapshot exists.
+        # An ENFORCED, non-degraded incident downgrades the leg (mirrors the
+        # single-chain gate: enforcement turns a landed tx into a recon
+        # failure; degraded reports are never enforced — VIB-3350; default
+        # observation mode warns loudly and continues).
+        recon = None
+        if run_recon and pre_snapshot is not None:
+            recon = await self._reconcile_post_execution_balances(
+                strategy,
+                intent,
+                execution_result,
+                pre_snapshot=pre_snapshot,
+                balance_provider=self._balance_provider_for_chain(chain),
+            )
+        recon_error = self._leg_recon_error(recon, chain=chain, deployment_id=strategy.deployment_id)
+
+        # 3. Slippage guard (best-effort, per-leg). A breach flips the leg to a
+        # framework-success / user-failure verdict (the source tx still landed).
+        slippage_error = self._leg_slippage_error(intent, execution_result) if run_slippage_guard else ""
+
+        # Resolve the user-facing verdict + a downgrade marker. The marker is
+        # stamped on the ledger row via success=False + error (no new schema —
+        # DB schema is owned out-of-repo); position events still emit because
+        # result.success stays True (chain reality moved).
+        user_success = settled and not slippage_error and not recon_error
+        if slippage_error:
+            marker = slippage_error
+        elif recon_error:
+            marker = recon_error
+        elif not settled:
+            marker = f"settlement_{settlement_status}"
+        else:
+            marker = ""
+        if marker and execution_result is not None and not getattr(execution_result, "error", None):
+            execution_result.error = marker
+
+        intent_protocol = (getattr(intent, "protocol", "") or "").lower()
+        pre_state = _build_pre_state_for_ledger(pre_snapshot, None, protocol=intent_protocol)
+        post_state = _build_post_state_for_ledger(recon, None, protocol=intent_protocol)
+
+        # 3./4. Ledger + outbox with the explicit per-leg chain / wallet. Live-mode
+        # persistence failures propagate (fail-closed) — NOT swallowed here.
+        ledger_entry_id = await self._write_ledger_entry(
+            strategy,
+            intent,
+            result=execution_result,
+            success=user_success,
+            error=marker,
+            price_oracle=price_oracle,
+            pre_state=pre_state,
+            post_state=post_state,
+            chain=chain,
+            wallet_address=wallet_address,
+        )
+        if ledger_entry_id:
+            resolved_pool = (bundle_metadata or {}).get("pool_name")
+            await self._write_outbox_and_fire_processor(
+                strategy,
+                intent,
+                ledger_entry_id,
+                resolved_pool=resolved_pool,
+                chain=chain,
+                wallet_address=wallet_address,
+            )
+
+        # 5. Sidecar append (best-effort) with the per-leg chain.
+        try:
+            from ..accounting.sidecar import AccountingSidecarWriter
+
+            AccountingSidecarWriter().append(
+                deployment_id=strategy.deployment_id,
+                intent=intent,
+                result=execution_result,
+                chain=chain,
+                price_oracle=price_oracle,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("Sidecar import/call failed (non-blocking, multi-chain leg)", exc_info=True)
+
+        # 7. Metrics — the lane records once per iteration, not per leg. The
+        # metric follows the USER verdict: a downgraded leg (slippage / enforced
+        # recon / degraded settlement) must never tick the success counter.
+        if record_metrics:
+            if user_success:
+                self._record_success(execution_proved=True)
+            else:
+                self._record_failure()
+
+        # 6. Notify — fired exactly once with the ENRICHED result. framework_success
+        # is always True (the source-chain tx landed); user_success carries the
+        # slippage / recon / settlement verdict so a degraded leg does NOT report
+        # success to the strategy callback.
+        self._notify_intent_executed(
+            strategy,
+            intent,
+            user_success,
+            execution_result,
+            framework_success=True,
+        )
+        return marker
 
     async def commit_teardown_intent(
         self,
@@ -9049,8 +9587,6 @@ class StrategyRunner:
                 duration_ms=self._calculate_duration_ms(start_time),
             )
 
-        first_intent = intents[0] if intents else None
-
         # If there are cross-chain intents, use PlanExecutor with bridge waiting
         if has_cross_chain:
             return await self._execute_with_bridge_waiting(
@@ -9062,42 +9598,263 @@ class StrategyRunner:
                 price_oracle=price_oracle,
             )
 
-        # For same-chain only flows, use direct execute_sequence (faster)
-        multi_result = await orchestrator.execute_sequence(intents, price_map=price_map, price_oracle=price_oracle)
+        # Same-chain only flows (VIB-5670 Stage 2): the runner drives the legs
+        # itself — capture-pre → broadcast → persist → fail-stop — so every
+        # executed leg lands in the shared accounting pipeline. The previous
+        # ``execute_sequence`` call broadcast every leg and then built an
+        # ``IterationResult`` with NO ``execution_result`` and NO accounting
+        # writes: real positions were minted with zero ledger / position_events
+        # rows, ``decide()`` re-opened every iteration (unbounded wallet drain),
+        # and teardown had nothing to discover. ``execute_sequence`` remains for
+        # its non-accounting tool/test callers.
+        return await self._execute_same_chain_legs(
+            strategy=strategy,
+            intents=intents,
+            orchestrator=orchestrator,
+            start_time=start_time,
+            price_map=price_map,
+            price_oracle=price_oracle,
+        )
 
-        # Always invalidate balance cache after execution (success or failure)
-        self.balance_provider.invalidate_cache()
+    @staticmethod
+    def _leg_amount_received(leg: Any, executed_intent: "AnyIntent") -> Decimal | None:
+        """Amount received by an executed leg, for ``amount='all'`` chaining (VIB-5670).
 
-        if multi_result.success:
-            logger.info(
-                f"Multi-chain execution successful for {deployment_id}: "
-                f"{multi_result.successful_count}/{len(intents)} succeeded, "
-                f"chains={list(multi_result.chains_used)}, "
-                f"time={multi_result.total_execution_time_ms:.0f}ms"
+        Mirrors ``execute_sequence``'s tracking: prefer the tx_result's
+        ``actual_amount_received``; fall back to the executed intent's own
+        resolved amount; ``None`` when neither is available.
+
+        VIB-4062 no-bifurcation: ``get_amount_field`` returns
+        ``ChainedAmount | None`` where ``ChainedAmount = Decimal | Literal["all"]``.
+        The sentinel is discriminated by VALUE (``!= "all"``), never by class —
+        an unresolved ``"all"`` here means the chaining contract broke upstream.
+        """
+        tx_result = getattr(leg, "tx_result", None)
+        if tx_result is not None and hasattr(tx_result, "actual_amount_received"):
+            return tx_result.actual_amount_received
+        amount_field = Intent.get_amount_field(executed_intent)
+        if amount_field is not None and amount_field != "all":
+            return cast(Decimal, amount_field)
+        return None
+
+    def _resolve_same_chain_leg_amount(
+        self,
+        intent: "AnyIntent",
+        previous_amount_received: Decimal | None,
+    ) -> tuple["AnyIntent | None", str]:
+        """Resolve ``amount='all'`` chaining for one same-chain leg (VIB-5670).
+
+        Returns ``(intent_to_execute, error)`` — exactly one is set. Mirrors
+        ``execute_sequence``'s chaining with the bridge lane's VIB-5346
+        carve-out: an LP_CLOSE ``amount='all'`` on a connector without fungible
+        close-chaining support must NEVER have the swap-output amount resolved
+        into its ``position_id`` (a position identity, not a fungible amount) —
+        the marker is left unresolved so the per-connector compiler guard
+        rejects it rather than silently re-pointing the close at a garbage
+        identity.
+        """
+        if not Intent.has_chained_amount(intent):
+            return intent, ""
+
+        from ..strategies.lp_position_tracker import lp_close_amount_chaining_supported
+
+        is_nonfungible_lp_close = getattr(
+            intent, "intent_type", None
+        ) == IntentType.LP_CLOSE and not lp_close_amount_chaining_supported(getattr(intent, "protocol", None))
+        if is_nonfungible_lp_close:
+            logger.error(
+                "LP_CLOSE amount='all' chaining is not supported for protocol "
+                "'%s' on the same-chain multi-chain path; leaving marker "
+                "unresolved so the compiler guard rejects it.",
+                getattr(intent, "protocol", None),
+            )
+            return intent, ""
+
+        if previous_amount_received is None:
+            return None, "amount='all' used but no previous step amount available"
+
+        logger.info(f"Resolving amount='all' to {previous_amount_received} for intent {intent.intent_id[:8]}...")
+        return Intent.set_resolved_amount(intent, previous_amount_received), ""
+
+    async def _execute_same_chain_legs(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        intents: list[AnyIntent],
+        orchestrator: MultiChainOrchestrator,
+        start_time: datetime,
+        price_map: dict[str, str] | None = None,
+        price_oracle: dict | None = None,
+    ) -> IterationResult:
+        """Runner-driven per-leg loop for same-chain multi-chain flows (VIB-5670 Stage 2).
+
+        For each intent: resolve amount-chaining → capture a pre-broadcast
+        balance snapshot on the leg's OWN chain (gateway-backed, Stage 0) →
+        broadcast the single leg → persist it through the shared accounting
+        pipeline (``_persist_executed_leg``: enrich → recon → ledger → outbox →
+        sidecar → notify) BEFORE the next leg broadcasts.
+
+        Failure semantics (design v2 #4): a live-mode
+        ``AccountingPersistenceError`` / ``CriticalAccountingError`` from the
+        persistence step propagates — fail-stop, no further leg broadcasts;
+        ``run_iteration`` converts it to ``ACCOUNTING_FAILED`` + operator
+        alert. Already-persisted legs keep their rows (real money is never
+        rolled back). An execution failure notifies the strategy with
+        ``success=False`` and fails the iteration.
+
+        The returned ``execution_result`` is a receipt-count / gas SUMMARY
+        aggregate for iteration-level consumers only (NOOP gate,
+        iteration_summary) — NOT a financial source of truth. Per-leg financial
+        truth lives in the ledger / position_events / accounting_events rows
+        written above (design v2 #5). ``_record_success`` fires exactly once
+        per iteration (issue #1780).
+        """
+        from ..intents.intent_errors import InvalidAmountError
+        from ..observability.context import get_cycle_id
+
+        deployment_id = strategy.deployment_id
+        first_intent = intents[0] if intents else None
+
+        # First-leg guard mirrors ``execute_sequence``: amount='all' on the
+        # first step has no previous output to reference. Raised BEFORE any
+        # broadcast; escapes to run_iteration's generic handler (pre-5670 the
+        # same InvalidAmountError escaped from execute_sequence).
+        if first_intent is not None and Intent.has_chained_amount(first_intent):
+            intent_type = first_intent.intent_type.value if hasattr(first_intent, "intent_type") else "Unknown"
+            raise InvalidAmountError(
+                intent_type=intent_type,
+                reason="amount='all' cannot be used on the first step of a sequence "
+                "because there is no previous step output to reference",
             )
 
-            self._record_success(execution_proved=True)
-            return IterationResult(
-                status=IterationStatus.SUCCESS,
-                intent=first_intent,
-                deployment_id=deployment_id,
-                duration_ms=self._calculate_duration_ms(start_time),
-            )
-        else:
-            # Aggregate errors from all chains
-            error_msgs = []
-            for chain, errors in multi_result.errors_by_chain.items():
-                error_msgs.extend([f"[{chain}] {e}" for e in errors])
-            error_summary = "; ".join(error_msgs) if error_msgs else "Unknown error"
+        leg_tx_results: list[TransactionResult] = []
+        total_gas_used = 0
+        total_gas_cost_wei = 0
+        previous_amount_received: Decimal | None = None
+        error_summary = ""
+        persisted_count = 0
 
+        try:
+            for intent in intents:
+                intent_to_execute, chain_error = self._resolve_same_chain_leg_amount(intent, previous_amount_received)
+                if intent_to_execute is None:
+                    leg_chain = Intent.get_chain(intent) or orchestrator.primary_chain
+                    error_summary = f"[{leg_chain}] {chain_error}"
+                    break
+
+                leg_chain = Intent.get_chain(intent_to_execute) or orchestrator.primary_chain
+
+                # Pre-broadcast snapshot on the leg's OWN chain. A ``None``
+                # provider (local mode, no gateway, non-primary leg) skips the
+                # snapshot — recon then degrades to unmeasured (Empty ≠ Zero)
+                # instead of reading balances from the wrong chain. In hosted /
+                # live mode ``_balance_provider_for_chain`` raises fail-closed
+                # before anything broadcasts.
+                pre_snapshot = None
+                leg_provider = self._balance_provider_for_chain(leg_chain)
+                if leg_provider is not None:
+                    pre_snapshot = await self._snapshot_balances_for_intent(
+                        intent_to_execute, balance_provider=leg_provider
+                    )
+
+                # Broadcast this single leg.
+                leg = await orchestrator.execute(intent_to_execute, price_map=price_map, price_oracle=price_oracle)
+
+                if not leg.success:
+                    error_summary = f"[{leg.chain}] {leg.error or 'Unknown error'}"
+                    logger.warning(
+                        f"Multi-chain leg failed at intent {intent_to_execute.intent_id[:8]}..., "
+                        f"chain={leg.chain}: {leg.error}"
+                    )
+                    self._notify_intent_executed(strategy, intent_to_execute, False, None)
+                    break
+
+                # Persist THIS leg before the next one broadcasts (fail-stop:
+                # accounting errors propagate out of the try, through the
+                # cache-invalidation finally, to run_iteration's handler).
+                execution_result = None
+                leg_wallet = self._multichain_wallet_for(leg_chain) or getattr(strategy, "wallet_address", "") or ""
+                execution_context = ExecutionContext(
+                    deployment_id=deployment_id,
+                    chain=leg_chain,
+                    wallet_address=leg_wallet,
+                    correlation_id=intent_to_execute.intent_id,
+                    cycle_id=get_cycle_id() or "",
+                    protocol=getattr(intent_to_execute, "protocol", None),
+                )
+                try:
+                    execution_result, tx_results = self._adapt_leg_to_execution_result(leg)
+                    leg_marker = await self._persist_executed_leg(
+                        strategy=strategy,
+                        intent=intent_to_execute,
+                        chain=leg_chain,
+                        wallet_address=leg_wallet,
+                        execution_result=execution_result,
+                        execution_context=execution_context,
+                        run_recon=True,
+                        run_slippage_guard=True,
+                        record_metrics=False,
+                        price_oracle=price_oracle,
+                        pre_snapshot=pre_snapshot,
+                    )
+                except Exception:
+                    # The leg's broadcast is CONFIRMED on-chain but its durable
+                    # record failed (fail-closed halt follows). Before
+                    # re-raising, fire the one notify with the framework-vs-user
+                    # split (framework_success=True: trackers + strategy state
+                    # must reflect chain reality) and persist strategy state —
+                    # otherwise the NEXT iteration's decide() re-opens the
+                    # position it already holds (duplicate broadcast) before
+                    # the consecutive-error breaker halts the loop. The
+                    # same-chain lane has no ExecutionProgress resume to skip
+                    # the step; strategy/tracker state IS the re-open guard.
+                    self._notify_intent_executed(
+                        strategy,
+                        intent_to_execute,
+                        False,
+                        execution_result,
+                        framework_success=True,
+                    )
+                    if hasattr(strategy, "save_state"):
+                        try:
+                            strategy.save_state()
+                        except Exception as save_err:  # noqa: BLE001
+                            logger.warning("save_state failed while halting on a persistence error: %s", save_err)
+                    raise
+                total_gas_used += execution_result.total_gas_used
+                total_gas_cost_wei += execution_result.total_gas_cost_wei
+                leg_tx_results.extend(tx_results)
+                persisted_count += 1
+
+                if leg_marker:
+                    # Enforced recon incident / slippage breach / degraded
+                    # settlement on THIS leg: the leg is persisted (row carries
+                    # the downgrade marker) and the strategy heard success=False
+                    # — do not broadcast further legs on a failed verdict
+                    # (design v3 #3: fail-stop on incident/breach).
+                    error_summary = f"[{leg_chain}] {leg_marker}"
+                    logger.error(
+                        f"Multi-chain leg downgraded at intent {intent_to_execute.intent_id[:8]}..., "
+                        f"chain={leg_chain}: {leg_marker} — halting remaining legs"
+                    )
+                    break
+
+                previous_amount_received = self._leg_amount_received(leg, intent_to_execute)
+        finally:
+            # Always invalidate balance caches after execution — success, leg
+            # failure, or a propagating accounting error (pre-5670 parity: the
+            # lane invalidated unconditionally after execute_sequence).
+            self.balance_provider.invalidate_cache()
+            for provider in self._leg_balance_providers.values():
+                if hasattr(provider, "invalidate_cache"):
+                    provider.invalidate_cache()
+
+        if error_summary:
             logger.error(
                 f"Multi-chain execution failed for {deployment_id}: "
-                f"{multi_result.failed_count}/{len(intents)} failed: {error_summary}"
+                f"{persisted_count}/{len(intents)} legs persisted before failure: {error_summary}"
             )
-
-            # Issue #1780: mirror the ``_record_success`` call on the
-            # success branch above (line ~3080) so the failed multi-chain
-            # iteration ticks the lifetime counter exactly once.
+            # Issue #1780: tick the lifetime counter exactly once per iteration.
             self._record_failure()
             return IterationResult(
                 status=IterationStatus.EXECUTION_FAILED,
@@ -9106,6 +9863,26 @@ class StrategyRunner:
                 deployment_id=deployment_id,
                 duration_ms=self._calculate_duration_ms(start_time),
             )
+
+        logger.info(
+            f"Multi-chain execution successful for {deployment_id}: "
+            f"{persisted_count}/{len(intents)} legs executed and persisted"
+        )
+        aggregate = ExecutionResult(
+            success=True,
+            phase=ExecutionPhase.COMPLETE,
+            transaction_results=leg_tx_results,
+            total_gas_used=total_gas_used,
+            total_gas_cost_wei=total_gas_cost_wei,
+        )
+        self._record_success(execution_proved=True)
+        return IterationResult(
+            status=IterationStatus.SUCCESS,
+            intent=first_intent,
+            execution_result=aggregate,
+            deployment_id=deployment_id,
+            duration_ms=self._calculate_duration_ms(start_time),
+        )
 
     async def _execute_with_bridge_waiting(
         self,
@@ -9254,6 +10031,49 @@ class StrategyRunner:
                 # Save initial progress with serialized intents
                 await self._save_execution_progress(deployment_id, state.progress)
 
+        # VIB-5670 Stage 3: an accounting-pending step's broadcast is CONFIRMED
+        # on-chain but its ledger/outbox write never landed (live-mode halt).
+        # ``next_step_to_execute`` already advances PAST it (never re-broadcast
+        # — a re-execute would duplicate the source tx). Surface the missing
+        # durable record loudly: operator alert + deferred-write log. Auto-
+        # replay of the deferred ledger write is an explicit documented
+        # follow-up (design v4 #1), not this path — the invariant here is
+        # "no duplicate broadcast + money-sent is visible".
+        if state.progress is not None and state.progress.is_accounting_pending:
+            pending_idx = state.progress.accounting_pending_step_index
+            logger.error(
+                "Resuming with ACCOUNTING-PENDING step %s for %s: its broadcast is "
+                "confirmed on-chain but the accounting write failed before the halt. "
+                "The step will NOT be re-broadcast; its ledger/outbox record needs "
+                "operator-assisted replay (see deferred-write log).",
+                (pending_idx or 0) + 1,
+                deployment_id,
+            )
+            from ..accounting.deferred_log import append_now
+            from ..observability.context import get_cycle_id
+
+            append_now(
+                kind="accounting_pending_replay",
+                deployment_id=deployment_id,
+                cycle_id=get_cycle_id() or "",
+                error=(
+                    f"accounting_pending_step_index={pending_idx}: broadcast confirmed, "
+                    "accounting write missing; replay required"
+                ),
+                extra={"execution_id": state.progress.execution_id},
+            )
+            await self._alert_accounting_failure(
+                state.strategy,
+                AccountingPersistenceError(
+                    "ledger",
+                    deployment_id=deployment_id,
+                    message=(
+                        f"Accounting-pending step {(pending_idx or 0) + 1} resumed: broadcast "
+                        "confirmed on-chain, durable accounting record missing (VIB-5670)"
+                    ),
+                ),
+            )
+
         logger.info(
             f"Executing {len(intents)} intents with bridge waiting for {deployment_id} "
             f"(starting from step {state.start_step_index + 1})"
@@ -9264,13 +10084,203 @@ class StrategyRunner:
         # steps.
         state.successful_count = state.start_step_index
 
-    async def _bridge_wait_process_intent(self, state: BridgeWaitState, i: int) -> bool:  # noqa: C901
+    async def _bridge_wait_capture_pre_snapshot(
+        self, intent_to_execute: "AnyIntent", *, chain: str, is_cross_chain: bool
+    ) -> Any | None:
+        """Pre-broadcast balance snapshot on the leg's OWN chain (VIB-5670 Stage 3).
+
+        Blueprint 02 §Multi-Chain Accounting: the "capture-pre" step for
+        same-chain-leg reconciliation. Cross-chain BRIDGE legs keep degraded
+        recon — destination settlement is async, there is no synchronous
+        post-snapshot to reconcile against (design v3 #3). A ``None`` provider
+        (local mode, no gateway, non-primary leg) skips the snapshot: recon
+        degrades to unmeasured (Empty != Zero) instead of reading balances
+        from the wrong chain.
+        """
+        pre_snapshot = None
+        if not is_cross_chain:
+            leg_provider = self._balance_provider_for_chain(chain)
+            if leg_provider is not None:
+                pre_snapshot = await self._snapshot_balances_for_intent(
+                    intent_to_execute, balance_provider=leg_provider
+                )
+        return pre_snapshot
+
+    async def _bridge_wait_settle_cross_chain(
+        self,
+        state: BridgeWaitState,
+        *,
+        result: Any,
+        intent_to_execute: "AnyIntent",
+        step_num: int,
+        chain: str,
+        dest_chain: str | None,
+        token_symbol: str | None,
+        is_cross_chain: bool,
+    ) -> bool:
+        """Cross-chain settle wrapper: verify + poll, materialise failures. True breaks.
+
+        Blueprint 02 §Multi-Chain Accounting: a source-succeeded /
+        bridge-failed step records the money that already moved (degraded
+        source-REQUEST persistence). Any config-defect exception that escapes
+        ``_bridge_wait_cross_chain`` (RuntimeError from the gateway precheck,
+        permanent gRPC codes from the verify loop, proto ImportError,
+        AttributeError/TypeError from a miswired stub) is POST-SUBMISSION:
+        ``orchestrator.execute`` has already broadcast the source transaction.
+        If we let the exception escape, ``_bridge_wait_finalize`` would never
+        run and ``progress.failed_at_step_index`` would never be persisted.
+        The next iteration would have no failure marker and could re-decide /
+        re-execute the same cross-chain step, risking duplicate source-TX
+        submissions. Materialise such failures into bridge failure state and
+        break so finalize runs. See PR #1676 review feedback.
+        """
+        if not (is_cross_chain and dest_chain and token_symbol):
+            return False
+        try:
+            bridge_break = await self._bridge_wait_cross_chain(
+                state,
+                result=result,
+                step_num=step_num,
+                chain=chain,
+                dest_chain=dest_chain,
+                token_symbol=token_symbol,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "Step %s: post-submission failure while waiting for bridge "
+                "completion on %s -> %s (token=%s). Materialising as bridge "
+                "failure state so progress is persisted.",
+                step_num,
+                chain,
+                dest_chain,
+                token_symbol,
+            )
+            error_message = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            # Use the ``-bridge`` suffix so ``_bridge_wait_build_failed_result``
+            # classifies this as a bridge failure (skips revert diagnostics,
+            # logs the BRIDGE FAILURE banner) rather than treating it like a
+            # plain execution revert. The source tx already succeeded; what
+            # failed was the cross-chain wait.
+            state.failed_step = f"step-{step_num}-bridge"
+            state.error_message = error_message
+            # Propagate the error onto the result so downstream consumers
+            # (e.g. on_intent_executed callbacks, telemetry) see the real
+            # post-submission failure instead of an empty ``result.error``.
+            if hasattr(result, "error"):
+                result.error = error_message
+            state.failed_result = result
+            await self._persist_degraded_bridge_source_leg(state, intent_to_execute, chain, result)
+            return True
+        if bridge_break:
+            # Source tx succeeded; the bridge wait / settlement failed.
+            # Record the money that already moved (VIB-5670 Stage 3).
+            await self._persist_degraded_bridge_source_leg(state, intent_to_execute, chain, result)
+            return True
+        return False
+
+    async def _bridge_wait_persist_leg(
+        self,
+        state: BridgeWaitState,
+        *,
+        intent_to_execute: "AnyIntent",
+        i: int,
+        step_num: int,
+        chain: str,
+        is_cross_chain: bool,
+        result: Any,
+        pre_snapshot: Any | None,
+    ) -> None:
+        """Persist THIS leg BEFORE progress advances (VIB-5670 Stage 3).
+
+        Blueprint 02 §Multi-Chain Accounting: persist-before-progress (design
+        v3 #4). ``_persist_executed_leg`` fires ``on_intent_executed`` exactly
+        once with the ENRICHED result (v3 #5) — replacing the raw-result
+        inline notify that previously lived here, which left LPPositionTracker
+        and user callbacks without ``position_id`` / ``swap_amounts`` and
+        wrote NO accounting rows at all. A persistence exception stamps the
+        accounting-pending marker and RE-RAISES — the caller does not catch it.
+        """
+        strategy = state.strategy
+        deployment_id = state.deployment_id
+        leg_wallet = self._multichain_wallet_for(chain) or getattr(strategy, "wallet_address", "") or ""
+        from ..observability.context import get_cycle_id
+
+        execution_context = ExecutionContext(
+            deployment_id=deployment_id,
+            chain=chain,
+            wallet_address=leg_wallet,
+            correlation_id=intent_to_execute.intent_id,
+            cycle_id=get_cycle_id() or "",
+            protocol=getattr(intent_to_execute, "protocol", None),
+        )
+        execution_result = None
+        try:
+            execution_result, tx_results = self._adapt_leg_to_execution_result(result)
+            leg_marker = await self._persist_executed_leg(
+                strategy=strategy,
+                intent=intent_to_execute,
+                chain=chain,
+                wallet_address=leg_wallet,
+                execution_result=execution_result,
+                execution_context=execution_context,
+                run_recon=not is_cross_chain,
+                run_slippage_guard=True,
+                record_metrics=False,
+                price_oracle=state.price_oracle,
+                pre_snapshot=pre_snapshot,
+            )
+        except Exception:
+            # The broadcast is CONFIRMED on-chain but the durable accounting
+            # record failed (fail-closed AccountingPersistenceError /
+            # CriticalAccountingError — or any unexpected persistence defect;
+            # every exception here is post-confirmed-broadcast). A plain
+            # ``failed_at_step_index`` means "re-execute" — which would
+            # DUPLICATE the source tx on restart. Stamp the distinct
+            # accounting-pending marker instead (``next_step_to_execute``
+            # advances past it; never re-broadcast), persist it, fire the one
+            # notify with the framework-vs-user split (trackers + strategy
+            # state must reflect chain reality before the halt), and re-raise
+            # so run_iteration halts with the appropriate failure status +
+            # operator alert (design v3 #4 / v4 #1).
+            assert state.progress is not None
+            state.progress.accounting_pending_step_index = i
+            state.progress.previous_amount_received = state.previous_amount_received
+            state.progress.last_updated = datetime.now(UTC)
+            await self._save_execution_progress(deployment_id, state.progress)
+            self._notify_intent_executed(
+                strategy,
+                intent_to_execute,
+                False,
+                execution_result,
+                framework_success=True,
+            )
+            raise
+        state.leg_tx_results.extend(tx_results)
+        if leg_marker:
+            # Enforced recon incident / slippage breach on a persisted bridge-lane
+            # leg: the row carries the downgrade marker and the strategy heard
+            # success=False. The step is complete for broadcast purposes (progress
+            # advances below — never re-broadcast). Halting the SEQUENCE here is
+            # deliberately deferred: the failure machinery
+            # (``failed_at_step_index``) means "re-execute step i" on resume,
+            # which would duplicate this confirmed broadcast. Loud ERROR instead.
+            logger.error(
+                "Step %s persisted with a downgrade marker (chain=%s): %s — sequence continues; "
+                "bridge-lane enforcement halt semantics are deferred (see blueprint 02 "
+                "§Multi-Chain Accounting).",
+                step_num,
+                chain,
+                leg_marker,
+            )
+
+    async def _bridge_wait_process_intent(self, state: BridgeWaitState, i: int) -> bool:
         """Execute one intent + optional bridge wait. Returns True to break.
 
         Mirrors the per-iteration body of the original for-loop: skip already-
         completed steps, log, resolve amount="all", validate cross-chain
         metadata, execute the intent, verify source TX + poll bridge
-        completion if cross-chain, then persist progress. Any failure records
+        completion if cross-chain, then persist the leg's accounting
+        (``_bridge_wait_persist_leg``) and progress. Any failure records
         the failure on ``state`` (``failed_step``, ``error_message``,
         ``failed_result``, ``callback_fired``) and returns True so the caller
         breaks out of the loop.
@@ -9358,6 +10368,13 @@ class StrategyRunner:
                 )
                 return True
 
+        # VIB-5670 Stage 3: pre-broadcast balance snapshot on the leg's OWN
+        # chain (gateway-backed, Stage 0) so the persist step can run POST
+        # reconciliation for same-chain legs.
+        pre_snapshot = await self._bridge_wait_capture_pre_snapshot(
+            intent_to_execute, chain=chain, is_cross_chain=is_cross_chain
+        )
+
         # Execute the intent
         try:
             result = await orchestrator.execute(
@@ -9408,58 +10425,34 @@ class StrategyRunner:
                 state.previous_amount_received = cast(Decimal, amount_field)
 
         # For cross-chain swaps, verify source TX and wait for bridge completion.
-        #
-        # Any config-defect exception that escapes ``_bridge_wait_cross_chain``
-        # (RuntimeError from the gateway precheck, permanent gRPC codes from
-        # the verify loop, proto ImportError, AttributeError/TypeError from a
-        # miswired stub) is POST-SUBMISSION: ``orchestrator.execute`` above
-        # has already broadcast the source transaction. If we let the
-        # exception escape, ``_bridge_wait_finalize`` would never run and
-        # ``progress.failed_at_step_index`` would never be persisted. The
-        # next iteration would have no failure marker and could re-decide /
-        # re-execute the same cross-chain step, risking duplicate source-TX
-        # submissions. Materialise such failures into bridge failure state
-        # and break so finalize runs. See PR #1676 review feedback.
-        if is_cross_chain and dest_chain and token_symbol:
-            try:
-                bridge_break = await self._bridge_wait_cross_chain(
-                    state,
-                    result=result,
-                    step_num=step_num,
-                    chain=chain,
-                    dest_chain=dest_chain,
-                    token_symbol=token_symbol,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(
-                    "Step %s: post-submission failure while waiting for bridge "
-                    "completion on %s -> %s (token=%s). Materialising as bridge "
-                    "failure state so progress is persisted.",
-                    step_num,
-                    chain,
-                    dest_chain,
-                    token_symbol,
-                )
-                error_message = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-                # Use the ``-bridge`` suffix so ``_bridge_wait_build_failed_result``
-                # classifies this as a bridge failure (skips revert diagnostics,
-                # logs the BRIDGE FAILURE banner) rather than treating it like a
-                # plain execution revert. The source tx already succeeded; what
-                # failed was the cross-chain wait.
-                state.failed_step = f"step-{step_num}-bridge"
-                state.error_message = error_message
-                # Propagate the error onto the result so downstream consumers
-                # (e.g. on_intent_executed callbacks, telemetry) see the real
-                # post-submission failure instead of an empty ``result.error``.
-                if hasattr(result, "error"):
-                    result.error = error_message
-                state.failed_result = result
-                return True
-            if bridge_break:
-                return True
+        # Failure materialisation (incl. the PR #1676 post-submission guard and
+        # the VIB-5670 degraded source-REQUEST persistence) lives in the helper.
+        if await self._bridge_wait_settle_cross_chain(
+            state,
+            result=result,
+            intent_to_execute=intent_to_execute,
+            step_num=step_num,
+            chain=chain,
+            dest_chain=dest_chain,
+            token_symbol=token_symbol,
+            is_cross_chain=is_cross_chain,
+        ):
+            return True
 
-        # Notify strategy of successful execution (mirrors _execute_single_chain lines 2459-2478)
-        self._notify_intent_executed(strategy, intent, True, result)
+        # VIB-5670 Stage 3: persist THIS leg through the shared accounting
+        # pipeline BEFORE progress advances (persist-before-progress; a
+        # persistence failure stamps accounting_pending_step_index and
+        # re-raises through here unchanged — never re-broadcast).
+        await self._bridge_wait_persist_leg(
+            state,
+            intent_to_execute=intent_to_execute,
+            i=i,
+            step_num=step_num,
+            chain=chain,
+            is_cross_chain=is_cross_chain,
+            result=result,
+            pre_snapshot=pre_snapshot,
+        )
 
         # Save strategy state after successful execution
         if hasattr(strategy, "save_state"):
@@ -9706,12 +10699,11 @@ class StrategyRunner:
         be resolved for amount normalization). Returns False on successful
         completion (``state.previous_amount_received`` updated so the next
         intent can chain the received amount). Failure paths set
-        ``state.failed_step`` / ``error_message`` and fire the strategy
-        callback so the finalization block doesn't double-fire it.
+        ``state.failed_step`` / ``error_message``; the strategy callback for
+        source-succeeded / bridge-failed legs fires from the degraded
+        source-REQUEST persistence in ``_bridge_wait_process_intent``
+        (VIB-5670 Stage 3), with ``_bridge_wait_finalize`` as the fallback.
         """
-        strategy = state.strategy
-        intent = state.current_intent
-
         # Register and wait for bridge transfer
         # expected_amount=0 means accept any positive balance increase
         deposit_id = state.state_provider.register_bridge_transfer(
@@ -9740,18 +10732,20 @@ class StrategyRunner:
                 )
 
             logger.error(f"Bridge failed: {bridge_status}")
-            # Notify strategy of bridge failure (source tx succeeded but bridge failed)
-            self._notify_intent_executed(strategy, intent, False, result)
-            state.callback_fired = True
+            # VIB-5670 Stage 3: the strategy callback for a source-succeeded /
+            # bridge-failed leg now fires from the degraded source-REQUEST
+            # persistence in ``_bridge_wait_process_intent`` (user success=False,
+            # framework_success=True so trackers see the money that moved);
+            # ``_bridge_wait_finalize`` remains the fallback when that
+            # persistence itself fails.
             state.failed_step = f"step-{step_num}-bridge"
             state.error_message = f"Bridge transfer failed: {bridge_status.get('error', 'Unknown')}"
             return True
 
         except TimeoutError as e:
             logger.error(f"Bridge timeout: {e}")
-            # Notify strategy of bridge timeout (source tx succeeded but bridge timed out)
-            self._notify_intent_executed(strategy, intent, False, result)
-            state.callback_fired = True
+            # VIB-5670 Stage 3: callback moved to the degraded source-REQUEST
+            # persistence (see the "Bridge failed" branch above).
             state.failed_step = f"step-{step_num}-bridge"
             state.error_message = "Bridge transfer timed out after 5 minutes"
             return True
@@ -9771,8 +10765,8 @@ class StrategyRunner:
                 e,
                 exc_info=True,
             )
-            self._notify_intent_executed(strategy, intent, False, result)
-            state.callback_fired = True
+            # VIB-5670 Stage 3: callback moved to the degraded source-REQUEST
+            # persistence (see the "Bridge failed" branch above).
             state.failed_step = f"step-{step_num}-bridge"
             state.error_message = f"Bridge wait failed ({type(e).__name__}): {e}"
             return True
@@ -9799,9 +10793,6 @@ class StrategyRunner:
         ``previous_amount_received`` untouched -- matching the pre-refactor
         behaviour.
         """
-        strategy = state.strategy
-        intent = state.current_intent
-
         # Update amount received with actual bridge output
         # Balance increase is in wei - normalize using TokenResolver metadata
         actual_received_wei = bridge_status.get("balance_increase")
@@ -9822,9 +10813,8 @@ class StrategyRunner:
                 "Bridge normalization failed due to unresolved token metadata: %s",
                 exc,
             )
-            # Notify strategy of bridge failure (source tx succeeded but bridge normalization failed)
-            self._notify_intent_executed(strategy, intent, False, result)
-            state.callback_fired = True
+            # VIB-5670 Stage 3: callback moved to the degraded source-REQUEST
+            # persistence in ``_bridge_wait_process_intent``.
             state.failed_step = f"step-{step_num}-bridge"
             state.error_message = str(exc)
             return True
@@ -9846,6 +10836,92 @@ class StrategyRunner:
                 normalization_metadata,
             )
         return False
+
+    async def _persist_degraded_bridge_source_leg(
+        self,
+        state: BridgeWaitState,
+        intent: "AnyIntent",
+        chain: str,
+        result: Any,
+    ) -> None:
+        """Record a confirmed bridge source tx whose settlement failed (VIB-5670 Stage 3).
+
+        Money moved on the source chain but the bridge verify/wait/normalize
+        step failed — pre-5670 this wrote NOTHING, leaving recovery blind to
+        funds already sent. Persists the source tx as a REQUEST-phase TRANSFER
+        with ``settlement_status="degraded"``: ``transaction_ledger`` +
+        ``accounting_outbox`` → typed ``accounting_events`` only (design v4 #2
+        — ``position_events`` naturally drops BRIDGE/TRANSFER via
+        ``_resolve_event_and_position_type``; the outbox dedup key is
+        ``_bridge_outbox_position_key``). Destination-settlement matching stays
+        deferred (blueprint 27 §19.4).
+
+        Fires ``on_intent_executed`` with the framework-vs-user split
+        (``framework_success=True`` — chain reality moved; user
+        ``success=False`` — the settlement failed), then marks
+        ``state.callback_fired`` so ``_bridge_wait_finalize`` does not
+        double-fire. A persistence failure here logs ERROR + the deferred-write
+        log and leaves ``callback_fired`` unset (finalize's fallback notify
+        covers the strategy callback) — it NEVER blocks the existing
+        failure/finalize path.
+
+        Only runs for ``-bridge`` failure materializations (source confirmed,
+        settlement failed). Pre-broadcast and source-reverted failures persist
+        nothing — no money moved.
+        """
+        if not (state.failed_step or "").endswith("-bridge"):
+            return
+
+        strategy = state.strategy
+        from ..observability.context import get_cycle_id
+
+        try:
+            execution_result, _tx_results = self._adapt_leg_to_execution_result(result)
+            leg_wallet = self._multichain_wallet_for(chain) or getattr(strategy, "wallet_address", "") or ""
+            execution_context = ExecutionContext(
+                deployment_id=strategy.deployment_id,
+                chain=chain,
+                wallet_address=leg_wallet,
+                correlation_id=getattr(intent, "intent_id", "") or "",
+                cycle_id=get_cycle_id() or "",
+                protocol=getattr(intent, "protocol", None),
+            )
+            await self._persist_executed_leg(
+                strategy=strategy,
+                intent=intent,
+                chain=chain,
+                wallet_address=leg_wallet,
+                execution_result=execution_result,
+                execution_context=execution_context,
+                settlement_status="degraded",
+                run_recon=False,
+                run_slippage_guard=False,
+                record_metrics=False,
+                price_oracle=state.price_oracle,
+                pre_snapshot=None,
+            )
+            state.callback_fired = True
+        except Exception as exc:  # noqa: BLE001 — loud-but-never-block (blueprint 27 §14.1)
+            logger.error(
+                "Bridge source REQUEST persistence failed (settlement degraded, money "
+                "already moved on %s): %s — recording to the deferred-write log; the "
+                "bridge failure path continues.",
+                chain,
+                exc,
+                exc_info=True,
+            )
+            from ..accounting.deferred_log import append_now
+
+            tx_result = getattr(result, "tx_result", None)
+            append_now(
+                kind="bridge_source_request",
+                deployment_id=strategy.deployment_id,
+                cycle_id=get_cycle_id() or "",
+                intent_type=str(getattr(getattr(intent, "intent_type", None), "value", "") or ""),
+                tx_hash=getattr(tx_result, "tx_hash", None),
+                error=f"{type(exc).__name__}: {exc}",
+                extra={"chain": chain, "failed_step": state.failed_step or ""},
+            )
 
     async def _bridge_wait_finalize(self, state: BridgeWaitState) -> IterationResult:
         """Build the final IterationResult after the intent loop terminates.
@@ -9882,10 +10958,26 @@ class StrategyRunner:
         # Clear execution progress on successful completion
         await self._clear_execution_progress(deployment_id)
 
+        # VIB-5670 Stage 3: attach a receipt-count / gas SUMMARY aggregate for
+        # iteration-level consumers (NOOP gate, iteration_summary) — NOT a
+        # financial source of truth; per-leg truth lives in the ledger /
+        # accounting rows written by ``_persist_executed_leg`` (design v2 #5).
+        # None when every step was skipped on resume (nothing executed here).
+        aggregate = None
+        if state.leg_tx_results:
+            aggregate = ExecutionResult(
+                success=True,
+                phase=ExecutionPhase.COMPLETE,
+                transaction_results=list(state.leg_tx_results),
+                total_gas_used=sum(int(getattr(tr, "gas_used", 0) or 0) for tr in state.leg_tx_results),
+                total_gas_cost_wei=sum(int(getattr(tr, "gas_cost_wei", 0) or 0) for tr in state.leg_tx_results),
+            )
+
         self._record_success(execution_proved=True)
         return IterationResult(
             status=IterationStatus.SUCCESS,
             intent=state.first_intent,
+            execution_result=aggregate,
             deployment_id=deployment_id,
             duration_ms=self._calculate_duration_ms(state.start_time),
         )
@@ -10210,11 +11302,18 @@ class StrategyRunner:
             duration_ms=self._calculate_duration_ms(start_time),
         )
 
-    async def _reconcile_post_execution_balances(self, strategy, intent, execution_result, pre_snapshot=None):
+    async def _reconcile_post_execution_balances(
+        self, strategy, intent, execution_result, pre_snapshot=None, *, balance_provider=None
+    ):
         from .runner_state import reconcile_post_execution_balances
 
         return await reconcile_post_execution_balances(
-            self, strategy, intent, execution_result, pre_snapshot=pre_snapshot
+            self,
+            strategy,
+            intent,
+            execution_result,
+            pre_snapshot=pre_snapshot,
+            balance_provider=balance_provider,
         )
 
     @staticmethod
@@ -10281,10 +11380,10 @@ class StrategyRunner:
             parts.append(f"{token} delta={actual} expected=[{expected_min},{expected_max}]")
         return "Balance reconciliation incident: " + "; ".join(parts)
 
-    async def _snapshot_balances_for_intent(self, intent):
+    async def _snapshot_balances_for_intent(self, intent, *, balance_provider=None):
         from .runner_state import snapshot_balances_for_intent
 
-        return await snapshot_balances_for_intent(self, intent)
+        return await snapshot_balances_for_intent(self, intent, balance_provider=balance_provider)
 
     @staticmethod
     def _extract_intent_tokens(intent):

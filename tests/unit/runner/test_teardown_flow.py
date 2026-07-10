@@ -514,26 +514,33 @@ class TestTeardownInRunIteration:
     @pytest.mark.asyncio
     @patch("almanak.framework.teardown.get_teardown_state_manager")
     async def test_multichain_teardown_threads_prices(self, mock_get_manager):
-        """Multi-chain teardown extracts price_map from market and passes to orchestrator."""
+        """Multi-chain teardown extracts price_map from market and passes to the same-chain lane.
+
+        VIB-5670 Stage 2: the same-chain accounting path no longer calls
+        ``execute_sequence`` (it broadcast every leg with ZERO accounting
+        writes); prices now thread through ``_execute_same_chain_legs``, whose
+        per-leg ``orchestrator.execute`` price threading is covered by
+        ``test_vib5670_stage2.py``.
+        """
         from almanak.framework.execution.multichain import MultiChainOrchestrator
 
         multi_orch = MagicMock(spec=MultiChainOrchestrator)
         multi_orch.primary_chain = "arbitrum"
-        multi_orch.execute_sequence = AsyncMock(
-            return_value=MagicMock(
-                success=True,
-                successful_count=1,
-                chains_used={"arbitrum"},
-                total_execution_time_ms=100,
-                errors_by_chain={},
+        multi_orch.execute_sequence = AsyncMock()
+        runner = _make_runner(execution_orchestrator=multi_orch)
+        runner._execute_same_chain_legs = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.SUCCESS,
+                intent=None,
+                deployment_id="test_strat",
+                duration_ms=100,
             )
         )
-        runner = _make_runner(execution_orchestrator=multi_orch)
 
         prices = {"ETH": Decimal("3400"), "USDC": Decimal("1")}
         market_mock = MagicMock(get_price_oracle_dict=MagicMock(return_value=prices))
         intent = _make_intent()
-        # Mark intent as same-chain (no destination_chain) to hit execute_sequence path
+        # Mark intent as same-chain (no destination_chain) to hit the same-chain lane
         intent.destination_chain = None
         strategy = _make_strategy(
             should_teardown=True,
@@ -549,11 +556,13 @@ class TestTeardownInRunIteration:
         with patch("almanak.framework.runner.strategy_runner.is_cross_chain_intent", return_value=False):
             await runner.run_iteration(strategy)
 
-        # Verify execute_sequence was called with price_map and price_oracle
-        multi_orch.execute_sequence.assert_called_once()
-        call_kwargs = multi_orch.execute_sequence.call_args[1]
+        # Verify the same-chain lane received price_map and price_oracle;
+        # execute_sequence is no longer part of the accounting path.
+        runner._execute_same_chain_legs.assert_called_once()
+        call_kwargs = runner._execute_same_chain_legs.call_args[1]
         assert call_kwargs["price_map"] == {"ETH": "3400", "USDC": "1"}
         assert call_kwargs["price_oracle"] == prices
+        multi_orch.execute_sequence.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

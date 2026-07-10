@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.framework.execution.chain_executor import TransactionExecutionResult
 from almanak.framework.intents.vocabulary import HoldIntent, SwapIntent
 from almanak.framework.runner.runner_models import ExecutionProgress
 from almanak.framework.runner.strategy_runner import (
@@ -54,13 +55,19 @@ def _make_runner(
     if balance_provider is None:
         balance_provider = MagicMock()
         balance_provider.invalidate_cache = MagicMock()
-    return StrategyRunner(
+    runner = StrategyRunner(
         price_oracle=MagicMock(),
         balance_provider=balance_provider,
         execution_orchestrator=MagicMock(),
         state_manager=state_manager,
         config=config,
     )
+    # VIB-5670 Stage 3: bridge-failure paths run the degraded source-REQUEST
+    # persistence. Pin non-live (same convention as test_vib5670_stage1.py) so
+    # MagicMock persistence backends degrade to logged errors instead of the
+    # live-mode fail-closed AccountingPersistenceError.
+    runner._is_live_mode = MagicMock(return_value=False)  # type: ignore[method-assign]
+    return runner
 
 
 def _make_strategy() -> MagicMock:
@@ -306,7 +313,7 @@ class TestBridgeWaitApplyCompletion:
         state.current_intent = intent
 
         bridge_status = {"status": "completed", "balance_increase": 9500000}
-        result = SimpleNamespace(tx_result=SimpleNamespace(tx_hash="0xabc"))
+        result = SimpleNamespace(tx_result=TransactionExecutionResult(success=True, tx_hash="0xabc"))
 
         should_break = await runner._bridge_wait_apply_completion(
             state,
@@ -319,6 +326,12 @@ class TestBridgeWaitApplyCompletion:
         assert should_break is True
         assert state.failed_step == "step-1-bridge"
         assert "token metadata missing" in state.error_message
+        # VIB-5670 Stage 3: the callback moved to the degraded source-REQUEST
+        # persistence in _bridge_wait_process_intent — not fired inline here.
+        assert state.callback_fired is False
+        strategy.on_intent_executed.assert_not_called()
+
+        await runner._persist_degraded_bridge_source_leg(state, intent, "arbitrum", result)
         assert state.callback_fired is True
         strategy.on_intent_executed.assert_called_once()
         assert strategy.on_intent_executed.call_args.kwargs.get("success") is False
@@ -371,7 +384,7 @@ class TestBridgeWaitPollCompletionFailures:
             return_value={"status": "failed", "error": "bridge reverted"}
         )
 
-        result = SimpleNamespace(tx_result=SimpleNamespace(tx_hash="0xabc"))
+        result = SimpleNamespace(tx_result=TransactionExecutionResult(success=True, tx_hash="0xabc"))
 
         should_break = await runner._bridge_wait_poll_completion(
             state,
@@ -385,6 +398,12 @@ class TestBridgeWaitPollCompletionFailures:
         assert should_break is True
         assert state.failed_step == "step-1-bridge"
         assert "bridge reverted" in state.error_message
+        # VIB-5670 Stage 3: the callback moved to the degraded source-REQUEST
+        # persistence in _bridge_wait_process_intent — not fired inline here.
+        assert state.callback_fired is False
+        strategy.on_intent_executed.assert_not_called()
+
+        await runner._persist_degraded_bridge_source_leg(state, intent, "arbitrum", result)
         assert state.callback_fired is True
         strategy.on_intent_executed.assert_called_once()
         assert strategy.on_intent_executed.call_args.kwargs.get("success") is False
@@ -402,7 +421,7 @@ class TestBridgeWaitPollCompletionFailures:
             side_effect=TimeoutError("5 minutes passed")
         )
 
-        result = SimpleNamespace(tx_result=SimpleNamespace(tx_hash="0xabc"))
+        result = SimpleNamespace(tx_result=TransactionExecutionResult(success=True, tx_hash="0xabc"))
 
         should_break = await runner._bridge_wait_poll_completion(
             state,
@@ -416,6 +435,12 @@ class TestBridgeWaitPollCompletionFailures:
         assert should_break is True
         assert state.failed_step == "step-1-bridge"
         assert "timed out after 5 minutes" in state.error_message
+        # VIB-5670 Stage 3: the callback moved to the degraded source-REQUEST
+        # persistence in _bridge_wait_process_intent — not fired inline here.
+        assert state.callback_fired is False
+        strategy.on_intent_executed.assert_not_called()
+
+        await runner._persist_degraded_bridge_source_leg(state, intent, "arbitrum", result)
         assert state.callback_fired is True
         strategy.on_intent_executed.assert_called_once()
         assert strategy.on_intent_executed.call_args.kwargs.get("success") is False
@@ -444,7 +469,7 @@ class TestBridgeWaitPollCompletionFailures:
             side_effect=ConnectionError("gateway unreachable")
         )
 
-        result = SimpleNamespace(tx_result=SimpleNamespace(tx_hash="0xabc"))
+        result = SimpleNamespace(tx_result=TransactionExecutionResult(success=True, tx_hash="0xabc"))
 
         should_break = await runner._bridge_wait_poll_completion(
             state,
@@ -461,18 +486,25 @@ class TestBridgeWaitPollCompletionFailures:
         assert should_break is True
         # Failure bookkeeping must match the TimeoutError path.
         assert state.failed_step == "step-1-bridge"
-        assert state.callback_fired is True
         # Error message must identify the exception type so ops can
         # distinguish timeout from other bridge errors.
         assert "ConnectionError" in state.error_message
         assert "gateway unreachable" in state.error_message
-        # Strategy must be notified of failure exactly once with the exact
-        # intent and the exact result object the runner was executing.
+
+        # VIB-5670 Stage 3: the strategy notification moved to the degraded
+        # source-REQUEST persistence (fired exactly once with the ENRICHED
+        # per-leg ExecutionResult, not the raw leg result — design v3 #5).
+        assert state.callback_fired is False
+        strategy.on_intent_executed.assert_not_called()
+        await runner._persist_degraded_bridge_source_leg(state, intent, "arbitrum", result)
+        assert state.callback_fired is True
         strategy.on_intent_executed.assert_called_once()
         call_args = strategy.on_intent_executed.call_args
         assert call_args.args[0] is intent
         assert call_args.kwargs.get("success") is False
-        assert call_args.kwargs.get("result") is result
+        notified_result = call_args.kwargs.get("result")
+        assert notified_result is not None
+        assert notified_result.transaction_results[0].tx_hash == "0xabc"
 
     @pytest.mark.asyncio
     async def test_callback_exception_in_non_timeout_path_is_swallowed(self) -> None:
@@ -489,7 +521,7 @@ class TestBridgeWaitPollCompletionFailures:
             side_effect=ValueError("malformed bridge response")
         )
 
-        result = SimpleNamespace(tx_result=SimpleNamespace(tx_hash="0xabc"))
+        result = SimpleNamespace(tx_result=TransactionExecutionResult(success=True, tx_hash="0xabc"))
 
         should_break = await runner._bridge_wait_poll_completion(
             state,
@@ -503,13 +535,15 @@ class TestBridgeWaitPollCompletionFailures:
 
         assert should_break is True
         assert state.failed_step == "step-1-bridge"
-        assert state.callback_fired is True
         assert "ValueError" in state.error_message
-        # The failing callback was still called with the exact result object.
+
+        # VIB-5670 Stage 3: the callback fires from the degraded source-REQUEST
+        # persistence; a callback that raises must not break the failure path.
+        await runner._persist_degraded_bridge_source_leg(state, intent, "arbitrum", result)
+        assert state.callback_fired is True
         call_args = strategy.on_intent_executed.call_args
         assert call_args.args[0] is intent
         assert call_args.kwargs.get("success") is False
-        assert call_args.kwargs.get("result") is result
 
     @pytest.mark.parametrize("exc_cls", [SystemExit, KeyboardInterrupt])
     @pytest.mark.asyncio

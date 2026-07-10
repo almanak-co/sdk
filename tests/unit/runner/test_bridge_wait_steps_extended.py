@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.framework.execution.chain_executor import TransactionExecutionResult
 from almanak.framework.intents.vocabulary import SwapIntent
 from almanak.framework.runner.runner_models import ExecutionProgress
 from almanak.framework.runner.strategy_runner import (
@@ -48,13 +49,19 @@ def _make_runner(
     if balance_provider is None:
         balance_provider = MagicMock()
         balance_provider.invalidate_cache = MagicMock()
-    return StrategyRunner(
+    runner = StrategyRunner(
         price_oracle=MagicMock(),
         balance_provider=balance_provider,
         execution_orchestrator=MagicMock(),
         state_manager=state_manager,
         config=config,
     )
+    # VIB-5670 Stage 3: success paths run the real per-leg accounting
+    # pipeline. Pin non-live (same convention as test_vib5670_stage1.py) so
+    # MagicMock persistence backends degrade to logged errors instead of the
+    # live-mode fail-closed AccountingPersistenceError.
+    runner._is_live_mode = MagicMock(return_value=False)  # type: ignore[method-assign]
+    return runner
 
 
 def _make_strategy() -> MagicMock:
@@ -186,10 +193,12 @@ class TestBridgeWaitProcessIntentSuccess:
         state = _make_state(intents=[intent], strategy=strategy)
         state.progress = _make_progress(total_steps=1)
 
+        # VIB-5670 Stage 3: the success path now runs the real per-leg
+        # accounting pipeline, whose adapter requires a typed tx_result.
         success_result = SimpleNamespace(
             success=True,
             error=None,
-            tx_result=SimpleNamespace(tx_hash="0xabc"),
+            tx_result=TransactionExecutionResult(success=True, tx_hash="0xabc"),
         )
         state.orchestrator.execute.return_value = success_result
 
@@ -220,7 +229,7 @@ class TestBridgeWaitProcessIntentSuccess:
         state.previous_amount_received = Decimal("42")
 
         state.orchestrator.execute.return_value = SimpleNamespace(
-            success=True, error=None, tx_result=SimpleNamespace(tx_hash="0xabc")
+            success=True, error=None, tx_result=TransactionExecutionResult(success=True, tx_hash="0xabc")
         )
 
         with patch(
@@ -244,7 +253,7 @@ class TestBridgeWaitProcessIntentSuccess:
         state.progress = _make_progress()
 
         state.orchestrator.execute.return_value = SimpleNamespace(
-            success=True, error=None, tx_result=SimpleNamespace(tx_hash="0xabc")
+            success=True, error=None, tx_result=TransactionExecutionResult(success=True, tx_hash="0xabc")
         )
 
         with patch(
@@ -447,7 +456,14 @@ class TestBridgeWaitPollCompletionExtended:
     async def test_on_intent_executed_callback_exception_swallowed_on_bridge_failure(
         self,
     ) -> None:
-        """Strategy callback errors during failure paths do not prevent break."""
+        """Strategy callback errors during failure paths do not prevent break.
+
+        VIB-5670 Stage 3: the bridge-failure callback moved from
+        ``_bridge_wait_poll_completion`` into the degraded source-REQUEST
+        persistence (``_persist_degraded_bridge_source_leg``); the poll helper
+        now only records the failure, and the persistence step fires the
+        callback (guarded — a strategy bug never propagates).
+        """
         runner = _make_runner()
         strategy = _make_strategy()
         strategy.on_intent_executed.side_effect = RuntimeError("strat bug")
@@ -460,7 +476,7 @@ class TestBridgeWaitPollCompletionExtended:
             return_value={"status": "failed", "error": "revert"}
         )
 
-        result = SimpleNamespace(tx_result=SimpleNamespace(tx_hash="0xabc"))
+        result = SimpleNamespace(tx_result=TransactionExecutionResult(success=True, tx_hash="0xabc"))
         should_break = await runner._bridge_wait_poll_completion(
             state,
             result=result,
@@ -471,8 +487,17 @@ class TestBridgeWaitPollCompletionExtended:
             step_num=1,
         )
         assert should_break is True
-        assert state.callback_fired is True
         assert state.failed_step == "step-1-bridge"
+        # Poll helper no longer fires the callback inline...
+        assert state.callback_fired is False
+        strategy.on_intent_executed.assert_not_called()
+
+        # ...the degraded source-REQUEST persistence does, and swallows the
+        # strategy bug (callback exceptions never propagate).
+        await runner._persist_degraded_bridge_source_leg(state, intent, "arbitrum", result)
+        assert state.callback_fired is True
+        strategy.on_intent_executed.assert_called_once()
+        assert strategy.on_intent_executed.call_args.kwargs.get("success") is False
 
 
 # =============================================================================

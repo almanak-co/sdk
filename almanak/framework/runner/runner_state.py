@@ -1295,6 +1295,8 @@ def _native_gas_symbol_for_intent(intent: AnyIntent) -> str | None:
 async def snapshot_balances_for_intent(
     runner: Any,
     intent: AnyIntent,
+    *,
+    balance_provider: Any | None = None,
 ) -> BalanceSnapshot | None:
     """Capture a balance snapshot for every token named by the intent.
 
@@ -1303,7 +1305,13 @@ async def snapshot_balances_for_intent(
     if the intent names no tokens or every balance query failed. Individual
     balance failures are skipped (non-fatal) so a flaky RPC for one token
     does not blind reconciliation on the others.
+
+    VIB-5670: ``balance_provider`` overrides ``runner.balance_provider`` so a
+    multi-chain per-leg recon reads on the leg's own chain-bound provider. It
+    defaults to ``None`` → ``runner.balance_provider``, keeping the single-chain
+    path byte-for-byte identical.
     """
+    bp = balance_provider or runner.balance_provider
     tokens = extract_intent_tokens(intent)
     if not tokens:
         return None
@@ -1339,9 +1347,7 @@ async def snapshot_balances_for_intent(
             # receipt block, so a stale pre would mis-attribute earlier changes to
             # this intent). Legacy providers that reject force_refresh fall back
             # to the prior call shape via _read_balance_for_reconciliation.
-            bal, _pinned = await _read_balance_for_reconciliation(
-                runner.balance_provider, token_symbol, force_refresh=True
-            )
+            bal, _pinned = await _read_balance_for_reconciliation(bp, token_symbol, force_refresh=True)
             balances[token_symbol] = bal.balance
         except Exception as exc:  # noqa: BLE001
             logger.debug("Balance snapshot: failed to fetch %s balance: %s", token_symbol, exc)
@@ -1438,6 +1444,8 @@ async def _confirmation_wait_outcome(
     strategy: StrategyProtocol,
     intent: AnyIntent,
     post_block: int | None,
+    *,
+    balance_provider: Any | None = None,
 ) -> tuple[int, bool | None, int | None]:
     """Run the optional VIB-3350 confirmation-depth wait for one reconciliation.
 
@@ -1459,9 +1467,8 @@ async def _confirmation_wait_outcome(
     if depth <= 0:
         return depth, None, None
     timeout_seconds = getattr(config, "reconciliation_confirmation_timeout_seconds", 12.0)
-    confirmed, head = await _wait_for_confirmation_depth(
-        runner.balance_provider, post_block, depth, timeout_seconds=timeout_seconds
-    )
+    bp = balance_provider or runner.balance_provider
+    confirmed, head = await _wait_for_confirmation_depth(bp, post_block, depth, timeout_seconds=timeout_seconds)
     if not confirmed:
         logger.warning(
             "Balance reconciliation: confirmation-depth wait timed out for %s "
@@ -1526,6 +1533,7 @@ async def _read_post_balances(
     post_block: int | None,
     *,
     force_refresh: bool,
+    balance_provider: Any | None = None,
 ) -> tuple[dict[str, Decimal], bool]:
     """Read post-execution balances for ``tokens``. Returns ``(balances, degrade)``.
 
@@ -1541,6 +1549,7 @@ async def _read_post_balances(
     does not blind the others), but on a pinned reconciliation a failure flips
     ``degrade`` so enforcement refuses to enforce against partial evidence.
     """
+    bp = balance_provider or runner.balance_provider
     post_balances: dict[str, Decimal] = {}
     intended_pin = post_block is not None
     degrade = False
@@ -1548,7 +1557,7 @@ async def _read_post_balances(
     for token_symbol in tokens:
         try:
             bal, pinned = await _read_balance_for_reconciliation(
-                runner.balance_provider,
+                bp,
                 token_symbol,
                 force_refresh=force_refresh,
                 as_of_block=post_block,
@@ -1578,6 +1587,8 @@ async def reconcile_post_execution_balances(
     intent: AnyIntent,
     execution_result: ExecutionResult | None,
     pre_snapshot: BalanceSnapshot | None = None,
+    *,
+    balance_provider: Any | None = None,
 ) -> dict[str, Any] | None:
     """Verify post-execution token balances match intent expectations.
 
@@ -1589,8 +1600,17 @@ async def reconcile_post_execution_balances(
     When ``pre_snapshot`` is ``None`` the legacy post-only behavior is
     preserved so older call sites continue to work; in that case only
     warnings (not incidents) are produced.
+
+    VIB-5670: ``balance_provider`` overrides ``runner.balance_provider`` for the
+    confirmation-depth wait and the post-execution reads so a multi-chain per-leg
+    recon stays bound to the leg's own chain (the pre-snapshot must have been
+    captured on the SAME provider — reading post-balances on the primary provider
+    while the pre came from the leg provider would compute a delta across two
+    chains and falsely pass). Defaults to ``None`` → ``runner.balance_provider``,
+    keeping the single-chain path byte-for-byte identical.
     """
     try:
+        bp = balance_provider or runner.balance_provider
         tokens = extract_intent_tokens(intent)
         if not tokens:
             return None
@@ -1617,11 +1637,11 @@ async def reconcile_post_execution_balances(
         # anyway and flag the report unconfirmed. ``reconciliation_confirmed`` is
         # None when no wait ran (Empty != Zero: not-measured vs measured).
         confirmation_depth, confirmation_confirmed, confirmation_head = await _confirmation_wait_outcome(
-            runner, strategy, intent, post_block
+            runner, strategy, intent, post_block, balance_provider=bp
         )
 
         post_balances, post_read_degraded = await _read_post_balances(
-            runner, tokens, post_block, force_refresh=pre_snapshot is not None
+            runner, tokens, post_block, force_refresh=pre_snapshot is not None, balance_provider=bp
         )
 
         # VIB-3350 (H2 + Codex follow-up): if we intended to pin to the receipt

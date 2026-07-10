@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.framework.execution.chain_executor import TransactionExecutionResult
 from almanak.framework.intents.vocabulary import HoldIntent, SwapIntent
 from almanak.framework.runner.runner_models import ExecutionProgress
 from almanak.framework.runner.strategy_runner import (
@@ -50,13 +51,19 @@ def _make_runner(*, dry_run: bool = False, max_retries: int = 2) -> StrategyRunn
 
     state_manager = MagicMock()
     state_manager.load_state = AsyncMock(return_value=None)
-    return StrategyRunner(
+    runner = StrategyRunner(
         price_oracle=MagicMock(),
         balance_provider=balance_provider,
         execution_orchestrator=execution_orchestrator,
         state_manager=state_manager,
         config=config,
     )
+    # VIB-5670 Stage 3: bridge-wait success paths run the real per-leg
+    # accounting pipeline. Pin non-live (test_vib5670_stage1.py convention) so
+    # MagicMock persistence backends degrade to logged errors instead of the
+    # live-mode fail-closed AccountingPersistenceError.
+    runner._is_live_mode = MagicMock(return_value=False)
+    return runner
 
 
 def _make_strategy(*, intent=None) -> MagicMock:
@@ -248,9 +255,9 @@ class TestBridgeWaitingDriverSuccess:
         orch.primary_chain = "arbitrum"
         orch._config = SimpleNamespace(rpc_urls={"arbitrum": "https://arb"})
 
-        result_obj = SimpleNamespace(
-            success=True, error=None, tx_result=SimpleNamespace(tx_hash="0xabc", actual_amount_received=Decimal("50"))
-        )
+        _tx = TransactionExecutionResult(success=True, tx_hash="0xabc")
+        _tx.actual_amount_received = Decimal("50")
+        result_obj = SimpleNamespace(success=True, error=None, tx_result=_tx)
         orch.execute = AsyncMock(return_value=result_obj)
 
         intent = SwapIntent(
@@ -413,7 +420,7 @@ class TestBridgeWaitingResume:
             return SimpleNamespace(
                 success=True,
                 error=None,
-                tx_result=SimpleNamespace(tx_hash="0xok"),
+                tx_result=TransactionExecutionResult(success=True, tx_hash="0xok"),
             )
 
         orch.execute = AsyncMock(side_effect=_exec)

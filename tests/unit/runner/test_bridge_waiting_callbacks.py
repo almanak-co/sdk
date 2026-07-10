@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.framework.execution.chain_executor import TransactionExecutionResult
 from almanak.framework.runner.strategy_runner import (
     RunnerConfig,
     StrategyRunner,
@@ -31,6 +32,11 @@ def _make_runner() -> StrategyRunner:
             enable_state_persistence=False,
         ),
     )
+    # VIB-5670 Stage 3: successful bridge-wait steps run the real per-leg
+    # accounting pipeline. Pin non-live (test_vib5670_stage1.py convention) so
+    # MagicMock persistence backends degrade to logged errors instead of the
+    # live-mode fail-closed AccountingPersistenceError.
+    runner._is_live_mode = MagicMock(return_value=False)
     return runner
 
 
@@ -64,7 +70,11 @@ def _make_orchestrator(success: bool = True) -> MagicMock:
     result = MagicMock()
     result.success = success
     result.error = None if success else "execution failed"
-    result.tx_result = SimpleNamespace(actual_amount_received=Decimal("100"))
+    # VIB-5670 Stage 3: the per-leg accounting adapter requires a typed
+    # tx_result; the extra attribute keeps amount-chaining coverage.
+    tx_result = TransactionExecutionResult(success=success, tx_hash="0xabc")
+    tx_result.actual_amount_received = Decimal("100")
+    result.tx_result = tx_result
     orch.execute = AsyncMock(return_value=result)
     return orch
 
