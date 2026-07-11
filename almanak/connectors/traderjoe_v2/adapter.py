@@ -491,6 +491,7 @@ class TraderJoeV2Adapter:
         recipient: str | None = None,
         *,
         quote: SwapQuote | None = None,
+        amount_out_min: int | None = None,
     ) -> TransactionData:
         """Build a swap transaction without executing it.
 
@@ -535,10 +536,17 @@ class TraderJoeV2Adapter:
                 f"request=(token_in={token_in}, token_out={token_out}, "
                 f"amount_in={amount_in}, bin_step={bin_step})"
             )
-        amount_out_min = self.to_wei(
-            quote.amount_out * Decimal(10000 - slippage) / Decimal(10000),
-            token_out,
-        )
+        # VIB-5740: prefer a caller-supplied, oracle-guarded ``amount_out_min``
+        # (the compiler's price-impact guard computes it off an INDEPENDENT
+        # oracle baseline). Only fall back to the pool-quote-derived floor when
+        # no override is given — that legacy path is pool-self-referential and
+        # provides no protection against a drained pool (which is why the
+        # compiler now always passes the guarded value).
+        if amount_out_min is None:
+            amount_out_min = self.to_wei(
+                quote.amount_out * Decimal(10000 - slippage) / Decimal(10000),
+                token_out,
+            )
 
         # Build transaction
         tx, gas = self.sdk.build_swap_exact_tokens_for_tokens(

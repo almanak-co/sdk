@@ -7,9 +7,18 @@ import time
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext, BaseProtocolCompiler
+from almanak.connectors._strategy_base.base.compiler import (
+    BaseCompilerContext,
+    BaseProtocolCompiler,
+    SwapCompilerContext,
+)
+from almanak.framework.execution.simulator.config import is_local_rpc
 from almanak.framework.intents._compiler_helpers import (
+    PriceImpactDecision,
     assemble_action_bundle,
+    check_price_impact,
+    choose_safer_quote,
+    compute_min_amount_out,
     normalise_gateway_or_rpc,
     sum_transaction_gas,
 )
@@ -24,9 +33,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class TraderJoeV2Compiler(BaseProtocolCompiler[BaseCompilerContext]):
+class TraderJoeV2Compiler(BaseProtocolCompiler[SwapCompilerContext]):
     """Compiler for TraderJoe V2 Liquidity Book intents."""
 
+    # VIB-5740: SWAP participates in the shared oracle-aware price-impact guard,
+    # so it needs the swap knobs (max_price_impact_pct / using_placeholders) the
+    # framework injects for a SwapCompilerContext. The LP intents on this same
+    # compiler ignore those extra fields (SwapCompilerContext is a superset).
+    context_type: ClassVar[type[BaseCompilerContext]] = SwapCompilerContext
     protocols: ClassVar[frozenset[str]] = frozenset({"traderjoe_v2"})
     intents: ClassVar[frozenset[IntentType]] = frozenset(
         {
@@ -38,7 +52,7 @@ class TraderJoeV2Compiler(BaseProtocolCompiler[BaseCompilerContext]):
     )
     chains: ClassVar[frozenset[str]] = frozenset({"avalanche", "arbitrum", "bnb", "ethereum"})
 
-    def compile(self, ctx: BaseCompilerContext, intent: Any) -> CompilationResult:
+    def compile(self, ctx: SwapCompilerContext, intent: Any) -> CompilationResult:
         invalid_ctx = self._check_context(ctx, intent)
         if invalid_ctx is not None:
             return invalid_ctx
@@ -53,13 +67,13 @@ class TraderJoeV2Compiler(BaseProtocolCompiler[BaseCompilerContext]):
             return self.compile_collect_fees(ctx, intent)
         return self._unsupported(intent)
 
-    def compile_swap(self, ctx: BaseCompilerContext, intent: SwapIntent) -> CompilationResult:
+    def compile_swap(self, ctx: SwapCompilerContext, intent: SwapIntent) -> CompilationResult:
         return _TraderJoeV2CompileImpl(ctx)._compile_swap_traderjoe_v2(intent)
 
-    def compile_lp_open(self, ctx: BaseCompilerContext, intent: LPOpenIntent) -> CompilationResult:
+    def compile_lp_open(self, ctx: SwapCompilerContext, intent: LPOpenIntent) -> CompilationResult:
         return _TraderJoeV2CompileImpl(ctx)._compile_lp_open_traderjoe_v2(intent)
 
-    def compile_lp_close(self, ctx: BaseCompilerContext, intent: LPCloseIntent) -> CompilationResult:
+    def compile_lp_close(self, ctx: SwapCompilerContext, intent: LPCloseIntent) -> CompilationResult:
         # VIB-5346 defense-in-depth: position_id is a bin-id / identity for
         # TraderJoe V2 (Liquidity Book), not a fungible LP-token wei amount.
         # Reject amount="all" chaining via the shared fail-closed allowlist (the
@@ -80,14 +94,14 @@ class TraderJoeV2Compiler(BaseProtocolCompiler[BaseCompilerContext]):
             )
         return _TraderJoeV2CompileImpl(ctx)._compile_lp_close_traderjoe_v2(intent)
 
-    def compile_collect_fees(self, ctx: BaseCompilerContext, intent: CollectFeesIntent) -> CompilationResult:
+    def compile_collect_fees(self, ctx: SwapCompilerContext, intent: CollectFeesIntent) -> CompilationResult:
         return _TraderJoeV2CompileImpl(ctx)._compile_collect_fees_traderjoe_v2(intent)
 
 
 class _TraderJoeV2CompileImpl:
     """Per-call adapter that preserves the pre-fold TraderJoe compiler body."""
 
-    def __init__(self, ctx: BaseCompilerContext) -> None:
+    def __init__(self, ctx: SwapCompilerContext) -> None:
         self._ctx = ctx
         self.chain = ctx.chain
         self.wallet_address = ctx.wallet_address
@@ -1194,6 +1208,105 @@ class _TraderJoeV2CompileImpl:
             tx_type="traderjoe_v2_swap",
         )
 
+    def _guard_swap_price_impact(
+        self,
+        intent: SwapIntent,
+        from_token: TokenInfo,
+        to_token: TokenInfo,
+        amount_in_wei: int,
+        quote: Any,
+        rpc_url: str | None,
+    ) -> tuple[int, int, int] | CompilationResult:
+        """Oracle-aware price-impact guard + ``amount_out_min`` floor (VIB-5740).
+
+        The TraderJoe LB ``getSwapOut`` quote is pool-self-referential: on a
+        one-sided / drained pair it returns a near-zero output, and computing
+        ``amount_out_min`` from it (the adapter's default) makes the slippage
+        guard circular — a ~99.85% loss passes its own floor. This mirrors the
+        shared guard used by uniswap_v3 / aerodrome / enso: cross-check the
+        on-chain quote against an INDEPENDENT oracle estimate and fail closed on
+        excessive impact, then floor ``amount_out_min`` off the guarded baseline.
+
+        Returns ``(amount_out_min_wei, oracle_estimate_wei, quoter_amount_wei)``
+        on success, or a FAILED :class:`CompilationResult` when the guard trips.
+        """
+        ctx = self._ctx
+        # Oracle-derived expected output (wei), independent of the pool quote.
+        # A missing price degrades to 0 (== "no oracle to compare against"): the
+        # guard then skips rather than hard-failing a swap on a flaky feed. Only
+        # a readable, high-impact quote holds capital out.
+        try:
+            oracle_estimate_wei = int(ctx.services.calculate_expected_output(amount_in_wei, from_token, to_token))
+        except Exception:  # noqa: BLE001 — oracle gap degrades to "no comparison", never a hard error
+            oracle_estimate_wei = 0
+
+        # The TraderJoe quote is a genuine on-chain ``getSwapOut`` read (the
+        # fetch path raises rather than silently falling back to an oracle), so
+        # it is a valid, independent quoter amount — no is_onchain coercion is
+        # needed (unlike the Aerodrome adapter).
+        quoter_amount_wei = int(quote.amount_out * Decimal(10**to_token.decimals))
+
+        guard_skipped = is_local_rpc(rpc_url)
+        if guard_skipped:
+            # Fork pool state and live oracle prices are not time-aligned.
+            logger.info("Skipping TraderJoe V2 oracle price-impact guard on local Anvil RPC (%s)", rpc_url)
+        else:
+            result = check_price_impact(
+                oracle_estimate=oracle_estimate_wei,
+                quoter_amount=quoter_amount_wei,
+                intent_max_impact=intent.max_price_impact,
+                config_max_impact=ctx.max_price_impact_pct,
+                offline_mode=ctx.using_placeholders or ctx.permission_discovery,
+                using_placeholders=ctx.using_placeholders,
+            )
+            if result.decision is PriceImpactDecision.IMPACT_TOO_HIGH:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Price impact too high: TraderJoe V2 getSwapOut implies "
+                        f"{result.price_impact:.1%} price impact "
+                        f"(oracle estimate: {oracle_estimate_wei}, quoter: {quoter_amount_wei}). "
+                        f"Maximum allowed: {result.effective_max_impact:.2%}. Likely cause: the "
+                        f"{intent.from_token}->{intent.to_token} LB pair is one-sided / drained "
+                        f"of output-token liquidity."
+                    ),
+                    intent_id=intent.intent_id,
+                )
+            if result.decision is PriceImpactDecision.QUOTER_MISSING_FAIL_CLOSED:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Price impact guard: TraderJoe V2 returned no on-chain quote for "
+                        f"{intent.from_token}->{intent.to_token}. Refusing to compile a swap "
+                        f"backed only by the oracle price."
+                    ),
+                    intent_id=intent.intent_id,
+                )
+            if result.decision is PriceImpactDecision.SKIPPED_NO_ORACLE:
+                logger.warning(
+                    "TraderJoe V2 price-impact guard skipped for %s->%s: no oracle price to "
+                    "compare against the quoter; slippage-only protection applies.",
+                    intent.from_token,
+                    intent.to_token,
+                )
+
+        # Floor amount_out_min off the guarded baseline:
+        # - guard skipped (local fork): the oracle is NOT time-aligned with fork
+        #   pool state, so it must not move the floor — use the quoter directly
+        #   (otherwise choose_safer_quote could let a live oracle lower the floor
+        #   below the fork quote, the very mismatch the skip exists to avoid).
+        # - guard ran with a usable oracle: floor off the safer (lower) of the
+        #   oracle estimate and the quoter — a genuinely drained quote already
+        #   failed the guard above, so the quoter is within max_impact; this
+        #   additionally covers the rare oracle<quoter case.
+        # - guard ran but no oracle (SKIPPED_NO_ORACLE): quoter, slippage-only.
+        if guard_skipped or oracle_estimate_wei <= 0:
+            basis = quoter_amount_wei
+        else:
+            basis, _used = choose_safer_quote(oracle_estimate_wei, quoter_amount_wei)
+        amount_out_min_wei = compute_min_amount_out(basis, intent.max_slippage)
+        return amount_out_min_wei, oracle_estimate_wei, quoter_amount_wei
+
     def _compile_swap_traderjoe_v2(self, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for TraderJoe V2 Liquidity Book (VIB-1928).
 
@@ -1319,6 +1432,17 @@ class _TraderJoeV2CompileImpl:
             quote = quote_or_err
             expected_output_human: Decimal = quote.amount_out
 
+            # VIB-5740: oracle-aware price-impact guard. The LB getSwapOut quote
+            # is pool-self-referential, so deriving amount_out_min from it makes
+            # the slippage guard circular on a one-sided / drained pair (a
+            # ~99.85% loss passes its own floor). Cross-check the on-chain quote
+            # against an independent oracle estimate, fail closed on excessive
+            # impact, and floor amount_out_min off the guarded baseline.
+            guarded = self._guard_swap_price_impact(intent, from_token, to_token, amount_in_wei, quote, rpc_url)
+            if isinstance(guarded, CompilationResult):
+                return guarded
+            amount_out_min_wei, oracle_estimate_wei, quoter_amount_wei = guarded
+
             swap_tx = tj_adapter.build_swap_transaction(
                 token_in=from_token.symbol,
                 token_out=to_token.symbol,
@@ -1326,6 +1450,7 @@ class _TraderJoeV2CompileImpl:
                 bin_step=bin_step,
                 slippage_bps=slippage_bps,
                 quote=quote,
+                amount_out_min=amount_out_min_wei,
             )
             transactions.append(
                 self._build_traderjoe_v2_swap_tx_data(
@@ -1353,6 +1478,12 @@ class _TraderJoeV2CompileImpl:
                     # Consumed by ResultEnricher -> extract_swap_amounts for
                     # realized slippage_bps (VIB-3203).
                     "expected_output_human": str(expected_output_human),
+                    # VIB-5740: persist the guard inputs so realized slippage is
+                    # reported against an INDEPENDENT oracle baseline, not only
+                    # the pool's own quote (which hides a drained-pool loss).
+                    "oracle_expected_wei": str(oracle_estimate_wei),
+                    "quoter_amount_wei": str(quoter_amount_wei),
+                    "amount_out_min_wei": str(amount_out_min_wei),
                 },
             )
 
