@@ -35,6 +35,7 @@ from ...backtesting.pnl.logging_utils import configure_backtest_logging
 from ...backtesting.visualization import save_chart
 from ...data.cache import CacheStats, DataCache
 from ...strategies import get_strategy
+from ..chain_resolution import get_default_chain
 from ._backtest_context import PnLBacktestContext
 from .group import backtest
 from .helpers import (
@@ -190,7 +191,7 @@ def _validate_and_build_context(
     start: datetime | None,
     end: datetime | None,
     interval: int,
-    chain: str,
+    chain: str | None,
     tokens: str,
     gas_price: float | None,
     output: str | None,
@@ -227,6 +228,13 @@ def _validate_and_build_context(
     # Create PnL backtest config if not loaded from result
     if not loaded_from_result:
         token_list = parse_token_list(tokens)
+        # When --chain is omitted, resolve the strategy's declared default_chain
+        # (default_chain -> supported_chains[0] -> DEFAULT_CHAIN), matching the
+        # sweep runner. Without this, every no-`--chain` run silently targeted
+        # arbitrum and failed for demos on any other chain (RSI/looping are
+        # ethereum). validate_strategy_is_registered above guarantees the lookup.
+        if chain is None:
+            chain = get_default_chain(get_strategy(strategy))
         pnl_config = PnLBacktestConfig(
             start_time=start,  # type: ignore[arg-type]
             end_time=end,  # type: ignore[arg-type]
@@ -1189,8 +1197,11 @@ def _generate_html_report(
     "--chain",
     "-c",
     type=str,
-    default=DEFAULT_CHAIN,
-    help=f"Target blockchain (default: {DEFAULT_CHAIN})",
+    default=None,
+    help=(
+        "Target blockchain. Defaults to the strategy's declared default_chain "
+        f"(then supported_chains[0], then {DEFAULT_CHAIN})."
+    ),
 )
 @click.option(
     "--tokens",
@@ -1334,7 +1345,7 @@ def pnl_backtest(
     end: datetime | None,
     interval: int,
     output: str | None,
-    chain: str,
+    chain: str | None,
     tokens: str,
     gas_price: float | None,
     verbose: bool,

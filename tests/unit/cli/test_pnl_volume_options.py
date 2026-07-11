@@ -41,6 +41,7 @@ from almanak.framework.cli.backtest.pnl import (
     _build_volume_data_config,
     _emit_missing_volume_hint_for_result,
     _run_backtest,
+    _validate_and_build_context,
 )
 from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
@@ -96,6 +97,14 @@ class _DummyStrategy:
 
     def decide(self, market: Any) -> None:
         return None
+
+
+class _MetaChainStrategy(_DummyStrategy):
+    """Strategy exposing STRATEGY_METADATA.default_chain for chain resolution."""
+
+    class STRATEGY_METADATA:  # noqa: N801 - mirrors the real attribute name
+        default_chain = "base"
+        supported_chains = ("base", "arbitrum")
 
 
 def _strategy_config(deployment_id: str = "dummy_lp_strategy") -> dict[str, Any]:
@@ -456,3 +465,50 @@ class TestPnLBacktestVolumeWiring:
         assert result.exit_code == 0, f"CLI failed: {result.output}"
         assert "LP Pool Volume (explicit): $5,000,000.00/day" in result.output
         assert "LP Volume Fallback: enabled (LOW confidence)" in result.output
+
+
+# ===========================================================================
+# --chain default resolution (aligns pnl with the sweep runner)
+# ===========================================================================
+
+
+class TestPnLChainDefaultResolution:
+    """When `--chain` is omitted, pnl resolves the strategy's declared
+    default_chain (default_chain -> supported_chains[0] -> DEFAULT_CHAIN),
+    matching the sweep runner. Regression for the dogfood finding that every
+    no-`--chain` run silently targeted arbitrum and failed for demos on any
+    other chain (RSI/looping are ethereum)."""
+
+    def _build(self, chain: str | None, strategy_cls: type) -> Any:
+        with (
+            patch("almanak.framework.cli.backtest.pnl.validate_strategy_is_registered"),
+            patch(
+                "almanak.framework.cli.backtest.pnl.get_strategy",
+                return_value=strategy_cls,
+            ),
+        ):
+            return _validate_and_build_context(
+                strategy="demo",
+                start=datetime(2025, 11, 1, tzinfo=UTC),
+                end=datetime(2025, 11, 15, tzinfo=UTC),
+                interval=3600,
+                chain=chain,
+                tokens="WETH,USDC",
+                gas_price=None,
+                output=None,
+                loaded_from_result=False,
+                pnl_config=None,
+            )
+
+    def test_omitted_chain_uses_strategy_default_chain(self) -> None:
+        ctx = self._build(None, _MetaChainStrategy)
+        assert ctx.pnl_config.chain == "base"
+
+    def test_explicit_chain_overrides_strategy_default(self) -> None:
+        ctx = self._build("optimism", _MetaChainStrategy)
+        assert ctx.pnl_config.chain == "optimism"
+
+    def test_omitted_chain_without_metadata_falls_back_to_default_chain(self) -> None:
+        """No metadata / supported_chains -> get_default_chain's arbitrum floor."""
+        ctx = self._build(None, _DummyStrategy)
+        assert ctx.pnl_config.chain == "arbitrum"
