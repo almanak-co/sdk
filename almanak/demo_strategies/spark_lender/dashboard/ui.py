@@ -12,6 +12,7 @@ import streamlit as st
 
 from almanak.framework.dashboard import (
     render_cost_stack_section,
+    render_nav_history_section,
     render_pnl_section,
     render_trade_tape_section,
 )
@@ -34,6 +35,9 @@ def render_custom_dashboard(
     """
     st.title("Spark Lender Strategy Dashboard")
     render_pnl_section(deployment_id)
+    # NAV / PnL / drawdown over time — the lifetime portfolio-value chart
+    # (reads portfolio_snapshots via the gateway; no fabricated data).
+    render_nav_history_section(deployment_id, default_range="All")
 
 
     # Extract config values
