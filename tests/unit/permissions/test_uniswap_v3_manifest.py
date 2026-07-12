@@ -42,6 +42,17 @@ _USDE = CHAIN_TOKENS[_CHAIN]["usde"].lower()
 _SWAP_ROUTER_02 = UNISWAP_V3[_CHAIN]["swap_router_02"].lower()
 _NPM = UNISWAP_V3[_CHAIN]["position_manager"].lower()
 
+# The manifest that actually ships is generated WITH the strategy config. The
+# WETH/USDG pair approve coverage comes from two sources that BOTH must run: the
+# synthetic swap/LP discovery pins the swap-side USDG approve (via the connector
+# PermissionHints override), while the config token-funding scan emits the WETH
+# approve for the wrapped-native leg — which the native-in synthetic path omits.
+# Generating config-less surfaces only the synthetic USDG approve and misses the
+# WETH leg, i.e. an intermediate manifest that never deploys. Mirror the demo's
+# ``anvil_funding`` so the assertions reflect what a real WETH/USDG strategy
+# authorises on robinhood.
+_STRATEGY_CONFIG = {"anvil_funding": {"WETH": 1, "USDG": 100}}
+
 
 def _manifest_pairs(intent_types: list[str]) -> set[tuple[str, str]]:
     """Return the (target, selector) set produced by the manifest generator."""
@@ -50,6 +61,7 @@ def _manifest_pairs(intent_types: list[str]) -> set[tuple[str, str]]:
         chain=_CHAIN,
         supported_protocols=["uniswap_v3"],
         intent_types=intent_types,
+        config=_STRATEGY_CONFIG,
     )
     return {
         (perm.target.lower(), sel.selector.lower())
@@ -76,9 +88,10 @@ class TestUniswapV3RobinhoodManifest:
             f"({EXACT_INPUT_SINGLE_SELECTOR}) on {_SWAP_ROUTER_02}"
         )
         approves = _approve_targets(["SWAP"])
-        assert approves == {_USDG}, (
-            f"SWAP manifest must authorise approve on exactly USDG ({_USDG}) — "
-            f"any extra target is silent over-authorisation; got {sorted(approves)}"
+        assert approves == {_USDG, _WETH}, (
+            f"SWAP manifest must authorise approve on exactly the WETH/USDG pair "
+            f"({_USDG}, {_WETH}) — any extra target is silent over-authorisation; "
+            f"got {sorted(approves)}"
         )
         assert _USDE not in approves, (
             f"SWAP manifest must NOT authorise approve on USDe ({_USDE}) — "
