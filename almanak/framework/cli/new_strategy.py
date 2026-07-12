@@ -4180,6 +4180,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.framework.market.models import RSIData, TokenBalance
+from almanak.framework.market.testing import seeded
 from strategy import {class_name}
 
 # ---------------------------------------------------------------------------
@@ -4210,55 +4212,85 @@ def strategy(config: dict) -> {class_name}:
     )
 
 
-def _make_mock_market(
+def _load_test_config() -> dict:
+    """config.json drives the seeded market (module-level so helpers can use it)."""
+    config_path = Path(__file__).parent.parent / "config.json"
+    if config_path.exists():
+        with open(config_path) as f:
+            return json.load(f)
+    return {{"deployment_id": "test-strategy-001", "chain": "{chain}"}}
+
+
+_TEST_CONFIG = _load_test_config()
+
+# Config keys that name tokens the strategy may query. Symbols found here get
+# seeded prices/balances so decide() sees a funded, priced market.
+_TOKEN_CONFIG_KEYS = (
+    "base_token", "quote_token", "target_token", "stable_token",
+    "collateral_token", "borrow_token", "supply_token", "deposit_token",
+    "token_x", "token_y", "token0", "token1",
+)
+
+T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+
+def _config_tokens() -> list[str]:
+    tokens: list[str] = []
+    for key in _TOKEN_CONFIG_KEYS:
+        value = _TEST_CONFIG.get(key)
+        if isinstance(value, str) and value:
+            tokens.append(value)
+    for entry in _TEST_CONFIG.get("token_funding", []) or []:
+        symbol = entry.get("symbol") if isinstance(entry, dict) else None
+        if isinstance(symbol, str) and symbol:
+            tokens.append(symbol)
+    for pool_key in ("pool", "lp_pool"):
+        pool = _TEST_CONFIG.get(pool_key)
+        if isinstance(pool, str) and "/" in pool:
+            tokens.extend(part for part in pool.split("/")[:2] if part)
+    # Snapshot lookups are case-insensitive, so seed each symbol exactly as
+    # config.json spells it and dedupe case-insensitively (first spelling
+    # wins). Fall back to common majors so the harness still seeds something
+    # before config.json is filled in.
+    seen: dict[str, str] = {{}}
+    for t in tokens:
+        seen.setdefault(t.upper(), t)
+    return list(seen.values()) or ["WETH", "USDC"]
+
+
+def _make_market(
     *,
     price: Decimal = Decimal("2000"),
     balance: Decimal = Decimal("100"),
     balance_usd: Decimal = Decimal("100000"),
     rsi: Decimal = Decimal("50"),
-    timestamp: datetime | None = None,
-) -> MagicMock:
-    """Build a configurable MarketSnapshot mock (generic smoke-test scaffolding).
+    timestamp: datetime = T0,
+):
+    """Build a seeded MarketSnapshot for the tokens config.json names.
 
-    For tests of your strategy logic, prefer the real seeding API
-    (``almanak.framework.market.testing.seeded``) and drive time-based tests
-    through the snapshot ``timestamp`` rather than a patched clock helper.
+    Unseeded data (funding rates, position health, ...) raises the SDK's
+    data-unavailable errors. Drive time-based tests by passing different
+    ``timestamp`` values to successive decide() calls.
     """
-    market = MagicMock()
-    market.price.return_value = price
-    market.chain = "{chain}"
-    market.wallet_address = "0x" + "1" * 40
-    market.timestamp = timestamp or datetime(2026, 1, 1, tzinfo=UTC)
-
-    balance_mock = MagicMock()
-    balance_mock.balance = balance
-    balance_mock.balance_usd = balance_usd
-    market.balance.return_value = balance_mock
-
-    rsi_mock = MagicMock()
-    rsi_mock.value = rsi
-    rsi_mock.is_oversold = rsi <= Decimal("30")
-    rsi_mock.is_overbought = rsi >= Decimal("70")
-    market.rsi.return_value = rsi_mock
-
-    # Bollinger bands (used by ta_swap when indicator='bollinger' or 'rsi_bb')
-    bb_mock = MagicMock()
-    bb_mock.bandwidth = 0.05
-    bb_mock.percent_b = 0.5
-    market.bollinger_bands.return_value = bb_mock
-
-    # Funding rate (used by basis_trade)
-    funding_mock = MagicMock()
-    funding_mock.rate_hourly = Decimal("0.0002")
-    market.funding_rate.return_value = funding_mock
-
-    return market
+    period = int(_TEST_CONFIG.get("rsi_period", 14) or 14)
+    tokens = _config_tokens()
+    return seeded(
+        chain="{chain}",
+        wallet_address="0x" + "1" * 40,
+        prices={{token: price for token in tokens}},
+        balances={{
+            token: TokenBalance(symbol=token, balance=balance, balance_usd=balance_usd)
+            for token in tokens
+        }},
+        indicators={{f"{{token}}:rsi:{{period}}": RSIData(value=rsi, period=period) for token in tokens}},
+        timestamp=timestamp,
+    )
 
 
 @pytest.fixture
-def mock_market() -> MagicMock:
-    """MarketSnapshot mock with healthy defaults (ETH=$2000, balances funded)."""
-    return _make_mock_market()
+def market():
+    """Seeded MarketSnapshot with healthy defaults (all config tokens funded)."""
+    return _make_market()
 
 
 def _make_mock_intent(intent_type_value: str, **attrs: object) -> MagicMock:
@@ -4304,13 +4336,13 @@ class Test{class_name}Basics:
         assert strategy.wallet_address == "0x" + "1" * 40
 
     def test_decide_returns_intent_or_none(
-        self, strategy: {class_name}, mock_market: MagicMock
+        self, strategy: {class_name}, market
     ) -> None:
         """decide() must return None, an Intent (with intent_type), or an IntentSequence.
 
         Any other return type breaks the framework's intent compiler.
         """
-        result = strategy.decide(mock_market)
+        result = strategy.decide(market)
         # Accept three valid return types: None, Intent (has .intent_type),
         # or IntentSequence (has .intents).
         assert (
@@ -4323,18 +4355,12 @@ class Test{class_name}Basics:
         )
 
     def test_decide_handles_market_errors_gracefully(
-        self, strategy: {class_name}, mock_market: MagicMock
+        self, strategy: {class_name}
     ) -> None:
-        """When market providers raise, decide() must NOT propagate -- return hold/None."""
-        # Blow up every market access to simulate a gateway outage.
-        mock_market.balance.side_effect = ValueError("Balance unavailable")
-        mock_market.price.side_effect = ValueError("Price unavailable")
-        mock_market.rsi.side_effect = ValueError("RSI unavailable")
-        mock_market.bollinger_bands.side_effect = ValueError("BB unavailable")
-        mock_market.funding_rate.side_effect = ValueError("Funding unavailable")
-        mock_market.wallet_activity.side_effect = ValueError("Wallet activity unavailable")
+        """When market data is unavailable (bare snapshot), decide() must return hold/None, not raise."""
+        market = seeded(chain="{chain}", timestamp=T0)
 
-        result = strategy.decide(mock_market)
+        result = strategy.decide(market)
 
         # Must not raise. Must return a hold intent or None.
         assert (
@@ -4380,7 +4406,7 @@ class Test{class_name}EdgeCases:
         self, strategy: {class_name}
     ) -> None:
         """With zero balance, decide() should return cleanly (typically a hold)."""
-        market = _make_mock_market(balance=Decimal("0"), balance_usd=Decimal("0"))
+        market = _make_market(balance=Decimal("0"), balance_usd=Decimal("0"))
         result = strategy.decide(market)
         assert (
             result is None
@@ -4396,7 +4422,7 @@ class Test{class_name}EdgeCases:
         Strategies that size by ``amount_usd / price`` are especially vulnerable.
         If decide() raises anything except a hold, that is a bug to fix.
         """
-        market = _make_mock_market(price=Decimal("0"))
+        market = _make_market(price=Decimal("0"))
         try:
             result = strategy.decide(market)
         except ZeroDivisionError as exc:
@@ -4805,7 +4831,7 @@ class Test{class_name}ResumeReconcile:
     """Cached side-state flag is reconciled from live balance, not trusted blindly."""
 
     def test_reconcile_resumed_state_flips_stale_false_flag(
-        self, strategy: {class_name}, mock_market: MagicMock
+        self, strategy: {class_name}, market
     ) -> None:
         """Resume hook flips a stale FALSE flag to True when the wallet holds base.
 
@@ -4817,22 +4843,22 @@ class Test{class_name}ResumeReconcile:
         strategy.load_persistent_state({{"holding_base": False, "last_signal": "buy"}})
         assert strategy._holding_base is False
 
-        corrected = strategy.reconcile_resumed_state(mock_market)
+        corrected = strategy.reconcile_resumed_state(market)
 
         assert corrected is True, "desync should be detected and corrected"
         assert strategy._holding_base is True, "flag must follow live balance (truth)"
 
     def test_reconcile_resumed_state_noop_when_already_agrees(
-        self, strategy: {class_name}, mock_market: MagicMock
+        self, strategy: {class_name}, market
     ) -> None:
         """No desync -> hook returns False and leaves the flag unchanged."""
         strategy.load_persistent_state({{"holding_base": True, "last_signal": "buy"}})
-        corrected = strategy.reconcile_resumed_state(mock_market)
+        corrected = strategy.reconcile_resumed_state(market)
         assert corrected is False
         assert strategy._holding_base is True
 
     def test_teardown_exits_despite_stale_false_flag(
-        self, strategy: {class_name}, mock_market: MagicMock
+        self, strategy: {class_name}, market
     ) -> None:
         """THE FUND-SAFETY CASE: balance-true-but-flag-false must still exit.
 
@@ -4842,13 +4868,13 @@ class Test{class_name}ResumeReconcile:
         """
         from almanak.framework.teardown import TeardownMode
 
-        # Desynced resume: flag false, but the wallet holds base (mock_market
+        # Desynced resume: flag false, but the wallet holds base (market
         # reports a funded base balance).
         strategy.load_persistent_state({{"holding_base": False, "last_signal": "buy"}})
         assert strategy._holding_base is False
 
         intents = strategy.generate_teardown_intents(
-            mode=TeardownMode.SOFT, market=mock_market
+            mode=TeardownMode.SOFT, market=market
         )
 
         assert len(intents) > 0, (
@@ -4869,7 +4895,7 @@ class Test{class_name}ResumeReconcile:
         """
         from almanak.framework.teardown import TeardownMode
 
-        flat = _make_mock_market(balance=Decimal("0"), balance_usd=Decimal("0"))
+        flat = _make_market(balance=Decimal("0"), balance_usd=Decimal("0"))
         strategy.load_persistent_state({{"holding_base": True, "last_signal": "buy"}})
 
         intents = strategy.generate_teardown_intents(mode=TeardownMode.SOFT, market=flat)
@@ -4892,7 +4918,7 @@ class Test{class_name}ResumeReconcile:
         from almanak.framework.teardown import TeardownMode
 
         # Funded but unpriceable: non-zero native balance, USD coerced to 0.
-        unpriceable = _make_mock_market(balance=Decimal("5"), balance_usd=Decimal("0"))
+        unpriceable = _make_market(balance=Decimal("5"), balance_usd=Decimal("0"))
         strategy.load_persistent_state({{"holding_base": True, "last_signal": "buy"}})
 
         intents = strategy.generate_teardown_intents(mode=TeardownMode.SOFT, market=unpriceable)

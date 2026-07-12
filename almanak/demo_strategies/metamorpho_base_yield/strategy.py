@@ -169,6 +169,8 @@ class MetaMorphoBaseYield(IntentStrategy):
         self._deposit_shares = Decimal("0")
         self._deposit_timestamp: datetime | None = None
         self._last_compound_time: datetime | None = None
+        # Market clock from the latest decide() snapshot.
+        self._last_seen_market_ts: datetime | None = None
         self._redeem_assets = Decimal("0")
         self._total_yield_earned = Decimal("0")
         self._epochs_completed = 0
@@ -192,6 +194,12 @@ class MetaMorphoBaseYield(IntentStrategy):
         any other exception propagates (no blanket ``except -> hold`` masking a
         real bug).
         """
+        _ts = getattr(market, "timestamp", None)
+        if isinstance(_ts, datetime):
+            self._last_seen_market_ts = _ts if _ts.tzinfo is not None else _ts.replace(tzinfo=UTC)
+        else:
+            self._last_seen_market_ts = None
+
         if self._state == "idle":
             return self._handle_idle(market)
         if self._state == "deposited":
@@ -249,7 +257,7 @@ class MetaMorphoBaseYield(IntentStrategy):
 
         self._previous_stable_state = self._state
         self._state = "depositing"
-        self._deposit_timestamp = datetime.now(UTC)
+        self._deposit_timestamp = self._last_seen_market_ts or datetime.now(UTC)
 
         return Intent.vault_deposit(
             protocol="metamorpho",
@@ -372,7 +380,10 @@ class MetaMorphoBaseYield(IntentStrategy):
         else:
             reference_time = self._last_compound_time
 
-        elapsed_hours = (datetime.now(UTC) - reference_time).total_seconds() / 3600
+        now = self._last_seen_market_ts or datetime.now(UTC)
+        if reference_time.tzinfo is None:  # older persisted state may be naive
+            reference_time = reference_time.replace(tzinfo=UTC)
+        elapsed_hours = (now - reference_time).total_seconds() / 3600
         return elapsed_hours >= self.compound_interval_hours
 
     def _assets_to_human(self, raw_assets: Decimal) -> Decimal:
@@ -406,7 +417,7 @@ class MetaMorphoBaseYield(IntentStrategy):
 
                 if self._state == "compounding":
                     self._compounds_completed += 1
-                    self._last_compound_time = datetime.now(UTC)
+                    self._last_compound_time = self._last_seen_market_ts or datetime.now(UTC)
                     self._state = "deposited"
                     logger.info(
                         "Compound #%d confirmed: +%s assets, +%s shares",

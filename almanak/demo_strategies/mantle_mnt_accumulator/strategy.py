@@ -100,6 +100,8 @@ class MantleMntAccumulator(IntentStrategy):
 
         # Internal state
         self._last_trade_time: datetime | None = None
+        # Market clock from the latest decide() snapshot.
+        self._last_seen_market_ts: datetime | None = None
         self._last_rsi_signal: str = "NEUTRAL"
         # Signal to commit to ``_last_rsi_signal`` once a swap fill is confirmed
         # (in on_intent_executed) — never latched pre-fill.
@@ -122,6 +124,12 @@ class MantleMntAccumulator(IntentStrategy):
     # --------------------------------------------------------------------- #
 
     def decide(self, market: MarketSnapshot) -> Intent:
+        _ts = getattr(market, "timestamp", None)
+        if isinstance(_ts, datetime):
+            self._last_seen_market_ts = _ts if _ts.tzinfo is not None else _ts.replace(tzinfo=UTC)
+        else:
+            self._last_seen_market_ts = None
+
         # Fresh tick: clear any uncommitted signal latch from a prior emit so a
         # failed swap can never leak its signal into the next fill's commit.
         self._pending_signal = None
@@ -266,7 +274,11 @@ class MantleMntAccumulator(IntentStrategy):
     def _cooldown_passed(self) -> bool:
         if not self._last_trade_time:
             return True
-        return datetime.now(UTC) - self._last_trade_time >= self.cooldown
+        now = self._last_seen_market_ts or datetime.now(UTC)
+        last_trade = self._last_trade_time
+        if last_trade.tzinfo is None:  # older persisted state may be naive
+            last_trade = last_trade.replace(tzinfo=UTC)
+        return now - last_trade >= self.cooldown
 
     def _round_amount(self, amount: Decimal) -> Decimal:
         return amount.quantize(Decimal("0.000001"), rounding=ROUND_DOWN)
@@ -280,7 +292,7 @@ class MantleMntAccumulator(IntentStrategy):
             logger.warning("Trade failed")
             return
 
-        self._last_trade_time = datetime.now(UTC)
+        self._last_trade_time = self._last_seen_market_ts or datetime.now(UTC)
 
         # Commit the signal latch only on a CONFIRMED fill. Setting it in
         # decide() would lock out a retry after a failed swap and desync the

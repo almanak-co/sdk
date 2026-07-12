@@ -223,6 +223,9 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
     }
     """
 
+    # Default so the attribute exists even when __init__ is bypassed.
+    _last_seen_market_ts: datetime | None = None
+
     # =========================================================================
     # INITIALIZATION
     # =========================================================================
@@ -289,6 +292,8 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         self._range_upper: Decimal | None = None
         # Hysteresis bookkeeping (committed in on_intent_executed, post-fill).
         self._last_open_time: datetime | None = None
+        # Market clock from the latest decide() snapshot.
+        self._last_seen_market_ts: datetime | None = None
         self._rebalance_count = 0
 
         logger.info(
@@ -320,6 +325,12 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         Returns:
             Intent: LP_OPEN, LP_CLOSE, or HOLD
         """
+        _ts = getattr(market, "timestamp", None)
+        if isinstance(_ts, datetime):
+            self._last_seen_market_ts = _ts if _ts.tzinfo is not None else _ts.replace(tzinfo=UTC)
+        else:
+            self._last_seen_market_ts = None
+
         # =================================================================
         # STEP 1: Get current market price
         # =================================================================
@@ -633,7 +644,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             self._range_lower = Decimal(str(rl)) if rl is not None else None
             self._range_upper = Decimal(str(ru)) if ru is not None else None
             # Start the rebalance cooldown clock from this confirmed open.
-            self._last_open_time = datetime.now(UTC)
+            self._last_open_time = self._last_seen_market_ts or datetime.now(UTC)
 
             add_event(
                 TimelineEvent(
@@ -666,7 +677,8 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         """
         if self._last_open_time is None:
             return True
-        return datetime.now(UTC) - self._last_open_time >= self.rebalance_cooldown
+        now = self._last_seen_market_ts or datetime.now(UTC)
+        return now - self._last_open_time >= self.rebalance_cooldown
 
     def get_persistent_state(self) -> dict[str, Any]:
         """Persist bin IDs so teardown can recover after process restarts."""
@@ -714,9 +726,9 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
                 logger.warning("Invalid rebalance_count in persisted state: %r", state.get("rebalance_count"))
         if state and state.get("last_open_time"):
             try:
-                # fromisoformat() can yield a naive datetime; force aware UTC so the
-                # later `datetime.now(UTC) - self._last_open_time` cooldown math
-                # never raises on naive/aware subtraction.
+                # fromisoformat() can yield a naive datetime; force aware UTC so
+                # the later market-clock cooldown subtraction never raises on
+                # naive/aware mismatch.
                 last_open_time = datetime.fromisoformat(state["last_open_time"])
                 if last_open_time.tzinfo is None:
                     last_open_time = last_open_time.replace(tzinfo=UTC)
