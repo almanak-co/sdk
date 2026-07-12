@@ -52,6 +52,38 @@ def render_custom_dashboard(deployment_id, strategy_config, api_client, session_
     render_trade_tape_section(deployment_id)
 ```
 
+## Where dashboard data comes from
+
+Custom metric tiles must read strategy state through **`api_client`** — it is
+the only channel that reaches the strategy's live state:
+
+```python
+import streamlit as st
+
+def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
+    state = api_client.get_state()          # -> the strategy's get_persistent_state() output
+    summary = api_client.get_summary()      # -> deployment-level summary
+
+    spend = state.get("cumulative_spend_usd")
+    st.metric("Cumulative spend", "—" if spend is None else f"${spend}")  # Empty != Zero
+    st.metric("Last decision", state.get("last_decision_reason") or "No decision yet")
+    st.metric("Status", summary.get("status") or "—")
+```
+
+Two rules that prevent permanently-empty dashboards:
+
+- **`session_state` is a pass-through for template renderers, not a strategy-state
+  channel.** The platform hands you generic Streamlit session state; the strategy
+  never writes into it. Reading `session_state["my_metric"]` for a key that no
+  template demonstrably writes renders `$0.00` / "Never" forever. If you populate
+  extras for a template (e.g. `price_history`), that flows *into* the renderer —
+  nothing flows back out for you to read.
+- **A tile can only show what the strategy persists.** `api_client.get_state()`
+  returns the strategy's `get_persistent_state()` dict — if the value you want to
+  display (last premium, decision reason, phase) isn't in that dict, add it there
+  first or drop the tile. Follow the Empty ≠ Zero doctrine: render "—" or
+  "awaiting data" for missing keys, never a fabricated `0`.
+
 ## Audit primitives
 
 ::: almanak.framework.dashboard

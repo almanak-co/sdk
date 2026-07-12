@@ -10,6 +10,29 @@ strategy-facing market-data interface. It replaces the two legacy locations
 `almanak.framework.data.market_snapshot.MarketSnapshot`) that silently
 diverged before VIB-4062.
 
+## The snapshot clock
+
+`MarketSnapshot.timestamp` is the strategy's **only** legitimate clock. It is
+a tz-aware `datetime`: real time on the live surface, **simulated time** in
+backtests. Any time arithmetic that feeds a decision — cooldowns, cadences,
+daily counters — must be measured against it; `datetime.now()` inside
+`decide()` or `on_intent_executed()` mixes clocks and silently breaks every
+backtest (a 24h wall-clock cooldown never expires when weeks of simulated
+time replay in minutes).
+
+```python
+def decide(self, market: MarketSnapshot) -> Intent:
+    now = market.timestamp
+    if self._last_trade_ts and now - self._last_trade_ts < self._cooldown:
+        return Intent.hold(reason="cooldown")
+    ...
+```
+
+`on_intent_executed()` has no snapshot parameter — capture `market.timestamp`
+in `decide()` and reuse the captured value when stamping fill state there.
+See [Time in Strategies](../getting-started.md#time-in-strategies) for the
+full pattern.
+
 ## Builder factories
 
 ::: almanak.framework.market.builders.MarketSnapshotBuilder

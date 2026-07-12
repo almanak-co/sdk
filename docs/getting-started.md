@@ -296,6 +296,40 @@ Without these hooks, your strategy will lose all internal state on restart. This
     - Store `Decimal` values as strings (`str(amount)`) and parse them back (`Decimal(state["amount"])`) for safe JSON round-tripping.
     - The `on_intent_executed()` callback is the natural place to update state after a trade (e.g., storing a new position ID), and `get_persistent_state()` then picks it up for saving.
     - Persist identity and phase (position IDs, cooldowns, workflow step) — not market exposure. Values that feed `decide()` triggers (debt, exposures, hedge deltas) should be re-read from the market snapshot each cycle: cached intent-derived amounts drift from on-chain reality as interest accrues and prices move.
+    - Persisted cooldown/cadence timestamps must be **market-clock** values (`market.timestamp`), never wall-clock — see [Time in Strategies](#time-in-strategies).
+
+## Time in Strategies
+
+Every time-based rule in a strategy — cooldowns, trade cadences, daily counters, "N hours since last fill" — must be computed from **`market.timestamp`**, the snapshot's clock. Never call `datetime.now()` (or `time.time()`) inside `decide()` or `on_intent_executed()` for anything that feeds a decision.
+
+Why: in live trading the two clocks agree, so wall-clock code *appears* to work. In a backtest, weeks of simulated time replay in minutes of wall time — a 24-hour cooldown measured against `datetime.now()` never expires, so the strategy trades once and holds forever. The bug is invisible in unit tests and single-iteration smoke runs; it only surfaces as a silently degenerate backtest.
+
+`on_intent_executed()` receives no market snapshot, so capture the snapshot's timestamp in `decide()` and reuse the captured value when stamping state in the callback:
+
+```python
+class MyStrategy(IntentStrategy):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._last_buy_ts: datetime | None = None
+        self._pending_ts: datetime | None = None
+
+    def decide(self, market: MarketSnapshot) -> Intent:
+        now = market.timestamp  # simulated time in backtests, real time live
+        if self._last_buy_ts and now - self._last_buy_ts < timedelta(hours=24):
+            return Intent.hold(reason="Cadence: waiting for next 24h window")
+        self._pending_ts = now  # capture for the fill callback
+        return Intent.swap(...)
+
+    def on_intent_executed(self, intent, success, result) -> None:
+        if success and self._pending_ts is not None:
+            self._last_buy_ts = self._pending_ts  # market clock, NOT datetime.now()
+            self._pending_ts = None
+```
+
+Wall-clock time is acceptable only for **reporting** fields that never feed a decision (e.g. the `timestamp` on a `TeardownPositionSummary`, log lines, dashboard "generated at" labels).
+
+!!! warning "Unit tests can hide this bug"
+    A test that monkeypatches a `_now()` helper on the strategy validates the internal logic while hiding the clock-domain defect. Drive time through the snapshot instead: build test snapshots with `almanak.framework.market.testing.seeded(timestamp=...)` and advance the `timestamp` between calls to `decide()` — see [Unit Testing Strategies](#unit-testing-strategies).
 
 ## Strategy Teardown (Required)
 
@@ -319,6 +353,42 @@ class MyStrategy(IntentStrategy):
 ```
 
 If your strategy holds multiple position types, close them in order: **perps -> borrows -> supplies -> LPs -> tokens**. See the [Teardown CLI](cli/strat-teardown.md) for how operators trigger teardown.
+
+Two contract points that are easy to get wrong:
+
+- **Teardown is one-shot.** The list returned by `generate_teardown_intents()` is the *entire* unwind plan — the framework executes it and stops. There are no follow-up `decide()` iterations, and no "next pass" that continues a partial unwind. A strategy that returns only its LP close and assumes the borrow/supply legs get repaid "on a subsequent iteration" strands live debt and collateral. If exact downstream amounts aren't knowable up front (e.g. how much WETH an LP close returns), use `amount="all"` / `repay_full=True` style intents rather than deferring legs to an iteration that will never run. For leveraged positions, `almanak.framework.teardown.generate_lending_unwind(...)` builds the sanctioned repay-and-withdraw sequence — compose it: `[lp_close_intent, *generate_lending_unwind(...)]`.
+- **Report every leg in `get_open_positions()`.** A leveraged LP strategy holds three positions — the LP (`PositionType.LP`), the debt (`PositionType.BORROW`), and the collateral (`PositionType.SUPPLY`) — and all of them belong in the `TeardownPositionSummary`. The framework's teardown-completeness verification compares closed positions against this summary; omitting the lending legs blinds that check, and a half-unwound position gets reported as cleanly COMPLETED.
+
+## Unit Testing Strategies
+
+Build test snapshots with the real `MarketSnapshot` seeding API — not `unittest.mock.MagicMock`:
+
+```python
+from decimal import Decimal
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+from almanak.framework.market.testing import seeded
+
+def test_cadence_gates_second_buy(strategy):     # `strategy` = your fixture
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    market = seeded(
+        chain="base",
+        prices={"WETH": Decimal("2000")},
+        timestamp=t0,
+    )
+    intent = strategy.decide(market)             # first buy fires
+    assert intent.intent_type.value == "SWAP"
+    result = SimpleNamespace(swap_amounts=None)  # minimal execution result
+    strategy.on_intent_executed(intent, True, result)
+
+    later = seeded(chain="base", prices={"WETH": Decimal("2000")}, timestamp=t0 + timedelta(hours=1))
+    assert strategy.decide(later).intent_type.value == "HOLD"   # cadence gate holds
+```
+
+`seeded(...)` accepts `prices`, `balances` (real `TokenBalance` objects), `indicators` (real `RSIData` / `MACDData` / `BollingerBandsData`, keyed `"TOKEN:indicator:period:timeframe"`), and a `timestamp`. Individual `seed_price(...)` / `seed_balance(...)` / `seed_rsi(...)` calls on the snapshot cover the rest.
+
+Why not `MagicMock`? A mocked market answers *any* method call — a misspelled accessor, a wrong keyword argument, or an API that doesn't exist all pass green, so the tests validate nothing about your integration with the SDK. And mocking time helpers on the strategy (instead of driving `timestamp` through the snapshot) hides wall-clock bugs that break backtests — see [Time in Strategies](#time-in-strategies). Reserve `MagicMock` for execution-result objects in `on_intent_executed()` tests, where no seeding API exists.
 
 ## Generating Permissions (Safe Wallets)
 

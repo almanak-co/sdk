@@ -1442,7 +1442,7 @@ def _get_template_teardown(
         # Add PositionInfo entries here as you implement your strategy logic.
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(UTC),  # reporting-only (decisions use market.timestamp)
             positions=[],
         )
 
@@ -1508,7 +1508,7 @@ def _get_template_teardown(
 
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(UTC),  # reporting-only (decisions use market.timestamp)
             positions=positions,
         )
 
@@ -1590,7 +1590,7 @@ def _get_template_teardown(
 
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(UTC),  # reporting-only (decisions use market.timestamp)
             positions=positions,
         )
 
@@ -1696,7 +1696,7 @@ def _get_template_teardown(
 
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(UTC),  # reporting-only (decisions use market.timestamp)
             positions=positions,
         )
 
@@ -1788,7 +1788,7 @@ def _get_template_teardown(
 
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(UTC),  # reporting-only (decisions use market.timestamp)
             positions=positions,
         )
 
@@ -1876,7 +1876,7 @@ def _get_template_teardown(
 
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(UTC),  # reporting-only (decisions use market.timestamp)
             positions=positions,
         )
 
@@ -1947,7 +1947,7 @@ def _get_template_teardown(
 
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(UTC),  # reporting-only (decisions use market.timestamp)
             positions=positions,
         )
 
@@ -2069,7 +2069,7 @@ def _get_template_teardown(
 
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(UTC),  # reporting-only (decisions use market.timestamp)
             positions=positions,
         )
 
@@ -2140,7 +2140,7 @@ def _get_template_teardown(
 
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(UTC),  # reporting-only (decisions use market.timestamp)
             positions=positions,
         )
 
@@ -2218,7 +2218,7 @@ def _get_template_teardown(
 
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(UTC),  # reporting-only (decisions use market.timestamp)
             positions=positions,
         )
 
@@ -2266,7 +2266,7 @@ def _get_template_teardown(
         from almanak.framework.teardown import TeardownPositionSummary
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(UTC),  # reporting-only (decisions use market.timestamp)
             positions=[],
         )
 
@@ -4173,6 +4173,7 @@ round-trip, teardown intents, and common edge cases (zero balance, zero price).
 """
 
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -4215,16 +4216,19 @@ def _make_mock_market(
     balance: Decimal = Decimal("100"),
     balance_usd: Decimal = Decimal("100000"),
     rsi: Decimal = Decimal("50"),
+    timestamp: datetime | None = None,
 ) -> MagicMock:
-    """Build a configurable MarketSnapshot mock.
+    """Build a configurable MarketSnapshot mock (generic smoke-test scaffolding).
 
-    Tunable inputs let edge-case tests override specific market conditions
-    (e.g. zero balance, zero price) without duplicating fixture boilerplate.
+    For tests of your strategy logic, prefer the real seeding API
+    (``almanak.framework.market.testing.seeded``) and drive time-based tests
+    through the snapshot ``timestamp`` rather than a patched clock helper.
     """
     market = MagicMock()
     market.price.return_value = price
     market.chain = "{chain}"
     market.wallet_address = "0x" + "1" * 40
+    market.timestamp = timestamp or datetime(2026, 1, 1, tzinfo=UTC)
 
     balance_mock = MagicMock()
     balance_mock.balance = balance
