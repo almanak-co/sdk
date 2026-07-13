@@ -648,8 +648,16 @@ class TestUniswapV3CollectFeesIntent:
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
     @pytest.mark.xfail(
-        strict=True,
-        reason="VIB-4314: same-pool fee-accrual fixture not yet wired — swap routes to different fee tier than LP position (as of 2026-05-12)",
+        strict=False,
+        reason=(
+            "VIB-4314: same-pool fee-accrual fixture not yet wired — the setup swap routes to a "
+            "different fee tier than the LP position, so post-open fee accrual is fork-state-dependent "
+            "and this test's outcome flip-flops (fees accrue → XPASS; no fees → xfail). strict=False "
+            "because an XPASS here is NOT the fixture being wired, just the same unwired condition "
+            "landing on the other side of the coin — with strict=True the XPASS half turned this into a "
+            "nondeterministic red that blocked unrelated PRs (observed across #3257/#3258 as of 2026-07-13). "
+            "as of 2026-05-12"
+        ),
     )
     async def test_collect_fees_weth_usdc(
         self,
