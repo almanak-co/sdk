@@ -52,12 +52,16 @@ INV_VALUE = Decimal("0.05") * Decimal("110000")  # 5500
 # ---------------------------------------------------------------------------
 
 
-def make_strategy(tracked=("WBTC", "USDC"), positions=None) -> MagicMock:
+def make_strategy(tracked=("WBTC", "USDC"), positions=None, quote_token=None) -> MagicMock:
     s = MagicMock()
     s.deployment_id = DEP
     s.chain = "arbitrum"
     s.wallet_address = WALLET
     s._get_tracked_tokens.return_value = list(tracked)
+    # Deterministic config accessor (VIB-5761): a real get_config so the
+    # numéraire hint is None by default (byte-identical to pre-hint), and can be
+    # set per test to exercise the quote-token-as-cash reclassification.
+    s.get_config = lambda key, default=None: quote_token if key == "quote_token" else default
     s.get_open_positions.return_value = TeardownPositionSummary(
         deployment_id=DEP, timestamp=datetime.now(UTC), positions=positions or []
     )
@@ -120,12 +124,12 @@ def make_store(events) -> MagicMock:
     return st
 
 
-def snap_with(events, prices, balances, tracked=("WBTC", "USDC"), positions=None) -> PortfolioSnapshot:
+def snap_with(events, prices, balances, tracked=("WBTC", "USDC"), positions=None, quote_token=None) -> PortfolioSnapshot:
     """Run the production snapshot writer. ``events=None`` = no accounting context."""
     v = PortfolioValuer()
     if events is not None:
         v.set_accounting_context(make_store(events), DEP)
-    return v.value(make_strategy(tracked, positions), make_market(prices, balances))
+    return v.value(make_strategy(tracked, positions, quote_token=quote_token), make_market(prices, balances))
 
 
 def money(s: PortfolioSnapshot):
@@ -481,3 +485,140 @@ class TestPersistenceRoundTrip:
         assert count == 1
         assert debt_to_net == Decimal("0")
         assert debt_cost == Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# VIB-5761 — the strategy's quote/numéraire token held as swap inventory is
+# CASH, not a deployed position. Optional hint from strategy.get_config.
+# ---------------------------------------------------------------------------
+
+# An open swap lot in the numéraire (USDC), e.g. the proceeds of a
+# position-closing sell. Without the quote-token hint the writer books it as
+# deployed inventory → "1 open position" on an otherwise-flat wallet.
+USDC_INVENTORY = swap_event("USDC", "200", token_in="ETH", amount_in="0.08", amount_out_usd="200")
+_NUM_PRICES = {"USDC": Decimal("1"), "ETH": Decimal("2500")}
+_NUM_BALANCES = {"USDC": Decimal("200"), "ETH": Decimal("0.01")}
+_NUM_WALLET_VALUE = Decimal("200") + Decimal("0.01") * Decimal("2500")  # 225
+
+
+class TestNumeraireCashClassification:
+    """VIB-5761 — idle numéraire (quote token) is cash, not deployed inventory."""
+
+    def test_numeraire_lot_classified_as_cash_when_hinted(self):
+        snap = snap_with(
+            [USDC_INVENTORY], _NUM_PRICES, _NUM_BALANCES, tracked=("USDC", "ETH"), quote_token="USDC"
+        )
+        # The numéraire stays in cash; nothing deployed; zero open-position rows.
+        assert snap.available_cash_usd == _NUM_WALLET_VALUE
+        assert snap.total_value_usd == Decimal("0")
+        assert snap.deployed_capital_usd == Decimal("0")
+        assert [p for p in inventory_rows(snap) if p.value_usd > 0] == []
+        meta = (snap.snapshot_metadata or {}).get("swap_inventory") or {}
+        assert (meta.get("skipped") or {}).get("usdc") == "numeraire_cash", meta
+
+    def test_pure_numeraire_snapshot_stamps_applied_not_unmeasured(self):
+        # VIB-5761 cross-lane guard: a torn-down wallet holding ONLY the numéraire
+        # has empty inventory rows, but the classifier authoritatively decided the
+        # numéraire is cash. The stamp MUST stay "applied" (the pre-fix numéraire
+        # deployed-row status) so the gateway's GetCostStack keeps suppressing the
+        # legacy VIB-4984 additive inventory-MTM term. A regression to "unmeasured"
+        # here re-marks the numéraire as directional inventory in Strategy PnL —
+        # the exact phantom this fix removes from NAV, reappearing in another lane.
+        snap = snap_with(
+            [USDC_INVENTORY], _NUM_PRICES, _NUM_BALANCES, tracked=("USDC", "ETH"), quote_token="USDC"
+        )
+        meta = (snap.snapshot_metadata or {}).get("swap_inventory") or {}
+        assert [p for p in inventory_rows(snap) if p.value_usd > 0] == []  # no rows
+        assert meta.get("status") == "applied", meta
+
+    def test_genuinely_unmeasured_lot_still_stamps_unmeasured(self):
+        # Contrast guard: a lot the classifier could NOT measure (missing FIFO
+        # basis) is NOT an authoritative decision — it must keep stamping
+        # "unmeasured" so GetCostStack's legacy fallback still runs. The fix must
+        # not blanket-flip empty-row snapshots to "applied".
+        eth_lot_no_cost = swap_event("ETH", "0.01", token_in="USDC", amount_in="25", amount_out_usd=None)
+        snap = snap_with([eth_lot_no_cost], _NUM_PRICES, _NUM_BALANCES, tracked=("USDC", "ETH"))
+        meta = (snap.snapshot_metadata or {}).get("swap_inventory") or {}
+        assert (meta.get("skipped") or {}).get("eth") == "cost_unmeasured", meta
+        assert meta.get("status") == "unmeasured", meta
+
+    def test_without_hint_numeraire_is_the_bug(self):
+        # Regression anchor: no hint → the numéraire reads as a deployed position
+        # (the field lie), so the hint is what fixes it — not a no-op test.
+        snap = snap_with([USDC_INVENTORY], _NUM_PRICES, _NUM_BALANCES, tracked=("USDC", "ETH"))
+        assert snap.total_value_usd == Decimal("200")
+        assert snap.deployed_capital_usd == Decimal("200")
+        assert any(p.details.get("asset", "").upper() == "USDC" for p in inventory_rows(snap))
+
+    def test_nav_invariant_across_hint(self):
+        # NAV = total + cash is IDENTICAL with and without the hint — only the
+        # cash/deployed split moves (blueprint 27 §7.11 swap-inventory contract).
+        hinted = snap_with(
+            [USDC_INVENTORY], _NUM_PRICES, _NUM_BALANCES, tracked=("USDC", "ETH"), quote_token="USDC"
+        )
+        plain = snap_with([USDC_INVENTORY], _NUM_PRICES, _NUM_BALANCES, tracked=("USDC", "ETH"))
+        assert (hinted.total_value_usd + hinted.available_cash_usd) == (
+            plain.total_value_usd + plain.available_cash_usd
+        ) == _NUM_WALLET_VALUE
+        assert hinted.wallet_total_value_usd == plain.wallet_total_value_usd
+
+    def test_non_numeraire_lot_still_deployed_with_hint(self):
+        # A genuine net-long position (WBTC) is NOT hidden by the hint — only the
+        # numéraire (USDC) reclassifies. WBTC inventory + USDC cash coexist.
+        snap = snap_with(
+            [BUY_WBTC, USDC_INVENTORY],
+            {"WBTC": Decimal("110000"), "USDC": Decimal("1"), "ETH": Decimal("2500")},
+            {"WBTC": Decimal("0.05"), "USDC": Decimal("200"), "ETH": Decimal("0.01")},
+            tracked=("WBTC", "USDC", "ETH"),
+            quote_token="USDC",
+        )
+        assets = {p.details.get("asset", "").upper() for p in inventory_rows(snap) if p.value_usd > 0}
+        assert assets == {"WBTC"}  # WBTC deployed; USDC is cash
+        assert snap.total_value_usd == Decimal("5500")  # WBTC only, not +200 USDC
+
+    def test_no_hint_is_byte_identical(self):
+        # quote_token=None → pre-VIB-5761 classification, byte for byte.
+        with_none = snap_with([USDC_INVENTORY], _NUM_PRICES, _NUM_BALANCES, tracked=("USDC", "ETH"), quote_token=None)
+        plain = snap_with([USDC_INVENTORY], _NUM_PRICES, _NUM_BALANCES, tracked=("USDC", "ETH"))
+        assert money(with_none) == money(plain)
+
+
+class TestResolveNumeraireHint:
+    """VIB-5761 — the optional numéraire resolver is best-effort + safe."""
+
+    def test_reads_get_config_quote_token(self):
+        from almanak.framework.valuation.portfolio_valuer import _resolve_numeraire_hint
+
+        s = MagicMock()
+        s.get_config = lambda key, default=None: "USDG" if key == "quote_token" else default
+        assert _resolve_numeraire_hint(s) == "USDG"
+
+    def test_falls_back_to_quote_token_attr(self):
+        from almanak.framework.valuation.portfolio_valuer import _resolve_numeraire_hint
+
+        s = MagicMock(spec=["quote_token"])
+        s.quote_token = "USDC"
+        assert _resolve_numeraire_hint(s) == "USDC"
+
+    def test_absent_returns_none(self):
+        from almanak.framework.valuation.portfolio_valuer import _resolve_numeraire_hint
+
+        s = MagicMock(spec=[])  # no get_config, no quote_token
+        assert _resolve_numeraire_hint(s) is None
+
+    def test_raising_accessor_degrades_to_none(self):
+        from almanak.framework.valuation.portfolio_valuer import _resolve_numeraire_hint
+
+        s = MagicMock()
+        s.get_config = MagicMock(side_effect=RuntimeError("boom"))
+        s.quote_token = None
+        assert _resolve_numeraire_hint(s) is None
+
+    def test_bare_magicmock_does_not_pollute_hint(self):
+        # A bare, unspec'd MagicMock returns a truthy MagicMock from both
+        # get_config(...) and .quote_token. Without an isinstance(str) guard the
+        # resolver would str()-ify the mock into a garbage "<MagicMock ...>" hint
+        # and corrupt classification. Only a real string token is a valid hint.
+        from almanak.framework.valuation.portfolio_valuer import _resolve_numeraire_hint
+
+        assert _resolve_numeraire_hint(MagicMock()) is None

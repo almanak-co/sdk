@@ -400,17 +400,58 @@ def _aggregate_open_swap_lots(
     return totals
 
 
+def _resolve_numeraire_hint(strategy: Any) -> str | None:
+    """Optional numéraire/quote-token hint for swap-inventory classification (VIB-5761).
+
+    A swap strategy's quote token is CASH, not directional inventory — but the
+    fungible FIFO swap-inventory pool mints a lot for the numéraire acquired as
+    the **proceeds of a position-closing sell** (WETH→USDG on teardown), so idle
+    numéraire reads as a deployed position on an otherwise-flat wallet
+    (``1 open position / $X open-position NAV``). When the strategy declares a
+    quote token, return it so :func:`_classify_swap_inventory` leaves that token
+    classified as cash.
+
+    Fully optional + best-effort: any strategy without a declared quote token
+    (LP / lending / perp, or a ``StrategyLike`` that is not config-backed) yields
+    ``None`` and classification is byte-identical to the pre-hint behaviour.
+    Never raises — a config accessor that throws degrades to ``None``.
+    """
+    # isinstance(str) guards, not truthiness: a MagicMock strategy (ubiquitous in
+    # unit tests) returns a truthy MagicMock from get_config(...) / .quote_token,
+    # which str() would turn into a garbage "<MagicMock ...>" hint and pollute
+    # classification. Only a real, non-empty string token is a valid numéraire.
+    getter = getattr(strategy, "get_config", None)
+    if callable(getter):
+        try:
+            configured = getter("quote_token", None)
+        except Exception:  # pragma: no cover - defensive: exotic strategy configs
+            configured = None
+        if isinstance(configured, str) and configured:
+            return configured
+    attr = getattr(strategy, "quote_token", None)
+    return attr if isinstance(attr, str) and attr else None
+
+
 def _classify_swap_inventory(
     lot_totals: dict[str, tuple[Decimal, Decimal | None]],
     balances: dict[str, Decimal],
     prices: dict[str, Decimal],
     chain: str,
+    numeraire: str | None = None,
 ) -> _SwapInventoryClassification:
     """Classify per-token open-lot inventory as deployed capital (VIB-5057).
 
     Per token, the classification is whole-or-nothing with explicit skip
     reasons (never a silent $0 booking):
 
+    * ``numeraire_cash`` — the token is the strategy's declared quote/numéraire
+      token (``numeraire`` hint, VIB-5761). It is CASH, not directional
+      inventory: the fungible swap pool mints a lot for the numéraire received
+      as sell proceeds, but holding the numéraire is holding cash. Leaving it in
+      ``available_cash_usd`` (instead of moving it to ``total_value_usd`` /
+      ``deployed_capital_usd``) is what makes a torn-down wallet read 0 open
+      positions. **NAV-invariant** — only the cash/deployed split changes.
+      Absent hint ⇒ this skip never fires ⇒ pre-VIB-5761 behaviour.
     * ``cost_unmeasured`` — the token's FIFO basis is ``None`` (e.g. degraded
       SWAP events missing ``amount_out_usd``). Moving the value while booking
       a fabricated ``Decimal("0")`` basis would overstate unrealized PnL by
@@ -432,6 +473,7 @@ def _classify_swap_inventory(
     """
     if not lot_totals:
         return _NO_SWAP_INVENTORY
+    numeraire_key = numeraire.casefold() if numeraire else None
 
     # Case-variant duplicate symbols (e.g. "USDC" and "usdc" both tracked) must
     # SUM, not last-write-wins: wallet_value already counts both balances, so a
@@ -452,6 +494,14 @@ def _classify_swap_inventory(
 
     for key in sorted(lot_totals):
         remaining, cost = lot_totals[key]
+        # VIB-5761: the strategy's quote/numéraire token held as swap inventory
+        # is idle CASH (typically the proceeds of a position-closing sell), not
+        # deployed directional exposure. Leave it in available_cash so a flat
+        # wallet does not read as an open position. NAV-invariant. Checked first
+        # so it short-circuits regardless of cost/price/holding state.
+        if numeraire_key is not None and key == numeraire_key:
+            skipped[key] = "numeraire_cash"
+            continue
         display, wallet_qty = balance_by_key.get(key, (key.upper(), None))
         price = price_by_key.get(key)
         if cost is None:
@@ -497,7 +547,19 @@ def _classify_swap_inventory(
             )
         )
 
-    metadata: dict[str, Any] = {"status": "applied" if rows else "unmeasured"}
+    # VIB-5761: a numeraire_cash skip is an AUTHORITATIVE cash classification
+    # (the numéraire's inventory-MTM contribution is exactly zero), not an absence
+    # of measurement — so it keeps the snapshot stamped "applied", the same status
+    # the numéraire's pre-VIB-5761 deployed row produced. This matters gateway-side:
+    # GetCostStack suppresses the legacy VIB-4984 additive inventory-MTM term ONLY
+    # for status=="applied". A pure-numéraire (torn-down) wallet has empty ``rows``;
+    # without this, the stamp flips to "unmeasured", the legacy path re-marks the
+    # numéraire as directional inventory, and the exact phantom this fix removes
+    # from NAV reappears in Strategy PnL. Genuinely-unmeasured skips
+    # (cost_unmeasured / price_missing) still stamp "unmeasured"; the legacy path
+    # returns None on those same lots, so suppression loses no real mark there.
+    classifier_applied = bool(rows) or "numeraire_cash" in skipped.values()
+    metadata: dict[str, Any] = {"status": "applied" if classifier_applied else "unmeasured"}
     if rows:
         metadata["value_usd"] = str(total_value)
         metadata["cost_usd"] = str(total_cost)
@@ -1374,7 +1436,12 @@ class PortfolioValuer:
             # ``available_cash_usd`` so wallet NAV stays invariant — only the
             # cash/deployed split moves. Zero open lots ⇒ empty rows + None
             # metadata ⇒ byte-identical snapshot to the pre-VIB-5057 writer.
-            swap_inventory = self._swap_inventory_for_snapshot(chain, balances, prices)
+            # VIB-5761: pass the strategy's optional quote/numéraire token so its
+            # idle balance (sell proceeds) classifies as cash, not a deployed
+            # position — absent hint keeps the pre-VIB-5761 classification.
+            swap_inventory = self._swap_inventory_for_snapshot(
+                chain, balances, prices, numeraire=_resolve_numeraire_hint(strategy)
+            )
             positions = [*positions, *swap_inventory.rows]
 
             # Step 4a-bis (VIB-5316): synthesize the held-PT inventory from FIFO
@@ -1721,6 +1788,7 @@ class PortfolioValuer:
         chain: str,
         balances: dict[str, Decimal],
         prices: dict[str, Decimal],
+        numeraire: str | None = None,
     ) -> _SwapInventoryClassification:
         """Classify this snapshot's open swap-inventory lots (VIB-5057).
 
@@ -1764,7 +1832,7 @@ class PortfolioValuer:
             return _NO_SWAP_INVENTORY
         try:
             lot_totals = _aggregate_open_swap_lots(self._snapshot_events_flat, self._deployment_id)
-            return _classify_swap_inventory(lot_totals, balances, prices, chain)
+            return _classify_swap_inventory(lot_totals, balances, prices, chain, numeraire=numeraire)
         except Exception:
             logger.warning(
                 "Swap inventory classification failed for %s; inventory remains classified as cash",
