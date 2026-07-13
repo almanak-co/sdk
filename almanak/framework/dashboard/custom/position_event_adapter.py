@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from math import exp, log
 from typing import Any
 
-from ._token_decimals import TOKEN_DECIMALS as _TOKEN_DECIMALS
+from ._token_decimals import resolve_token_decimals
 
 
 def position_event_to_dict(event: Any) -> dict[str, Any]:
@@ -132,6 +132,7 @@ def position_events_to_position_data_dicts(
         if anchor is None:
             continue
 
+        anchor_chain = anchor.get("chain") or None
         positions.append(
             {
                 "position_id": pid,
@@ -139,8 +140,8 @@ def position_events_to_position_data_dicts(
                 "date_end": _parse_iso(close_row.get("timestamp")) if close_row else None,
                 "bound_tick_lower": anchor.get("tick_lower") or 0,
                 "bound_tick_upper": anchor.get("tick_upper") or 0,
-                "bound_price_lower": _tick_to_price(anchor.get("tick_lower"), token0, token1),
-                "bound_price_upper": _tick_to_price(anchor.get("tick_upper"), token0, token1),
+                "bound_price_lower": _tick_to_price(anchor.get("tick_lower"), token0, token1, anchor_chain),
+                "bound_price_upper": _tick_to_price(anchor.get("tick_upper"), token0, token1, anchor_chain),
                 "is_active": close_row is None,
                 "position_type": anchor.get("position_type", "") or "",
                 "protocol": anchor.get("protocol", "") or "",
@@ -174,7 +175,7 @@ def _parse_iso(value: Any) -> datetime | None:
         return None
 
 
-def _tick_to_price(tick: Any, token0: str | None, token1: str | None) -> float:
+def _tick_to_price(tick: Any, token0: str | None, token1: str | None, chain: str | None = None) -> float:
     """Convert a Uniswap-style tick into token1-per-token0 display price."""
     if tick is None or token0 is None or token1 is None:
         return 0.0
@@ -183,8 +184,11 @@ def _tick_to_price(tick: Any, token0: str | None, token1: str | None) -> float:
     except (TypeError, ValueError):
         return 0.0
 
-    decimals0 = _TOKEN_DECIMALS.get(str(token0).upper())
-    decimals1 = _TOKEN_DECIMALS.get(str(token1).upper())
+    # Registry-first, per-chain decimals — a static symbol map silently
+    # mis-scales any token it doesn't list (VIB-5738), collapsing the
+    # position-range band on the Positions-Over-Time chart to price 0.
+    decimals0 = resolve_token_decimals(token0, chain)
+    decimals1 = resolve_token_decimals(token1, chain)
     if decimals0 is None or decimals1 is None:
         return 0.0
 

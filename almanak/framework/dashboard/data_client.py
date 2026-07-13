@@ -331,7 +331,9 @@ class DashboardDataClient:
             return PortfolioMetricsSummary(
                 deployment_id=deployment_id,
                 total_value_usd=summary.total_value_usd,
-                pnl_usd=summary.pnl_24h_usd,
+                # Coalesce an unmeasured 24h (None) to 0 for this legacy
+                # wallet-level summary shape (VIB-5787).
+                pnl_usd=summary.pnl_24h_usd if summary.pnl_24h_usd is not None else Decimal("0"),
             )
         except Exception:
             logger.debug("Failed to fetch portfolio metrics for %s", deployment_id, exc_info=True)

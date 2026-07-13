@@ -29,7 +29,10 @@ class StrategySummary:
     chain: str
     protocol: str
     total_value_usd: Decimal
-    pnl_24h_usd: Decimal
+    # None = unmeasured (Empty ≠ Zero) — e.g. a run younger than 24h with no
+    # trailing baseline. Consumers that render a wallet-level PnL coalesce this
+    # to Decimal("0"); the TA performance tile shows "—" (VIB-5787).
+    pnl_24h_usd: Decimal | None
     last_action_at: datetime | None
     attention_required: bool
     attention_reason: str
@@ -1008,7 +1011,11 @@ class GatewayDashboardClient:
             chain=proto.chain,
             protocol=proto.protocol,
             total_value_usd=Decimal(proto.total_value_usd) if proto.total_value_usd else Decimal("0"),
-            pnl_24h_usd=Decimal(proto.pnl_24h_usd) if proto.pnl_24h_usd else Decimal("0"),
+            # Empty ≠ Zero: an unmeasured 24h PnL (gateway couldn't compute a
+            # trailing-24h NAV delta — e.g. a run younger than 24h with no
+            # baseline snapshot) is None, not a fabricated $0.00 that reads as
+            # a measured break-even next to a real Strategy PnL (VIB-5787).
+            pnl_24h_usd=Decimal(proto.pnl_24h_usd) if proto.pnl_24h_usd else None,
             last_action_at=datetime.fromtimestamp(proto.last_action_at, tz=UTC) if proto.last_action_at else None,
             attention_required=proto.attention_required,
             attention_reason=proto.attention_reason,

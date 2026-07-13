@@ -424,11 +424,19 @@ def render_money_trail(p: PnLSummary, cost: CostStackInfo | None = None) -> None
     if open_position_nav < Decimal("0"):
         open_position_nav = Decimal("0")
     strategy_pnl = _strategy_pnl_usd(p, cost, open_position_nav)
-    age_sub = f"max DD {_pct(p.max_drawdown_pct, decimals=1)}" if p.max_drawdown_pct > 0 else f"{p.age_days}d age"
+    # Max drawdown is a LOSS: ``max_drawdown_pct`` is a positive magnitude, so
+    # render it with an explicit leading "-" — that makes Streamlit's metric
+    # delta draw a downward (loss) glyph instead of the misleading up-arrow a
+    # bare "+1.3%" produced, and the sign now reads as one with the meaning
+    # (delta_color is "off"/neutral, so no green/red — just direction).
+    age_sub = f"-{p.max_drawdown_pct:.1f}% max DD" if p.max_drawdown_pct > 0 else f"{p.age_days}d age"
     c4, c5, c6, c7 = st.columns(4)
     with c4:
+        # Empty ≠ a placeholder: on a flat / fully-unwound strategy the badge
+        # must say so, not print the literal "active exposure" (which reads as
+        # the opposite of the $0.00 NAV it sits under).
         open_position_delta = (
-            f"{p.open_position_count} open position(s)" if p.open_position_count > 0 else "active exposure"
+            f"{p.open_position_count} open position(s)" if p.open_position_count > 0 else "no open positions"
         )
         st.metric(
             "Open position NAV",

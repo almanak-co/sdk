@@ -16,7 +16,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from ._token_decimals import token_decimals as _token_decimals
+from ._token_decimals import resolve_token_decimals as _resolve_token_decimals
 
 logger = logging.getLogger(__name__)
 
@@ -648,8 +648,29 @@ class DashboardAPIClient:
                     return b""
                 return bytes.fromhex(raw.removeprefix("0x"))
 
-            decimals0 = _token_decimals(token0)
-            decimals1 = _token_decimals(token1)
+            # Resolve per-chain decimals from the canonical registry — the LP
+            # price axis is derived from tick + (decimals0 - decimals1), so a
+            # wrong decimals value mis-scales every price by 10**delta and
+            # collapses the axis (VIB-5738: USDG=6 mis-read as 18 rendered
+            # ~$1800 prices as ~1.8e-9 → all ticks "0.00"). Empty ≠ Zero: if
+            # either token's decimals is genuinely unresolvable, DO NOT fabricate
+            # a default (an 18-guess is exactly what caused the original bug) —
+            # skip the chart so it renders "not available" honestly rather than a
+            # silently mis-scaled axis.
+            decimals0 = _resolve_token_decimals(token0, chain)
+            decimals1 = _resolve_token_decimals(token1, chain)
+            if decimals0 is None or decimals1 is None:
+                logger.warning(
+                    "Skipping liquidity distribution for %s on %s: unresolved decimals "
+                    "(token0=%s→%s, token1=%s→%s) — refusing to mis-scale the price axis",
+                    pool_address,
+                    chain,
+                    token0,
+                    decimals0,
+                    token1,
+                    decimals1,
+                )
+                return []
             reader = LiquidityDepthReader(
                 rpc_call=_rpc_call,
                 tick_range_multiplier=tick_range_multiplier,
@@ -949,7 +970,10 @@ class DashboardAPIClient:
             "chain": summary.chain if hasattr(summary, "chain") else "",
             "protocol": summary.protocol if hasattr(summary, "protocol") else "",
             "total_value_usd": str(summary.total_value_usd) if hasattr(summary, "total_value_usd") else "0",
-            "pnl_24h_usd": str(summary.pnl_24h_usd) if hasattr(summary, "pnl_24h_usd") else "0",
+            # Empty ≠ Zero: an unmeasured 24h PnL (None) serialises to "" so the
+            # TA performance tile renders "—" rather than a fabricated "$0.00"
+            # (VIB-5787).
+            "pnl_24h_usd": str(summary.pnl_24h_usd) if getattr(summary, "pnl_24h_usd", None) is not None else "",
             "attention_required": summary.attention_required if hasattr(summary, "attention_required") else False,
             "attention_reason": summary.attention_reason if hasattr(summary, "attention_reason") else "",
         }

@@ -473,8 +473,9 @@ def _hydrate_active_position_from_events(
     result["is_active"] = True
     result.setdefault("lower_tick", active_open.get("tick_lower"))
     result.setdefault("upper_tick", active_open.get("tick_upper"))
-    amount0 = _token_amount_to_display(active_open.get("amount0"), config.token0 if config else None)
-    amount1 = _token_amount_to_display(active_open.get("amount1"), config.token1 if config else None)
+    _chain = config.chain if config else None
+    amount0 = _token_amount_to_display(active_open.get("amount0"), config.token0 if config else None, _chain)
+    amount1 = _token_amount_to_display(active_open.get("amount1"), config.token1 if config else None, _chain)
     if amount0 is not None:
         result["token0_amount"] = amount0
     if amount1 is not None:
@@ -494,10 +495,13 @@ def _tick_to_display_price(tick: Any, config: LPDashboardConfig) -> float | None
     """Convert a Uniswap-style tick into token1-per-token0 display price."""
     from math import exp, log
 
-    from almanak.framework.dashboard.custom._token_decimals import TOKEN_DECIMALS
+    from almanak.framework.dashboard.custom._token_decimals import resolve_token_decimals
 
-    decimals0 = TOKEN_DECIMALS.get(config.token0.upper())
-    decimals1 = TOKEN_DECIMALS.get(config.token1.upper())
+    # Registry-first, per-chain decimals — a static symbol map silently
+    # mis-scales any token it doesn't list (VIB-5738), turning the price by
+    # 10**(dec0-dec1) into nonsense.
+    decimals0 = resolve_token_decimals(config.token0, config.chain)
+    decimals1 = resolve_token_decimals(config.token1, config.chain)
     if tick is None or decimals0 is None or decimals1 is None:
         return None
     try:
@@ -506,12 +510,12 @@ def _tick_to_display_price(tick: Any, config: LPDashboardConfig) -> float | None
         return None
 
 
-def _token_amount_to_display(amount: Any, symbol: str | None) -> float | None:
-    from almanak.framework.dashboard.custom._token_decimals import TOKEN_DECIMALS
+def _token_amount_to_display(amount: Any, symbol: str | None, chain: str | None = None) -> float | None:
+    from almanak.framework.dashboard.custom._token_decimals import resolve_token_decimals
 
     if amount in (None, "") or symbol is None:
         return None
-    token_decimals = TOKEN_DECIMALS.get(symbol.upper())
+    token_decimals = resolve_token_decimals(symbol, chain)
     if token_decimals is None:
         return None
     try:

@@ -1176,7 +1176,10 @@ def _populate_performance_pnl(api_client: Any, result: dict[str, Any]) -> None:
             pnl_24h = getattr(summary, "pnl_24h_usd", None)
             if pnl_24h is None and isinstance(summary, dict):
                 pnl_24h = summary.get("pnl_24h_usd")
-            if pnl_24h is not None:
+            # Empty ≠ Zero: None (typed) and "" (dict-serialised unmeasured)
+            # both mean "no measured 24h value" — leave ``total_pnl`` absent so
+            # the tile renders "—", never a fabricated $0.00 (VIB-5787).
+            if pnl_24h is not None and pnl_24h != "":
                 result["total_pnl"] = pnl_24h
     except Exception:  # noqa: BLE001
         logger.debug("api_client.get_summary() failed for TA performance PnL", exc_info=True)
@@ -1290,8 +1293,14 @@ def render_ta_dashboard(
 
     st.divider()
 
-    # Signal status
-    _render_signal_status(session_state, strategy_config, config)
+    # Signal status — gated on lifecycle: a torn-down deployment shows a
+    # neutral notice, never a live BUY/SELL badge (VIB-5787).
+    _render_signal_status(
+        session_state,
+        strategy_config,
+        config,
+        is_terminal=_deployment_is_terminal(deployment_id),
+    )
 
     st.divider()
 
@@ -2176,13 +2185,49 @@ _DEDICATED_RENDERERS: dict[
 ] = dict.fromkeys(("MACD", "BOLLINGER", "CCI", "STOCHASTIC", "ATR", "ADX"), _render_indicator_with_price)
 
 
+# Lifecycle states in which the deployment is terminal — the strategy is no
+# longer evaluating signals or placing trades. A live BUY/SELL badge on a
+# torn-down deployment advertises intent that can never execute, so the badge
+# is gated on these (VIB-5787).
+_TERMINAL_STATUSES: frozenset[str] = frozenset({"INACTIVE", "ARCHIVED"})
+
+
+def _deployment_is_terminal(deployment_id: str) -> bool:
+    """Best-effort: is this deployment torn down / terminal?
+
+    Fails OPEN (returns ``False``) on any error so a transient gateway hiccup
+    during a live run never wrongly suppresses the current signal — the badge
+    is only gated when we positively read a terminal lifecycle status.
+    """
+    try:
+        from almanak.framework.dashboard.data_source import get_strategy_details
+
+        strategy = get_strategy_details(deployment_id)
+    except Exception:  # noqa: BLE001
+        return False
+    if strategy is None:
+        return False
+    return str(getattr(strategy, "status", "")) in _TERMINAL_STATUSES
+
+
 def _render_signal_status(
     session_state: dict[str, Any],
     strategy_config: dict[str, Any],
     config: TADashboardConfig,
+    *,
+    is_terminal: bool = False,
 ) -> None:
-    """Render the signal status section."""
+    """Render the signal status section.
+
+    When ``is_terminal`` (the deployment is torn down / archived), the live
+    BUY/SELL/NEUTRAL badge is suppressed in favour of a neutral notice — a
+    strategy that no longer trades must not advertise a live signal (VIB-5787).
+    """
     st.subheader("Signal Status")
+
+    if is_terminal:
+        st.info("Strategy stopped — signal evaluation is inactive (deployment is torn down).")
+        return
 
     # Get indicator value
     indicator_key = config.indicator_name.lower()
@@ -2270,8 +2315,9 @@ def _render_performance(session_state: dict[str, Any]) -> None:
         # explicitly. Empty ≠ Zero: when the summary RPC failed / pnl_24h is
         # unmeasured, ``total_pnl`` is ABSENT — show "—", never a fabricated
         # "$0.00" that reads as a measured break-even.
-        if "total_pnl" in session_state and session_state.get("total_pnl") is not None:
-            pnl = Decimal(str(session_state["total_pnl"]))
+        total_pnl_raw = session_state.get("total_pnl")
+        if total_pnl_raw is not None and total_pnl_raw != "":
+            pnl = Decimal(str(total_pnl_raw))
             st.metric(
                 "24h PnL",
                 f"${pnl:+,.2f}",

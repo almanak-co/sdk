@@ -191,7 +191,10 @@ def _convert_gateway_summary_to_model(summary: StrategySummary) -> Strategy:
         id=summary.deployment_id,
         name=summary.name,
         status=_convert_status(summary.status),
-        pnl_24h_usd=summary.pnl_24h_usd,
+        # Operator-console Strategy model keeps a concrete Decimal — coalesce
+        # an unmeasured 24h (None, Empty ≠ Zero) to the legacy 0 here; the
+        # Empty-vs-measured distinction is only surfaced on the TA tile.
+        pnl_24h_usd=summary.pnl_24h_usd if summary.pnl_24h_usd is not None else Decimal("0"),
         total_value_usd=summary.total_value_usd,
         chain=summary.chain,
         protocol=summary.protocol,
