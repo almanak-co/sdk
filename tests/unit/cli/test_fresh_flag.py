@@ -4,6 +4,10 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+from almanak.framework.cli._run_setup import (
+    _FRESH_DECISION_STATE_TABLES,
+    _FRESH_ONCHAIN_RECORD_TABLES,
+)
 from almanak.framework.cli.run_helpers import (
     _FRESH_DEPLOYMENT_ID_TABLES,
     _fresh_clear_state,
@@ -105,6 +109,34 @@ class TestFreshTableLists:
         assert "accounting_events" in _FRESH_DEPLOYMENT_ID_TABLES
         assert "position_events" in _FRESH_DEPLOYMENT_ID_TABLES
 
+    def test_full_set_is_decision_plus_onchain(self) -> None:
+        # The Anvil wipe-everything set is the union of the two categories.
+        assert set(_FRESH_DEPLOYMENT_ID_TABLES) == set(_FRESH_DECISION_STATE_TABLES) | set(
+            _FRESH_ONCHAIN_RECORD_TABLES
+        )
+        # The two categories must be disjoint — a table is either decision
+        # state (wiped on --fresh) or the immutable on-chain record (preserved
+        # on real networks), never both.
+        assert not (set(_FRESH_DECISION_STATE_TABLES) & set(_FRESH_ONCHAIN_RECORD_TABLES))
+
+    def test_books_tables_are_onchain_record(self) -> None:
+        # VIB-5784: the immutable "books" must live in the preserve-on-mainnet
+        # category so a --fresh relaunch cannot erase real executed trades. This
+        # is an INDEPENDENT contract from the constant itself — it pins every
+        # immutable table by name so accidentally moving one (e.g.
+        # position_state_snapshots or position_registry) into decision state
+        # fails here, not silently in production.
+        for table in (
+            "transaction_ledger",
+            "accounting_events",
+            "accounting_outbox",
+            "position_events",
+            "position_state_snapshots",
+            "position_registry",
+        ):
+            assert table in _FRESH_ONCHAIN_RECORD_TABLES
+            assert table not in _FRESH_DECISION_STATE_TABLES
+
 
 class TestFreshFlagAnvil:
     """On Anvil all rows across all strategies must be deleted."""
@@ -132,9 +164,11 @@ class TestFreshFlagAnvil:
 
 
 class TestFreshFlagMainnet:
-    """On mainnet only the target strategy's rows are deleted."""
+    """On a real network --fresh resets only the target strategy's DECISION
+    state; the immutable on-chain accounting/ledger record is preserved so a
+    relaunch cannot erase trades that already landed on-chain (VIB-5784)."""
 
-    def test_target_strategy_rows_cleared(self) -> None:
+    def test_target_decision_state_cleared_onchain_record_preserved(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             db = Path(f.name)
 
@@ -146,35 +180,37 @@ class TestFreshFlagMainnet:
         _fresh_clear_state(sqlite3.connect(str(db)), "dep-target", is_anvil=False)
 
         with sqlite3.connect(str(db)) as conn:
-            for table in _FRESH_DEPLOYMENT_ID_TABLES:
+            # Decision-state tables: only the target's row is removed.
+            for table in _FRESH_DECISION_STATE_TABLES:
                 rows = conn.execute(
                     f"SELECT deployment_id FROM {table}"  # noqa: S608
                 ).fetchall()
                 assert len(rows) == 1, f"Expected exactly 1 row in {table} after mainnet --fresh, got {len(rows)}"
                 assert rows[0][0] == "dep-other", f"Surviving row in {table} should be 'dep-other', got {rows[0][0]!r}"
-            # position_events for target deployment should be gone
-            n_pe = conn.execute("SELECT COUNT(*) FROM position_events WHERE deployment_id = 'dep-target'").fetchone()[0]
-            assert n_pe == 0, "position_events for target deployment should be deleted"
-            # position_events for other deployment must be preserved
-            n_pe_other = conn.execute(
-                "SELECT COUNT(*) FROM position_events WHERE deployment_id = 'dep-other'"
-            ).fetchone()[0]
-            assert n_pe_other == 1, "position_events for other deployment must be preserved"
+            # On-chain record tables: BOTH deployments' rows survive — --fresh
+            # must never delete the immutable record of executed activity.
+            for table in _FRESH_ONCHAIN_RECORD_TABLES:
+                ids = {
+                    row[0]
+                    for row in conn.execute(f"SELECT deployment_id FROM {table}").fetchall()  # noqa: S608
+                }
+                assert ids == {"dep-target", "dep-other"}, (
+                    f"{table} must preserve BOTH deployments on mainnet --fresh, got {ids!r}"
+                )
 
-    def test_outbox_only_deployment_id_clears_position_events(self) -> None:
-        """position_events are cleared even when the deployment_id only appears in
-        accounting_outbox (i.e. the outbox hasn't been drained into accounting_events yet).
-        """
+    def test_onchain_record_preserved_even_when_only_in_outbox(self) -> None:
+        """The immutable record is preserved even when the deployment_id only
+        appears in accounting_outbox (outbox not yet drained into accounting_events)."""
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             db = Path(f.name)
 
         _create_db(db)
         with sqlite3.connect(str(db)) as conn:
-            # Seed target strategy with a deployment_id that ONLY appears in accounting_outbox.
+            # Target strategy: decision state + an undrained outbox event + a position event.
             conn.execute("INSERT INTO strategy_state VALUES ('dep-outbox', 'x')")
             conn.execute("INSERT INTO accounting_outbox VALUES ('ao-target', 'dep-outbox', 'x')")
             conn.execute("INSERT INTO position_events VALUES ('pe-outbox', 'dep-outbox', 'x')")
-            # Seed an unrelated strategy that must be preserved.
+            # Unrelated strategy that must also be preserved.
             conn.execute("INSERT INTO strategy_state VALUES ('dep-other', 'x')")
             conn.execute("INSERT INTO accounting_outbox VALUES ('ao-other', 'dep-other', 'x')")
             conn.execute("INSERT INTO position_events VALUES ('pe-other', 'dep-other', 'x')")
@@ -182,17 +218,93 @@ class TestFreshFlagMainnet:
         _fresh_clear_state(sqlite3.connect(str(db)), "dep-outbox", is_anvil=False)
 
         with sqlite3.connect(str(db)) as conn:
-            # Target's position_events should be gone even though dep-outbox never
-            # made it into accounting_events.
-            n_target = conn.execute(
-                "SELECT COUNT(*) FROM position_events WHERE deployment_id = 'dep-outbox'"
-            ).fetchone()[0]
-            assert n_target == 0, "position_events for outbox-only dep should be deleted"
-            # Other strategy's events must be untouched.
-            n_other = conn.execute("SELECT COUNT(*) FROM position_events WHERE deployment_id = 'dep-other'").fetchone()[
-                0
-            ]
-            assert n_other == 1, "position_events for other strategy must be preserved"
+            # Target's decision state is reset...
+            assert (
+                conn.execute("SELECT COUNT(*) FROM strategy_state WHERE deployment_id = 'dep-outbox'").fetchone()[0] == 0
+            )
+            # ...but its undrained outbox event AND position event survive.
+            assert (
+                conn.execute("SELECT COUNT(*) FROM accounting_outbox WHERE deployment_id = 'dep-outbox'").fetchone()[0]
+                == 1
+            ), "undrained accounting_outbox must survive mainnet --fresh (it still needs draining)"
+            assert (
+                conn.execute("SELECT COUNT(*) FROM position_events WHERE deployment_id = 'dep-outbox'").fetchone()[0]
+                == 1
+            ), "position_events for target must survive mainnet --fresh"
+            # Other strategy untouched.
+            assert (
+                conn.execute("SELECT COUNT(*) FROM position_events WHERE deployment_id = 'dep-other'").fetchone()[0] == 1
+            )
+
+    def test_vib_5784_relaunch_does_not_drop_prior_executed_trade(self) -> None:
+        """Regression for VIB-5784.
+
+        Reproduces the confirmed mechanism: launch 1 executes + persists a
+        balancing SWAP (its transaction_ledger + accounting_events rows), the
+        process is restarted, and launch 2 boots with --fresh on the SAME
+        deterministic deployment_id. The --fresh clear must NOT delete the
+        already-executed SWAP's books; it may only reset decision state.
+        """
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db = Path(f.name)
+
+        _create_db(db)
+        deployment_id = "deployment:5f50490f814c"
+        with sqlite3.connect(str(db)) as conn:
+            # Launch 1 aftermath: strategy decision state + the executed SWAP's books.
+            conn.execute("INSERT INTO strategy_state VALUES (?, 'stale-decision')", (deployment_id,))
+            conn.execute(
+                "INSERT INTO transaction_ledger VALUES ('swap-ledger-1', ?, 'SWAP 0x3d3189')",
+                (deployment_id,),
+            )
+            conn.execute(
+                "INSERT INTO accounting_events VALUES ('swap-acc-1', ?, 'SWAP')",
+                (deployment_id,),
+            )
+
+        # Launch 2 boots with --fresh (real network).
+        _fresh_clear_state(sqlite3.connect(str(db)), deployment_id, is_anvil=False)
+
+        with sqlite3.connect(str(db)) as conn:
+            # Decision state was reset...
+            assert (
+                conn.execute(
+                    "SELECT COUNT(*) FROM strategy_state WHERE deployment_id = ?", (deployment_id,)
+                ).fetchone()[0]
+                == 0
+            ), "--fresh should reset strategy decision state"
+            # ...but the executed SWAP's books MUST survive (this is the bug).
+            assert (
+                conn.execute(
+                    "SELECT COUNT(*) FROM transaction_ledger WHERE deployment_id = ?", (deployment_id,)
+                ).fetchone()[0]
+                == 1
+            ), "VIB-5784: transaction_ledger row for an executed SWAP must survive a --fresh relaunch"
+            assert (
+                conn.execute(
+                    "SELECT COUNT(*) FROM accounting_events WHERE deployment_id = ?", (deployment_id,)
+                ).fetchone()[0]
+                == 1
+            ), "VIB-5784: accounting_events row for an executed SWAP must survive a --fresh relaunch"
+
+    def test_anvil_relaunch_still_wipes_everything(self) -> None:
+        """On Anvil the fork reset invalidates the on-chain record, so --fresh
+        still wipes the ledger/accounting rows too (VIB-2573 preserved)."""
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db = Path(f.name)
+
+        _create_db(db)
+        deployment_id = "deployment:5f50490f814c"
+        with sqlite3.connect(str(db)) as conn:
+            conn.execute("INSERT INTO strategy_state VALUES (?, 'x')", (deployment_id,))
+            conn.execute("INSERT INTO transaction_ledger VALUES ('t', ?, 'SWAP')", (deployment_id,))
+            conn.execute("INSERT INTO accounting_events VALUES ('a', ?, 'SWAP')", (deployment_id,))
+
+        _fresh_clear_state(sqlite3.connect(str(db)), deployment_id, is_anvil=True)
+
+        with sqlite3.connect(str(db)) as conn:
+            for table in ("strategy_state", "transaction_ledger", "accounting_events"):
+                assert _count(conn, table) == 0, f"Anvil --fresh must wipe {table}"
 
     def test_missing_tables_do_not_raise(self) -> None:
         """Older DBs without all tables should not error."""

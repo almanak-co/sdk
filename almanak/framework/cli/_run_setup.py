@@ -490,29 +490,65 @@ def _detect_state_resume(state_db_path: Path, deployment_id: str) -> ResumeInfo:
         return ResumeInfo(is_resume=False, version=None, state_keys=[])
 
 
-# Tables keyed on the canonical `deployment_id` column, cleared by --fresh.
-_FRESH_DEPLOYMENT_ID_TABLES = [
+# Strategy DECISION state + derived aggregates + pending signals. Safe to wipe
+# on every ``--fresh`` (Anvil AND real networks): these carry no record of real
+# executed on-chain activity, so resetting them just makes the strategy
+# re-derive its position from a clean slate. ``portfolio_snapshots`` /
+# ``portfolio_metrics`` are derived aggregates (rebuilt from the ledger), and
+# ``migration_state`` is boot bookkeeping.
+_FRESH_DECISION_STATE_TABLES = [
     "strategy_state",
     "teardown_requests",
     "portfolio_snapshots",
     "portfolio_metrics",
-    "transaction_ledger",
-    "position_events",
-    "accounting_events",
-    "accounting_outbox",
-    "position_state_snapshots",
     "clob_orders",
-    "position_registry",
     "migration_state",
 ]
 
+# The IMMUTABLE record of REAL executed activity — "the books" (blueprint 27:
+# "Every executed intent produces a LedgerEntry — an immutable record of the
+# trade"; position events track "immutable-ID positions").
+#
+# On a REAL network the on-chain positions/trades these rows describe still
+# exist after a restart, so ``--fresh`` MUST preserve them: deleting them makes
+# the books lie about trades that actually landed on-chain (VIB-5784 — a
+# ``--fresh`` relaunch wiped a prior launch's already-executed balancing SWAP,
+# leaving zero ``transaction_ledger`` / ``accounting_events`` rows for it).
+# On Anvil the fork is reset between runs, so the described on-chain state no
+# longer exists; those rows become stale cross-fork references that MUST be
+# cleared (VIB-2573).
+_FRESH_ONCHAIN_RECORD_TABLES = [
+    "transaction_ledger",
+    "accounting_events",
+    "accounting_outbox",
+    "position_events",
+    "position_state_snapshots",
+    "position_registry",
+]
+
+# Full set keyed on the canonical ``deployment_id`` column. Used by the Anvil
+# wipe-everything path; the real-network path clears only decision state.
+_FRESH_DEPLOYMENT_ID_TABLES = _FRESH_DECISION_STATE_TABLES + _FRESH_ONCHAIN_RECORD_TABLES
+
 
 def _fresh_clear_state(conn: Any, deployment_id: str, is_anvil: bool) -> int:  # noqa: C901
-    """Delete all state rows for a strategy (or all strategies on Anvil).
+    """Clear ``--fresh`` state rows for a strategy (or all strategies on Anvil).
 
     VIB-4722 renamed deployment-scoped SQLite identity columns to
     ``deployment_id``. This helper clears only by that canonical identity; old
     local DB files must run migrations before their rows are in scope.
+
+    Scope depends on the network (VIB-5784):
+
+    - **Anvil**: the fork is reset between runs, so every row — including the
+      accounting/ledger record — describes on-chain state that no longer exists.
+      Wipe ALL rows across ALL strategies for a clean cross-fork slate
+      (VIB-2573).
+    - **Real network**: the strategy's on-chain positions/trades survive a
+      restart, so the immutable on-chain record (``_FRESH_ONCHAIN_RECORD_TABLES``)
+      MUST survive too — otherwise a ``--fresh`` relaunch erases the books for
+      trades that already landed on-chain. Only the target deployment's DECISION
+      state (``_FRESH_DECISION_STATE_TABLES``) is reset.
 
     Returns the total number of rows deleted.
     """
@@ -533,7 +569,8 @@ def _fresh_clear_state(conn: Any, deployment_id: str, is_anvil: bool) -> int:  #
                 except sqlite3.OperationalError:
                     pass
         else:
-            for table in _FRESH_DEPLOYMENT_ID_TABLES:
+            # Preserve the immutable on-chain record; reset only decision state.
+            for table in _FRESH_DECISION_STATE_TABLES:
                 columns = _columns(table)
                 if "deployment_id" in columns:
                     try:
@@ -568,9 +605,12 @@ def _resolve_identity(
         3. Generates an ephemeral `run_id`.
         4. Writes both into `strategy_config` (mutated in place, matching
            the original inlined behavior).
-        5. If `fresh=True`, deletes `strategy_state` (and `teardown_requests`
-           if present) rows. On Anvil, scope is ALL rows (VIB-2573). On
-           mainnet, scope is just the current deployment_id.
+        5. If `fresh=True`, clears state. On Anvil, scope is ALL rows across
+           ALL tables (VIB-2573 — the fork reset invalidates every row). On a
+           real network, scope is the current deployment_id's DECISION state
+           only; the immutable on-chain accounting/ledger record is preserved
+           (VIB-5784 — a `--fresh` relaunch must not erase the books for trades
+           that already landed on-chain).
 
     Args:
         strategy_config: strategy config dict. MUTATED: deployment_id and
@@ -625,17 +665,28 @@ def _resolve_identity(
         if state_db_path.exists():
             try:
                 import sqlite3
+                from contextlib import closing
 
                 is_anvil = gateway_network == "anvil"
-                total_deleted = _fresh_clear_state(sqlite3.connect(str(state_db_path)), deployment_id, is_anvil)
+                # ``closing`` guarantees the connection is released even on the
+                # error path — a leaked WAL connection can otherwise block the
+                # checkpoint that flushes the runner's writes to the main DB.
+                with closing(sqlite3.connect(str(state_db_path))) as conn:
+                    total_deleted = _fresh_clear_state(conn, deployment_id, is_anvil)
                 scope = "all strategies" if is_anvil else f"strategy '{deployment_id}'"
+                # On real networks the immutable on-chain accounting/ledger record
+                # is preserved (VIB-5784); only decision state is reset.
+                cleared_desc = "all state" if is_anvil else "decision state (on-chain accounting history preserved)"
                 if total_deleted > 0:
                     click.secho(
-                        f"Cleared all state for {scope} (--fresh flag)",
+                        f"Cleared {cleared_desc} for {scope} (--fresh flag)",
                         fg="yellow",
                     )
                 else:
-                    click.echo(f"No existing state for {scope} (--fresh flag)")
+                    # Anvil attempts to clear ALL state; a real network attempts
+                    # only decision state — report the scope actually attempted.
+                    empty_desc = "state" if is_anvil else "decision state"
+                    click.echo(f"No existing {empty_desc} for {scope} (--fresh flag)")
             except Exception as e:
                 raise click.ClickException(
                     f"--fresh cleanup failed; refusing to start with potentially dirty state: {e}"

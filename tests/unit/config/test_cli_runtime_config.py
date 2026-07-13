@@ -315,7 +315,22 @@ class TestGatewayClientResolved:
     :meth:`GatewayClientConfig.from_env` doesn't have to re-read env.
     """
 
-    def test_defaults_match_legacy_hardcoded_ladder(self):
+    def test_defaults_match_legacy_hardcoded_ladder(self, gateway_env_scrub: pytest.MonkeyPatch):
+        # This test asserts the ZERO-config default ladder, so it must be hermetic
+        # against BOTH sources that feed ``gateway_client_auth_token_resolved``:
+        #   1. env vars (ALMANAK_GATEWAY_AUTH_TOKEN / GATEWAY_AUTH_TOKEN) — scrubbed
+        #      by the ``gateway_env_scrub`` fixture; and
+        #   2. the on-disk session-token file (lowest-precedence fallback,
+        #      cli_runtime.py `_gateway_session_token_fallback`). Another test on the
+        #      same xdist worker that boots the managed gateway writes a uuid4 session
+        #      token to that file (``write_gateway_session_token``) without clearing it,
+        #      so ``read_gateway_session_token`` returns it here and the "is None"
+        #      assertion flakes. Neutralise the file fallback too (VIB-5786 tracks the
+        #      source-side leak fix). ``_gateway_session_token_fallback`` imports this
+        #      name lazily, so patching it at the source module takes effect.
+        gateway_env_scrub.setattr(
+            "almanak.framework.local_paths.read_gateway_session_token", lambda: None
+        )
         cfg = cli_runtime_config_from_env()
         assert cfg.gateway_client_host_resolved == "localhost"
         assert cfg.gateway_client_port_resolved == 50051

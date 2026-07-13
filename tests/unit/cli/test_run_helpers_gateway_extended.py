@@ -472,7 +472,9 @@ class TestResolveIdentityFreshExtended:
             remaining = conn.execute("SELECT deployment_id FROM teardown_requests").fetchall()
         assert [r[0] for r in remaining] == ["other-strat"]
         text = out.getvalue().decode()
-        assert "cleared all state for strategy" in text.lower()
+        # VIB-5784: mainnet --fresh resets decision state only (teardown_requests
+        # is decision state); the immutable on-chain record is preserved.
+        assert "cleared decision state" in text.lower()
 
     def test_fresh_anvil_clears_all_teardown_requests(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -566,7 +568,7 @@ class TestResolveIdentityFreshExtended:
                 config_display_name="strat-1",
                 gateway_network="mainnet",
             )
-        assert "No existing state for strategy" in out.getvalue().decode()
+        assert "No existing decision state for strategy" in out.getvalue().decode()
 
     def test_fresh_raises_click_exception_on_sqlite_error(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
