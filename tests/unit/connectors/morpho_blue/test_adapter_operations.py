@@ -240,6 +240,11 @@ class TestRepay:
         assert "No borrow position" in result.error
 
     def test_repay_all_uses_actual_borrow_shares(self, adapter_no_sdk: MorphoBlueAdapter) -> None:
+        """VIB-5745: a full ('all') repay must be sized by SHARES (assets=0,
+        shares=position.borrow_shares), never by a snapshot ASSETS amount.
+        Repay-by-shares clears the debt exactly regardless of interest that
+        accrues between the read and on-chain execution — an assets-sized full
+        repay under-repays by the accrued delta and strands the position."""
         adapter_no_sdk._sdk_enabled = True
         adapter_no_sdk._sdk = MagicMock()
         position = MorphoBluePosition(
@@ -250,6 +255,15 @@ class TestRepay:
             result = adapter_no_sdk.repay(WSTETH_USDC_MARKET, Decimal("0"), repay_all=True)
         assert result.success
         assert "full debt" in result.description
+
+        # Decode repay(MarketParams,uint256 assets,uint256 shares,address,bytes):
+        # after the 4-byte selector, 5 MarketParams slots precede assets then shares.
+        body = result.tx_data["data"][2 + 8 :]  # strip "0x" + selector
+        slot = lambda i: int(body[i * 64 : (i + 1) * 64], 16)  # noqa: E731
+        assets_wei = slot(5)
+        shares_wei = slot(6)
+        assert assets_wei == 0, "full repay must send assets=0 (accrual-proof)"
+        assert shares_wei == 123456789, "full repay must send the position's exact borrow_shares"
 
     def test_repay_exception(self, adapter_no_sdk: MorphoBlueAdapter, usdc_resolver: MagicMock) -> None:
         usdc_resolver.resolve.side_effect = TokenResolutionError("USDC", "ethereum", "boom")

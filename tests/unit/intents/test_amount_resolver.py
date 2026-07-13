@@ -682,46 +682,48 @@ class TestResolveAmountAllRepayResolution:
             chain="arbitrum",
         )
 
-    @patch("almanak.framework.intents.amount_resolver.AaveV3BalanceReader.get_debt_balance")
-    @patch("almanak.framework.intents.amount_resolver._resolve_token_address")
-    @patch("almanak.framework.intents.amount_resolver._get_token_decimals")
-    def test_repay_aave_resolves_concrete_amount(
-        self, mock_decimals, mock_resolve, mock_debt
-    ):
-        mock_resolve.return_value = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
-        mock_debt.return_value = 250_000_000  # 250 USDC with 6 decimals
-        mock_decimals.return_value = 6
+    def test_repay_all_routes_to_repay_full_not_snapshot_assets(self):
+        """VIB-5745: REPAY amount='all' must route to repay_full (each connector's
+        exact-clear), NEVER a snapshot ASSETS amount — a snapshot under-repays vs
+        interest accrual and strands the position. No debt query is made: the
+        connector compiler owns the shares/MAX sizing at execution time."""
+        called: list[str] = []
 
-        intent = self._make_repay_intent(protocol="aave_v3")
-        result = resolve_amount_all(
-            intent, chain="arbitrum", wallet_address="0x1234", gateway_client=MagicMock()
+        def _boom(*_a, **_k):  # any debt query would be a regression
+            called.append("get_debt_balance")
+            return 250_000_000
+
+        with patch(
+            "almanak.framework.intents.amount_resolver.AaveV3BalanceReader.get_debt_balance",
+            side_effect=_boom,
+        ):
+            intent = self._make_repay_intent(protocol="aave_v3")
+            result = resolve_amount_all(
+                intent, chain="arbitrum", wallet_address="0x1234", gateway_client=MagicMock()
+            )
+
+        assert result.repay_full is True
+        assert result.amount == Decimal("0")
+        assert not called, "repay amount='all' must not read a debt snapshot (accrual-lossy)"
+
+    def test_repay_morpho_routes_to_repay_full(self):
+        """Morpho Blue repay_full clears the debt exactly by borrow SHARES,
+        immune to accrual — the resolver must hand off the 'all' signal, not a
+        snapshot assets amount."""
+        from almanak.framework.intents.lending_intents import RepayIntent
+
+        intent = RepayIntent(
+            protocol="morpho_blue",
+            token="USDC",
+            amount="all",
+            chain="arbitrum",
+            market_id="0x" + "c8" * 32,
         )
-        assert result.amount == Decimal("250")
-        assert result.repay_full is False
-
-    @patch("almanak.framework.intents.amount_resolver.AaveV3BalanceReader.get_debt_balance")
-    @patch("almanak.framework.intents.amount_resolver._resolve_token_address")
-    def test_repay_none_balance_falls_back_to_repay_full(self, mock_resolve, mock_debt):
-        mock_resolve.return_value = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
-        mock_debt.return_value = None
-
-        intent = self._make_repay_intent(protocol="aave_v3")
         result = resolve_amount_all(
             intent, chain="arbitrum", wallet_address="0x1234", gateway_client=MagicMock()
         )
         assert result.repay_full is True
-
-    @patch("almanak.framework.intents.amount_resolver.AaveV3BalanceReader.get_debt_balance")
-    @patch("almanak.framework.intents.amount_resolver._resolve_token_address")
-    def test_repay_zero_balance_sets_repay_full(self, mock_resolve, mock_debt):
-        mock_resolve.return_value = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
-        mock_debt.return_value = 0
-
-        intent = self._make_repay_intent(protocol="aave_v3")
-        result = resolve_amount_all(
-            intent, chain="arbitrum", wallet_address="0x1234", gateway_client=MagicMock()
-        )
-        assert result.repay_full is True
+        assert result.amount == Decimal("0")
 
 
 # =============================================================================
@@ -1055,12 +1057,14 @@ class TestAaveForkProtocolRouting:
         assert result.withdraw_all is False
 
     @pytest.mark.parametrize("protocol,expected_provider,other_provider", _FORK_ROUTING_CASES)
-    def test_repay_routes_debt_query_to_protocol_data_provider(
+    def test_repay_makes_no_debt_query_and_routes_to_repay_full(
         self, protocol, expected_provider, other_provider
     ):
-        """A REPAY amount='all' reads debt from the resolved protocol's own
-        pool_data_provider — the debt branch threads protocol exactly like the
-        supply branch, so a Spark repay must not query Aave's contract."""
+        """VIB-5745: unlike WITHDRAW, a REPAY amount='all' resolves WITHOUT any
+        on-chain debt read — it routes straight to repay_full (each connector's
+        exact-clear). A snapshot debt read would be accrual-lossy, so the whole
+        query is gone; the fork-routing concern above is covered by the WITHDRAW
+        variant, which still threads protocol to the correct data provider."""
         captured: list[str] = []
         gw = _gateway_capturing_eth_call_target(captured, debt_wei=250_000_000)
 
@@ -1069,9 +1073,6 @@ class TestAaveForkProtocolRouting:
             intent, chain="ethereum", wallet_address=self._WALLET, gateway_client=gw
         )
 
-        assert captured, f"{protocol} repay resolution made no eth_call"
-        assert captured[0].lower() == expected_provider.lower()
-        assert captured[0].lower() != other_provider.lower()
-        # End-to-end: 250_000_000 wei / 1e6 (USDC) = 250 USDC debt resolved.
-        assert result.amount == Decimal("250")
-        assert result.repay_full is False
+        assert not captured, f"{protocol} repay resolution must make no eth_call (accrual-lossy)"
+        assert result.repay_full is True
+        assert result.amount == Decimal("0")

@@ -7,7 +7,9 @@ reaches protocol-specific compilers.
 
 Resolution semantics by intent type:
 - WITHDRAW: Query protocol supply balance (aToken, cToken, shares)
-- REPAY: Query protocol debt balance (variable debt, borrow balance)
+- REPAY: Route to repay_full=True (each connector's exact-clear: Morpho borrow
+  shares, Aave/Compound capped MAX) — never a snapshot assets amount, which would
+  under-repay vs interest accrual and strand the position (VIB-5745)
 - SWAP / SUPPLY / BRIDGE / STAKE: Query wallet ERC-20 balance
 - CHAINED (amount="all" in IntentSequence): Left for sequence resolution
 
@@ -204,66 +206,38 @@ def resolve_amount_all(  # noqa: C901
         return _set_resolved_amount(intent, amount_decimal)
 
     # -----------------------------------------------------------------------
-    # PROTOCOL DEBT BALANCE resolution (repay)
+    # PROTOCOL DEBT resolution (repay) — hand off to repay_full
     # -----------------------------------------------------------------------
     if category == AmountResolutionCategory.PROTOCOL_DEBT:
-        reader = get_reader_for_protocol(protocol_lower)
-
-        if reader is None:
-            logger.warning(
-                "No balance reader for protocol '%s' — amount='all' for repay will be converted to repay_full=True",
-                protocol_lower,
-            )
-            return _set_repay_full(intent)
-
-        token_address = _resolve_token_address(token, chain)
-        if not token_address:
-            logger.warning(
-                "Cannot resolve token '%s' on %s for debt balance query — falling back to repay_full=True",
-                token,
-                chain,
-            )
-            return _set_repay_full(intent)
-
-        balance_wei = reader.get_debt_balance(
-            chain=chain,
-            token_address=token_address,
-            wallet=wallet_address,
-            protocol=protocol_lower,
-            market_id=market_id,
-            gateway_client=gateway_client,
-        )
-
-        if balance_wei is None:
-            logger.info(
-                "Debt balance query returned None for %s/%s — using repay_full=True",
-                protocol_lower,
-                token,
-            )
-            return _set_repay_full(intent)
-
-        if balance_wei <= 0:
-            logger.info("Protocol debt balance is 0 for %s/%s — nothing to repay", protocol_lower, token)
-            return _set_repay_full(intent)
-
-        try:
-            decimals = _get_token_decimals(token, chain)
-        except Exception:
-            logger.warning(
-                "Cannot determine decimals for %s on %s — falling back to repay_full=True",
-                token,
-                chain,
-            )
-            return _set_repay_full(intent)
-        amount_decimal = Decimal(balance_wei) / Decimal(10**decimals)
-        logger.info(
-            "Resolved repay amount='all' for %s/%s: %s (from %d wei)",
-            protocol_lower,
-            token,
-            amount_decimal,
-            balance_wei,
-        )
-        return _set_resolved_amount(intent, amount_decimal)
+        # VIB-5745: "repay everything" must NOT be sized as a snapshot ASSETS
+        # amount. Debt accrues interest between the read and on-chain execution,
+        # so a snapshot-assets repay under-repays by the accrued delta and strands
+        # dust debt — which then reverts the follow-on full-collateral WITHDRAW
+        # ("insufficient collateral") and leaves the whole position open (proven
+        # live on Morpho, Robinhood mainnet 2026-07-11).
+        #
+        # ``repay_full`` is each connector's full-debt mechanism; the connector
+        # compilers own the sizing and the approval headroom, so the resolver's
+        # job is simply to hand off the "all" signal. The mechanism differs by
+        # connector, and so does its accrual-immunity:
+        #   • Morpho Blue — repays by borrow SHARES (assets=0, shares=position
+        #     borrow shares): a true exact-clear regardless of accrual, always.
+        #   • Compound V3 — supply(base, MAX_UINT256); Comet caps at the borrow
+        #     balance → exact-clear when the wallet holds the full debt.
+        #   • Aave V3 / Spark — repay sized to the wallet balance (Aave caps at
+        #     debt), with MAX_UINT256 as the fallback if the balance is
+        #     unqueryable → exact-clear when the wallet holds the full debt.
+        # Except for Morpho's shares path, exact-clear therefore requires the
+        # wallet to hold the debt token (principal + accrued interest); this is
+        # the strategy/caller's funding responsibility and mirrors the
+        # wallet-coverage invariant in teardown/lending_unwind.py. An underfunded
+        # "all" repay reduces the debt as far as the balance allows rather than
+        # reverting atomically — risk-reducing, and it loses no funds.
+        #
+        # A zero-debt repay_full is rejected cleanly at compile time (the Morpho
+        # adapter refuses when borrow_shares <= 0), so no on-chain gas is spent —
+        # we do not need a pre-flight debt query here.
+        return _set_repay_full(intent)
 
     return intent
 
