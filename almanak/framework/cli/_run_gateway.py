@@ -554,6 +554,21 @@ def _start_managed_gateway_and_connect(
     # Register atexit handler as safety net for sys.exit() paths that skip cleanup
     atexit.register(managed_gateway.stop)
 
+    # VIB-4047: persist the session token to a 0600 file sibling to the
+    # folder-scoped DB so a SEPARATELY launched ``almanak dashboard`` (second
+    # terminal) can authenticate against this gateway's ephemeral token. The
+    # embedded ``--dashboard`` subprocess already gets it via env; this closes
+    # the standalone-dashboard gap without an operator env-var dance. No-op in
+    # hosted mode. Cleared on shutdown so a dead gateway's token can't linger.
+    if session_auth_token:
+        from almanak.framework.local_paths import (
+            clear_gateway_session_token,
+            write_gateway_session_token,
+        )
+
+        write_gateway_session_token(session_auth_token)
+        atexit.register(clear_gateway_session_token)
+
     click.secho(f"Managed gateway started on {effective_host}:{gateway_port}", fg="green")
 
     # Connect client to the managed gateway (use same session token)

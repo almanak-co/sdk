@@ -419,6 +419,40 @@ def test_render_performance_shows_na_without_win_rate():
     _render_performance({"total_pnl": "1.23", "total_trades": 2, "win_rate": "60"})  # explicit → rendered
 
 
+def test_render_performance_24h_pnl_empty_not_zero(monkeypatch):
+    # VIB-5737 / Empty ≠ Zero: when total_pnl is ABSENT (summary RPC failed /
+    # pnl_24h unmeasured) the 24h PnL tile shows "—", never a fabricated "$0.00".
+    import almanak.framework.dashboard.templates.ta_dashboard as tad
+
+    calls: list[tuple[str, str]] = []
+
+    class _St:
+        def columns(self, _n):
+            return (self, self, self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def metric(self, label, value, **_kw):
+            calls.append((label, value))
+
+    monkeypatch.setattr(tad, "st", _St())
+
+    # total_pnl absent → "—"
+    _render_performance = tad._render_performance
+    _render_performance({"total_trades": 5})
+    pnl_tiles = [v for lbl, v in calls if lbl == "24h PnL"]
+    assert pnl_tiles == ["—"]
+
+    calls.clear()
+    # measured zero is legitimate → "$+0.00" (NOT "—")
+    _render_performance({"total_trades": 5, "total_pnl": "0"})
+    assert [v for lbl, v in calls if lbl == "24h PnL"] == ["$+0.00"]
+
+
 def test_prepare_preserves_caller_supplied_balances():
     client = _FakeClient(
         token_balances=[{"symbol": "WETH", "balance": "9.9", "value_usd": "99"}],
@@ -764,8 +798,14 @@ def test_prepare_requests_ohlcv_with_configured_timeframe_and_scaled_limit():
     assert client.ohlcv_kwargs["quote"] == "USDC"
 
 
-def test_prepare_defaults_to_1h_when_timeframe_unset():
-    """Back-compat: callers that never set a timeframe still request 1h/168."""
+def test_prepare_defaults_to_framework_timeframe_when_unset():
+    """VIB-5737: a config that never sets a timeframe requests the SAME default
+    the strategy's ``market.rsi()`` uses (``market.snapshot.DEFAULT_TIMEFRAME``,
+    "4h"), so the dashboard indicator series matches the decision series — not
+    the old hardcoded "1h" that produced RSI shown ≠ RSI lived."""
+    from almanak.framework.dashboard.templates._ohlcv_window import ohlcv_limit_for_timeframe
+    from almanak.framework.market.snapshot import DEFAULT_TIMEFRAME
+
     client = _RecordingClient(ohlcv=_ohlcv_payload_hourly([2300.0 + i for i in range(60)]))
     config = get_rsi_config(period=14)  # no timeframe kwarg
     config.base_token = "WETH"
@@ -775,8 +815,16 @@ def test_prepare_defaults_to_1h_when_timeframe_unset():
     prepare_ta_session_state(client, session_state={}, config=config)
 
     assert client.ohlcv_kwargs is not None
-    assert client.ohlcv_kwargs["timeframe"] == "1h"
-    assert client.ohlcv_kwargs["limit"] == 168
+    assert client.ohlcv_kwargs["timeframe"] == DEFAULT_TIMEFRAME == "4h"
+    assert client.ohlcv_kwargs["limit"] == ohlcv_limit_for_timeframe("4h")
+
+
+def test_get_rsi_config_default_timeframe_matches_market_default():
+    """VIB-5737 regression: the dashboard indicator default MUST equal the
+    framework's OHLCV default so an unconfigured demo can't drift."""
+    from almanak.framework.market.snapshot import DEFAULT_TIMEFRAME
+
+    assert get_rsi_config().timeframe == DEFAULT_TIMEFRAME
 
 
 def test_normalize_timeframe_coerces_falsy_to_default():

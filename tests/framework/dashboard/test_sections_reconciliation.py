@@ -249,17 +249,43 @@ class TestRenderPositionsSection:
         mock_info.assert_called_once()
         mock_df.assert_not_called()
 
-    def test_client_error_degrades_to_info_banner(self, fake_client: MagicMock) -> None:
-        fake_client.get_positions.side_effect = DashboardClientError("boom")
+    def test_client_error_fails_loud_and_clean(self, fake_client: MagicMock) -> None:
+        # VIB-4047: a GetPositions failure must fail LOUD (a banner, never a
+        # silently-empty pane that reads as "no activity") and CLEAN (the raw
+        # error text — e.g. a leaked gRPC repr — is never shown to the user).
+        fake_client.get_positions.side_effect = DashboardClientError("boom raw grpc detail")
         with (
             patch.object(sec.st, "divider"),
             patch.object(sec.st, "markdown"),
             patch.object(sec.st, "info") as mock_info,
+            patch.object(sec.st, "warning") as mock_warning,
+            patch.object(sec.st, "error") as mock_error,
             patch.object(sec.st, "dataframe") as mock_df,
         ):
             sec.render_positions_section("sid", fake_client)
-        mock_info.assert_called_once()
-        assert "boom" in mock_info.call_args.args[0]
+        # A loud banner (warning for a generic error, error for auth/unreachable)
+        # — not the quiet blue st.info the field bug hid behind.
+        assert mock_warning.called or mock_error.called
+        mock_info.assert_not_called()
+        shown = " ".join(str(c.args[0]) for c in (*mock_warning.call_args_list, *mock_error.call_args_list))
+        assert "boom raw grpc detail" not in shown
+        mock_df.assert_not_called()
+
+    def test_auth_error_renders_red_banner(self, fake_client: MagicMock) -> None:
+        # An UNAUTHENTICATED failure against the strategy's own managed gateway
+        # renders the red st.error auth banner — the dangerous silent-empty case.
+        fake_client.get_positions.side_effect = DashboardClientError(
+            "GetPositions failed: <_InactiveRpcError ... StatusCode.UNAUTHENTICATED ...>"
+        )
+        with (
+            patch.object(sec.st, "divider"),
+            patch.object(sec.st, "markdown"),
+            patch.object(sec.st, "error") as mock_error,
+            patch.object(sec.st, "dataframe") as mock_df,
+        ):
+            sec.render_positions_section("sid", fake_client)
+        mock_error.assert_called_once()
+        assert "authenticate" in mock_error.call_args.args[0].lower()
         mock_df.assert_not_called()
 
 

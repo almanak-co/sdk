@@ -213,30 +213,14 @@ def _render_interface_error(dashboard_info: CustomDashboardInfo, error_msg: str)
         st.rerun()
 
 
-def _render_runtime_error(dashboard_info: CustomDashboardInfo, error: Exception) -> None:
-    """Render a runtime error message with traceback."""
-    st.error("Dashboard Runtime Error")
+def _render_error_recovery_buttons() -> None:
+    """Render the shared "Return to Overview" / "Retry" recovery buttons.
 
-    # Get traceback
-    tb_str = traceback.format_exc()
-
-    st.markdown(f"""
-    **An error occurred while rendering:** {dashboard_info.display_name}
-
-    **Error type:** `{type(error).__name__}`
-
-    **Error message:** {str(error)}
-    """)
-
-    # Show traceback in expander
-    with st.expander("Show full traceback"):
-        st.code(tb_str, language="python")
-
-    logger.error(
-        f"Runtime error in dashboard {dashboard_info.strategy_name}: {error}",
-        exc_info=True,
-    )
-
+    Both the gateway-classified and the generic runtime-error branches need
+    these in-pane recovery actions — extracted so a gateway auth/unreachable
+    error (the most common live-mainnet case) doesn't leave the operator without
+    a way out (VIB-4047, CodeRabbit).
+    """
     col1, col2 = st.columns(2)
 
     with col1:
@@ -247,6 +231,57 @@ def _render_runtime_error(dashboard_info: CustomDashboardInfo, error: Exception)
     with col2:
         if st.button("Retry", key="runtime_error_retry"):
             st.rerun()
+
+
+def _render_runtime_error(dashboard_info: CustomDashboardInfo, error: Exception) -> None:
+    """Render a runtime error message.
+
+    VIB-4047: the most common runtime error on a live mainnet dashboard is a
+    gateway auth/connection failure surfacing from a data call. Route those to
+    the shared LOUD + CLEAN banner (clean actionable message, red for
+    auth/unreachable) and never dump a raw ``_InactiveRpcError`` traceback into
+    the pane — the full traceback is logged and only shown behind the debug
+    flag. Genuinely-unexpected errors keep a clean summary with the same
+    debug-gated traceback.
+    """
+    from almanak.framework.dashboard.error_ui import (
+        GatewayErrorKind,
+        classify_gateway_error,
+        dashboard_debug_enabled,
+        render_gateway_error,
+    )
+
+    if classify_gateway_error(error) is not GatewayErrorKind.OTHER:
+        render_gateway_error(error, context=f"the {dashboard_info.display_name} dashboard", raw=str(error))
+        logger.error(
+            f"Runtime error in dashboard {dashboard_info.strategy_name}: {error}",
+            exc_info=True,
+        )
+        # A gateway auth/unreachable error must still offer the recovery actions
+        # (VIB-4047, CodeRabbit) — the early return used to skip them.
+        _render_error_recovery_buttons()
+        return
+
+    st.error("Dashboard Runtime Error")
+    st.markdown(f"""
+    **An error occurred while rendering:** {dashboard_info.display_name}
+
+    **Error type:** `{type(error).__name__}`
+
+    **Error message:** {str(error)}
+    """)
+
+    # Raw traceback is debug-only (never leaked into a user-facing pane).
+    if dashboard_debug_enabled():
+        with st.expander("Show full traceback (debug)"):
+            st.code(traceback.format_exc(), language="python")
+
+    logger.error(
+        f"Runtime error in dashboard {dashboard_info.strategy_name}: {error}",
+        exc_info=True,
+    )
+
+    _render_error_recovery_buttons()
 
 
 def create_mock_api_client():

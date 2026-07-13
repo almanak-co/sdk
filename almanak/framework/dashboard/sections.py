@@ -83,8 +83,14 @@ def render_pnl_section(deployment_id: str) -> None:
     st.markdown("### PnL")
     try:
         pnl = get_pnl_summary(deployment_id)
-    except GatewayConnectionError:
-        st.info("PnL temporarily unavailable — the gateway is disconnected.")
+    except GatewayConnectionError as exc:
+        # VIB-4047: distinguish a genuine disconnect from an UNAUTHENTICATED
+        # gateway (managed mainnet session-token mismatch). Both fail LOUD +
+        # CLEAN here — a quiet "temporarily unavailable" hid a dashboard that
+        # could not read live money for an entire session.
+        from almanak.framework.dashboard.error_ui import render_gateway_error
+
+        render_gateway_error(exc, context="PnL", raw=str(exc))
         return
     if pnl is None:
         st.info("No PnL data yet — run a few iterations to populate the snapshot table.")

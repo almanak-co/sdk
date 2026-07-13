@@ -1615,3 +1615,99 @@ def test_inventory_unrealized_missing_mark_price_returns_none():
         ),
     ]
     assert compute_inventory_unrealized(events, _DEP, {}) is None
+
+
+# ─── Open-position DISPLAY count: dust exclusion (VIB-5339 / VIB-5738) ───────
+
+
+def _leg(value_usd, cost_basis_usd="0"):
+    return SimpleNamespace(value_usd=value_usd, cost_basis_usd=cost_basis_usd)
+
+
+def _snap_with_positions(positions, **kw):
+    base = dict(
+        available_cash_usd="4.00",
+        deployed_capital_usd="0",
+        total_value_usd="0",
+        value_confidence="HIGH",
+    )
+    base.update(kw)
+    return SimpleNamespace(positions=positions, **base)
+
+
+def test_open_position_count_excludes_sub_dollar_dust():
+    # VIB-5339: a $0.04 residual leg (below the dust floor) must NOT read as an
+    # open position on an otherwise-flat wallet.
+    snap = _snap_with_positions([_leg("0.04")])
+    out = compute_pnl_summary(
+        portfolio_metrics=None, snapshots=[snap], ledger_entries=[], accounting_events=[]
+    )
+    assert out.open_position_count == 0
+
+
+def test_open_position_count_excludes_measured_zero_closed_leg():
+    snap = _snap_with_positions([_leg("0")])
+    out = compute_pnl_summary(
+        portfolio_metrics=None, snapshots=[snap], ledger_entries=[], accounting_events=[]
+    )
+    assert out.open_position_count == 0
+
+
+def test_open_position_count_excludes_unmeasured_value_leg():
+    # Empty != Zero: an unmeasured (None / "") value_usd must not inflate the badge.
+    snap = _snap_with_positions([_leg(None)])
+    out = compute_pnl_summary(
+        portfolio_metrics=None, snapshots=[snap], ledger_entries=[], accounting_events=[]
+    )
+    assert out.open_position_count == 0
+
+
+def test_open_position_count_keeps_real_position():
+    # A genuine $2,000 position is still one open position.
+    snap = _snap_with_positions([_leg("2000")], total_value_usd="2000", deployed_capital_usd="2000")
+    out = compute_pnl_summary(
+        portfolio_metrics=None, snapshots=[snap], ledger_entries=[], accounting_events=[]
+    )
+    assert out.open_position_count == 1
+
+
+def test_open_position_count_mixed_dust_and_real():
+    snap = _snap_with_positions(
+        [_leg("2000"), _leg("0.04"), _leg("0"), _leg("1500")],
+        total_value_usd="3500",
+        deployed_capital_usd="3500",
+    )
+    out = compute_pnl_summary(
+        portfolio_metrics=None, snapshots=[snap], ledger_entries=[], accounting_events=[]
+    )
+    assert out.open_position_count == 2
+
+
+def test_dust_aware_zero_survives_accounting_events_reconstruction():
+    # VIB-5339/VIB-5738: a torn-down typed snapshot resolves the DISPLAY count to
+    # 0 (dust-only legs). It also has deployed_capital_usd == 0, which triggers
+    # the accounting-events cost-basis reconstruction fallback. A lingering
+    # historical open cost basis must NOT flip open_position_count back to 1 —
+    # that is the exact "1 open position(s)" lie the dust-aware count fixes.
+    snap = _snap_with_positions([_leg("0.04")])  # deployed_capital_usd="0" by default
+    events = [_event("LP_OPEN", {"cost_basis_usd": "6.45", "position_key": "lp:abc"})]
+    out = compute_pnl_summary(
+        portfolio_metrics=None, snapshots=[snap], ledger_entries=[], accounting_events=events
+    )
+    # Cost-basis tile still reconstructs (deployed exposure is real historically)...
+    assert out.deployed_capital_usd == Decimal("6.45")
+    # ...but the DISPLAY count stays at the dust-aware zero.
+    assert out.open_position_count == 0
+
+
+def test_reconstruction_still_synthesizes_count_for_dict_snapshot():
+    # Guard the other direction: a dict/legacy snapshot exposes no typed
+    # positions, so _count_open_positions returns None and the fallback must
+    # STILL synthesize a count of 1 from the reconstructed cost basis.
+    snap = {"available_cash_usd": "4.00", "deployed_capital_usd": "0", "total_value_usd": "0", "value_confidence": "HIGH"}
+    events = [_event("LP_OPEN", {"cost_basis_usd": "6.45", "position_key": "lp:abc"})]
+    out = compute_pnl_summary(
+        portfolio_metrics=None, snapshots=[snap], ledger_entries=[], accounting_events=events
+    )
+    assert out.deployed_capital_usd == Decimal("6.45")
+    assert out.open_position_count == 1

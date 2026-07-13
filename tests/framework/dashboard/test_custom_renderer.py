@@ -206,3 +206,48 @@ def test_render_returns_false_on_runtime_error(fake_st, monkeypatch, tmp_path) -
     monkeypatch.setattr(renderer, "load_dashboard_module", lambda **_k: object())
     monkeypatch.setattr(renderer, "get_dashboard_render_function", lambda _m: _render_func)
     assert renderer.render_custom_dashboard_safe(_dashboard_info(tmp_path), api_client=object()) is False
+
+
+# --- _render_runtime_error: recovery buttons on BOTH branches (VIB-4047) ---
+
+
+class _ButtonRecordingSt(_FakeSt):
+    """``_FakeSt`` that records the ``key`` of every ``st.button`` rendered."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.button_keys: list[str] = []
+
+    def button(self, *_a, key=None, **_k) -> bool:
+        self.button_keys.append(key)
+        return False
+
+
+@pytest.fixture
+def recording_st(monkeypatch):
+    st = _ButtonRecordingSt()
+    monkeypatch.setattr(renderer, "st", st)
+    return st
+
+
+def test_runtime_error_gateway_branch_still_offers_recovery_buttons(recording_st, monkeypatch, tmp_path) -> None:
+    # A gateway auth/unreachable error routes to the LOUD banner and used to
+    # `return` early — skipping the in-pane recovery buttons that the generic
+    # branch offers. Regression guard for the fix (CodeRabbit): both branches
+    # must render the same two recovery actions.
+    banner: dict = {}
+    monkeypatch.setattr(
+        "almanak.framework.dashboard.error_ui.render_gateway_error",
+        lambda *a, **k: banner.setdefault("shown", True),
+    )
+    # Text-classified as AUTH (not OTHER) → takes the gateway branch.
+    renderer._render_runtime_error(_dashboard_info(tmp_path), Exception("gRPC status = UNAUTHENTICATED"))
+    assert banner.get("shown") is True
+    assert recording_st.button_keys == ["runtime_error_return", "runtime_error_retry"]
+
+
+def test_runtime_error_generic_branch_offers_recovery_buttons(recording_st, tmp_path) -> None:
+    # An unclassified (OTHER) error takes the generic branch and must still
+    # render the recovery buttons.
+    renderer._render_runtime_error(_dashboard_info(tmp_path), RuntimeError("kaboom"))
+    assert recording_st.button_keys == ["runtime_error_return", "runtime_error_retry"]

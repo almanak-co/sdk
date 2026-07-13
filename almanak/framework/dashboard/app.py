@@ -244,10 +244,12 @@ def _load_dashboard_strategies() -> list:
     try:
         return get_all_strategies()
     except Exception as e:
-        st.error(f"Error loading strategies: {e}")
-        import traceback
+        # VIB-4047: a gateway auth/connection failure is the common cause here.
+        # Render a LOUD + CLEAN banner (never a raw gRPC traceback in the UI);
+        # the raw text is logged and only shown behind the debug expander.
+        from almanak.framework.dashboard.error_ui import render_gateway_error
 
-        st.code(traceback.format_exc())
+        render_gateway_error(e, context="the strategy list", raw=str(e))
         return []
 
 
@@ -289,11 +291,23 @@ def _render_page_route(current_page: str, custom_dashboards: list, strategies: l
 
 def _render_page_error(current_page: str, error: Exception) -> None:
     logger.exception("Error rendering page '%s'", current_page)
-    st.error(f"Error rendering page '{current_page}': {error}")
-    import traceback
+    # VIB-4047: the raw exception text (e.g. a gRPC _InactiveRpcError repr) is
+    # developer noise in a user-facing pane — keep the default banner generic and
+    # gate both the raw message and the traceback behind the debug flag (env
+    # ALMANAK_DASHBOARD_DEBUG or the in-app "show_debug" toggle). Always logged
+    # above regardless.
+    from almanak.framework.dashboard.error_ui import dashboard_debug_enabled
 
-    with st.expander("Error Details"):
-        st.code(traceback.format_exc())
+    debug = dashboard_debug_enabled()
+    if debug:
+        st.error(f"Error rendering page '{current_page}': {error}")
+    else:
+        st.error(f"Error rendering page '{current_page}'. See the dashboard logs for detail.")
+    if debug:
+        import traceback
+
+        with st.expander("Error Details (debug)"):
+            st.code(traceback.format_exc())
     if current_page != "overview":
         st.info("Returning to overview page...")
         st.query_params["page"] = "overview"

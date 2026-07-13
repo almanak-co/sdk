@@ -184,7 +184,14 @@ def render_positions_section(
             primitive=primitive,
         )
     except DashboardClientError as exc:
-        st.info(f"Positions temporarily unavailable: {exc}")
+        # VIB-4047: fail LOUD + CLEAN. An UNAUTHENTICATED GetPositions against a
+        # managed mainnet gateway must never render as a quiet blue "temporarily
+        # unavailable" that reads as "no activity" while real exposure is live —
+        # nor leak the raw _InactiveRpcError repr. render_gateway_error picks the
+        # red auth/unreachable banner and hides the raw text behind debug.
+        from almanak.framework.dashboard.error_ui import render_gateway_error
+
+        render_gateway_error(exc, context="Positions", raw=str(exc))
         return
 
     if not result.positions:

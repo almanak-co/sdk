@@ -493,7 +493,13 @@ def cli_runtime_config_from_env(
         "gateway_client_timeout_resolved": (
             almanak_timeout if almanak_timeout is not None else (legacy_timeout if legacy_timeout is not None else 30.0)
         ),
-        "gateway_client_auth_token_resolved": almanak_auth or legacy_auth or None,
+        # VIB-4047: lowest-precedence fallback is the local managed gateway's
+        # on-disk session token (0600 file sibling to the folder-scoped DB), so
+        # a separately-launched ``almanak dashboard`` authenticates against the
+        # ephemeral token the gateway rolled — instead of returning
+        # UNAUTHENTICATED and rendering silently empty. Read lazily (only when
+        # no env token is set) and fail-open to None; hosted never writes it.
+        "gateway_client_auth_token_resolved": (almanak_auth or legacy_auth or _gateway_session_token_fallback()),
         "gateway_wallets_configured": bool(os.environ.get("ALMANAK_GATEWAY_WALLETS")),
         "gateway_safe_mode": (safe_mode_raw.lower() if safe_mode_raw else None) or None,
         "gateway_safe_address": os.environ.get("ALMANAK_GATEWAY_SAFE_ADDRESS") or None,
@@ -664,6 +670,24 @@ def anvil_port_for_chain(chain: str) -> int | None:
     if raw is None or not raw.strip():
         return None
     return _require_int_env(env_var, raw)
+
+
+def _gateway_session_token_fallback() -> str | None:
+    """Lowest-precedence gateway auth token: the local managed gateway's
+    on-disk session file (VIB-4047).
+
+    Only consulted when neither ``ALMANAK_GATEWAY_AUTH_TOKEN`` nor
+    ``GATEWAY_AUTH_TOKEN`` is set, so the common (env-provided) path pays no
+    filesystem cost. Imported lazily and fully fail-open — any error resolves
+    to ``None`` (auth then fails exactly as it did before this fallback
+    existed). Hosted mode never writes the file, so this returns ``None`` there.
+    """
+    try:
+        from almanak.framework.local_paths import read_gateway_session_token
+
+        return read_gateway_session_token()
+    except Exception:
+        return None
 
 
 def subprocess_env_with_overrides(overrides: dict[str, str]) -> dict[str, str]:

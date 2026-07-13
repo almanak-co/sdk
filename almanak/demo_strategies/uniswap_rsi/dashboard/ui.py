@@ -29,17 +29,25 @@ def render_custom_dashboard(
     api_client: Any,
     session_state: dict[str, Any],
 ) -> None:
-    config = get_rsi_config(
-        period=int(strategy_config.get("rsi_period", 14)),
-        overbought=float(strategy_config.get("rsi_overbought", 70)),
-        oversold=float(strategy_config.get("rsi_oversold", 30)),
-        # Compute the dashboard RSI from the SAME candle granularity the
-        # strategy decides on, so the RSI line and the buy/sell markers share
-        # one series (VIB-4969). ``... or "1h"`` (not a .get default) so an
-        # explicit ``data_granularity: null`` / "" also falls back rather than
-        # stringifying to "None"; prepare_ta_session_state normalizes too.
-        timeframe=str(strategy_config.get("data_granularity") or "1h"),
-    )
+    # Compute the dashboard RSI from the SAME candle granularity the strategy
+    # decides on, so the RSI line and the buy/sell markers share one series
+    # (VIB-4969). When ``data_granularity`` is unset the strategy's
+    # ``market.rsi()`` falls back to ``market.snapshot.DEFAULT_TIMEFRAME`` ("4h")
+    # — so the dashboard MUST use that same default, not a hardcoded "1h", or the
+    # rendered RSI is a different series than the one that fired the trade (the
+    # VIB-5737 field bug: RSI shown ~70 while the strategy lived at ~64). Passing
+    # a truthy config value overrides; ``None`` / "" defers to get_rsi_config's
+    # shared default. ``or None`` (not ``or "4h"``) keeps the single source of
+    # truth in the template so a future DEFAULT_TIMEFRAME change can't drift.
+    granularity = strategy_config.get("data_granularity") or None
+    rsi_config_kwargs: dict[str, Any] = {
+        "period": int(strategy_config.get("rsi_period", 14)),
+        "overbought": float(strategy_config.get("rsi_overbought", 70)),
+        "oversold": float(strategy_config.get("rsi_oversold", 30)),
+    }
+    if granularity is not None:
+        rsi_config_kwargs["timeframe"] = str(granularity)
+    config = get_rsi_config(**rsi_config_kwargs)
     config.base_token = str(strategy_config.get("base_token", config.base_token))
     config.quote_token = str(strategy_config.get("quote_token", config.quote_token))
     config.chain = str(strategy_config.get("chain", config.chain))

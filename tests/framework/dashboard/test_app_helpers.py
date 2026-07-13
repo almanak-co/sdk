@@ -36,12 +36,16 @@ class _StubStreamlit:
         self.session_state = _SessionState()
         self.captions: list[str] = []
         self.errors: list[str] = []
+        self.warnings: list[str] = []
         self.infos: list[str] = []
         self.codes: list[str] = []
         self.rerun_count = 0
 
-    def error(self, message: str) -> None:
+    def error(self, message: str, *_args: object, **_kwargs: object) -> None:
         self.errors.append(message)
+
+    def warning(self, message: str, *_args: object, **_kwargs: object) -> None:
+        self.warnings.append(message)
 
     def info(self, message: str) -> None:
         self.infos.append(message)
@@ -212,6 +216,33 @@ def test_render_current_page_falls_back_to_overview_on_render_error(
     monkeypatch: pytest.MonkeyPatch,
     stub_st: _StubStreamlit,
 ) -> None:
+    # VIB-4047: the default (non-debug) banner must NOT leak the raw exception
+    # text (a gRPC _InactiveRpcError repr would be noise / a mild info leak).
+    monkeypatch.delenv("ALMANAK_DASHBOARD_DEBUG", raising=False)
+    stub_st.query_params["page"] = "detail"
+
+    def _raise_error(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(app, "_render_page_route", _raise_error)
+
+    app._render_current_page([], [])
+
+    assert stub_st.errors == ["Error rendering page 'detail'. See the dashboard logs for detail."]
+    assert "boom" not in " ".join(stub_st.errors)  # raw error not leaked to the pane
+    assert stub_st.codes == []  # no traceback expander when debug off
+    assert stub_st.infos == ["Returning to overview page..."]
+    assert stub_st.query_params["page"] == "overview"
+    assert stub_st.rerun_count == 1
+
+
+def test_render_current_page_error_shows_raw_detail_in_debug(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_st: _StubStreamlit,
+) -> None:
+    # VIB-4047: with the debug flag set, the raw exception text + traceback ARE
+    # surfaced (the operator opted in).
+    monkeypatch.setenv("ALMANAK_DASHBOARD_DEBUG", "1")
     stub_st.query_params["page"] = "detail"
 
     def _raise_error(*_args: object, **_kwargs: object) -> None:
@@ -222,7 +253,7 @@ def test_render_current_page_falls_back_to_overview_on_render_error(
     app._render_current_page([], [])
 
     assert stub_st.errors == ["Error rendering page 'detail': boom"]
-    assert stub_st.infos == ["Returning to overview page..."]
+    assert stub_st.codes  # traceback rendered in the debug expander
     assert stub_st.query_params["page"] == "overview"
     assert stub_st.rerun_count == 1
 
@@ -283,11 +314,22 @@ def test_load_dashboard_strategies_returns_empty_on_error(
     monkeypatch: pytest.MonkeyPatch,
     stub_st: _StubStreamlit,
 ) -> None:
+    # VIB-4047: the strategy-list load failing (commonly a gateway auth/
+    # connection error) must fail LOUD + CLEAN — a banner, and NEVER a raw
+    # traceback dumped into the UI. The raw text is logged, not shown.
+    from almanak.framework.dashboard import error_ui
+
+    monkeypatch.setattr(error_ui, "st", stub_st)
+
     def _raise() -> list:
-        raise RuntimeError("load failed")
+        raise RuntimeError("load failed raw detail")
 
     monkeypatch.setattr(app, "get_all_strategies", _raise)
 
     assert app._load_dashboard_strategies() == []
-    assert stub_st.errors == ["Error loading strategies: load failed"]
-    assert "RuntimeError: load failed" in stub_st.codes[0]
+    # Loud banner shown (a generic error → warning); no raw traceback leaked.
+    assert stub_st.warnings or stub_st.errors
+    assert stub_st.codes == []
+    shown = " ".join(stub_st.warnings + stub_st.errors)
+    assert "load failed raw detail" not in shown
+    assert "Traceback" not in shown

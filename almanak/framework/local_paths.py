@@ -450,6 +450,110 @@ def _lock_file_path(db_path: Path) -> Path:
     return db_path.with_suffix(db_path.suffix + ".gw.lock")
 
 
+# ---------------------------------------------------------------------------
+# Managed-gateway session-token handoff (VIB-4047)
+# ---------------------------------------------------------------------------
+# The strat-run-managed gateway (and standalone ``almanak gateway``) rolls a
+# fresh ``uuid.uuid4().hex`` session token on every non-anvil boot so it is
+# never running unauthenticated (VIB-520). That token lives only in the
+# gateway server's in-memory ``AuthInterceptor`` and the launching process's
+# gRPC client — there is no handoff to a *separately launched* dashboard
+# (``almanak dashboard`` in a second terminal), so every dashboard gRPC call
+# returned UNAUTHENTICATED and the tiles rendered silently empty while real
+# exposure was live (VIB-4047). We persist the token to a 0600 file sibling to
+# the folder-scoped DB so any client that owns the same strategy folder can
+# authenticate without the operator hand-exporting an ephemeral value. Local
+# mode only — hosted never writes a token to disk (the security perimeter).
+
+
+def _gateway_session_token_path(db_path: Path) -> Path:
+    """Sibling session-token file for the local managed gateway (VIB-4047).
+
+    ``.gw.session`` mirrors the ``.gw.lock`` naming so the two folder-scoped
+    gateway artifacts sit side by side and neither collides with SQLite's own
+    sidecar files.
+    """
+    return db_path.with_suffix(db_path.suffix + ".gw.session")
+
+
+def write_gateway_session_token(token: str) -> Path | None:
+    """Persist the managed gateway's session token next to its DB, mode 0600.
+
+    Local mode only: a no-op returning ``None`` in hosted mode (the token
+    must never touch disk on the multi-tenant perimeter) or when no strategy
+    folder is resolvable. Best-effort — a read-only / unwritable filesystem
+    degrades to ``None`` and the embedded-dashboard env-var handoff still
+    works; this file is purely the fallback for a *separately launched*
+    dashboard. Returns the path written, or ``None``.
+    """
+    from almanak.framework.deployment import is_hosted
+
+    if is_hosted() or not token:
+        return None
+    try:
+        db_path = _resolve_db_path(strict=True)
+    except LocalPathError:
+        return None
+    path = _gateway_session_token_path(db_path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # O_CREAT with 0o600 so the token file is never briefly world-readable;
+        # O_TRUNC so a relaunch overwrites a prior gateway's stale token.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(token)
+        # Re-assert perms in case the file pre-existed with looser bits.
+        os.chmod(path, 0o600)
+        return path
+    except OSError:
+        return None
+
+
+def read_gateway_session_token() -> str | None:
+    """Read the local managed gateway's session token from its sibling file.
+
+    Local mode only; the lowest-precedence fallback under
+    ``ALMANAK_GATEWAY_AUTH_TOKEN`` / ``GATEWAY_AUTH_TOKEN`` (see
+    ``cli_runtime_config_from_env``). Returns ``None`` when hosted, when no
+    strategy folder resolves, or when the file is absent / empty / unreadable
+    — a wrong or stale token simply fails auth exactly as before, never worse.
+    """
+    from almanak.framework.deployment import is_hosted
+
+    if is_hosted():
+        return None
+    try:
+        db_path = _resolve_db_path(strict=True)
+    except LocalPathError:
+        return None
+    try:
+        token = _gateway_session_token_path(db_path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return token or None
+
+
+def clear_gateway_session_token() -> None:
+    """Remove the session-token file on gateway shutdown (best-effort).
+
+    Local mode only. A leftover file is harmless (the reader is a fallback and
+    a stale token only fails auth), but clearing it keeps a dead gateway's
+    token from lingering for the next unrelated dashboard launch.
+    """
+    from almanak.framework.deployment import is_hosted
+
+    if is_hosted():
+        return
+    try:
+        db_path = _resolve_db_path(strict=True)
+    except LocalPathError:
+        return
+    try:
+        _gateway_session_token_path(db_path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def acquire_local_db_lock(db_path: Path, *, timeout: float = 0.0, poll_interval: float = 0.05) -> int:
     """Acquire an exclusive flock on the gateway DB path.
 

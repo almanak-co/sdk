@@ -92,6 +92,20 @@ from almanak.framework.dashboard.templates._ohlcv_window import (
 
 logger = logging.getLogger(__name__)
 
+# VIB-5737: the dashboard recomputes the indicator from OHLCV candles and MUST
+# use the SAME candle granularity the strategy decided on, or the rendered line
+# / signal banner is a different series than the one that fired the trade (the
+# field bug: RSI shown 70.6 vs lived ~64 because the dashboard defaulted to
+# "1h" while ``market.rsi()`` defaults an unset ``data_granularity`` to "4h").
+# Single source of truth for that default is ``market.snapshot.DEFAULT_TIMEFRAME``
+# — mirror it here so the two can never drift. Guarded import keeps the streamlit
+# process importable even if the market module can't load (falls back to the
+# same literal the framework uses).
+try:
+    from almanak.framework.market.snapshot import DEFAULT_TIMEFRAME as _DEFAULT_TIMEFRAME
+except Exception:  # pragma: no cover - import guard for the dashboard subprocess
+    _DEFAULT_TIMEFRAME = "4h"
+
 
 def _resolve_chart_window(
     deployment_id: str | None,
@@ -139,7 +153,11 @@ class TADashboardConfig:
         quote_token: Default quote token
         timeframe: OHLCV candle interval the dashboard fetches and computes the
             indicator series from — one of ``1m``/``5m``/``15m``/``1h``/``4h``/``1d``.
-            Defaults to ``"1h"`` for back-compat. **Must match the strategy's own
+            Defaults to ``market.snapshot.DEFAULT_TIMEFRAME`` ("4h") — the SAME
+            default ``market.rsi()`` / ``market.macd()`` etc. apply when a strategy
+            leaves ``data_granularity`` unset, so an unconfigured demo's dashboard
+            line matches the strategy's decision series instead of silently reading
+            a different ("1h") window (VIB-5737). **Must match the strategy's own
             ``data_granularity``**: otherwise the dashboard RSI/MACD/etc. line is a
             *different* series from the one the strategy decides on, so buy/sell
             markers won't align with the indicator band (VIB-4969). For the
@@ -180,7 +198,7 @@ class TADashboardConfig:
     protocol: str = "Uniswap V3"
     base_token: str = "WETH"
     quote_token: str = "USDC"
-    timeframe: str = "1h"
+    timeframe: str = _DEFAULT_TIMEFRAME
     extra_indicators: list["TADashboardConfig"] = field(default_factory=list)
     display_window_seconds: int = DEFAULT_DISPLAY_WINDOW_SECONDS
 
@@ -2236,7 +2254,6 @@ def _render_position(
 
 def _render_performance(session_state: dict[str, Any]) -> None:
     """Render the performance metrics section."""
-    pnl = Decimal(str(session_state.get("total_pnl", "0")))
     trades = session_state.get("total_trades", 0)
     # win_rate is None/absent unless a caller computed a real realized win rate.
     # Previously this defaulted to "50", which rendered a fabricated 50% for
@@ -2245,7 +2262,34 @@ def _render_performance(session_state: dict[str, Any]) -> None:
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("PnL", f"${float(pnl):+,.2f}")
+        # VIB-5737: this tile is the WALLET 24h NAV delta (StrategySummary.
+        # pnl_24h_usd), a different metric than the authoritative "Strategy PnL"
+        # (realized + unrealized) in the money-trail card above. Labeling both
+        # "PnL" made them look like two contradictory values for the same thing
+        # (the field bug: this froze at ~gas while Strategy PnL moved). Name it
+        # explicitly. Empty ≠ Zero: when the summary RPC failed / pnl_24h is
+        # unmeasured, ``total_pnl`` is ABSENT — show "—", never a fabricated
+        # "$0.00" that reads as a measured break-even.
+        if "total_pnl" in session_state and session_state.get("total_pnl") is not None:
+            pnl = Decimal(str(session_state["total_pnl"]))
+            st.metric(
+                "24h PnL",
+                f"${pnl:+,.2f}",
+                help=(
+                    "Wallet net-asset-value change over the last 24h. Distinct from "
+                    "the Strategy PnL card above (realized + unrealized mark-to-market); "
+                    "on a short run this is dominated by gas and moves little."
+                ),
+            )
+        else:
+            st.metric(
+                "24h PnL",
+                "—",
+                help=(
+                    "Wallet 24h NAV change — unavailable (the summary could not be "
+                    "read). Shown as — rather than a fabricated $0.00 (Empty ≠ Zero)."
+                ),
+            )
     with col2:
         st.metric("Trades", str(trades))
     with col3:
@@ -2263,13 +2307,15 @@ def _render_performance(session_state: dict[str, Any]) -> None:
 
 
 def get_rsi_config(
-    period: int = 14, overbought: float = 70, oversold: float = 30, timeframe: str = "1h"
+    period: int = 14, overbought: float = 70, oversold: float = 30, timeframe: str = _DEFAULT_TIMEFRAME
 ) -> TADashboardConfig:
     """Get pre-configured RSI dashboard config.
 
     ``timeframe`` must match the strategy's ``data_granularity`` so the
     dashboard RSI is computed from the same candles the strategy decides on
-    (VIB-4969). Defaults to ``"1h"`` for back-compat.
+    (VIB-4969). Defaults to ``market.snapshot.DEFAULT_TIMEFRAME`` ("4h") — the
+    same default ``market.rsi()`` applies for an unset ``data_granularity`` —
+    so an unconfigured demo can't drift to a different ("1h") series (VIB-5737).
     """
     return TADashboardConfig(
         indicator_name="RSI",
@@ -2294,7 +2340,9 @@ def _macd_signal_fn(session_state: dict[str, Any]) -> str:
     return "NEUTRAL: MACD at Signal line"
 
 
-def get_macd_config(fast: int = 12, slow: int = 26, signal: int = 9, timeframe: str = "1h") -> TADashboardConfig:
+def get_macd_config(
+    fast: int = 12, slow: int = 26, signal: int = 9, timeframe: str = _DEFAULT_TIMEFRAME
+) -> TADashboardConfig:
     """Get pre-configured MACD dashboard config.
 
     ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
@@ -2311,7 +2359,7 @@ def get_macd_config(fast: int = 12, slow: int = 26, signal: int = 9, timeframe: 
 
 
 def get_cci_config(
-    period: int = 20, overbought: float = 100, oversold: float = -100, timeframe: str = "1h"
+    period: int = 20, overbought: float = 100, oversold: float = -100, timeframe: str = _DEFAULT_TIMEFRAME
 ) -> TADashboardConfig:
     """Get pre-configured CCI dashboard config.
 
@@ -2334,7 +2382,7 @@ def get_stochastic_config(
     slow_d: int = 3,
     overbought: float = 80,
     oversold: float = 20,
-    timeframe: str = "1h",
+    timeframe: str = _DEFAULT_TIMEFRAME,
 ) -> TADashboardConfig:
     """Get pre-configured Stochastic dashboard config.
 
@@ -2352,7 +2400,7 @@ def get_stochastic_config(
     )
 
 
-def get_atr_config(period: int = 14, timeframe: str = "1h") -> TADashboardConfig:
+def get_atr_config(period: int = 14, timeframe: str = _DEFAULT_TIMEFRAME) -> TADashboardConfig:
     """Get pre-configured ATR dashboard config.
 
     ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
@@ -2366,7 +2414,9 @@ def get_atr_config(period: int = 14, timeframe: str = "1h") -> TADashboardConfig
     )
 
 
-def get_adx_config(period: int = 14, trend_threshold: float = 25, timeframe: str = "1h") -> TADashboardConfig:
+def get_adx_config(
+    period: int = 14, trend_threshold: float = 25, timeframe: str = _DEFAULT_TIMEFRAME
+) -> TADashboardConfig:
     """Get pre-configured ADX dashboard config.
 
     ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
@@ -2380,7 +2430,9 @@ def get_adx_config(period: int = 14, trend_threshold: float = 25, timeframe: str
     )
 
 
-def get_bollinger_config(period: int = 20, std_dev: float = 2.0, timeframe: str = "1h") -> TADashboardConfig:
+def get_bollinger_config(
+    period: int = 20, std_dev: float = 2.0, timeframe: str = _DEFAULT_TIMEFRAME
+) -> TADashboardConfig:
     """Get pre-configured Bollinger Bands dashboard config.
 
     ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).

@@ -899,6 +899,20 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure, s
             click.style("Session auth token (pass to clients via ALMANAK_GATEWAY_AUTH_TOKEN env var):", fg="yellow")
         )
         click.echo(f"  export ALMANAK_GATEWAY_AUTH_TOKEN={session_auth_token}")
+        # VIB-4047: also persist to a 0600 file sibling to the folder-scoped DB
+        # so ``almanak dashboard`` launched from the same strategy folder
+        # authenticates without the operator copy-pasting the export line above.
+        # No-op in hosted mode or when no strategy folder resolves.
+        from almanak.framework.local_paths import write_gateway_session_token
+
+        if write_gateway_session_token(session_auth_token) is not None:
+            click.echo(
+                click.style(
+                    "  (also written to a 0600 session file — `almanak dashboard` "
+                    "in this folder picks it up automatically)",
+                    fg="green",
+                )
+            )
 
     click.echo()
     click.echo("Press Ctrl+C to stop the gateway.")
@@ -909,6 +923,13 @@ def gateway(port, network, metrics, metrics_port, log_level, chains, insecure, s
     except KeyboardInterrupt:
         click.echo()
         click.echo("Gateway stopped.")
+    finally:
+        # VIB-4047: clear the session-token file so a stopped gateway's token
+        # doesn't linger for the next unrelated dashboard launch. Best-effort.
+        if session_auth_token:
+            from almanak.framework.local_paths import clear_gateway_session_token
+
+            clear_gateway_session_token()
 
 
 @almanak.command("backtest-service")
@@ -1034,8 +1055,19 @@ def dashboard(port, gateway_host, gateway_port, no_browser):
     # handful of renderers that read SQLite directly.
     auto_detect_strategy_folder()
 
-    # Check gateway connectivity first
-    config = GatewayClientConfig(host=gateway_host, port=gateway_port)
+    # Check gateway connectivity first. Resolve the auth token via ``from_env``
+    # (ALMANAK_GATEWAY_AUTH_TOKEN > GATEWAY_AUTH_TOKEN > the VIB-4047 on-disk
+    # session-token fallback written by the managed gateway that owns this
+    # folder) so the preflight probe authenticates against the same ephemeral
+    # token the dashboard subprocess will present — otherwise a managed mainnet
+    # gateway would reject this check and the dashboard never launches.
+    resolved = GatewayClientConfig.from_env()
+    config = GatewayClientConfig(
+        host=gateway_host,
+        port=gateway_port,
+        timeout=resolved.timeout,
+        auth_token=resolved.auth_token,
+    )
     client = GatewayClient(config)
 
     format_output(

@@ -39,9 +39,44 @@ from almanak.framework.portfolio.models import ValueConfidence
 from almanak.framework.valuation.net_debt import (
     net_debt_from_positions_json,
     net_debt_from_snapshot,
+    read_position_decimal,
 )
 
 logger = logging.getLogger(__name__)
+
+# VIB-5339 / VIB-5738: a post-teardown residual worth a fraction of a dollar (a
+# sub-floor dust leg, or a fully-closed position marked at ~0) is not an "open
+# position" — displaying "1 open position(s)" for it is a display lie on an
+# otherwise-flat wallet. The DISPLAY count excludes legs whose |value_usd| is
+# unmeasured or at/below this dust floor. This is presentation-only: it changes
+# neither the debt-netting money math (``net_debt_from_snapshot`` still owns
+# ``debt_mark`` / ``net_cost``) nor the cash-vs-deployed classification (the
+# idle-numéraire-as-inventory misclassification is a separate valuation fix). $1
+# is conservative — below any position a user would care to see, above genuine
+# dust — and stays under the numéraire-residual sizes so it never masks that
+# distinct bug (which the valuer fix, not this threshold, resolves).
+_OPEN_POSITION_DUST_USD = Decimal("1")
+
+
+def _count_open_positions(snapshot: Any) -> int | None:
+    """Number of position legs worth more than dust on ``snapshot``.
+
+    Returns ``None`` when the snapshot exposes no typed ``positions`` list (dict
+    / legacy shapes), so the caller keeps the ``net_debt_from_snapshot`` count
+    unchanged rather than guessing. A leg with an unmeasured (``None``)
+    ``value_usd`` is NOT counted (Empty ≠ Zero — an unmeasured leg must not
+    inflate the badge), and a leg at/below :data:`_OPEN_POSITION_DUST_USD` is
+    dust, not an open position.
+    """
+    positions = getattr(snapshot, "positions", None)
+    if positions is None or isinstance(snapshot, dict):
+        return None
+    count = 0
+    for pos in positions:
+        value = read_position_decimal(pos, "value_usd")
+        if value is not None and abs(value) > _OPEN_POSITION_DUST_USD:
+            count += 1
+    return count
 
 
 # ε threshold for G6 reconciliation. The Accountant Test uses ε = $0.50
@@ -1384,6 +1419,11 @@ def compute_pnl_summary(
     # ── Latest snapshot first: needed to compute wallet NAV (VIB-3884) ───
     deployed_value_usd = Decimal("0")
     _debt_cost_to_net = Decimal("0")
+    # VIB-5339/VIB-5738: the dust-aware DISPLAY count for a typed snapshot, or
+    # None for dict/legacy shapes (and when there is no snapshot). Hoisted to
+    # function scope so the accounting-events fallback below can tell "we already
+    # resolved a typed count" from "no typed count available".
+    _display_count: int | None = None
     if snapshots:
         latest = snapshots[-1]
         pnl.available_cash_usd = _to_decimal(getattr(latest, "available_cash_usd", "0"))
@@ -1409,6 +1449,14 @@ def compute_pnl_summary(
         # leverage phantom). net_debt_from_snapshot prefers .positions, falling
         # back to positions_json for dict / legacy callers.
         pnl.open_position_count, _debt_to_net, _debt_cost_to_net, _net_cost = net_debt_from_snapshot(latest)
+        # VIB-5339 / VIB-5738: the debt-netting count is len(positions) — it
+        # counts sub-floor dust / fully-closed (~0) legs as open positions, so a
+        # torn-down wallet reads "1 open position(s)". Override with the dust-
+        # aware DISPLAY count (money math above is untouched). Only when the
+        # snapshot exposes typed positions; dict/legacy shapes keep the len count.
+        _display_count = _count_open_positions(latest)
+        if _display_count is not None:
+            pnl.open_position_count = _display_count
         deployed_value_usd -= _debt_to_net
 
     # VIB-3914: Anchor "Deployed" to the wallet snapshot the strategy
@@ -1456,7 +1504,13 @@ def compute_pnl_summary(
         reconstructed = _open_position_cost_basis(accounting_events)
         if reconstructed > Decimal("0"):
             pnl.deployed_capital_usd = reconstructed
-            if pnl.open_position_count == 0:
+            # VIB-5339/VIB-5738: only synthesize a count when no dust-aware
+            # DISPLAY count was available (dict/legacy snapshot). If a typed
+            # snapshot already resolved 0 (torn-down / dust-only wallet), a
+            # lingering historical cost basis must NOT flip the badge back to
+            # "1 open position(s)" — that is the exact display lie the dust-aware
+            # count fixes.
+            if pnl.open_position_count == 0 and _display_count is None:
                 pnl.open_position_count = 1
 
     # VIB-4983 follow-up: net the BORROW cost basis out of the Open-cost-basis

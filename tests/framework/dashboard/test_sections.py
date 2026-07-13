@@ -135,26 +135,56 @@ def test_render_pnl_section_degrades_to_info_when_rpc_returns_none() -> None:
     mock_render.assert_not_called()
 
 
-def test_render_pnl_section_degrades_to_info_on_gateway_disconnect() -> None:
-    """Gateway-down case — ``get_pnl_summary`` re-raises
-    ``GatewayConnectionError``. The section helper must catch it and
-    fall through to the info banner instead of crashing the page."""
+def test_render_pnl_section_fails_loud_on_gateway_disconnect() -> None:
+    """Gateway-down / UNAUTHENTICATED case — ``get_pnl_summary`` re-raises
+    ``GatewayConnectionError``. VIB-4047: the section must fail LOUD (a banner,
+    never crash) — a quiet ``st.info`` hid a dashboard that could not read live
+    money for a whole session. A generic disconnect renders ``st.warning`` or
+    ``st.error``; the raw error text is not shown to the user."""
     from almanak.framework.dashboard import sections
 
     with (
         patch.object(sections.st, "divider"),
         patch.object(sections.st, "markdown"),
         patch.object(sections.st, "info") as mock_info,
+        patch.object(sections.st, "warning") as mock_warning,
+        patch.object(sections.st, "error") as mock_error,
         patch.object(
             sections,
             "get_pnl_summary",
-            side_effect=sections.GatewayConnectionError("test"),
+            side_effect=sections.GatewayConnectionError("test raw detail"),
         ),
         patch.object(sections, "render_money_trail") as mock_render,
     ):
         sections.render_pnl_section("sid")
 
-    mock_info.assert_called_once()
+    assert mock_warning.called or mock_error.called
+    mock_info.assert_not_called()
+    mock_render.assert_not_called()
+
+
+def test_render_pnl_section_auth_failure_renders_red_banner() -> None:
+    """An UNAUTHENTICATED gateway (managed mainnet session-token mismatch)
+    renders the red auth banner, not a benign info line (VIB-4047)."""
+    from almanak.framework.dashboard import sections
+
+    with (
+        patch.object(sections.st, "divider"),
+        patch.object(sections.st, "markdown"),
+        patch.object(sections.st, "error") as mock_error,
+        patch.object(
+            sections,
+            "get_pnl_summary",
+            side_effect=sections.GatewayConnectionError(
+                "Failed to get PnL summary: <_InactiveRpcError ... StatusCode.UNAUTHENTICATED ...>"
+            ),
+        ),
+        patch.object(sections, "render_money_trail") as mock_render,
+    ):
+        sections.render_pnl_section("sid")
+
+    mock_error.assert_called_once()
+    assert "authenticate" in mock_error.call_args.args[0].lower()
     mock_render.assert_not_called()
 
 

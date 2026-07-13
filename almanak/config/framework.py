@@ -316,6 +316,17 @@ class FrameworkConfig(BaseModel):
     disable redaction installation.
     """
 
+    dashboard_debug_enabled: bool = False
+    """Whether the dashboard renders raw gRPC error detail
+    (``ALMANAK_DASHBOARD_DEBUG``).
+
+    Default ``False``. Consumed by ``framework/dashboard/error_ui.py`` to
+    gate the raw-traceback debug expander for the custom / hosted-parity
+    dashboard subprocess (which may not carry the ``show_debug`` Streamlit
+    session flag). User-facing panes never leak a raw traceback unless this
+    is truthy.
+    """
+
     model_config = ConfigDict(
         # Reject typos at the service boundary — a misspelt kwarg here
         # would silently flow into the config without populating any
@@ -360,6 +371,7 @@ def framework_config_from_env(
     * ``ALMANAK_FORCE_PRODUCTION`` → ``force_production_enabled``.
     * ``RUGCHECK_API_KEY`` → ``rugcheck_api_key``.
     * ``ALMANAK_REDACT_SECRETS`` → ``redact_secrets_enabled``.
+    * ``ALMANAK_DASHBOARD_DEBUG`` → ``dashboard_debug_enabled``.
 
     Args:
         dotenv_path: Optional ``.env`` path; routed through the shared
@@ -403,6 +415,7 @@ def framework_config_from_env(
         force_production_enabled=_parse_truthy_flag(os.environ.get("ALMANAK_FORCE_PRODUCTION")),
         rugcheck_api_key=os.environ.get("RUGCHECK_API_KEY") or None,
         redact_secrets_enabled=_parse_log_emojis(os.environ.get("ALMANAK_REDACT_SECRETS")),
+        dashboard_debug_enabled=_parse_truthy_flag(os.environ.get("ALMANAK_DASHBOARD_DEBUG")),
     )
 
 
