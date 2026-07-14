@@ -32,7 +32,7 @@ class _MockMarket:
     def balance(self, token: str, chain: str | None = None):
         return SimpleNamespace(balance=Decimal("0"))
 
-    def position_health(self, protocol, market_id, collateral_price_usd=None, debt_price_usd=None):
+    def position_health(self, protocol, market_id, collateral_price_usd=None, debt_price_usd=None, ref=None):
         return SimpleNamespace(
             collateral_value_usd=self._coll,
             debt_value_usd=self._debt,

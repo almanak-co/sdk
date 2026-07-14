@@ -735,6 +735,79 @@ class TestMorphoHealthFactorProvider:
             with pytest.raises(ValueError, match="no collateral/loan"):
                 provider._build_price_oracle_dict("morpho_blue", "0xmarket", None, None)
 
+    def test_build_price_oracle_dict_single_leg_no_override_uses_unit(self):
+        """VIB-5775: a SINGLE-LEG (supply-only) market (loan_token=None) is valued
+        from ONE collateral price — no raise. No override → unit placeholder."""
+        from almanak.framework.data.position_health import PRICE_SOURCE_SAME_ASSET_UNIT
+
+        provider = PositionHealthProvider(chain="avalanche", gateway_client=MagicMock())
+        with patch(self._MARKET_PARAMS_TARGET, return_value={"collateral_token": "USDC", "loan_token": None}):
+            oracle, source = provider._build_price_oracle_dict("euler_v2", "usdc", None, None)
+        assert oracle == {"USDC": Decimal("1")}
+        assert source == PRICE_SOURCE_SAME_ASSET_UNIT
+
+    def test_build_price_oracle_dict_single_leg_with_override_uses_price(self):
+        """A single-leg market with a collateral override values from that price."""
+        from almanak.framework.data.position_health import PRICE_SOURCE_OVERRIDE
+
+        provider = PositionHealthProvider(chain="avalanche", gateway_client=MagicMock())
+        with patch(self._MARKET_PARAMS_TARGET, return_value={"collateral_token": "WAVAX", "loan_token": None}):
+            oracle, source = provider._build_price_oracle_dict("euler_v2", "wavax", Decimal("40"), None)
+        assert oracle == {"WAVAX": Decimal("40")}
+        assert source == PRICE_SOURCE_OVERRIDE
+
+    def test_build_price_oracle_dict_two_leg_partial_override_still_raises(self):
+        """LOCK (VIB-5775): the line-734 partial-override raise is UNTOUCHED — a
+        genuine TWO-LEG market (silo usdc/wavax, loan_token present) given exactly ONE
+        override must still raise. This is why the guard supplies the loan leg rather
+        than passing a partial pair; the safety raise itself is not weakened."""
+        provider = PositionHealthProvider(chain="avalanche", gateway_client=MagicMock())
+        with patch(self._MARKET_PARAMS_TARGET, return_value={"collateral_token": "USDC", "loan_token": "WAVAX"}):
+            with pytest.raises(ValueError, match="Price overrides required"):
+                provider._build_price_oracle_dict("silo_v2", "usdc/wavax", Decimal("1"), None)
+
+    def test_build_price_oracle_dict_single_leg_silo_analogue_is_general(self):
+        """The single-leg branch is params-driven, not euler-specific: a silo_v2
+        single-leg params shape resolves the same way (no raise)."""
+        from almanak.framework.data.position_health import PRICE_SOURCE_SAME_ASSET_UNIT
+
+        provider = PositionHealthProvider(chain="avalanche", gateway_client=MagicMock())
+        with patch(self._MARKET_PARAMS_TARGET, return_value={"collateral_token": "sAVAX", "loan_token": None}):
+            oracle, source = provider._build_price_oracle_dict("silo_v2", "savax", None, None)
+        assert oracle == {"sAVAX": Decimal("1")}
+        assert source == PRICE_SOURCE_SAME_ASSET_UNIT
+
+    def test_get_health_single_leg_supply_only_measures_zero_debt(self):
+        """VIB-5775 end-to-end: a single-leg euler supply position reads MEASURED
+        collateral + a measured ZERO debt (not None), threads collateral_token into
+        the seam, and maps to Infinity HF (no debt) — no HealthUnavailableError."""
+        from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
+
+        crafted = LendingAccountState(
+            collateral_usd=Decimal("500"),
+            debt_usd=Decimal("0"),  # MEASURED zero (supply-only), not None
+            health_factor=Decimal("999999"),  # reducer's no-debt sentinel
+            liquidation_threshold_bps=None,
+            e_mode_category=None,
+            lltv=None,
+        )
+        single_leg_params = {"collateral_token": "USDC", "loan_token": None, "comet_address": "0xVAULT"}
+        with (
+            patch(self._SEAM_TARGET, return_value=crafted) as mock_seam,
+            patch(self._MARKET_PARAMS_TARGET, return_value=single_leg_params),
+        ):
+            provider = PositionHealthProvider(chain="avalanche", gateway_client=MagicMock())
+            health = provider.get_health("euler_v2", "usdc", "0xabc")
+
+        assert health.collateral_value_usd == Decimal("500")
+        assert health.debt_value_usd == Decimal("0")  # measured zero, not unmeasured
+        assert health.health_factor == Decimal("Infinity")  # no debt -> Infinity
+        seam_kwargs = mock_seam.call_args.kwargs
+        # collateral_token threaded into the reader; single-leg oracle dict injected.
+        assert seam_kwargs["collateral_token"] == "USDC"
+        assert seam_kwargs["price_oracle"] == {"USDC": Decimal("1")}
+        assert seam_kwargs["market_id"] == "usdc"
+
     def test_to_position_health_none_state_raises(self):
         """``_to_position_health`` fails closed on a ``None`` state.
 
@@ -1436,9 +1509,7 @@ class TestMorphoOracleDefaultPricing:
         raises, which ``_gateway_eth_call`` maps to ``None`` -- a failed read).
         """
         position_blob = "0x" + self._word(0) + self._word(borrow_shares) + self._word(collateral_raw)
-        market_blob = "0x" + "".join(
-            self._word(w) for w in (0, 0, total_borrow_assets, total_borrow_shares, 0, 0)
-        )
+        market_blob = "0x" + "".join(self._word(w) for w in (0, 0, total_borrow_assets, total_borrow_shares, 0, 0))
         calls: list[tuple[str, str]] = []
 
         def _eth_call(chain: str, to: str, data: str, block=None) -> str:
@@ -1567,6 +1638,4 @@ class TestMorphoOracleDefaultPricing:
         with patch(self._MARKET_PARAMS_TARGET, return_value=self._market_params()):
             provider = PositionHealthProvider(chain="ethereum", gateway_client=gateway)
             with pytest.raises(ValueError, match="Price overrides required"):
-                provider.get_health(
-                    "morpho_blue", self._MARKET_ID, "0xabc", collateral_price_usd=Decimal("3000")
-                )
+                provider.get_health("morpho_blue", self._MARKET_ID, "0xabc", collateral_price_usd=Decimal("3000"))

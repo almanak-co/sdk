@@ -80,6 +80,7 @@ from almanak.connectors._strategy_base.lending_read_base import (
     AccountStateReadSpec,
     EthCall,
     LendingAccountState,
+    LendingPositionRef,
     decode_uint_hex,
     pad_address,
 )
@@ -206,6 +207,19 @@ def _benqi_query_inputs_from_intent(intent: Any) -> dict[str, Any]:
     an ambiguous per-pair collateral guess (Empty ≠ Zero — never guess).
     """
     return {"market_id": _BENQI_MARKET_ID, "collateral_token": None}
+
+
+def _benqi_market_id_from_ref(ref: LendingPositionRef) -> str | None:
+    """Return BENQI's fixed whole-account synthetic ``market_id`` (VIB-5775).
+
+    BENQI is a pooled, cross-asset market read WHOLE-ACCOUNT: there is a single
+    synthetic id per chain (``"benqi"``) and the read is intent/token-agnostic (it
+    values the user's entire position regardless of which leg triggered it — the
+    same reason ``_benqi_query_inputs_from_intent`` ignores the intent's tokens). So
+    the ref's tokens are irrelevant and this always returns the fixed id, matching
+    the account-state (intent) path exactly.
+    """
+    return _BENQI_MARKET_ID
 
 
 def _decode_account_snapshot(blob: str | None) -> tuple[int, int, int] | None:
@@ -462,4 +476,7 @@ ACCOUNT_STATE_READ_SPEC: AccountStateReadSpec = AccountStateReadSpec(
     valuation_role_keys=(),
     normalize_market_id=str.lower,
     query_inputs_fn=_benqi_query_inputs_from_intent,
+    # VIB-5775: teardown/valuation/health carry a typed LendingPositionRef (no intent,
+    # no market_id). BENQI's whole-account read is token-agnostic → the fixed id.
+    market_id_from_ref=_benqi_market_id_from_ref,
 )

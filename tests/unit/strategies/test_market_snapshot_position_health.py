@@ -289,3 +289,57 @@ class TestMorphoCrossAssetDefaultPricing:
         assert health.debt_value_usd == Decimal("3000")
         # Provenance: oracle-defaulted, distinguishable from override-computed.
         assert health.price_source == PRICE_SOURCE_MARKET_ORACLE
+
+
+class TestVIB5775CacheKeyOnResolvedMarketId:
+    """VIB-5775: an empty-``market_id`` + typed ``ref`` call must key the cache on
+    the RESOLVED synthetic id, so it (a) HITS a ``set_position_health`` pre-seed on
+    that id (set/get symmetry) and (b) does NOT collide across distinct positions."""
+
+    @staticmethod
+    def _euler_ref(collateral: str):
+        from almanak.connectors._strategy_base.lending_read_base import LendingPositionRef
+
+        # euler intents carry no market_id; the ref names the tokens. ethereum has
+        # single-leg "usdc" and "weth" catalogue entries.
+        return LendingPositionRef(protocol="euler_v2", chain="ethereum", collateral_token=collateral, loan_token=None)
+
+    def _health(self, hf: str) -> PositionHealth:
+        return PositionHealth(
+            health_factor=Decimal(hf),
+            collateral_value_usd=Decimal("500"),
+            debt_value_usd=Decimal("0"),
+            lltv=Decimal("0"),
+            max_borrow_usd=Decimal("0"),
+            protocol="euler_v2",
+            market_id="usdc",
+        )
+
+    def test_empty_market_id_plus_ref_hits_preseed_on_resolved_id(self):
+        market = MarketSnapshot(chain="ethereum", wallet_address="0xabc")
+        seeded = self._health("111")
+        # Strategy pre-seeds under the explicit short key the resolver produces.
+        market.set_position_health("euler_v2", "usdc", seeded)
+
+        # Empty market_id + euler USDC ref → resolves "usdc" → HITS the pre-seed,
+        # WITHOUT invoking the provider (no gateway needed).
+        with patch("almanak.framework.data.position_health.PositionHealthProvider") as mock_provider:
+            result = market.position_health(protocol="euler_v2", market_id="", ref=self._euler_ref("USDC"))
+            mock_provider.assert_not_called()
+        assert result is seeded
+
+    def test_distinct_euler_refs_do_not_collide(self):
+        market = MarketSnapshot(chain="ethereum", wallet_address="0xabc")
+        usdc_health = self._health("111")
+        weth_health = self._health("222")
+        market.set_position_health("euler_v2", "usdc", usdc_health)
+        market.set_position_health("euler_v2", "weth", weth_health)
+
+        with patch("almanak.framework.data.position_health.PositionHealthProvider") as mock_provider:
+            got_usdc = market.position_health(protocol="euler_v2", market_id="", ref=self._euler_ref("USDC"))
+            got_weth = market.position_health(protocol="euler_v2", market_id="", ref=self._euler_ref("WETH"))
+            mock_provider.assert_not_called()
+        # Each ref resolves to its OWN id → no cross-position collision.
+        assert got_usdc is usdc_health
+        assert got_weth is weth_health
+        assert got_usdc is not got_weth

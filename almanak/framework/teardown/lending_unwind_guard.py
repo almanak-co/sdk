@@ -451,6 +451,41 @@ def _intent_chain_matches_snapshot(market: Any, intent: Any) -> bool:
     return intent_chain == snapshot_chain
 
 
+def _resolve_ref_market_id(
+    protocol: str,
+    intent: Any,
+    market: Any,
+    collateral_token: str | None,
+    borrow_token: str | None,
+) -> str | None:
+    """Reconstruct a synthetic ``market_id`` from the position's tokens (VIB-5775).
+
+    Euler V2 / Silo V2 intents carry no ``market_id`` and their real id is a
+    COMPOSITE synthetic id (``_synthesize_market_id(chain, collateral, loan)``),
+    not a bare token. Routes through the SAME
+    :meth:`~almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.resolve_market_id`
+    entry point :meth:`PositionHealthProvider.get_health` uses (a single derivation
+    path, no re-implemented synthesis here). Returns ``None`` — so the caller falls
+    through to the existing token fallback unchanged — for protocols that declare no
+    ref resolver (the Aave family, token-keyed Fluid), on an unknown protocol, or
+    when the tokens are ambiguous / uncatalogued (never guesses; Empty ≠ Zero).
+
+    The chain mirrors ``_intent_chain_matches_snapshot`` (already asserted equal by
+    the caller): the intent's own chain when set, else the snapshot's pinned chain.
+    """
+    from almanak.connectors._strategy_base.lending_read_base import LendingPositionRef
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    chain = (getattr(intent, "chain", None) or getattr(market, "chain", None) or "") or ""
+    ref = LendingPositionRef(
+        protocol=protocol,
+        chain=chain,
+        collateral_token=collateral_token,
+        loan_token=borrow_token,
+    )
+    return LendingReadRegistry.resolve_market_id(ref)
+
+
 def _read_exposure(
     market: Any,
     intent: Any,
@@ -472,10 +507,17 @@ def _read_exposure(
     conflation this fix targets — an unmeasured read must mean "the chain could
     not answer", not "the guard asked the wrong question":
 
-    * ``market_id`` falls back to the position's token when the intent carries
-      none. Token-keyed protocols (Fluid) attach no ``market_id``; without this
-      ``position_health`` raises "market_id is required" → unmeasured → a
-      legitimate zero-debt ``withdraw_all`` gets refused (VIB-5452).
+    * ``market_id`` precedence (VIB-5775): the intent's explicit ``market_id``
+      wins; else the connector-declared resolver reconstructs a SYNTHETIC id from
+      the position's tokens (Euler V2 / Silo V2 — whose real id is the composite
+      ``_synthesize_market_id(chain, collateral, loan)``, NOT a bare token, so the
+      token fallback below would hand ``position_health`` an unresolvable id →
+      unmeasured → a legitimate WITHDRAW dropped); else the position's token
+      (token-keyed protocols like Fluid attach no ``market_id`` and ARE keyed by
+      token — VIB-5452). The resolver is the SAME ``LendingReadRegistry.resolve_market_id``
+      entry point ``get_health`` uses (one derivation path); it returns ``None``
+      for protocols with no resolver (Aave family, Fluid), so those fall through to
+      the existing token fallback byte-for-byte.
     * Oracle price overrides (collateral + borrow) are passed exactly as the
       ``generate_lending_unwind`` primitive does, so a cross-asset per-market read
       (Morpho Blue) computes USD instead of coming back unmeasured (VIB-5418).
@@ -489,9 +531,61 @@ def _read_exposure(
 
     protocol = _normalize_protocol(getattr(intent, "protocol", ""))
     raw_market_id = getattr(intent, "market_id", "") or ""
-    read_market_id = raw_market_id or collateral_token or borrow_token or ""
+    # Precedence: explicit intent id → connector resolver (synthetic composite id
+    # for euler/silo) → bare token (token-keyed protocols) → "". The resolver is only
+    # consulted when the intent carries no id (``or`` short-circuits), so explicit-id
+    # protocols (Aave/Morpho/Compound) are byte-for-byte unaffected.
+    read_market_id = (
+        (raw_market_id or _resolve_ref_market_id(protocol, intent, market, collateral_token, borrow_token))
+        or collateral_token
+        or borrow_token
+        or ""
+    )
     collateral_price = _market_price(market, collateral_token) if collateral_token else Decimal("0")
     borrow_price = _market_price(market, borrow_token) if borrow_token else Decimal("0")
+    # Single-sided position on a TWO-LEG market (silo pairs, e.g. ``usdc/wavax``): the
+    # position has a collateral price but NO borrow leg (no REPAY intent), yet its
+    # resolved market id still names a loan token. Passing only the collateral override
+    # would hand ``_build_price_oracle_dict`` a PARTIAL pair → its "exactly one override
+    # provided" raise (VIB-5775) → unmeasured → the WITHDRAW dropped. SUPPLY the market's
+    # OWN loan-leg price from its params so BOTH legs are priced (never blank the present
+    # collateral price — that would drop euler/silo to the single-leg carve-out's UNIT
+    # price and risk the $0.01 collateral-dust flip, which euler/silo have no
+    # per-reserve balance backstop for). A genuine SINGLE-LEG market (euler
+    # collateral-only) names no ``loan_token`` → ``borrow_price`` stays 0 → the lone REAL
+    # collateral override flows through, which euler's single-leg carve-out values at the
+    # real price (no unit-price regression, no dust flip). Defensive: a params/price
+    # glitch degrades to the lone-collateral path — it must never crash the guard.
+    if collateral_price > 0 and borrow_price <= 0 and read_market_id:
+        # Chain mirrors ``_resolve_ref_market_id`` / ``_intent_chain_matches_snapshot``:
+        # the intent's own chain when set, else the snapshot's pinned chain (already
+        # asserted equal above), so the market-table lookup is the position's chain.
+        chain = (getattr(intent, "chain", None) or getattr(market, "chain", None) or "") or ""
+        try:
+            from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+            params = LendingReadRegistry.market_params(protocol, chain, read_market_id)
+            col_symbol = (params or {}).get("collateral_token")
+            loan_symbol = (params or {}).get("loan_token")
+            # Only a GENUINE two-leg pair (both a distinct collateral AND loan token
+            # named) needs the loan leg supplied. This excludes single-leg euler
+            # entries (loan_token None → lone collateral) AND token-keyed supply-only
+            # shapes like Fluid (collateral_token None, loan_token = the supply token
+            # itself → NOT a real debt leg; supplying it would fabricate a debt
+            # override the position never had).
+            if isinstance(col_symbol, str) and col_symbol and isinstance(loan_symbol, str) and loan_symbol:
+                borrow_price = _market_price(market, loan_symbol)
+        except Exception:
+            # A params/price failure degrades to the lone-collateral path (which then
+            # raises/unmeasured for a two-leg market — same as before this fix), never a
+            # crash. Debug-level: this is a best-effort enrichment, not the read itself.
+            logger.debug(
+                "lending unwind guard: could not price loan leg for %s market=%r; "
+                "falling back to collateral-only override.",
+                protocol,
+                read_market_id,
+                exc_info=True,
+            )
     try:
         health = market.position_health(
             protocol=protocol,
@@ -500,6 +594,19 @@ def _read_exposure(
             debt_price_usd=borrow_price if borrow_price > 0 else None,
         )
     except Exception:
+        # Empty ≠ Zero: an unreadable exposure stays unmeasured (never a fabricated
+        # zero). But log the REASON at WARNING — a silently-swallowed read blinds
+        # production to WHY a teardown withdraw was refused (the VIB-5775 euler/silo
+        # strand was invisible until this line surfaced it).
+        logger.warning(
+            "lending unwind guard: exposure read failed for %s market=%r (collateral=%s, borrow=%s) "
+            "— treating as unmeasured; withdraw may be refused.",
+            protocol,
+            read_market_id,
+            collateral_token,
+            borrow_token,
+            exc_info=True,
+        )
         return _Exposure(collateral_usd=None, debt_usd=None)
 
     collateral = _safe_decimal(getattr(health, "collateral_value_usd", None))

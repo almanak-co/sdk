@@ -59,6 +59,7 @@ from almanak.connectors._strategy_base.lending_read_base import (
     EthCall,
     LendingAccountState,
     LendingPositionOnChain,
+    LendingPositionRef,
     LendingReadSpec,
     MarketOraclePriceSpec,
 )
@@ -76,6 +77,7 @@ __all__ = [
     "AccountStatePlan",
     "LendingAccountState",
     "LendingPositionOnChain",
+    "LendingPositionRef",
     "LendingReadPlan",
     "LendingReadRegistry",
 ]
@@ -751,6 +753,108 @@ class LendingReadRegistry:
         if spec is None:
             return None
         return spec.query_inputs_from_intent(intent)
+
+    @classmethod
+    def resolve_market_id(cls, ref: LendingPositionRef) -> str | None:
+        """Reconstruct a protocol's ``market_id`` from a typed position ref (VIB-5775).
+
+        The framework's valuation / position-health / teardown paths sometimes hold a
+        :class:`~almanak.connectors._strategy_base.lending_read_base.LendingPositionRef`
+        (protocol + chain + both leg tokens) but NO ``market_id`` — the case for
+        synthetic-market protocols (Euler V2, Silo V2, BENQI) whose intents carry
+        none. This resolves the connector-declared
+        :attr:`~almanak.connectors._strategy_base.lending_read_base.AccountStateReadSpec.market_id_from_ref`
+        (a PURE token-attribute function that shares the intent path's derivation, so
+        the two ids can never drift) and returns the reconstructed id.
+
+        Never guesses (Empty ≠ Zero): returns ``None`` — with a structured WARNING —
+        when the protocol is unknown, publishes no account-state spec, declares no
+        ``market_id_from_ref`` resolver, the resolver itself returns ``None``
+        (ambiguous / uncatalogued tokens), or the resolver **raises** (a misbehaving
+        connector must not crash the teardown/valuation guard — it fails CLOSED to
+        ``None`` with a WARNING, honouring the same "never guess" contract). Callers
+        fail closed on ``None``.
+
+        If the ref already carries an explicit ``market_id`` (isolated-market
+        protocols like Morpho, which DON'T declare a resolver), that id is returned
+        verbatim — the ref already knows its market.
+        """
+        protocol = cls.normalize_protocol(ref.protocol)
+        spec = cls._load_account_state_spec(protocol)
+        if spec is None:
+            logger.warning(
+                "resolve_market_id: no account-state spec for protocol %r (chain=%s); "
+                "cannot reconstruct market_id from ref — failing closed.",
+                ref.protocol,
+                ref.chain,
+            )
+            return None
+        if spec.market_id_from_ref is None:
+            # No ref resolver declared. An isolated-market protocol (Morpho) instead
+            # carries an explicit market_id on the ref; honour it. Otherwise there is
+            # nothing to derive — fail closed rather than guess.
+            if ref.market_id:
+                return ref.market_id
+            # No resolver AND no explicit id. Two cases, logged differently so the
+            # common/benign case is not mistaken for a fault:
+            #   * WHOLE-ACCOUNT (no market table: Aave family) or TOKEN-KEYED (Fluid)
+            #     protocols legitimately have NO synthetic market id — the caller
+            #     proceeds with none (Aave drops the informational id; the guard's
+            #     token fallback keys Fluid by token, VIB-5452). Expected → DEBUG.
+            #   * A PER-MARKET, non-token-keyed protocol (Morpho / Compound / Fluid
+            #     vault) that declares no resolver NEEDS an explicit id and got none —
+            #     a real gap the caller must fail closed on → WARNING.
+            if cls.publishes_market_table(protocol) and not cls.is_token_keyed(protocol):
+                logger.warning(
+                    "resolve_market_id: per-market protocol %r declares no market_id_from_ref "
+                    "resolver and the ref carries no market_id (chain=%s, collateral=%s, loan=%s); "
+                    "failing closed.",
+                    protocol,
+                    ref.chain,
+                    ref.collateral_token,
+                    ref.loan_token,
+                )
+            else:
+                logger.debug(
+                    "resolve_market_id: whole-account/token-keyed protocol %r has no synthetic "
+                    "market_id to derive from a ref (chain=%s, collateral=%s, loan=%s); returning "
+                    "None so the caller proceeds with none.",
+                    protocol,
+                    ref.chain,
+                    ref.collateral_token,
+                    ref.loan_token,
+                )
+            return None
+        try:
+            market_id = spec.market_id_from_ref(ref)
+        except Exception:
+            # A connector resolver is contracted PURE + non-raising (return None, never
+            # guess). If one nevertheless raises, fail CLOSED rather than let it crash the
+            # teardown/valuation guard that called us: return None (caller drops/keeps
+            # conservatively — Empty ≠ Zero) and surface the fault at WARNING with a
+            # traceback so the misbehaving connector is diagnosable.
+            logger.warning(
+                "resolve_market_id: %s resolver raised while reconstructing a market_id from ref "
+                "(chain=%s, collateral=%s, loan=%s) — failing closed to None (never guessing).",
+                protocol,
+                ref.chain,
+                ref.collateral_token,
+                ref.loan_token,
+                exc_info=True,
+            )
+            return None
+        if not market_id:
+            logger.warning(
+                "resolve_market_id: %s resolver could not reconstruct a market_id from ref "
+                "(chain=%s, collateral=%s, loan=%s) — tokens ambiguous or uncatalogued; "
+                "failing closed (never guessing).",
+                protocol,
+                ref.chain,
+                ref.collateral_token,
+                ref.loan_token,
+            )
+            return None
+        return market_id
 
     @classmethod
     def market_oracle_price_spec(cls, protocol: str) -> MarketOraclePriceSpec | None:

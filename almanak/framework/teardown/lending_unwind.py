@@ -73,6 +73,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base.lending_read_base import LendingPositionRef
 from almanak.framework.intents.vocabulary import AnyIntent, Intent, RepayIntent, SwapIntent, WithdrawIntent
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -206,11 +207,31 @@ def generate_lending_unwind(
     collateral_price = _price(market, collateral_token)
     borrow_price = _price(market, borrow_token)
 
+    # VIB-5775: synthetic-market protocols (euler_v2, silo_v2) carry no market_id —
+    # their lending_loop teardown would otherwise die with "market_id is required to
+    # value a <proto> position". Pass a typed ref carrying both legs so the framework
+    # derives the market_id from the connector-declared resolver. The ref is ignored
+    # when a concrete market_id is present (Morpho/Aave), so this is safe for all
+    # protocols.
+    # ``chain`` defaults to None (the strategy's primary chain). Synthetic-market
+    # resolvers (Euler) index a PER-CHAIN catalogue, so an empty chain resolves to
+    # None and the fix is defeated for the documented ``chain=None`` caller. Fall back
+    # to the snapshot's pinned chain — mirrors ``lending_unwind_guard``'s own chain
+    # resolution — so the ref always names the position's chain.
+    ref_chain = chain or getattr(market, "chain", None) or ""
+    position_ref = LendingPositionRef(
+        protocol=protocol,
+        chain=ref_chain,
+        collateral_token=collateral_token,
+        loan_token=borrow_token,
+        market_id=market_id,
+    )
     health = market.position_health(
         protocol=protocol,
         market_id=market_id or "",
         collateral_price_usd=collateral_price if collateral_price > 0 else None,
         debt_price_usd=borrow_price if borrow_price > 0 else None,
+        ref=position_ref,
     )
     collateral_usd = Decimal(str(health.collateral_value_usd))
     debt_usd = Decimal(str(health.debt_value_usd))

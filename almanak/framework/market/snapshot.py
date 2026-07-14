@@ -48,6 +48,8 @@ from .models import (
 if TYPE_CHECKING:
     import pandas as pd
 
+    from almanak.connectors._strategy_base.lending_read_base import LendingPositionRef
+
     from ..data.defi.pools import PoolReserves
     from ..data.funding import FundingRate, FundingRateSpread
     from ..data.health import HealthReport
@@ -3100,6 +3102,7 @@ class MarketSnapshot:
         rpc_url: str | None = None,
         collateral_price_usd: Decimal | None = None,
         debt_price_usd: Decimal | None = None,
+        ref: LendingPositionRef | None = None,
     ) -> Any:
         """Get health factor for a lending position.
 
@@ -3124,6 +3127,12 @@ class MarketSnapshot:
                 neither — a partial pair raises. The result's ``price_source``
                 states which source valued the position.
             debt_price_usd: Optional override for debt-token price (same).
+            ref: Optional typed :class:`LendingPositionRef` (VIB-5775). Callers
+                holding the position's tokens but NO ``market_id`` — the case for
+                synthetic-market protocols (Euler V2, Silo V2) whose intents carry
+                none — pass this so the framework derives the ``market_id`` from the
+                connector-declared resolver. Used ONLY when ``market_id`` is empty;
+                an explicit ``market_id`` is unaffected.
 
         Returns:
             PositionHealth with .health_factor (Decimal), .collateral_value_usd,
@@ -3133,12 +3142,25 @@ class MarketSnapshot:
         Raises:
             ValueError: If health data cannot be retrieved.
         """
+        # Resolve the effective market id ONCE (VIB-5775): explicit id wins; else
+        # derive it from the ref (synthetic-market protocols carry none on the
+        # intent); else empty. Same precedence ``get_health`` uses. Keying the cache
+        # on the RESOLVED id — not the raw ref tokens — is what disambiguates two
+        # euler positions (``"usdc"`` vs ``"dai"``) AND preserves set/get symmetry:
+        # ``set_position_health`` pre-seeds under the explicit short key (e.g.
+        # ``"usdc"``), so a subsequent empty-id + ref call must key on that same
+        # resolved id to HIT the pre-seed (the 5-tuple shape below must match
+        # ``set_position_health`` exactly — do NOT add a 6th element).
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        effective_market_id = market_id or (LendingReadRegistry.resolve_market_id(ref) if ref is not None else "") or ""
+
         # Cache key includes the override inputs (CodeRabbit 2026-05-06):
         # a second call with different rpc_url / price overrides was reusing
         # the first result and returning stale health data.
         cache_key: tuple[str, ...] = (
             protocol,
-            market_id,
+            effective_market_id,
             rpc_url or "",
             str(collateral_price_usd) if collateral_price_usd is not None else "",
             str(debt_price_usd) if debt_price_usd is not None else "",
@@ -3158,10 +3180,15 @@ class MarketSnapshot:
         try:
             health = provider.get_health(
                 protocol=protocol,
-                market_id=market_id,
+                # Pass the already-resolved id and ref=None so get_health does NOT
+                # re-resolve (single, authoritative resolution above). When resolution
+                # yielded nothing (effective_market_id == "") get_health's own empty-id
+                # errors fire unchanged — a ref would only have re-derived the same None.
+                market_id=effective_market_id,
                 user_address=self._wallet_address,
                 collateral_price_usd=collateral_price_usd,
                 debt_price_usd=debt_price_usd,
+                ref=None,
             )
         except HealthUnavailableError:
             raise

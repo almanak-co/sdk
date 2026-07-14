@@ -72,6 +72,7 @@ __all__ = [
     "EthCall",
     "LendingAccountState",
     "LendingPositionOnChain",
+    "LendingPositionRef",
     "LendingReadSpec",
     "MarketOraclePriceSpec",
     "build_compound_asset_info_calldata",
@@ -404,6 +405,47 @@ class MarketOraclePriceSpec:
 
 
 @dataclass(frozen=True)
+class LendingPositionRef:
+    """Canonical, connector-agnostic identity of a single lending position (VIB-5775).
+
+    A typed seam the framework's valuation, position-health, and teardown paths
+    pass *instead of* a raw ``market_id`` string when they don't have one — the
+    case for synthetic-market protocols (Euler V2, Silo V2, BENQI) whose intents
+    carry no ``market_id`` at all. The connector-declared
+    :attr:`AccountStateReadSpec.market_id_from_ref` resolver reconstructs the
+    protocol's own ``market_id`` from this ref's *tokens* (both legs are named
+    explicitly here), so the framework never hardcodes a protocol's synthetic-id
+    scheme.
+
+    Every field but ``protocol`` / ``chain`` is optional because callers differ
+    in what they know: teardown always has both leg tokens; a whole-account
+    protocol (BENQI) ignores them. Empty ≠ Zero — ``None`` is "unknown", never a
+    fabricated blank.
+
+    Attributes:
+        protocol: Lending protocol identifier (e.g. ``"euler_v2"``, ``"silo_v2"``);
+            normalised by the registry (case / alias-folded) at resolution time.
+        chain: Chain identifier (e.g. ``"ethereum"``, ``"avalanche"``). Some
+            synthetic-id schemes are per-chain (Euler), so the resolver needs it.
+        collateral_token: Collateral-leg token symbol, or ``None`` when unknown.
+        loan_token: Loan/debt-leg token symbol, or ``None`` for a collateral-only
+            (supply) position or when unknown.
+        market_id: An already-known ``market_id`` when the caller happens to have
+            one (isolated-market protocols like Morpho); ``None`` for the
+            synthetic-market protocols this ref primarily serves.
+        user_address: Optional wallet address the position belongs to. Not needed
+            to resolve the market id; carried for callers that value/read with it.
+    """
+
+    protocol: str
+    chain: str
+    collateral_token: str | None
+    loan_token: str | None
+    market_id: str | None = None
+    user_address: str | None = None
+
+
+@dataclass(frozen=True)
 class AccountStateReadSpec:
     """Connector-published descriptor for an aggregate account-state read.
 
@@ -451,6 +493,15 @@ class AccountStateReadSpec:
     # ``contract_kinds`` (above) signals a *market-scoped* read target (the per-market
     # Comet), which the registry binds from the market table rather than AddressRegistry.
     query_inputs_fn: Callable[[Any], dict[str, Any]] | None = None
+    # Connector-declared reconstruction of the protocol's ``market_id`` from a typed
+    # :class:`LendingPositionRef` (VIB-5775). ``None`` → the protocol has no ref-based
+    # resolver (isolated-market protocols like Morpho already carry an explicit
+    # ``market_id`` on the ref). Synthetic-market protocols (Euler V2, Silo V2, BENQI)
+    # whose intents carry NO ``market_id`` declare a PURE token-attribute function here
+    # so the framework can derive the id from the ref's tokens without hardcoding the
+    # protocol's synthetic-id scheme. It MUST be pure (no live RPC read) and MUST return
+    # ``None`` — never guess — when the ref's tokens are ambiguous / unknown.
+    market_id_from_ref: Callable[[LendingPositionRef], str | None] | None = None
     # Connector-declared read of the market's OWN price oracle — the price the
     # protocol itself liquidates against (VIB-5527 follow-up). ``None``
     # for protocols that publish no such read; the framework's position-health

@@ -76,6 +76,7 @@ from almanak.connectors._strategy_base.lending_read_base import (
     AccountStateReadSpec,
     EthCall,
     LendingAccountState,
+    LendingPositionRef,
     decode_uint_hex,
     pad_address,
 )
@@ -296,6 +297,23 @@ def _euler_query_inputs_from_intent(intent: Any) -> dict[str, Any]:
     return {"market_id": market_id, "collateral_token": collateral_token}
 
 
+def _euler_market_id_from_ref(ref: LendingPositionRef) -> str | None:
+    """Reconstruct Euler's synthetic ``market_id`` from a typed position ref (VIB-5775).
+
+    Pure token-attribute logic: the ref names BOTH legs explicitly, so this is a thin
+    adapter over :func:`_synthesize_market_id` (the SAME derivation the intent path's
+    ``query_inputs_fn`` uses) keyed off ``ref.collateral_token`` / ``ref.loan_token``
+    on ``ref.chain``. Because both share ``_synthesize_market_id``, the ref-derived id
+    can never drift from the account-state (intent) path's id for the same tokens.
+
+    Unlike the intent path, this does NOT do catalogue collateral-recovery: the ref
+    already carries the collateral token, so there is nothing to recover. Returns
+    ``None`` (never a guessed vault — Empty ≠ Zero) when the tokens are ambiguous or
+    name no catalogued market.
+    """
+    return _synthesize_market_id(ref.chain, ref.collateral_token, ref.loan_token)
+
+
 def _decode_uint(blob: str | None) -> int | None:
     """Decode word 0 of a single-uint return blob, or ``None`` on a short/None blob.
 
@@ -439,4 +457,8 @@ ACCOUNT_STATE_READ_SPEC: AccountStateReadSpec = AccountStateReadSpec(
     ),
     normalize_market_id=str.lower,
     query_inputs_fn=_euler_query_inputs_from_intent,
+    # VIB-5775: teardown/valuation/health carry a typed LendingPositionRef (no intent,
+    # no market_id). Derive the synthetic id from the ref's tokens — pure, drift-proof
+    # against the intent path (both share ``_synthesize_market_id``).
+    market_id_from_ref=_euler_market_id_from_ref,
 )

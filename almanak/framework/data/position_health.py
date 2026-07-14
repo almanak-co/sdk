@@ -29,7 +29,10 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
+    from almanak.connectors._strategy_base.lending_read_base import (
+        LendingAccountState,
+        LendingPositionRef,
+    )
     from almanak.framework.gateway_client import GatewayClient
 
 
@@ -263,6 +266,7 @@ class PositionHealthProvider:
         user_address: str,
         collateral_price_usd: Decimal | None = None,
         debt_price_usd: Decimal | None = None,
+        ref: "LendingPositionRef | None" = None,
     ) -> PositionHealth:
         """Get health factor for a lending position.
 
@@ -276,7 +280,8 @@ class PositionHealthProvider:
                 For per-market protocols it scopes the read: Morpho Blue takes
                 the bytes32 market id; Compound V3 the Comet market key (e.g.
                 "usdc", "weth"); Silo V2 / Euler V2 / BENQI their synthetic
-                ``"<col>"`` / ``"<col>/<loan>"`` ids.
+                ``"<col>"`` / ``"<col>/<loan>"`` ids. May be empty when a typed
+                ``ref`` is supplied instead (see below).
             user_address: Wallet address holding the position
             collateral_price_usd: Optional override for collateral price on
                 cross-asset markets of non-USD-native protocols. When BOTH
@@ -287,6 +292,13 @@ class PositionHealthProvider:
                 which source valued the position. Supply both overrides or
                 neither — a partial pair is ambiguous and raises.
             debt_price_usd: Optional override for debt token price
+            ref: Optional typed :class:`LendingPositionRef` (VIB-5775). Callers
+                that hold the position's tokens but NO ``market_id`` — the case
+                for synthetic-market protocols (Euler V2, Silo V2) whose intents
+                carry none — pass this so the framework can derive the
+                ``market_id`` from the connector-declared resolver. Used ONLY
+                when ``market_id`` is empty; an explicit ``market_id`` is
+                byte-for-byte unaffected (the ref is ignored).
 
         Returns:
             PositionHealth with computed health factor
@@ -296,6 +308,18 @@ class PositionHealthProvider:
         """
         protocol_lower = _normalize_protocol(protocol)
         from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        # VIB-5775: synthetic-market protocols (euler_v2, silo_v2, benqi) carry NO
+        # market_id on their intents; teardown/valuation supply a typed ref instead.
+        # Derive the market_id from the connector-declared resolver ONCE here — before
+        # any downstream consumer (``_read_account_state`` AND ``_build_price_oracle_dict``
+        # both need it) — so the whole read is scoped correctly. An explicit market_id
+        # is untouched (derivation only fires when empty); a ref that cannot resolve
+        # leaves market_id empty and the existing empty-id errors fire unchanged.
+        if not market_id and ref is not None:
+            derived_market_id = LendingReadRegistry.resolve_market_id(ref)
+            if derived_market_id:
+                market_id = derived_market_id
 
         # Dispatch on connector-declared capabilities, never on protocol names
         # (VIB-4851). Order matters: a protocol that publishes BOTH a
@@ -483,6 +507,24 @@ class PositionHealthProvider:
 
         seam_market_id = market_id if LendingReadRegistry.publishes_market_table(protocol) else None
 
+        # Thread the market's collateral token so the generic reader prices + injects
+        # the collateral leg — mirroring the accounting path, which calls
+        # ``read_lending_account_state`` with ``collateral_token=`` from the spec's
+        # query inputs (``lending_accounting.build_lending_accounting_event``). Without
+        # it a SINGLE-LEG (supply-only) synthetic euler/silo market reads no collateral
+        # and comes back unmeasured → the WITHDRAW is refused (VIB-5775). Additive for
+        # two-leg markets: the collateral symbol is already priced via valuation roles,
+        # so this only resolves its address (no new failure surface). ``None`` for
+        # whole-account protocols (Aave — no market table) and for BENQI (its
+        # whole-account params name no single ``collateral_token``).
+        collateral_token: str | None = None
+        if seam_market_id:
+            market_params = LendingReadRegistry.market_params(protocol, self._chain, seam_market_id)
+            if market_params:
+                catalogue_collateral = market_params.get("collateral_token")
+                if isinstance(catalogue_collateral, str) and catalogue_collateral:
+                    collateral_token = catalogue_collateral
+
         state = read_lending_account_state(
             protocol=protocol,
             chain=self._chain,
@@ -490,6 +532,7 @@ class PositionHealthProvider:
             market_id=seam_market_id,
             gateway_client=self._gateway_client,
             price_oracle=price_oracle,
+            collateral_token=collateral_token,
         )
         if state is None:
             # Empty != Zero: a failed read must surface, never become a fabricated
@@ -625,6 +668,39 @@ class PositionHealthProvider:
                 f"{protocol} market {market_id} not found on {self._chain}; cannot resolve "
                 f"its collateral/loan tokens to value the position."
             )
+
+        # Single-leg (supply-only) synthetic market (VIB-5775): a collateral leg with
+        # NO loan leg — the euler_v2 / silo_v2 ``"<collateral>"`` catalogue entries: a
+        # pure supply position (no controller vault, no debt). The two-leg cross-asset
+        # logic below fails closed here (the declared ``loan_token`` role resolves to
+        # None ⇒ ``valuation_roles`` returns () ⇒ the ``declares_valuation_roles``
+        # branch RAISES "has no collateral/loan token symbols"), but a one-leg market
+        # is legitimately valued from a SINGLE collateral price — its debt is a
+        # measured zero. Detected from the params SHAPE (general — not euler-specific,
+        # also covers silo_v2 and any synthetic single-leg supply), so the account-state
+        # read runs and returns measured collateral + ``Decimal("0")`` debt instead of
+        # this method aborting the whole health read. The HF is debt-free (the price
+        # cancels), so a missing override uses the unit placeholder exactly like the
+        # same-asset path. BENQI (no ``collateral_token`` key in its whole-account
+        # params) and every two-leg market (``loan_token`` present) skip this branch.
+        collateral_only_symbol = params.get("collateral_token")
+        if params.get("loan_token") is None and isinstance(collateral_only_symbol, str) and collateral_only_symbol:
+            if collateral_price_usd is not None:
+                return {collateral_only_symbol: collateral_price_usd}, PRICE_SOURCE_OVERRIDE
+            # DENOMINATION CAVEAT (PR #3277 audit — codex/CodeRabbit/pr-auditor): in the
+            # NO-override path (reached only when the caller's own oracle read returned no
+            # price, e.g. a transient price-feed outage) the resulting
+            # ``collateral_value_usd`` is token-DENOMINATED, not USD, for a non-USD-pegged
+            # collateral. This is safe for the two proven money-consumers: the teardown
+            # guard and ``generate_lending_unwind`` both PASS a real override on the happy
+            # path (so they never reach here), and the only consumer of this degraded value
+            # is a conservative ``> _DUST_USD`` gate before a risk-reducing ``withdraw_all``
+            # — it never sizes a real trade (two-leg sizing requires both real prices and
+            # raises otherwise). A USD-accurate no-override valuation for non-stable
+            # single-leg collateral is tracked as a follow-up (a real USD oracle must be
+            # threaded into this pricing dict; not available in-method today). The unit
+            # placeholder is correct for USD-pegged collateral (the tested/proven token).
+            return {collateral_only_symbol: Decimal("1")}, PRICE_SOURCE_SAME_ASSET_UNIT
 
         roles = dict(LendingReadRegistry.valuation_roles(protocol, self._chain, market_id))
         if not roles:

@@ -16,14 +16,20 @@ guard must never ACT on a ``None`` as if it were a measured zero.
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Any
 
+import pytest
+
 from almanak.framework.intents.vocabulary import Intent
 from almanak.framework.teardown.lending_unwind_guard import (
+    _read_exposure,
     sanitize_lending_teardown_intents,
 )
 from almanak.framework.teardown.models import TeardownMode
+
+_GUARD_LOGGER = "almanak.framework.teardown.lending_unwind_guard"
 
 _PROTOCOL = "aave_v3"
 _CHAIN = "arbitrum"
@@ -1240,3 +1246,390 @@ def test_vib5493_fluid_vault_collateral_plus_debt_stays_grouped_by_market_id():
     result = sanitize_lending_teardown_intents([withdraw, repay], market)
     assert market.reads == 1  # single vault-keyed position
     assert _types(result.intents) == ["REPAY", "WITHDRAW"]
+
+
+# ---------------------------------------------------------------------------
+# VIB-5775: synthetic-market resolution in _read_exposure so euler/silo aren't
+# stranded with a bare-token market_id that position_health cannot resolve.
+# ---------------------------------------------------------------------------
+
+_AVALANCHE = "avalanche"
+
+
+class _CapturingMarket:
+    """Records every market_id ``position_health`` was called with; returns a fixed
+    health, or (``strict_id`` set) raises unmeasured for any OTHER market id."""
+
+    def __init__(
+        self,
+        collateral_usd: Decimal | None,
+        debt_usd: Decimal | None,
+        *,
+        chain: str = _AVALANCHE,
+        strict_id: str | None = None,
+        prices: dict[str, Decimal] | None = None,
+    ) -> None:
+        self._health = _Health(collateral_usd, debt_usd)
+        self.chain = chain
+        self._strict_id = strict_id
+        self._prices = prices or {}
+        self.reads: list[str] = []
+        self.calls: list[dict[str, Any]] = []  # captured position_health kwargs
+
+    def position_health(
+        self,
+        protocol: str,
+        market_id: str,
+        collateral_price_usd: Decimal | None = None,
+        debt_price_usd: Decimal | None = None,
+        **kwargs: Any,
+    ) -> _Health:
+        self.reads.append(market_id)
+        self.calls.append(
+            {"market_id": market_id, "collateral_price_usd": collateral_price_usd, "debt_price_usd": debt_price_usd}
+        )
+        if self._strict_id is not None and market_id != self._strict_id:
+            raise RuntimeError(f"unmeasured: market {market_id!r} not resolvable")
+        return self._health
+
+    def price(self, token: str) -> Decimal:  # cross-asset override plumbing
+        return self._prices.get(token, Decimal("1"))
+
+
+def _euler_withdraw(token: str = "WAVAX") -> Any:
+    return Intent.withdraw(protocol="euler_v2", token=token, amount=Decimal("0"), withdraw_all=True, chain=_AVALANCHE)
+
+
+def _euler_repay(token: str = "USDC") -> Any:
+    return Intent.repay(protocol="euler_v2", token=token, repay_full=True, chain=_AVALANCHE)
+
+
+def test_vib5775_read_exposure_uses_resolved_synthetic_id_not_bare_token() -> None:
+    """euler intent carries no market_id; ``_read_exposure`` must pass the RESOLVED
+    composite id (``_synthesize_market_id``), not the bare collateral token."""
+    from almanak.connectors.euler_v2.lending_read import _synthesize_market_id
+
+    expected = _synthesize_market_id(_AVALANCHE, "WAVAX", "USDC")
+    assert expected == "wavax/usdc"  # sanity: directed pair, not the bare token
+
+    market = _CapturingMarket(collateral_usd=Decimal("1000"), debt_usd=Decimal("400"))
+    exposure = _read_exposure(market, _euler_withdraw(), collateral_token="WAVAX", borrow_token="USDC")
+
+    assert market.reads == ["wavax/usdc"]  # resolved directed-pair id, NOT "WAVAX"
+    assert exposure.measured  # measured collateral + debt (not unmeasured)
+    assert exposure.collateral_usd == Decimal("1000")
+    assert exposure.debt_usd == Decimal("400")
+
+
+def test_vib5775_euler_collateral_only_ref_resolves_collateral_id() -> None:
+    """A collateral-only euler position (no borrow leg) resolves the ``"<col>"`` id."""
+    market = _CapturingMarket(collateral_usd=Decimal("500"), debt_usd=Decimal("0"))
+    exposure = _read_exposure(market, _euler_withdraw("USDC"), collateral_token="USDC", borrow_token=None)
+    assert market.reads == ["usdc"]
+    assert exposure.measured
+
+
+def test_vib5775_euler_withdraw_kept_end_to_end_via_resolved_id() -> None:
+    """End-to-end through ``sanitize_lending_teardown_intents``: a market that ONLY
+    answers the resolved directed-pair id yields MEASURED exposure, so the euler
+    WITHDRAW survives (repay-first). A bare-token id would have raised → unmeasured."""
+    market = _CapturingMarket(collateral_usd=Decimal("1000"), debt_usd=Decimal("400"), strict_id="wavax/usdc")
+    result = sanitize_lending_teardown_intents([_euler_repay("USDC"), _euler_withdraw("WAVAX")], market)
+    assert "wavax/usdc" in market.reads
+    assert "WAVAX" not in market.reads and "wavax" not in market.reads
+    assert _types(result.intents) == ["REPAY", "WITHDRAW"]  # both risk-reducing legs kept
+
+
+def test_vib5775_fluid_still_falls_back_to_token_not_resolver() -> None:
+    """Regression (VIB-5452): token-keyed Fluid has no ref resolver → resolver
+    returns None → the market_id falls through to the position's token, unchanged."""
+    market = _CapturingMarket(collateral_usd=Decimal("100"), debt_usd=Decimal("0"))
+    fluid_withdraw = Intent.withdraw(
+        protocol="fluid", token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN
+    )
+    market.chain = _CHAIN
+    _read_exposure(market, fluid_withdraw, collateral_token="USDC", borrow_token=None)
+    assert market.reads == ["USDC"]  # bare token, not a synthetic composite
+
+
+def test_vib5775_explicit_market_id_bypasses_resolver() -> None:
+    """A Morpho intent carrying an explicit market_id must use it verbatim; the
+    resolver is never consulted (``or`` short-circuits on the non-empty raw id)."""
+    called: list[Any] = []
+    from almanak.framework.teardown import lending_unwind_guard as guard
+
+    real = guard._resolve_ref_market_id
+
+    def spy(*args: Any, **kwargs: Any) -> Any:  # pragma: no cover - asserted unused
+        called.append(args)
+        return real(*args, **kwargs)
+
+    guard._resolve_ref_market_id = spy  # type: ignore[assignment]
+    try:
+        market = _CapturingMarket(collateral_usd=Decimal("2000"), debt_usd=Decimal("900"), chain="ethereum")
+        morpho_withdraw = Intent.withdraw(
+            protocol="morpho_blue",
+            token="wstETH",
+            market_id="0xMARKET",
+            amount=Decimal("0"),
+            withdraw_all=True,
+            chain="ethereum",
+        )
+        _read_exposure(market, morpho_withdraw, collateral_token="wstETH", borrow_token="USDC")
+        assert market.reads == ["0xMARKET"]
+        assert called == []  # resolver never invoked when an explicit id is present
+    finally:
+        guard._resolve_ref_market_id = real  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# VIB-5775 surgical form: single-sided position on a TWO-LEG (pair) market must be
+# valued by SUPPLYING the market's own loan-leg price — never by blanking the
+# present collateral price (which would drop euler/silo to unit price + dust-flip).
+# ---------------------------------------------------------------------------
+
+
+def _silo_withdraw(token: str = "USDC") -> Any:
+    return Intent.withdraw(protocol="silo_v2", token=token, amount=Decimal("0"), withdraw_all=True, chain=_AVALANCHE)
+
+
+def test_vib5775_silo_single_sided_supplies_both_real_prices() -> None:
+    """Silo single-supply (USDC, no REPAY) resolves to the two-leg id ``usdc/wavax``.
+    The guard must pass BOTH real overrides — collateral USDC + the market's own loan
+    leg WAVAX (priced from params) — so ``_build_price_oracle_dict`` never sees a
+    partial pair. collateral_usd stays REAL (no unit-price dust flip)."""
+    market = _CapturingMarket(
+        collateral_usd=Decimal("5"),  # $5 USDC supply
+        debt_usd=Decimal("0"),
+        prices={"USDC": Decimal("1"), "WAVAX": Decimal("30")},
+    )
+    exposure = _read_exposure(market, _silo_withdraw("USDC"), collateral_token="USDC", borrow_token=None)
+
+    assert market.reads == ["usdc/wavax"]  # resolved two-leg pair id
+    call = market.calls[-1]
+    assert call["collateral_price_usd"] == Decimal("1")  # real USDC override
+    assert call["debt_price_usd"] == Decimal("30")  # loan leg (WAVAX) supplied from params
+    assert exposure.measured and not exposure.collateral_is_zero  # real, not dust
+
+
+def test_vib5775_silo_single_sided_withdraw_kept_end_to_end() -> None:
+    """End-to-end: with both legs priced, a silo single-supply reads MEASURED
+    collateral + 0 debt → the WITHDRAW survives sanitize (the mainnet gap)."""
+    market = _CapturingMarket(
+        collateral_usd=Decimal("5"),
+        debt_usd=Decimal("0"),
+        prices={"USDC": Decimal("1"), "WAVAX": Decimal("30")},
+    )
+    result = sanitize_lending_teardown_intents([_silo_withdraw("USDC")], market)
+    assert [i.intent_type.value for i in result.intents] == ["WITHDRAW"]  # not dropped
+    assert market.calls[-1]["debt_price_usd"] == Decimal("30")  # loan leg was supplied
+
+
+def test_vib5775_euler_single_leg_single_supply_keeps_real_collateral_price() -> None:
+    """REGRESSION LOCK (the euler dust-flip): a euler single-supply resolves to a
+    SINGLE-LEG id (no loan_token in params), so the guard passes the LONE REAL
+    collateral override — NOT ``None`` — which euler's single-leg carve-out values at
+    the real price. This is the exact keep/drop-affecting magnitude the pass-neither
+    form would have broken (real $ → unit → dust-zero → stranded)."""
+    market = _CapturingMarket(
+        collateral_usd=Decimal("50"),
+        debt_usd=Decimal("0"),
+        prices={"WAVAX": Decimal("30")},
+    )
+    exposure = _read_exposure(market, _euler_withdraw("WAVAX"), collateral_token="WAVAX", borrow_token=None)
+
+    assert market.reads == ["wavax"]  # single-leg id (loan_token None)
+    call = market.calls[-1]
+    assert call["collateral_price_usd"] == Decimal("30")  # REAL price, NOT blanked to None
+    assert call["debt_price_usd"] is None  # no loan leg to supply
+    assert exposure.measured and not exposure.collateral_is_zero
+
+
+def test_vib5775_two_sided_passes_both_real_prices_unchanged() -> None:
+    """A two-sided position (both tokens priced) is byte-identical to before: both
+    real overrides passed, the loan-leg params lookup is skipped (borrow_price>0)."""
+    market = _CapturingMarket(
+        collateral_usd=Decimal("1000"),
+        debt_usd=Decimal("400"),
+        prices={"WAVAX": Decimal("30"), "USDC": Decimal("1")},
+    )
+    _read_exposure(market, _euler_withdraw("WAVAX"), collateral_token="WAVAX", borrow_token="USDC")
+    call = market.calls[-1]
+    assert call["collateral_price_usd"] == Decimal("30")
+    assert call["debt_price_usd"] == Decimal("1")  # from borrow_token, not the params lookup
+
+
+def test_vib5775_two_sided_unpriceable_borrow_stays_partial() -> None:
+    """When the borrow leg is genuinely unpriceable (0), the guard passes the lone
+    collateral override — which a real two-leg ``_build_price_oracle_dict`` then
+    raises on (partial pair) → unmeasured → drop, unchanged from today."""
+    market = _CapturingMarket(
+        collateral_usd=Decimal("1000"),
+        debt_usd=Decimal("400"),
+        prices={"WAVAX": Decimal("30"), "USDC": Decimal("0")},  # USDC unpriceable
+    )
+    _read_exposure(market, _euler_withdraw("WAVAX"), collateral_token="WAVAX", borrow_token="USDC")
+    call = market.calls[-1]
+    assert call["collateral_price_usd"] == Decimal("30")
+    assert call["debt_price_usd"] is None  # unpriceable loan leg not fabricated
+
+
+def test_vib5775_fluid_token_keyed_passes_lone_collateral_no_loan_leg() -> None:
+    """Fluid (token-keyed, no loan_token in params) passes just the lone collateral
+    override — the loan-leg supply does not fire, unchanged from today (VIB-5452)."""
+    market = _CapturingMarket(collateral_usd=Decimal("100"), debt_usd=Decimal("0"), chain=_CHAIN)
+    fluid_withdraw = Intent.withdraw(
+        protocol="fluid", token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN
+    )
+    _read_exposure(market, fluid_withdraw, collateral_token="USDC", borrow_token=None)
+    assert market.reads == ["USDC"]  # bare token, not a synthetic composite
+    assert market.calls[-1]["debt_price_usd"] is None  # no loan leg supplied
+
+
+# ---------------------------------------------------------------------------
+# VIB-5775 silent-error gate (D3.F6): the exposure-read failure path must NOT be
+# silent. Before VIB-5775 the guard swallowed the read exception and returned
+# unmeasured with NO log, hiding the euler/silo strand. These lock BOTH halves of
+# the D3.F6 contract: the degraded state AND the emitted log line.
+# ---------------------------------------------------------------------------
+
+
+class _RaisingHealthMarket:
+    """position_health always raises — models a gateway/RPC read failure BENEATH the
+    valuation read (UNAVAILABLE, 5xx, unreadable market)."""
+
+    def __init__(self, chain: str = _AVALANCHE, prices: dict[str, Decimal] | None = None) -> None:
+        self.chain = chain
+        self._prices = prices or {}
+
+    def position_health(self, protocol: str, market_id: str, **kwargs: Any) -> Any:
+        raise RuntimeError("gateway UNAVAILABLE")
+
+    def price(self, token: str) -> Decimal:
+        return self._prices.get(token, Decimal("1"))
+
+
+def test_vib5775_exposure_read_failure_is_unmeasured_and_warns(caplog: pytest.LogCaptureFixture) -> None:
+    """D3.F6 HARD GATE: when the underlying read raises, ``_read_exposure`` returns
+    UNMEASURED (None/None — Empty != Zero, never a fabricated Decimal('0')) AND emits a
+    WARNING naming the protocol + market. A swallowed exception with no log would fail
+    this test — that was the pre-VIB-5775 silent bug."""
+    market = _RaisingHealthMarket()
+    with caplog.at_level(logging.WARNING, logger=_GUARD_LOGGER):
+        exposure = _read_exposure(market, _euler_withdraw("USDC"), collateral_token="USDC", borrow_token=None)
+
+    # Degraded state: unmeasured, NOT a fabricated zero.
+    assert exposure.collateral_usd is None
+    assert exposure.debt_usd is None
+    assert not exposure.measured
+
+    # Emitted log: a WARNING that names the failure, protocol, and resolved market.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and r.name == _GUARD_LOGGER]
+    assert warnings, "exposure-read failure must emit a WARNING (no silent swallow)"
+    msg = warnings[-1].getMessage().lower()
+    assert "exposure read failed" in msg
+    assert "euler_v2" in msg
+    assert "usdc" in msg  # the resolved market id appears (not blank)
+
+
+def test_vib5775_loan_leg_enrichment_failure_degrades_and_logs_debug(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3.F6 secondary path: if the best-effort loan-leg params lookup RAISES, the guard
+    must degrade to the lone-collateral override (never crash) AND log the degrade at
+    DEBUG. Locks both the degraded behavior and the (previously unasserted) DEBUG line."""
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("params backend down")
+
+    # Force the enrichment's market_params lookup to raise. The read itself still
+    # succeeds (single-sided silo: collateral priced, borrow leg absent).
+    monkeypatch.setattr(LendingReadRegistry, "market_params", classmethod(_boom))
+
+    market = _CapturingMarket(
+        collateral_usd=Decimal("5"),
+        debt_usd=Decimal("0"),
+        prices={"USDC": Decimal("1"), "WAVAX": Decimal("30")},
+    )
+    with caplog.at_level(logging.DEBUG, logger=_GUARD_LOGGER):
+        exposure = _read_exposure(market, _silo_withdraw("USDC"), collateral_token="USDC", borrow_token=None)
+
+    # Degraded, not crashed: the lone REAL collateral override still flows through
+    # (debt leg not fabricated), and the collateral read is measured.
+    assert market.calls[-1]["collateral_price_usd"] == Decimal("1")
+    assert market.calls[-1]["debt_price_usd"] is None  # loan leg could not be supplied → not fabricated
+    assert exposure.measured
+
+    debugs = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.DEBUG and r.name == _GUARD_LOGGER and "price loan leg" in r.getMessage().lower()
+    ]
+    assert debugs, "loan-leg enrichment failure must log at DEBUG (best-effort degrade, not silent)"
+
+
+class _PerIdRaisingMarket:
+    """position_health RAISES for ids in ``raise_ids`` (models a per-position gateway
+    read failure), and returns a measured zero-debt health for every other id."""
+
+    def __init__(self, raise_ids: set[str], chain: str = _AVALANCHE) -> None:
+        self.chain = chain
+        self._raise = set(raise_ids)
+        self.reads: list[str] = []
+
+    def position_health(self, protocol: str, market_id: str, **kwargs: Any) -> _Health:
+        self.reads.append(market_id)
+        if market_id in self._raise:
+            raise RuntimeError(f"gateway UNAVAILABLE for {market_id}")
+        return _Health(Decimal("100"), Decimal("0"))  # measured, zero-debt
+
+    def price(self, token: str) -> Decimal:
+        return Decimal("1")
+
+
+def test_vib5775_faulting_position_is_loud_but_does_not_block_other_withdraw(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D3.FS4 COMBINED (loud-but-non-blocking, one case): with two INDEPENDENT token-keyed
+    (Fluid) positions, position A's ``position_health`` RAISES — its standalone
+    withdraw_all is dropped as unmeasured and the loud WARNING fires — while position B, a
+    live independent position, keeps + dispatches its WITHDRAW. One position's read fault
+    must never strand another's risk-reducing intent."""
+    # Fluid keys each token as its own position → A (USDC) and B (WETH) are independent.
+    market = _PerIdRaisingMarket(raise_ids={"USDC"}, chain=_CHAIN)  # A=USDC raises; B=WETH measured
+    a_withdraw = Intent.withdraw(protocol="fluid", token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
+    b_withdraw = Intent.withdraw(protocol="fluid", token="WETH", amount=Decimal("0"), withdraw_all=True, chain=_CHAIN)
+
+    with caplog.at_level(logging.WARNING, logger=_GUARD_LOGGER):
+        result = sanitize_lending_teardown_intents([a_withdraw, b_withdraw], market)
+
+    kept = [(i.protocol, i.token, i.intent_type.value) for i in result.intents]
+    # B survives; A is dropped (unmeasured standalone withdraw_all) — non-blocking.
+    assert ("fluid", "WETH", "WITHDRAW") in kept
+    assert ("fluid", "USDC", "WITHDRAW") not in kept
+    # A's fault was LOUD, not silent.
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == _GUARD_LOGGER and "exposure read failed" in r.getMessage().lower()
+    ]
+    assert warnings, "the faulting position must emit a WARNING (loud, not silent)"
+    assert "usdc" in warnings[-1].getMessage().lower()  # names the faulting position
+
+
+def test_vib5775_benqi_whole_account_ref_resolves_fixed_id_and_keeps() -> None:
+    """D2.M3 whole-account shape: BENQI carries no market_id and its resolver returns the
+    FIXED ``"benqi"`` id regardless of tokens. ``_read_exposure`` must pass THAT resolved
+    id to ``position_health`` (not the bare ``"USDC"`` token), read MEASURED, and the
+    WITHDRAW must survive sanitize end-to-end — the whole-account path exercised through
+    the guard, not merely the resolver's return value."""
+    market = _CapturingMarket(collateral_usd=Decimal("100"), debt_usd=Decimal("0"))
+    benqi_withdraw = Intent.withdraw(
+        protocol="benqi", token="USDC", amount=Decimal("0"), withdraw_all=True, chain=_AVALANCHE
+    )
+    exposure = _read_exposure(market, benqi_withdraw, collateral_token="USDC", borrow_token=None)
+    assert market.reads == ["benqi"]  # fixed whole-account id, NOT the bare "USDC" token
+    assert exposure.measured
+    result = sanitize_lending_teardown_intents([benqi_withdraw], market)
+    assert [i.intent_type.value for i in result.intents] == ["WITHDRAW"]  # kept, not dropped
