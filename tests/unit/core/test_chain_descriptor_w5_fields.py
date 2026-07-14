@@ -78,6 +78,30 @@ HISTORICAL_FALLBACK_GAS_PRICES: dict[str, dict[str, Decimal]] = {
 }
 
 
+# Post-legacy additions: chains that were never in the legacy DEFAULT_GAS_PRICES
+# and whose fallback fees were measured from the live chain instead of inherited.
+# Kept OUT of HISTORICAL_FALLBACK_GAS_PRICES on purpose — that map is a frozen
+# legacy snapshot whose value is that a diff against ``main`` stays obvious, and
+# these values have no legacy counterpart to mirror.
+#
+# robinhood (VIB-5811): measured 2026-07-14 from baseFeePerGas sampled every
+# 1000 blocks over the last 20_000 (min 0.05293 / median 0.05328 / max 0.05427
+# gwei); 0.055 rounds the median up, the conservative direction for backtest
+# cost estimation. priority_fee is a measured 0.0 (Orbit sequencer is FCFS with
+# no priority auction), NOT an unmeasured blank — same shape as arbitrum/bsc.
+MEASURED_FALLBACK_GAS_PRICES: dict[str, dict[str, Decimal]] = {
+    "robinhood": {"base_fee": Decimal("0.055"), "priority_fee": Decimal("0")},
+}
+
+
+# Union of both: the full set of chains the registry should expose fallback gas
+# prices for. DEFAULT_GAS_PRICES is derived from descriptors, so it sees both.
+ALL_FALLBACK_GAS_PRICES: dict[str, dict[str, Decimal]] = {
+    **HISTORICAL_FALLBACK_GAS_PRICES,
+    **MEASURED_FALLBACK_GAS_PRICES,
+}
+
+
 HISTORICAL_BLOCK_TIMES: dict[str, float] = {
     "ethereum": 12.0,
     "arbitrum": 0.25,
@@ -149,7 +173,7 @@ class TestPopulatedFields:
 
     @pytest.mark.parametrize(
         "chain_name,expected",
-        sorted(HISTORICAL_FALLBACK_GAS_PRICES.items()),
+        sorted(ALL_FALLBACK_GAS_PRICES.items()),
     )
     def test_fallback_gas_prices_byte_equivalent(
         self,
@@ -216,7 +240,7 @@ class TestNoneFieldFallbackSemantics:
 
     def test_chains_without_legacy_fallback_gas_prices_have_none(self) -> None:
         for d in ChainRegistry.all():
-            if d.name in HISTORICAL_FALLBACK_GAS_PRICES:
+            if d.name in ALL_FALLBACK_GAS_PRICES:
                 continue
             assert d.gas.fallback_base_fee_gwei is None, f"{d.name} fallback_base_fee_gwei should be None"
             assert d.gas.fallback_priority_fee_gwei is None, f"{d.name} fallback_priority_fee_gwei should be None"
@@ -381,7 +405,7 @@ class TestDerivedViews:
         from almanak.framework.backtesting.pnl.providers.gas import DEFAULT_GAS_PRICES
 
         actual = {chain: dict(v) for chain, v in DEFAULT_GAS_PRICES.items()}
-        assert actual == HISTORICAL_FALLBACK_GAS_PRICES
+        assert actual == ALL_FALLBACK_GAS_PRICES
 
     def test_archive_rpc_chains_derived_view_matches_history(self) -> None:
         from almanak.framework.backtesting.pnl.providers.gas import ARCHIVE_RPC_CHAINS
@@ -467,3 +491,68 @@ class TestOperationOverridesImmutable:
         # descriptor's view.
         backing["swap_simple"] = 999_999
         assert gp.operation_overrides["swap_simple"] == 180_000
+
+
+# =============================================================================
+# VIB-5811: Robinhood's deliberate W5 shape.
+#
+# Robinhood is the one chain that carries measured fallback gas fees while
+# deliberately leaving ``rpc.block_time_seconds`` and ``explorer.api_url`` at
+# ``None``. Both omissions are verified findings, not unfinished work (the
+# reasons live in ``almanak/core/chains/robinhood.py``), so "helpfully" filling
+# them in is a regression this class exists to catch:
+#
+# * ``explorer.api_url`` — Blockscout on 4663 implements no ``gastracker``
+#   module, the only Etherscan-style query the SDK issues. Setting it buys a
+#   different error string and an extra rate-limited round-trip.
+# * ``rpc.block_time_seconds`` — the chain's realised block time ranges from
+#   ~1310 s/block (block 1) to 0.1002 (since 2026-07-08). The gas provider
+#   extrapolates linearly across the whole span, so any value clamps long
+#   windows to block 1 and returns wrong-era gas at HIGH confidence.
+# =============================================================================
+
+
+class TestRobinhoodDeliberateOmissions:
+    """Lock Robinhood's intended descriptor shape (VIB-5811)."""
+
+    def test_robinhood_has_measured_fallback_gas_fees(self) -> None:
+        d = ChainRegistry.resolve("robinhood")
+        # Empty≠Zero: priority_fee is a measured 0.0 (FCFS Orbit sequencer, no
+        # priority auction), not an unmeasured blank. Consumers gate on
+        # ``is None``, so the 0.0 must survive as a real measurement.
+        assert d.gas.fallback_base_fee_gwei == 0.055
+        assert d.gas.fallback_priority_fee_gwei == 0.0
+        assert d.gas.fallback_priority_fee_gwei is not None
+
+    def test_robinhood_gas_default_is_not_the_ethereum_fallback(self) -> None:
+        """The bug VIB-5811 fixed: robinhood priced gas at ethereum's 22 gwei."""
+        from almanak.framework.backtesting.pnl.config import default_gas_price_gwei_for_chain
+
+        resolved = default_gas_price_gwei_for_chain("robinhood")
+        assert resolved == Decimal("0.055")
+        assert resolved != default_gas_price_gwei_for_chain("ethereum")
+
+    def test_robinhood_block_time_stays_unset(self) -> None:
+        assert ChainRegistry.resolve("robinhood").rpc.block_time_seconds is None
+
+    def test_robinhood_explorer_api_surface_stays_unset(self) -> None:
+        explorer = ChainRegistry.resolve("robinhood").explorer
+        assert explorer.api_url is None
+        assert explorer.api_key_env is None
+        # The human-facing browse URL is still declared.
+        assert explorer.browse_url == "https://robinhoodchain.blockscout.com"
+
+    def test_robinhood_absent_from_every_archive_membership(self) -> None:
+        """Setting either omitted field silently widens these four surfaces."""
+        from almanak.config.backtest import DEFAULT_ARCHIVE_RPC_CHAINS
+        from almanak.core.chains._helpers import blocks_per_day_map
+        from almanak.framework.backtesting.pnl.providers.gas import (
+            ARCHIVE_RPC_CHAINS,
+            ETHERSCAN_API_URLS,
+        )
+
+        assert "robinhood" not in DEFAULT_ARCHIVE_RPC_CHAINS
+        assert "robinhood" not in ARCHIVE_RPC_CHAINS
+        assert "robinhood" not in ETHERSCAN_API_URLS
+        # Backs the replay --chain choices and backtest BLOCKS_PER_DAY.
+        assert "robinhood" not in blocks_per_day_map()
