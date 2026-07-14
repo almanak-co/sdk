@@ -58,6 +58,7 @@ def _make_position(
     source: PositionSource = PositionSource.REGISTRY,
     confidence: PositionConfidence = PositionConfidence.HIGH,
     cutover_state: CutoverState = CutoverState.BACKFILL_COMPLETE,
+    value_usd: Decimal | None = Decimal("100.50"),
 ) -> PositionEntry:
     return PositionEntry(
         handle=handle,
@@ -71,7 +72,7 @@ def _make_position(
         closed_at_block=0,
         opened_tx="0xopen",
         closed_tx="",
-        value_usd=Decimal("100.50"),
+        value_usd=value_usd,
         value_token0=Decimal("50.00"),
         value_token1=Decimal("50.25"),
         source=source,
@@ -113,11 +114,7 @@ class TestPublicAPI:
 
         source = inspect.getsource(sec)
         # Scan only `from`/`import` lines so docstring mentions don't trip the assert.
-        import_lines = [
-            line
-            for line in source.splitlines()
-            if line.lstrip().startswith(("from ", "import "))
-        ]
+        import_lines = [line for line in source.splitlines() if line.lstrip().startswith(("from ", "import "))]
         joined = "\n".join(import_lines)
         assert "OperatorDashboardServiceClient" not in joined, (
             "sections_reconciliation.py must not IMPORT OperatorDashboardServiceClient "
@@ -146,10 +143,24 @@ class TestDisplayHelpers:
         assert sec._cutover_pill(state) == expected_label
 
     def test_value_usd_formatting_zero(self) -> None:
+        # A *measured* zero renders as an explicit $0.00 (distinct from unmeasured).
         assert sec._format_value_usd(Decimal("0")) == "$0.00"
+
+    def test_value_usd_formatting_unmeasured_is_dash_not_zero(self) -> None:
+        # Empty≠Zero: an unmeasured value (None) must render "—", never a
+        # fabricated "$0.00" that contradicts the position's real value on the
+        # other surfaces (VIB-5738 cluster).
+        assert sec._format_value_usd(None) == "—"
 
     def test_value_usd_formatting_thousands(self) -> None:
         assert sec._format_value_usd(Decimal("12345.6789")) == "$12,345.68"
+
+    def test_position_row_unmeasured_value_renders_dash(self) -> None:
+        """An open position the gateway couldn't value (value_usd=None) shows
+        "—" in the Value column, not a confident "$0.00"."""
+        p = _make_position(value_usd=None)
+        row = sec._position_row(p)
+        assert row["Value (USD)"] == "—"
 
     def test_format_freshness_iso(self) -> None:
         out = sec._format_freshness("2026-05-17T01:23:45Z")
@@ -193,9 +204,7 @@ class TestRenderPositionsSection:
         ):
             sec.render_positions_section("sid", fake_client, chain="avalanche", primitive="lp")
 
-        fake_client.get_positions.assert_called_once_with(
-            "sid", chain="avalanche", primitive="lp"
-        )
+        fake_client.get_positions.assert_called_once_with("sid", chain="avalanche", primitive="lp")
 
     def test_groups_by_accounting_category(self, fake_client: MagicMock) -> None:
         positions = [
@@ -328,9 +337,7 @@ class TestRenderPositionRangeHistorySection:
         mock_df.assert_not_called()
 
     def test_empty_no_stub_renders_caption(self, fake_client: MagicMock) -> None:
-        fake_client.get_position_range_history.return_value = GetRangeHistoryResult(
-            entries=[], stub_message=""
-        )
+        fake_client.get_position_range_history.return_value = GetRangeHistoryResult(entries=[], stub_message="")
         with (
             patch.object(sec.st, "divider"),
             patch.object(sec.st, "markdown"),

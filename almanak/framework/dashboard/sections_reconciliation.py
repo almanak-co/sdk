@@ -101,8 +101,18 @@ def _status_label(status: PositionStatus) -> str:
     return _STATUS_LABELS.get(status, _STATUS_LABELS[PositionStatus.UNSPECIFIED])
 
 
-def _format_value_usd(value: Decimal) -> str:
-    """Render USD amounts in a way that's stable across small / large values."""
+def _format_value_usd(value: Decimal | None) -> str:
+    """Render USD amounts in a way that's stable across small / large values.
+
+    Empty≠Zero: ``None`` is an *unmeasured* value (the gateway emitted an empty
+    ``value_usd`` for this row — typically a transient reprice miss surfaced
+    honestly with confidence=LOW) and renders as "—", NOT "$0.00". Rendering a
+    fabricated "$0.00" here made the Positions table contradict the position's
+    real value on every other surface (VIB-5738 cluster). A measured
+    ``Decimal("0")`` is preserved as "$0.00".
+    """
+    if value is None:
+        return "—"
     if value == 0:
         return "$0.00"
     return f"${value:,.2f}"

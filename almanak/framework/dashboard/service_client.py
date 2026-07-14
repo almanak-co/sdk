@@ -220,9 +220,12 @@ class PositionEntry:
     closed_at_block: int
     opened_tx: str
     closed_tx: str
-    value_usd: Decimal
-    value_token0: Decimal
-    value_token1: Decimal
+    # ``None`` == unmeasured (gateway emitted an empty value string, typically
+    # with confidence=LOW) — distinct from ``Decimal("0")`` (a measured zero).
+    # Empty≠Zero: renderers show "—" for None, never a fabricated "$0.00".
+    value_usd: Decimal | None
+    value_token0: Decimal | None
+    value_token1: Decimal | None
     source: PositionSource
     confidence: PositionConfidence
     last_reconciled_at_block: int
@@ -474,13 +477,31 @@ class RefreshRegistryResult:
 # =============================================================================
 
 
-def _decimal(s: str) -> Decimal:
+def _decimal_or_none(s: str) -> Decimal | None:
+    """Parse a decimal-string but preserve the Empty≠Zero distinction.
+
+    An empty proto string is the gateway's *unmeasured* sentinel (see the
+    ``PositionEntry.value_usd`` proto comment "empty otherwise", and
+    ``_dashboard_phase1.build_position_entry`` which emits ``""`` +
+    ``confidence=LOW`` when the latest snapshot carries no valuation for a
+    registry row). Collapsing that to ``Decimal("0")`` fabricates a measured
+    zero and makes the Positions table render a confident ``$0.00`` that
+    contradicts the position's real value on every other surface (VIB-5738
+    cluster).
+
+    Returns ``None`` for an empty string (unmeasured), an unparseable string
+    (untrustworthy ⇒ also unmeasured, never a fake zero), AND a non-finite
+    value (``NaN`` / ``±Infinity`` parse cleanly but are not measured values
+    and would crash the ``,.2f`` formatter downstream). A literal ``"0"`` is a
+    *measured* zero and is preserved as ``Decimal("0")``.
+    """
     if not s:
-        return Decimal("0")
+        return None
     try:
-        return Decimal(s)
+        value = Decimal(s)
     except (InvalidOperation, ValueError, TypeError):
-        return Decimal("0")
+        return None
+    return value if value.is_finite() else None
 
 
 def _bytes_to_str(payload: bytes | str | None) -> str:
@@ -523,9 +544,9 @@ def _convert_position_entry(proto: Any) -> PositionEntry:
         closed_at_block=proto.closed_at_block,
         opened_tx=proto.opened_tx,
         closed_tx=proto.closed_tx,
-        value_usd=_decimal(proto.value_usd),
-        value_token0=_decimal(proto.value_token0),
-        value_token1=_decimal(proto.value_token1),
+        value_usd=_decimal_or_none(proto.value_usd),
+        value_token0=_decimal_or_none(proto.value_token0),
+        value_token1=_decimal_or_none(proto.value_token1),
         source=PositionSource.from_proto(proto.source),
         confidence=PositionConfidence.from_proto(proto.confidence),
         last_reconciled_at_block=proto.last_reconciled_at_block,

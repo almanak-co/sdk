@@ -477,7 +477,10 @@ class TestConverters:
         # The bytes payload must become a str so renderers can json.loads() it.
         assert result.primitive_payload_json == '{"tick_lower":-1000,"tick_upper":1000}'
 
-    def test_position_entry_handles_empty_value_strings(self) -> None:
+    def test_position_entry_empty_value_strings_are_unmeasured_not_zero(self) -> None:
+        """Empty≠Zero: an empty ``value_usd`` is *unmeasured* (None), not a
+        fabricated measured zero. The gateway emits "" (+ confidence=LOW) for a
+        registry row whose latest snapshot carries no valuation (VIB-5738)."""
         proto = gateway_pb2.PositionEntry(
             handle="lp-1",
             physical_identity_hash="h",
@@ -486,17 +489,26 @@ class TestConverters:
             value_token1="",
         )
         result = _convert_position_entry(proto)
-        assert result.value_usd == Decimal("0")
-        assert result.value_token0 == Decimal("0")
-        assert result.value_token1 == Decimal("0")
+        assert result.value_usd is None
+        assert result.value_token0 is None
+        assert result.value_token1 is None
 
-    def test_position_entry_handles_malformed_decimals(self) -> None:
-        """A garbage ``value_usd`` must not crash the dashboard render."""
-        proto = gateway_pb2.PositionEntry(
-            handle="lp-1", physical_identity_hash="h", value_usd="not-a-number"
-        )
+    def test_position_entry_measured_zero_is_preserved(self) -> None:
+        """A literal "0" is a *measured* zero and must survive as Decimal("0"),
+        distinct from the unmeasured None case above."""
+        proto = gateway_pb2.PositionEntry(handle="lp-1", physical_identity_hash="h", value_usd="0")
         result = _convert_position_entry(proto)
         assert result.value_usd == Decimal("0")
+
+    def test_position_entry_handles_malformed_decimals(self) -> None:
+        """A garbage ``value_usd`` must not crash the dashboard render and is
+        treated as unmeasured (None) — an untrustworthy value is never a fake zero.
+        ``NaN`` / ``Infinity`` parse cleanly via ``Decimal`` but would blow up the
+        ``,.2f`` formatter downstream, so they must be caught as unmeasured too."""
+        for bad in ("not-a-number", "NaN", "Infinity", "-Infinity"):
+            proto = gateway_pb2.PositionEntry(handle="lp-1", physical_identity_hash="h", value_usd=bad)
+            result = _convert_position_entry(proto)
+            assert result.value_usd is None, f"{bad!r} should be unmeasured (None)"
 
     def test_cutover_state_entry_round_trip(self) -> None:
         proto = gateway_pb2.CutoverStateEntry(
@@ -610,7 +622,7 @@ class TestConverters:
             source="reconciliation_discovery",
             last_reconciled_at_block=4000,
             reconciliation_id="recon-1",
-            registry_row_json=b'{}',
+            registry_row_json=b"{}",
         )
         result = _convert_rebuilt(proto)
         assert isinstance(result, RebuiltRow)
@@ -725,9 +737,7 @@ class TestGetPositionRangeHistory:
         assert request.handle == "my-lp"
         assert request.physical_identity_hash == ""
 
-    def test_physical_identity_hash_routing(
-        self, read_client: DashboardServiceClient, mock_stub: MagicMock
-    ) -> None:
+    def test_physical_identity_hash_routing(self, read_client: DashboardServiceClient, mock_stub: MagicMock) -> None:
         mock_stub.GetPositionRangeHistory.return_value = gateway_pb2.GetPositionRangeHistoryResponse()
 
         read_client.get_position_range_history(
@@ -748,9 +758,7 @@ class TestGetPositionRangeHistory:
                 accounting_category="LP_UNIV3",
             )
 
-    def test_time_window_converted_to_unix(
-        self, read_client: DashboardServiceClient, mock_stub: MagicMock
-    ) -> None:
+    def test_time_window_converted_to_unix(self, read_client: DashboardServiceClient, mock_stub: MagicMock) -> None:
         mock_stub.GetPositionRangeHistory.return_value = gateway_pb2.GetPositionRangeHistoryResponse()
         start = datetime(2026, 5, 17, 0, 0, 0, tzinfo=UTC)
         end = datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC)
@@ -767,9 +775,7 @@ class TestGetPositionRangeHistory:
         assert request.from_unix_seconds == int(start.timestamp())
         assert request.to_unix_seconds == int(end.timestamp())
 
-    def test_parses_stub_message(
-        self, read_client: DashboardServiceClient, mock_stub: MagicMock
-    ) -> None:
+    def test_parses_stub_message(self, read_client: DashboardServiceClient, mock_stub: MagicMock) -> None:
         """Swap-only primitives surface a stub message instead of empty entries."""
         mock_stub.GetPositionRangeHistory.return_value = gateway_pb2.GetPositionRangeHistoryResponse(
             stub_message="No held position; see trade tape for swap history.",
@@ -795,7 +801,7 @@ class TestGetPositionRangeHistory:
                     source_table="position_events",
                     ledger_entry_id="ledger-1",
                     tx_hash="0xtx1",
-                    payload_json=b'{}',
+                    payload_json=b"{}",
                 ),
                 gateway_pb2.RangeHistoryEntry(
                     timestamp_unix_seconds=1747443600,
@@ -804,7 +810,7 @@ class TestGetPositionRangeHistory:
                     source_table="position_events",
                     ledger_entry_id="ledger-2",
                     tx_hash="0xtx2",
-                    payload_json=b'{}',
+                    payload_json=b"{}",
                 ),
             ],
         )
@@ -823,9 +829,7 @@ class TestGetReconciliationReport:
         request = mock_stub.GetReconciliationReport.call_args[0][0]
         assert request.deployment_id == "aave-avax"
 
-    def test_parses_findings_and_stubs(
-        self, read_client: DashboardServiceClient, mock_stub: MagicMock
-    ) -> None:
+    def test_parses_findings_and_stubs(self, read_client: DashboardServiceClient, mock_stub: MagicMock) -> None:
         mock_stub.GetReconciliationReport.return_value = gateway_pb2.GetReconciliationReportResponse(
             findings=[
                 gateway_pb2.ReconciliationFinding(
@@ -890,14 +894,12 @@ class TestPreviewReconcile:
                     physical_identity_hash="h2",
                     primitive="lp",
                     accounting_category="LP_UNIV3",
-                    payload_json=b'{}',
+                    payload_json=b"{}",
                 )
             ],
             stranded=[],
             primitive_stubs=[
-                gateway_pb2.PrimitiveCoverageStub(
-                    primitive="perp", message="pending VIB-4202", ticket="VIB-4202"
-                )
+                gateway_pb2.PrimitiveCoverageStub(primitive="perp", message="pending VIB-4202", ticket="VIB-4202")
             ],
             reconciliation_id="recon-2",
             source_block_number=100,
@@ -932,7 +934,7 @@ class TestApplyReconcile:
                     source="reconciliation_discovery",
                     last_reconciled_at_block=4000,
                     reconciliation_id="recon-3",
-                    registry_row_json=b'{}',
+                    registry_row_json=b"{}",
                 )
             ],
             reconciliation_id="recon-3",
@@ -991,9 +993,7 @@ class TestApplyReconcile:
 
 class TestRefreshRegistryFromChain:
     def test_request_shape(self, operator_client, mock_stub: MagicMock) -> None:
-        mock_stub.RefreshRegistryFromChain.return_value = gateway_pb2.RefreshRegistryFromChainResponse(
-            result="SUCCESS"
-        )
+        mock_stub.RefreshRegistryFromChain.return_value = gateway_pb2.RefreshRegistryFromChainResponse(result="SUCCESS")
         operator_client.refresh_registry_from_chain("aave-avax")
         request = mock_stub.RefreshRegistryFromChain.call_args[0][0]
         assert request.deployment_id == "aave-avax"
@@ -1053,6 +1053,7 @@ class TestLifecycle:
     def test_owns_client_disconnects_on_disconnect(self) -> None:
         """A client constructed without an injected gateway owns + disconnects it."""
         from almanak.framework import dashboard as _dash_mod
+
         # The "owns" branch only fires when gateway_client=None at construction
         client = DashboardServiceClient(gateway_client=None)
         # Avoid actually connecting; just verify the disconnect path is wired.
