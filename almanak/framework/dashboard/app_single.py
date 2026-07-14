@@ -32,7 +32,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import streamlit as st
 
@@ -59,13 +59,29 @@ ENV_WORKING_DIR = "ALMANAK_DASHBOARD_WORKING_DIR"
 # subprocess never crashes on env shape regressions.
 ENV_STRATEGY_CONFIG = "ALMANAK_DASHBOARD_STRATEGY_CONFIG"
 
+# Where ``_load_strategy_config`` resolved the rendered config from. Drives the
+# provenance banner (``_render_config_provenance_banner``) so a manual
+# ``streamlit run app_single.py`` reattach that didn't forward
+# ``ALMANAK_DASHBOARD_STRATEGY_CONFIG`` can't silently mislabel the pair / chain /
+# display name of a real run (VIB-5802).
+CONFIG_SOURCE_RUNTIME = "runtime"  # launcher-forwarded env var — authoritative
+CONFIG_SOURCE_FILE = "file"  # fell back to working_dir/config.json on disk
+CONFIG_SOURCE_NONE = "none"  # neither available — labels come from defaults
+
+
+class _StrategyConfigResolution(NamedTuple):
+    """The resolved config plus WHERE it came from (for the provenance banner)."""
+
+    config: dict
+    source: str
+
 
 def _read_env_required(name: str) -> str | None:
     value = os.environ.get(name, "").strip()
     return value or None
 
 
-def _load_strategy_config(working_dir: Path) -> dict:
+def _load_strategy_config(working_dir: Path) -> _StrategyConfigResolution:
     """Resolve the strategy config the dashboard should render against.
 
     Resolution order:
@@ -74,13 +90,17 @@ def _load_strategy_config(working_dir: Path) -> dict:
        config from the launcher) — preferred because it reflects
        ``--config`` flag, runtime overrides (copy-trading flags), and
        the resolved ``deployment_id`` field as the running strategy sees
-       them.
+       them. Reported as ``CONFIG_SOURCE_RUNTIME`` (authoritative).
     2. ``working_dir/config.json`` (file on disk) — fallback for the
        case where the env var is missing (someone launched the
-       dashboard manually) or the JSON was malformed.
+       dashboard manually) or the JSON was malformed. Reported as
+       ``CONFIG_SOURCE_FILE`` — the caller surfaces a loud banner because
+       the on-disk file may be a demo default / stale config, not the
+       ``--config`` the live run actually used (VIB-5802).
 
-    Empty dict on every failure — never crashes the subprocess; the
-    dashboard falls back to whatever defaults the custom UI prescribes.
+    Returns the config plus its source. Empty dict + ``CONFIG_SOURCE_NONE``
+    on total failure — never crashes the subprocess; the dashboard falls
+    back to whatever defaults the custom UI prescribes.
     """
     serialised = os.environ.get(ENV_STRATEGY_CONFIG, "").strip()
     if serialised:
@@ -95,7 +115,7 @@ def _load_strategy_config(working_dir: Path) -> dict:
             )
         else:
             if isinstance(parsed, dict):
-                return parsed
+                return _StrategyConfigResolution(parsed, CONFIG_SOURCE_RUNTIME)
             logger.warning(
                 "%s did not parse to a dict (got %s); falling back to config.json",
                 ENV_STRATEGY_CONFIG,
@@ -104,13 +124,59 @@ def _load_strategy_config(working_dir: Path) -> dict:
 
     config_path = working_dir / "config.json"
     if not config_path.is_file():
-        return {}
+        return _StrategyConfigResolution({}, CONFIG_SOURCE_NONE)
     try:
         with config_path.open() as f:
-            return json.load(f)
+            loaded = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
         logger.warning("Failed to read %s: %s", config_path, e)
-        return {}
+        return _StrategyConfigResolution({}, CONFIG_SOURCE_NONE)
+    if isinstance(loaded, dict):
+        return _StrategyConfigResolution(loaded, CONFIG_SOURCE_FILE)
+    # Valid JSON that isn't an object (e.g. a top-level list) parses cleanly but
+    # would crash every downstream ``strategy_config.get(...)`` — mirror the
+    # env-var branch's dict guard and render with defaults instead.
+    logger.warning(
+        "%s did not parse to a dict (got %s); rendering with defaults",
+        config_path,
+        type(loaded).__name__,
+    )
+    return _StrategyConfigResolution({}, CONFIG_SOURCE_NONE)
+
+
+def _render_config_provenance_banner(source: str, working_dir: Path) -> None:
+    """Warn loudly when the rendered labels did NOT come from the live run's config.
+
+    The launcher forwards the running strategy's post-bootstrap config via
+    ``ALMANAK_DASHBOARD_STRATEGY_CONFIG``, so a normal
+    ``almanak strat run --dashboard`` shows no banner. A manual
+    ``streamlit run app_single.py`` reattach (e.g. viewing a stopped /
+    torn-down strategy) does NOT forward it, so the header pair / chain /
+    display name fall back to whatever ``working_dir/config.json`` holds —
+    which may be a demo default or a stale config, not the ``--config`` the
+    run actually used. Money data (positions, ledger, PnL) is gateway-backed
+    and stays accurate; only the config-derived LABELS can be wrong, so the
+    warning is scoped to labels (VIB-5802).
+    """
+    if source == CONFIG_SOURCE_RUNTIME:
+        return
+    if source == CONFIG_SOURCE_FILE:
+        st.warning(
+            f"Showing strategy **labels** (pair / chain / display name) from "
+            f"`{working_dir / 'config.json'}` on disk — the running strategy's actual "
+            f"config was not forwarded to this dashboard, so these labels may not match "
+            f"the live run's `--config` / runtime overrides. **Money data below "
+            f"(positions, ledger, PnL) is read from the gateway and is accurate.** For "
+            f"exact labels, launch via `uv run almanak strat run --dashboard` or set "
+            f"`{ENV_STRATEGY_CONFIG}` to the run's serialised config."
+        )
+        return
+    st.warning(
+        f"No strategy config resolved for this dashboard (neither "
+        f"`{ENV_STRATEGY_CONFIG}` nor `{working_dir / 'config.json'}` was available) — "
+        f"labels fall back to defaults and may not reflect the live run. Money data "
+        f"below is gateway-backed and accurate."
+    )
 
 
 def _connect_gateway_fail_closed(deployment_id: str) -> DashboardAPIClient | None:
@@ -221,9 +287,11 @@ def main() -> None:
         return
 
     working_dir = Path(working_dir_raw).expanduser().resolve()
-    strategy_config = _load_strategy_config(working_dir)
+    resolved = _load_strategy_config(working_dir)
+    strategy_config = resolved.config
 
     st.caption(f"Strategy: `{deployment_id}` · Source: `{working_dir}`")
+    _render_config_provenance_banner(resolved.source, working_dir)
 
     # Connect first so a missing-ui fallback can still talk to the gateway
     # if/when we add a generic fallback view later.

@@ -107,8 +107,7 @@ def strategy_dir(tmp_path: Path) -> Path:
     # executes. Keeping it valid python avoids surprises if the stubbing
     # regresses.
     (dashboard_dir / "ui.py").write_text(
-        "def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):\n"
-        "    return None\n"
+        "def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):\n    return None\n"
     )
     return tmp_path
 
@@ -227,9 +226,7 @@ def test_missing_ui_renders_fallback_without_crashing(stub_streamlit, monkeypatc
 
     # Fallback was rendered (warning surfaced), real renderer not invoked
     assert any("No custom dashboard" in w for w in stub_streamlit.warnings), stub_streamlit.warnings
-    assert rendered_with == [], (
-        "render_custom_dashboard_safe must not run when dashboard/ui.py is absent"
-    )
+    assert rendered_with == [], "render_custom_dashboard_safe must not run when dashboard/ui.py is absent"
 
 
 def test_connect_gateway_fail_closed_returns_none_on_connect_failure(monkeypatch) -> None:
@@ -401,9 +398,7 @@ def test_launcher_chooses_app_for_command_center(monkeypatch) -> None:
 
     assert proc is not None
     cmd = captured_cmd[0]
-    assert any(arg.endswith("app.py") for arg in cmd) and not any(
-        arg.endswith("app_single.py") for arg in cmd
-    ), cmd
+    assert any(arg.endswith("app.py") for arg in cmd) and not any(arg.endswith("app_single.py") for arg in cmd), cmd
     env = captured_env[0]
     assert "ALMANAK_DASHBOARD_DEPLOYMENT_ID" not in env
     assert "ALMANAK_DASHBOARD_WORKING_DIR" not in env
@@ -428,9 +423,7 @@ def test_launcher_falls_back_to_cc_when_hosted_parity_missing_context(monkeypatc
 
     assert proc is not None
     cmd = captured_cmd[0]
-    assert any(arg.endswith("app.py") for arg in cmd) and not any(
-        arg.endswith("app_single.py") for arg in cmd
-    ), cmd
+    assert any(arg.endswith("app.py") for arg in cmd) and not any(arg.endswith("app_single.py") for arg in cmd), cmd
 
 
 def test_launcher_forwards_runtime_strategy_config_to_env(monkeypatch, tmp_path) -> None:
@@ -505,8 +498,7 @@ def test_app_single_prefers_env_config_over_file_config(monkeypatch, tmp_path, s
     dashboard_dir = tmp_path / "dashboard"
     dashboard_dir.mkdir()
     (dashboard_dir / "ui.py").write_text(
-        "def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):\n"
-        "    return None\n"
+        "def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):\n    return None\n"
     )
     _set_context(monkeypatch, "MyStrat:42", tmp_path)
 
@@ -535,6 +527,11 @@ def test_app_single_prefers_env_config_over_file_config(monkeypatch, tmp_path, s
         f"app_single must prefer env-forwarded runtime config over on-disk config.json; "
         f"got {captured.get('strategy_config')!r}"
     )
+    # VIB-5802: when the launcher forwarded the authoritative runtime config, the
+    # provenance banner must stay silent — no false "labels may be wrong" noise.
+    assert not any("config.json" in w for w in stub_streamlit.warnings), (
+        f"no config-provenance banner expected for runtime-forwarded config; got {stub_streamlit.warnings!r}"
+    )
 
 
 def test_app_single_falls_back_to_file_config_on_missing_env(monkeypatch, tmp_path, stub_streamlit) -> None:
@@ -546,8 +543,7 @@ def test_app_single_falls_back_to_file_config_on_missing_env(monkeypatch, tmp_pa
     dashboard_dir = tmp_path / "dashboard"
     dashboard_dir.mkdir()
     (dashboard_dir / "ui.py").write_text(
-        "def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):\n"
-        "    return None\n"
+        "def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):\n    return None\n"
     )
     _set_context(monkeypatch, "MyStrat:42", tmp_path)
     monkeypatch.delenv("ALMANAK_DASHBOARD_STRATEGY_CONFIG", raising=False)
@@ -571,6 +567,77 @@ def test_app_single_falls_back_to_file_config_on_missing_env(monkeypatch, tmp_pa
     app_single.main()
 
     assert captured.get("strategy_config") == file_config
+    # VIB-5802: the on-disk config.json fallback used to be SILENT, so a manual
+    # post-teardown reattach could mislabel the pair / chain of a real run and fool
+    # a reviewer. It must now be LOUD — a banner scoped to labels, reassuring that
+    # the money data below is gateway-backed and accurate.
+    banner = next((w for w in stub_streamlit.warnings if "config.json" in w), None)
+    assert banner is not None, (
+        f"expected a config-provenance banner on the file fallback; got {stub_streamlit.warnings!r}"
+    )
+    assert "accurate" in banner.lower() and "labels" in banner.lower(), (
+        f"the banner must scope the warning to labels and reassure about money data; got {banner!r}"
+    )
+
+
+class TestConfigProvenance:
+    """VIB-5802 — the dashboard must not silently mislabel a run whose actual
+    config was not forwarded via ``ALMANAK_DASHBOARD_STRATEGY_CONFIG``."""
+
+    def test_load_reports_runtime_source(self, monkeypatch, tmp_path) -> None:
+        cfg = {"deployment_id": "S:1", "chain": "arbitrum"}
+        monkeypatch.setenv("ALMANAK_DASHBOARD_STRATEGY_CONFIG", json.dumps(cfg))
+        res = app_single._load_strategy_config(tmp_path)
+        assert res.config == cfg
+        assert res.source == app_single.CONFIG_SOURCE_RUNTIME
+
+    def test_load_reports_file_source_on_missing_env(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("ALMANAK_DASHBOARD_STRATEGY_CONFIG", raising=False)
+        cfg = {"deployment_id": "S:1", "chain": "ethereum"}
+        (tmp_path / "config.json").write_text(json.dumps(cfg))
+        res = app_single._load_strategy_config(tmp_path)
+        assert res.config == cfg
+        assert res.source == app_single.CONFIG_SOURCE_FILE
+
+    def test_load_malformed_env_falls_back_to_file_source(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("ALMANAK_DASHBOARD_STRATEGY_CONFIG", "{not valid json")
+        cfg = {"deployment_id": "S:1", "chain": "ethereum"}
+        (tmp_path / "config.json").write_text(json.dumps(cfg))
+        res = app_single._load_strategy_config(tmp_path)
+        assert res.config == cfg
+        assert res.source == app_single.CONFIG_SOURCE_FILE
+
+    def test_load_reports_none_source_when_nothing_available(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("ALMANAK_DASHBOARD_STRATEGY_CONFIG", raising=False)
+        res = app_single._load_strategy_config(tmp_path)  # no config.json on disk
+        assert res.config == {}
+        assert res.source == app_single.CONFIG_SOURCE_NONE
+
+    def test_load_non_dict_config_json_falls_back_to_none(self, monkeypatch, tmp_path) -> None:
+        """Valid-but-non-dict config.json (e.g. a top-level JSON array) parses
+        cleanly but would crash downstream ``.get(...)`` — must resolve to an
+        empty dict + NONE, never a list handed to the renderer."""
+        monkeypatch.delenv("ALMANAK_DASHBOARD_STRATEGY_CONFIG", raising=False)
+        (tmp_path / "config.json").write_text(json.dumps(["not", "a", "dict"]))
+        res = app_single._load_strategy_config(tmp_path)
+        assert res.config == {}
+        assert res.source == app_single.CONFIG_SOURCE_NONE
+
+    def test_banner_silent_on_runtime_source(self, stub_streamlit, tmp_path) -> None:
+        app_single._render_config_provenance_banner(app_single.CONFIG_SOURCE_RUNTIME, tmp_path)
+        assert stub_streamlit.warnings == []
+
+    def test_banner_warns_on_file_source(self, stub_streamlit, tmp_path) -> None:
+        app_single._render_config_provenance_banner(app_single.CONFIG_SOURCE_FILE, tmp_path)
+        assert len(stub_streamlit.warnings) == 1
+        banner = stub_streamlit.warnings[0]
+        assert "config.json" in banner
+        assert "accurate" in banner.lower()  # money-data reassurance is mandatory
+
+    def test_banner_warns_on_none_source(self, stub_streamlit, tmp_path) -> None:
+        app_single._render_config_provenance_banner(app_single.CONFIG_SOURCE_NONE, tmp_path)
+        assert len(stub_streamlit.warnings) == 1
+        assert "accurate" in stub_streamlit.warnings[0].lower()
 
 
 def test_standalone_dashboard_warns_when_hosted_parity_explicitly_requested(monkeypatch) -> None:
@@ -623,9 +690,7 @@ def test_standalone_dashboard_warns_when_hosted_parity_explicitly_requested(monk
     captured_errs: list[str] = []
     monkeypatch.setattr(
         "click.echo",
-        lambda *args, **kwargs: captured_errs.append(args[0] if args else "")
-        if kwargs.get("err")
-        else None,
+        lambda *args, **kwargs: captured_errs.append(args[0] if args else "") if kwargs.get("err") else None,
     )
 
     handled = run_helpers._handle_standalone_dashboard(
