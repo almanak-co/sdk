@@ -90,13 +90,27 @@ VICTIM_ORACLE_TOL_BPS = 3
 # sandwich-exploitable; the anchor caps damage at its residual regardless.
 WIDE_SLIPPAGE = Decimal("0.10")  # 10% == 1000 bps
 
+# --- Determinism (VIB-5674): two independent fork-drift vectors --------------
+# This test forks the Ethereum "latest" block (NOT a pinned block) and the 3pool
+# (DAI/USDC/USDT) is being deprecated, so its USDT reserve drains over time. Two
+# distinct fork-drift vectors would otherwise make it flaky, each neutralised
+# separately:
+#   1. CLEAN-pool precondition (the deterministic red this comment's sibling
+#      docstring covers): the build-time detection guard compares the frozen
+#      clean quote against the LIVE-CoinGecko oracle-fair 1:1. As the pool drains,
+#      the clean quote falls >VICTIM_ORACLE_TOL_BPS below 1:1 and the guard
+#      refuses the CLEAN-pool compile. Fixed by the module-scoped ``price_oracle``
+#      override above, which derives oracle-fair from the pool's OWN frozen spot.
+#   2. Displacement magnitude (below): the front-run dump must land the victim's
+#      post-displacement fill in a ratio band robust to pool depth. Binary-search
+#      re-calibrates it per run.
+#
 # --- Adaptive displacement sizing (VIB-5674) ---------------------------------
 # The single-sided USDC->USDT dump that front-runs the victim must drift the
 # 3pool into a narrow window: ABOVE the 50 bps stable residual floor (so the
 # anchored victim in test A reverts) yet BELOW the victim's 10% baseline slippage
-# (so the no-oracle loose victim in test B still fills). This test forks the
-# Ethereum "latest" block (NOT a pinned block), and the 3pool is being deprecated
-# — its USDT reserve drains over time. A hardcoded USD dump (the original 105M)
+# (so the no-oracle loose victim in test B still fills). Because the pool's USDT
+# reserve drains over time, a hardcoded USD dump (the original 105M)
 # silently crossed the drain cliff once the pool shrank below ~105M USDT,
 # over-displacing the pool so BOTH victims reverted and the delta this test proves
 # vanished (VIB-5674). Instead of a magic number, we binary-search the dump that
@@ -147,6 +161,65 @@ _ERC20_APPROVE_ABI = [
         "type": "function",
     },
 ]
+
+# Small spot probe (100 USDC) — a negligible-impact ``get_dy`` eth_call on the deep
+# 3pool used ONLY to derive the fork-consistent USDC/USDT rate in the price_oracle
+# override below. No state change. Sized at the victim amount so the derived
+# oracle-fair equals the pool's own clean quote for the victim (shortfall ≈ 0).
+_PRICE_PROBE_USDC_UNITS = VICTIM_UNITS  # 100 USDC in 6-decimal base units
+
+
+@pytest.fixture(scope="module")
+def price_oracle(web3: Web3, _eoa_funded_wallet: str) -> dict[str, Decimal]:
+    """Fork-state-derived USDC/USDT prices — overrides the session live-CoinGecko oracle.
+
+    THE determinism fix for this module (VIB-5674). Commit 432e3891d fixed the
+    identical live-oracle-vs-frozen-fork skew for the VOLATILE sibling
+    (``test_curve_executed_floor_volatile_residual.py``) but MISSED this stable
+    3pool test. The session ``price_oracle`` fixture fetches LIVE CoinGecko prices
+    (USDC ≈ USDT ≈ $1, but pinned to *today's* wall-market), while this test runs
+    against the 3pool FROZEN at the fork block. The DAI/USDC/USDT 3pool is being
+    deprecated and its USDT reserve drains over time, so its clean USDC→USDT quote
+    sits progressively further below the CoinGecko-implied 1:1. The victim carries
+    a tight ``oracle_guard_bps`` tolerance, and the VIB-5439 build-time detection
+    guard reuses that SAME tolerance — so the moment the frozen clean quote drifts
+    more than ``VICTIM_ORACLE_TOL_BPS`` below the live-oracle-fair 1:1, the guard
+    correctly refuses the CLEAN-pool victim compile and the test's precondition
+    (``victim compile against the CLEAN pool should pass``) fails for a reason that
+    is NOT what it proves — deterministically red once the pool has drained past
+    that point, intermittent before it. Same block, same code; only the drift
+    between the frozen pool and the live market moved.
+
+    Deriving the oracle input from the pool's OWN frozen spot makes oracle-fair
+    agree with the world the test runs in: the CLEAN-pool detection guard passes
+    at ANY fork block and ANY market (shortfall ≈ 0), while the thing under test —
+    the EXECUTED floor biting on the in-block adverse move — is unchanged, because
+    that floor binds at the stable RESIDUAL cap (``clean_quote × (1 − 50 bps)``),
+    which is relative to the clean quote, not the absolute oracle level. The
+    displacement magnitude is still calibrated per-run to the live pool depth
+    (``_calibrate_displacement_units``), so the two determinism vectors (oracle
+    skew here, pool drain there) are both neutralised.
+
+    Depends on ``_eoa_funded_wallet`` explicitly: that module fixture reverts the
+    shared fork to session-pristine state, and the probe MUST read the pristine
+    pool — not whatever a prior module left behind. Without the explicit edge the
+    ordering rests on test-signature parameter order, the same implicit
+    nondeterminism class this override exists to remove.
+
+    USDT is the numeraire (≈$1); USDC is priced by a negligible-impact ``get_dy``
+    eth_call on the 3pool itself (DAI is unused by the swaps but included for
+    completeness).
+    """
+    pool = web3.eth.contract(address=_POOL_ADDR, abi=_POOL_PROBE_ABI)
+    dy = pool.functions.get_dy(_USDC_COIN_IDX, _USDT_COIN_IDX, _PRICE_PROBE_USDC_UNITS).call()
+    assert dy > 0, "fork-state price probe returned zero USDT — 3pool unreadable"
+    # USDT out per USDC in (both 6 decimals) — the pool's own frozen spot rate.
+    usdc_usd = Decimal(dy) / Decimal(_PRICE_PROBE_USDC_UNITS)
+    return {
+        "USDC": usdc_usd,
+        "USDT": Decimal("1"),
+        "DAI": Decimal("1"),
+    }
 
 
 def _assert_swap_receipt_parsed(exec_result, *, expected_bought_wei: int) -> None:
@@ -375,21 +448,6 @@ class TestExecutedFloorOracleAnchorRealFork:
     """VIB-5490 real-fork: the executed floor is oracle-anchored and bites on an
     in-block adverse move, while the pre-anchor loose floor would have filled."""
 
-    @pytest.mark.xfail(
-        reason=(
-            "VIB-5674: this test forks Ethereum 'latest' (unpinned) and the Curve 3pool "
-            "(DAI/USDC/USDT) is being deprecated / draining, so the CLEAN-pool precondition "
-            "— the pre-displacement 3pool sits within the 3bps oracle-fair guard tolerance — "
-            "is not market-guaranteed; when the real pool is already displaced the build-time "
-            "guard correctly refuses and the 'clean pool should pass' assertion fails for a "
-            "reason unrelated to what the test proves (as of 2026-07-13). "
-            "strict=False because an XPASS is the correct outcome whenever the live pool "
-            "happens to be within tolerance — the test genuinely passes then. The root-cause "
-            "fix (pin the fork block / precondition-skip) lands on "
-            "fix/curve-floor-oracle-robust-vib5674 and will remove this marker."
-        ),
-        strict=False,
-    )
     @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
     async def test_oracle_anchored_floor_bites_on_adverse_move(
