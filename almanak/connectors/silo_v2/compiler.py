@@ -74,6 +74,9 @@ class _LendingCompilerAdapter:
     def _query_erc20_balance(self, token_address: str, wallet_address: str) -> int | None:
         return self._ctx.services.query_erc20_balance(token_address, wallet_address)
 
+    def eth_call(self, to: str, data: str, *, chain: str | None = None) -> str | None:
+        return self._ctx.services.eth_call(to, data, chain=chain)
+
     def _get_wrapped_native_address(self) -> str | None:
         return self._ctx.services.get_wrapped_native_address()
 

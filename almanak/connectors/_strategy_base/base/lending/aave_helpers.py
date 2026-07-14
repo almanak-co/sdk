@@ -609,6 +609,60 @@ def _decode_uint_word(hex_data: str, word_index: int) -> int | None:
         return None
 
 
+# ERC-4626 reads on a Silo V2 vault. The silo contract IS the share token for
+# Collateral (borrowable) deposits, so ``balanceOf(owner)`` = collateral shares
+# and ``maxRedeem(owner)`` = the liquidity-aware redeemable share count.
+_SILO_V2_MAX_REDEEM_SELECTOR = "0xd905777e"  # maxRedeem(address)
+
+
+def _resolve_silo_v2_redeemable_shares(compiler: Any, silo_address: str, owner: str) -> tuple[int | None, bool]:
+    """Resolve a wallet's redeemable Silo V2 collateral shares at compile time.
+
+    Silo V2's ``redeem()`` does NOT cap ``MAX_UINT256`` to the caller's balance —
+    it reverts ``NotEnoughLiquidity()`` (``0x4323a555``) on the deployed contract
+    (VIB-5800, proven on an Avalanche fork). A full exit must therefore redeem an
+    explicit share count, resolved here via an on-chain read (gateway-first, with
+    the direct-RPC fallback the compiler already uses for Anvil / local dev).
+
+    The ONLY value ever redeemed is the liquidity-aware ERC-4626 ``maxRedeem(owner)``.
+    ``balanceOf(owner)`` proves *ownership*, not *current redeemability* — redeeming
+    the raw balance can itself revert ``NotEnoughLiquidity()`` under partial
+    illiquidity (the very failure this fix removes), so it is read ONLY to classify
+    the no-redeemable-shares case, never used as a redeem amount.
+
+    Returns ``(shares_to_redeem, is_transient)``:
+
+    - ``(positive, False)`` — redeem exactly this many liquidity-aware shares.
+    - ``(None, True)`` — cannot redeem *now* but should be retried: either the reads
+      failed (data gap), or the wallet holds shares while ``maxRedeem`` is ``0``
+      (silo momentarily illiquid). Retryable — never a fabricated ``0``.
+    - ``(None, False)`` — the wallet genuinely holds no shares (``balanceOf == 0``):
+      terminal, nothing to withdraw.
+    """
+    owner_word = owner.lower().removeprefix("0x").zfill(64)
+    eth_call = getattr(compiler, "eth_call", None)
+    max_redeem: int | None = None
+    if callable(eth_call):
+        max_redeem_hex = eth_call(silo_address, _SILO_V2_MAX_REDEEM_SELECTOR + owner_word)
+        if isinstance(max_redeem_hex, str):
+            max_redeem = _decode_uint_word(max_redeem_hex, 0)
+
+    if max_redeem is not None and max_redeem > 0:
+        return max_redeem, False
+
+    # maxRedeem is 0 or unreadable — read balanceOf ONLY to classify the failure as
+    # terminal (empty position) vs transient (shares exist but not currently
+    # redeemable, or a read gap). balanceOf is never redeemed directly.
+    balance = compiler._query_erc20_balance(silo_address, owner)
+    if balance is None:
+        return None, True  # total read gap → retryable
+    if balance <= 0:
+        return None, False  # genuinely empty position → terminal
+    # Wallet holds shares but none are currently redeemable (maxRedeem == 0, silo
+    # illiquid) or the maxRedeem read was unavailable → retry when it recovers.
+    return None, True
+
+
 def _check_lending_borrow_capacity_aave_v3(
     compiler: Any,
     wallet_address: str,
@@ -5288,6 +5342,7 @@ def _compile_withdraw_silo_v2(
 ) -> CompilationResult:
     """Compile WITHDRAW for Silo V2 (isolated markets on Avalanche)."""
     from almanak.connectors.silo_v2.adapter import (
+        COLLATERAL_TYPE_COLLATERAL,
         SILO_V2_MARKETS,
         SiloV2Adapter,
         SiloV2Config,
@@ -5325,13 +5380,52 @@ def _compile_withdraw_silo_v2(
 
     sv2_market, silo_address, _ = sv2_silo_result
 
-    # Build withdraw TX
-    withdraw_result = silo_adapter.withdraw(
-        asset=withdraw_symbol,
-        amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
-        market_name=sv2_market.market_name,
-        withdraw_all=intent.withdraw_all,
-    )
+    # Build withdraw TX. A full exit (``withdraw_all``, no explicit amount) must
+    # redeem an EXPLICIT share count: Silo V2's redeem() reverts
+    # NotEnoughLiquidity() on ``MAX_UINT256`` (VIB-5800), so resolve the actual
+    # redeemable shares on-chain here — mirroring the Curvance redeemCollateral
+    # share-resolution — and redeem exactly that many. The withdraw path uses the
+    # Collateral (borrowable) share side, matching the deposit collateral_type.
+    if intent.withdraw_all:
+        shares, is_transient = _resolve_silo_v2_redeemable_shares(compiler, silo_address, compiler.wallet_address)
+        if shares is None:
+            if is_transient:
+                # Reads failed, OR the wallet holds shares while maxRedeem == 0 (silo
+                # momentarily illiquid). Retryable — do NOT strand the leg by reporting
+                # a terminal failure; teardown will re-attempt when liquidity/the read
+                # recovers (VIB-5800).
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Silo V2 withdraw_all could not resolve currently-redeemable "
+                        f"shares for {compiler.wallet_address} on silo {silo_address} "
+                        f"(maxRedeem read gap or silo temporarily illiquid) — retryable."
+                    ),
+                    intent_id=intent.intent_id,
+                    is_transient=True,
+                )
+            # Genuinely empty position (balanceOf == 0): terminal, nothing to withdraw.
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Silo V2 withdraw_all: wallet {compiler.wallet_address} holds no "
+                    f"redeemable shares on silo {silo_address} — nothing to withdraw."
+                ),
+                intent_id=intent.intent_id,
+            )
+        withdraw_result = silo_adapter.redeem_shares(
+            shares=shares,
+            market_name=sv2_market.market_name,
+            silo_address=silo_address,
+            collateral_type=COLLATERAL_TYPE_COLLATERAL,
+        )
+    else:
+        withdraw_result = silo_adapter.withdraw(
+            asset=withdraw_symbol,
+            amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
+            market_name=sv2_market.market_name,
+            withdraw_all=False,
+        )
 
     if not withdraw_result.success:
         return CompilationResult(

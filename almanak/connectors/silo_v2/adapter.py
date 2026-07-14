@@ -363,35 +363,47 @@ class SiloV2Adapter:
         decimals = resolver.get_decimals(self.chain, asset)
 
         if withdraw_all:
-            if amount > 0:
-                # Caller provided an explicit amount — use withdraw() with that amount
-                amount_wei = int(amount * Decimal(10**decimals))
-                calldata = self._encode_withdraw(
-                    amount_wei,
-                    self.wallet_address,
-                    self.wallet_address,
-                    collateral_type,
+            if amount <= 0:
+                # Full exit with no explicit amount. Silo V2's redeem() does NOT cap
+                # MAX_UINT256 to the caller's share balance — it reverts
+                # NotEnoughLiquidity() (0x4323a555) on the real contract (VIB-5800,
+                # proven on an Avalanche fork). The caller must resolve the redeemable
+                # share balance (maxRedeem / balanceOf) at compile time and call
+                # ``redeem_shares`` instead; this pure encoder refuses to emit a redeem
+                # it knows reverts on-chain.
+                return TransactionResult(
+                    success=False,
+                    error=(
+                        "Silo V2 full-exit withdraw requires an explicit redeemable "
+                        "share balance: resolve maxRedeem/balanceOf and call "
+                        "redeem_shares(). Encoding redeem(MAX_UINT256) reverts "
+                        "NotEnoughLiquidity() on-chain (VIB-5800)."
+                    ),
                 )
-            else:
-                # No explicit amount — use redeem(MAX_UINT256) to redeem all shares.
-                # Silo V2's redeem() caps to the caller's actual share balance,
-                # so MAX_UINT256 safely withdraws everything without NotEnoughLiquidity.
-                calldata = self._encode_redeem(
-                    MAX_UINT256,
-                    self.wallet_address,
-                    self.wallet_address,
-                    collateral_type,
-                )
+            # Caller provided an explicit amount — use withdraw() with that amount.
+            amount_wei = int(amount * Decimal(10**decimals))
             amount_display = "all"
         else:
             amount_wei = int(amount * Decimal(10**decimals))
-            calldata = self._encode_withdraw(
-                amount_wei,
-                self.wallet_address,
-                self.wallet_address,
-                collateral_type,
-            )
             amount_display = str(amount)
+
+        # A positive Decimal below one base unit (e.g. 0.0000001 USDC at 6 decimals)
+        # truncates to 0 wei — encoding withdraw(0) would emit a no-op success. Refuse
+        # loudly instead of silently withdrawing nothing.
+        if amount_wei <= 0:
+            return TransactionResult(
+                success=False,
+                error=(
+                    f"Silo V2 withdraw amount {amount} {asset} rounds to zero base units "
+                    f"({decimals} decimals) — nothing to withdraw."
+                ),
+            )
+        calldata = self._encode_withdraw(
+            amount_wei,
+            self.wallet_address,
+            self.wallet_address,
+            collateral_type,
+        )
 
         silo_checksum = Web3.to_checksum_address(silo_address)
         logger.info(f"Silo V2 withdraw: {amount_display} {asset} from silo {silo_checksum}")

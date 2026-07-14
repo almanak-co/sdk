@@ -526,6 +526,133 @@ class TestSiloV2SupplyIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
+    @pytest.mark.asyncio
+    async def test_withdraw_all_full_exit_using_intent(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+    ):
+        """Full-exit WITHDRAW (withdraw_all) must redeem the ACTUAL share balance.
+
+        Regression for VIB-5800: the adapter previously encoded
+        ``redeem(MAX_UINT256, …)`` for a full exit on the (false) assumption that
+        Silo V2's ``redeem()`` caps to the caller's share balance. The deployed
+        contract does NOT cap — it reverts ``NotEnoughLiquidity()`` (``0x4323a555``).
+        The fix resolves the redeemable shares at compile time (maxRedeem →
+        balanceOf) and redeems exactly that many. This test proves the redeem tx
+        SUCCEEDS on a real Avalanche fork (which mirrors mainnet's revert), returns
+        the USDC, and drains the vault shares to zero.
+
+        Flow:
+        1. Supply USDC (establish a Collateral position → mints silo shares)
+        2. Create WithdrawIntent(withdraw_all=True) — no explicit amount
+        3. Compile → the redeem carries the resolved share count, NOT MAX_UINT256
+        4. Execute → redeem tx SUCCEEDS (no 0x4323a555 NotEnoughLiquidity revert)
+        5. Verify USDC returned and vault shares drained to ~0
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc = tokens["USDC"]
+        decimals = get_token_decimals(web3, usdc)
+
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+
+        # 1. Supply 1500 USDC to establish the position (mints silo shares).
+        supply_amount = Decimal("1500")
+        supply_intent = SupplyIntent(
+            protocol="silo_v2",
+            token="USDC",
+            amount=supply_amount,
+            chain=CHAIN_NAME,
+        )
+        supply_result = compiler.compile(supply_intent)
+        assert supply_result.status.value == "SUCCESS", f"Supply compile failed: {supply_result.error}"
+        assert supply_result.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_result.action_bundle)
+        assert supply_exec.success, f"Initial supply failed: {supply_exec.error}"
+
+        # Silo shares (the silo vault IS the ERC-4626 collateral share token).
+        shares_before = get_token_balance(web3, SILO_V2_USDC_SILO, funded_wallet)
+        usdc_before = get_token_balance(web3, usdc, funded_wallet)
+        print(f"\n{'=' * 80}")
+        print("Test: Full-exit WITHDRAW (withdraw_all) from Silo V2 (VIB-5800)")
+        print(f"{'=' * 80}")
+        print(f"Silo shares before: {shares_before}")
+        print(f"USDC before withdraw: {format_token_amount(usdc_before, decimals)}")
+        assert shares_before > 0, "Supply must have minted silo shares"
+
+        # 2. Full-exit WithdrawIntent — no explicit amount, withdraw_all=True.
+        intent = WithdrawIntent(
+            protocol="silo_v2",
+            token="USDC",
+            amount=supply_amount,  # ignored for withdraw_all; resolved from shares
+            withdraw_all=True,
+            chain=CHAIN_NAME,
+        )
+
+        # 3. Compile — Layer 1. The redeem must carry the resolved share count,
+        #    NEVER MAX_UINT256 (the whole bug).
+        compilation_result = compiler.compile(intent)
+        assert compilation_result.status.value == "SUCCESS", f"Compile failed: {compilation_result.error}"
+        assert compilation_result.action_bundle is not None
+        redeem_calldata = compilation_result.action_bundle.transactions[0]["data"]
+        max_uint_hex = f"{2**256 - 1:064x}"
+        assert max_uint_hex not in redeem_calldata, "redeem must NOT encode MAX_UINT256 (VIB-5800)"
+        # redeem(uint256,address,address,uint8) selector — full exit uses redeem, not withdraw.
+        assert redeem_calldata.startswith("0xda537660"), "full exit must encode redeem()"
+
+        # 4. Execute — Layer 2. THIS is the acceptance: the redeem must NOT revert
+        #    with NotEnoughLiquidity() (0x4323a555).
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert execution_result.success, (
+            f"Full-exit redeem must succeed (no NotEnoughLiquidity revert): {execution_result.error}"
+        )
+
+        # Layer 3 — receipt parser sees a Withdraw event.
+        redeem_tx_hash = None
+        found_withdraw_event = False
+        for tx_result in execution_result.transaction_results:
+            redeem_tx_hash = tx_result.tx_hash
+            if tx_result.receipt:
+                assert tx_result.receipt.to_dict()["status"] == 1, "redeem tx must have status=1 (success)"
+                parser = SiloV2ReceiptParser(underlying_decimals=decimals)
+                parse_result = parser.parse_receipt(
+                    tx_result.receipt.to_dict(),
+                    silo_address=SILO_V2_USDC_SILO,
+                )
+                if parse_result.success and parse_result.withdraw_amount > 0:
+                    print(f"  Redeem tx hash:  {redeem_tx_hash}")
+                    print(f"  Withdraw amount: {parse_result.withdraw_amount}")
+                    print(f"  Shares redeemed: {parse_result.withdraw_shares}")
+                    assert parse_result.withdraw_shares > 0, "Shares redeemed must be positive"
+                    found_withdraw_event = True
+        assert found_withdraw_event, "Receipt parser must find a Withdraw event on the full exit"
+
+        # 5. Balance deltas — Layer 4. USDC returns, vault shares drained to ~0.
+        usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        shares_after = get_token_balance(web3, SILO_V2_USDC_SILO, funded_wallet)
+        usdc_received = usdc_after - usdc_before
+        print(f"\nUSDC received: {format_token_amount(usdc_received, decimals)}")
+        print(f"Silo shares after: {shares_after}")
+
+        # Full exit returns essentially the full principal (interest on a same-block
+        # supply→withdraw is negligible; assert we got back at least ~99.9%).
+        expected_min = int(supply_amount * Decimal(10**decimals)) * 999 // 1000
+        assert usdc_received >= expected_min, (
+            f"Full exit must return ~all supplied USDC. Expected >= {expected_min}, got {usdc_received}"
+        )
+        assert shares_after == 0, f"Full exit must drain ALL silo shares, {shares_after} remain"
+
+        print("\nALL CHECKS PASSED")
+
     @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
     async def test_supply_intent_with_insufficient_balance_fails(

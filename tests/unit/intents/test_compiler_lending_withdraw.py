@@ -969,21 +969,82 @@ class TestSiloV2Helper:
         assert result.action_bundle.metadata["market_name"] == "USDC-WAVAX"
         assert result.action_bundle.metadata["silo_address"] == "0xsilo"
 
-    def test_withdraw_all_propagates_flag(self):
+    # VIB-5800: withdraw_all must NOT encode redeem(MAX_UINT256) — Silo V2's redeem()
+    # reverts NotEnoughLiquidity() on it. The helper redeems ONLY the liquidity-aware
+    # maxRedeem(owner); balanceOf is read solely to classify the no-redeemable-shares
+    # case (terminal empty vs transient illiquid/read-gap) and is NEVER redeemed
+    # directly. These tests use the REAL SiloV2Adapter (no adapter patch) so they
+    # assert the actual redeem calldata carries the resolved share count.
+    _REDEEM_SELECTOR = "0xda537660"
+
+    def test_withdraw_all_resolves_shares_via_max_redeem(self):
         compiler = _mock_compiler(chain="avalanche")
-        with patch(SILO_ADAPTER) as mock_cls, patch(SILO_CONFIG):
-            mock_adapter = MagicMock()
-            market = MagicMock()
-            market.silo_config = "0xsc"
-            market.market_name = "m"
-            mock_adapter.find_silo_for_asset.return_value = (market, "0xsilo", "0xtok")
-            mock_adapter.withdraw.return_value = _mock_tx_result()
-            mock_cls.return_value = mock_adapter
-            intent = _withdraw_intent(protocol="silo_v2", withdraw_all=True, amount=Decimal("1"))
-            result = cl._compile_withdraw_silo_v2(compiler, intent, _mock_token("USDC"), None, [])
+        # maxRedeem(owner) returns 5e9 shares (ABI-encoded uint256).
+        compiler.eth_call.return_value = "0x" + f"{5_000_000_000:064x}"
+        compiler._query_erc20_balance.return_value = 999  # must NOT be used
+        intent = _withdraw_intent(protocol="silo_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_silo_v2(compiler, intent, _mock_token("USDC"), None, [])
         assert result.status == CompilationStatus.SUCCESS
-        kwargs = mock_adapter.withdraw.call_args.kwargs
-        assert kwargs["withdraw_all"] is True
+        data = result.transactions[0].data
+        assert data.startswith(self._REDEEM_SELECTOR)
+        # redeem calldata carries the liquidity-aware maxRedeem share count …
+        assert f"{5_000_000_000:064x}" in data
+        # … never MAX_UINT256, and — since maxRedeem > 0 — balanceOf is never even read.
+        assert "f" * 64 not in data.lower()
+        compiler._query_erc20_balance.assert_not_called()
+
+    def test_withdraw_all_maxredeem_unreadable_with_balance_is_transient(self):
+        # maxRedeem read unavailable but the wallet holds shares. balanceOf proves
+        # ownership, NOT current redeemability — redeeming it could revert
+        # NotEnoughLiquidity, so the compile fails TRANSIENTLY (retry) rather than
+        # encoding a redeem that may revert (VIB-5800 finding B).
+        compiler = _mock_compiler(chain="avalanche")
+        compiler.eth_call.return_value = "0x"  # maxRedeem read unavailable
+        compiler._query_erc20_balance.return_value = 8_000_000_000  # collateral shares
+        intent = _withdraw_intent(protocol="silo_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_silo_v2(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_transient is True
+        assert "retryable" in result.error
+        # balanceOf is read against the silo vault (the ERC-4626 collateral share token),
+        # purely to classify — never redeemed.
+        call_args = compiler._query_erc20_balance.call_args.args
+        assert call_args[1] == TEST_WALLET
+
+    def test_withdraw_all_illiquid_maxredeem_zero_with_balance_is_transient(self):
+        # Silo momentarily at ~100% utilization: maxRedeem == 0 while the wallet still
+        # holds shares. This must be TRANSIENT/retryable — NOT a terminal "nothing to
+        # withdraw" that strands the leg (VIB-5800 finding A: same fund-stranding class
+        # the fix targets, for the illiquid-at-teardown edge).
+        compiler = _mock_compiler(chain="avalanche")
+        compiler.eth_call.return_value = "0x" + f"{0:064x}"  # maxRedeem = 0
+        compiler._query_erc20_balance.return_value = 5_000_000_000  # wallet still holds shares
+        intent = _withdraw_intent(protocol="silo_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_silo_v2(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_transient is True
+        assert "nothing to withdraw" not in result.error
+
+    def test_withdraw_all_zero_shares_fails(self):
+        compiler = _mock_compiler(chain="avalanche")
+        compiler.eth_call.return_value = "0x" + f"{0:064x}"  # maxRedeem = 0
+        compiler._query_erc20_balance.return_value = 0  # genuinely empty position
+        intent = _withdraw_intent(protocol="silo_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_silo_v2(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.FAILED
+        assert "nothing to withdraw" in result.error
+        assert result.is_transient is False
+
+    def test_withdraw_all_read_unavailable_is_transient(self):
+        compiler = _mock_compiler(chain="avalanche")
+        compiler.eth_call.return_value = None  # maxRedeem read failed
+        compiler._query_erc20_balance.return_value = None  # balanceOf read failed
+        intent = _withdraw_intent(protocol="silo_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_silo_v2(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.FAILED
+        assert "could not resolve currently-redeemable shares" in result.error
+        # A transient data gap must be retryable, not a permanent compile failure.
+        assert result.is_transient is True
 
     def test_withdraw_failure(self):
         compiler = _mock_compiler(chain="avalanche")
