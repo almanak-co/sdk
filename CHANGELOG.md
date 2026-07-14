@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Robinhood Chain (id 4663).** Chain descriptor for the Arbitrum Orbit L2
+  (ETH gas, Blockscout explorer, Arbitrum `ArbGasInfo` L1-fee oracle) plus the
+  token layer (WETH, USDG, USDe — no canonical USDC/USDT exists on 4663 with
+  real liquidity, so none is registered), managed-Anvil funding profile, and
+  the canonical Safe v1.4.1 + Zodiac Roles v2 stack. (#3234)
+- **Uniswap V3 and Morpho Blue on Robinhood Chain.** Both connectors now
+  advertise `robinhood` in their manifests and appear in
+  `almanak info matrix`: Uniswap V3 for `SWAP` + the LP lifecycle, Morpho Blue
+  for the lending lifecycle. Uniswap V3 on Robinhood is a **non-canonical
+  deployment** — the periphery addresses differ from every other chain and
+  same-named forks exist on the explorer, so each address was verified by
+  cross-checking `factory()`. The `uniswap_rsi`, `uniswap_lp`, and
+  `morpho_looping` demos ship a `config.robinhood.json`. (#3238)
+
 ## [2.21.0] - 2026-07-04
 
 ### Added

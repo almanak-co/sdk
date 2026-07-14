@@ -107,7 +107,7 @@ Si vous avez besoin d'une méthode bloquée, contactez le support pour discuter 
 
 **Solution :**
 
-Chaînes autorisées : `ethereum`, `arbitrum`, `base`, `optimism`, `polygon`, `avalanche`, `bsc`, `sonic`, `plasma`, `linea`, `blast`, `mantle`, `berachain`, `monad`, `xlayer`, `zerog`, `solana`
+Chaînes autorisées : `ethereum`, `arbitrum`, `base`, `optimism`, `polygon`, `avalanche`, `bsc`, `sonic`, `plasma`, `linea`, `blast`, `mantle`, `berachain`, `monad`, `xlayer`, `zerog`, `hyperevm`, `robinhood`, `solana`
 
 ```bash
 # Vérifier que la source RPC est configurée dans la passerelle

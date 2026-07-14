@@ -10,11 +10,15 @@ periphery (which reverts here) and NOT from a Blockscout symbol search (many
 same-symbol scam tokens). It is WETH9-style: ``deposit()`` / ``withdraw()`` are
 present in the runtime bytecode, so it is managed-Anvil deposit-fundable.
 
-Plumbing-only registration (VIB-5706): no protocol *connector* targets Robinhood
-yet, so the fields nothing consumes today (backtesting block time, receipt
-polling, gas buffers/caps, chainlink, simulation) stay at their documented-miss
-defaults and are populated when the first connector lands — matching the
-HyperEVM precedent. Two non-defaults:
+Registered plumbing-first (VIB-5706); Uniswap V3 (swap + LP) and Morpho Blue
+(lending) now target Robinhood (VIB-5709, VIB-5710). The fields nothing consumes
+today (receipt polling, gas buffers/caps, chainlink, simulation) remain at their
+documented-miss defaults — the framework defaults apply and no measured
+chain-specific values have been taken yet. Note ``rpc.block_time_seconds`` and
+``explorer.api_url`` are both still unset, which keeps Robinhood out of
+``DEFAULT_ARCHIVE_RPC_CHAINS`` (``almanak/config/backtest.py``): backtests of a
+Robinhood strategy silently get no historical gas/Chainlink/TWAP data. Two
+non-defaults:
 
 * ``gas`` declares the Arbitrum L1-fee oracle (``arbitrum_nodeinterface`` at the
   ArbGasInfo precompile ``0x…006C``, verified responding on 4663) because
@@ -63,8 +67,11 @@ DESCRIPTOR = register_chain(
             slip44=60,  # SLIP-44 coin type for Ether (CAIP-19 native)
         ),
         # Orbit L2: declare the Arbitrum ArbGasInfo precompile for L1 data-cost
-        # estimation (Plan 026). Gas buffers/caps left unset (framework defaults)
-        # until a strategy actually executes on Robinhood — plumbing-only.
+        # estimation (Plan 026). Gas buffers/caps left unset — the framework
+        # defaults apply (buffer 1.2; the price/cost caps are advisory maps with
+        # no production consumer, operators cap via MAX_GAS_*). Arbitrum, the
+        # chain this rollup derives from, measures buffer=1.5 and
+        # simulation_buffer=0.5; no equivalent measurement taken here yet.
         gas=GasProfile(
             l1_fee_oracle_kind="arbitrum_nodeinterface",
             l1_fee_oracle_address="0x000000000000000000000000000000000000006C",
@@ -76,8 +83,9 @@ DESCRIPTOR = register_chain(
             anvil_port=8560,  # next free port after hyperevm (8559)
         ),
         # Blockscout explorer. Only the human-facing browse URL is declared; the
-        # Etherscan-compatible API surface (api_url / api_key_env) is left for the
-        # first-connector PR, matching every other no-connector chain.
+        # Etherscan-compatible API surface (api_url / api_key_env) is still unset.
+        # Declaring it (with rpc.block_time_seconds) is what admits Robinhood to
+        # DEFAULT_ARCHIVE_RPC_CHAINS and the backtesting historical providers.
         explorer=Explorer(browse_url="https://robinhoodchain.blockscout.com"),
         # Canonical Safe v1.4.1 + Zodiac Roles v2 stack (CREATE2 — same address
         # on every EVM chain; deployed + on-chain-verified on Robinhood, VIB-5708).
