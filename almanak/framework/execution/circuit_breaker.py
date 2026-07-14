@@ -264,6 +264,13 @@ class CircuitBreaker:
         self._consecutive_failures = 0
         self._consecutive_action_failures = 0
         self._consecutive_data_failures = 0
+        # VIB-5746: consecutive pre-execution safety-guard refusals. A refusal is
+        # NOT an execution failure (no tx was sent, the position is untouched), so
+        # it never increments the action/data trip counters above and can never
+        # trip the breaker. It is tracked separately so the runner can back the
+        # loop cadence off on a refusal streak instead of hot-looping the refused
+        # action. Reset by any real failure, any success, and on close/reset.
+        self._consecutive_guard_refusals = 0
         self._failure_history: list[FailureRecord] = []
         self._last_failure_time: datetime | None = None
 
@@ -302,6 +309,19 @@ class CircuitBreaker:
         """Get current circuit breaker state."""
         with self._lock:
             return self._state
+
+    @property
+    def consecutive_guard_refusals(self) -> int:
+        """Number of consecutive pre-execution safety-guard refusals (VIB-5746).
+
+        A guard refusal (price impact too high, quoter returned no amount) sends
+        ZERO transactions and never trips the breaker. The runner reads this
+        streak to apply an increasing back-off to the loop cadence so a strategy
+        stuck proposing an un-fillable swap idles-and-monitors instead of
+        hot-looping. Reset to 0 by any real failure, any success, or on
+        close/reset."""
+        with self._lock:
+            return self._consecutive_guard_refusals
 
     @property
     def tripped_on_data_class_only(self) -> bool:
@@ -398,6 +418,7 @@ class CircuitBreaker:
             self._consecutive_failures = 0
             self._consecutive_action_failures = 0
             self._consecutive_data_failures = 0
+            self._consecutive_guard_refusals = 0  # VIB-5746: success ends any refusal streak
 
             if self._state == CircuitBreakerState.HALF_OPEN:
                 self._half_open_successes += 1
@@ -444,6 +465,28 @@ class CircuitBreaker:
 
         with self._lock:
             now = datetime.now(UTC)
+
+            # VIB-5746: a pre-execution safety-guard refusal is NEUTRAL to the
+            # breaker's trip logic. No transaction was sent, so it is neither an
+            # execution fault nor a data outage — it must not increment the
+            # action/data counters, must not append to the loss history, and must
+            # never trip. Track only the refusal streak (for the runner's loop
+            # back-off) and return. It is intentionally NOT a success either, so
+            # a HALF_OPEN breaker is left untouched (a refusal proves nothing
+            # about whether execution works).
+            if resolved_kind.is_guard_refusal:
+                self._consecutive_guard_refusals += 1
+                logger.info(
+                    "CircuitBreaker %s: safety-guard refusal (neutral, no trip) streak=%d - %s",
+                    self.deployment_id,
+                    self._consecutive_guard_refusals,
+                    error_message,
+                )
+                return
+
+            # Any real failure ends a refusal streak — the strategy stopped
+            # merely being refused and actually failed.
+            self._consecutive_guard_refusals = 0
 
             # Record failure on the legacy total + kinded counter.
             self._consecutive_failures += 1
@@ -617,6 +660,7 @@ class CircuitBreaker:
             self._consecutive_failures = 0
             self._consecutive_action_failures = 0
             self._consecutive_data_failures = 0
+            self._consecutive_guard_refusals = 0
             self._last_known_exposure_open = None
             self._last_exposure_at = None
             self._failure_history = []
@@ -643,6 +687,7 @@ class CircuitBreaker:
                 "consecutive_failures": self._consecutive_failures,
                 "consecutive_action_failures": self._consecutive_action_failures,
                 "consecutive_data_failures": self._consecutive_data_failures,
+                "consecutive_guard_refusals": self._consecutive_guard_refusals,
                 "effective_data_threshold": self._effective_data_threshold(),
                 "last_known_exposure_open": self._last_known_exposure_open,
                 "last_exposure_at": (self._last_exposure_at.isoformat() if self._last_exposure_at else None),
@@ -707,6 +752,7 @@ class CircuitBreaker:
         # the configured threshold.
         self._consecutive_action_failures = 0
         self._consecutive_data_failures = 0
+        self._consecutive_guard_refusals = 0  # VIB-5746
         self._trip_time = None
         self._trip_reason = None
         self._tripped_on_data_class_only = False

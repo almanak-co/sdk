@@ -2860,10 +2860,18 @@ class StrategyRunner:
                     logger.info(f"Reached max iterations ({max_iterations}) for {deployment_id}. Stopping.")
                     break
 
-                # Sleep until next iteration (unless shutdown requested)
+                # Sleep until next iteration (unless shutdown requested).
+                # VIB-5746: extend the wait when the strategy is stuck on a
+                # pre-execution safety-guard refusal streak (e.g. a recycle swap
+                # the price-impact guard keeps refusing on a shallow pool). The
+                # breaker classifies these as neutral GUARD_REFUSED events (they
+                # never trip it), and here we back the cadence off exponentially
+                # so the loop idles-and-monitors instead of hot-looping the
+                # refused action — resuming the base interval the moment any
+                # non-refusal outcome clears the streak.
                 if not self._shutdown_requested:
-                    logger.debug(f"Sleeping for {interval}s before next iteration")
-                    await self._interruptible_wait(deployment_id, interval, strategy)
+                    effective_wait = _run_loop_helpers.resolve_iteration_wait(self, deployment_id, interval)
+                    await self._interruptible_wait(deployment_id, effective_wait, strategy)
 
             except asyncio.CancelledError:
                 logger.info(f"Run loop cancelled for {deployment_id}")
@@ -9370,6 +9378,22 @@ class StrategyRunner:
         if state.record_metrics:
             self._record_failure()
 
+        # VIB-5746: a terminal FAILED driven by a pre-execution safety-guard
+        # refusal (price impact too high / quoter returned no amount) is a safety
+        # SUCCESS, not an execution fault — no tx ever reached the chain. Stamp a
+        # typed GUARD_REFUSED classification (read from the state machine's last
+        # compilation result, a typed pipeline signal — never the error string)
+        # so the breaker recording path does not count it toward an emergency
+        # stop and the run loop backs the cadence off instead of hot-looping.
+        from .failure_kind import FailureKind
+
+        # getattr default False: safety-guard refusals are a capability of the
+        # EVM IntentStateMachine (compile-time price-impact / quoter guards); the
+        # CLOB/polymarket routing lane runs a different state machine that has no
+        # such guard, so it legitimately does not expose this signal — a missing
+        # attribute means "no guard refusal", never a crash.
+        refusal_kind = FailureKind.GUARD_REFUSED if getattr(state_machine, "refused_by_safety_guard", False) else None
+
         return IterationResult(
             status=IterationStatus.EXECUTION_FAILED,
             intent=intent,
@@ -9377,6 +9401,7 @@ class StrategyRunner:
             error=error_msg,
             deployment_id=deployment_id,
             duration_ms=self._calculate_duration_ms(state.start_time),
+            failure_kind=refusal_kind,
         )
 
     # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.

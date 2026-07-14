@@ -174,8 +174,10 @@ class FluidCompiler(BaseProtocolCompiler[SwapCompilerContext]):
                 using_placeholders=ctx.using_placeholders,
             )
             if impact.decision is PriceImpactDecision.IMPACT_TOO_HIGH:
+                # VIB-5746: pre-execution safety refusal, not an execution fault.
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
+                    is_safety_refusal=True,
                     error=(
                         f"Price impact too high: resolver quote implies "
                         f"{impact.price_impact:.1%} price impact "
@@ -187,8 +189,10 @@ class FluidCompiler(BaseProtocolCompiler[SwapCompilerContext]):
                     intent_id=intent.intent_id,
                 )
             if impact.decision is PriceImpactDecision.QUOTER_MISSING_FAIL_CLOSED:
+                # VIB-5746: fail-closed liquidity-unverifiable refusal, not a fault.
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
+                    is_safety_refusal=True,
                     error=(
                         f"Price impact guard: Fluid reserves resolver returned no quote for "
                         f"{intent.from_token}->{intent.to_token}. Cannot verify pool liquidity. "

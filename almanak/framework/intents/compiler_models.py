@@ -125,6 +125,17 @@ class CompilationResult:
         total_gas_estimate: Sum of all gas estimates
         error: Error message (if failed)
         is_transient: Whether the failure is retryable orchestration-level I/O
+        is_safety_refusal: Whether a ``FAILED`` status is a pre-execution
+            SAFETY-GUARD refusal rather than an execution/compile fault
+            (VIB-5746). Set by compile-time guards that refuse to build a
+            transaction because acting would be unsafe — e.g. price impact above
+            the configured max, or the on-chain quoter returned no amount so pool
+            liquidity could not be verified. When True, ZERO transactions were
+            built and the on-chain position is untouched: the guard did its job.
+            The runner maps this to :class:`FailureKind.GUARD_REFUSED` so it does
+            NOT count toward the circuit breaker's consecutive-failure trip
+            thresholds (a correct refusal is a safety success, not a fault). Only
+            meaningful when ``status is CompilationStatus.FAILED``.
         retry_after_seconds: Optional retry delay hinted by the failing backend
         warnings: List of warnings encountered during compilation
         intent_id: ID of the intent that was compiled
@@ -137,6 +148,7 @@ class CompilationResult:
     total_gas_estimate: int = 0
     error: str | None = None
     is_transient: bool = False
+    is_safety_refusal: bool = False
     retry_after_seconds: float | None = None
     warnings: list[str] = field(default_factory=list)
     intent_id: str = ""
@@ -151,6 +163,7 @@ class CompilationResult:
             "total_gas_estimate": self.total_gas_estimate,
             "error": self.error,
             "is_transient": self.is_transient,
+            "is_safety_refusal": self.is_safety_refusal,
             "retry_after_seconds": self.retry_after_seconds,
             "warnings": self.warnings,
             "intent_id": self.intent_id,

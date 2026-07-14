@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from ..intents.vocabulary import AnyIntent, DecideResult
 from ..portfolio import PortfolioSnapshot
+from .failure_kind import FailureKind
 
 # =============================================================================
 # Exceptions
@@ -302,6 +303,12 @@ class IterationResult:
     duration_ms: float = 0.0
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     balance_reconciliation: dict[str, Any] | None = None  # Post-execution balance check
+    # VIB-5746: typed failure classification for the circuit-breaker recording
+    # path. When set, ``handle_iteration_failure`` uses it instead of inferring
+    # from the status string — so a pre-execution safety-guard refusal
+    # (``FailureKind.GUARD_REFUSED``) is recognised from a typed pipeline signal,
+    # never by matching the error message. ``None`` means "infer from status".
+    failure_kind: FailureKind | None = None
 
     @property
     def success(self) -> bool:

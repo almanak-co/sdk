@@ -979,6 +979,26 @@ class IntentStateMachine:
             return self._compilation_result.action_bundle
         return None
 
+    @property
+    def refused_by_safety_guard(self) -> bool:
+        """True when the last compile was refused by a pre-execution safety guard.
+
+        VIB-5746: a compile-time guard (price impact above the configured max, or
+        the on-chain quoter returning no amount so liquidity is unverifiable)
+        returns ``CompilationStatus.FAILED`` with ``is_safety_refusal=True``. No
+        transaction was ever built, so the terminal FAILED state after retries is
+        a *safety refusal*, not an execution fault. The runner reads this to map
+        the failure to :class:`FailureKind.GUARD_REFUSED` — a typed signal that
+        keeps a correct refusal from tripping the circuit breaker's emergency
+        stop the way real reverts would. Reads the last compilation result, which
+        after retry exhaustion holds the final (still-refused) compile.
+        """
+        return bool(
+            self._compilation_result is not None
+            and self._compilation_result.status == CompilationStatus.FAILED
+            and self._compilation_result.is_safety_refusal
+        )
+
     def _build_sadflow_context(self) -> SadflowContext:
         """Build SadflowContext for hook callbacks.
 

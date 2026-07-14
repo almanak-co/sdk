@@ -47,6 +47,89 @@ logger = logging.getLogger("almanak.framework.runner.strategy_runner")
 
 
 # =============================================================================
+# VIB-5746 — safety-guard-refusal loop back-off
+# =============================================================================
+
+# Upper bound on the extra idle time a refusal streak may add to the loop
+# cadence. A strategy stuck proposing an un-fillable swap (e.g. a recycle swap
+# refused every cycle by the price-impact guard on a shallow pool) must not
+# hot-loop, but it must also keep polling so it resumes automatically the moment
+# liquidity / prices change. Capping the back-off at 15 minutes keeps the
+# strategy monitoring (it re-evaluates ``decide()`` on every backed-off tick)
+# without burning CPU/RPC on a tight retry loop. Fixed constant, not a config
+# knob: the streak already scales the back-off from the deployment's own
+# interval, and the emergency circuit breaker is a SEPARATE safety layer.
+MAX_REFUSAL_BACKOFF_SECONDS: float = 900.0
+
+# A single, isolated refusal is not penalised — inputs (pool depth, price) may
+# well have changed by the next normal tick, so the first refusal keeps the
+# deployment's ordinary interval. Back-off engages from the SECOND consecutive
+# refusal onward, doubling each cycle up to the cap.
+_REFUSAL_BACKOFF_GRACE = 1
+
+
+def resolve_iteration_wait(runner: StrategyRunner, deployment_id: str, interval: float) -> float:
+    """Compute the wait before the next iteration, applying refusal back-off.
+
+    VIB-5746: reads the circuit breaker's ``consecutive_guard_refusals`` streak,
+    applies :func:`effective_iteration_wait_seconds`, and logs the back-off when
+    it engages. Extracted from ``run_loop`` so the loop body stays under the
+    cyclomatic-complexity gate. Defensive against a test-double / partially-wired
+    breaker whose streak isn't a real int (→ no back-off, base interval).
+    """
+    raw_streak = getattr(runner._circuit_breaker, "consecutive_guard_refusals", 0)
+    refusal_streak = raw_streak if isinstance(raw_streak, int) else 0
+    effective_wait = effective_iteration_wait_seconds(interval, refusal_streak)
+    if effective_wait > interval:
+        logger.info(
+            "Safety-guard refusal streak=%d for %s — backing off: sleeping %.0fs "
+            "before next iteration (base interval %ss)",
+            refusal_streak,
+            deployment_id,
+            effective_wait,
+            interval,
+        )
+    else:
+        logger.debug("Sleeping for %ss before next iteration", interval)
+    return effective_wait
+
+
+def effective_iteration_wait_seconds(interval: float, guard_refusal_streak: int) -> float:
+    """Return the wait before the next iteration, extended on a refusal streak.
+
+    VIB-5746: when a strategy is repeatedly refused by a pre-execution safety
+    guard (0 tx sent, position untouched — see :class:`FailureKind.GUARD_REFUSED`),
+    re-issuing the identical action every ``interval`` seconds is a busy-loop. It
+    is neither an execution failure (so the circuit breaker stays closed) nor a
+    reason to stop (inputs may change), so the correct response is to keep polling
+    at an *increasing* cadence: exponential back-off off the deployment's own
+    interval, capped at :data:`MAX_REFUSAL_BACKOFF_SECONDS`.
+
+    Schedule (for ``interval`` = 60s): streak 0-1 → 60s (grace, no penalty);
+    streak 2 → 120s; streak 3 → 240s; … doubling until capped at 900s. The streak
+    resets to 0 (restoring the base interval) as soon as any non-refusal outcome
+    occurs — a fill, a HOLD, or a real failure — because the breaker clears
+    ``consecutive_guard_refusals`` on success/real-failure.
+
+    Args:
+        interval: the deployment's configured base interval (seconds).
+        guard_refusal_streak: consecutive safety-guard refusals so far
+            (``CircuitBreaker.consecutive_guard_refusals``).
+
+    Returns:
+        The number of seconds to wait before the next iteration — never below
+        ``interval``, never above the base interval plus the cap.
+    """
+    if guard_refusal_streak <= _REFUSAL_BACKOFF_GRACE or interval <= 0:
+        return interval
+    # Exponential growth off the base interval; guard the exponent so a very long
+    # streak can't overflow before the min() cap clamps it.
+    exponent = min(guard_refusal_streak - _REFUSAL_BACKOFF_GRACE, 20)
+    backed_off = interval * float(2**exponent)
+    return min(backed_off, interval + MAX_REFUSAL_BACKOFF_SECONDS)
+
+
+# =============================================================================
 # Cross-entry-point startup helpers
 # =============================================================================
 
@@ -1773,11 +1856,19 @@ async def handle_iteration_failure(
         # UNKNOWN/action-class fast-fail. The decide()-exception path classifies
         # via classify_failure(); this path has no live exception, so map from
         # the iteration status instead (VIB-3803 parity).
+        #
+        # VIB-5746: prefer a typed ``result.failure_kind`` when the pipeline
+        # already classified the failure (e.g. a pre-execution safety-guard
+        # refusal stamped GUARD_REFUSED in ``_single_chain_handle_failure``).
+        # This is a typed signal from the compilation result — never a match on
+        # the error string — so a correct guard refusal is recorded as neutral
+        # and cannot trip the breaker.
         from .failure_kind import kind_for_status
 
+        recorded_kind = result.failure_kind or kind_for_status(result.status, result.error)
         runner._circuit_breaker.record_failure(
             error_message=result.error or f"Iteration failed: {result.status.value}",
-            kind=kind_for_status(result.status, result.error),
+            kind=recorded_kind,
         )
 
     # Auto-trigger emergency stop if breaker just tripped to OPEN

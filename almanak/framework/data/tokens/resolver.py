@@ -408,6 +408,15 @@ class TokenResolver:
         # exceeds this, expired entries are swept before the new write.
         self._negative_cache_ttl_seconds: float = 300.0
         self._negative_cache_max_size: int = 10000
+        # VIB-5746: cooldown applied when a gateway SYMBOL lookup times out
+        # (DEADLINE_EXCEEDED) rather than returning a definitive "not found".
+        # Deliberately much shorter than the definitive-miss TTL: a timeout is
+        # not proof the symbol is absent, so we re-probe periodically (a genuine
+        # transient blip recovers), but long enough to comfortably exceed a
+        # single strategy loop interval so the identical lookup can't re-burn the
+        # ~15s deadline on every iteration (the USDC-on-a-USDC-less-chain
+        # busy-timeout).
+        self._gateway_timeout_cooldown_seconds: float = 120.0
 
         # Operators can tune both without subclassing. Long-lived
         # platforms (kitchen loop, backtester) may want a longer TTL;
@@ -758,6 +767,14 @@ class TokenResolver:
         # skip_gateway=True)`` on the same thread could write a
         # negative-cache entry for a static-only failure.
         self._gateway_miss_state.definitive = False
+        # VIB-5746: reset the per-call timeout flag too. A gateway symbol lookup
+        # that exceeds its deadline (DEADLINE_EXCEEDED) is not a definitive miss,
+        # but re-probing it on every strategy iteration burns the full ~15s
+        # deadline each time (timeout-as-control-flow). We short-TTL negative-
+        # cache a timed-out symbol so the identical lookup fails fast for a
+        # cool-down window, while still re-probing periodically so a genuinely
+        # transient gateway blip recovers.
+        self._gateway_miss_state.timed_out = False
 
         try:
             # Determine if input is address or symbol (pure functions, no lock needed)
@@ -877,9 +894,16 @@ class TokenResolver:
             # reject paths stay False, so transient gateway trouble
             # doesn't get locked in for 5 minutes.
             definitive_miss = getattr(self._gateway_miss_state, "definitive", False)
+            timed_out = getattr(self._gateway_miss_state, "timed_out", False)
             gateway_attempted = self._gateway_channel is not None or self._gateway_client is not None
             if gateway_attempted and definitive_miss:
                 self._store_negative_cache(neg_key)
+            elif gateway_attempted and timed_out:
+                # VIB-5746: a timed-out (not definitive) symbol lookup gets the
+                # short cooldown so the same lookup fails fast for a window
+                # instead of re-burning the full ~15s deadline every iteration,
+                # while still re-probing periodically for transient recovery.
+                self._store_negative_cache(neg_key, ttl_seconds=self._gateway_timeout_cooldown_seconds)
 
             raise TokenNotFoundError(
                 token=token,
@@ -1510,6 +1534,16 @@ class TokenResolver:
                     suggestions=[f"Candidate: {addr}" for addr in candidates],
                 ) from e
 
+            # VIB-5746: mark a deadline-exceeded symbol lookup so resolve() can
+            # short-TTL negative-cache it. Without this the identical lookup
+            # (e.g. "USDC" on a chain that has no USDC) re-burns the full ~15s
+            # gateway deadline on every strategy iteration — timeout-as-control-
+            # flow. UNAVAILABLE (gateway down) is left un-cached: that is a true
+            # transient outage and is already handled by ``_gateway_available``.
+            # error_str is defined at the top of this except block (str(e)).
+            error_upper = error_str.upper()
+            if "DEADLINE_EXCEEDED" in error_upper or "DEADLINE EXCEEDED" in error_upper:
+                self._gateway_miss_state.timed_out = True
             logger.debug("token_gateway_symbol_lookup_error: symbol=%s chain=%s error=%s", symbol, chain_lower, e)
             return None
 
@@ -1868,7 +1902,15 @@ class TokenResolver:
                 return False
             return True
 
-    def _store_negative_cache(self, key: tuple[str, str]) -> None:
+    def _store_negative_cache(self, key: tuple[str, str], ttl_seconds: float | None = None) -> None:
+        """Negative-cache a (chain, key) miss.
+
+        ``ttl_seconds`` overrides the default definitive-miss TTL — used for the
+        shorter gateway-timeout cooldown (VIB-5746) so a timed-out lookup fails
+        fast for a window without being locked in for the full 5-minute
+        definitive-miss window.
+        """
+        ttl = self._negative_cache_ttl_seconds if ttl_seconds is None else ttl_seconds
         with self._lock:
             now = time.monotonic()
             # Lazy sweep: long-running resolvers that accumulate many
@@ -1878,7 +1920,7 @@ class TokenResolver:
             # when the map is larger than the soft cap.
             if len(self._negative_cache) > self._negative_cache_max_size:
                 self._negative_cache = {k: exp for k, exp in self._negative_cache.items() if exp > now}
-            self._negative_cache[key] = now + self._negative_cache_ttl_seconds
+            self._negative_cache[key] = now + ttl
 
     def _invalidate_negative_cache(self, chain_lower: str, *keys: str) -> None:
         """Drop matching entries so a freshly-registered token is visible.

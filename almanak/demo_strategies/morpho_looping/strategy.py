@@ -231,9 +231,7 @@ class MorphoLoopingStrategy(IntentStrategy):
         # the guard MUST stay active even on a misconfigured deployment.
         _hf_raw = self.get_config("target_min_hf", None)
         if _hf_raw is None:
-            logger.warning(
-                "morpho_looping config.json missing `target_min_hf`; using default target_min_hf=1.10"
-            )
+            logger.warning("morpho_looping config.json missing `target_min_hf`; using default target_min_hf=1.10")
             self.target_min_hf = Decimal("1.10")
         else:
             self.target_min_hf = Decimal(str(_hf_raw))
@@ -260,8 +258,14 @@ class MorphoLoopingStrategy(IntentStrategy):
         self._pending_swap_amount = Decimal("0")
         self._pending_wallet_collateral = Decimal("0")
 
-        # Health tracking
-        self._current_health_factor = Decimal("0")
+        # Health tracking. VIB-5746: unmeasured = None (Empty ≠ Zero), NEVER a
+        # fabricated Decimal("0"). HF is only computed once the position is live
+        # (COMPLETE state); before then, and after any iteration that did not
+        # re-measure it (e.g. a refused recycle swap), it stays None — an honest
+        # "not measured this cycle". Persisting a literal 0 here was a false
+        # liquidation-risk signal: an operator reading current_health_factor="0"
+        # would see a healthy 1.83 position as if it were being liquidated.
+        self._current_health_factor: Decimal | None = None
 
         logger.info(
             f"MorphoLoopingStrategy initialized: "
@@ -309,12 +313,7 @@ class MorphoLoopingStrategy(IntentStrategy):
         # VIB-4491: surface invalid oracle output (None / zero / negative) as HOLD
         # before any further computation. Format-strings below would crash on None;
         # downstream math would divide by zero or size a nonsense BORROW.
-        if (
-            collateral_price is None
-            or borrow_price is None
-            or collateral_price <= 0
-            or borrow_price <= 0
-        ):
+        if collateral_price is None or borrow_price is None or collateral_price <= 0 or borrow_price <= 0:
             return Intent.hold(
                 reason=(
                     f"invalid_oracle: refusing to act on non-positive/missing price "
@@ -379,12 +378,9 @@ class MorphoLoopingStrategy(IntentStrategy):
         else:
             if self._loop_state in ("supplying", "borrowing", "swapping"):
                 revert_to = self._previous_stable_state
-                logger.warning(
-                    f"Stuck in transitional state '{self._loop_state}' — reverting to '{revert_to}'"
-                )
+                logger.warning(f"Stuck in transitional state '{self._loop_state}' — reverting to '{revert_to}'")
                 self._loop_state = revert_to
             return Intent.hold(reason=f"Waiting for state transition (current: {self._loop_state})")
-
 
     # =========================================================================
     # STATE HANDLERS
@@ -422,9 +418,7 @@ class MorphoLoopingStrategy(IntentStrategy):
         """
         intent = self._create_borrow_intent(collateral_price, borrow_price)
         if intent.intent_type == IntentType.BORROW:
-            logger.info(
-                f"State: SUPPLIED -> BORROWING (loop {self._current_loop + 1}/{self.target_loops})"
-            )
+            logger.info(f"State: SUPPLIED -> BORROWING (loop {self._current_loop + 1}/{self.target_loops})")
             self._emit_state_change("supplied", "borrowing")
             self._previous_stable_state = self._loop_state
             self._loop_state = "borrowing"
@@ -462,9 +456,7 @@ class MorphoLoopingStrategy(IntentStrategy):
             # For now, supply the pending amount (set by on_intent_executed)
             supply_amount = self._pending_swap_amount
             if supply_amount <= 0:
-                return Intent.hold(
-                    reason="Swap output amount unavailable; cannot size the next supply safely"
-                )
+                return Intent.hold(reason="Swap output amount unavailable; cannot size the next supply safely")
 
             return self._create_supply_intent(supply_amount)
         else:
@@ -488,9 +480,15 @@ class MorphoLoopingStrategy(IntentStrategy):
             if self._current_health_factor < self.min_health_factor:
                 logger.warning(f"Health factor low: {self._current_health_factor:.2f} < {self.min_health_factor}")
                 # In a production strategy, you would add collateral or repay debt here
+        else:
+            # No outstanding debt ⇒ no liquidation surface. Unmeasured, not 0.
+            self._current_health_factor = None
 
+        # VIB-5746: HF may be unmeasured (None) — format it as "n/a" rather than
+        # crashing on ``None:.2f`` or printing a misleading 0.00.
+        hf_display = f"{self._current_health_factor:.2f}" if self._current_health_factor is not None else "n/a"
         return Intent.hold(
-            reason=f"Position active - HF: {self._current_health_factor:.2f}, "
+            reason=f"Position active - HF: {hf_display}, "
             f"Collateral: {self._total_collateral} {self.collateral_token}, "
             f"Borrowed: {self._total_borrowed} {self.borrow_token}"
         )
@@ -549,12 +547,7 @@ class MorphoLoopingStrategy(IntentStrategy):
         # zero / negative price. ``decide()`` already screens for these at the price-read
         # boundary; this branch protects the ``force_action="borrow"`` test path and any
         # future direct caller from sizing a borrow on bad oracle output.
-        if (
-            collateral_price is None
-            or borrow_price is None
-            or collateral_price <= 0
-            or borrow_price <= 0
-        ):
+        if collateral_price is None or borrow_price is None or collateral_price <= 0 or borrow_price <= 0:
             return Intent.hold(
                 reason=(
                     "invalid_oracle: refusing BORROW because collateral or borrow price "
@@ -783,9 +776,7 @@ class MorphoLoopingStrategy(IntentStrategy):
                     self._total_collateral = Decimal("0")
                 elif isinstance(raw_amount, Decimal):
                     withdrawn_amount = min(self._total_collateral, raw_amount)
-                    self._total_collateral = max(
-                        Decimal("0"), self._total_collateral - raw_amount
-                    )
+                    self._total_collateral = max(Decimal("0"), self._total_collateral - raw_amount)
                 self._pending_wallet_collateral += withdrawn_amount
                 logger.info(
                     f"Withdraw successful - On-chain collateral: {self._total_collateral} {self.collateral_token}; "
@@ -817,9 +808,7 @@ class MorphoLoopingStrategy(IntentStrategy):
                 if repay_full or raw_amount == "all":
                     self._total_borrowed = Decimal("0")
                 elif isinstance(raw_amount, Decimal):
-                    self._total_borrowed = max(
-                        Decimal("0"), self._total_borrowed - raw_amount
-                    )
+                    self._total_borrowed = max(Decimal("0"), self._total_borrowed - raw_amount)
                 # When the strategy is in ``borrowed`` state, ``_pending_swap_amount``
                 # represents the borrow_token sitting in the wallet (from the BORROW
                 # that has not yet swapped). A REPAY consumes wallet borrow_token,
@@ -829,12 +818,8 @@ class MorphoLoopingStrategy(IntentStrategy):
                     if repay_full or raw_amount == "all":
                         self._pending_swap_amount = Decimal("0")
                     elif isinstance(raw_amount, Decimal):
-                        self._pending_swap_amount = max(
-                            Decimal("0"), self._pending_swap_amount - raw_amount
-                        )
-                logger.info(
-                    f"Repay successful - Total borrowed: {self._total_borrowed} {self.borrow_token}"
-                )
+                        self._pending_swap_amount = max(Decimal("0"), self._pending_swap_amount - raw_amount)
+                logger.info(f"Repay successful - Total borrowed: {self._total_borrowed} {self.borrow_token}")
                 add_event(
                     TimelineEvent(
                         timestamp=datetime.now(UTC),
@@ -853,18 +838,14 @@ class MorphoLoopingStrategy(IntentStrategy):
             # On failure, revert to previous stable state so decide() can retry
             # (staying in the transitional state would permanently stuck the strategy)
             revert_to = self._previous_stable_state
-            logger.warning(
-                f"{intent_type} failed in state '{self._loop_state}' — reverting to '{revert_to}'"
-            )
+            logger.warning(f"{intent_type} failed in state '{self._loop_state}' — reverting to '{revert_to}'")
             self._loop_state = revert_to
 
     def _handle_successful_swap(self, intent: Intent, result: Any) -> None:
         swap_from_token = getattr(intent, "from_token", None)
         swap_to_token = getattr(intent, "to_token", None)
         raw_amount = getattr(intent, "amount", None)
-        is_wallet_collateral_swap = (
-            swap_from_token == self.collateral_token and swap_to_token == self.borrow_token
-        )
+        is_wallet_collateral_swap = swap_from_token == self.collateral_token and swap_to_token == self.borrow_token
 
         if is_wallet_collateral_swap:
             self._mark_wallet_collateral_swapped(raw_amount)
@@ -903,9 +884,7 @@ class MorphoLoopingStrategy(IntentStrategy):
             self._pending_wallet_collateral -= drained_from_wallet
             remaining = raw_amount - drained_from_wallet
             if remaining > 0 and consumes_pending_swap:
-                self._pending_swap_amount = max(
-                    Decimal("0"), self._pending_swap_amount - remaining
-                )
+                self._pending_swap_amount = max(Decimal("0"), self._pending_swap_amount - remaining)
         logger.info(
             f"Swap successful - {self.collateral_token} -> {self.borrow_token}; "
             f"wallet pending swap: {self._pending_wallet_collateral} {self.collateral_token}; "
@@ -972,7 +951,10 @@ class MorphoLoopingStrategy(IntentStrategy):
                 "loops_completed": self._loops_completed,
                 "total_collateral": str(self._total_collateral),
                 "total_borrowed": str(self._total_borrowed),
-                "health_factor": str(self._current_health_factor),
+                # VIB-5746: unmeasured HF is null, never the string "0".
+                "health_factor": (
+                    str(self._current_health_factor) if self._current_health_factor is not None else None
+                ),
                 "pending_wallet_collateral": str(self._pending_wallet_collateral),
             },
         }
@@ -992,7 +974,12 @@ class MorphoLoopingStrategy(IntentStrategy):
             "total_borrowed": str(self._total_borrowed),
             "pending_swap_amount": str(self._pending_swap_amount),
             "pending_wallet_collateral": str(self._pending_wallet_collateral),
-            "current_health_factor": str(self._current_health_factor),
+            # VIB-5746: persist unmeasured HF as null (Empty ≠ Zero), NEVER the
+            # string "0" — a fabricated 0 reads downstream as a liquidation
+            # signal even when the on-chain position is perfectly healthy.
+            "current_health_factor": (
+                str(self._current_health_factor) if self._current_health_factor is not None else None
+            ),
         }
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -1014,7 +1001,18 @@ class MorphoLoopingStrategy(IntentStrategy):
         if "pending_wallet_collateral" in state:
             self._pending_wallet_collateral = Decimal(str(state["pending_wallet_collateral"]))
         if "current_health_factor" in state:
-            self._current_health_factor = Decimal(str(state["current_health_factor"]))
+            # VIB-5746: current HF is None until measured (Empty!=Zero). Restore a
+            # persisted null as unmeasured, AND map the legacy zero sentinel
+            # (older builds stored "0" for "not yet measured") back to None — a
+            # live position's HF is never a true 0 (it would already be
+            # liquidated), so a stored 0 always meant "unmeasured", not HF=0.
+            # Otherwise the restored strategy would keep reporting HF 0.00 and
+            # trip false liquidation-risk warnings until the next measurement.
+            hf_raw = state["current_health_factor"]
+            if hf_raw is None or str(hf_raw) in ("0", "0.0"):
+                self._current_health_factor = None
+            else:
+                self._current_health_factor = Decimal(str(hf_raw))
 
         logger.info(
             f"Restored state: loop={self._current_loop}/{self.target_loops}, "
@@ -1125,9 +1123,7 @@ class MorphoLoopingStrategy(IntentStrategy):
             # Chain is authoritative (14:811). Include a leg only when it carries
             # real on-chain value; an all-zero live read is a genuinely closed
             # market and correctly yields no teardown intents.
-            collateral_amount = (
-                live.collateral_amount if live.collateral_amount is not None else self._total_collateral
-            )
+            collateral_amount = live.collateral_amount if live.collateral_amount is not None else self._total_collateral
             borrow_amount = live.debt_amount if live.debt_amount is not None else self._total_borrowed
             health_factor = live.health_factor if live.health_factor is not None else self._current_health_factor
             if live.collateral_value_usd > dust_usd:
@@ -1235,9 +1231,7 @@ class MorphoLoopingStrategy(IntentStrategy):
         """
         loop_state = getattr(self, "_loop_state", None)
         pending_swap = getattr(self, "_pending_swap_amount", Decimal("0")) or Decimal("0")
-        pending_wallet_collateral = getattr(
-            self, "_pending_wallet_collateral", Decimal("0")
-        ) or Decimal("0")
+        pending_wallet_collateral = getattr(self, "_pending_wallet_collateral", Decimal("0")) or Decimal("0")
 
         if loop_state == "borrowed":
             return pending_swap, pending_wallet_collateral
@@ -1266,7 +1260,6 @@ class MorphoLoopingStrategy(IntentStrategy):
             mode=mode,
         )
 
-
     def on_teardown_started(self, mode: "TeardownMode") -> None:  # noqa: F821
         """Called when teardown starts."""
         from almanak.framework.teardown import TeardownMode
@@ -1291,7 +1284,8 @@ class MorphoLoopingStrategy(IntentStrategy):
             self._total_borrowed = Decimal("0")
             self._pending_swap_amount = Decimal("0")
             self._pending_wallet_collateral = Decimal("0")
-            self._current_health_factor = Decimal("0")
+            # VIB-5746: position closed ⇒ HF is unmeasured (no debt), not 0.
+            self._current_health_factor = None
         else:
             logger.error("Teardown failed - manual intervention may be required")
 

@@ -46,6 +46,18 @@ class FailureKind(Enum):
     DATA_TIMEOUT = "data_timeout"
     EXECUTION_REVERTED = "execution_reverted"
     STATE_CORRUPT = "state_corrupt"
+    # VIB-5746: a pre-execution SAFETY-GUARD refusal — the strategy proposed an
+    # action (typically a swap) that a compile-time guard refused BEFORE any
+    # transaction was built or sent (e.g. price impact above the configured max,
+    # or the on-chain quoter returned no amount so liquidity could not be
+    # verified). ZERO transactions reach the chain and the on-chain position is
+    # untouched: the guard did exactly its job. This is a safety SUCCESS, not an
+    # execution failure, so it must NOT count toward the circuit breaker's
+    # consecutive-failure trip thresholds (a refusal streak backs off the loop
+    # cadence instead — see the runner's refusal-backoff). Distinct from
+    # ``UNKNOWN``/action-class precisely so a correct refusal can never trip an
+    # emergency stop the way three real reverts would.
+    GUARD_REFUSED = "guard_refused"
     UNKNOWN = "unknown"
 
     @property
@@ -58,6 +70,18 @@ class FailureKind(Enum):
         a strategy that's holding correct positions.
         """
         return self in _DATA_KINDS
+
+    @property
+    def is_guard_refusal(self) -> bool:
+        """True iff this is a pre-execution safety-guard refusal (VIB-5746).
+
+        A guard refusal is neither data-class nor action-class for trip
+        purposes: no transaction was sent, so it is not an execution failure,
+        and it is not a data outage either. The circuit breaker treats it as
+        NEUTRAL to its trip counters and the runner backs the loop cadence off
+        instead of hot-looping the refused action.
+        """
+        return self is FailureKind.GUARD_REFUSED
 
 
 _DATA_KINDS = frozenset(

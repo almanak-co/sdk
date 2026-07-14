@@ -771,8 +771,13 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
             )
             impact = impact_result.decision
         if impact is PriceImpactDecision.IMPACT_TOO_HIGH and impact_result is not None:
+            # VIB-5746: a price-impact refusal is a pre-execution SAFETY success,
+            # not an execution fault — no tx is built, the position is untouched.
+            # Flag it so the runner classifies it GUARD_REFUSED and the circuit
+            # breaker does not count it toward an emergency stop.
             return CompilationResult(
                 status=CompilationStatus.FAILED,
+                is_safety_refusal=True,
                 error=(
                     f"Price impact too high: quoter returned amount implying "
                     f"{impact_result.price_impact:.1%} price impact "
@@ -783,8 +788,11 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 ),
             )
         if impact is PriceImpactDecision.QUOTER_MISSING_FAIL_CLOSED:
+            # VIB-5746: fail-closed refusal (quoter returned no amount → liquidity
+            # unverifiable) is also a pre-execution safety refusal, not a fault.
             return CompilationResult(
                 status=CompilationStatus.FAILED,
+                is_safety_refusal=True,
                 error=(
                     f"Price impact guard: on-chain quoter returned no amount for "
                     f"{intent.from_token}->{intent.to_token}. Cannot verify pool liquidity "
