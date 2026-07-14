@@ -33,6 +33,7 @@ from almanak.framework.portfolio.models import (
     TokenBalance,
     ValueConfidence,
 )
+from almanak.framework.teardown.config import DEFAULT_MIN_SWAP_VALUE_USD
 from almanak.framework.teardown.models import PositionInfo, PositionType
 from almanak.framework.valuation.curve_lp_position_reader import (
     _NATIVE_ETH_ADDRESSES,
@@ -347,6 +348,120 @@ def _is_swap_inventory_row(position: Any) -> bool:
 
 
 @dataclass(frozen=True)
+class _SwapCoveredIdentities:
+    """Token identities the synthetic swap-inventory rows account for (VIB-5738).
+
+    A swap-inventory row names its token only by symbol (``details["asset"]`` /
+    ``tokens``). A discovered wallet pseudo-position for the SAME holding may
+    instead be keyed by contract address (``details["address"]`` — the overlap
+    matcher already handles both, see ``_token_overlaps_wallet_index``), so the
+    dedup must recognise either. We resolve each covered symbol to its wallet
+    balance address(es) so an address-keyed duplicate is caught too.
+    """
+
+    symbols: frozenset[str]  # case-folded
+    evm_addresses: frozenset[str]  # case-folded, EVM-shape only
+    exact_addresses: frozenset[str]  # non-EVM (case-significant)
+
+
+def _swap_inventory_covered_identities(
+    swap_rows: list["PositionValue"],
+    wallet_balances: list[Any],
+) -> _SwapCoveredIdentities:
+    """Symbols + wallet addresses the swap-inventory rows cover (VIB-5738).
+
+    Symbols come straight off the swap rows. Addresses are resolved by matching
+    each covered symbol against the wallet balances (which carry both symbol and
+    address), so a discovered pseudo-position keyed by address — not symbol —
+    for the same holding is still recognised as a duplicate.
+    """
+    symbols: set[str] = set()
+    for row in swap_rows:
+        details = getattr(row, "details", None) or {}
+        asset = details.get("asset")
+        if isinstance(asset, str) and asset:
+            symbols.add(asset.casefold())
+        for tok in getattr(row, "tokens", None) or []:
+            if isinstance(tok, str) and tok:
+                symbols.add(tok.casefold())
+    evm_addresses: set[str] = set()
+    exact_addresses: set[str] = set()
+    for tb in wallet_balances:
+        sym = getattr(tb, "symbol", None)
+        if not (isinstance(sym, str) and sym and sym.casefold() in symbols):
+            continue
+        addr = getattr(tb, "address", None)
+        if isinstance(addr, str) and addr:
+            if _is_evm_address_shape(addr):
+                evm_addresses.add(addr.casefold())
+            else:
+                exact_addresses.add(addr)
+    return _SwapCoveredIdentities(
+        symbols=frozenset(symbols),
+        evm_addresses=frozenset(evm_addresses),
+        exact_addresses=frozenset(exact_addresses),
+    )
+
+
+def _position_matches_covered_identities(position: Any, covered: _SwapCoveredIdentities) -> bool:
+    """True iff a TOKEN pseudo-position names a token a swap row already covers.
+
+    Mirrors ``_token_overlaps_wallet_index`` (symbol OR EVM/exact address) so an
+    address-only pseudo-position is matched, not just a symbol-keyed one.
+    """
+    details = getattr(position, "details", None) or {}
+    asset = details.get("asset")
+    if isinstance(asset, str) and asset and asset.casefold() in covered.symbols:
+        return True
+    addr = details.get("address")
+    if isinstance(addr, str) and addr:
+        if _is_evm_address_shape(addr):
+            if addr.casefold() in covered.evm_addresses:
+                return True
+        elif addr in covered.exact_addresses:
+            return True
+    return False
+
+
+def _dedup_wallet_pseudo_positions_covered_by_swap_inventory(
+    positions: list["PositionValue"],
+    swap_rows: list["PositionValue"],
+    wallet_index: _WalletMatchIndex,
+    wallet_balances: list[Any],
+) -> list["PositionValue"]:
+    """Drop discovered wallet pseudo-positions a swap-inventory row already covers (VIB-5738).
+
+    The same wallet holding can surface twice: once as a discovered
+    ``PositionType.TOKEN`` pseudo-position (a wallet-overlapping row kept for
+    operator / teardown visibility) and once as the synthetic
+    ``swap_inventory_lots`` row. The swap-inventory row is authoritative (FIFO
+    cost basis + canonical classification), so remove the redundant discovered
+    pseudo-position for any token a swap row covers — matched by symbol OR by
+    contract address (a discovered row may carry only ``details["address"]``).
+    Only a wallet-OVERLAPPING TOKEN row is a candidate — a deployed TOKEN holding
+    that is NOT in the wallet (e.g. a vault-share pseudo-position, VIB-4909) is a
+    distinct real position and is never dropped even if it shares a symbol. No
+    swap rows ⇒ no-op.
+    """
+    if not swap_rows:
+        return positions
+    covered = _swap_inventory_covered_identities(swap_rows, wallet_balances)
+    if not (covered.symbols or covered.evm_addresses or covered.exact_addresses):
+        return positions
+    kept: list[PositionValue] = []
+    for pos in positions:
+        if (
+            pos.position_type == PositionType.TOKEN
+            and not _is_swap_inventory_row(pos)
+            and _position_matches_covered_identities(pos, covered)
+            and _token_overlaps_wallet_index(pos, wallet_index)
+        ):
+            continue  # redundant with the authoritative swap-inventory row
+        kept.append(pos)
+    return kept
+
+
+@dataclass(frozen=True)
 class _SwapInventoryClassification:
     """Result of classifying open swap-inventory lots for one snapshot.
 
@@ -400,6 +515,45 @@ def _aggregate_open_swap_lots(
     return totals
 
 
+# Valuation-layer swap-inventory dust floor (VIB-5738). Derives from the SAME
+# constant as the teardown token-consolidation floor (VIB-5011) so "what teardown
+# strands as dust" and "what valuation books as wallet cash" can never drift: a
+# swap-inventory residual worth ≤ this value that is NOT the strategy's declared
+# directional (``base_token``) holding is the negligible dust teardown deliberately
+# leaves behind, so the valuer classifies it as cash rather than a deployed open
+# position (``dust_residual`` skip). A strategy that customises
+# ``token_consolidation.min_swap_value_usd`` shifts this floor with it (see
+# ``_resolve_swap_dust_floor``); absent that config the shared default applies.
+_DEFAULT_SWAP_DUST_FLOOR_USD: Decimal = DEFAULT_MIN_SWAP_VALUE_USD
+
+
+def _resolve_str_config(strategy: Any, key: str) -> str | None:
+    """Best-effort read of a single string strategy-config value.
+
+    isinstance(str) guards, not truthiness: a MagicMock strategy (ubiquitous in
+    unit tests) returns a truthy MagicMock from ``get_config(...)`` / attribute
+    access, which ``str()`` would turn into a garbage ``"<MagicMock ...>"`` hint
+    and pollute classification. Only a real, non-empty string is a valid hint.
+    Never raises — a config accessor that throws degrades to ``None``.
+    """
+    getter = getattr(strategy, "get_config", None)
+    if callable(getter):
+        try:
+            configured = getter(key, None)
+        except Exception:  # pragma: no cover - defensive: exotic strategy configs
+            configured = None
+        if isinstance(configured, str) and configured:
+            return configured
+    # getattr is wrapped too: it only suppresses AttributeError, but an object
+    # with a custom __getattr__ that raises something else would break the
+    # "never raises" contract otherwise.
+    try:
+        attr = getattr(strategy, key, None)
+    except Exception:  # pragma: no cover - defensive: exotic strategy objects
+        return None
+    return attr if isinstance(attr, str) and attr else None
+
+
 def _resolve_numeraire_hint(strategy: Any) -> str | None:
     """Optional numéraire/quote-token hint for swap-inventory classification (VIB-5761).
 
@@ -414,22 +568,64 @@ def _resolve_numeraire_hint(strategy: Any) -> str | None:
     Fully optional + best-effort: any strategy without a declared quote token
     (LP / lending / perp, or a ``StrategyLike`` that is not config-backed) yields
     ``None`` and classification is byte-identical to the pre-hint behaviour.
-    Never raises — a config accessor that throws degrades to ``None``.
     """
-    # isinstance(str) guards, not truthiness: a MagicMock strategy (ubiquitous in
-    # unit tests) returns a truthy MagicMock from get_config(...) / .quote_token,
-    # which str() would turn into a garbage "<MagicMock ...>" hint and pollute
-    # classification. Only a real, non-empty string token is a valid numéraire.
+    return _resolve_str_config(strategy, "quote_token")
+
+
+def _resolve_base_token_hint(strategy: Any) -> str | None:
+    """Optional base/directional-token hint for swap-inventory classification (VIB-5738).
+
+    The symmetric partner of :func:`_resolve_numeraire_hint`. A spot/TA strategy
+    declares its ``base_token`` (e.g. WETH) as the directional inventory it
+    deliberately holds. A swap-inventory lot in that token is a genuine open
+    position **regardless of size** — even a small one is intended directional
+    exposure the operator wants to see — so it is protected from the
+    ``dust_residual`` sub-floor reclassification below. A strategy whose deployed
+    capital is a protocol position rather than a wallet token (LP / lending /
+    perp) declares no ``base_token``; its incidental swap residuals (e.g. the
+    WETH left over from balancing an LP pair) are NOT directional inventory and
+    fall under the dust floor once the position is closed.
+
+    Fully optional + best-effort; absent hint ⇒ no token is size-protected.
+    """
+    return _resolve_str_config(strategy, "base_token")
+
+
+def _resolve_swap_dust_floor(strategy: Any) -> Decimal:
+    """Resolve the swap-inventory dust floor for ``strategy`` (VIB-5738).
+
+    Tracks the strategy's teardown token-consolidation floor when it customises
+    ``token_consolidation.min_swap_value_usd`` (so valuation calls "dust" exactly
+    what that strategy's teardown would strand), else the shared platform default
+    (:data:`_DEFAULT_SWAP_DUST_FLOOR_USD` = VIB-5011's ``$5``). Best-effort +
+    never raises: any missing / malformed config degrades to the default.
+    """
     getter = getattr(strategy, "get_config", None)
     if callable(getter):
         try:
-            configured = getter("quote_token", None)
+            cfg = getter("token_consolidation", None)
         except Exception:  # pragma: no cover - defensive: exotic strategy configs
-            configured = None
-        if isinstance(configured, str) and configured:
-            return configured
-    attr = getattr(strategy, "quote_token", None)
-    return attr if isinstance(attr, str) and attr else None
+            cfg = None
+        raw: Any = None
+        if isinstance(cfg, dict):
+            raw = cfg.get("min_swap_value_usd")
+        elif cfg is not None:
+            try:
+                raw = getattr(cfg, "min_swap_value_usd", None)
+            except Exception:  # pragma: no cover - defensive: exotic config objects
+                raw = None
+        if isinstance(raw, Decimal):
+            return raw
+        # int | float | str (not bool): a JSON/YAML-loaded config carries
+        # min_swap_value_usd as a float, so excluding float would silently drop a
+        # customised floor back to the $5 default. Decimal(str(float)) avoids the
+        # binary-float artefact that Decimal(float) would introduce.
+        if isinstance(raw, int | float | str) and not isinstance(raw, bool):
+            try:
+                return Decimal(str(raw))
+            except (ArithmeticError, ValueError):
+                return _DEFAULT_SWAP_DUST_FLOOR_USD
+    return _DEFAULT_SWAP_DUST_FLOOR_USD
 
 
 def _classify_swap_inventory(
@@ -438,6 +634,8 @@ def _classify_swap_inventory(
     prices: dict[str, Decimal],
     chain: str,
     numeraire: str | None = None,
+    base_token: str | None = None,
+    dust_floor: Decimal = _DEFAULT_SWAP_DUST_FLOOR_USD,
 ) -> _SwapInventoryClassification:
     """Classify per-token open-lot inventory as deployed capital (VIB-5057).
 
@@ -452,6 +650,19 @@ def _classify_swap_inventory(
       ``deployed_capital_usd``) is what makes a torn-down wallet read 0 open
       positions. **NAV-invariant** — only the cash/deployed split changes.
       Absent hint ⇒ this skip never fires ⇒ pre-VIB-5761 behaviour.
+    * ``dust_residual`` — the lot's measured value is at/below ``dust_floor``
+      (the teardown consolidation floor, VIB-5011/VIB-5738) AND the token is NOT
+      the strategy's declared directional ``base_token``. This is the negligible
+      residual teardown deliberately strands (e.g. the WETH left over from
+      balancing an LP pair, once the LP is closed and burned): it is idle wallet
+      dust, not a deployed open position, so it stays in ``available_cash_usd``
+      and a torn-down wallet reads 0 open positions instead of a phantom
+      "1 open position / $X". Like ``numeraire_cash`` this is an AUTHORITATIVE
+      cash classification (measured, not unmeasured) and **NAV-invariant** — only
+      the cash/deployed split moves. A declared ``base_token`` lot is protected
+      (a spot/TA strategy's small directional holding stays a deployed position);
+      an above-floor lot stays deployed, so VIB-5057's large-inventory contract
+      is unchanged. Absent floor breach ⇒ this skip never fires.
     * ``cost_unmeasured`` — the token's FIFO basis is ``None`` (e.g. degraded
       SWAP events missing ``amount_out_usd``). Moving the value while booking
       a fabricated ``Decimal("0")`` basis would overstate unrealized PnL by
@@ -474,6 +685,7 @@ def _classify_swap_inventory(
     if not lot_totals:
         return _NO_SWAP_INVENTORY
     numeraire_key = numeraire.casefold() if numeraire else None
+    base_token_key = base_token.casefold() if base_token else None
 
     # Case-variant duplicate symbols (e.g. "USDC" and "usdc" both tracked) must
     # SUM, not last-write-wins: wallet_value already counts both balances, so a
@@ -518,6 +730,17 @@ def _classify_swap_inventory(
         capped = quantity < remaining
         cost_for_quantity = cost * (quantity / remaining) if capped else cost
         value = quantity * price
+        # VIB-5738: a sub-floor residual that is NOT the strategy's declared
+        # directional (base) token is negligible dust teardown deliberately
+        # strands, not a deployed open position — classify it as cash (like
+        # numeraire_cash). A declared base_token lot is protected regardless of
+        # size (a spot/TA strategy's small directional holding is still a
+        # position); above the floor everything stays deployed (VIB-5057). Tested
+        # after value/price/cost resolution so an unmeasured/unpriced/stale lot
+        # takes its existing skip reason (those are Empty≠Zero, not dust).
+        if base_token_key != key and value <= dust_floor:
+            skipped[key] = "dust_residual"
+            continue
         total_value += value
         total_cost += cost_for_quantity
         token_detail[key] = {
@@ -547,18 +770,17 @@ def _classify_swap_inventory(
             )
         )
 
-    # VIB-5761: a numeraire_cash skip is an AUTHORITATIVE cash classification
-    # (the numéraire's inventory-MTM contribution is exactly zero), not an absence
-    # of measurement — so it keeps the snapshot stamped "applied", the same status
-    # the numéraire's pre-VIB-5761 deployed row produced. This matters gateway-side:
-    # GetCostStack suppresses the legacy VIB-4984 additive inventory-MTM term ONLY
-    # for status=="applied". A pure-numéraire (torn-down) wallet has empty ``rows``;
-    # without this, the stamp flips to "unmeasured", the legacy path re-marks the
-    # numéraire as directional inventory, and the exact phantom this fix removes
-    # from NAV reappears in Strategy PnL. Genuinely-unmeasured skips
-    # (cost_unmeasured / price_missing) still stamp "unmeasured"; the legacy path
-    # returns None on those same lots, so suppression loses no real mark there.
-    classifier_applied = bool(rows) or "numeraire_cash" in skipped.values()
+    # numeraire_cash (VIB-5761) and dust_residual (VIB-5738) are AUTHORITATIVE cash classifications
+    # (measured; inventory-MTM contribution is exactly zero), so — like a
+    # produced row — they keep the snapshot stamped "applied". This is the gate
+    # the gateway's GetCostStack uses to suppress the legacy VIB-4984 additive
+    # inventory-MTM term; without it, a torn-down wallet whose only swap lots
+    # were reclassified to cash would flip to "unmeasured", re-enabling the
+    # legacy path that re-marks those tokens as directional inventory in Strategy
+    # PnL. Genuinely-unmeasured skips (cost_unmeasured / price_missing) still
+    # stamp "unmeasured".
+    _AUTHORITATIVE_CASH_SKIPS = {"numeraire_cash", "dust_residual"}
+    classifier_applied = bool(rows) or bool(_AUTHORITATIVE_CASH_SKIPS.intersection(skipped.values()))
     metadata: dict[str, Any] = {"status": "applied" if classifier_applied else "unmeasured"}
     if rows:
         metadata["value_usd"] = str(total_value)
@@ -1439,8 +1661,35 @@ class PortfolioValuer:
             # VIB-5761: pass the strategy's optional quote/numéraire token so its
             # idle balance (sell proceeds) classifies as cash, not a deployed
             # position — absent hint keeps the pre-VIB-5761 classification.
+            # VIB-5738: also pass the optional directional ``base_token`` and the
+            # teardown consolidation dust floor so a sub-floor, non-directional
+            # residual (e.g. WETH left over after an LP closes) classifies as cash
+            # (``dust_residual``) instead of a phantom deployed position.
             swap_inventory = self._swap_inventory_for_snapshot(
-                chain, balances, prices, numeraire=_resolve_numeraire_hint(strategy)
+                chain,
+                balances,
+                prices,
+                numeraire=_resolve_numeraire_hint(strategy),
+                base_token=_resolve_base_token_hint(strategy),
+                dust_floor=_resolve_swap_dust_floor(strategy),
+            )
+            # VIB-5738: a discovered wallet pseudo-position (a ``PositionType.TOKEN``
+            # row overlapping the wallet, kept for operator/teardown visibility)
+            # and a synthetic swap-inventory row can describe the SAME wallet
+            # holding (e.g. a spot strategy's WETH appears both as a discovered
+            # ``uniswap_v3 TOKEN`` leg and a ``swap_inventory_lots`` leg). The value
+            # sums already de-duplicate them (the pseudo-position is excluded from
+            # total_value_usd / wallet_total_value_usd), but positions_json and the
+            # ``len(positions)`` open-position count would double-count. The
+            # swap-inventory row is authoritative (it carries the FIFO cost basis
+            # and the canonical ``deployed_inventory`` classification), so drop the
+            # redundant discovered pseudo-position for any token a swap row covers.
+            # Zero swap rows ⇒ no-op ⇒ byte-identical to the pre-VIB-5738 writer.
+            positions = _dedup_wallet_pseudo_positions_covered_by_swap_inventory(
+                positions,
+                swap_inventory.rows,
+                _build_wallet_match_index(wallet_balances),
+                wallet_balances,
             )
             positions = [*positions, *swap_inventory.rows]
 
@@ -1789,6 +2038,8 @@ class PortfolioValuer:
         balances: dict[str, Decimal],
         prices: dict[str, Decimal],
         numeraire: str | None = None,
+        base_token: str | None = None,
+        dust_floor: Decimal = _DEFAULT_SWAP_DUST_FLOOR_USD,
     ) -> _SwapInventoryClassification:
         """Classify this snapshot's open swap-inventory lots (VIB-5057).
 
@@ -1832,7 +2083,15 @@ class PortfolioValuer:
             return _NO_SWAP_INVENTORY
         try:
             lot_totals = _aggregate_open_swap_lots(self._snapshot_events_flat, self._deployment_id)
-            return _classify_swap_inventory(lot_totals, balances, prices, chain, numeraire=numeraire)
+            return _classify_swap_inventory(
+                lot_totals,
+                balances,
+                prices,
+                chain,
+                numeraire=numeraire,
+                base_token=base_token,
+                dust_floor=dust_floor,
+            )
         except Exception:
             logger.warning(
                 "Swap inventory classification failed for %s; inventory remains classified as cash",

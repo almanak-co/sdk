@@ -19,6 +19,16 @@ from decimal import Decimal
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 from almanak.framework.teardown.models import TeardownAssetPolicy
 
+# Consolidation dust floor (VIB-5011): residuals worth at or below this USD value
+# are never swapped during teardown token-consolidation — the swap gas would eat
+# the proceeds, so they are DELIBERATELY left in the wallet as negligible dust.
+# Single source of truth: the ``TokenConsolidationConfig.min_swap_value_usd``
+# default and the valuation-layer swap-inventory ``dust_residual`` classification
+# (``portfolio_valuer._DEFAULT_SWAP_DUST_FLOOR_USD``) both derive from this constant
+# so "what teardown strands as dust" and "what valuation books as wallet cash"
+# can never drift apart.
+DEFAULT_MIN_SWAP_VALUE_USD: Decimal = Decimal("5")
+
 
 @dataclass
 class TokenConsolidationConfig:
@@ -36,7 +46,7 @@ class TokenConsolidationConfig:
     keep_tokens: list[str] = field(default_factory=list)  # Don't swap these
     # Dust threshold: residuals below this USD value are never swapped — the
     # swap gas would eat the proceeds. VIB-5011 raised the floor $1 → $5.
-    min_swap_value_usd: Decimal = field(default_factory=lambda: Decimal("5"))
+    min_swap_value_usd: Decimal = field(default_factory=lambda: DEFAULT_MIN_SWAP_VALUE_USD)
 
     def __post_init__(self) -> None:
         """Normalize fields."""
@@ -55,11 +65,17 @@ class TokenConsolidationConfig:
     @classmethod
     def from_dict(cls, data: dict) -> "TokenConsolidationConfig":
         """Deserialize from dictionary."""
+        # An explicit ``"min_swap_value_usd": null`` deserialises to None, which
+        # dict.get returns (the default only applies to a MISSING key) — coalesce
+        # to the default so Decimal(None) never raises TypeError.
+        raw_floor = data.get("min_swap_value_usd")
+        if raw_floor is None:
+            raw_floor = str(DEFAULT_MIN_SWAP_VALUE_USD)
         return cls(
             enabled=data.get("enabled", True),
             target_token=data.get("target_token", "USDC"),
             keep_tokens=data.get("keep_tokens", []),
-            min_swap_value_usd=Decimal(data.get("min_swap_value_usd", "5")),
+            min_swap_value_usd=Decimal(str(raw_floor)),
         )
 
 

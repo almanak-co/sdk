@@ -52,6 +52,7 @@ from almanak.framework.accounting.reporting.render_text import (
     render_lp_section,
 )
 from almanak.framework.accounting.reporting.swap_class_fallback import (
+    detect_closed_swap_primitive,
     detect_stale_post_teardown_snapshot,
 )
 
@@ -795,6 +796,34 @@ def _apply_leveraged_lending_headline(
         breakdown.headline_suppression_reason = verdict.reason
 
 
+def _apply_closed_swap_primitive_headline(
+    breakdown: PnLBreakdown,
+    metrics: Any,
+    snapshot: Any,
+    ledger_entries: list,
+) -> None:
+    """Suppress the headline for a fully-closed swap-primitive deployment (VIB-5788).
+
+    The swap-primitive analog of the VIB-4975 leveraged-lending *closed* state:
+    a spot swap strategy that swapped its capital back to wallet cash on
+    teardown has ``total_value_usd`` collapsed to ~0 (VIB-3614 position scope)
+    while ``initial_value_usd`` still reflects the deployed position, so the
+    verbatim headline reads ≈ −initial (a false near-total loss). Recovering the
+    true ≈ −gas number needs the schema-gated strategy-attributed wallet
+    baseline (VIB-4976 / VIB-4927); until then suppress, matching VIB-4975.
+
+    Runs AFTER ``_apply_leveraged_lending_headline`` and no-ops when an earlier
+    verdict already scoped the headline — a leveraged strategy (suppressed or
+    leverage-adjusted) is that path's responsibility, not this one.
+    """
+    if breakdown.headline_suppressed or breakdown.headline_leverage_adjusted:
+        return
+    verdict = detect_closed_swap_primitive(snapshot, ledger_entries, metrics)
+    if verdict.suppressed:
+        breakdown.headline_suppressed = True
+        breakdown.headline_suppression_reason = verdict.reason
+
+
 def _compute_gas(breakdown: PnLBreakdown, metrics: Any, ledger_entries: list) -> int:
     """Gas (sum across ledger). Returns ``measured_gas_count``.
 
@@ -1018,6 +1047,13 @@ def compute_pnl_breakdown(
     # debt-netted NAV (open) or suppressed (closed) — runs AFTER the verbatim
     # PortfolioMetrics headline so it can override / suppress it in place.
     _apply_leveraged_lending_headline(breakdown, metrics, snapshot, ledger_entries)
+    # VIB-5788: swap-primitive analog of the leveraged closed case — a spot swap
+    # strategy that closed back to wallet cash has total_value_usd collapsed to
+    # ~0 while initial_value_usd reflects the deployed position, so the verbatim
+    # headline reads ≈ −initial. Suppress it (mirrors VIB-4975) rather than
+    # print a confident-wrong near-total loss. No-ops when leveraged already
+    # scoped the headline.
+    _apply_closed_swap_primitive_headline(breakdown, metrics, snapshot, ledger_entries)
     measured_gas_count = _compute_gas(breakdown, metrics, ledger_entries)
     _compute_slippage(breakdown, ledger_entries)
     _compute_trade_stats(breakdown, ledger_entries)

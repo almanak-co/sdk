@@ -44,17 +44,26 @@ from almanak.framework.valuation.net_debt import (
 
 logger = logging.getLogger(__name__)
 
-# VIB-5339 / VIB-5738: a post-teardown residual worth a fraction of a dollar (a
-# sub-floor dust leg, or a fully-closed position marked at ~0) is not an "open
-# position" — displaying "1 open position(s)" for it is a display lie on an
-# otherwise-flat wallet. The DISPLAY count excludes legs whose |value_usd| is
-# unmeasured or at/below this dust floor. This is presentation-only: it changes
-# neither the debt-netting money math (``net_debt_from_snapshot`` still owns
-# ``debt_mark`` / ``net_cost``) nor the cash-vs-deployed classification (the
-# idle-numéraire-as-inventory misclassification is a separate valuation fix). $1
-# is conservative — below any position a user would care to see, above genuine
-# dust — and stays under the numéraire-residual sizes so it never masks that
-# distinct bug (which the valuer fix, not this threshold, resolves).
+# VIB-5339: a post-teardown residual worth a fraction of a dollar (a sub-floor
+# dust leg, or a fully-closed position marked at ~0) is not an "open position" —
+# displaying "1 open position(s)" for it is a display lie on an otherwise-flat
+# wallet. The DISPLAY count excludes legs whose |value_usd| is unmeasured or
+# at/below this dust floor. This is presentation-only: it changes neither the
+# debt-netting money math (``net_debt_from_snapshot`` still owns ``debt_mark`` /
+# ``net_cost``) nor the cash-vs-deployed classification.
+#
+# VIB-5738 update: the write side is now authoritative. The PortfolioValuer
+# classifies a sub-floor, non-directional swap-inventory residual as wallet cash
+# (``dust_residual``) and de-duplicates a holding that surfaces as both a
+# discovered pseudo-position and a swap-inventory row, so a typed snapshot
+# produced by the current valuer no longer carries a sub-floor swap-dust leg or a
+# double-counted holding for this filter to remove. This threshold is therefore
+# now a defensive BACKSTOP — retained (not removed) to keep protecting dict /
+# legacy / historical snapshots (which never pass through the valuer fix) and any
+# non-swap sub-floor leg — deliberately NOT the primary fix. It is intentionally
+# coarser than and independent of the valuer's $5 classification floor: a genuine
+# declared-``base_token`` holding worth <$1 stays a deployed position in the money
+# math (``total_value_usd``) even while this badge rounds it out of the count.
 _OPEN_POSITION_DUST_USD = Decimal("1")
 
 
