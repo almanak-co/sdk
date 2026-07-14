@@ -356,7 +356,17 @@ class SQLiteTeardownStateManager:
                 # Migration (VIB-3951): add crash-watchdog columns to existing
                 # local DBs. Idempotent — ALTER raises OperationalError when the
                 # column already exists; swallow per-column.
-                for _col, _decl in (("owner_pid", "INTEGER"), ("heartbeat_at", "TEXT")):
+                # VIB-5778: ``error_message`` joins the additive loop as
+                # defense-in-depth. It has always been in ``CREATE TABLE`` above,
+                # but ``_row_to_request`` now reads it UNCONDITIONALLY on every
+                # read path — so a legacy local DB that predates the column would
+                # raise on every ``status`` / ``list`` read, not just on a failed
+                # ``mark_failed`` UPDATE. Backfilling it here keeps such a DB readable.
+                for _col, _decl in (
+                    ("owner_pid", "INTEGER"),
+                    ("heartbeat_at", "TEXT"),
+                    ("error_message", "TEXT"),
+                ):
                     try:
                         conn.execute(f"ALTER TABLE teardown_requests ADD COLUMN {_col} {_decl}")
                     except sqlite3.OperationalError:
@@ -781,6 +791,10 @@ class SQLiteTeardownStateManager:
 
         request.status = TeardownStatus.FAILED
         request.completed_at = datetime.now(UTC)
+        # VIB-5778: keep the returned dataclass consistent with the row — the
+        # direct UPDATE below persists error_message, but the in-memory request
+        # was read before it, so mirror the value onto the object callers get back.
+        request.error_message = error
         if positions_closed is not None:
             request.positions_closed = positions_closed
         if positions_failed is not None:
@@ -1113,6 +1127,9 @@ class SQLiteTeardownStateManager:
             positions_total=row["positions_total"],
             positions_closed=row["positions_closed"],
             positions_failed=row["positions_failed"],
+            # VIB-5778: surface the persisted failure detail so the CLI can print
+            # it at every FAILED render site instead of silently dropping it.
+            error_message=row["error_message"],
             cancel_requested=bool(row["cancel_requested"]),
             cancel_deadline=datetime.fromisoformat(row["cancel_deadline"]) if row["cancel_deadline"] else None,
         )

@@ -170,6 +170,56 @@ class TestTeardownIntentGenerationFailure:
         assert "intent gen boom" in runner._terminal_lifecycle_error_message
         assert runner._shutdown_requested is True
 
+    @pytest.mark.asyncio
+    async def test_generation_failure_with_active_request_wires_honest_counts(self, monkeypatch):
+        """VIB-5778 integration: when an active teardown request EXISTS, the
+        generation-exception path must persist honest position-level counts via
+        ``_failure_position_counts`` → ``mark_failed`` AND still propagate the
+        ORIGINAL exception (shutdown + STRATEGY_ERROR). The pre-existing
+        generation-failure test stubs ``get_active_request`` to ``None``, so it
+        never exercises the ``if request:`` branch that the field incident hit.
+        """
+        from almanak.framework import teardown as teardown_pkg
+        from almanak.framework.runner import runner_teardown
+
+        active_request = MagicMock()  # truthy → the ``if request:`` branch runs
+        stub_manager = MagicMock()
+        stub_manager.get_active_request.return_value = active_request
+        monkeypatch.setattr(
+            teardown_pkg,
+            "get_teardown_state_manager_for_runtime",
+            MagicMock(return_value=stub_manager),
+        )
+        # Enumeration resolved a 2-position open set → nothing closed, both failed.
+        monkeypatch.setattr(
+            runner_teardown,
+            "_failure_position_counts",
+            AsyncMock(return_value=(0, 2)),
+        )
+
+        runner = _make_runner()
+        strategy = _make_strategy()
+        strategy.generate_teardown_intents.side_effect = RuntimeError("intent gen boom")
+
+        from almanak.framework.teardown.models import TeardownMode
+
+        result = await runner._execute_teardown(
+            strategy=strategy,
+            teardown_mode=TeardownMode.HARD,
+            start_time=datetime.now(UTC),
+        )
+
+        # Honest counts persisted alongside the original error.
+        stub_manager.mark_failed.assert_called_once()
+        _args, kwargs = stub_manager.mark_failed.call_args
+        assert kwargs["error"] == "intent gen boom"
+        assert kwargs["positions_closed"] == 0
+        assert kwargs["positions_failed"] == 2
+        # The original generation exception is NOT masked by the honesty step.
+        assert result.status == IterationStatus.STRATEGY_ERROR
+        assert "intent gen boom" in runner._terminal_lifecycle_error_message
+        assert runner._shutdown_requested is True
+
 
 @pytest.mark.usefixtures("_local")
 class TestTeardownIntentGenerationFailureLocal:

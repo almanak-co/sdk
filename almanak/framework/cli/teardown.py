@@ -318,8 +318,31 @@ def format_datetime(dt: datetime | None) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+# VIB-5778: the honest render for an unmeasured count. A FAILED teardown that
+# never reached ``mark_started`` (``started_at IS NULL``) has NO measured
+# position accounting — its count columns are schema 0-defaults, not zeros.
+# UNKNOWN is not zero.
+_UNKNOWN_COUNT = "unknown"
+
+
+def format_count(request: TeardownRequest, value: int) -> str:
+    """Render one position count honestly (VIB-5778).
+
+    Returns ``"unknown"`` when ``request.counts_unmeasured`` — a FAILED teardown
+    that failed before enumeration ran, whose count columns are unmeasured
+    defaults — otherwise the integer as-is (including a genuine measured ``0``).
+    Empty ≠ Zero, in both directions.
+    """
+    return _UNKNOWN_COUNT if request.counts_unmeasured else str(value)
+
+
 def format_progress(request: TeardownRequest) -> str:
     """Format teardown progress."""
+    # VIB-5778: a FAILED teardown with unmeasured counts renders "unknown", not a
+    # success-shaped "-" / "0/0" that hides a stranded position.
+    if request.counts_unmeasured:
+        return _UNKNOWN_COUNT
+
     total = request.positions_total
     closed = request.positions_closed
     failed = request.positions_failed
@@ -1339,11 +1362,15 @@ def _poll_for_terminal_state(
         if status == TeardownStatus.FAILED:
             click.echo()
             click.secho(f"Teardown FAILED for {deployment_id}.", fg="red", bold=True)
+            # VIB-5778: render unmeasured counts as "unknown" (never a
+            # success-shaped 0) and always surface the persisted error_message.
             click.echo(
-                f"  positions_closed={request_row.positions_closed}, "
-                f"positions_failed={request_row.positions_failed}, "
-                f"total={request_row.positions_total}"
+                f"  positions_closed={format_count(request_row, request_row.positions_closed)}, "
+                f"positions_failed={format_count(request_row, request_row.positions_failed)}, "
+                f"total={format_count(request_row, request_row.positions_total)}"
             )
+            if request_row.error_message:
+                click.secho(f"  error: {request_row.error_message}", fg="red")
             return 1
         if status == TeardownStatus.CANCELLED:
             click.echo()
@@ -1435,13 +1462,17 @@ def status(working_dir: str | None, strategy: str, as_json: bool):
         click.echo(f"  Phase:        {request.current_phase.value}")
     click.echo(f"  Progress:     {format_progress(request)}")
     # Terminal payload (from result_json) — only present on COMPLETED rows
-    # (mark_completed writes result_json; mark_failed does not — a FAILED row's
-    # failure is already loud via Status + error_message).
+    # (mark_completed writes result_json; mark_failed does not).
     if request.status == TeardownStatus.COMPLETED:
         # VIB-2932 / VIB-5472: closure-verification confidence.
         _render_verification_status(manager, strategy)
         # VIB-5011: terminal consolidation summary.
         _render_consolidation_summary(manager, strategy)
+    # VIB-5778: a FAILED teardown must always surface its persisted error_message
+    # here — the field incident printed success-shaped counts and dropped the
+    # error entirely, hiding a stranded live position.
+    if request.status == TeardownStatus.FAILED and request.error_message:
+        click.secho(f"  Error:        {request.error_message}", fg="red")
     click.echo()
     click.echo(click.style("Timestamps:", bold=True))
     click.echo(f"  Requested:    {format_datetime(request.requested_at)}")
@@ -1610,6 +1641,11 @@ def list_teardowns(working_dir: str | None, show_all: bool, as_json: bool):
             f"{phase:<20} "
             f"{progress:<15}"
         )
+        # VIB-5778: surface the failure detail for FAILED rows so the table never
+        # renders a failure as a silent bare row (progress already shows
+        # "unknown" when the counts are unmeasured).
+        if req.status == TeardownStatus.FAILED and req.error_message:
+            click.secho(f"    error: {req.error_message}", fg="red")
 
     click.echo()
 

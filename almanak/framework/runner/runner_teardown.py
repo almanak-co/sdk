@@ -367,6 +367,41 @@ async def _count_open_positions(strategy: Any) -> int | None:
         return None
 
 
+async def _failure_position_counts(strategy: Any) -> tuple[int | None, int | None]:
+    """Best-effort ``(positions_closed, positions_failed)`` for a teardown that
+    FAILED before execution (VIB-5778).
+
+    Reuses the SAME registry-reconciled discovery the no-intent completeness gate
+    uses (``_count_open_positions`` → ``resolve_open_positions_with_registry``) to
+    learn how many positions were open when the failure struck. A generation /
+    pre-execution failure ran NO closing intent, so ``positions_closed`` is a
+    measured ``0`` and every enumerable open position is a ``positions_failed`` —
+    honest position-level counts (blueprint 14 §Teardown; the columns count
+    positions, VIB-4542 Item 6).
+
+    Returns ``(0, count)`` when the open-position set is enumerable, or
+    ``(None, None)`` when it is not. The ``None`` pair leaves ``mark_failed``'s
+    counts at preserve-prior — NEVER a fabricated ``0/0`` — and the CLI's
+    ``started_at``-NULL "unknown" inference then governs the render.
+
+    ``_count_open_positions`` already never raises, but this call is defensively
+    wrapped so the honesty step can NEVER mask the original teardown exception:
+    per the teardown risk contract, extra bookkeeping on an already-failing path
+    must not disturb it.
+    """
+    try:
+        count = await _count_open_positions(strategy)
+    except Exception:
+        logger.debug(
+            "VIB-5778: best-effort failure enumeration errored; leaving mark_failed counts unset",
+            exc_info=True,
+        )
+        return None, None
+    if count is None:
+        return None, None
+    return 0, count
+
+
 async def _check_no_intent_completeness(strategy: Any, request: Any = None) -> Any:
     """Completeness report for the no-intents teardown gate (TD-11 / VIB-5469).
 
@@ -950,7 +985,33 @@ async def execute_teardown(  # noqa: C901
     except Exception as e:
         logger.error(f"Failed to generate teardown intents for {deployment_id}: {e}")
         if request:
-            _safe_mark(manager, "mark_failed", deployment_id, error=str(e))
+            # VIB-5778: best-effort enumeration so the persisted failure carries
+            # honest position-level counts (nothing closed; the enumerable open
+            # positions all failed to close) instead of preserving the row's
+            # success-shaped 0-defaults. Enumeration is isolated inside
+            # ``_failure_position_counts`` so its own failure can never mask the
+            # original generation exception; when the set is unreadable it passes
+            # nothing (None) and the CLI's started_at-NULL "unknown" render covers it.
+            #
+            # Known limitation (deferred to VIB-5792): ``mark_failed`` cannot set
+            # ``positions_total`` (its proto / signature carries only closed +
+            # failed), so on this pre-``mark_started`` path ``positions_total``
+            # stays at its 0-default while ``positions_failed=N``. The HUMAN render
+            # is correct — ``counts_unmeasured`` (started_at IS NULL) shows
+            # "unknown" for all three — but ``--json`` / gateway consumers see a
+            # raw ``failed=N`` against ``total=0``. Making that row internally
+            # consistent requires persisting a measured ``positions_total`` on the
+            # failure path, which is a persisted-shape/proto change owned by
+            # VIB-5792 (persisted tri-state UNKNOWN counts). Out of scope here.
+            closed, failed = await _failure_position_counts(strategy)
+            _safe_mark(
+                manager,
+                "mark_failed",
+                deployment_id,
+                error=str(e),
+                positions_closed=closed,
+                positions_failed=failed,
+            )
         runner._request_teardown_failure_shutdown(str(e))
         return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
 

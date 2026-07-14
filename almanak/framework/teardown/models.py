@@ -789,6 +789,11 @@ class TeardownRequest:
     positions_closed: int = 0
     positions_failed: int = 0
 
+    # Failure detail (VIB-5778). Persisted in the ``error_message`` column by
+    # ``mark_failed`` on every FAILED teardown. Carried on the dataclass so the
+    # CLI can surface it at every FAILED render site instead of dropping it.
+    error_message: str | None = None
+
     # Cancel window
     cancel_requested: bool = False
     cancel_deadline: datetime | None = None
@@ -801,6 +806,30 @@ class TeardownRequest:
             TeardownStatus.CANCELLED,
             TeardownStatus.FAILED,
         )
+
+    @property
+    def counts_unmeasured(self) -> bool:
+        """VIB-5778: True when a FAILED teardown's position counts are UNKNOWN, not zero.
+
+        ``mark_started`` (``runner_teardown``) is the sole writer of
+        ``positions_total`` and the only setter of ``started_at``; it runs only
+        AFTER position enumeration succeeds and execution begins. A teardown that
+        FAILED *before* that point — e.g. an exception raised inside
+        ``generate_teardown_intents`` (the VIB-5778 field incident that stranded a
+        live position) — has ``started_at IS NULL`` and its count columns are the
+        schema 0-defaults, NOT measured zeros. Rendering those as ``0`` reports a
+        success-shaped "0 positions failed" for a failure that closed nothing.
+
+        UNKNOWN is not zero: callers render these counts as ``unknown``. A FAILED
+        row that DID start (``started_at`` set) carries real measured counts —
+        including a genuine measured ``0`` — and is never treated as unmeasured.
+
+        This is a read-side inference only (no persisted shape change — the
+        persisted tri-state UNKNOWN contract belongs to VIB-5792). Best-effort
+        counts written to the DB by the failure path still round-trip via
+        ``to_dict`` / ``--json``; this property governs only the human render.
+        """
+        return self.status == TeardownStatus.FAILED and self.started_at is None
 
     @property
     def can_cancel(self) -> bool:
@@ -829,6 +858,7 @@ class TeardownRequest:
             "positions_total": self.positions_total,
             "positions_closed": self.positions_closed,
             "positions_failed": self.positions_failed,
+            "error_message": self.error_message,
             "cancel_requested": self.cancel_requested,
             "cancel_deadline": self.cancel_deadline.isoformat() if self.cancel_deadline else None,
         }
@@ -852,6 +882,7 @@ class TeardownRequest:
             positions_total=data.get("positions_total", 0),
             positions_closed=data.get("positions_closed", 0),
             positions_failed=data.get("positions_failed", 0),
+            error_message=data.get("error_message"),
             cancel_requested=data.get("cancel_requested", False),
             cancel_deadline=datetime.fromisoformat(data["cancel_deadline"]) if data.get("cancel_deadline") else None,
         )
