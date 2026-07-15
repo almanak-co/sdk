@@ -1474,6 +1474,37 @@ def _cell_g6_reconciliation(  # noqa: C901
     capital = max(abs(initial), abs(final))
     gap = abs(wallet_pnl - component_pnl)
 
+    # VIB-5826: a notional-scaled tolerance that meets or exceeds the capital at
+    # risk makes G6 *unfalsifiable* — ``gap <= eps`` holds for every reconciliation
+    # error the run could physically produce, so the cell reports PASS while
+    # verifying nothing. That is not a measured pass; it is an absent measurement,
+    # and per Empty != Zero it must not be scored as one.
+    #
+    # This is a LOGICAL bound, not a tuned threshold — below it the cell can still
+    # discriminate, at or above it the cell is dead. Only the *scaled* term is
+    # bounded: the ``floor`` is a deliberate rounding/oracle-noise ε and a dust-sized
+    # run must not trip on it.
+    #
+    # Motivating defect (docs/internal/qa/g6-matrix-sweep-2026-07-15.md §6):
+    # ``lp-uniswap_v3-ethereum`` scored 21/22 — the best row in the matrix — on
+    # ε=$5,160,574 from a $2.06bn phantom ``notional_traded`` (token decimals applied
+    # by config label order instead of on-chain token0/token1), against $191,861 of
+    # capital. Its baseline said FAIL, so an outcome-only ratchet read the corruption
+    # as an improvement. Across that 24-row sweep the worst legitimate row sat at
+    # scaled/capital = 8.3e-6 — five orders of magnitude of headroom under this bound.
+    # The vacuity test and the ratio have DIFFERENT preconditions, and conflating
+    # them re-opens the hole: guarding the test on ``capital > 0`` (to keep the
+    # ratio's divisor safe) would suppress the guard on the most vacuous row of all
+    # — zero capital with a non-zero scaled tolerance, where nothing is at stake and
+    # ε is still positive. So the test is bare and only the RATIO is divisor-guarded.
+    #
+    # ``eps_scaled > 0`` keeps a genuinely empty run (no capital, no notional) out of
+    # it: there the floor governs and the cell is comparing 0 against 0, which is
+    # uninformative but not a false green.
+    eps_scaled = eps_pct * scaling_base
+    eps_vacuous = eps_scaled > 0 and eps_scaled >= capital
+    eps_over_capital = (eps_scaled / capital) if capital > 0 else None
+
     null_breakdown = {
         "Σ_swaps_usd_null_count": null_swap_rpnl,
         "Σ_lp_usd_null_count": null_lp_close_rpnl,
@@ -1535,6 +1566,11 @@ def _cell_g6_reconciliation(  # noqa: C901
         "ε_scaling_base_usd": str(scaling_base),
         "ε_scaling_base_label": scaling_label,
         "capital_usd": str(capital),
+        # VIB-5826: always emitted so a vacuous tolerance is visible in the
+        # decomposition even on rows where it does not change the verdict.
+        # Empty != Zero: ratio is "" (not 0) when capital is unmeasured.
+        "ε_vacuous": str(eps_vacuous),
+        "ε_scaled_over_capital": ("" if eps_over_capital is None else str(eps_over_capital)),
         "il_diagnostic_usd_NOT_in_PnL": str(il_diagnostic),
         **{k: str(v) for k, v in null_breakdown.items()},
     }
@@ -1579,6 +1615,27 @@ def _cell_g6_reconciliation(  # noqa: C901
                 f"component buckets contain unmeasured nulls: {nonzero}; "
                 f"wallet=${wallet_pnl} component=${component_pnl} gap=${gap} "
                 "(reconciliation result is not trustworthy until inputs are populated)",
+                decomposition=decomp,
+            ),
+            decomp,
+        )
+    # VIB-5826: guard the PASS path. Placed after the null check (an unmeasured
+    # input is the more specific diagnosis) and before ``gap <= eps`` — which, with
+    # a vacuous ε, is true by construction. A gap that exceeds even a vacuous ε is
+    # still reported as an ordinary gap FAIL below, since that verdict is sound.
+    if eps_vacuous and gap <= eps:
+        return (
+            CellResult(
+                "G6",
+                "Reconciliation",
+                "FAIL",
+                f"tolerance is vacuous: notional-scaled ε=${eps_scaled} >= capital=${capital} "
+                f"({'ratio=' + str(eps_over_capital) + 'x' if eps_over_capital is not None else 'capital is zero — ANY positive ε is vacuous'})"
+                f" — G6 cannot fail for ANY input at this ε, so a PASS "
+                f"would verify nothing. Root-cause the scaling base "
+                f"(${scaling_base} via {scaling_label}) before trusting this cell; a notional that "
+                f"exceeds capital usually means mis-scaled leg amounts, not real volume. "
+                f"wallet=${wallet_pnl} component=${component_pnl} gap=${gap}",
                 decomposition=decomp,
             ),
             decomp,
