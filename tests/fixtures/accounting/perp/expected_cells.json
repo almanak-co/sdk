@@ -17,7 +17,7 @@
     "G8": "PASS",
     "G9": "PASS",
     "L5_22": "XFAIL",
-    "P1": "XFAIL",
+    "P1": "PASS",
     "P2": "XFAIL",
     "P3": "PASS",
     "P4": "XFAIL",

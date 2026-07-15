@@ -47,6 +47,10 @@ from almanak.framework.accounting.scorecard_profiles import (
     ScorecardCtx,
     ScorecardProfile,
 )
+from almanak.framework.observability.position_events import (
+    PositionEventType,
+    PositionType,
+)
 from almanak.framework.primitives.taxonomy import (
     _SETTLEMENT_LIFECYCLE,
     TAXONOMY,
@@ -3062,14 +3066,36 @@ def _cells_perp(
     payload_errors: dict[Any, str],
 ) -> list[CellResult]:
     out: list[CellResult] = []
-    has_open = any(r.get("event_type") == "PERP_OPEN" for r in pos_events)
-    has_close = any(r.get("event_type") == "PERP_CLOSE" for r in pos_events)
+    # VIB-5830 — ``position_events`` and ``accounting_events`` use DIFFERENT
+    # event-type vocabularies, and conflating them made this cell
+    # XFAIL-by-construction:
+    #   * ``position_events.event_type``  → ``PositionEventType`` (OPEN / CLOSE / …)
+    #     with the primitive carried separately on ``position_type`` (PERP).
+    #   * ``accounting_events.event_type`` → intent-type strings (PERP_OPEN / PERP_CLOSE).
+    # The old code matched the accounting vocabulary ("PERP_OPEN") against the
+    # position table, which can never match — P1 reported XFAIL even on a DB
+    # holding a complete PERP OPEN→CLOSE arc. Compare against the enum, and scope
+    # by ``position_type`` because LP / lending rows share the OPEN/CLOSE verbs —
+    # without that filter an LP-only DB would score P1 PASS by construction.
+    # (The sibling read of ``acct_events`` below is correct as-is: that table
+    # genuinely does speak PERP_OPEN / PERP_CLOSE.)
+    perp_pos = [r for r in pos_events if r.get("position_type") == PositionType.PERP]
+    has_open = any(r.get("event_type") == PositionEventType.OPEN for r in perp_pos)
+    has_close = any(r.get("event_type") == PositionEventType.CLOSE for r in perp_pos)
     out.append(
         CellResult(
             "P1",
             "Position lifecycle (size, leverage, direction, entry/exit price)",
-            "PASS" if (has_open or has_close) else "XFAIL",
-            f"OPEN={has_open} CLOSE={has_close} on position_events",
+            # An OPEN is REQUIRED: it carries entry price/size/leverage/direction —
+            # the very things this cell is named for. A CLOSE-only DB means the
+            # entry was never recorded, which is precisely the lifecycle gap P1
+            # exists to catch, so it must stay XFAIL rather than score green off
+            # the exit alone. OPEN-only is legitimate: a mid-flight position has
+            # no CLOSE yet. (Pre-VIB-5830 the predicate was ``has_open or
+            # has_close``, but both terms were unreachable — the vocabulary bug
+            # pinned them False — so the ``or`` only became live with this fix.)
+            "PASS" if has_open else "XFAIL",
+            f"OPEN={has_open} CLOSE={has_close} on {len(perp_pos)} PERP position_events row(s)",
         )
     )
     out.append(
