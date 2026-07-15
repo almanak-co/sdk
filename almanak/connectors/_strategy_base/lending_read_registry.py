@@ -152,6 +152,9 @@ class _LendingDispatchMaps:
     # VIB-5418: set of canonical protocol keys that declare market_isolated=True
     # (one collateral + one loan token per market — Morpho Blue).
     market_isolated_protocols: frozenset[str]
+    # VIB-5729: canonical protocol keys that declare collateral_earns_no_yield=True
+    # (posted collateral is held, not lent — Morpho Blue's supplyCollateral).
+    collateral_no_yield_protocols: frozenset[str]
 
 
 class LendingReadRegistry:
@@ -196,6 +199,7 @@ class LendingReadRegistry:
             collateral_flag_protocols: set[str] = set()
             token_keyed_protocols: set[str] = set()
             market_isolated_protocols: set[str] = set()
+            collateral_no_yield_protocols: set[str] = set()
             for connector_manifest in CONNECTOR_REGISTRY.with_lending_read():
                 decl = connector_manifest.lending_read
                 assert decl is not None
@@ -221,6 +225,8 @@ class LendingReadRegistry:
                     token_keyed_protocols.add(key)
                 if decl.market_isolated:
                     market_isolated_protocols.add(key)
+                if decl.collateral_earns_no_yield:
+                    collateral_no_yield_protocols.add(key)
             cls._dispatch_maps = _LendingDispatchMaps(
                 spec_loaders=spec_loaders,
                 account_state_loaders=account_state_loaders,
@@ -231,6 +237,7 @@ class LendingReadRegistry:
                 collateral_flag_protocols=frozenset(collateral_flag_protocols),
                 token_keyed_protocols=frozenset(token_keyed_protocols),
                 market_isolated_protocols=frozenset(market_isolated_protocols),
+                collateral_no_yield_protocols=frozenset(collateral_no_yield_protocols),
             )
         return cls._dispatch_maps
 
@@ -1076,6 +1083,26 @@ class LendingReadRegistry:
         """
         canonical = cls.normalize_protocol(protocol)
         return bool(canonical) and canonical in cls._dispatch().market_isolated_protocols
+
+    @classmethod
+    def collateral_earns_no_yield(cls, protocol: str | None) -> bool:
+        """Return True when posted collateral on ``protocol`` earns exactly zero.
+
+        Manifest-derived (``LendingReadDecl.collateral_earns_no_yield``, VIB-5729).
+        True only where the protocol HOLDS collateral rather than lending it out
+        (Morpho Blue's ``supplyCollateral``), which makes a collateral leg's supply
+        APY a *measured* zero rather than an unmeasured one.
+
+        Deliberately NOT inferable from ``market_isolated`` or from a market table
+        naming a ``collateral_token``: Silo V2 / Euler V2 do both, yet their
+        collateral IS lent out and accrues — stamping a measured zero there would
+        fabricate a rate for a leg that is genuinely earning.
+
+        Total by design: ``None`` / non-``str`` / unknown input normalises to
+        ``False``, so callers fail closed onto honest-unmeasured.
+        """
+        canonical = cls.normalize_protocol(protocol)
+        return bool(canonical) and canonical in cls._dispatch().collateral_no_yield_protocols
 
     @classmethod
     def reset_cache(cls) -> None:

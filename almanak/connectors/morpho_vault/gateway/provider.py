@@ -275,6 +275,7 @@ class MorphoVaultGatewayConnector(
         chain: str,
         asset_symbol: str,
         side: str,
+        market_id: str | None = None,  # noqa: ARG002 — not market-scoped: see below
     ) -> Any:
         """Fetch live MetaMorpho supply APY from the ERC-4626 share price (VIB-5040).
 
@@ -284,6 +285,12 @@ class MorphoVaultGatewayConnector(
         is unavailable. ``servicer`` is the gateway-side
         ``RateHistoryServiceServicer`` — we read its shared aiohttp session +
         settings, so no egress happens in the strategy container.
+
+        ``market_id`` is accepted-and-ignored (VIB-5729): a MetaMorpho vault is
+        selected by ``asset_symbol``, and its APY is a blended share-price rate
+        across the vault's allocations — NOT a single Morpho Blue market's rate.
+        The returned point leaves ``market_id`` unset, so a market-scoped caller
+        sees no echo and falls closed to unmeasured.
         """
         from almanak.gateway.services.rate_history_service import LendingRatePoint, RateHistoryUnavailable
 

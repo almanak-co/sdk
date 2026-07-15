@@ -8,12 +8,14 @@ supports lending_rate(), best_lending_rate(), and set_lending_rate() directly.
 
 import asyncio
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from almanak.framework.data.rates import BestRateResult, LendingRate, RateMonitor, RateSide
 from almanak.framework.market import MarketSnapshot
+from almanak.framework.market.builders import MarketSnapshotBuilder
 
 
 # =============================================================================
@@ -496,3 +498,132 @@ class TestEdgeCases:
         strategy = _StubStrategy._create(chain="ethereum")
         assert hasattr(strategy, "_rate_monitor")
         assert strategy._rate_monitor is None
+
+
+# =============================================================================
+# VIB-5729 — market-scoped lending rates
+# =============================================================================
+
+
+class TestVib5729MarketScopedLendingRate:
+    """``market_id`` reaches the monitor and scopes the snapshot's own cache."""
+
+    MARKET_A = "0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6"
+    MARKET_B = "0x919a9b6b94dae7c86620eaf7a08e597aae8a4c3a9e9c7671771fbaf62b6b61c7"
+
+    @staticmethod
+    def _snapshot(monitor):
+        """Build the snapshot through the sanctioned factory (VIB-4062 §5.7).
+
+        ``for_strategy_runner`` duck-types ``strategy`` via ``getattr``, so a
+        stub carrying just ``rate_monitor`` is all this needs — no direct
+        constructor call. Each test passes its OWN monitor because each needs a
+        different market -> rate map; that IS the cache-collision proof, so the
+        module-level ``snapshot_with_rates`` fixture cannot serve them.
+        """
+        return MarketSnapshotBuilder.for_strategy_runner(
+            strategy=SimpleNamespace(rate_monitor=monitor),
+            chain="robinhood",
+        )
+
+    def test_cache_key_is_market_scoped(self):
+        """Two markets lending one token must not share a cache slot."""
+        key = MarketSnapshot._lending_cache_key
+        assert key("morpho_blue", "USDG", "borrow", self.MARKET_A) != key(
+            "morpho_blue", "USDG", "borrow", self.MARKET_B
+        )
+        # Unscoped keeps the legacy 3-part key (Aave lane byte-identical).
+        assert key("aave_v3", "USDC", "supply") == "aave_v3/USDC/supply"
+        assert key("morpho_blue", "USDG", "borrow", self.MARKET_A) != key("morpho_blue", "USDG", "borrow")
+
+    def test_market_id_is_forwarded_to_the_monitor(self):
+        """The scoping must actually reach the gateway lane, not be dropped."""
+        monitor = RateMonitor(chain="robinhood")
+        captured = {}
+
+        async def _get(protocol, token, side, market_id=None):
+            captured.update(protocol=protocol, token=token, side=side, market_id=market_id)
+            return LendingRate(
+                protocol=protocol,
+                token=token,
+                side=side.value if hasattr(side, "value") else side,
+                apy_ray=Decimal("0"),
+                apy_percent=Decimal("3.5325"),
+                chain="robinhood",
+            )
+
+        monitor.get_lending_rate = _get
+        snapshot = self._snapshot(monitor)
+
+        rate = snapshot.lending_rate("morpho_blue", "USDG", "borrow", market_id=self.MARKET_A)
+
+        assert captured["market_id"] == self.MARKET_A
+        assert rate.apy_percent == Decimal("3.5325")
+
+    def test_two_markets_do_not_collide_in_the_snapshot_cache(self):
+        """End-to-end cache proof: asking for market B after market A must not
+        return market A's cached rate."""
+        monitor = RateMonitor(chain="robinhood")
+        rates = {self.MARKET_A: Decimal("3.5325"), self.MARKET_B: Decimal("2.7744")}
+
+        async def _get(protocol, token, side, market_id=None):
+            return LendingRate(
+                protocol=protocol,
+                token=token,
+                side=side.value if hasattr(side, "value") else side,
+                apy_ray=Decimal("0"),
+                apy_percent=rates[market_id],
+                chain="robinhood",
+            )
+
+        monitor.get_lending_rate = _get
+        snapshot = self._snapshot(monitor)
+
+        first = snapshot.lending_rate("morpho_blue", "USDG", "borrow", market_id=self.MARKET_A)
+        second = snapshot.lending_rate("morpho_blue", "USDG", "borrow", market_id=self.MARKET_B)
+
+        assert first.apy_percent == Decimal("3.5325")
+        assert second.apy_percent == Decimal("2.7744"), "market B must not be served market A's cached rate"
+
+    def test_set_lending_rate_can_seed_a_market_scoped_slot(self):
+        """Regression (CodeRabbit, PR #3287): the pre-populate path must be able
+        to reach a market-scoped read.
+
+        ``_lending_cache_key`` carries ``market_id``, so a ``set_lending_rate``
+        that could not take one would only ever fill the UNSCOPED slot — and a
+        caller injecting a synthetic rate for one isolated market would then miss
+        the cache and fall through to the monitor / gateway.
+        """
+        rate_a = LendingRate(
+            protocol="morpho_blue",
+            token="USDG",
+            side="borrow",
+            apy_ray=Decimal("0"),
+            apy_percent=Decimal("3.5343"),
+            chain="robinhood",
+        )
+        snapshot = self._snapshot(RateMonitor(chain="robinhood"))
+        snapshot.set_lending_rate("morpho_blue", "USDG", "borrow", rate_a, market_id=self.MARKET_A)
+
+        # The scoped read finds the seeded rate — no monitor/gateway round-trip.
+        got = snapshot.lending_rate("morpho_blue", "USDG", "borrow", market_id=self.MARKET_A)
+        assert got is rate_a
+
+    def test_seeding_one_market_does_not_answer_for_another(self):
+        """Seeding market A must not satisfy a read scoped to market B."""
+        rate_a = LendingRate(
+            protocol="morpho_blue",
+            token="USDG",
+            side="borrow",
+            apy_ray=Decimal("0"),
+            apy_percent=Decimal("3.5343"),
+            chain="robinhood",
+        )
+        snapshot = self._snapshot(RateMonitor(chain="robinhood"))
+        snapshot.set_lending_rate("morpho_blue", "USDG", "borrow", rate_a, market_id=self.MARKET_A)
+
+        keys = snapshot._lending_rate_cache
+        assert snapshot._lending_cache_key("morpho_blue", "USDG", "borrow", self.MARKET_A) in keys
+        assert snapshot._lending_cache_key("morpho_blue", "USDG", "borrow", self.MARKET_B) not in keys
+        # And an unscoped seed stays in its own slot (Aave lane unchanged).
+        assert snapshot._lending_cache_key("morpho_blue", "USDG", "borrow") not in keys

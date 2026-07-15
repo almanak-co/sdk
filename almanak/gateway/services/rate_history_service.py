@@ -98,12 +98,20 @@ class LendingRatePoint:
     Connectors MUST raise :class:`DataSourceUnavailable` rather than
     returning a point with all-``None`` numeric fields — the "no data"
     case belongs in the failure envelope, not the success one.
+
+    ``market_id`` (VIB-5729) names the market this point was ACTUALLY measured
+    for, on isolated-market lenders that support market-scoped reads. It is the
+    provider's own claim — the dispatcher echoes it to the wire so a caller can
+    verify its requested scoping was honoured (see
+    ``LendingRatePointResponse.market_id``). ``None`` = the provider makes no
+    market-scoping claim (unscoped read, or a venue without markets).
     """
 
     timestamp: int
     supply_apy_pct: Decimal | None = None
     borrow_apy_pct: Decimal | None = None
     utilization_pct: Decimal | None = None
+    market_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -797,6 +805,9 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         chain = _normalize_key(request.chain)
         asset = request.asset_symbol.strip()
         side = _normalize_key(request.side)
+        # Optional market scoping (VIB-5729). Empty = unscoped; the provider
+        # decides whether it can honour a scoped read.
+        market_id = request.market_id.strip()
 
         if not protocol:
             _invalid_argument(context, "protocol is required")
@@ -830,6 +841,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
                 chain=chain,
                 asset_symbol=asset,
                 side=side,
+                market_id=market_id or None,
             )
         except RateHistoryUnavailable as exc:
             logger.info(
@@ -879,6 +891,11 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             source="on_chain",
             is_live_data=True,
             success=True,
+            # Echo the market the PROVIDER actually measured — never `market_id`
+            # from the request (VIB-5729). Copying the request back would make
+            # the echo a tautology that any provider "passes" while ignoring the
+            # scoping, which is exactly the silent-fabrication this guards.
+            market_id=getattr(point, "market_id", None) or "",
         )
 
     # ---------------------------------------------------------------------

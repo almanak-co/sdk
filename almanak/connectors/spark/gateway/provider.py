@@ -65,12 +65,18 @@ class SparkGatewayConnector(
         chain: str,
         asset_symbol: str,
         side: str,
+        market_id: str | None = None,  # noqa: ARG002 — not market-scoped: see below
     ) -> Any:
         """Fetch live Spark supply / borrow / utilisation via on-chain
         ``eth_call`` to ``PoolDataProvider.getReserveData(asset)``.
 
         Delegates to the fork-shared pipeline (identical Aave V3 ABI);
         only the ``pool_data_provider`` address differs from Aave's.
+
+        ``market_id`` is accepted-and-ignored (VIB-5729): Spark is an Aave-fork
+        whole-account venue, so a reserve's rate is fully identified by
+        ``asset_symbol``. The returned point leaves ``market_id`` unset, so a
+        market-scoped caller sees no echo and falls closed to unmeasured.
         """
         return await fetch_aave_fork_lending_current(
             servicer,

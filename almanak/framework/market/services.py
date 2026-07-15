@@ -62,7 +62,7 @@ class IndicatorService(Protocol):
 
 
 class RateService(Protocol):
-    def lending_rate(self, protocol: str, token: str, side: str, chain: str) -> Any: ...
+    def lending_rate(self, protocol: str, token: str, side: str, chain: str, market_id: str | None = None) -> Any: ...
 
 
 class FundingService(Protocol):

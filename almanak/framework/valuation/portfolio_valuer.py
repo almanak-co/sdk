@@ -4431,8 +4431,9 @@ class PortfolioValuer:
           The Aave family already carries ``supply_apy_pct`` from
           :meth:`_reprice_lending_on_chain_enriched` (its single-reserve
           repricer), so this method is idempotent — it fills only keys that path
-          left absent, keeping the Aave leg byte-identical. Morpho's live rate is
-          unmeasured until VIB-5040 (its gateway provider raises), so its APY
+          left absent, keeping the Aave leg byte-identical. Isolated-market
+          venues (Morpho Blue) read their rate MARKET-SCOPED via
+          :meth:`_isolated_market_rates`; a venue with no gateway rate provider
           stays ``None`` honestly.
 
         Empty ≠ Zero, two ways: a real read stamps the measured value; an
@@ -4544,17 +4545,101 @@ class PortfolioValuer:
                     out["supply_apy_pct"] = self._lending_rate_pct(market, protocol, base_symbol, "supply", chain)
                 if out.get("borrow_apy_pct") is None:
                     out["borrow_apy_pct"] = self._lending_rate_pct(market, protocol, base_symbol, "borrow", chain)
-        elif is_per_market:
-            # Per-market protocols without a market-health rate source (Morpho
-            # Blue, role-based) — the seam owns these fields but has no live-rate
-            # source yet (Morpho live rate is VIB-5040), so stamp an explicit None
-            # rather than leaving the keys absent: a stale strategy-reported APY
-            # must not survive the merge. (Aave is whole-account, never per-market,
-            # so its repricer-set supply_apy_pct is untouched — byte-neutral.)
-            out["supply_apy_pct"] = None
-            out["borrow_apy_pct"] = None
+        elif is_per_market and market_id:
+            # Isolated-market protocols (Morpho Blue and the role-based family).
+            # VIB-5729: these used to stamp an unconditional None because Morpho
+            # had no live on-chain rate — that blocker (VIB-5040) shipped, so the
+            # rate is now read MARKET-SCOPED here. Venues whose connector has no
+            # gateway rate provider (silo_v2 / euler_v2 / fluid_vault today) fall
+            # out of ``_lending_rate_pct`` as None and stay honestly unmeasured —
+            # capability-gated, not protocol-name-gated.
+            out.update(self._isolated_market_rates(market, protocol, chain, market_id, position))
 
         return out
+
+    def _isolated_market_rates(
+        self,
+        market: MarketDataSource,
+        protocol: str,
+        chain: str,
+        market_id: str,
+        position: "PositionInfo",
+    ) -> dict[str, Any]:
+        """Track-C APY for one leg of an ISOLATED lending market (VIB-5729).
+
+        An isolated market has exactly one collateral token and one loan token,
+        and the two legs earn fundamentally different things — so the leg's role
+        decides the answer, and getting the role wrong fabricates a number:
+
+        * **Loan-token leg** — supplying the loan asset earns the market's supply
+          APY; borrowing it pays the market's borrow APY. Both are read
+          market-scoped from the venue's own IRM.
+        * **Collateral leg** — a measured ``"0"`` ONLY where the connector
+          declares ``collateral_earns_no_yield`` (Morpho Blue holds collateral
+          via ``supplyCollateral`` rather than lending it, so it earns exactly
+          zero by construction — a known invariant, hence measured-zero rather
+          than unmeasured). Everywhere else the collateral leg is ``None``:
+          Silo V2 / Euler V2 also name a collateral token per market, but theirs
+          IS lent out and accrues, so a ``"0"`` there would fabricate a measured
+          rate for a leg that is genuinely earning (Codex, PR #3287). Stamping
+          the market's *supply* APY on a collateral leg would be wrong in either
+          case — that rate is what LOAN-token suppliers earn.
+
+        The role is resolved from the connector's own market catalogue via
+        ``LendingReadRegistry.market_params`` — the same catalogue the account
+        state read already prices legs from (``valuation_role_keys``), so no
+        protocol-specific knowledge enters the framework.
+
+        Fails CLOSED to unmeasured (``None``) whenever the role cannot be
+        established — unknown market, absent catalogue, or an asset matching
+        neither token. Guessing a role here would be the same fabrication as
+        guessing a rate.
+        """
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+        from almanak.framework.teardown.models import PositionType
+
+        unmeasured: dict[str, Any] = {"supply_apy_pct": None, "borrow_apy_pct": None}
+
+        params = LendingReadRegistry.market_params(protocol, chain, market_id)
+        if not params:
+            return unmeasured
+        # ``details`` is dict-typed on PositionInfo but a caller can pass None
+        # explicitly — fall back rather than AttributeError into the snapshot
+        # path (gemini, PR #3287).
+        asset = (position.details or {}).get("asset")
+        if not asset:
+            return unmeasured
+
+        asset_key = str(asset).strip().upper()
+        loan_token = str(params.get("loan_token", "")).strip().upper()
+        collateral_token = str(params.get("collateral_token", "")).strip().upper()
+
+        # A market whose collateral and loan token are the same symbol cannot be
+        # role-resolved from the asset alone — refuse rather than coin-flip.
+        if not loan_token or not collateral_token or loan_token == collateral_token:
+            return unmeasured
+
+        if asset_key == collateral_token:
+            # A measured zero ONLY where the venue guarantees collateral yields
+            # nothing (Morpho Blue holds it rather than lending it). Elsewhere the
+            # collateral accrues and we have not read its rate, so it is honestly
+            # unmeasured — claiming zero would fabricate a rate for an earning leg.
+            # Stringly typed to match every other value in this dict (persisted as
+            # JSON). No borrow rate attaches to a collateral leg either way.
+            if not LendingReadRegistry.collateral_earns_no_yield(protocol):
+                return unmeasured
+            return {"supply_apy_pct": "0", "borrow_apy_pct": None}
+
+        if asset_key != loan_token:
+            return unmeasured
+
+        # Loan-token leg: read the side this leg actually carries.
+        side = "borrow" if position.position_type == PositionType.BORROW else "supply"
+        pct = self._lending_rate_pct(market, protocol, str(asset), side, chain, market_id=market_id)
+        return {
+            "supply_apy_pct": pct if side == "supply" else None,
+            "borrow_apy_pct": pct if side == "borrow" else None,
+        }
 
     def _read_lending_trackc_state(
         self,
@@ -4684,6 +4769,7 @@ class PortfolioValuer:
         token: str,
         side: str,
         chain: str,
+        market_id: str | None = None,
     ) -> str | None:
         """Gateway-routed live lending APY as a stringified percent, or ``None``.
 
@@ -4691,6 +4777,13 @@ class PortfolioValuer:
         ``RateHistoryUnavailable``, reduced ``market`` lacking the accessor)
         stamps an explicit ``None``, never a fabricated rate. Never raises into
         the snapshot path.
+
+        ``market_id`` scopes the read to one market on isolated-market lenders
+        (VIB-5729). It is REQUIRED for a correct answer there: without it the
+        venue picks a best-across-markets rate that may belong to a different
+        market than the position being valued. The scoped lane also refuses to
+        degrade to a placeholder constant, so a stale / old gateway yields
+        ``None`` here rather than a plausible wrong rate.
         """
         # ``lending_rate`` lives on the concrete MarketSnapshot, not the narrow
         # ``MarketDataSource`` protocol — resolve it dynamically so a reduced
@@ -4699,7 +4792,18 @@ class PortfolioValuer:
         if not callable(rate_fn):
             return None
         try:
-            rate = rate_fn(protocol, token, side, chain=chain)
+            rate = rate_fn(protocol, token, side, chain=chain, market_id=market_id)
+        except TypeError:
+            # A market source whose ``lending_rate`` predates ``market_id``
+            # (older injected double / stub). For an UNSCOPED read fall back to
+            # the legacy call; for a scoped read do NOT — silently dropping the
+            # scoping is how the wrong market's rate gets recorded as measured.
+            if market_id:
+                return None
+            try:
+                rate = rate_fn(protocol, token, side, chain=chain)
+            except Exception:
+                return None
         except Exception:
             return None
         pct = getattr(rate, "apy_percent", None)

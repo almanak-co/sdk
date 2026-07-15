@@ -6415,6 +6415,7 @@ class GetLendingRateCurrentRequest(_message.Message):
     CHAIN_FIELD_NUMBER: _builtins.int
     ASSET_SYMBOL_FIELD_NUMBER: _builtins.int
     SIDE_FIELD_NUMBER: _builtins.int
+    MARKET_ID_FIELD_NUMBER: _builtins.int
     protocol: _builtins.str
     """Required. Lending protocol identifier — one per registered
     ``GatewayLendingRateHistoryCapability`` connector
@@ -6435,6 +6436,24 @@ class GetLendingRateCurrentRequest(_message.Message):
     """Required. ``"supply"`` or ``"borrow"`` — matches
     ``RateMonitor.get_lending_rate(side=...)``.
     """
+    market_id: _builtins.str
+    """Optional. Scopes the read to ONE market for isolated-market lenders
+    (Morpho Blue: a bytes32 market id). Empty = unscoped (the whole-account
+    Aave family, and the legacy best-across-markets behaviour).
+
+    WHY (VIB-5729): ``asset_symbol`` alone does NOT identify a market on an
+    isolated-market lender — several markets can lend the same loan token at
+    materially different rates (on robinhood, USDe/USDG borrows at 3.53% while
+    syrupUSDG/USDG borrows at 2.77%). Picking "best across markets" for a
+    position that lives in ONE market returns a plausible but WRONG rate, which
+    is strictly worse than reporting nothing.
+
+    ROLLOUT (proto3 unknown-field semantics): an OLDER gateway silently ignores
+    this field and would answer with the unscoped best-of rate. Callers MUST
+    therefore verify ``LendingRatePointResponse.market_id`` echoes the value
+    they sent and treat any absent / mismatched echo as UNMEASURED — never
+    trust the number. See the echo field for the full contract.
+    """
     def __init__(
         self,
         *,
@@ -6442,8 +6461,9 @@ class GetLendingRateCurrentRequest(_message.Message):
         chain: _builtins.str = ...,
         asset_symbol: _builtins.str = ...,
         side: _builtins.str = ...,
+        market_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_symbol", b"asset_symbol", "chain", b"chain", "protocol", b"protocol", "side", b"side"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_symbol", b"asset_symbol", "chain", b"chain", "market_id", b"market_id", "protocol", b"protocol", "side", b"side"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetLendingRateCurrentRequest: _TypeAlias = GetLendingRateCurrentRequest  # noqa: Y015
@@ -6496,6 +6516,7 @@ class LendingRatePointResponse(_message.Message):
     IS_LIVE_DATA_FIELD_NUMBER: _builtins.int
     SUCCESS_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
+    MARKET_ID_FIELD_NUMBER: _builtins.int
     protocol: _builtins.str
     """Echoed identity (normalised)."""
     chain: _builtins.str
@@ -6509,6 +6530,24 @@ class LendingRatePointResponse(_message.Message):
     success: _builtins.bool
     """Dual-channel envelope — see header comment for RateHistoryService."""
     error: _builtins.str
+    market_id: _builtins.str
+    """Echo of the market this rate was ACTUALLY measured for (VIB-5729).
+    Sourced from the provider's own answer — NOT copied from the request — so
+    a provider that ignores ``GetLendingRateCurrentRequest.market_id`` cannot
+    produce a matching echo.
+
+    CONTRACT: a caller that sent a non-empty ``market_id`` MUST compare it to
+    this field and treat a mismatch or an empty echo as UNMEASURED (``None``),
+    never as a rate. This is what makes market-scoping safe across version
+    skew: an older gateway drops the unknown request field and answers with an
+    unscoped rate, but it also cannot set this echo — so the caller fails
+    CLOSED to honest-unmeasured instead of silently recording another market's
+    rate as if it were measured.
+
+    Empty when the read was unscoped (Aave-family whole-account reads) or when
+    the provider does not report a market — both are "no market-scoping claim",
+    which an unscoped caller simply ignores.
+    """
     @_builtins.property
     def point(self) -> Global___LendingRatePoint:
         """The single point. Always populated on success=true."""
@@ -6525,10 +6564,11 @@ class LendingRatePointResponse(_message.Message):
         is_live_data: _builtins.bool = ...,
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
+        market_id: _builtins.str = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["point", b"point"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_symbol", b"asset_symbol", "chain", b"chain", "error", b"error", "is_live_data", b"is_live_data", "point", b"point", "protocol", b"protocol", "side", b"side", "source", b"source", "success", b"success"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_symbol", b"asset_symbol", "chain", b"chain", "error", b"error", "is_live_data", b"is_live_data", "market_id", b"market_id", "point", b"point", "protocol", b"protocol", "side", b"side", "source", b"source", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___LendingRatePointResponse: _TypeAlias = LendingRatePointResponse  # noqa: Y015

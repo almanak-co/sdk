@@ -103,6 +103,12 @@ def _build_lending_rate_from_point(
         apy_percent=apy_percent,
         utilization_percent=utilization_percent,
         chain=chain,
+        # Carry the market the gateway ACTUALLY read (VIB-5729). Callers that
+        # discover a market from a rate (config omitting market_id) read
+        # ``rate.market_id``; leaving it None would make an unscoped Morpho scan
+        # unable to report which market it selected, even though the response
+        # carries it. Empty echo -> None (unscoped venue / no claim made).
+        market_id=(getattr(response, "market_id", "") or "").strip() or None,
     )
 
 
@@ -114,16 +120,21 @@ async def _monitor_call_lending_rate_current(
     chain: str,
     token: str,
     side: str,
+    market_id: str | None = None,
 ) -> Any:
     """Issue ``GetLendingRateCurrent`` via ``asyncio.to_thread`` and return the response.
 
     Wraps transport + ``success=False`` failures as ``DataSourceUnavailable``.
+
+    When ``market_id`` is supplied the response is only accepted if the gateway
+    echoes back the SAME market (VIB-5729) — see :func:`_assert_market_scope_honoured`.
     """
     request = gateway_pb2.GetLendingRateCurrentRequest(
         protocol=protocol,
         chain=chain,
         asset_symbol=token,
         side=side,
+        market_id=market_id or "",
     )
     try:
         response = await asyncio.to_thread(client.rate_history.GetLendingRateCurrent, request)
@@ -137,7 +148,53 @@ async def _monitor_call_lending_rate_current(
             source=response.source or "gateway",
             reason=response.error or "GetLendingRateCurrent returned success=false",
         )
+    _assert_market_scope_honoured(response, requested=market_id, protocol=protocol, chain=chain, token=token)
     return response
+
+
+def _assert_market_scope_honoured(
+    response: Any,
+    *,
+    requested: str | None,
+    protocol: str,
+    chain: str,
+    token: str,
+) -> None:
+    """Fail CLOSED unless the gateway proved it read the market we asked for.
+
+    The rollout guard for market-scoped lending rates (VIB-5729). ``market_id``
+    is an OPTIONAL proto3 request field, so a gateway older than the field —
+    hosted runs the gateway as a sidecar that may lag the framework image —
+    silently DROPS it and answers with the legacy best-across-markets rate.
+    That rate is plausible and wrong: on robinhood the two USDG markets differ
+    by ~27% relative, and recording one for a position in the other would be the
+    exact fabrication market-scoping exists to prevent.
+
+    Unknown fields are invisible to the client, so absence of support cannot be
+    detected on the request side. Instead the server echoes the market its
+    PROVIDER actually measured; an old gateway cannot set that field, and a
+    provider that ignores the scoping does not set it either. So: no echo, or a
+    different echo, ⇒ the scoping was not honoured ⇒ raise, which callers turn
+    into an honest unmeasured ``None`` rather than a wrong number.
+    """
+    # Normalise first: a whitespace-only market_id is not a scoping claim, and
+    # must take the same unscoped path as None rather than being compared against
+    # an echo it can never match (gemini, PR #3287).
+    wanted = (requested or "").strip()
+    if not wanted:
+        return  # unscoped read — nothing to prove
+    echoed = (getattr(response, "market_id", "") or "").strip()
+    if echoed.lower() == wanted.lower():
+        return
+    raise DataSourceUnavailable(
+        source=response.source or "gateway",
+        reason=(
+            f"market-scoped lending rate for {protocol}/{chain}/{token} was not honoured: "
+            f"requested market_id={requested!r} but the gateway echoed {echoed or '<none>'!r}. "
+            "Treating as unmeasured — a gateway older than VIB-5729 ignores market scoping "
+            "and would answer with another market's rate. Upgrade the gateway sidecar."
+        ),
+    )
 
 
 # =============================================================================
@@ -725,19 +782,36 @@ class RateMonitor:
         """Clear all mock rates."""
         self._mock_rates.clear()
 
+    @staticmethod
+    def _cache_side_key(side: str, market_id: str | None) -> str:
+        """Innermost cache key — ``side``, scoped by market when market-scoped.
+
+        Two isolated markets can lend the SAME token at different rates
+        (VIB-5729), so ``(protocol, token, side)`` is NOT a unique key for an
+        isolated-market venue: a market-blind key would serve the first market's
+        rate for the second. Unscoped reads keep the bare ``side`` key, so the
+        Aave-family lane is byte-identical to before. A whitespace-only
+        ``market_id`` is not a scoping claim and collapses to the unscoped key
+        rather than minting a bogus ``"side|"`` slot (gemini, PR #3287).
+        """
+        scoped = (market_id or "").strip().lower()
+        return f"{side}|{scoped}" if scoped else side
+
     def _get_cached_rate(
         self,
         protocol: str,
         token: str,
         side: str,
+        market_id: str | None = None,
     ) -> LendingRate | None:
         """Get cached rate if still valid."""
+        key = self._cache_side_key(side, market_id)
         try:
-            cached = self._cache[protocol][token][side]
+            cached = self._cache[protocol][token][key]
             rate, cache_time = cached
             age = time.time() - cache_time
             if age < self._cache_ttl_seconds:
-                logger.debug(f"Cache hit for {protocol}/{token}/{side} (age: {age:.1f}s)")
+                logger.debug(f"Cache hit for {protocol}/{token}/{key} (age: {age:.1f}s)")
                 return rate
         except KeyError:
             pass
@@ -749,19 +823,21 @@ class RateMonitor:
         token: str,
         side: str,
         rate: LendingRate,
+        market_id: str | None = None,
     ) -> None:
         """Cache a rate."""
         if protocol not in self._cache:
             self._cache[protocol] = {}
         if token not in self._cache[protocol]:
             self._cache[protocol][token] = {}
-        self._cache[protocol][token][side] = (rate, time.time())
+        self._cache[protocol][token][self._cache_side_key(side, market_id)] = (rate, time.time())
 
     async def get_lending_rate(
         self,
         protocol: str,
         token: str,
         side: RateSide,
+        market_id: str | None = None,
     ) -> LendingRate:
         """Get lending rate for a specific protocol/token/side.
 
@@ -769,6 +845,12 @@ class RateMonitor:
             protocol: Protocol identifier (aave_v3, morpho_blue, compound_v3)
             token: Token symbol (USDC, WETH, etc.)
             side: Rate side (SUPPLY or BORROW)
+            market_id: Optional market scoping for isolated-market lenders
+                (Morpho Blue). REQUIRED to get the rate of a specific market —
+                without it an isolated-market venue answers with a best-across-
+                markets selection, which is not any single position's rate
+                (VIB-5729). A market-scoped call is treated as accounting-grade:
+                it NEVER degrades to a placeholder (see below).
 
         Returns:
             LendingRate with APY data
@@ -776,7 +858,8 @@ class RateMonitor:
         Raises:
             ProtocolNotSupportedError: If protocol not available on chain
             TokenNotSupportedError: If token not supported
-            RateUnavailableError: If rate cannot be fetched
+            RateUnavailableError: If rate cannot be fetched — including when a
+                requested ``market_id`` scoping was not honoured by the gateway.
         """
         side_str = side.value if isinstance(side, RateSide) else side
 
@@ -784,8 +867,10 @@ class RateMonitor:
         if protocol not in self._protocols:
             raise ProtocolNotSupportedError(protocol, self._chain)
 
-        # Check cache first
-        cached = self._get_cached_rate(protocol, token, side_str)
+        # Check cache first. The key carries market_id (VIB-5729): two isolated
+        # markets can lend the SAME token at different rates, so a market-blind
+        # key would serve one market's rate for the other.
+        cached = self._get_cached_rate(protocol, token, side_str, market_id)
         if cached is not None:
             return cached
 
@@ -807,10 +892,29 @@ class RateMonitor:
 
         # Fetch from gateway via RateHistoryService.GetLendingRateCurrent.
         try:
-            rate = await self._fetch_lending_rate_via_gateway(protocol, token, side_str)
+            rate = await self._fetch_lending_rate_via_gateway(protocol, token, side_str, market_id)
         except (ProtocolNotSupportedError, TokenNotSupportedError):
             raise
         except DataSourceUnavailable as exc:
+            if market_id:
+                # A market-scoped read is accounting-grade: its answer is
+                # persisted as a MEASURED rate. `_placeholder_rate` returns a
+                # hardcoded constant, which for that purpose is a fabrication,
+                # not a rate — and it cannot honour market scoping anyway (its
+                # tables are keyed by token). Empty != Zero: fail loudly so the
+                # caller records honest-unmeasured instead of a plausible
+                # invention (VIB-5729).
+                logger.warning(
+                    "Market-scoped lending-rate lookup unavailable for %s/%s/%s market=%s on %s: %s; "
+                    "NOT falling back to a placeholder (would fabricate a measured rate).",
+                    protocol,
+                    token,
+                    side_str,
+                    market_id,
+                    self._chain,
+                    exc,
+                )
+                raise RateUnavailableError(protocol, token, side_str, str(exc)) from exc
             # Gateway returned success=false (typed "no data" envelope) or
             # is unreachable. Fall back to the offline placeholder lane so
             # tests / offline backtests don't break. Production callers
@@ -828,7 +932,7 @@ class RateMonitor:
             logger.warning(f"Failed to fetch rate for {protocol}/{token}/{side_str}: {e}")
             raise RateUnavailableError(protocol, token, side_str, str(e)) from e
 
-        self._set_cached_rate(protocol, token, side_str, rate)
+        self._set_cached_rate(protocol, token, side_str, rate, market_id)
         return rate
 
     async def _fetch_lending_rate_via_gateway(
@@ -836,11 +940,13 @@ class RateMonitor:
         protocol: str,
         token: str,
         side: str,
+        market_id: str | None = None,
     ) -> LendingRate:
         """Translate ``GetLendingRateCurrent`` RPC result to a ``LendingRate``.
 
         Raises :class:`DataSourceUnavailable` on any wire-level failure (the
-        caller maps that to a placeholder-rate fallback for back-compat).
+        caller maps that to a placeholder-rate fallback for back-compat), and
+        also when a requested ``market_id`` scoping was not honoured (VIB-5729).
         """
         client, gateway_pb2 = _monitor_get_connected_gateway_client()
         response = await _monitor_call_lending_rate_current(
@@ -850,6 +956,7 @@ class RateMonitor:
             chain=self._chain,
             token=token,
             side=side,
+            market_id=market_id,
         )
         return _build_lending_rate_from_point(
             response,

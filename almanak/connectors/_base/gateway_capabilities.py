@@ -673,10 +673,12 @@ class GatewayLendingRateHistoryCapability(Protocol):
     * ``lending_supported_chains() -> frozenset[str]`` — the chains the
       connector serves. Empty set is legal (connector registered for a
       sibling capability while lending coverage is staged in).
-    * ``fetch_lending_current(*, servicer, chain, asset_symbol, side)
-      -> LendingRatePoint`` — single-point live rate. ``servicer``
-      carries the gateway-side HTTP session, web3 cache, settings; the
-      connector body stays free of gateway plumbing.
+    * ``fetch_lending_current(*, servicer, chain, asset_symbol, side,
+      market_id=None) -> LendingRatePoint`` — single-point live rate.
+      ``servicer`` carries the gateway-side HTTP session, web3 cache,
+      settings; the connector body stays free of gateway plumbing.
+      ``market_id`` scopes the read on isolated-market venues — see the
+      per-argument contract below.
     * ``fetch_lending_history(*, servicer, chain, asset_symbol, side,
       start_ts, end_ts) -> list[LendingRatePoint]`` — time-series
       history, ascending timestamps, NEVER fake-success with an empty
@@ -686,6 +688,24 @@ class GatewayLendingRateHistoryCapability(Protocol):
     ``side`` is the literal ``"supply"`` or ``"borrow"`` string a
     strategy submits via ``RateMonitor.get_lending_rate`` — same
     vocabulary the existing framework consumers already use.
+
+    ``market_id`` (VIB-5729) scopes ``fetch_lending_current`` to ONE market on
+    isolated-market lenders, where ``asset_symbol`` alone is ambiguous (several
+    Morpho Blue markets can lend the same loan token at different rates).
+    Contract for implementers:
+
+    * ``None`` / empty — unscoped. Keep the venue's existing behaviour.
+    * Non-empty and the venue is market-scoped — read THAT market only, and set
+      ``LendingRatePoint.market_id`` to the market actually read. Raise
+      ``RateHistoryUnavailable`` for an unknown market; never silently widen to
+      another market.
+    * Non-empty but the venue is NOT market-scoped (the Aave family) — ignore it
+      and leave ``LendingRatePoint.market_id`` unset. The caller sees no echo and
+      fails closed to unmeasured, which is the honest outcome.
+
+    Implementations MUST accept the keyword even when they ignore it: the
+    dispatcher passes it uniformly, so omitting it from the signature is a
+    ``TypeError`` at runtime, not a graceful degradation.
 
     The ``LendingRatePoint`` return type is the dataclass declared in
     ``almanak.gateway.services._rate_history_models`` (gateway-side, so
@@ -708,6 +728,7 @@ class GatewayLendingRateHistoryCapability(Protocol):
         chain: str,
         asset_symbol: str,
         side: str,
+        market_id: str | None = None,
     ) -> Any: ...
 
     async def fetch_lending_history(

@@ -154,6 +154,7 @@ class AaveV3GatewayConnector(
         chain: str,
         asset_symbol: str,
         side: str,
+        market_id: str | None = None,  # noqa: ARG002 — whole-account venue: see below
     ) -> Any:
         """Fetch live Aave v3 supply / borrow / utilisation via on-chain
         ``eth_call`` to ``AaveProtocolDataProvider.getReserveData(asset)``.
@@ -163,6 +164,12 @@ class AaveV3GatewayConnector(
         identical across the Aave V3 fork family). ``servicer`` is the
         gateway-side ``RateHistoryServiceServicer`` — the shared body reads
         its shared aiohttp session + settings.
+
+        ``market_id`` is accepted-and-ignored (VIB-5729): Aave V3 is a
+        whole-account venue with one pool per chain, so a reserve's rate is fully
+        identified by ``asset_symbol``. Ignoring it is safe BECAUSE the returned
+        point leaves ``market_id`` unset, so a market-scoped caller sees no echo
+        and falls closed to unmeasured rather than trusting this rate.
         """
         return await fetch_aave_fork_lending_current(
             servicer,

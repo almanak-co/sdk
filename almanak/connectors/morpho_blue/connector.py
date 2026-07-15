@@ -79,10 +79,17 @@ CONNECTOR = Connector(
     # values come from interest.py's existing hardcoded behavior (0.035 / 0.04) so net
     # simulation behavior is unchanged — this merely moves the literals to the manifest.
     lending_read=LendingReadDecl(
-        # arbitrum + polygon included — MORPHO_MARKETS catalogues
-        # markets on both, and the gateway provider derives its servable set
-        # from that catalogue (VIB-5040 had scoped itself to ethereum+base).
-        rate_history_chains=("ethereum", "base", "arbitrum", "polygon"),
+        # Must track MORPHO_MARKETS: the gateway provider derives its servable
+        # set from that catalogue (``lending_supported_chains()``), so any chain
+        # with a registered market catalogue can serve a live rate. arbitrum +
+        # polygon were added when VIB-5040's ethereum+base scoping was widened;
+        # monad + robinhood follow for the same reason (VIB-5729) — both ship a
+        # market catalogue with IRM addresses, so the live lane already served
+        # them while this declaration under-reported them to the CLI support
+        # matrix. This tuple is DISPLAY/support-matrix truth, not a runtime gate
+        # (``MarketSnapshot.lending_rate`` never consults it), so the bug it
+        # caused was an honesty bug, not an outage.
+        rate_history_chains=("ethereum", "base", "arbitrum", "polygon", "monad", "robinhood"),
         backtest_default_supply_apy="0.035",
         backtest_default_borrow_apy="0.04",
         backtest_provider=ImportRef(
@@ -101,6 +108,13 @@ CONNECTOR = Connector(
         accepts_is_collateral=True,
         # VIB-5418: Morpho markets are ISOLATED (one collateral + one loan token),
         # so a per-market on-chain read's debt IS the whole-position debt. Lets the
+        # VIB-5729: Morpho Blue HOLDS collateral (``supplyCollateral``) rather than
+        # lending it out, so a collateral leg earns exactly zero by construction —
+        # a MEASURED zero for the Track-C rate seam, not an unmeasured one. Declared
+        # here (not inferred from ``market_isolated`` / a collateral_token in the
+        # market table) because Silo V2 + Euler V2 share both of those signals while
+        # their collateral DOES accrue.
+        collateral_earns_no_yield=True,
         # teardown lending guard KEEP a zero-debt collateral withdraw_all on a
         # measured per-reserve read even when the account-level USD aggregate is
         # unmeasured (empty snapshot prices for the cross-asset market).

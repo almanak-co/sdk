@@ -119,6 +119,50 @@ def _morpho_blue_markets_for_asset(chain: str, asset_symbol: str) -> list[tuple[
     return matches
 
 
+def _morpho_blue_market_by_id(chain: str, market_id: str, asset_symbol: str) -> list[tuple[str, dict[str, Any]]]:
+    """Return exactly ``[(market_id, params)]`` for one registered market.
+
+    The market-scoped counterpart of :func:`_morpho_blue_markets_for_asset`
+    (VIB-5729). Morpho Blue markets are ISOLATED, so a position's rate is a
+    property of its market — not of its loan token. Several markets can lend the
+    same token at materially different rates, which makes the asset-keyed
+    best-of scan wrong for a position that lives in one specific market.
+
+    Fails CLOSED, two ways, rather than ever answering with the wrong market:
+
+    * **Unknown market id** — raise, never fall back to the asset-keyed scan: a
+      caller that asked for a specific market must not be silently handed a
+      different market's rate.
+    * **Market/asset disagreement** — raise when the market's ``loan_token`` is
+      not ``asset_symbol``. Scoping bypasses the asset lookup, so without this a
+      request for ``asset_symbol="USDC"`` carrying a USDe/USDT market id would
+      return the USDT rate while the response echoes ``asset_symbol="USDC"``,
+      misattributing it downstream (CodeRabbit, PR #3287). The two inputs must
+      agree or we do not answer.
+    """
+    from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+
+    chain_markets = MORPHO_MARKETS.get(chain, {})
+    # bytes32 ids are hex — compare case-insensitively so a caller's checksum /
+    # upper-case spelling resolves to the same catalogue entry.
+    wanted = market_id.strip().lower()
+    for registered_id, params in chain_markets.items():
+        if registered_id.strip().lower() != wanted:
+            continue
+        loan_token = str(params.get("loan_token", ""))
+        if loan_token.upper() != asset_symbol.strip().upper():
+            raise RateHistoryUnavailable(
+                "morpho_blue",
+                f"Morpho Blue market {market_id!r} on {chain!r} lends {loan_token!r}, "
+                f"not the requested {asset_symbol!r} — refusing to misattribute its rate",
+            )
+        return [(registered_id, params)]
+    raise RateHistoryUnavailable(
+        "morpho_blue",
+        f"Morpho Blue market {market_id!r} is not registered on {chain!r}",
+    )
+
+
 def _morpho_blue_resolve_rpc_url(servicer: Any, chain: str) -> str:
     """Resolve the RPC URL for ``chain``, raising ``RateHistoryUnavailable`` on failure."""
     from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
@@ -300,24 +344,42 @@ class MorphoBlueGatewayConnector(
         chain: str,
         asset_symbol: str,
         side: str,
+        market_id: str | None = None,
     ) -> Any:
         """Fetch live Morpho Blue supply / borrow / utilisation on-chain (VIB-5040).
 
         Reads ``market(id)`` from the Morpho singleton and ``borrowRateView``
-        from each registered market's Adaptive-Curve IRM, then returns the best
-        rate across the markets that lend ``asset_symbol`` (highest supply APY /
-        lowest borrow APY). ``servicer`` is the gateway-side
-        ``RateHistoryServiceServicer`` — we read its shared aiohttp session +
-        settings, so no egress happens in the strategy container.
+        from each registered market's Adaptive-Curve IRM. ``servicer`` is the
+        gateway-side ``RateHistoryServiceServicer`` — we read its shared aiohttp
+        session + settings, so no egress happens in the strategy container.
+
+        Two scoping modes (VIB-5729):
+
+        * ``market_id`` given — read THAT market only and echo it back on the
+          returned point. This is the correct mode for valuing a real position:
+          Morpho markets are ISOLATED, so the position's rate belongs to its
+          market. Unknown ids fail closed.
+        * ``market_id`` omitted — legacy asset-keyed scan returning the best rate
+          across the markets that lend ``asset_symbol`` (highest supply APY /
+          lowest borrow APY). Preserved for callers that only know a token, but
+          note the answer is a market SELECTION, not the rate of any particular
+          position — hence the echo, so a market-scoped caller can tell the two
+          apart.
         """
         from almanak.gateway.services.rate_history_service import LendingRatePoint, RateHistoryUnavailable
 
         morpho_address = _morpho_blue_resolve_morpho_address(chain)
-        markets = _morpho_blue_markets_for_asset(chain, asset_symbol)
+        scoped = bool(market_id and market_id.strip())
+        markets = (
+            _morpho_blue_market_by_id(chain, str(market_id), asset_symbol)
+            if scoped
+            else _morpho_blue_markets_for_asset(chain, asset_symbol)
+        )
         rpc_url = _morpho_blue_resolve_rpc_url(servicer, chain)
         session = await servicer._get_http_session()
 
         best: tuple[Decimal, Decimal, Decimal] | None = None
+        best_market_id: str | None = None
         last_error: RateHistoryUnavailable | None = None
         for market_id, params in markets:
             try:
@@ -359,12 +421,13 @@ class MorphoBlueGatewayConnector(
                 )
                 continue
 
-            if best is None:
+            if (
+                best is None
+                or (side == "supply" and supply_apy > best[0])
+                or (side == "borrow" and borrow_apy < best[1])
+            ):
                 best = (supply_apy, borrow_apy, utilisation)
-            elif side == "supply" and supply_apy > best[0]:
-                best = (supply_apy, borrow_apy, utilisation)
-            elif side == "borrow" and borrow_apy < best[1]:
-                best = (supply_apy, borrow_apy, utilisation)
+                best_market_id = market_id
 
         if best is None:
             raise last_error or RateHistoryUnavailable(
@@ -385,11 +448,16 @@ class MorphoBlueGatewayConnector(
 
         # Side selection means the OTHER side is unmeasured by this call —
         # Empty fields on the wire encode that ("Empty != Zero").
+        #
+        # ``market_id`` echoes the market actually read (VIB-5729) so a
+        # market-scoped caller can prove its scoping was honoured rather than
+        # trusting a number that may have come from a different market.
         return LendingRatePoint(
             timestamp=0,
             supply_apy_pct=supply_apy if side == "supply" else None,
             borrow_apy_pct=borrow_apy if side == "borrow" else None,
             utilization_pct=utilisation,
+            market_id=best_market_id,
         )
 
     async def fetch_lending_history(

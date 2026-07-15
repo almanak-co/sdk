@@ -2790,9 +2790,20 @@ class MarketSnapshot:
         self._ichimoku_values[token] = (ichimoku_data, timeframe)
 
     @staticmethod
-    def _lending_cache_key(protocol: str, token: str, side: str) -> str:
-        """Normalize lending rate cache key to avoid case-sensitive misses."""
-        return f"{protocol.strip().lower()}/{token.strip().upper()}/{side.strip().lower()}"
+    def _lending_cache_key(protocol: str, token: str, side: str, market_id: str | None = None) -> str:
+        """Normalize lending rate cache key to avoid case-sensitive misses.
+
+        ``market_id`` participates in the key (VIB-5729) because isolated-market
+        lenders can lend one token in several markets at different rates — a
+        market-blind key would serve one market's rate for another. Unscoped
+        reads keep the 3-part key, so the Aave-family lane is unchanged. A
+        whitespace-only ``market_id`` is not a scoping claim and collapses to the
+        unscoped key rather than minting a bogus trailing-slash slot (gemini,
+        PR #3287).
+        """
+        base = f"{protocol.strip().lower()}/{token.strip().upper()}/{side.strip().lower()}"
+        scoped = (market_id or "").strip().lower()
+        return f"{base}/{scoped}" if scoped else base
 
     def _run_async_bridged(self, coro: Any) -> Any:
         """Bridge an async coroutine to sync, handling running event loops."""
@@ -2820,6 +2831,7 @@ class MarketSnapshot:
         side: str = "supply",
         *,
         chain: str | None = None,
+        market_id: str | None = None,
     ) -> Any:
         """Get the lending rate for a specific protocol and token.
 
@@ -2849,6 +2861,21 @@ class MarketSnapshot:
             side: Rate side — ``"supply"`` (default) or ``"borrow"``.
             chain: Optional chain override (keyword-only, PRD §4.2 R1). When
                 omitted the snapshot's resolved chain is used.
+            market_id: Optional market scoping for ISOLATED-market lenders
+                (Morpho Blue — a bytes32 market id). Keyword-only.
+
+                **Pass this whenever you mean a specific market** (VIB-5729).
+                On an isolated-market venue ``token`` alone does NOT identify a
+                market: several markets can lend the same loan token at very
+                different rates (on robinhood, USDG borrows at 3.53% in the
+                USDe/USDG market but 2.77% in syrupUSDG/USDG). Omitting it
+                returns a best-across-markets *selection* — a real rate, but not
+                necessarily YOUR position's rate.
+
+                A market-scoped call is accounting-grade: it is verified against
+                the gateway's echo and NEVER degrades to a placeholder constant,
+                so it either returns the requested market's measured rate or
+                raises.
 
         Returns:
             :class:`LendingRate` dataclass with ``apy_percent``, ``apy_ray``,
@@ -2875,7 +2902,7 @@ class MarketSnapshot:
         rate_side = RateSide(side_str)
 
         # Check pre-populated rates first.
-        cache_key = self._lending_cache_key(protocol, token, side_str)
+        cache_key = self._lending_cache_key(protocol, token, side_str, market_id)
         if cache_key in self._lending_rate_cache:
             return self._lending_rate_cache[cache_key]
 
@@ -2883,7 +2910,9 @@ class MarketSnapshot:
         # — preserves test surfaces that mock the monitor).
         if self._rate_monitor is not None:
             try:
-                result = self._run_async_bridged(self._rate_monitor.get_lending_rate(protocol, token, rate_side))
+                result = self._run_async_bridged(
+                    self._rate_monitor.get_lending_rate(protocol, token, rate_side, market_id)
+                )
                 self._lending_rate_cache[cache_key] = result
                 return result
             except ValueError:
@@ -2922,7 +2951,7 @@ class MarketSnapshot:
             # unreachable gateway raises rather than silently returning a
             # hardcoded number. Forward the normalized ``side_str`` so the
             # gateway lane matches the legacy lane and the cache key.
-            return await monitor._fetch_lending_rate_via_gateway(protocol, token, side_str)
+            return await monitor._fetch_lending_rate_via_gateway(protocol, token, side_str, market_id)
 
         try:
             result = self._run_async_bridged(_fetch_via_gateway())
@@ -3073,7 +3102,7 @@ class MarketSnapshot:
         except Exception as e:
             raise ValueError(f"Failed to get best lending rate for {token}/{side_str}: {e}") from e
 
-    def set_lending_rate(self, protocol: str, token: str, side: str, rate: Any) -> None:
+    def set_lending_rate(self, protocol: str, token: str, side: str, rate: Any, market_id: str | None = None) -> None:
         """Pre-populate a lending rate for a protocol/token/side.
 
         Useful for backtesting and testing where you want to inject known rates
@@ -3084,6 +3113,12 @@ class MarketSnapshot:
             token: Token symbol (e.g., "USDC")
             side: Rate side ("supply" or "borrow")
             rate: LendingRate dataclass instance
+            market_id: Optional market scoping, matching :meth:`lending_rate`.
+                REQUIRED to seed a rate that a market-scoped read will find: the
+                cache key carries ``market_id`` (VIB-5729), so seeding without it
+                fills only the UNSCOPED slot and a subsequent
+                ``lending_rate(..., market_id=X)`` would miss the cache and fall
+                through to the monitor / gateway (CodeRabbit, PR #3287).
 
         Example:
             from almanak.framework.data.rates import LendingRate
@@ -3092,7 +3127,7 @@ class MarketSnapshot:
                 apy_ray=Decimal("0"), apy_percent=Decimal("4.25"),
             ))
         """
-        cache_key = self._lending_cache_key(protocol, token, side)
+        cache_key = self._lending_cache_key(protocol, token, side, market_id)
         self._lending_rate_cache[cache_key] = rate
 
     def position_health(
@@ -5669,8 +5704,8 @@ class MarketSnapshot:
     ) -> None:
         self.set_bollinger_bands(token, data, timeframe=timeframe)
 
-    def seed_lending_rate(self, protocol: str, token: str, side: str, rate: Any) -> None:
-        self.set_lending_rate(protocol, token, side, rate)
+    def seed_lending_rate(self, protocol: str, token: str, side: str, rate: Any, market_id: str | None = None) -> None:
+        self.set_lending_rate(protocol, token, side, rate, market_id)
 
     def seed_position_health(self, protocol: str, market_id: str, health: Any) -> None:
         self.set_position_health(protocol, market_id, health)

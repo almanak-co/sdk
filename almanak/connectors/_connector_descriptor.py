@@ -213,6 +213,25 @@ class LendingReadDecl:
     (the conservative non-isolated keep, gated on the account aggregate). Set ``True``
     only for one-collateral-one-loan isolated-market lenders."""
 
+    collateral_earns_no_yield: bool = False
+    """When ``True``, posted COLLATERAL on this venue earns exactly zero by protocol
+    construction — it is held, not lent out (Morpho Blue's ``supplyCollateral``).
+
+    The Track-C rate seam (``PortfolioValuer._isolated_market_rates``, VIB-5729)
+    consults this to decide what a collateral leg's ``supply_apy_pct`` is:
+
+    * ``True``  -> a *measured* ``"0"``. The zero is a known protocol invariant, so
+      recording it is honest (Empty != Zero: this is measured-zero, not unmeasured).
+    * ``False`` -> ``None`` (unmeasured), because the venue's collateral DOES accrue
+      and we have not read its rate.
+
+    Defaults to ``False`` — the honest-unmeasured answer. Do NOT infer this from
+    ``market_isolated`` or from publishing a market table with a ``collateral_token``:
+    Silo V2 and Euler V2 also name a collateral token per market, but their collateral
+    is lent out and earns, so stamping ``"0"`` there would fabricate a measured rate
+    for a leg that is genuinely accruing (Codex review, PR #3287). Set ``True`` only
+    where the protocol guarantees collateral yields nothing."""
+
     def __post_init__(self) -> None:
         """Validate the declaration's import references and aliases."""
         for field_name in ("spec", "account_state", "market_table", "market_health", "backtest_provider"):
@@ -229,6 +248,10 @@ class LendingReadDecl:
             raise ValueError(f"LendingReadDecl.token_keyed must be a bool, got {self.token_keyed!r}")
         if not isinstance(self.market_isolated, bool):
             raise ValueError(f"LendingReadDecl.market_isolated must be a bool, got {self.market_isolated!r}")
+        if not isinstance(self.collateral_earns_no_yield, bool):
+            raise ValueError(
+                f"LendingReadDecl.collateral_earns_no_yield must be a bool, got {self.collateral_earns_no_yield!r}"
+            )
         _validate_decl_aliases("LendingReadDecl", self.aliases)
         if not isinstance(self.rate_history_chains, tuple):
             raise ValueError(

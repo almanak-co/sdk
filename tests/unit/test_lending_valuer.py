@@ -1045,7 +1045,12 @@ class TestVib5006LendingTrackCEnrichment:
         """VIB-4551: a Morpho leg (per-market — publishes a market table but no
         market-health reader) now reads the aggregate account state scoped by
         market_id (with the market's token prices injected), no longer skipped.
-        HF is stamped; APY stays None (Morpho live rate is VIB-5040)."""
+        HF is stamped.
+
+        APY is None here because ``market_id="0xabc"`` is NOT a registered
+        Morpho market, so the rate seam cannot establish the leg's role and
+        fails closed (VIB-5729) — NOT because Morpho lacks a live rate (that
+        blocker, VIB-5040, has shipped; see the market-scoped tests below)."""
         from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
 
         valuer = self._valuer_with_on_chain(None)
@@ -1071,9 +1076,8 @@ class TestVib5006LendingTrackCEnrichment:
         out = valuer._enrich_lending_trackc_fields(position, "ethereum", {}, {}, market)
         assert out["health_factor"] == "1.95"
         assert captured["market_id"] == "0xabc"  # per-market scoped read
-        # APY stays unmeasured for Morpho (VIB-5040) — stamped as an EXPLICIT None
-        # (key present) so a stale strategy-reported APY can't survive the merge,
-        # never fabricated.
+        # Unknown market => role unresolvable => EXPLICIT None (key present) so a
+        # stale strategy-reported APY can't survive the merge, never fabricated.
         assert "supply_apy_pct" in out and out["supply_apy_pct"] is None
         assert "borrow_apy_pct" in out and out["borrow_apy_pct"] is None
 
@@ -1548,3 +1552,364 @@ class TestVib5417SparkRepricerUnmeasured:
         snapshot = valuer.value(strategy, market)
         assert reprice_calls["n"] >= 1, "value() must actually reach the Spark repricer"
         assert snapshot.value_confidence == ValueConfidence.UNAVAILABLE
+
+
+class TestVib5729MorphoMarketScopedRates:
+    """VIB-5729: isolated-market lending rates are read MARKET-SCOPED.
+
+    Morpho Blue markets are isolated, so a rate belongs to a MARKET, not to a
+    token. Several markets can lend the same loan token at very different rates
+    (robinhood: USDG borrows at ~3.53% in USDe/USDG but ~2.77% in
+    syrupUSDG/USDG). The seam must therefore ask for the position's OWN market,
+    and must refuse any answer it cannot prove came from that market.
+
+    These tests pin the three ways this can silently go wrong:
+      1. Reading a token-keyed rate (wrong market's number, stamped as measured).
+      2. Stamping the market's supply APY on a collateral leg (collateral earns 0).
+      3. Trusting a rate from a gateway that ignored the market scoping.
+    """
+
+    # The real robinhood USDe/USDG market — collateral USDe, loan USDG.
+    MARKET_ID = "0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6"
+    OTHER_MARKET_ID = "0x919a9b6b94dae7c86620eaf7a08e597aae8a4c3a9e9c7671771fbaf62b6b61c7"
+
+    def _valuer(self):
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        return PortfolioValuer(gateway_client=MagicMock())
+
+    def _make_position(self, position_type, **kwargs):
+        from almanak.framework.teardown.models import PositionInfo, PositionType
+
+        defaults = {
+            "position_type": getattr(PositionType, position_type),
+            "position_id": "morpho-test",
+            "chain": "robinhood",
+            "protocol": "morpho_blue",
+            "value_usd": Decimal("20"),
+            "details": {},
+        }
+        defaults.update(kwargs)
+        return PositionInfo(**defaults)
+
+    def _market(self, rate_by_market):
+        """A market source whose lending_rate is market-scoped, like the real one.
+
+        Raises if called WITHOUT a market_id — an isolated-market venue answering
+        an unscoped query is the bug this suite exists to prevent.
+        """
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+
+        def _rate(protocol, token, side, chain=None, market_id=None):
+            if not market_id:
+                raise AssertionError(f"unscoped lending_rate for isolated market: {protocol}/{token}/{side}")
+            return SimpleNamespace(apy_percent=rate_by_market[market_id][side])
+
+        market.lending_rate.side_effect = _rate
+        return market
+
+    def _enrich(self, valuer, position, market):
+        return valuer._enrich_lending_trackc_fields(position, "robinhood", {}, {}, market, strategy_wallet="0xW")
+
+    def test_borrow_leg_reads_its_own_market_not_the_best_of_scan(self):
+        """THE value assertion: the BORROW leg carries ITS market's rate.
+
+        Both robinhood markets lend USDG. A token-keyed implementation returns
+        the best-of answer (2.7744, the OTHER market) and would still satisfy
+        Accountant L5 — which only checks the field is non-null. This test is
+        what makes L5 green mean 'correct', not merely 'populated'.
+        """
+        rates = {
+            self.MARKET_ID: {"borrow": Decimal("3.5325"), "supply": Decimal("3.1987")},
+            self.OTHER_MARKET_ID: {"borrow": Decimal("2.7744"), "supply": Decimal("2.0026")},
+        }
+        valuer = self._valuer()
+        position = self._make_position("BORROW", details={"market_id": self.MARKET_ID, "asset": "USDG"})
+        out = self._enrich(valuer, position, self._market(rates))
+
+        assert out["borrow_apy_pct"] == "3.5325", "must be THIS market's borrow rate"
+        assert out["borrow_apy_pct"] != "2.7744", "must NOT be the other USDG market's rate (best-of trap)"
+        # A borrow leg carries no supply rate — the side it does not hold is unmeasured.
+        assert out["supply_apy_pct"] is None
+
+    def test_borrow_leg_requests_the_positions_market_id(self):
+        """The scoping actually reaches the gateway call (not just the result)."""
+        rates = {self.MARKET_ID: {"borrow": Decimal("3.5325"), "supply": Decimal("3.1987")}}
+        market = self._market(rates)
+        valuer = self._valuer()
+        position = self._make_position("BORROW", details={"market_id": self.MARKET_ID, "asset": "USDG"})
+        self._enrich(valuer, position, market)
+
+        assert market.lending_rate.call_args.kwargs["market_id"] == self.MARKET_ID
+        assert market.lending_rate.call_args.args[2] == "borrow"
+
+    def test_collateral_leg_is_measured_zero_not_the_markets_supply_apy(self):
+        """Morpho collateral is not lent out: it earns exactly 0, by construction.
+
+        The market's supply APY (3.1987%) is what USDG *loan-token* suppliers
+        earn — stamping it on the USDe collateral leg would be fabrication with
+        extra steps. Empty != Zero: this is a MEASURED zero (a known protocol
+        invariant), so "0" is more honest than None.
+        """
+        rates = {self.MARKET_ID: {"borrow": Decimal("3.5325"), "supply": Decimal("3.1987")}}
+        market = self._market(rates)
+        valuer = self._valuer()
+        position = self._make_position("SUPPLY", details={"market_id": self.MARKET_ID, "asset": "USDe"})
+        out = self._enrich(valuer, position, market)
+
+        assert out["supply_apy_pct"] == "0", "collateral earns a measured zero"
+        assert out["supply_apy_pct"] != "3.1987", "must NOT inherit the loan-token supply APY"
+        assert out["borrow_apy_pct"] is None
+        market.lending_rate.assert_not_called()  # no rate read is needed for collateral
+
+    def test_loan_token_supply_leg_earns_the_markets_supply_apy(self):
+        """The mirror of the collateral case: plain `supply()` of the LOAN token
+        DOES earn the market's supply APY (morpho_blue declares
+        supports_collateral_toggle=True, so this leg is reachable). Proves the
+        Decimal("0") ruling is scoped to collateral, not applied blindly."""
+        rates = {self.MARKET_ID: {"borrow": Decimal("3.5325"), "supply": Decimal("3.1987")}}
+        valuer = self._valuer()
+        position = self._make_position("SUPPLY", details={"market_id": self.MARKET_ID, "asset": "USDG"})
+        out = self._enrich(valuer, position, self._market(rates))
+
+        assert out["supply_apy_pct"] == "3.1987", "loan-token supply earns the market supply APY"
+        assert out["borrow_apy_pct"] is None
+
+    def test_unknown_market_fails_closed(self):
+        """A market that is not in the catalogue cannot have its role resolved."""
+        valuer = self._valuer()
+        position = self._make_position("BORROW", details={"market_id": "0xdeadbeef", "asset": "USDG"})
+        out = self._enrich(valuer, position, self._market({}))
+
+        assert out["supply_apy_pct"] is None
+        assert out["borrow_apy_pct"] is None
+
+    def test_asset_matching_neither_token_fails_closed(self):
+        """An asset that is neither the market's collateral nor its loan token is
+        unattributable — refuse rather than guess a role."""
+        valuer = self._valuer()
+        position = self._make_position("SUPPLY", details={"market_id": self.MARKET_ID, "asset": "WBTC"})
+        out = self._enrich(valuer, position, self._market({}))
+
+        assert out["supply_apy_pct"] is None
+        assert out["borrow_apy_pct"] is None
+
+    def test_missing_asset_fails_closed(self):
+        """No asset => no role => unmeasured (never a fabricated zero)."""
+        valuer = self._valuer()
+        position = self._make_position("SUPPLY", details={"market_id": self.MARKET_ID})
+        out = self._enrich(valuer, position, self._market({}))
+
+        assert out["supply_apy_pct"] is None
+        assert out["borrow_apy_pct"] is None
+
+    def test_rate_source_failure_stamps_none_never_a_placeholder(self):
+        """A raising rate source yields honest-unmeasured, not a stand-in number."""
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+        market.lending_rate.side_effect = ValueError("RateHistoryUnavailable")
+        valuer = self._valuer()
+        position = self._make_position("BORROW", details={"market_id": self.MARKET_ID, "asset": "USDG"})
+        out = self._enrich(valuer, position, market)
+
+        assert out["borrow_apy_pct"] is None
+        assert out["supply_apy_pct"] is None
+
+    def test_market_source_without_market_id_support_fails_closed(self):
+        """A reduced/older market source whose lending_rate has no market_id kwarg
+        must NOT be retried unscoped for an isolated market — dropping the scoping
+        is exactly how another market's rate gets recorded as measured."""
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+
+        def _legacy(protocol, token, side, chain=None):  # no market_id kwarg
+            return SimpleNamespace(apy_percent=Decimal("2.7744"))  # the WRONG market
+
+        market.lending_rate.side_effect = _legacy
+        valuer = self._valuer()
+        position = self._make_position("BORROW", details={"market_id": self.MARKET_ID, "asset": "USDG"})
+        out = self._enrich(valuer, position, market)
+
+        assert out["borrow_apy_pct"] is None, "must not fall back to an unscoped rate"
+
+
+class TestVib5729PerMarketVenuesWithoutRateProviderStayUnmeasured:
+    """Scope guard: only venues that CAN read a rate start reporting one.
+
+    ``morpho_blue``, ``silo_v2``, ``euler_v2`` and ``fluid_vault`` all take the
+    isolated-market branch, but only morpho_blue ships a gateway rate provider.
+    The fix is capability-gated, not protocol-name-gated, so the other three must
+    keep stamping an honest ``None`` — never a fabricated or borrowed number.
+
+    This is the test that fails if someone later "fixes" L5 for those venues by
+    widening the branch instead of writing their rate providers.
+    """
+
+    def test_only_morpho_blue_declares_a_gateway_rate_provider(self):
+        """Pins the capability split the valuer branch relies on."""
+        import importlib
+
+        expected = {"morpho_blue": True, "silo_v2": False, "euler_v2": False, "fluid_vault": False}
+        for protocol, has_provider in expected.items():
+            try:
+                mod = importlib.import_module(f"almanak.connectors.{protocol}.gateway.provider")
+            except ModuleNotFoundError:
+                assert not has_provider, f"{protocol} should have a gateway rate provider"
+                continue
+            found = any(
+                hasattr(v, "fetch_lending_current") for v in vars(mod).values() if isinstance(v, type)
+            )
+            assert found is has_provider, f"{protocol}: gateway rate provider presence changed"
+
+    @pytest.mark.parametrize("protocol", ["silo_v2", "euler_v2", "fluid_vault"])
+    def test_venue_without_rate_provider_stamps_none(self, protocol):
+        """No rate source => explicit None (key present), never a number."""
+        from almanak.framework.teardown.models import PositionInfo, PositionType
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        valuer = PortfolioValuer(gateway_client=MagicMock())
+        position = PositionInfo(
+            position_type=PositionType.BORROW,
+            position_id="p",
+            chain="ethereum",
+            protocol=protocol,
+            value_usd=Decimal("10"),
+            details={"market_id": "0xabc", "asset": "USDC", "wallet": "0xW"},
+        )
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+        out = valuer._enrich_lending_trackc_fields(position, "ethereum", {}, {}, market)
+
+        assert "supply_apy_pct" in out and out["supply_apy_pct"] is None
+        assert "borrow_apy_pct" in out and out["borrow_apy_pct"] is None
+
+    def test_silo_collateral_leg_is_unmeasured_not_a_fabricated_zero(self):
+        """A REAL Silo market — the measured-zero must NOT leak to non-Morpho venues.
+
+        Regression for a bug Codex caught on PR #3287. Silo V2 publishes a market
+        table naming both ``collateral_token`` and ``loan_token``, exactly like
+        Morpho — so a role-discriminator gated on "is_per_market" stamped
+        ``supply_apy_pct="0"`` on a Silo collateral leg. That is a FABRICATED
+        measured zero: Silo lends its collateral out and it accrues. The zero is
+        legal only where the connector declares ``collateral_earns_no_yield``.
+
+        Uses a real registered market on purpose. The earlier version of this
+        guard passed a FAKE market id, so ``market_params`` returned None and the
+        test passed without ever reaching the branch under test.
+        """
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+        from almanak.framework.teardown.models import PositionInfo, PositionType
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        market_id, chain = "wavax/usdc", "avalanche"
+        params = LendingReadRegistry.market_params("silo_v2", chain, market_id)
+        # Pin the premise: if this stops holding, the regression is not exercised.
+        assert params and params.get("collateral_token") and params.get("loan_token"), (
+            "silo_v2 must still publish a collateral+loan market for this guard to bite"
+        )
+        assert not LendingReadRegistry.collateral_earns_no_yield("silo_v2")
+
+        valuer = PortfolioValuer(gateway_client=MagicMock())
+        position = PositionInfo(
+            position_type=PositionType.SUPPLY,
+            position_id="silo-collateral",
+            chain=chain,
+            protocol="silo_v2",
+            value_usd=Decimal("100"),
+            details={"market_id": market_id, "asset": params["collateral_token"], "wallet": "0xW"},
+        )
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+        out = valuer._enrich_lending_trackc_fields(position, chain, {}, {}, market, strategy_wallet="0xW")
+
+        assert out["supply_apy_pct"] is None, "Silo collateral accrues — a '0' here is fabricated"
+        assert out["borrow_apy_pct"] is None
+
+    def test_only_morpho_declares_collateral_earns_no_yield(self):
+        """The measured-zero capability is opt-in and Morpho-only today."""
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry as R
+
+        assert R.collateral_earns_no_yield("morpho_blue") is True
+        for protocol in ("silo_v2", "euler_v2", "fluid_vault", "aave_v3", "compound_v3"):
+            assert R.collateral_earns_no_yield(protocol) is False, protocol
+        # Total on junk input — callers fail closed onto honest-unmeasured.
+        assert R.collateral_earns_no_yield(None) is False
+        assert R.collateral_earns_no_yield("nope") is False
+
+
+class TestVib5729SignatureCallerContract:
+    """Static guard: nobody may silently drop ``market_id`` on the accounting path.
+
+    A behavioural test of the callee cannot catch this — the callee is correct;
+    the bug would be a CALLER that omits the scoping and thereby restores the
+    best-of answer. So this pins the callers themselves.
+
+    Deliberately NOT pinned: ``best_lending_rate`` and the Compound branch.
+    * ``best_lending_rate`` shops for a rate ACROSS protocols — a market id is
+      meaningless there, and it never reaches accounting.
+    * Compound V3 is multi-collateral against ONE base asset, so
+      ``(protocol, base_symbol, side)`` already identifies the Comet. Passing a
+      market_id would be actively harmful: its provider ignores the field, emits
+      no echo, and the scope check would then (correctly) refuse the rate.
+    """
+
+    def test_every_rate_provider_accepts_market_id(self):
+        """The dispatcher passes market_id uniformly — a provider missing the
+        kwarg is a runtime TypeError, not a graceful degradation."""
+        import importlib
+        import inspect
+
+        for slug in ("aave_v3", "compound_v3", "morpho_blue", "morpho_vault", "spark"):
+            mod = importlib.import_module(f"almanak.connectors.{slug}.gateway.provider")
+            impls = [
+                v
+                for v in vars(mod).values()
+                if isinstance(v, type) and "fetch_lending_current" in vars(v)
+            ]
+            assert impls, f"{slug}: no fetch_lending_current implementation found"
+            for cls in impls:
+                params = inspect.signature(cls.fetch_lending_current).parameters
+                assert "market_id" in params, f"{cls.__name__}.fetch_lending_current must accept market_id"
+                assert params["market_id"].default is None, f"{cls.__name__}: market_id must default to None"
+
+    def test_dispatcher_forwards_market_id_to_the_provider(self):
+        """The gateway servicer must thread the request's market_id through."""
+        import inspect
+
+        from almanak.gateway.services.rate_history_service import RateHistoryServiceServicer
+
+        src = inspect.getsource(RateHistoryServiceServicer.GetLendingRateCurrent)
+        assert "market_id=market_id or None" in src, "dispatcher must forward market_id to fetch_lending_current"
+        assert "request.market_id" in src, "dispatcher must read market_id off the request"
+
+    def test_monitor_forwards_market_id_down_to_the_wire(self):
+        """RateMonitor -> _fetch_lending_rate_via_gateway -> RPC request."""
+        import inspect
+
+        from almanak.framework.data.rates import monitor as m
+
+        assert "market_id=market_id" in inspect.getsource(m.RateMonitor._fetch_lending_rate_via_gateway)
+        assert "market_id=market_id or " in inspect.getsource(m._monitor_call_lending_rate_current)
+
+    def test_isolated_market_seam_always_scopes_its_rate_read(self):
+        """The accounting seam must never call the rate read unscoped."""
+        import inspect
+
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        src = inspect.getsource(PortfolioValuer._isolated_market_rates)
+        assert "market_id=market_id" in src, "isolated-market seam must pass market_id"
+
+    def test_scoped_reads_never_fall_back_to_a_placeholder(self):
+        """A market-scoped read is accounting-grade: a hardcoded placeholder
+        constant is a fabrication, not a rate."""
+        import inspect
+
+        from almanak.framework.data.rates.monitor import RateMonitor
+
+        src = inspect.getsource(RateMonitor.get_lending_rate)
+        raise_idx = src.find("if market_id:")
+        placeholder_idx = src.find("_placeholder_rate(")
+        assert raise_idx != -1, "scoped-read guard missing"
+        assert raise_idx < placeholder_idx, "the market_id guard must precede any placeholder fallback"

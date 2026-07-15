@@ -477,7 +477,13 @@ FROZEN_LENDING_RATE_PROTOCOLS = ("aave_v3", "compound_v3", "morpho_blue", "spark
 FROZEN_LENDING_RATE_CHAINS = {
     "aave_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc"),
     "compound_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base"),
-    "morpho_blue": ("ethereum", "base", "arbitrum", "polygon"),
+    # VIB-5729: monad + robinhood join for the SAME reason arbitrum + polygon
+    # did — MORPHO_MARKETS catalogues markets (with IRM addresses) on both, and
+    # the gateway provider derives its servable set from that catalogue, so the
+    # live lane already served them while this declaration under-reported them
+    # to the CLI support matrix. Widening the DISPLAY truth to match the runtime
+    # truth; `MarketSnapshot.lending_rate` never gated on this tuple.
+    "morpho_blue": ("ethereum", "base", "arbitrum", "polygon", "monad", "robinhood"),
     "spark": ("ethereum",),
 }
 # monitor.py PROTOCOL_CHAINS rows (values now sorted; legacy insertion order
@@ -490,6 +496,10 @@ FROZEN_LENDING_PROTOCOL_CHAINS = {
     "base": ["aave_v3", "compound_v3", "morpho_blue"],
     "avalanche": ["aave_v3"],
     "bsc": ["aave_v3"],
+    # VIB-5729: morpho_blue is the only lending venue with a registered market
+    # catalogue on these chains, so it is the only rate-lane provider there.
+    "monad": ["morpho_blue"],
+    "robinhood": ["morpho_blue"],
 }
 FROZEN_LENDING_DEFAULT_APYS = {
     "aave_v3": ("0.03", "0.05"),

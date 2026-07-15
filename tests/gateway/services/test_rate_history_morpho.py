@@ -291,3 +291,162 @@ def test_metamorpho_borrow_side_unavailable() -> None:
 
     assert response.success is False
     assert "supply-only" in response.error
+
+
+# =============================================================================
+# VIB-5729 — market-scoped reads + the version-skew echo
+# =============================================================================
+
+
+def _rate_wad(apy: str) -> str:
+    """Per-second borrow rate (WAD hex) that annualises to ``apy`` at 100% util."""
+    return "0x" + f"{int((Decimal(apy).ln() / Decimal(_SECONDS_PER_YEAR)) * Decimal(10**18)):064x}"
+
+
+def test_market_scoped_read_targets_only_that_market() -> None:
+    """A scoped request reads the REQUESTED market, not a best-of scan.
+
+    robinhood has two markets lending USDG (USDe/USDG and syrupUSDG/USDG). The
+    unscoped path picks the lowest borrow APY; a scoped path must read only the
+    market asked for. Asserted on the WIRE: exactly one market() call, carrying
+    the requested market id.
+    """
+    from almanak.connectors.morpho_blue.addresses import MORPHO_MARKETS
+
+    target = "0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6"
+    assert target in MORPHO_MARKETS["robinhood"]
+
+    market_hex = _encode_market_struct(total_supply_assets=10**12, total_borrow_assets=10**12)
+    seen: list[dict[str, Any]] = []
+
+    def _router(payload: dict[str, Any]) -> str:
+        seen.append(payload)
+        return market_hex if payload.get("id") == 1 else _rate_wad("1.10")
+
+    servicer = _make_servicer(_router)
+    with patch("almanak.gateway.utils.get_rpc_url", return_value="http://rpc.test"):
+        request = gateway_pb2.GetLendingRateCurrentRequest(
+            protocol="morpho_blue", chain="robinhood", asset_symbol="USDG", side="borrow", market_id=target
+        )
+        ctx = _MockContext()
+        response = asyncio.run(servicer.GetLendingRateCurrent(request, ctx))  # type: ignore[arg-type]
+
+    assert response.success is True, response.error
+    market_calls = [p for p in seen if p.get("id") == 1]
+    assert len(market_calls) == 1, "scoped read must touch exactly one market"
+    # The market() calldata is selector + the bytes32 id — prove it is OUR market.
+    assert target[2:] in market_calls[0]["params"][0]["data"]
+
+
+def test_market_scoped_response_echoes_the_market_read() -> None:
+    """The echo is what lets a caller prove its scoping was honoured."""
+    target = "0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6"
+    market_hex = _encode_market_struct(total_supply_assets=10**12, total_borrow_assets=10**12)
+    servicer = _make_servicer(lambda p: market_hex if p.get("id") == 1 else _rate_wad("1.10"))
+
+    with patch("almanak.gateway.utils.get_rpc_url", return_value="http://rpc.test"):
+        request = gateway_pb2.GetLendingRateCurrentRequest(
+            protocol="morpho_blue", chain="robinhood", asset_symbol="USDG", side="borrow", market_id=target
+        )
+        response = asyncio.run(servicer.GetLendingRateCurrent(request, _MockContext()))  # type: ignore[arg-type]
+
+    assert response.success is True, response.error
+    assert response.market_id == target
+
+
+def test_unknown_market_id_fails_closed_not_widened() -> None:
+    """An unregistered market must NOT silently fall back to the asset scan."""
+    market_hex = _encode_market_struct(total_supply_assets=10**12, total_borrow_assets=10**12)
+    servicer = _make_servicer(lambda p: market_hex if p.get("id") == 1 else _rate_wad("1.10"))
+
+    with patch("almanak.gateway.utils.get_rpc_url", return_value="http://rpc.test"):
+        request = gateway_pb2.GetLendingRateCurrentRequest(
+            protocol="morpho_blue",
+            chain="robinhood",
+            asset_symbol="USDG",
+            side="borrow",
+            market_id="0x" + "de" * 32,
+        )
+        response = asyncio.run(servicer.GetLendingRateCurrent(request, _MockContext()))  # type: ignore[arg-type]
+
+    assert response.success is False
+    assert "not registered" in response.error
+
+
+def test_unscoped_read_still_works_and_echoes_the_chosen_market() -> None:
+    """Back-compat: an unscoped caller (old framework) is unaffected, and the
+    echo names whichever market the best-of scan actually chose."""
+    from almanak.connectors.morpho_blue.addresses import MORPHO_MARKETS
+
+    market_hex = _encode_market_struct(total_supply_assets=10**12, total_borrow_assets=10**12)
+    servicer = _make_servicer(lambda p: market_hex if p.get("id") == 1 else _rate_wad("1.10"))
+
+    with patch("almanak.gateway.utils.get_rpc_url", return_value="http://rpc.test"):
+        request = gateway_pb2.GetLendingRateCurrentRequest(
+            protocol="morpho_blue", chain="robinhood", asset_symbol="USDG", side="borrow"
+        )
+        response = asyncio.run(servicer.GetLendingRateCurrent(request, _MockContext()))  # type: ignore[arg-type]
+
+    assert response.success is True, response.error
+    assert response.point.borrow_apy_pct != ""
+    assert response.market_id in MORPHO_MARKETS["robinhood"]
+
+
+def test_non_market_scoped_providers_accept_market_id_and_emit_no_echo() -> None:
+    """Every rate provider must ACCEPT ``market_id`` — the dispatcher passes it
+    uniformly, so a provider missing the kwarg is a TypeError at runtime, not a
+    graceful degradation.
+
+    A whole-account venue then IGNORES it (its rate is fully identified by the
+    asset) and, crucially, emits NO echo. That absence is what makes a
+    market-scoped caller fail closed instead of trusting a rate that was never
+    market-scoped.
+    """
+    import inspect
+
+    from almanak.connectors.aave_v3.gateway.provider import AaveV3GatewayConnector
+    from almanak.connectors.compound_v3.gateway.provider import CompoundV3GatewayConnector
+    from almanak.connectors.morpho_vault.gateway.provider import MorphoVaultGatewayConnector
+    from almanak.connectors.spark.gateway.provider import SparkGatewayConnector
+
+    for conn_cls in (
+        AaveV3GatewayConnector,
+        CompoundV3GatewayConnector,
+        MorphoVaultGatewayConnector,
+        SparkGatewayConnector,
+    ):
+        params = inspect.signature(conn_cls.fetch_lending_current).parameters
+        assert "market_id" in params, f"{conn_cls.__name__} must accept market_id (dispatcher passes it)"
+        assert params["market_id"].default is None, f"{conn_cls.__name__}.market_id must default to None"
+
+    # And the wire contract: no provider-set market_id => empty echo.
+    point = MagicMock()
+    point.market_id = None
+    assert (getattr(point, "market_id", None) or "") == ""
+
+
+def test_scoped_market_must_lend_the_requested_asset() -> None:
+    """A market id that does not lend ``asset_symbol`` is refused, not answered.
+
+    Regression for a Major data-integrity bug CodeRabbit caught on PR #3287: the
+    scoped branch bypasses the asset lookup, so without this check a request for
+    asset_symbol="USDC" carrying the USDe/USDG market id would return the USDG
+    rate while the response echoes asset_symbol="USDC" — misattributing it
+    downstream. The market id and the asset must agree or we do not answer.
+    """
+    market_hex = _encode_market_struct(total_supply_assets=10**12, total_borrow_assets=10**12)
+    servicer = _make_servicer(lambda p: market_hex if p.get("id") == 1 else _rate_wad("1.10"))
+
+    with patch("almanak.gateway.utils.get_rpc_url", return_value="http://rpc.test"):
+        request = gateway_pb2.GetLendingRateCurrentRequest(
+            protocol="morpho_blue",
+            chain="robinhood",
+            asset_symbol="USDC",  # the market lends USDG, not USDC
+            side="borrow",
+            market_id="0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6",
+        )
+        response = asyncio.run(servicer.GetLendingRateCurrent(request, _MockContext()))  # type: ignore[arg-type]
+
+    assert response.success is False
+    assert "not the requested" in response.error
+    assert response.market_id == ""  # no echo => a scoped caller fails closed

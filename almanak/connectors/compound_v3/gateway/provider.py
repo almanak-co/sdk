@@ -215,6 +215,7 @@ class CompoundV3GatewayConnector(
         chain: str,
         asset_symbol: str,
         side: str,
+        market_id: str | None = None,  # noqa: ARG002 — not market-scoped: see below
     ) -> Any:
         """Fetch live Compound V3 supply / borrow / utilisation via on-chain
         ``eth_call`` to ``Comet.getUtilization()`` + ``getSupplyRate(util)`` /
@@ -224,6 +225,11 @@ class CompoundV3GatewayConnector(
         ``framework/data/rates/monitor.py:_fetch_compound_v3_rate_onchain``.
         ``servicer`` is the gateway-side ``RateHistoryServiceServicer`` —
         we read its shared aiohttp session + settings.
+
+        ``market_id`` is accepted-and-ignored (VIB-5729): a Comet is already
+        selected by its base ``asset_symbol``, and the returned point leaves
+        ``market_id`` unset, so a market-scoped caller sees no echo and falls
+        closed to unmeasured rather than trusting this rate.
         """
         from almanak.gateway.services.rate_history_service import LendingRatePoint
 

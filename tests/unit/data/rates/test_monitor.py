@@ -525,3 +525,253 @@ class TestRateMonitorIntegration:
         assert sorted_rates[1].apy_percent == Decimal("5.0")
         assert sorted_rates[2].apy_percent == Decimal("5.0")
         assert sorted_rates[3].protocol == "aave_v3"
+
+
+# =============================================================================
+# VIB-5729 — market-scoped rates: version-skew guard + cache scoping
+# =============================================================================
+
+
+class TestVib5729MarketScopedRateGuards:
+    """A market-scoped rate must be provably from the market we asked for.
+
+    ``market_id`` is an OPTIONAL proto3 request field, so a gateway sidecar older
+    than VIB-5729 silently DROPS it and answers with a best-across-markets rate.
+    Hosted can run exactly that pairing (gateway image lagging the framework), so
+    "proto3 is backward compatible" is true on the wire and unsafe in behaviour:
+    the caller would record another market's rate as if measured.
+
+    The defence is a server echo of the market the PROVIDER actually read. These
+    tests pin that the client refuses anything it cannot verify.
+    """
+
+    def _response(self, *, market_id: str, success: bool = True):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            success=success,
+            error="",
+            source="on_chain",
+            market_id=market_id,
+            point=SimpleNamespace(
+                supply_apy_pct="3.1987", borrow_apy_pct="", utilization_pct="90.7", timestamp=0
+            ),
+        )
+
+    def _assert_scope(self, response, requested):
+        from almanak.framework.data.rates.monitor import _assert_market_scope_honoured
+
+        return _assert_market_scope_honoured(
+            response, requested=requested, protocol="morpho_blue", chain="robinhood", token="USDG"
+        )
+
+    def test_matching_echo_is_accepted(self):
+        target = "0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6"
+        self._assert_scope(self._response(market_id=target), target)  # does not raise
+
+    def test_echo_comparison_is_case_insensitive(self):
+        target = "0xC845DA65A020DDCA5F132EFA8FEA79676D8EDFDEA504226A4C01E7A9E34CDDD6"
+        self._assert_scope(self._response(market_id=target.lower()), target)  # does not raise
+
+    def test_absent_echo_is_rejected_old_gateway(self):
+        """THE rollout guard: an old gateway drops the request field and cannot
+        set the echo. Without this check its unscoped rate would be recorded as
+        this market's measured rate."""
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        target = "0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6"
+        with pytest.raises(DataSourceUnavailable) as exc:
+            self._assert_scope(self._response(market_id=""), target)
+        assert "not honoured" in str(exc.value)
+
+    def test_mismatched_echo_is_rejected(self):
+        """A provider that answered about a DIFFERENT market is refused."""
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        target = "0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6"
+        other = "0x919a9b6b94dae7c86620eaf7a08e597aae8a4c3a9e9c7671771fbaf62b6b61c7"
+        with pytest.raises(DataSourceUnavailable):
+            self._assert_scope(self._response(market_id=other), target)
+
+    def test_unscoped_request_ignores_the_echo(self):
+        """Back-compat: a caller that asked for no market proves nothing."""
+        self._assert_scope(self._response(market_id=""), None)  # does not raise
+        self._assert_scope(self._response(market_id="0xanything"), None)  # does not raise
+
+    def test_cache_key_separates_markets_lending_the_same_token(self):
+        """Two isolated markets can lend ONE token at different rates, so a
+        market-blind cache key would serve the first market's rate for the
+        second — a wrong number, from our own cache."""
+        from almanak.framework.data.rates.monitor import RateMonitor
+
+        a = "0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6"
+        b = "0x919a9b6b94dae7c86620eaf7a08e597aae8a4c3a9e9c7671771fbaf62b6b61c7"
+        key = RateMonitor._cache_side_key
+
+        assert key("borrow", a) != key("borrow", b)
+        assert key("borrow", a) == key("borrow", a.upper())  # case-insensitive
+        assert key("borrow", None) == "borrow"  # unscoped lane unchanged
+        assert key("borrow", a) != key("borrow", None)  # scoped never aliases unscoped
+
+
+class TestBuildLendingRateFromPoint:
+    """Direct cover for ``_build_lending_rate_from_point`` (VIB-5729).
+
+    The wire->dataclass decoder every gateway rate read passes through, and it
+    was almost entirely uncovered (CRAP gate: cc=6 at 9% coverage). Its branches
+    are all Empty != Zero decisions, so they are worth pinning explicitly rather
+    than exercising incidentally through the RPC path.
+    """
+
+    @staticmethod
+    def _response(*, supply="", borrow="", util="", source="on_chain", market_id=""):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            source=source,
+            market_id=market_id,
+            point=SimpleNamespace(supply_apy_pct=supply, borrow_apy_pct=borrow, utilization_pct=util),
+        )
+
+    def _build(self, response, side="supply"):
+        from almanak.framework.data.rates.monitor import _build_lending_rate_from_point
+
+        return _build_lending_rate_from_point(
+            response, protocol="morpho_blue", token="USDG", side=side, chain="robinhood"
+        )
+
+    def test_supply_side_decodes_the_supply_field(self):
+        rate = self._build(self._response(supply="3.1987", borrow="9.99"))
+        assert rate.apy_percent == Decimal("3.1987")
+        assert rate.side == "supply"
+        assert rate.protocol == "morpho_blue"
+        assert rate.token == "USDG"
+        assert rate.chain == "robinhood"
+
+    def test_borrow_side_decodes_the_borrow_field(self):
+        rate = self._build(self._response(supply="9.99", borrow="3.5343"), side="borrow")
+        assert rate.apy_percent == Decimal("3.5343")
+        assert rate.side == "borrow"
+
+    def test_apy_ray_is_derived_from_percent(self):
+        from almanak.framework.data.rates.monitor import RAY
+
+        rate = self._build(self._response(supply="5"))
+        assert rate.apy_ray == Decimal("5") * RAY / Decimal("100")
+
+    def test_utilisation_is_parsed_when_present(self):
+        rate = self._build(self._response(supply="3.1987", util="90.70"))
+        assert rate.utilization_percent == Decimal("90.70")
+
+    def test_absent_utilisation_is_unmeasured_not_zero(self):
+        """Empty != Zero: no utilisation on the wire => None, never Decimal(0)."""
+        rate = self._build(self._response(supply="3.1987", util=""))
+        assert rate.utilization_percent is None
+
+    def test_missing_apy_for_the_requested_side_raises(self):
+        """The OTHER side being populated must not rescue the requested side."""
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        with pytest.raises(DataSourceUnavailable) as exc:
+            self._build(self._response(supply="", borrow="3.5343"), side="supply")
+        assert "no supply APY" in str(exc.value)
+
+    def test_market_id_echo_is_carried_onto_the_rate(self):
+        """VIB-5729: callers discovering a market from a rate read rate.market_id."""
+        target = "0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6"
+        rate = self._build(self._response(supply="3.1987", market_id=target))
+        assert rate.market_id == target
+
+    def test_empty_market_id_echo_is_none_not_empty_string(self):
+        """An unscoped venue makes no market-scoping claim — None, not ""."""
+        assert self._build(self._response(supply="3.1987", market_id="")).market_id is None
+
+    def test_whitespace_market_id_echo_is_none(self):
+        assert self._build(self._response(supply="3.1987", market_id="   ")).market_id is None
+
+    def test_response_without_market_id_attribute_is_tolerated(self):
+        """An older gateway stub has no market_id field at all — must not raise."""
+        from types import SimpleNamespace
+
+        legacy = SimpleNamespace(
+            source="on_chain",
+            point=SimpleNamespace(supply_apy_pct="3.1987", borrow_apy_pct="", utilization_pct=""),
+        )
+        rate = self._build(legacy)
+        assert rate.market_id is None
+        assert rate.apy_percent == Decimal("3.1987")
+
+
+class TestVib5729EchoGuardIsNotDecorative:
+    """End-to-end proof that the rollout guard actually blocks a wrong rate.
+
+    Asserting that ``_assert_market_scope_honoured`` raises in isolation only
+    proves the function works. What matters is the whole lane: a gateway that
+    ignores ``market_id`` (an older sidecar) must not be able to get a rate past
+    ``_fetch_lending_rate_via_gateway`` into a caller. These tests drive the real
+    call chain with a stubbed transport, so if the guard were ever bypassed —
+    reordered after the decode, wrapped in a swallow, or dropped — they fail.
+    """
+
+    MARKET_A = "0xc845da65a020ddca5f132efa8fea79676d8edfdea504226a4c01e7a9e34cddd6"
+    MARKET_B = "0x919a9b6b94dae7c86620eaf7a08e597aae8a4c3a9e9c7671771fbaf62b6b61c7"
+
+    def _client(self, *, echo: str, borrow="2.7744"):
+        """A gateway stub returning a real rate carrying ``echo`` as its market."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        response = SimpleNamespace(
+            success=True,
+            error="",
+            source="on_chain",
+            market_id=echo,
+            point=SimpleNamespace(supply_apy_pct="", borrow_apy_pct=borrow, utilization_pct="72.45"),
+        )
+        client = MagicMock()
+        client.is_connected = True
+        client.rate_history.GetLendingRateCurrent = MagicMock(return_value=response)
+        return client
+
+    def _fetch(self, monkeypatch, client, market_id):
+        import asyncio
+
+        from almanak.framework.data.rates import monitor as m
+
+        monkeypatch.setattr(
+            m, "_monitor_get_connected_gateway_client", lambda: (client, m.gateway_pb2)
+            if hasattr(m, "gateway_pb2") else (client, __import__("almanak.gateway.proto.gateway_pb2", fromlist=["x"]))
+        )
+        mon = m.RateMonitor(chain="robinhood", _internal=True)
+        return asyncio.run(mon._fetch_lending_rate_via_gateway("morpho_blue", "USDG", "borrow", market_id))
+
+    def test_old_gateway_absent_echo_cannot_deliver_a_rate(self, monkeypatch):
+        """The version-skew case: old sidecar drops market_id, sets no echo.
+
+        The response carries a perfectly valid-looking 2.7744% — the OTHER
+        market's rate. It must not reach the caller.
+        """
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        with pytest.raises(DataSourceUnavailable) as exc:
+            self._fetch(monkeypatch, self._client(echo=""), self.MARKET_A)
+        assert "not honoured" in str(exc.value)
+
+    def test_mismatched_echo_cannot_deliver_a_rate(self, monkeypatch):
+        """A provider that answered about a DIFFERENT market is blocked."""
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        with pytest.raises(DataSourceUnavailable):
+            self._fetch(monkeypatch, self._client(echo=self.MARKET_B), self.MARKET_A)
+
+    def test_matching_echo_delivers_the_rate_and_carries_the_market(self, monkeypatch):
+        """The guard must not be so tight it blocks the honest path."""
+        rate = self._fetch(monkeypatch, self._client(echo=self.MARKET_A, borrow="3.5343"), self.MARKET_A)
+        assert rate.apy_percent == Decimal("3.5343")
+        assert rate.market_id == self.MARKET_A  # echo propagated (codex P2)
+
+    def test_unscoped_read_is_unaffected_by_the_guard(self, monkeypatch):
+        """Aave-family lane: no market_id sent => no proof demanded."""
+        rate = self._fetch(monkeypatch, self._client(echo=""), None)
+        assert rate.apy_percent == Decimal("2.7744")
+        assert rate.market_id is None
