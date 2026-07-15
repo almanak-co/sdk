@@ -664,7 +664,9 @@ class TeardownManager:
             # intents-present path it is folded into the result AFTER execution so
             # the risk-reducing intents still run first (inverted semantics).
             completeness = check_intent_coverage(
-                positions, intents, consolidation_target_token=self._consolidation_noop_target()
+                positions,
+                intents,
+                consolidation_target_token=self._consolidation_noop_target(strategy, intents),
             )
 
             if not intents:
@@ -1216,21 +1218,45 @@ class TeardownManager:
             consolidation_consent=state.consolidation_consent,
         )
 
-    def _consolidation_noop_target(self) -> str | None:
+    def _consolidation_noop_target(
+        self,
+        strategy: IntentStrategy | None,
+        intents: list[Any] | None,
+    ) -> str | None:
         """The token Phase-2 consolidation swaps residual holdings INTO, threaded
         into the TD-11 completeness gate (VIB-5494 Item 1).
 
-        Uses the SAME target expression ``run_token_consolidation`` resolves
-        (``token_consolidation.target_token or target_token``), gated to the
+        Uses the SAME target expression AND the same chain derivation
+        ``run_token_consolidation`` resolves with, so the gate credits exactly
+        the token consolidation will actually target. Gated to the
         ``TARGET_TOKEN`` policy by :func:`resolve_consolidation_noop_target` so a
         held STAKE/TOKEN position already denominated in that target is credited a
         no-op close instead of false-failing the teardown. Returns ``None`` for
         entry-token / keep-outputs policies (no single "already done" token).
+
+        Passing the chain is load-bearing (VIB-5727): the configured target is
+        normally the "no preference" sentinel, and resolving it without a chain
+        yields the legacy ``USDC`` — which on a USDC-less chain credits a token
+        the wallet cannot hold while denying credit to the one it does (robinhood
+        holds USDG), re-arming the recurring failed-teardown loop this credit
+        exists to prevent.
+
+        Both parameters are REQUIRED — deliberately, even though ``None`` is an
+        accepted *value* for each. They were briefly optional, and the runner
+        lane (``_teardown_helpers.execute_and_verify``) called this with no
+        arguments: the chain silently resolved to ``None`` → legacy ``USDC``,
+        reintroducing the exact bug above on the one chain this ticket is about.
+        A defaulted parameter turns "the caller forgot" into a wrong answer;
+        a required one turns it into a TypeError at the call site. Callers with
+        genuinely no strategy/intents must pass ``None`` explicitly and thereby
+        state that they know the chain is unknown.
         """
         cfg = self.config.token_consolidation
+        chain = _teardown_chain(list(intents or [])) or (getattr(strategy, "chain", None) or None)
         return resolve_consolidation_noop_target(
             self.config.asset_policy,
             (getattr(cfg, "target_token", None) or self.config.target_token),
+            chain=chain,
         )
 
     async def run_token_consolidation(
@@ -1270,8 +1296,15 @@ class TeardownManager:
             ConsolidationOutcome,
             derive_strategy_token_universe,
             plan_consolidation,
+            resolve_chain_target_token,
             resolve_consolidation_targets,
         )
+
+        # Bound BEFORE the try so the failure path can report the target if one
+        # was already resolved (VIB-5727 / CodeRabbit). `None` here means the
+        # phase genuinely never got that far — Empty ≠ Zero in both directions:
+        # never invent a target that was not chosen, never discard one that was.
+        target_token: str | None = None
 
         try:
             cfg = self.config.token_consolidation
@@ -1293,7 +1326,15 @@ class TeardownManager:
             if self.runner_helpers.has_accounting_events:
                 accounting_events = self.runner_helpers.get_accounting_events(strategy)  # type: ignore[misc]
 
-            target_token = cfg.target_token or self.config.target_token
+            # Chain FIRST — the target can only be resolved against a known
+            # chain (VIB-5727). The request row is written before anyone knows
+            # the chain (the hosted STOP bridge does not even accept a target),
+            # so this is the only honest place to choose one.
+            chain = _teardown_chain(closing) or (getattr(strategy, "chain", None) or None)
+
+            requested_token = cfg.target_token or self.config.target_token
+            target_token, chain_target_warnings = resolve_chain_target_token(requested_token, chain)
+
             targets, target_warnings = resolve_consolidation_targets(
                 self.config.asset_policy,
                 target_token,
@@ -1301,7 +1342,6 @@ class TeardownManager:
                 accounting_events=accounting_events,
             )
 
-            chain = _teardown_chain(closing) or (getattr(strategy, "chain", None) or None)
             plan = plan_consolidation(
                 market=market,
                 chain=chain,
@@ -1312,7 +1352,7 @@ class TeardownManager:
                 mode=mode,
                 targets=targets,
             )
-            warnings = [*target_warnings, *plan.warnings]
+            warnings = [*chain_target_warnings, *target_warnings, *plan.warnings]
             if plan.intents:
                 # Wallet-scope disclosure (pr-auditor): token SELECTION is
                 # strategy-scoped, but each swap's AMOUNT is the full wallet
@@ -1341,7 +1381,7 @@ class TeardownManager:
 
             if not plan.intents:
                 return ConsolidationOutcome(
-                    planned=0, succeeded=0, failed=0, warnings=warnings, decisions=plan.decisions
+                    planned=0, succeeded=0, failed=0, warnings=warnings, decisions=plan.decisions, target=target_token
                 )
 
             logger.info(
@@ -1444,6 +1484,7 @@ class TeardownManager:
                 warnings=warnings,
                 decisions=plan.decisions,
                 accounting_degraded_count=result.accounting_degraded_count,
+                target=target_token,
             )
         except Exception as exc:  # noqa: BLE001 — consolidation must never un-succeed the teardown
             logger.exception(
@@ -1455,6 +1496,12 @@ class TeardownManager:
                 succeeded=0,
                 failed=1,
                 warnings=[f"token consolidation raised: {exc}"],
+                # Carry the resolved target through the failure path: swaps may
+                # already have been attempted against it, and reporting None
+                # would tell an operator "no target was resolved" precisely when
+                # they are debugging why it failed. `None` only when the raise
+                # preceded resolution.
+                target=target_token,
             )
 
     # crap-allowlist: PR is pure string-content cleanup (chore: VIB removal); zero branches added, function was already over threshold on main. Refactor tracked in VIB-4139.

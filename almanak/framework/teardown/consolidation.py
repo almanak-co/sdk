@@ -127,6 +127,10 @@ class ConsolidationOutcome:
     warnings: list[str] = field(default_factory=list)
     decisions: list[ConsolidationDecision] = field(default_factory=list)
     accounting_degraded_count: int = 0
+    # The chain-resolved target this phase actually used (VIB-5727). ``None``
+    # when no target was resolved (phase skipped / nothing usable on the
+    # chain) — Empty ≠ Zero: never defaulted to a symbol that was not used.
+    target: str | None = None
 
 
 def _is_consolidatable_symbol(value: str) -> bool:
@@ -294,6 +298,110 @@ def _earliest_swap_entry_token(accounting_events: Sequence[dict] | None) -> str 
     return None
 
 
+# The historical consolidation target, and the backward-compatibility anchor
+# (VIB-5727). Deliberately a literal in ONE place: every chain that resolved
+# USDC before this change must still resolve USDC, and the cheapest proof of
+# that is to try this symbol first and return it untouched when it resolves.
+_LEGACY_TARGET_TOKEN = "USDC"
+
+
+def resolve_chain_target_token(
+    requested: str | None,
+    chain: str | None,
+) -> tuple[str | None, list[str]]:
+    """Resolve the consolidation target for *chain*. Returns ``(target, warnings)``.
+
+    The seam VIB-5727 exists for: the request row is written before anyone knows
+    the chain (the hosted STOP bridge does not even take a target), so the
+    target can only honestly be chosen here, where the chain is known.
+
+    ``None`` target means "no usable target — skip consolidation", never a
+    guess. Order:
+
+    1. **Chain unknown** → preserve legacy behaviour exactly (explicit value, or
+       ``USDC``). Nothing better is knowable.
+    2. **Explicit request that resolves** → honoured verbatim.
+    3. **Explicit request that does NOT resolve** → skip + loud warning. An
+       operator instruction is never silently substituted; teardown's rule is to
+       warn rather than guess a trade (same contract as ``entry_token``).
+    4. **Unspecified** → ``USDC`` when it resolves. This single step is the
+       whole backward-compatibility guarantee: all 15 chains that work today
+       take it and are provably unaffected. It is NOT redundant with step 5 —
+       berachain resolves ``USDC`` via a symbol alias while its
+       stable-enumeration ranks ``HONEY`` first, so skipping this step would
+       silently re-target a working chain.
+    5. **Unspecified, no USDC** → the chain's declared/derived dollar.
+    6. **Unspecified, no dollar at all** → wrapped native (still a consolidation
+       into one asset, and the wrapped native is swappable — it is the very
+       token LP exits leave behind).
+    7. Otherwise → skip + loud warning.
+    """
+    from almanak.framework.teardown.models import TARGET_TOKEN_CHAIN_DEFAULT
+
+    warnings: list[str] = []
+    is_explicit = bool(requested) and requested != TARGET_TOKEN_CHAIN_DEFAULT
+
+    if not chain:
+        # No chain in hand (no closing intent declared one and the strategy has
+        # no chain attribute). Chain-aware resolution is impossible by
+        # definition; fall back to exactly what this code did before VIB-5727.
+        return (requested if is_explicit else _LEGACY_TARGET_TOKEN), warnings
+
+    from almanak.framework.data.tokens.chain_stable import (
+        resolve_chain_stable,
+        token_resolves_on_chain,
+    )
+
+    if requested and is_explicit:
+        # `requested` is narrowed to `str` here, so no type-ignore is needed —
+        # `is_explicit` already implies truthiness, but only the explicit check
+        # proves it to the type checker (gemini, PR #3285).
+        if token_resolves_on_chain(requested, chain):
+            return requested, warnings
+        warnings.append(
+            f"asset_policy=target_token requested {requested!r}, which is not a registered "
+            f"token on {chain} — skipping token consolidation rather than substituting a "
+            f"different asset for an explicit instruction. The wallet keeps its natural "
+            f"exit tokens. Re-run without --target-token to consolidate into the chain's "
+            f"default asset."
+        )
+        return None, warnings
+
+    if token_resolves_on_chain(_LEGACY_TARGET_TOKEN, chain):
+        return _LEGACY_TARGET_TOKEN, warnings
+
+    stable = resolve_chain_stable(chain)
+    if stable:
+        warnings.append(
+            f"{_LEGACY_TARGET_TOKEN} is not registered on {chain} — consolidating into "
+            f"{stable} (the chain's canonical dollar) instead. Pass --target-token to override."
+        )
+        return stable, warnings
+
+    wrapped = None
+    try:
+        from almanak.core.chains import ChainRegistry
+
+        descriptor = ChainRegistry.try_resolve(chain)
+        wrapped = descriptor.native.wrapped_symbol if descriptor is not None else None
+    except Exception:  # noqa: BLE001 — an unresolvable chain just means no fallback
+        logger.debug("ChainRegistry lookup failed for chain=%r", chain, exc_info=True)
+
+    if wrapped and token_resolves_on_chain(wrapped, chain):
+        warnings.append(
+            f"{chain} has no registered stablecoin — consolidating into wrapped native "
+            f"{wrapped} instead. Pass --target-token to override."
+        )
+        return wrapped, warnings
+
+    warnings.append(
+        f"no usable consolidation target on {chain} (no {_LEGACY_TARGET_TOKEN}, no registered "
+        f"stablecoin, no resolvable wrapped native) — skipping token consolidation; the wallet "
+        f"keeps its natural exit tokens. Pass --target-token to consolidate explicitly."
+    )
+    return None, warnings
+
+
 def resolve_consolidation_targets(
     asset_policy: TeardownAssetPolicy | str,
     target_token: str | None,
@@ -305,7 +413,9 @@ def resolve_consolidation_targets(
 
     Returns ``(targets, warnings)``:
 
-    * ``target_token`` policy → ``{target_token}`` (default USDC).
+    * ``target_token`` policy → ``{target_token}``; ``None`` target (already
+      chain-resolved by :func:`resolve_chain_target_token`, which returns
+      ``None`` when nothing is usable) → skip, never a fabricated default.
     * ``entry_token`` policy → ``get_teardown_profile().original_entry_assets``
       when non-empty; fallback = from-token of the deployment's earliest SWAP
       accounting event; undiscoverable → ``(None, [loud warning])`` —
@@ -323,7 +433,17 @@ def resolve_consolidation_targets(
         return None, []
 
     if policy == TeardownAssetPolicy.TARGET_TOKEN:
-        return {target_token or "USDC"}, []
+        # No `or "USDC"`: the caller has already done chain-aware resolution and
+        # a None here means "nothing usable on this chain" (VIB-5727).
+        # Re-defaulting to USDC would resurrect the exact bug — planning a swap
+        # into a token the chain does not have.
+        if not target_token:
+            warnings.append(
+                "asset_policy=target_token but no usable consolidation target was resolved "
+                "— skipping token consolidation; the wallet keeps its natural exit tokens."
+            )
+            return None, warnings
+        return {target_token}, []
 
     # ENTRY_TOKEN — profile first, earliest-SWAP fallback second.
     entry_assets: list[str] = []
@@ -388,7 +508,14 @@ def _resolve_plan_target_set(
             warnings.append(f"unknown asset_policy {asset_policy!r} — skipping token consolidation")
             return None
         if policy == TeardownAssetPolicy.TARGET_TOKEN:
-            targets = {target_token or "USDC"}
+            # No `or "USDC"` (VIB-5727) — see resolve_consolidation_targets.
+            if not target_token:
+                warnings.append(
+                    "asset_policy=target_token but no usable consolidation target was resolved "
+                    "— skipping token consolidation"
+                )
+                return None
+            targets = {target_token}
         elif policy == TeardownAssetPolicy.ENTRY_TOKEN:
             warnings.append(
                 "entry_token policy requires pre-resolved targets "
@@ -662,6 +789,7 @@ def fold_consolidation_outcome(result: TeardownResult, outcome: ConsolidationOut
         consolidation_succeeded=outcome.succeeded,
         consolidation_failed=outcome.failed,
         consolidation_warnings=list(outcome.warnings),
+        consolidation_target=outcome.target,
         accounting_degraded=result.accounting_degraded or outcome.accounting_degraded_count > 0,
         accounting_degraded_count=result.accounting_degraded_count + outcome.accounting_degraded_count,
     )
@@ -674,5 +802,6 @@ __all__ = [
     "derive_strategy_token_universe",
     "fold_consolidation_outcome",
     "plan_consolidation",
+    "resolve_chain_target_token",
     "resolve_consolidation_targets",
 ]

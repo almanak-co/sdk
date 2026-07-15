@@ -206,15 +206,24 @@ def _is_noop_target_close(position: PositionInfo, consolidation_target_token: st
 def resolve_consolidation_noop_target(
     asset_policy: TeardownAssetPolicy | str | None,
     target_token: str | None,
+    *,
+    chain: str | None = None,
 ) -> str | None:
     """The single token every residual is consolidated INTO, or ``None`` when the
     policy has no single target so no no-op credit should apply (VIB-5494 Item 1).
 
-    Returns the target ONLY for the ``TARGET_TOKEN`` policy (default ``"USDC"``).
+    Returns the target ONLY for the ``TARGET_TOKEN`` policy.
     ``ENTRY_TOKEN`` (per-position entry assets) and ``KEEP_OUTPUTS`` (no terminal
     swaps) have no single "already done" token, so they return ``None`` and the
     completeness gate keeps its strict, fail-safe behaviour for them. Callers
     thread the result into :func:`check_intent_coverage`.
+
+    *chain* (VIB-5727) resolves the "no preference" sentinel to the same token
+    the consolidation phase will actually target. Threading it is not cosmetic:
+    this gate credits a position already denominated in the target as a no-op
+    close, and without the real target that credit is lost — which is exactly
+    the recurring failed-teardown loop VIB-5494 Item 1 fixed. Chain unknown →
+    the legacy ``USDC`` answer, so the gate is never *less* accurate than before.
     """
     # Narrow explicitly for mypy (the enum constructor is typed to accept only
     # ``str``). Behaviour is identical to ``TeardownAssetPolicy(asset_policy)``
@@ -233,7 +242,15 @@ def resolve_consolidation_noop_target(
         return None
     if policy != TeardownAssetPolicy.TARGET_TOKEN:
         return None
-    return target_token or "USDC"
+
+    from almanak.framework.teardown.consolidation import resolve_chain_target_token
+
+    # Same resolution the consolidation phase uses, so the no-op credit is
+    # granted for the token that will actually be targeted (VIB-5727). An
+    # explicit-but-unresolvable target yields None here → strict gate, which is
+    # the fail-safe direction (no false "already done" credit).
+    resolved, _warnings = resolve_chain_target_token(target_token, chain)
+    return resolved
 
 
 # Position types where two distinct positions ALWAYS need two distinct on-chain

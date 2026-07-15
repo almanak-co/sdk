@@ -1664,6 +1664,7 @@ def update_teardown_requests_lifecycle(
     try:
         # Local alias-imports to avoid shadowing the outer-scope
         # ``TeardownMode`` reference in the parent module.
+        from ..teardown.models import TARGET_TOKEN_CHAIN_DEFAULT as _TARGET_TOKEN_CHAIN_DEFAULT
         from ..teardown.models import TeardownAssetPolicy as _TAP
         from ..teardown.models import TeardownMode as _TM
         from ..teardown.models import TeardownRequest as _TR
@@ -1681,7 +1682,11 @@ def update_teardown_requests_lifecycle(
                 deployment_id=deployment_id,
                 mode=_TM(mode),
                 asset_policy=_TAP.TARGET_TOKEN,
-                target_token="USDC",
+                # Mirrors the request-lane default, which is now the "no
+                # preference" sentinel resolved per-chain (VIB-5727) — the
+                # execute lane surfaces no asset-routing knobs, so it has no
+                # operator preference to honour.
+                target_token=_TARGET_TOKEN_CHAIN_DEFAULT,
                 requested_by="cli-execute",
                 reason="execute_teardown CLI invocation",
                 positions_total=result.positions_total if result.has_position_breakdown else result.intents_total,

@@ -558,6 +558,27 @@ class ChainDescriptor:
             semantics — consumers must handle empty / missing lookups).
             Frozen at construction; mutating after returns has no effect.
             VIB-4872 (W6-followup).
+        canonical_stable: The chain's canonical USD stablecoin SYMBOL (e.g.
+            ``"USDG"``) — the dollar that actually has routable liquidity here
+            and that protocols on this chain denominate in. **Sparse and
+            deliberately so**: declare it ONLY where the chain has a single
+            verifiable answer that a registry-ordering heuristic gets WRONG.
+            ``None`` (the default, and the case for every chain that has a
+            liquid Circle-USDC) means "no chain-specific override" — consumers
+            fall back to their own ordering, which is already correct there.
+
+            This is a PICK, never an existence check. It answers "which dollar
+            do we mean on this chain?", NOT "is token X registered here?" — the
+            latter is ``TokenResolver``'s job, and ``TokenResolver`` does not
+            read this field or ``tokens``. Do not infer one from the other:
+            ``tokens`` is ``None`` on several chains where USDC nonetheless
+            resolves fine (berachain, solana), because symbol resolution is
+            driven by an independent catalogue.
+
+            The declared symbol MUST resolve on this chain. ``core`` cannot
+            import the ``framework`` token layer to check that at construction
+            (backward import), so the invariant is enforced by a unit test
+            (``tests/unit/core/test_chain_canonical_stable.py``). VIB-5727.
         external_ids: Sparse, vendor-keyed mapping from a third-party data /
             integration vendor (see :data:`KNOWN_VENDORS`) to that vendor's
             per-chain identifier — e.g. ``{"coingecko": "arbitrum-one",
@@ -627,6 +648,7 @@ class ChainDescriptor:
     explorer: Explorer = field(default_factory=Explorer)
     simulation: SimulationProfile = field(default_factory=SimulationProfile)
     tokens: Mapping[str, str] | None = None
+    canonical_stable: str | None = None
     external_ids: Mapping[str, str] | None = None
     chainlink: ChainlinkFeeds | None = None
     contracts: Mapping[str, str] | None = None

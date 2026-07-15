@@ -19,6 +19,25 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
+# Sentinel for "the operator expressed no target-token preference" (VIB-5727).
+#
+# Why a sentinel string and not None: `teardown_requests.target_token` is
+# `TEXT NOT NULL` (state_manager.py), so None cannot be persisted; None also
+# survives the to_dict/from_dict round-trip and then crashes the first
+# `target_token.upper()` in the planner. A string keeps every existing reader
+# total.
+#
+# Why not simply keep "USDC" as the default: then "the operator asked for USDC"
+# and "nobody asked for anything" are indistinguishable, and the resolver
+# cannot know whether it is allowed to substitute a chain-appropriate dollar
+# (it must never override an explicit instruction — teardown's rule is to warn
+# and skip rather than guess a trade).
+#
+# The value cannot collide with a real token symbol by construction. It is
+# resolved to a concrete symbol at consolidation time, where the chain is
+# known, and the resolved value is what gets reported and stamped back.
+TARGET_TOKEN_CHAIN_DEFAULT = "__chain_default__"
+
 
 class TeardownMode(StrEnum):
     """Internal execution mode (not exposed directly to users).
@@ -450,6 +469,13 @@ class TeardownResult:
     consolidation_succeeded: int = 0
     consolidation_failed: int = 0
     consolidation_warnings: list[str] = field(default_factory=list)
+    # The target the consolidation phase ACTUALLY used, after chain-aware
+    # resolution (VIB-5727). The request row may carry the
+    # ``TARGET_TOKEN_CHAIN_DEFAULT`` sentinel, so the request is not a truthful
+    # source for "what happened" — this is. ``None`` means the phase never
+    # resolved a target (skipped, or no usable dollar on the chain); Empty ≠
+    # Zero, so it is not defaulted to a symbol that was never used.
+    consolidation_target: str | None = None
 
     # VIB-5085: position-level closure counts. ``positions_closed`` reports the
     # number of *positions* verified closed by ``_verify_closure_detailed`` —
@@ -768,7 +794,14 @@ class TeardownRequest:
     deployment_id: str
     mode: TeardownMode
     asset_policy: TeardownAssetPolicy = TeardownAssetPolicy.TARGET_TOKEN
-    target_token: str = "USDC"
+    # NOT a token symbol by default (VIB-5727). The sentinel means "the
+    # operator expressed no preference — resolve the chain's dollar at
+    # consolidation time, where the chain is actually known". A literal
+    # ``"USDC"`` here means the operator ASKED for USDC and is honoured as an
+    # explicit instruction (never silently substituted), which is also what
+    # every pre-VIB-5727 persisted row means — hence old rows keep their exact
+    # behaviour. See ``TARGET_TOKEN_CHAIN_DEFAULT``.
+    target_token: str = TARGET_TOKEN_CHAIN_DEFAULT
 
     # Request metadata
     reason: str | None = None
@@ -870,7 +903,12 @@ class TeardownRequest:
             deployment_id=data["deployment_id"],
             mode=TeardownMode(data["mode"]),
             asset_policy=TeardownAssetPolicy(data.get("asset_policy", "target_token")),
-            target_token=data.get("target_token", "USDC"),
+            # `or` (not `.get`'s default): a present-but-null / empty value has
+            # to collapse to the sentinel too. `.get(k, default)` only
+            # substitutes on a MISSING key, so an explicit JSON `null` used to
+            # survive the round-trip as None and then crash the first
+            # `target_token.upper()` in the planner (VIB-5727).
+            target_token=data.get("target_token") or TARGET_TOKEN_CHAIN_DEFAULT,
             reason=data.get("reason"),
             requested_at=datetime.fromisoformat(data["requested_at"]),
             requested_by=data.get("requested_by", "dashboard"),

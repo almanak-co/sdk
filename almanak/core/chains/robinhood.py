@@ -166,18 +166,40 @@ DESCRIPTOR = register_chain(
         # No Enso delegate (Enso not deployed here).
         contracts=safe_stack_contracts(enso_delegate_primary=False),
         # Lowercase symbol → chain-canonical ERC-20 address, all verified on-chain
-        # at block 5_610_000. USDG is "Global Dollar" (Paxos, 6 dec) — the chain's
-        # canonical stable and the loan asset of every Morpho market; it shares the
-        # USDG ticker with an unrelated "Gravity USD" on X-Layer, so it is keyed by
-        # its own address, never aliased to USDC. USDe is Ethena's canonical
-        # cross-chain address (Morpho collateral, PR 2). No canonical Circle-USDC /
-        # Tether-USDT with real liquidity exists on 4663 — deliberately omitted, not
-        # invented (the 6-dec USDC/USDT that exist are dead, ~11 holders).
+        # at block 5_610_000. USDG is "Global Dollar" (Paxos, 6 dec), the loan asset
+        # of every Morpho market; it shares the USDG ticker with an unrelated
+        # "Gravity USD" on X-Layer, so it is keyed by its own address, never aliased
+        # to USDC. USDe is Ethena's canonical cross-chain address (Morpho collateral,
+        # PR 2). No canonical Circle-USDC / Tether-USDT with real liquidity exists on
+        # 4663 — deliberately omitted, not invented (the 6-dec USDC/USDT that exist
+        # are dead, ~11 holders). Which of these is the chain's dollar is NOT stated
+        # here in prose: it is declared as data on ``canonical_stable`` below, with
+        # one reader (VIB-5727).
         tokens={
             "weth": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
             "usdg": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
             "usde": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
         },
+        # The chain's canonical dollar, declared as DATA because no ordering
+        # heuristic over the token registry gets 4663 right (VIB-5727).
+        #
+        # Both USDG and USDe are registered stablecoins here, so any
+        # registry-order / is_stablecoin ranking is free to pick either — and
+        # the framework's generic picker
+        # (``permissions/synthetic_intents.py:_candidate_stable_symbols``)
+        # picks USDE first. That answer is not merely arbitrary, it is WRONG:
+        # USDe has zero-liquidity pools on 4663 (VIB-5729 — a USDG→USDe swap
+        # leg is refused by the price-impact guard), while WETH/USDG is the
+        # only pair with a real V3 pool (~$3.5M TVL, fee tier 500). A
+        # consolidation or synthetic-approval target of USDe therefore cannot
+        # route at all.
+        #
+        # The deciding fact — which dollar has liquidity — is not derivable
+        # from any registry field, so it is declared here rather than inferred.
+        # A swap connector's permission-hints module currently hand-pins the
+        # same fact; folding that override into this field is tracked separately
+        # (it flips the Zodiac manifest and needs its own regression review).
+        canonical_stable="USDG",
         # Per-vendor chain slugs, all verified 2026-07-09: CoinGecko asset-platform
         # id "robinhood" (chain_identifier 4663), DexScreener "robinhood",
         # GeckoTerminal "robinhood" (went live 2026-07-09), and DeFiLlama chain slug

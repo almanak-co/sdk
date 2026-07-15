@@ -907,7 +907,16 @@ class TestUpdateTeardownRequestsLifecycle:
         created = tsm.create_request.call_args.args[0]
         assert created.deployment_id == "my-strat"
         assert created.requested_by == "cli-execute"
-        assert created.target_token == "USDC"
+        # VIB-5727: the execute lane surfaces no asset-routing knobs, so it has
+        # no operator preference to record — it mirrors the request-lane default,
+        # which is now the "no preference" sentinel resolved per-chain at
+        # consolidation time. It must NOT hardcode a token: pinning "USDC" here
+        # is what made every USDC-less chain (robinhood) fail, because a literal
+        # is indistinguishable from an operator explicitly asking for USDC and
+        # therefore blocks chain-aware substitution.
+        from almanak.framework.teardown import TARGET_TOKEN_CHAIN_DEFAULT
+
+        assert created.target_token == TARGET_TOKEN_CHAIN_DEFAULT
         # And then update_request was called with success status
         tsm.update_request.assert_called_once()
         updated = tsm.update_request.call_args.args[0]

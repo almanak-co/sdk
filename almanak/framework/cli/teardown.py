@@ -56,6 +56,7 @@ from almanak.config.cli_options import gateway_client_options
 logger = logging.getLogger(__name__)
 
 from ..teardown import (
+    TARGET_TOKEN_CHAIN_DEFAULT,
     TeardownAssetPolicy,
     TeardownMode,
     TeardownPhase,
@@ -334,6 +335,20 @@ def format_count(request: TeardownRequest, value: int) -> str:
     Empty ≠ Zero, in both directions.
     """
     return _UNKNOWN_COUNT if request.counts_unmeasured else str(value)
+
+
+def format_target_token(target_token: str | None) -> str:
+    """Render a requested consolidation target honestly (VIB-5727).
+
+    The ``TARGET_TOKEN_CHAIN_DEFAULT`` sentinel means the operator expressed no
+    preference and the real target is resolved per-chain when the consolidation
+    phase runs. Printing the sentinel raw would be noise; printing a guessed
+    ``"USDC"`` would be a lie on any chain that has no USDC — the exact
+    mis-report this ticket is about. Say what is true: it is not decided yet.
+    """
+    if not target_token or target_token == TARGET_TOKEN_CHAIN_DEFAULT:
+        return "auto (chain default, resolved at teardown time)"
+    return target_token
 
 
 def format_progress(request: TeardownRequest) -> str:
@@ -990,13 +1005,21 @@ def execute_teardown(  # noqa: C901
     "-a",
     type=click.Choice(["target", "entry", "keep"]),
     default="target",
-    help="Asset policy: target (USDC), entry (original), keep (native)",
+    help="Asset policy: target (chain's default stable), entry (original), keep (native)",
 )
 @click.option(
     "--target-token",
     "-t",
-    default="USDC",
-    help="Target token for consolidation (default: USDC)",
+    default=None,
+    help=(
+        "Target token for consolidation. Default: resolved per-chain at teardown "
+        "time, in order — USDC on every chain that has it; else the chain's "
+        "declared canonical stable (e.g. USDG on robinhood); else any other "
+        "registered stablecoin (e.g. USDT0 on plasma, USDC.e on zerog); else "
+        "wrapped native. Pass a symbol to force it; an explicit symbol that is "
+        "not registered on the chain skips consolidation rather than being "
+        "substituted for one you did not choose."
+    ),
 )
 @click.option(
     "--reason",
@@ -1031,7 +1054,7 @@ def request(
     strategy: str,
     mode: str,
     asset_policy: str,
-    target_token: str,
+    target_token: str | None,
     reason: str | None,
     force: bool,
     wait: bool,
@@ -1087,7 +1110,10 @@ def request(
     click.echo(f"  Mode:         {format_mode(mode_enum)}")
     click.echo(f"  Asset Policy: {asset_policy_enum.value}")
     if asset_policy_enum == TeardownAssetPolicy.TARGET_TOKEN:
-        click.echo(f"  Target Token: {target_token}")
+        # Do not print a token the runner may not actually use: with no -t the
+        # target is resolved per-chain at teardown time (VIB-5727), so naming a
+        # symbol here would be a guess the operator could reasonably act on.
+        click.echo(f"  Target Token: {format_target_token(target_token)}")
     if reason:
         click.echo(f"  Reason:       {reason}")
     click.echo()
@@ -1119,7 +1145,12 @@ def request(
         deployment_id=strategy,
         mode=mode_enum,
         asset_policy=asset_policy_enum,
-        target_token=target_token,
+        # No -t → persist the "no preference" sentinel, NOT a token symbol. The
+        # runner resolves it per-chain (VIB-5727). Persisting "USDC" here is
+        # what made every USDC-less chain fail: it is indistinguishable from an
+        # operator explicitly asking for USDC, so nothing downstream was allowed
+        # to substitute the chain's actual dollar.
+        target_token=target_token or TARGET_TOKEN_CHAIN_DEFAULT,
         reason=reason,
         requested_by="cli",
     )
@@ -1457,7 +1488,11 @@ def status(working_dir: str | None, strategy: str, as_json: bool):
     click.echo(f"  Mode:         {format_mode(request.mode)}")
     click.echo(f"  Asset Policy: {request.asset_policy.value}")
     if request.asset_policy == TeardownAssetPolicy.TARGET_TOKEN:
-        click.echo(f"  Target Token: {request.target_token}")
+        # Never surface the sentinel raw (VIB-5727). Until the phase runs there
+        # is genuinely no target to report — the chain-aware choice happens at
+        # consolidation time — and the resolved value is reported from
+        # result_json by `_render_consolidation_status` once it exists.
+        click.echo(f"  Target Token: {format_target_token(request.target_token)}")
     if request.current_phase:
         click.echo(f"  Phase:        {request.current_phase.value}")
     click.echo(f"  Progress:     {format_progress(request)}")

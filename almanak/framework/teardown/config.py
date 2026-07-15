@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
-from almanak.framework.teardown.models import TeardownAssetPolicy
+from almanak.framework.teardown.models import TARGET_TOKEN_CHAIN_DEFAULT, TeardownAssetPolicy
 
 # Consolidation dust floor (VIB-5011): residuals worth at or below this USD value
 # are never swapped during teardown token-consolidation — the swap gas would eat
@@ -37,12 +37,22 @@ class TokenConsolidationConfig:
     Controls whether and how tokens are consolidated after
     closing positions (Phase 1).
 
-    Default: ON, consolidate to USDC.
+    Default: ON, consolidating into the chain's dollar — resolved at
+    consolidation time, NOT fixed to USDC (VIB-5727). Order: USDC where it
+    resolves; else the chain's declared ``canonical_stable`` (e.g. USDG on
+    robinhood); else any other registered stablecoin (e.g. USDT0 on plasma);
+    else wrapped native; else the phase is skipped with a loud warning rather
+    than guessing. An explicit ``target_token`` is honoured verbatim, or refused
+    with a warning if it does not resolve on the chain — never substituted.
     Emergency mode: Automatically disabled (KEEP_OUTPUTS).
     """
 
     enabled: bool = True  # ON by default
-    target_token: str = "USDC"  # Default target
+    # "No preference" — resolved per-chain at consolidation time (VIB-5727).
+    # A programmatic TeardownConfig() gets the same chain-aware treatment as a
+    # CLI request; hardcoding "USDC" here would keep every USDC-less chain
+    # broken for embedders.
+    target_token: str = TARGET_TOKEN_CHAIN_DEFAULT
     keep_tokens: list[str] = field(default_factory=list)  # Don't swap these
     # Dust threshold: residuals below this USD value are never swapped — the
     # swap gas would eat the proceeds. VIB-5011 raised the floor $1 → $5.
@@ -73,7 +83,8 @@ class TokenConsolidationConfig:
             raw_floor = str(DEFAULT_MIN_SWAP_VALUE_USD)
         return cls(
             enabled=data.get("enabled", True),
-            target_token=data.get("target_token", "USDC"),
+            # `or`: a present-but-null/empty value means "no preference" too.
+            target_token=data.get("target_token") or TARGET_TOKEN_CHAIN_DEFAULT,
             keep_tokens=data.get("keep_tokens", []),
             min_swap_value_usd=Decimal(str(raw_floor)),
         )
@@ -202,8 +213,9 @@ class TeardownConfig:
 
     # === Execution Settings ===
 
-    # Target token for proceeds
-    target_token: str = "USDC"
+    # Target token for proceeds. "No preference" by default — resolved
+    # per-chain at consolidation time (VIB-5727).
+    target_token: str = TARGET_TOKEN_CHAIN_DEFAULT
 
     # Gas price strategy: "normal", "fast", "aggressive"
     gas_strategy: str = "normal"

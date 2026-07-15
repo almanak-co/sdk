@@ -438,6 +438,11 @@ async def _check_no_intent_completeness(strategy: Any, request: Any = None) -> A
     noop_target = resolve_consolidation_noop_target(
         getattr(request, "asset_policy", None),
         getattr(request, "target_token", None),
+        # VIB-5727: the request may carry the "no preference" sentinel, so the
+        # gate needs the chain to credit the same token consolidation will
+        # target. No teardown plan exists yet at this gate, so the strategy is
+        # the only chain source available here.
+        chain=getattr(strategy, "chain", None) or None,
     )
     return check_intent_coverage(positions, [], consolidation_target_token=noop_target)
 

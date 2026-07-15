@@ -688,6 +688,10 @@ class TestResultJsonContract:
         runner = MagicMock()
         runner._calculate_duration_ms = MagicMock(return_value=10)
         request = MagicMock()
+        # VIB-5727: deliberately DIFFERENT from the result's resolved target.
+        # result_json must report what the phase actually did, not echo the
+        # request — the request may carry the "no preference" sentinel, and on a
+        # USDC-less chain echoing it reported a token that was never used.
         request.target_token = "USDC"
         state_manager = MagicMock()
 
@@ -697,6 +701,7 @@ class TestResultJsonContract:
             consolidation_succeeded=0,
             consolidation_failed=1,
             consolidation_warnings=["1 consolidation swap(s) failed"],
+            consolidation_target="USDG",
         )
 
         iteration_result = map_teardown_result(
@@ -718,7 +723,8 @@ class TestResultJsonContract:
         consolidation = kwargs["result"]["consolidation"]
         assert consolidation["planned"] == 1
         assert consolidation["failed"] == 1
-        assert consolidation["target_token"] == "USDC"
+        # Reads the RESOLVED target off the result, NOT request.target_token.
+        assert consolidation["target_token"] == "USDG"
         assert consolidation["warnings"] == ["1 consolidation swap(s) failed"]
 
     def test_below_dust_only_residual_fires_runner_warning(self, caplog):
@@ -809,11 +815,14 @@ class TestResultJsonContract:
         TeardownRequest as consent; self-signalled teardowns keep the
         pre-VIB-5011 behaviour."""
         from almanak.framework.runner._teardown_helpers import _teardown_config_from_request
-        from almanak.framework.teardown.models import TeardownAssetPolicy
+        from almanak.framework.teardown.models import TARGET_TOKEN_CHAIN_DEFAULT, TeardownAssetPolicy
 
         cfg = _teardown_config_from_request(None)
         assert cfg.asset_policy == TeardownAssetPolicy.TARGET_TOKEN
-        assert cfg.target_token == "USDC"
+        # VIB-5727: "no preference" — the config builder runs before the chain
+        # is known, so it must carry the sentinel rather than pick a token.
+        # (Moot here since consolidation is disabled, but the contract holds.)
+        assert cfg.target_token == TARGET_TOKEN_CHAIN_DEFAULT
         assert cfg.token_consolidation.enabled is False
 
     def test_build_teardown_config_threads_request_policy_and_target(self):
@@ -830,12 +839,13 @@ class TestResultJsonContract:
 
     def test_build_teardown_config_unknown_policy_falls_back(self):
         from almanak.framework.runner._teardown_helpers import _teardown_config_from_request
-        from almanak.framework.teardown.models import TeardownAssetPolicy
+        from almanak.framework.teardown.models import TARGET_TOKEN_CHAIN_DEFAULT, TeardownAssetPolicy
 
         request = SimpleNamespace(asset_policy="banana", target_token=None)
         cfg = _teardown_config_from_request(request)
         assert cfg.asset_policy == TeardownAssetPolicy.TARGET_TOKEN
-        assert cfg.target_token == "USDC"
+        # VIB-5727: a null target is "no preference", not USDC.
+        assert cfg.target_token == TARGET_TOKEN_CHAIN_DEFAULT
 
     def test_result_payload_roundtrip_through_sqlite_manager(self, tmp_path):
         """mark_completed persists the consolidation summary into

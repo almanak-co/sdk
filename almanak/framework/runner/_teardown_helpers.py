@@ -179,7 +179,7 @@ def _teardown_config_from_request(request: Any | None) -> Any:
     consolidation DISABLED, close-only.
     """
     from ..teardown.config import TeardownConfig, TokenConsolidationConfig
-    from ..teardown.models import TeardownAssetPolicy
+    from ..teardown.models import TARGET_TOKEN_CHAIN_DEFAULT, TeardownAssetPolicy
 
     if request is None:
         # No operator request → NO token consolidation (pr-auditor blocker).
@@ -208,7 +208,13 @@ def _teardown_config_from_request(request: Any | None) -> Any:
             raw_policy,
         )
         asset_policy = TeardownAssetPolicy.TARGET_TOKEN
-    target_token = getattr(request, "target_token", None) or "USDC"
+    # Carried through VERBATIM, sentinel included (VIB-5727). Resolution is
+    # deliberately NOT done here: this runs before the teardown plan exists, so
+    # the chain is not yet known, and collapsing the sentinel to "USDC" here
+    # would re-create the bug — every writer (CLI, hosted STOP bridge, dashboard
+    # API) funnels through this config, and the chain-aware choice happens at
+    # the consolidation seam where the chain is authoritative.
+    target_token = getattr(request, "target_token", None) or TARGET_TOKEN_CHAIN_DEFAULT
 
     return TeardownConfig(
         asset_policy=asset_policy,
@@ -592,10 +598,13 @@ async def execute_and_verify(
         # VIB-5494 Item 1: thread the Phase-2 consolidation target so a held
         # STAKE/TOKEN position already denominated in the target (for which
         # full_close emits no swap) is credited a no-op close, not false-failed.
+        # VIB-5727: strategy + intents supply the CHAIN, without which the
+        # "no preference" sentinel resolves to legacy USDC and this gate credits
+        # the wrong token on a USDC-less chain (robinhood holds USDG, not USDC).
         completeness = check_intent_coverage(
             positions,
             teardown_intents,
-            consolidation_target_token=teardown_mgr._consolidation_noop_target(),
+            consolidation_target_token=teardown_mgr._consolidation_noop_target(strategy, teardown_intents),
         )
         if not completeness.complete:
             # The uncovered positions are definitively NOT closed (no intent even
@@ -939,10 +948,16 @@ def map_teardown_result(
                         "succeeded": teardown_result.consolidation_succeeded,
                         "failed": teardown_result.consolidation_failed,
                         "warnings": list(teardown_result.consolidation_warnings),
-                        # The RESOLVED target (request may omit the field; the
-                        # phase then consolidates into the USDC default) — the
-                        # status surface must report what actually happened.
-                        "target_token": getattr(request, "target_token", None) or "USDC",
+                        # The target the phase ACTUALLY consolidated into, read
+                        # from the result rather than echoed back from the
+                        # request (VIB-5727). The request is not a truthful
+                        # source: it may carry the "no preference" sentinel, and
+                        # the real target is only chosen at consolidation time
+                        # once the chain is known. `None` = no target was
+                        # resolved (phase skipped, or nothing usable on the
+                        # chain) — Empty ≠ Zero, so it is NOT defaulted to a
+                        # symbol that was never used.
+                        "target_token": teardown_result.consolidation_target,
                     },
                 },
             )
