@@ -23,11 +23,13 @@ _KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
         ): "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8",
     },
     "arbitrum": {
+        # Native-USDC fee-500 pool, verified on-chain 2026-07-16 (ALM-2947);
+        # 0xC31E54c7 is the bridged USDC.e pool and was wrong under this key.
         (
             "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
             "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
             500,
-        ): "0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
+        ): "0xC6962004f452bE9203591991D15f6b388e09E8D0",
         (
             "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
             "0xaf88d065e77c8cc2239327c5edb3a432268e5831",

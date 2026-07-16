@@ -160,7 +160,7 @@ class TestPoolConfiguration:
         """Test getting pool address on arbitrum chain."""
         provider = TWAPDataProvider(chain="arbitrum")
         address = provider.get_pool_address("ETH")
-        assert address == "0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443"
+        assert address == "0xC6962004f452bE9203591991D15f6b388e09E8D0"
 
     def test_get_pool_address_unknown_token(self):
         """Test getting pool address for unknown token returns None."""

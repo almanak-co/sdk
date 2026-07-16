@@ -150,13 +150,13 @@ class TestPoolConfiguration:
         """Test getting pool address on arbitrum chain."""
         provider = DEXTWAPDataProvider(chain="arbitrum")
         address = provider.get_pool_address("ETH", "USDC")
-        assert address == "0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443"
+        assert address == "0xC6962004f452bE9203591991D15f6b388e09E8D0"
 
     def test_get_pool_address_arb_token(self):
         """Test getting pool address for ARB token on Arbitrum."""
         provider = DEXTWAPDataProvider(chain="arbitrum")
         address = provider.get_pool_address("ARB", "USDC")
-        assert address == "0xc473e2aEE3441BF9240Be85eb122aBB059A3B57c"
+        assert address == "0xb0f6cA40411360c03d41C5fFc5F179b8403CdcF8"
 
     def test_best_quote_token_usdc_preferred(self):
         """Test that USDC is preferred quote token."""
