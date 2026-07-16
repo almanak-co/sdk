@@ -182,6 +182,18 @@ class BacktestState:
     tick_count: int = 0
     execution_delayed_at_end: int = 0
     initial_portfolio_seeded: bool = False
+    # decide()-time market-data failures aggregated across ticks (ALM-2951):
+    # (source, key) -> {"ticks": n, "detail": first message}.
+    decision_input_failures: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    no_intent_ticks: int = 0
+
+
+def _decision_input_failure_report(state: BacktestState) -> list[dict[str, Any]]:
+    """Sorted decide()-time data-failure report entries (ALM-2951)."""
+    return [
+        {"source": source, "key": key, "ticks": entry["ticks"], "detail": entry["detail"]}
+        for (source, key), entry in sorted(state.decision_input_failures.items(), key=lambda item: -item[1]["ticks"])
+    ]
 
 
 # =============================================================================
@@ -545,6 +557,17 @@ async def execute_iteration_loop(
     # initialize_backtest, before this loop starts.
     token_addresses = _registered_token_addresses(backtester)
 
+    # decide()-time data lanes (ALM-2951): on-demand indicators (any period,
+    # tick-derivable timeframes) and engine-modeled gas, per-tick bound.
+    from almanak.framework.backtesting.pnl.engine import SimulatedGasView
+    from almanak.framework.backtesting.pnl.indicator_engine import timeframe_label
+
+    tick_timeframe = timeframe_label(config.interval_seconds)
+    rsi_provider, indicator_provider = state.indicator_engine.snapshot_providers(
+        state.strategy_config, config.interval_seconds
+    )
+    gas_view = SimulatedGasView(backtester, config)
+
     with bt_logger.phase("simulation"):
         # Iterate through historical data
         async for timestamp, market_state in backtester.data_provider.iterate(state.data_config):
@@ -575,12 +598,17 @@ async def execute_iteration_loop(
                 bt_logger.info(f"Seeded initial portfolio from token_funding: ${initial_value:,.2f}")
 
             # Create market snapshot for strategy
+            gas_view.bind(market_state, timestamp)
             snapshot = create_market_snapshot_from_state(
                 market_state=market_state,
                 chain=config.chain,
                 portfolio=state.portfolio,
                 token_addresses=token_addresses,
                 funding_rate_source=funding_rate_source,
+                rsi_provider=rsi_provider,
+                indicator_provider=indicator_provider,
+                gas_view=gas_view,
+                default_timeframe=tick_timeframe,
             )
 
             # Cache available_tokens once per tick: the property returns a
@@ -600,7 +628,10 @@ async def execute_iteration_loop(
                     tick_tokens.add(token)
                 except KeyError:
                     pass
-            state.indicator_engine.populate_snapshot(snapshot, state.strategy_config, active_tokens=tick_tokens)
+            state.indicator_engine.populate_snapshot(
+                snapshot, state.strategy_config, active_tokens=tick_tokens, timeframe=tick_timeframe
+            )
+            state.indicator_engine.enrich_price_data(snapshot, config.interval_seconds, active_tokens=tick_tokens)
 
             # Track data quality: record successful price lookups
             # Count tokens with available prices in this tick
@@ -652,6 +683,18 @@ async def execute_iteration_loop(
             # Queue intent for execution (with inclusion delay)
             if intent is not None and not backtester._is_hold_intent(intent):
                 state.pending_intents.append((intent, timestamp, config.inclusion_delay_blocks))
+            else:
+                # Counts every tick without a queued intent: explicit holds,
+                # indicator warm-up, and handled decide() errors alike — the
+                # hollow-run warning's causal gate is zero fills + recorded
+                # failures, not this counter.
+                state.no_intent_ticks += 1
+
+            # Aggregate decide()-time data failures for the run report
+            # (ALM-2951): the snapshot records every input it could not serve.
+            for failure_key, detail in getattr(snapshot, "_critical_data_failures", {}).items():
+                entry = state.decision_input_failures.setdefault(failure_key, {"ticks": 0, "detail": str(detail)})
+                entry["ticks"] += 1
 
             # Update positions via adapter if available
             backtester._update_positions_via_adapter(state.portfolio, market_state, timestamp)
@@ -878,6 +921,7 @@ def build_error_result(
         initial_portfolio_value_usd=state.portfolio.initial_capital_usd,
         final_capital_usd=state.portfolio.initial_capital_usd,
         chain=config.chain,
+        decision_input_failures=_decision_input_failure_report(state) or None,
         run_started_at=run_started_at,
         run_ended_at=run_ended_at,
         run_duration_seconds=(run_ended_at - run_started_at).total_seconds(),
@@ -1056,6 +1100,16 @@ def finalize_backtest_result(
     # Compliance is True only if there are no violations
     institutional_compliance = len(state.compliance_violations) == 0
 
+    # decide()-time data-failure report + hollow-run detection (ALM-2951).
+    decision_input_failures = _decision_input_failure_report(state)
+    if decision_input_failures and not state.portfolio.trades:
+        top = "; ".join(f"{f['source']}:{f['key']} ({f['ticks']} ticks)" for f in decision_input_failures[:3])
+        bt_logger.warning(
+            f"HOLLOW BACKTEST: 0 trades, {state.no_intent_ticks}/{state.tick_count} no-intent ticks, "
+            f"and {len(decision_input_failures)} decision-input failure(s) — the strategy held because "
+            f"inputs were missing, not because it chose to. Top: {top}"
+        )
+
     return BacktestResult(
         engine=BacktestEngine.PNL,
         deployment_id=strategy.deployment_id,
@@ -1072,6 +1126,7 @@ def finalize_backtest_result(
         price_series=state.portfolio.price_series,
         price_series_display_labels=price_series_display_labels(state.portfolio.price_series),
         chain=config.chain,
+        decision_input_failures=decision_input_failures or None,
         run_started_at=run_started_at,
         run_ended_at=run_ended_at,
         run_duration_seconds=(run_ended_at - run_started_at).total_seconds(),

@@ -77,6 +77,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class MultiDexUnavailableError(ValueError, NotImplementedError):
+    """Multi-DEX comparison unavailable: no MultiDexService wired.
+
+    Inherits BOTH ValueError (so standard data-unavailable catches degrade
+    to HOLD, ALM-2951) and NotImplementedError (the pinned legacy contract —
+    strategy authors who already catch it keep working).
+    """
+
+
 # Default OHLCV timeframe used by indicator methods when neither an explicit
 # timeframe argument nor a strategy-level default_timeframe is provided.
 DEFAULT_TIMEFRAME = "4h"
@@ -947,6 +956,9 @@ class MarketSnapshot:
         # intermediate ``gateway_connected`` bool would not narrow the attr access).
         client = self._gateway_client
         if client is None or not getattr(client, "is_connected", False):
+            self._record_critical_data_failure(
+                "pt_price", f"{symbol}@{requested_chain}", "pt_price unavailable: no connected GatewayClient"
+            )
             raise PriceUnavailableError(
                 token=symbol,
                 reason=(
@@ -1174,10 +1186,14 @@ class MarketSnapshot:
             MultiDexPriceResult with quotes from each DEX
 
         Raises:
-            NotImplementedError: If multi-DEX service is not configured
+            ValueError: If multi-DEX service is not configured (recorded as a
+                critical data failure; standard data-unavailable catches apply)
         """
         if self._multi_dex_service is None:
-            raise NotImplementedError(
+            self._record_critical_data_failure(
+                "price_across_dexs", "unconfigured", "price_across_dexs unavailable: no provider configured"
+            )
+            raise MultiDexUnavailableError(
                 "Multi-DEX price comparison is not available. "
                 "The MultiDexService must be configured by the strategy runner."
             )
@@ -1223,10 +1239,14 @@ class MarketSnapshot:
             BestDexResult with the best DEX and quote
 
         Raises:
-            NotImplementedError: If multi-DEX service is not configured
+            ValueError: If multi-DEX service is not configured (recorded as a
+                critical data failure; standard data-unavailable catches apply)
         """
         if self._multi_dex_service is None:
-            raise NotImplementedError(
+            self._record_critical_data_failure(
+                "best_dex_price", "unconfigured", "best_dex_price unavailable: no provider configured"
+            )
+            raise MultiDexUnavailableError(
                 "Multi-DEX price comparison is not available. "
                 "The MultiDexService must be configured by the strategy runner."
             )
@@ -2956,6 +2976,9 @@ class MarketSnapshot:
         try:
             result = self._run_async_bridged(_fetch_via_gateway())
         except DataSourceUnavailable as exc:
+            self._record_critical_data_failure(
+                "lending_rate", "unconfigured", "lending_rate unavailable: no provider configured"
+            )
             raise ValueError(
                 f"No rate monitor configured for MarketSnapshot and the gateway is "
                 f"unavailable for {protocol}/{token}/{side_str}: {exc}. "
@@ -3091,6 +3114,9 @@ class MarketSnapshot:
         try:
             return self._run_async_bridged(_best_via_gateway())
         except DataSourceUnavailable as exc:
+            self._record_critical_data_failure(
+                "best_lending_rate", "unconfigured", "best_lending_rate unavailable: no provider configured"
+            )
             raise ValueError(
                 f"No rate monitor configured for MarketSnapshot and the gateway is "
                 f"unavailable for best {side_str} rate on {token}: {exc}. "
@@ -3228,6 +3254,9 @@ class MarketSnapshot:
         except HealthUnavailableError:
             raise
         except Exception as e:
+            self._record_critical_data_failure(
+                "position_health", "unconfigured", "position_health unavailable: no provider configured"
+            )
             raise HealthUnavailableError(f"Position health unavailable: {e}") from e
 
         self._position_health_cache[cache_key] = health
@@ -3519,6 +3548,9 @@ class MarketSnapshot:
             ValueError: If no funding rate provider is configured or venue is unsupported
         """
         if self._funding_rate_provider is None:
+            self._record_critical_data_failure(
+                "funding_rate", "unconfigured", "funding_rate unavailable: no provider configured"
+            )
             raise ValueError("No funding rate provider configured for MarketSnapshot")
 
         from almanak.framework.data.funding import Venue
@@ -3541,6 +3573,9 @@ class MarketSnapshot:
             ValueError: If no funding rate provider is configured or venue is unsupported
         """
         if self._funding_rate_provider is None:
+            self._record_critical_data_failure(
+                "funding_rate_spread", "unconfigured", "funding_rate_spread unavailable: no provider configured"
+            )
             raise ValueError("No funding rate provider configured for MarketSnapshot")
 
         from almanak.framework.data.funding import Venue
@@ -3692,6 +3727,9 @@ class MarketSnapshot:
 
         gas_oracle = getattr(self, "_gas_oracle", None)
         if gas_oracle is None:
+            self._record_critical_data_failure(
+                "gas_price", "unconfigured", "gas_price unavailable: no provider configured"
+            )
             raise ValueError("No gas oracle configured for MarketSnapshot")
 
         # Lower-case chain name to match the chain registry (matches main's
@@ -3825,6 +3863,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import PoolPriceUnavailableError
 
         if self._pool_reader_registry is None:
+            self._record_critical_data_failure(
+                "pool_price", "unconfigured", "pool_price unavailable: no provider configured"
+            )
             raise ValueError("No pool reader registry configured for MarketSnapshot")
 
         target_chain = (chain or self._chain).lower()
@@ -3883,6 +3924,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import PoolPriceUnavailableError
 
         if self._pool_reader_registry is None:
+            self._record_critical_data_failure(
+                "pool_price_by_pair", "unconfigured", "pool_price_by_pair unavailable: no provider configured"
+            )
             raise ValueError("No pool reader registry configured for MarketSnapshot")
 
         target_chain = (chain or self._chain).lower()
@@ -3940,6 +3984,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import PoolReservesUnavailableError
 
         if self._pool_reader is None:
+            self._record_critical_data_failure(
+                "pool_reserves", "unconfigured", "pool_reserves unavailable: no provider configured"
+            )
             raise ValueError("No pool reader configured for MarketSnapshot")
 
         target_chain = (chain or self._chain).lower()
@@ -3994,6 +4041,11 @@ class MarketSnapshot:
                 )
             # Non-explicit_pool path always has a registry (the caller
             # already used it to resolve pool_address). Defensive guard.
+            self._record_critical_data_failure(
+                "_resolve_pool_decimals_for_twap",
+                "unconfigured",
+                "_resolve_pool_decimals_for_twap unavailable: no provider configured",
+            )
             raise ValueError("No pool reader registry configured for decimals lookup")
 
         try:
@@ -4139,6 +4191,7 @@ class MarketSnapshot:
         from almanak.framework.data.models import resolve_instrument
 
         if self._price_aggregator is None:
+            self._record_critical_data_failure("twap", "unconfigured", "twap unavailable: no provider configured")
             raise ValueError("No price aggregator configured for MarketSnapshot")
 
         target_chain = (chain or self._chain).lower()
@@ -4149,6 +4202,9 @@ class MarketSnapshot:
         try:
             if pool_address is None:
                 if self._pool_reader_registry is None:
+                    self._record_critical_data_failure(
+                        "twap", "unconfigured", "twap unavailable: no provider configured"
+                    )
                     raise ValueError("No pool reader registry configured; provide pool_address explicitly")
                 reader = self._pool_reader_registry.get_reader(target_chain, protocol)
                 # VIB-4924 C1: resolve the highest-liquidity pool across fee
@@ -4229,6 +4285,7 @@ class MarketSnapshot:
         from almanak.framework.data.models import resolve_instrument
 
         if self._price_aggregator is None:
+            self._record_critical_data_failure("lwap", "unconfigured", "lwap unavailable: no provider configured")
             raise ValueError("No price aggregator configured for MarketSnapshot")
 
         target_chain = (chain or self._chain).lower()
@@ -4336,6 +4393,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import PoolHistoryUnavailableError
 
         if self._pool_history_reader is None:
+            self._record_critical_data_failure(
+                "pool_history", "unconfigured", "pool_history unavailable: no provider configured"
+            )
             raise ValueError("No pool history reader configured for MarketSnapshot")
 
         target_chain = (chain or self._chain).lower()
@@ -4383,6 +4443,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import LiquidityDepthUnavailableError
 
         if self._liquidity_depth_reader is None:
+            self._record_critical_data_failure(
+                "liquidity_depth", "unconfigured", "liquidity_depth unavailable: no provider configured"
+            )
             raise ValueError("No liquidity depth reader configured for MarketSnapshot")
 
         target_chain = (chain or self._chain).lower()
@@ -4428,6 +4491,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import SlippageEstimateUnavailableError
 
         if self._slippage_estimator is None:
+            self._record_critical_data_failure(
+                "estimate_slippage", "unconfigured", "estimate_slippage unavailable: no provider configured"
+            )
             raise ValueError("No slippage estimator configured for MarketSnapshot")
 
         target_chain = (chain or self._chain).lower()
@@ -4472,6 +4538,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import PoolAnalyticsUnavailableError
 
         if self._pool_analytics_reader is None:
+            self._record_critical_data_failure(
+                "pool_analytics", "unconfigured", "pool_analytics unavailable: no provider configured"
+            )
             raise ValueError("No pool analytics reader configured for MarketSnapshot")
 
         target_chain = (chain or self._chain).lower()
@@ -4514,6 +4583,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import PoolAnalyticsUnavailableError
 
         if self._pool_analytics_reader is None:
+            self._record_critical_data_failure(
+                "best_pool", "unconfigured", "best_pool unavailable: no provider configured"
+            )
             raise ValueError("No pool analytics reader configured for MarketSnapshot")
 
         target_chain = (chain or self._chain).lower()
@@ -4572,6 +4644,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import YieldOpportunitiesUnavailableError
 
         if self._yield_aggregator is None:
+            self._record_critical_data_failure(
+                "yield_opportunities", "unconfigured", "yield_opportunities unavailable: no provider configured"
+            )
             raise ValueError(
                 "No yield aggregator configured for MarketSnapshot: "
                 "yield_opportunities() is not gateway-served yet (the gateway "
@@ -4622,6 +4697,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import LendingRateHistoryUnavailableError
 
         if self._rate_history_reader is None:
+            self._record_critical_data_failure(
+                "lending_rate_history", "unconfigured", "lending_rate_history unavailable: no provider configured"
+            )
             raise ValueError("No rate history reader configured for MarketSnapshot")
 
         target_chain = (chain or self._chain).lower()
@@ -4662,6 +4740,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import FundingRateHistoryUnavailableError
 
         if self._rate_history_reader is None:
+            self._record_critical_data_failure(
+                "funding_rate_history", "unconfigured", "funding_rate_history unavailable: no provider configured"
+            )
             raise ValueError("No rate history reader configured for MarketSnapshot")
 
         try:
@@ -4736,6 +4817,9 @@ class MarketSnapshot:
         )
 
         if self._il_calculator is None:
+            self._record_critical_data_failure(
+                "il_exposure", "unconfigured", "il_exposure unavailable: no provider configured"
+            )
             raise ValueError("No IL calculator configured for MarketSnapshot")
 
         try:
@@ -4809,6 +4893,9 @@ class MarketSnapshot:
         from almanak.framework.data.lp import InvalidPriceError, InvalidWeightError
 
         if self._il_calculator is None:
+            self._record_critical_data_failure(
+                "projected_il", "unconfigured", "projected_il unavailable: no provider configured"
+            )
             raise ValueError("No IL calculator configured for MarketSnapshot")
 
         try:
@@ -4859,6 +4946,9 @@ class MarketSnapshot:
         )
 
         if self._volatility_calculator is None:
+            self._record_critical_data_failure(
+                "realized_vol", "unconfigured", "realized_vol unavailable: no provider configured"
+            )
             raise ValueError("No volatility calculator configured for MarketSnapshot")
 
         try:
@@ -4920,6 +5010,9 @@ class MarketSnapshot:
         )
 
         if self._volatility_calculator is None:
+            self._record_critical_data_failure(
+                "vol_cone", "unconfigured", "vol_cone unavailable: no provider configured"
+            )
             raise ValueError("No volatility calculator configured for MarketSnapshot")
 
         if windows is None:
@@ -4993,6 +5086,9 @@ class MarketSnapshot:
         )
 
         if self._risk_calculator is None:
+            self._record_critical_data_failure(
+                "portfolio_risk", "unconfigured", "portfolio_risk unavailable: no provider configured"
+            )
             raise ValueError("No risk calculator configured for MarketSnapshot")
 
         try:
@@ -5068,6 +5164,9 @@ class MarketSnapshot:
         )
 
         if self._risk_calculator is None:
+            self._record_critical_data_failure(
+                "rolling_sharpe", "unconfigured", "rolling_sharpe unavailable: no provider configured"
+            )
             raise ValueError("No risk calculator configured for MarketSnapshot")
 
         try:
@@ -5201,6 +5300,7 @@ class MarketSnapshot:
             return self._envelope_to_ohlcv_df(envelope, token, token_str, quote, timeframe, gap_strategy)
 
         if self._ohlcv_module is None:
+            self._record_critical_data_failure("ohlcv", "unconfigured", "ohlcv unavailable: no provider configured")
             raise ValueError("No OHLCV module or router configured for MarketSnapshot")
 
         # The legacy ``OHLCVModule.get_ohlcv`` is strictly token-scoped (CEX
@@ -5414,6 +5514,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import PredictionUnavailableError
 
         if self._prediction_provider is None:
+            self._record_critical_data_failure(
+                "prediction", "unconfigured", "prediction unavailable: no provider configured"
+            )
             raise ValueError("No prediction provider configured for MarketSnapshot")
 
         try:
@@ -5440,6 +5543,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import PredictionUnavailableError
 
         if self._prediction_provider is None:
+            self._record_critical_data_failure(
+                "prediction_positions", "unconfigured", "prediction_positions unavailable: no provider configured"
+            )
             raise ValueError("No prediction provider configured for MarketSnapshot")
 
         try:
@@ -5472,6 +5578,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import PredictionUnavailableError
 
         if self._prediction_provider is None:
+            self._record_critical_data_failure(
+                "prediction_orders", "unconfigured", "prediction_orders unavailable: no provider configured"
+            )
             raise ValueError("No prediction provider configured for MarketSnapshot")
 
         try:
@@ -5497,6 +5606,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import LSTDataUnavailableError
 
         if self._solana_lst_provider is None:
+            self._record_critical_data_failure(
+                "lst_exchange_rate", "unconfigured", "lst_exchange_rate unavailable: no provider configured"
+            )
             raise ValueError("No Solana LST provider configured for MarketSnapshot")
 
         try:
@@ -5519,6 +5631,9 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import LSTDataUnavailableError
 
         if self._solana_lst_provider is None:
+            self._record_critical_data_failure(
+                "lst_all_rates", "unconfigured", "lst_all_rates unavailable: no provider configured"
+            )
             raise ValueError("No Solana LST provider configured for MarketSnapshot")
 
         try:

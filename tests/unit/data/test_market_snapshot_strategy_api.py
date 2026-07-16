@@ -485,15 +485,19 @@ class TestProviderlessMethodsRaiseValueError:
     def test_multi_dex_methods_raise_not_implemented(
         self, bare_snapshot: MarketSnapshot, method_name: str
     ) -> None:
-        """``price_across_dexs`` and ``best_dex_price`` historically raise
-        ``NotImplementedError`` (not ``ValueError``) when no MultiDexService
-        is wired. Pin that legacy contract so refactors don't change it
-        unintentionally — strategy authors who already catch
-        ``NotImplementedError`` continue to work.
+        """``price_across_dexs`` and ``best_dex_price`` raise
+        ``MultiDexUnavailableError`` when no MultiDexService is wired — a
+        dual-contract error inheriting BOTH ``NotImplementedError`` (the
+        pinned legacy contract; existing catches keep working) and
+        ``ValueError`` (so standard data-unavailable catches degrade to
+        HOLD instead of crashing, ALM-2951).
         """
         method = getattr(bare_snapshot, method_name)
-        with pytest.raises(NotImplementedError, match=r"[Mm]ulti-DEX"):
+        with pytest.raises(NotImplementedError, match=r"[Mm]ulti-DEX") as excinfo:
             method("WETH", "USDC", Decimal("1"))
+        # Dual contract (ALM-2951): the same error must satisfy standard
+        # data-unavailable catches too.
+        assert isinstance(excinfo.value, ValueError)
 
 
 class TestProvidersAreWired:

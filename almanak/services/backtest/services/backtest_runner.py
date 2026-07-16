@@ -686,6 +686,8 @@ def serialize_result(result: BacktestResult) -> dict[str, Any]:
     """
     payload: dict[str, Any] = {
         "metrics": result.metrics.to_dict(),
+        # decide()-time data-failure report (ALM-2951); [] when clean.
+        "decision_input_failures": result.decision_input_failures or [],
         "equity_curve": [_serialize_equity_point(pt) for pt in (result.equity_curve or [])],
         "trades": [
             {

@@ -2290,6 +2290,9 @@ class BacktestResult:
     phase_timings: list[dict[str, Any]] = field(default_factory=list)
     config_hash: str | None = None
     execution_delayed_at_end: int = 0
+    # Aggregated decide()-time market-data failures (ALM-2951): entries of
+    # {source, key, ticks, detail}. Zero fills + entries here = HOLLOW run.
+    decision_input_failures: list[dict[str, Any]] | None = None
     data_source_capabilities: dict[str, "HistoricalDataCapability"] = field(default_factory=dict)
     data_source_warnings: list[str] = field(default_factory=list)
     data_quality: DataQualityReport | None = None
@@ -2681,6 +2684,7 @@ class BacktestResult:
             "walk_forward_results": self.walk_forward_results.to_dict() if self.walk_forward_results else None,
             "monte_carlo_results": self.monte_carlo_results.to_dict() if self.monte_carlo_results else None,
             "crisis_results": self.crisis_results.to_dict() if self.crisis_results else None,
+            "decision_input_failures": self.decision_input_failures,
             "errors": self.errors,
             "backtest_id": self.backtest_id,
             "phase_timings": self.phase_timings,
@@ -3023,6 +3027,7 @@ class BacktestResult:
             walk_forward_results=cls._parse_walk_forward_results(data.get("walk_forward_results")),
             monte_carlo_results=cls._parse_monte_carlo_results(data.get("monte_carlo_results")),
             crisis_results=CrisisMetrics.from_dict(data["crisis_results"]) if data.get("crisis_results") else None,
+            decision_input_failures=data.get("decision_input_failures"),
             errors=data.get("errors", []),
             backtest_id=data.get("backtest_id"),
             phase_timings=data.get("phase_timings", []),

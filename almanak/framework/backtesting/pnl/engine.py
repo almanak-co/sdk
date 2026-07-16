@@ -448,6 +448,10 @@ def create_market_snapshot_from_state(
     token_aliases: dict[str, str] | None = None,
     token_addresses: Mapping[str, tuple[str, str]] | None = None,
     funding_rate_source: "SnapshotFundingRateSource | None" = None,
+    rsi_provider: Any | None = None,
+    indicator_provider: Any | None = None,
+    gas_view: Any | None = None,
+    default_timeframe: str | None = None,
 ) -> MarketSnapshot:
     """Create a MarketSnapshot from historical MarketState data.
 
@@ -485,7 +489,14 @@ def create_market_snapshot_from_state(
         funding_rate_provider=(
             funding_rate_source.view_at(market_state.timestamp) if funding_rate_source is not None else None
         ),
+        rsi_provider=rsi_provider,
+        indicator_provider=indicator_provider,
+        default_timeframe=default_timeframe,
     )
+    if gas_view is not None:
+        # decide()-time gas reads served by the engine's own gas model
+        # (ALM-2951); the accessor reads this attribute via getattr.
+        snapshot._gas_oracle = gas_view
     _ = token_aliases
     # Canonicalize map keys ONCE at ingress: alias registration upper-cases
     # alias names, so every downstream probe (the cash lane's held-key guard
@@ -500,6 +511,57 @@ def create_market_snapshot_from_state(
     if portfolio:
         _seed_snapshot_balances(snapshot, market_state, portfolio, token_addresses)
     return snapshot
+
+
+class SimulatedGasView:
+    """Serves ``decide()``-time gas reads from the engine's gas model (ALM-2951).
+
+    The strategy-facing gas helpers (``gas_price`` /
+    ``estimate_swap_gas_cost_usd`` / ``is_trade_worthwhile``) were silent
+    fail-opens in backtests (no oracle wired). This view answers them with
+    the same static gwei ladder the engine charges fills with
+    (``config.gas_price_gwei``, chain-default aware) and the tick's gas-asset
+    price — modeled, not historical, matching the engine's own gas
+    accounting. Bound per tick via :meth:`bind`.
+    """
+
+    def __init__(self, backtester: Any, config: Any) -> None:
+        self._backtester = backtester
+        self._config = config
+        self._market_state: MarketState | None = None
+        self._timestamp: datetime | None = None
+
+    def bind(self, market_state: MarketState, timestamp: datetime) -> None:
+        self._market_state = market_state
+        self._timestamp = timestamp
+
+    def get_gas_price(self, chain: str) -> Any:
+        # GasUnavailableError (not ValueError): the decide()-loop suppresses
+        # ValueError during indicator warm-up, which would silently eat a gas
+        # failure; GasUnavailableError flows to is_trade_worthwhile's
+        # documented fail-open handling instead (review round, ALM-2951).
+        from almanak.framework.data.defi.gas import STANDARD_GAS_UNITS, GasPrice
+        from almanak.framework.market.errors import GasUnavailableError
+
+        if self._market_state is None or self._timestamp is None:
+            raise GasUnavailableError(chain=chain, reason="SimulatedGasView not bound to a tick")
+        gwei = self._config.gas_price_gwei
+        if gwei is None:
+            raise GasUnavailableError(chain=chain, reason="no gas price available in backtest config")
+        gas_asset_price, _source = self._backtester._resolve_gas_eth_price(
+            self._config, self._market_state, self._timestamp
+        )
+        cost_usd = (
+            Decimal(str(gwei)) * Decimal(STANDARD_GAS_UNITS) * Decimal("1e-9") * Decimal(str(gas_asset_price))
+        ).quantize(Decimal("0.000001"))
+        return GasPrice(
+            chain=chain,
+            base_fee_gwei=Decimal(str(gwei)),
+            priority_fee_gwei=Decimal("0"),
+            max_fee_gwei=Decimal(str(gwei)),
+            estimated_cost_usd=cost_usd,
+            timestamp=self._timestamp,
+        )
 
 
 def _normalized_token_address_map(
