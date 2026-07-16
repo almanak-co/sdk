@@ -923,6 +923,211 @@ class TestEulerV2Helper:
         assert result.status == CompilationStatus.FAILED
         assert "Euler V2 withdraw failed" in result.error
 
+    # ------------------------------------------------------------------
+    # VIB-5801 — full-exit liquidity resolution.
+    #
+    # Euler is NOT Silo. EVK's redeem() genuinely caps MAX_UINT256 to balanceOf
+    # (verified on ethereum/base/arbitrum/avalanche — see
+    # tests/reports/euler_v2_full_exit_redeem_max_verification_vib5801.md), so the
+    # liquid path MUST stay on redeem(MAX): it drains at BROADCAST time, where a
+    # resolved count is a stale compile-time snapshot that would leave dust.
+    # Resolving exists only to bound the request by LIQUIDITY, because MAX caps to
+    # the balance and reverts E_InsufficientCash on a cash-short vault.
+    #
+    # These tests use the REAL EulerV2Adapter (no adapter patch) so they assert the
+    # actual calldata, not a mock's call args.
+    # ------------------------------------------------------------------
+    _REDEEM_SELECTOR = "0xba087652"  # redeem(uint256,address,address)
+    _MAX_UINT256_WORD = "f" * 64
+
+    _MAX_REDEEM_SEL = "0xd905777e"
+    _GET_CONTROLLERS_SEL = "0xfd6046d7"
+
+    @classmethod
+    def _route_eth_call(cls, *, max_redeem=None, controllers=0):
+        """Route the compiler's single eth_call seam by selector.
+
+        The resolver makes TWO distinct reads — maxRedeem(owner) on the vault and
+        EVC.getControllers(owner) — so a single return_value would conflate them and let a
+        controller-gate regression pass unnoticed.
+        """
+
+        def _call(to, data, **kwargs):
+            if data.startswith(cls._GET_CONTROLLERS_SEL):
+                # ABI: word0 = offset(0x20), word1 = array length.
+                return "0x" + f"{32:064x}" + f"{controllers:064x}"
+            if data.startswith(cls._MAX_REDEEM_SEL):
+                return max_redeem
+            return None
+
+        return _call
+
+
+    @staticmethod
+    def _uint_word(value: int) -> str:
+        return f"{value:064x}"
+
+    def test_withdraw_all_liquid_uses_redeem_max(self):
+        # maxRedeem == balanceOf: fully liquid for this owner. MAX and the resolved
+        # count are the same share count, so MAX wins (drift-immune, drains flat).
+        compiler = _mock_compiler(chain="ethereum")
+        compiler.eth_call.side_effect = self._route_eth_call(max_redeem="0x" + self._uint_word(5_000_000_000))
+        compiler._query_erc20_balance.return_value = 5_000_000_000
+        intent = _withdraw_intent(protocol="euler_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_euler_v2(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.SUCCESS
+        data = result.transactions[0].data.lower()
+        assert data.startswith(self._REDEEM_SELECTOR)
+        assert self._MAX_UINT256_WORD in data
+        assert result.action_bundle.metadata["full_exit_mode"] == "redeem_max"
+        assert result.action_bundle.metadata["withdraw_amount"] == "all"
+
+    def test_withdraw_all_partially_illiquid_is_transient_and_emits_no_tx(self):
+        # 0 < maxRedeem < balanceOf: redeem(MAX) WOULD revert E_InsufficientCash.
+        # Fail transiently BEFORE broadcasting a doomed tx — and deliberately do NOT
+        # partially fill. A partial fill completes SUCCESSFULLY, and the runner then
+        # fires on_intent_executed(success=True); strategies treat a successful
+        # full-exit as "closed" (euler_v2_supply_ethereum sets COMPLETE and zeroes its
+        # tracked supply), so a partial would make them abandon the residual FOREVER —
+        # strictly worse than the revert-and-retry it replaces. Partial recovery needs
+        # outcome-aware full-exit semantics across runner/registry/strategy: VIB-5806.
+        compiler = _mock_compiler(chain="ethereum")
+        compiler.eth_call.side_effect = self._route_eth_call(max_redeem="0x" + self._uint_word(4_000_000_000))
+        compiler._query_erc20_balance.return_value = 32_000_000_000
+        intent = _withdraw_intent(protocol="euler_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_euler_v2(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_transient is True
+        assert "retryable" in result.error
+        # No transaction at all — never burn gas on a guaranteed revert...
+        assert not result.transactions
+        # ...and never silently partial-fill a full exit.
+        assert result.action_bundle is None
+
+    def test_withdraw_all_maxredeem_read_gap_falls_back_to_max_not_transient(self):
+        # THE euler/silo divergence. Silo fails closed on a read gap because its MAX is
+        # broken. Euler's MAX is proven, so failing closed here would strand a full exit
+        # that works fine on a liquid vault. Fall back to today's behaviour, loudly.
+        compiler = _mock_compiler(chain="ethereum")
+        compiler.eth_call.side_effect = self._route_eth_call(max_redeem="0x")  # maxRedeem unreadable
+        compiler._query_erc20_balance.return_value = 5_000_000_000
+        intent = _withdraw_intent(protocol="euler_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_euler_v2(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.is_transient is False
+        data = result.transactions[0].data.lower()
+        assert self._MAX_UINT256_WORD in data
+        assert result.action_bundle.metadata["full_exit_mode"] == "redeem_max"
+        assert any("maxRedeem read unavailable" in w for w in result.warnings)
+
+    def test_withdraw_all_illiquid_maxredeem_zero_with_balance_is_transient(self):
+        # Holds shares but none redeemable now: vault out of cash, or an open borrow
+        # locks the collateral. Both clear with time → retryable, never terminal.
+        compiler = _mock_compiler(chain="ethereum")
+        compiler.eth_call.side_effect = self._route_eth_call(max_redeem="0x" + self._uint_word(0))
+        compiler._query_erc20_balance.return_value = 8_000_000_000
+        intent = _withdraw_intent(protocol="euler_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_euler_v2(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_transient is True
+        assert "retryable" in result.error
+
+    def test_withdraw_all_maxredeem_zero_and_balance_unreadable_is_transient(self):
+        # Empty != unmeasured: an unreadable balance must never be collapsed into
+        # "nothing to withdraw".
+        compiler = _mock_compiler(chain="ethereum")
+        compiler.eth_call.side_effect = self._route_eth_call(max_redeem="0x" + self._uint_word(0))
+        compiler._query_erc20_balance.return_value = None
+        intent = _withdraw_intent(protocol="euler_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_euler_v2(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_transient is True
+
+    def test_withdraw_all_measured_empty_balance_is_noop_success(self):
+        # A MEASURED zero balance means the requested terminal state ALREADY holds.
+        # Report a no-op SUCCESS (the established idiom, cf. Compound V3), not a failure:
+        # a stale or repeated teardown request must not count an already-flat leg as
+        # failed, and no gas may be burned on a guaranteed revert.
+        compiler = _mock_compiler(chain="ethereum")
+        compiler.eth_call.side_effect = self._route_eth_call(max_redeem="0x" + self._uint_word(0))
+        compiler._query_erc20_balance.return_value = 0
+        intent = _withdraw_intent(protocol="euler_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_euler_v2(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle.metadata["no_op"] is True
+        assert result.action_bundle.metadata["full_exit_mode"] == "empty"
+        assert result.action_bundle.transactions == []
+        assert not result.transactions
+
+    def test_withdraw_all_balance_unreadable_falls_back_to_max(self):
+        # maxRedeem readable and positive, balance not: we can neither prove nor disprove
+        # that the vault settles the whole position. MAX is the proven default and cannot
+        # over-withdraw (it caps); if the vault is short it reverts and the leg retries —
+        # exactly the pre-VIB-5801 behaviour, so this is never a regression.
+        compiler = _mock_compiler(chain="ethereum")
+        compiler.eth_call.side_effect = self._route_eth_call(max_redeem="0x" + self._uint_word(7_000_000_000))
+        compiler._query_erc20_balance.return_value = None
+        intent = _withdraw_intent(protocol="euler_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_euler_v2(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.SUCCESS
+        data = result.transactions[0].data.lower()
+        assert self._MAX_UINT256_WORD in data
+        assert result.action_bundle.metadata["full_exit_mode"] == "redeem_max"
+
+    def test_withdraw_all_with_controller_enabled_uses_max_not_transient(self):
+        # THE VIB-5801 BLOCKER REGRESSION GUARD (found by the Stage-1 audit).
+        # EVK zeroes maxRedeem for ANY controller-enabled account — no debt check, no
+        # health check. Measured: a fully liquid deposit reads maxRedeem == balanceOf;
+        # enabling a controller with ZERO debt drops it to 0 while redeem(MAX) still
+        # SUCCEEDS. Repaying does not clear it; only disableController() does, and this
+        # repo never calls that. Reading that 0 as "illiquid" would classify every euler
+        # BORROW teardown (repay_full -> withdraw_all) TRANSIENT and retry forever against
+        # a state that can never change — wedging a lane that works on main today.
+        compiler = _mock_compiler(chain="ethereum")
+        compiler.eth_call.side_effect = self._route_eth_call(
+            max_redeem="0x" + self._uint_word(0),  # EVK's controller short-circuit
+            controllers=1,
+        )
+        compiler._query_erc20_balance.return_value = 8_000_000_000
+        intent = _withdraw_intent(protocol="euler_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_euler_v2(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.SUCCESS, (
+            "A controller-enabled full exit MUST still emit redeem(MAX) — it works on-chain. "
+            "Classifying it transient wedges euler borrow teardown forever."
+        )
+        assert result.is_transient is False
+        assert self._MAX_UINT256_WORD in result.transactions[0].data.lower()
+        assert result.action_bundle.metadata["full_exit_mode"] == "redeem_max"
+        assert any("controller" in w for w in result.warnings)
+
+    def test_withdraw_all_controller_read_unavailable_uses_max(self):
+        # Cannot tell whether a controller is enabled => cannot trust maxRedeem as a
+        # liquidity signal => fall back to the proven default rather than risk wedging.
+        compiler = _mock_compiler(chain="ethereum")
+
+        def _call(to, data, **kwargs):
+            if data.startswith(self._GET_CONTROLLERS_SEL):
+                return None  # EVC read gap
+            return "0x" + self._uint_word(0)
+
+        compiler.eth_call.side_effect = _call
+        compiler._query_erc20_balance.return_value = 8_000_000_000
+        intent = _withdraw_intent(protocol="euler_v2", withdraw_all=True, amount=Decimal("1"))
+        result = cl._compile_withdraw_euler_v2(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.is_transient is False
+        assert self._MAX_UINT256_WORD in result.transactions[0].data.lower()
+
+    def test_explicit_amount_withdraw_does_not_resolve_liquidity(self):
+        # The resolution is full-exit-only. An explicit-amount withdraw must not pay for
+        # the extra reads or change shape.
+        compiler = _mock_compiler(chain="ethereum")
+        intent = _withdraw_intent(protocol="euler_v2", withdraw_all=False, amount=Decimal("100"))
+        result = cl._compile_withdraw_euler_v2(compiler, intent, _mock_token("USDC"), Decimal("100"), [])
+        assert result.status == CompilationStatus.SUCCESS
+        compiler.eth_call.assert_not_called()
+        assert result.action_bundle.metadata["full_exit_mode"] is None
+
 
 # ---------------------------------------------------------------------------
 # Silo V2

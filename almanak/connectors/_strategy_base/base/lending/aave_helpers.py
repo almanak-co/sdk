@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from decimal import Decimal
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.address_registry import AddressRegistry
@@ -661,6 +662,240 @@ def _resolve_silo_v2_redeemable_shares(compiler: Any, silo_address: str, owner: 
     # Wallet holds shares but none are currently redeemable (maxRedeem == 0, silo
     # illiquid) or the maxRedeem read was unavailable → retry when it recovers.
     return None, True
+
+
+# ERC-4626 reads on a Euler V2 EVault. The vault IS the share token, so
+# ``balanceOf(owner)`` = the owner's share balance.
+#
+# ``maxRedeem(owner)`` is a LIQUIDITY bound — but ONLY for an account with no controller
+# enabled. EVK short-circuits it to 0 for ANY controller-enabled account, with no debt
+# check and no health check (``Vault.sol``: ``if (max.isZero() || hasAnyControllerEnabled(owner))
+# return Shares.wrap(0)``). So for a borrower it carries no liquidity information at all
+# and must not be read as one — hence the EVC controller gate below (VIB-5801).
+_EULER_V2_MAX_REDEEM_SELECTOR = "0xd905777e"  # maxRedeem(address)
+_EVC_GET_CONTROLLERS_SELECTOR = "0xfd6046d7"  # getControllers(address) -> address[]
+
+
+def _euler_v2_has_controller(compiler: Any, owner: str) -> bool | None:
+    """True if the owner has any EVC controller enabled; ``None`` if unreadable.
+
+    EVK zeroes ``maxRedeem`` for any controller-enabled account **regardless of debt or
+    health** — measured: a wallet with a fully liquid deposit reads
+    ``maxRedeem == balanceOf``, and enabling a controller with **zero** debt drops it
+    straight to 0 while ``redeem(MAX)`` still succeeds. Repaying does NOT clear it; only
+    ``disableController()`` does, and this repo never calls that. So ``maxRedeem == 0``
+    must never be read as "illiquid" without first ruling out a controller.
+    """
+    eth_call = getattr(compiler, "eth_call", None)
+    if not callable(eth_call):
+        return None
+    from almanak.connectors.euler_v2.adapter import CHAIN_ADDRESSES
+
+    evc_address = (CHAIN_ADDRESSES.get(compiler.chain) or {}).get("evc")
+    if not evc_address:
+        return None
+    owner_word = owner.lower().removeprefix("0x").zfill(64)
+    raw = eth_call(evc_address, _EVC_GET_CONTROLLERS_SELECTOR + owner_word)
+    if not isinstance(raw, str):
+        return None
+    # ABI: word 0 = array offset (0x20), word 1 = array length.
+    length = _decode_uint_word(raw, 1)
+    if length is None:
+        return None
+    return length > 0
+
+
+class _EulerV2FullExitMode(str, Enum):
+    """How a Euler V2 ``withdraw_all`` should be encoded, decided at compile time."""
+
+    REDEEM_MAX = "redeem_max"  # redeem(MAX_UINT256) — caps to balance at broadcast time
+    TRANSIENT = "transient"  # cannot exit now; retry (never strand the leg)
+    EMPTY = "empty"  # proven-empty position; the requested terminal state already holds
+
+
+def _resolve_euler_v2_full_exit(compiler: Any, vault_address: str, owner: str) -> tuple[_EulerV2FullExitMode, str]:
+    """Decide how to encode a Euler V2 full exit, resolved on-chain at compile time.
+
+    **Euler is not Silo — do not collapse this into the VIB-5800 shape.** Silo V2 MUST
+    resolve an explicit share count because its ``redeem(MAX_UINT256)`` is broken (it
+    reverts ``NotEnoughLiquidity()``). Euler's ``redeem(MAX_UINT256)`` genuinely caps to
+    ``balanceOf(owner)`` — verified on-chain against every deployment the manifest
+    declares (VIB-5801;
+    ``tests/reports/euler_v2_full_exit_redeem_max_verification_vib5801.md``). Always
+    resolving here would *regress* euler: ``redeem(MAX)`` drains the balance as of
+    BROADCAST time, whereas a resolved count is a stale compile-time snapshot that
+    leaves dust if the share balance moves in between (and a dusty full exit means a
+    teardown leg that never goes flat).
+
+    What ``redeem(MAX)`` does **not** do is bound the request by *liquidity*. It asks for
+    the whole balance, so when the vault's ``cash`` is short it reverts
+    ``E_InsufficientCash`` (``0xf077d877``). This read exists to detect exactly that, and
+    to classify it **transient/retryable before a doomed transaction is ever broadcast** —
+    rather than burning gas on a guaranteed revert and reporting an opaque failure.
+
+    **Why this deliberately does NOT emit a partial ``redeem(maxRedeem)``.** Recovering the
+    available part looks strictly better and is not: a ``withdraw_all=True`` intent that
+    *partially* fills still completes **successfully**, and success is what downstream
+    readers key off. `StrategyRunner` fires ``on_intent_executed(success=True)``, and
+    strategies legitimately treat a successful full-exit as "position closed" — the
+    euler_v2 supply demo sets ``COMPLETE`` and zeroes its tracked supply on any successful
+    WITHDRAW. A partial exit would therefore make the strategy abandon the residual
+    **forever**, which is worse than today: a reverting full exit reports
+    ``success=False``, the strategy reverts to its prior stable state, and it **retries**
+    when liquidity returns. Emitting partials safely requires outcome-aware full-exit
+    semantics across the runner/registry/strategy contract — that is **VIB-5806**, not this
+    change. Classifying transient here preserves the retry and removes the wasted gas.
+
+    **``maxRedeem`` is exact only at the instant it is read, and decays within ONE second.
+    It is usable here as a PREDICATE and must never be broadcast as an AMOUNT.** Measured
+    on arbitrum eWETH-1, with nobody else touching the vault:
+
+    ==========  =================================  ==========================
+    read at     ``previewRedeem(that maxRedeem)``  ``redeem(that count)``
+    ==========  =================================  ==========================
+    T           ``cash - 1 wei``                   SUCCESS
+    T, mined T+1s  ``cash + 137213623206 wei``     **REVERT E_InsufficientCash**
+    T+1s, mined T+1s  ``cash - 1 wei``             SUCCESS (fresh read)
+    ==========  =================================  ==========================
+
+    ``cash()`` is **bit-identical** across those blocks — the *exchange rate* moves. EVK
+    accrues interest by raising the rate while ``cash`` stands still, so a FIXED share
+    count converts to strictly MORE assets every second, against a headroom of 1 wei. The
+    decay is **deterministic and needs no third party**; it is not a TOCTOU race, and no
+    constant safety margin can be correct because accrual is unbounded in time.
+    (``balanceOf`` in shares IS drift-free — do not generalise that to ``maxRedeem``,
+    which is cash-derived. Conflating the two is the trap.)
+
+    This is why the comparison ``maxRedeem < balanceOf`` is used only as a *sign test*
+    evaluated at read time, and why a resolved count is never encoded. **VIB-5806 must not
+    "just redeem maxRedeem"** — it would rebuild this bug. Target *assets* instead
+    (``withdraw(assets ≤ cash)`` is drift-immune: both sides of that check are stable, and
+    the shares burned simply shrink as the rate rises).
+
+    .. warning::
+
+       If a future change DOES make a ``withdraw_all`` intent able to partially fill
+       (VIB-5806), two downstream readers must be fixed first, or funds will be silently
+       abandoned:
+
+       1. **Strategy callbacks.** ``StrategyRunner._notify_intent_executed`` fires
+          ``on_intent_executed(success=True)`` for a partial fill, and strategies treat a
+          successful full-exit as "closed" (see ``euler_v2_supply_ethereum``).
+       2. **The lending registry.** ``StrategyRunner._lending_leg_is_fully_exited`` treats
+          the ``withdraw_all`` flag as *proof* of a full exit (signal #1, before any
+          post-state check) and would close a leg still holding a residual. Unreachable
+          today only because it is gated on ``_LENDING_REGISTRY_PROTOCOLS``, which is
+          ``{"aave_v3"}`` — adding euler_v2 or silo_v2 there without making signal #1
+          outcome-aware would silently close legs with residuals. ``cutover.py`` calls
+          that "a thin add"; it is not.
+
+       3. **The backtest PnL engine.** ``backtesting/pnl/engine.py`` passes
+          ``force_full=bool(intent.withdraw_all)`` into its withdraw accounting, forcing a
+          full-close from the flag. Sim-only (no cash-short vault is modelled), so there is
+          no live divergence today — but it is a third flag-as-proof reader.
+
+       (The accounting lane is already safe: ``position_events`` refines CLOSE vs DECREASE
+       from the MEASURED on-chain residual and never reads the flag.)
+
+    Returns ``(mode, note)``:
+
+    - ``(REDEEM_MAX, note)`` — emit ``redeem(MAX_UINT256)``.
+    - ``(TRANSIENT, note)`` — cannot exit now; retryable, never terminal.
+    - ``(EMPTY, note)`` — measured-empty; the requested terminal state already holds.
+    """
+    max_redeem: int | None = None
+    eth_call = getattr(compiler, "eth_call", None)
+    if callable(eth_call):
+        owner_word = owner.lower().removeprefix("0x").zfill(64)
+        raw = eth_call(vault_address, _EULER_V2_MAX_REDEEM_SELECTOR + owner_word)
+        if isinstance(raw, str):
+            max_redeem = _decode_uint_word(raw, 0)
+
+    balance = compiler._query_erc20_balance(vault_address, owner)
+
+    # Empty != unmeasured: only a MEASURED zero balance is terminal. ``None`` means the
+    # read failed and must never be collapsed into "nothing to withdraw".
+    if balance is not None and balance <= 0:
+        return (
+            _EulerV2FullExitMode.EMPTY,
+            f"wallet {owner} holds no shares in vault {vault_address}",
+        )
+
+    # CONTROLLER GATE (VIB-5801). EVK zeroes maxRedeem for ANY controller-enabled account
+    # — no debt check, no health check. A borrower's maxRedeem is therefore 0 even with
+    # zero debt and a fully liquid vault, while redeem(MAX) succeeds (measured). Reading
+    # that 0 as "illiquid" would classify every borrow teardown TRANSIENT and retry
+    # forever against a state that only disableController() can change — which this repo
+    # never calls. So when a controller is enabled (or we cannot tell), maxRedeem carries
+    # no liquidity information: fall back to redeem(MAX), which is exactly what shipped
+    # before this change and is verified to work in that state.
+    has_controller = _euler_v2_has_controller(compiler, owner)
+    if has_controller is not False:
+        reason = (
+            "an EVC controller is enabled — maxRedeem is 0 by construction and carries no liquidity signal"
+            if has_controller
+            else "EVC controller state unreadable — cannot trust maxRedeem as a liquidity signal"
+        )
+        return (
+            _EulerV2FullExitMode.REDEEM_MAX,
+            f"{reason}; using redeem(MAX_UINT256)",
+        )
+
+    if max_redeem is None:
+        # maxRedeem read gap. Fall back to redeem(MAX) — euler's proven default and
+        # byte-identical to the pre-VIB-5801 behaviour. Failing closed here would
+        # strand a full exit that succeeds fine on a liquid vault, which is the
+        # opposite of this fix's purpose; MAX cannot over-withdraw (it caps), so the
+        # worst case is the same revert we already ship today.
+        return (
+            _EulerV2FullExitMode.REDEEM_MAX,
+            "maxRedeem read unavailable — falling back to redeem(MAX_UINT256)",
+        )
+
+    if max_redeem <= 0:
+        # No controller is enabled (gated above), so a 0 here is a genuine LIQUIDITY zero:
+        # the vault has no cash to give right now. Retryable — liquidity does return.
+        # NOTE: do NOT add "or the debt is repaid" to this reason. A controller-enabled
+        # account also reads 0, but that never clears by waiting (only disableController
+        # does) and is handled by the gate above — collapsing the two states here is what
+        # would wedge a borrow teardown forever (VIB-5801).
+        held = "an unreadable balance" if balance is None else f"{balance} shares"
+        return (
+            _EulerV2FullExitMode.TRANSIENT,
+            (
+                f"wallet {owner} holds {held} in vault {vault_address} but the vault has no "
+                f"redeemable cash right now (maxRedeem == 0, no controller enabled) — retryable"
+            ),
+        )
+
+    if balance is None:
+        # maxRedeem readable and positive, balance not. We cannot prove the vault can
+        # settle the whole position, but we also cannot prove it cannot. MAX is the
+        # proven default and cannot over-withdraw; if the vault turns out to be short
+        # it reverts and the leg retries, exactly as it does today.
+        return (
+            _EulerV2FullExitMode.REDEEM_MAX,
+            "share balance unreadable — falling back to redeem(MAX_UINT256)",
+        )
+
+    if max_redeem >= balance:
+        # Fully liquid for this owner: MAX and maxRedeem resolve to the same share
+        # count, so prefer MAX for its broadcast-time drain (guarantees a flat exit).
+        return (_EulerV2FullExitMode.REDEEM_MAX, "")
+
+    # 0 < maxRedeem < balance: the vault cannot settle the full balance right now, so
+    # redeem(MAX) WOULD revert E_InsufficientCash. Do not broadcast a doomed tx, and do
+    # NOT partially fill (see the docstring: a partial fill reports success and makes
+    # strategies abandon the residual). Retry when liquidity returns — the position is
+    # untouched and fully recoverable meanwhile.
+    return (
+        _EulerV2FullExitMode.TRANSIENT,
+        (
+            f"vault {vault_address} cannot currently settle the full position "
+            f"(maxRedeem={max_redeem} < balance={balance}); redeem(MAX) would revert "
+            f"E_InsufficientCash — retryable when liquidity returns"
+        ),
+    )
 
 
 def _check_lending_borrow_capacity_aave_v3(
@@ -5274,13 +5509,69 @@ def _compile_withdraw_euler_v2(
             intent_id=intent.intent_id,
         )
 
-    # Build withdraw TX
-    withdraw_result = euler_adapter.withdraw(
-        asset=withdraw_symbol,
-        amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
-        withdraw_all=intent.withdraw_all,
-        vault_symbol=withdraw_vault.vault_symbol,
-    )
+    # Build withdraw TX. A full exit needs a liquidity decision that redeem(MAX_UINT256)
+    # cannot express on its own: MAX caps to the owner's BALANCE, not to what the vault
+    # can currently settle, so a cash-short vault reverts E_InsufficientCash and strands
+    # the position. Resolve on-chain and redeem the liquidity-aware share count in that
+    # case only — the liquid path stays on MAX, which is proven and drains at broadcast
+    # time (VIB-5801). Explicit-amount withdraws are unchanged.
+    full_exit_mode: str | None = None
+    if intent.withdraw_all:
+        mode, note = _resolve_euler_v2_full_exit(compiler, withdraw_vault.vault_address, compiler.wallet_address)
+        full_exit_mode = mode.value
+
+        if mode is _EulerV2FullExitMode.TRANSIENT:
+            # Retryable — do NOT report terminal. Teardown must re-attempt when
+            # liquidity returns or the debt clears, rather than abandoning the leg.
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Euler V2 withdraw_all cannot exit right now: {note}",
+                intent_id=intent.intent_id,
+                is_transient=True,
+            )
+
+        if mode is _EulerV2FullExitMode.EMPTY:
+            # The requested terminal state ALREADY holds — there is nothing to withdraw.
+            # Report a no-op SUCCESS (the established idiom, cf. the Compound V3 branch
+            # above), not a failure: a stale or repeated teardown request must not count
+            # an already-flat leg as a failed one.
+            return CompilationResult(
+                status=CompilationStatus.SUCCESS,
+                action_bundle=ActionBundle(
+                    intent_type=IntentType.WITHDRAW.value,
+                    transactions=[],
+                    metadata={
+                        "protocol": intent.protocol,
+                        "vault_address": withdraw_vault.vault_address,
+                        "vault_symbol": withdraw_vault.vault_symbol,
+                        "withdraw_token": withdraw_token.to_dict(),
+                        "withdraw_amount": "0",
+                        "withdraw_all": True,
+                        "full_exit_mode": mode.value,
+                        "chain": compiler.chain,
+                        "no_op": True,
+                        "reason": f"Nothing to withdraw ({note})",
+                    },
+                ),
+                intent_id=intent.intent_id,
+                warnings=warnings,
+            )
+
+        if note:
+            warnings.append(f"Euler V2 full-exit: {note}")
+        withdraw_result = euler_adapter.withdraw(
+            asset=withdraw_symbol,
+            amount=Decimal("0"),
+            withdraw_all=True,
+            vault_symbol=withdraw_vault.vault_symbol,
+        )
+    else:
+        withdraw_result = euler_adapter.withdraw(
+            asset=withdraw_symbol,
+            amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
+            withdraw_all=False,
+            vault_symbol=withdraw_vault.vault_symbol,
+        )
 
     if not withdraw_result.success:
         return CompilationResult(
@@ -5318,6 +5609,13 @@ def _compile_withdraw_euler_v2(
             "withdraw_token": withdraw_token.to_dict(),
             "withdraw_amount": amount_display,
             "withdraw_all": intent.withdraw_all,
+            # Provenance for the full-exit decision (VIB-5801). ``withdraw_all`` records
+            # what was ASKED; this records what was actually ENCODED. Today every
+            # tx-emitting full exit is ``redeem_max`` (a true full exit) and ``no_op``
+            # carries ``empty``, so the two never disagree — this exists so that if
+            # VIB-5806 ever adds a liquidity-bounded partial mode, readers have a signal
+            # that is not the flag.
+            "full_exit_mode": full_exit_mode,
             "chain": compiler.chain,
         },
     )
@@ -5328,7 +5626,8 @@ def _compile_withdraw_euler_v2(
     result.warnings = warnings
 
     logger.info(
-        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, {len(transactions)} txs, {total_gas} gas (Euler V2)"
+        f"Compiled WITHDRAW: {withdraw_token.symbol}, all={intent.withdraw_all}, "
+        f"mode={full_exit_mode or 'n/a'}, {len(transactions)} txs, {total_gas} gas (Euler V2)"
     )
     return result
 

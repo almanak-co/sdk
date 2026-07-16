@@ -431,6 +431,12 @@ class EulerV2Adapter:
         for specific amounts, or redeem(uint256 shares, address receiver, address owner)
         with MAX_UINT256 for withdraw_all.
 
+        A full exit does NOT bound the request by vault liquidity: MAX caps to the
+        owner's BALANCE, not to what the vault can SETTLE, so a cash-short vault
+        reverts ``E_InsufficientCash`` (``0xf077d877``). The compiler detects that
+        case ahead of time via ``maxRedeem(owner)`` and fails the compile
+        transiently rather than broadcasting a doomed transaction (VIB-5801).
+
         Args:
             asset: Token symbol to withdraw
             amount: Amount in human-readable units (ignored if withdraw_all=True)
@@ -449,9 +455,27 @@ class EulerV2Adapter:
 
         if withdraw_all:
             # redeem(uint256 shares, address receiver, address owner) with MAX_UINT256.
-            # Euler V2 EVault inherits OpenZeppelin's ERC4626 which handles
-            # type(uint256).max in redeem() by capping to balanceOf(owner).
-            # This is safe and standard behavior for OZ-based ERC4626 vaults.
+            #
+            # EVK's redeem() caps type(uint256).max to balanceOf(owner). This is NOT
+            # inherited OpenZeppelin behaviour (EVK is not OZ-ERC4626-derived, and OZ
+            # does not special-case type(uint256).max) — EVK special-cases it itself.
+            # VERIFIED on-chain, not assumed: a controlled fork deposit + broadcast on
+            # every deployment the manifest declares capped to the share balance and
+            # drained the position to 0. Reproduce with UAT card VIB-5801 D2.M5, which
+            # pins these exact fork blocks:
+            #   ethereum  eWETH-2   @ 25533805  4802871239767043521 shares -> 0
+            #   base      eWETH-1   @ 48639025  4820809992518089632 shares -> 0
+            #   arbitrum  eWETH-1   @ 483906634 4815139187994060102 shares -> 0
+            #   avalanche eUSDC-19  @ 90323173  951114407 shares -> 0
+            # Evidence: tests/reports/euler_v2_full_exit_redeem_max_verification_vib5801.md
+            # and docs/internal/uat-cards/VIB-5801.md (VIB-5801).
+            # Re-verify before adding a chain to the manifest.
+            #
+            # MAX is preferred over a resolved share count because it drains the balance
+            # as of BROADCAST time; a compile-time count is a stale snapshot that would
+            # leave dust if the balance moved. What MAX does not do is bound by
+            # liquidity — the compiler pre-checks maxRedeem(owner) and fails transiently
+            # instead of broadcasting a doomed redeem (VIB-5801).
             calldata = (
                 REDEEM_SELECTOR
                 + _encode_uint256(MAX_UINT256)

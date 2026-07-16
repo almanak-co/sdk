@@ -164,3 +164,39 @@ class TestSharedKeywordParity:
     )
     def test_legacy_categories_unchanged(self, msg: str, expected: str | None) -> None:
         assert categorize_error(msg) == expected
+
+
+class TestVaultCashShortage:
+    """VIB-5801 — a lending vault that cannot settle a redeem right now.
+
+    Distinct from the CALLER being short (INSUFFICIENT_BALANCE / NON_RETRYABLE): the
+    caller owns the shares; the vault has lent the underlying out. Liquidity returns as
+    borrowers repay, so the correct reaction is to retry at the SAME level. Escalating
+    slippage is meaningless for a cash shortage and just re-broadcasts a reverting redeem
+    at each rung.
+    """
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "execution reverted: E_InsufficientCash()",  # EVK / euler_v2, decoded
+            'execution reverted, data: "0xf077d877"',  # EVK, bare selector
+            "execution reverted: NotEnoughLiquidity()",  # Silo V2, decoded
+            'execution reverted, data: "0x4323a555"',  # Silo V2, bare selector
+        ],
+    )
+    def test_vault_cash_shortage_is_liquidity_unavailable_and_retryable(self, message):
+        revert_class, disposition = classify_teardown_failure(message)
+        assert revert_class == RevertClass.LIQUIDITY_UNAVAILABLE
+        assert disposition == Disposition.RETRY_SAME_LEVEL
+        # Never terminal: the funds are recoverable once the vault has cash again.
+        assert disposition != Disposition.NON_RETRYABLE
+        # Never a slippage bump: slippage cannot conjure cash into a vault.
+        assert disposition != Disposition.ESCALATE
+
+    def test_caller_short_still_classifies_as_insufficient_balance(self):
+        # Guard the boundary: the new branch must not swallow the caller-is-short case,
+        # which is deterministic and correctly NON_RETRYABLE.
+        revert_class, disposition = classify_teardown_failure("Insufficient USDC: need 100, have 5 (deficit: 95)")
+        assert revert_class == RevertClass.INSUFFICIENT_BALANCE
+        assert disposition == Disposition.NON_RETRYABLE

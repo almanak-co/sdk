@@ -55,6 +55,17 @@ class Disposition(StrEnum):
 # VIB-4258: Anvil lazy-fetch surfaces alloy/reqwest wording. Teardown retries
 # these at the same slippage level rather than escalating — bumping slippage can
 # never make a DNS failure resolve.
+# Lending-vault cash shortage (VIB-5801). The vault cannot settle a redeem right now
+# because the underlying is lent out — distinct from the CALLER being short (which is
+# INSUFFICIENT_BALANCE / NON_RETRYABLE). Selector forms are included because a bare
+# revert often carries only the 4-byte selector, not a decoded name.
+_VAULT_CASH_SHORTAGE_KEYWORDS = (
+    "e_insufficientcash",  # EVK / euler_v2
+    "0xf077d877",  # keccak("E_InsufficientCash()")[:4]
+    "notenoughliquidity",  # Silo V2
+    "0x4323a555",  # keccak("NotEnoughLiquidity()")[:4]
+)
+
 _TRANSPORT_KEYWORDS = (
     "fork error",
     "transport",
@@ -134,6 +145,18 @@ def classify_teardown_failure(error_message: str | None) -> tuple[RevertClass, D
     # 2. Transport / RPC transient (VIB-4258) — retry same level, never escalate.
     if any(k in e for k in _TRANSPORT_KEYWORDS):
         return RevertClass.TRANSPORT_TRANSIENT, Disposition.RETRY_SAME_LEVEL
+
+    # 2b. Lending vault has no CASH to settle right now (VIB-5801) — EVK's
+    #     ``E_InsufficientCash`` (``0xf077d877``, euler_v2) and Silo V2's
+    #     ``NotEnoughLiquidity`` (``0x4323a555``). These are NOT the caller's balance
+    #     being short (step 3) — the caller owns the shares; the vault has lent the
+    #     underlying out. Liquidity returns as borrowers repay, so retry at the SAME
+    #     level: escalating slippage is meaningless for a cash shortage and merely
+    #     re-broadcasts a reverting redeem at each rung. Must precede step 3, whose
+    #     "insufficient" test would otherwise be the nearest match, and step 6, which
+    #     would fall through to UNKNOWN/ESCALATE.
+    if any(k in e for k in _VAULT_CASH_SHORTAGE_KEYWORDS):
+        return RevertClass.LIQUIDITY_UNAVAILABLE, Disposition.RETRY_SAME_LEVEL
 
     # 3. Insufficient balance / collateral (VIB-4664) — deterministic pre-flight.
     #    Two real shapes: the prefixed orchestrator message ("Pre-flight balance

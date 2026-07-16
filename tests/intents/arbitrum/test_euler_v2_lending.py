@@ -59,6 +59,7 @@ from typing import Any
 import pytest
 from web3 import Web3
 
+from almanak.connectors.euler_v2.adapter import CHAIN_ADDRESSES, EULER_V2_VAULTS_BY_CHAIN
 from almanak.connectors.euler_v2.receipt_parser import EulerV2ReceiptParser
 from almanak.framework.accounting.lending_accounting import (
     capture_lending_post_state,
@@ -104,6 +105,11 @@ CHAIN_NAME = "arbitrum"
 # Euler V2 vault address on Ethereum (eUSDC-2) — used for receipt-parser filtering
 # so we only count Deposit/Withdraw/Borrow/Repay events emitted by this vault.
 EULER_V2_USDC_VAULT = "0x0a1eCC5Fe8C9be3C809844fcBe615B46A869b899"  # eUSDC-1 (arbitrum)
+
+# Sourced from the connector's own registry rather than hand-typed, so the test cannot
+# drift from the addresses the compiler actually targets (VIB-5801).
+EULER_V2_WETH_VAULT = EULER_V2_VAULTS_BY_CHAIN[CHAIN_NAME]["eWETH-1"]["vault_address"]  # collateral vault
+EULER_V2_EVC = CHAIN_ADDRESSES[CHAIN_NAME]["evc"]  # controller registry — see the controller-gate test
 
 PROTOCOL = "euler_v2"
 
@@ -372,6 +378,145 @@ class TestEulerV2SupplyIntent:
         assert payload["interest_delta_usd"] is None, "SUPPLY has no interest leg — must be None, not 0"
 
         print("\nALL CHECKS PASSED")
+
+    @pytest.mark.withdraw
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
+    @pytest.mark.asyncio
+    async def test_withdraw_all_liquid_redeems_max_uint256_and_drains_position(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+    ) -> None:
+        """VIB-5801: a liquid full exit encodes redeem(MAX_UINT256) and goes flat.
+
+        The regression guard for the fix. Euler's ``redeem(MAX_UINT256)`` genuinely caps
+        to ``balanceOf(owner)`` — verified against all four deployments in
+        ``tests/reports/euler_v2_full_exit_redeem_max_verification_vib5801.md`` — so the
+        liquid path MUST stay on MAX. MAX drains the balance as of BROADCAST time, where
+        a resolved compile-time share count is a stale snapshot that can leave dust, and
+        a dusty "full exit" is a teardown leg that never goes flat.
+
+        Supplying always adds cash 1:1, so a wallet's own fresh deposit is by
+        construction fully liquid (``maxRedeem == balanceOf``) — which is exactly the
+        REDEEM_MAX branch this asserts.
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc = tokens["USDC"]
+        decimals = get_token_decimals(web3, usdc)
+
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+
+        supply_amount = Decimal("2000")
+        supply_result = compiler.compile(
+            SupplyIntent(protocol="euler_v2", token="USDC", amount=supply_amount, chain=CHAIN_NAME)
+        )
+        assert supply_result.status.value == "SUCCESS"
+        supply_exec = await orchestrator.execute(supply_result.action_bundle)
+        assert supply_exec.success, f"Initial supply failed: {supply_exec.error}"
+
+        vault = web3.eth.contract(
+            address=Web3.to_checksum_address(EULER_V2_USDC_VAULT),
+            abi=[
+                {
+                    "name": "balanceOf",
+                    "type": "function",
+                    "stateMutability": "view",
+                    "inputs": [{"name": "a", "type": "address"}],
+                    "outputs": [{"name": "", "type": "uint256"}],
+                },
+                {
+                    "name": "maxRedeem",
+                    "type": "function",
+                    "stateMutability": "view",
+                    "inputs": [{"name": "a", "type": "address"}],
+                    "outputs": [{"name": "", "type": "uint256"}],
+                },
+            ],
+        )
+        shares_before = vault.functions.balanceOf(Web3.to_checksum_address(funded_wallet)).call()
+        max_redeem = vault.functions.maxRedeem(Web3.to_checksum_address(funded_wallet)).call()
+        assert shares_before > 0, "Supply must mint vault shares"
+        # Precondition for the REDEEM_MAX branch: this deposit is fully liquid.
+        assert max_redeem == shares_before, (
+            f"Fresh deposit must be fully redeemable (cash covers it): "
+            f"maxRedeem={max_redeem} shares={shares_before}"
+        )
+
+        usdc_before = get_token_balance(web3, usdc, funded_wallet)
+
+        # Layer 1: Compile — full exit must encode redeem(MAX_UINT256), not a resolved count.
+        intent = WithdrawIntent(
+            protocol="euler_v2",
+            token="USDC",
+            amount=Decimal("1"),  # ignored — withdraw_all wins
+            withdraw_all=True,
+            chain=CHAIN_NAME,
+        )
+        compilation_result = compiler.compile(intent)
+        assert compilation_result.status.value == "SUCCESS", f"Compile failed: {compilation_result.error}"
+        assert compilation_result.action_bundle is not None
+        metadata = compilation_result.action_bundle.metadata
+        assert metadata["full_exit_mode"] == "redeem_max", (
+            f"A liquid full exit must resolve to REDEEM_MAX, got {metadata['full_exit_mode']}"
+        )
+        calldata = compilation_result.transactions[0].data.lower()
+        assert calldata.startswith("0xba087652"), "Full exit must call redeem(uint256,address,address)"
+        assert "f" * 64 in calldata, "Liquid full exit must carry MAX_UINT256"
+
+        # Layer 2: Execute
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert execution_result.success, f"Execution failed: {execution_result.error}"
+
+        # Layer 3: Receipt parse — Withdraw event with real assets + shares
+        found_withdraw_event = False
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt:
+                parse_result = EulerV2ReceiptParser(underlying_decimals=decimals).parse_receipt(
+                    tx_result.receipt.to_dict(),
+                    vault_address=EULER_V2_USDC_VAULT,
+                )
+                if parse_result.success and parse_result.withdraw_amount > 0:
+                    assert parse_result.withdraw_shares > 0
+                    found_withdraw_event = True
+        assert found_withdraw_event, "Receipt parser must find a Withdraw event"
+
+        # Layer 4: Balance deltas — position flat, principal recovered.
+        shares_after = vault.functions.balanceOf(Web3.to_checksum_address(funded_wallet)).call()
+        assert shares_after == 0, (
+            f"redeem(MAX_UINT256) must drain the position to ZERO shares — this is the "
+            f"cap-to-balance behaviour VIB-5801 verified on-chain. Residual: {shares_after}"
+        )
+        usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        usdc_received = usdc_after - usdc_before
+        supplied_wei = int(supply_amount * Decimal(10**decimals))
+        # A full exit returns the principal MINUS at most ERC-4626 double-rounding dust,
+        # never a real loss. Both conversions round in the vault's favour — deposit rounds
+        # the minted shares DOWN, redeem rounds the returned assets DOWN — so a same-block
+        # round-trip can come back up to 2 base units light (here: 1, i.e. $0.000001).
+        # Interest accrual pushes the other way, so the observed value straddles the
+        # principal depending on the fork block; only the FLOOR is a stable invariant.
+        # Asserting `>= supplied` exactly is wrong and fails on a same-block round-trip.
+        rounding_dust_wei = 2
+        assert usdc_received >= supplied_wei - rounding_dust_wei, (
+            f"Full exit must return the principal minus at most {rounding_dust_wei} base units "
+            f"of ERC-4626 rounding dust. Supplied: {supply_amount}, "
+            f"received: {format_token_amount(usdc_received, decimals)} "
+            f"(short by {supplied_wei - usdc_received} base units)"
+        )
+        # ...and no windfall: a full exit must not return materially MORE than principal
+        # on a fresh same-block position (guards a mis-scaled amount / wrong-decimals bug).
+        assert usdc_received <= supplied_wei * 101 // 100, (
+            f"Full exit returned more than 101% of principal — suspicious. "
+            f"Supplied: {supply_amount}, received: {format_token_amount(usdc_received, decimals)}"
+        )
 
     @pytest.mark.withdraw
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
@@ -720,6 +865,183 @@ class TestEulerV2BorrowIntent:
         assert payload["principal_delta_usd"] is not None, "BORROW must measure principal_delta_usd"
         assert Decimal(payload["principal_delta_usd"]) > 0
         assert payload["interest_delta_usd"] is None, "BORROW has no interest leg yet — must be None, not 0"
+
+    @pytest.mark.withdraw
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW)
+    @pytest.mark.asyncio
+    async def test_borrow_repay_then_withdraw_all_still_exits_with_controller_enabled(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+    ) -> None:
+        """VIB-5801 controller-gate regression, at 4 layers on a real fork.
+
+        This is the exact teardown shape euler's borrow lifecycle emits
+        (``repay(repay_full=True)`` -> ``withdraw(withdraw_all=True)``), and it is the
+        lane a Stage-1 audit blocker would have wedged **forever**.
+
+        EVK zeroes ``maxRedeem`` for ANY controller-enabled account — no debt check, no
+        health check (``Vault.sol``: ``if (max.isZero() || hasAnyControllerEnabled(owner))
+        return Shares.wrap(0)``). Borrowing enables a controller and **nothing in this repo
+        ever calls disableController()**, so a borrower's ``maxRedeem`` is 0 even after the
+        debt is fully repaid. Reading that 0 as "illiquid" would classify every borrow
+        teardown TRANSIENT — retrying forever against a state that can never change — while
+        ``redeem(MAX)`` succeeds perfectly well.
+
+        So this test pins the invariant that the unit tests can only assert in the
+        abstract: **with a real controller enabled on-chain, a full exit still emits
+        redeem(MAX) and still goes flat.**
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc = tokens["USDC"]
+        weth = tokens["WETH"]
+
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+
+        collateral_amount = Decimal("0.5")
+        weth_price = price_oracle.get("WETH", Decimal("1800"))
+        # <=30% LTV per .claude/rules/intent-tests.md — the oracle uses live prices.
+        borrow_amount = min(Decimal("250"), collateral_amount * weth_price * Decimal("0.30"))
+
+        weth_decimals = get_token_decimals(web3, weth)
+        weth_balance = get_token_balance(web3, weth, funded_wallet)
+        assert weth_balance >= int(collateral_amount * Decimal(10**weth_decimals)), (
+            f"Funded wallet lacks WETH collateral. Need {collateral_amount}, have {weth_balance / 10**weth_decimals}"
+        )
+
+        # --- Setup: borrow (this is what enables the EVC controller) ---
+        borrow_intent = BorrowIntent.model_construct(
+            protocol="euler_v2",
+            collateral_token="WETH",
+            collateral_amount=collateral_amount,
+            borrow_token="USDC",
+            borrow_amount=borrow_amount,
+            chain=CHAIN_NAME,
+        )
+        borrow_result = compiler.compile(borrow_intent)
+        assert borrow_result.status.value == "SUCCESS", f"Borrow compile failed: {borrow_result.error}"
+        borrow_exec = await orchestrator.execute(borrow_result.action_bundle)
+        assert borrow_exec.success, f"Borrow setup failed: {borrow_exec.error}"
+
+        evc = web3.eth.contract(
+            address=Web3.to_checksum_address(EULER_V2_EVC),
+            abi=[
+                {
+                    "name": "getControllers",
+                    "type": "function",
+                    "stateMutability": "view",
+                    "inputs": [{"name": "account", "type": "address"}],
+                    "outputs": [{"name": "", "type": "address[]"}],
+                }
+            ],
+        )
+        collateral_vault = web3.eth.contract(
+            address=Web3.to_checksum_address(EULER_V2_WETH_VAULT),
+            abi=[
+                {
+                    "name": "balanceOf",
+                    "type": "function",
+                    "stateMutability": "view",
+                    "inputs": [{"name": "a", "type": "address"}],
+                    "outputs": [{"name": "", "type": "uint256"}],
+                },
+                {
+                    "name": "maxRedeem",
+                    "type": "function",
+                    "stateMutability": "view",
+                    "inputs": [{"name": "a", "type": "address"}],
+                    "outputs": [{"name": "", "type": "uint256"}],
+                },
+            ],
+        )
+        wallet_cs = Web3.to_checksum_address(funded_wallet)
+
+        # --- Setup: repay the debt in full (what teardown does before withdraw_all) ---
+        repay_result = compiler.compile(
+            RepayIntent.model_construct(
+                protocol="euler_v2",
+                token="USDC",
+                amount=borrow_amount,
+                repay_full=True,
+                chain=CHAIN_NAME,
+            )
+        )
+        assert repay_result.status.value == "SUCCESS", f"Repay compile failed: {repay_result.error}"
+        repay_exec = await orchestrator.execute(repay_result.action_bundle)
+        assert repay_exec.success, f"Repay setup failed: {repay_exec.error}"
+
+        # --- The precondition this test exists for, asserted on-chain (not assumed) ---
+        controllers = evc.functions.getControllers(wallet_cs).call()
+        collateral_shares = collateral_vault.functions.balanceOf(wallet_cs).call()
+        max_redeem = collateral_vault.functions.maxRedeem(wallet_cs).call()
+        assert len(controllers) > 0, (
+            "Setup invalid: borrowing must leave an EVC controller enabled — that is the "
+            "whole condition under test. Without it this test proves nothing."
+        )
+        assert collateral_shares > 0, "Setup invalid: the wallet must hold collateral shares to exit"
+        assert max_redeem == 0, (
+            f"EVK is expected to zero maxRedeem for a controller-enabled account even at zero "
+            f"debt; got {max_redeem} against {collateral_shares} shares. If this ever fails, "
+            f"EVK's semantics changed and the controller gate should be re-derived — do NOT "
+            f"just relax this assertion."
+        )
+
+        # --- Layer 1: the full exit must NOT be classified transient ---
+        withdraw_intent = WithdrawIntent(
+            protocol="euler_v2",
+            token="WETH",
+            amount=Decimal("1"),  # ignored — withdraw_all wins
+            withdraw_all=True,
+            chain=CHAIN_NAME,
+        )
+        compilation_result = compiler.compile(withdraw_intent)
+        assert compilation_result.status.value == "SUCCESS", (
+            f"REGRESSION: a controller-enabled full exit compiled to "
+            f"{compilation_result.status.value} ({compilation_result.error}). maxRedeem is 0 "
+            f"for ANY borrower regardless of debt — treating that as 'illiquid' wedges euler "
+            f"borrow teardown forever, because only disableController() clears it and this "
+            f"repo never calls it."
+        )
+        assert compilation_result.is_transient is False, "A controller-enabled exit must never be transient"
+        assert compilation_result.action_bundle.metadata["full_exit_mode"] == "redeem_max"
+        calldata = compilation_result.transactions[0].data.lower()
+        assert calldata.startswith("0xba087652"), "Full exit must call redeem(uint256,address,address)"
+        assert "f" * 64 in calldata, "A controller-enabled full exit must carry MAX_UINT256"
+
+        # --- Layer 2: execute ---
+        weth_before = get_token_balance(web3, weth, funded_wallet)
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert execution_result.success, f"Controller-enabled full exit failed to execute: {execution_result.error}"
+
+        # --- Layer 3: receipt parse ---
+        found_withdraw_event = False
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt:
+                parse_result = EulerV2ReceiptParser(underlying_decimals=weth_decimals).parse_receipt(
+                    tx_result.receipt.to_dict(),
+                    vault_address=EULER_V2_WETH_VAULT,
+                )
+                if parse_result.success and parse_result.withdraw_amount > 0:
+                    assert parse_result.withdraw_shares > 0
+                    found_withdraw_event = True
+        assert found_withdraw_event, "Receipt parser must find a Withdraw event on the collateral vault"
+
+        # --- Layer 4: balance deltas — the position actually went flat ---
+        shares_after = collateral_vault.functions.balanceOf(wallet_cs).call()
+        assert shares_after == 0, (
+            f"redeem(MAX) must drain the collateral position to ZERO even with a controller "
+            f"enabled. Residual: {shares_after}"
+        )
+        weth_received = get_token_balance(web3, weth, funded_wallet) - weth_before
+        assert weth_received > 0, "Full exit must return WETH to the wallet (no-op guard)"
 
     @pytest.mark.repay
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY)
