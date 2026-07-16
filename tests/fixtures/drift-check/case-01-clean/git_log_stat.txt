@@ -1,5 +1,5 @@
 commit abc123
-Author: yannick-almanak <ymyannick@gmail.com>
+Author: example-dev <dev@example.com>
 Date:   2026-05-08
 
     feat(skills): add Stage 6.5 drift check to /pr-merger

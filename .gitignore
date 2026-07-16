@@ -40,6 +40,8 @@ docs/internal/AccountantTest-baseline/db-backups/
 .almanak/sdk.json
 scripts/contracts.db
 almanak/.dashboard_events.json
+# Local dashboard spawn logs — contain absolute machine paths; never commit.
+**/dashboard.log
 probe/
 
 # Native binaries (downloaded at build time)

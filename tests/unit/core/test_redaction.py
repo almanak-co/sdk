@@ -26,7 +26,7 @@ from almanak.core.redaction import (
 
 class TestPartialReveal:
     def test_long_secret(self):
-        assert _partial_reveal("QuiTw3JuH0VUc8CpUmacvhSIFIsSHuQZ") == "Qu***QZ"
+        assert _partial_reveal("xxNOTREAL00AlchemyKeyForTestsOnly") == "xx***ly"
 
     def test_hex_key(self):
         assert _partial_reveal("0xabcdef1234567890") == "0x***90"
@@ -182,8 +182,8 @@ class TestMaskUrl:
         assert "format=json" in result
 
     def test_long_path_segment(self):
-        result = mask_url("https://arb-mainnet.g.alchemy.com/v2/QuiTw3JuH0VUc8CpUmacvhSIFIsSHuQZ")
-        assert "QuiTw3JuH0VUc8CpUmacvhSIFIsSHuQZ" not in result
+        result = mask_url("https://arb-mainnet.g.alchemy.com/v2/xxNOTREAL00AlchemyKeyForTestsOnly")
+        assert "xxNOTREAL00AlchemyKeyForTestsOnly" not in result
         assert "/***" in result
 
     def test_short_path_segment_preserved(self):

@@ -12,7 +12,7 @@ Usage::
     install_redaction()
 
 Partial reveal format: first 2 + last 2 characters shown.
-    ``QuiTw3JuH0VUc8CpUmacvhSIFIsSHuQZ`` -> ``Qu***QZ``
+    ``xxNOTREAL00AlchemyKeyForTestsOnly`` -> ``xx***ly``
     ``0xabcdef1234567890`` -> ``0x***90``
     Secrets <= 4 chars -> ``***``
 """

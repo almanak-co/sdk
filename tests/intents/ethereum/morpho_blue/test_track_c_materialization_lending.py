@@ -263,7 +263,7 @@ async def test_morpho_supply_position_materialises_and_lands_in_sqlite(  # noqa:
 # A real managed-Anvil run of the morpho_looping demo proves the same wiring
 # end-to-end through the production gRPC channel. Re-run with:
 #
-#     cd /Users/nick/Documents/Almanak/src/almanak-sdk
+#     cd /path/to/almanak-sdk
 #     ALMANAK_CHAIN=ethereum uv run almanak strat run \
 #       -d almanak/demo_strategies/morpho_looping \
 #       --network anvil \
