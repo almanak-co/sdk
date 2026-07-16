@@ -610,7 +610,14 @@ class TestVib5729MarketScopedLendingRate:
         assert got is rate_a
 
     def test_seeding_one_market_does_not_answer_for_another(self):
-        """Seeding market A must not satisfy a read scoped to market B."""
+        """A seeded market-A rate must not satisfy a read scoped to market B.
+
+        Asserted BEHAVIOURALLY — on the rate the caller receives, not on private
+        cache keys (CodeRabbit, PR #3287). A key-only assertion would pass even
+        if the B-scoped read were served market A's cached 3.5343%, which is the
+        exact failure it exists to exclude: the observable symptom of a cache
+        collision is the WRONG RATE, not a missing dict entry.
+        """
         rate_a = LendingRate(
             protocol="morpho_blue",
             token="USDG",
@@ -619,11 +626,67 @@ class TestVib5729MarketScopedLendingRate:
             apy_percent=Decimal("3.5343"),
             chain="robinhood",
         )
-        snapshot = self._snapshot(RateMonitor(chain="robinhood"))
+
+        async def _get(protocol, token, side, market_id=None):
+            # Only ever reached for market B — A is seeded. Returns B's own rate.
+            assert market_id == self.MARKET_B, f"unexpected monitor round-trip for {market_id}"
+            return LendingRate(
+                protocol=protocol,
+                token=token,
+                side=side.value if hasattr(side, "value") else side,
+                apy_ray=Decimal("0"),
+                apy_percent=Decimal("2.7744"),
+                chain="robinhood",
+                # Mirror the real monitor, which stamps the market it actually read
+                # (`_build_lending_rate_from_point`, VIB-5729). A stub that omits it
+                # diverges from the contract it stands in for (gemini, PR #3288).
+                market_id=market_id,
+            )
+
+        monitor = RateMonitor(chain="robinhood")
+        monitor.get_lending_rate = _get
+        snapshot = self._snapshot(monitor)
         snapshot.set_lending_rate("morpho_blue", "USDG", "borrow", rate_a, market_id=self.MARKET_A)
 
-        keys = snapshot._lending_rate_cache
-        assert snapshot._lending_cache_key("morpho_blue", "USDG", "borrow", self.MARKET_A) in keys
-        assert snapshot._lending_cache_key("morpho_blue", "USDG", "borrow", self.MARKET_B) not in keys
-        # And an unscoped seed stays in its own slot (Aave lane unchanged).
-        assert snapshot._lending_cache_key("morpho_blue", "USDG", "borrow") not in keys
+        # A is served from the seed; B must fall through to its own read.
+        assert snapshot.lending_rate("morpho_blue", "USDG", "borrow", market_id=self.MARKET_A) is rate_a
+        got_b = snapshot.lending_rate("morpho_blue", "USDG", "borrow", market_id=self.MARKET_B)
+        assert got_b.apy_percent == Decimal("2.7744"), "market B must not be served market A's seeded rate"
+        assert got_b is not rate_a
+
+    def test_seeding_a_market_does_not_fill_the_unscoped_slot(self):
+        """A market-scoped seed must not answer an UNSCOPED read.
+
+        The Aave-family lane reads unscoped; a scoped seed leaking into that slot
+        would hand a whole-account caller one isolated market's rate.
+        """
+        rate_a = LendingRate(
+            protocol="morpho_blue",
+            token="USDG",
+            side="borrow",
+            apy_ray=Decimal("0"),
+            apy_percent=Decimal("3.5343"),
+            chain="robinhood",
+        )
+
+        async def _get(protocol, token, side, market_id=None):
+            assert market_id is None, "unscoped read must not carry a market_id"
+            return LendingRate(
+                protocol=protocol,
+                token=token,
+                side=side.value if hasattr(side, "value") else side,
+                apy_ray=Decimal("0"),
+                apy_percent=Decimal("9.9999"),  # deliberately distinct
+                chain="robinhood",
+                # Mirrors the real monitor: an unscoped read echoes no market, so
+                # this stays None rather than inventing one (gemini, PR #3288).
+                market_id=market_id,
+            )
+
+        monitor = RateMonitor(chain="robinhood")
+        monitor.get_lending_rate = _get
+        snapshot = self._snapshot(monitor)
+        snapshot.set_lending_rate("morpho_blue", "USDG", "borrow", rate_a, market_id=self.MARKET_A)
+
+        got = snapshot.lending_rate("morpho_blue", "USDG", "borrow")
+        assert got.apy_percent == Decimal("9.9999"), "unscoped read must not be served a market-scoped seed"
