@@ -199,16 +199,37 @@ class GasProfile:
         fallback_priority_fee_gwei: Typical priority fee (tip) in gwei for
             backtesting fallback estimation — mirrors
             ``DEFAULT_GAS_PRICES[chain]["priority_fee"]``.  VIB-4857 (W5).
-        min_priority_fee_gwei: **Live-submit** priority-fee (tip) floor in
-            gwei. Distinct from ``fallback_priority_fee_gwei`` (a backtest
-            *estimate*): this is the hard minimum the live EIP-1559 fee
-            builder floors the RPC's ``eth_maxPriorityFeePerGas`` suggestion
-            to, so a node that legitimately returns ``0`` (common on L1) does
-            not produce a tip≈0 tx that stalls when the base fee rises
-            (VIB-5419). ``None`` / ``0.0`` means "no live floor" — correct
-            for L2s whose near-zero base fees let even a zero tip land. L1
-            (ethereum) carries a real floor (~2 gwei); validator-gated chains
-            (polygon ~30 gwei) and avalanche (~1 gwei) carry their own.
+        min_priority_fee_gwei: **Absolute component** of the live-submit
+            priority-fee (tip) floor, in gwei. Distinct from
+            ``fallback_priority_fee_gwei`` (a backtest *estimate*): this feeds
+            the live EIP-1559 fee builder, which floors the RPC's
+            ``eth_maxPriorityFeePerGas`` suggestion so a node that legitimately
+            returns ``0`` (common on L1) does not produce a tip≈0 tx that
+            stalls when the base fee rises (VIB-5419).
+
+            The *effective* floor is
+            ``max(min_priority_fee_gwei, base_fee * PRIORITY_FEE_BASE_FEE_MULTIPLIER)``
+            — see ``framework/execution/gas/fees.py``. VIB-5673 added the
+            relative term because absolute gwei constants silently rot: the L1
+            floor was set at 2.0 gwei when base fees were 20-50 gwei (~5% tip)
+            and became 12.5x the base fee post-blob, overriding the node's own
+            landable estimate and overpaying ~10x on every tx.
+
+            Set this to the chain's **hard** minimum where one genuinely
+            exists (polygon: ~30 gwei, enforced by PoS validators — a lower
+            tip is dropped, so the relative term must never undercut it), and
+            to a small "greater than zero" anti-stall token (~0.02 gwei) where
+            the floor is only a soft heuristic (ethereum, avalanche); the
+            relative term lifts those under congestion.
+
+            ``None`` / ``0.0`` means "this chain declares no floor policy" —
+            correct for L2s whose near-zero base fees let even a zero tip land.
+            Such chains get **no relative term either**, so a returned ``0``
+            stays ``0``.
+
+            A CI gate (``tests/unit/core/test_chain_gas_cap_sanity.py``) pins
+            this value against the ``OBSERVED_TYPICAL_GAS_GWEI`` snapshot so it
+            cannot drift far above base fee again.
         l1_fee_oracle_kind: L1 fee-oracle mechanism this chain uses for L2
             data-cost estimation. One of ``KNOWN_L1_FEE_ORACLE_KINDS``
             (``"arbitrum_nodeinterface"`` or ``"op_gaspriceoracle"``).

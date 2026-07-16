@@ -43,9 +43,16 @@ DESCRIPTOR = register_chain(
             },
             fallback_base_fee_gwei=25.0,
             fallback_priority_fee_gwei=1.0,
-            # VIB-5419: live-submit tip floor (~1 gwei is the typical C-Chain
-            # tip; floors a node that returns 0 from shipping a tip≈0 tx).
-            min_priority_fee_gwei=1.0,
+            # VIB-5419: live-submit tip floor (floors a node that returns 0
+            # from shipping a tip≈0 tx).
+            # VIB-5673: retuned 1.0 → 0.02 and made congestion-relative. Like
+            # ethereum's, this is a SOFT anti-stall heuristic, not a protocol
+            # minimum. Measured C-Chain base fee is ~0.01 gwei, so a 1.0 gwei
+            # floor was ~100x base — it overrode the node's own suggestion and,
+            # since the tip is always paid, inflated every avalanche tx (18.7x
+            # measured required-vs-actual). The effective floor is now
+            # max(0.02, 0.05 * base_fee), which tracks congestion instead.
+            min_priority_fee_gwei=0.02,
         ),
         timeouts=Timeouts(
             tx_confirmation=120,

@@ -62,6 +62,14 @@ DESCRIPTOR = register_chain(
             # a ~30 gwei minimum priority fee (mirrors the polymarket gateway's
             # POLYGON_MIN_PRIORITY_FEE_WEI); a node returning a lower estimate
             # would otherwise have its tx dropped.
+            # VIB-5673: DELIBERATELY LEFT ABSOLUTE at 30.0 while ethereum and
+            # avalanche were retuned down. This is a HARD, protocol-enforced
+            # minimum, not a soft anti-stall heuristic — and it is already
+            # well-calibrated (~10% of polygon's ~284 gwei measured base fee),
+            # so it is not part of the VIB-5673 overpay. The relative term
+            # (0.05 * base_fee = ~14 gwei at that base) is applied as a MAX
+            # against this value precisely so it can never undercut the
+            # validator minimum and get txs dropped.
             min_priority_fee_gwei=30.0,
         ),
         timeouts=Timeouts(

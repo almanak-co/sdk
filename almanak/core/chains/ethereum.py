@@ -52,7 +52,18 @@ DESCRIPTOR = register_chain(
             # VIB-5419: live-submit tip floor. L1 nodes legitimately return
             # eth_maxPriorityFeePerGas=0; without a floor the tx ships with
             # tip≈0 and stalls/drops when the base fee rises.
-            min_priority_fee_gwei=2.0,
+            # VIB-5673: retuned 2.0 → 0.02 and made congestion-relative. This
+            # is a SOFT anti-stall heuristic, not a protocol minimum. 2.0 gwei
+            # was calibrated for pre-2024 L1 (base 20-50 gwei, so ~5% tip);
+            # post-blob L1 sits at ~0.16 gwei, leaving the floor at 12.5x the
+            # base fee and 86% of max_fee — it overrode the node's own landable
+            # ~0.05 gwei estimate and, since the tip is always paid, cost ~10x
+            # on every L1 tx. The effective floor is now
+            # max(0.02, 0.05 * base_fee): ~5% of base once base > 0.4 gwei, and
+            # pinned at the 0.02 gwei absolute component below that. 0.02 gwei
+            # is a "greater than zero" anti-stall token for the case where the
+            # node itself suggests 0 (i.e. blocks are not full).
+            min_priority_fee_gwei=0.02,
         ),
         timeouts=Timeouts(
             tx_confirmation=300,

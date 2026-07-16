@@ -11,6 +11,20 @@ tip to the per-chain descriptor value (``min_priority_fee_gwei``) on a
 returned ``0`` *and* on an RPC exception, that a high RPC suggestion is left
 untouched, that L2s (floor 0) are behaviour-preserving, and that **both**
 production call sites delegate to the shared helper.
+
+VIB-5673 update — read before "fixing" a failing assertion here:
+    VIB-5673 retuned the L1 / avalanche floors (2.0 / 1.0 gwei → 0.02 gwei)
+    and made the floor congestion-relative
+    (``max(absolute, 0.05 * base_fee)``). The absolute gwei values below were
+    *calibration*, not the VIB-5419 contract, and they moved.
+
+    **The VIB-5419 invariant is "tip > 0 or the tx stalls" — NOT "tip == 2
+    gwei".** That invariant is unchanged and is now asserted directly and
+    calibration-independently in :class:`TestVib5419InvariantTipIsNeverZero`,
+    so it can no longer rot when the floor is re-tuned. Every
+    behaviour-preserving property VIB-5419 pinned (L2 zero stays zero, a
+    healthy RPC suggestion passes through untouched, ``priority <= max_fee``
+    survives capping, both call sites delegate) is likewise unchanged.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -32,23 +46,35 @@ GWEI = 10**9
 
 class TestPriorityFeeFloorWei:
     def test_ethereum_l1_has_a_real_floor(self):
-        # ethereum.py declares min_priority_fee_gwei=2.0
-        assert priority_fee_floor_wei("ethereum") == 2 * GWEI
+        # ethereum.py declares min_priority_fee_gwei=0.02 (VIB-5673 retune of
+        # the original 2.0). Still a real, non-zero floor.
+        assert priority_fee_floor_wei("ethereum") == 0.02 * GWEI
 
     def test_ethereum_alias_resolves(self):
-        assert priority_fee_floor_wei("mainnet") == 2 * GWEI
+        assert priority_fee_floor_wei("mainnet") == 0.02 * GWEI
 
     def test_avalanche_floor(self):
-        assert priority_fee_floor_wei("avalanche") == 1 * GWEI
+        assert priority_fee_floor_wei("avalanche") == 0.02 * GWEI
 
     def test_polygon_validator_floor(self):
         # Polygon PoS enforces ~30 gwei min priority fee at the validator layer.
+        # VIB-5673 deliberately left this ABSOLUTE: it is a protocol-enforced
+        # minimum, not a soft heuristic.
         assert priority_fee_floor_wei("polygon") == 30 * GWEI
 
     @pytest.mark.parametrize("l2", ["base", "arbitrum", "optimism", "bsc"])
     def test_l2s_have_no_floor(self, l2):
         # L2s declare no live floor (None) → 0; behaviour-preserving.
         assert priority_fee_floor_wei(l2) == 0
+
+    @pytest.mark.parametrize("l2", ["base", "arbitrum", "optimism", "bsc"])
+    def test_l2s_get_no_relative_term_either(self, l2):
+        """VIB-5673: a chain with no floor policy stays at exactly 0.
+
+        The relative term must NOT leak onto L2s — declaring no floor means
+        no floor, so a returned 0 still ships as 0.
+        """
+        assert priority_fee_floor_wei(l2, base_fee_wei=50 * GWEI) == 0
 
     def test_unknown_chain_is_zero(self):
         assert priority_fee_floor_wei("not-a-real-chain") == 0
@@ -61,15 +87,20 @@ class TestPriorityFeeFloorWei:
 
 class TestBuildEip1559Fees:
     def test_rpc_zero_is_floored_on_l1(self):
-        """The core bug: node returns 0 → tip floored to the descriptor value."""
+        """The core bug: node returns 0 → tip floored to a non-zero value.
+
+        VIB-5673: at a congested 30 gwei base the relative term dominates —
+        floor = max(0.02, 0.05 * 30) = 1.5 gwei. The tip scales WITH
+        congestion, which is exactly when a tip is needed to land.
+        """
         fees = build_eip1559_fees(
             base_fee_wei=30 * GWEI,
             rpc_priority_fee_wei=0,
             chain="ethereum",
         )
-        assert fees["max_priority_fee_per_gas"] == 2 * GWEI
-        # max_fee = 2*base + tip = 60 + 2 = 62 gwei (the old bug gave 60).
-        assert fees["max_fee_per_gas"] == 62 * GWEI
+        assert fees["max_priority_fee_per_gas"] == 1.5 * GWEI
+        # max_fee = 2*base + tip = 60 + 1.5 = 61.5 gwei (the old bug gave 60).
+        assert fees["max_fee_per_gas"] == 61.5 * GWEI
         assert fees["base_fee_per_gas"] == 30 * GWEI
 
     def test_rpc_none_is_floored_on_l1(self):
@@ -79,7 +110,8 @@ class TestBuildEip1559Fees:
             rpc_priority_fee_wei=None,
             chain="ethereum",
         )
-        assert fees["max_priority_fee_per_gas"] == 2 * GWEI
+        # floor = max(0.02, 0.05 * 10) = 0.5 gwei
+        assert fees["max_priority_fee_per_gas"] == 0.5 * GWEI
 
     def test_high_rpc_suggestion_untouched_on_l1(self):
         """A node suggestion above the floor passes through unchanged."""
@@ -116,9 +148,91 @@ class TestBuildEip1559Fees:
             rpc_priority_fee_wei=0,
             chain="ethereum",
         )
+        # Relative term is 0 at zero base fee → the absolute component holds
+        # the line, keeping the tip > 0 (the VIB-5419 invariant).
         assert fees["base_fee_per_gas"] == 0
-        assert fees["max_fee_per_gas"] == 2 * GWEI
-        assert fees["max_priority_fee_per_gas"] == 2 * GWEI
+        assert fees["max_fee_per_gas"] == 0.02 * GWEI
+        assert fees["max_priority_fee_per_gas"] == 0.02 * GWEI
+
+
+# =============================================================================
+# The VIB-5419 invariant itself, stated independently of calibration
+# =============================================================================
+
+
+class TestVib5419InvariantTipIsNeverZero:
+    """VIB-5419's actual contract: **tip > 0, or the tx stalls**.
+
+    Stated without reference to any particular gwei value, so re-tuning the
+    floor (as VIB-5673 did) cannot silently delete the protection. The
+    original tests asserted ``tip == 2 gwei``, which conflated the invariant
+    with a calibration constant that later became the VIB-5673 overpay bug.
+
+    There is no pending-tx replacement / speed-up path anywhere in
+    ``almanak/framework/execution/`` (VIB-69), so the floor carries the whole
+    anti-stall burden: a tip of exactly 0 has no recovery path.
+    """
+
+    @pytest.mark.parametrize(
+        "base_fee_gwei",
+        [0, 0.001, 0.09, 0.16, 1, 10, 30, 100, 500],
+    )
+    @pytest.mark.parametrize("chain", ["ethereum", "avalanche", "polygon"])
+    @pytest.mark.parametrize("rpc_suggestion", [0, None])
+    def test_tip_is_never_zero_when_node_gives_no_suggestion(self, chain, base_fee_gwei, rpc_suggestion):
+        """A node returning 0/None must never yield a tip≈0 tx, at any base fee."""
+        fees = build_eip1559_fees(
+            base_fee_wei=int(base_fee_gwei * GWEI),
+            rpc_priority_fee_wei=rpc_suggestion,
+            chain=chain,
+        )
+        assert fees["max_priority_fee_per_gas"] > 0, (
+            f"{chain} at base={base_fee_gwei} gwei with rpc={rpc_suggestion} "
+            f"produced tip=0 — VIB-5419 anti-stall protection is GONE."
+        )
+
+    @pytest.mark.parametrize("chain", ["ethereum", "avalanche", "polygon"])
+    def test_floor_scales_with_congestion(self, chain):
+        """VIB-5673: the floor must track base fee, not sit at a constant.
+
+        This is what stops the floor from rotting into a 12.5x overpay the
+        next time L1 economics shift.
+        """
+        quiet = priority_fee_floor_wei(chain, base_fee_wei=int(0.16 * GWEI))
+        busy = priority_fee_floor_wei(chain, base_fee_wei=1000 * GWEI)
+        assert busy > quiet, f"{chain} floor did not scale with base fee"
+
+    @pytest.mark.parametrize(
+        ("chain", "base_fee_gwei"),
+        [("ethereum", 0.16), ("avalanche", 0.01), ("polygon", 283.95)],
+    )
+    def test_floor_never_dominates_max_fee_at_typical_base(self, chain, base_fee_gwei):
+        """VIB-5673 regression: the tip must not become most of max_fee.
+
+        At the 2.0 gwei L1 floor the tip was 86% of max_fee. The tip is money
+        that is ALWAYS paid, so a tip-dominated max_fee is a direct ~10x
+        overpay on every transaction.
+
+        The `negligible` escape hatch matters: on a chain whose base fee is
+        ~0 (avalanche, 0.01 gwei) the share test and VIB-5419's "tip > 0"
+        invariant are in direct tension — ANY non-zero tip dominates a
+        near-zero max_fee. A 0.05 gwei tip costs ~$0.02 on a 400k-gas tx, so
+        it cannot be the ~10x overpay this guards. The share rule applies
+        where base fee is large enough for the ratio to mean anything.
+        """
+        fees = build_eip1559_fees(
+            base_fee_wei=int(base_fee_gwei * GWEI),
+            rpc_priority_fee_wei=0,
+            chain=chain,
+        )
+        tip = fees["max_priority_fee_per_gas"]
+        tip_share = tip / fees["max_fee_per_gas"]
+        negligible = tip <= 0.05 * GWEI
+        assert negligible or tip_share <= 0.25, (
+            f"{chain}: tip is {tip_share:.0%} of max_fee ({tip / GWEI} gwei) "
+            f"at a typical {base_fee_gwei} gwei base fee — the floor has "
+            f"drifted above base fee again (VIB-5673)."
+        )
 
 
 # =============================================================================
@@ -154,8 +268,9 @@ class TestOrchestratorUsesSharedHelper:
 
         gas = await orch.get_gas_price()
 
-        assert gas["max_priority_fee_per_gas"] == 2 * GWEI
-        assert gas["max_fee_per_gas"] == 62 * GWEI
+        # VIB-5673: floor = max(0.02, 0.05 * 30) = 1.5 gwei.
+        assert gas["max_priority_fee_per_gas"] == 1.5 * GWEI
+        assert gas["max_fee_per_gas"] == 61.5 * GWEI
 
     @pytest.mark.asyncio
     async def test_l2_zero_priority_preserved(self):
@@ -204,8 +319,9 @@ class TestChainExecutorUsesSharedHelper:
         with patch.object(executor, "_get_web3", side_effect=fake_get_web3):
             gas = await executor.get_gas_params()
 
-        assert gas["max_priority_fee_per_gas"] == 2 * GWEI
-        assert gas["max_fee_per_gas"] == 62 * GWEI
+        # VIB-5673: floor = max(0.02, 0.05 * 30) = 1.5 gwei.
+        assert gas["max_priority_fee_per_gas"] == 1.5 * GWEI
+        assert gas["max_fee_per_gas"] == 61.5 * GWEI
 
     @pytest.mark.asyncio
     async def test_l2_zero_priority_preserved(self):
