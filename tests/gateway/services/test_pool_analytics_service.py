@@ -592,3 +592,412 @@ def test_shared_defillama_infrastructure_untouched():
     assert "ethereum" in _CHAIN_TO_LLAMA_DISPLAY
     assert _resolve_defillama_slug("uniswap_v3") == "uniswap-v3"
     assert _defillama_slug_table()["uniswap_v3"] == "uniswap-v3"
+
+
+# =============================================================================
+# ListTokenPools (product-distinct dex ids for symbolic pool resolution)
+# =============================================================================
+
+
+def _token_pools_payload() -> dict[str, Any]:
+    return {
+        "data": [
+            {
+                "attributes": {
+                    "address": "0xB2cc224c1c9feE385f8ad6a55b4d94E92359DC59",
+                    "name": "WETH / USDC 0.05%",
+                    "reserve_in_usd": "8866105.12",
+                },
+                "relationships": {
+                    "dex": {"data": {"id": "aerodrome-slipstream"}},
+                    "base_token": {"data": {"id": "base_0x4200000000000000000000000000000000000006"}},
+                    "quote_token": {"data": {"id": "base_0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}},
+                },
+            },
+            {
+                "attributes": {
+                    "address": "0xcDAC0d6c6C59727a65F871236188350531885C43",
+                    "name": "WETH / USDC",
+                    "reserve_in_usd": "7654838.9",
+                },
+                "relationships": {
+                    "dex": {"data": {"id": "aerodrome-base"}},
+                    "base_token": {"data": {"id": "base_0x4200000000000000000000000000000000000006"}},
+                    "quote_token": {"data": {"id": "base_0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}},
+                },
+            },
+            {"attributes": {}, "relationships": {}},  # malformed row: skipped, never fatal
+        ]
+    }
+
+
+def _token_pools_request(chain: str = "base") -> gateway_pb2.TokenPoolsRequest:
+    return gateway_pb2.TokenPoolsRequest(
+        chain=chain,
+        token_address="0x4200000000000000000000000000000000000006",
+    )
+
+
+def _fake_session_returning(payload: Any, status: int = 200):
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status = status
+
+        async def json(self) -> Any:
+            return payload
+
+        async def text(self) -> str:
+            return json.dumps(payload)
+
+    class _FakeGetCtx:
+        async def __aenter__(self) -> Any:
+            return _FakeResponse()
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+    class _FakeSession:
+        def get(self, _url: str, params: dict | None = None, headers: dict | None = None) -> Any:
+            return _FakeGetCtx()
+
+    return _FakeSession()
+
+
+def test_list_token_pools_parses_product_distinct_dex_ids():
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+    ctx = _MockContext()
+
+    with patch.object(
+        servicer, "_get_http_session", new=AsyncMock(return_value=_fake_session_returning(_token_pools_payload()))
+    ):
+        response = asyncio.run(servicer.ListTokenPools(_token_pools_request(), ctx))
+
+    assert response.success is True
+    assert response.source == "coingecko_onchain"
+    assert [p.dex_id for p in response.pools] == ["aerodrome-slipstream", "aerodrome-base"]
+    assert response.pools[0].pool_address == "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"
+    assert response.pools[0].base_token_address == "0x4200000000000000000000000000000000000006"
+    assert response.pools[0].reserve_usd == "8866105.12"
+
+
+def test_list_token_pools_canonicalizes_chain_aliases():
+    """ "avax" resolves through ChainRegistry; unsupported chains reject."""
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+    ctx = _MockContext()
+
+    with patch.object(servicer, "_get_http_session", new=AsyncMock(return_value=_fake_session_returning({"data": []}))):
+        response = asyncio.run(servicer.ListTokenPools(_token_pools_request(chain="avax"), ctx))
+
+    assert response.success is True
+    assert response.chain == "avalanche"
+
+
+def test_list_token_pools_rejects_bad_arguments():
+    servicer = _make_servicer()
+    ctx = _MockContext()
+    request = gateway_pb2.TokenPoolsRequest(chain="base", token_address="not-an-address")
+
+    response = asyncio.run(servicer.ListTokenPools(request, ctx))
+
+    assert response.success is False
+    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
+
+
+def test_list_token_pools_maps_provider_failure_to_unavailable():
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+    ctx = _MockContext()
+
+    with patch.object(
+        servicer, "_get_http_session", new=AsyncMock(return_value=_fake_session_returning({"error": "x"}, status=500))
+    ):
+        response = asyncio.run(servicer.ListTokenPools(_token_pools_request(), ctx))
+
+    assert response.success is False
+    assert ctx.code == grpc.StatusCode.UNAVAILABLE
+    assert "coingecko_onchain" in response.error
+
+
+def test_list_token_pools_preserves_multi_underscore_networks_and_case():
+    """polygon_pos ids must strip the EXACT network prefix (first-underscore
+    splitting yields 'pos_0x…'); Solana-family case is preserved by the
+    chain-aware normalizer."""
+    payload = {
+        "data": [
+            {
+                "attributes": {
+                    "address": "0xPoolAddrPolygon00000000000000000000000001".lower().replace(
+                        "pooladdrpolygon00000000000000000000000001", "b" * 40
+                    ),
+                    "name": "X / Y",
+                    "reserve_in_usd": "10",
+                },
+                "relationships": {
+                    "dex": {"data": {"id": "quickswap"}},
+                    "base_token": {"data": {"id": "polygon_pos_0x" + "c" * 40}},
+                    "quote_token": {"data": {"id": "polygon_pos_0x" + "d" * 40}},
+                },
+            }
+        ]
+    }
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+    ctx = _MockContext()
+    request = gateway_pb2.TokenPoolsRequest(chain="polygon", token_address="0x" + "c" * 40)
+
+    with patch.object(servicer, "_get_http_session", new=AsyncMock(return_value=_fake_session_returning(payload))):
+        response = asyncio.run(servicer.ListTokenPools(request, ctx))
+
+    assert response.success is True
+    assert response.pools[0].base_token_address == "0x" + "c" * 40  # exact prefix stripped, not 'pos_0x…'
+    assert response.pools[0].quote_token_address == "0x" + "d" * 40
+
+
+def test_list_token_pools_skips_invalid_pool_addresses_and_nonfinite_reserves():
+    payload = {
+        "data": [
+            {
+                "attributes": {"address": "not-a-contract", "name": "bad", "reserve_in_usd": "10"},
+                "relationships": {"dex": {"data": {"id": "aerodrome-base"}}},
+            },
+            {
+                "attributes": {"address": "0x" + "e" * 40, "name": "nan-pool", "reserve_in_usd": "NaN"},
+                "relationships": {
+                    "dex": {"data": {"id": "aerodrome-base"}},
+                    "base_token": {"data": {"id": "base_0x" + "a" * 40}},
+                    "quote_token": {"data": {"id": "base_0x" + "b" * 40}},
+                },
+            },
+        ]
+    }
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+    ctx = _MockContext()
+
+    with patch.object(servicer, "_get_http_session", new=AsyncMock(return_value=_fake_session_returning(payload))):
+        response = asyncio.run(servicer.ListTokenPools(_token_pools_request(), ctx))
+
+    assert response.success is True
+    assert len(response.pools) == 1  # non-address row skipped
+    assert response.pools[0].reserve_usd == ""  # NaN is unmeasured, never serialized
+
+
+def test_list_token_pools_malformed_payload_stays_in_envelope():
+    """A 200 whose body is a LIST is a provider failure (structured
+    UNAVAILABLE), never an AttributeError surfaced as gRPC UNKNOWN."""
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+    ctx = _MockContext()
+
+    with patch.object(servicer, "_get_http_session", new=AsyncMock(return_value=_fake_session_returning([1, 2, 3]))):
+        response = asyncio.run(servicer.ListTokenPools(_token_pools_request(), ctx))
+
+    assert response.success is False
+    assert ctx.code == grpc.StatusCode.UNAVAILABLE
+    assert "coingecko_onchain" in response.error
+
+
+def test_list_token_pools_caches_positive_and_negative():
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+
+    # Positive: second call served from cache (session dialed once).
+    session_calls: list[int] = []
+
+    def counting_session(payload):
+        inner = _fake_session_returning(payload)
+
+        class _Session:
+            def get(self, url, params=None, headers=None):
+                session_calls.append(1)
+                return inner.get(url, params=params, headers=headers)
+
+        return _Session()
+
+    with patch.object(
+        servicer, "_get_http_session", new=AsyncMock(return_value=counting_session(_token_pools_payload()))
+    ):
+        first = asyncio.run(servicer.ListTokenPools(_token_pools_request(), _MockContext()))
+        second = asyncio.run(servicer.ListTokenPools(_token_pools_request(), _MockContext()))
+
+    assert first.success is True and second.success is True
+    assert len(session_calls) == 1
+    assert [p.dex_id for p in second.pools] == [p.dex_id for p in first.pools]
+
+    # Negative: a provider failure is cached briefly (one paid dial).
+    servicer2 = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+    fail_calls: list[int] = []
+
+    def failing_session():
+        inner = _fake_session_returning({"error": "x"}, status=500)
+
+        class _Session:
+            def get(self, url, params=None, headers=None):
+                fail_calls.append(1)
+                return inner.get(url, params=params, headers=headers)
+
+        return _Session()
+
+    with patch.object(servicer2, "_get_http_session", new=AsyncMock(return_value=failing_session())):
+        r1 = asyncio.run(servicer2.ListTokenPools(_token_pools_request(), _MockContext()))
+        r2 = asyncio.run(servicer2.ListTokenPools(_token_pools_request(), _MockContext()))
+
+    assert r1.success is False and r2.success is False
+    assert len(fail_calls) == 1
+
+
+def _pool_row(i: int, dex: str = "aerodrome-base", reserve: str = "1000") -> dict[str, Any]:
+    return {
+        "attributes": {"address": f"0x{i:040x}", "name": "WETH / USDC", "reserve_in_usd": reserve},
+        "relationships": {
+            "dex": {"data": {"id": dex}},
+            "base_token": {"data": {"id": "base_0x" + "a" * 40}},
+            "quote_token": {"data": {"id": "base_0x" + "b" * 40}},
+        },
+    }
+
+
+def _fake_paged_session(pages: dict[int, list[dict[str, Any]]]):
+    calls: list[int] = []
+
+    class _FakeResponse:
+        def __init__(self, rows: list[dict[str, Any]]):
+            self.status = 200
+            self._rows = rows
+
+        async def json(self) -> Any:
+            return {"data": self._rows}
+
+        async def text(self) -> str:
+            return "{}"
+
+    class _FakeGetCtx:
+        def __init__(self, rows):
+            self._rows = rows
+
+        async def __aenter__(self):
+            return _FakeResponse(self._rows)
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+    class _FakeSession:
+        def get(self, _url: str, params: dict | None = None, headers: dict | None = None):
+            page = int((params or {}).get("page", "1"))
+            calls.append(page)
+            return _FakeGetCtx(pages.get(page, []))
+
+    return _FakeSession(), calls
+
+
+def test_list_token_pools_atomic_pages_on_raw_counts_not_filtered():
+    """Round-7 contract: a sanitized junk row on a FULL upstream page must
+    not stop the fetch — continuation is decided on raw row counts."""
+    page1 = [_pool_row(i) for i in range(1, 20)] + [{"attributes": {}, "relationships": {}}]  # 20 raw, 19 valid
+    page2 = [_pool_row(99, reserve="9000000")]
+    session, calls = _fake_paged_session({1: page1, 2: page2})
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+
+    with patch.object(servicer, "_get_http_session", new=AsyncMock(return_value=session)):
+        response = asyncio.run(servicer.ListTokenPools(_token_pools_request(), _MockContext()))
+
+    assert response.success is True
+    assert response.complete is True
+    assert calls == [1, 2]  # page 2 fetched despite only 19 FILTERED rows on page 1
+    assert len(response.pools) == 20  # 19 valid + the page-2 winner
+    assert any(p.reserve_usd == "9000000" for p in response.pools)
+
+
+def test_list_token_pools_full_final_page_is_not_complete():
+    """A full page at the bound means the snapshot is NOT known-complete —
+    completeness-requiring consumers must treat it as a failed lookup."""
+    pages = {page: [_pool_row(page * 100 + i) for i in range(20)] for page in range(1, 6)}
+    session, calls = _fake_paged_session(pages)
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+
+    with patch.object(servicer, "_get_http_session", new=AsyncMock(return_value=session)):
+        response = asyncio.run(servicer.ListTokenPools(_token_pools_request(), _MockContext()))
+
+    assert response.success is True
+    assert response.complete is False
+    assert calls == [1, 2, 3, 4, 5]  # bound respected
+
+
+def test_list_token_pools_single_flight_dedups_concurrent_misses():
+    session, calls = _fake_paged_session({1: [_pool_row(1)]})
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+
+    async def two_concurrent():
+        with patch.object(servicer, "_get_http_session", new=AsyncMock(return_value=session)):
+            return await asyncio.gather(
+                servicer.ListTokenPools(_token_pools_request(), _MockContext()),
+                servicer.ListTokenPools(_token_pools_request(), _MockContext()),
+            )
+
+    first, second = asyncio.run(two_concurrent())
+    assert first.success is True and second.success is True
+    assert calls == [1]  # one upstream dial for two concurrent identical misses
+
+
+def test_list_token_pools_cache_is_bounded():
+    from almanak.gateway.services import pool_analytics_service as svc
+
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+    now = 0.0
+    for i in range(svc._TOKEN_POOLS_CACHE_MAX_ENTRIES + 100):
+        servicer._token_pools_cache[("base", f"0x{i:040x}", 0)] = (now, None, "x")
+    with servicer._cache_lock:
+        servicer._evict_token_pools_locked(now + 0.1)
+    assert len(servicer._token_pools_cache) < svc._TOKEN_POOLS_CACHE_MAX_ENTRIES
+
+
+def test_list_token_pools_rejects_unsupported_chain():
+    """The docstring-promised half of the alias test (CodeRabbit, #3271):
+    a chain outside the GT network map is INVALID_ARGUMENT, success=False,
+    with the chain named in the error."""
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+    ctx = _MockContext()
+
+    response = asyncio.run(servicer.ListTokenPools(_token_pools_request(chain="notachain"), ctx))
+
+    assert response.success is False
+    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
+    assert "notachain" in response.error
+
+
+def test_list_token_pools_rejects_negative_page():
+    """The wire contract defines page 0 (atomic) and >= 1 only — malformed
+    negative input must not silently map onto the most expensive mode
+    (CodeRabbit, #3271)."""
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+    ctx = _MockContext()
+    request = _token_pools_request()
+    request.page = -1
+
+    response = asyncio.run(servicer.ListTokenPools(request, ctx))
+
+    assert response.success is False
+    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
+    assert "page" in response.error
+
+
+def test_list_token_pools_single_flight_entry_survives_the_fetch():
+    """The in-flight registry entry must stay registered UNTIL the upstream
+    work completes — popping before the await let a concurrent caller mint
+    its own lock and double-spend the CG budget (CodeRabbit find, #3271)."""
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+    ctx = _MockContext()
+    observed: dict[str, bool] = {}
+
+    real_fetch = servicer._fetch_token_pools_upstream
+
+    async def instrumented_fetch(chain, token_address, page):
+        observed["registered_during_fetch"] = any(
+            key[0] == chain and key[1] == token_address for key in servicer._token_pools_inflight
+        )
+        return await real_fetch(chain, token_address, page)
+
+    with (
+        patch.object(servicer, "_get_http_session", new=AsyncMock(return_value=_fake_session_returning({"data": []}))),
+        patch.object(servicer, "_fetch_token_pools_upstream", new=instrumented_fetch),
+    ):
+        response = asyncio.run(servicer.ListTokenPools(_token_pools_request(), ctx))
+
+    assert response.success is True
+    assert observed["registered_during_fetch"] is True  # entry alive across the await
+    assert not servicer._token_pools_inflight  # and popped after completion

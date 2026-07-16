@@ -49,13 +49,14 @@ from almanak.framework.backtesting.adapters.base import (
     AdapterRegistry,
     StrategyBacktestAdapter,
     StrategyBacktestConfig,
-    get_adapter,
+    get_adapter_with_config,
     register_adapter,
 )
 from almanak.framework.backtesting.pnl.data_provider import TokenRef, token_ref_display
 from almanak.framework.backtesting.pnl.position_models import PositionType
 
 if TYPE_CHECKING:
+    from almanak.framework.backtesting.config import BacktestDataConfig
     from almanak.framework.backtesting.pnl.data_provider import MarketState
     from almanak.framework.backtesting.pnl.portfolio import (
         SimulatedFill,
@@ -440,14 +441,24 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         risk_result = adapter.calculate_unified_risk(portfolio, market_state)
     """
 
-    def __init__(self, config: MultiProtocolBacktestConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: MultiProtocolBacktestConfig | None = None,
+        data_config: "BacktestDataConfig | None" = None,
+    ) -> None:
         """Initialize the multi-protocol backtest adapter.
 
         Args:
             config: Multi-protocol-specific configuration. If None, uses default
                 MultiProtocolBacktestConfig with strategy_type="multi_protocol".
+            data_config: Engine BacktestDataConfig, threaded through to every
+                sub-adapter so their historical-data providers honor the
+                caller's settings (ALM-2930: dropping it left the LP sub-adapter
+                on LPBacktestConfig defaults, turning a missing pool-volume
+                source into a fatal error for every multi-protocol strategy).
         """
         self._config = config or MultiProtocolBacktestConfig(strategy_type="multi_protocol")
+        self._data_config = data_config
         self._sub_adapters: dict[str, StrategyBacktestAdapter] = {}
         self._risk_history: list[AggregatedRiskResult] = []
         self._portfolio_aggregator: PortfolioAggregator = PortfolioAggregator()
@@ -465,7 +476,7 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
                 continue
 
             # Get adapter instance
-            adapter = get_adapter(adapter_type)
+            adapter = get_adapter_with_config(adapter_type, data_config=self._data_config)
             if adapter:
                 self._sub_adapters[adapter_type] = adapter
                 logger.debug("Initialized sub-adapter for protocol type: %s", adapter_type)
@@ -611,6 +622,27 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         if protocol_type is None:
             return None
         return self._sub_adapters.get(protocol_type)
+
+    async def prewarm_history(
+        self,
+        intent: "Intent",
+        chain: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> None:
+        """Route the engine's post-open prewarm hook to the owning sub-adapter.
+
+        LP_OPEN → lp sub-adapter (volume/liquidity); PERP_OPEN → perp
+        sub-adapter (funding). Sub-adapters without the hook are skipped —
+        prewarm is best-effort everywhere.
+        """
+        intent_type = str(getattr(getattr(intent, "intent_type", None), "value", "")).upper()
+        sub_type = {"LP_OPEN": "lp", "PERP_OPEN": "perp"}.get(intent_type)
+        if sub_type is None:
+            return
+        prewarm = getattr(self._sub_adapters.get(sub_type), "prewarm_history", None)
+        if prewarm is not None:
+            await prewarm(intent, chain=chain, start_time=start_time, end_time=end_time)
 
     def update_position(
         self,

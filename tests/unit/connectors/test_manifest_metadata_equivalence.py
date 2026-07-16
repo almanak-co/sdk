@@ -367,19 +367,22 @@ FROZEN_DEX_VOLUME_DATA_SOURCES = {
     "curve": "curve_messari_subgraph",
     "balancer": "balancer_v2_subgraph",
 }
+# Deployment-id refresh 2026-07-14: uniswap/optimism, pancake/ethereum and
+# pancake/bsc were re-pointed at healthy Messari-standard deployments (the
+# originals had sick indexers / frozen data) — see the connector decls.
 FROZEN_DEX_LIQUIDITY_SUBGRAPH_IDS = {
     "uniswap_v3": {
         "ethereum": "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
         "arbitrum": "FbCGRftH4a3yZugY7TnbYgPJVEv2LvMT6oF1fxPe9aJM",
         "base": "96eJ9Go8gFjySRGnndG7EYxThaiwVDV8BYPp1TMDcoYh",
-        "optimism": "Cghf4LfVqPiFw6fp6Y5X5Ubc8UpmUhSfJL82zwiBFLaj",
+        "optimism": "EgnS9YE1avupkvCNj9fHnJxppfEmNNywYJtghqiu2pd9",
         "polygon": "3hCPRGf4z88VC5rsBKU5AA9FBBq5nF3jbKJG7VZCbhjm",
     },
     "sushiswap_v3": {"ethereum": "2tGWMrDha4164KkFAfkU3rDCtuxGb4q1emXmFdLLzJ8x"},
     "pancakeswap_v3": {
-        "ethereum": "CJYGNhb7RvnhfBDjqpRnD3oxgyhibzc7fkAMa38YV3oS",
+        "ethereum": "JAGXF8B14mpB8QGKnwhKTs5JxsQZBJQvbDGFcWwL7gbm",
         "arbitrum": "251MHFNN1rwjErXD2efWMpNS73SANZN8Ua192zw6iXve",
-        "bsc": "Hv1GncLY5docZoGtXjo4kwbTvxm3MAhVZqBZE4sUT9eZ",
+        "bsc": "ChmxqA9bX71cB2cQTRRULbWUBKoMRk7oh3JnpZShDQ2V",
         "base": "BHWNsedAHtmTCzXxCCDfhPmm6iN9rxUhoRHdHKyujic3",
     },
     "aerodrome": {"base": "GENunSHWLBXm59mBSgPzQ8metBEp9YDfdqwFr91Av1UM"},
@@ -812,6 +815,18 @@ FROZEN_PROTOCOL_TO_STRATEGY_TYPE = {
     "curve": "lp",
     "balancer": "lp",
     "sushiswap": "lp",
+    # Solana LP venues (declared 2026-07-14: lp_economic_family completeness —
+    # every connector with LP_OPEN must carry a backtest decl)
+    "raydium": "lp",
+    "raydium_clmm": "lp",
+    "orca": "lp",
+    "orca_whirlpools": "lp",
+    "meteora": "lp",
+    "meteora_dlmm": "lp",
+    "fluid_dex_lp": "lp",
+    # pendle and uniswap_v4 declare lp_economic_family with detection=False:
+    # swap-first venues must not join protocol-name routing (their swap-shaped
+    # strategies would reroute to the LP adapter).
     # Perp protocols
     "gmx_v2": "perp",
     "gmx": "perp",
@@ -839,6 +854,49 @@ def test_protocol_strategy_type_equals_frozen_legacy_dict() -> None:
     from almanak.framework.backtesting.adapters.registry import PROTOCOL_TO_STRATEGY_TYPE
 
     assert PROTOCOL_TO_STRATEGY_TYPE == FROZEN_PROTOCOL_TO_STRATEGY_TYPE
+
+
+def test_lp_connectors_declare_economic_family() -> None:
+    """Every connector that can open LP positions declares its LP economics.
+
+    An undeclared family silently backtests as fungible — out-of-range
+    concentrated positions would keep accruing fees. New LP connectors must
+    pick "concentrated", "bin", or "fungible" in their backtest decl.
+    """
+    for connector in CONNECTOR_REGISTRY.all():
+        if "LP_OPEN" not in (connector.strategy_intents or ()):
+            continue
+        decl = connector.backtest_strategy_type
+        assert decl is not None, (
+            f"connector {connector.name!r} opens LP positions but has no backtest_strategy_type decl"
+        )
+        keys = {decl.name or connector.name, *decl.aliases, *(decl.lp_economic_family_overrides or {})}
+        families = {(decl.lp_economic_family_overrides or {}).get(key, decl.lp_economic_family) for key in keys}
+        assert None not in families, (
+            f"connector {connector.name!r} opens LP positions but leaves lp_economic_family undeclared "
+            f"for at least one of its keys {sorted(keys)}"
+        )
+
+
+def test_family_only_decls_stay_out_of_detection_namespace() -> None:
+    """detection=False decls contribute LP families but never routing keys.
+
+    Pendle and Uniswap V4 declare SWAP among their strategy_intents, so
+    swap-only strategies on them are legal and common; protocol-name
+    detection runs before intent detection, so putting their names in the
+    routing map would reroute those strategies to the LP adapter. (LP-only
+    venues like raydium/orca/meteora keep detection=True: their intents are
+    LP_OPEN/LP_CLOSE only, so the "lp" mapping cannot misroute anything.)
+    """
+    from almanak.framework.backtesting.adapters.registry import (
+        PROTOCOL_TO_STRATEGY_TYPE,
+        lp_economic_family_for,
+    )
+
+    for key in ("pendle", "uniswap_v4"):
+        assert key not in PROTOCOL_TO_STRATEGY_TYPE, key
+    assert lp_economic_family_for("pendle") == "fungible"
+    assert lp_economic_family_for("uniswap_v4") == "concentrated"
 
 
 def test_backtest_strategy_type_values_are_known_framework_types() -> None:

@@ -463,6 +463,11 @@ class TokenBucketRateLimiter:
                 self._record_retry_success(attempt)
                 return result
             except Exception as e:
+                # Permanent failures (e.g. a GraphQL schema mismatch) can never
+                # succeed on retry — surface immediately instead of burning the
+                # whole backoff ladder.
+                if getattr(e, "permanent", False):
+                    raise
                 self._stats.retry_attempts += 1
                 if _retry_exhausted(attempt, config.max_retries):
                     _log_retries_exhausted(config.max_retries, e)

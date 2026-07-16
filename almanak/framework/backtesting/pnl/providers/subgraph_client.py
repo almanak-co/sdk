@@ -122,6 +122,30 @@ class SubgraphQueryError(SubgraphClientError):
         self.errors = errors or []
 
 
+class SubgraphSchemaError(SubgraphQueryError):
+    """Raised when a query doesn't match the subgraph's schema.
+
+    Schema mismatches are PERMANENT for a given (query, deployment) pair —
+    retrying can never succeed. The retry layer fails these fast instead of
+    burning the full backoff ladder on every fetch (4 retries x 15 prewarmed
+    days = a warning storm per run when a declared liquidity subgraph has a
+    mismatched schema).
+    """
+
+    #: Read by TokenBucketRateLimiter.retry_with_backoff: never retried.
+    permanent = True
+
+
+# GraphQL error-message markers that indicate a schema mismatch rather than a
+# transient failure (The Graph phrases vary by graph-node version).
+_SCHEMA_ERROR_MARKERS = ("has no field", "cannot query field", "unknown field", "unknown argument")
+
+# Gateway-side availability failures that cannot recover within one retry
+# ladder (seconds): a deployment with no allocations or indexers that are
+# hours behind stays that way.
+_UNAVAILABLE_ERROR_MARKERS = ("no allocations", "bad indexers", "subgraph not found")
+
+
 class SubgraphConnectionError(SubgraphClientError):
     """Raised when connection to subgraph fails."""
 
@@ -731,19 +755,37 @@ class SubgraphClient:
 
         Single error-classification point: gateway-served payloads carry the
         same ``{"data": ..., "errors": [...]}`` shape as the direct HTTP
-        body, so error semantics cannot drift between transports.
+        body, so error semantics cannot drift between transports. The schema /
+        unavailability classification (ALM-2939) lives HERE — inside the shared
+        method extracted by #3302 — so both the direct-HTTP and gateway-served
+        paths fail permanent errors fast instead of burning the retry ladder.
         """
         if "errors" in data and data["errors"]:
             error_msgs = [e.get("message", str(e)) for e in data["errors"]]
+            joined = "; ".join(error_msgs)
             logger.error(
                 "Subgraph query returned errors: %s",
-                "; ".join(error_msgs),
+                joined,
             )
-            raise SubgraphQueryError(
-                f"GraphQL errors: {'; '.join(error_msgs)}",
+            lowered = joined.lower()
+            if any(marker in lowered for marker in _SCHEMA_ERROR_MARKERS):
+                # Schema mismatch is PERMANENT for a (query, deployment) pair —
+                # retrying can never succeed; fail fast, callers degrade.
+                raise SubgraphSchemaError(
+                    f"GraphQL schema mismatch (permanent, not retried): {joined}",
+                    query=query,
+                    errors=data["errors"],
+                )
+            error = SubgraphQueryError(
+                f"GraphQL errors: {joined}",
                 query=query,
                 errors=data["errors"],
             )
+            if any(marker in lowered for marker in _UNAVAILABLE_ERROR_MARKERS):
+                # Dead/stale deployments never recover within a retry ladder —
+                # fail fast, callers degrade to fallback.
+                error.permanent = True  # type: ignore[attr-defined]
+            raise error
 
         return data.get("data", {})
 

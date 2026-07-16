@@ -265,32 +265,48 @@ class TestV3LiquidityQuery:
 
     @pytest.mark.asyncio
     async def test_query_sushiswap_v3_liquidity(self, provider, mock_subgraph_client):
-        """Test querying SushiSwap V3 liquidity."""
+        """Sushiswap's declared deployment is Messari-standard."""
         mock_subgraph_client.query.return_value = {
-            "poolDayDatas": [
-                {
-                    "id": "0x456-19723",
-                    "date": 1704067200,
-                    "tvlUSD": "2000000",
-                    "liquidity": "500000000000000000",
-                },
+            "liquidityPoolDailySnapshots": [
+                {"id": "0xsushi-1", "timestamp": 1704067200, "totalValueLockedUSD": "42000000", "dailyVolumeUSD": "1"},
             ]
         }
 
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
-            pool_address="0x456",
+            pool_address="0xsushi",
             chain="ethereum",
             timestamp=timestamp,
             protocol="sushiswap_v3",
         )
 
-        assert result.depth == Decimal("2000000")
-        assert result.source_info.source == "sushiswap_v3_subgraph"
+        assert result.depth == Decimal("42000000")
+        assert result.source_info.confidence == DataConfidence.HIGH
+
 
     @pytest.mark.asyncio
     async def test_query_pancakeswap_v3_liquidity(self, provider, mock_subgraph_client):
-        """Test querying PancakeSwap V3 liquidity."""
+        """Pancake's bsc deployment is Messari-standard (per-chain override)."""
+        mock_subgraph_client.query.return_value = {
+            "liquidityPoolDailySnapshots": [
+                {"id": "0x789-1", "timestamp": 1704067200, "totalValueLockedUSD": "10000000", "dailyVolumeUSD": "1"},
+            ]
+        }
+
+        timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
+        result = await provider.get_liquidity_depth(
+            pool_address="0x789",
+            chain="bsc",
+            timestamp=timestamp,
+            protocol="pancakeswap_v3",
+        )
+
+        assert result.depth == Decimal("10000000")
+        assert result.source_info.source == "pancakeswap_v3_subgraph"
+
+    @pytest.mark.asyncio
+    async def test_query_pancakeswap_v3_liquidity_classic_chain(self, provider, mock_subgraph_client):
+        """Pancake's base deployment keeps the classic v3 schema (no override)."""
         mock_subgraph_client.query.return_value = {
             "poolDayDatas": [
                 {
@@ -305,7 +321,7 @@ class TestV3LiquidityQuery:
         timestamp = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
         result = await provider.get_liquidity_depth(
             pool_address="0x789",
-            chain="bsc",
+            chain="base",
             timestamp=timestamp,
             protocol="pancakeswap_v3",
         )
@@ -325,13 +341,15 @@ class TestV2LiquidityQuery:
     @pytest.mark.asyncio
     async def test_query_aerodrome_liquidity(self, provider, mock_subgraph_client):
         """Test querying Aerodrome liquidity."""
+        # The aerodrome subgraph exposes the uniswap-v3 fork schema
+        # (poolDayDatas/tvlUSD), not solidly pairDayDatas (ALM-2930).
         mock_subgraph_client.query.return_value = {
-            "pairDayDatas": [
+            "poolDayDatas": [
                 {
                     "id": "0xaero-19723",
                     "date": 1704067200,
-                    "reserveUSD": "8000000",
-                    "dailyVolumeUSD": "1000000",
+                    "tvlUSD": "8000000",
+                    "liquidity": "1000000",
                 },
             ]
         }
@@ -360,8 +378,10 @@ class TestLiquidityBookQuery:
     @pytest.mark.asyncio
     async def test_query_traderjoe_liquidity(self, provider, mock_subgraph_client):
         """Test querying TraderJoe V2 Liquidity Book liquidity."""
+        # Query-type field is lowercase-p lbpairDayDatas on the declared
+        # deployment (see tests/audit/test_subgraph_schema_parity.py).
         mock_subgraph_client.query.return_value = {
-            "lbPairDayDatas": [
+            "lbpairDayDatas": [
                 {
                     "id": "0xtjoe-19723",
                     "date": 1704067200,
@@ -624,10 +644,15 @@ class TestLiquidityDepthRouting:
         ("protocol", "chain", "method_name"),
         [
             ("uniswap_v3", "arbitrum", "_query_v3_liquidity"),
-            ("aerodrome", "base", "_query_v2_liquidity"),
+            # aerodrome is a solidly AMM whose subgraph is a v3 fork; the
+            # connector declares liquidity_query_family="v3_concentrated" (ALM-2930).
+            ("aerodrome", "base", "_query_v3_liquidity"),
             ("traderjoe_v2", "avalanche", "_query_liquidity_book"),
             ("balancer", "ethereum", "_query_balancer_liquidity"),
-            ("curve", "ethereum", "_query_curve_liquidity"),
+            # curve + sushiswap declared deployments are Messari-standard
+            # (see tests/audit/test_subgraph_schema_parity.py).
+            ("curve", "ethereum", "_query_messari_liquidity"),
+            ("sushiswap_v3", "ethereum", "_query_messari_liquidity"),
         ],
     )
     async def test_protocol_family_dispatches_to_expected_query_method(
@@ -688,6 +713,30 @@ class TestLiquidityDepthRouting:
                 chain="arbitrum",
                 timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
                 protocol="uniswap_v3",
+            )
+
+    @pytest.mark.asyncio
+    async def test_messari_pagination_overflow_stays_loud(self, provider, monkeypatch):
+        # Regression (CodeRabbit #3271): the messari-standard handler must let
+        # DataSourceUnavailableError (pagination overflow) propagate like every
+        # sibling family — a broad `except Exception` previously swallowed it,
+        # breaking the fail-loud guarantee for curve / sushiswap_v3.
+        monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
+        provider._client.query_with_pagination = AsyncMock(  # type: ignore[method-assign]
+            side_effect=DataSourceUnavailableError(
+                data_type="liquidity",
+                identifier="0xpool",
+                remediation="narrow the query window",
+                message="window too large",
+            )
+        )
+
+        with pytest.raises(DataSourceUnavailableError, match="window too large"):
+            await provider._query_messari_liquidity(
+                pool_address="0xpool",
+                chain="ethereum",
+                timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+                protocol_id="sushiswap_v3",
             )
 
 
@@ -945,3 +994,27 @@ class TestCursorPaginationThroughProvider:
         assert result.source_info.confidence == DataConfidence.HIGH
         # 2 pages: 1000 + 201 (boundary row re-fetched and deduplicated)
         assert mock_subgraph_client.query.call_count == 2
+
+
+class TestBalancerPoolIdNormalization:
+    """Full 32-byte Balancer pool IDs normalize to their leading address."""
+
+    @pytest.mark.asyncio
+    async def test_full_pool_id_queries_by_leading_address(self, provider, mock_subgraph_client):
+        captured: dict = {}
+
+        async def capture(**kwargs):
+            captured.update(kwargs.get("variables") or {})
+            return []
+
+        mock_subgraph_client.query_with_pagination = capture
+        full_id = "0x32296969ef14eb0c6d29669c550d4a0449130230000200000000000000000080"
+
+        await provider.get_liquidity_depth(
+            pool_address=full_id,
+            chain="ethereum",
+            timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+            protocol="balancer",
+        )
+
+        assert captured.get("poolAddress") == full_id[:42]

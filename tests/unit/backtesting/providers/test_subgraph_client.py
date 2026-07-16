@@ -1380,3 +1380,33 @@ class TestConstants:
     def test_default_max_retries(self):
         """Test default max retries."""
         assert DEFAULT_MAX_RETRIES == 3
+
+
+class TestSchemaErrorFastFail:
+    """Schema mismatches are permanent: no retries."""
+
+    @pytest.mark.asyncio
+    async def test_schema_error_is_not_retried(self):
+        from unittest.mock import AsyncMock
+
+        from almanak.framework.backtesting.pnl.providers.rate_limiter import TokenBucketRateLimiter
+        from almanak.framework.backtesting.pnl.providers.subgraph_client import SubgraphSchemaError
+
+        limiter = TokenBucketRateLimiter(requests_per_minute=6000)
+        boom = AsyncMock(side_effect=SubgraphSchemaError("Type `Query` has no field `poolDayDatas`"))
+        with pytest.raises(SubgraphSchemaError):
+            await limiter.retry_with_backoff(boom, max_retries=4)
+        assert boom.await_count == 1  # no retries on a permanent error
+
+    @pytest.mark.asyncio
+    async def test_transient_error_still_retries(self):
+        from unittest.mock import AsyncMock
+
+        from almanak.framework.backtesting.pnl.providers.rate_limiter import TokenBucketRateLimiter
+        from almanak.framework.backtesting.pnl.providers.subgraph_client import SubgraphQueryError
+
+        limiter = TokenBucketRateLimiter(requests_per_minute=6000)
+        boom = AsyncMock(side_effect=SubgraphQueryError("HTTP 502: bad gateway"))
+        with pytest.raises(SubgraphQueryError):
+            await limiter.retry_with_backoff(boom, max_retries=2, base_delay_seconds=0.01)
+        assert boom.await_count == 3  # initial + 2 retries

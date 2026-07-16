@@ -29,7 +29,7 @@ CONNECTOR = Connector(
         },
     ),
     # Legacy backtest detection key is the bare "balancer", mirroring dex_volume.
-    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", name="balancer"),
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", name="balancer", lp_economic_family="fungible"),
     address_tables=(
         AddressTableSpec(
             protocol="balancer_v2",

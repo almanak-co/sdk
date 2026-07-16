@@ -140,8 +140,11 @@ class CurveGatewayConnector(
                 id_field="pool",
                 volume_field="dailyVolumeUSD",
                 source="curve_messari_subgraph",
-                time_field="day",
-                time_unit="days",
+                # The deployed Messari revision keys snapshots by unix-second
+                # ``timestamp`` — the older ``day`` (days-since-epoch) field is
+                # gone and hard-errors ("has no field `day`").
+                time_field="timestamp",
+                time_unit="seconds",
             ),
             chain=chain,
             pool_address=pool_address,

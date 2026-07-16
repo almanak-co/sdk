@@ -157,6 +157,32 @@ _NON_CONNECTOR_STRATEGY_TYPES: dict[str, str] = {
 
 
 @functools.cache
+def _protocol_to_lp_family() -> dict[str, str]:
+    """Cached protocol-key -> LP economic family map from connector decls."""
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+    mapping: dict[str, str] = {}
+    for connector in CONNECTOR_REGISTRY.with_backtest_strategy_type():
+        decl = connector.backtest_strategy_type
+        assert decl is not None  # narrowed by with_backtest_strategy_type()
+        if decl.lp_economic_family is not None:
+            for key in (decl.name or connector.name, *decl.aliases):
+                mapping[key] = decl.lp_economic_family
+        for key, family in (decl.lp_economic_family_overrides or {}).items():
+            mapping[key] = family
+    return mapping
+
+
+def lp_economic_family_for(protocol: str | None) -> str | None:
+    """LP position-economics family for ``protocol``: "concentrated", "bin",
+    "fungible", or None when the venue declares nothing (callers must fail
+    toward the less-destructive interpretation)."""
+    if not isinstance(protocol, str) or not protocol:
+        return None
+    return _protocol_to_lp_family().get(protocol.strip().lower().replace("-", "_"))
+
+
+@functools.cache
 def _protocol_to_strategy_type() -> dict[str, str]:
     """Cached ``PROTOCOL_TO_STRATEGY_TYPE`` (lazy — see the ``__getattr__`` note).
 
@@ -174,6 +200,10 @@ def _protocol_to_strategy_type() -> dict[str, str]:
     for connector in CONNECTOR_REGISTRY.with_backtest_strategy_type():
         decl = connector.backtest_strategy_type
         assert decl is not None  # narrowed by with_backtest_strategy_type()
+        if not decl.detection:
+            # Family-only decl: contributes to lp_economic_family_for() but
+            # not to protocol-name routing (swap-first venues like pendle).
+            continue
         for key in (decl.name or connector.name, *decl.aliases):
             if key in mapping:
                 raise ValueError(

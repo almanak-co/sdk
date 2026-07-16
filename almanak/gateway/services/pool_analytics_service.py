@@ -53,6 +53,7 @@ State / scope:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import re
@@ -103,6 +104,15 @@ _is_solana_family = is_solana_family
 # a cache hit on the second iteration is what makes per-strategy load
 # bearable for the upstream API.
 _CACHE_TTL_SECONDS = 60.0
+# Negative results (provider failure / schema garbage) are cached briefly so
+# retry storms cannot drain the shared CoinGecko bucket, but recover fast.
+_NEGATIVE_CACHE_TTL_SECONDS = 30.0
+# CoinGecko Onchain token-pools upstream paging (atomic fetch bound).
+_TOKEN_POOLS_UPSTREAM_PAGE_SIZE = 20
+_TOKEN_POOLS_MAX_UPSTREAM_PAGES = 5
+# Hard cap on distinct token-pools cache keys (kilobytes of protobufs, but
+# unbounded key space is unbounded key space).
+_TOKEN_POOLS_CACHE_MAX_ENTRIES = 2048
 
 # Bound the per-pool caches so unique-key traffic over long uptime can't
 # leak memory. 5000 keys × ~250 bytes/record ≈ 1.25 MB worst-case per
@@ -163,10 +173,17 @@ def _safe_decimal_str(value: Any) -> str:
     if value is None:
         return ""
     try:
-        return str(Decimal(str(value)))
+        parsed = Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
         logger.debug("pool_analytics: dropped unparseable decimal %r", value)
         return ""
+    # Decimal accepts "NaN"/"Infinity" — non-finite readings are unmeasured,
+    # never serialized onto the wire (Empty != Zero, and NaN poisons every
+    # downstream comparison).
+    if not parsed.is_finite():
+        logger.debug("pool_analytics: dropped non-finite decimal %r", value)
+        return ""
+    return str(parsed)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -281,6 +298,12 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
         }
         self._public_cache: dict[tuple[str, str, str], _CacheEntry] = {}
         self._raw_cache: dict[tuple[str, str, str, str], _CacheEntry] = {}
+        # ListTokenPools TTL cache: (chain, token, page) -> (monotonic_at,
+        # response_snapshot | None, error). None snapshot = negative entry.
+        # page 0 entries are ATOMIC full-fetch snapshots.
+        self._token_pools_cache: dict[tuple[str, str, int], tuple[float, Any, str]] = {}
+        # Single-flight locks for in-progress token-pools fetches.
+        self._token_pools_inflight: dict[tuple[str, str, int], asyncio.Lock] = {}
         self._cache_lock = threading.Lock()
         logger.debug("Initialized PoolAnalyticsService")
 
@@ -403,6 +426,200 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
             success=False,
             error=joined,
         )
+
+    async def ListTokenPools(
+        self,
+        request: gateway_pb2.TokenPoolsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.TokenPoolsResponse:
+        """Pools where a token is base or quote, with product-distinct dex ids.
+
+        Serves symbolic pool resolution for product-ambiguous venue families
+        (Aerodrome/Velodrome classic vs Slipstream): CoinGecko Onchain keys
+        every pool with a product-distinct dex id where DexScreener cannot.
+        """
+        from almanak.core.chains import ChainRegistry
+
+        raw_chain = request.chain.strip()
+        descriptor = ChainRegistry.try_resolve(raw_chain)
+        chain = descriptor.name.lower() if descriptor is not None else raw_chain.lower()
+        token_address = _normalize_pool_address(request.token_address, chain)
+        # page 0 (default) = ATOMIC bounded fetch: the gateway pages upstream
+        # itself on RAW row counts and returns one consistent snapshot with
+        # `complete` set. page >= 1 = single upstream page (compat).
+        page = int(request.page or 0)
+
+        def _fail(code: grpc.StatusCode, error: str) -> gateway_pb2.TokenPoolsResponse:
+            context.set_code(code)
+            context.set_details(error)
+            return gateway_pb2.TokenPoolsResponse(chain=chain, token_address=token_address, success=False, error=error)
+
+        if page < 0:
+            # The wire contract defines page 0 (atomic) and >= 1 (single
+            # upstream page) only; silently mapping malformed input onto the
+            # atomic mode would turn garbage into the most expensive request.
+            return _fail(grpc.StatusCode.INVALID_ARGUMENT, f"page must be >= 0, got {page}")
+
+        if not token_address or not chain:
+            return _fail(grpc.StatusCode.INVALID_ARGUMENT, "token_address and chain are required")
+        if chain not in _CHAIN_TO_GT_NETWORK:
+            return _fail(grpc.StatusCode.INVALID_ARGUMENT, f"unsupported chain: {chain}")
+        if not _validate_pool_address(token_address, chain):
+            return _fail(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"invalid token_address for chain {chain!r}: {token_address!r}",
+            )
+
+        # Bounded TTL cache (positive AND negative): symbolic resolution
+        # retries per open/prewarm, and every uncached call spends the shared
+        # 30/min CoinGecko bucket — repeated unresolved lookups must not
+        # throttle unrelated consumers.
+        cache_key = (chain, token_address, page)
+        now = time.monotonic()
+        with self._cache_lock:
+            cached = self._token_pools_cache.get(cache_key)
+            if cached is not None and now - cached[0] <= (
+                _CACHE_TTL_SECONDS if cached[1] is not None else _NEGATIVE_CACHE_TTL_SECONDS
+            ):
+                if cached[1] is not None:
+                    response = gateway_pb2.TokenPoolsResponse()
+                    response.CopyFrom(cached[1])
+                    return response
+                return _fail(grpc.StatusCode.UNAVAILABLE, cached[2] or "coingecko_onchain: cached failure")
+
+        def _fail_cached(error: str) -> gateway_pb2.TokenPoolsResponse:
+            with self._cache_lock:
+                self._evict_token_pools_locked(time.monotonic())
+                self._token_pools_cache[cache_key] = (time.monotonic(), None, error)
+            return _fail(grpc.StatusCode.UNAVAILABLE, error)
+
+        # SINGLE-FLIGHT: concurrent identical misses share one upstream fetch
+        # instead of double-spending the paid rate budget.
+        flight = self._token_pools_inflight.get(cache_key)
+        if flight is None:
+            flight = asyncio.Lock()
+            self._token_pools_inflight[cache_key] = flight
+        async with flight:
+            # The registry entry must survive until the work completes —
+            # popping before the upstream await lets a second caller
+            # miss the entry, mint its own lock, and double-spend the
+            # shared CoinGecko budget (CodeRabbit find, #3271). Waiters
+            # acquire the same lock, then hit the re-checked cache.
+            try:
+                # Re-check the cache: a concurrent holder may have filled it.
+                now = time.monotonic()
+                with self._cache_lock:
+                    cached = self._token_pools_cache.get(cache_key)
+                    if cached is not None and now - cached[0] <= (
+                        _CACHE_TTL_SECONDS if cached[1] is not None else _NEGATIVE_CACHE_TTL_SECONDS
+                    ):
+                        if cached[1] is not None:
+                            response = gateway_pb2.TokenPoolsResponse()
+                            response.CopyFrom(cached[1])
+                            return response
+                        return _fail(grpc.StatusCode.UNAVAILABLE, cached[2] or "coingecko_onchain: cached failure")
+
+                try:
+                    pools, complete = await self._fetch_token_pools_upstream(chain, token_address, page)
+                except _RateLimitedError:
+                    # Rate-limit pressure is transient: fail WITHOUT
+                    # negative-caching, or one burst would blank the lane for the
+                    # negative-TTL window.
+                    return _fail(grpc.StatusCode.UNAVAILABLE, "coingecko_onchain: rate limited")
+                except (TimeoutError, aiohttp.ClientError, ValueError, TypeError, AttributeError, _ProviderError) as e:
+                    self._metrics[_COINGECKO_ONCHAIN_SOURCE].failures += 1
+                    return _fail_cached(f"{_COINGECKO_ONCHAIN_SOURCE}: {e}")
+
+                self._metrics[_COINGECKO_ONCHAIN_SOURCE].successes += 1
+                response = gateway_pb2.TokenPoolsResponse(
+                    chain=chain,
+                    token_address=token_address,
+                    pools=pools,
+                    source=_COINGECKO_ONCHAIN_SOURCE,
+                    observed_at=int(time.time()),
+                    success=True,
+                    complete=complete,
+                )
+                with self._cache_lock:
+                    self._evict_token_pools_locked(time.monotonic())
+                    snapshot = gateway_pb2.TokenPoolsResponse()
+                    snapshot.CopyFrom(response)
+                    self._token_pools_cache[cache_key] = (time.monotonic(), snapshot, "")
+                return response
+            finally:
+                self._token_pools_inflight.pop(cache_key, None)
+
+    async def _fetch_token_pools_upstream(
+        self,
+        chain: str,
+        token_address: str,
+        page: int,
+    ) -> tuple[list[gateway_pb2.TokenPoolRow], bool]:
+        """Fetch token pools upstream; page 0 = bounded atomic multi-page.
+
+        Returns ``(pools, complete)``. Continuation decides on the RAW
+        upstream row count — filtered counts under-read full pages (a
+        sanitized junk row must not truncate the search). Payload navigation
+        and row parsing stay INSIDE the provider boundary: a 200 whose body
+        is a list / malformed relationship object raises ``_ProviderError``
+        (structured UNAVAILABLE), never AttributeError surfaced as UNKNOWN.
+        Raises ``_RateLimitedError`` on local bucket exhaustion (transient —
+        the caller must not negative-cache it).
+        """
+        if not self._coingecko_api_key:
+            raise _ProviderError(
+                "CoinGecko Onchain API requires a valid COINGECKO_API_KEY for token pools; "
+                "set ALMANAK_GATEWAY_COINGECKO_API_KEY on the gateway"
+            )
+        network = _CHAIN_TO_GT_NETWORK[chain]
+        url = f"{self._coingecko_onchain_api_base}/networks/{network}/tokens/{token_address}/pools"
+        pages = [page] if page >= 1 else list(range(1, _TOKEN_POOLS_MAX_UPSTREAM_PAGES + 1))
+        session = await self._get_http_session()
+        pools: list[gateway_pb2.TokenPoolRow] = []
+        for upstream_page in pages:
+            if not self._rate_limiter_cg.acquire():
+                raise _RateLimitedError()
+            async with session.get(
+                url, params={"page": str(upstream_page)}, headers=self._coingecko_onchain_headers
+            ) as response:
+                if response.status == 404:
+                    payload: dict[str, Any] | None = None
+                elif response.status != 200:
+                    text = await response.text()
+                    raise _ProviderError(f"HTTP {response.status}: {text[:200]}")
+                else:
+                    payload = await response.json()
+            if payload is not None and not isinstance(payload, dict):
+                raise _ProviderError(f"token-pools returned non-object payload: {str(payload)[:120]}")
+            rows = (payload or {}).get("data")
+            if payload is not None and not isinstance(rows, list):
+                raise _ProviderError(f"token-pools payload missing data list: {str(payload)[:120]}")
+            raw_count = len(rows or [])
+            pools.extend(
+                parsed
+                for parsed in (_parse_token_pool_row(row, network, chain) for row in rows or [])
+                if parsed is not None
+            )
+            if raw_count < _TOKEN_POOLS_UPSTREAM_PAGE_SIZE:
+                return pools, True
+        # Bound exhausted without a short page: NOT known-complete.
+        return pools, False
+
+    def _evict_token_pools_locked(self, now: float) -> None:
+        """Sweep expired token-pools entries; hard-cap the key space.
+
+        Caller holds ``_cache_lock``. Expired entries go first; if the cap is
+        still exceeded (distinct live keys), the oldest entries are dropped.
+        """
+        self._token_pools_cache = {
+            k: v
+            for k, v in self._token_pools_cache.items()
+            if now - v[0] <= (_CACHE_TTL_SECONDS if v[1] is not None else _NEGATIVE_CACHE_TTL_SECONDS)
+        }
+        overflow = len(self._token_pools_cache) - (_TOKEN_POOLS_CACHE_MAX_ENTRIES - 1)
+        if overflow > 0:
+            for key in sorted(self._token_pools_cache, key=lambda k: self._token_pools_cache[k][0])[:overflow]:
+                del self._token_pools_cache[key]
 
     # -- CoinGecko Onchain provider ------------------------------------------
 
@@ -550,6 +767,10 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
 # =============================================================================
 
 
+class _RateLimitedError(Exception):
+    """Local token bucket exhausted — transient, never negative-cached."""
+
+
 class _ProviderError(Exception):
     """Raised inside the provider path on a transport / rate-limit / parse failure.
 
@@ -561,6 +782,61 @@ class _ProviderError(Exception):
 # =============================================================================
 # Provider payload parser (pure function for unit testability)
 # =============================================================================
+
+
+def _token_address_from_relationship_id(token_id: Any, network: str, chain: str) -> str:
+    """Extract the address from a relationship id like ``"base_0xabc..."``.
+
+    The id format is ``{network}_{address}`` and NETWORK IDS THEMSELVES
+    CONTAIN UNDERSCORES (``polygon_pos``) — splitting at the first
+    underscore mangles those chains' addresses ("pos_0x…"). Strip the exact
+    requested network prefix instead, then normalize chain-aware (EVM
+    lowercases; Solana-family base58 is case-sensitive and must be
+    preserved). A row from a different network than requested yields ``""``.
+    """
+    if not isinstance(token_id, str):
+        return ""
+    prefix = f"{network}_"
+    if not token_id.startswith(prefix):
+        return ""
+    address = token_id[len(prefix) :]
+    if not address:
+        return ""
+    normalized = _normalize_pool_address(address, chain)
+    # Syntactic validation, chain-aware: a malformed identity is omitted
+    # (""), never surfaced as a matchable token address.
+    return normalized if _validate_pool_address(normalized, chain) else ""
+
+
+def _parse_token_pool_row(row: Any, network: str, chain: str) -> gateway_pb2.TokenPoolRow | None:
+    """One CoinGecko Onchain token-pools row -> ``TokenPoolRow`` (None = skip).
+
+    Money stays decimal-as-string (Empty != Zero): an absent or non-numeric
+    ``reserve_in_usd`` is ``""`` — the CLIENT decides how to rank unmeasured
+    reserves, the wire never invents a zero. Rows whose pool address fails
+    the chain's syntactic validation are skipped: a non-address identity
+    must never become a selectable "product-exact" pool.
+    """
+    if not isinstance(row, dict):
+        return None
+    attributes = row.get("attributes") or {}
+    relationships = row.get("relationships") or {}
+    address = _normalize_pool_address(str(attributes.get("address") or ""), chain)
+    if not address or not _validate_pool_address(address, chain):
+        return None
+    dex = ((relationships.get("dex") or {}).get("data") or {}).get("id")
+    return gateway_pb2.TokenPoolRow(
+        pool_address=address,
+        dex_id=str(dex or "").lower(),
+        name=str(attributes.get("name") or ""),
+        reserve_usd=_safe_decimal_str(attributes.get("reserve_in_usd")),
+        base_token_address=_token_address_from_relationship_id(
+            ((relationships.get("base_token") or {}).get("data") or {}).get("id"), network, chain
+        ),
+        quote_token_address=_token_address_from_relationship_id(
+            ((relationships.get("quote_token") or {}).get("data") or {}).get("id"), network, chain
+        ),
+    )
 
 
 def _parse_coingecko_onchain_pool(

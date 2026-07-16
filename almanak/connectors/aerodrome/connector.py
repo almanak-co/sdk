@@ -29,6 +29,9 @@ CONNECTOR = Connector(
         liquidity_subgraph_ids={
             "base": "GENunSHWLBXm59mBSgPzQ8metBEp9YDfdqwFr91Av1UM",
         },
+        # The declared subgraph is a uniswap-v3 fork exposing poolDayDatas;
+        # the solidly pairDayDatas query hard-errors against it (ALM-2930).
+        liquidity_query_family="v3_concentrated",
     ),
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.aerodrome.fee_model", attribute="AerodromeFeeModel"),
@@ -38,7 +41,14 @@ CONNECTOR = Connector(
     # Velodrome (the Optimism original Aerodrome forked) has no connector
     # package; this folder owns its backtest detection key, mirroring the
     # fee-model alias above.
-    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", aliases=("velodrome",)),
+    backtest_strategy_type=BacktestStrategyTypeDecl(
+        strategy_type="lp",
+        aliases=("velodrome",),
+        # Plain aerodrome/velodrome pools are solidly-style fungible shares;
+        # the slipstream product is concentrated liquidity.
+        lp_economic_family="fungible",
+        lp_economic_family_overrides={"aerodrome_slipstream": "concentrated", "velodrome_slipstream": "concentrated"},
+    ),
     aliases=("aerodrome_slipstream",),
     address_tables=(
         AddressTableSpec(

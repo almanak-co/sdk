@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     ImportRef,
     PositionReadDecl,
@@ -57,6 +58,11 @@ CONNECTOR = Connector(
     # round-tripped on-chain). base/ethereum/polygon need per-chain resolver
     # verification before being added.
     strategy_chains=("arbitrum",),
+    backtest_strategy_type=BacktestStrategyTypeDecl(
+        strategy_type="lp",
+        # Fungible ERC-20-share wrapper positions: no tick range.
+        lp_economic_family="fungible",
+    ),
 )
 
 __all__ = ["CONNECTOR"]

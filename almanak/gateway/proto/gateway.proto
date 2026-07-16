@@ -2088,6 +2088,12 @@ service PoolAnalyticsService {
   // DefiLlama first, CoinGecko Onchain as fallback. Returns UNAVAILABLE when
   // both providers fail.
   rpc GetPoolAnalytics(PoolAnalyticsRequest) returns (PoolAnalyticsResponse);
+
+  // List pools where a token is base or quote, with PRODUCT-DISTINCT dex ids
+  // (CoinGecko Onchain keys classic vs Slipstream pools separately —
+  // "aerodrome-base" vs "aerodrome-slipstream*" — where DexScreener cannot).
+  // Serves symbolic pool resolution for product-ambiguous venue families.
+  rpc ListTokenPools(TokenPoolsRequest) returns (TokenPoolsResponse);
 }
 
 message PoolAnalyticsRequest {
@@ -2129,6 +2135,46 @@ message PoolAnalyticsResponse {
   // Dual-channel envelope (see header comment)
   bool   success = 15;
   string error = 16;
+}
+
+message TokenPoolsRequest {
+  string chain = 1;          // Required. Chain name (canonical or registered alias).
+  string token_address = 2;  // Required. Token contract address (EVM case-insensitive;
+                             // Solana-family base58 is case-sensitive and preserved).
+  int32  page = 3;           // 0 (default) = ATOMIC bounded fetch: the gateway pages the
+                             // upstream itself (raw-row-count driven) and returns the full
+                             // union as one consistent snapshot with `complete` set.
+                             // >=1 = single upstream page (compat/diagnostic use).
+}
+
+message TokenPoolRow {
+  string pool_address = 1;       // Chain-normalized (EVM lower-cased; Solana case preserved)
+                                 // and syntactically validated — invalid rows are dropped.
+  string dex_id = 2;             // Product-distinct dex id (e.g. "aerodrome-slipstream").
+  string name = 3;               // Human-readable pool name (may carry the fee, e.g. "WETH / USDC 0.05%").
+  string reserve_usd = 4;        // Decimal-as-string; "" = unmeasured (Empty != Zero; never NaN/Infinity).
+  string base_token_address = 5; // Chain-normalized + validated; "" when omitted or invalid.
+  string quote_token_address = 6;
+}
+
+message TokenPoolsResponse {
+  string chain = 1;          // Echoed-back, canonicalized.
+  string token_address = 2;  // Echoed-back, chain-normalized.
+  repeated TokenPoolRow pools = 3;
+  string source = 4;         // "coingecko_onchain"
+  int64  observed_at = 5;    // Unix seconds when the gateway fetched the data.
+
+  // Dual-channel envelope (see PoolAnalyticsService header comment).
+  bool   success = 6;
+  string error = 7;
+
+  // True when the returned set is COMPLETE per upstream raw row counts
+  // (last upstream page was short/absent within the page bound). False
+  // when the bound was hit while upstream still reported full pages.
+  // Consumers select by RANK-ORDER within the window (first exact match =
+  // the canonical pool for the pair) — never a deepest-of-all claim over a
+  // truncated window; no in-window match fails closed.
+  bool   complete = 8;
 }
 
 // =============================================================================

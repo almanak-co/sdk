@@ -19,7 +19,10 @@ _VOLUME_SUBGRAPH_URLS = {
     "ethereum": "https://gateway.thegraph.com/api/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
     "arbitrum": "https://gateway.thegraph.com/api/subgraphs/id/FbCGRftH4a3yZugY7TnbYgPJVEv2LvMT6oF1fxPe9aJM",
     "base": "https://gateway.thegraph.com/api/subgraphs/id/96eJ9Go8gFjySRGnndG7EYxThaiwVDV8BYPp1TMDcoYh",
-    "optimism": "https://gateway.thegraph.com/api/subgraphs/id/Cghf4LfVqPiFw6fp6Y5X5Ubc8UpmUhSfJL82zwiBFLaj",
+    # The V3-native optimism deployment (Cghf4LfV...) has sick indexers;
+    # the healthy current deployment is Messari-standard — the gateway
+    # provider and liquidity_query_family_overrides branch on it.
+    "optimism": "https://gateway.thegraph.com/api/subgraphs/id/EgnS9YE1avupkvCNj9fHnJxppfEmNNywYJtghqiu2pd9",
     "polygon": "https://gateway.thegraph.com/api/subgraphs/id/3hCPRGf4z88VC5rsBKU5AA9FBBq5nF3jbKJG7VZCbhjm",
 }
 
@@ -50,6 +53,7 @@ CONNECTOR = Connector(
             "polygon": "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-v3-polygon",
         },
         liquidity_subgraph_ids={chain: url.rsplit("/", 1)[-1] for chain, url in _VOLUME_SUBGRAPH_URLS.items()},
+        liquidity_query_family_overrides={"optimism": "messari_standard"},
     ),
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.uniswap_v3.fee_model", attribute="UniswapV3FeeModel"),
@@ -60,7 +64,19 @@ CONNECTOR = Connector(
     # family's detection keys: the bare "uniswap" (fee-model precedent above)
     # and "uniswap_v2", which has no connector package (aave_v3 lending_read
     # claims "aave_v2" the same way).
-    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", aliases=("uniswap", "uniswap_v2")),
+    backtest_strategy_type=BacktestStrategyTypeDecl(
+        strategy_type="lp",
+        aliases=("uniswap", "uniswap_v2"),
+        lp_economic_family="concentrated",
+        # uniswap_v2 pool shares are fungible — no range semantics; agni is a
+        # v3 fork sharing this connector's address tables (strategies name it
+        # by both the manifest key and the bare "agni").
+        lp_economic_family_overrides={
+            "uniswap_v2": "fungible",
+            "agni_finance": "concentrated",
+            "agni": "concentrated",
+        },
+    ),
     aliases=("agni_finance",),
     address_tables=(
         AddressTableSpec(

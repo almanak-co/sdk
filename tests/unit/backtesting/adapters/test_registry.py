@@ -691,3 +691,15 @@ class TestAccrualMixPromotionScope:
 
         hint = _detect_from_protocols(["uniswap_v3", "aave_v3"])
         assert hint.strategy_type in ("lp", "lending")
+
+    def test_registry_maps_are_memoized(self) -> None:
+        # Both connector-registry folds are @functools.cache-d: every
+        # PROTOCOL_TO_STRATEGY_TYPE access / _detect_from_protocols call would
+        # otherwise re-iterate the whole CONNECTOR_REGISTRY and re-run the
+        # collision check. A decorator displacement silently drops the cache.
+        from almanak.framework.backtesting.adapters import registry
+
+        assert hasattr(registry._protocol_to_strategy_type, "cache_info")
+        assert hasattr(registry._protocol_to_lp_family, "cache_info")
+        assert registry._protocol_to_strategy_type() is registry._protocol_to_strategy_type()
+        assert registry._protocol_to_lp_family() is registry._protocol_to_lp_family()

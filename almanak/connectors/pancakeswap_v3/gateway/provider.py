@@ -46,10 +46,15 @@ from ..addresses import PANCAKESWAP_V3
 # ``framework/backtesting/pnl/providers/dex/pancakeswap_v3_volume.py``.
 # PancakeSwap V3 is a Uniswap V3 fork → identical ``poolDayDatas`` schema.
 _PANCAKESWAP_V3_VOLUME_SUBGRAPH_IDS: dict[str, str] = {
-    "ethereum": "CJYGNhb7RvnhfBDjqpRnD3oxgyhibzc7fkAMa38YV3oS",
     "arbitrum": "251MHFNN1rwjErXD2efWMpNS73SANZN8Ua192zw6iXve",
-    "bsc": "Hv1GncLY5docZoGtXjo4kwbTvxm3MAhVZqBZE4sUT9eZ",
     "base": "BHWNsedAHtmTCzXxCCDfhPmm6iN9rxUhoRHdHKyujic3",
+}
+
+# ethereum's V3-native deployment has sick indexers and bsc's has been
+# frozen since 2025-08; the healthy current deployments are Messari-standard.
+_PANCAKESWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS: dict[str, str] = {
+    "ethereum": "JAGXF8B14mpB8QGKnwhKTs5JxsQZBJQvbDGFcWwL7gbm",
+    "bsc": "ChmxqA9bX71cB2cQTRRULbWUBKoMRk7oh3JnpZShDQ2V",
 }
 
 
@@ -159,7 +164,7 @@ class PancakeSwapV3GatewayConnector(
 
     def volume_supported_chains(self) -> frozenset[str]:
         """Chains with a registered PancakeSwap V3 volume subgraph."""
-        return frozenset(_PANCAKESWAP_V3_VOLUME_SUBGRAPH_IDS)
+        return frozenset(_PANCAKESWAP_V3_VOLUME_SUBGRAPH_IDS) | frozenset(_PANCAKESWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS)
 
     async def fetch_volume_history(
         self,
@@ -181,16 +186,28 @@ class PancakeSwapV3GatewayConnector(
             fetch_dex_volume_history,
         )
 
-        return await fetch_dex_volume_history(
-            servicer,
-            DexVolumeSubgraphSpec(
+        if chain in _PANCAKESWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS:
+            spec = DexVolumeSubgraphSpec(
+                dex_name="pancakeswap_v3",
+                subgraph_ids=dict(_PANCAKESWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS),
+                entity="liquidityPoolDailySnapshots",
+                id_field="pool",
+                volume_field="dailyVolumeUSD",
+                source="pancakeswap_v3_messari_subgraph",
+                time_field="timestamp",
+            )
+        else:
+            spec = DexVolumeSubgraphSpec(
                 dex_name="pancakeswap_v3",
                 subgraph_ids=dict(_PANCAKESWAP_V3_VOLUME_SUBGRAPH_IDS),
                 entity="poolDayDatas",
                 id_field="pool",
                 volume_field="volumeUSD",
                 source="pancakeswap_v3_subgraph",
-            ),
+            )
+        return await fetch_dex_volume_history(
+            servicer,
+            spec,
             chain=chain,
             pool_address=pool_address,
             start_ts=start_ts,

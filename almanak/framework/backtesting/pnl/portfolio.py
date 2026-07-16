@@ -2460,9 +2460,21 @@ class SimulatedPortfolio:
 
     @classmethod
     def _unique_sources_from_metadata(cls, positions: list[SimulatedPosition], key: str) -> list[str]:
+        """Aggregate distinct data sources across positions.
+
+        Reads the CUMULATIVE ``<key>s`` list when a position carries one (a
+        position that degraded mid-run touched several sources — exporting
+        only the latest hides the degradation); the singular latest-wins key
+        is the fallback for positions written before the list existed.
+        """
         data_sources: list[str] = []
         for position in positions:
-            cls._append_unique_source(data_sources, position.metadata.get(key))
+            cumulative = position.metadata.get(f"{key}s")
+            if isinstance(cumulative, list) and cumulative:
+                for source in cumulative:
+                    cls._append_unique_source(data_sources, source)
+            else:
+                cls._append_unique_source(data_sources, position.metadata.get(key))
         return data_sources
 
     def _lp_data_coverage_metrics(self, lp_positions: list[SimulatedPosition]) -> LPMetrics:

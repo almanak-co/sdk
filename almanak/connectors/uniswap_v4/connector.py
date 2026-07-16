@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     ImportRef,
     StrategyMatrixEntry,
@@ -82,6 +83,18 @@ CONNECTOR = Connector(
         attribute="PROTOCOL_FAMILY",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
+    # Backtests as "lp"; V4 positions are tick-ranged concentrated liquidity
+    # (hooks change fee routing, not range economics). Historical-data lanes
+    # for V4 are a separate, still-open support question.
+    backtest_strategy_type=BacktestStrategyTypeDecl(
+        strategy_type="lp",
+        # Family-only: this venue declares SWAP in strategy_intents, so
+        # swap-only strategies on it are legal — joining protocol-name
+        # detection (which runs before intent detection) would reroute them
+        # to the LP adapter.
+        detection=False,
+        lp_economic_family="concentrated",
+    ),
     # VIB-4421: extended from ("ethereum", "arbitrum", "base") to the full
     # deployed set so the registry's (connector, intent, chain) universe matches
     # ``UNISWAP_V4`` in addresses.py and the 28 on-chain intent tests (7 chains x

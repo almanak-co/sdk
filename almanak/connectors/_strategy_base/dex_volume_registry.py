@@ -44,6 +44,16 @@ class DexVolumeEntry:
     volume_subgraph_urls: dict[str, str] | None = None  # {chain: https_url} — plan 024
     hosted_volume_subgraph_urls: dict[str, str] | None = None  # fallback URLs — plan 024
     liquidity_subgraph_ids: dict[str, str] | None = None  # {chain: deployment_id} — liquidity depth
+    # Depth-query schema family of the liquidity subgraph; "" = same as
+    # amm_family (ALM-2930: aerodrome's subgraph is a v3 fork, not solidly).
+    liquidity_query_family: str = ""
+    # Per-chain family overrides for mixed-schema deployments.
+    liquidity_query_family_overrides: dict[str, str] | None = None
+
+    def liquidity_family_for(self, chain: str) -> str:
+        """Schema family for ``chain``'s declared liquidity deployment."""
+        overrides = self.liquidity_query_family_overrides or {}
+        return overrides.get(chain.lower()) or self.liquidity_query_family or self.amm_family
 
 
 class DexVolumeRegistry:
@@ -88,6 +98,12 @@ class DexVolumeRegistry:
                 ),
                 liquidity_subgraph_ids=(
                     dict(decl.liquidity_subgraph_ids) if decl.liquidity_subgraph_ids is not None else None
+                ),
+                liquidity_query_family=decl.liquidity_query_family or "",
+                liquidity_query_family_overrides=(
+                    dict(decl.liquidity_query_family_overrides)
+                    if decl.liquidity_query_family_overrides is not None
+                    else None
                 ),
             )
             for alias in decl.aliases:

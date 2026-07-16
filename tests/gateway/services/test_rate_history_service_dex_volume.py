@@ -25,12 +25,11 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
-
-import pytest
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import grpc
+import pytest
 
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
@@ -179,12 +178,14 @@ def test_aerodrome_pool_day_datas_decode() -> None:
 # =============================================================================
 
 
-def test_curve_messari_day_unit_converts_to_unix_seconds() -> None:
-    # Messari ``day`` = days since epoch. day 19676 → 19676 * 86400.
+def test_curve_messari_timestamp_decode() -> None:
+    # Curve's current Messari deployment keys daily rows by ``timestamp``
+    # (unix seconds) — the older ``day`` (days-since-epoch) field is gone
+    # and hard-errors upstream, so the spec declares time_field="timestamp".
     body = {
         "data": {
             "liquidityPoolDailySnapshots": [
-                {"day": 19676, "dailyVolumeUSD": "500000"},
+                {"timestamp": 1_700_000_000, "dailyVolumeUSD": "500000"},
             ]
         }
     }
@@ -193,16 +194,14 @@ def test_curve_messari_day_unit_converts_to_unix_seconds() -> None:
 
     assert response.success is True
     assert len(response.points) == 1
-    # day → unix seconds.
-    assert response.points[0].timestamp == 19676 * 86400
+    assert response.points[0].timestamp == 1_700_000_000
     assert Decimal(response.points[0].volume_usd) == Decimal("500000")
 
-    # The request window (unix seconds) was converted to day numbers in
-    # the filter variables.
+    # The request window stays in unix seconds (no day-number conversion).
     variables = captured[0]["json"]["variables"]
-    assert variables["startTime"] == 1_700_000_000 // 86400
-    assert variables["endTime"] == 1_700_604_800 // 86400
-    assert "day_gte" in captured[0]["json"]["query"]
+    assert variables["startTime"] == 1_700_000_000
+    assert variables["endTime"] == 1_700_604_800
+    assert "timestamp_gte" in captured[0]["json"]["query"]
 
 
 # =============================================================================
@@ -211,10 +210,16 @@ def test_curve_messari_day_unit_converts_to_unix_seconds() -> None:
 
 
 def test_balancer_v2_pool_snapshots_decode() -> None:
+    # poolSnapshots.swapVolume is CUMULATIVE lifetime volume: daily values
+    # are consecutive-snapshot differences, and a point with no earlier
+    # baseline is DROPPED (a raw cumulative reading would report the pool's
+    # lifetime total as one day's volume). The fixture therefore carries a
+    # pre-window baseline row.
     body = {
         "data": {
             "poolSnapshots": [
-                {"timestamp": 1_700_000_000, "swapVolume": "42.0"},
+                {"timestamp": 1_699_913_600, "swapVolume": "42.0"},  # baseline (pre-window)
+                {"timestamp": 1_700_000_000, "swapVolume": "142.0"},
             ]
         }
     }
@@ -224,11 +229,34 @@ def test_balancer_v2_pool_snapshots_decode() -> None:
     assert response.success is True
     assert len(response.points) == 1
     assert response.points[0].timestamp == 1_700_000_000
-    assert Decimal(response.points[0].volume_usd) == Decimal("42.0")
+    assert Decimal(response.points[0].volume_usd) == Decimal("100.0")  # 142 - 42, never the raw reading
 
     query = captured[0]["json"]["query"]
     assert "poolSnapshots" in query
     assert "timestamp_gte" in query
+    # The QUERY itself must request the pre-window baseline — the fixture
+    # injects the baseline row regardless of startTime, so without this the
+    # test keeps passing if production stops extending the window
+    # (CodeRabbit, #3271). Cumulative specs look back 7 days.
+    variables = captured[0]["json"]["variables"]
+    assert variables["startTime"] == 1_700_000_000 - 7 * 24 * 3600
+    assert variables["endTime"] == 1_700_604_800
+
+
+def test_balancer_v2_lone_snapshot_fails_closed() -> None:
+    # A lone (pre-window baseline only) cumulative snapshot is never emitted
+    # raw (the $1.37B-lifetime-as-daily failure mode). After differencing drops
+    # it there are no in-window points, so the lane FAILS CLOSED rather than
+    # returning an empty success — an empty success would silently become
+    # zero-fee backtest data, and it contradicts the no-rows contract above
+    # (CodeRabbit #3271).
+    body = {"data": {"poolSnapshots": [{"timestamp": 1_700_000_000, "swapVolume": "42.0"}]}}
+    servicer, _captured = _make_servicer_with_subgraph(body)
+    response, _ctx = _run_volume(servicer, dex="balancer_v2", chain="ethereum", pool_address="0xBAL")
+
+    assert response.success is False
+    assert len(response.points) == 0
+    assert "after cumulative differencing" in response.error
 
 
 # =============================================================================
@@ -305,9 +333,13 @@ _BAL_POOL_ID = "0x5c6ee304399dbdb9c8ef030ab642b10820db8f560002000000000000000000
 # One recorded poolSnapshots fixture served to BOTH the bare-address and
 # the direct-pool-ID paths, so the parity test compares identical rows.
 _BAL_SNAPSHOT_ROWS = [
+    # Pre-window cumulative baseline + two in-window readings: differencing
+    # yields TWO daily points (32.0 and 35.5).
+    {"timestamp": 1_699_913_600, "swapVolume": "10.0"},
     {"timestamp": 1_700_000_000, "swapVolume": "42.0"},
     {"timestamp": 1_700_086_400, "swapVolume": "77.5"},
 ]
+_BAL_EXPECTED_DAILY_POINTS = 2
 
 
 def _make_servicer_with_routed_subgraph(
@@ -401,8 +433,8 @@ def test_balancer_bare_address_parity_with_direct_pool_id() -> None:
     assert captured_a[-1]["json"]["variables"]["poolAddress"] == _BAL_POOL_ID
     assert captured_b[-1]["json"]["variables"]["poolAddress"] == _BAL_POOL_ID
 
-    # Point-for-point parity.
-    assert len(via_address.points) == len(via_pool_id.points) == len(_BAL_SNAPSHOT_ROWS)
+    # Point-for-point parity (on the DIFFERENCED daily points).
+    assert len(via_address.points) == len(via_pool_id.points) == _BAL_EXPECTED_DAILY_POINTS
     for point_a, point_b in zip(via_address.points, via_pool_id.points, strict=True):
         assert point_a.timestamp == point_b.timestamp
         assert Decimal(point_a.volume_usd) == Decimal(point_b.volume_usd)

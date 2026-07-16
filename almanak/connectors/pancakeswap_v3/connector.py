@@ -22,10 +22,17 @@ CONNECTOR = Connector(
         amm_family="v3_concentrated",
         aliases=("pancake_v3",),
         liquidity_subgraph_ids={
-            "ethereum": "CJYGNhb7RvnhfBDjqpRnD3oxgyhibzc7fkAMa38YV3oS",
+            # ethereum: the V3-native deployment has sick indexers; bsc:
+            # frozen since 2025-08 — both point at current Messari-standard
+            # deployments instead.
+            "ethereum": "JAGXF8B14mpB8QGKnwhKTs5JxsQZBJQvbDGFcWwL7gbm",
             "arbitrum": "251MHFNN1rwjErXD2efWMpNS73SANZN8Ua192zw6iXve",
-            "bsc": "Hv1GncLY5docZoGtXjo4kwbTvxm3MAhVZqBZE4sUT9eZ",
+            "bsc": "ChmxqA9bX71cB2cQTRRULbWUBKoMRk7oh3JnpZShDQ2V",
             "base": "BHWNsedAHtmTCzXxCCDfhPmm6iN9rxUhoRHdHKyujic3",
+        },
+        liquidity_query_family_overrides={
+            "ethereum": "messari_standard",
+            "bsc": "messari_standard",
         },
     ),
     fee_model=FeeModelDecl(
@@ -33,7 +40,9 @@ CONNECTOR = Connector(
         description="PancakeSwap V3 DEX fee model with tier-based fees (0.01%, 0.05%, 0.25%, 1%)",
         aliases=("pancakeswap", "pancake_v3", "pcs_v3"),
     ),
-    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", aliases=("pancakeswap",)),
+    backtest_strategy_type=BacktestStrategyTypeDecl(
+        strategy_type="lp", aliases=("pancakeswap",), lp_economic_family="concentrated"
+    ),
     address_tables=(
         AddressTableSpec(
             protocol="pancakeswap_v3",

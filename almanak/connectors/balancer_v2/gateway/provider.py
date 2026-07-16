@@ -130,6 +130,10 @@ class BalancerV2GatewayConnector(
                 source="balancer_v2_subgraph",
                 time_field="timestamp",
                 resolve_bare_address_pool_id=True,
+                # poolSnapshots.swapVolume is the pool's CUMULATIVE lifetime
+                # volume — daily values are consecutive-snapshot differences
+                # (a raw read reports the pool's multi-year total as one day).
+                cumulative_volume=True,
             ),
             chain=chain,
             pool_address=pool_address,

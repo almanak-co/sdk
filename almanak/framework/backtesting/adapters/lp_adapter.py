@@ -42,9 +42,11 @@ Example:
 """
 
 import logging
+import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, cast
@@ -95,6 +97,9 @@ if TYPE_CHECKING:
     from almanak.framework.intents.vocabulary import Intent, LPOpenIntent
 
 logger = logging.getLogger(__name__)
+
+# Sentinel expiry for permanently-memoized resolution failures.
+_PERMANENT_MEMO = float("inf")
 
 # Uniswap V3 tick constants
 TICK_BASE = Decimal("1.0001")
@@ -397,6 +402,10 @@ class _LPUpdatePrices:
     token0_price: Decimal
     token1_price: Decimal
     current_price: Decimal
+    fallback_used: bool = False
+    """True when either token price came from ``_price_fallback`` rather than
+    the market — downstream range verdicts must not claim measured-price
+    confidence on a fabricated ratio."""
 
 
 @dataclass(frozen=True)
@@ -613,6 +622,34 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         self._config = config or LPBacktestConfig(strategy_type="lp")
         self._data_config = data_config
         self._il_calculator = ImpermanentLossCalculator()
+        # Log-once bookkeeping for the guessed-fee-tier confidence cap.
+        self._guessed_tier_warned_positions: set[str] = set()
+        # Log-once bookkeeping for the per-tick fallback-volume warning.
+        self._fallback_volume_warned_positions: set[str] = set()
+        # Log-once bookkeeping for the per-tick slippage-fallback warning.
+        self._slippage_fallback_warned_pools: set[str] = set()
+        # Log-once bookkeeping for the unknown-LP-family confidence degrade.
+        self._unknown_family_warned_protocols: set[str] = set()
+        # Log-once bookkeeping for failed product-ambiguous pool resolution.
+        self._ambiguous_resolution_warned: set[tuple[str, frozenset[str]]] = set()
+        # Negative memo for failed product-ambiguous resolutions: key ->
+        # _PERMANENT_MEMO (semantic no-match, final for the run) or a
+        # monotonic expiry (transient transport/rate-limit failure).
+        self._ambiguous_resolution_failed: dict[tuple[str, frozenset[str]], float] = {}
+        # (protocol, frozenset(pair)) -> resolved pool address. Filled by
+        # prewarm_history for symbolic pools (generated strategies pass
+        # "WETH/USDC"; the volume lane needs an address).
+        # Keyed without chain: one adapter instance serves one backtest chain,
+        # and config.chain may sit on its DEFAULT while intents carry the real one.
+        self._resolved_pool_addresses: dict[tuple[str, frozenset[str]], str] = {}
+        # resolved address -> how it was chosen (result-doc provenance).
+        self._resolved_pool_provenance: dict[str, str] = {}
+        # pool address -> real fee tier (fraction) fetched from the v3-family
+        # subgraph at prewarm; corrects slug-guessed position tiers.
+        self._resolved_fee_tiers: dict[str, Decimal] = {}
+        # Whether the most recent _lp_open_fee_tier call used an explicit
+        # caller override (single-threaded per-fill; read when annotating).
+        self._last_fee_tier_explicit = False
         self._volume_provider: MultiDEXVolumeProvider | None = volume_provider
         self._volume_provider_initialized = volume_provider is not None
 
@@ -1133,13 +1170,19 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         )
 
         if slippage_result.was_fallback:
-            logger.warning(
-                "Slippage calculation using fallback: trade=$%.2f, pool=%s, slippage=%.4f%%, confidence=%s",
-                float(trade_amount_usd),
-                pool_address[:10] if pool_address else "unknown",
-                float(slippage_result.slippage_pct),
-                slippage_result.confidence.value,
-            )
+            # Log once per pool, not per tick — an unavailable liquidity
+            # source otherwise repeats an identical line every tick.
+            warn_key = (pool_address or "unknown").lower()
+            if warn_key not in self._slippage_fallback_warned_pools:
+                self._slippage_fallback_warned_pools.add(warn_key)
+                logger.warning(
+                    "Slippage calculation using fallback: trade=$%.2f, pool=%s, slippage=%.4f%%, confidence=%s "
+                    "(logged once per pool)",
+                    float(trade_amount_usd),
+                    pool_address[:10] if pool_address else "unknown",
+                    float(slippage_result.slippage_pct),
+                    slippage_result.confidence.value,
+                )
         else:
             logger.debug(
                 "Slippage calculated: trade=$%.2f, pool=%s, slippage=%.4f%%, liquidity=$%.2f, confidence=%s",
@@ -1151,6 +1194,624 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             )
 
         return slippage_result
+
+    async def prewarm_history(
+        self,
+        intent: "LPOpenIntent",
+        chain: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> None:
+        """Pre-fetch the backtest window's daily volume + liquidity into the caches.
+
+        The sync accrual path cannot fetch mid-sim (``in_running_event_loop_task``
+        guard refuses to block on the async providers), so without a warm cache
+        historical volume ALWAYS degrades to fallback or refusal (ALM-2930 #4).
+        The engine awaits this hook right after an LP_OPEN fill — a legal await
+        point — so subsequent per-tick sync lookups hit ``_volume_cache`` /
+        ``_liquidity_cache`` instead of the guard.
+
+        Best-effort by design: symbolic pools (no address) and provider failures
+        log once and return; accrual then proceeds with the existing
+        fallback/refusal semantics.
+        """
+        protocol = intent.protocol.lower()
+        pool_address = self._lp_open_pool_address(intent.pool)
+        if pool_address is None:
+            # Symbolic pool ("WETH/USDC") — resolve pair -> address here, at
+            # the async prewarm point, so the sync volume/liquidity lanes have
+            # an address to key on.
+            pool_address = await self._resolve_symbolic_pool_address(intent.pool, protocol, chain)
+            if pool_address is None:
+                logger.warning(
+                    "prewarm_history: could not resolve symbolic pool %r (%s/%s) to an address; "
+                    "volume/liquidity stay on fallback semantics",
+                    intent.pool,
+                    protocol,
+                    chain,
+                )
+                return
+        pool_lower = pool_address.lower()
+        days = [start_time.date() + timedelta(days=i) for i in range((end_time.date() - start_time.date()).days + 1)]
+
+        await self._prewarm_fee_tier(pool_lower, protocol, chain)
+        await self._prewarm_volume_lane(pool_lower, protocol, chain, days)
+        await self._prewarm_liquidity_lane(pool_lower, protocol, chain, days)
+
+    @staticmethod
+    def _prewarm_lane_aborts(pool_lower: str, lane: str, streak: int) -> bool:
+        """Whether a prewarm lane should stop after ``streak`` consecutive fails.
+
+        Two consecutive failures = a sick deployment / transient outage that
+        won't recover within the window — stop dialing it once per day. Shared
+        by the volume and liquidity lanes so their resilience policy cannot drift.
+        """
+        if streak >= 2:
+            logger.warning(
+                "%s prewarm aborted for pool %s after %d consecutive failed days; "
+                "lane appears unavailable for the window",
+                lane,
+                pool_lower[:10],
+                streak,
+            )
+            return True
+        return False
+
+    async def _prewarm_volume_lane(self, pool_lower: str, protocol: str, chain: str, days: list[date]) -> None:
+        volume_provider = self._ensure_volume_provider()
+        if volume_provider is None:
+            return
+        warmed = 0
+        failed_days = 0
+        for day in days:
+            cache_key = (pool_lower, day)
+            if cache_key in self._volume_cache:
+                continue
+            try:
+                results = await volume_provider.get_volume(
+                    pool_address=pool_lower, chain=chain, start_date=day, end_date=day, protocol=protocol
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort, per-day
+                # A transient per-day fetch error must NOT abandon the rest of
+                # the window: later days still prewarm so accrual keeps a warm
+                # cache and does not fall back to the chain-default DEX miss
+                # path. An empty (non-raising) day is a legitimate "no volume"
+                # and resets the streak below.
+                failed_days += 1
+                logger.warning(
+                    "Volume history prewarm failed for pool %s on %s (%d consecutive): %s",
+                    pool_lower[:10],
+                    day,
+                    failed_days,
+                    exc,
+                )
+                if self._prewarm_lane_aborts(pool_lower, "Volume", failed_days):
+                    break
+                continue
+            failed_days = 0
+            if results:
+                self._cache_volume_success(cache_key, results[0])
+                warmed += 1
+        logger.info(
+            "Prewarmed %d/%d days of volume history for pool %s (%s/%s)",
+            warmed,
+            len(days),
+            pool_lower[:10],
+            protocol,
+            chain,
+        )
+
+    async def _prewarm_liquidity_lane(self, pool_lower: str, protocol: str, chain: str, days: list[date]) -> None:
+        liquidity_provider = self._ensure_liquidity_provider()
+        if liquidity_provider is None:
+            return
+        warmed = 0
+        failed_days = 0
+        for day in days:
+            cache_key = (pool_lower, day)
+            if cache_key in self._liquidity_cache:
+                continue
+            try:
+                result = await liquidity_provider.get_liquidity_depth(
+                    pool_address=pool_lower,
+                    chain=chain,
+                    timestamp=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+                    protocol=protocol,
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort, per-day
+                # A transient per-day fetch error must NOT abandon the rest of
+                # the window (mirrors the volume lane): later days still prewarm.
+                failed_days += 1
+                logger.warning(
+                    "Liquidity prewarm failed for pool %s on %s (%d consecutive): %s",
+                    pool_lower[:10],
+                    day,
+                    failed_days,
+                    exc,
+                )
+                if self._prewarm_lane_aborts(pool_lower, "Liquidity", failed_days):
+                    break
+                continue
+            if result.source_info.confidence == DataConfidence.LOW and result.depth <= 0:
+                # An empty LOW result shares the same sticky-abort streak.
+                failed_days += 1
+                if self._prewarm_lane_aborts(pool_lower, "Liquidity", failed_days):
+                    break
+                continue
+            failed_days = 0
+            self._cache_liquidity_success(cache_key, result)
+            warmed += 1
+        logger.info(
+            "Prewarmed %d/%d days of liquidity history for pool %s (%s/%s)",
+            warmed,
+            len(days),
+            pool_lower[:10],
+            protocol,
+            chain,
+        )
+
+    async def _prewarm_fee_tier(self, pool_lower: str, protocol: str, chain: str) -> None:
+        """Fetch the pool's real ``feeTier`` from its v3-family subgraph.
+
+        Uniswap-v3-family fees are immutable per pool; the slug-derived guess
+        (0.30% default) overstates fees 6x on 0.05% pools. Best-effort: only
+        v3-family subgraph schemas expose ``feeTier``, and failures leave the
+        guessed tier in place.
+        """
+        if pool_lower in self._resolved_fee_tiers:
+            return
+        from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
+
+        entry = DexVolumeRegistry.entry_for(DexVolumeRegistry.canonical(protocol) or protocol)
+        # SCHEMA gate, not economics: the query below (`pool { feeTier }`) is the
+        # uniswap-v3 subgraph shape. Messari-standard deployments (sushiswap,
+        # pancakeswap/ethereum+bsc, uniswap/optimism) are v3-concentrated pools
+        # but expose no `pool.feeTier` entity, so the query would 404 there.
+        # Gating on liquidity_family_for (the subgraph schema) — NOT
+        # lp_economic_family — is deliberate: it only dials the query where it
+        # works. Those chains fall through to the guessed tier, which is HONESTLY
+        # marked (fee confidence capped to medium + `guessed_fee_tier` provenance
+        # + warn-once, see _fee_amount_from_resolution). A schema-aware feeTier
+        # source for messari deployments is tracked (real-fee-tier data broker,
+        # ALM-2943 / BUGLIST "Real fee-tier source for Messari-schema chains").
+        if entry is None or entry.liquidity_family_for(chain) != "v3_concentrated":
+            return
+        subgraph_id = (entry.liquidity_subgraph_ids or {}).get(chain.lower())
+        if subgraph_id is None:
+            return
+        provider = self._ensure_liquidity_provider()
+        client = getattr(provider, "_client", None)
+        if client is None:
+            return
+        try:
+            data = await client.query(
+                subgraph_id=subgraph_id,
+                query="query GetPoolFee($poolAddress: ID!) { pool(id: $poolAddress) { feeTier } }",
+                variables={"poolAddress": pool_lower},
+            )
+            raw = ((data or {}).get("pool") or {}).get("feeTier")
+            if raw is None:
+                return
+            # Subgraph feeTier is in hundredths of a bip (500 = 0.05%).
+            tier = Decimal(str(raw)) / Decimal("1000000")
+            # Guard the money-math input: only a finite tier in (0, 1] (0%–100%)
+            # may replace the guess. A malformed/Infinity/absurd subgraph row
+            # would otherwise install an unbounded multiplier into
+            # volume * fee_tier * share and mint arbitrary simulated fees.
+            if tier.is_finite() and Decimal("0") < tier <= Decimal("1"):
+                self._resolved_fee_tiers[pool_lower] = tier
+                logger.info("Resolved pool %s real feeTier: %s", pool_lower[:10], tier)
+            else:
+                logger.warning(
+                    "Ignoring out-of-range feeTier %s for pool %s (raw=%r); keeping prior tier",
+                    tier,
+                    pool_lower[:10],
+                    raw,
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.debug("feeTier fetch failed for pool %s: %s", pool_lower[:10], exc)
+
+    # DexScreener dexId roots per protocol slug (their ids don't carry version
+    # suffixes: uniswap_v3 pools report dexId="uniswap" with labels=["v3"]).
+    _DEXSCREENER_DEX_ROOTS = {
+        "uniswap_v3": "uniswap",
+        "pancakeswap_v3": "pancakeswap",
+        "sushiswap_v3": "sushiswap",
+        "aerodrome": "aerodrome",
+        "aerodrome_slipstream": "aerodrome",
+        "balancer": "balancer",
+        "curve": "curve",
+        "traderjoe_v2": "traderjoe",
+    }
+
+    # DexScreener version label a protocol's pools must carry when the venue
+    # labels versions at all (dexId is shared across versions: a deep
+    # labels=["v2"] pool would otherwise win a v3 resolution). Candidates with
+    # NO version labels are accepted — several venues/chains omit them.
+    # Keys cover both canonical names AND the bare aliases strategies use
+    # (registry detection maps "uniswap"/"pancakeswap"/"sushiswap" to the v3
+    # connectors, so a bare-alias resolution demands the same label).
+    # Aerodrome/slipstream is absent on purpose: DexScreener returns NO
+    # labels on aerodrome pools (verified live 2026-07-14), so the two are
+    # indistinguishable here — a documented resolution gap, not a policy one.
+    _DEXSCREENER_VERSION_LABELS = {
+        "uniswap_v3": "v3",
+        "uniswap": "v3",
+        "uniswap_v4": "v4",
+        "uniswap_v2": "v2",
+        "pancakeswap_v3": "v3",
+        "pancakeswap": "v3",
+        "sushiswap_v3": "v3",
+        "sushiswap": "v3",
+    }
+
+    # Labels that count as VERSION CLAIMS. DexScreener labels carry other
+    # vocabularies too (solidly forks tag "stable"/"volatile"); those say
+    # nothing about the protocol version and must not exclude a candidate.
+    _DEXSCREENER_VERSION_VOCABULARY = frozenset({"v1", "v2", "v3", "v4"})
+
+    @classmethod
+    def _pick_deepest_pair_candidate(
+        cls,
+        candidates: Any,
+        *,
+        chain: str,
+        dex_root: str,
+        wanted_addresses: set[str],
+        wanted_symbols: set[str],
+        required_version_label: str | None = None,
+    ) -> tuple[Any, str]:
+        """Pick the highest-liquidity candidate and its match kind.
+
+        Address-exact matches win over symbol matches. Symbol fallback exists
+        for bridged variants (USDC.e et al): they trade under the same display
+        symbol but a different address than the registry's canonical token —
+        a symbolic-pool strategy means "the deep pool for this pair".
+        """
+        # Slot order encodes trust: address-exact token identity dominates —
+        # DexScreener's version labels are aggregator metadata, so a
+        # symbol-only match may never override ANY address-exact match no
+        # matter how its labels compare. Within each identity tier, an
+        # explicit correct version label beats an unlabeled candidate
+        # regardless of depth (a $50m unlabeled pool may be the wrong
+        # version).
+        slots: dict[tuple[str, bool], tuple[float, Any]] = {}
+
+        def _offer(key: tuple[str, bool], candidate: Any, liquidity: float) -> None:
+            current = slots.get(key)
+            if current is None or liquidity > current[0]:
+                slots[key] = (liquidity, candidate)
+
+        for candidate in candidates:
+            if not candidate.pair_address:
+                continue
+            if candidate.chain_id.lower() != chain.lower():
+                continue
+            if not candidate.dex_id.lower().startswith(dex_root):
+                continue
+            labels = {str(label).lower() for label in (getattr(candidate, "labels", None) or [])}
+            version_labels = labels & cls._DEXSCREENER_VERSION_VOCABULARY
+            if len(version_labels) >= 2:
+                # Contradictory version claims: the metadata cannot be trusted
+                # either way, so the candidate is excluded outright.
+                continue
+            if required_version_label is not None and version_labels and version_labels != {required_version_label}:
+                continue
+            version_confirmed = required_version_label is None or required_version_label in version_labels
+            # No dedup set: the two token windows repeat pools, but _offer is
+            # max-idempotent per slot, so duplicates are harmless — and any
+            # order-dependent skip lets one copy shadow another.
+            # Liquidity must be finite and non-negative BEFORE ranking:
+            # aggregator payloads parse "NaN"/"Infinity"/negatives as floats,
+            # and NaN in particular poisons every later comparison (a
+            # NaN-first candidate could never be displaced — response order
+            # would pick the pool).
+            raw_liquidity = candidate.liquidity.usd
+            liquidity = 0.0 if raw_liquidity is None else float(raw_liquidity)
+            if not math.isfinite(liquidity) or liquidity < 0:
+                continue
+            candidate_addresses = {
+                candidate.base_token.address.lower(),
+                candidate.quote_token.address.lower(),
+            }
+            if candidate_addresses == wanted_addresses:
+                _offer(("address", version_confirmed), candidate, liquidity)
+                continue
+            candidate_symbols = {candidate.base_token.symbol.upper(), candidate.quote_token.symbol.upper()}
+            if candidate_symbols == wanted_symbols:
+                _offer(("symbol", version_confirmed), candidate, liquidity)
+
+        # Provenance honesty: a version claim in the match kind is only
+        # meaningful when a version label was actually REQUIRED — with no
+        # requirement every candidate is trivially "confirmed", and stamping
+        # "version-labeled" on it would be a lie in the result record.
+        if required_version_label is None:
+            suffixes = {True: "", False: ""}
+        else:
+            suffixes = {True: ", version-labeled", False: ", unlabeled version"}
+        for match, version_confirmed, base_kind in (
+            ("address", True, "address-exact"),
+            ("address", False, "address-exact"),
+            ("symbol", True, "symbol-match"),
+            ("symbol", False, "symbol-match"),
+        ):
+            entry = slots.get((match, version_confirmed))
+            if entry is not None:
+                return entry[1], f"{base_kind}{suffixes[version_confirmed]}"
+        return None, "no-match"
+
+    async def _resolve_symbolic_pool_address(self, pool: str, protocol: str, chain: str) -> str | None:
+        """Resolve a symbolic "TOKEN0/TOKEN1" pool to its deepest on-chain address.
+
+        Token symbols resolve to addresses via the offline token registry, then
+        DexScreener's chain-keyed token-pairs endpoint (plain HTTPS, no gateway)
+        lists that token's pools; filter to the protocol family + the exact
+        address pair and take the highest-liquidity match — the pool a strategy
+        means when it names a pair without an address. Memoized per
+        (protocol, pair). Free-text search is NOT used: it is cross-chain fuzzy
+        and misses the majors.
+        """
+        from almanak.framework.backtesting.pnl.intent_extraction import lp_pool_tokens
+
+        pair = lp_pool_tokens(pool)
+        if pair is None:
+            return None
+        key = (protocol, frozenset(pair))
+        cached = self._resolved_pool_addresses.get(key)
+        if cached is not None:
+            return cached
+
+        from almanak.framework.data.dexscreener.client import DexScreenerClient
+        from almanak.framework.data.tokens import get_token_resolver
+
+        resolver = get_token_resolver()
+        addresses: dict[str, str] = {}
+        for symbol in pair:
+            info = resolver.resolve(symbol, chain, log_errors=False, skip_gateway=True)
+            address = getattr(info, "address", None) if info is not None else None
+            if not address:
+                logger.warning("Pool resolution: token registry cannot resolve %s on %s", symbol, chain)
+                return None
+            addresses[symbol] = address.lower()
+        token0_address, token1_address = (addresses[symbol] for symbol in pair)
+
+        if protocol in self._PRODUCT_AMBIGUOUS_LP_PROTOCOLS:
+            # Classic and Slipstream pools share one DexScreener dexId with no
+            # labels (verified live 2026-07-14) — depth-ranking them silently
+            # bets the product. Resolution rides the gateway's ListTokenPools
+            # (CoinGecko Onchain), whose dex ids ARE product-distinct; when
+            # that lane is unavailable the family fails closed, never guesses.
+            resolved = await self._resolve_product_ambiguous_pool(
+                pool, protocol, chain, pair, token0_address, token1_address
+            )
+            if resolved is not None:
+                self._resolved_pool_addresses[key] = resolved
+                self._resolved_pool_provenance[resolved] = "gateway_onchain:product-exact-ranked"
+            return resolved
+
+        dex_root = self._DEXSCREENER_DEX_ROOTS.get(protocol, protocol.split("_")[0])
+        try:
+            async with DexScreenerClient() as client:
+                # Union BOTH tokens' pair lists: the endpoint caps at ~30 pairs
+                # per token, and the deepest pool for a pair is routinely absent
+                # from one side's window.
+                candidates = await client.get_token_pairs(chain.lower(), token0_address)
+                candidates += await client.get_token_pairs(chain.lower(), token1_address)
+        except Exception as exc:  # noqa: BLE001 — resolution is best-effort
+            logger.warning("DexScreener pool resolution failed for %s on %s: %s", pool, chain, exc)
+            return None
+
+        best, match_kind = self._pick_deepest_pair_candidate(
+            candidates,
+            chain=chain,
+            dex_root=dex_root,
+            wanted_addresses={token0_address, token1_address},
+            wanted_symbols={symbol.upper() for symbol in pair},
+            required_version_label=self._DEXSCREENER_VERSION_LABELS.get(protocol),
+        )
+        if best is None or not best.pair_address:
+            return None
+        # DexScreener multi-coin venues (curve) return a COMPOSITE id
+        # ("pool-token0-token1"); every downstream lane keys on the plain pool
+        # address, so keep only the first segment — and only if it actually is
+        # an EVM address.
+        first_segment = best.pair_address.lower().split("-")[0]
+        if not re.fullmatch(r"0x[0-9a-f]{40}", first_segment):
+            logger.warning(
+                "Resolved DexScreener id %r for %s is not a plain pool address; skipping",
+                best.pair_address,
+                pool,
+            )
+            return None
+        resolved = first_segment
+        self._resolved_pool_addresses[key] = resolved
+        self._resolved_pool_provenance[resolved] = f"dexscreener:{match_kind}"
+        logger.info(
+            "Resolved symbolic pool %s (%s/%s) -> %s ($%.0f liquidity via DexScreener, %s)",
+            pool,
+            protocol,
+            chain,
+            resolved,
+            float(best.liquidity.usd or 0),
+            match_kind,
+        )
+        return resolved
+
+    # Venue families whose products (classic vs Slipstream) share one
+    # aggregator dex root with no distinguishing labels. Their SYMBOLIC
+    # resolution must use product-distinct evidence or fail closed.
+    _PRODUCT_AMBIGUOUS_LP_PROTOCOLS = frozenset(
+        {"aerodrome", "aerodrome_slipstream", "velodrome", "velodrome_slipstream"}
+    )
+
+    # Transient resolution failures (gateway down, rate limit, incomplete
+    # snapshot) retry after this many seconds; semantic no-match is final.
+    _TRANSIENT_RESOLUTION_RETRY_SECONDS = 60.0
+
+    # ANCHORED CoinGecko Onchain dex-id patterns per product. An id that does
+    # not match a known pattern is EXCLUDED — an unknown namespace (vendor
+    # rename, new venue product, near-prefix lookalike like "aerodrome-fork")
+    # must fail closed, never be classified by substring heuristics. Numeric
+    # suffixes cover factory generations ("aerodrome-slipstream-3",
+    # "velodrome-slipstream-v2-optimism": all observed live 2026-07-14).
+    _PRODUCT_DEX_ID_PATTERNS: dict[str, re.Pattern[str]] = {
+        "aerodrome": re.compile(r"^aerodrome-base$"),
+        "aerodrome_slipstream": re.compile(r"^aerodrome-slipstream(-\d+)?$"),
+        # Velodrome ids are ENUMERATED exactly (observed live 2026-07-14):
+        # open version wildcards would classify a future incompatible product
+        # (e.g. a hypothetical velodrome-v3 CL) as classic. Extend this list
+        # deliberately when Velodrome ships something new.
+        "velodrome": re.compile(r"^(velodrome|velodrome-finance-v2)$"),
+        "velodrome_slipstream": re.compile(r"^(velodrome-finance-slipstream|velodrome-slipstream-v2-optimism)$"),
+    }
+
+    @classmethod
+    def _product_dex_id_matches(cls, protocol: str, dex_id: str) -> bool:
+        """True when a CoinGecko Onchain dex id names ``protocol``'s product,
+        by ANCHORED pattern — unknown namespaces never classify."""
+        pattern = cls._PRODUCT_DEX_ID_PATTERNS.get(protocol)
+        return bool(pattern is not None and pattern.match(dex_id))
+
+    def _warn_once_ambiguous_resolution(self, protocol: str, pair: tuple[str, str], reason: str) -> None:
+        warn_key = (protocol, frozenset(pair))
+        if warn_key in self._ambiguous_resolution_warned:
+            return
+        self._ambiguous_resolution_warned.add(warn_key)
+        logger.warning(
+            "Symbolic %s pool %s/%s NOT resolved (fail closed — classic and Slipstream pools are "
+            "indistinguishable without product-exact dex ids): %s. Pass an explicit pool address, "
+            "or ensure the gateway is reachable.",
+            protocol,
+            pair[0],
+            pair[1],
+            reason,
+        )
+
+    async def _fetch_token_pool_rows(
+        self,
+        client: Any,
+        gateway_pb2: Any,
+        chain: str,
+        token_addresses: tuple[str, str],
+    ) -> list[list[Any]]:
+        """Fetch both tokens' RANKED pool windows via ListTokenPools (atomic).
+
+        page=0 asks the GATEWAY to page the upstream itself on raw row counts
+        and return one consistent snapshot per token, preserving upstream
+        rank order — client-side pagination inferred completeness from
+        FILTERED counts (a sanitized junk row truncated the search) and could
+        mix cache ages across pages. Major tokens (WETH) have hundreds of
+        pools, so full completeness is unattainable; selection therefore uses
+        RANK-ORDER semantics (see the caller), never a deepest-of-all claim.
+        """
+        from almanak.framework.backtesting.pnl.providers.perp._gateway_history import run_sync_gateway_call
+
+        windows: list[list[Any]] = []
+        for token_address in token_addresses:
+            request = gateway_pb2.TokenPoolsRequest(chain=chain, token_address=token_address, page=0)
+            response = await run_sync_gateway_call(client.pool_analytics.ListTokenPools, request, timeout=30.0)
+            if not response.success:
+                raise RuntimeError(response.error or "token-pools returned success=False")
+            windows.append(list(response.pools))
+        return windows
+
+    async def _resolve_product_ambiguous_pool(
+        self,
+        pool: str,
+        protocol: str,
+        chain: str,
+        pair: tuple[str, str],
+        token0_address: str,
+        token1_address: str,
+    ) -> str | None:
+        """Resolve an aerodrome/velodrome-family symbolic pool product-exactly.
+
+        Unions both tokens' pool windows from the gateway's ListTokenPools
+        (CoinGecko Onchain), keeps only pools whose dex id names THIS
+        protocol's product and whose token pair matches address-exactly, and
+        picks the deepest finite, non-negative reserve. Any failure returns
+        None (fail closed) — DexScreener is deliberately NOT a fallback here.
+        """
+        # Negative memo with failure-kind semantics: a SEMANTIC no-match is
+        # final for the run (the pool set will not change mid-backtest), but
+        # transport/rate-limit/incomplete failures are TRANSIENT — memoizing
+        # them permanently would let one rate-limited burst blank the family
+        # for the whole run. Transient entries expire and retry.
+        import time as _time
+
+        from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
+            get_connected_gateway_client,
+        )
+
+        memo_key = (protocol, frozenset(pair))
+        memo = self._ambiguous_resolution_failed.get(memo_key)
+        if memo is not None and (memo == _PERMANENT_MEMO or _time.monotonic() < memo):
+            return None
+
+        def _fail_permanent(reason: str) -> None:
+            self._ambiguous_resolution_failed[memo_key] = _PERMANENT_MEMO
+            self._warn_once_ambiguous_resolution(protocol, pair, reason)
+            return None
+
+        def _fail_transient(reason: str) -> None:
+            self._ambiguous_resolution_failed[memo_key] = _time.monotonic() + self._TRANSIENT_RESOLUTION_RETRY_SECONDS
+            self._warn_once_ambiguous_resolution(protocol, pair, reason)
+            return None
+
+        try:
+            client, gateway_pb2 = get_connected_gateway_client()
+        except Exception as exc:  # noqa: BLE001 — fail closed, never guess the product
+            _fail_transient(f"gateway unavailable: {exc}")
+            return None
+
+        try:
+            windows = await self._fetch_token_pool_rows(client, gateway_pb2, chain, (token0_address, token1_address))
+        except Exception as exc:  # noqa: BLE001 — fail closed, never guess the product
+            _fail_transient(f"token-pools lookup failed: {exc}")
+            return None
+
+        # RANK-ORDER selection: the FIRST exact-pair, product-exact match in
+        # each token's upstream-ranked window (combined liquidity/volume
+        # relevance) is the pool the strategy means — the canonical, active
+        # pool for the pair. Reserve is the tie-break between the two token
+        # windows' firsts, never a deepest-of-all claim: major tokens carry
+        # hundreds of pools, so an exhaustive reserve scan is unattainable and
+        # a bounded one would be a truncation lie (round-7). Windows are
+        # bounded (gateway page bound) — a pair whose pools all rank below the
+        # window fails closed.
+        wanted = {token0_address, token1_address}
+        candidates_seen = 0
+        firsts: list[tuple[float, Any]] = []
+        for window in windows:
+            for row in window:
+                candidates_seen += 1
+                if not self._product_dex_id_matches(protocol, row.dex_id):
+                    continue
+                if {row.base_token_address, row.quote_token_address} != wanted:
+                    continue
+                try:
+                    reserve = float(row.reserve_usd) if row.reserve_usd else 0.0
+                except ValueError:
+                    continue
+                if not math.isfinite(reserve) or reserve < 0:
+                    continue
+                firsts.append((reserve, row))
+                break
+        if not firsts:
+            _fail_permanent(f"no product-exact pool within the ranked windows ({candidates_seen} candidates)")
+            return None
+        best_reserve, best = max(firsts, key=lambda entry: entry[0])
+        logger.info(
+            "Resolved symbolic pool %s (%s/%s) -> %s ($%.0f reserve via gateway CoinGecko Onchain, "
+            "product-exact dex id %r, ranked-window selection)",
+            pool,
+            protocol,
+            chain,
+            best.pool_address,
+            best_reserve,
+            best.dex_id,
+        )
+        return best.pool_address
 
     def _ensure_volume_provider(self) -> "MultiDEXVolumeProvider | None":
         """Lazily initialize the volume provider if needed.
@@ -1480,6 +2141,35 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             )
 
         plan = self._build_lp_open_plan(intent, market_state)
+        coin_amounts = getattr(intent, "coin_amounts", None) or []
+        has_coin_vector = any(amount and Decimal(str(amount)) > 0 for amount in coin_amounts)
+        # NB: coin_amounts and amount0/amount1 are mutually exclusive — the
+        # LPOpenIntent validator rejects both together ("Cannot provide both
+        # coin_amounts and amount0/amount1"), so a coin vector alongside a
+        # positive amount0/amount1 notional is unconstructable (CodeRabbit
+        # #3271 flagged a silent-drop there; it is not reachable).
+        if plan.amount_usd <= 0 and not has_coin_vector:
+            # Nothing to deposit: on-chain a zero-amount mint reverts, and a
+            # zero-liquidity position would still accrue fee ticks.
+            return self._failed_lp_open_fill(
+                market_state=market_state,
+                protocol=plan.protocol,
+                reason="zero-notional LP_OPEN: no deposit amounts resolved",
+            )
+        if plan.amount_usd <= 0 and has_coin_vector:
+            # Multi-coin allocation vectors are not modeled: proceeding would
+            # record a phantom success ($0 notional, zero flows, missing
+            # legs) indistinguishable from a real position in the result.
+            # Fail closed with a machine-visible reason (ALM-2943 tracks the
+            # stable-swap position family that values these).
+            return self._failed_lp_open_fill(
+                market_state=market_state,
+                protocol=plan.protocol,
+                reason=(
+                    "unsupported: multi-coin allocation vector (coin_amounts) is not yet modeled by "
+                    "the backtest LP adapter — use amount0/amount1 pairs, or forward-test"
+                ),
+            )
         position = self._lp_open_position(plan, market_state)
         self._annotate_lp_open_position(position, intent.pool, plan)
         self._log_lp_open(intent.pool, plan)
@@ -1519,7 +2209,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         entry_price = token0_price / token1_price if token1_price > 0 else token0_price
         range_lower, range_upper, tick_lower, tick_upper = self._lp_open_range(intent)
         protocol = intent.protocol.lower()
-        fee_tier = self._lp_fee_tier_from_protocol(protocol)
+        fee_tier = self._lp_open_fee_tier(intent, protocol)
         liquidity = self._lp_open_liquidity(
             amount_usd=amount_usd,
             token1_price=token1_price,
@@ -1595,6 +2285,30 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             return Decimal("0.01")
         return Decimal("0.003")
 
+    def _lp_open_fee_tier(self, intent: "LPOpenIntent", protocol: str) -> Decimal:
+        """Resolve the LP fee tier, honoring an explicit ``protocol_params["fee_tier"]``.
+
+        ``_lp_fee_tier_from_protocol`` defaults to 0.30% for any pool whose fee
+        tier is not encoded in its protocol slug (e.g. ``aerodrome_slipstream``),
+        overstating fees ~60x for low-fee pools (ALM-2930). When the caller
+        declares the pool's real fee tier (a fraction, e.g. ``0.00005``), use it
+        verbatim. Guessed tiers (``_last_fee_tier_explicit`` False) are
+        corrected from the pool's real subgraph ``feeTier`` at prewarm.
+        """
+        self._last_fee_tier_explicit = False
+        params = getattr(intent, "protocol_params", None) or {}
+        override = params.get("fee_tier")
+        if override is not None:
+            try:
+                tier = Decimal(str(override))
+            except (TypeError, ValueError, ArithmeticError):
+                tier = Decimal("-1")
+            if tier > 0:
+                self._last_fee_tier_explicit = True
+                return tier
+            logger.warning("Ignoring invalid protocol_params['fee_tier']=%r for %s", override, protocol)
+        return self._lp_fee_tier_from_protocol(protocol)
+
     def _lp_open_liquidity(
         self,
         amount_usd: Decimal,
@@ -1646,6 +2360,10 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         }
         position.metadata["entry_price_ratio"] = str(plan.entry_price)
         position.metadata["pool_address"] = self._lp_open_pool_address(pool)
+        # Guessed tiers may be corrected from the pool's real subgraph feeTier
+        # at prewarm (the 0.30% slug default overstates fees 6x on a real
+        # 0.05% pool); explicit caller overrides never are.
+        position.metadata["fee_tier_source"] = "explicit" if self._last_fee_tier_explicit else "slug_guess"
 
     @staticmethod
     def _log_lp_open(pool: str, plan: _LPOpenPlan) -> None:
@@ -1727,6 +2445,23 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 protocol="unknown",
                 tokens=[],
                 reason="Invalid intent type",
+            )
+
+        if getattr(intent, "coin_index", None) is not None or getattr(intent, "imbalanced_amounts", None) is not None:
+            # Pool-coin exit selectors reshape the close's token flows
+            # (single-sided or exact-amounts withdrawal); executing them as a
+            # standard proportional close records flows the venue would never
+            # pay out. Fail closed before any position mutation.
+            selector = "coin_index" if getattr(intent, "coin_index", None) is not None else "imbalanced_amounts"
+            return self._failed_lp_close_fill(
+                market_state=market_state,
+                protocol=intent.protocol,
+                tokens=[],
+                reason=(
+                    f"unsupported: pool-coin exit selector ({selector}) is not yet modeled by the "
+                    "backtest LP adapter — close proportionally, or forward-test"
+                ),
+                position_close_id=intent.position_id,
             )
 
         position = self._find_lp_close_position(intent, portfolio)
@@ -1949,6 +2684,73 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             },
         )
 
+    @staticmethod
+    def _is_concentrated_position(position: "SimulatedPosition") -> bool:
+        """True when the position's protocol family has range semantics.
+
+        Resolved from connector-owned `lp_economic_family` declarations —
+        position economics are the connector's to declare, not derivable
+        from data-source registries. Unknown venues default to fungible
+        (no gating): wrongly zeroing an earning position is worse than
+        skipping the range refinement, and "slipstream" forks without a
+        declaration are the one recognized concentrated shape. Positions
+        that hit this default while carrying real tick bounds get their fee
+        confidence degraded (see `_unknown_family_with_tick_bounds`) — the
+        fungible treatment is a guess there, not a declared fact.
+        """
+        from almanak.framework.backtesting.adapters.registry import lp_economic_family_for
+
+        protocol = str(getattr(position, "protocol", "") or "").lower()
+        family = lp_economic_family_for(protocol)
+        if family is not None:
+            return family in ("concentrated", "bin")
+        return "slipstream" in protocol
+
+    @staticmethod
+    def _unknown_family_with_tick_bounds(position: "SimulatedPosition") -> bool:
+        """True when a venue with NO declared LP family carries tick bounds.
+
+        Such a position is treated as fungible (never range-gated), but the
+        tick bounds suggest concentrated economics — the accrual may be
+        crediting fees an out-of-range position would not earn, so the
+        result must say so instead of passing as a declared-family number.
+        """
+        from almanak.framework.backtesting.adapters.registry import lp_economic_family_for
+
+        protocol = str(getattr(position, "protocol", "") or "").lower()
+        if lp_economic_family_for(protocol) is not None or "slipstream" in protocol:
+            return False
+        return getattr(position, "tick_lower", None) is not None and getattr(position, "tick_upper", None) is not None
+
+    def _warn_once_unknown_family(self, protocol: str) -> None:
+        if protocol in self._unknown_family_warned_protocols:
+            return
+        self._unknown_family_warned_protocols.add(protocol)
+        logger.warning(
+            "Protocol %r declares no lp_economic_family but its positions carry tick bounds: "
+            "treating as fungible (no out-of-range gating) with LOW fee confidence. "
+            "Declare the family on the connector's backtest_strategy_type to remove this degrade.",
+            protocol,
+        )
+
+    def _position_out_of_range(
+        self, position: "SimulatedPosition", token0_price: Decimal, token1_price: Decimal
+    ) -> bool:
+        """True when the current price sits outside the position's tick range.
+
+        Full-range / non-CL positions (no tick bounds) are never out of range.
+        Unpriceable inputs conservatively count as in-range so a data gap can't
+        zero out fee accrual (ALM-2930).
+        """
+        tick_lower = getattr(position, "tick_lower", None)
+        tick_upper = getattr(position, "tick_upper", None)
+        if tick_lower is None or tick_upper is None:
+            return False
+        if token0_price <= 0 or token1_price <= 0:
+            return False
+        current_tick = self._price_to_tick_int(token0_price / token1_price)
+        return current_tick < int(tick_lower) or current_tick >= int(tick_upper)
+
     def _price_to_tick_int(self, price: Decimal) -> int:
         """Convert a price ratio to a Uniswap V3 tick.
 
@@ -2061,10 +2863,13 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         except KeyError:
             token1_price = None
 
+        fallback_used = False
         if token0_price is None or token0_price <= 0:
             token0_price = self._price_fallback(token0, position.entry_price, context)
+            fallback_used = True
         if token1_price is None or token1_price <= 0:
             token1_price = self._price_fallback(token1, Decimal("1"), context)
+            fallback_used = True
 
         current_price = token0_price / token1_price if token1_price > 0 else position.entry_price
         return _LPUpdatePrices(
@@ -2073,6 +2878,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             token0_price=token0_price,
             token1_price=token1_price,
             current_price=current_price,
+            fallback_used=fallback_used,
         )
 
     def _calculate_lp_update_amounts(
@@ -2134,6 +2940,41 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         if not self._config.fee_tracking_enabled or elapsed_seconds <= 0:
             return None
 
+        # Backfill a symbolic-pool position with the prewarm-resolved address
+        # so the volume/liquidity lanes can key on it. The resolution
+        # provenance travels with the position into the result doc.
+        if position.metadata.get("pool_address") is None:
+            resolved = self._resolved_pool_addresses.get(
+                (
+                    position.protocol.lower(),
+                    frozenset(token_ref_display(t).upper() for t in (prices.token0, prices.token1)),
+                )
+            )
+            if resolved is not None:
+                position.metadata["pool_address"] = resolved
+                provenance = self._resolved_pool_provenance.get(resolved)
+                if provenance:
+                    position.metadata["pool_resolution"] = provenance
+
+        # Correct a slug-guessed fee tier with the pool's real subgraph
+        # feeTier (never an explicit caller override).
+        pool_address = position.metadata.get("pool_address")
+        if pool_address and position.metadata.get("fee_tier_source") == "slug_guess":
+            real_tier = self._resolved_fee_tiers.get(str(pool_address).lower())
+            if real_tier is not None:
+                # A verified tier is "subgraph" even when it equals the guess:
+                # fee-confidence handling keys on whether the tier is verified,
+                # not on whether the guess happened to be right.
+                if real_tier != position.fee_tier:
+                    logger.info(
+                        "Correcting %s fee tier %s -> %s (pool's real feeTier)",
+                        position.position_id,
+                        position.fee_tier,
+                        real_tier,
+                    )
+                    position.fee_tier = real_tier
+                position.metadata["fee_tier_source"] = "subgraph"
+
         return self._calculate_fee_accrual(
             position=position,
             position_value_usd=amounts.position_value_usd,
@@ -2144,10 +2985,18 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             token1_price=prices.token1_price,
             timestamp=update_time,
             pool_address=position.metadata.get("pool_address"),
+            # Route the volume/liquidity lanes to the position's real protocol.
+            # Without it, an accrual-tick cache MISS (prewarm didn't cover the
+            # day / never ran) re-resolves with protocol=None, which the
+            # MultiDEXVolumeProvider maps to the chain-DEFAULT DEX — silently
+            # sending curve/balancer/sushiswap pools to uniswap_v3's subgraph
+            # and undoing the schema-family + fee-share fixes on the miss path.
+            protocol=position.protocol,
             amounts={
                 prices.token0: amounts.token0_amount,
                 prices.token1: amounts.token1_amount,
             },
+            prices_are_fallback=prices.fallback_used,
         )
 
     @staticmethod
@@ -2175,6 +3024,27 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
 
         if plan.fee_result is not None:
             fee_result = plan.fee_result
+            # Durable result provenance: the metrics aggregator reads
+            # metadata["data_source"] — logs alone are not result-visible.
+            # "data_source" holds the LATEST source (back-compat);
+            # "data_sources" accumulates every distinct source the position
+            # touched, so a run that degraded mid-way cannot present its
+            # final tick's source as the whole story.
+            if fee_result.data_source:
+                sources = position.metadata.get("data_sources")
+                if not isinstance(sources, list):
+                    sources = []
+                    position.metadata["data_sources"] = sources
+                # Seed the previous singular source whenever it is absent —
+                # not only when the list is missing: a partially-migrated
+                # position ({data_source: "x", data_sources: []}) would
+                # otherwise lose its first source on the next overwrite.
+                previous = position.metadata.get("data_source")
+                if isinstance(previous, str) and previous and previous not in sources:
+                    sources.append(previous)
+                position.metadata["data_source"] = fee_result.data_source
+                if fee_result.data_source not in sources:
+                    sources.append(fee_result.data_source)
             position.fees_earned += fee_result.fees_usd
             position.accumulated_fees_usd += fee_result.fees_usd
             position.fees_token0 += fee_result.fees_token0
@@ -2300,14 +3170,21 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             )
             return None
         estimated_daily_volume = position_value_usd * multiplier
-        logger.warning(
-            "LP fee accrual using OPT-IN fallback volume multiplier (LOW confidence): "
-            "position=%s, multiplier=%.1fx, estimated_volume=$%.2f. "
-            "This is a rough estimate that can be off by an order of magnitude.",
-            position.position_id,
-            float(multiplier),
-            float(estimated_daily_volume),
-        )
+        # Warn once per position, not once per tick: a 6-month hourly backtest
+        # otherwise emits thousands of identical lines and drowns real signals
+        # in Cloud Run logs (ALM-2936 follow-up). The LOW confidence is also
+        # stamped on the position and the per-fill data_source.
+        if position.position_id not in self._fallback_volume_warned_positions:
+            self._fallback_volume_warned_positions.add(position.position_id)
+            logger.warning(
+                "LP fee accrual using OPT-IN fallback volume multiplier (LOW confidence): "
+                "position=%s, multiplier=%.1fx, estimated_volume=$%.2f. "
+                "This is a rough estimate that can be off by an order of magnitude. "
+                "(Logged once per position; applies to every accrual tick.)",
+                position.position_id,
+                float(multiplier),
+                float(estimated_daily_volume),
+            )
         return _VolumeResolution(
             volume_usd=estimated_daily_volume,
             source="fallback",
@@ -2342,6 +3219,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         pool_address: str | None = None,
         protocol: str | None = None,
         amounts: dict[TokenRef, Decimal] | None = None,
+        prices_are_fallback: bool = False,
     ) -> FeeAccrualResult:
         """Calculate fee accrual for an LP position.
 
@@ -2373,6 +3251,40 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         if position_value_usd <= 0 or elapsed_seconds <= 0:
             return self._empty_fee_accrual_result(pool_address, timestamp)
 
+        # Out-of-range CL positions provide no active liquidity and earn no
+        # fees on-chain (ALM-2930). Decided from prices alone, BEFORE any
+        # historical-data resolution (the formula context resolves volume and
+        # can raise in strict mode): a measured zero must not fail over data
+        # it does not need. Fungible families (stableswap, weighted, solidly)
+        # have no range — their tick fields are vocabulary defaults with no
+        # financial meaning — so they are never gated.
+        if self._is_concentrated_position(position) and self._position_out_of_range(
+            position, token0_price, token1_price
+        ):
+            # A complete deterministic result: no attribution, no slippage
+            # resolution — zero fees produce zero flows, and the slippage
+            # lane would otherwise query historical liquidity for a
+            # synthetic trade this position never makes.
+            # A range verdict computed from FALLBACK prices (entry price /
+            # $1 substitutes) is not a measured verdict: the zero fee stands
+            # (accruing on the same fabricated ratio would be no better) but
+            # it must not read as high confidence (CodeRabbit find, #3271).
+            return FeeAccrualResult(
+                fees_usd=Decimal("0"),
+                fee_confidence="high" if not prices_are_fallback else "low",
+                data_source="out_of_range" if not prices_are_fallback else "out_of_range:fallback_price",
+                fees_token0=Decimal("0"),
+                fees_token1=Decimal("0"),
+                # None, not $0: no volume was measured — the zero fee is a
+                # range verdict, and a "measured zero volume" reading would
+                # misattribute it to a dead pool.
+                volume_usd=None,
+                pool_address=pool_address,
+                timestamp=timestamp,
+                slippage_confidence=None,
+                slippage_pct=None,
+                liquidity_usd=None,
+            )
         context = self._fee_formula_context(
             position=position,
             position_value_usd=position_value_usd,
@@ -2382,6 +3294,9 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             protocol=protocol,
         )
         fee_amount = self._fee_amount_from_resolution(position, position_value_usd, context, pool_address, timestamp)
+        degrade_unknown_family = self._unknown_family_with_tick_bounds(position)
+        if degrade_unknown_family:
+            self._warn_once_unknown_family(str(getattr(position, "protocol", "") or "").lower())
         attribution = self._attribute_lp_fees(
             fees_usd=fee_amount.fees_usd,
             amounts=amounts if amounts is not None else position.amounts,
@@ -2401,8 +3316,10 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
 
         return FeeAccrualResult(
             fees_usd=fee_amount.fees_usd,
-            fee_confidence=fee_amount.fee_confidence,
-            data_source=fee_amount.data_source,
+            fee_confidence="low" if degrade_unknown_family else fee_amount.fee_confidence,
+            data_source=(
+                f"{fee_amount.data_source}:unknown_lp_family" if degrade_unknown_family else fee_amount.data_source
+            ),
             fees_token0=attribution.token0_amount,
             fees_token1=attribution.token1_amount,
             volume_usd=fee_amount.volume_usd,
@@ -2442,16 +3359,36 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             pool_address=pool_address,
             protocol=protocol,
         )
+        # Real pool depth for the share denominator: the historical liquidity
+        # lane was previously consumed ONLY by slippage, so fee shares divided
+        # by the static base_liquidity placeholder ($1M) — inflating fees ~100x
+        # on a deep pool (ALM-2930). Caller override still wins; placeholder is
+        # the last resort.
+        historical_depth: Decimal | None = None
+        if pool_address and timestamp is not None and self._use_historical_liquidity():
+            liquidity_result = self._get_historical_liquidity(
+                pool_address=pool_address,
+                timestamp=timestamp,
+                protocol=protocol,
+            )
+            if liquidity_result is not None and liquidity_result.depth > 0:
+                historical_depth = liquidity_result.depth
+
         return _FeeFormulaContext(
             days_elapsed=Decimal(str(elapsed_seconds)) / Decimal("86400"),
-            liquidity_share=self._lp_liquidity_share(position_value_usd),
+            liquidity_share=self._lp_liquidity_share(position_value_usd, historical_depth),
             base_apr=self._base_apr_for_fee_tier(position.fee_tier),
             resolution=resolution,
         )
 
-    def _lp_liquidity_share(self, position_value_usd: Decimal) -> Decimal:
+    def _lp_liquidity_share(self, position_value_usd: Decimal, historical_depth: Decimal | None = None) -> Decimal:
         explicit_pool_liquidity = self._explicit_pool_liquidity_usd()
-        pool_liquidity = explicit_pool_liquidity if explicit_pool_liquidity is not None else self._config.base_liquidity
+        if explicit_pool_liquidity is not None:
+            pool_liquidity = explicit_pool_liquidity
+        elif historical_depth is not None:
+            pool_liquidity = historical_depth
+        else:
+            pool_liquidity = self._config.base_liquidity
         if pool_liquidity > 0:
             # Real share of pool TVL. There is deliberately NO floor here: a
             # position that is 0.1% of the pool earns 0.1% of pool fees, not
@@ -2481,22 +3418,49 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         resolution = context.resolution
         volume_based_fees = resolution.volume_usd * position.fee_tier * context.liquidity_share * context.days_elapsed
         apr_based_fees = position_value_usd * (context.base_apr / Decimal("365")) * context.days_elapsed
+        tier_is_guess = position.metadata.get("fee_tier_source") == "slug_guess"
+        if tier_is_guess:
+            self._warn_once_guessed_tier(position)
 
         if resolution.source == "fallback":
+            data_source = f"fallback_multiplier:{self._get_volume_fallback_multiplier()}x"
+            if tier_is_guess:
+                data_source = f"{data_source}:guessed_fee_tier"
             return _FeeAmountResult(
                 fees_usd=(volume_based_fees + apr_based_fees) / Decimal("2"),
                 fee_confidence="low",
-                data_source=f"fallback_multiplier:{self._get_volume_fallback_multiplier()}x",
+                data_source=data_source,
                 volume_usd=resolution.volume_usd,
             )
 
         self._log_real_volume_fee_source(resolution, volume_based_fees, pool_address, timestamp)
         data_source = "explicit_volume" if resolution.source == "explicit" else f"multi_dex:{self._config.chain}"
+        fee_confidence: FeeConfidence = resolution.confidence.value
+        if tier_is_guess:
+            # The tier is an unverified guess (no v3-schema subgraph to read
+            # feeTier from) and can be 6x off — the provenance marks EVERY
+            # confidence level, and high volume confidence must not read as
+            # high FEE confidence.
+            data_source = f"{data_source}:guessed_fee_tier"
+            if fee_confidence == "high":
+                fee_confidence = "medium"
         return _FeeAmountResult(
             fees_usd=volume_based_fees,
-            fee_confidence=resolution.confidence.value,
+            fee_confidence=fee_confidence,
             data_source=data_source,
             volume_usd=resolution.volume_usd,
+        )
+
+    def _warn_once_guessed_tier(self, position: "SimulatedPosition") -> None:
+        if position.position_id in self._guessed_tier_warned_positions:
+            return
+        self._guessed_tier_warned_positions.add(position.position_id)
+        logger.warning(
+            "LP fee tier for %s %s is a slug guess (%s) with no verifiable subgraph source — "
+            "fee confidence capped at medium; pass protocol_params['fee_tier'] for exact fees",
+            position.protocol,
+            position.position_id,
+            position.fee_tier,
         )
 
     @staticmethod

@@ -22,9 +22,17 @@ CONNECTOR = Connector(
         liquidity_subgraph_ids={
             "ethereum": "2tGWMrDha4164KkFAfkU3rDCtuxGb4q1emXmFdLLzJ8x",
         },
+        # The declared deployment is Messari-standard (liquidityPoolDailySnapshots),
+        # not the uniswap-v3 fork schema.
+        liquidity_query_family="messari_standard",
     ),
     # Legacy backtest detection key is the bare "sushiswap".
-    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", name="sushiswap"),
+    backtest_strategy_type=BacktestStrategyTypeDecl(
+        strategy_type="lp",
+        name="sushiswap",
+        lp_economic_family="concentrated",
+        lp_economic_family_overrides={"sushiswap_v3": "concentrated"},
+    ),
     address_tables=(
         AddressTableSpec(
             protocol="sushiswap_v3",

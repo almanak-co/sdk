@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     ImportRef,
 )
@@ -37,6 +38,12 @@ CONNECTOR = Connector(
     ),
     strategy_intents=("LP_OPEN", "LP_CLOSE"),
     strategy_chains=("solana",),
+    backtest_strategy_type=BacktestStrategyTypeDecl(
+        strategy_type="lp",
+        aliases=("meteora_dlmm",),
+        # Meteora DLMM: discrete-bin Liquidity Book economics.
+        lp_economic_family="bin",
+    ),
 )
 
 __all__ = ["CONNECTOR"]

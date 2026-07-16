@@ -16,7 +16,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | DashboardService | 22 | Operator dashboard data, actions, transaction ledger, PnL/cost stack, audit posture, trade tape, activity feed, positions, reconciliation report, and operator reconciliation actions |
 | FundingRateService | 2 | Perpetual funding rates and spreads |
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
-| PoolAnalyticsService | 1 | DEX pool analytics (TVL, volume, fees) for risk-adjusted decisions |
+| PoolAnalyticsService | 2 | DEX pool analytics (TVL, volume, fees) + product-distinct token-pool listing |
 | PoolHistoryService | 1 | Historical pool snapshots (TVL, volume, fees over time). Disabled by default; hosted rollout enables via `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true` deployment config |
 | RateHistoryService | 8 | Lending APY (live + historical), perp funding history, DEX TWAP (single + series), DEX LWAP (liquidity-weighted spot), DEX volume history, and gas prices (VIB-4859 / W7, VIB-4948). Strategy-side `RateMonitor` / backtesting rate providers are thin gRPC clients of this service. |
 | PolymarketService | 20 | Polymarket CLOB API proxy (market data, orders, positions, price history, trade tape) |
@@ -1394,6 +1394,62 @@ Aggregated DEX pool analytics (TVL, volume, fees) sourced through the gateway's 
 ```protobuf
 rpc GetPoolAnalytics(PoolAnalyticsRequest) returns (PoolAnalyticsResponse)
 ```
+
+### ListTokenPools
+
+List pools where a token is base or quote, with **product-distinct dex ids**
+sourced from CoinGecko Onchain (`aerodrome-base` vs `aerodrome-slipstream*`,
+where aggregator labels cannot distinguish the products). Serves symbolic
+pool resolution for product-ambiguous venue families (Aerodrome/Velodrome
+classic vs Slipstream) in the backtest LP adapter.
+
+```protobuf
+rpc ListTokenPools(TokenPoolsRequest) returns (TokenPoolsResponse)
+```
+
+**Request:**
+```protobuf
+message TokenPoolsRequest {
+  string chain = 1;          // Required. Chain name (canonical or registered alias).
+  string token_address = 2;  // Required. Token address (EVM case-insensitive; Solana case-sensitive).
+  int32  page = 3;           // 0 (default) = ATOMIC bounded fetch (gateway pages upstream on
+                             // raw row counts, one consistent snapshot, `complete` set).
+                             // >=1 = single upstream page (compat/diagnostic).
+}
+```
+
+**Response:**
+```protobuf
+message TokenPoolsResponse {
+  string chain = 1;          // Echoed-back, canonicalized.
+  string token_address = 2;  // Echoed-back, chain-normalized.
+  repeated TokenPoolRow pools = 3;
+  string source = 4;         // "coingecko_onchain"
+  int64  observed_at = 5;    // Unix seconds when the gateway fetched the data.
+  bool   success = 6;
+  string error = 7;
+  bool   complete = 8;       // True when the set is complete per upstream RAW row
+                             // counts; false when the page bound was hit with more
+                             // upstream data. Consumers select by RANK-ORDER within
+                             // the returned window (first exact match = the canonical
+                             // pool) — never a deepest-of-all claim over a truncated
+                             // window; a pair with no in-window match fails closed.
+}
+```
+
+Each `TokenPoolRow` carries the pool address (chain-normalized and
+syntactically validated — non-address identities are dropped), the
+product-distinct `dex_id`, the pool name, `reserve_usd` as decimal-as-string
+(Empty ≠ Zero: absent or non-finite readings are `""`, never `"NaN"`), and
+the base/quote token addresses (chain-normalized + validated; `""` when
+omitted or invalid). Identity handling is chain-aware throughout: EVM
+addresses lower-case, Solana-family base58 preserves case. Atomic fetches
+page the upstream on **raw** row counts (a sanitized junk row never truncates
+the search) up to a 5-page bound. Results are TTL-cached gateway-side
+atomically per snapshot (60s positive, 30s negative; the cache is bounded and
+swept), with single-flight deduplication of concurrent identical misses.
+Errors follow the dual-channel envelope: provider/schema failures return
+structured `UNAVAILABLE`, never `UNKNOWN`.
 
 ## PoolHistoryService
 

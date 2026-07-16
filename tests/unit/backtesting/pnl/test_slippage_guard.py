@@ -685,6 +685,38 @@ class TestHistoricalSlippageModel:
         assert result.liquidity_usd == Decimal("1000000")
         assert result.slippage > Decimal("0")
 
+    def test_fallback_warning_logs_once_per_model_instance(self, caplog) -> None:
+        import logging
+
+        model = HistoricalSlippageModel(SlippageModelConfig(fallback_liquidity_usd=Decimal("1000000")))
+
+        with caplog.at_level(logging.WARNING):
+            first = model.calculate_slippage(
+                trade_amount_usd=Decimal("25000"), historical_liquidity=None, pool_type="v2", fee_bps=20
+            )
+            second = model.calculate_slippage(
+                trade_amount_usd=Decimal("25000"), historical_liquidity=None, pool_type="v2", fee_bps=20
+            )
+
+        fallback_warnings = [r for r in caplog.records if "fallback" in r.getMessage().lower()]
+        assert len(fallback_warnings) == 1
+        assert first.was_fallback is True
+        assert second.was_fallback is True
+        assert second.slippage == first.slippage
+
+    def test_fresh_model_instance_warns_again(self, caplog) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            for _ in range(2):
+                model = HistoricalSlippageModel(SlippageModelConfig(fallback_liquidity_usd=Decimal("1000000")))
+                model.calculate_slippage(
+                    trade_amount_usd=Decimal("25000"), historical_liquidity=None, pool_type="v2", fee_bps=20
+                )
+
+        fallback_warnings = [r for r in caplog.records if "fallback" in r.getMessage().lower()]
+        assert len(fallback_warnings) == 2
+
     def test_zero_fallback_liquidity_returns_low_confidence_zero_slippage(self) -> None:
         model = HistoricalSlippageModel(SlippageModelConfig(fallback_liquidity_usd=None))
 

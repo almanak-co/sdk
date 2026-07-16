@@ -6039,6 +6039,121 @@ class PoolAnalyticsResponse(_message.Message):
 Global___PoolAnalyticsResponse: _TypeAlias = PoolAnalyticsResponse  # noqa: Y015
 
 @_typing.final
+class TokenPoolsRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    CHAIN_FIELD_NUMBER: _builtins.int
+    TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
+    PAGE_FIELD_NUMBER: _builtins.int
+    chain: _builtins.str
+    """Required. Chain name (canonical or registered alias)."""
+    token_address: _builtins.str
+    """Required. Token contract address (EVM case-insensitive;"""
+    page: _builtins.int
+    """Solana-family base58 is case-sensitive and preserved).
+    0 (default) = ATOMIC bounded fetch: the gateway pages the
+    """
+    def __init__(
+        self,
+        *,
+        chain: _builtins.str = ...,
+        token_address: _builtins.str = ...,
+        page: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "page", b"page", "token_address", b"token_address"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___TokenPoolsRequest: _TypeAlias = TokenPoolsRequest  # noqa: Y015
+
+@_typing.final
+class TokenPoolRow(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    DEX_ID_FIELD_NUMBER: _builtins.int
+    NAME_FIELD_NUMBER: _builtins.int
+    RESERVE_USD_FIELD_NUMBER: _builtins.int
+    BASE_TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
+    QUOTE_TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
+    pool_address: _builtins.str
+    """Chain-normalized (EVM lower-cased; Solana case preserved)"""
+    dex_id: _builtins.str
+    """and syntactically validated — invalid rows are dropped.
+    Product-distinct dex id (e.g. "aerodrome-slipstream").
+    """
+    name: _builtins.str
+    """Human-readable pool name (may carry the fee, e.g. "WETH / USDC 0.05%")."""
+    reserve_usd: _builtins.str
+    """Decimal-as-string; "" = unmeasured (Empty != Zero; never NaN/Infinity)."""
+    base_token_address: _builtins.str
+    """Chain-normalized + validated; "" when omitted or invalid."""
+    quote_token_address: _builtins.str
+    def __init__(
+        self,
+        *,
+        pool_address: _builtins.str = ...,
+        dex_id: _builtins.str = ...,
+        name: _builtins.str = ...,
+        reserve_usd: _builtins.str = ...,
+        base_token_address: _builtins.str = ...,
+        quote_token_address: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["base_token_address", b"base_token_address", "dex_id", b"dex_id", "name", b"name", "pool_address", b"pool_address", "quote_token_address", b"quote_token_address", "reserve_usd", b"reserve_usd"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___TokenPoolRow: _TypeAlias = TokenPoolRow  # noqa: Y015
+
+@_typing.final
+class TokenPoolsResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    CHAIN_FIELD_NUMBER: _builtins.int
+    TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
+    POOLS_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    OBSERVED_AT_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    COMPLETE_FIELD_NUMBER: _builtins.int
+    chain: _builtins.str
+    """Echoed-back, canonicalized."""
+    token_address: _builtins.str
+    """Echoed-back, chain-normalized."""
+    source: _builtins.str
+    """"coingecko_onchain" """
+    observed_at: _builtins.int
+    """Unix seconds when the gateway fetched the data."""
+    success: _builtins.bool
+    """Dual-channel envelope (see PoolAnalyticsService header comment)."""
+    error: _builtins.str
+    complete: _builtins.bool
+    """True when the returned set is COMPLETE per upstream raw row counts
+    (last upstream page was short/absent within the page bound). False
+    when the bound was hit while upstream still reported full pages.
+    Consumers select by RANK-ORDER within the window (first exact match =
+    the canonical pool for the pair) — never a deepest-of-all claim over a
+    truncated window; no in-window match fails closed.
+    """
+    @_builtins.property
+    def pools(self) -> _containers.RepeatedCompositeFieldContainer[Global___TokenPoolRow]: ...
+    def __init__(
+        self,
+        *,
+        chain: _builtins.str = ...,
+        token_address: _builtins.str = ...,
+        pools: _abc.Iterable[Global___TokenPoolRow] | None = ...,
+        source: _builtins.str = ...,
+        observed_at: _builtins.int = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+        complete: _builtins.bool = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "complete", b"complete", "error", b"error", "observed_at", b"observed_at", "pools", b"pools", "source", b"source", "success", b"success", "token_address", b"token_address"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___TokenPoolsResponse: _TypeAlias = TokenPoolsResponse  # noqa: Y015
+
+@_typing.final
 class PoolSnapshot(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 

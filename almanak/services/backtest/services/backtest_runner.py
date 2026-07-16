@@ -12,10 +12,11 @@ The runner wires the **full** backtesting engine:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from almanak.core.chains import ChainRegistry
@@ -451,6 +452,7 @@ def create_backtester(
     token_addresses: TokenAddressMap | None = None,
     *,
     close_providers_on_finish: bool = True,
+    data_config_overrides: Mapping[str, Any] | None = None,
 ) -> PnLBacktester:
     """Create a PnLBacktester wired with the full engine capabilities.
 
@@ -490,13 +492,31 @@ def create_backtester(
     # - Lending adapter: historical APY for interest accrual
     # - Perp adapter: historical funding rates
     # Non-strict mode uses fallback values when historical data is unavailable.
-    data_config = BacktestDataConfig(
-        use_historical_volume=True,
-        use_historical_funding=True,
-        use_historical_apy=True,
-        use_historical_liquidity=True,
-        strict_historical_mode=False,
-    )
+    data_config_kwargs: dict[str, Any] = {
+        "use_historical_volume": True,
+        "use_historical_funding": True,
+        "use_historical_apy": True,
+        "use_historical_liquidity": True,
+        "strict_historical_mode": False,
+    }
+    if data_config_overrides:
+        # Callers (platform BACKTEST_CONFIG, ALM-2930 #6) may tune the LP
+        # data lanes: allow_volume_fallback, explicit_pool_volume_usd_daily,
+        # explicit_pool_liquidity_usd, strict_historical_mode, ...
+        fields_by_name = {f.name: f for f in dataclasses.fields(BacktestDataConfig)}
+        unknown = sorted(set(data_config_overrides) - set(fields_by_name))
+        if unknown:
+            raise ValueError(f"Unknown BacktestDataConfig overrides: {', '.join(unknown)}")
+        for key, value in data_config_overrides.items():
+            # JSON delivers numbers as float/str; Decimal-typed fields must be
+            # coerced or downstream Decimal arithmetic fails mid-backtest.
+            if value is not None and "Decimal" in str(fields_by_name[key].type) and not isinstance(value, Decimal):
+                try:
+                    value = Decimal(str(value))
+                except (InvalidOperation, ValueError) as exc:
+                    raise ValueError(f"BacktestDataConfig override {key!r} is not a valid number: {value!r}") from exc
+            data_config_kwargs[key] = value
+    data_config = BacktestDataConfig(**data_config_kwargs)
 
     return PnLBacktester(
         data_provider=data_provider,

@@ -425,6 +425,41 @@ class FundingHistoryDecl:
 
 
 _DEX_AMM_FAMILIES = ("v3_concentrated", "solidly_v2", "liquidity_book", "weighted", "stableswap")
+# Query-schema families that are not AMM shapes: valid for
+# ``liquidity_query_family`` (subgraph SCHEMA dispatch) but never for
+# ``amm_family``. Messari-standard deployments expose
+# ``liquidityPoolDailySnapshots`` regardless of the underlying AMM.
+_EXTRA_LIQUIDITY_QUERY_FAMILIES = ("messari_standard",)
+
+
+def _validate_liquidity_families(
+    liquidity_query_family: str | None,
+    overrides: Mapping[str, str] | None,
+) -> None:
+    """Validate the liquidity schema family and its per-chain overrides."""
+    if overrides is not None and not isinstance(overrides, Mapping):
+        # A non-Mapping (e.g. a list) would otherwise pass an empty override set
+        # silently or raise a bare AttributeError on `.items()` (CodeRabbit #3271).
+        raise ValueError(
+            f"DexVolumeDecl.liquidity_query_family_overrides must be a Mapping[str, str], got {overrides!r}"
+        )
+    allowed_query_families = (*_DEX_AMM_FAMILIES, *_EXTRA_LIQUIDITY_QUERY_FAMILIES)
+    if liquidity_query_family is not None and liquidity_query_family not in allowed_query_families:
+        raise ValueError(
+            f"DexVolumeDecl.liquidity_query_family must be None or one of {allowed_query_families}, "
+            f"got {liquidity_query_family!r}"
+        )
+    for chain, family in (overrides or {}).items():
+        if not isinstance(chain, str) or not chain.strip() or chain != chain.lower():
+            raise ValueError(
+                f"DexVolumeDecl.liquidity_query_family_overrides keys must be lowercase non-empty "
+                f"chain names, got {chain!r}"
+            )
+        if family not in allowed_query_families:
+            raise ValueError(
+                f"DexVolumeDecl.liquidity_query_family_overrides[{chain!r}] must be one of "
+                f"{allowed_query_families}, got {family!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -476,6 +511,18 @@ class DexVolumeDecl:
     volume_subgraph_urls: Mapping[str, str] | None = None
     hosted_volume_subgraph_urls: Mapping[str, str] | None = None
     liquidity_subgraph_ids: Mapping[str, str] | None = None
+    #: AMM family whose depth-query SCHEMA the declared liquidity subgraph
+    #: exposes, when it differs from ``amm_family`` (ALM-2930: aerodrome is a
+    #: solidly_v2 AMM but its subgraph is a uniswap-v3 fork exposing
+    #: ``poolDayDatas`` — the solidly ``pairDayDatas`` query hard-errors).
+    #: ``None`` = the subgraph schema matches ``amm_family``.
+    liquidity_query_family: str | None = None
+    #: Per-CHAIN schema-family overrides, for protocols whose declared
+    #: deployments mix schemas across chains (e.g. uniswap_v3's optimism
+    #: deployment is Messari-standard while its sibling chains stay on the
+    #: v3 fork). Takes precedence over ``liquidity_query_family`` for its
+    #: chains.
+    liquidity_query_family_overrides: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         """Validate the declaration's keys, chains, and family."""
@@ -494,6 +541,7 @@ class DexVolumeDecl:
             raise ValueError(f"DexVolumeDecl.chains contains duplicates: {self.chains!r}")
         if self.amm_family not in _DEX_AMM_FAMILIES:
             raise ValueError(f"DexVolumeDecl.amm_family must be one of {_DEX_AMM_FAMILIES}, got {self.amm_family!r}")
+        _validate_liquidity_families(self.liquidity_query_family, self.liquidity_query_family_overrides)
         if self.volume_data_source is not None and (
             not isinstance(self.volume_data_source, str) or not self.volume_data_source.strip()
         ):
@@ -730,6 +778,11 @@ class BacktestRiskDecl:
 _BACKTEST_STRATEGY_TYPES = ("lp", "perp", "lending", "arbitrage", "swap", "yield", "multi_protocol")
 
 
+# LP position-economics families for BacktestStrategyTypeDecl: whether a
+# venue's positions have range semantics (fee gating) or are fungible shares.
+_LP_ECONOMIC_FAMILIES = ("concentrated", "fungible", "bin")
+
+
 @dataclass(frozen=True)
 class BacktestStrategyTypeDecl:
     """Connector-owned backtest strategy-type declaration (VIB-4851).
@@ -752,14 +805,62 @@ class BacktestStrategyTypeDecl:
     strategy_type: str
     name: str | None = None
     aliases: tuple[str, ...] = ()
+    #: LP position economics for this venue's protocol keys: "concentrated"
+    #: (tick/price ranges gate fee accrual), "bin" (Liquidity Book bins), or
+    #: "fungible" (no range — stableswap/weighted/solidly pool shares whose
+    #: tick fields are vocabulary defaults with no financial meaning). Owned
+    #: here, NOT derived from data-source registries: a volume subgraph's
+    #: schema family says nothing about whether a position earns fees out of
+    #: range. Only meaningful for strategy_type "lp".
+    lp_economic_family: str | None = None
+    #: Per-protocol-key family overrides; may introduce extra keys beyond
+    #: name/aliases (e.g. uniswap_v3 declares "uniswap_v2" -> fungible and
+    #: "aerodrome" declares "aerodrome_slipstream" -> concentrated).
+    lp_economic_family_overrides: Mapping[str, str] | None = None
+    #: Whether this decl's keys join the protocol-name DETECTION namespace
+    #: (``PROTOCOL_TO_STRATEGY_TYPE``). Set False for venues whose strategies
+    #: are routinely NOT of this decl's strategy_type (pendle and uniswap_v4
+    #: are swap-first venues: protocol detection runs BEFORE intent detection,
+    #: so a "pendle" key would reroute swap-shaped strategies to the LP
+    #: adapter). The ``lp_economic_family`` map is unaffected -- position
+    #: economics apply whenever an LP position exists, however it was routed.
+    detection: bool = True
 
     def __post_init__(self) -> None:
-        """Validate the declaration's strategy type, name, and aliases."""
+        """Validate the declaration's strategy type, name, aliases, and LP family."""
         if self.strategy_type not in _BACKTEST_STRATEGY_TYPES:
             raise ValueError(
                 f"BacktestStrategyTypeDecl.strategy_type must be one of {_BACKTEST_STRATEGY_TYPES}, "
                 f"got {self.strategy_type!r}"
             )
+        if not isinstance(self.detection, bool):
+            # _protocol_to_strategy_type() routes on truthiness: a string
+            # "false" would route and 0 would suppress, silently, instead of
+            # failing manifest validation (CodeRabbit #3271).
+            raise ValueError(f"BacktestStrategyTypeDecl.detection must be a bool, got {self.detection!r}")
+        if self.lp_economic_family_overrides is not None:
+            if not isinstance(self.lp_economic_family_overrides, Mapping):
+                raise ValueError(
+                    "BacktestStrategyTypeDecl.lp_economic_family_overrides must be a mapping, "
+                    f"got {type(self.lp_economic_family_overrides).__name__}"
+                )
+            for key in self.lp_economic_family_overrides:
+                if not isinstance(key, str) or not key.strip() or key != key.lower() or "-" in key:
+                    raise ValueError(
+                        "BacktestStrategyTypeDecl.lp_economic_family_overrides keys must be non-empty, "
+                        f"lowercase, hyphen-free protocol keys, got {key!r}"
+                    )
+        for label, family in (
+            ("lp_economic_family", self.lp_economic_family),
+            *(
+                (f"lp_economic_family_overrides[{k!r}]", v)
+                for k, v in (self.lp_economic_family_overrides or {}).items()
+            ),
+        ):
+            if family is not None and family not in _LP_ECONOMIC_FAMILIES:
+                raise ValueError(
+                    f"BacktestStrategyTypeDecl.{label} must be one of {_LP_ECONOMIC_FAMILIES}, got {family!r}"
+                )
         if self.name is not None:
             if not isinstance(self.name, str) or not self.name.strip():
                 raise ValueError(f"BacktestStrategyTypeDecl.name must be None or a non-empty string, got {self.name!r}")

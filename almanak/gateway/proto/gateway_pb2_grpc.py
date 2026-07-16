@@ -3818,6 +3818,11 @@ class PoolAnalyticsServiceStub(object):
                 request_serializer=gateway__pb2.PoolAnalyticsRequest.SerializeToString,
                 response_deserializer=gateway__pb2.PoolAnalyticsResponse.FromString,
                 _registered_method=True)
+        self.ListTokenPools = channel.unary_unary(
+                '/almanak.gateway.proto.PoolAnalyticsService/ListTokenPools',
+                request_serializer=gateway__pb2.TokenPoolsRequest.SerializeToString,
+                response_deserializer=gateway__pb2.TokenPoolsResponse.FromString,
+                _registered_method=True)
 
 
 class PoolAnalyticsServiceServicer(object):
@@ -3858,6 +3863,16 @@ class PoolAnalyticsServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ListTokenPools(self, request, context):
+        """List pools where a token is base or quote, with PRODUCT-DISTINCT dex ids
+        (CoinGecko Onchain keys classic vs Slipstream pools separately —
+        "aerodrome-base" vs "aerodrome-slipstream*" — where DexScreener cannot).
+        Serves symbolic pool resolution for product-ambiguous venue families.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_PoolAnalyticsServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -3865,6 +3880,11 @@ def add_PoolAnalyticsServiceServicer_to_server(servicer, server):
                     servicer.GetPoolAnalytics,
                     request_deserializer=gateway__pb2.PoolAnalyticsRequest.FromString,
                     response_serializer=gateway__pb2.PoolAnalyticsResponse.SerializeToString,
+            ),
+            'ListTokenPools': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListTokenPools,
+                    request_deserializer=gateway__pb2.TokenPoolsRequest.FromString,
+                    response_serializer=gateway__pb2.TokenPoolsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -3920,6 +3940,33 @@ class PoolAnalyticsService(object):
             '/almanak.gateway.proto.PoolAnalyticsService/GetPoolAnalytics',
             gateway__pb2.PoolAnalyticsRequest.SerializeToString,
             gateway__pb2.PoolAnalyticsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListTokenPools(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.PoolAnalyticsService/ListTokenPools',
+            gateway__pb2.TokenPoolsRequest.SerializeToString,
+            gateway__pb2.TokenPoolsResponse.FromString,
             options,
             channel_credentials,
             insecure,

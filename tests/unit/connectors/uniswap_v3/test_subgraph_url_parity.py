@@ -1,5 +1,5 @@
-"""ID-parity test: DexVolumeDecl.volume_subgraph_urls IDs must match
-_UNISWAP_V3_VOLUME_SUBGRAPH_IDS in the gateway provider (plan 024).
+"""ID-parity test: DexVolumeDecl.volume_subgraph_urls IDs must match the
+gateway provider's id maps (classic + Messari-standard, plan 024).
 
 The connector manifest stores the full gateway.thegraph.com URLs.  Each URL
 ends with the subgraph deployment ID (``/id/<ID>``).  This test extracts the
@@ -11,9 +11,22 @@ from __future__ import annotations
 
 
 def test_volume_subgraph_url_ids_match_gateway_provider() -> None:
-    """Deployment IDs embedded in DexVolumeDecl URLs must equal gateway provider IDs."""
+    """Deployment IDs embedded in DexVolumeDecl URLs must equal gateway provider IDs.
+
+    The gateway provider splits its ids by schema family (classic v3 vs
+    Messari-standard replacements); the manifest URLs remain
+    the single flat list, so parity is against the union.
+    """
     from almanak.connectors._connector import CONNECTOR_REGISTRY
-    from almanak.connectors.uniswap_v3.gateway.provider import _UNISWAP_V3_VOLUME_SUBGRAPH_IDS
+    from almanak.connectors.uniswap_v3.gateway.provider import (
+        _UNISWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS,
+        _UNISWAP_V3_VOLUME_SUBGRAPH_IDS,
+    )
+
+    gateway_ids = {**_UNISWAP_V3_VOLUME_SUBGRAPH_IDS, **_UNISWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS}
+    assert set(_UNISWAP_V3_VOLUME_SUBGRAPH_IDS).isdisjoint(
+        _UNISWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS
+    ), "a chain must live in exactly one gateway id map (classic or Messari)"
 
     connector = CONNECTOR_REGISTRY.get("uniswap_v3")
     assert connector is not None
@@ -27,14 +40,14 @@ def test_volume_subgraph_url_ids_match_gateway_provider() -> None:
     for chain, url in urls.items():
         assert url.startswith(prefix), f"Unexpected URL format for {chain!r}: {url!r}"
         manifest_id = url[len(prefix) :]
-        gateway_id = _UNISWAP_V3_VOLUME_SUBGRAPH_IDS.get(chain)
+        gateway_id = gateway_ids.get(chain)
         if gateway_id is None:
             mismatches.append(f"  {chain!r}: manifest has ID but gateway dict missing the chain")
         elif manifest_id != gateway_id:
             mismatches.append(f"  {chain!r}: manifest={manifest_id!r} gateway={gateway_id!r}")
 
-    # Every chain in the gateway dict must also appear in the manifest
-    for chain in _UNISWAP_V3_VOLUME_SUBGRAPH_IDS:
+    # Every chain in the gateway dicts must also appear in the manifest
+    for chain in gateway_ids:
         if chain not in urls:
             mismatches.append(f"  {chain!r}: in gateway dict but missing from manifest volume_subgraph_urls")
 

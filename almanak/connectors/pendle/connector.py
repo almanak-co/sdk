@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     ImportRef,
     StrategyMatrixEntry,
@@ -76,6 +77,17 @@ CONNECTOR = Connector(
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"),
     strategy_chains=("arbitrum", "ethereum"),
+    # Backtests as "lp" (what intent-priority detection already resolves for
+    # SWAP+LP_OPEN); Pendle AMM LP shares are fungible ERC-20 — no tick range.
+    backtest_strategy_type=BacktestStrategyTypeDecl(
+        strategy_type="lp",
+        # Family-only: this venue declares SWAP in strategy_intents, so
+        # swap-only strategies on it are legal — joining protocol-name
+        # detection (which runs before intent detection) would reroute them
+        # to the LP adapter.
+        detection=False,
+        lp_economic_family="fungible",
+    ),
     # Matrix output renders Pendle as "yield" — an explicit entry is required
     # because intent-derived categories would map WITHDRAW→lending and SWAP/LP
     # to swap/lp, never "yield".

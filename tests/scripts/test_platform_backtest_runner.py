@@ -646,8 +646,16 @@ def test_run_platform_backtest_posts_start_before_clone(monkeypatch: pytest.Monk
 
 
 def test_run_platform_backtest_threads_token_addresses(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    env = _env(STRATEGY_WORKDIR=str(tmp_path / "strategy"))
+    env = _env(
+        STRATEGY_WORKDIR=str(tmp_path / "strategy"),
+        # data_config rides BACKTEST_CONFIG; the fake below asserts the exact
+        # mapping reaches create_backtester (CodeRabbit, #3271: a discarded
+        # kwarg would let a propagation regression pass silently).
+        BACKTEST_CONFIG='{"start_time":"2024-01-01","end_time":"2024-03-01",'
+        '"data_config":{"allow_volume_fallback":true,"subgraph_rate_limit_per_minute":42}}',
+    )
     captured: list[dict[str, tuple[str, str]] | None] = []
+    captured_overrides: list[dict | None] = []
 
     class Strategy:
         __name__ = "Strategy"
@@ -666,8 +674,13 @@ def test_run_platform_backtest_threads_token_addresses(monkeypatch: pytest.Monke
         async def close(self) -> None:
             return None
 
-    def fake_create_backtester(*, token_addresses: dict[str, tuple[str, str]] | None = None) -> Backtester:
+    def fake_create_backtester(
+        *,
+        token_addresses: dict[str, tuple[str, str]] | None = None,
+        data_config_overrides: dict | None = None,
+    ) -> Backtester:
         captured.append(token_addresses)
+        captured_overrides.append(data_config_overrides)
         return Backtester()
 
     strategy_config = {"base_token_address": BASE_CBBTC, "quote_token_address": BASE_USDC}
@@ -695,6 +708,7 @@ def test_run_platform_backtest_threads_token_addresses(monkeypatch: pytest.Monke
             "USDC": ("base", BASE_USDC),
         }
     ]
+    assert captured_overrides == [{"allow_volume_fallback": True, "subgraph_rate_limit_per_minute": 42}]
 
 
 def test_from_env_rejects_non_sha_commit() -> None:

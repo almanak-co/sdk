@@ -9,7 +9,7 @@ This module tests the LPBacktestAdapter, focusing on:
 - Position valuation with IL
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 
@@ -894,6 +894,39 @@ class TestExecuteIntentLPOpen:
         assert fill.position_delta.is_lp is True
         assert fill.tokens == ["ETH", "USDC"]
         assert fill.tokens_out == {"ETH": Decimal("1"), "USDC": Decimal("2000")}
+
+    def test_execute_lp_open_zero_notional_plan_rejects(self, monkeypatch) -> None:
+        """A plan that resolves to $0 must reject, not open a zero-liquidity position.
+
+        The typed vocabulary rejects zero amounts and prices fall back to $1,
+        so this is a defense-in-depth invariant on the plan itself.
+        """
+        from almanak.framework.intents.vocabulary import LPOpenIntent
+
+        adapter = LPBacktestAdapter()
+
+        intent = LPOpenIntent(
+            pool="ETH/USDC",
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+            range_lower=Decimal("0.5"),
+            range_upper=Decimal("2.0"),
+            protocol="uniswap_v3",
+        )
+        market = MockMarketStateWithTimestamp(
+            prices={"ETH": Decimal("2000"), "USDC": Decimal("1")},
+            timestamp=datetime.now(),
+        )
+
+        real_plan = adapter._build_lp_open_plan(intent, market)
+        zero_plan = replace(real_plan, amount_usd=Decimal("0"))
+        monkeypatch.setattr(adapter, "_build_lp_open_plan", lambda *_args, **_kwargs: zero_plan)
+
+        fill = adapter.execute_intent(intent, MockPortfolio(), market)
+
+        assert fill is not None
+        assert fill.success is False
+        assert "zero-notional" in fill.metadata.get("failure_reason", "")
 
     def test_execute_lp_open_calculates_amount_usd(self) -> None:
         """Test LP open intent calculates correct USD amount."""
@@ -2523,7 +2556,6 @@ class TestResolveVolumeChain:
     """Config-string to canonical chain name resolution for the volume lane."""
 
     def test_known_chain_returns_enum(self) -> None:
-
         adapter = make_volume_adapter(chain="ethereum")
         key = ("0xpool", datetime(2024, 1, 15).date())
 
@@ -2927,7 +2959,6 @@ class TestResolveLiquidityChain:
     """Config-string to canonical chain name resolution for the liquidity lane."""
 
     def test_known_chain_returns_enum(self) -> None:
-
         adapter = make_liquidity_adapter(chain="ethereum")
 
         assert adapter._resolve_liquidity_chain(datetime(2024, 1, 15), None, "0xpool") == "ethereum"
@@ -2990,7 +3021,6 @@ class TestGetHistoricalLiquidityOrchestration:
     """End-to-end behaviour of _get_historical_liquidity through the helpers."""
 
     def test_success_via_stub_provider(self) -> None:
-
         stub = StubLiquidityProvider(result=make_liquidity_result(Decimal("50000000")))
         adapter = make_liquidity_adapter(provider=stub)
         ts = datetime(2024, 1, 15, 12, 0, 0)
@@ -3141,3 +3171,1581 @@ class TestGetHistoricalLiquidityOrchestration:
         assert adapter._get_historical_liquidity("0xpool", datetime(2024, 1, 15)) is None
         assert adapter._liquidity_cache == {}
         assert stub.calls == []
+
+
+class TestPrewarmHistory:
+    """prewarm_history populates the sync-read caches before the sim loop reads them (ALM-2930 #4)."""
+
+    @pytest.mark.asyncio
+    async def test_prewarm_populates_volume_and_liquidity_caches(self):
+        from datetime import UTC, date, datetime
+        from decimal import Decimal
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from almanak.framework.backtesting.adapters.lp_adapter import LPBacktestAdapter
+        from almanak.framework.backtesting.pnl.types import (
+            DataConfidence,
+            DataSourceInfo,
+            LiquidityResult,
+            VolumeResult,
+        )
+
+        adapter = LPBacktestAdapter()
+        source = DataSourceInfo(
+            source="test", confidence=DataConfidence.HIGH, timestamp=datetime(2026, 6, 20, tzinfo=UTC)
+        )
+        volume_provider = SimpleNamespace(
+            get_volume=AsyncMock(return_value=[VolumeResult(value=Decimal("1000000"), source_info=source)])
+        )
+        liquidity_provider = SimpleNamespace(
+            get_liquidity_depth=AsyncMock(return_value=LiquidityResult(depth=Decimal("5000000"), source_info=source))
+        )
+        adapter._volume_provider = volume_provider
+        adapter._volume_provider_initialized = True
+        adapter._liquidity_provider = liquidity_provider
+        adapter._liquidity_provider_initialized = True
+
+        intent = SimpleNamespace(pool="0xAbCd000000000000000000000000000000000001", protocol="uniswap_v3")
+        await adapter.prewarm_history(
+            intent,
+            chain="base",
+            start_time=datetime(2026, 6, 20, tzinfo=UTC),
+            end_time=datetime(2026, 6, 22, tzinfo=UTC),
+        )
+
+        pool = intent.pool.lower()
+        assert (pool, date(2026, 6, 20)) in adapter._volume_cache
+        assert (pool, date(2026, 6, 22)) in adapter._volume_cache
+        assert adapter._volume_cache[(pool, date(2026, 6, 21))][0] == Decimal("1000000")
+        assert (pool, date(2026, 6, 21)) in adapter._liquidity_cache
+        assert volume_provider.get_volume.await_count == 3
+        assert liquidity_provider.get_liquidity_depth.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_prewarm_volume_survives_a_transient_mid_window_error(self):
+        # Regression: a single transient per-day fetch error must NOT abort the
+        # rest of the window — later days still prewarm so accrual keeps a warm
+        # cache instead of falling to the chain-default DEX miss path. Two
+        # CONSECUTIVE errors is the sticky-abort threshold; one is not.
+        from datetime import UTC, date, datetime
+        from decimal import Decimal
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from almanak.framework.backtesting.adapters.lp_adapter import LPBacktestAdapter
+        from almanak.framework.backtesting.pnl.types import (
+            DataConfidence,
+            DataSourceInfo,
+            VolumeResult,
+        )
+
+        adapter = LPBacktestAdapter()
+        source = DataSourceInfo(
+            source="test", confidence=DataConfidence.HIGH, timestamp=datetime(2026, 6, 20, tzinfo=UTC)
+        )
+        ok = [VolumeResult(value=Decimal("1000000"), source_info=source)]
+        # day0 ok, day1 raises (isolated), day2 ok — day2 must still be warmed.
+        volume_provider = SimpleNamespace(
+            get_volume=AsyncMock(side_effect=[ok, RuntimeError("transient"), ok])
+        )
+        adapter._volume_provider = volume_provider
+        adapter._volume_provider_initialized = True
+        adapter._liquidity_provider = None
+        adapter._liquidity_provider_initialized = True
+
+        intent = SimpleNamespace(pool="0xAbCd000000000000000000000000000000000001", protocol="curve")
+        await adapter.prewarm_history(
+            intent,
+            chain="ethereum",
+            start_time=datetime(2026, 6, 20, tzinfo=UTC),
+            end_time=datetime(2026, 6, 22, tzinfo=UTC),
+        )
+
+        pool = intent.pool.lower()
+        assert volume_provider.get_volume.await_count == 3  # NOT aborted after day1
+        assert (pool, date(2026, 6, 20)) in adapter._volume_cache
+        assert (pool, date(2026, 6, 22)) in adapter._volume_cache  # day AFTER the error still warmed
+        assert (pool, date(2026, 6, 21)) not in adapter._volume_cache  # the erroring day is skipped
+
+    @pytest.mark.asyncio
+    async def test_prewarm_volume_aborts_after_two_consecutive_errors(self):
+        # Two consecutive fetch errors = a sick lane; stop dialing it once per
+        # day. A 4-day window that errors on day1+day2 must stop there (3 calls:
+        # day0 ok, day1 err, day2 err -> abort), never reaching day3.
+        from datetime import UTC, datetime
+        from decimal import Decimal
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from almanak.framework.backtesting.adapters.lp_adapter import LPBacktestAdapter
+        from almanak.framework.backtesting.pnl.types import (
+            DataConfidence,
+            DataSourceInfo,
+            VolumeResult,
+        )
+
+        adapter = LPBacktestAdapter()
+        source = DataSourceInfo(
+            source="test", confidence=DataConfidence.HIGH, timestamp=datetime(2026, 6, 20, tzinfo=UTC)
+        )
+        ok = [VolumeResult(value=Decimal("1000000"), source_info=source)]
+        volume_provider = SimpleNamespace(
+            get_volume=AsyncMock(side_effect=[ok, RuntimeError("down"), RuntimeError("down"), ok])
+        )
+        adapter._volume_provider = volume_provider
+        adapter._volume_provider_initialized = True
+        adapter._liquidity_provider = None
+        adapter._liquidity_provider_initialized = True
+
+        intent = SimpleNamespace(pool="0xAbCd000000000000000000000000000000000001", protocol="curve")
+        await adapter.prewarm_history(
+            intent,
+            chain="ethereum",
+            start_time=datetime(2026, 6, 20, tzinfo=UTC),
+            end_time=datetime(2026, 6, 23, tzinfo=UTC),  # 4 days
+        )
+        assert volume_provider.get_volume.await_count == 3  # aborted, never dialed day3
+
+    @pytest.mark.asyncio
+    async def test_prewarm_liquidity_survives_a_transient_mid_window_error(self):
+        # Regression (CodeRabbit #3271): the liquidity prewarm lane must handle
+        # a transient per-day error like the volume lane — one exception must
+        # NOT abort the rest of the window.
+        from datetime import UTC, date, datetime
+        from decimal import Decimal
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from almanak.framework.backtesting.adapters.lp_adapter import LPBacktestAdapter
+        from almanak.framework.backtesting.pnl.types import (
+            DataConfidence,
+            DataSourceInfo,
+            LiquidityResult,
+        )
+
+        adapter = LPBacktestAdapter()
+        source = DataSourceInfo(
+            source="test", confidence=DataConfidence.HIGH, timestamp=datetime(2026, 6, 20, tzinfo=UTC)
+        )
+        ok = LiquidityResult(depth=Decimal("5000000"), source_info=source)
+        # day0 ok, day1 raises (isolated), day2 ok — day2 must still be warmed.
+        liquidity_provider = SimpleNamespace(
+            get_liquidity_depth=AsyncMock(side_effect=[ok, RuntimeError("transient"), ok])
+        )
+        adapter._volume_provider = None
+        adapter._volume_provider_initialized = True
+        adapter._liquidity_provider = liquidity_provider
+        adapter._liquidity_provider_initialized = True
+
+        intent = SimpleNamespace(pool="0xAbCd000000000000000000000000000000000001", protocol="curve")
+        await adapter.prewarm_history(
+            intent,
+            chain="ethereum",
+            start_time=datetime(2026, 6, 20, tzinfo=UTC),
+            end_time=datetime(2026, 6, 22, tzinfo=UTC),
+        )
+
+        pool = intent.pool.lower()
+        assert liquidity_provider.get_liquidity_depth.await_count == 3  # NOT aborted after day1
+        assert (pool, date(2026, 6, 20)) in adapter._liquidity_cache
+        assert (pool, date(2026, 6, 22)) in adapter._liquidity_cache  # day AFTER the error still warmed
+        assert (pool, date(2026, 6, 21)) not in adapter._liquidity_cache  # the erroring day is skipped
+
+    @pytest.mark.asyncio
+    async def test_prewarm_liquidity_aborts_after_two_consecutive_errors(self):
+        # Two consecutive liquidity errors = a sick lane; stop dialing it.
+        from datetime import UTC, datetime
+        from decimal import Decimal
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from almanak.framework.backtesting.adapters.lp_adapter import LPBacktestAdapter
+        from almanak.framework.backtesting.pnl.types import (
+            DataConfidence,
+            DataSourceInfo,
+            LiquidityResult,
+        )
+
+        adapter = LPBacktestAdapter()
+        source = DataSourceInfo(
+            source="test", confidence=DataConfidence.HIGH, timestamp=datetime(2026, 6, 20, tzinfo=UTC)
+        )
+        ok = LiquidityResult(depth=Decimal("5000000"), source_info=source)
+        liquidity_provider = SimpleNamespace(
+            get_liquidity_depth=AsyncMock(side_effect=[ok, RuntimeError("down"), RuntimeError("down"), ok])
+        )
+        adapter._volume_provider = None
+        adapter._volume_provider_initialized = True
+        adapter._liquidity_provider = liquidity_provider
+        adapter._liquidity_provider_initialized = True
+
+        intent = SimpleNamespace(pool="0xAbCd000000000000000000000000000000000001", protocol="curve")
+        await adapter.prewarm_history(
+            intent,
+            chain="ethereum",
+            start_time=datetime(2026, 6, 20, tzinfo=UTC),
+            end_time=datetime(2026, 6, 23, tzinfo=UTC),  # 4 days
+        )
+        assert liquidity_provider.get_liquidity_depth.await_count == 3  # aborted, never dialed day3
+
+    @pytest.mark.asyncio
+    async def test_prewarm_symbolic_pool_resolves_via_dexscreener(self):
+        """Symbolic pools resolve pair->address before warming."""
+        from datetime import UTC, datetime
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from almanak.framework.backtesting.adapters.lp_adapter import LPBacktestAdapter
+
+        adapter = LPBacktestAdapter()
+        adapter._resolve_symbolic_pool_address = AsyncMock(return_value="0xabc0000000000000000000000000000000000001")
+        adapter._volume_provider = None
+        adapter._volume_provider_initialized = True
+        adapter._liquidity_provider = None
+        adapter._liquidity_provider_initialized = True
+
+        intent = SimpleNamespace(pool="WETH/USDC", protocol="uniswap_v3")
+        await adapter.prewarm_history(
+            intent,
+            chain="base",
+            start_time=datetime(2026, 6, 20, tzinfo=UTC),
+            end_time=datetime(2026, 6, 22, tzinfo=UTC),
+        )
+        adapter._resolve_symbolic_pool_address.assert_awaited_once_with("WETH/USDC", "uniswap_v3", "base")
+
+    @pytest.mark.asyncio
+    async def test_prewarm_unresolvable_symbolic_pool_is_a_noop(self):
+        from datetime import UTC, datetime
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from almanak.framework.backtesting.adapters.lp_adapter import LPBacktestAdapter
+
+        adapter = LPBacktestAdapter()
+        adapter._resolve_symbolic_pool_address = AsyncMock(return_value=None)
+        intent = SimpleNamespace(pool="WETH/USDC", protocol="uniswap_v3")
+        await adapter.prewarm_history(
+            intent,
+            chain="base",
+            start_time=datetime(2026, 6, 20, tzinfo=UTC),
+            end_time=datetime(2026, 6, 22, tzinfo=UTC),
+        )
+        assert not adapter._volume_cache
+        assert not adapter._liquidity_cache
+
+
+class TestRangeGatingScope:
+    """Fee range gating applies to concentrated-liquidity families only."""
+
+    @staticmethod
+    def _position(protocol: str, tick_lower: int = 0, tick_upper: int = 6931):
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
+
+        return SimulatedPosition.lp(
+            token0="WETH",
+            token1="USDT",
+            amount0=Decimal("1"),
+            amount1=Decimal("1765"),
+            liquidity=Decimal("1000"),
+            entry_price=Decimal("1765"),
+            entry_time=datetime(2024, 1, 1),
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+            fee_tier=Decimal("0.0004"),
+            protocol=protocol,
+        )
+
+    def test_family_classification_from_connector_decls(self) -> None:
+        # Invariant: position economics come from connector-owned
+        # lp_economic_family declarations, covering aliases and forks;
+        # unknown venues default to fungible (no gating) — wrongly zeroing
+        # an earning position is worse than skipping the range refinement.
+        adapter = LPBacktestAdapter()
+        expected = {
+            "uniswap_v3": True,
+            "uniswap": True,
+            "uniswap_v2": False,
+            "agni_finance": True,
+            "pancakeswap_v3": True,
+            "sushiswap": True,
+            "sushiswap_v3": True,
+            "traderjoe_v2": True,
+            "aerodrome_slipstream": True,
+            "velodrome_slipstream": True,
+            "aerodrome": False,
+            "curve": False,
+            "balancer": False,
+            "raydium_clmm": True,
+            "orca_whirlpools": True,
+            "meteora_dlmm": True,
+            "agni": True,
+            "pendle": False,
+            "fluid_dex_lp": False,
+            "uniswap_v4": True,
+            "unknown_dex": False,
+        }
+        for protocol, concentrated in expected.items():
+            assert adapter._is_concentrated_position(self._position(protocol)) is concentrated, protocol
+
+    def test_tick_upper_boundary_is_out_of_range(self) -> None:
+        # V3 ranges are [lower, upper): price exactly at the upper tick is out.
+        adapter = LPBacktestAdapter()
+        position = self._position("uniswap_v3", tick_lower=0, tick_upper=4054)
+        assert adapter._position_out_of_range(position, Decimal("1.5"), Decimal("1")) is True
+
+    def test_out_of_range_zeroes_fees_without_touching_data_lanes(self, monkeypatch) -> None:
+        # The range verdict is decided from prices alone — strict runs must not
+        # raise over volume data an out-of-range position does not need.
+        adapter = LPBacktestAdapter()
+        position = self._position("uniswap_v3")  # in-range bounds 1..2, price ratio 1765 -> out
+
+        def _boom(*_args, **_kwargs):
+            raise AssertionError("no data lane may run for an out-of-range position")
+
+        # Invariant: fees AND slippage AND the formula context (which
+        # resolves volume) are all skipped — the range verdict needs prices only.
+        monkeypatch.setattr(adapter, "_fee_amount_from_resolution", _boom)
+        monkeypatch.setattr(adapter, "_fee_slippage_result", _boom)
+        monkeypatch.setattr(adapter, "_fee_formula_context", _boom)
+        result = adapter._calculate_fee_accrual(
+            position=position,
+            position_value_usd=Decimal("3530"),
+            elapsed_seconds=3600,
+            token0="WETH",
+            token1="USDT",
+            token0_price=Decimal("1765"),
+            token1_price=Decimal("1"),
+        )
+        assert result.fees_usd == Decimal("0")
+        assert result.data_source == "out_of_range"
+        assert result.slippage_pct is None
+        # None, not $0: no volume was measured — the zero fee is a range
+        # verdict, and "measured zero volume" would read as a dead pool.
+        assert result.volume_usd is None
+        # Measured prices -> the verdict legitimately claims high confidence.
+        assert result.fee_confidence == "high"
+
+    def test_out_of_range_verdict_from_fallback_prices_is_not_high_confidence(self) -> None:
+        # A range verdict computed from FALLBACK prices (entry-price / $1
+        # substitutes for a missing market price) is not a measured verdict:
+        # the zero fee stands, but it must not read as high confidence and
+        # the provenance must name the fabricated input (CodeRabbit find,
+        # #3271: a WETH/WBTC pool missing its token1 price computes a wildly
+        # wrong ratio and could zero fees while claiming "high").
+        adapter = LPBacktestAdapter()
+        position = self._position("uniswap_v3")  # bounds 1..2, ratio 1765 -> out
+
+        result = adapter._calculate_fee_accrual(
+            position=position,
+            position_value_usd=Decimal("3530"),
+            elapsed_seconds=3600,
+            token0="WETH",
+            token1="USDT",
+            token0_price=Decimal("1765"),
+            token1_price=Decimal("1"),
+            prices_are_fallback=True,
+        )
+        assert result.fees_usd == Decimal("0")
+        assert result.fee_confidence == "low"
+        assert result.data_source == "out_of_range:fallback_price"
+        assert result.volume_usd is None
+
+    def test_unknown_family_with_tick_bounds_degrades_confidence(self, monkeypatch) -> None:
+        # A venue with NO declared lp_economic_family whose position carries
+        # real tick bounds is treated as fungible (accrues, never gated) but
+        # must say so: LOW confidence + an ":unknown_lp_family" marker —
+        # never a silent declared-family-quality number.
+        from types import SimpleNamespace
+
+        adapter = LPBacktestAdapter()
+        position = self._position("unknown_dex", tick_lower=0, tick_upper=4054)
+
+        monkeypatch.setattr(
+            adapter,
+            "_fee_formula_context",
+            lambda **_kwargs: SimpleNamespace(),
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_fee_amount_from_resolution",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                fees_usd=Decimal("10"),
+                fee_confidence="high",
+                data_source="subgraph:test",
+                volume_usd=Decimal("1000"),
+            ),
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_fee_slippage_result",
+            lambda **_kwargs: SimpleNamespace(confidence=None, pct=None, liquidity_usd=None),
+        )
+
+        result = adapter._calculate_fee_accrual(
+            position=position,
+            position_value_usd=Decimal("3530"),
+            elapsed_seconds=3600,
+            token0="WETH",
+            token1="USDT",
+            token0_price=Decimal("1.5"),
+            token1_price=Decimal("1"),
+        )
+        assert result.fees_usd == Decimal("10")  # accrues — never zeroed
+        assert result.fee_confidence == "low"
+        assert result.data_source == "subgraph:test:unknown_lp_family"
+
+    def test_declared_family_is_not_degraded(self, monkeypatch) -> None:
+        from types import SimpleNamespace
+
+        adapter = LPBacktestAdapter()
+        # curve declares fungible: tick fields are vocabulary defaults and
+        # must NOT trigger the unknown-family degrade.
+        position = self._position("curve", tick_lower=0, tick_upper=4054)
+
+        monkeypatch.setattr(adapter, "_fee_formula_context", lambda **_kwargs: SimpleNamespace())
+        monkeypatch.setattr(
+            adapter,
+            "_fee_amount_from_resolution",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                fees_usd=Decimal("10"),
+                fee_confidence="high",
+                data_source="subgraph:test",
+                volume_usd=Decimal("1000"),
+            ),
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_fee_slippage_result",
+            lambda **_kwargs: SimpleNamespace(confidence=None, pct=None, liquidity_usd=None),
+        )
+
+        result = adapter._calculate_fee_accrual(
+            position=position,
+            position_value_usd=Decimal("3530"),
+            elapsed_seconds=3600,
+            token0="WETH",
+            token1="USDT",
+            token0_price=Decimal("1.5"),
+            token1_price=Decimal("1"),
+        )
+        assert result.fee_confidence == "high"
+        assert result.data_source == "subgraph:test"
+
+
+class TestCoinAmountsOpenFailsClosed:
+    """A multi-coin allocation vector is not modeled: the result must say so.
+
+    Invariant (result honesty): an unmodeled deposit shape must never
+    produce a success — a $0-notional, zero-flow "position" is
+    machine-indistinguishable from a real one in the result doc.
+    """
+
+    def test_coin_amounts_open_rejects_with_machine_visible_reason(self) -> None:
+        from almanak.framework.intents import Intent
+
+        adapter = LPBacktestAdapter()
+        intent = Intent.lp_open(
+            pool="USDC/USDT/DAI",
+            coin_amounts=[Decimal("0"), Decimal("500"), Decimal("500")],
+            protocol="curve",
+            chain="ethereum",
+        )
+        market = MockMarketStateWithTimestamp(
+            prices={"USDC": Decimal("1"), "USDT": Decimal("1"), "DAI": Decimal("1")},
+            timestamp=datetime.now(),
+        )
+
+        fill = adapter.execute_intent(intent, MockPortfolio(), market)
+
+        assert fill is not None
+        assert fill.success is False
+        assert "coin_amounts" in fill.metadata.get("failure_reason", "")
+        assert fill.position_delta is None
+
+
+class TestPoolCoinExitSelectorsFailClosed:
+    """coin_index / imbalanced_amounts closes are not modeled: reject, no mutation.
+
+    Executing them as a standard proportional close records token flows the
+    venue would never pay out (single-sided and exact-amounts exits reshape
+    the withdrawal).
+    """
+
+    @staticmethod
+    def _close_intent(**selector):
+        from almanak.framework.intents import Intent
+
+        return Intent.lp_close(position_id="pos-1", protocol="curve", chain="ethereum", **selector)
+
+    def test_coin_index_close_rejects_without_mutation(self) -> None:
+        adapter = LPBacktestAdapter()
+        portfolio = MockPortfolio()
+
+        fill = adapter._execute_lp_close(
+            self._close_intent(coin_index=1),
+            portfolio,
+            MockMarketStateWithTimestamp(prices={"USDC": Decimal("1")}, timestamp=datetime.now()),
+        )
+
+        assert fill.success is False
+        assert "coin_index" in fill.metadata.get("failure_reason", "")
+
+    def test_imbalanced_amounts_close_rejects_without_mutation(self) -> None:
+        adapter = LPBacktestAdapter()
+        portfolio = MockPortfolio()
+
+        fill = adapter._execute_lp_close(
+            self._close_intent(imbalanced_amounts=[Decimal("100"), Decimal("0")]),
+            portfolio,
+            MockMarketStateWithTimestamp(prices={"USDC": Decimal("1")}, timestamp=datetime.now()),
+        )
+
+        assert fill.success is False
+        assert "imbalanced_amounts" in fill.metadata.get("failure_reason", "")
+
+
+class TestDataSourceProvenanceAccumulates:
+    """metadata["data_sources"] records every distinct source, append-only."""
+
+    def test_commit_accumulates_distinct_sources(self) -> None:
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.adapters.lp_adapter import _LPUpdatePlan
+
+        adapter = LPBacktestAdapter()
+        position = SimulatedPosition(
+            position_type=PositionType.LP,
+            protocol="uniswap_v3",
+            tokens=["WETH", "USDT"],
+            amounts={"WETH": Decimal("1"), "USDT": Decimal("1765")},
+            entry_price=Decimal("1765"),
+            entry_time=datetime(2024, 1, 1),
+        )
+
+        def _plan(source: str) -> _LPUpdatePlan:
+            return _LPUpdatePlan(
+                update_time=datetime(2024, 1, 2),
+                prices=SimpleNamespace(token0="WETH", token1="USDT", current_price=Decimal("1765")),
+                amounts=SimpleNamespace(
+                    token0_amount=Decimal("1"),
+                    token1_amount=Decimal("1765"),
+                    il_pct=Decimal("0"),
+                ),
+                fee_result=SimpleNamespace(
+                    fees_usd=Decimal("1"),
+                    fees_token0=Decimal("0"),
+                    fees_token1=Decimal("1"),
+                    fee_confidence="high",
+                    slippage_confidence=None,
+                    data_source=source,
+                    volume_usd=Decimal("100"),
+                ),
+            )
+
+        adapter._commit_lp_update(position, _plan("subgraph:uniswap_v3"))
+        adapter._commit_lp_update(position, _plan("fallback_multiplier:10x"))
+        adapter._commit_lp_update(position, _plan("subgraph:uniswap_v3"))
+
+        # Latest wins the back-compat key; the cumulative list keeps both.
+        assert position.metadata["data_source"] == "subgraph:uniswap_v3"
+        assert position.metadata["data_sources"] == ["subgraph:uniswap_v3", "fallback_multiplier:10x"]
+
+    def test_legacy_singular_key_seeds_the_cumulative_list(self) -> None:
+        """A position written before the list existed keeps its first source."""
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.adapters.lp_adapter import _LPUpdatePlan
+
+        adapter = LPBacktestAdapter()
+        position = SimulatedPosition(
+            position_type=PositionType.LP,
+            protocol="uniswap_v3",
+            tokens=["WETH", "USDT"],
+            amounts={"WETH": Decimal("1"), "USDT": Decimal("1765")},
+            entry_price=Decimal("1765"),
+            entry_time=datetime(2024, 1, 1),
+        )
+        position.metadata["data_source"] = "subgraph:legacy"  # pre-list state
+
+        plan = _LPUpdatePlan(
+            update_time=datetime(2024, 1, 2),
+            prices=SimpleNamespace(token0="WETH", token1="USDT", current_price=Decimal("1765")),
+            amounts=SimpleNamespace(token0_amount=Decimal("1"), token1_amount=Decimal("1765"), il_pct=Decimal("0")),
+            fee_result=SimpleNamespace(
+                fees_usd=Decimal("1"),
+                fees_token0=Decimal("0"),
+                fees_token1=Decimal("1"),
+                fee_confidence="high",
+                slippage_confidence=None,
+                data_source="out_of_range",
+                volume_usd=None,
+            ),
+        )
+        adapter._commit_lp_update(position, plan)
+
+        assert position.metadata["data_sources"] == ["subgraph:legacy", "out_of_range"]
+
+    def test_partially_migrated_empty_list_still_seeds_the_singular(self) -> None:
+        """{data_source: x, data_sources: []} must not lose x on the next commit."""
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.adapters.lp_adapter import _LPUpdatePlan
+
+        adapter = LPBacktestAdapter()
+        position = SimulatedPosition(
+            position_type=PositionType.LP,
+            protocol="uniswap_v3",
+            tokens=["WETH", "USDT"],
+            amounts={"WETH": Decimal("1"), "USDT": Decimal("1765")},
+            entry_price=Decimal("1765"),
+            entry_time=datetime(2024, 1, 1),
+        )
+        position.metadata["data_source"] = "subgraph:legacy"
+        position.metadata["data_sources"] = []  # partially migrated
+
+        plan = _LPUpdatePlan(
+            update_time=datetime(2024, 1, 2),
+            prices=SimpleNamespace(token0="WETH", token1="USDT", current_price=Decimal("1765")),
+            amounts=SimpleNamespace(token0_amount=Decimal("1"), token1_amount=Decimal("1765"), il_pct=Decimal("0")),
+            fee_result=SimpleNamespace(
+                fees_usd=Decimal("1"),
+                fees_token0=Decimal("0"),
+                fees_token1=Decimal("1"),
+                fee_confidence="high",
+                slippage_confidence=None,
+                data_source="out_of_range",
+                volume_usd=None,
+            ),
+        )
+        adapter._commit_lp_update(position, plan)
+
+        assert position.metadata["data_sources"] == ["subgraph:legacy", "out_of_range"]
+
+    def test_metrics_export_reads_the_cumulative_list(self) -> None:
+        """The exported coverage metrics must surface EVERY source a position
+        touched — latest-wins alone hides a mid-run degradation."""
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
+        position = SimulatedPosition(
+            position_type=PositionType.LP,
+            protocol="uniswap_v3",
+            tokens=["WETH", "USDT"],
+            amounts={"WETH": Decimal("1"), "USDT": Decimal("1765")},
+            entry_price=Decimal("1765"),
+            entry_time=datetime(2024, 1, 1),
+        )
+        position.metadata["data_source"] = "out_of_range"  # latest only
+        position.metadata["data_sources"] = ["subgraph:uniswap_v3", "fallback_multiplier:10x", "out_of_range"]
+
+        metrics = portfolio._lp_data_coverage_metrics([position])
+
+        assert metrics.data_sources == ["subgraph:uniswap_v3", "fallback_multiplier:10x", "out_of_range"]
+
+    def test_metrics_export_falls_back_to_singular_key(self) -> None:
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
+        position = SimulatedPosition(
+            position_type=PositionType.LP,
+            protocol="uniswap_v3",
+            tokens=["WETH", "USDT"],
+            amounts={"WETH": Decimal("1"), "USDT": Decimal("1765")},
+            entry_price=Decimal("1765"),
+            entry_time=datetime(2024, 1, 1),
+        )
+        position.metadata["data_source"] = "subgraph:legacy"  # no list at all
+
+        metrics = portfolio._lp_data_coverage_metrics([position])
+
+        assert metrics.data_sources == ["subgraph:legacy"]
+
+
+class TestResolutionVersionLabels:
+    """Version-labelled candidates must match the protocol's version."""
+
+    @staticmethod
+    def _candidate(pair_address: str, labels: list[str], liquidity_usd: float):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            pair_address=pair_address,
+            chain_id="ethereum",
+            dex_id="uniswap",
+            labels=labels,
+            liquidity=SimpleNamespace(usd=liquidity_usd),
+            base_token=SimpleNamespace(address="0x" + "a" * 40, symbol="WETH"),
+            quote_token=SimpleNamespace(address="0x" + "b" * 40, symbol="DAI"),
+        )
+
+    def test_deeper_v2_pool_is_excluded_for_v3(self) -> None:
+        deep_v2 = self._candidate("0x" + "1" * 40, ["v2"], 50_000_000)
+        v3 = self._candidate("0x" + "2" * 40, ["v3"], 5_000_000)
+
+        best, _kind = LPBacktestAdapter._pick_deepest_pair_candidate(
+            [deep_v2, v3],
+            chain="ethereum",
+            dex_root="uniswap",
+            wanted_addresses={"0x" + "a" * 40, "0x" + "b" * 40},
+            wanted_symbols={"WETH", "DAI"},
+            required_version_label="v3",
+        )
+        assert best is v3
+
+    def test_unlabelled_candidates_serve_only_without_labeled_match(self) -> None:
+        unlabelled = self._candidate("0x" + "3" * 40, [], 1_000_000)
+
+        best, kind = LPBacktestAdapter._pick_deepest_pair_candidate(
+            [unlabelled],
+            chain="ethereum",
+            dex_root="uniswap",
+            wanted_addresses={"0x" + "a" * 40, "0x" + "b" * 40},
+            wanted_symbols={"WETH", "DAI"},
+            required_version_label="v3",
+        )
+        assert best is unlabelled
+        assert "unlabeled" in kind
+
+    def test_deep_unlabelled_never_outranks_labeled_correct(self) -> None:
+        # Invariant: an explicit correct version label beats ANY depth of
+        # unlabeled candidate — a $50m unlabeled pool may be the wrong version.
+        deep_unlabelled = self._candidate("0x" + "4" * 40, [], 50_000_000)
+        labeled_v3 = self._candidate("0x" + "5" * 40, ["v3"], 5_000_000)
+
+        best, kind = LPBacktestAdapter._pick_deepest_pair_candidate(
+            [deep_unlabelled, labeled_v3],
+            chain="ethereum",
+            dex_root="uniswap",
+            wanted_addresses={"0x" + "a" * 40, "0x" + "b" * 40},
+            wanted_symbols={"WETH", "DAI"},
+            required_version_label="v3",
+        )
+        assert best is labeled_v3
+        assert "version-labeled" in kind
+
+    def test_non_version_labels_are_ignored_not_excluding(self) -> None:
+        # "stable"/"volatile" are solidly-fork vocabulary, not version claims:
+        # a candidate carrying only such labels must stay eligible (as
+        # version-unlabeled), not be excluded as a version mismatch.
+        stable_labeled = self._candidate("0x" + "6" * 40, ["stable"], 1_000_000)
+
+        best, kind = LPBacktestAdapter._pick_deepest_pair_candidate(
+            [stable_labeled],
+            chain="ethereum",
+            dex_root="uniswap",
+            wanted_addresses={"0x" + "a" * 40, "0x" + "b" * 40},
+            wanted_symbols={"WETH", "DAI"},
+            required_version_label="v3",
+        )
+        assert best is stable_labeled
+        assert "unlabeled" in kind
+
+    def test_contradictory_version_labels_exclude_candidate(self) -> None:
+        # ["v2","v3"] claims two versions at once — the metadata cannot be
+        # trusted either way, so the candidate is excluded outright.
+        contradictory = self._candidate("0x" + "7" * 40, ["v2", "v3"], 50_000_000)
+
+        best, kind = LPBacktestAdapter._pick_deepest_pair_candidate(
+            [contradictory],
+            chain="ethereum",
+            dex_root="uniswap",
+            wanted_addresses={"0x" + "a" * 40, "0x" + "b" * 40},
+            wanted_symbols={"WETH", "DAI"},
+            required_version_label="v3",
+        )
+        assert best is None
+        assert kind == "no-match"
+
+    def test_unlabeled_address_match_beats_labeled_symbol_match(self) -> None:
+        # Address-exact token identity dominates aggregator labels: a
+        # symbol-only match may never override ANY address-exact match.
+        from types import SimpleNamespace
+
+        labeled_symbol_only = SimpleNamespace(
+            pair_address="0x" + "8" * 40,
+            chain_id="ethereum",
+            dex_id="uniswap",
+            labels=["v3"],
+            liquidity=SimpleNamespace(usd=50_000_000),
+            base_token=SimpleNamespace(address="0x" + "c" * 40, symbol="WETH"),
+            quote_token=SimpleNamespace(address="0x" + "d" * 40, symbol="DAI"),
+        )
+        unlabeled_address = self._candidate("0x" + "9" * 40, [], 1_000_000)
+
+        best, kind = LPBacktestAdapter._pick_deepest_pair_candidate(
+            [labeled_symbol_only, unlabeled_address],
+            chain="ethereum",
+            dex_root="uniswap",
+            wanted_addresses={"0x" + "a" * 40, "0x" + "b" * 40},
+            wanted_symbols={"WETH", "DAI"},
+            required_version_label="v3",
+        )
+        assert best is unlabeled_address
+        assert "address-exact" in kind
+
+    def test_filtered_duplicate_does_not_shadow_valid_entry(self) -> None:
+        # The two token windows repeat pools: an entry rejected by the
+        # filters (wrong chain here) must not mark its pair_address as seen
+        # and shadow the valid duplicate arriving later.
+        from types import SimpleNamespace
+
+        wrong_chain = SimpleNamespace(
+            pair_address="0x" + "e" * 40,
+            chain_id="base",
+            dex_id="uniswap",
+            labels=["v3"],
+            liquidity=SimpleNamespace(usd=5_000_000),
+            base_token=SimpleNamespace(address="0x" + "a" * 40, symbol="WETH"),
+            quote_token=SimpleNamespace(address="0x" + "b" * 40, symbol="DAI"),
+        )
+        valid = self._candidate("0x" + "e" * 40, ["v3"], 5_000_000)
+
+        best, _kind = LPBacktestAdapter._pick_deepest_pair_candidate(
+            [wrong_chain, valid],
+            chain="ethereum",
+            dex_root="uniswap",
+            wanted_addresses={"0x" + "a" * 40, "0x" + "b" * 40},
+            wanted_symbols={"WETH", "DAI"},
+            required_version_label="v3",
+        )
+        assert best is valid
+
+    def test_malformed_first_copy_does_not_shadow_valid_duplicate(self) -> None:
+        # Order-independence: a copy passing the chain/dex/version filters
+        # but failing TOKEN IDENTITY must not suppress a later valid copy of
+        # the same pair_address.
+        from types import SimpleNamespace
+
+        malformed = SimpleNamespace(
+            pair_address="0x" + "f" * 40,
+            chain_id="ethereum",
+            dex_id="uniswap",
+            labels=["v3"],
+            liquidity=SimpleNamespace(usd=5_000_000),
+            base_token=SimpleNamespace(address="0x" + "c" * 40, symbol="OTHER"),
+            quote_token=SimpleNamespace(address="0x" + "d" * 40, symbol="TOKENS"),
+        )
+        valid = self._candidate("0x" + "f" * 40, ["v3"], 5_000_000)
+
+        best, _kind = LPBacktestAdapter._pick_deepest_pair_candidate(
+            [malformed, valid],
+            chain="ethereum",
+            dex_root="uniswap",
+            wanted_addresses={"0x" + "a" * 40, "0x" + "b" * 40},
+            wanted_symbols={"WETH", "DAI"},
+            required_version_label="v3",
+        )
+        assert best is valid
+
+    def test_bare_alias_protocols_demand_the_version_label(self) -> None:
+        # Strategies name the venue by bare alias too ("uniswap" means the
+        # v3 connector in the detection namespace): the label policy must
+        # cover those keys, or a deep v2 pool wins a v3 resolution.
+        for protocol in ("uniswap", "pancakeswap", "sushiswap"):
+            assert LPBacktestAdapter._DEXSCREENER_VERSION_LABELS.get(protocol) == "v3", protocol
+        assert LPBacktestAdapter._DEXSCREENER_VERSION_LABELS.get("uniswap_v4") == "v4"
+        assert LPBacktestAdapter._DEXSCREENER_VERSION_LABELS.get("uniswap_v2") == "v2"
+
+        deep_v2 = self._candidate("0x" + "1" * 40, ["v2"], 50_000_000)
+        v3 = self._candidate("0x" + "2" * 40, ["v3"], 1_000_000)
+        best, _kind = LPBacktestAdapter._pick_deepest_pair_candidate(
+            [deep_v2, v3],
+            chain="ethereum",
+            dex_root="uniswap",
+            wanted_addresses={"0x" + "a" * 40, "0x" + "b" * 40},
+            wanted_symbols={"WETH", "DAI"},
+            required_version_label=LPBacktestAdapter._DEXSCREENER_VERSION_LABELS.get("uniswap"),
+        )
+        assert best is v3
+
+
+class TestRankingLiquiditySanitation:
+    """NaN / Infinity / negative liquidity must never influence ranking."""
+
+    @staticmethod
+    def _candidate(pair_address: str, liquidity_usd):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            pair_address=pair_address,
+            chain_id="ethereum",
+            dex_id="uniswap",
+            labels=["v3"],
+            liquidity=SimpleNamespace(usd=liquidity_usd),
+            base_token=SimpleNamespace(address="0x" + "a" * 40, symbol="WETH"),
+            quote_token=SimpleNamespace(address="0x" + "b" * 40, symbol="DAI"),
+        )
+
+    def _pick(self, cands):
+        best, _kind = LPBacktestAdapter._pick_deepest_pair_candidate(
+            cands,
+            chain="ethereum",
+            dex_root="uniswap",
+            wanted_addresses={"0x" + "a" * 40, "0x" + "b" * 40},
+            wanted_symbols={"WETH", "DAI"},
+            required_version_label="v3",
+        )
+        return best
+
+    def test_malformed_liquidity_never_wins_in_any_order(self) -> None:
+        import itertools
+
+        nan_pool = self._candidate("0x" + "1" * 40, float("nan"))
+        inf_pool = self._candidate("0x" + "2" * 40, float("inf"))
+        neg_pool = self._candidate("0x" + "3" * 40, -5.0)
+        valid = self._candidate("0x" + "4" * 40, 1_000_000)
+
+        for perm in itertools.permutations([nan_pool, inf_pool, neg_pool, valid]):
+            best = self._pick(list(perm))
+            assert best is valid, [c.pair_address[:6] for c in perm]
+
+    def test_malformed_only_is_no_match(self) -> None:
+        assert self._pick([self._candidate("0x" + "1" * 40, float("nan"))]) is None
+
+    def test_none_liquidity_is_still_eligible_at_zero_rank(self) -> None:
+        # None = unmeasured, not malformed: a lone pool with unknown depth
+        # still resolves (it ranks at zero, below any measured pool).
+        lone = self._candidate("0x" + "5" * 40, None)
+        assert self._pick([lone]) is lone
+        measured = self._candidate("0x" + "6" * 40, 10.0)
+        assert self._pick([lone, measured]) is measured
+
+    def test_kind_claims_no_version_when_none_required(self) -> None:
+        cand = self._candidate("0x" + "7" * 40, 1_000_000)
+        _best, kind = LPBacktestAdapter._pick_deepest_pair_candidate(
+            [cand],
+            chain="ethereum",
+            dex_root="uniswap",
+            wanted_addresses={"0x" + "a" * 40, "0x" + "b" * 40},
+            wanted_symbols={"WETH", "DAI"},
+            required_version_label=None,
+        )
+        assert kind == "address-exact"
+        assert "version" not in kind
+
+
+class TestProductAmbiguousResolution:
+    """Aerodrome/Velodrome symbolic pools resolve product-exactly or not at all."""
+
+    @staticmethod
+    def _row(address: str, dex_id: str, reserve: str, base="0x" + "a" * 40, quote="0x" + "b" * 40):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            pool_address=address,
+            dex_id=dex_id,
+            name="WETH / USDC",
+            reserve_usd=reserve,
+            base_token_address=base,
+            quote_token_address=quote,
+        )
+
+    def _resolve(self, monkeypatch, protocol: str, rows, gateway_error: Exception | None = None):
+        import asyncio
+        from types import SimpleNamespace
+
+        adapter = LPBacktestAdapter()
+        monkeypatch.setattr(
+            adapter,
+            "_resolve_token_addresses_for_test",  # marker only; real seam below
+            None,
+            raising=False,
+        )
+
+        async def fake_call(func, request, timeout=None):
+            return SimpleNamespace(success=True, error="", pools=rows, complete=True)
+
+        def fake_client():
+            if gateway_error is not None:
+                raise gateway_error
+
+            class _Pb2:
+                @staticmethod
+                def TokenPoolsRequest(**kwargs):
+                    return kwargs
+
+            return SimpleNamespace(pool_analytics=SimpleNamespace(ListTokenPools=lambda *a, **k: None)), _Pb2
+
+        import almanak.framework.backtesting.pnl.providers.perp._gateway_history as gh
+
+        monkeypatch.setattr(gh, "get_connected_gateway_client", fake_client)
+        monkeypatch.setattr(gh, "run_sync_gateway_call", fake_call)
+
+        return asyncio.run(
+            adapter._resolve_product_ambiguous_pool(
+                "WETH/USDC", protocol, "base", ("WETH", "USDC"), "0x" + "a" * 40, "0x" + "b" * 40
+            )
+        )
+
+    def test_classic_never_gets_a_slipstream_pool(self, monkeypatch) -> None:
+        rows = [
+            self._row("0x" + "1" * 40, "aerodrome-slipstream", "50000000"),
+            self._row("0x" + "2" * 40, "aerodrome-base", "5000000"),
+        ]
+        assert self._resolve(monkeypatch, "aerodrome", rows) == "0x" + "2" * 40
+
+    def test_slipstream_never_gets_a_classic_pool(self, monkeypatch) -> None:
+        rows = [
+            self._row("0x" + "1" * 40, "aerodrome-base", "50000000"),
+            self._row("0x" + "2" * 40, "aerodrome-slipstream-3", "5000000"),
+        ]
+        assert self._resolve(monkeypatch, "aerodrome_slipstream", rows) == "0x" + "2" * 40
+
+    def test_gateway_unavailable_fails_closed(self, monkeypatch) -> None:
+        assert self._resolve(monkeypatch, "aerodrome", [], gateway_error=RuntimeError("no gateway")) is None
+
+    def test_no_product_match_fails_closed(self, monkeypatch) -> None:
+        rows = [self._row("0x" + "1" * 40, "aerodrome-slipstream", "50000000")]
+        assert self._resolve(monkeypatch, "aerodrome", rows) is None
+
+    def test_malformed_reserve_is_skipped(self, monkeypatch) -> None:
+        rows = [
+            self._row("0x" + "1" * 40, "aerodrome-base", "nan"),
+            self._row("0x" + "2" * 40, "aerodrome-base", "1000"),
+        ]
+        assert self._resolve(monkeypatch, "aerodrome", rows) == "0x" + "2" * 40
+
+    def test_product_dex_id_predicate(self) -> None:
+        cases = {
+            ("aerodrome", "aerodrome-base"): True,
+            ("aerodrome", "aerodrome-slipstream"): False,
+            ("aerodrome_slipstream", "aerodrome-slipstream-2"): True,
+            ("aerodrome_slipstream", "aerodrome-base"): False,
+            ("velodrome", "velodrome-finance-v2"): True,
+            ("velodrome_slipstream", "velodrome-finance-slipstream"): True,
+            ("velodrome_slipstream", "velodrome-slipstream-v2-optimism"): True,
+            ("velodrome", "aerodrome-base"): False,
+            ("aerodrome", "uniswap-v3-base"): False,
+        }
+        for (protocol, dex_id), expected in cases.items():
+            assert LPBacktestAdapter._product_dex_id_matches(protocol, dex_id) is expected, (protocol, dex_id)
+
+    def test_unknown_namespaces_never_classify(self) -> None:
+        # ANCHORED patterns: near-prefix lookalikes and future/renamed ids
+        # must fail closed, never be classified by substring heuristics.
+        rejected = [
+            ("aerodrome", "aerodrome-v3"),
+            ("aerodrome", "aerodrome-fork"),
+            ("aerodrome", "aerodromeevil"),
+            ("aerodrome_slipstream", "aerodrome-slipstream-fork"),
+            ("aerodrome_slipstream", "aerodrome-slipstreamperps"),
+            ("velodrome", "velodromeevil"),
+            ("velodrome_slipstream", "velodrome-slipstream-perps"),
+        ]
+        for protocol, dex_id in rejected:
+            assert LPBacktestAdapter._product_dex_id_matches(protocol, dex_id) is False, (protocol, dex_id)
+
+    def test_ranked_window_selection_semantics(self, monkeypatch) -> None:
+        """Selection is FIRST-match-per-ranked-window (the canonical pool),
+        never a deepest-of-all claim: a deeper exact match later in the
+        window does not displace the first, and a pair with no match within
+        the bounded windows fails closed."""
+        import asyncio
+        from types import SimpleNamespace
+
+        import almanak.framework.backtesting.pnl.providers.perp._gateway_history as gh
+
+        first_match = self._row("0x" + "1" * 40, "aerodrome-base", "1000")
+        deeper_later = self._row("0x" + "2" * 40, "aerodrome-base", "9000000")
+        requested_pages: list[int] = []
+
+        async def fake_call(func, request, timeout=None):
+            requested_pages.append(request["page"])
+            return SimpleNamespace(success=True, error="", pools=[first_match, deeper_later], complete=False)
+
+        def fake_client():
+            class _Pb2:
+                @staticmethod
+                def TokenPoolsRequest(**kwargs):
+                    return kwargs
+
+            return SimpleNamespace(pool_analytics=SimpleNamespace(ListTokenPools=lambda *a, **k: None)), _Pb2
+
+        monkeypatch.setattr(gh, "get_connected_gateway_client", fake_client)
+        monkeypatch.setattr(gh, "run_sync_gateway_call", fake_call)
+
+        args = ("WETH/USDC", "aerodrome", "base", ("WETH", "USDC"), "0x" + "a" * 40, "0x" + "b" * 40)
+        resolved = asyncio.run(LPBacktestAdapter()._resolve_product_ambiguous_pool(*args))
+        assert resolved == first_match.pool_address  # upstream rank wins, not raw reserve
+        assert set(requested_pages) == {0}  # atomic mode: gateway owns pagination
+
+        # No match within the (possibly incomplete) windows -> fail closed.
+        async def no_match_call(func, request, timeout=None):
+            return SimpleNamespace(
+                success=True,
+                error="",
+                pools=[self._row("0x" + "3" * 40, "aerodrome-slipstream", "1000")],
+                complete=False,
+            )
+
+        monkeypatch.setattr(gh, "run_sync_gateway_call", no_match_call)
+        assert asyncio.run(LPBacktestAdapter()._resolve_product_ambiguous_pool(*args)) is None
+
+    def test_transient_failure_memo_expires_semantic_memo_does_not(self, monkeypatch) -> None:
+        """Failure-kind memo semantics: transport failures retry after the
+        expiry window (a rate-limited burst must not blank the family for the
+        whole run); a semantic no-match is final for the run."""
+        import asyncio
+        from types import SimpleNamespace
+
+        import almanak.framework.backtesting.adapters.lp_adapter as lp_mod
+        import almanak.framework.backtesting.pnl.providers.perp._gateway_history as gh
+
+        dials: list[int] = []
+
+        def failing_client():
+            dials.append(1)
+            raise RuntimeError("no gateway")
+
+        monkeypatch.setattr(gh, "get_connected_gateway_client", failing_client)
+
+        adapter = LPBacktestAdapter()
+        args = ("WETH/USDC", "aerodrome", "base", ("WETH", "USDC"), "0x" + "a" * 40, "0x" + "b" * 40)
+        assert asyncio.run(adapter._resolve_product_ambiguous_pool(*args)) is None
+        assert asyncio.run(adapter._resolve_product_ambiguous_pool(*args)) is None
+        assert len(dials) == 1  # inside the expiry window: served from memo
+
+        # Simulate recovery past the window: the memo expires and retries.
+        key = ("aerodrome", frozenset(("WETH", "USDC")))
+        adapter._ambiguous_resolution_failed[key] = 0.0  # already expired
+        assert asyncio.run(adapter._resolve_product_ambiguous_pool(*args)) is None
+        assert len(dials) == 2  # retried after expiry
+
+        # Semantic no-match is permanent.
+        empty_adapter = LPBacktestAdapter()
+        semantic_dials: list[int] = []
+
+        async def empty_call(func, request, timeout=None):
+            return SimpleNamespace(success=True, error="", pools=[], complete=True)
+
+        def ok_client():
+            semantic_dials.append(1)
+
+            class _Pb2:
+                @staticmethod
+                def TokenPoolsRequest(**kwargs):
+                    return kwargs
+
+            return SimpleNamespace(pool_analytics=SimpleNamespace(ListTokenPools=lambda *a, **k: None)), _Pb2
+
+        monkeypatch.setattr(gh, "get_connected_gateway_client", ok_client)
+        monkeypatch.setattr(gh, "run_sync_gateway_call", empty_call)
+        assert asyncio.run(empty_adapter._resolve_product_ambiguous_pool(*args)) is None
+        memo = empty_adapter._ambiguous_resolution_failed[key]
+        assert memo == lp_mod._PERMANENT_MEMO
+        assert asyncio.run(empty_adapter._resolve_product_ambiguous_pool(*args)) is None
+        assert len(semantic_dials) == 1  # never re-dialed
+
+
+class TestGuessedTierConfidenceCap:
+    """An unverified slug-guessed fee tier caps fee confidence at medium."""
+
+    def test_slug_guess_caps_high_volume_confidence(self) -> None:
+        from almanak.framework.backtesting.adapters.lp_adapter import _FeeFormulaContext, _VolumeResolution
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = LPBacktestAdapter()
+        position = TestRangeGatingScope._position("uniswap_v3")
+        position.metadata["fee_tier_source"] = "slug_guess"
+        resolution = _VolumeResolution(
+            volume_usd=Decimal("1000000"),
+            source="historical",
+            confidence=DataConfidence.HIGH,
+        )
+        context = _FeeFormulaContext(
+            days_elapsed=Decimal("1"),
+            liquidity_share=Decimal("0.001"),
+            base_apr=Decimal("0"),
+            resolution=resolution,
+        )
+
+        result = adapter._fee_amount_from_resolution(position, Decimal("1000"), context, "0xpool", None)
+
+        assert result.fee_confidence == "medium"
+        assert "guessed_fee_tier" in result.data_source
+
+    def test_guessed_tier_annotates_all_confidence_levels(self) -> None:
+        # Invariant (result honesty): the guessed-tier provenance marks the
+        # data_source at EVERY confidence level and on the fallback path —
+        # not only when capping high.
+        from almanak.framework.backtesting.adapters.lp_adapter import _FeeFormulaContext, _VolumeResolution
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = LPBacktestAdapter()
+        for source, confidence in (("historical", DataConfidence.MEDIUM), ("fallback", DataConfidence.LOW)):
+            position = TestRangeGatingScope._position("uniswap_v3")
+            position.metadata["fee_tier_source"] = "slug_guess"
+            context = _FeeFormulaContext(
+                days_elapsed=Decimal("1"),
+                liquidity_share=Decimal("0.001"),
+                base_apr=Decimal("0.05"),
+                resolution=_VolumeResolution(volume_usd=Decimal("1000000"), source=source, confidence=confidence),
+            )
+            result = adapter._fee_amount_from_resolution(position, Decimal("1000"), context, "0xpool", None)
+            assert "guessed_fee_tier" in result.data_source, source
+
+    def test_verified_tier_equal_to_guess_marks_verified(self) -> None:
+        adapter = LPBacktestAdapter()
+        position = TestRangeGatingScope._position("uniswap_v3")
+        position.metadata["fee_tier_source"] = "slug_guess"
+        position.metadata["pool_address"] = "0xpool"
+        adapter._resolved_fee_tiers["0xpool"] = position.fee_tier  # equals the guess
+
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        state = MarketState(
+            timestamp=datetime.now(),
+            prices={"WETH": Decimal("1765"), "USDT": Decimal("1")},
+            chain="ethereum",
+            block_number=1,
+        )
+        adapter.update_position(position, state, elapsed_seconds=3600)
+
+        assert position.metadata["fee_tier_source"] == "subgraph"
+
+    def test_fee_data_source_persists_to_position_metadata(self) -> None:
+        # Invariant: provenance must be result-visible — the metrics
+        # aggregator reads metadata["data_source"], not logs.
+        from almanak.framework.backtesting.config import BacktestDataConfig
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        adapter = LPBacktestAdapter(data_config=BacktestDataConfig(allow_volume_fallback=True))
+        position = TestRangeGatingScope._position("uniswap_v3", tick_lower=0, tick_upper=6931)
+        state = MarketState(
+            timestamp=datetime.now(),
+            prices={"WETH": Decimal("1.5"), "USDT": Decimal("1")},
+            chain="ethereum",
+            block_number=1,
+        )
+        adapter.update_position(position, state, elapsed_seconds=3600)
+
+        assert position.metadata.get("data_source")
+
+    def test_explicit_tier_keeps_high_confidence(self) -> None:
+        from almanak.framework.backtesting.adapters.lp_adapter import _FeeFormulaContext, _VolumeResolution
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = LPBacktestAdapter()
+        position = TestRangeGatingScope._position("uniswap_v3")
+        position.metadata["fee_tier_source"] = "explicit"
+        resolution = _VolumeResolution(
+            volume_usd=Decimal("1000000"),
+            source="historical",
+            confidence=DataConfidence.HIGH,
+        )
+        context = _FeeFormulaContext(
+            days_elapsed=Decimal("1"),
+            liquidity_share=Decimal("0.001"),
+            base_apr=Decimal("0"),
+            resolution=resolution,
+        )
+
+        result = adapter._fee_amount_from_resolution(position, Decimal("1000"), context, "0xpool", None)
+
+        assert result.fee_confidence == "high"
+
+
+class TestPrewarmFeeTier:
+    """Branch coverage for the fee-tier prewarm (CRAP gate, #3271): the
+    slug-guessed tier can be 6x off, so the real feeTier is fetched from
+    v3-family subgraphs — best-effort, with every miss leaving the guess."""
+
+    @staticmethod
+    def _adapter_with_client(query_result=None, exc: Exception | None = None):
+        adapter = LPBacktestAdapter()
+        calls: list[dict] = []
+
+        class _Client:
+            async def query(self, **kwargs):
+                calls.append(kwargs)
+                if exc is not None:
+                    raise exc
+                return query_result
+
+        class _Provider:
+            _client = _Client()
+
+        adapter._liquidity_provider = _Provider()
+        adapter._liquidity_provider_initialized = True
+        return adapter, calls
+
+    @pytest.mark.asyncio
+    async def test_v3_family_pool_resolves_and_caches_real_tier(self):
+        adapter, calls = self._adapter_with_client({"pool": {"feeTier": "500"}})
+
+        await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
+
+        assert adapter._resolved_fee_tiers["0xpool"] == Decimal("0.0005")  # 500 hundredths-of-a-bip
+        assert calls[0]["variables"] == {"poolAddress": "0xpool"}
+
+    @pytest.mark.asyncio
+    async def test_memoized_pool_skips_the_query(self):
+        adapter, calls = self._adapter_with_client({"pool": {"feeTier": "500"}})
+        adapter._resolved_fee_tiers["0xpool"] = Decimal("0.003")
+
+        await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
+
+        assert calls == []
+        assert adapter._resolved_fee_tiers["0xpool"] == Decimal("0.003")  # untouched
+
+    @pytest.mark.asyncio
+    async def test_non_v3_family_and_unknown_protocol_never_query(self):
+        adapter, calls = self._adapter_with_client({"pool": {"feeTier": "500"}})
+
+        await adapter._prewarm_fee_tier("0xpool", "curve", "ethereum")  # messari family
+        await adapter._prewarm_fee_tier("0xpool", "not_a_protocol", "ethereum")  # no entry
+        await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "bsc")  # no declared deployment
+
+        assert calls == []
+        assert "0xpool" not in adapter._resolved_fee_tiers
+
+    @pytest.mark.asyncio
+    async def test_missing_fee_tier_and_zero_tier_leave_the_guess(self):
+        for payload in ({"pool": {"feeTier": None}}, {"pool": None}, None, {"pool": {"feeTier": "0"}}):
+            adapter, _calls = self._adapter_with_client(payload)
+            await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
+            assert "0xpool" not in adapter._resolved_fee_tiers
+
+    @pytest.mark.asyncio
+    async def test_out_of_range_fee_tier_is_rejected(self):
+        # A finite tier in (0, 1] may replace the guess; anything else
+        # (>100%, non-finite) is a malformed row that would mint unbounded
+        # simulated fees through volume * fee_tier * share — reject it.
+        for raw in ("2000000", "1000001", "Infinity", "1e30"):
+            adapter, _calls = self._adapter_with_client({"pool": {"feeTier": raw}})
+            await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
+            assert "0xpool" not in adapter._resolved_fee_tiers, raw
+        # The 100% boundary is accepted (0, 1].
+        adapter, _calls = self._adapter_with_client({"pool": {"feeTier": "1000000"}})
+        await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
+        assert adapter._resolved_fee_tiers["0xpool"] == Decimal("1")
+
+    @pytest.mark.asyncio
+    async def test_query_failure_is_best_effort(self):
+        adapter, _calls = self._adapter_with_client(exc=RuntimeError("subgraph down"))
+
+        await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")  # must not raise
+
+        assert "0xpool" not in adapter._resolved_fee_tiers
+
+    @pytest.mark.asyncio
+    async def test_missing_provider_client_is_a_noop(self, monkeypatch):
+        adapter = LPBacktestAdapter()
+        monkeypatch.setattr(adapter, "_ensure_liquidity_provider", lambda: None)
+
+        await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
+
+        assert "0xpool" not in adapter._resolved_fee_tiers
+
+
+class TestFeeAccrualRoutesProtocol:
+    """Regression: the per-tick fee accrual must route the volume/liquidity
+    lanes to the position's REAL protocol. Without it, an accrual cache MISS
+    re-resolves with protocol=None, which MultiDEXVolumeProvider maps to the
+    chain-DEFAULT DEX — silently sending curve/balancer/sushiswap pools to
+    uniswap_v3's subgraph and undoing the schema-family fixes."""
+
+    @pytest.mark.asyncio
+    async def test_maybe_accrual_forwards_position_protocol(self, monkeypatch):
+        adapter = LPBacktestAdapter()
+        position = SimulatedPosition.lp(
+            token0="WETH",
+            token1="USDT",
+            amount0=Decimal("1"),
+            amount1=Decimal("1765"),
+            liquidity=Decimal("1000"),
+            entry_price=Decimal("1765"),
+            entry_time=datetime(2024, 1, 1),
+            tick_lower=0,
+            tick_upper=6931,
+            fee_tier=Decimal("0.0004"),
+            protocol="curve",  # a non-default DEX — the bug's blast radius
+        )
+        from almanak.framework.backtesting.adapters.lp_adapter import (
+            _LPUpdateAmounts,
+            _LPUpdatePrices,
+        )
+
+        prices = _LPUpdatePrices(
+            token0="WETH",
+            token1="USDT",
+            token0_price=Decimal("1765"),
+            token1_price=Decimal("1"),
+            current_price=Decimal("1765"),
+        )
+        amounts = _LPUpdateAmounts(
+            il_pct=Decimal("0"),
+            token0_amount=Decimal("1"),
+            token1_amount=Decimal("1765"),
+            position_value_usd=Decimal("3530"),
+        )
+
+        captured: dict = {}
+
+        def _spy(*_args, **kwargs):
+            captured.update(kwargs)
+            return None
+
+        monkeypatch.setattr(adapter, "_calculate_fee_accrual", _spy)
+        adapter._maybe_calculate_lp_fee_accrual(
+            position=position,
+            prices=prices,
+            amounts=amounts,
+            elapsed_seconds=3600,
+            update_time=datetime(2024, 1, 2),
+        )
+        assert captured["protocol"] == "curve"
+
+
+class TestResolveSymbolicPoolAddress:
+    """Branch coverage for the symbolic-resolution ORCHESTRATOR (CRAP gate,
+    #3271). Its sub-pieces (ranking, product-exact resolution) carry their
+    own suites; these tests drive the method itself through every outcome:
+    parse/memo/registry guards, the product-ambiguous split, DexScreener
+    failure, picker miss, composite-id honesty, and the happy path."""
+
+    @staticmethod
+    def _resolver_returning(addresses: dict[str, str | None]):
+        class _Info:
+            def __init__(self, address):
+                self.address = address
+
+        class _Resolver:
+            def resolve(self, symbol, chain, **_kwargs):
+                addr = addresses.get(symbol.upper())
+                return _Info(addr) if addr else None
+
+        return _Resolver()
+
+    @staticmethod
+    def _dexscreener_returning(candidates=None, exc: Exception | None = None):
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_a):
+                return False
+
+            async def get_token_pairs(self, chain, token_address):
+                if exc is not None:
+                    raise exc
+                return list(candidates or [])
+
+        return _Client
+
+    def _patched(self, monkeypatch, *, addresses=None, candidates=None, dex_exc=None, best=None):
+        import almanak.framework.data.dexscreener.client as dex_mod
+        import almanak.framework.data.tokens as tokens_mod
+
+        adapter = LPBacktestAdapter()
+        monkeypatch.setattr(
+            tokens_mod,
+            "get_token_resolver",
+            lambda: self._resolver_returning(addresses or {"WETH": "0x" + "a" * 40, "USDC": "0x" + "b" * 40}),
+        )
+        monkeypatch.setattr(dex_mod, "DexScreenerClient", self._dexscreener_returning(candidates, dex_exc))
+        if best is not None:
+            monkeypatch.setattr(adapter, "_pick_deepest_pair_candidate", lambda *a, **k: best)
+        return adapter
+
+    @staticmethod
+    def _best(pair_address: str):
+        from types import SimpleNamespace
+
+        return (SimpleNamespace(pair_address=pair_address, liquidity=SimpleNamespace(usd=1000000.0)), "address")
+
+    @pytest.mark.asyncio
+    async def test_unparseable_pool_returns_none_before_any_lookup(self, monkeypatch):
+        import almanak.framework.data.tokens as tokens_mod
+
+        adapter = LPBacktestAdapter()
+        monkeypatch.setattr(
+            tokens_mod, "get_token_resolver", lambda: pytest.fail("resolver must not run for unparseable pools")
+        )
+        assert await adapter._resolve_symbolic_pool_address("0xdeadbeef", "uniswap_v3", "base") is None
+
+    @pytest.mark.asyncio
+    async def test_memo_hit_short_circuits(self, monkeypatch):
+        import almanak.framework.data.tokens as tokens_mod
+
+        adapter = LPBacktestAdapter()
+        adapter._resolved_pool_addresses[("uniswap_v3", frozenset({"WETH", "USDC"}))] = "0xcached"
+        monkeypatch.setattr(tokens_mod, "get_token_resolver", lambda: pytest.fail("memo hit must not resolve"))
+
+        assert await adapter._resolve_symbolic_pool_address("WETH/USDC", "uniswap_v3", "base") == "0xcached"
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_token_fails_closed(self, monkeypatch):
+        adapter = self._patched(monkeypatch, addresses={"WETH": "0x" + "a" * 40, "USDC": None})
+
+        assert await adapter._resolve_symbolic_pool_address("WETH/USDC", "uniswap_v3", "base") is None
+
+    @pytest.mark.asyncio
+    async def test_product_ambiguous_routes_to_gateway_and_stamps_provenance(self, monkeypatch):
+        adapter = self._patched(monkeypatch)
+        target = "0x" + "c" * 40
+
+        async def fake_product_exact(pool, protocol, chain, pair, t0, t1):
+            return target
+
+        monkeypatch.setattr(adapter, "_resolve_product_ambiguous_pool", fake_product_exact)
+
+        resolved = await adapter._resolve_symbolic_pool_address("WETH/USDC", "aerodrome", "base")
+
+        assert resolved == target
+        assert adapter._resolved_pool_provenance[target] == "gateway_onchain:product-exact-ranked"
+        assert adapter._resolved_pool_addresses[("aerodrome", frozenset({"WETH", "USDC"}))] == target
+
+    @pytest.mark.asyncio
+    async def test_product_ambiguous_miss_never_falls_back_to_dexscreener(self, monkeypatch):
+        import almanak.framework.data.dexscreener.client as dex_mod
+
+        adapter = self._patched(monkeypatch)
+
+        async def fake_product_exact(*_args):
+            return None
+
+        monkeypatch.setattr(adapter, "_resolve_product_ambiguous_pool", fake_product_exact)
+        monkeypatch.setattr(
+            dex_mod, "DexScreenerClient", lambda: pytest.fail("product-ambiguous must NEVER use DexScreener")
+        )
+
+        assert await adapter._resolve_symbolic_pool_address("WETH/USDC", "aerodrome", "base") is None
+        assert ("aerodrome", frozenset({"WETH", "USDC"})) not in adapter._resolved_pool_addresses
+
+    @pytest.mark.asyncio
+    async def test_dexscreener_failure_is_best_effort(self, monkeypatch):
+        adapter = self._patched(monkeypatch, dex_exc=RuntimeError("dexscreener down"))
+
+        assert await adapter._resolve_symbolic_pool_address("WETH/USDC", "uniswap_v3", "base") is None
+
+    @pytest.mark.asyncio
+    async def test_no_candidate_returns_none(self, monkeypatch):
+        adapter = self._patched(monkeypatch, candidates=[], best=(None, ""))
+
+        assert await adapter._resolve_symbolic_pool_address("WETH/USDC", "uniswap_v3", "base") is None
+
+    @pytest.mark.asyncio
+    async def test_composite_non_address_id_is_refused(self, monkeypatch):
+        adapter = self._patched(monkeypatch, candidates=[], best=self._best("weirdpool-0xaaa-0xbbb"))
+
+        assert await adapter._resolve_symbolic_pool_address("WETH/USDC", "curve", "ethereum") is None
+
+    @pytest.mark.asyncio
+    async def test_happy_path_memoizes_with_dexscreener_provenance(self, monkeypatch):
+        pool_address = "0x" + "d" * 40
+        adapter = self._patched(monkeypatch, candidates=[], best=self._best(pool_address))
+
+        resolved = await adapter._resolve_symbolic_pool_address("WETH/USDC", "uniswap_v3", "base")
+
+        assert resolved == pool_address
+        assert adapter._resolved_pool_provenance[pool_address] == "dexscreener:address"
+        # Composite curve-style ids keep only the leading plain address.
+        composite = self._patched(
+            monkeypatch,
+            addresses={"USDT": "0x" + "e" * 40, "USDC": "0x" + "b" * 40},
+            candidates=[],
+            best=self._best(pool_address + "-0xt0-0xt1"),
+        )
+        assert await composite._resolve_symbolic_pool_address("USDT/USDC", "curve", "ethereum") == pool_address

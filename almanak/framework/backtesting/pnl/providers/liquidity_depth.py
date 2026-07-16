@@ -71,6 +71,10 @@ LIQUIDITY_QUERY_METHOD_BY_FAMILY = {
     "liquidity_book": "_query_liquidity_book",
     "weighted": "_query_balancer_liquidity",
     "stableswap": "_query_curve_liquidity",
+    # Messari-standard deployments (declared curve/sushiswap_v3 liquidity
+    # subgraphs) expose liquidityPoolDailySnapshots, none of the AMM-native
+    # schemas above.
+    "messari_standard": "_query_messari_liquidity",
 }
 
 
@@ -147,7 +151,7 @@ query GetPairLiquidity($first: Int!, $pairAddress: String!, $startDate: Int!, $e
 # Liquidity Book (TraderJoe V2): Query lb pair daily data
 LB_PAIR_DAY_DATA_QUERY = """
 query GetLBPairLiquidity($first: Int!, $lbPairAddress: String!, $startDate: Int!, $endDate: Int!) {
-    lbPairDayDatas(
+    lbpairDayDatas(
         first: $first
         where: {
             lbPair: $lbPairAddress
@@ -164,6 +168,31 @@ query GetLBPairLiquidity($first: Int!, $lbPairAddress: String!, $startDate: Int!
     }
 }
 """
+# NOTE: the query-type field really is lowercase-p ``lbpairDayDatas`` on the
+# declared traderjoe_v2 deployment (entity type LBPairDayData) — the camelCase
+# spelling hard-errors with "Type `Query` has no field".
+
+# Messari-standard schema (curve, sushiswap_v3 declared deployments): daily pool
+# snapshots keyed by unix ``timestamp``, TVL in ``totalValueLockedUSD``.
+MESSARI_POOL_DAILY_SNAPSHOT_QUERY = """
+query GetPoolDailySnapshots($first: Int!, $poolAddress: String!, $startDate: Int!, $endDate: Int!) {
+    liquidityPoolDailySnapshots(
+        first: $first
+        where: {
+            pool: $poolAddress
+            timestamp_gte: $startDate
+            timestamp_lte: $endDate
+        }
+        orderBy: timestamp
+        orderDirection: asc
+    ) {
+        id
+        timestamp
+        totalValueLockedUSD
+        dailyVolumeUSD
+    }
+}
+"""
 
 # Balancer: Query pool snapshots
 BALANCER_POOL_SNAPSHOT_QUERY = """
@@ -171,7 +200,7 @@ query GetPoolSnapshots($first: Int!, $poolAddress: String!, $startTimestamp: Int
     poolSnapshots(
         first: $first
         where: {
-            pool: $poolAddress
+            pool_: { address: $poolAddress }
             timestamp_gte: $startTimestamp
             timestamp_lte: $endTimestamp
         }
@@ -186,6 +215,12 @@ query GetPoolSnapshots($first: Int!, $poolAddress: String!, $startTimestamp: Int
     }
 }
 """
+# NOTE: Balancer keys ``poolSnapshots.pool`` by the bytes32 POOL ID
+# (address + specialization + nonce), so a bare ``pool: <address>`` filter
+# matches nothing — every balancer liquidity lookup silently returns empty
+# and the fee-share denominator falls back to the placeholder. The nested
+# ``pool_: { address: ... }`` relation filter matches on the pool's contract
+# address directly.
 
 # Curve (Messari schema): Query pool daily snapshots
 CURVE_POOL_DAILY_QUERY = """
@@ -682,6 +717,83 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             )
             return None
 
+    async def _query_messari_liquidity(
+        self,
+        pool_address: str,
+        chain: str,
+        timestamp: datetime,
+        protocol_id: str,
+    ) -> LiquidityResult | None:
+        """Query liquidity from a Messari-standard subgraph deployment.
+
+        ``liquidityPoolDailySnapshots`` keyed by unix ``timestamp``; depth is
+        the snapshot's ``totalValueLockedUSD``.
+        """
+        subgraph_id = self._get_subgraph_id(protocol_id, chain)
+        if subgraph_id is None:
+            return None
+
+        pool_address_lower = pool_address.lower()
+        if self._use_twap:
+            start_timestamp = self._datetime_to_timestamp(timestamp - timedelta(hours=self._twap_window_hours))
+        else:
+            start_timestamp = self._datetime_to_timestamp(timestamp - timedelta(days=1))
+        end_timestamp = self._datetime_to_timestamp(timestamp)
+
+        try:
+            snapshots = await self._client.query_with_pagination(
+                subgraph_id=subgraph_id,
+                query=MESSARI_POOL_DAILY_SNAPSHOT_QUERY,
+                variables={
+                    "poolAddress": pool_address_lower,
+                    "startDate": start_timestamp,
+                    "endDate": end_timestamp,
+                },
+                data_path="liquidityPoolDailySnapshots",
+                max_pages=MAX_PAGINATION_PAGES,
+                cursor_field="timestamp",
+                cursor_variable="startDate",
+            )
+            if not snapshots:
+                logger.warning(
+                    "No liquidity data from Messari-standard subgraph: protocol=%s, chain=%s, pool=%s...",
+                    protocol_id,
+                    chain,
+                    pool_address_lower[:10],
+                )
+                return None
+
+            data_points: list[tuple[datetime, Decimal]] = []
+            for snapshot in snapshots:
+                snapshot_ts = int(snapshot.get("timestamp", 0))
+                snapshot_dt = datetime.fromtimestamp(snapshot_ts, tz=UTC)
+                tvl_usd = Decimal(str(snapshot.get("totalValueLockedUSD", "0")))
+                data_points.append((snapshot_dt, tvl_usd))
+
+            depth = self._select_depth(data_points, timestamp)
+            return LiquidityResult(
+                depth=depth,
+                source_info=DataSourceInfo(
+                    source=self._data_source_for(protocol_id),
+                    confidence=DataConfidence.HIGH,
+                    timestamp=timestamp,
+                ),
+            )
+        except (SubgraphRateLimitError, SubgraphQueryError) as e:
+            # Match every sibling handler: a transient query failure degrades to
+            # None, but DataSourceUnavailableError (e.g. pagination overflow from
+            # query_with_pagination) MUST propagate — a broad `except Exception`
+            # here silently broke the fail-loud pagination guarantee for the
+            # messari family (curve, sushiswap_v3) (CodeRabbit #3271).
+            logger.warning(
+                "Messari-standard liquidity query failed: protocol=%s, chain=%s, pool=%s..., error=%s",
+                protocol_id,
+                chain,
+                pool_address_lower[:10],
+                e,
+            )
+            return None
+
     async def _query_liquidity_book(
         self,
         pool_address: str,
@@ -724,7 +836,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                     "startDate": start_timestamp,
                     "endDate": end_timestamp,
                 },
-                data_path="lbPairDayDatas",
+                data_path="lbpairDayDatas",
                 max_pages=MAX_PAGINATION_PAGES,
                 cursor_field="date",
                 cursor_variable="startDate",
@@ -820,6 +932,11 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
 
         end_timestamp = self._datetime_to_timestamp(timestamp)
 
+        if len(pool_address_lower) == 66 and pool_address_lower.startswith("0x"):
+            # A full Balancer pool ID (address + specialization + nonce): the
+            # pool_.address filter matches the plain contract address, which
+            # is the id's leading 20 bytes.
+            pool_address_lower = pool_address_lower[:42]
         try:
             pool_snapshots = await self._client.query_with_pagination(
                 subgraph_id=subgraph_id,
@@ -1119,7 +1236,13 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         )
 
         entry = DexVolumeRegistry.entry_for(protocol_id)
-        method_name = LIQUIDITY_QUERY_METHOD_BY_FAMILY.get(entry.amm_family) if entry is not None else None
+        # Dispatch on the subgraph's SCHEMA family when the connector declares
+        # it separately from the AMM family (ALM-2930: aerodrome is a solidly
+        # AMM whose subgraph is a uniswap-v3 fork — the solidly pairDayDatas
+        # query hard-errors and zeroed the fee-share TVL denominator).
+        # Resolved per-CHAIN: some deployments mix schemas across chains.
+        query_family = entry.liquidity_family_for(chain) if entry is not None else None
+        method_name = LIQUIDITY_QUERY_METHOD_BY_FAMILY.get(query_family) if query_family is not None else None
         if method_name is None:
             logger.warning(
                 "Unknown protocol type for %s, returning fallback",

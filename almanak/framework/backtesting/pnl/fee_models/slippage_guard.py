@@ -865,6 +865,10 @@ class HistoricalSlippageModel:
             config: Configuration for slippage calculation. Uses defaults if None.
         """
         self.config = config or SlippageModelConfig()
+        # Log-once memo for the fallback-liquidity warning: a backtest calls
+        # calculate_slippage every tick, and an unavailable liquidity source
+        # otherwise repeats an identical warning per tick.
+        self._fallback_warned = False
 
     def calculate_slippage(
         self,
@@ -930,10 +934,13 @@ class HistoricalSlippageModel:
             source_info = None
             was_fallback = True
 
-            logger.warning(
-                "Historical liquidity unavailable for slippage calculation, using fallback liquidity: $%s",
-                liquidity_usd,
-            )
+            if not self._fallback_warned:
+                self._fallback_warned = True
+                logger.warning(
+                    "Historical liquidity unavailable for slippage calculation, using fallback "
+                    "liquidity: $%s (logged once; applies to every tick without liquidity data)",
+                    liquidity_usd,
+                )
 
         # Handle zero liquidity edge case
         if liquidity_usd <= 0:

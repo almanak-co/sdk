@@ -3045,3 +3045,49 @@ class TestLendingReadDeclRateLaneValidation:
         # flip the teardown guard's per-token split.
         with pytest.raises(ValueError, match="token_keyed must be a bool"):
             self._decl(token_keyed=bad)
+
+
+class TestLiquidityFamilyOverrideValidation:
+    """Per-chain family override keys must be lowercase chain names."""
+
+    def _decl(self, **kwargs):
+        from almanak.connectors._connector_descriptor import DexVolumeDecl
+
+        return DexVolumeDecl(chains=("ethereum",), amm_family="v3_concentrated", **kwargs)
+
+    def test_lowercase_override_key_accepted(self):
+        decl = self._decl(liquidity_query_family_overrides={"ethereum": "messari_standard"})
+        assert decl.liquidity_query_family_overrides == {"ethereum": "messari_standard"}
+
+    def test_uppercase_override_key_rejected(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="lowercase"):
+            self._decl(liquidity_query_family_overrides={"BSC": "messari_standard"})
+
+    def test_unknown_override_family_rejected(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="must be one of"):
+            self._decl(liquidity_query_family_overrides={"ethereum": "not_a_family"})
+
+
+def test_lp_economic_family_overrides_rejects_non_mapping() -> None:
+    """A list (or any non-mapping) must fail loudly at decl construction, not
+    AttributeError later at .items() (CodeRabbit, #3271)."""
+    import pytest
+
+    from almanak.connectors._connector_descriptor import BacktestStrategyTypeDecl
+
+    with pytest.raises(ValueError, match="must be a mapping"):
+        BacktestStrategyTypeDecl(strategy_type="lp", lp_economic_family_overrides=["fungible"])  # type: ignore[arg-type]
+
+
+def test_lp_economic_family_overrides_rejects_malformed_keys() -> None:
+    import pytest
+
+    from almanak.connectors._connector_descriptor import BacktestStrategyTypeDecl
+
+    for bad_key in ("", "  ", "Uniswap_V2", "uniswap-v2"):
+        with pytest.raises(ValueError, match="lowercase, hyphen-free"):
+            BacktestStrategyTypeDecl(strategy_type="lp", lp_economic_family_overrides={bad_key: "fungible"})

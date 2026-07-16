@@ -29,15 +29,21 @@ CONNECTOR = Connector(
         volume_data_source="curve_messari_subgraph",
         liquidity_subgraph_ids={
             "ethereum": "3fy93eAT56UJsRCEht8iFhfi6wjHWXtZ9dnnbQmvFopF",
+            # NOTE: dead on the gateway ("subgraph not found: no
+            # allocations"); kept as a pointer — queries fail fast and
+            # degrade to fallback.
             "optimism": "CXDZPduZE6nWuWEkSzWkRoJSSJ6CneSqiDxdnhhURShX",
         },
+        # Declared deployments are Messari-standard (liquidityPoolDailySnapshots),
+        # matching volume_data_source above — not a Curve-native schema.
+        liquidity_query_family="messari_standard",
     ),
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.curve.fee_model", attribute="CurveFeeModel"),
         description="Curve Finance DEX fee model with dynamic fee calculation",
         aliases=("curve_fi", "crv"),
     ),
-    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp"),
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", lp_economic_family="fungible"),
     gateway_connector=ImportRef(
         module="almanak.connectors.curve.gateway.provider",
         attribute="CurveGatewayConnector",

@@ -24,7 +24,9 @@ CONNECTOR = Connector(
             "avalanche": "6KD9JYCg2qa3TxNK3tLdhj5zuZTABoLLNcnUZXKG9vuH",
         },
     ),
-    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", aliases=("traderjoe",)),
+    backtest_strategy_type=BacktestStrategyTypeDecl(
+        strategy_type="lp", aliases=("traderjoe",), lp_economic_family="bin"
+    ),
     address_tables=(
         AddressTableSpec(
             protocol="traderjoe_v2",

@@ -103,6 +103,13 @@ class DexVolumeSubgraphSpec:
     time_field: str = "date"
     time_unit: str = "seconds"
     resolve_bare_address_pool_id: bool = False
+    #: When True, ``volume_field`` carries the pool's CUMULATIVE lifetime
+    #: volume (Balancer ``poolSnapshots.swapVolume``), not a per-day value:
+    #: daily volume is the difference of consecutive snapshots. Left as a
+    #: raw daily read, a mature pool reports its lifetime total (billions)
+    #: as one day's volume — inflating LP fee backtests by orders of
+    #: magnitude.
+    cumulative_volume: bool = False
 
     def __post_init__(self) -> None:
         if self.time_unit not in ("seconds", "days"):
@@ -191,6 +198,38 @@ def _parse_rows(
             raise ValueError(f"unparseable {spec.volume_field!r}={raw!r} for {spec.dex_name} (ts={ts})") from exc
         points.append(DexVolumePoint(timestamp=ts, volume_usd=volume))
     return points
+
+
+# Snapshots are event-driven on some venues (idle days produce no row), so a
+# one-day lookback can miss the baseline row entirely. Look back a week to
+# find the latest pre-window cumulative reading.
+_CUMULATIVE_BASELINE_LOOKBACK_SECONDS = 7 * 24 * 3600
+
+
+def _difference_cumulative_points(points: list[Any], start_ts: int) -> list[Any]:
+    """Convert ascending cumulative-volume points to per-day volumes.
+
+    Each day's volume = its cumulative reading minus the previous
+    snapshot's (clamped at 0 for corrections/restatements). A point with no
+    earlier baseline is DROPPED, never emitted raw: snapshots are
+    event-driven, so a missing lookback row usually means an idle pool, and
+    a raw cumulative reading would report the pool's lifetime total as one
+    day's volume. The genuinely-new-pool case loses its first partial day,
+    which is negligible against that failure mode.
+    """
+    from almanak.gateway.services.rate_history_service import DexVolumePoint
+
+    daily: list[Any] = []
+    previous = None
+    for point in points:
+        if previous is not None:
+            value = point.volume_usd - previous.volume_usd
+            if value < 0:
+                value = Decimal("0")
+            if point.timestamp >= start_ts:
+                daily.append(DexVolumePoint(timestamp=point.timestamp, volume_usd=value))
+        previous = point
+    return daily
 
 
 def _resolve_subgraph_id(spec: DexVolumeSubgraphSpec, chain: str) -> str:
@@ -445,10 +484,15 @@ async def fetch_dex_volume_history(
         )
 
     requested_days = (end_ts // _SECONDS_PER_DAY) - (start_ts // _SECONDS_PER_DAY) + 1
-    if requested_days > _PAGE_FIRST:
+    # Cumulative specs fetch extra pre-window baseline rows from the same
+    # single page, so they count against the limit too.
+    lookback_days = (_CUMULATIVE_BASELINE_LOOKBACK_SECONDS // _SECONDS_PER_DAY) if spec.cumulative_volume else 0
+    if requested_days + lookback_days > _PAGE_FIRST:
         raise RateHistoryUnavailable(
             spec.dex_name,
-            f"requested window spans {requested_days} daily points, exceeds single-page limit {_PAGE_FIRST}",
+            f"requested window spans {requested_days} daily points"
+            f"{f' (+{lookback_days} baseline lookback)' if lookback_days else ''}, "
+            f"exceeds single-page limit {_PAGE_FIRST}",
         )
 
     subgraph_id = _resolve_subgraph_id(spec, chain)
@@ -479,11 +523,14 @@ async def fetch_dex_volume_history(
             pool_address=pool_address,
         )
 
+    # Cumulative specs need one snapshot BEFORE the window as the baseline
+    # for the first in-window day's difference.
+    query_start_ts = start_ts - _CUMULATIVE_BASELINE_LOOKBACK_SECONDS if spec.cumulative_volume else start_ts
     payload = {
         "query": _build_query(spec),
         "variables": {
             "poolAddress": identifier,
-            "startTime": spec.to_filter_value(start_ts),
+            "startTime": spec.to_filter_value(query_start_ts),
             "endTime": spec.to_filter_value(end_ts),
         },
     }
@@ -500,9 +547,22 @@ async def fetch_dex_volume_history(
         )
 
     try:
-        return _parse_rows(rows, spec)
+        points = _parse_rows(rows, spec)
     except ValueError as exc:
         raise RateHistoryUnavailable(spec.dex_name, str(exc)) from exc
+    if spec.cumulative_volume:
+        points = _difference_cumulative_points(points, start_ts)
+        if not points:
+            # The raw-row check above passes when only pre-window (lookback)
+            # snapshots exist; differencing then drops them, leaving no
+            # in-window volume. Fail closed — returning [] here would silently
+            # become zero-fee backtest data (CodeRabbit #3271).
+            raise RateHistoryUnavailable(
+                spec.dex_name,
+                f"no in-window {spec.entity} for pool {pool_address!r} on {chain} "
+                f"({start_ts}..{end_ts}) after cumulative differencing",
+            )
+    return points
 
 
 __all__ = ["DexVolumeSubgraphSpec", "fetch_dex_volume_history"]

@@ -11,6 +11,7 @@ This module tests the MultiProtocolBacktestAdapter, focusing on:
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -964,6 +965,66 @@ class TestMultiProtocolIntegration:
         # Should return None for unknown intent (default execution)
         result = adapter.execute_intent(intent, portfolio, market_state)
         assert result is None
+
+
+class TestDataConfigAndPrewarmRouting:
+    """data_config threads into sub-adapters; prewarm routes to the owner."""
+
+    def test_data_config_propagates_to_sub_adapters(self):
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        data_config = BacktestDataConfig(allow_volume_fallback=True)
+        adapter = MultiProtocolBacktestAdapter(data_config=data_config)
+
+        lp_sub = adapter._sub_adapters.get("lp")
+        assert lp_sub is not None
+        assert getattr(lp_sub, "_data_config", None) is data_config
+
+    @pytest.mark.asyncio
+    async def test_prewarm_routes_lp_open_to_lp_sub_adapter(self):
+        adapter = MultiProtocolBacktestAdapter()
+        calls: list[str] = []
+
+        class Hooked:
+            async def prewarm_history(self, intent, *, chain, start_time, end_time):
+                calls.append(chain)
+
+        adapter._sub_adapters["lp"] = Hooked()
+        intent = SimpleNamespace(intent_type=SimpleNamespace(value="LP_OPEN"))
+
+        await adapter.prewarm_history(
+            intent, chain="base", start_time=datetime(2024, 1, 1), end_time=datetime(2024, 1, 8)
+        )
+
+        assert calls == ["base"]
+
+    @pytest.mark.asyncio
+    async def test_prewarm_ignores_unrelated_intents_and_missing_hooks(self):
+        """Asserted OBSERVABLY (CodeRabbit, #3271): a SWAP intent must never
+        probe the sub-adapter at all, and an LP_OPEN against a hookless
+        sub-adapter probes exactly ``prewarm_history`` and no-ops."""
+        lookups: list[str] = []
+
+        class HooklessRecordingSubAdapter:
+            def __getattr__(self, name):  # only invoked for MISSING attributes
+                lookups.append(name)
+                raise AttributeError(name)
+
+        adapter = MultiProtocolBacktestAdapter()
+        adapter._sub_adapters["lp"] = HooklessRecordingSubAdapter()
+
+        swap = SimpleNamespace(intent_type=SimpleNamespace(value="SWAP"))
+        lp_open = SimpleNamespace(intent_type=SimpleNamespace(value="LP_OPEN"))
+
+        await adapter.prewarm_history(
+            swap, chain="base", start_time=datetime(2024, 1, 1), end_time=datetime(2024, 1, 8)
+        )
+        assert lookups == []  # unrelated intent: the sub-adapter is never touched
+
+        await adapter.prewarm_history(
+            lp_open, chain="base", start_time=datetime(2024, 1, 1), end_time=datetime(2024, 1, 8)
+        )
+        assert lookups == ["prewarm_history"]  # hookless: probed once, no-op
 
 
 # =============================================================================

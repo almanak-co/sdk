@@ -130,8 +130,14 @@ _UNISWAP_V3_VOLUME_SUBGRAPH_IDS: dict[str, str] = {
     "ethereum": "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
     "arbitrum": "FbCGRftH4a3yZugY7TnbYgPJVEv2LvMT6oF1fxPe9aJM",
     "base": "96eJ9Go8gFjySRGnndG7EYxThaiwVDV8BYPp1TMDcoYh",
-    "optimism": "Cghf4LfVqPiFw6fp6Y5X5Ubc8UpmUhSfJL82zwiBFLaj",
     "polygon": "3hCPRGf4z88VC5rsBKU5AA9FBBq5nF3jbKJG7VZCbhjm",
+}
+
+# Optimism's V3-native deployment (Cghf4LfV...) went dark — "bad indexers:
+# too far behind" on every query. The only healthy current deployment is
+# Messari-standard, so optimism gets its own spec.
+_UNISWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS: dict[str, str] = {
+    "optimism": "EgnS9YE1avupkvCNj9fHnJxppfEmNNywYJtghqiu2pd9",
 }
 
 
@@ -371,7 +377,7 @@ class UniswapV3GatewayConnector(
 
         = the chains with a registered volume subgraph.
         """
-        return frozenset(_UNISWAP_V3_VOLUME_SUBGRAPH_IDS)
+        return frozenset(_UNISWAP_V3_VOLUME_SUBGRAPH_IDS) | frozenset(_UNISWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS)
 
     async def fetch_volume_history(
         self,
@@ -397,7 +403,7 @@ class UniswapV3GatewayConnector(
 
         return await fetch_dex_volume_history(
             servicer,
-            _uniswap_v3_volume_spec(),
+            _uniswap_v3_volume_spec(chain),
             chain=chain,
             pool_address=pool_address,
             start_ts=start_ts,
@@ -406,14 +412,26 @@ class UniswapV3GatewayConnector(
         )
 
 
-def _uniswap_v3_volume_spec() -> Any:
-    """Build the V3 daily-volume subgraph spec.
+def _uniswap_v3_volume_spec(chain: str) -> Any:
+    """Build the V3 daily-volume subgraph spec for ``chain``.
 
     Lazy (function-local import) so the connector module stays importable
-    without eagerly pulling in the gateway services package.
+    without eagerly pulling in the gateway services package. Optimism's only
+    healthy deployment is Messari-standard, so it gets a Messari-shaped spec;
+    every other chain stays V3-native.
     """
     from almanak.gateway.services._dex_volume_subgraph import DexVolumeSubgraphSpec
 
+    if chain in _UNISWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS:
+        return DexVolumeSubgraphSpec(
+            dex_name="uniswap_v3",
+            subgraph_ids=dict(_UNISWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS),
+            entity="liquidityPoolDailySnapshots",
+            id_field="pool",
+            volume_field="dailyVolumeUSD",
+            source="uniswap_v3_messari_subgraph",
+            time_field="timestamp",
+        )
     return DexVolumeSubgraphSpec(
         dex_name="uniswap_v3",
         subgraph_ids=dict(_UNISWAP_V3_VOLUME_SUBGRAPH_IDS),

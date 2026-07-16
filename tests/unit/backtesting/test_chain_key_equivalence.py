@@ -59,12 +59,15 @@ from almanak.connectors.spark.backtest_apy import (
 from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
 
 # --- the frozen tables, verbatim (lowercase keys, pre-rekey values) --------------
+# Deployment-id refresh 2026-07-14: uniswap/optimism, pancake/ethereum and
+# pancake/bsc were re-pointed at healthy Messari-standard deployments (the
+# originals had sick indexers / frozen data) — see the connector decls.
 
 FROZEN_UNISWAP_V3: dict[str, str] = {
     "ethereum": "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
     "arbitrum": "FbCGRftH4a3yZugY7TnbYgPJVEv2LvMT6oF1fxPe9aJM",
     "base": "96eJ9Go8gFjySRGnndG7EYxThaiwVDV8BYPp1TMDcoYh",
-    "optimism": "Cghf4LfVqPiFw6fp6Y5X5Ubc8UpmUhSfJL82zwiBFLaj",
+    "optimism": "EgnS9YE1avupkvCNj9fHnJxppfEmNNywYJtghqiu2pd9",
     "polygon": "3hCPRGf4z88VC5rsBKU5AA9FBBq5nF3jbKJG7VZCbhjm",
 }
 
@@ -73,9 +76,9 @@ FROZEN_SUSHISWAP_V3: dict[str, str] = {
 }
 
 FROZEN_PANCAKESWAP_V3: dict[str, str] = {
-    "ethereum": "CJYGNhb7RvnhfBDjqpRnD3oxgyhibzc7fkAMa38YV3oS",
+    "ethereum": "JAGXF8B14mpB8QGKnwhKTs5JxsQZBJQvbDGFcWwL7gbm",
     "arbitrum": "251MHFNN1rwjErXD2efWMpNS73SANZN8Ua192zw6iXve",
-    "bsc": "Hv1GncLY5docZoGtXjo4kwbTvxm3MAhVZqBZE4sUT9eZ",
+    "bsc": "ChmxqA9bX71cB2cQTRRULbWUBKoMRk7oh3JnpZShDQ2V",
     "base": "BHWNsedAHtmTCzXxCCDfhPmm6iN9rxUhoRHdHKyujic3",
 }
 

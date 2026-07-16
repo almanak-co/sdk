@@ -326,6 +326,30 @@ class TestBacktestTokenRefs:
         finally:
             asyncio.run(backtester.close())
 
+    def test_create_backtester_coerces_json_decimal_overrides(self):
+        # Platform BACKTEST_CONFIG delivers JSON numbers as float/str; the
+        # Decimal-typed data-config fields must not reach Decimal arithmetic raw.
+        backtester = create_backtester(
+            data_config_overrides={
+                "allow_volume_fallback": True,
+                "explicit_pool_volume_usd_daily": 5000000.0,
+                "explicit_pool_liquidity_usd": "8800000",
+            }
+        )
+        try:
+            config = backtester.data_config
+            assert config.explicit_pool_volume_usd_daily == Decimal("5000000")
+            assert isinstance(config.explicit_pool_volume_usd_daily, Decimal)
+            assert config.explicit_pool_liquidity_usd == Decimal("8800000")
+            assert isinstance(config.explicit_pool_liquidity_usd, Decimal)
+            assert config.allow_volume_fallback is True
+        finally:
+            asyncio.run(backtester.close())
+
+    def test_create_backtester_rejects_non_numeric_decimal_override(self):
+        with pytest.raises(ValueError, match="not a valid number"):
+            create_backtester(data_config_overrides={"explicit_pool_liquidity_usd": "not-a-number"})
+
     @pytest.mark.asyncio
     async def test_run_backtest_job_threads_strategy_token_addresses(self):
         captured: list[dict[str, tuple[str, str]] | None] = []
