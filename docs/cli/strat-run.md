@@ -212,6 +212,13 @@ Usage: almanak strat run [OPTIONS]
     Use existing Anvil instance: CHAIN=PORT (e.g., --anvil-port arbitrum=8545). Repeatable.
 
 
+* `keep_anvil`:
+    * Type: BOOL
+    * Default: `False`
+    * Usage: `--keep-anvil`
+    Keep managed Anvil fork(s) running after the runner exits (incl. after a graceful teardown), detached in their own session, for post-run/post-teardown inspection or a sealed audit. You must kill the fork PID(s) yourself afterwards.
+
+
 * `help`:
     * Type: BOOL
     * Default: `False`
@@ -310,6 +317,12 @@ Options:
   --anvil-port TEXT               Use existing Anvil instance: CHAIN=PORT
                                   (e.g., --anvil-port arbitrum=8545).
                                   Repeatable.
+  --keep-anvil                    Keep managed Anvil fork(s) running after the
+                                  runner exits (incl. after a graceful
+                                  teardown), detached in their own session,
+                                  for post-run/post-teardown inspection or a
+                                  sealed audit. You must kill the fork PID(s)
+                                  yourself afterwards.
   --help                          Show this message and exit.
 ```
 

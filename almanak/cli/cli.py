@@ -1741,6 +1741,14 @@ def strategy_test(
     multiple=True,
     help="Use existing Anvil instance: CHAIN=PORT (e.g., --anvil-port arbitrum=8545). Repeatable.",
 )
+@click.option(
+    "--keep-anvil",
+    is_flag=True,
+    default=False,
+    help="Keep managed Anvil fork(s) running after the runner exits (incl. after a "
+    "graceful teardown), detached in their own session, for post-run/post-teardown "
+    "inspection or a sealed audit. You must kill the fork PID(s) yourself afterwards.",
+)
 @click.pass_context
 def strategy_run(
     ctx,
@@ -1767,6 +1775,7 @@ def strategy_run(
     max_iterations,
     teardown_after,
     anvil_ports,
+    keep_anvil,
 ):
     """Run a strategy from its working directory.
 
@@ -1887,6 +1896,7 @@ def strategy_run(
             teardown_after=teardown_after,
             working_dir=working_dir,
             anvil_ports=anvil_ports,
+            keep_anvil=keep_anvil,
         )
     except click.Abort:
         sys.exit(1)
