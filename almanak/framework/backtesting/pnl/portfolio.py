@@ -72,6 +72,7 @@ logger = logging.getLogger(__name__)
 CASH_EQUIVALENT_STABLECOIN_SYMBOLS: frozenset[str] = frozenset({"USDC", "USDT", "DAI"})
 CASH_EQUIVALENT_STABLECOINS: frozenset[str] = CASH_EQUIVALENT_STABLECOIN_SYMBOLS
 
+
 #: Relative shortfall below which a debit is treated as spend-all instead of
 #: failing the fill. Absorbs Decimal round-trip error from flow computations
 #: (``amount_usd / price`` on both legs) without permitting economically
@@ -848,6 +849,14 @@ class SimulatedPortfolio:
                 cash_needed += shortfall * price
                 conversions[token] = shortfall
 
+        # Nothing to fund -> nothing to reject: a fill with zero cash need must
+        # not be blocked by already-negative cash-like (gas paid from a wallet
+        # holding no stables drives it negative) — that rejects every sell-all
+        # with "required 0, cash-like -0.001", and even blocks a cash-RAISING
+        # LP close (ALM-2936).
+        if cash_needed <= Decimal("0"):
+            return token_debits, Decimal("0"), conversions, None
+
         cash_available = self._cash_like_available(token_debits)
         cash_shortfall = cash_needed - cash_available
         if cash_shortfall > Decimal("0"):
@@ -911,6 +920,16 @@ class SimulatedPortfolio:
             if key in self.tokens:
                 return key
         return normalized
+
+    def cash_like_available(self) -> Decimal:
+        """Public read of spendable cash: ``cash_usd`` plus stable-token balances.
+
+        Adapters must use THIS for capital checks, not bare ``cash_usd`` —
+        token-funded portfolios (the platform's ``token_funding`` startup path)
+        hold their stables as tokens and have ``cash_usd == 0``, so a bare
+        ``cash_usd`` pre-check rejects every open on token-funded runs.
+        """
+        return self._cash_like_available()
 
     def _cash_like_available(self, planned_token_debits: dict[TokenRef, Decimal] | None = None) -> Decimal:
         """Cash plus explicit cash-equivalent token balances not already debited."""

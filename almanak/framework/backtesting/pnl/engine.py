@@ -2468,14 +2468,28 @@ class PnLBacktester:
         Returns:
             TradeRecord with all execution details including fees, slippage, and gas
         """
-        adapter_record = await self._execute_with_adapter_if_available(
-            intent=intent,
-            portfolio=portfolio,
-            market_state=market_state,
-            timestamp=timestamp,
-            config=config,
-            delayed_at_end=delayed_at_end,
-            data_quality_tracker=data_quality_tracker,
+        from .intent_extraction import intent_has_unresolved_all_sizing
+
+        # Lane INGRESS gate: an unresolved "all" sizing sentinel is decided
+        # here — before adapters, pricing, portfolio reads, or USD extraction
+        # — so the rejection is uniform (same machine-visible reason) instead
+        # of depending on which adapter or oracle happens to see the intent
+        # first. Adapters keep their own fail-closed checks as
+        # defense-in-depth for direct callers.
+        unresolved_all_sizing = intent_has_unresolved_all_sizing(intent, self._get_intent_type(intent))
+
+        adapter_record = (
+            None
+            if unresolved_all_sizing
+            else await self._execute_with_adapter_if_available(
+                intent=intent,
+                portfolio=portfolio,
+                market_state=market_state,
+                timestamp=timestamp,
+                config=config,
+                delayed_at_end=delayed_at_end,
+                data_quality_tracker=data_quality_tracker,
+            )
         )
         if adapter_record is not None:
             return adapter_record
@@ -2517,6 +2531,7 @@ class PnLBacktester:
             executed_price=executed_price,
             timestamp=timestamp,
             market_state=market_state,
+            amount_usd=details.amount_usd,
             strict_reproducibility=config.strict_reproducibility,
         )
         fill = self._build_generic_fill(
@@ -2599,10 +2614,38 @@ class PnLBacktester:
         market_state: MarketState,
         config: PnLBacktestConfig,
     ) -> _GenericIntentDetails:
+        from .intent_extraction import (
+            UNSUPPORTED_ALL_SIZING_REASON,
+            intent_has_unresolved_all_sizing,
+        )
+
         intent_type = self._get_intent_type(intent)
         protocol = self._get_intent_protocol(intent)
         chain = str(getattr(market_state, "chain", config.chain))
         tokens = self._get_intent_tokens(intent, chain=chain)
+
+        # An "all" sizing sentinel on ANY sizing attribute is a live-execution
+        # construct with no backtest sizing lane (ALM-2943): fail closed with
+        # a machine-visible reason instead of trading a silent $0 or
+        # re-sizing from unrelated fields. Decided BEFORE USD extraction — a
+        # rejected intent must reject identically whether or not its tokens
+        # happen to be priceable (strict-mode extraction raises on missing
+        # prices, which would replace the promised rejection with an
+        # oracle-dependent crash). The gate is general — per-attribute patches
+        # kept leaving the next attribute executable. Close-shaped intents
+        # keep their position-close resolution below.
+        if intent_has_unresolved_all_sizing(intent, intent_type):
+            return _GenericIntentDetails(
+                intent_type=intent_type,
+                protocol=protocol,
+                tokens=tokens,
+                amount_usd=Decimal("0"),
+                close_resolution=_CloseResolution(
+                    amount_usd=Decimal("0"),
+                    failure_reason=UNSUPPORTED_ALL_SIZING_REASON,
+                ),
+            )
+
         amount_usd = self._get_intent_amount_usd(
             intent,
             market_state,
@@ -2629,6 +2672,22 @@ class PnLBacktester:
         config: PnLBacktestConfig,
         data_quality_tracker: DataQualityTracker | None,
     ) -> _GenericExecutionCosts:
+        if details.close_resolution.failure_reason is not None:
+            # A rejected fill is TERMINAL the moment it is decided: no fee or
+            # slippage model may run for it — user-pluggable models can dial
+            # prices and raise over data a rejected trade does not need, which
+            # would replace the serialized rejection with a run-killing crash.
+            # A rejected trade also charges nothing (canonical zero-cost fill).
+            return _GenericExecutionCosts(
+                fee_usd=Decimal("0"),
+                slippage_pct=Decimal("0"),
+                slippage_usd=Decimal("0"),
+                gas_cost_usd=Decimal("0"),
+                gas_price_gwei=None,
+                gas_gwei_source="rejected_fill",
+                estimated_mev_cost_usd=None,
+            )
+
         fee_usd = self.get_fee_model(details.protocol).calculate_fee(
             intent_type=details.intent_type,
             amount_usd=details.amount_usd,
@@ -2641,18 +2700,6 @@ class PnLBacktester:
             market_state=market_state,
             protocol=details.protocol,
         )
-        if details.close_resolution.failure_reason is not None:
-            # Failed closes are recorded as rejected trades. Skip MEV/slippage/gas
-            # resolution so missing ETH data cannot hide the failed-trade record.
-            return _GenericExecutionCosts(
-                fee_usd=fee_usd,
-                slippage_pct=slippage_pct,
-                slippage_usd=Decimal("0"),
-                gas_cost_usd=Decimal("0"),
-                gas_price_gwei=None,
-                gas_gwei_source="rejected_fill",
-                estimated_mev_cost_usd=None,
-            )
 
         estimated_mev_cost_usd, slippage_pct = self._simulate_mev_impact(
             intent_type=details.intent_type,
@@ -3350,6 +3397,8 @@ class PnLBacktester:
         timestamp: datetime,
         market_state: MarketState,
         strict_reproducibility: bool = False,
+        *,
+        amount_usd: Decimal | None = None,
     ) -> SimulatedPosition | None:
         """Create a position delta for intents that create positions.
 
@@ -3367,6 +3416,10 @@ class PnLBacktester:
             executed_price: Executed price
             timestamp: Time of execution
             market_state: Market state
+            amount_usd: The fill's resolved USD notional. The fill path always
+                passes it — re-extraction inside a builder has no portfolio, so
+                an amount="all" intent would zero-fall-back while the token
+                flows debit the resolved amount. None = extract from the intent
             strict_reproducibility: If True, raise on missing USD amount
 
         Returns:
@@ -3376,7 +3429,16 @@ class PnLBacktester:
         if handler_name is None:
             return None
         handler = getattr(self, handler_name)
-        return handler(intent, protocol, tokens, executed_price, timestamp, market_state, strict_reproducibility)
+        return handler(
+            intent,
+            protocol,
+            tokens,
+            executed_price,
+            timestamp,
+            market_state,
+            strict_reproducibility,
+            amount_usd=amount_usd,
+        )
 
     def _lp_open_delta(
         self,
@@ -3386,7 +3448,9 @@ class PnLBacktester:
         executed_price: Decimal,
         timestamp: datetime,
         market_state: MarketState,
-        strict_reproducibility: bool,
+        strict_reproducibility: bool = False,
+        *,
+        amount_usd: Decimal | None = None,
     ) -> SimulatedPosition:
         """Create the simulated LP position for an LP_OPEN intent.
 
@@ -3412,8 +3476,6 @@ class PnLBacktester:
 
         token0 = tokens[0] if len(tokens) > 0 else "WETH"
         token1 = tokens[1] if len(tokens) > 1 else "USDC"
-
-        amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
 
         # Get fee tier
         fee_tier = getattr(intent, "fee_tier", Decimal("0.003"))
@@ -3460,6 +3522,10 @@ class PnLBacktester:
         # valuation path compares against (SimulatedPosition.lp contract).
         entry_price_ratio = price0 / price1
 
+        if amount_usd is None:
+            amount_usd = self._get_intent_amount_usd(
+                intent, market_state, strict_reproducibility=strict_reproducibility
+            )
         liquidity = calculator.liquidity_for_target_value(
             value_token1=amount_usd / price1,
             price=entry_price_ratio,
@@ -3504,13 +3570,18 @@ class PnLBacktester:
         executed_price: Decimal,
         timestamp: datetime,
         market_state: MarketState,
-        strict_reproducibility: bool,
+        strict_reproducibility: bool = False,
+        *,
+        amount_usd: Decimal | None = None,
     ) -> SimulatedPosition:
         """Create the simulated lending position for a SUPPLY intent."""
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
 
         token, price = self._position_token_and_price(tokens[0] if tokens else "WETH", market_state)
-        amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
+        if amount_usd is None:
+            amount_usd = self._get_intent_amount_usd(
+                intent, market_state, strict_reproducibility=strict_reproducibility
+            )
         amount = amount_usd / price if price is not None and price > 0 else amount_usd
 
         # Get APY if available
@@ -3535,7 +3606,9 @@ class PnLBacktester:
         executed_price: Decimal,
         timestamp: datetime,
         market_state: MarketState,
-        strict_reproducibility: bool,
+        strict_reproducibility: bool = False,
+        *,
+        amount_usd: Decimal | None = None,
     ) -> SimulatedPosition:
         """Create the simulated vault supply position for a VAULT_DEPOSIT intent."""
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
@@ -3549,7 +3622,10 @@ class PnLBacktester:
                 "Vault deposit missing deposit_token, defaulting to %s — set deposit_token for accurate backtesting",
                 token_ref_display(token),
             )
-        amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
+        if amount_usd is None:
+            amount_usd = self._get_intent_amount_usd(
+                intent, market_state, strict_reproducibility=strict_reproducibility
+            )
         amount = amount_usd / price if price is not None and price > 0 else amount_usd
 
         # ERC-4626 vault yield: pending PPFS-curve replay via gateway
@@ -3577,13 +3653,18 @@ class PnLBacktester:
         executed_price: Decimal,
         timestamp: datetime,
         market_state: MarketState,
-        strict_reproducibility: bool,
+        strict_reproducibility: bool = False,
+        *,
+        amount_usd: Decimal | None = None,
     ) -> SimulatedPosition:
         """Create the simulated borrow position for a BORROW intent."""
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
 
         token, price = self._position_token_and_price(tokens[0] if tokens else "USDC", market_state)
-        amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
+        if amount_usd is None:
+            amount_usd = self._get_intent_amount_usd(
+                intent, market_state, strict_reproducibility=strict_reproducibility
+            )
         amount = amount_usd / price if price is not None and price > 0 else amount_usd
 
         # Get APY if available
@@ -3608,7 +3689,9 @@ class PnLBacktester:
         executed_price: Decimal,
         timestamp: datetime,
         market_state: MarketState,
-        strict_reproducibility: bool,
+        strict_reproducibility: bool = False,
+        *,
+        amount_usd: Decimal | None = None,
     ) -> SimulatedPosition:
         """Create the simulated position for a PERP_OPEN intent.
 
@@ -3622,7 +3705,10 @@ class PnLBacktester:
         from .intent_extraction import get_perp_open_params, intent_is_long
 
         token = tokens[0] if tokens else "WETH"
-        amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
+        if amount_usd is None:
+            amount_usd = self._get_intent_amount_usd(
+                intent, market_state, strict_reproducibility=strict_reproducibility
+            )
         collateral_usd, leverage = get_perp_open_params(
             intent,
             market_state,

@@ -280,6 +280,48 @@ class TestSimulatedFill:
         assert trade.slippage_usd == Decimal("1")
         assert trade.gas_cost_usd == Decimal("0.50")
 
+    def test_rejected_fill_to_trade_record_carries_failure_reason(self, base_timestamp: datetime) -> None:
+        """A rejected fill's failure_reason surfaces as TradeRecord.error."""
+        fill = SimulatedFill(
+            timestamp=base_timestamp,
+            intent_type=IntentType.SWAP,
+            protocol="uniswap_v3",
+            tokens=["USDC", "WETH"],
+            executed_price=Decimal("0"),
+            amount_usd=Decimal("0"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={},
+            tokens_out={},
+            success=False,
+            metadata={"failure_reason": "insufficient cash for fill: required 1, cash-like 0"},
+        )
+
+        trade = fill.to_trade_record()
+
+        assert trade.success is False
+        assert trade.error == "insufficient cash for fill: required 1, cash-like 0"
+
+    def test_successful_fill_to_trade_record_has_no_error(self, base_timestamp: datetime) -> None:
+        """Success clears error even when metadata carries stale reasons."""
+        fill = SimulatedFill(
+            timestamp=base_timestamp,
+            intent_type=IntentType.SWAP,
+            protocol="uniswap_v3",
+            tokens=["USDC", "WETH"],
+            executed_price=Decimal("3000"),
+            amount_usd=Decimal("1000"),
+            fee_usd=Decimal("3"),
+            slippage_usd=Decimal("1"),
+            gas_cost_usd=Decimal("0.50"),
+            tokens_in={},
+            tokens_out={},
+            metadata={"failure_reason": "stale"},
+        )
+
+        assert fill.to_trade_record().error is None
+
     def test_fill_to_dict_keeps_none_optional_values(self, base_timestamp: datetime) -> None:
         """Optional measured fields remain None when they were not measured."""
         fill = SimulatedFill(
@@ -384,6 +426,40 @@ class TestPortfolioApplyFill:
         # Trade should be recorded
         assert len(portfolio.trades) == 1
         assert portfolio.trades[0].intent_type == IntentType.SWAP
+
+    def test_apply_fill_zero_cash_need_accepted_with_negative_cash(
+        self, portfolio: SimulatedPortfolio, base_timestamp: datetime
+    ) -> None:
+        """A fill funded entirely by held tokens must not be rejected by negative cash-like."""
+        portfolio.tokens["WETH"] = Decimal("1.0")
+        portfolio.cash_usd = Decimal("-0.001")
+
+        fill = SimulatedFill(
+            timestamp=base_timestamp,
+            intent_type=IntentType.SWAP,
+            protocol="uniswap_v3",
+            tokens=["WETH", "USDC"],
+            executed_price=Decimal("3000"),
+            amount_usd=Decimal("3000"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={"USDC": Decimal("3000")},
+            tokens_out={"WETH": Decimal("1.0")},
+        )
+
+        portfolio.apply_fill(fill)
+
+        assert portfolio.trades[-1].success is True
+        assert portfolio.tokens.get("WETH", Decimal("0")) == Decimal("0")
+
+    def test_cash_like_available_sums_cash_and_stable_tokens(self, portfolio: SimulatedPortfolio) -> None:
+        """cash_like_available() = cash_usd plus cash-equivalent stable token balances."""
+        portfolio.cash_usd = Decimal("100")
+        portfolio.tokens["USDC"] = Decimal("40")
+        portfolio.tokens["WETH"] = Decimal("2")
+
+        assert portfolio.cash_like_available() == Decimal("140")
 
     def test_apply_fill_stablecoins_convert_to_cash(
         self, portfolio: SimulatedPortfolio, base_timestamp: datetime

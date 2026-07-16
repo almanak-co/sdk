@@ -174,3 +174,57 @@ def test_get_intent_tokens_deduplicates_case_insensitive_lp_aliases() -> None:
     )()
 
     assert get_intent_tokens(intent) == ["WETH", "USDC"]
+
+
+class TestAmountAllSentinel:
+    """amount="all" has no backtest sizing lane: the extraction returns a
+    deterministic $0 placeholder (no warning, no price lookup) and the engine
+    rejects the intent with UNSUPPORTED_ALL_SIZING_REASON (ALM-2943 owns the
+    typed sizing that would make these executable)."""
+
+    def _sell_all_intent(self) -> Any:
+        return SimpleNamespace(intent_type=IntentType.SWAP, from_token="WETH", to_token="USDC", amount="all")
+
+    def test_swap_all_is_deterministic_zero_placeholder(self) -> None:
+        assert get_intent_amount_usd(self._sell_all_intent(), _market_state()) == Decimal("0")
+
+    def test_swap_all_is_zero_in_strict_mode_too(self) -> None:
+        # The rejection is deterministic; strict mode must not raise over
+        # price data a rejected intent does not need.
+        amount = get_intent_amount_usd(self._sell_all_intent(), _market_state(), strict_reproducibility=True)
+        assert amount == Decimal("0")
+
+    def test_amountless_close_placeholder_applies_in_strict_mode(self) -> None:
+        # Position-close resolution sizes these deterministically from the
+        # matched position, so strict mode must not raise before it runs.
+        for intent_type, field in (
+            (IntentType.WITHDRAW, "token"),
+            (IntentType.REPAY, "token"),
+            (IntentType.PERP_CLOSE, "market"),
+        ):
+            intent = SimpleNamespace(intent_type=intent_type, **{field: "WETH"}, amount=None)
+            assert get_intent_amount_usd(intent, _market_state(), strict_reproducibility=True) == Decimal("0")
+
+    def test_fail_closed_category_only_covers_generic_lane_types(self) -> None:
+        # Every type in the fail-closed category must be one the generic
+        # engine lane actually simulates — otherwise the run dies with
+        # UnsupportedIntentError upstream and the promised rejected-trade
+        # blotter record can never be built (BRIDGE is the excluded case:
+        # refused wholesale for ANY amount, not just "all").
+        from almanak.framework.backtesting.pnl._engine_helpers import GENERIC_SIMULATED_INTENT_TYPES
+        from almanak.framework.backtesting.pnl.intent_extraction import WALLET_BALANCE_ALL_INTENT_TYPES
+
+        assert WALLET_BALANCE_ALL_INTENT_TYPES <= GENERIC_SIMULATED_INTENT_TYPES
+        assert IntentType.BRIDGE not in WALLET_BALANCE_ALL_INTENT_TYPES
+
+    def test_withdraw_all_is_not_sized_from_wallet_balance(self) -> None:
+        # WITHDRAW "all" is a PROTOCOL_SUPPLY resolution in live execution;
+        # wallet holdings are the wrong category, so the resolver must not bite.
+        withdraw = SimpleNamespace(intent_type=IntentType.WITHDRAW, token="WETH", amount="all")
+        amount_usd = get_intent_amount_usd(withdraw, _market_state())
+        assert amount_usd == Decimal("0")
+
+    def test_explicit_amount_still_wins_over_resolver(self) -> None:
+        intent = SimpleNamespace(intent_type=IntentType.SWAP, from_token="WETH", to_token="USDC", amount="1.5")
+        amount_usd = get_intent_amount_usd(intent, _market_state())
+        assert amount_usd == Decimal("3000")

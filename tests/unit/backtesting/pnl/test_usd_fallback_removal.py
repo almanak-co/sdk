@@ -465,3 +465,238 @@ class TestBorrowAmountUsdExtraction:
         intent = MockBorrowIntent(borrow_token=None)
         with pytest.raises(ValueError, match="no borrow_token"):
             backtester._get_intent_amount_usd(intent, market_state, strict_reproducibility=True)
+
+
+class TestAmountAllFailsClosed:
+    """amount="all" is a live-execution sentinel with no backtest sizing lane.
+
+    Pending ALM-2943 typed sizing, the engine rejects such intents with a
+    machine-visible reason instead of trading a silent $0 or re-pricing
+    dollars at the token's market price.
+    """
+
+    @staticmethod
+    def _config():
+        from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+
+        return PnLBacktestConfig(
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            end_time=datetime(2024, 1, 31, tzinfo=UTC),
+        )
+
+    def test_swap_all_rejected_with_unsupported_reason(self, backtester: PnLBacktester, market_state: MarketState):
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("500"))
+        intent = SimpleNamespace(intent_type=IntentType.SWAP, from_token="USDC", to_token="WETH", amount="all")
+
+        details = backtester._generic_intent_details(intent, portfolio, market_state, self._config())
+
+        assert details.close_resolution.failure_reason == UNSUPPORTED_ALL_SIZING_REASON
+        assert details.amount_usd == Decimal("0")
+
+    def test_swap_all_rejected_off_par_regardless_of_price(self, backtester: PnLBacktester):
+        """Rejection must not depend on the stable's market price.
+
+        Sizing "all" from an aggregate USD figure re-prices dollars at the
+        token's market price and mints/burns value whenever a stable trades
+        off $1 -- the rejection closes that lane entirely.
+        """
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        for price in ("0.90", "1.10"):
+            state = MarketState(
+                timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+                prices={"USDC": Decimal(price), "WETH": Decimal("3000")},
+                chain="arbitrum",
+                block_number=100000,
+            )
+            portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
+            portfolio.tokens["USDC"] = Decimal("10")
+            intent = SimpleNamespace(intent_type=IntentType.SWAP, from_token="USDC", to_token="WETH", amount="all")
+
+            details = backtester._generic_intent_details(intent, portfolio, state, self._config())
+
+            assert details.close_resolution.failure_reason == UNSUPPORTED_ALL_SIZING_REASON, price
+            assert details.amount_usd == Decimal("0"), price
+
+    def test_borrow_bundled_collateral_all_rejected(self, backtester: PnLBacktester, market_state: MarketState):
+        """The general gate covers collateral_amount too: a Fluid-style atomic
+        bundled-collateral borrow carrying the "all" sentinel must reject —
+        executing it records the debt while the chained collateral is neither
+        locked nor represented."""
+        from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+        from almanak.framework.intents.lending_intents import BorrowIntent
+
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100000"))
+        intent = BorrowIntent(
+            protocol="fluid_vault",
+            borrow_token="USDC",
+            borrow_amount=Decimal("500"),
+            collateral_token="WETH",
+            collateral_amount="all",
+            chain="arbitrum",
+            market_id="WETH/USDC",
+        )
+
+        details = backtester._generic_intent_details(intent, portfolio, market_state, self._config())
+
+        assert details.close_resolution.failure_reason == UNSUPPORTED_ALL_SIZING_REASON
+
+    def test_withdraw_all_close_sentinel_is_not_gated(self, backtester: PnLBacktester, market_state: MarketState):
+        """Close-shaped "all" is the close-in-full sentinel — never rejected here."""
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.intent_extraction import (
+            UNSUPPORTED_ALL_SIZING_REASON,
+            intent_has_unresolved_all_sizing,
+        )
+
+        withdraw = SimpleNamespace(intent_type=IntentType.WITHDRAW, token="WETH", amount="all")
+        assert intent_has_unresolved_all_sizing(withdraw, IntentType.WITHDRAW) is False
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        details = backtester._generic_intent_details(
+            withdraw, SimulatedPortfolio(initial_capital_usd=Decimal("100")), market_state, self._config()
+        )
+        assert details.close_resolution.failure_reason != UNSUPPORTED_ALL_SIZING_REASON
+
+    def test_strict_vault_redeem_all_rejects_before_extraction(self, backtester: PnLBacktester):
+        """The gate decides BEFORE USD extraction: a strict redeem-all whose
+        tokens are unpriceable must produce the machine-readable rejection,
+        never an oracle-dependent 'no USD amount' crash."""
+        from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        class VaultRedeemIntent:
+            shares = "all"
+            vault = "0x" + "a" * 40
+            protocol = "yearn"
+
+        strict = self._config()
+        strict.strict_reproducibility = True
+        market = MarketState(
+            timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+            prices={},  # nothing priceable — extraction would raise in strict mode
+            chain="arbitrum",
+            block_number=100000,
+        )
+
+        details = backtester._generic_intent_details(
+            VaultRedeemIntent(), SimulatedPortfolio(initial_capital_usd=Decimal("1000")), market, strict
+        )
+
+        assert details.close_resolution.failure_reason == UNSUPPORTED_ALL_SIZING_REASON
+
+    @pytest.mark.asyncio
+    async def test_ingress_gate_preempts_adapters(self, backtester: PnLBacktester, market_state: MarketState):
+        """Rejection semantics must not depend on portfolio state: the lane
+        ingress gate decides before adapter dispatch, so an unhealthy
+        portfolio cannot swap the sizing rejection for an adapter-specific
+        reason."""
+        from datetime import timedelta
+
+        from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+        from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+        from almanak.framework.intents.lending_intents import BorrowIntent
+
+        intent = BorrowIntent(
+            protocol="fluid_vault",
+            borrow_token="USDC",
+            borrow_amount=Decimal("500"),
+            collateral_token="WETH",
+            collateral_amount="all",
+            chain="arbitrum",
+            market_id="WETH/USDC",
+        )
+        config = PnLBacktestConfig(
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            end_time=datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=1),
+        )
+
+        for capital in (Decimal("0"), Decimal("100000")):  # unhealthy AND healthy
+            portfolio = SimulatedPortfolio(initial_capital_usd=capital)
+            trade = await backtester._execute_intent(
+                intent=intent,
+                portfolio=portfolio,
+                market_state=market_state,
+                timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+                config=config,
+            )
+            assert trade.success is False, capital
+            assert trade.metadata.get("failure_reason") == UNSUPPORTED_ALL_SIZING_REASON, capital
+            assert portfolio.positions == [], capital
+
+    @pytest.mark.asyncio
+    async def test_rejection_is_terminal_before_any_model_runs(
+        self, backtester: PnLBacktester, market_state: MarketState
+    ):
+        """The reviewer's round-7 probe: a price-dialing fee model must never
+        run for a gated intent — the serialized rejection is the outcome, not
+        a run-killing KeyError, and the rejected fill charges nothing."""
+        from datetime import timedelta
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+        from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        class PriceDialingFeeModel:
+            def calculate_fee(self, *, intent_type, amount_usd, market_state, protocol):
+                return amount_usd * market_state.prices["MISSING_TOKEN"]  # KeyError if ever run
+
+        backtester.fee_models = {"default": PriceDialingFeeModel()}
+        intent = SimpleNamespace(intent_type=IntentType.SWAP, from_token="USDC", to_token="WETH", amount="all")
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("500"))
+        config = PnLBacktestConfig(
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            end_time=datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=1),
+        )
+
+        trade = await backtester._execute_intent(
+            intent=intent,
+            portfolio=portfolio,
+            market_state=market_state,
+            timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+            config=config,
+        )
+
+        assert trade.success is False
+        assert trade.metadata.get("failure_reason") == UNSUPPORTED_ALL_SIZING_REASON
+        assert trade.fee_usd == Decimal("0")
+        assert trade.slippage_usd == Decimal("0")
+
+    def test_supply_all_position_delta_uses_resolved_notional(
+        self, backtester: PnLBacktester, market_state: MarketState
+    ):
+        """The delta builder must consume the fill's resolved notional, not re-extract."""
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.models import IntentType
+
+        intent = SimpleNamespace(intent_type=IntentType.SUPPLY, token="USDC", amount="all")
+        position = backtester._create_position_delta(
+            intent=intent,
+            intent_type=IntentType.SUPPLY,
+            protocol="aave_v3",
+            tokens=["USDC"],
+            executed_price=Decimal("1"),
+            timestamp=market_state.timestamp,
+            market_state=market_state,
+            amount_usd=Decimal("500"),
+        )
+
+        assert position is not None
+        assert position.amounts == {"USDC": Decimal("500")}

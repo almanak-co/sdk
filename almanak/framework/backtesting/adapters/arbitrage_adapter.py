@@ -501,6 +501,29 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
 
         token_in = intent.from_token
         token_out = intent.to_token
+        if intent.amount == "all" and getattr(intent, "amount_usd", None) is None:
+            # No backtest sizing lane for the "all" sentinel (ALM-2943): fail
+            # closed BEFORE any price/route lookup — strict mode must not
+            # raise over data a rejected intent does not need.
+            from almanak.framework.backtesting.models import IntentType
+            from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
+            from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
+
+            return SimulatedFill(
+                timestamp=market_state.timestamp,
+                intent_type=IntentType.SWAP,
+                protocol=intent.protocol or "arbitrage",
+                tokens=[token_in, token_out],
+                executed_price=Decimal("0"),
+                amount_usd=Decimal("0"),
+                fee_usd=Decimal("0"),
+                slippage_usd=Decimal("0"),
+                gas_cost_usd=Decimal("0"),
+                tokens_in={},
+                tokens_out={},
+                success=False,
+                metadata={"failure_reason": UNSUPPORTED_ALL_SIZING_REASON},
+            )
         amount_usd = self._swap_amount_usd(intent, portfolio, market_state)
         price_in = self._swap_price(token_in, market_state, intent.protocol)
         price_out = self._swap_price(token_out, market_state, intent.protocol)
@@ -571,17 +594,14 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
     ) -> Decimal:
         if getattr(intent, "amount_usd", None) is not None:
             return Decimal(str(intent.amount_usd))
-        token_amount = self._swap_token_amount(intent, portfolio)
-        token_price = self._swap_price(intent.from_token, market_state, intent.protocol)
-        return token_amount * token_price
-
-    @staticmethod
-    def _swap_token_amount(intent: "SwapIntent", portfolio: "SimulatedPortfolio") -> Decimal:
         if intent.amount == "all":
-            return portfolio.get_token_balance(intent.from_token)
+            # Rejected upstream (see execute_intent) — deterministic zero,
+            # never a price lookup.
+            return Decimal("0")
         if intent.amount is None:
             raise ValueError("SwapIntent requires amount when amount_usd is not set")
-        return Decimal(str(intent.amount))
+        token_amount = Decimal(str(intent.amount))
+        return token_amount * self._swap_price(intent.from_token, market_state, intent.protocol)
 
     def _swap_price(
         self,

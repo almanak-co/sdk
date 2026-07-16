@@ -611,6 +611,60 @@ def _direct_usd_amount(intent: Any) -> Decimal | None:
     return None
 
 
+# Intent types whose amount="all" resolves against the WALLET balance in live
+# execution (amount_resolver._INTENT_TYPE_TO_CATEGORY) AND that the generic
+# engine lane actually simulates. The backtest engine does not size this
+# sentinel — typed sizing that survives fill construction is ALM-2943's
+# ResolvedIntent — so these intents FAIL CLOSED with an explicit unsupported
+# reason instead of a silent $0. WITHDRAW/REPAY are excluded: their
+# amountless shape is the close-in-full sentinel, sized by position-close
+# resolution. BRIDGE is deliberately absent: it is outside
+# GENERIC_SIMULATED_INTENT_TYPES, so every BRIDGE intent (any amount) is
+# refused wholesale upstream with UnsupportedIntentError before this
+# rejection lane could build a blotter trade.
+WALLET_BALANCE_ALL_INTENT_TYPES = frozenset({IntentType.SWAP, IntentType.SUPPLY, IntentType.VAULT_DEPOSIT})
+
+UNSUPPORTED_ALL_SIZING_REASON = (
+    'unsupported: amount="all" sizing is not yet modeled by the backtest engine — pass an explicit amount'
+)
+
+# Intent types whose "no amount" shape means "close in full" — sized downstream
+# by position-close resolution, never by the generic scan (ALM-2936).
+_CLOSE_SHAPED_INTENT_TYPES = frozenset(
+    {IntentType.PERP_CLOSE, IntentType.WITHDRAW, IntentType.REPAY, IntentType.LP_CLOSE}
+)
+
+
+def intent_amount_is_all(intent: Any) -> bool:
+    """True when any generic amount attribute carries the ``"all"`` sentinel."""
+    return any(str(getattr(intent, attr, None) or "").lower() == "all" for attr in _GENERIC_AMOUNT_ATTRIBUTES)
+
+
+# Every sizing attribute that can carry a chained/wallet "all" sentinel.
+# ``collateral_amount`` rides OUTSIDE the generic amount scan: PerpOpenIntent
+# uses it for margin sizing and BorrowIntent for atomic bundled-collateral
+# shapes (Fluid vault operate()), so a gate over the generic attributes alone
+# lets those smuggle the sentinel into lanes that cannot resolve it.
+_CHAINED_SIZING_ATTRIBUTES = (*_GENERIC_AMOUNT_ATTRIBUTES, "collateral_amount")
+
+
+def intent_has_unresolved_all_sizing(intent: Any, intent_type: IntentType) -> bool:
+    """True when ``intent`` carries an "all" sizing sentinel the generic lane
+    cannot resolve — the engine fails such intents closed (ALM-2943 owns the
+    typed sizing that would make them executable).
+
+    Close-shaped intents are excluded: their "all"/None IS the close-in-full
+    sentinel, sized deterministically by position-close resolution. This is
+    deliberately a GENERAL gate over every known sizing attribute rather than
+    per-intent-type attribute patches: each patched attribute so far (generic
+    amounts, then perp collateral, then borrow collateral) left the next one
+    executable.
+    """
+    if intent_type in _CLOSE_SHAPED_INTENT_TYPES:
+        return False
+    return any(str(getattr(intent, attr, None) or "").lower() == "all" for attr in _CHAINED_SIZING_ATTRIBUTES)
+
+
 def _generic_amount_and_token(intent: Any) -> tuple[Decimal | None, str | None]:
     amount: Decimal | None = None
     token: str | None = None
@@ -734,6 +788,17 @@ def get_intent_amount_usd(
         return lp_amount_usd
 
     amount, token = _generic_amount_and_token(intent)
+    if amount is None and intent_amount_is_all(intent) and get_intent_type(intent) in WALLET_BALANCE_ALL_INTENT_TYPES:
+        # The engine rejects these upstream (UNSUPPORTED_ALL_SIZING_REASON);
+        # this zero is the deterministic placeholder for that rejection —
+        # no zero-fallback warning, no price lookup.
+        return Decimal("0")
+    if amount is None and get_intent_type(intent) in _CLOSE_SHAPED_INTENT_TYPES:
+        # Close-shaped intents legitimately omit an amount (= close in full):
+        # position-close resolution sizes them deterministically from the
+        # matched position, so the zero here is expected in strict mode too —
+        # no zero-fallback warning, no fallback tracking.
+        return Decimal("0")
     return _generic_amount_usd(amount, token, market_state, strict_reproducibility, track_fallback, token_addresses)
 
 

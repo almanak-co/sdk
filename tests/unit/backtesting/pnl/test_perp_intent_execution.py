@@ -31,7 +31,6 @@ Conservation of collateral in ``apply_fill`` is covered separately
 (PR #2744 / test_perp_conservation.py); these tests assert the values
 *reaching* that machinery, not cash movement.
 """
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -43,8 +42,6 @@ from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
-
-
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktester,
@@ -52,6 +49,7 @@ from almanak.framework.backtesting.pnl.engine import (
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 from almanak.framework.backtesting.pnl.position_models import PositionType
 from almanak.framework.intents.perp_intents import PerpCloseIntent, PerpOpenIntent
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 ETH_PRICE = Decimal("3000")
 T0 = datetime(2024, 1, 1, tzinfo=UTC)
@@ -292,18 +290,22 @@ class TestPerpOpenExecution:
         assert position.leverage == Decimal("2")
 
     @pytest.mark.asyncio
-    async def test_open_collateral_all_falls_back_to_size_over_leverage(self):
-        """Chained 'all' collateral cannot be resolved in the generic lane;
-        size_usd / leverage is the deterministic fallback."""
+    async def test_open_collateral_all_fails_closed(self):
+        """collateral_amount='all' has no backtest sizing lane: the generic
+        lane must reject it exactly like the perp adapter does — re-sizing
+        it as size_usd / leverage opens a position the strategy never
+        collateralized that way."""
+        from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
+
         backtester = make_backtester()
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100000"))
         intent = make_open_intent(collateral_amount="all")
 
-        await execute(backtester, intent, portfolio)
+        trade = await execute(backtester, intent, portfolio)
 
-        position = portfolio.positions[0]
-        assert position.collateral_usd == Decimal("1000")  # 5000 / 5
-        assert position.notional_usd == Decimal("5000")
+        assert portfolio.positions == []
+        assert trade.success is False
+        assert trade.metadata.get("failure_reason") == UNSUPPORTED_ALL_SIZING_REASON
 
     @pytest.mark.asyncio
     async def test_open_fee_charged_on_notional(self):

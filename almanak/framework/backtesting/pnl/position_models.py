@@ -736,6 +736,10 @@ class SimulatedFill:
             gas_cost_usd=self.gas_cost_usd,
             pnl_usd=pnl_usd,
             success=self.success,
+            # Surface the portfolio's rejection reason on the record itself —
+            # result.json serializes TradeRecord.error as rejection_reason, and
+            # adapter-lane rejections would otherwise carry it in metadata only.
+            error=None if self.success else (self.metadata or {}).get("failure_reason"),
             amount_usd=self.amount_usd,
             protocol=self.protocol,
             tokens=[token_ref_display(token) for token in self.tokens],

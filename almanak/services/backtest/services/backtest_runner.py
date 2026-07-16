@@ -697,6 +697,11 @@ def serialize_result(result: BacktestResult) -> dict[str, Any]:
                 # None for an opening / inventory-building trade (no realized
                 # PnL yet, VIB-5083): serialize JSON null, not the str "None".
                 "pnl_usd": str(t.pnl_usd) if t.pnl_usd is not None else None,
+                # The trades array records rejected intents alongside fills
+                # (result_summary.total_trades counts fills only); without a
+                # status the UI blotter renders rejections as $0 trades (ALM-2936).
+                "status": "filled" if t.success else "rejected",
+                "rejection_reason": t.error if not t.success and t.error else None,
             }
             for t in (result.trades or [])
         ],

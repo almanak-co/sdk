@@ -658,6 +658,42 @@ class TestSerializeResult:
         assert serialized[0]["pnl_usd"] is None  # opening trade -> JSON null, not "None"
         assert serialized[1]["pnl_usd"] == "1250"  # closing trade -> realized gain
 
+    def test_rejected_trades_carry_status_and_reason(self):
+        """Rejected intents serialize as status=rejected with the portfolio's reason (ALM-2936)."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.backtesting.models import IntentType, TradeRecord
+
+        filled = TradeRecord(
+            timestamp=datetime(2025, 11, 1, 1, tzinfo=UTC),
+            intent_type=IntentType.SWAP,
+            executed_price=Decimal("2000"),
+            fee_usd=Decimal("1"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            pnl_usd=None,
+            success=True,
+            amount_usd=Decimal("5000"),
+        )
+        rejected = TradeRecord(
+            timestamp=datetime(2025, 11, 1, 2, tzinfo=UTC),
+            intent_type=IntentType.SWAP,
+            executed_price=Decimal("0"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            pnl_usd=None,
+            success=False,
+            amount_usd=Decimal("0"),
+            error="insufficient cash for fill: required 1, cash-like 0",
+        )
+
+        serialized = serialize_result(self._result([filled, rejected]))["trades"]
+        assert serialized[0]["status"] == "filled"
+        assert serialized[0]["rejection_reason"] is None
+        assert serialized[1]["status"] == "rejected"
+        assert serialized[1]["rejection_reason"].startswith("insufficient cash for fill")
+
     def test_usd_result_emits_no_numeraire_or_price_keys(self):
         """A fiat_usd result payload stays free of numeraire / price-series keys."""
         out = serialize_result(self._result([]))

@@ -375,9 +375,9 @@ class TestCumulativeSlippageModels:
         adapter = ArbitrageBacktestAdapter(config)
 
         hops = [
-            ("USDC", "WETH", Decimal("0.01")),   # 1%
-            ("WETH", "ARB", Decimal("0.01")),    # 1%
-            ("ARB", "USDC", Decimal("0.01")),    # 1%
+            ("USDC", "WETH", Decimal("0.01")),  # 1%
+            ("WETH", "ARB", Decimal("0.01")),  # 1%
+            ("ARB", "USDC", Decimal("0.01")),  # 1%
         ]
         result = adapter.calculate_cumulative_slippage(
             hops=hops,
@@ -423,9 +423,9 @@ class TestCumulativeSlippageModels:
         adapter = ArbitrageBacktestAdapter(config)
 
         hops = [
-            ("USDC", "WETH", Decimal("0.01")),   # 1%
-            ("WETH", "ARB", Decimal("0.01")),    # 1%
-            ("ARB", "USDC", Decimal("0.01")),    # 1%
+            ("USDC", "WETH", Decimal("0.01")),  # 1%
+            ("WETH", "ARB", Decimal("0.01")),  # 1%
+            ("ARB", "USDC", Decimal("0.01")),  # 1%
         ]
         result = adapter.calculate_cumulative_slippage(
             hops=hops,
@@ -454,9 +454,9 @@ class TestCumulativeSlippageModels:
 
         # Test with varying slippages
         hops = [
-            ("USDC", "WETH", Decimal("0.02")),   # 2%
-            ("WETH", "ARB", Decimal("0.015")),   # 1.5%
-            ("ARB", "USDC", Decimal("0.01")),    # 1%
+            ("USDC", "WETH", Decimal("0.02")),  # 2%
+            ("WETH", "ARB", Decimal("0.015")),  # 1.5%
+            ("ARB", "USDC", Decimal("0.01")),  # 1%
         ]
 
         result_mult = adapter_mult.calculate_cumulative_slippage(
@@ -484,8 +484,8 @@ class TestCumulativeSlippageModels:
 
         hops = [
             ("USDC", "WETH", Decimal("0.005")),  # 0.5% - stablecoin swap
-            ("WETH", "ARB", Decimal("0.02")),    # 2% - more volatile pair
-            ("ARB", "USDC", Decimal("0.008")),   # 0.8%
+            ("WETH", "ARB", Decimal("0.02")),  # 2% - more volatile pair
+            ("ARB", "USDC", Decimal("0.008")),  # 0.8%
         ]
         result = adapter.calculate_cumulative_slippage(
             hops=hops,
@@ -608,14 +608,14 @@ class TestMultiHopSwapIntegration:
             strategy_type="arbitrage",
             cumulative_slippage_model="multiplicative",
             base_slippage_per_hop_pct=Decimal("0.003"),  # 0.3%
-            base_fee_per_hop_pct=Decimal("0.003"),       # 0.3%
+            base_fee_per_hop_pct=Decimal("0.003"),  # 0.3%
         )
         adapter = ArbitrageBacktestAdapter(config)
 
         hops = [
             ("USDC", "WETH", Decimal("0.003")),  # 0.3%
-            ("WETH", "ARB", Decimal("0.005")),   # 0.5%
-            ("ARB", "USDC", Decimal("0.004")),   # 0.4%
+            ("WETH", "ARB", Decimal("0.005")),  # 0.5%
+            ("ARB", "USDC", Decimal("0.004")),  # 0.4%
         ]
         result = adapter.calculate_cumulative_slippage(
             hops=hops,
@@ -683,9 +683,9 @@ class TestMultiHopSwapIntegration:
         adapter = ArbitrageBacktestAdapter(config)
 
         hops = [
-            ("USDC", "RARE_TOKEN", Decimal("0.05")),   # 5% slippage (illiquid)
-            ("RARE_TOKEN", "WETH", Decimal("0.05")),   # 5% slippage
-            ("WETH", "USDC", Decimal("0.003")),        # 0.3% (liquid)
+            ("USDC", "RARE_TOKEN", Decimal("0.05")),  # 5% slippage (illiquid)
+            ("RARE_TOKEN", "WETH", Decimal("0.05")),  # 5% slippage
+            ("WETH", "USDC", Decimal("0.003")),  # 0.3% (liquid)
         ]
         result = adapter.calculate_cumulative_slippage(
             hops=hops,
@@ -700,7 +700,7 @@ class TestMultiHopSwapIntegration:
 
         # Verify high total costs
         assert result.total_slippage_pct > Decimal("0.09")  # > 9%
-        assert result.profit_loss_pct < Decimal("-0.10")    # > 10% loss
+        assert result.profit_loss_pct < Decimal("-0.10")  # > 10% loss
 
     def test_flash_loan_arbitrage_path(self) -> None:
         """Test flash loan style arbitrage (large amount, tight margins).
@@ -712,7 +712,7 @@ class TestMultiHopSwapIntegration:
             strategy_type="arbitrage",
             cumulative_slippage_model="multiplicative",
             base_slippage_per_hop_pct=Decimal("0.0001"),  # 0.01% (very liquid)
-            base_fee_per_hop_pct=Decimal("0.0003"),       # 0.03%
+            base_fee_per_hop_pct=Decimal("0.0003"),  # 0.03%
             execution_delay_seconds=0.1,  # Fast execution
         )
         adapter = ArbitrageBacktestAdapter(config)
@@ -1266,9 +1266,7 @@ class TestExecuteIntentBranches:
     def test_explicit_route_metadata_executes_multi_hop(self) -> None:
         """Route metadata drives multi-hop execution with per-hop slippage."""
         adapter = self._adapter()
-        market_state = MockMarketState(
-            prices={"FOO": Decimal("1"), "MID": Decimal("1"), "BAR": Decimal("1")}
-        )
+        market_state = MockMarketState(prices={"FOO": Decimal("1"), "MID": Decimal("1"), "BAR": Decimal("1")})
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
         intent = RoutedSwapIntent(
             from_token="FOO",
@@ -1315,3 +1313,118 @@ class TestExecuteIntentBranches:
         assert fill.tokens_out == {}
         assert fill.metadata["failure_reason"] == "max_hops_exceeded"
         assert fill.metadata["max_hops"] == 2
+
+
+class TestSwapAllFailsClosed:
+    """amount="all" has no backtest sizing lane (ALM-2943): fail closed.
+
+    execute_intent must reject the intent BEFORE any price/route lookup —
+    a rejected fill with a machine-visible reason, never a raise and never
+    a silent $0 trade.
+    """
+
+    @staticmethod
+    def _adapter(strict: bool = False):
+        from almanak.framework.backtesting.adapters.arbitrage_adapter import (
+            ArbitrageBacktestAdapter,
+            ArbitrageBacktestConfig,
+        )
+
+        if strict:
+            return ArbitrageBacktestAdapter(
+                ArbitrageBacktestConfig(strategy_type="arbitrage", strict_reproducibility=True)
+            )
+        return ArbitrageBacktestAdapter()
+
+    @staticmethod
+    def _market(prices: dict[str, Decimal]):
+        from types import SimpleNamespace
+
+        def get_price(token):
+            return prices[token]
+
+        return SimpleNamespace(prices=prices, get_price=get_price, timestamp=None, chain="ethereum")
+
+    def test_swap_all_rejected_not_filled(self) -> None:
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
+        portfolio.tokens["USDC"] = Decimal("10")
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount="all")
+        market = self._market({"USDC": Decimal("1"), "WETH": Decimal("2000")})
+
+        fill = self._adapter().execute_intent(intent, portfolio, market)
+
+        assert fill is not None
+        assert fill.success is False
+        assert 'amount="all"' in fill.metadata["failure_reason"]
+        assert fill.amount_usd == Decimal("0")
+
+    def test_swap_all_rejected_off_par_regardless_of_price(self) -> None:
+        """No price-dependent sizing: rejection is identical at any stable price."""
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        for price in ("0.90", "1.10"):
+            portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
+            portfolio.tokens["USDC"] = Decimal("10")
+            intent = SwapIntent(from_token="USDC", to_token="WETH", amount="all")
+            market = self._market({"USDC": Decimal(price), "WETH": Decimal("2000")})
+
+            fill = self._adapter().execute_intent(intent, portfolio, market)
+
+            assert fill is not None and fill.success is False, price
+            assert 'amount="all"' in fill.metadata["failure_reason"], price
+
+    def test_swap_all_strict_empty_wallet_rejects_without_raising(self) -> None:
+        # Strict mode + no price data must reject cleanly, never raise a
+        # HistoricalDataUnavailableError over data a rejected intent does
+        # not need.
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+
+        def get_price(token):
+            raise KeyError(token)
+
+        market = SimpleNamespace(prices={}, get_price=get_price, timestamp=None, chain="ethereum")
+        intent = SwapIntent(from_token="XYZ", to_token="WETH", amount="all")
+
+        fill = self._adapter(strict=True).execute_intent(intent, portfolio, market)
+
+        assert fill is not None
+        assert fill.success is False
+        assert 'amount="all"' in fill.metadata["failure_reason"]
+
+    def test_swap_all_with_explicit_usd_still_executes(self) -> None:
+        """amount_usd sizing is unaffected — only the bare sentinel rejects."""
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount_usd=Decimal("50"))
+        market = self._market({"USDC": Decimal("1"), "WETH": Decimal("2000")})
+
+        fill = self._adapter().execute_intent(intent, portfolio, market)
+
+        assert fill is not None
+        assert fill.success is True
+        assert fill.amount_usd == Decimal("50")
+
+    def test_swap_amount_usd_all_is_deterministic_zero(self) -> None:
+        # The sizing helper never prices "all" — rejected upstream, the
+        # placeholder must be a deterministic $0 with no price lookup.
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("500"))
+        portfolio.tokens["USDC"] = Decimal("40")
+        intent = SimpleNamespace(amount="all", amount_usd=None, from_token="USDC", protocol="uniswap_v3")
+
+        def get_price(token):
+            raise AssertionError("amount='all' sizing must not look up prices")
+
+        market = SimpleNamespace(prices={}, get_price=get_price, timestamp=None, chain="ethereum")
+
+        assert self._adapter()._swap_amount_usd(intent, portfolio, market) == Decimal("0")
