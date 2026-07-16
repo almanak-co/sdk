@@ -461,3 +461,335 @@ def test_pool_data_provider_network_error_still_fails_open():
         asset_symbol="WETH",
         protocol="aave_v3",
     )
+
+
+# =============================================================================
+# VIB-5864: absent reserve must not be reported as a governance pause
+# =============================================================================
+#
+# Aave's PoolDataProvider reads an empty mapping slot for an unlisted asset and
+# returns a SUCCESSFUL, well-formed, ALL-ZERO tuple. The guards read
+# isActive=False off it and told users to HOLD until governance reactivated a
+# reserve that will never exist (ALM-2911 ETH/base, ALM-2775 Case 2
+# POL/polygon). Measured live: absent -> decimals=0 + all words zero; a
+# genuinely frozen reserve (CRV/polygon) -> decimals=18, isActive=1, isFrozen=1.
+
+
+def _absent_reserve_hex() -> str:
+    """The all-zero tuple a PoolDataProvider returns for an unlisted asset."""
+    return "0x" + _word(0) * 10
+
+
+def _all_reserves_hex(tokens: list[tuple[str, str]]) -> str:
+    """ABI-encode getAllReservesTokens() -> TokenData[] (string symbol, address)."""
+    from eth_abi import encode as _abi_encode
+
+    return "0x" + _abi_encode(["(string,address)[]"], [tokens]).hex()
+
+
+def _routed_compiler(
+    *,
+    config_hex: str,
+    reserves: list[tuple[str, str]] | None,
+    chain: str = "base",
+) -> MagicMock:
+    """Compiler whose gateway answers per-selector.
+
+    ``reserves=None`` simulates getAllReservesTokens() being unavailable
+    (the enumeration reverts), which must NOT re-mask the absent reserve.
+    """
+    compiler = _mock_compiler(gateway_response=config_hex, chain=chain)
+
+    def _call(request, timeout=None):  # noqa: ARG001
+        params = json.loads(request.params)
+        data = params[0]["data"]
+        resp = MagicMock()
+        resp.error = ""
+        if data.startswith(cl._AAVE_GET_ALL_RESERVES_TOKENS_SELECTOR):
+            if reserves is None:
+                resp.success = False
+                resp.result = ""
+                return resp
+            resp.success = True
+            resp.result = json.dumps(_all_reserves_hex(reserves))
+            return resp
+        resp.success = True
+        resp.result = json.dumps(config_hex)
+        return resp
+
+    compiler._gateway_client.rpc.Call.side_effect = _call
+    return compiler
+
+
+# Base Aave V3 lists WETH but has no reserve for native ETH (ALM-2911).
+BASE_WETH = "0x4200000000000000000000000000000000000006"
+ETH_SENTINEL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+BASE_RESERVES = [("WETH", BASE_WETH), ("USDC", "0x" + "11" * 20)]
+
+
+def test_decoder_marks_all_zero_tuple_as_absent():
+    """The pure decoder must expose word 0 and flag the empty-slot read."""
+    cfg = cl.decode_reserve_configuration_data(_absent_reserve_hex())
+    assert cfg is not None
+    assert cfg.decimals == 0
+    assert cfg.exists is False
+
+
+def test_decoder_marks_real_frozen_reserve_as_existing():
+    """CRV/polygon control: a genuinely frozen reserve carries decimals=18."""
+    cfg = cl.decode_reserve_configuration_data(_encode_reserve_config(decimals=18, is_frozen=True))
+    assert cfg is not None
+    assert cfg.decimals == 18
+    assert cfg.exists is True
+
+
+def test_decoder_marks_real_deactivated_reserve_as_existing():
+    """A deactivated-but-listed reserve must stay on the governance-pause path."""
+    cfg = cl.decode_reserve_configuration_data(_encode_reserve_config(decimals=18, is_active=False))
+    assert cfg is not None
+    assert cfg.exists is True
+
+
+def test_absent_reserve_reports_no_reserve_not_paused():
+    """ALM-2911 repro: borrowing ETH on Base must not report a governance pause."""
+    compiler = _routed_compiler(config_hex=_absent_reserve_hex(), reserves=BASE_RESERVES)
+
+    reason = cl._check_lending_reserve_active(compiler, ETH_SENTINEL, "ETH", "aave_v3")
+
+    assert reason is not None
+    # The bug: the user was told to wait for governance.
+    assert "is not active" not in reason
+    assert "until governance reactivates" not in reason
+    # The fix: name the real problem and the resolved address.
+    assert "No aave_v3 reserve exists for ETH on base" in reason
+    assert ETH_SENTINEL in reason
+    assert "will not resolve by waiting" in reason
+
+
+def test_absent_reserve_suggests_wrapped_token_the_pool_actually_lists():
+    """The wrapped suggestion must be verified against the pool's own universe."""
+    compiler = _routed_compiler(config_hex=_absent_reserve_hex(), reserves=BASE_RESERVES)
+
+    reason = cl._check_lending_reserve_active(compiler, ETH_SENTINEL, "ETH", "aave_v3")
+
+    assert "did you mean WETH?" in reason
+    assert "confirmed against getAllReservesTokens()" in reason
+
+
+def test_absent_reserve_offers_no_suggestion_for_ordinary_unsupported_erc20():
+    """No WFOO reserve exists -> do not invent a suggestion (TRAP 1 control).
+
+    A random unsupported ERC20 hits the identical all-zero path as the native
+    sentinel — which is why a sentinel-address check would have been
+    insufficient — but it has no wrapped equivalent to suggest.
+    """
+    compiler = _routed_compiler(config_hex=_absent_reserve_hex(), reserves=BASE_RESERVES)
+
+    reason = cl._check_lending_reserve_active(compiler, "0x" + "22" * 20, "FOO", "aave_v3")
+
+    assert "No aave_v3 reserve exists for FOO on base" in reason
+    assert "did you mean" not in reason
+
+
+def test_absent_reserve_still_reported_when_enumeration_unavailable():
+    """Enumeration failure must not fall back to the phantom-pause message."""
+    compiler = _routed_compiler(config_hex=_absent_reserve_hex(), reserves=None)
+
+    reason = cl._check_lending_reserve_active(compiler, ETH_SENTINEL, "ETH", "aave_v3")
+
+    assert "No aave_v3 reserve exists for ETH on base" in reason
+    assert "is not active" not in reason
+    assert "getAllReservesTokens() unavailable" in reason
+
+
+def test_enumeration_listing_the_asset_wins_over_all_zero_config():
+    """Contradicting reads -> defer to the definitive enumeration, not absence."""
+    compiler = _routed_compiler(
+        config_hex=_absent_reserve_hex(),
+        reserves=[("ETH", ETH_SENTINEL)],
+    )
+
+    reason = cl._check_lending_reserve_active(compiler, ETH_SENTINEL, "ETH", "aave_v3")
+
+    # Listed but all-zero: report the honest paused verdict, never "no reserve".
+    assert reason is not None
+    assert "No aave_v3 reserve exists" not in reason
+    assert "is not active" in reason
+
+
+def test_deactivated_reserve_still_reports_governance_pause():
+    """Regression guard: the fix must NOT green a real deactivated reserve."""
+    compiler = _routed_compiler(
+        config_hex=_encode_reserve_config(decimals=18, is_active=False),
+        reserves=BASE_RESERVES,
+    )
+
+    reason = cl._check_lending_reserve_active(compiler, BASE_WETH, "WETH", "aave_v3")
+
+    assert "is not active" in reason
+    assert "isActive=False" in reason
+    assert "until governance reactivates" in reason
+    assert "No aave_v3 reserve exists" not in reason
+
+
+def test_absent_reserve_on_borrowable_guard_reports_absence():
+    """The borrowable guard must not claim governance disabled borrowing."""
+    compiler = _routed_compiler(config_hex=_absent_reserve_hex(), reserves=BASE_RESERVES)
+
+    reason = cl._check_lending_reserve_borrowable(compiler, ETH_SENTINEL, "ETH", "aave_v3")
+
+    assert "No aave_v3 reserve exists for ETH on base" in reason
+    assert "is not borrowable" not in reason
+
+
+def test_absent_reserve_on_collateral_guard_reports_absence():
+    """The collateral guard must not claim ltv=0 / not collateral-eligible."""
+    compiler = _routed_compiler(config_hex=_absent_reserve_hex(), reserves=BASE_RESERVES)
+
+    reason = cl._check_aave_v3_collateral_eligibility(compiler, ETH_SENTINEL, "ETH")
+
+    assert "No aave_v3 reserve exists for ETH on base" in reason
+    assert "not collateral-eligible" not in reason
+
+
+def test_borrow_disabled_reserve_still_reports_borrow_disabled():
+    """WMATIC/WPOL control (ALM-2775 Case 1 — explicitly OUT of scope).
+
+    WPOL's reserve genuinely exists, is active, and Aave governance has
+    genuinely disabled borrowing. That path MUST keep failing with its honest
+    message — greening it would fabricate market state.
+    """
+    compiler = _routed_compiler(
+        config_hex=_encode_reserve_config(decimals=18, borrowing_enabled=False),
+        reserves=[("WPOL", BASE_WETH)],
+        chain="polygon",
+    )
+
+    reason = cl._check_lending_reserve_borrowable(compiler, BASE_WETH, "WPOL", "aave_v3")
+
+    assert "is not borrowable" in reason
+    assert "borrowingEnabled=False" in reason
+    assert "No aave_v3 reserve exists" not in reason
+
+
+def test_reverting_data_provider_still_reports_frozen_not_absent():
+    """A reverting/stubbed provider says nothing about listing — stay frozen.
+
+    Guards the synthesised-config default: those paths mean "pool is broken ->
+    treat as frozen", and must not be re-routed into the absent branch.
+    """
+    compiler = MagicMock()
+    compiler.chain = "ethereum"
+    compiler.rpc_timeout = 5.0
+    gateway = MagicMock()
+    gateway.is_connected = True
+    rpc_resp = MagicMock()
+    rpc_resp.success = False
+    rpc_resp.result = ""
+    rpc_resp.error = "execution reverted"
+    gateway.rpc.Call.return_value = rpc_resp
+    compiler._gateway_client = gateway
+
+    config = cl._fetch_reserve_config(
+        compiler, TEST_ASSET_ADDR, "WETH", protocol="aave_v3", pre_flight_label="test"
+    )
+    assert config is not None
+    assert config.exists is True
+    assert config.decimals is None  # unmeasured, NOT a measured zero
+
+    reason = cl._check_lending_reserve_active(compiler, TEST_ASSET_ADDR, "WETH", "aave_v3")
+    assert "is not active" in reason
+    assert "No aave_v3 reserve exists" not in reason
+
+
+# =============================================================================
+# VIB-5864 follow-ups (gemini-code-assist review on PR #3296)
+# =============================================================================
+
+
+def test_absent_non_native_pair_suggests_without_claiming_nativeness():
+    """stETH/wstETH: a real X/WX pair that is NOT native.
+
+    The `W` + symbol match finds a genuinely useful suggestion here (wstETH is
+    a real listed Base reserve), but stETH is not a native token. The message
+    must offer the suggestion WITHOUT claiming nativeness — the nativeness
+    claim is gated on the registry, not on symbol shape.
+    """
+    reserves = [("WETH", BASE_WETH), ("wstETH", "0x" + "33" * 20)]
+    compiler = _routed_compiler(config_hex=_absent_reserve_hex(), reserves=reserves)
+
+    reason = cl._check_lending_reserve_active(compiler, "0x" + "44" * 20, "stETH", "aave_v3")
+
+    assert "No aave_v3 reserve exists for stETH on base" in reason
+    # The suggestion survives — wstETH is a plausible thing to have meant.
+    assert "did you mean wstETH?" in reason
+    # ...but the false nativeness claim must be gone.
+    assert "native gas token" not in reason
+    assert "unwrapped native" not in reason
+
+
+def test_absent_native_asset_still_claims_nativeness():
+    """ETH/base: genuinely native — the native phrasing must survive the gate."""
+    compiler = _routed_compiler(config_hex=_absent_reserve_hex(), reserves=BASE_RESERVES)
+
+    reason = cl._check_lending_reserve_active(compiler, ETH_SENTINEL, "ETH", "aave_v3")
+
+    assert "ETH is base's native gas token" in reason
+    assert "did you mean WETH?" in reason
+
+
+def test_native_detection_is_registry_derived_not_symbol_shaped():
+    """Nativeness comes from the ERC-7528 sentinel OR ChainDescriptor.native."""
+    # Sentinel address alone is sufficient.
+    assert cl._is_native_asset("base", ETH_SENTINEL, "ETH") is True
+    # Descriptor symbol alone is sufficient (polygon -> {"MATIC", "POL"}).
+    assert cl._is_native_asset("polygon", "0x" + "55" * 20, "POL") is True
+    assert cl._is_native_asset("polygon", "0x" + "55" * 20, "MATIC") is True
+    # A real ERC20 with a W-pair partner is NOT native.
+    assert cl._is_native_asset("base", "0x" + "44" * 20, "stETH") is False
+    assert cl._is_native_asset("base", BASE_WETH, "WETH") is False
+
+
+def test_reserve_universe_fetched_once_per_compiler_across_guards():
+    """One compile tripping several guards must issue ONE enumeration."""
+    compiler = _routed_compiler(config_hex=_absent_reserve_hex(), reserves=BASE_RESERVES)
+
+    cl._check_lending_reserve_active(compiler, ETH_SENTINEL, "ETH", "aave_v3")
+    cl._check_lending_reserve_borrowable(compiler, ETH_SENTINEL, "ETH", "aave_v3")
+    cl._check_aave_v3_collateral_eligibility(compiler, ETH_SENTINEL, "ETH")
+
+    enumeration_calls = [
+        c
+        for c in compiler._gateway_client.rpc.Call.call_args_list
+        if json.loads(c.args[0].params)[0]["data"].startswith(cl._AAVE_GET_ALL_RESERVES_TOKENS_SELECTOR)
+    ]
+    assert len(enumeration_calls) == 1, f"expected 1 enumeration, got {len(enumeration_calls)}"
+
+
+def test_failed_reserve_universe_read_is_not_cached():
+    """A transient enumeration failure must NOT poison the compiler.
+
+    Mirrors the sibling reserve caches' contract: a gateway error on iteration
+    N must not permanently disable the check on iteration N+1. Caching the
+    None would be worse than the redundant call it saves.
+    """
+    compiler = _routed_compiler(config_hex=_absent_reserve_hex(), reserves=None)
+
+    # Iteration N — enumeration unavailable, absence inferred from all-zero.
+    first = cl._check_lending_reserve_active(compiler, ETH_SENTINEL, "ETH", "aave_v3")
+    assert "getAllReservesTokens() unavailable" in first
+    assert compiler._lending_reserve_universe_cache == {}, "a failed read must not be cached"
+
+    # Iteration N+1 — enumeration recovers; a fresh compiler must now confirm.
+    recovered = _routed_compiler(config_hex=_absent_reserve_hex(), reserves=BASE_RESERVES)
+    second = cl._check_lending_reserve_active(recovered, ETH_SENTINEL, "ETH", "aave_v3")
+    assert "confirmed against getAllReservesTokens()" in second
+    assert recovered._lending_reserve_universe_cache, "a successful read SHOULD be cached"
+
+
+def test_reserve_universe_cache_is_keyed_per_chain_and_protocol():
+    """The cache must not leak one market's universe into another's."""
+    compiler = _routed_compiler(config_hex=_absent_reserve_hex(), reserves=BASE_RESERVES)
+    cl._check_lending_reserve_active(compiler, ETH_SENTINEL, "ETH", "aave_v3")
+
+    assert ("base", "aave_v3") in compiler._lending_reserve_universe_cache

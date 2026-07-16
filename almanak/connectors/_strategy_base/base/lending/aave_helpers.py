@@ -81,6 +81,8 @@ class _DecodedReserveConfig:
         "borrowing_enabled",
         "is_active",
         "is_frozen",
+        "decimals",
+        "exists",
     )
 
     def __init__(
@@ -92,6 +94,8 @@ class _DecodedReserveConfig:
         is_active: bool,
         is_frozen: bool,
         liquidation_threshold: int = 0,
+        decimals: int | None = None,
+        exists: bool = True,
     ) -> None:
         self.ltv = ltv
         self.liquidation_threshold = liquidation_threshold
@@ -99,6 +103,15 @@ class _DecodedReserveConfig:
         self.borrowing_enabled = borrowing_enabled
         self.is_active = is_active
         self.is_frozen = is_frozen
+        # ``None`` = unmeasured (synthesised configs — revert / empty-payload
+        # paths below never read word 0). ``0`` = measured zero, which on Aave
+        # only ever happens for an asset that has no reserve. Empty != Zero.
+        self.decimals = decimals
+        # False ONLY when the payload proves the reserve is absent (VIB-5864).
+        # Synthesised configs default to True: a reverting or stubbed
+        # PoolDataProvider says nothing about whether the reserve was listed,
+        # and those paths deliberately mean "pool is broken -> treat as frozen".
+        self.exists = exists
 
 
 def decode_reserve_configuration_data(raw_hex: str) -> _DecodedReserveConfig | None:
@@ -115,6 +128,17 @@ def decode_reserve_configuration_data(raw_hex: str) -> _DecodedReserveConfig | N
     6: borrowingEnabled (bool), 7: stableBorrowRateEnabled (bool),
     8: isActive (bool), 9: isFrozen (bool).
 
+    Word 0 (``decimals``) is decoded because it is the ONLY field that
+    discriminates "this reserve does not exist" from "this reserve exists but
+    governance deactivated it" (VIB-5864). Aave's PoolDataProvider reads an
+    *empty mapping slot* for an unlisted asset and returns a successful,
+    well-formed, all-zero tuple — so ``isActive=False`` alone cannot tell the
+    two apart, and the guards used to report an absent reserve as a
+    governance pause the user could wait on forever (ALM-2911, ALM-2775).
+    Measured on live mainnet: an absent asset returns ``decimals=0`` with
+    every other word zero, while a genuinely frozen reserve (CRV on Polygon)
+    returns ``decimals=18, isActive=1, isFrozen=1``.
+
     Returns ``None`` when the payload is shorter than the 640-hex-char tuple
     or a word fails to parse — callers decide how to surface that.
     """
@@ -124,14 +148,39 @@ def decode_reserve_configuration_data(raw_hex: str) -> _DecodedReserveConfig | N
     if len(raw) < 640:
         return None
     try:
+        decimals = int(raw[0:64], 16)  # word 0 — VIB-5864
         ltv = int(raw[64:128], 16)
         liquidation_threshold = int(raw[2 * 64 : 3 * 64], 16)
+        liquidation_bonus = int(raw[3 * 64 : 4 * 64], 16)
+        reserve_factor = int(raw[4 * 64 : 5 * 64], 16)
         usage_as_collateral_enabled = int(raw[5 * 64 : 6 * 64], 16) != 0
         borrowing_enabled = int(raw[6 * 64 : 7 * 64], 16) != 0  # word 6 — VIB-3825
+        stable_borrow_rate_enabled = int(raw[7 * 64 : 8 * 64], 16) != 0
         is_active = int(raw[8 * 64 : 9 * 64], 16) != 0
         is_frozen = int(raw[9 * 64 : 10 * 64], 16) != 0
     except ValueError:
         return None
+
+    # An unlisted asset yields an all-zero tuple — the empty-mapping read.
+    # Require EVERY word to be zero rather than keying off ``decimals == 0``
+    # alone: this is the conservative direction. A reserve that is listed but
+    # somehow reports zero decimals still keeps its real config words, so it
+    # stays on the existing frozen/inactive path instead of being mislabelled
+    # absent. Only a genuinely empty slot reaches ``exists=False``.
+    exists = any(
+        (
+            decimals,
+            ltv,
+            liquidation_threshold,
+            liquidation_bonus,
+            reserve_factor,
+            usage_as_collateral_enabled,
+            borrowing_enabled,
+            stable_borrow_rate_enabled,
+            is_active,
+            is_frozen,
+        )
+    )
 
     return _DecodedReserveConfig(
         ltv=ltv,
@@ -140,6 +189,8 @@ def decode_reserve_configuration_data(raw_hex: str) -> _DecodedReserveConfig | N
         borrowing_enabled=borrowing_enabled,
         is_active=is_active,
         is_frozen=is_frozen,
+        decimals=decimals,
+        exists=exists,
     )
 
 
@@ -350,6 +401,160 @@ def _fetch_reserve_config(
     return decode_reserve_configuration_data(raw)
 
 
+def _is_native_asset(chain: str, asset_address: str, asset_symbol: str) -> bool:
+    """True when ``(address, symbol)`` denotes ``chain``'s native gas coin.
+
+    Both signals are registry-derived, never a symbol-shape heuristic: the
+    ERC-7528 sentinel address, and ``native_symbols_for`` (derived from
+    ``ChainDescriptor.native``, e.g. polygon -> ``{"MATIC", "POL"}``). The
+    union is deliberate — a chain whose native token resolves to a precompile
+    rather than the sentinel is still caught by the descriptor, and vice versa.
+
+    Used ONLY to decide whether the absent-reserve message may claim the asset
+    is native. Guessing that from ``W`` + symbol is what produced the bug this
+    guards against (stETH -> WSTETH: wstETH is a real listed reserve, but
+    stETH is NOT a native token).
+    """
+    from almanak.core.chains._helpers import native_symbols_for
+    from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+    if asset_address.lower() == NATIVE_SENTINEL.lower():
+        return True
+    return asset_symbol.upper() in native_symbols_for(chain)
+
+
+def _fetch_all_reserves_tokens(compiler: Any, protocol: str) -> list[tuple[str, str]] | None:
+    """Enumerate the pool's reserve universe via ``getAllReservesTokens()``.
+
+    Called ONLY from the absent-reserve path in :func:`_absent_reserve_reason`,
+    never on the happy path — so the common case pays no extra RPC. Returns
+    ``(symbol, lowercased_address)`` pairs, or ``None`` when the read or decode
+    could not be performed (caller falls back to the all-zero verdict).
+
+    Cached per ``(chain, protocol)`` on the compiler so one compile that trips
+    several guards on the same absent asset issues a single enumeration.
+
+    Only a SUCCESSFUL fetch is cached. Caching a ``None`` would turn a
+    transient gateway blip into a permanently poisoned reserve universe for
+    the life of the compiler — the same invalidation contract the sibling
+    reserve caches document: a transient error on iteration N must not
+    disable the check on iteration N+1.
+    """
+    cache = getattr(compiler, "_lending_reserve_universe_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        compiler._lending_reserve_universe_cache = cache
+
+    cache_key = (compiler.chain, protocol)
+    if cache_key in cache:
+        return cache[cache_key]
+
+    pool_data_provider = _resolve_pool_data_provider(compiler.chain, protocol)
+    if not pool_data_provider:
+        return None
+    raw = _gateway_eth_call_raw(
+        compiler,
+        pool_data_provider,
+        _AAVE_GET_ALL_RESERVES_TOKENS_SELECTOR,
+        f"{protocol} reserve-universe",
+    )
+    if raw is None:
+        return None
+    tokens = decode_all_reserves_tokens(raw)
+    if tokens is None:
+        # Read succeeded but the payload did not decode — still a data gap,
+        # still must not be cached.
+        return None
+    cache[cache_key] = tokens
+    return tokens
+
+
+def _absent_reserve_reason(
+    compiler: Any,
+    asset_address: str,
+    asset_symbol: str,
+    protocol: str,
+    config: _DecodedReserveConfig,
+) -> str | None:
+    """Return an actionable error when the asset has no reserve on this pool.
+
+    VIB-5864. Shared by all three reserve pre-flights so an absent reserve
+    reports the same truth whichever guard sees it first.
+
+    ``config.exists is False`` means the PoolDataProvider returned the all-zero
+    tuple it reads out of an empty mapping slot. That is already a strong
+    signal, but before emitting a terminal error we confirm it against
+    ``getAllReservesTokens()`` — the pool's own definitive reserve universe,
+    the same read ``ax lending-reserves`` enumerates:
+
+    - asset absent from the enumeration -> confirmed, emit the error.
+    - asset present in the enumeration  -> the two reads contradict each other.
+      Defer to the enumeration (the definitive one), log loudly, and fall
+      through to the existing frozen/inactive handling rather than tell the
+      user a listed reserve does not exist.
+    - enumeration unavailable -> emit the error on the all-zero evidence
+      alone. Still strictly better than reporting a phantom governance pause.
+
+    Deliberately does NOT auto-resolve native -> wrapped. Blueprint 17's
+    ``resolve_for_swap()`` has no lending equivalent, and silently rewriting a
+    BORROW of ETH into a BORROW of WETH would hand the user a different debt
+    position than the one they asked for — a money-path semantic change that
+    needs a human design decision, not a guard-level guess. We name the
+    resolved address and suggest the wrapped reserve instead.
+    """
+    if config.exists:
+        return None
+
+    reserves = _fetch_all_reserves_tokens(compiler, protocol)
+    if reserves is not None and any(addr == asset_address.lower() for _, addr in reserves):
+        logger.warning(
+            "%s reserve-absent check: getReserveConfigurationData returned an all-zero "
+            "tuple for asset=%s (%s) on %s, but getAllReservesTokens() lists it. "
+            "Deferring to the enumeration and treating the reserve as present.",
+            protocol,
+            asset_symbol,
+            asset_address,
+            compiler.chain,
+        )
+        return None
+
+    # Suggest the wrapped equivalent only when the pool actually lists it —
+    # a suggestion we cannot verify is worse than none. Matching on the
+    # enumeration's own symbols keeps this chain-agnostic (ETH->WETH,
+    # POL->WPOL, AVAX->WAVAX) without a curated table, and yields no
+    # suggestion at all for an ordinary unsupported ERC20.
+    #
+    # The `W` + symbol match identifies a plausible SUGGESTION, but it is NOT
+    # evidence of nativeness: stETH -> WSTETH matches a real listed reserve
+    # while stETH is not a native token. Any X/WX pair that isn't native hits
+    # this. Gate the native claim on the registry (`_is_native_asset`) and use
+    # neutral phrasing otherwise — the suggestion stays useful either way.
+    suggestion = ""
+    if reserves is not None:
+        wrapped_symbol = f"W{asset_symbol.upper()}"
+        match = next((sym for sym, _ in reserves if sym.upper() == wrapped_symbol), None)
+        if match and _is_native_asset(compiler.chain, asset_address, asset_symbol):
+            suggestion = (
+                f" {asset_symbol} is {compiler.chain}'s native gas token and has no reserve of "
+                f"its own — the pool does list {match}; did you mean {match}?"
+            )
+        elif match:
+            suggestion = f" The pool does list {match} — did you mean {match}?"
+
+    evidence = (
+        "confirmed against getAllReservesTokens()"
+        if reserves is not None
+        else "getAllReservesTokens() unavailable, inferred from the all-zero config read"
+    )
+    return (
+        f"No {protocol} reserve exists for {asset_symbol} on {compiler.chain} "
+        f"(resolved to {asset_address}) — the asset is not listed on this market "
+        f"({evidence}).{suggestion} This is NOT a governance pause and will not "
+        f"resolve by waiting. Run `almanak ax --chain {compiler.chain} lending-reserves` "
+        f"to list the supported reserves."
+    )
+
+
 def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, asset_symbol: str) -> str | None:
     """Verify an asset is collateral-eligible on the compiler's Aave V3 market.
 
@@ -389,6 +594,13 @@ def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, ass
         # Fail-open: do NOT cache the miss. A transient gateway failure on
         # iteration N must not permanently disable the pre-flight on iter N+1.
         return None
+
+    # VIB-5864: an absent reserve is all-zero, so it would otherwise read as
+    # "ltv=0 -> not collateral-eligible" and hide the real problem.
+    absent_reason = _absent_reserve_reason(compiler, asset_address, asset_symbol, "aave_v3", config)
+    if absent_reason is not None:
+        cache[cache_key] = absent_reason
+        return absent_reason
 
     if not config.usage_as_collateral_enabled or config.ltv == 0:
         reason = (
@@ -449,6 +661,14 @@ def _check_lending_reserve_borrowable(
         # Fail-open on transient gateway errors — do not cache the miss.
         return None
 
+    # VIB-5864: an absent reserve reads borrowingEnabled=False off the all-zero
+    # tuple, which would send the user waiting for governance to enable
+    # borrowing on a reserve that does not exist.
+    absent_reason = _absent_reserve_reason(compiler, asset_address, asset_symbol, protocol, config)
+    if absent_reason is not None:
+        cache[cache_key] = absent_reason
+        return absent_reason
+
     if not config.borrowing_enabled:
         reason = (
             f"Reserve {asset_symbol} on {protocol} {compiler.chain} is not "
@@ -507,6 +727,15 @@ def _check_lending_reserve_active(
     if config is None:
         # Fail-open: do not cache transient failures.
         return None
+
+    # VIB-5864: this is the guard the user tickets landed on — an absent
+    # reserve reads isActive=False off the all-zero tuple and was reported as
+    # a governance pause on a reserve that will never exist (ALM-2911 ETH/base,
+    # ALM-2775 Case 2 POL/polygon). Check absence BEFORE the paused verdict.
+    absent_reason = _absent_reserve_reason(compiler, asset_address, asset_symbol, protocol, config)
+    if absent_reason is not None:
+        cache[cache_key] = absent_reason
+        return absent_reason
 
     if not config.is_active or config.is_frozen:
         reason = (
