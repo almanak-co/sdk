@@ -8,7 +8,10 @@ the aggregator that derives
 
 from __future__ import annotations
 
-# TraderJoe Liquidity Book V2 on Avalanche.
+# TraderJoe Liquidity Book V2 — Avalanche (native), plus Arbitrum, BSC, and
+# Ethereum via the same CREATE2-deployed LBFactory/LBRouter v2.1 (see
+# ``addresses.py`` for the per-chain, on-chain-verified factory/router and
+# LBPair addresses).
 SUPPORTED_CHAINS_BY_PROTOCOL: dict[str, frozenset[str]] = {
-    "traderjoe_v2": frozenset({"avalanche"}),
+    "traderjoe_v2": frozenset({"avalanche", "arbitrum", "bsc", "ethereum"}),
 }

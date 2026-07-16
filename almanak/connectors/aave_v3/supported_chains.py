@@ -18,6 +18,18 @@ from __future__ import annotations
 # key (mirrors ``capabilities.py``'s ``PROTOCOL_CAPABILITIES`` shape).
 SUPPORTED_CHAINS_BY_PROTOCOL: dict[str, frozenset[str]] = {
     "aave_v3": frozenset(
-        {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "linea", "plasma", "xlayer"}
+        {
+            "ethereum",
+            "arbitrum",
+            "optimism",
+            "polygon",
+            "base",
+            "avalanche",
+            "bsc",
+            "linea",
+            "plasma",
+            "xlayer",
+            "mantle",
+        }
     ),
 }

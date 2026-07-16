@@ -10,5 +10,5 @@ from __future__ import annotations
 
 # PancakeSwap V3 DEX.
 SUPPORTED_CHAINS_BY_PROTOCOL: dict[str, frozenset[str]] = {
-    "pancakeswap_v3": frozenset({"bsc", "ethereum", "arbitrum"}),
+    "pancakeswap_v3": frozenset({"bsc", "ethereum", "arbitrum", "base"}),
 }
