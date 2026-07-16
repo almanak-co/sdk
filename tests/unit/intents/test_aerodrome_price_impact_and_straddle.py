@@ -28,7 +28,7 @@ from almanak.connectors.aerodrome.compiler import (
 )
 from almanak.framework.intents.compiler import CompilationStatus
 from almanak.framework.intents.tick_utils import price_to_tick
-from almanak.framework.intents.vocabulary import Intent
+from almanak.framework.intents.vocabulary import Intent, TickBand
 
 # Canonical token order: token0 address < token1 address (EVM convention).
 _T0_ADDR = "0x" + "aa" * 20
@@ -278,13 +278,16 @@ def _cl_adapter_result() -> MagicMock:
 
 
 def _make_lp_open_intent(lower: int, upper: int, *, allow_oor: bool = False) -> Intent:
+    # These are RAW TICKS (the straddle guard is a tick-space invariant), stated
+    # via an explicit TickBand. A bare positive whole-number pair is ambiguous on
+    # a tick-based protocol -- valid as prices AND as ticks -- and is rejected at
+    # construction (VIB-5867), so the form has to be declared.
     params = {"allow_out_of_range": True} if allow_oor else None
     return Intent.lp_open(
         pool="WETH/USDC/100",
         amount0=Decimal("0.01"),
         amount1=Decimal("30"),
-        range_lower=Decimal(lower),
-        range_upper=Decimal(upper),
+        range_spec=TickBand(lower=lower, upper=upper),
         protocol="aerodrome_slipstream",
         chain="base",
         protocol_params=params,

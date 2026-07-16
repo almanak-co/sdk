@@ -87,19 +87,38 @@ def price_to_tick(
 
 def tick_to_price(
     tick: int,
-    decimals0: int = 18,
-    decimals1: int = 18,
+    decimals0: int | None = None,
+    decimals1: int | None = None,
 ) -> Decimal:
     """Convert a Uniswap V3 tick to a human-readable price.
 
+    **Decimals are mandatory (ALM-2891 / ALM-2901).** This is the exact inverse
+    of :func:`price_to_tick` and carries the exact same decimals term, so it
+    must fail closed the same way. While ``price_to_tick`` was made mandatory
+    (#3108), this function kept a ``decimals0=decimals1=18`` default — meaning
+    the *inverse* direction stayed silently wrong for every decimal-asymmetric
+    pair, understating/overstating the price by ``10 ** (decimals0 - decimals1)``
+    (a factor of 100 for USDC(6)/cbBTC(8), 1e12 for USDC(6)/WETH(18)). A guard
+    that only fails closed in one direction is not a guard.
+
     Args:
         tick: Tick value to convert.
-        decimals0: Decimals of token0.
-        decimals1: Decimals of token1.
+        decimals0: Decimals of token0 (required — read from token metadata).
+        decimals1: Decimals of token1 (required — read from token metadata).
 
     Returns:
         Price of token0 in terms of token1.
+
+    Raises:
+        ValueError: If either ``decimals0`` or ``decimals1`` is not supplied.
     """
+    if decimals0 is None or decimals1 is None:
+        raise ValueError(
+            "tick_to_price requires explicit decimals0 and decimals1 — token decimals "
+            "scale the price by 10 ** (decimals0 - decimals1) (e.g. USDC=6 vs WETH=18 "
+            "is a 1e12 factor). Pass both from token metadata "
+            f"(got decimals0={decimals0}, decimals1={decimals1})."
+        )
     return _tick_to_price(tick, decimals0=decimals0, decimals1=decimals1)
 
 

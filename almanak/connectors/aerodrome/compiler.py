@@ -19,9 +19,10 @@ from almanak.connectors._strategy_base.base.cl_math import (
     maybe_recompute_lp_amounts_from_slot0,
 )
 from almanak.connectors._strategy_base.base.compiler import BaseConcentratedLiquidityCompiler, CLCompilerContext
+from almanak.connectors._strategy_base.cl_range import PriceBandToTicksError, price_band_to_ticks
 from almanak.framework.intents import compiler_constants
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
-from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.intents.vocabulary import IntentType, lp_range_bounds, lp_range_is_ticks
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
 if TYPE_CHECKING:
@@ -292,25 +293,34 @@ def _aerodrome_swap_price_impact_guard(
 def _validate_slipstream_tick_bounds(
     intent: LPOpenIntent,
     tick_spacing: int,
+    lower: Decimal | None = None,
+    upper: Decimal | None = None,
 ) -> tuple[int, int] | CompilationResult:
     """Validate Slipstream tick bounds: integer, ordered, aligned to tick_spacing.
 
     Returns ``(tick_lower, tick_upper)`` on success or a FAILED
     ``CompilationResult``. Extracted from ``compile_lp_open_aerodrome_slipstream``
-    so the main path stays under the mccabe limit; behaviour is byte-identical to
-    the previous inline guards.
+    so the main path stays under the mccabe limit.
+
+    ``lower``/``upper`` are the bounds resolved by the caller via
+    :func:`lp_range_bounds` (which prefers ``range_spec`` over the legacy fields,
+    so a ``TickBand``-only ``model_construct`` intent whose ``range_lower``/
+    ``range_upper`` are absent still validates — VIB-5867). They default to the
+    legacy fields for the standalone callers (e.g. the scaffold guard test) that
+    pass a fully-populated intent.
     """
-    if int(intent.range_lower) != intent.range_lower or int(intent.range_upper) != intent.range_upper:
+    if lower is None:
+        lower = intent.range_lower
+    if upper is None:
+        upper = intent.range_upper
+    if int(lower) != lower or int(upper) != upper:
         return CompilationResult(
             status=CompilationStatus.FAILED,
-            error=(
-                f"Aerodrome Slipstream tick bounds must be integers, "
-                f"got range_lower={intent.range_lower}, range_upper={intent.range_upper}"
-            ),
+            error=(f"Aerodrome Slipstream tick bounds must be integers, got range_lower={lower}, range_upper={upper}"),
             intent_id=intent.intent_id,
         )
-    tick_lower = int(intent.range_lower)
-    tick_upper = int(intent.range_upper)
+    tick_lower = int(lower)
+    tick_upper = int(upper)
     if tick_lower >= tick_upper:
         return CompilationResult(
             status=CompilationStatus.FAILED,
@@ -328,6 +338,99 @@ def _validate_slipstream_tick_bounds(
             intent_id=intent.intent_id,
         )
     return tick_lower, tick_upper
+
+
+def _slipstream_price_band_to_ticks(
+    intent: LPOpenIntent,
+    tick_spacing: int,
+    token0_decimals: int,
+    token1_decimals: int,
+    lower: Decimal,
+    upper: Decimal,
+) -> tuple[int, int] | CompilationResult:
+    """Convert a Slipstream price band to spacing-aligned ticks (VIB-5867 / ALM-2901).
+
+    Delegates every step to the shared ``cl_range`` seam so the decimals-correct
+    price->tick math is written once for all concentrated-liquidity connectors.
+    Before this, Slipstream was the only CL connector without a price path, which
+    forced strategy authors and codegen to hand-roll ``log(price)/log(1.0001)`` —
+    a formula that omits the decimals term and is therefore wrong by
+    ``|decimals0 - decimals1| * 23027`` ticks (46,054 for USDC(6)/cbBTC(8); ~100x
+    off in price). That hand-roll is what produced ALM-2901.
+
+    ``lower``/``upper`` are the price bounds already resolved by the caller via
+    :func:`lp_range_bounds` (so a ``PriceBand``-only intent whose legacy
+    ``range_lower``/``range_upper`` are absent is handled — VIB-5867).
+
+    ``tokens_swapped=False`` is correct here and not an assumption: the caller
+    has already rejected any non-canonical pool ordering, so the user's pair
+    orientation always matches the pool's ``token0``/``token1``.
+
+    The straddle invariant is deliberately *not* enforced inside the seam
+    (``current_tick=None``): the caller reads ``slot0`` after this and applies
+    :func:`_slipstream_tick_straddle_failure` to BOTH the price and tick paths,
+    so there stays exactly one straddle guard with one error message.
+
+    Returns:
+        ``(tick_lower, tick_upper)`` on success, or a FAILED ``CompilationResult``.
+    """
+    try:
+        tick_range = price_band_to_ticks(
+            range_lower=lower,
+            range_upper=upper,
+            token0_decimals=token0_decimals,
+            token1_decimals=token1_decimals,
+            tokens_swapped=False,
+            tick_spacing=tick_spacing,
+            current_tick=None,
+        )
+    except (PriceBandToTicksError, ValueError) as exc:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"Aerodrome Slipstream price band [{lower}, {upper}] "
+                f"could not be converted to a tick range (tick_spacing={tick_spacing}, "
+                f"decimals={token0_decimals}/{token1_decimals}): {exc}"
+            ),
+            intent_id=intent.intent_id,
+        )
+    return tick_range.tick_lower, tick_range.tick_upper
+
+
+def _resolve_slipstream_ticks(
+    intent: LPOpenIntent,
+    tick_spacing: int,
+    token0_decimals: int,
+    token1_decimals: int,
+) -> tuple[int, int] | CompilationResult:
+    """Resolve a Slipstream LP_OPEN range to ticks, whichever form it was stated in.
+
+    The bounds are resolved ONCE here via
+    :func:`~almanak.framework.intents.vocabulary.lp_range_bounds` (prefers
+    ``range_spec`` over the legacy fields, so a ``range_spec``-only intent whose
+    ``range_lower``/``range_upper`` are absent still resolves — VIB-5867), then
+    dispatched on the one shared discriminator
+    (:func:`~almanak.framework.intents.vocabulary.lp_range_is_ticks`) that the
+    backtest extractor also consumes, so a given intent can never be read as
+    ticks by one lane and prices by the other:
+
+    - **Price band** (the canonical, decimals-safe UX, same as every other CL
+      connector) -> the shared ``cl_range`` seam, which aligns to ``tick_spacing``.
+    - **Tick band** (explicit opt-in escape hatch) -> the pre-existing
+      ``_validate_slipstream_tick_bounds``: raw ticks are taken literally, so they
+      must already be integral, ordered and aligned.
+    """
+    bounds = lp_range_bounds(intent)
+    if bounds is None:
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error="Aerodrome Slipstream LP_OPEN has no range: provide a price band (range_lower/range_upper or a PriceBand range_spec).",
+            intent_id=intent.intent_id,
+        )
+    lower, upper = bounds
+    if lp_range_is_ticks(intent):
+        return _validate_slipstream_tick_bounds(intent, tick_spacing, lower, upper)
+    return _slipstream_price_band_to_ticks(intent, tick_spacing, token0_decimals, token1_decimals, lower, upper)
 
 
 def _slipstream_tick_straddle_failure(
@@ -1280,7 +1383,15 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
     Aerodrome Slipstream uses Uniswap V3-style concentrated liquidity with NFT positions.
     Pool format: "TOKEN0/TOKEN1/200" (tick_spacing as 3rd component, integer)
 
-    The intent's ``range_lower`` and ``range_upper`` are the tick bounds (cast to int).
+    The intent's ``range_lower``/``range_upper`` may be stated either way, and the
+    form is resolved by the shared discriminator (see
+    :func:`_resolve_slipstream_ticks`):
+
+    - a **price band** (``PriceBand`` range_spec, or positive fractional legacy
+      bounds) — the canonical UX shared with every other CL connector, converted
+      here with decimals-correct math via the ``cl_range`` seam;
+    - a **tick band** (``TickBand`` range_spec, or legacy tick-shaped bounds) —
+      raw Slipstream ticks, taken literally.
 
     Args:
         compiler: IntentCompiler instance
@@ -1328,9 +1439,10 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
                 intent_id=intent.intent_id,
             )
 
+        range_form = "ticks" if lp_range_is_ticks(intent) else "prices"
         logger.info(
             f"Compiling Aerodrome Slipstream LP_OPEN: {token0_symbol}/{token1_symbol}, "
-            f"tick_spacing={tick_spacing}, ticks=[{intent.range_lower},{intent.range_upper}], "
+            f"tick_spacing={tick_spacing}, range={range_form}=[{intent.range_lower},{intent.range_upper}], "
             f"amounts={intent.amount0}/{intent.amount1}"
         )
 
@@ -1382,8 +1494,10 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
         if failed is not None:
             return failed
 
-        # Validate tick bounds: must be integers, ordered, and aligned to tick_spacing.
-        tick_bounds = _validate_slipstream_tick_bounds(intent, tick_spacing)
+        # Resolve the range to ticks. A price band (the canonical UX) is converted
+        # via the shared decimals-correct cl_range seam; an explicit TickBand is
+        # validated as raw ticks (integer, ordered, aligned to tick_spacing).
+        tick_bounds = _resolve_slipstream_ticks(intent, tick_spacing, token0_info.decimals, token1_info.decimals)
         if isinstance(tick_bounds, CompilationResult):
             return tick_bounds
         tick_lower, tick_upper = tick_bounds

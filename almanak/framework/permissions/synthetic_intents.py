@@ -34,6 +34,7 @@ from ..intents.vocabulary import (
     LPOpenIntent,
     PerpCloseIntent,
     PerpOpenIntent,
+    PriceBand,
     RepayIntent,
     SupplyIntent,
     SwapIntent,
@@ -529,6 +530,14 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
     return intents
 
 
+# The synthetic LP range used for permission discovery. A PRICE band: these are
+# USDC/WETH-style prices, and stating the form explicitly keeps the generator
+# valid on tick-based protocols, where a bare whole-number pair is ambiguous and
+# rejected (VIB-5867). Permission discovery only needs a well-formed range — the
+# manifest depends on the (target, selector) pairs, not on the range's value.
+_SYNTHETIC_LP_PRICE_BAND = PriceBand(lower=Decimal("1500"), upper=Decimal("4000"))
+
+
 def _build_lp_open_intents(protocol: str, chain: str) -> list[AnyIntent]:
     if protocol not in _lp_protocols():
         return []
@@ -571,8 +580,16 @@ def _build_lp_open_intents(protocol: str, chain: str) -> list[AnyIntent]:
             pool=pool,
             amount0=Decimal("100"),
             amount1=Decimal("0.05"),
-            range_lower=Decimal("1500"),
-            range_upper=Decimal("4000"),
+            # An explicit PriceBand, not a bare range_lower/range_upper pair:
+            # [1500, 4000] is a USDC/WETH-style PRICE range, but as a bare
+            # whole-number pair it is ambiguous on a tick-based protocol (equally
+            # valid as raw ticks) and is rejected at construction (VIB-5867).
+            # Stating the form keeps this generator working across every LP
+            # protocol in the matrix. The legacy bounds are derived from the same
+            # band so the two can never drift apart.
+            range_spec=_SYNTHETIC_LP_PRICE_BAND,
+            range_lower=_SYNTHETIC_LP_PRICE_BAND.lower,
+            range_upper=_SYNTHETIC_LP_PRICE_BAND.upper,
             protocol=protocol,
             chain=chain,
         )

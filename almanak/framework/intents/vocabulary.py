@@ -501,39 +501,170 @@ def _range_spec_bounds(spec: Any) -> tuple[Decimal, Decimal]:
     raise ValueError(f"Unrecognized range_spec (expected PriceBand/TickBand): {spec!r}")
 
 
-def _is_tick_shaped(lower: Decimal, upper: Decimal) -> bool:
-    """Heuristic bridge (design §Migration Step 1).
+def _classify_legacy_bounds(protocol: str, lower: Decimal, upper: Decimal) -> Literal["ticks", "prices", "ambiguous"]:
+    """Classify a bare legacy ``range_lower``/``range_upper`` pair (design §Migration Step 1).
 
-    Integer-valued or non-positive bounds are treated as raw ticks; positive
-    fractional bounds are treated as prices. Only consulted for legacy
-    ``range_lower``/``range_upper`` on tick-based protocols (Slipstream) so the
-    bridge never silently reinterprets a deployed intent.
+    **The single source of truth** for "are these bounds ticks or prices?" — both
+    :func:`_bridge_legacy_range` (which raises on ``ambiguous``) and
+    :func:`lp_range_is_ticks` (which treats ``ambiguous`` as *not* ticks) route
+    through here so they can never disagree. Having two copies of this decision is
+    exactly how the ALM-2901 class re-enters through a side door (VIB-5867).
+
+    - Non-tick-based protocol -> always ``prices`` (Slipstream's tick ambiguity
+      does not exist there).
+    - Non-positive bound(s) -> ``ticks``: a price can never be <= 0.
+    - Positive fractional bound(s) -> ``prices``: a tick is always an integer.
+    - Positive whole numbers -> ``ambiguous``: ``[2000, 4000]`` is an equally
+      valid WETH/USDC *price* band and *tick* range, and the two mint completely
+      different positions. Never guessed.
     """
+    if protocol not in _TICK_BASED_LP_PROTOCOLS:
+        return "prices"
     if lower <= 0 or upper <= 0:
+        return "ticks"
+    if lower == lower.to_integral_value() and upper == upper.to_integral_value():
+        return "ambiguous"
+    return "prices"
+
+
+def lp_range_bounds(intent: Any) -> tuple[Decimal, Decimal] | None:
+    """Return an LP intent's ``(lower, upper)`` range bounds, or ``None`` if absent.
+
+    **The single source of truth** for *where the bounds live*. A canonical
+    intent carries a typed :data:`RangeSpec`; a validated one ALSO mirrors it onto
+    the legacy ``range_lower``/``range_upper`` fields — but a ``model_construct``
+    or duck-typed intent (the paths the backtest extractor and compilers must
+    tolerate) can carry only one of the two. Preferring ``range_spec`` and falling
+    back to the legacy fields means "the range is a ``range_spec`` with no legacy
+    fields" no longer reads as "no range at all" (which used to collapse a
+    Slipstream price band to the full V3 range in the backtest — VIB-5867).
+
+    Both bounds must be present and coercible or ``None`` is returned; callers
+    decide what an absent range means (full-range fallback, error, ...).
+    """
+    spec = getattr(intent, "range_spec", None)
+    if spec is not None:
+        try:
+            return _range_spec_bounds(spec)
+        except (ValueError, TypeError, ArithmeticError):
+            pass
+    lower = getattr(intent, "range_lower", None)
+    upper = getattr(intent, "range_upper", None)
+    if lower is None or upper is None:
+        return None
+    try:
+        return validate_decimal_safe(lower), validate_decimal_safe(upper)
+    except (ValueError, TypeError, ArithmeticError):
+        return None
+
+
+def lp_range_is_ticks(intent: Any) -> bool:
+    """Return ``True`` when an LP intent's range **unambiguously** carries raw ticks.
+
+    **The single discriminator.** Every consumer that has to answer "are these
+    bounds ticks or prices?" must call this — the connector compilers (which
+    turn the range into calldata) and the backtest extractor
+    (``framework/backtesting/pnl/intent_extraction.get_lp_tick_range``, which
+    replays the same range off-chain). Two independent copies of this decision
+    are exactly how a backtest/live desync is introduced (design
+    ``docs/internal/unified-lp-range-ux-design.md`` §Migration, "Required
+    co-change"), so the answer lives here once.
+
+    Resolution order:
+
+    1. The typed :data:`RangeSpec` when present (a :class:`TickBand` is raw
+       ticks, a :class:`PriceBand` is prices) — including its serialized dict
+       form, so the deserialize path agrees with the in-memory one.
+    2. Otherwise :func:`_classify_legacy_bounds` — the SAME classifier the legacy
+       bridge uses. This branch only runs for intents that never went through the
+       validator (``model_construct`` / duck-typed), since the validator always
+       synthesises a ``range_spec``. Crucially an **ambiguous** positive-integer
+       pair is treated as *not ticks* (returns ``False``): it must never be
+       silently compiled as raw ticks — that is the ALM-2901 failure class. The
+       bridge rejects it outright for validated intents; this fallback refuses to
+       guess "ticks" for the unvalidated ones.
+
+    Args:
+        intent: An :class:`LPOpenIntent` or any object exposing ``range_spec`` /
+            ``protocol`` / ``range_lower`` / ``range_upper``.
+
+    Returns:
+        ``True`` only when the range is unambiguously raw protocol ticks.
+    """
+    spec = getattr(intent, "range_spec", None)
+    if isinstance(spec, TickBand):
         return True
-    return lower == lower.to_integral_value() and upper == upper.to_integral_value()
+    if isinstance(spec, PriceBand):
+        return False
+    if isinstance(spec, dict):
+        kind = spec.get("kind")
+        if kind in ("tick", "price"):
+            return kind == "tick"
+    protocol = getattr(intent, "protocol", None)
+    if protocol not in _TICK_BASED_LP_PROTOCOLS:
+        return False
+    lower = getattr(intent, "range_lower", None)
+    upper = getattr(intent, "range_upper", None)
+    if lower is None or upper is None:
+        return False
+    try:
+        classification = _classify_legacy_bounds(protocol, validate_decimal_safe(lower), validate_decimal_safe(upper))
+    except (ValueError, TypeError, ArithmeticError):
+        return False
+    return classification == "ticks"
 
 
 def _bridge_legacy_range(protocol: str, lower: Decimal, upper: Decimal) -> PriceBand | TickBand:
     """Map legacy ``range_lower``/``range_upper`` onto a typed :data:`RangeSpec`.
 
     Preserves on-chain semantics exactly: price-based protocols get a
-    :class:`PriceBand`; a tick-based protocol (Slipstream) with tick-shaped
-    bounds gets a :class:`TickBand` plus a :class:`DeprecationWarning`. Built via
-    ``model_construct`` (unvalidated) so the :class:`LPOpenIntent` validator stays
-    the single source of the legacy error messages.
+    :class:`PriceBand`; a tick-based protocol (Slipstream) with unambiguously
+    tick-shaped bounds gets a :class:`TickBand` plus a :class:`DeprecationWarning`.
+    Built via ``model_construct`` (unvalidated) so the :class:`LPOpenIntent`
+    validator stays the single source of the legacy error messages.
+
+    On a tick-based protocol the bare legacy pair is genuinely ambiguous, and the
+    three cases are resolved WITHOUT guessing (design
+    ``docs/internal/unified-lp-range-ux-design.md`` §Migration Step 1):
+
+    - **Non-positive** -> ticks. A price can never be <= 0, so this is unambiguous.
+    - **Positive and fractional** -> prices. A tick is an integer, so this is
+      unambiguous too.
+    - **Positive integers** -> AMBIGUOUS, so it is rejected rather than guessed.
+      ``[2000, 4000]`` is an entirely natural WETH/USDC *price* band and an
+      entirely valid *tick* range, and the two mint wildly different positions.
+      Reading it either way silently is a money bug, so the caller must say which
+      they meant via an explicit ``PriceBand``/``TickBand``.
+
+    Classification is delegated to :func:`_classify_legacy_bounds` so this bridge
+    and :func:`lp_range_is_ticks` can never disagree about the same pair.
     """
-    if protocol in _TICK_BASED_LP_PROTOCOLS and _is_tick_shaped(lower, upper):
-        # Ticks are integers. A non-integral tick-shaped bound (e.g. -1800.5)
-        # would be silently truncated by int() below, so the synthesised TickBand
-        # would no longer agree with the preserved legacy range_lower/range_upper
-        # and a later serialize()->deserialize() would trip the conflict check and
-        # fail to rehydrate. Reject fail-closed rather than truncate.
-        if lower != lower.to_integral_value() or upper != upper.to_integral_value():
-            raise ValueError(f"tick-based legacy bounds for '{protocol}' must be integer-valued (got {lower}, {upper})")
-        warnings.warn(_RANGE_SPEC_TICK_DEPRECATION, DeprecationWarning, stacklevel=3)
-        return TickBand.model_construct(kind="tick", lower=int(lower), upper=int(upper))
-    return PriceBand.model_construct(kind="price", lower=lower, upper=upper)
+    classification = _classify_legacy_bounds(protocol, lower, upper)
+
+    if classification == "prices":
+        return PriceBand.model_construct(kind="price", lower=lower, upper=upper)
+
+    if classification == "ambiguous":
+        raise ValueError(
+            f"Ambiguous LP range for '{protocol}': range_lower={lower}, range_upper={upper} are "
+            f"positive whole numbers, which are valid as EITHER a price band or raw ticks — and the "
+            f"two mint completely different positions. Say which you mean:\n"
+            f"  prices -> Intent.lp_open(..., range_spec=PriceBand(lower={lower}, upper={upper}))\n"
+            f"  ticks  -> Intent.lp_open(..., range_spec=TickBand(lower={int(lower)}, upper={int(upper)}))\n"
+            f"Price bands are the canonical form: the connector converts them using the pool's real "
+            f"on-chain token decimals (see ALM-2901 / VIB-5867)."
+        )
+
+    # classification == "ticks". Ticks are integers, and a non-integral tick-shaped
+    # bound (e.g. -1800.5) would be silently truncated by int() below, so the
+    # synthesised TickBand would no longer agree with the preserved legacy
+    # range_lower/range_upper and a later serialize()->deserialize() would trip
+    # the conflict check and fail to rehydrate. Reject fail-closed rather than
+    # truncate.
+    if lower != lower.to_integral_value() or upper != upper.to_integral_value():
+        raise ValueError(f"tick-based legacy bounds for '{protocol}' must be integer-valued (got {lower}, {upper})")
+    warnings.warn(_RANGE_SPEC_TICK_DEPRECATION, DeprecationWarning, stacklevel=3)
+    return TickBand.model_construct(kind="tick", lower=int(lower), upper=int(upper))
 
 
 class LPOpenIntent(BaseIntent):

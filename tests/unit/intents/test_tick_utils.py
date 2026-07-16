@@ -91,6 +91,40 @@ class TestTickToPrice:
         price = tick_to_price(-1000, decimals0=18, decimals1=18)
         assert price < Decimal("1.0")
 
+    # --- mandatory decimals (VIB-5867) ---------------------------------------
+    # price_to_tick was made fail-closed in #3108, but its inverse kept a
+    # decimals0=decimals1=18 default -- so the reverse direction stayed silently
+    # wrong for every decimal-asymmetric pair. A guard that only fires in one
+    # direction is not a guard.
+
+    def test_missing_both_decimals_raises(self):
+        with pytest.raises(ValueError, match="tick_to_price requires explicit decimals0 and decimals1"):
+            tick_to_price(-64744)
+
+    def test_missing_decimals0_raises(self):
+        with pytest.raises(ValueError, match="requires explicit decimals0 and decimals1"):
+            tick_to_price(-64744, decimals1=8)
+
+    def test_missing_decimals1_raises(self):
+        with pytest.raises(ValueError, match="requires explicit decimals0 and decimals1"):
+            tick_to_price(-64744, decimals0=6)
+
+    def test_decimals_are_load_bearing_alm_2901_pair(self):
+        """The silent-wrongness the default used to hide (USDC(6)/cbBTC(8)).
+
+        The pool's live tick -64744 is a human price of ~1.543e-05. With the old
+        18/18 default it reads as ~1.543e-03 -- a factor of 10**(d1-d0) = 100 off.
+        """
+        real = tick_to_price(-64744, decimals0=6, decimals1=8)
+        symmetric = tick_to_price(-64744, decimals0=18, decimals1=18)
+        assert float(real) == pytest.approx(1.543e-05, rel=0.01)
+        assert float(symmetric / real) == pytest.approx(100.0, rel=0.01)
+
+    def test_roundtrips_with_price_to_tick_on_asymmetric_decimals(self):
+        tick = price_to_tick(Decimal("1.543067e-05"), decimals0=6, decimals1=8)
+        assert tick == -64744
+        assert float(tick_to_price(tick, decimals0=6, decimals1=8)) == pytest.approx(1.543e-05, rel=0.01)
+
 
 class TestSnapToTickSpacing:
     """Tests for snap_to_tick_spacing()."""

@@ -44,7 +44,12 @@ from almanak.framework.intents import (
     LPOpenIntent,
     SwapIntent,
 )
-from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType
+from almanak.framework.intents.vocabulary import (
+    CollectFeesIntent,
+    IntentType,
+    PriceBand,
+    lp_range_is_ticks,
+)
 from tests.intents._lp_setup_helpers import (
     collect_all_tokens,
     decrease_all_liquidity,
@@ -87,6 +92,20 @@ LP_AMOUNT_USDC = Decimal("250")  # amount1 (USDC, token1 on Base)
 # regardless of the fork-block ETH price.
 RANGE_LOWER = Decimal("-300000")  # must be tick-integer-valued
 RANGE_UPPER = Decimal("200000")
+
+# PRICE band for the same pool (VIB-5867 / ALM-2901). Slipstream now accepts a
+# price band like every other concentrated-liquidity connector, and converts it
+# with the pool's real on-chain decimals via the shared cl_range seam.
+#
+# token0=WETH(18), token1=USDC(6), so the band is USDC-per-WETH (token1 per
+# token0). [1000, 12000] brackets any ETH price the fork block is likely to
+# carry while staying well inside the tick domain. The decimals term is what
+# makes this work: with the correct 18/6 decimals these prices map to ticks
+# ~[-207200, -184600]; drop the term (the ALM-2901 hand-roll) and the same
+# prices map to ~[+69000, +94000] instead -- 276,324 ticks away, on the wrong
+# side of the pool, which is what minted one-sided positions.
+PRICE_BAND_LOWER = Decimal("1000")  # USDC per WETH
+PRICE_BAND_UPPER = Decimal("12000")
 
 
 # =============================================================================
@@ -262,6 +281,68 @@ async def _open_position_via_intent(
 
 
 # =============================================================================
+# Tick readback helpers (VIB-5867 straddle proof)
+# =============================================================================
+
+
+def _as_int24(word: bytes) -> int:
+    """Decode a right-aligned, two's-complement int24 from a 32-byte ABI word.
+
+    Slipstream ticks are ``int24`` and are negative for WETH/USDC on Base, so an
+    unsigned read would silently produce a ~16.7M nonsense tick instead of, say,
+    -196257 — which is exactly the class of sign/decimals error this test exists
+    to catch. Decode it properly.
+    """
+    value = int.from_bytes(word, "big")
+    return value - (1 << 256) if value >= (1 << 255) else value
+
+
+def _query_position_ticks(web3: Web3, position_manager: str, token_id: int) -> tuple[int, int]:
+    """Return ``(tickLower, tickUpper)`` read back from the position NFT itself.
+
+    Reads ``positions(uint256)`` via ``eth_call``. Slipstream's NPM is
+    byte-compatible with the Uniswap V3 NPM here (slot 4 carries ``tickSpacing``
+    instead of ``fee``, but the tick slots are unmoved): nonce(0), operator(1),
+    token0(2), token1(3), tickSpacing(4), tickLower(5), tickUpper(6), ...
+    """
+    selector = "0x99fbab88"  # positions(uint256)
+    data = selector + hex(token_id)[2:].zfill(64)
+    result = web3.eth.call({"to": Web3.to_checksum_address(position_manager), "data": data})
+    expected_min_len = 7 * 32
+    assert len(result) >= expected_min_len, (
+        f"positions() returned {len(result)} bytes for token_id={token_id}; expected >= {expected_min_len}"
+    )
+    return _as_int24(result[5 * 32 : 6 * 32]), _as_int24(result[6 * 32 : 7 * 32])
+
+
+def _query_pool_current_tick(web3: Web3, token0: str, token1: str, tick_spacing: int) -> int | None:
+    """Return the pool's live ``slot0.tick``, or None if the pool can't be resolved.
+
+    Resolves the pool through the Slipstream CL factory's tick-spacing-keyed
+    ``getPool(address,address,int24)`` (selector 0x28af8d0b — Slipstream's
+    signature differs from Uniswap V3's fee-keyed one), then reads ``slot0()``
+    (0x3850c7bd), whose second word is the current ``int24`` tick.
+    """
+    factory = AERODROME[CHAIN_NAME]["cl_factory"]
+    get_pool = (
+        "0x28af8d0b"
+        + Web3.to_checksum_address(token0)[2:].lower().zfill(64)
+        + Web3.to_checksum_address(token1)[2:].lower().zfill(64)
+        + (tick_spacing & ((1 << 24) - 1)).to_bytes(32, "big").hex()
+    )
+    pool_word = web3.eth.call({"to": Web3.to_checksum_address(factory), "data": get_pool})
+    if len(pool_word) < 32:
+        return None
+    pool = Web3.to_checksum_address("0x" + pool_word[-20:].hex())
+    if int(pool, 16) == 0:
+        return None
+    slot0 = web3.eth.call({"to": pool, "data": "0x3850c7bd"})
+    if len(slot0) < 64:
+        return None
+    return _as_int24(slot0[32:64])
+
+
+# =============================================================================
 # LPOpenIntent Tests
 # =============================================================================
 
@@ -420,6 +501,130 @@ class TestAerodromeSlipstreamLPOpenIntent:
         assert payload["in_range"] is True
 
         print("\nALL CHECKS PASSED")
+
+    @pytest.mark.intent(IntentType.LP_OPEN)
+    @pytest.mark.asyncio
+    async def test_lp_open_weth_usdc_with_price_band(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+        anvil_rpc_url: str,
+    ):
+        """Open the same position from a PRICE band instead of raw ticks (VIB-5867).
+
+        This is the ALM-2901 regression test at the level the bug actually shipped
+        at: a user states a human price range, and the SDK -- not the strategy --
+        turns it into ticks using the pool's real decimals.
+
+        Layers:
+        1. Compile — LPOpenIntent(range=prices) → ActionBundle.
+        2. Execute — ExecutionOrchestrator submits the bundle.
+        3. Parse   — position id + the minted ticks straddle the live pool tick.
+        4. Balance — BOTH tokens are deposited, which is only possible for a
+                     straddling range. A one-sided (ALM-2901) range would deposit
+                     one token and strand the other.
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc_addr = tokens["USDC"]
+        weth_addr = tokens["WETH"]
+        usdc_decimals = get_token_decimals(web3, usdc_addr)
+        weth_decimals = get_token_decimals(web3, weth_addr)
+
+        print(f"\n{'=' * 80}")
+        print("Test: LP Open WETH/USDC via PRICE BAND (Aerodrome Slipstream, VIB-5867)")
+        print(f"{'=' * 80}")
+        print(f"Pool: {POOL}  (token0=WETH/{weth_decimals}dp, token1=USDC/{usdc_decimals}dp)")
+        print(f"Price band: [{PRICE_BAND_LOWER}, {PRICE_BAND_UPPER}] USDC per WETH")
+
+        usdc_before = get_token_balance(web3, usdc_addr, funded_wallet)
+        weth_before = get_token_balance(web3, weth_addr, funded_wallet)
+        assert usdc_before > 0, "funded_wallet has no USDC — fixture funding failed"
+        assert weth_before > 0, "funded_wallet has no WETH — fixture funding failed"
+
+        # The range is PRICES, stated explicitly via PriceBand. No price_to_tick
+        # anywhere in this test — that is the entire point of the fix.
+        intent = LPOpenIntent(
+            pool=POOL,
+            amount0=LP_AMOUNT_WETH,
+            amount1=LP_AMOUNT_USDC,
+            range_spec=PriceBand(lower=PRICE_BAND_LOWER, upper=PRICE_BAND_UPPER),
+            protocol="aerodrome_slipstream",
+            chain=CHAIN_NAME,
+        )
+        # The vocabulary must read this as a price band, not as ticks.
+        assert lp_range_is_ticks(intent) is False, "positive fractional/price bounds must read as prices"
+
+        # Layer 1 — Compile
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        compilation_result = compiler.compile(intent)
+        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
+        assert compilation_result.action_bundle is not None
+
+        # The compiled ticks must be negative (WETH/USDC on Base) and aligned.
+        # Before this fix these prices could not compile at all ("tick bounds
+        # must be integers"); a decimals-blind conversion would make them
+        # POSITIVE (~+69k/+94k) and non-straddling.
+        metadata = compilation_result.action_bundle.metadata or {}
+        print(f"Compiled metadata ticks: {metadata.get('tick_lower')} .. {metadata.get('tick_upper')}")
+
+        # Layer 2 — Execute
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert execution_result.success, f"Execution failed: {execution_result.error}"
+
+        # Layer 3 — Parse
+        parser = AerodromeSlipstreamReceiptParser(chain=CHAIN_NAME)
+        position_id: int | None = None
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt:
+                pos_id_str = parser.extract_position_id(tx_result.receipt.to_dict())
+                if pos_id_str is not None:
+                    position_id = int(pos_id_str)
+        assert position_id is not None, "Must extract position ID from Slipstream mint receipt"
+        print(f"Position tokenId: {position_id}")
+
+        liquidity = query_position_liquidity(web3, POSITION_MANAGER, position_id)
+        assert liquidity > 0, f"Position must have positive liquidity, got {liquidity}"
+
+        # The straddle proof, read back from the NFT itself: the minted ticks
+        # must bracket the pool's live tick. This is the assertion ALM-2901's
+        # position would have failed.
+        tick_lower, tick_upper = _query_position_ticks(web3, POSITION_MANAGER, position_id)
+        current_tick = _query_pool_current_tick(web3, weth_addr, usdc_addr, 200)
+        print(f"Minted ticks: [{tick_lower}, {tick_upper}) | live pool tick: {current_tick}")
+        assert tick_lower < 0 and tick_upper < 0, (
+            f"WETH/USDC Slipstream ticks must be negative (USDC has 6dp vs WETH 18dp); "
+            f"got [{tick_lower}, {tick_upper}] — the decimals term was dropped"
+        )
+        assert tick_lower % 200 == 0 and tick_upper % 200 == 0, "ticks must align to tick_spacing=200"
+        if current_tick is not None:
+            assert tick_lower <= current_tick < tick_upper, (
+                f"minted range [{tick_lower}, {tick_upper}) must straddle the live tick "
+                f"{current_tick} — a non-straddling range is the ALM-2901 one-sided mint"
+            )
+
+        # Layer 4 — Balance deltas. BOTH tokens must move: a straddling range
+        # consumes both sides. This is the strongest available proof that the
+        # range landed on the right side of the curve.
+        usdc_after = get_token_balance(web3, usdc_addr, funded_wallet)
+        weth_after = get_token_balance(web3, weth_addr, funded_wallet)
+        usdc_spent = usdc_before - usdc_after
+        weth_spent = weth_before - weth_after
+        print(f"USDC spent: {format_token_amount(usdc_spent, usdc_decimals)}")
+        print(f"WETH spent: {format_token_amount(weth_spent, weth_decimals)}")
+
+        assert usdc_spent > 0, "USDC (token1) must be deposited — a one-sided mint strands it"
+        assert weth_spent > 0, "WETH (token0) must be deposited — a one-sided mint strands it"
+        assert usdc_spent <= int(LP_AMOUNT_USDC * Decimal(10**usdc_decimals))
+        assert weth_spent <= int(LP_AMOUNT_WETH * Decimal(10**weth_decimals))
+
+        print("\nALL CHECKS PASSED — price band minted a straddling, two-sided position")
 
 
 # =============================================================================

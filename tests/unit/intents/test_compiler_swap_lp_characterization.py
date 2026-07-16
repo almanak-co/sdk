@@ -23,7 +23,7 @@ import pytest
 
 from almanak import IntentCompiler, IntentCompilerConfig, SwapIntent
 from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext
-from almanak.framework.intents import LPOpenIntent
+from almanak.framework.intents import LPOpenIntent, PriceBand, RangeSpec
 from almanak.framework.intents.compiler import CompilationStatus
 
 # ---------------------------------------------------------------------------
@@ -203,6 +203,7 @@ def _make_lp_intent(
     amount1: Decimal = Decimal("0.5"),
     range_lower: Decimal = Decimal("1500"),
     range_upper: Decimal = Decimal("2500"),
+    range_spec: RangeSpec | None = None,
     protocol: str = "uniswap_v3",
     protocol_params: dict | None = None,
 ) -> LPOpenIntent:
@@ -210,10 +211,15 @@ def _make_lp_intent(
         "pool": pool,
         "amount0": amount0,
         "amount1": amount1,
-        "range_lower": range_lower,
-        "range_upper": range_upper,
         "protocol": protocol,
     }
+    # A typed range_spec is authoritative; passing the legacy bounds alongside it
+    # would trip the model's conflict check.
+    if range_spec is not None:
+        kwargs["range_spec"] = range_spec
+    else:
+        kwargs["range_lower"] = range_lower
+        kwargs["range_upper"] = range_upper
     if protocol_params is not None:
         kwargs["protocol_params"] = protocol_params
     return LPOpenIntent(**kwargs)
@@ -998,10 +1004,12 @@ class TestCompileLPOpenHappyPaths:
             intent = _make_lp_intent(
                 pool="USDC/WETH/500",
                 protocol="aerodrome_slipstream",
-                # Slipstream accepts tick-based ranges (negative allowed), but
-                # for dispatch-only we just need a valid positive range.
-                range_lower=Decimal("1000"),
-                range_upper=Decimal("3000"),
+                # Dispatch-only: the range form is irrelevant here, but it must
+                # be UNAMBIGUOUS. A bare positive whole-number pair on a
+                # tick-based protocol is valid as both prices and ticks, so it is
+                # rejected at construction (VIB-5867). Use a price band, the
+                # canonical form.
+                range_spec=PriceBand(lower=Decimal("1000"), upper=Decimal("3000")),
             )
             result = compiler.compile(intent)
 

@@ -17,6 +17,7 @@ from typing import Any
 
 from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.data_provider import MarketState, is_address_like, is_token_key
+from almanak.framework.intents.vocabulary import lp_range_bounds, lp_range_is_ticks
 
 logger = logging.getLogger(__name__)
 
@@ -387,12 +388,23 @@ def get_lp_tick_range(intent: Any, price_to_tick: Callable[[Decimal], int]) -> t
     """Resolve the ``(tick_lower, tick_upper)`` range for an LP intent.
 
     Explicit ``tick_lower``/``tick_upper`` attributes win. LP vocabulary
-    intents (``LPOpenIntent``) declare the range as price bounds
-    (``range_lower``/``range_upper``) instead, converted via
-    ``price_to_tick``; protocols listed in the intent's
-    ``_TICK_BASED_LP_PROTOCOLS`` carry raw ticks in those same fields and
-    are used directly. Falls back to the full V3 range when no usable
-    bounds are present.
+    intents (``LPOpenIntent``) declare the range in ``range_lower``/
+    ``range_upper``, which carry either raw ticks or price bounds; the form is
+    resolved by :func:`~almanak.framework.intents.vocabulary.lp_range_is_ticks`
+    — the *same* discriminator the connector compilers dispatch on, so a given
+    intent can never be replayed here as prices while it executed on-chain as
+    ticks (or vice-versa). Prices are converted via ``price_to_tick``; ticks are
+    used directly. Falls back to the full V3 range when no usable bounds are
+    present.
+
+    Keeping this in lockstep with the compilers is a hard requirement of the
+    LP-range design (``docs/internal/unified-lp-range-ux-design.md``
+    §Migration): reading the discriminator off a second, independently
+    maintained list is what causes backtest/live desync. Before VIB-5867 this
+    branched on ``intent._TICK_BASED_LP_PROTOCOLS``, which said "every
+    Slipstream range is ticks" — so a Slipstream *price* band (now a supported,
+    canonical form) would have been truncated by ``int()`` here, e.g. a
+    USDC/cbBTC band of 1.54e-05 -> tick 0.
 
     Args:
         intent: Intent object
@@ -407,13 +419,30 @@ def get_lp_tick_range(intent: Any, price_to_tick: Callable[[Decimal], int]) -> t
     if tick_lower is not None and tick_upper is not None:
         return int(tick_lower), int(tick_upper)
 
-    range_lower = _decimal_or_none(getattr(intent, "range_lower", None))
-    range_upper = _decimal_or_none(getattr(intent, "range_upper", None))
-    if range_lower is None or range_upper is None or range_lower >= range_upper:
+    # Resolve the bounds through the shared vocabulary helper, NOT the legacy
+    # fields directly: a canonical intent may carry only a ``range_spec`` (the
+    # pattern the fixed Slipstream demo uses), in which case ``range_lower``/
+    # ``range_upper`` can be absent. Reading them directly collapsed such a band
+    # to the full V3 range here while live minted the real band — a backtest/live
+    # desync (VIB-5867). ``lp_range_bounds`` prefers ``range_spec`` then falls
+    # back to the legacy fields, so both forms resolve identically.
+    bounds = lp_range_bounds(intent)
+    if bounds is None:
+        return _FULL_RANGE_TICKS
+    range_lower, range_upper = bounds
+    if range_lower >= range_upper:
         return _FULL_RANGE_TICKS
 
-    tick_based_protocols: frozenset[str] = getattr(intent, "_TICK_BASED_LP_PROTOCOLS", frozenset())
-    if getattr(intent, "protocol", None) in tick_based_protocols:
+    if lp_range_is_ticks(intent):
+        # Raw ticks are on-chain (raw-price) space; the caller's ``price_to_tick``
+        # and the IL model it feeds work in human-price space. For a decimal-
+        # ASYMMETRIC pool these spaces differ by the constant decimals shift, so a
+        # raw TickBand can read as out-of-range against a human-price reference.
+        # This is a pre-existing limitation of the tick escape hatch (every
+        # Slipstream backtest hit it before price bands existed); the canonical
+        # price-band path below is decimals-consistent with the model and is the
+        # common case. Closing it fully needs decimals threaded into the backtest
+        # value model -- tracked as a follow-up, not silently converted wrong here.
         return int(range_lower), int(range_upper)
     if range_lower <= 0:
         return _FULL_RANGE_TICKS

@@ -71,6 +71,50 @@ class TestOrientationAndDecimals:
         assert result == TickRange(*_expected(inv_lower, inv_upper, d0=6, d1=18, spacing=10))
         assert result.tick_lower < result.tick_upper
 
+    def test_alm_2901_usdc6_cbbtc8_matches_the_onchain_tick(self):
+        """Bit-exact anchor against the real ALM-2901 pool (VIB-5867).
+
+        Base ``0x4e962bb3...``: token0=USDC(6), token1=cbBTC(8), live tick
+        -64744 at a human price of 1.543067e-05. A band straddling that price
+        must produce ticks straddling that tick. The user's hand-rolled
+        conversion returned -110797 for the same price -- 46,054 ticks (~100x in
+        price) away, which is exactly |6-8| * log_1.0001(10).
+        """
+        result = price_band_to_ticks(
+            range_lower=Decimal("1.5e-05"),
+            range_upper=Decimal("1.6e-05"),
+            token0_decimals=6,
+            token1_decimals=8,
+            tokens_swapped=False,
+            tick_spacing=100,
+            current_tick=-64744,
+        )
+        assert result.tick_lower <= -64744 < result.tick_upper
+        # And the same band with symmetric decimals is ~46k ticks off -- i.e. the
+        # decimals term is doing real work, not decoration.
+        symmetric = price_band_to_ticks(
+            range_lower=Decimal("1.5e-05"),
+            range_upper=Decimal("1.6e-05"),
+            token0_decimals=18,
+            token1_decimals=18,
+            tokens_swapped=False,
+            tick_spacing=100,
+        )
+        assert result.tick_lower - symmetric.tick_lower == pytest.approx(46054, abs=100)
+
+    def test_alm_2901_pair_swapped_orientation(self):
+        """Same pair stated as cbBTC/USDC: the reciprocal band, still straddling."""
+        result = price_band_to_ticks(
+            range_lower=Decimal(1) / Decimal("1.6e-05"),
+            range_upper=Decimal(1) / Decimal("1.5e-05"),
+            token0_decimals=6,
+            token1_decimals=8,
+            tokens_swapped=True,
+            tick_spacing=100,
+            current_tick=-64744,
+        )
+        assert result.tick_lower <= -64744 < result.tick_upper
+
     def test_swap_inverts_band(self):
         # The swapped result must equal feeding the reciprocal band un-swapped.
         swapped = price_band_to_ticks(

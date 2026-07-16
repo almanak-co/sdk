@@ -28,6 +28,7 @@ from almanak.framework.intents.vocabulary import (
     IntentType,
     LPCloseIntent,
     LPOpenIntent,
+    PriceBand,
 )
 from almanak.framework.runner.strategy_runner import (
     IterationResult,
@@ -265,8 +266,11 @@ async def test_lp_open_then_close_all_nft_protocol_rejected_before_resolution(
         pool="0x" + "2" * 40,
         amount0=Decimal("100"),
         amount1=Decimal("0"),
-        range_lower=Decimal("1"),
-        range_upper=Decimal("2"),
+        # Filler range — this test is about LP_CLOSE amount="all" resolution, not
+        # the range. Stated as an explicit PriceBand because a bare whole-number
+        # pair is ambiguous on a tick-based protocol (aerodrome_slipstream is one
+        # of the parametrized cases) and is rejected at construction (VIB-5867).
+        range_spec=PriceBand(lower=Decimal("1"), upper=Decimal("2")),
         protocol=protocol,
     )
     lp_close = LPCloseIntent(position_id="0", pool="0x" + "1" * 40, protocol=protocol, amount="all")

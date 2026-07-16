@@ -194,19 +194,51 @@ class TestLegacyBridge:
         assert intent.range_upper == Decimal("-2000")
         assert any(issubclass(w.category, DeprecationWarning) for w in caught)
 
-    def test_slipstream_positive_integer_maps_to_tick_band(self):
-        # Slipstream legacy semantics: integer-valued bounds are ticks.
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            intent = Intent.lp_open(
+    def test_slipstream_positive_integer_bounds_are_ambiguous_and_rejected(self):
+        """BEHAVIOUR CHANGE (VIB-5867). Was: silently interpreted as ticks.
+
+        This test previously asserted that ``[2000, 5000]`` on Slipstream maps to
+        a ``TickBand`` -- i.e. the bridge GUESSED "ticks" for a pair that is an
+        equally valid, and far more natural, WETH/USDC *price* band. That guess is
+        a money bug: the same user input mints two completely different positions
+        depending on a coin-flip the caller never sees, and it flips based on
+        nothing more than whether the live price happens to be a round number
+        (``[2000, 5000]`` -> ticks, ``[2000.5, 5000.5]`` -> prices).
+
+        The design (``docs/internal/unified-lp-range-ux-design.md`` §Migration
+        Step 1) specifies rejection here: "zero / positive-integer values are
+        ambiguous -> require the explicit flag and reject otherwise ... a
+        whole-number price band like range_lower=2000.0 must never be silently
+        reinterpreted as a tick". The landed Step-1 heuristic deviated from that;
+        this restores it. Unambiguous forms (negative -> ticks, fractional ->
+        prices) are unchanged, and an explicit PriceBand/TickBand always wins.
+        """
+        with pytest.raises(ValidationError, match="Ambiguous LP range"):
+            Intent.lp_open(
                 pool=POOL,
                 amount0=Decimal("1"),
                 range_lower=Decimal("2000"),
                 range_upper=Decimal("5000"),
                 protocol="aerodrome_slipstream",
             )
-        assert isinstance(intent.range_spec, TickBand)
-        assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+
+    def test_slipstream_positive_integer_bounds_accepted_when_form_is_explicit(self):
+        """The escape from the ambiguity: say which form you meant."""
+        as_ticks = Intent.lp_open(
+            pool=POOL,
+            amount0=Decimal("1"),
+            range_spec=TickBand(lower=2000, upper=5000),
+            protocol="aerodrome_slipstream",
+        )
+        assert isinstance(as_ticks.range_spec, TickBand)
+
+        as_prices = Intent.lp_open(
+            pool=POOL,
+            amount0=Decimal("1"),
+            range_spec=PriceBand(lower=Decimal("2000"), upper=Decimal("5000")),
+            protocol="aerodrome_slipstream",
+        )
+        assert isinstance(as_prices.range_spec, PriceBand)
 
     def test_slipstream_non_integral_tick_bound_rejected(self):
         # A non-positive (tick-shaped) but fractional legacy bound on a tick-based
