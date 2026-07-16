@@ -225,3 +225,71 @@ class TestGetConnectedGatewayClient:
             get_connected_gateway_client()
         assert exc_info.value.source == "gateway"
         assert "refused" in exc_info.value.reason
+
+
+class TestTransportClassification:
+    """Only connectivity failures memoize; per-request statuses stay retryable."""
+
+    @staticmethod
+    def _raise_through(exc: Exception):
+        from almanak.framework.backtesting.pnl.providers.perp import _gateway_history as gh
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        class Service:
+            def GetFundingRateHistory(self, request):
+                raise exc
+
+        class Client:
+            rate_history = Service()
+
+        class Pb2:
+            @staticmethod
+            def GetFundingRateHistoryRequest(**kwargs):
+                return kwargs
+
+        try:
+            gh._fetch_window(Client(), Pb2, venue="gmx", market="ETH-USD", chain="arbitrum", start_ts=0, end_ts=1)
+        except DataSourceUnavailable as caught:
+            return caught
+        raise AssertionError("expected DataSourceUnavailable")
+
+    def test_permanent_status_is_not_transport(self):
+        class RpcError(Exception):
+            def code(self):
+                from types import SimpleNamespace
+
+                return SimpleNamespace(name="INVALID_ARGUMENT")
+
+        assert self._raise_through(RpcError("bad market")).transport is False
+
+    def test_unavailable_status_is_transport(self):
+        class RpcError(Exception):
+            def code(self):
+                from types import SimpleNamespace
+
+                return SimpleNamespace(name="UNAVAILABLE")
+
+        assert self._raise_through(RpcError("channel down")).transport is True
+
+    def test_connectivity_exception_types_are_transport(self):
+        assert self._raise_through(ConnectionError("socket closed")).transport is True
+        assert self._raise_through(TimeoutError("timed out")).transport is True
+
+    def test_unknown_exceptions_default_to_non_transport(self):
+        # A local decoding bug must not memoize the gateway as down for the run.
+        assert self._raise_through(ValueError("bad payload")).transport is False
+        assert self._raise_through(TypeError("wrong type")).transport is False
+        assert self._raise_through(RuntimeError("boom")).transport is False
+
+    def test_local_oserror_subclasses_are_not_transport(self):
+        # FileNotFoundError/PermissionError are OSError subclasses but signal
+        # local defects (missing cert, bad path), not channel failures.
+        assert self._raise_through(FileNotFoundError("cert missing")).transport is False
+        assert self._raise_through(PermissionError("denied")).transport is False
+
+    def test_raising_code_accessor_is_non_transport(self):
+        class RpcError(Exception):
+            def code(self):
+                raise RuntimeError("no status")
+
+        assert self._raise_through(RpcError("weird")).transport is False

@@ -154,6 +154,16 @@ class GMXFundingProvider(HistoricalFundingProvider):
                           based on config.requests_per_minute.
         """
         self._config = config or GMXClientConfig()
+        # Public chain scope (HistoricalFundingProvider contract): the perp
+        # adapter keys injected providers by (protocol, chain) via this.
+        self.chain = self._config.chain
+        # Sticky per-run memo: after two CONSECUTIVE gateway TRANSPORT
+        # failures, stop re-dialing a dead gateway every tick (~2s per dial
+        # adds minutes to an hourly-tick backtest). One failure alone is not
+        # memoized -- a single DEADLINE on a slow response must not disable
+        # the lane for the run. Data-level errors are NOT memoized.
+        self._gateway_unavailable = False
+        self._transport_failure_streak = 0
 
         # Create or use provided rate limiter
         if rate_limiter is not None:
@@ -386,6 +396,9 @@ class GMXFundingProvider(HistoricalFundingProvider):
         if end_date.tzinfo is None:
             end_date = end_date.replace(tzinfo=UTC)
 
+        if self._gateway_unavailable:
+            return self._generate_fallback_results(start_date, end_date)
+
         try:
             points = await self._fetch_points(
                 market=market,
@@ -394,6 +407,7 @@ class GMXFundingProvider(HistoricalFundingProvider):
                 end_ts=int(end_date.timestamp()),
             )
             results = self._grid_results(points, start_date, end_date)
+            self._transport_failure_streak = 0
             logger.info(
                 "Generated %d funding rate data points for market=%s (%d measured)",
                 len(results),
@@ -403,10 +417,28 @@ class GMXFundingProvider(HistoricalFundingProvider):
             return results
 
         except GMXAPIError as e:
-            logger.error("GMX funding history error: %s", str(e))
+            if getattr(e.__cause__, "transport", False):
+                self._transport_failure_streak += 1
+                if self._transport_failure_streak >= 2:
+                    self._gateway_unavailable = True
+                    logger.error(
+                        "GMX funding gateway lane unavailable (%d consecutive transport failures); "
+                        "using fallback rate for the remainder of this provider's lifetime "
+                        "(logged once): %s",
+                        self._transport_failure_streak,
+                        e,
+                    )
+                else:
+                    logger.warning("GMX funding gateway transport failure (will retry next fetch): %s", e)
+            else:
+                self._transport_failure_streak = 0
+                logger.error("GMX funding history error: %s", str(e))
             return self._generate_fallback_results(start_date, end_date)
 
         except Exception as e:
+            # A non-transport failure breaks the CONSECUTIVE-transport streak:
+            # transport -> generic -> transport must not memoize.
+            self._transport_failure_streak = 0
             logger.error("Unexpected error fetching funding rates: %s", str(e))
             return self._generate_fallback_results(start_date, end_date)
 

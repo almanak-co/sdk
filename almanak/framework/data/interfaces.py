@@ -66,6 +66,10 @@ class DataSourceUnavailable(DataSourceError):
         source: Name of the data source
         reason: Human-readable reason for unavailability
         retry_after: Suggested seconds to wait before retrying (optional)
+        transport: True when the failure is at the transport/connection layer
+            (client missing, connect failed, RPC error) rather than a
+            data-level miss — callers may memoize transport failures for the
+            rest of a run, but never data-level ones
     """
 
     def __init__(
@@ -73,10 +77,12 @@ class DataSourceUnavailable(DataSourceError):
         source: str,
         reason: str,
         retry_after: float | None = None,
+        transport: bool = False,
     ) -> None:
         self.source = source
         self.reason = reason
         self.retry_after = retry_after
+        self.transport = transport
         super().__init__(f"Data source '{source}' unavailable: {reason}")
 
 

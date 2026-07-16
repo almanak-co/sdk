@@ -198,6 +198,45 @@ class TestErrorHandling:
         assert len(rates) == 2
         assert all(r.source_info.source == "fallback" for r in rates)
 
+    @pytest.mark.asyncio
+    async def test_transport_failure_memoizes_after_two_consecutive(self):
+        """Two consecutive transport failures are sticky; one alone retries.
+
+        A single DEADLINE on a slow response must not disable the lane for
+        the rest of the run.
+        """
+        provider = HyperliquidFundingProvider()
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 1, tzinfo=UTC)
+
+        with patch(
+            _GATEWAY_SEAM,
+            side_effect=DataSourceUnavailable(source="gateway", reason="connect failed", transport=True),
+        ) as seam:
+            await provider.get_funding_rates("ETH-USD", start, end)
+            assert seam.call_count == 1  # first failure: retryable
+            await provider.get_funding_rates("ETH-USD", start, end)
+            assert seam.call_count == 2  # second consecutive failure: memoized
+            rates = await provider.get_funding_rates("ETH-USD", start, end)
+            assert seam.call_count == 2  # gateway no longer dialed
+
+        assert all(r.source_info.source == "fallback" for r in rates)
+
+    @pytest.mark.asyncio
+    async def test_data_level_miss_is_not_memoized(self):
+        """A data-level miss (success=False envelope) stays retryable."""
+        provider = HyperliquidFundingProvider()
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 1, tzinfo=UTC)
+
+        with patch(
+            _GATEWAY_SEAM,
+            side_effect=DataSourceUnavailable(source="gateway", reason="no data for market"),
+        ) as seam:
+            await provider.get_funding_rates("ETH-USD", start, end)
+            await provider.get_funding_rates("ETH-USD", start, end)
+            assert seam.call_count == 2
+
 
 class TestGetCurrentFundingRate:
     """Tests for the current-rate convenience method."""

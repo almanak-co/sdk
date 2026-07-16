@@ -237,6 +237,81 @@ class TestErrorHandling:
         assert len(rates) == 2
         assert all(r.source_info.source == "fallback" for r in rates)
 
+    @pytest.mark.asyncio
+    async def test_transport_failure_memoizes_after_two_consecutive(self):
+        """Two consecutive transport failures are sticky; one alone retries.
+
+        A single DEADLINE on a slow response must not disable the lane for
+        the rest of the run.
+        """
+        provider = GMXFundingProvider()
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 1, tzinfo=UTC)
+
+        with patch(
+            _GATEWAY_SEAM,
+            side_effect=DataSourceUnavailable(source="gateway", reason="connect failed", transport=True),
+        ) as seam:
+            await provider.get_funding_rates("ETH-USD", start, end)
+            assert seam.call_count == 1  # first failure: retryable
+            await provider.get_funding_rates("ETH-USD", start, end)
+            assert seam.call_count == 2  # second consecutive failure: memoized
+            rates = await provider.get_funding_rates("ETH-USD", start, end)
+            assert seam.call_count == 2  # gateway no longer dialed
+
+        assert all(r.source_info.source == "fallback" for r in rates)
+
+    @pytest.mark.asyncio
+    async def test_transport_streak_resets_on_non_transport_failure(self):
+        """transport -> generic error -> transport must NOT memoize.
+
+        The threshold is two CONSECUTIVE transport failures; any
+        non-transport failure in between breaks the streak.
+        """
+        provider = GMXFundingProvider()
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 1, tzinfo=UTC)
+        transport_error = DataSourceUnavailable(source="gateway", reason="deadline", transport=True)
+
+        with patch(_GATEWAY_SEAM, side_effect=[transport_error, RuntimeError("boom"), transport_error]) as seam:
+            await provider.get_funding_rates("ETH-USD", start, end)  # transport 1
+            await provider.get_funding_rates("ETH-USD", start, end)  # generic: streak resets
+            await provider.get_funding_rates("ETH-USD", start, end)  # transport 1 again
+            assert not provider._gateway_unavailable
+            assert seam.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_transport_streak_resets_on_success(self):
+        """A success between transport failures resets the memo streak."""
+        provider = GMXFundingProvider()
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 1, tzinfo=UTC)
+        transport_error = DataSourceUnavailable(source="gateway", reason="deadline", transport=True)
+
+        with patch(_GATEWAY_SEAM, side_effect=[transport_error, [], transport_error, transport_error]) as seam:
+            await provider.get_funding_rates("ETH-USD", start, end)  # failure 1
+            await provider.get_funding_rates("ETH-USD", start, end)  # success: streak resets
+            await provider.get_funding_rates("ETH-USD", start, end)  # failure 1 (again)
+            assert not provider._gateway_unavailable
+            await provider.get_funding_rates("ETH-USD", start, end)  # failure 2: memoized
+            assert provider._gateway_unavailable
+            assert seam.call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_data_level_miss_is_not_memoized(self):
+        """A data-level miss (success=False envelope) stays retryable."""
+        provider = GMXFundingProvider()
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 1, tzinfo=UTC)
+
+        with patch(
+            _GATEWAY_SEAM,
+            side_effect=DataSourceUnavailable(source="gateway", reason="no data for market"),
+        ) as seam:
+            await provider.get_funding_rates("ETH-USD", start, end)
+            await provider.get_funding_rates("ETH-USD", start, end)
+            assert seam.call_count == 2
+
 
 class TestGetCurrentFundingRate:
     """Tests for the current-rate convenience method."""

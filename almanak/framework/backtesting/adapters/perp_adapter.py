@@ -89,6 +89,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Wildcard chain key for injected funding providers (chain-agnostic seam).
+_ANY_CHAIN = "*"
+
+
 @dataclass
 class PerpBacktestConfig(StrategyBacktestConfig):
     """Configuration for perp-specific backtesting.
@@ -384,8 +388,8 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         self._last_funding_time: dict[str, datetime] = {}
 
         # Historical funding providers, keyed by connector registry canonical key.
-        self._provider_cache: dict[str, HistoricalFundingProvider | None] = {}
-        self._provider_tried: set[str] = set()
+        self._provider_cache: dict[tuple[str, str], HistoricalFundingProvider | None] = {}
+        self._provider_tried: set[tuple[str, str]] = set()
         self._seed_injected_provider("gmx", gmx_provider)
         self._seed_injected_provider("hyperliquid", hyperliquid_provider)
         self._seed_injected_providers(injected_providers or {})
@@ -408,15 +412,74 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             )
 
     def _seed_injected_provider(self, protocol: str, provider: HistoricalFundingProvider | None) -> None:
-        """Seed one injected provider into the connector-keyed provider cache."""
+        """Seed one injected provider into the connector-keyed provider cache.
+
+        ``protocol`` accepts an explicit ``"protocol:chain"`` scope (e.g.
+        ``"gmx:arbitrum"``); a bare protocol falls back to the provider's
+        public ``chain`` attribute (the HistoricalFundingProvider contract),
+        and chainless providers serve as the wildcard fallback. An explicit
+        scope that CONTRADICTS the provider's declared chain is rejected —
+        serving one chain's data under another chain's key silently corrupts
+        every funding number downstream. Scoping a chain-agnostic provider
+        explicitly stays legal.
+        """
         if provider is None:
             return
-        canonical = FundingHistoryRegistry.canonical(protocol)
-        if canonical is None:
-            logger.debug("Ignoring injected funding provider for unknown protocol '%s'", protocol)
+        protocol_key, scope_separator, explicit_chain = protocol.partition(":")
+        if scope_separator and not explicit_chain.strip():
+            # "gmx_v2:" is a malformed explicit scope, not a wildcard request —
+            # silently broadening a typo to every supported chain is exactly
+            # the cross-chain hazard the scoping syntax exists to prevent.
+            logger.warning(
+                "Rejecting injected funding provider %r: explicit chain scope is blank "
+                "(use a bare protocol key for wildcard seeding)",
+                protocol,
+            )
             return
-        self._provider_cache[canonical] = provider
-        self._provider_tried.add(canonical)
+        canonical = FundingHistoryRegistry.canonical(protocol_key)
+        if canonical is None:
+            logger.debug("Ignoring injected funding provider for unknown protocol '%s'", protocol_key)
+            return
+        # Canonicalize BOTH sides before comparing/keying: "avax" and
+        # "avalanche" are the same chain, and a raw-string mismatch here
+        # rejects correct injections (the lookup then builds a wrong-chain
+        # fallback under the alias key).
+        public_chain = self._canonical_chain(provider.chain)
+        if explicit_chain:
+            chain_key = self._canonical_chain(explicit_chain) or explicit_chain.strip().lower()
+            if public_chain is not None and public_chain != chain_key:
+                logger.warning(
+                    "Rejecting injected funding provider for %r: explicit scope %r contradicts "
+                    "the provider's declared chain %r",
+                    protocol_key,
+                    chain_key,
+                    public_chain,
+                )
+                return
+        else:
+            chain_key = public_chain if public_chain is not None else _ANY_CHAIN
+        # Declared-chain contract: a connector that declares funding chains
+        # serves ONLY those chains — an injection scoped (explicitly or via
+        # its public chain) to an undeclared chain is rejected, never cached.
+        # An EMPTY declared set is the explicit chain-agnostic contract
+        # (Hyperliquid). The wildcard seam stays; lookups gate it below.
+        declared = frozenset(
+            resolved
+            for resolved in (self._canonical_chain(c) for c in FundingHistoryRegistry.declared_chains(canonical) or ())
+            if resolved is not None
+        )
+        if chain_key != _ANY_CHAIN and declared and chain_key not in declared:
+            logger.warning(
+                "Rejecting injected funding provider for %r: chain %r is not in the connector's "
+                "declared funding chains %s",
+                protocol_key,
+                chain_key,
+                sorted(declared),
+            )
+            return
+        key = (canonical, chain_key)
+        self._provider_cache[key] = provider
+        self._provider_tried.add(key)
 
     def _seed_injected_providers(self, providers: Mapping[str, HistoricalFundingProvider | None]) -> None:
         """Seed the generic provider cache from test/operator injections."""
@@ -480,7 +543,78 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             return self._data_config.strict_historical_mode
         return False
 
-    def _get_provider_for_protocol(self, protocol: str) -> HistoricalFundingProvider | None:
+    async def prewarm_history(
+        self,
+        intent: Any,
+        chain: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> None:
+        """Pre-fetch the backtest window's hourly funding into ``_funding_cache``.
+
+        Per-tick accrual fetches funding one hour at a time through a worker
+        thread (~1.2s each — minutes of pure fetch latency on an hourly-tick
+        backtest even with a healthy gateway). One whole-window fetch here (a
+        legal await point, right after the PERP_OPEN fill) makes every
+        subsequent tick a cache hit. Best-effort: on failure the per-tick
+        semantics (fetch → fallback rate) are unchanged.
+        """
+        protocol = str(getattr(intent, "protocol", "") or "").lower()
+        raw_market = getattr(intent, "market", None)
+        if not protocol or not isinstance(raw_market, str) or not raw_market:
+            return
+        provider = self._get_provider_for_protocol(protocol, chain)
+        if provider is None:
+            return
+        # Cache market key must match _funding_lookup's "<BASE>-USD". Both
+        # sides normalize through the SAME token_ref_provider_symbol call
+        # (which unwraps address-resolved wrapped natives) — key parity is
+        # the contract; a divergent key is a guaranteed cache miss that
+        # silently defeats the prewarm.
+        base = raw_market.replace("/", "-").split("-")[0].strip().upper()
+        base = token_ref_provider_symbol(base, chain, unwrap_wrapped_native=True).upper()
+        market = f"{base}-USD"
+        try:
+            rates = await provider.get_funding_rates(market=market, start_date=start_time, end_date=end_time)
+        except Exception as exc:  # noqa: BLE001 — best-effort prewarm
+            logger.warning("Funding history prewarm failed for %s %s: %s", protocol, market, exc)
+            return
+        warmed = 0
+        for rate in rates or []:
+            info = rate.source_info
+            if info.source == "fallback":
+                # A degraded prewarm must not freeze fallback rates into the
+                # cache — the per-tick lane can still fetch measured data.
+                continue
+            hour = self._normalize_timestamp_to_hour(info.timestamp)
+            confidence = info.confidence.value if hasattr(info.confidence, "value") else str(info.confidence)
+            self._funding_cache[(protocol, market, hour)] = (rate.rate, confidence, f"historical:{info.source}")
+            warmed += 1
+        logger.info("Prewarmed %d hours of funding history for %s %s", warmed, protocol, market)
+
+    @staticmethod
+    def _canonical_chain(value: Any) -> str | None:
+        """Canonical ChainRegistry name for ``value``, or None when unset.
+
+        Chain identity must never be raw-string compared: registered aliases
+        ("avax") and canonical names ("avalanche") are the same chain, and a
+        raw comparison both rejects correct injections and caches providers
+        under alias keys that never match their canonical duplicates.
+        Unregistered strings fall back to lowercase (fail-soft: an unknown
+        chain still gets a stable key).
+        """
+        if not isinstance(value, str) or not value:
+            return None
+        from almanak.core.chains import ChainRegistry
+
+        descriptor = ChainRegistry.try_resolve(value)
+        return descriptor.name.lower() if descriptor is not None else value.strip().lower()
+
+    def _provider_chain(self, chain: str | None) -> str:
+        """Chain a funding provider should be built for (run chain, not default)."""
+        return self._canonical_chain(chain) or self._canonical_chain(self._config.chain) or DEFAULT_CHAIN
+
+    def _get_provider_for_protocol(self, protocol: str, chain: str | None = None) -> HistoricalFundingProvider | None:
         """Resolve a historical funding provider through connector declarations."""
         if not self._use_historical_funding():
             return None
@@ -489,16 +623,49 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         if canonical is None:
             logger.debug("No historical funding provider for protocol '%s', will use fallback", protocol)
             return None
-        if canonical in self._provider_tried:
-            return self._provider_cache.get(canonical)
+        provider_chain = self._provider_chain(chain)
+        key = (canonical, provider_chain)
+        # Declared-chain contract, enforced on EVERY return path: a connector
+        # that declares funding chains never serves an undeclared one — not
+        # from the exact cache, not via the wildcard seam, and never by
+        # constructing a provider whose factory would silently fall back to
+        # its default chain. Empty declared set = chain-agnostic (Hyperliquid).
+        # Canonicalize the DECLARED side too: chain identity is never
+        # raw-string compared (the R5 lesson) — a connector declaring the
+        # registered alias "avax" must match the canonical "avalanche" run
+        # chain, not silently fall back on a correctly-aliased manifest.
+        declared = frozenset(
+            resolved
+            for resolved in (self._canonical_chain(c) for c in FundingHistoryRegistry.declared_chains(canonical) or ())
+            if resolved is not None
+        )
+        if declared and provider_chain not in declared:
+            if key not in self._provider_tried:
+                self._provider_tried.add(key)
+                self._provider_cache[key] = None
+                logger.warning(
+                    "No funding history for %s on undeclared chain %r (declared: %s); using fallback rate.",
+                    canonical,
+                    provider_chain,
+                    sorted(declared),
+                )
+            return None
+        # Exact (protocol, chain) entries always win; the injected wildcard
+        # only serves chains with no exact entry, so a chain-agnostic test
+        # injection can never shadow a real chain-keyed provider.
+        if key in self._provider_tried:
+            return self._provider_cache.get(key)
+        wildcard = (canonical, _ANY_CHAIN)
+        if wildcard in self._provider_tried:
+            return self._provider_cache.get(wildcard)
 
-        self._provider_tried.add(canonical)
+        self._provider_tried.add(key)
         provider_cls = cast(
             type[HistoricalFundingProvider] | None,
             FundingHistoryRegistry.backtest_provider(canonical),
         )
         if provider_cls is None:
-            self._provider_cache[canonical] = None
+            self._provider_cache[key] = None
             logger.debug("No historical funding provider declared for protocol '%s'", canonical)
             return None
 
@@ -506,20 +673,44 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             provider = provider_cls.for_backtest(
                 BacktestProviderConfig(
                     funding_fallback_rate=self._get_funding_fallback_rate(),
-                    chain=self._config.chain,
+                    chain=provider_chain,
                 )
             )
-            self._provider_cache[canonical] = provider
+            # Verify BEFORE caching: connector factories fall back to their
+            # default chain for unsupported requests (GMX -> arbitrum), and
+            # caching that mismatch serves another chain's funding history
+            # for the rest of the run. For declared-chain protocols a MISSING
+            # built chain is rejected too — a chain-scoped provider that does
+            # not publish its chain can default internally to another chain
+            # with no way to detect it. None stays legal only for explicitly
+            # chain-agnostic venues (empty declared set, e.g. Hyperliquid).
+            built_chain = self._canonical_chain(provider.chain)
+            built_invalid = (
+                (built_chain != provider_chain)
+                if declared
+                else (built_chain is not None and built_chain != provider_chain)
+            )
+            if built_invalid:
+                logger.warning(
+                    "Funding provider for %s was built for chain %r, not the requested %r; "
+                    "using fallback rates instead of cross-chain history.",
+                    canonical,
+                    built_chain,
+                    provider_chain,
+                )
+                self._provider_cache[key] = None
+                return None
+            self._provider_cache[key] = provider
             logger.debug(
                 "Initialized historical funding provider for %s: chain=%s, fallback_rate=%s",
                 canonical,
-                self._config.chain,
+                provider_chain,
                 self._get_funding_fallback_rate(),
             )
             return provider
         except Exception as e:
             logger.warning("Failed to initialize funding provider for %s: %s. Will use fallback rate.", canonical, e)
-            self._provider_cache[canonical] = None
+            self._provider_cache[key] = None
             return None
 
     def _normalize_timestamp_to_hour(self, timestamp: datetime) -> datetime:
@@ -600,13 +791,32 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             return None
 
         params = self._perp_open_params(intent)
-        collateral_usd = self._perp_collateral_usd(params, portfolio, market_state)
+
+        if params.collateral_amount == "all":
+            # No backtest sizing lane for the "all" sentinel (ALM-2943): fail
+            # closed before sizing — resolving it from cash-like here while
+            # the debit side resolves independently splits the two figures.
+            from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
+
+            return self._perp_margin_failure_fill(
+                params,
+                market_state,
+                collateral_usd=Decimal("0"),
+                required_margin_ratio=self._config.initial_margin_ratio,
+                reason=UNSUPPORTED_ALL_SIZING_REASON,
+                validation_type="sizing",
+            )
+
+        collateral_usd = self._perp_collateral_usd(params, market_state)
         required_margin_ratio = self._perp_required_margin_ratio(params.leverage)
 
         can_open, reason = self._margin_validator.can_open_position(
             position_size=params.size_usd,
             collateral=collateral_usd,
-            available_capital=portfolio.cash_usd,
+            # cash_usd alone is 0 for token-funded portfolios (platform
+            # token_funding path) — stables held as tokens ARE the margin
+            # capital, exactly as apply_fill debits them.
+            available_capital=portfolio.cash_like_available(),
             current_margin_used=self._get_current_margin_used(portfolio),
             margin_ratio=required_margin_ratio,
         )
@@ -637,12 +847,8 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
     def _perp_collateral_usd(
         self,
         params: _PerpOpenParams,
-        portfolio: "SimulatedPortfolio",
         market_state: "MarketState",
     ) -> Decimal:
-        if params.collateral_amount == "all":
-            return portfolio.cash_usd
-
         collateral_price = self._perp_collateral_price(params, market_state)
         return Decimal(str(params.collateral_amount)) * collateral_price
 
@@ -670,8 +876,18 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         return Decimal("1")
 
     def _perp_required_margin_ratio(self, leverage: Decimal) -> Decimal:
-        if leverage > Decimal("1"):
-            return Decimal("1") / leverage
+        """The venue's initial-margin floor — the only economic constraint here.
+
+        The intent's declared ``leverage`` is sizing metadata already encoded in
+        ``(size_usd, collateral_amount)``. The original engine derived the
+        required ratio as ``1/leverage`` (PR #143), which re-validates the
+        user's own declaration against market-repriced collateral — rejecting
+        every self-consistent intent by epsilon whenever the collateral stable
+        isn't exactly $1. An over-leveraged intent is
+        still rejected: its actual collateral/size ratio falls below the venue
+        floor regardless of what it declared.
+        """
+        del leverage  # sizing metadata, not a constraint
         return self._config.initial_margin_ratio
 
     def _perp_margin_failure_fill(
@@ -681,12 +897,14 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         collateral_usd: Decimal,
         required_margin_ratio: Decimal,
         reason: str,
+        validation_type: str = "margin",
     ) -> "SimulatedFill":
         from almanak.framework.backtesting.models import IntentType
         from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
 
         logger.warning(
-            "Margin validation failed for PERP_OPEN: size=%s, collateral=%s, reason=%s",
+            "%s validation failed for PERP_OPEN: size=%s, collateral=%s, reason=%s",
+            validation_type.capitalize(),
             params.size_usd,
             collateral_usd,
             reason,
@@ -706,7 +924,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             success=False,
             metadata={
                 "failure_reason": reason,
-                "validation_type": "margin",
+                "validation_type": validation_type,
                 "required_margin_ratio": str(required_margin_ratio),
                 "collateral_usd": str(collateral_usd),
                 "attempted_collateral_amount": str(params.collateral_amount),
@@ -1119,7 +1337,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         if lookup.timestamp is None:
             return self._funding_no_timestamp_result(position, lookup)
 
-        provider = self._get_provider_for_protocol(position.protocol)
+        provider = self._get_provider_for_protocol(position.protocol, chain)
         if provider is None:
             return self._funding_provider_unavailable_result(position, lookup)
 

@@ -68,18 +68,55 @@ class TestProviderCaching:
 
         assert first is not None
         assert first is second
-        assert adapter._provider_tried == {"gmx_v2"}
-        assert adapter._provider_cache["gmx_v2"] is first
+        assert adapter._provider_tried == {("gmx_v2", "arbitrum")}
+        assert adapter._provider_cache[("gmx_v2", "arbitrum")] is first
 
     def test_injected_provider_seeds_generic_cache(self) -> None:
         sentinel = MagicMock()
         adapter = _make_adapter(injected_providers={"hyperliquid": sentinel})
 
-        assert adapter._provider_tried == {"hyperliquid"}
-        assert adapter._provider_cache["hyperliquid"] is sentinel
+        assert adapter._provider_tried == {("hyperliquid", "*")}
+        assert adapter._provider_cache[("hyperliquid", "*")] is sentinel
 
     def test_provider_cache_starts_empty_without_injections(self) -> None:
         adapter = _make_adapter()
 
         assert adapter._provider_tried == set()
         assert adapter._provider_cache == {}
+
+
+class TestDeclaredChainCanonicalization:
+    """Declared funding chains canonicalize before comparison (CodeRabbit
+    review on #3270): a manifest declaring the registered alias "avax" must
+    serve the canonical "avalanche" run chain — chain identity is never
+    raw-string compared (the round-5 lesson, applied to the DECLARED side)."""
+
+    def test_alias_declared_chain_serves_canonical_run_chain(self, monkeypatch) -> None:
+        from almanak.connectors._strategy_base.funding_history_registry import (
+            FundingHistoryRegistry,
+        )
+
+        monkeypatch.setattr(FundingHistoryRegistry, "declared_chains", classmethod(lambda cls, protocol: ("avax",)))
+
+        mock_provider = MagicMock()
+        mock_provider.chain = "avalanche"
+        adapter = _make_adapter(injected_providers={"gmx_v2:avalanche": mock_provider})
+
+        # Pre-fix: declared {"avax"} != canonical "avalanche" -> the injection
+        # was REJECTED at seeding and the lookup fell back to None.
+        assert adapter._get_provider_for_protocol("gmx_v2", "avalanche") is mock_provider
+
+    def test_alias_declared_chain_still_rejects_undeclared(self, monkeypatch) -> None:
+        from almanak.connectors._strategy_base.funding_history_registry import (
+            FundingHistoryRegistry,
+        )
+
+        monkeypatch.setattr(FundingHistoryRegistry, "declared_chains", classmethod(lambda cls, protocol: ("avax",)))
+
+        mock_provider = MagicMock()
+        mock_provider.chain = "arbitrum"
+        adapter = _make_adapter(injected_providers={"gmx_v2:arbitrum": mock_provider})
+
+        # Canonicalization must not LOOSEN the contract: arbitrum stays
+        # undeclared and both the seeding and the lookup reject it.
+        assert adapter._get_provider_for_protocol("gmx_v2", "arbitrum") is None

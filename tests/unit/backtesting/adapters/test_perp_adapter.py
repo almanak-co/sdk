@@ -492,7 +492,7 @@ class TestFundingAccumulationOverTime:
         )
         captured: dict[str, str] = {}
 
-        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda protocol: object())
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda protocol, chain=None: object())
 
         def fake_fetch_historical_funding_rates(provider, lookup):
             captured["market"] = lookup.market
@@ -1299,8 +1299,8 @@ class TestHistoricalFundingRateIntegration:
             protocol="gmx",
         )
 
-        adapter._provider_tried.add("gmx_v2")
-        adapter._provider_cache["gmx_v2"] = None
+        adapter._provider_tried.add(("gmx_v2", "*"))
+        adapter._provider_cache[("gmx_v2", "*")] = None
         rate, confidence, source = adapter._get_historical_funding_rate_v2(
             position=position,
             timestamp=entry_time,
@@ -1386,8 +1386,7 @@ class TestHistoricalFundingRateIntegration:
 
         import logging
 
-        adapter._provider_tried.add("gmx_v2")
-        adapter._provider_cache["gmx_v2"] = mock_provider
+        adapter._seed_injected_provider("gmx_v2", mock_provider)
         with caplog.at_level(logging.DEBUG, logger="almanak.framework.backtesting.adapters.perp_adapter"):
             # Apply 1 hour of funding
             adapter.update_position(position, market, elapsed_seconds=3600, timestamp=entry_time)
@@ -1442,8 +1441,7 @@ class TestHistoricalFundingRateIntegration:
         mock_provider = MagicMock()
         mock_provider.get_funding_rates = AsyncMock(return_value=[newest, older])
 
-        adapter._provider_tried.add("gmx_v2")
-        adapter._provider_cache["gmx_v2"] = mock_provider
+        adapter._seed_injected_provider("gmx_v2", mock_provider)
         rate, confidence, source = adapter._get_historical_funding_rate_v2(
             position=position,
             timestamp=entry_time,
@@ -1509,8 +1507,7 @@ class TestHistoricalFundingRateIntegration:
         mock_provider = MagicMock()
         mock_provider.get_funding_rates = AsyncMock(return_value=[mock_funding_result])
 
-        adapter._provider_tried.add("hyperliquid")
-        adapter._provider_cache["hyperliquid"] = mock_provider
+        adapter._seed_injected_provider("hyperliquid", mock_provider)
         rate, confidence, source = adapter._get_historical_funding_rate_v2(
             position=position,
             timestamp=entry_time,
@@ -1728,37 +1725,357 @@ class TestExecuteIntentUsesRealPortfolioCash:
                 market,
             )
 
-    def test_open_all_collateral_uses_portfolio_cash_usd(self) -> None:
-        """collateral_amount='all' must resolve to the portfolio's cash_usd."""
-        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+    def test_open_all_collateral_fails_closed(self) -> None:
+        """collateral_amount='all' has no backtest sizing lane (ALM-2943).
 
-        adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
-        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
-
-        # size 5000 at 5x needs 1000 collateral; "all" cash is only 100.
-        fill = adapter.execute_intent(self._open_intent("all"), portfolio, self._market_state())
-
-        assert fill is not None
-        assert fill.success is False
-        assert fill.metadata["validation_type"] == "margin"
-        # Proves the 'all' path read the real cash balance.
-        assert Decimal(fill.metadata["collateral_usd"]) == Decimal("100")
-
-    def test_open_all_collateral_with_ample_cash_hits_utilization_check(self) -> None:
-        """collateral_amount='all' resolves to the full cash_usd balance.
-
-        Committing 100% of cash as collateral always trips the margin
-        validator's max-utilization check (90%), so the expected outcome is
-        a failed fill whose metadata proves the 'all' path read cash_usd.
+        Sizing it from cash-like while the debit side resolves independently
+        splits the two figures, so the open is rejected with a
+        machine-visible reason regardless of how much cash is available.
         """
+        from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 
         adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
-        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
 
-        fill = adapter.execute_intent(self._open_intent("all"), portfolio, self._market_state())
+        for capital in (Decimal("100"), Decimal("10000")):
+            portfolio = SimulatedPortfolio(initial_capital_usd=capital)
 
-        assert fill is not None
-        assert fill.success is False
-        assert fill.metadata["validation_type"] == "margin"
-        assert Decimal(fill.metadata["collateral_usd"]) == Decimal("10000")
+            fill = adapter.execute_intent(self._open_intent("all"), portfolio, self._market_state())
+
+            assert fill is not None, capital
+            assert fill.success is False, capital
+            assert fill.metadata["validation_type"] == "sizing", capital
+            assert fill.metadata["failure_reason"] == UNSUPPORTED_ALL_SIZING_REASON, capital
+            assert fill.metadata["attempted_collateral_amount"] == "all", capital
+
+
+class TestFundingProviderChainRouting:
+    """Funding providers are built and cached per (protocol, chain)."""
+
+    def _adapter(self):
+        from almanak.framework.backtesting.adapters.perp_adapter import PerpBacktestAdapter
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        return PerpBacktestAdapter(data_config=BacktestDataConfig(use_historical_funding=True))
+
+    def test_run_chain_threads_into_provider(self):
+        adapter = self._adapter()
+        provider = adapter._get_provider_for_protocol("gmx_v2", "avalanche")
+        assert provider is not None
+        assert provider._config.chain == "avalanche"
+
+    def test_provider_cache_is_chain_keyed(self):
+        adapter = self._adapter()
+        arb = adapter._get_provider_for_protocol("gmx_v2", "arbitrum")
+        avax = adapter._get_provider_for_protocol("gmx_v2", "avalanche")
+        assert arb is not None and avax is not None
+        assert arb is not avax
+        assert adapter._get_provider_for_protocol("gmx_v2", "avalanche") is avax
+
+    def test_chain_alias_canonicalizes_everywhere(self):
+        """ "avax" and "avalanche" are the same chain: an aliased injection is
+        accepted, an aliased lookup serves the canonical entry, and no
+        alias-keyed duplicate is ever cached."""
+        from unittest.mock import MagicMock
+
+        adapter = self._adapter()
+        injected = MagicMock(spec=[])
+        injected.chain = "avalanche"
+        adapter._seed_injected_provider("gmx_v2:avax", injected)
+
+        assert adapter._provider_cache.get(("gmx_v2", "avalanche")) is injected
+        assert ("gmx_v2", "avax") not in adapter._provider_cache
+        assert adapter._get_provider_for_protocol("gmx_v2", "avax") is injected
+        assert adapter._get_provider_for_protocol("gmx_v2", "avalanche") is injected
+
+    def test_declared_chain_contract_enforced_on_injections(self):
+        """A connector that declares funding chains never serves an undeclared
+        one — not via explicit scope, not via public chain, not via the
+        wildcard seam."""
+        from unittest.mock import MagicMock
+
+        # Explicit scope to an undeclared chain: rejected at seeding.
+        adapter = self._adapter()
+        chainless = MagicMock(spec=[])
+        chainless.chain = None
+        adapter._seed_injected_provider("gmx_v2:ethereum", chainless)
+        assert ("gmx_v2", "ethereum") not in adapter._provider_cache
+
+        # Public chain reporting an undeclared chain: rejected at seeding.
+        adapter2 = self._adapter()
+        eth_reporting = MagicMock(spec=[])
+        eth_reporting.chain = "ethereum"
+        adapter2._seed_injected_provider("gmx_v2", eth_reporting)
+        assert ("gmx_v2", "ethereum") not in adapter2._provider_cache
+
+        # Wildcard seam serves declared chains only.
+        adapter3 = self._adapter()
+        wildcard = MagicMock(spec=[])
+        wildcard.chain = None
+        adapter3._seed_injected_provider("gmx_v2", wildcard)
+        assert adapter3._get_provider_for_protocol("gmx_v2", "ethereum") is None
+        assert adapter3._get_provider_for_protocol("gmx_v2", "avalanche") is wildcard
+
+    def test_chainless_factory_output_rejected_for_declared_protocols(self):
+        """A chain-scoped factory returning chain=None must not be cached —
+        such a provider can default internally to another chain with no way
+        to detect it (round-7: silent cross-chain funding corruption)."""
+        from unittest.mock import patch
+
+        from almanak.connectors.gmx_v2.backtest_funding import GMXFundingProvider
+
+        adapter = self._adapter()
+        real = GMXFundingProvider.for_backtest
+
+        def chainless_factory(config):
+            provider = real(config)
+            provider.chain = None
+            return provider
+
+        with patch.object(GMXFundingProvider, "for_backtest", staticmethod(chainless_factory)):
+            provider = adapter._get_provider_for_protocol("gmx_v2", "avalanche")
+
+        assert provider is None
+        assert adapter._provider_cache.get(("gmx_v2", "avalanche")) is None
+
+    def test_blank_explicit_scope_is_rejected_not_wildcard(self):
+        """ "gmx_v2:" is a typo, not a wildcard — it must not silently broaden
+        a chainless provider to every supported chain."""
+        from unittest.mock import MagicMock
+
+        adapter = self._adapter()
+        injected = MagicMock(spec=[])
+        injected.chain = None
+        adapter._seed_injected_provider("gmx_v2:", injected)
+
+        assert not any(key[0] == "gmx_v2" for key in adapter._provider_cache)
+        assert adapter._get_provider_for_protocol("gmx_v2", "avalanche") is not injected
+
+    def test_empty_declared_set_is_chain_agnostic(self):
+        """Hyperliquid's empty declared-chain set is the explicit
+        chain-agnostic contract: the wildcard serves any chain."""
+        from unittest.mock import MagicMock
+
+        adapter = self._adapter()
+        injected = MagicMock(spec=[])
+        injected.chain = None
+        adapter._seed_injected_provider("hyperliquid", injected)
+
+        assert adapter._get_provider_for_protocol("hyperliquid", "arbitrum") is injected
+
+    def test_wrong_chain_construction_is_never_cached(self):
+        """A factory that falls back to its default chain (GMX -> arbitrum for
+        undeclared chains) must yield None, not another chain's history."""
+        adapter = self._adapter()
+
+        provider = adapter._get_provider_for_protocol("gmx_v2", "ethereum")
+
+        assert provider is None
+        assert adapter._provider_cache.get(("gmx_v2", "ethereum")) is None
+
+    def test_exact_chain_entry_beats_injected_wildcard(self):
+        from unittest.mock import MagicMock
+
+        adapter = self._adapter()
+        avax = adapter._get_provider_for_protocol("gmx_v2", "avalanche")
+        wildcard = MagicMock(spec=[])
+        adapter._provider_cache[("gmx_v2", "*")] = wildcard
+        adapter._provider_tried.add(("gmx_v2", "*"))
+
+        assert adapter._get_provider_for_protocol("gmx_v2", "avalanche") is avax
+
+    def test_chain_scoped_injection_serves_its_chain_only(self):
+        """A provider declaring a public chain scope is keyed to that chain."""
+        from unittest.mock import MagicMock
+
+        adapter = self._adapter()
+        injected = MagicMock(spec=[])
+        injected.chain = "arbitrum"
+        adapter._seed_injected_provider("gmx_v2", injected)
+
+        assert adapter._get_provider_for_protocol("gmx_v2", "arbitrum") is injected
+        avax = adapter._get_provider_for_protocol("gmx_v2", "avalanche")
+        assert avax is not injected
+
+    def test_explicit_key_scopes_a_chainless_provider(self):
+        """'protocol:chain' seeding explicitly scopes a chain-agnostic provider."""
+        from unittest.mock import MagicMock
+
+        adapter = self._adapter()
+        injected = MagicMock(spec=[])
+        injected.chain = None
+        adapter._seed_injected_provider("gmx_v2:avalanche", injected)
+
+        assert adapter._get_provider_for_protocol("gmx_v2", "avalanche") is injected
+        arb = adapter._get_provider_for_protocol("gmx_v2", "arbitrum")
+        assert arb is not injected
+
+    def test_explicit_key_contradicting_provider_chain_is_rejected(self):
+        """An explicit scope contradicting the provider's declared chain is
+        refused — serving one chain's data under another chain's key silently
+        corrupts every funding number downstream."""
+        from unittest.mock import MagicMock
+
+        adapter = self._adapter()
+        injected = MagicMock(spec=[])
+        injected.chain = "arbitrum"
+        adapter._seed_injected_provider("gmx_v2:avalanche", injected)
+
+        assert ("gmx_v2", "avalanche") not in adapter._provider_cache
+        assert adapter._get_provider_for_protocol("gmx_v2", "avalanche") is not injected
+
+    def test_mock_auto_attribute_does_not_leak_into_chain_key(self):
+        """A bare MagicMock's auto-created .chain (not a str) seeds the wildcard."""
+        from unittest.mock import MagicMock
+
+        adapter = self._adapter()
+        injected = MagicMock()  # .chain auto-creates a truthy Mock, NOT a str
+        adapter._seed_injected_provider("gmx_v2", injected)
+
+        assert adapter._provider_cache[("gmx_v2", "*")] is injected
+
+
+class TestPrewarmHistory:
+    """prewarm_history fills _funding_cache for the whole window (P5).
+
+    Branch coverage for the post-open funding prewarm: happy path, wrapped-
+    native market normalization, fallback-row skip, best-effort failure,
+    and every early-return guard (CRAP-gate coverage for the cc=11 method).
+    """
+
+    @staticmethod
+    def _adapter() -> PerpBacktestAdapter:
+        return PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
+
+    @staticmethod
+    def _intent(protocol: str = "gmx_v2", market: str = "ETH/USD"):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(protocol=protocol, market=market)
+
+    @staticmethod
+    def _window() -> tuple[datetime, datetime]:
+        return datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC)
+
+    @staticmethod
+    def _funding_result(hour: int, source: str = "gateway"):
+        from almanak.framework.backtesting.pnl.types import (
+            DataConfidence,
+            DataSourceInfo,
+            FundingResult,
+        )
+
+        return FundingResult(
+            rate=Decimal("0.0001"),
+            source_info=DataSourceInfo(
+                source=source,
+                confidence=DataConfidence.HIGH,
+                timestamp=datetime(2024, 1, 1, hour, 30, tzinfo=UTC),
+            ),
+        )
+
+    class _FakeProvider:
+        def __init__(self, rates):
+            self._rates = rates
+            self.calls: list[dict] = []
+
+        async def get_funding_rates(self, *, market, start_date, end_date):
+            self.calls.append({"market": market, "start": start_date, "end": end_date})
+            if isinstance(self._rates, Exception):
+                raise self._rates
+            return self._rates
+
+    @pytest.mark.asyncio
+    async def test_measured_rates_fill_cache_with_hour_keys(self, monkeypatch):
+        adapter = self._adapter()
+        provider = self._FakeProvider([self._funding_result(0), self._funding_result(1)])
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda protocol, chain=None: provider)
+        start, end = self._window()
+
+        await adapter.prewarm_history(self._intent(), "arbitrum", start, end)
+
+        key = ("gmx_v2", "ETH-USD", datetime(2024, 1, 1, 0, tzinfo=UTC))
+        assert key in adapter._funding_cache
+        rate, confidence, label = adapter._funding_cache[key]
+        assert rate == Decimal("0.0001")
+        assert confidence == "high"
+        assert label == "historical:gateway"
+        assert len([k for k in adapter._funding_cache if k[0] == "gmx_v2"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_prewarm_key_parity_with_funding_lookup(self, monkeypatch):
+        """The prewarm's cache key must equal the key _funding_lookup reads
+        for the same underlying — both normalize through the same
+        token_ref_provider_symbol call; a divergent key silently defeats the
+        prewarm (gemini review pin, restated as the parity contract)."""
+        adapter = self._adapter()
+        provider = self._FakeProvider([self._funding_result(0)])
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda protocol, chain=None: provider)
+        start, end = self._window()
+
+        await adapter.prewarm_history(self._intent(market="ETH/USD"), "arbitrum", start, end)
+
+        position = create_perp_long_position(token="ETH", protocol="gmx_v2")
+        lookup = adapter._funding_lookup(position, datetime(2024, 1, 1, 0, 30, tzinfo=UTC), "arbitrum")
+
+        assert provider.calls[0]["market"] == lookup.market  # fetched what the reader will ask for
+        cache_key = ("gmx_v2", lookup.market, datetime(2024, 1, 1, 0, tzinfo=UTC))
+        assert cache_key in adapter._funding_cache  # the per-tick read is a cache HIT
+
+    @pytest.mark.asyncio
+    async def test_fallback_rows_are_never_frozen_into_the_cache(self, monkeypatch):
+        adapter = self._adapter()
+        provider = self._FakeProvider([self._funding_result(0, source="fallback"), self._funding_result(1)])
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda protocol, chain=None: provider)
+        start, end = self._window()
+
+        await adapter.prewarm_history(self._intent(), "arbitrum", start, end)
+
+        cached = [k for k in adapter._funding_cache if k[0] == "gmx_v2"]
+        assert cached == [("gmx_v2", "ETH-USD", datetime(2024, 1, 1, 1, tzinfo=UTC))]
+
+    @pytest.mark.asyncio
+    async def test_provider_failure_is_best_effort(self, monkeypatch):
+        adapter = self._adapter()
+        provider = self._FakeProvider(RuntimeError("gateway down"))
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda protocol, chain=None: provider)
+        start, end = self._window()
+
+        await adapter.prewarm_history(self._intent(), "arbitrum", start, end)  # must not raise
+
+        assert not [k for k in adapter._funding_cache if k[0] == "gmx_v2"]
+
+    @pytest.mark.asyncio
+    async def test_missing_protocol_or_market_returns_before_provider_lookup(self, monkeypatch):
+        adapter = self._adapter()
+
+        def _fail(protocol, chain=None):
+            raise AssertionError("provider must not be resolved for unroutable intents")
+
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", _fail)
+        start, end = self._window()
+
+        await adapter.prewarm_history(self._intent(protocol=""), "arbitrum", start, end)
+        await adapter.prewarm_history(self._intent(market=None), "arbitrum", start, end)
+        await adapter.prewarm_history(self._intent(market=""), "arbitrum", start, end)
+
+    @pytest.mark.asyncio
+    async def test_no_provider_is_a_noop(self, monkeypatch):
+        adapter = self._adapter()
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda protocol, chain=None: None)
+        start, end = self._window()
+
+        await adapter.prewarm_history(self._intent(), "arbitrum", start, end)
+
+        assert not [k for k in adapter._funding_cache if k[0] == "gmx_v2"]
+
+    @pytest.mark.asyncio
+    async def test_empty_rates_warm_nothing(self, monkeypatch):
+        adapter = self._adapter()
+        provider = self._FakeProvider(None)
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda protocol, chain=None: provider)
+        start, end = self._window()
+
+        await adapter.prewarm_history(self._intent(), "arbitrum", start, end)
+
+        assert not [k for k in adapter._funding_cache if k[0] == "gmx_v2"]

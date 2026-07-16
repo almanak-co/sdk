@@ -74,6 +74,7 @@ def get_connected_gateway_client() -> tuple[Any, Any]:
         raise DataSourceUnavailable(
             source="gateway",
             reason=f"Gateway client unavailable: {exc}",
+            transport=True,
         ) from exc
 
     client = get_gateway_client()
@@ -84,6 +85,7 @@ def get_connected_gateway_client() -> tuple[Any, Any]:
             raise DataSourceUnavailable(
                 source="gateway",
                 reason=f"Gateway connect failed: {exc}",
+                transport=True,
             ) from exc
     return client, gateway_pb2
 
@@ -149,6 +151,38 @@ def fetch_funding_points(
     return points
 
 
+# gRPC status codes that indicate the CHANNEL is unusable (memoizable for a
+# run). Everything else — INVALID_ARGUMENT, NOT_FOUND, PERMISSION_DENIED,
+# UNIMPLEMENTED, ... — is a per-request outcome and must stay retryable.
+_TRANSPORT_STATUS_NAMES = frozenset({"UNAVAILABLE", "DEADLINE_EXCEEDED"})
+
+# Python exception types that are connectivity failures by construction.
+# Deliberately NOT bare OSError: FileNotFoundError/PermissionError are OSError
+# subclasses, and a local file/cert bug must not memoize as a gateway outage.
+_TRANSPORT_EXCEPTION_TYPES = (ConnectionError, TimeoutError)
+
+
+def _is_transport_failure(exc: Exception) -> bool:
+    """True only when an exception is POSITIVELY a connectivity failure.
+
+    The default for anything unrecognized is NON-transport: memoizing an
+    unknown exception (a local decoding bug, a ValueError) as a gateway
+    outage silently disables the funding lane for the rest of the run,
+    which is far worse than one redundant retry.
+    """
+    if isinstance(exc, _TRANSPORT_EXCEPTION_TYPES):
+        return True
+    code = getattr(exc, "code", None)
+    if not callable(code):
+        return False
+    try:
+        status = code()
+    except Exception:  # noqa: BLE001 — unreadable status is not proof of an outage
+        return False
+    name = getattr(status, "name", None) or str(status)
+    return any(marker in str(name).upper() for marker in _TRANSPORT_STATUS_NAMES)
+
+
 def _fetch_window(
     client: Any,
     gateway_pb2: Any,
@@ -173,6 +207,7 @@ def _fetch_window(
         raise DataSourceUnavailable(
             source="gateway",
             reason=f"GetFundingRateHistory RPC failed: {exc}",
+            transport=_is_transport_failure(exc),
         ) from exc
     if not response.success:
         raise DataSourceUnavailable(

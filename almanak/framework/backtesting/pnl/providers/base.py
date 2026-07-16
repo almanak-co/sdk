@@ -135,6 +135,12 @@ class HistoricalFundingProvider(ABC):
         - Graceful degradation when data is unavailable
     """
 
+    #: Public chain scope of this provider instance, or None for
+    #: chain-agnostic providers. Chain-scoped implementations must set this;
+    #: the perp adapter keys injected providers by (protocol, chain) and
+    #: reads only this attribute -- never private configuration.
+    chain: str | None = None
+
     @classmethod
     def for_backtest(cls, config: BacktestProviderConfig) -> Self:
         """Construct a provider from the adapter's protocol-neutral config."""
