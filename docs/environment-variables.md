@@ -28,17 +28,35 @@ These must be set before running any strategy.
 | `ALCHEMY_API_KEY` | 5 (fallback) | Alchemy API key -- URLs built automatically per chain | `abc123def456` |
 | `TENDERLY_API_KEY_{CHAIN}` | 6 (fallback) | Tenderly API key for chain-specific RPC (e.g. `TENDERLY_API_KEY_ARBITRUM`) | `abc123...` |
 
-Any provider works: Infura, QuickNode, self-hosted, Alchemy, etc. `ALCHEMY_API_KEY` is an optional fallback that auto-constructs URLs for all supported chains. If none are set, the gateway falls back to free public RPCs (rate-limited, best-effort).
+Any provider works: Infura, QuickNode, self-hosted, Alchemy, etc. `ALCHEMY_API_KEY` is an optional fallback that auto-constructs URLs for all supported chains. If none are set, the gateway falls back to free public RPCs (rate-limited, best-effort) — fine for one-off reads and swaps, but **not** for Anvil forks; see below.
 
-!!! warning "Some public RPCs are unsuitable as Anvil-fork upstreams"
-    The free public RPCs for **0G** (`https://rpc.ankr.com/0g_mainnet_evm`) and **X-Layer** (`https://rpc.xlayer.tech`) are full nodes that aggressively prune historical state and frequently return `DEADLINE_EXCEEDED` under sustained load. They work for one-off swaps but break Anvil-fork demos that hold positions across blocks (LP teardown, lending repay, etc.) because the LP_CLOSE / REPAY compile path queries storage slots on a block that has already been pruned (`missing trie node` from the upstream).
+!!! danger "Anvil forks need an archive RPC — the managed gateway now enforces it"
+    Anvil pins a fork at a block and fetches state **lazily**. Free public RPCs serve only a short window of historical state, so once the chain head moves past the pinned block, **every uncached read fails permanently** with `missing trie node`. The fork cannot recover and retrying does not help.
 
-    For these chains, set a paid archive-capable endpoint:
+    Measured windows (2026-07-16, `scripts/measure_rpc_state_retention.py`; confirmed by wedging a real fork):
+
+    | Chain | Default public RPC serves | Fork wedged after |
+    |---|---|---|
+    | Arbitrum | ~16s of state | 25s |
+    | BSC | ~48s | 45s |
+    | Base / Optimism | ~128s | ~200s |
+    | Polygon | ~134s | — |
+    | Ethereum | ~19min | — |
+    | 0G | ~108s | — |
+
+    Because of this, `almanak strat run --network anvil` **refuses to start** a fork on these chains unless an archive-capable RPC is configured. Set any one of:
 
     ```bash
-    ZEROG_RPC_URL=https://your-archive-0g-endpoint
-    XLAYER_RPC_URL=https://your-archive-xlayer-endpoint
+    ALCHEMY_API_KEY=your-key            # covers every supported chain
+    BSC_RPC_URL=https://your-archive-endpoint     # per-chain
+    RPC_URL=https://your-archive-endpoint         # generic
     ```
+
+    Live (non-fork) usage on public RPCs is unaffected — only reads of *historical* state are.
+
+| Variable | Description |
+| --- | --- |
+| `ALMANAK_ALLOW_PRUNED_FORK_RPC` | Set to `1` to downgrade the archive check above from a hard failure to a warning. Only sensible for a fork you know will finish inside the window in the table — any longer run will wedge. |
 
 !!! warning
     Never commit private keys. Use a dedicated testing wallet for development.

@@ -68,6 +68,7 @@ DESCRIPTOR = register_chain(
             anvil_port=8546,
             poa=True,
             rate_limit_rpm=300,
+            fork_requires_archive=True,
         ),
         explorer=Explorer(
             api_url="https://api.bscscan.com/api",

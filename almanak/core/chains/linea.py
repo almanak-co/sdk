@@ -43,6 +43,7 @@ DESCRIPTOR = register_chain(
             public_rpc="https://linea-rpc.publicnode.com",
             alchemy_prefix="linea",
             anvil_port=8552,
+            fork_requires_archive=True,
         ),
         # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS.
         tokens={

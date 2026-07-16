@@ -358,6 +358,40 @@ def _auto_select_provider(chain: str) -> NodeProvider:
     )
 
 
+def fork_upstream_is_public_rpc(chain: str, network: str = "mainnet") -> bool:
+    """Whether a managed-Anvil fork of ``chain`` would use the free public RPC.
+
+    Single source of truth for the VIB-5869 archive gate: rather than
+    re-deriving "is an archive RPC configured?" with a parallel env-var check
+    that can drift from the real fork path, the gate asks THIS — the same
+    ``_auto_select_provider`` that :func:`get_rpc_url` uses to pick the fork
+    upstream. So an operator who set only ``ALMANAK_GATEWAY_ALCHEMY_API_KEY``
+    (resolved via ``gateway_prefixed_or_bare``), a chain-specific
+    ``{CHAIN}_RPC_URL``, a generic ``RPC_URL``, or a Tenderly key is seen as
+    configured by the gate exactly when the fork will actually use it — no
+    false-positive fail-fast, and no false-negative pass.
+
+    Returns ``True`` (⇒ gate should fire) when the resolver falls all the way
+    through to the pruned public endpoint, or when no provider resolves at all.
+    """
+    chain_lower = chain.lower()
+    try:
+        from almanak.core.constants import resolve_chain_name
+
+        chain_lower = resolve_chain_name(chain_lower)
+    except (ValueError, ImportError):
+        pass
+    if network.lower() in ("anvil",):
+        # Local Anvil is not a fork upstream; nothing to gate.
+        return False
+    try:
+        return _auto_select_provider(chain_lower) is NodeProvider.PUBLIC
+    except ValueError:
+        # No provider resolves at all — the fork cannot use a configured
+        # archive RPC, so the gate must fire just as it would for public.
+        return True
+
+
 def _get_anvil_url(chain: str | None = None) -> str:
     """Get Anvil RPC URL for local development.
 

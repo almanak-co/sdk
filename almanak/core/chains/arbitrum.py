@@ -53,6 +53,7 @@ DESCRIPTOR = register_chain(
             anvil_port=8545,
             block_time_seconds=0.25,
             rate_limit_rpm=300,
+            fork_requires_archive=True,
         ),
         explorer=Explorer(
             api_url="https://api.arbiscan.io/api",

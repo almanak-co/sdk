@@ -250,7 +250,7 @@ def _compute_startup_budget(workspace: Path) -> float:
     """Mirror the gateway's own startup-budget calculation so we never kill a
     managed_serve subprocess whose ``ManagedGateway.start(timeout=…)`` is still
     within its budget. Uses the same helper managed_serve imports, sourced from
-    ``ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS`` so policy stays in one place.
+    ``ManagedGateway.COLD_START_SLOW_CHAINS`` so policy stays in one place.
 
     Falls back to a 60s minimum if chain resolution returns empty (mainnet
     network, malformed config) — covers the gRPC-bind tail without forks.

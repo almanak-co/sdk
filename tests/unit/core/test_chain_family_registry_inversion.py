@@ -40,6 +40,18 @@ FROZEN_ARCHIVE_RPC_REQUIRED_CHAINS = frozenset(
     {"polygon", "ethereum", "avalanche", "zerog", "xlayer"}
 )
 
+# DELIBERATE widening (VIB-5869 / ALM-2695), pinned here rather than hidden.
+# The frozen literal above was not a considered design — it was the residue of
+# three separate incidents (VIB-646, VIB-3971, VIB-3973), and it ran INVERTED
+# to measured risk: ethereum's public RPC serves the longest state window
+# (~19min) and was flagged, while arbitrum (~16s) and bsc (~48s) were not, so
+# a managed BSC fork started fine and died minutes later on `missing trie
+# node`. Membership is now derived from the measured retention table in
+# ``almanak/core/chains/_rpc_retention.py``; see
+# ``tests/unit/core/test_rpc_retention.py`` for the invariant that keeps it
+# honest. The widening is one-directional: every legacy entry is retained.
+VIB_5869_ARCHIVE_WIDENING = frozenset({"arbitrum", "bsc", "base", "optimism", "sonic", "linea"})
+
 FROZEN_ANVIL_CHAINS = frozenset(
     {
         "ethereum",
@@ -115,8 +127,16 @@ class TestRegistryDerivedEnumerations:
         assert "linea" not in rpc_rate_limit_map()
         assert "berachain" not in rpc_rate_limit_map()
 
-    def test_archive_required_set_byte_equivalent(self) -> None:
-        assert fork_archive_required_chains() == FROZEN_ARCHIVE_RPC_REQUIRED_CHAINS
+    def test_archive_required_set_is_legacy_plus_documented_widening(self) -> None:
+        """No longer byte-equivalent to the legacy literal — VIB-5869 widened it
+        on measured evidence. Both halves are asserted so an *undocumented*
+        drift still fails."""
+        assert fork_archive_required_chains() == (FROZEN_ARCHIVE_RPC_REQUIRED_CHAINS | VIB_5869_ARCHIVE_WIDENING)
+
+    def test_archive_widening_never_drops_a_legacy_entry(self) -> None:
+        """Each legacy entry was added after a real production stall; the
+        measurement may tighten the guard but must never loosen it."""
+        assert FROZEN_ARCHIVE_RPC_REQUIRED_CHAINS <= fork_archive_required_chains()
 
     def test_evm_chain_names_byte_equivalent(self) -> None:
         # The legacy anvil_chains tuple enumerated exactly the registered

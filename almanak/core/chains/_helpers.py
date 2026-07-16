@@ -280,8 +280,24 @@ def fork_archive_required_chains() -> frozenset[str]:
     Membership == descriptors with ``rpc.fork_requires_archive=True``
     (legacy ``gateway/managed.py`` ``ARCHIVE_RPC_REQUIRED_CHAINS``;
     VIB-3971 / VIB-3973 Part B; inverted in VIB-4851 CS-3).
+
+    Since VIB-5869 this is the **safety** axis only: it gates whether a fork
+    may start at all. For the "this chain forks slowly, widen the startup
+    budget" axis use :func:`fork_cold_start_slow_chains` — the two sets were
+    one field until VIB-5869 and do not coincide.
     """
     return frozenset(d.name for d in ChainRegistry.all() if d.rpc.fork_requires_archive)
+
+
+def fork_cold_start_slow_chains() -> frozenset[str]:
+    """Chains needing the extended cold-cache Anvil startup budget (VIB-5869).
+
+    Split out of ``fork_requires_archive``, which used to carry both
+    meanings. Conflating them meant that correctly flagging a *fast* chain
+    as archive-requiring (Arbitrum: forks in seconds, 16s state window)
+    would have tripled its startup budget for no reason.
+    """
+    return frozenset(d.name for d in ChainRegistry.all() if d.rpc.fork_cold_start_slow)
 
 
 def rpc_rate_limit_map() -> Mapping[str, int]:

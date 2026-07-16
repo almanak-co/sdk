@@ -77,6 +77,7 @@ DESCRIPTOR = register_chain(
             block_time_seconds=12.0,
             rate_limit_rpm=300,
             fork_requires_archive=True,
+            fork_cold_start_slow=True,
         ),
         explorer=Explorer(
             api_url="https://api.etherscan.io/api",

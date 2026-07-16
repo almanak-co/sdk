@@ -37,6 +37,7 @@ DESCRIPTOR = register_chain(
             public_rpc="https://rpc.ankr.com/0g_mainnet_evm",
             anvil_port=8558,
             fork_requires_archive=True,
+            fork_cold_start_slow=True,
         ),
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
         # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /

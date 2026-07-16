@@ -380,14 +380,30 @@ class RpcProfile:
             falls back to its own conservative default, preserving the
             legacy ``CHAIN_RATE_LIMITS.get(chain, <default>)`` miss
             semantics. VIB-4851 (Phase E, CS-3).
-        fork_requires_archive: ``True`` when free-tier public RPCs for this
-            chain lack archive state, so managed-Anvil fork operations
+        fork_requires_archive: ``True`` when this chain's default public RPC
+            lacks archive state, so managed-Anvil fork operations
             (``eth_getStorageAt`` for ERC-20 approvals, etc.) fail without
             an archive-capable RPC (Alchemy key or chain-specific URL).
-            Mirrors the legacy ``gateway/managed.py``
-            ``ARCHIVE_RPC_REQUIRED_CHAINS`` membership (VIB-3971,
-            VIB-3973 Part B). Drives the pre-fork warning only — not a
-            hard gate. VIB-4851 (Phase E, CS-3).
+
+            **Membership is measurement-derived** — see
+            ``_rpc_retention.PUBLIC_RPC_RETENTION`` and its regression test.
+            Do not add a chain here from an anecdote; measure the endpoint
+            with ``scripts/measure_rpc_state_retention.py`` and record the
+            result in that table first. Pre-VIB-5869 this set was assigned
+            by whichever chain someone last hit a bug on, which left it
+            inverted relative to real exposure.
+
+            **Safety axis only.** This drives the hard pre-fork gate
+            (VIB-5869). It used to double as the "slow to fork, give it 90s"
+            signal — that is now ``fork_cold_start_slow``, because the two
+            concepts do not coincide: BSC forks slowly *and* has a 48s state
+            window, while Arbitrum forks fast *and* has a 16s window.
+            VIB-646 / VIB-3971 / VIB-3973 Part B, VIB-4851 (Phase E, CS-3).
+        fork_cold_start_slow: ``True`` when a cold-cache managed-Anvil fork
+            of this chain routinely needs the extended startup budget
+            (``ARCHIVE_RPC_FORK_BUDGET_SECONDS``, 90s) rather than the
+            default L2 budget (30s). Split out of ``fork_requires_archive``
+            in VIB-5869; values preserve the pre-split behaviour exactly.
     """
 
     public_rpc: str | None = None
@@ -398,6 +414,7 @@ class RpcProfile:
     block_time_seconds: float | None = None
     rate_limit_rpm: int | None = None
     fork_requires_archive: bool = False
+    fork_cold_start_slow: bool = False
 
 
 @dataclass(frozen=True)

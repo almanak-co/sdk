@@ -22,17 +22,55 @@ if TYPE_CHECKING:
 
 from almanak.config.gateway_runtime import (
     anvil_fork_block_for_chain,
-    chain_specific_rpc_url,
     env_value,
-    generic_rpc_url,
     restore_env_value,
     set_env_value,
 )
 from almanak.config.runtime import private_key_from_env
-from almanak.core.chains._helpers import fork_archive_required_chains
+from almanak.core.chains._helpers import fork_archive_required_chains, fork_cold_start_slow_chains
+from almanak.core.chains._rpc_retention import MEASURED_ON, PUBLIC_RPC_RETENTION
 from almanak.gateway.core.settings import GatewaySettings
 
 logger = logging.getLogger(__name__)
+
+# Opt-in boolean env-var values, matching the repo's reference truthiness in
+# ``almanak/framework/deployment/mode.py`` (``_TRUTHY``). Anything else — most
+# importantly ``"0"`` / ``"false"`` / ``""`` / whitespace — is FALSE.
+_TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
+
+
+def _env_flag_enabled(name: str) -> bool:
+    """Parse an opt-in boolean env var safely (VIB-5869).
+
+    ``ALMANAK_ALLOW_PRUNED_FORK_RPC`` disables a SAFETY gate, so a naive
+    ``if env_value(name):`` truthy-string check is a bug: ``"0"`` and
+    ``"false"`` are non-empty strings and would read as "enabled" — inverting
+    the intent of the one operator who set the var explicitly to keep the gate
+    ON. Only ``{1,true,yes,on}`` (after strip + lowercase) enable the flag.
+
+    This is pure config *within* a deployment mode — NOT a mode/hosted signal —
+    so it is read here directly and never routed through ``mode.py``.
+    """
+    return (env_value(name) or "").strip().lower() in _TRUTHY_ENV
+
+
+def _format_pruned_chain(chain: str) -> str:
+    """One human-readable line describing why ``chain`` is being gated.
+
+    Quotes the MEASURED window so the error is actionable rather than a bare
+    policy assertion — "serves ~48s of state" tells an operator immediately
+    that this is not a transient blip they can retry past.
+    """
+    m = PUBLIC_RPC_RETENTION.get(chain.lower())
+    if m is None:
+        return f"{chain}: public RPC is not archive-capable"
+    if m.window_seconds is not None:
+        window = f"~{m.window_seconds:.0f}s of state"
+    elif m.retention_blocks is not None:
+        window = f"~{m.retention_blocks} blocks of state"
+    else:
+        window = "no archive state"
+    return f"{chain}: {m.endpoint} serves {window} ({m.evidence}; measured {MEASURED_ON})"
 
 
 def find_free_port() -> int:
@@ -201,44 +239,102 @@ class ManagedGateway:
     def port(self) -> int:
         return self.settings.grpc_port
 
-    # Chains where free-tier public RPCs lack archive state, causing Anvil fork
-    # operations (eth_getStorageAt for ERC-20 approvals, etc.) to fail silently.
-    # 0G (rpc.ankr.com/0g_mainnet_evm) and X-Layer (rpc.xlayer.tech) are
-    # non-archive full nodes that aggressively prune state and frequently
-    # return DEADLINE_EXCEEDED — both stall LP teardown / lending repay
-    # mid-run with `missing trie node` (VIB-3971, VIB-3973 Part B).
-    # Membership now derives from ``RpcProfile.fork_requires_archive`` so a
-    # new chain declares its own archive requirement (VIB-4851 CS-3).
+    # Chains whose default public RPC lacks archive state, so a managed-Anvil
+    # fork wedges once the chain head advances past the endpoint's retention
+    # window: Anvil pins a block and fetches state lazily, so every *uncached*
+    # read then fails permanently with `missing trie node` and no retry helps.
+    #
+    # Membership derives from ``RpcProfile.fork_requires_archive``, which is in
+    # turn pinned to the MEASURED retention table in
+    # ``almanak/core/chains/_rpc_retention.py`` (VIB-5869). Before that the set
+    # was folklore and ran inverted to real risk — Ethereum (~19min window) was
+    # flagged while Arbitrum (~16s) and BSC (~48s, ALM-2695) were not.
     ARCHIVE_RPC_REQUIRED_CHAINS = fork_archive_required_chains()
 
-    def _check_archive_rpc_availability(self) -> None:
-        """Warn if any target chain needs archive RPC but only has public RPCs.
+    #: Chains needing the extended cold-cache fork budget. Split from
+    #: ARCHIVE_RPC_REQUIRED_CHAINS in VIB-5869: correctly gating fast L2s
+    #: (arbitrum forks in seconds but has a ~16s state window) must not
+    #: silently triple their startup budget.
+    COLD_START_SLOW_CHAINS = fork_cold_start_slow_chains()
 
-        Checks whether ALCHEMY_API_KEY or a chain-specific RPC URL is set.
-        If not, emits a warning for each affected chain so users know the
-        fork will likely fail on contract storage access.
+    #: Escape hatch for the pre-fork archive gate. Truthy => downgrade the hard
+    #: failure back to a warning. For deliberately short-lived forks (a <1min
+    #: smoke test that finishes inside the retention window) where the operator
+    #: has accepted that any longer run will wedge.
+    ALLOW_PRUNED_FORK_RPC_ENV = "ALMANAK_ALLOW_PRUNED_FORK_RPC"
+
+    def _archive_rpc_gate_failures(self) -> list[str]:
+        """Chains that will fork against a state-pruned RPC and wedge.
+
+        A chain is reported when it needs archive state AND the real fork path
+        would fall through to the free public RPC. "Would the fork use public?"
+        is answered by :func:`fork_upstream_is_public_rpc`, i.e. the SAME
+        ``_auto_select_provider`` :func:`get_rpc_url` uses to pick the upstream
+        — so the gate can never disagree with what the fork actually does
+        (VIB-5869 finding: a hand-rolled ``ALCHEMY_API_KEY`` check missed
+        ``ALMANAK_GATEWAY_ALCHEMY_API_KEY`` and Tenderly, and would have
+        false-positive-blocked an operator who did configure Alchemy).
+
+        Chains running on an external Anvil are skipped: the operator owns that
+        fork's upstream RPC, not us.
         """
-        has_alchemy = bool(env_value("ALCHEMY_API_KEY"))
-        has_generic_rpc = bool(generic_rpc_url())
+        from almanak.gateway.utils.rpc_provider import fork_upstream_is_public_rpc
 
+        failures: list[str] = []
         for chain in self._anvil_chains:
             if chain.lower() not in self.ARCHIVE_RPC_REQUIRED_CHAINS:
                 continue
             # Skip if external Anvil is provided (user manages RPC)
             if chain in self._external_anvil_ports:
                 continue
-            # Check chain-specific env vars
-            chain_upper = chain.upper()
-            has_chain_rpc = bool(chain_specific_rpc_url(chain_upper))
-            if not has_alchemy and not has_generic_rpc and not has_chain_rpc:
-                logger.warning(
-                    "Chain '%s' requires an archive-capable RPC for Anvil fork testing. "
-                    "Set ALCHEMY_API_KEY in your .env file or provide a chain-specific RPC URL "
-                    "(%s_RPC_URL). Free-tier public RPCs will likely fail on contract storage access "
-                    "(eth_getStorageAt).",
-                    chain,
-                    chain_upper,
-                )
+            if fork_upstream_is_public_rpc(chain):
+                failures.append(chain)
+        return failures
+
+    def _check_archive_rpc_availability(self) -> None:
+        """Refuse to start a fork that is guaranteed to wedge (VIB-5869).
+
+        This was a ``logger.warning`` until VIB-5869, which meant the fork
+        started, ran, and then died minutes later on an unrelated-looking
+        ``missing trie node`` deep inside a strategy iteration — after real
+        intents had already been dispatched. A fork that cannot survive its
+        own first cold read must not start at all.
+
+        Raises:
+            RuntimeError: If any target chain would fork against a pruned RPC
+                and ``ALMANAK_ALLOW_PRUNED_FORK_RPC`` is not set.
+        """
+        failures = self._archive_rpc_gate_failures()
+        if not failures:
+            return
+
+        details = "\n".join(f"  - {line}" for line in map(_format_pruned_chain, failures))
+        if _env_flag_enabled(self.ALLOW_PRUNED_FORK_RPC_ENV):
+            logger.warning(
+                "%s is set — bypassing the archive-RPC gate and starting Anvil fork(s) against "
+                "state-pruned public RPC(s) anyway:\n%s\n"
+                "These forks WILL fail on every uncached read once the chain head passes the "
+                "measured window above, with 'missing trie node', unrecoverably. This bypass is "
+                "only safe for a run you KNOW finishes inside that window.",
+                self.ALLOW_PRUNED_FORK_RPC_ENV,
+                details,
+            )
+            return
+
+        chain_upper = failures[0].upper()
+        raise RuntimeError(
+            "Refusing to start Anvil fork(s) against state-pruned public RPC(s):\n"
+            f"{details}\n\n"
+            "Anvil pins the fork at a block and reads state lazily, so once the chain head\n"
+            "moves past that window EVERY uncached read fails permanently with\n"
+            "'missing trie node'. Retrying cannot help — the fork is already unrecoverable.\n\n"
+            "Fix — configure an archive-capable RPC (any one of):\n"
+            "  - ALCHEMY_API_KEY=<key>          (covers every supported chain)\n"
+            f"  - {chain_upper}_RPC_URL=<archive endpoint>   (per-chain)\n"
+            "  - RPC_URL=<archive endpoint>     (generic, all chains)\n\n"
+            f"Override (NOT recommended) — set {self.ALLOW_PRUNED_FORK_RPC_ENV}=1 to downgrade this\n"
+            "to a warning. Only sane for a fork you know will finish inside the window above."
+        )
 
     async def _start_anvil_forks(self) -> None:
         """Start Anvil fork instances for each configured chain.
@@ -288,14 +384,14 @@ class ManagedGateway:
                 fork_block = anvil_fork_block_for_chain(chain)
                 if fork_block:
                     logger.info("Anvil fork for %s pinned to block %d", chain, fork_block)
-                # Archive-RPC chains (Avalanche, Ethereum, Polygon) require
+                # Cold-start-slow chains (Avalanche, Ethereum, Polygon) require
                 # longer startup time: the archive node is queried during fork
                 # setup, which can take 60-90s on cold cache vs ~10s for L2s.
                 # Using the default 30s causes a timeout on these chains before
                 # the gateway server can fully initialise, which in turn produces
                 # a daemon-thread/gRPC cleanup race that manifests as the
                 # "absl::InitializeLog() called multiple times" error.
-                anvil_startup_timeout = 90.0 if chain.lower() in self.ARCHIVE_RPC_REQUIRED_CHAINS else 30.0
+                anvil_startup_timeout = 90.0 if chain.lower() in self.COLD_START_SLOW_CHAINS else 30.0
                 manager = RollingForkManager(
                     rpc_url=fork_url,
                     chain=chain,

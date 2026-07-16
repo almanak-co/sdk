@@ -58,6 +58,7 @@ DESCRIPTOR = register_chain(
             alchemy_prefix="sonic",
             anvil_port=8553,
             rate_limit_rpm=300,
+            fork_requires_archive=True,
         ),
         explorer=Explorer(browse_url="https://sonicscan.org"),
         # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS.

@@ -34,17 +34,27 @@ def test_empty_anvil_chains_returns_no_fork_budget() -> None:
 
 
 def test_single_l2_chain_gets_l2_budget_plus_headroom() -> None:
-    """One L2 fork → one L2 budget + warmup headroom."""
+    """One L2 fork → one L2 budget + warmup headroom.
+
+    ``base`` is deliberately the subject: VIB-5869 flagged it as requiring an
+    archive RPC, and this asserts that did NOT silently inflate its startup
+    budget. This test is the tripwire for re-conflating the two axes.
+    """
     assert compute_anvil_startup_timeout(["base"]) == L2_FORK_BUDGET_SECONDS + GATEWAY_WARMUP_HEADROOM_SECONDS
 
 
-@pytest.mark.parametrize("archive_chain", sorted(ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS))
+@pytest.mark.parametrize("archive_chain", sorted(ManagedGateway.COLD_START_SLOW_CHAINS))
 def test_archive_chain_gets_archive_budget(archive_chain: str) -> None:
     """Every chain in the gateway's slow-set must get the archive budget.
 
-    Parameterized so when ``ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS`` adds
-    a new entry (the original drift risk that motivated this helper), the
-    test catches any path that bypasses the policy.
+    Parameterized so when ``ManagedGateway.COLD_START_SLOW_CHAINS`` adds a new
+    entry (the original drift risk that motivated this helper), the test
+    catches any path that bypasses the policy.
+
+    VIB-5869: this used to parameterize over ARCHIVE_RPC_REQUIRED_CHAINS. That
+    set is now the *safety* gate and includes fast-forking L2s (arbitrum, bsc,
+    base, optimism), which must keep the 30s L2 budget — needing archive state
+    says nothing about how long a fork takes to boot.
     """
     expected = ARCHIVE_RPC_FORK_BUDGET_SECONDS + GATEWAY_WARMUP_HEADROOM_SECONDS
     assert compute_anvil_startup_timeout([archive_chain]) == expected
@@ -90,10 +100,10 @@ def test_helper_sources_slow_set_from_managed_gateway() -> None:
     """If the gateway adds a new archive-RPC chain, the helper must follow.
 
     Pin contract: the helper must consult
-    ``ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS`` rather than redeclaring its
+    ``ManagedGateway.COLD_START_SLOW_CHAINS`` rather than redeclaring its
     own copy. Tested by re-classifying the budget for every chain in the set.
     """
-    for chain in ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS:
+    for chain in ManagedGateway.COLD_START_SLOW_CHAINS:
         budget = compute_anvil_startup_timeout([chain])
         assert budget == ARCHIVE_RPC_FORK_BUDGET_SECONDS + GATEWAY_WARMUP_HEADROOM_SECONDS, (
             f"Slow-chain {chain!r} must get the archive-RPC budget; got {budget}s"

@@ -8,9 +8,16 @@ take ~30s. Multi-chain configs (e.g. ``[ethereum, polygon]``) need the budget
 summed because ``ManagedGateway`` boots forks sequentially.
 
 Pulling this into a single helper keeps the policy in one place, sourced from
-``ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS`` so the gateway itself owns the
+``ManagedGateway.COLD_START_SLOW_CHAINS`` so the gateway itself owns the
 slow-chain set. Two call-site copies will silently drift the next time the
-policy changes (e.g. when ``bsc`` joins the slow set).
+policy changes.
+
+VIB-5869: this used to read ``ARCHIVE_RPC_REQUIRED_CHAINS``, conflating "needs
+an archive RPC" with "is slow to fork". Those are different questions —
+Arbitrum needs archive state (~16s public-RPC window) but forks in seconds —
+so correctly flagging it would have tripled its startup budget for no reason.
+The budget now follows ``fork_cold_start_slow``; the archive flag is a pure
+safety gate.
 """
 
 from __future__ import annotations
@@ -25,8 +32,11 @@ Mantle, BSC, ...). Empirically sufficient for cold-cache fork startup against
 public RPC endpoints."""
 
 ARCHIVE_RPC_FORK_BUDGET_SECONDS = 90.0
-"""Per-fork startup budget for an archive-RPC chain (Ethereum, Polygon,
-Avalanche). Cold-cache fork against an archive node can take 60-90s."""
+"""Per-fork startup budget for a cold-start-slow chain (Ethereum, Polygon,
+Avalanche). Cold-cache fork against an archive node can take 60-90s.
+
+Name retained for backwards compatibility with importers; membership is now
+``fork_cold_start_slow``, not the archive flag (VIB-5869)."""
 
 
 def _canonical_chain(chain: str) -> str:
@@ -48,7 +58,7 @@ def compute_anvil_startup_timeout(anvil_chains: list[str]) -> float:
     """Return the ``ManagedGateway.start(timeout=...)`` budget for ``anvil_chains``.
 
     For each chain, allocate :data:`ARCHIVE_RPC_FORK_BUDGET_SECONDS` if the chain
-    is in :attr:`ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS` (sourced live so
+    is in :attr:`ManagedGateway.COLD_START_SLOW_CHAINS` (sourced live so
     this helper can never drift), else :data:`L2_FORK_BUDGET_SECONDS`. Add a
     flat :data:`GATEWAY_WARMUP_HEADROOM_SECONDS` for the gateway-server start
     that follows.
@@ -72,7 +82,7 @@ def compute_anvil_startup_timeout(anvil_chains: list[str]) -> float:
 
     from almanak.gateway.managed import ManagedGateway
 
-    slow_chains = ManagedGateway.ARCHIVE_RPC_REQUIRED_CHAINS
+    slow_chains = ManagedGateway.COLD_START_SLOW_CHAINS
     fork_budget = sum(
         ARCHIVE_RPC_FORK_BUDGET_SECONDS if _canonical_chain(c) in slow_chains else L2_FORK_BUDGET_SECONDS
         for c in anvil_chains

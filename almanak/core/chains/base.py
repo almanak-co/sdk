@@ -54,6 +54,7 @@ DESCRIPTOR = register_chain(
             anvil_port=8548,
             block_time_seconds=2.0,
             rate_limit_rpm=300,
+            fork_requires_archive=True,
         ),
         explorer=Explorer(
             api_url="https://api.basescan.org/api",
