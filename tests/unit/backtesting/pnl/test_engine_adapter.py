@@ -7,27 +7,27 @@ Tests verify that the PnLBacktester correctly:
 4. Handles explicit strategy_type configuration
 5. Calls adapter's execute_intent when adapter exists
 """
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
-
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from almanak.framework.backtesting.adapters import (
-
-
     AdapterRegistry,
     StrategyBacktestAdapter,
 )
+from almanak.framework.backtesting.models import IntentType, TradeRecord
 from almanak.framework.backtesting.pnl import _engine_helpers
+from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktester,
 )
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 # =============================================================================
 # Mock Adapters for Testing
@@ -883,7 +883,17 @@ def _portfolio_with_position():
     return portfolio
 
 
+
+def _strict(backtester):
+    """ALM-2930: the fail-loud missing-data contract now applies in strict mode."""
+    from almanak.framework.backtesting.config import BacktestDataConfig
+
+    backtester.data_config = BacktestDataConfig(strict_historical_mode=True)
+    return backtester
+
+
 def test_missing_volume_error_propagates_when_no_handler(backtester):
+    _strict(backtester)
     """VIB-4849 (P1): DataSourceUnavailableError must NOT be swallowed to DEBUG.
 
     With no error handler configured, the engine must re-raise so the backtest
@@ -901,6 +911,7 @@ def test_missing_volume_error_propagates_when_no_handler(backtester):
 
 
 def test_missing_volume_error_is_not_downgraded_to_debug(backtester, caplog):
+    _strict(backtester)
     """VIB-4849 (P1): the missing-data signal is surfaced at ERROR, not hidden at DEBUG."""
     import logging
 
@@ -923,6 +934,7 @@ def test_missing_volume_error_is_not_downgraded_to_debug(backtester, caplog):
 
 
 def test_missing_volume_error_routes_to_handler_stop(backtester):
+    _strict(backtester)
     """VIB-4849 (P1): with a stop-policy handler, the error still surfaces (raises)."""
     from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 
@@ -946,6 +958,7 @@ def test_missing_volume_error_routes_to_handler_stop(backtester):
 
 
 def test_missing_volume_error_handler_continue_does_not_swallow_silently(backtester, caplog):
+    _strict(backtester)
     """VIB-4849 (P1): a continue-policy handler still gets a loud ERROR (no silent zero)."""
     import logging
 
@@ -976,3 +989,240 @@ def test_missing_volume_error_handler_continue_does_not_swallow_silently(backtes
     assert len(handler.handled) == 1
     error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert any("Missing data source" in r.message for r in error_records)
+
+
+def test_missing_volume_non_strict_skips_position_and_continues(backtester, caplog):
+    """ALM-2930: non-strict mode skips the position's accrual tick with a
+    once-per-position WARNING instead of killing the simulation."""
+    import logging
+
+    backtester._adapter = _RaisingAdapter()
+    backtester._error_handler = None
+    portfolio = _portfolio_with_position()
+    market_state = MockMarketState()
+
+    with caplog.at_level(logging.DEBUG, logger="almanak.framework.backtesting.pnl.engine"):
+        backtester._update_positions_via_adapter(portfolio, market_state, datetime.now(UTC))
+        backtester._update_positions_via_adapter(portfolio, market_state, datetime.now(UTC))
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "skipping its accrual" in r.message]
+    assert len(warnings) == 1, "data-gap warning must fire exactly once per position"
+
+
+def test_missing_volume_gap_on_one_position_does_not_starve_the_other(backtester, caplog):
+    """A data gap on position A must not abort position B's update in the same
+    tick — the skip is per-position, the tick's remaining positions still
+    update (CodeRabbit review on #3269)."""
+    import logging
+
+    updated: list[str] = []
+
+    class _SelectivelyRaisingAdapter(_RaisingAdapter):
+        def update_position(self, position, market_state, elapsed_seconds, timestamp=None):
+            if position.metadata.get("fail"):
+                super().update_position(position, market_state, elapsed_seconds, timestamp)
+            updated.append(position.position_id)
+
+    failing = _lp_position()
+    failing.metadata["fail"] = True
+    healthy = _lp_position()
+
+    from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+    portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+    portfolio.positions.extend([failing, healthy])
+
+    backtester._adapter = _SelectivelyRaisingAdapter()
+    backtester._error_handler = None
+
+    with caplog.at_level(logging.DEBUG, logger="almanak.framework.backtesting.pnl.engine"):
+        backtester._update_positions_via_adapter(portfolio, MockMarketState(), datetime.now(UTC))
+
+    assert updated == [healthy.position_id], "the healthy position must still update"
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "skipping its accrual" in r.message]
+    assert len(warnings) == 1
+    assert failing.position_id in warnings[0].message
+
+
+@pytest.mark.asyncio
+async def test_accrual_gap_memo_resets_per_run(backtester, monkeypatch):
+    """A reused backtester instance must re-log gaps in every run: parameter
+    sweeps rerun identical windows, so position ids collide across runs and a
+    stale memo entry would suppress the once-per-position warning (gemini
+    review on #3269)."""
+    from almanak.framework.backtesting.pnl import engine as engine_module
+
+    backtester._accrual_data_gap_positions.add("stale-position-id")
+
+    class _Sentinel(Exception):
+        pass
+
+    async def _abort_immediately(**_kwargs):
+        raise _Sentinel()
+
+    monkeypatch.setattr(engine_module._engine_helpers, "run_preflight", _abort_immediately)
+
+    from almanak.framework.backtesting.pnl.engine import PnLBacktestConfig
+
+    config = PnLBacktestConfig(
+        start_time=datetime(2024, 1, 1, tzinfo=UTC),
+        end_time=datetime(2024, 1, 2, tzinfo=UTC),
+        token_funding=_pnl_token_funding(Decimal("1000")),
+        tokens=["WETH", "USDC"],
+    )
+    with pytest.raises(_Sentinel):
+        await backtester._run_backtest(
+            SimpleNamespace(), config, "run-2", SimpleNamespace(), datetime.now(UTC)
+        )
+
+    assert backtester._accrual_data_gap_positions == set(), "memo must clear at run start"
+
+
+# =============================================================================
+# Tests: Post-open prewarm hook wiring
+# =============================================================================
+
+
+class TestPrewarmAfterOpen:
+    """_prewarm_after_open hands off to the adapter's prewarm_history hook."""
+
+    @staticmethod
+    def _config():
+        from almanak.framework.backtesting.pnl.engine import PnLBacktestConfig
+
+        return PnLBacktestConfig(
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            end_time=datetime(2024, 1, 8, tzinfo=UTC),
+            token_funding=_pnl_token_funding(Decimal("1000")),
+            tokens=["WETH", "USDC"],
+        )
+
+    @staticmethod
+    def _trade_record(success: bool):
+        return TradeRecord(
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            intent_type=IntentType.LP_OPEN,
+            executed_price=Decimal("1"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            pnl_usd=None,
+            success=success,
+            amount_usd=Decimal("100"),
+        )
+
+    @staticmethod
+    def _market_state():
+        return MarketState(
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            prices={"WETH": Decimal("2000")},
+            chain="base",
+            block_number=1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_successful_open_awaits_adapter_prewarm(self, backtester):
+        calls: list[dict] = []
+
+        class PrewarmAdapter:
+            async def prewarm_history(self, intent, *, chain, start_time, end_time):
+                calls.append({"intent": intent, "chain": chain, "start": start_time, "end": end_time})
+
+        backtester._adapter = PrewarmAdapter()
+        intent = SimpleNamespace(intent_type=IntentType.LP_OPEN)
+        config = self._config()
+
+        await backtester._prewarm_after_open(intent, self._trade_record(True), self._market_state(), config)
+
+        assert len(calls) == 1
+        assert calls[0]["chain"] == "base"
+        assert calls[0]["start"] == config.start_time
+        assert calls[0]["end"] == config.end_time
+
+    @pytest.mark.asyncio
+    async def test_failed_open_skips_prewarm(self, backtester):
+        calls: list[Any] = []
+
+        class PrewarmAdapter:
+            async def prewarm_history(self, intent, *, chain, start_time, end_time):
+                calls.append(intent)
+
+        backtester._adapter = PrewarmAdapter()
+        intent = SimpleNamespace(intent_type=IntentType.LP_OPEN)
+
+        await backtester._prewarm_after_open(intent, self._trade_record(False), self._market_state(), self._config())
+
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_non_open_intent_skips_prewarm(self, backtester):
+        calls: list[Any] = []
+
+        class PrewarmAdapter:
+            async def prewarm_history(self, intent, *, chain, start_time, end_time):
+                calls.append(intent)
+
+        backtester._adapter = PrewarmAdapter()
+        intent = SimpleNamespace(intent_type=IntentType.SWAP)
+
+        await backtester._prewarm_after_open(intent, self._trade_record(True), self._market_state(), self._config())
+
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_adapter_without_hook_is_noop(self, backtester):
+        """No-hook adapters no-op — asserted OBSERVABLY: the engine must probe
+        exactly the ``prewarm_history`` attribute and touch nothing else
+        (CodeRabbit review on #3269)."""
+        lookups: list[str] = []
+
+        class HooklessRecordingAdapter:
+            def __getattr__(self, name):  # only invoked for MISSING attributes
+                lookups.append(name)
+                raise AttributeError(name)
+
+        backtester._adapter = HooklessRecordingAdapter()
+        intent = SimpleNamespace(intent_type=IntentType.LP_OPEN)
+
+        await backtester._prewarm_after_open(intent, self._trade_record(True), self._market_state(), self._config())
+
+        assert lookups == ["prewarm_history"]
+
+    @pytest.mark.asyncio
+    async def test_perp_open_also_prewarms(self, backtester):
+        """PERP_OPEN rides the same post-open hook as LP_OPEN (P5: funding
+        prewarm) — pin the branch explicitly (CodeRabbit review on #3269)."""
+        calls: list[dict] = []
+
+        class PrewarmAdapter:
+            async def prewarm_history(self, intent, *, chain, start_time, end_time):
+                calls.append({"intent": intent, "chain": chain})
+
+        backtester._adapter = PrewarmAdapter()
+        intent = SimpleNamespace(intent_type=IntentType.PERP_OPEN)
+        record = self._trade_record(True)
+        record.intent_type = IntentType.PERP_OPEN
+
+        await backtester._prewarm_after_open(intent, record, self._market_state(), self._config())
+
+        assert len(calls) == 1 and calls[0]["chain"] == "base"
+
+    @pytest.mark.asyncio
+    async def test_market_state_chain_none_falls_back_to_config_chain(self, backtester):
+        """A market_state whose ``chain`` attribute EXISTS but is None must
+        fall back to config.chain — str(None) would prewarm chain "None"
+        (gemini review on #3269)."""
+        calls: list[dict] = []
+
+        class PrewarmAdapter:
+            async def prewarm_history(self, intent, *, chain, start_time, end_time):
+                calls.append({"chain": chain})
+
+        backtester._adapter = PrewarmAdapter()
+        intent = SimpleNamespace(intent_type=IntentType.LP_OPEN)
+        config = self._config()
+        market_state = SimpleNamespace(chain=None)
+
+        await backtester._prewarm_after_open(intent, self._trade_record(True), market_state, config)
+
+        assert calls == [{"chain": config.chain}]

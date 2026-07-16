@@ -928,6 +928,13 @@ def _build_token_availability_check(
 # =============================================================================
 
 
+# Intent types whose $0 notional is legitimate: close-in-full sentinels (sized
+# by position-close resolution) and HOLD. Everything else with $0 rejects.
+_ZERO_NOTIONAL_EXEMPT_INTENT_TYPES = frozenset(
+    {IntentType.PERP_CLOSE, IntentType.WITHDRAW, IntentType.REPAY, IntentType.LP_CLOSE, IntentType.HOLD}
+)
+
+
 @dataclass(frozen=True)
 class _CloseResolution:
     """How a closing intent maps onto the portfolio's open positions.
@@ -1147,6 +1154,9 @@ class PnLBacktester:
     _error_handler: BacktestErrorHandler | None = None
     _fallback_usage: dict[str, int] | None = None
     _gas_price_records: list["GasPriceRecord"] | None = None
+    #: Positions whose accrual update already reported a data gap (log-once
+    #: bookkeeping for the non-strict skip path, ALM-2930).
+    _accrual_data_gap_positions: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -2046,6 +2056,12 @@ class PnLBacktester:
         preserved byte-for-byte by ``_engine_helpers``; see that module's
         docstring for details.
         """
+        # Per-run state: a reused backtester instance (parameter sweeps rerun
+        # the same window, so position ids collide across runs) must re-log
+        # each position's first accrual data gap in every run — a stale entry
+        # here would silently suppress the once-per-position warning.
+        self._accrual_data_gap_positions.clear()
+
         # Run preflight validation if enabled (no BacktestState yet, so a
         # PreflightValidationError propagates straight to the caller -- matches
         # pre-extraction behavior).
@@ -2201,6 +2217,23 @@ class PnLBacktester:
         timestamp: datetime,
         exc: DataSourceUnavailableError,
     ) -> None:
+        # A data gap on ONE position's accrual tick must not kill the whole
+        # simulation (ALM-2930: every LP backtest returned empty because the
+        # first volume-source refusal escalated to a sim-fatal error). In
+        # non-strict mode: skip this position's accrual for the tick, log once
+        # per position, and keep the run alive; the position still marks to
+        # market through the price path. Strict mode keeps the hard stop.
+        strict = bool(self.data_config is not None and self.data_config.strict_historical_mode)
+        if not strict:
+            if position.position_id not in self._accrual_data_gap_positions:
+                self._accrual_data_gap_positions.add(position.position_id)
+                logger.warning(
+                    "Missing data source while updating position %s; skipping its accrual this tick "
+                    "(logged once per position, run continues): %s",
+                    position.position_id,
+                    exc,
+                )
+            return
         logger.error(
             "Missing data source while updating position %s: %s",
             position.position_id,
@@ -2492,6 +2525,7 @@ class PnLBacktester:
             )
         )
         if adapter_record is not None:
+            await self._prewarm_after_open(intent, adapter_record, market_state, config)
             return adapter_record
 
         self._refuse_unsupported_intent(intent)
@@ -2546,7 +2580,42 @@ class PnLBacktester:
             delayed_at_end=delayed_at_end,
         )
 
-        return self._apply_fill_and_return_trade(fill, portfolio, market_state, timestamp)
+        trade_record = self._apply_fill_and_return_trade(fill, portfolio, market_state, timestamp)
+        await self._prewarm_after_open(intent, trade_record, market_state, config)
+        return trade_record
+
+    async def _prewarm_after_open(
+        self,
+        intent: Any,
+        trade_record: TradeRecord,
+        market_state: MarketState,
+        config: PnLBacktestConfig,
+    ) -> None:
+        """Pre-warm the opened position's history caches (best-effort).
+
+        Runs after a SUCCESSFUL opening fill — the only legal await point: the
+        sync per-tick accrual path cannot fetch inside the running loop
+        (LP volume/liquidity, perp funding — ALM-2930). Hooked here in
+        ``_execute_intent`` rather than the adapter wrapper because a
+        successful PERP_OPEN executes via the GENERIC lane (the perp adapter
+        returns a fill only to reject on margin), which the wrapper never sees.
+        """
+        if not trade_record.success:
+            return
+        prewarm = getattr(self._adapter, "prewarm_history", None)
+        if prewarm is None:
+            return
+        if self._get_intent_type(intent) not in (IntentType.LP_OPEN, IntentType.PERP_OPEN):
+            return
+        try:
+            await prewarm(
+                intent,
+                chain=str(getattr(market_state, "chain", None) or config.chain),
+                start_time=config.start_time,
+                end_time=config.end_time,
+            )
+        except Exception as exc:  # noqa: BLE001 — prewarm is best-effort
+            logger.warning("History prewarm failed; accrual falls back to per-tick semantics: %s", exc)
 
     async def _execute_with_adapter_if_available(
         self,
@@ -2621,7 +2690,10 @@ class PnLBacktester:
 
         intent_type = self._get_intent_type(intent)
         protocol = self._get_intent_protocol(intent)
-        chain = str(getattr(market_state, "chain", config.chain))
+        # `or config.chain`: a market_state whose `chain` attribute EXISTS but
+        # is None must fall back too — str(None) would label the record with
+        # the literal chain "None".
+        chain = str(getattr(market_state, "chain", None) or config.chain)
         tokens = self._get_intent_tokens(intent, chain=chain)
 
         # An "all" sizing sentinel on ANY sizing attribute is a live-execution
@@ -2656,6 +2728,19 @@ class PnLBacktester:
         # (size_usd=None) and a lending withdraw_all take their fee notional
         # from the matched position.
         close_resolution = self._resolve_position_close(intent, intent_type, portfolio, amount_usd, market_state)
+        # A zero-notional opening intent has nothing to execute (on-chain it
+        # would revert); recording it as a filled trade inflates trade counts
+        # (ALM-2936). Close-shaped intents are exempt: their zero is the
+        # close-in-full sentinel resolved above.
+        if (
+            close_resolution.failure_reason is None
+            and close_resolution.amount_usd <= Decimal("0")
+            and intent_type not in _ZERO_NOTIONAL_EXEMPT_INTENT_TYPES
+        ):
+            close_resolution = _CloseResolution(
+                amount_usd=Decimal("0"),
+                failure_reason="zero-notional intent: amount resolved to $0 (empty balance or unresolvable size)",
+            )
         return _GenericIntentDetails(
             intent_type=intent_type,
             protocol=protocol,
@@ -3231,6 +3316,14 @@ class PnLBacktester:
             declared = getattr(intent, "intent_type", None)
             declared_label = getattr(declared, "value", declared)
             label = f"{declared_label or intent_type.value} ({type(intent).__name__})"
+            if "STAKE" in str(declared_label or type(intent).__name__).upper():
+                # Liquid-staking connectors declare backtest_strategy_type="yield"
+                # but no yield adapter/engine lane exists, so the claim is not
+                # backtestable today.
+                hint = (
+                    "Staking/yield strategies have no backtest lane despite the connector's "
+                    "backtest_strategy_type='yield' declaration — forward-test (anvil/paper) instead."
+                )
 
         raise UnsupportedIntentError(
             label,
@@ -3745,6 +3838,14 @@ class PnLBacktester:
         """
         if intent_type == IntentType.PERP_CLOSE:
             position_close_id, amount_usd = self._resolve_perp_close(intent, portfolio, amount_usd)
+            if position_close_id is None:
+                # Mirror the WITHDRAW contract: a close that matches no open
+                # position must reject, not fill as a $0 no-op — a $0 "filled"
+                # close hides the failed open from the trade blotter.
+                return _CloseResolution(
+                    amount_usd=amount_usd,
+                    failure_reason="PERP_CLOSE matched no open perp position to close",
+                )
             return _CloseResolution(amount_usd=amount_usd, position_close_id=position_close_id)
         if intent_type == IntentType.WITHDRAW:
             return self._resolve_withdraw_close(intent, portfolio, amount_usd, market_state)

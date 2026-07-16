@@ -628,3 +628,66 @@ def test_strategy_type_hint_none_type():
     """Test StrategyTypeHint with None type."""
     hint = StrategyTypeHint(strategy_type=None)
     assert hint.strategy_type is None
+
+
+class TestMultiCategoryIntentDetection:
+    """Mixed accrual-category intent sets promote to multi_protocol."""
+
+    def test_lp_plus_lending_detects_multi_protocol(self):
+        hint = detect_strategy_type(
+            {"metadata": {"tags": [], "supported_protocols": [], "intent_types": ["LP_OPEN", "LP_CLOSE", "SUPPLY", "WITHDRAW", "HOLD"]}}
+        )
+        assert hint.strategy_type == "multi_protocol"
+        assert hint.confidence == "high"
+
+    def test_perp_plus_lending_detects_multi_protocol(self):
+        hint = detect_strategy_type(
+            {"metadata": {"tags": [], "supported_protocols": [], "intent_types": ["PERP_OPEN", "SUPPLY", "HOLD"]}}
+        )
+        assert hint.strategy_type == "multi_protocol"
+
+    def test_lp_plus_swap_stays_lp(self):
+        # SWAP has no per-position accrual; rebalance swaps ride the generic
+        # lane either way, so single-accrual-category strategies keep their
+        # dedicated adapter.
+        hint = detect_strategy_type(
+            {"metadata": {"tags": [], "supported_protocols": [], "intent_types": ["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"]}}
+        )
+        assert hint.strategy_type == "lp"
+
+
+class TestAccrualMixPromotionScope:
+    """Promotion applies to declared intent types only — tag/protocol
+    vocabularies are noisy synonyms and must not promote."""
+
+    def test_mixed_intent_types_promote(self) -> None:
+        from almanak.framework.backtesting.adapters.registry import detect_strategy_type
+
+        strategy = {"metadata": {"tags": [], "supported_protocols": [], "intent_types": ["LP_OPEN", "SUPPLY"]}}
+        hint = detect_strategy_type(strategy)
+        assert hint.strategy_type == "multi_protocol"
+        assert hint.source == "intents"
+
+    def test_leverage_tag_does_not_promote_lending_strategy(self) -> None:
+        # "leverage" maps to perp in the tag vocabulary; a lending-looping
+        # strategy carrying it must not be promoted to multi_protocol.
+        from almanak.framework.backtesting.adapters.registry import detect_strategy_type
+
+        strategy = {
+            "metadata": {
+                "tags": ["lending", "leverage"],
+                "supported_protocols": ["morpho_blue"],
+                "intent_types": ["SUPPLY", "BORROW", "SWAP"],
+            }
+        }
+        hint = detect_strategy_type(strategy)
+        assert hint.strategy_type == "lending"
+
+    def test_mixed_protocol_declaration_does_not_promote(self) -> None:
+        # Known limitation: a multi-protocol DECLARATION with single-category
+        # tags is not promoted — declared intent types are the authoritative
+        # signal (capability routing supersedes this in the re-cut).
+        from almanak.framework.backtesting.adapters.registry import _detect_from_protocols
+
+        hint = _detect_from_protocols(["uniswap_v3", "aave_v3"])
+        assert hint.strategy_type in ("lp", "lending")

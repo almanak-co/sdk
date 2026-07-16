@@ -228,3 +228,72 @@ class TestAmountAllSentinel:
         intent = SimpleNamespace(intent_type=IntentType.SWAP, from_token="WETH", to_token="USDC", amount="1.5")
         amount_usd = get_intent_amount_usd(intent, _market_state())
         assert amount_usd == Decimal("3000")
+
+
+class TestLpClosePositionIdAddressCarrier:
+    """An address-shaped position_id is a valid pool carrier for fungible LP."""
+
+    def test_address_in_position_id_matches_position_metadata(self) -> None:
+        from datetime import UTC, datetime
+
+        from almanak.framework.backtesting.pnl.intent_extraction import find_lp_close_position_id
+
+        pool_address = "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"
+        position = SimpleNamespace(
+            is_lp=True,
+            position_id="LP_curve_USDC_USDT_1700000000",
+            protocol="curve",
+            tokens=["USDC", "USDT"],
+            entry_time=datetime(2024, 1, 1, tzinfo=UTC),
+            metadata={"pool_address": pool_address},
+        )
+        close = SimpleNamespace(position_id=pool_address, pool=None, protocol="curve")
+
+        assert find_lp_close_position_id(close, [position]) == "LP_curve_USDC_USDT_1700000000"
+
+    def test_mixed_case_address_carrier_still_matches(self) -> None:
+        # Checksummed close id vs lowercase open-stamped metadata: both sides
+        # normalize, the match must not be case-sensitive.
+        from datetime import UTC, datetime
+
+        from almanak.framework.backtesting.pnl.intent_extraction import find_lp_close_position_id
+
+        position = SimpleNamespace(
+            is_lp=True,
+            position_id="LP_curve_USDC_USDT_1700000000",
+            protocol="curve",
+            tokens=["USDC", "USDT"],
+            entry_time=datetime(2024, 1, 1, tzinfo=UTC),
+            metadata={"pool_address": "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"},
+        )
+        close = SimpleNamespace(
+            position_id="0xB2cC224c1c9feE385f8ad6a55b4d94E92359DC59", pool=None, protocol="curve"
+        )
+
+        assert find_lp_close_position_id(close, [position]) == "LP_curve_USDC_USDT_1700000000"
+
+    def test_multiple_same_pool_positions_close_fifo_oldest(self) -> None:
+        # Several open positions on the identical pool address: the OLDEST
+        # entry_time wins (FIFO), matching the documented contract.
+        from datetime import UTC, datetime
+
+        from almanak.framework.backtesting.pnl.intent_extraction import find_lp_close_position_id
+
+        pool_address = "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"
+
+        def _position(position_id: str, day: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                is_lp=True,
+                position_id=position_id,
+                protocol="curve",
+                tokens=["USDC", "USDT"],
+                entry_time=datetime(2024, 1, day, tzinfo=UTC),
+                metadata={"pool_address": pool_address},
+            )
+
+        newer = _position("LP_curve_USDC_USDT_newer", 5)
+        oldest = _position("LP_curve_USDC_USDT_oldest", 1)
+        close = SimpleNamespace(position_id=pool_address, pool=None, protocol="curve")
+
+        # Listed newest-first to prove the sort, not the input order, decides.
+        assert find_lp_close_position_id(close, [newer, oldest]) == "LP_curve_USDC_USDT_oldest"

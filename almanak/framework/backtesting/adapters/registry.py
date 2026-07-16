@@ -256,6 +256,33 @@ def _get_strategy_metadata(strategy: Any) -> "StrategyMetadata | None":
     return None
 
 
+def _accrual_mix_promotion(type_counts: dict[str, int], source: str) -> StrategyTypeHint | None:
+    """Promote to multi_protocol when matches span >= 2 accrual categories.
+
+    A strategy spanning two or more ACCRUAL-bearing categories (LP fee
+    accrual, perp funding, lending interest) needs the multi-protocol
+    adapter: picking one by count or priority starves the other categories'
+    update_position accrual entirely — a mixed LP+lending (delta-neutral)
+    strategy detected as "lp" earns silent zero lending interest.
+    SWAP/ARBITRAGE don't accrue per-position, so e.g. LP+SWAP stays "lp"
+    (rebalance swaps ride the generic lane unchanged).
+
+    Applied to declared INTENT TYPES only: tag and protocol vocabularies are
+    noisy synonyms (a "leverage" tag maps to perp; a second protocol may
+    never be executed), so promoting on them misclassifies.
+    """
+    accrual_types = {STRATEGY_TYPE_LP, STRATEGY_TYPE_PERP, STRATEGY_TYPE_LENDING}
+    matched_accrual = sorted(t for t in type_counts if t in accrual_types)
+    if len(matched_accrual) >= 2:
+        return StrategyTypeHint(
+            strategy_type=STRATEGY_TYPE_MULTI_PROTOCOL,
+            confidence="high",
+            source=source,
+            details=f"Matches span multiple accrual categories: {', '.join(matched_accrual)}",
+        )
+    return None
+
+
 def _detect_from_tags(tags: list[str]) -> StrategyTypeHint:
     """Detect strategy type from metadata tags.
 
@@ -280,6 +307,10 @@ def _detect_from_tags(tags: list[str]) -> StrategyTypeHint:
 
     if not type_counts:
         return StrategyTypeHint(strategy_type=None, source="tags")
+
+    # No accrual-mix promotion here: tag synonyms are noisy (e.g. "leverage"
+    # maps to perp), so promoting on tag mixes misfires — declared intent
+    # types are the authoritative signal (see _detect_from_intents).
 
     # Return the most common type
     best_type = max(type_counts, key=lambda t: type_counts[t])
@@ -323,6 +354,9 @@ def _detect_from_protocols(protocols: list[str]) -> StrategyTypeHint:
     if not type_counts:
         return StrategyTypeHint(strategy_type=None, source="protocols")
 
+    # No accrual-mix promotion here (same reasoning as tags): a multi-protocol
+    # declaration does not prove multi-category EXECUTION — intent types do.
+
     # Return the most common type
     best_type = max(type_counts, key=lambda t: type_counts[t])
     count = type_counts[best_type]
@@ -352,6 +386,15 @@ def _detect_from_intents(intent_types: list[str]) -> StrategyTypeHint:
 
     # Normalize intent types to uppercase
     normalized_intents = [i.upper() for i in intent_types]
+
+    intent_type_counts: dict[str, int] = {}
+    for i in normalized_intents:
+        mapped = INTENT_TO_STRATEGY_TYPE.get(i)
+        if mapped is not None:
+            intent_type_counts[mapped] = intent_type_counts.get(mapped, 0) + 1
+    promotion = _accrual_mix_promotion(intent_type_counts, source="intents")
+    if promotion is not None:
+        return promotion
 
     # Priority order: LP > Perp > Lending > Arbitrage > Swap
     # This handles cases where a strategy uses both SWAP and LP_OPEN

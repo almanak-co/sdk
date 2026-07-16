@@ -1326,6 +1326,35 @@ def find_lp_close_position_id(intent: Any, positions: Sequence[Any]) -> str | No
 
     pair = _lp_close_pair(intent)
     if pair is None:
+        # Address-keyed pool: no symbolic pair to resolve, but the open path
+        # stamped metadata["pool_address"] on the position — match on that,
+        # otherwise an address-pool LP_CLOSE is rejected as ambiguous even
+        # though the open used the identical address.
+        # For fungible LP the position_id doubles as the pool descriptor, so
+        # an address-shaped position_id is an equally valid carrier.
+        raw_pool = getattr(intent, "pool", None)
+        if not (isinstance(raw_pool, str) and raw_pool.strip().lower().startswith("0x")):
+            raw_id = getattr(intent, "position_id", None)
+            if isinstance(raw_id, str) and raw_id.strip().lower().startswith("0x"):
+                raw_pool = raw_id
+        if isinstance(raw_pool, str) and raw_pool.strip().lower().startswith("0x"):
+            pool_lower = raw_pool.strip().lower()
+            address_matches = [
+                position
+                for position in positions
+                if getattr(position, "is_lp", False)
+                and str((getattr(position, "metadata", None) or {}).get("pool_address") or "").lower() == pool_lower
+            ]
+            if address_matches:
+                address_matches.sort(key=lambda position: position.entry_time)
+                if len(address_matches) > 1:
+                    logger.warning(
+                        "LP_CLOSE matched %d open LP positions for pool address %s; closing the oldest (%s)",
+                        len(address_matches),
+                        pool_lower[:10],
+                        address_matches[0].position_id,
+                    )
+                return address_matches[0].position_id
         logger.warning(
             "LP_CLOSE carries no resolvable token pair (position_id=%r, pool=%r); refusing ambiguous close matching",
             getattr(intent, "position_id", None),
