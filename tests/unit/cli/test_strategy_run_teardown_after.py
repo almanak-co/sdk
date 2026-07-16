@@ -172,25 +172,29 @@ def test_strat_run_uses_interval_from_pyproject_when_flag_omitted(
     assert "Using interval from pyproject.toml: 30s" in result.output
 
 
-# Options the wrapper (`strategy_run`) intentionally does NOT redeclare yet.
-# This is the pre-existing wrapper/framework option-list drift documented in
-# docs/internal/blueprints/16-cli-reference.md and tracked as a follow-up under
-# VIB-5846. Removing an entry here means the wrapper gained that option (good) —
-# delete the line. Adding a NEW entry means the framework grew an option the
-# wrapper silently dropped: only add it if that drop is a conscious, tracked
-# decision, never to make this test pass.
-_KNOWN_WRAPPER_DRIFT: frozenset[str] = frozenset({"--dashboard-mode", "--debug", "--list", "--simulate-tx"})
+# Options the wrapper (`strategy_run`) intentionally does NOT redeclare.
+# As of VIB-5846 this is EMPTY: the wrapper and the framework `run` command both
+# apply the single shared ``strategy_run_options`` decorator
+# (``almanak/framework/cli/_run_options.py``), so they can no longer drift by
+# construction and the four historically-dropped flags (``--dashboard-mode`` /
+# ``--debug`` / ``--list`` / ``--simulate-tx``) are reachable again. Adding a NEW
+# entry means the framework grew an option the wrapper silently dropped: only add
+# it if that drop is a conscious, tracked decision, never to make this test pass —
+# and prefer keeping both commands on the shared decorator instead.
+_KNOWN_WRAPPER_DRIFT: frozenset[str] = frozenset()
 
 
 def test_strat_run_options_do_not_drift_from_framework_run() -> None:
     """`strategy_run` must forward every framework `run` option except tracked drift.
 
     Guards the exact bug class VIB-5846 fixed: the CLI-registered `strat run`
-    wrapper (`strategy_run`) hand-duplicates the framework `run` command's option
-    list and forwards by name, so any framework option the wrapper forgets to
-    redeclare becomes silently unreachable from the real CLI (as `--keep-anvil`
-    was). This asserts the wrapper's options are a superset of the framework
-    command's, modulo the explicitly-tracked `_KNOWN_WRAPPER_DRIFT` set.
+    wrapper (`strategy_run`) used to hand-duplicate the framework `run` command's
+    option list and forward by name, so any framework option the wrapper forgot to
+    redeclare became silently unreachable from the real CLI (as `--keep-anvil`,
+    `--debug`, `--list`, `--dashboard-mode`, `--simulate-tx` all were). Both
+    commands now share ``strategy_run_options``, so this asserts the wrapper's
+    options are a superset of the framework command's, with an empty tracked-drift
+    set.
     """
     framework_opts = {opt for param in cli_module.framework_run_cmd.params for opt in param.opts}
     wrapper_opts = {opt for param in cli_module.strategy_run.params for opt in param.opts}

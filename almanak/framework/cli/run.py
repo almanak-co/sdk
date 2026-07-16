@@ -35,10 +35,10 @@ if TYPE_CHECKING:
 
 import click
 
-from almanak.config.cli_options import gateway_client_options
 from almanak.config.cli_runtime import CliRuntimeConfig
 from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.anvil import accounts as _anvil_accounts
+from almanak.framework.cli._run_options import DEFAULT_STRAT_RUN_INTERVAL, strategy_run_options
 from almanak.gateway.data.balance import Web3BalanceProvider
 from almanak.gateway.data.price import CoinGeckoPriceSource, PriceAggregator
 
@@ -1189,191 +1189,12 @@ def format_iteration_result(result: IterationResult) -> str:
 
 
 @click.command("run")
-@click.option(
-    "--working-dir",
-    "-d",
-    type=click.Path(exists=True),
-    default=".",
-    help="Working directory containing strategy.py. Defaults to current directory.",
-)
-@click.option(
-    "--config",
-    "-c",
-    "config_file",
-    type=click.Path(exists=False),
-    default=None,
-    help="Path to strategy config JSON file",
-)
-@click.option(
-    "--once",
-    is_flag=True,
-    default=False,
-    help="Run single iteration then exit",
-)
-@click.option(
-    "--interval",
-    "-i",
-    type=int,
-    default=60,
-    help="Loop interval in seconds (default: 60)",
-)
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    default=False,
-    help="Execute decide() but don't submit transactions",
-)
-@click.option(
-    "--list",
-    "list_all",
-    is_flag=True,
-    default=False,
-    help="List all available strategies and exit",
-)
-@click.option(
-    "--verbose",
-    "-v",
-    is_flag=True,
-    default=False,
-    help="Enable verbose output (detailed strategy info)",
-)
-@click.option(
-    "--debug",
-    is_flag=True,
-    default=False,
-    help="Enable debug output (includes Web3/HTTP logs)",
-)
-@click.option(
-    "--dashboard",
-    is_flag=True,
-    default=False,
-    help="Launch live dashboard alongside strategy execution",
-)
-@click.option(
-    "--dashboard-port",
-    type=int,
-    default=8501,
-    help="Port to run the dashboard on (default: 8501)",
-)
-@click.option(
-    "--dashboard-mode",
-    type=click.Choice(["hosted-parity", "command-center"], case_sensitive=False),
-    default="hosted-parity",
-    help=(
-        "Dashboard layout. 'hosted-parity' (default) mirrors the hosted "
-        "platform: one strategy, one gateway, no multi-strategy navigation. "
-        "'command-center' opens the repo-wide browser. Standalone mode "
-        "(--dashboard from a non-strategy folder) always uses Command Center."
-    ),
-)
-@click.option(
-    "--simulate-tx/--no-simulate-tx",
-    "simulate_tx",
-    default=None,
-    help="Enable/disable transaction simulation via Tenderly/Alchemy before submission. Default: use SIMULATION_ENABLED env var",
-)
-@click.option(
-    "--network",
-    "-n",
-    type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
-    default=None,
-    help="Network environment: 'mainnet' for production RPC, 'anvil' for local fork testing (auto-starts Anvil on a free port). "
-    "For paper trading with PnL tracking, use 'almanak strat backtest paper'. Overrides config.json 'network' field.",
-)
-@gateway_client_options
-@click.option(
-    "--fresh",
-    is_flag=True,
-    default=False,
-    help="Start from a clean slate: clear persisted strategy state before running "
-    "instead of resuming it (useful for fresh Anvil forks, or to recover from a "
-    "desynced restart). Default is to resume existing state; the boot banner and "
-    "log report whether this run RESUMED or started FRESH.",
-)
-@click.option(
-    "--copy-mode",
-    type=click.Choice(["live", "shadow", "replay"], case_sensitive=False),
-    default=None,
-    help="Copy-trading mode override for this run.",
-)
-@click.option(
-    "--copy-shadow",
-    is_flag=True,
-    default=False,
-    help="Enable copy-trading shadow mode (decisioning only, no submissions).",
-)
-@click.option(
-    "--copy-replay-file",
-    type=click.Path(exists=False),
-    default=None,
-    help="Replay file (JSON/JSONL CopySignal fixtures) for copy-trading replay mode.",
-)
-@click.option(
-    "--copy-strict",
-    is_flag=True,
-    default=False,
-    help="Enable strict copy-trading schema + fail-closed validation.",
-)
-@click.option(
-    "--no-gateway",
-    "no_gateway",
-    is_flag=True,
-    default=False,
-    help="Do not auto-start a gateway; connect to an existing one.",
-)
-@click.option(
-    "--anvil-port",
-    "anvil_ports",
-    multiple=True,
-    help="Use existing Anvil instance: CHAIN=PORT (e.g., --anvil-port arbitrum=8545). Repeatable.",
-)
-@click.option(
-    "--keep-anvil",
-    is_flag=True,
-    default=False,
-    help="Keep managed Anvil fork(s) running after the runner exits (incl. after a "
-    "graceful teardown), detached in their own session, for post-run/post-teardown "
-    "inspection or a sealed audit. You must kill the fork PID(s) yourself afterwards.",
-)
-@click.option(
-    "--wallet",
-    type=click.Choice(["default", "isolated"], case_sensitive=False),
-    default="default",
-    help="Wallet mode for Anvil: 'isolated' derives a unique wallet per strategy for balance isolation.",
-)
-@click.option(
-    "--log-file",
-    type=click.Path(dir_okay=False),
-    default=None,
-    help="Write JSON logs to this file (in addition to console output). Useful for AI agent analysis.",
-)
-@click.option(
-    "--reset-fork",
-    "reset_fork",
-    is_flag=True,
-    default=False,
-    help="Reset Anvil fork to latest mainnet block before each iteration (requires --network anvil). "
-    "Gives live on-chain state for fork testing.",
-)
-@click.option(
-    "--max-iterations",
-    type=int,
-    default=None,
-    help="Maximum number of iterations to run before exiting cleanly. "
-    "Without this flag, continuous mode runs indefinitely.",
-)
-@click.option(
-    "--teardown-after",
-    is_flag=True,
-    default=False,
-    help="After --once iteration, automatically teardown (close all positions). "
-    "Useful for CI/testing to avoid accumulating stale positions on-chain.",
-)
+@strategy_run_options
 def run(  # noqa: C901
     working_dir: str,
     config_file: str | None,
     once: bool,
-    interval: int,
+    interval: int | None,
     dry_run: bool,
     list_all: bool,
     verbose: bool,
@@ -1439,12 +1260,21 @@ def run(  # noqa: C901
         # List registered strategies
         almanak strat run --list
     """
+    # ``--interval``'s shared option default is the ``None`` sentinel the wrapper
+    # needs to distinguish "user passed nothing" (resolve from pyproject) from an
+    # explicit value; every ctx.invoke caller resolves it to a concrete int first,
+    # so this only fires as defence-in-depth if a caller ever forwards None
+    # (VIB-5846).
+    if interval is None:
+        interval = DEFAULT_STRAT_RUN_INTERVAL
+
     from .run_helpers import (
         _build_cleanup_fn,
         _build_components_or_exit,
         _configure_logging_and_validate,
         _echo_strategy_runtime_summary,
         _execute_run_mode,
+        _handle_list_all,
         _instantiate_strategy,
         _load_strategy_bootstrap,
         _maybe_handle_run_early_exit,
@@ -1463,6 +1293,17 @@ def run(  # noqa: C901
         teardown_after=teardown_after,
         max_iterations=max_iterations,
     )
+
+    # `--list` only reads the strategy registry — it does not need a gateway.
+    # Handle it BEFORE _setup_gateway so `almanak strat run --list` works in
+    # gateway-less environments instead of paying for (and possibly failing at)
+    # gateway startup just to print strategy names. VIB-5846 exposed `--list` on
+    # the `strat run` wrapper (it was previously unreachable and hardcoded off),
+    # which made this ordering reachable (review: codex P2). The later
+    # _maybe_handle_run_early_exit still owns the standalone-dashboard branch,
+    # which genuinely needs the resolved gateway host/port.
+    if _handle_list_all(list_all, gateway_client=None):
+        return
 
     (
         gateway_client,
@@ -1492,7 +1333,9 @@ def run(  # noqa: C901
     click.echo()
 
     if _maybe_handle_run_early_exit(
-        list_all=list_all,
+        # list_all already handled above (pre-gateway); this call now only
+        # covers the standalone-dashboard early-exit, which needs the gateway.
+        list_all=False,
         gateway_client=gateway_client,
         working_dir=working_dir,
         dashboard=dashboard,

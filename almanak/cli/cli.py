@@ -19,6 +19,12 @@ from almanak.core.redaction import install_redaction
 # V2 Framework CLI commands
 from almanak.framework.cli import backtest as framework_backtest_group
 from almanak.framework.cli import new_strategy as framework_new_strategy_cmd
+from almanak.framework.cli._run_options import (
+    DEFAULT_STRAT_RUN_INTERVAL,
+    MAX_STRAT_RUN_INTERVAL,
+    MIN_STRAT_RUN_INTERVAL,
+    strategy_run_options,
+)
 from almanak.framework.cli.ax import ax as framework_ax_group
 from almanak.framework.cli.capability_matrix import capability_matrix_command as framework_capability_matrix_cmd
 from almanak.framework.cli.chain_params import ChainChoice
@@ -49,9 +55,10 @@ from almanak.framework.cli.strat_pnl import strat_pnl as framework_strat_pnl_cmd
 from almanak.framework.cli.support_matrix import support_matrix as framework_support_matrix_cmd
 from almanak.framework.cli.teardown import teardown as framework_teardown_group
 
-DEFAULT_STRAT_RUN_INTERVAL = 60
-MIN_STRAT_RUN_INTERVAL = 5
-MAX_STRAT_RUN_INTERVAL = 3600
+# Loop-interval bounds live in ``almanak.framework.cli._run_options`` (the single
+# source of truth shared with the framework ``run`` command); re-exported into this
+# module's namespace above so existing ``cli.DEFAULT_STRAT_RUN_INTERVAL`` references
+# keep resolving.
 
 
 def format_output(status: str | None = None, title=None, key_value_pairs=None, items=None, delimiter=True):
@@ -1603,152 +1610,7 @@ def strategy_test(
 # managed-Anvil-required-for-end-to-end constraint that holds back ``strategy_test``.
 # The migration touches only the dotenv ingest site at the top of the function body.
 @strat.command("run")
-@click.option(
-    "--working-dir",
-    "-d",
-    type=click.Path(exists=True),
-    default=".",
-    help="Working directory containing the strategy files. Defaults to the current directory.",
-)
-@click.option(
-    "--config",
-    "-c",
-    "config_file",
-    type=click.Path(exists=True),
-    default=None,
-    help="Path to strategy config JSON file.",
-)
-@click.option(
-    "--once",
-    is_flag=True,
-    default=False,
-    help="Run single iteration then exit.",
-)
-@click.option(
-    "--interval",
-    "-i",
-    type=int,
-    default=None,
-    help="Loop interval in seconds. Defaults to [tool.almanak.run].interval or 60.",
-)
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    default=False,
-    help="Execute decide() but don't submit transactions.",
-)
-@click.option(
-    "--fresh",
-    is_flag=True,
-    default=False,
-    help="Clear strategy state before running (useful for fresh Anvil forks).",
-)
-@click.option(
-    "--verbose",
-    "-v",
-    is_flag=True,
-    default=False,
-    help="Enable verbose output.",
-)
-@click.option(
-    "--network",
-    "-n",
-    type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
-    default=None,
-    help="Network environment: 'mainnet' for production RPC, 'anvil' for local fork testing. "
-    "For paper trading with PnL tracking, use 'almanak strat backtest paper'.",
-)
-@gateway_client_options
-@click.option(
-    "--no-gateway",
-    "no_gateway",
-    is_flag=True,
-    default=False,
-    help="Do not auto-start a gateway; connect to an existing one.",
-)
-@click.option(
-    "--copy-mode",
-    type=click.Choice(["live", "shadow", "replay"], case_sensitive=False),
-    default=None,
-    help="Copy-trading mode override for this run.",
-)
-@click.option(
-    "--copy-shadow",
-    is_flag=True,
-    default=False,
-    help="Enable copy-trading shadow mode (decisioning only, no submissions).",
-)
-@click.option(
-    "--copy-replay-file",
-    type=click.Path(exists=False),
-    default=None,
-    help="Replay file (JSON/JSONL CopySignal fixtures) for copy-trading replay mode.",
-)
-@click.option(
-    "--copy-strict",
-    is_flag=True,
-    default=False,
-    help="Enable strict copy-trading validation and fail-closed behavior.",
-)
-@click.option(
-    "--dashboard",
-    is_flag=True,
-    default=False,
-    help="Launch live dashboard alongside strategy execution.",
-)
-@click.option(
-    "--dashboard-port",
-    type=int,
-    default=8501,
-    help="Port to run the dashboard on (default: 8501).",
-)
-@click.option(
-    "--wallet",
-    type=click.Choice(["default", "isolated"], case_sensitive=False),
-    default="default",
-    help="Wallet mode for Anvil: 'isolated' derives a unique wallet per strategy for balance isolation.",
-)
-@click.option(
-    "--log-file",
-    type=click.Path(),
-    default=None,
-    help="Write JSON logs to this file (in addition to console output). Useful for AI agent analysis.",
-)
-@click.option(
-    "--reset-fork",
-    "reset_fork",
-    is_flag=True,
-    default=False,
-    help="Reset Anvil fork to latest mainnet block before each iteration (requires --network anvil).",
-)
-@click.option(
-    "--max-iterations",
-    type=int,
-    default=None,
-    help="Maximum number of iterations to run before exiting cleanly. "
-    "Without this flag, continuous mode runs indefinitely.",
-)
-@click.option(
-    "--teardown-after",
-    is_flag=True,
-    default=False,
-    help="After --once iteration, automatically teardown (close all positions). "
-    "Useful for CI/testing to avoid accumulating stale positions on-chain.",
-)
-@click.option(
-    "--anvil-port",
-    "anvil_ports",
-    multiple=True,
-    help="Use existing Anvil instance: CHAIN=PORT (e.g., --anvil-port arbitrum=8545). Repeatable.",
-)
-@click.option(
-    "--keep-anvil",
-    is_flag=True,
-    default=False,
-    help="Keep managed Anvil fork(s) running after the runner exits (incl. after a "
-    "graceful teardown), detached in their own session, for post-run/post-teardown "
-    "inspection or a sealed audit. You must kill the fork PID(s) yourself afterwards.",
-)
+@strategy_run_options
 @click.pass_context
 def strategy_run(
     ctx,
@@ -1757,8 +1619,10 @@ def strategy_run(
     once,
     interval,
     dry_run,
-    fresh,
+    list_all,
     verbose,
+    debug,
+    fresh,
     network,
     gateway_host,
     gateway_port,
@@ -1769,6 +1633,8 @@ def strategy_run(
     copy_strict,
     dashboard,
     dashboard_port,
+    dashboard_mode,
+    simulate_tx,
     wallet,
     log_file,
     reset_fork,
@@ -1875,12 +1741,13 @@ def strategy_run(
             interval=interval,
             dry_run=dry_run,
             fresh=fresh,
-            list_all=False,
+            list_all=list_all,
             verbose=verbose,
-            debug=False,
+            debug=debug,
             dashboard=dashboard,
             dashboard_port=dashboard_port,
-            simulate_tx=None,
+            dashboard_mode=dashboard_mode,
+            simulate_tx=simulate_tx,
             network=network,
             gateway_host=gateway_host,
             gateway_port=gateway_port,
