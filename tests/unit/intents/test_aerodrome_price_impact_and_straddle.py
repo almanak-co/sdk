@@ -350,3 +350,33 @@ def test_slipstream_lp_open_out_of_range_opt_in_compiles() -> None:
         result = compile_lp_open_aerodrome_slipstream(compiler, intent)
 
     assert result.status == CompilationStatus.SUCCESS, result.error
+
+
+def test_slipstream_lp_open_out_of_range_opt_in_still_warns() -> None:
+    """VIB-exp19: allow_out_of_range=True suppresses the straddle FAILURE, but
+    must not suppress visibility entirely -- the compile succeeds with a
+    warning restoring the "this mints single-sided / zero fees" explanation
+    the straddle check would otherwise have raised as an error.
+    """
+    compiler = _FakeLpCompiler(current_tick=0)
+    intent = _make_lp_open_intent(-5000, -2000, allow_oor=True)
+    p1, p2, p3, p4 = _patches()
+    with p1, p2, p3, p4 as adapter_cls:
+        adapter_cls.return_value.add_cl_liquidity.return_value = _cl_adapter_result()
+        result = compile_lp_open_aerodrome_slipstream(compiler, intent)
+
+    assert result.status == CompilationStatus.SUCCESS, result.error
+    assert any("does not contain" in w and "ZERO fees" in w for w in result.warnings)
+
+
+def test_slipstream_lp_open_in_range_has_no_spot_warning() -> None:
+    """Straddling range: no straddle failure AND no spot-exclusion warning."""
+    compiler = _FakeLpCompiler(current_tick=0)
+    intent = _make_lp_open_intent(-2000, 2000)
+    p1, p2, p3, p4 = _patches()
+    with p1, p2, p3, p4 as adapter_cls:
+        adapter_cls.return_value.add_cl_liquidity.return_value = _cl_adapter_result()
+        result = compile_lp_open_aerodrome_slipstream(compiler, intent)
+
+    assert result.status == CompilationStatus.SUCCESS, result.error
+    assert not any("does not contain" in w for w in result.warnings)

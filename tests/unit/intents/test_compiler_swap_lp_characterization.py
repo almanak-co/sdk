@@ -15,6 +15,7 @@ Non-scope (by construction):
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -1353,6 +1354,75 @@ class TestCompileLPOpenSlot0Recompute:
         mock_recompute.assert_called_once()
         assert result.action_bundle.metadata["amount0_desired"] == "100"
         assert result.action_bundle.metadata["amount1_desired"] == "200"
+
+
+class TestCompileLPOpenRangeExcludesSpotWarning:
+    """VIB-exp19: LP_OPEN warns (never fails) when the requested tick range
+    doesn't contain the pool's live slot0 tick. The compile must still
+    SUCCEED either way -- one-sided/out-of-range LP_OPEN is an established,
+    intentional pattern this SDK supports (see
+    ``lp_range_excludes_spot_warning``'s docstring) -- but a warning
+    explaining the single-sided, zero-fee outcome must be attached when the
+    range misses spot, and absent when it doesn't.
+    """
+
+    @patch("almanak.connectors.uniswap_v3.compiler.price_band_to_ticks")
+    @patch(FETCH_SLOT0)
+    @patch(VALIDATE_V3_POOL)
+    @patch(LP_ADAPTER_CLS)
+    def test_range_excludes_spot_warns_but_still_succeeds(
+        self,
+        mock_adapter_cls: MagicMock,
+        mock_validate: MagicMock,
+        mock_fetch_slot0: MagicMock,
+        mock_band: MagicMock,
+    ) -> None:
+        mock_adapter_cls.return_value = _make_mock_lp_adapter()
+        mock_validate.return_value = _mock_pool_validation_ok(pool_address="0xC6962004f452bE9203591991D15f6b388e09E8D0")
+        # Fixed tick band [0, 100); slot0's current tick (500) sits outside it.
+        mock_band.return_value = SimpleNamespace(tick_lower=0, tick_upper=100)
+        mock_fetch_slot0.return_value = (int(2**96), 500)
+
+        compiler = _make_compiler(chain="arbitrum")
+        compiler.rpc_url = "http://localhost:8545"
+
+        with (
+            patch.object(compiler, "_parse_pool_info", return_value=(_USDC, _WETH, 3000, False)),
+            patch.object(compiler, "_build_approve_tx", return_value=[]),
+        ):
+            result = compiler.compile(_make_lp_intent())
+
+        assert result.status == CompilationStatus.SUCCESS, result.error
+        assert any("does not contain" in w and "ZERO fees" in w for w in result.warnings)
+
+    @patch("almanak.connectors.uniswap_v3.compiler.price_band_to_ticks")
+    @patch(FETCH_SLOT0)
+    @patch(VALIDATE_V3_POOL)
+    @patch(LP_ADAPTER_CLS)
+    def test_range_contains_spot_no_warning(
+        self,
+        mock_adapter_cls: MagicMock,
+        mock_validate: MagicMock,
+        mock_fetch_slot0: MagicMock,
+        mock_band: MagicMock,
+    ) -> None:
+        mock_adapter_cls.return_value = _make_mock_lp_adapter()
+        mock_validate.return_value = _mock_pool_validation_ok(pool_address="0xC6962004f452bE9203591991D15f6b388e09E8D0")
+        # Same fixed tick band [0, 100); slot0's current tick (50) is inside it.
+        mock_band.return_value = SimpleNamespace(tick_lower=0, tick_upper=100)
+        mock_fetch_slot0.return_value = (int(2**96), 50)
+
+        compiler = _make_compiler(chain="arbitrum")
+        compiler.rpc_url = "http://localhost:8545"
+
+        with (
+            patch.object(compiler, "_parse_pool_info", return_value=(_USDC, _WETH, 3000, False)),
+            patch.object(compiler, "_build_approve_tx", return_value=[]),
+        ):
+            result = compiler.compile(_make_lp_intent())
+
+        assert result.status == CompilationStatus.SUCCESS, result.error
+        assert not any("does not contain" in w for w in result.warnings)
 
 
 class TestCompileLPOpenSlipstreamSlot0Recompute:

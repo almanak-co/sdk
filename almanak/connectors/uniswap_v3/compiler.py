@@ -10,6 +10,7 @@ from typing import Any, ClassVar
 
 from almanak.connectors._strategy_base.base.cl_math import (
     compute_lp_slippage_mins,
+    lp_range_excludes_spot_warning,
     maybe_recompute_lp_amounts_from_slot0,
 )
 from almanak.connectors._strategy_base.base.compiler import (
@@ -282,6 +283,17 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
             )
 
             slot0 = self._fetch_lp_pool_slot0(ctx, pool_check)
+            range_warning = lp_range_excludes_spot_warning(
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                slot0=slot0,
+                range_lower=range_lower,
+                range_upper=range_upper,
+                pool_address=pool_check.pool_address,
+                protocol=protocol,
+            )
+            if range_warning:
+                warnings.append(range_warning)
             recomputed_or_fail = maybe_recompute_lp_amounts_from_slot0(
                 fetch_slot0=lambda pc: self._fetch_lp_pool_slot0(ctx, pc),
                 pool_check=pool_check,

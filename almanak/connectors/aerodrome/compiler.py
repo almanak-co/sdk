@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from almanak.connectors._strategy_base.base.cl_math import (
     compute_lp_slippage_mins,
+    lp_range_excludes_spot_warning,
     maybe_recompute_lp_amounts_from_slot0,
 )
 from almanak.connectors._strategy_base.base.compiler import BaseConcentratedLiquidityCompiler, CLCompilerContext
@@ -1399,6 +1400,22 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
         straddle_failure = _slipstream_tick_straddle_failure(intent, slot0, tick_lower, tick_upper)
         if straddle_failure is not None:
             return straddle_failure
+
+        # The straddle check above already fails closed on an out-of-range
+        # request UNLESS the caller opted in via allow_out_of_range=True --
+        # in which case it returns None and suppresses its own explanation.
+        # Re-derive that same warning here so an intentional one-sided open
+        # still gets a loud, explicit "this earns zero fees until price
+        # re-enters" notice instead of silence (VIB-exp19).
+        range_warning = lp_range_excludes_spot_warning(
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+            slot0=slot0,
+            pool_address=pool_check.pool_address,
+            protocol="aerodrome_slipstream",
+        )
+        if range_warning:
+            warnings.append(range_warning)
 
         # Align desired amounts to the pool's current sqrtPriceX96 (slot0).
         # Slipstream pools are V3-shaped, so the V3 recompute helper applies

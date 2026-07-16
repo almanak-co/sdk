@@ -313,7 +313,15 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
         try:
             token0_price_usd = market.price(self.token0_symbol)
             token1_price_usd = market.price(self.token1_symbol)
-            current_price = token0_price_usd / token1_price_usd
+            oracle_ratio = token0_price_usd / token1_price_usd
+            # VIB-exp19: center the range and test range-exit against the
+            # POOL's own price, not the market.price() USD oracle -- oracle
+            # and pool price are not guaranteed to agree (e.g. hardcoded 1.0
+            # for stablecoins; can drift for volatile pairs), so using the
+            # oracle here can silently mint out of range or hold forever
+            # without ever detecting real drift. Falls back to the oracle
+            # ratio (today's behavior) when the pool can't be read.
+            current_price = self._pool_spot_price(market, oracle_ratio) or oracle_ratio
             logger.debug(f"Current price: {current_price:.2f} {self.token1_symbol}/{self.token0_symbol}")
         except (ValueError, KeyError) as e:
             logger.warning(f"Could not get price: {e}")
@@ -399,6 +407,91 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
     # =========================================================================
     # INTENT CREATION HELPERS
     # =========================================================================
+
+    def _pool_spot_price(self, market: MarketSnapshot, oracle_ratio: Decimal) -> Decimal | None:
+        """Live pool price (token1 per token0, in this strategy's own token
+        order), or ``None`` when the pool can't be read.
+
+        VIB-exp19: ``market.price()`` is a USD *valuation* oracle (hardcoded
+        ``1.0`` for stablecoins) -- it is not guaranteed to match the actual
+        pool the LP position lives in, so it must never define a
+        concentrated range or its exit test. ``market.pool_price_by_pair()``
+        reads the pool's own slot0() instead.
+
+        Orientation caveat: ``pool_price_by_pair`` returns the price in the
+        pool's ON-CHAIN token0/token1 order (lower address first), which need
+        not match this strategy's config-declared
+        ``token0_symbol``/``token1_symbol`` order, and no strategy-facing API
+        exposes which one that is without an extra on-chain lookup. Rather
+        than resolve addresses (more RPC, more surface area), we use the
+        already-fetched ``oracle_ratio`` purely as an ORIENTATION HINT --
+        never as the value: of the two possible readings of the pool price
+        (as-is, or its reciprocal), pick whichever is closer to the oracle
+        ratio in log-space. This is safe for pairs priced away from 1.0: the
+        two orientations differ by orders of magnitude there, so the
+        correct one is never ambiguous.
+
+        It is NOT fully safe for pairs priced near 1.0 (e.g. stable/stable):
+        the two orientations are then numerically close, and when
+        ``oracle_ratio`` is EXACTLY ``1.0`` (the ``stablecoin_peg`` source
+        that motivated this whole fix) the comparison is mathematically
+        degenerate -- ``ln(oracle_ratio) == 0`` makes both candidate
+        log-distances always equal, so this heuristic ALWAYS keeps
+        ``pool_price`` as-read and never actually disambiguates for
+        exact-peg pairs. Correctness there depends entirely on
+        ``pool_price_by_pair`` happening to already return the price in
+        this strategy's declared token0/token1 order. We can't verify that
+        cheaply (no strategy-facing API exposes the pool's real on-chain
+        token0/token1 order without an extra RPC), so we log a loud warning
+        instead of silently trusting the assumption -- see the ``oracle_ratio
+        == 1`` branch below. Resolving this properly (address-based
+        disambiguation) is a follow-up, not bodged into this hotfix; the
+        compiler-level ``lp_range_excludes_spot_warning`` guard (VIB-5844)
+        still independently catches and warns on the resulting mint even if
+        this guess is wrong, so the failure mode degrades to "warned,
+        possibly mis-centered" rather than the original "silent, zero fees."
+
+        Implementation note: "closer in log-space" for a value and its
+        reciprocal reduces algebraically to "on the same side of 1.0" --
+        for ``a = ln(pool_price)``, ``b = ln(oracle_ratio)``,
+        ``|a - b| <= |a + b| iff a*b >= 0`` -- so we compare against ``1``
+        directly rather than calling ``Decimal.ln()`` twice.
+        """
+        try:
+            pool_price = market.pool_price_by_pair(
+                self.token0_symbol,
+                self.token1_symbol,
+                chain=self.chain,
+                protocol="uniswap_v3",
+                fee_tier=self.fee_tier,
+            ).price
+        except Exception as e:  # noqa: BLE001 - best-effort; caller falls back to the oracle ratio
+            logger.debug(f"pool_price_by_pair unavailable, falling back to oracle ratio: {e}")
+            return None
+
+        if pool_price <= 0 or oracle_ratio <= 0:
+            return None
+
+        if oracle_ratio == 1:
+            logger.warning(
+                "Pool orientation for %s/%s cannot be disambiguated from an exact-peg "
+                "oracle_ratio (1.0, stablecoin_peg): this heuristic always trusts "
+                "pool_price_by_pair's raw reading (%s) as-is. If the pool's real "
+                "on-chain token0/token1 order is reversed relative to this strategy's "
+                "declared %s/%s order, the LP range will be centered on the wrong "
+                "side. The compiler's lp_range_excludes_spot_warning guard will still "
+                "warn if the resulting mint misses live spot, but consider verifying "
+                "orientation manually for this pool before trusting this demo as-is "
+                "in production.",
+                self.token0_symbol,
+                self.token1_symbol,
+                pool_price,
+                self.token0_symbol,
+                self.token1_symbol,
+            )
+
+        same_side = (pool_price >= 1 and oracle_ratio >= 1) or (pool_price <= 1 and oracle_ratio <= 1)
+        return pool_price if same_side else (Decimal(1) / pool_price)
 
     def _create_open_intent(
         self,

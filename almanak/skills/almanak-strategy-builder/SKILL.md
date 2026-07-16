@@ -909,6 +909,11 @@ df = market.ohlcv("WETH", timeframe="1h", limit=100)  # pd.DataFrame
 
 ### Pool and DEX Data
 
+> Use these (not `market.price()`) for anything execution-facing — LP range
+> bounds, range-exit tests. `market.price()` is a USD valuation oracle
+> (hardcoded `1.0` for stablecoins) and can silently diverge from the pool's
+> actual price. See "LP Rebalancing" above.
+
 ```python
 pool = market.pool_price("0x...")                   # DataEnvelope[PoolPrice]
 pool = market.pool_price_by_pair("WETH", "USDC")   # DataEnvelope[PoolPrice]
@@ -1712,9 +1717,25 @@ def decide(self, market):
 
 ### LP Rebalancing
 
+> **Use `pool_price` / `pool_price_by_pair`, never `market.price()`, for
+> concentrated-LP range bounds or a range-exit test (VIB-exp19).**
+> `market.price()` is a USD *valuation* oracle — it returns a hardcoded
+> `1.0` for stablecoins (`source: stablecoin_peg`) and is not guaranteed to
+> match the pool's actual price for any pair. A range centered on it, or a
+> range-exit check built from it, can silently mint out of range (zero
+> fees, no error) — and for a stable pair pinned at oracle `1.0`, the
+> range-exit check below becomes a structural no-op (`spot` never moves, so
+> it's always "in range") even while the real pool has drifted outside the
+> position. `pool_price_by_pair` returns the price in the pool's own
+> on-chain token0/token1 order, which may not match your `base`/`quote`
+> order — verify orientation against a known price before trusting the
+> sign, or use `pool_price(pool_address, chain)` when you have the address.
+> See Blueprint 03 §"LP_OPEN range-excludes-spot warning" for the
+> compile-time guard that now catches this class of bug at LP_OPEN time.
+
 ```python
 def decide(self, market):
-    price = market.price(self.base_token)
+    price = market.pool_price_by_pair(self.base_token, self.quote_token).price
     position_id = self._lp_position_id
 
     if position_id:
@@ -1722,7 +1743,7 @@ def decide(self, market):
         if price < self._range_lower or price > self._range_upper:
             return Intent.lp_close(position_id=position_id, protocol="uniswap_v3")
 
-    # Open new position centered on current price
+    # Open new position centered on current pool price
     atr = market.atr(self.base_token)
     half_range = price * (atr.value_percent / Decimal("100")) * 2  # value_percent is percentage points
     return Intent.lp_open(
