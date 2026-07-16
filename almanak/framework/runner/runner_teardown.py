@@ -1327,7 +1327,9 @@ async def execute_teardown_via_manager(
     # Phase 2: construct TeardownManager + state adapter. The request threads
     # asset_policy / target_token into the manager's TeardownConfig so the
     # token-consolidation phase honours the operator's choice (VIB-5011).
-    teardown_mgr, teardown_state_adapter = _h.build_teardown_manager(runner, compiler, state_manager, request)
+    teardown_mgr, teardown_state_adapter = _h.build_teardown_manager(
+        runner, compiler, state_manager, request, strategy=strategy
+    )
 
     logger.info(
         f"🛑 Routing {deployment_id} teardown through TeardownManager (mode={mode_str}, intents={len(teardown_intents)})"

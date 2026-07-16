@@ -27,6 +27,7 @@ import logging
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING, Any
 
@@ -167,7 +168,7 @@ async def fetch_positions_or_fallback(
 # =============================================================================
 
 
-def _teardown_config_from_request(request: Any | None) -> Any:
+def _teardown_config_from_request(request: Any | None, strategy: Any | None = None) -> Any:
     """Build the :class:`TeardownConfig` for a teardown run from the operator's
     ``TeardownRequest`` (VIB-5011).
 
@@ -178,8 +179,68 @@ def _teardown_config_from_request(request: Any | None) -> Any:
     ``request=None`` (strategy self-signalled / risk-guard teardown) →
     consolidation DISABLED, close-only.
     """
-    from ..teardown.config import TeardownConfig, TokenConsolidationConfig
+    from ..teardown.config import (
+        DEFAULT_MIN_SWAP_VALUE_USD,
+        ChainConsolidationConfig,
+        TeardownConfig,
+        TokenConsolidationConfig,
+    )
     from ..teardown.models import TARGET_TOKEN_CHAIN_DEFAULT, TeardownAssetPolicy
+
+    configured = None
+    if strategy is not None:
+        get_config = getattr(strategy, "get_config", None)
+        if callable(get_config):
+            configured = get_config("teardown", None)
+    if isinstance(configured, dict):
+        # Teardown is the risk-reducing safety path — a malformed strategy
+        # ``teardown`` block must NEVER block it. ``from_dict`` ends in
+        # ``cls(**data)``, so any unknown key (custom metadata, a deprecated
+        # setting) raises TypeError; parse defensively and fall back to the
+        # production default rather than abort teardown (VIB-5844 review, gemini).
+        try:
+            cfg = TeardownConfig.from_dict(dict(configured))
+        except Exception as exc:
+            logger.warning(
+                "Strategy teardown config is malformed (%s) — ignoring it and using "
+                "TeardownConfig.default(); the production $%s dust floor applies.",
+                exc,
+                DEFAULT_MIN_SWAP_VALUE_USD,
+            )
+            cfg = TeardownConfig.default()
+    else:
+        cfg = TeardownConfig.default()
+
+    # A strategy may set ``token_consolidation``/``chain_consolidation`` to null;
+    # ``from_dict`` only rebuilds them when they are dicts, leaving None otherwise.
+    # Downstream code dereferences both (e.g. ``cfg.token_consolidation.enabled``),
+    # so coerce back to defaults rather than crash teardown (VIB-5844 review, gemini).
+    if not isinstance(cfg.token_consolidation, TokenConsolidationConfig):
+        cfg.token_consolidation = TokenConsolidationConfig()
+    if not isinstance(cfg.chain_consolidation, ChainConsolidationConfig):
+        cfg.chain_consolidation = ChainConsolidationConfig()
+
+    # ``from_dict`` coerces the dust floor to a Decimal but does not range-check
+    # it, so a strategy config of ``"-1"`` (every positive residual becomes
+    # "worth swapping") or ``"NaN"`` (breaks the ``<= floor`` comparison) is
+    # accepted verbatim. Neither is a valid floor — reset to the production
+    # default rather than let malformed input drive real consolidation swaps
+    # (VIB-5844 review, coderabbit). Coerce-and-validate rather than type-branch
+    # on the value (VIB-4062 caller-bifurcation contract).
+    raw_floor = cfg.token_consolidation.min_swap_value_usd
+    try:
+        floor = Decimal(str(raw_floor))
+        floor_valid = floor.is_finite() and floor >= 0
+    except (InvalidOperation, ValueError, TypeError):
+        floor_valid = False
+    if not floor_valid:
+        logger.warning(
+            "Strategy teardown min_swap_value_usd=%r is not a finite non-negative "
+            "number — ignoring it and using the production $%s dust floor.",
+            raw_floor,
+            DEFAULT_MIN_SWAP_VALUE_USD,
+        )
+        cfg.token_consolidation.min_swap_value_usd = DEFAULT_MIN_SWAP_VALUE_USD
 
     if request is None:
         # No operator request → NO token consolidation (pr-auditor blocker).
@@ -190,11 +251,15 @@ def _teardown_config_from_request(request: Any | None) -> Any:
         # sweep semantic (the same consent model as the long-standing
         # strategy-emitted ``amount="all"`` teardown sweeps, VIB-4587).
         # Self-signalled teardowns have no such consent — they keep the
-        # pre-VIB-5011 close-only behaviour.
-        cfg = TeardownConfig.default()
+        # pre-VIB-5011 close-only behaviour. Disable BOTH consolidation phases:
+        # a strategy config could set ``chain_consolidation.enabled=true``, and
+        # cross-chain bridging without operator consent is an even stronger
+        # violation of the close-only contract than a token sweep (VIB-5844
+        # review, coderabbit).
         cfg.token_consolidation.enabled = False
+        cfg.chain_consolidation.enabled = False
         logger.info(
-            "Teardown has no operator request — token consolidation disabled "
+            "Teardown has no operator request — token + chain consolidation disabled "
             "(close-only); request a teardown with an asset policy to consolidate."
         )
         return cfg
@@ -216,15 +281,22 @@ def _teardown_config_from_request(request: Any | None) -> Any:
     # the consolidation seam where the chain is authoritative.
     target_token = getattr(request, "target_token", None) or TARGET_TOKEN_CHAIN_DEFAULT
 
-    return TeardownConfig(
-        asset_policy=asset_policy,
-        target_token=target_token,
-        token_consolidation=TokenConsolidationConfig(target_token=target_token),
-    )
+    cfg.asset_policy = asset_policy
+    cfg.target_token = target_token
+    cfg.token_consolidation.target_token = target_token
+    # An explicit operator TeardownRequest IS the consent to consolidate. The
+    # request's ``asset_policy`` alone decides whether/where to consolidate —
+    # ``KEEP_OUTPUTS`` (and emergency mode, which overrides to it) skips the phase
+    # downstream. A strategy's own ``token_consolidation.enabled`` must NOT be able
+    # to veto an explicit operator request (pre-VIB-5844 the request lane always
+    # ran with ``enabled=True``); strategy config governs the dust FLOOR, not
+    # operator consent. Force it on to preserve that contract (VIB-5844 review, codex).
+    cfg.token_consolidation.enabled = True
+    return cfg
 
 
 def build_teardown_manager(
-    runner: Any, compiler: Any, state_manager: Any, request: Any | None = None
+    runner: Any, compiler: Any, state_manager: Any, request: Any | None = None, strategy: Any | None = None
 ) -> tuple[Any, Any | None]:
     """Instantiate the teardown state adapter and ``TeardownManager``.
 
@@ -261,7 +333,7 @@ def build_teardown_manager(
         compiler=compiler,
         alert_manager=runner.alert_manager,
         state_manager=teardown_state_adapter,
-        config=_teardown_config_from_request(request),
+        config=_teardown_config_from_request(request, strategy=strategy),
         runner_helpers=build_runner_helpers(runner),
     )
     return teardown_mgr, teardown_state_adapter
