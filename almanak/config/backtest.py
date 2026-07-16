@@ -216,6 +216,20 @@ class BacktestConfig(BaseModel):
     """Per-chain Etherscan-family API keys for ``EtherscanGasPriceProvider``."""
 
     # -------------------------------------------------------------------------
+    # Gateway presence — backtest data-transport routing signal.
+    # -------------------------------------------------------------------------
+
+    gateway_host: str | None = None
+    """Gateway host if one is configured (``ALMANAK_GATEWAY_HOST``).
+
+    Presence (not reachability) signals that backtest data transports
+    should prefer the gateway's vendor RPCs over direct keyless HTTP —
+    the platform runner mounts no vendor keys, the sidecar does
+    (ALM-2952). ``None`` means no gateway is configured and every
+    consumer keeps its direct-HTTP behaviour.
+    """
+
+    # -------------------------------------------------------------------------
     # SSL cert file — paper-trading's spawned subprocess hint.
     # -------------------------------------------------------------------------
 
@@ -399,6 +413,7 @@ def backtest_config_from_env(
         "coingecko_api_key": os.environ.get("COINGECKO_API_KEY") or None,
         "thegraph_api_key": os.environ.get("THEGRAPH_API_KEY") or None,
         "alchemy_api_key": os.environ.get("ALCHEMY_API_KEY") or None,
+        "gateway_host": os.environ.get("ALMANAK_GATEWAY_HOST") or None,
         "archive_rpc_urls": archive_rpc_urls,
         "gas_api": GasApiConfig(api_keys=gas_api_keys),
         "ssl_cert_file": _resolve_ssl_cert_file(),

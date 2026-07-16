@@ -46,6 +46,7 @@ import aiohttp
 from almanak.config.backtest import backtest_config_from_env
 
 from ...exceptions import DataSourceUnavailableError
+from .gateway_transport import GatewaySubgraphTransport, gateway_backtest_configured
 from .rate_limiter import TokenBucketRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -543,6 +544,7 @@ class SubgraphClient:
         self,
         config: SubgraphClientConfig | None = None,
         rate_limiter: TokenBucketRateLimiter | None = None,
+        use_gateway: bool | None = None,
     ) -> None:
         """Initialize the SubgraphClient.
 
@@ -551,8 +553,14 @@ class SubgraphClient:
                     THEGRAPH_API_KEY from environment.
             rate_limiter: Optional rate limiter. If None, creates one
                           based on config.requests_per_minute.
+            use_gateway: Route queries through the gateway's TheGraphQuery
+                         RPC (ALM-2952). None auto-detects from
+                         ALMANAK_GATEWAY_HOST.
         """
         self._config = config or SubgraphClientConfig()
+        if use_gateway is None:
+            use_gateway = gateway_backtest_configured()
+        self._gateway_transport = GatewaySubgraphTransport() if use_gateway else None
 
         # Create or use provided rate limiter
         if rate_limiter is not None:
@@ -571,11 +579,12 @@ class SubgraphClient:
         # Log initialization
         api_key_status = "provided" if self._config.api_key else "not provided"
         logger.debug(
-            "Initialized SubgraphClient: rate_limit=%d req/min, timeout=%ds, max_retries=%d, api_key=%s",
+            "Initialized SubgraphClient: rate_limit=%d req/min, timeout=%ds, max_retries=%d, api_key=%s, transport=%s",
             self._config.requests_per_minute,
             self._config.timeout_seconds,
             self._config.max_retries,
             api_key_status,
+            "gateway_thegraph" if self._gateway_transport is not None else "direct_http",
         )
 
     @property
@@ -656,6 +665,11 @@ class SubgraphClient:
             SubgraphQueryError: If query returns errors
             SubgraphConnectionError: If connection fails
         """
+        if self._gateway_transport is not None:
+            served = await self._gateway_transport.query_payload(subgraph_id, query, variables)
+            if served is not None:
+                return self._finish_graphql_payload(served, query)
+
         session = await self._get_session()
         url = self._build_url(subgraph_id)
         headers = self._build_headers()
@@ -702,21 +716,7 @@ class SubgraphClient:
 
                 # Parse response
                 data = await response.json()
-
-                # Check for GraphQL errors
-                if "errors" in data and data["errors"]:
-                    error_msgs = [e.get("message", str(e)) for e in data["errors"]]
-                    logger.error(
-                        "Subgraph query returned errors: %s",
-                        "; ".join(error_msgs),
-                    )
-                    raise SubgraphQueryError(
-                        f"GraphQL errors: {'; '.join(error_msgs)}",
-                        query=query,
-                        errors=data["errors"],
-                    )
-
-                return data.get("data", {})
+                return self._finish_graphql_payload(data, query)
 
         except aiohttp.ClientError as e:
             logger.error(
@@ -725,6 +725,27 @@ class SubgraphClient:
                 str(e),
             )
             raise SubgraphConnectionError(f"Connection failed: {e}") from e
+
+    def _finish_graphql_payload(self, data: dict[str, Any], query: str) -> dict[str, Any]:
+        """Classify a GraphQL response body shared by both transports.
+
+        Single error-classification point: gateway-served payloads carry the
+        same ``{"data": ..., "errors": [...]}`` shape as the direct HTTP
+        body, so error semantics cannot drift between transports.
+        """
+        if "errors" in data and data["errors"]:
+            error_msgs = [e.get("message", str(e)) for e in data["errors"]]
+            logger.error(
+                "Subgraph query returned errors: %s",
+                "; ".join(error_msgs),
+            )
+            raise SubgraphQueryError(
+                f"GraphQL errors: {'; '.join(error_msgs)}",
+                query=query,
+                errors=data["errors"],
+            )
+
+        return data.get("data", {})
 
     async def query(
         self,

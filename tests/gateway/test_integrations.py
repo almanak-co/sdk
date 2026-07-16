@@ -287,6 +287,23 @@ class TestTheGraphIntegration:
         url = thegraph.get_subgraph_url("unknown-subgraph")
         assert url is None
 
+    def test_get_subgraph_url_accepts_base58_deployment_id(self):
+        """Base58 network subgraph ids resolve when a key is present (ALM-2952)."""
+        base58_id = "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
+        keyed = TheGraphIntegration(api_key="test-key")
+        url = keyed.get_subgraph_url(base58_id)
+        assert url == f"https://gateway.thegraph.com/api/test-key/subgraphs/id/{base58_id}"
+
+        keyless = TheGraphIntegration(api_key=None)
+        assert keyless.get_subgraph_url(base58_id) is None
+
+    def test_get_subgraph_url_rejects_non_base58_junk(self, thegraph):
+        """Arbitrary strings still fail the allowlist (0/O/I/l are not base58)."""
+        assert thegraph.get_subgraph_url("l" * 44) is None
+        base58_id = "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
+        assert TheGraphIntegration(api_key="k").get_subgraph_url(base58_id + "\n") is None
+        assert thegraph.get_subgraph_url("../../etc/passwd/aaaaaaaaaaaaaaaaaaaaaaaaaaaaa") is None
+
     def test_add_allowed_subgraph(self, thegraph):
         """Subgraphs can be added to allowlist."""
         thegraph.add_allowed_subgraph("custom", "https://custom.subgraph.url")

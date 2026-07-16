@@ -33,12 +33,16 @@ Strategy-side code MUST NOT import this module.
 """
 
 import logging
+import re
 from collections.abc import Iterator
 from typing import Any
 
 from almanak.gateway.integrations.base import BaseIntegration, IntegrationError
 
 logger = logging.getLogger(__name__)
+
+# Decentralized-network subgraph ids are ~44-46 char base58 strings.
+_BASE58_SUBGRAPH_ID_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{40,50}$")
 
 
 def _build_default_allowed_subgraphs() -> dict[str, str]:
@@ -231,9 +235,10 @@ class TheGraphIntegration(BaseIntegration):
         if subgraph_id in self._allowed_subgraphs:
             return self._allowed_subgraphs[subgraph_id]
 
-        # Check if it's a direct URL (for subgraph IDs)
-        if subgraph_id.startswith("Qm") or subgraph_id.startswith("0x"):
-            # This is a deployment ID - construct URL
+        # Direct deployment/subgraph ids: Qm... (legacy IPFS hash), 0x...,
+        # or the decentralized network's base58 subgraph ids (the form the
+        # backtest connector registry declares — ALM-2952).
+        if subgraph_id.startswith(("Qm", "0x")) or _BASE58_SUBGRAPH_ID_RE.fullmatch(subgraph_id):
             if self._api_key:
                 return f"https://gateway.thegraph.com/api/{self._api_key}/subgraphs/id/{subgraph_id}"
             return None  # Deployment IDs require API key

@@ -44,6 +44,8 @@ import aiohttp
 
 from almanak.config.backtest import backtest_config_from_env
 
+from .coingecko_gateway import shared_gateway_transport
+
 logger = logging.getLogger(__name__)
 
 # CoinGecko API base URLs (same as CoinGeckoDataProvider)
@@ -296,6 +298,16 @@ async def _get_single_token_prices(
     # Convert to Unix timestamps
     start_ts = int(start.timestamp())
     end_ts = int(end.timestamp())
+
+    transport = shared_gateway_transport()
+    if transport is not None:
+        try:
+            served = await transport.market_chart_range(token_id, start_ts, end_ts)
+        except ValueError as e:
+            logger.error("CoinGecko gateway error for benchmark %s: %s", token, e)
+            return []
+        if served is not None:
+            return _parse_coingecko_prices(served, interval_seconds)
 
     # Use Pro API if API key is available (matches CoinGeckoDataProvider pattern).
     # Phase 5c: env reads centralised in almanak.config.backtest; the

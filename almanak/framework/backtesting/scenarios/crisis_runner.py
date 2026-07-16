@@ -309,6 +309,12 @@ def _validate_scenario_date_range(scenario: CrisisScenario, backtester: PnLBackt
     if has_api_key:
         return
 
+    # Gateway sidecar serves CG through the org's pro key (ALM-2952).
+    from almanak.framework.backtesting.pnl.providers.coingecko_gateway import gateway_coingecko_configured
+
+    if gateway_coingecko_configured():
+        return
+
     now = datetime.now(UTC)
     # Use warmup_start_date since data fetching begins from there
     effective_start = scenario.warmup_start_date

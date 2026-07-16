@@ -65,6 +65,7 @@ from ..data_provider import (
     normalize_token_key,
     token_ref_display,
 )
+from .coingecko_gateway import GatewayCoinGeckoTransport, gateway_coingecko_configured
 from .rate_limiter import TokenBucketRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -730,6 +731,7 @@ class CoinGeckoDataProvider:
         data_config: BacktestDataConfig | None = None,
         persistent_cache: bool = False,
         token_addresses: dict[str, tuple[str, str]] | None = None,
+        use_gateway: bool | None = None,
     ) -> None:
         """Initialize the CoinGecko data provider.
 
@@ -760,6 +762,9 @@ class CoinGeckoDataProvider:
                             chain registry and need no entry here; a symbol that is
                             neither native nor in this map is an honest miss (no
                             fabricated price).
+            use_gateway: Route market_chart/range and /history through the
+                            gateway's CoinGecko RPCs (ALM-2952). None
+                            auto-detects from ALMANAK_GATEWAY_HOST.
         """
         # Phase 5c: env reads for backtest creds live in
         # almanak.config.backtest. The factory is called only when no
@@ -818,10 +823,15 @@ class CoinGeckoDataProvider:
         # HTTP session (created on first request)
         self._session: aiohttp.ClientSession | None = None
 
+        if use_gateway is None:
+            use_gateway = gateway_coingecko_configured()
+        self._gateway_transport = GatewayCoinGeckoTransport() if use_gateway else None
+
         logger.info(
-            "Initialized CoinGeckoDataProvider: api_type=%s, rate_limit=%d req/min, "
+            "Initialized CoinGeckoDataProvider: api_type=%s, transport=%s, rate_limit=%d req/min, "
             "burst_size=%d, request_timeout=%.1fs, max_retries=%d",
             "pro" if self._api_key else "free",
+            "gateway_coingecko" if self._gateway_transport is not None else "direct_http",
             self._rate_limit,
             burst_size,
             request_timeout,
@@ -1172,6 +1182,11 @@ class CoinGeckoDataProvider:
             CoinGeckoRateLimitError: If rate limit is exceeded after max retries
             ValueError: If the API returns a non-retryable error
         """
+        if self._gateway_transport is not None:
+            served = await self._gateway_transport.request(endpoint, params)
+            if served is not None:
+                return served
+
         url = f"{self._api_base}{endpoint}"
 
         # Add API key header if available
