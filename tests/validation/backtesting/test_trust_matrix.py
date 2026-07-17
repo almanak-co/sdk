@@ -1297,9 +1297,10 @@ def test_perp_funding_lanes_agree_on_measured_rate(monkeypatch: pytest.MonkeyPat
     to a DIFFERENT rate so any lane falling back breaks the closed form.
 
     Choreography mirrors perp:round_trip_conservation: open decided t0
-    (executes t1), close decided t2 (executes t3). Funding applies at the t1
-    and t2 marks (the adapter's first update after open charges the first
-    elapsed hour) — two one-hour applications, both at the measured rate.
+    (executes t1), close decided t2 (executes t3). Funding applies at the t2
+    mark only — the open tick itself accrues nothing (the position existed
+    for zero elapsed time at its first mark; re-cut phase 2 fixed the
+    one-period over-accrual) — one one-hour application at the measured rate.
     """
     measured = Decimal("0.0004")
 
@@ -1332,8 +1333,8 @@ def test_perp_funding_lanes_agree_on_measured_rate(monkeypatch: pytest.MonkeyPat
     # ...the position's funding was stamped as measured history, not fallback...
     assert result.data_coverage_metrics.perp_metrics.data_sources == ["historical:gateway"]
     assert result.data_coverage_metrics.perp_metrics.funding_confidence_breakdown["high"] == 1
-    # ...and the position accrued exactly that rate for its two funding hours.
-    expected_funding = measured * notional * 2
+    # ...and the position accrued exactly that rate for its one funding hour.
+    expected_funding = measured * notional  # one funding hour (t2 mark)
     assert result.final_capital_usd == INITIAL_CAPITAL - expected_funding
     assert result.trades[-1].pnl_usd == -expected_funding
 

@@ -439,9 +439,10 @@ class TestRealLpOpenIntentEndToEnd:
         assert trade.amount_usd > Decimal("5900")
 
         values = [point.value_usd for point in result.equity_curve]
-        # The open pays execution costs out of the initial capital.
+        # Routed through the real LP adapter (per-intent router): the open is
+        # value-neutral at its own tick (no generic-lane fee model; gas meters
+        # to the tank), so the first equity change is the first price move.
         open_index = next(i for i, value in enumerate(values) if value != values[0])
-        assert values[open_index] < values[0]
 
         # The regression this guards against: equity frozen after the open.
         # ~1500-5500 of the position is WETH exposure inside the 2000-4000

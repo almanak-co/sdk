@@ -295,42 +295,82 @@ def test_detect_strategy_type_auto_mode(registered_adapters):
 # =============================================================================
 
 
-def test_init_adapter_loads_lp_adapter(backtester, registered_adapters):
-    """Test that LP adapter is loaded for LP strategy."""
+def test_init_adapter_routes_per_intent_by_default(backtester, registered_adapters):
+    """Without an explicit type, every strategy gets the per-intent router
+    with each registered adapter available as a sub-adapter (ALM-2943 ph2)."""
+    from almanak.framework.backtesting.adapters.multi_protocol_adapter import MultiProtocolBacktestAdapter
+
     strategy = MockStrategy(tags=["lp", "concentrated-liquidity"])
     backtester._init_adapter(strategy)
 
-    assert backtester._adapter is not None
-    assert isinstance(backtester._adapter, MockLPAdapter)
-    assert backtester._adapter.adapter_name == "lp"
+    assert isinstance(backtester._adapter, MultiProtocolBacktestAdapter)
+    subs = backtester._adapter.sub_adapters
+    assert isinstance(subs.get("lp"), MockLPAdapter)
+    assert isinstance(subs.get("perp"), MockPerpAdapter)
 
 
-def test_init_adapter_loads_perp_adapter(backtester, registered_adapters):
-    """Test that perp adapter is loaded for perp strategy."""
-    strategy = MockStrategy(tags=["perpetual", "margin"])
+def test_router_swap_lane_stays_generic_by_default(backtester, registered_adapters):
+    """The router leaves plain SWAPs to the generic lane — the behavior every
+    single-category strategy had before per-intent routing."""
+    strategy = MockStrategy(tags=["lp"])
     backtester._init_adapter(strategy)
 
-    assert backtester._adapter is not None
-    assert isinstance(backtester._adapter, MockPerpAdapter)
-    assert backtester._adapter.adapter_name == "perp"
+    assert backtester._adapter._config.swap_lane == "generic"
+    assert backtester._adapter._config.reconcile_positions is False
 
 
-def test_init_adapter_loads_lending_adapter(backtester, registered_adapters):
-    """Test that lending adapter is loaded for lending strategy."""
-    strategy = MockStrategy(tags=["lending", "supply"])
+
+def test_router_swap_lane_arbitrage_for_detected_arbitrage(backtester, registered_adapters):
+    """Metadata-declared arbitrage strategies keep the arbitrage swap lane
+    (multi-hop routing, MEV, cumulative slippage) under the router."""
+    strategy = MockStrategy(tags=["arbitrage"])
     backtester._init_adapter(strategy)
 
-    assert backtester._adapter is not None
-    assert isinstance(backtester._adapter, MockLendingAdapter)
-    assert backtester._adapter.adapter_name == "lending"
+    assert backtester._adapter._config.swap_lane == "arbitrage"
 
 
-def test_init_adapter_no_adapter_for_unknown_type(backtester, registered_adapters):
-    """Test that no adapter is loaded for unknown strategy type."""
+def test_router_records_rate_source_provenance(backtester, registered_adapters):
+    """Funding/APY provenance survives the router: lanes are read from the
+    sub-adapters, not the top-level adapter class name."""
+    from almanak.framework.backtesting.models import ParameterSourceTracker
+    from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+
+    backtester._init_adapter(MockStrategy(tags=["lp"]))
+    tracker = ParameterSourceTracker()
+    config = PnLBacktestConfig(start_time=datetime(2024, 1, 1, tzinfo=UTC), end_time=datetime(2024, 1, 2, tzinfo=UTC))
+    backtester._record_adapter_runtime_rate_sources(tracker, config)
+
+    assert {r.parameter_name for r in tracker.records} == {"funding_rate_source", "apy_source"}
+
+
+def test_explicit_adapter_rate_provenance_by_class_name(registered_adapters):
+    """The explicit single-adapter escape hatch still records by class name."""
+    from almanak.framework.backtesting.models import ParameterSourceTracker
+    from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+
+    backtester = PnLBacktester(
+        data_provider=MockDataProvider(),
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+        strategy_type="perp",
+    )
+    backtester._init_adapter(MockStrategy(tags=["perpetual"]))
+    tracker = ParameterSourceTracker()
+    config = PnLBacktestConfig(start_time=datetime(2024, 1, 1, tzinfo=UTC), end_time=datetime(2024, 1, 2, tzinfo=UTC))
+    backtester._record_adapter_runtime_rate_sources(tracker, config)
+
+    assert {r.parameter_name for r in tracker.records} == {"funding_rate_source"}
+
+
+def test_init_adapter_unknown_tags_still_get_the_router(backtester, registered_adapters):
+    """Metadata no longer decides: unknown tags route per-intent like any
+    other strategy (classification is deleted from the engine path)."""
+    from almanak.framework.backtesting.adapters.multi_protocol_adapter import MultiProtocolBacktestAdapter
+
     strategy = MockStrategy(tags=["unknown", "custom"])
     backtester._init_adapter(strategy)
 
-    assert backtester._adapter is None
+    assert isinstance(backtester._adapter, MultiProtocolBacktestAdapter)
 
 
 def test_init_adapter_explicit_type(registered_adapters):
@@ -351,22 +391,26 @@ def test_init_adapter_explicit_type(registered_adapters):
 
 
 def test_init_adapter_no_registered_adapters(backtester):
-    """Test behavior when no adapters are registered."""
-    # No adapters registered (clean_registry fixture)
+    """With nothing registered the router has no sub-adapters: every intent
+    falls through to the generic lane."""
     strategy = MockStrategy(tags=["lp", "liquidity"])
     backtester._init_adapter(strategy)
 
-    assert backtester._adapter is None
+    assert backtester._adapter is not None
+    assert backtester._adapter.sub_adapters == {}
 
 
-def test_init_adapter_via_alias(backtester, registered_adapters):
-    """Test adapter loading uses aliases."""
-    # Register adapter with alias
-    strategy = MockStrategy(tags=["liquidity"])  # Alias for lp
+def test_router_dispatches_lp_intent_to_lp_sub_adapter(backtester, registered_adapters):
+    """Per-intent dispatch: an LP-shaped intent reaches the lp sub-adapter."""
+    strategy = MockStrategy(tags=["liquidity"])
     backtester._init_adapter(strategy)
 
-    assert backtester._adapter is not None
-    assert backtester._adapter.adapter_name == "lp"
+    class LPOpenProbe:
+        pass
+
+    probe = LPOpenProbe()
+    sub = backtester._adapter._detect_intent_protocol_type(probe)
+    assert sub == "lp"
 
 
 # =============================================================================
@@ -426,24 +470,14 @@ def test_backtester_adapter_initially_none():
 # =============================================================================
 
 
-def test_adapter_changes_between_strategies(backtester, registered_adapters):
-    """Test that adapter changes when initializing for different strategies."""
-    # First strategy: LP
-    lp_strategy = MockStrategy(deployment_id="lp_strat", tags=["lp"])
-    backtester._init_adapter(lp_strategy)
-    assert backtester._adapter is not None
-    assert backtester._adapter.adapter_name == "lp"
+def test_router_is_uniform_across_strategies(backtester, registered_adapters):
+    """The router does not depend on strategy metadata: every non-explicit
+    strategy gets the same per-intent dispatch."""
+    from almanak.framework.backtesting.adapters.multi_protocol_adapter import MultiProtocolBacktestAdapter
 
-    # Second strategy: Perp
-    perp_strategy = MockStrategy(deployment_id="perp_strat", tags=["perp"])
-    backtester._init_adapter(perp_strategy)
-    assert backtester._adapter is not None
-    assert backtester._adapter.adapter_name == "perp"
-
-    # Third strategy: Unknown (no adapter)
-    unknown_strategy = MockStrategy(deployment_id="unknown_strat", tags=["custom"])
-    backtester._init_adapter(unknown_strategy)
-    assert backtester._adapter is None
+    for tags in (["lp"], ["perp"], ["custom"]):
+        backtester._init_adapter(MockStrategy(deployment_id=f"{tags[0]}_strat", tags=tags))
+        assert isinstance(backtester._adapter, MultiProtocolBacktestAdapter)
 
 
 # =============================================================================
@@ -989,6 +1023,28 @@ def test_missing_volume_error_handler_continue_does_not_swallow_silently(backtes
     assert len(handler.handled) == 1
     error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert any("Missing data source" in r.message for r in error_records)
+
+
+def test_first_mark_skip_tolerates_naive_entry_time(backtester):
+    """A tz-naive entry_time (e.g. an adapter's datetime.now() fallback) must
+    not crash the comparison against the aware tick timestamp."""
+    from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+
+    _strict(backtester)
+    backtester._adapter = _RaisingAdapter()
+    backtester._error_handler = None
+    portfolio = _portfolio_with_position()
+    position = portfolio.positions[0]
+    now = datetime.now(UTC)
+
+    # Naive entry at/after the tick: first-mark skip, adapter never reached.
+    position.entry_time = (now + timedelta(hours=1)).replace(tzinfo=None)
+    backtester._update_positions_via_adapter(portfolio, MockMarketState(), now)
+
+    # Naive entry before the tick: routed to the adapter (which raises).
+    position.entry_time = (now - timedelta(hours=1)).replace(tzinfo=None)
+    with pytest.raises(DataSourceUnavailableError):
+        backtester._update_positions_via_adapter(portfolio, MockMarketState(), now)
 
 
 def test_missing_volume_non_strict_skips_position_and_continues(backtester, caplog):

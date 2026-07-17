@@ -338,12 +338,18 @@ class TestMultiProtocolBacktestConfig:
                 liquidation_critical_threshold=Decimal("1.3"),
             )
 
+    def test_invalid_swap_lane_raises(self):
+        """from_dict can carry arbitrary strings; fail fast at construction."""
+        with pytest.raises(ValueError, match="swap_lane must be one of"):
+            MultiProtocolBacktestConfig(strategy_type="multi_protocol", swap_lane="fancy")  # type: ignore[arg-type]
+
     def test_config_serialization(self):
         """Test config serialization and deserialization."""
         original = MultiProtocolBacktestConfig(
             strategy_type="multi_protocol",
             unified_liquidation_model="aggregate",
             protocol_configs={"lp": {"fee_tracking_enabled": True}},
+            swap_lane="generic",
         )
 
         data = original.to_dict()
@@ -352,6 +358,7 @@ class TestMultiProtocolBacktestConfig:
         assert restored.strategy_type == original.strategy_type
         assert restored.unified_liquidation_model == original.unified_liquidation_model
         assert restored.protocol_configs == original.protocol_configs
+        assert restored.swap_lane == "generic"
 
 
 # =============================================================================

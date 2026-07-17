@@ -295,6 +295,11 @@ class MultiProtocolBacktestConfig(StrategyBacktestConfig):
     reconcile_positions: bool = True
     """Whether to reconcile positions across sub-adapters each tick."""
 
+    swap_lane: Literal["arbitrage", "generic"] = "arbitrage"
+    """Which lane executes plain SWAP intents: "arbitrage" (the historical
+    multi-protocol behavior) sends them to the arbitrage sub-adapter;
+    "generic" leaves them to the engine's generic lane — the router default."""
+
     unified_liquidation_model: Literal["conservative", "weighted", "aggregate"] = "conservative"
     """How to calculate unified liquidation risk."""
 
@@ -333,6 +338,11 @@ class MultiProtocolBacktestConfig(StrategyBacktestConfig):
             msg = f"unified_liquidation_model must be one of {valid_models}, got '{self.unified_liquidation_model}'"
             raise ValueError(msg)
 
+        # Validate swap_lane (from_dict can carry arbitrary strings)
+        if self.swap_lane not in {"arbitrage", "generic"}:
+            msg = f"swap_lane must be one of {{'arbitrage', 'generic'}}, got '{self.swap_lane}'"
+            raise ValueError(msg)
+
         # Validate threshold values
         if self.liquidation_warning_threshold <= Decimal("1"):
             msg = f"liquidation_warning_threshold must be > 1, got {self.liquidation_warning_threshold}"
@@ -362,6 +372,7 @@ class MultiProtocolBacktestConfig(StrategyBacktestConfig):
         base.update(
             {
                 "reconcile_positions": self.reconcile_positions,
+                "swap_lane": self.swap_lane,
                 "unified_liquidation_model": self.unified_liquidation_model,
                 "protocol_configs": dict(self.protocol_configs),
                 "liquidation_warning_threshold": str(self.liquidation_warning_threshold),
@@ -390,6 +401,7 @@ class MultiProtocolBacktestConfig(StrategyBacktestConfig):
             extra_params=data.get("extra_params", {}),
             strict_reproducibility=data.get("strict_reproducibility", False),
             reconcile_positions=data.get("reconcile_positions", True),
+            swap_lane=data.get("swap_lane", "arbitrage"),
             unified_liquidation_model=data.get("unified_liquidation_model", "conservative"),
             protocol_configs=data.get("protocol_configs", {}),
             liquidation_warning_threshold=Decimal(str(data.get("liquidation_warning_threshold", "1.3"))),
@@ -568,8 +580,9 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
             "REPAY": "lending",
             "SUPPLY": "lending",
             "WITHDRAW": "lending",
-            "SWAP": "arbitrage",  # Default to arbitrage for swaps in multi-protocol
         }
+        if self._config.swap_lane == "arbitrage":
+            intent_type_map["SWAP"] = "arbitrage"
 
         for key, protocol_type in intent_type_map.items():
             if key in intent_class_name:

@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from dataclasses import dataclass as _dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.sizing import SizingRejection
@@ -1583,12 +1583,16 @@ class PnLBacktester:
     ) -> None:
         if self._adapter is None:
             return
-        adapter_type = type(self._adapter).__name__.lower()
+        # Under the per-intent router the accrual machinery lives in the
+        # sub-adapters, so provenance is read from them; a single explicit
+        # adapter is still matched by its own class name.
+        sub_adapters = getattr(self._adapter, "sub_adapters", None) or {}
+        lanes = {str(name).lower() for name in sub_adapters} or {type(self._adapter).__name__.lower()}
         rate_source = ParameterSource.HISTORICAL if config.strict_reproducibility else ParameterSource.PROVIDER
         rate_value = "historical" if config.strict_reproducibility else "provider"
-        if "perp" in adapter_type:
+        if any("perp" in lane for lane in lanes):
             tracker.record_parameter("funding_rate_source", rate_value, rate_source, category="apy_funding")
-        if "lending" in adapter_type:
+        if any("lending" in lane for lane in lanes):
             tracker.record_parameter("apy_source", rate_value, rate_source, category="apy_funding")
 
     def _detect_strategy_type(
@@ -1646,28 +1650,50 @@ class PnLBacktester:
         Args:
             strategy: Strategy to initialize adapter for
         """
-        # Build config dict for adapter lookup
-        config: dict[str, Any] | None = None
+        # An EXPLICIT strategy_type still forces a single adapter (escape
+        # hatch). Otherwise every strategy gets the per-intent router:
+        # each intent dispatches to the sub-adapter that owns its lifecycle,
+        # and every position accrues through its own sub-adapter — a mixed
+        # strategy can no longer lose one category's accrual to
+        # whole-strategy classification (ALM-2943 phase 2).
         if self.strategy_type is not None and self.strategy_type != "auto":
-            config = {"strategy_type": self.strategy_type}
+            adapter = get_adapter_for_strategy_with_config(
+                strategy,
+                data_config=self.data_config,
+                config={"strategy_type": self.strategy_type},
+            )
+            if adapter:
+                self._adapter = adapter
+                logger.info(f"Loaded explicit adapter '{adapter.adapter_name}' for strategy '{strategy.deployment_id}'")
+            else:
+                self._adapter = None
+                logger.debug(f"No adapter for explicit type '{self.strategy_type}', using generic backtesting")
+            return
 
-        # Use get_adapter_for_strategy_with_config to pass data_config to adapters
-        adapter = get_adapter_for_strategy_with_config(
-            strategy,
-            data_config=self.data_config,
-            config=config,
+        from almanak.framework.backtesting.adapters.multi_protocol_adapter import (
+            MultiProtocolBacktestAdapter,
+            MultiProtocolBacktestConfig,
         )
 
-        if adapter:
-            self._adapter = adapter
-            adapter_info = f"'{adapter.adapter_name}' for strategy '{strategy.deployment_id}'"
-            if self.data_config is not None:
-                logger.info(f"Loaded adapter {adapter_info} with BacktestDataConfig")
-            else:
-                logger.info(f"Loaded adapter {adapter_info}")
-        else:
-            self._adapter = None
-            logger.debug(f"No adapter loaded for strategy '{strategy.deployment_id}', using generic backtesting")
+        # Detected-arbitrage strategies (tags/protocols/intents) keep the
+        # arbitrage swap lane — multi-hop routing, MEV, cumulative slippage —
+        # as they did before the router; everything else fills generically.
+        hint = self._detect_strategy_type(strategy)
+        swap_lane: Literal["arbitrage", "generic"] = "arbitrage" if hint.strategy_type == "arbitrage" else "generic"
+
+        self._adapter = MultiProtocolBacktestAdapter(
+            # Plain per-intent routing: the multi-protocol extras
+            # (cross-adapter reconciliation, execution coordination) stay off
+            # so single-category strategies behave exactly as before.
+            config=MultiProtocolBacktestConfig(
+                strategy_type="multi_protocol",
+                swap_lane=swap_lane,
+                reconcile_positions=False,
+                execution_coordination_enabled=False,
+            ),
+            data_config=self.data_config,
+        )
+        logger.info(f"Loaded per-intent adapter router for strategy '{strategy.deployment_id}' (swap_lane={swap_lane})")
 
     def _init_mev_simulator(self, config: PnLBacktestConfig) -> None:
         """Initialize MEV simulator based on config.
@@ -2375,6 +2401,18 @@ class PnLBacktester:
 
         elapsed_seconds = self._portfolio_elapsed_since_last_mark(portfolio, timestamp)
         for position in portfolio.positions:
+            # A position opened at this tick has existed for zero elapsed
+            # time: no accrual period has passed, so the adapter update
+            # (interest/funding/fees) starts at the NEXT mark. Without this,
+            # per-position routing over-accrues one period at the fill mark.
+            entry_time = getattr(position, "entry_time", None)
+            if entry_time is not None:
+                if (entry_time.tzinfo is None) != (timestamp.tzinfo is None):
+                    # Align tz-awareness: a naive entry_time (e.g. an adapter's
+                    # datetime.now() fallback) must not crash the comparison.
+                    entry_time = entry_time.replace(tzinfo=timestamp.tzinfo)
+                if entry_time >= timestamp:
+                    continue
             self._update_single_position_via_adapter(position, market_state, timestamp, elapsed_seconds)
 
     @staticmethod
