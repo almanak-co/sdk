@@ -656,12 +656,15 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         # _PERMANENT_MEMO (semantic no-match, final for the run) or a
         # monotonic expiry (transient transport/rate-limit failure).
         self._ambiguous_resolution_failed: dict[tuple[str, frozenset[str]], float] = {}
-        # (protocol, frozenset(pair)) -> resolved pool address. Filled by
-        # prewarm_history for symbolic pools (generated strategies pass
-        # "WETH/USDC"; the volume lane needs an address).
-        # Keyed without chain: one adapter instance serves one backtest chain,
-        # and config.chain may sit on its DEFAULT while intents carry the real one.
-        self._resolved_pool_addresses: dict[tuple[str, frozenset[str]], str] = {}
+        # (protocol, frozenset(pair), fee_units|None) -> resolved pool address.
+        # Filled by prewarm_history for symbolic pools (generated strategies
+        # pass "WETH/USDC"; the volume lane needs an address). The declared
+        # fee/step segment ("WETH/USDC/3000" -> 3000) is part of the identity:
+        # a fee-blind key made every tier of a pair share one resolved address
+        # (ALM-2949). Keyed without chain: one adapter instance serves one
+        # backtest chain, and config.chain may sit on its DEFAULT while intents
+        # carry the real one.
+        self._resolved_pool_addresses: dict[tuple[str, frozenset[str], int | None], str] = {}
         # resolved address -> how it was chosen (result-doc provenance).
         self._resolved_pool_provenance: dict[str, str] = {}
         # pool address -> real fee tier (fraction) fetched from the v3-family
@@ -1700,15 +1703,22 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         lists that token's pools; filter to the protocol family + the exact
         address pair and take the highest-liquidity match — the pool a strategy
         means when it names a pair without an address. Memoized per
-        (protocol, pair). Free-text search is NOT used: it is cross-chain fuzzy
-        and misses the majors.
+        (protocol, pair, fee_units). Free-text search is NOT used: it is
+        cross-chain fuzzy and misses the majors.
+
+        A declared fee segment ("WETH/USDC/3000") on a V3-factory-family
+        protocol resolves FEE-EXACT via the shared ``validate_v3_pool`` factory
+        lane instead of depth-ranking — the deepest pool for a pair is
+        routinely a DIFFERENT tier than the one the strategy names, and live
+        execution honors the declared tier via factory ``getPool`` (ALM-2949).
         """
-        from almanak.framework.backtesting.pnl.intent_extraction import lp_pool_tokens
+        from almanak.framework.backtesting.pnl.intent_extraction import lp_pool_fee_units, lp_pool_tokens
 
         pair = lp_pool_tokens(pool)
         if pair is None:
             return None
-        key = (protocol, frozenset(pair))
+        fee_units = lp_pool_fee_units(pool)
+        key = (protocol, frozenset(pair), fee_units)
         cached = self._resolved_pool_addresses.get(key)
         if cached is not None:
             return cached
@@ -1739,6 +1749,32 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             if resolved is not None:
                 self._resolved_pool_addresses[key] = resolved
                 self._resolved_pool_provenance[resolved] = "gateway_onchain:product-exact-ranked"
+            return resolved
+
+        if fee_units is not None and self._is_v3_factory_family(protocol):
+            # Declared tier -> factory getPool is the ground truth (the same
+            # lane live compilation uses). Depth-ranking is NOT a fallback
+            # here: it silently picks whatever tier is deepest, which is the
+            # exact wrong-pool bug this lane exists to close (ALM-2949).
+            if not self._valid_v3_fee_units(fee_units):
+                # A numeric-but-impossible declaration ("WETH/USDC/0") is a
+                # MALFORMED tier, not an undeclared one — silently depth-ranking
+                # it would resurrect the wrong-pool bug (CodeRabbit #3308).
+                logger.warning(
+                    "Symbolic pool %s (%s/%s) NOT resolved: declared fee tier %d is outside the "
+                    "V3 domain (0, 1_000_000). Failing closed — fix the pool id or pass an address.",
+                    pool,
+                    protocol,
+                    chain,
+                    fee_units,
+                )
+                return None
+            resolved = await self._resolve_fee_exact_pool(
+                pool, protocol, chain, token0_address, token1_address, fee_units
+            )
+            if resolved is not None:
+                self._resolved_pool_addresses[key] = resolved
+                self._resolved_pool_provenance[resolved] = "factory:fee-exact"
             return resolved
 
         dex_root = self._DEXSCREENER_DEX_ROOTS.get(protocol, protocol.split("_")[0])
@@ -1964,6 +2000,112 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             best.dex_id,
         )
         return best.pool_address
+
+    @staticmethod
+    def _valid_v3_fee_units(fee_units: int) -> bool:
+        """Whether raw units are a possible V3 fee (uint24 fraction of 1e6)."""
+        return 0 < fee_units < 1_000_000
+
+    @staticmethod
+    def _is_v3_factory_family(protocol: str) -> bool:
+        """Whether ``protocol`` exposes the shared V3 ``getPool(a,b,fee)`` factory.
+
+        Gates the fee-exact resolution lane and the pool-string fee-segment
+        read: bin venues (traderjoe_v2) put a BIN STEP in the same segment,
+        which is not a V3 fee and must not be priced or resolved as one.
+        """
+        from almanak.connectors._strategy_base.address_registry import AbiFamily, AddressRegistry
+
+        return AddressRegistry.has_abi(protocol, AbiFamily.V3_FACTORY)
+
+    async def _resolve_fee_exact_pool(
+        self,
+        pool: str,
+        protocol: str,
+        chain: str,
+        token0_address: str,
+        token1_address: str,
+        fee_units: int,
+    ) -> str | None:
+        """Resolve a fee-declared symbolic pool via the factory ``getPool`` lane.
+
+        Uses the shared :func:`validate_v3_pool` (the lane live compilation
+        honors the declared tier through), gateway-routed — available in the
+        runner since the ALM-2940 sidecar. Fails closed on any non-confirmation:
+        a gateway outage or a zero-address factory answer must never degrade to
+        depth-ranking, which is tier-blind (ALM-2949).
+        """
+        import asyncio
+
+        from almanak.connectors._strategy_base.v3_pool_validation import validate_v3_pool
+        from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
+            get_connected_gateway_client,
+        )
+
+        try:
+            client, _ = get_connected_gateway_client()
+        except Exception as exc:  # noqa: BLE001 — fail closed, never depth-rank a declared tier
+            logger.warning(
+                "Fee-exact resolution for %s (%s/%s, tier %d) unavailable — gateway: %s. "
+                "Failing closed; pass an explicit pool address or ensure the gateway is reachable.",
+                pool,
+                protocol,
+                chain,
+                fee_units,
+                exc,
+            )
+            return None
+
+        # validate_v3_pool is a sync eth_call; run it off the event loop. Any
+        # escape hatch (a malformed RPC response at decode, a registry edge)
+        # must still fail CLOSED, not abort the prewarm (review round, #3308).
+        try:
+            result = await asyncio.to_thread(
+                validate_v3_pool, chain, protocol, token0_address, token1_address, fee_units, None, client
+            )
+        except Exception as exc:  # noqa: BLE001 — fail closed, never depth-rank a declared tier
+            logger.warning(
+                "Fee-exact factory lookup for %s (%s/%s, tier %d) raised: %s. Failing closed.",
+                pool,
+                protocol,
+                chain,
+                fee_units,
+                exc,
+            )
+            return None
+        if result.exists and result.pool_address:
+            resolved = result.pool_address.lower()
+            logger.info(
+                "Resolved symbolic pool %s (%s/%s) -> %s (factory getPool, fee-exact tier %d)",
+                pool,
+                protocol,
+                chain,
+                resolved,
+                fee_units,
+            )
+            return resolved
+        if result.exists is False:
+            logger.warning(
+                "Symbolic pool %s (%s/%s) NOT resolved: no pool exists at declared fee tier %d "
+                "(factory getPool returned the zero address). The strategy names a tier the venue "
+                "does not have on %s — failing closed, never substituting another tier's pool.",
+                pool,
+                protocol,
+                chain,
+                fee_units,
+                chain,
+            )
+        else:
+            logger.warning(
+                "Symbolic pool %s (%s/%s) NOT resolved: fee-exact factory lookup for tier %d "
+                "could not verify (%s). Failing closed; volume/liquidity stay on fallback semantics.",
+                pool,
+                protocol,
+                chain,
+                fee_units,
+                result.warning or result.reason,
+            )
+        return None
 
     def _ensure_volume_provider(self) -> "MultiDEXVolumeProvider | None":
         """Lazily initialize the volume provider if needed.
@@ -2643,16 +2785,28 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         return Decimal("0.003")
 
     def _lp_open_fee_tier(self, intent: "LPOpenIntent", protocol: str) -> Decimal:
-        """Resolve the LP fee tier, honoring an explicit ``protocol_params["fee_tier"]``.
+        """Resolve the LP fee tier, honoring a caller-declared tier.
 
-        ``_lp_fee_tier_from_protocol`` defaults to 0.30% for any pool whose fee
-        tier is not encoded in its protocol slug (e.g. ``aerodrome_slipstream``),
-        overstating fees ~60x for low-fee pools (ALM-2930). When the caller
-        declares the pool's real fee tier (a fraction, e.g. ``0.00005``), use it
-        verbatim. Guessed tiers (``_last_fee_tier_explicit`` False) are
-        corrected from the pool's real subgraph ``feeTier`` at prewarm.
+        Declaration order: an explicit ``protocol_params["fee_tier"]`` fraction
+        wins; else a V3-family pool id's fee segment ("WETH/USDC/3000" — raw
+        factory units, ALM-2949) is the declared tier. Only then fall back to
+        ``_lp_fee_tier_from_protocol``, which defaults to 0.30% for any pool
+        whose fee tier is not encoded in its protocol slug (e.g.
+        ``aerodrome_slipstream``), overstating fees ~60x for low-fee pools
+        (ALM-2930). Guessed tiers (``_last_fee_tier_explicit`` False) are
+        corrected from the pool's real subgraph ``feeTier`` at prewarm;
+        declared tiers never are.
         """
+        from almanak.framework.backtesting.pnl.intent_extraction import lp_pool_fee_units
+
         self._last_fee_tier_explicit = False
+        pool = getattr(intent, "pool", None)
+        fee_units = lp_pool_fee_units(pool)
+        declared = (
+            Decimal(fee_units) / Decimal("1000000")
+            if fee_units is not None and self._is_v3_factory_family(protocol) and self._valid_v3_fee_units(fee_units)
+            else None
+        )
         params = getattr(intent, "protocol_params", None) or {}
         override = params.get("fee_tier")
         if override is not None:
@@ -2661,9 +2815,35 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             except (TypeError, ValueError, ArithmeticError):
                 tier = Decimal("-1")
             if tier > 0:
+                if declared is not None and tier != declared:
+                    # Both knobs set and disagreeing: the pool id names WHICH
+                    # pool (identity — resolution and volume/liquidity follow
+                    # it, like live getPool); the params override sets the fee
+                    # ECONOMICS (e.g. dynamic-fee venues). Legitimate, but
+                    # never silent (Codex review, #3308).
+                    logger.warning(
+                        "protocol_params['fee_tier']=%s differs from the tier declared in pool id %r "
+                        "(%s): the position PRICES fees at the override while volume/liquidity come "
+                        "from the declared pool.",
+                        tier,
+                        pool,
+                        declared,
+                    )
                 self._last_fee_tier_explicit = True
                 return tier
             logger.warning("Ignoring invalid protocol_params['fee_tier']=%r for %s", override, protocol)
+        if declared is not None:
+            self._last_fee_tier_explicit = True
+            return declared
+        if fee_units is not None and self._is_v3_factory_family(protocol) and not self._valid_v3_fee_units(fee_units):
+            # Malformed declaration ("WETH/USDC/0"): resolution already fails
+            # closed on it; pricing falls to the slug guess, loudly.
+            logger.warning(
+                "Declared fee tier %d in pool id %r is outside the V3 domain; falling back to the "
+                "slug-guessed tier for pricing",
+                fee_units,
+                pool,
+            )
         return self._lp_fee_tier_from_protocol(protocol)
 
     def _lp_open_liquidity(
@@ -2719,8 +2899,16 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         position.metadata["pool_address"] = self._lp_open_pool_address(pool)
         # Guessed tiers may be corrected from the pool's real subgraph feeTier
         # at prewarm (the 0.30% slug default overstates fees 6x on a real
-        # 0.05% pool); explicit caller overrides never are.
+        # 0.05% pool); declared tiers (params override or pool-id fee segment)
+        # never are.
         position.metadata["fee_tier_source"] = "explicit" if self._last_fee_tier_explicit else "slug_guess"
+        if position.metadata["pool_address"] is None:
+            # Symbolic pool: carry the declared fee segment so the accrual-time
+            # address backfill reconstructs the SAME memo key the resolver
+            # wrote — the key is fee-aware now (ALM-2949).
+            from almanak.framework.backtesting.pnl.intent_extraction import lp_pool_fee_units
+
+            position.metadata["declared_fee_units"] = lp_pool_fee_units(pool)
 
     @staticmethod
     def _log_lp_open(pool: str, plan: _LPOpenPlan) -> None:
@@ -3305,6 +3493,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 (
                     position.protocol.lower(),
                     frozenset(token_ref_display(t).upper() for t in (prices.token0, prices.token1)),
+                    position.metadata.get("declared_fee_units"),
                 )
             )
             if resolved is not None:

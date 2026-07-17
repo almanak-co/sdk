@@ -132,6 +132,38 @@ def lp_pool_tokens(pool: Any) -> tuple[str, str] | None:
     return segments[0].upper(), segments[1].upper()
 
 
+def lp_pool_fee_units(pool: Any) -> int | None:
+    """Parse the raw fee/step units from a symbolic pool's third segment.
+
+    ``"WETH/USDC/3000"`` declares the 0.30% pool in the venue's RAW units
+    (V3 factory ``uint24`` hundredths-of-a-bip; a bin-step for bin venues).
+    Kept separate from :func:`lp_pool_tokens` so its ``(token0, token1)``
+    contract is untouched; callers that resolve or price a specific tier read
+    the segment through this function (ALM-2949 — the segment used to be
+    silently discarded, so ``WETH/USDC/3000`` could backtest the 0.05% pool's
+    economics while live opened the 0.3% pool).
+
+    Returns None for address pools, missing/empty third segments, and
+    non-numeric segments — a non-numeric third segment is a TOKEN, not a fee
+    (curve multi-coin names like "DAI/USDC/USDT"), so it must read as absent,
+    never as malformed. Numeric segments return RAW and unvalidated: domain
+    checking (a V3 fee is 0 < units < 1_000_000) belongs to the V3 consumers,
+    which fail closed on an out-of-domain declaration instead of silently
+    treating it as undeclared (CodeRabbit #3308).
+    """
+    if not isinstance(pool, str):
+        return None
+    candidate = pool.strip()
+    if not candidate or candidate.lower().startswith("0x"):
+        return None
+    segments = [segment.strip() for segment in candidate.split("/")]
+    if len(segments) < 3 or not segments[2]:
+        return None
+    if not segments[2].isdigit():
+        return None
+    return int(segments[2])
+
+
 def lp_explicit_pair(intent: Any) -> tuple[Any, Any]:
     """Resolve an LP intent's explicit ``(token0, token1)`` attributes.
 

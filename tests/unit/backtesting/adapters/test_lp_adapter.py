@@ -12,6 +12,7 @@ This module tests the LPBacktestAdapter, focusing on:
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -4719,7 +4720,7 @@ class TestResolveSymbolicPoolAddress:
         import almanak.framework.data.tokens as tokens_mod
 
         adapter = LPBacktestAdapter()
-        adapter._resolved_pool_addresses[("uniswap_v3", frozenset({"WETH", "USDC"}))] = "0xcached"
+        adapter._resolved_pool_addresses[("uniswap_v3", frozenset({"WETH", "USDC"}), None)] = "0xcached"
         monkeypatch.setattr(tokens_mod, "get_token_resolver", lambda: pytest.fail("memo hit must not resolve"))
 
         assert await adapter._resolve_symbolic_pool_address("WETH/USDC", "uniswap_v3", "base") == "0xcached"
@@ -4744,7 +4745,7 @@ class TestResolveSymbolicPoolAddress:
 
         assert resolved == target
         assert adapter._resolved_pool_provenance[target] == "gateway_onchain:product-exact-ranked"
-        assert adapter._resolved_pool_addresses[("aerodrome", frozenset({"WETH", "USDC"}))] == target
+        assert adapter._resolved_pool_addresses[("aerodrome", frozenset({"WETH", "USDC"}), None)] == target
 
     @pytest.mark.asyncio
     async def test_product_ambiguous_miss_never_falls_back_to_dexscreener(self, monkeypatch):
@@ -4761,7 +4762,7 @@ class TestResolveSymbolicPoolAddress:
         )
 
         assert await adapter._resolve_symbolic_pool_address("WETH/USDC", "aerodrome", "base") is None
-        assert ("aerodrome", frozenset({"WETH", "USDC"})) not in adapter._resolved_pool_addresses
+        assert ("aerodrome", frozenset({"WETH", "USDC"}), None) not in adapter._resolved_pool_addresses
 
     @pytest.mark.asyncio
     async def test_dexscreener_failure_is_best_effort(self, monkeypatch):
@@ -4798,3 +4799,382 @@ class TestResolveSymbolicPoolAddress:
             best=self._best(pool_address + "-0xt0-0xt1"),
         )
         assert await composite._resolve_symbolic_pool_address("USDT/USDC", "curve", "ethereum") == pool_address
+
+
+class TestFeeExactPoolResolution:
+    """ALM-2949: a declared fee segment ("WETH/USDC/3000") resolves FEE-EXACT
+    via the factory getPool lane — never depth-ranked, never silently swapped
+    for another tier's pool, and the declared tier is never "corrected"."""
+
+    def _no_dexscreener(self, monkeypatch):
+        import almanak.framework.data.dexscreener.client as dex_mod
+        import almanak.framework.data.tokens as tokens_mod
+
+        monkeypatch.setattr(
+            tokens_mod,
+            "get_token_resolver",
+            lambda: TestResolveSymbolicPoolAddress._resolver_returning(
+                {"WETH": "0x" + "a" * 40, "USDC": "0x" + "b" * 40}
+            ),
+        )
+        monkeypatch.setattr(
+            dex_mod,
+            "DexScreenerClient",
+            lambda: pytest.fail("a declared V3 tier must NEVER be depth-ranked via DexScreener"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_declared_tier_routes_to_factory_lane_and_stamps_provenance(self, monkeypatch):
+        adapter = LPBacktestAdapter()
+        self._no_dexscreener(monkeypatch)
+        target = "0x" + "f" * 40
+        seen: list[int] = []
+
+        async def fake_fee_exact(pool, protocol, chain, t0, t1, fee_units):
+            seen.append(fee_units)
+            return target
+
+        monkeypatch.setattr(adapter, "_resolve_fee_exact_pool", fake_fee_exact)
+
+        resolved = await adapter._resolve_symbolic_pool_address("WETH/USDC/3000", "uniswap_v3", "base")
+
+        assert resolved == target
+        assert seen == [3000]
+        assert adapter._resolved_pool_provenance[target] == "factory:fee-exact"
+        assert adapter._resolved_pool_addresses[("uniswap_v3", frozenset({"WETH", "USDC"}), 3000)] == target
+
+    @pytest.mark.asyncio
+    async def test_fee_exact_failure_never_falls_back_to_depth_ranking(self, monkeypatch):
+        adapter = LPBacktestAdapter()
+        self._no_dexscreener(monkeypatch)
+
+        async def fake_fee_exact(*_args):
+            return None
+
+        monkeypatch.setattr(adapter, "_resolve_fee_exact_pool", fake_fee_exact)
+
+        assert await adapter._resolve_symbolic_pool_address("WETH/USDC/3000", "uniswap_v3", "base") is None
+        assert ("uniswap_v3", frozenset({"WETH", "USDC"}), 3000) not in adapter._resolved_pool_addresses
+
+    @pytest.mark.asyncio
+    async def test_tiers_resolve_to_distinct_addresses(self, monkeypatch):
+        adapter = LPBacktestAdapter()
+        self._no_dexscreener(monkeypatch)
+
+        async def fake_fee_exact(pool, protocol, chain, t0, t1, fee_units):
+            return f"0xpool{fee_units}"
+
+        monkeypatch.setattr(adapter, "_resolve_fee_exact_pool", fake_fee_exact)
+
+        assert await adapter._resolve_symbolic_pool_address("WETH/USDC/500", "uniswap_v3", "base") == "0xpool500"
+        assert await adapter._resolve_symbolic_pool_address("WETH/USDC/3000", "uniswap_v3", "base") == "0xpool3000"
+        # The memo is fee-aware: the second tier is NOT the first's cache hit.
+        assert adapter._resolved_pool_addresses[("uniswap_v3", frozenset({"WETH", "USDC"}), 500)] == "0xpool500"
+        assert adapter._resolved_pool_addresses[("uniswap_v3", frozenset({"WETH", "USDC"}), 3000)] == "0xpool3000"
+
+    @pytest.mark.asyncio
+    async def test_non_v3_family_fee_segment_keeps_depth_ranking(self, monkeypatch):
+        # A bin venue's third segment is a BIN STEP, not a V3 fee — it must
+        # not dial the factory lane; the segment still keys the memo.
+        import almanak.framework.data.dexscreener.client as dex_mod
+        import almanak.framework.data.tokens as tokens_mod
+
+        adapter = LPBacktestAdapter()
+        pool_address = "0x" + "d" * 40
+        monkeypatch.setattr(
+            tokens_mod,
+            "get_token_resolver",
+            lambda: TestResolveSymbolicPoolAddress._resolver_returning(
+                {"WETH": "0x" + "a" * 40, "USDC": "0x" + "b" * 40}
+            ),
+        )
+        monkeypatch.setattr(
+            dex_mod, "DexScreenerClient", TestResolveSymbolicPoolAddress._dexscreener_returning([])
+        )
+        monkeypatch.setattr(
+            adapter, "_pick_deepest_pair_candidate", lambda *a, **k: TestResolveSymbolicPoolAddress._best(pool_address)
+        )
+
+        async def forbidden(*_args):
+            pytest.fail("bin-step venues must not dial the V3 factory lane")
+
+        monkeypatch.setattr(adapter, "_resolve_fee_exact_pool", forbidden)
+
+        resolved = await adapter._resolve_symbolic_pool_address("WETH/USDC/25", "traderjoe_v2", "avalanche")
+
+        assert resolved == pool_address
+        assert adapter._resolved_pool_addresses[("traderjoe_v2", frozenset({"WETH", "USDC"}), 25)] == pool_address
+
+
+class TestResolveFeeExactPool:
+    """The factory getPool leg itself: confirmed / zero-address / unverifiable
+    / gateway-down outcomes (all but the first fail closed)."""
+
+    @staticmethod
+    def _result(exists, pool_address=None, warning=None, error=None):
+        from almanak.connectors._strategy_base.pool_validation_base import (
+            PoolValidationReason,
+            PoolValidationResult,
+        )
+
+        reason = (
+            PoolValidationReason.CONFIRMED
+            if exists
+            else (PoolValidationReason.NOT_FOUND if exists is False else PoolValidationReason.RPC_UNAVAILABLE)
+        )
+        return PoolValidationResult(
+            exists=exists, reason=reason, pool_address=pool_address, warning=warning, error=error
+        )
+
+    def _patched(self, monkeypatch, *, result=None, gateway_exc=None):
+        import almanak.connectors._strategy_base.v3_pool_validation as v3v
+        import almanak.framework.backtesting.pnl.providers.perp._gateway_history as gh
+
+        adapter = LPBacktestAdapter()
+        calls: list[tuple] = []
+
+        if gateway_exc is not None:
+
+            def _raise():
+                raise gateway_exc
+
+            monkeypatch.setattr(gh, "get_connected_gateway_client", _raise)
+        else:
+            client = SimpleNamespace(name="gateway-client")
+            monkeypatch.setattr(gh, "get_connected_gateway_client", lambda: (client, SimpleNamespace()))
+
+        def fake_validate(chain, protocol, token_a, token_b, fee_tier, rpc_url, gateway_client):
+            calls.append((chain, protocol, token_a, token_b, fee_tier, rpc_url, gateway_client))
+            if result is None:
+                pytest.fail("validate_v3_pool must not run when the gateway is unavailable")
+            return result
+
+        monkeypatch.setattr(v3v, "validate_v3_pool", fake_validate)
+        return adapter, calls
+
+    @pytest.mark.asyncio
+    async def test_confirmed_pool_returns_lowercased_address(self, monkeypatch):
+        adapter, calls = self._patched(
+            monkeypatch, result=self._result(True, pool_address="0x" + "AB" * 20)
+        )
+
+        resolved = await adapter._resolve_fee_exact_pool(
+            "WETH/USDC/3000", "uniswap_v3", "base", "0xtoken0", "0xtoken1", 3000
+        )
+
+        assert resolved == ("0x" + "AB" * 20).lower()
+        assert len(calls) == 1
+        chain, protocol, t0, t1, fee, rpc_url, _client = calls[0]
+        assert (chain, protocol, t0, t1, fee, rpc_url) == ("base", "uniswap_v3", "0xtoken0", "0xtoken1", 3000, None)
+
+    @pytest.mark.asyncio
+    async def test_zero_address_fails_closed(self, monkeypatch):
+        adapter, _ = self._patched(monkeypatch, result=self._result(False, error="no pool"))
+
+        assert (
+            await adapter._resolve_fee_exact_pool("WETH/USDC/123", "uniswap_v3", "base", "0xa", "0xb", 123) is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_unverifiable_fails_closed(self, monkeypatch):
+        adapter, _ = self._patched(monkeypatch, result=self._result(None, warning="rpc down"))
+
+        assert (
+            await adapter._resolve_fee_exact_pool("WETH/USDC/500", "uniswap_v3", "base", "0xa", "0xb", 500) is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_gateway_unavailable_fails_closed_without_validating(self, monkeypatch):
+        adapter, calls = self._patched(monkeypatch, gateway_exc=RuntimeError("gateway down"))
+
+        assert (
+            await adapter._resolve_fee_exact_pool("WETH/USDC/500", "uniswap_v3", "base", "0xa", "0xb", 500) is None
+        )
+        assert calls == []
+
+
+class TestPoolDeclaredFeeTier:
+    """The pool-id fee segment is a DECLARED tier: it prices the position and
+    is never subgraph-"corrected" (ALM-2949)."""
+
+    def test_pool_segment_declares_the_tier(self):
+        adapter = LPBacktestAdapter()
+        intent = SimpleNamespace(pool="WETH/USDC/3000", protocol_params={})
+
+        tier = adapter._lp_open_fee_tier(intent, "uniswap_v3")
+
+        assert tier == Decimal("0.003")
+        assert adapter._last_fee_tier_explicit is True
+
+    def test_params_override_wins_over_pool_segment(self):
+        adapter = LPBacktestAdapter()
+        intent = SimpleNamespace(pool="WETH/USDC/3000", protocol_params={"fee_tier": "0.0005"})
+
+        assert adapter._lp_open_fee_tier(intent, "uniswap_v3") == Decimal("0.0005")
+        assert adapter._last_fee_tier_explicit is True
+
+    def test_bin_step_segment_is_not_a_declared_fee(self):
+        adapter = LPBacktestAdapter()
+        intent = SimpleNamespace(pool="WETH/USDC/25", protocol_params={})
+
+        tier = adapter._lp_open_fee_tier(intent, "traderjoe_v2")
+
+        assert tier == Decimal("0.003")  # slug default, not 25/1e6
+        assert adapter._last_fee_tier_explicit is False
+
+    def test_declared_tier_survives_subgraph_correction(self):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        adapter = LPBacktestAdapter()
+        position = TestRangeGatingScope._position("uniswap_v3")
+        position.metadata["fee_tier_source"] = "explicit"
+        position.metadata["pool_address"] = "0xpool"
+        declared = position.fee_tier
+        adapter._resolved_fee_tiers["0xpool"] = declared * 6  # the WRONG pool's tier
+
+        state = MarketState(
+            timestamp=datetime.now(),
+            prices={"WETH": Decimal("1765"), "USDT": Decimal("1")},
+            chain="ethereum",
+            block_number=1,
+        )
+        adapter.update_position(position, state, elapsed_seconds=3600)
+
+        assert position.fee_tier == declared
+        assert position.metadata["fee_tier_source"] == "explicit"
+
+    def test_accrual_backfill_reconstructs_the_fee_aware_key(self):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        adapter = LPBacktestAdapter()
+        position = TestRangeGatingScope._position("uniswap_v3")
+        position.metadata["pool_address"] = None
+        position.metadata["declared_fee_units"] = 3000
+        resolved = "0x" + "9" * 40
+        adapter._resolved_pool_addresses[("uniswap_v3", frozenset({"WETH", "USDT"}), 3000)] = resolved
+        adapter._resolved_pool_provenance[resolved] = "factory:fee-exact"
+
+        state = MarketState(
+            timestamp=datetime.now(),
+            prices={"WETH": Decimal("1765"), "USDT": Decimal("1")},
+            chain="ethereum",
+            block_number=1,
+        )
+        adapter.update_position(position, state, elapsed_seconds=3600)
+
+        assert position.metadata["pool_address"] == resolved
+        assert position.metadata["pool_resolution"] == "factory:fee-exact"
+
+    def test_annotate_carries_declared_fee_units_for_symbolic_pools(self):
+        adapter = LPBacktestAdapter()
+        position = TestRangeGatingScope._position("uniswap_v3")
+        plan = SimpleNamespace(
+            token0="WETH",
+            token1="USDC",
+            amount0=Decimal("1"),
+            amount1=Decimal("3000"),
+            entry_price=Decimal("3000"),
+        )
+
+        adapter._annotate_lp_open_position(position, "WETH/USDC/3000", plan)
+        assert position.metadata["declared_fee_units"] == 3000
+
+        address_position = TestRangeGatingScope._position("uniswap_v3")
+        adapter._annotate_lp_open_position(address_position, "0x" + "c" * 40, plan)
+        assert "declared_fee_units" not in address_position.metadata
+
+
+class TestFeeExactReviewRound:
+    """Review round on #3308: exception containment, malformed-tier fail-closed,
+    and the identity-vs-economics mismatch warning."""
+
+    @pytest.mark.asyncio
+    async def test_raising_validator_fails_closed(self, monkeypatch):
+        import almanak.connectors._strategy_base.v3_pool_validation as v3v
+        import almanak.framework.backtesting.pnl.providers.perp._gateway_history as gh
+
+        adapter = LPBacktestAdapter()
+        monkeypatch.setattr(gh, "get_connected_gateway_client", lambda: (SimpleNamespace(), SimpleNamespace()))
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("garbage RPC response at decode")
+
+        monkeypatch.setattr(v3v, "validate_v3_pool", boom)
+
+        assert (
+            await adapter._resolve_fee_exact_pool("WETH/USDC/500", "uniswap_v3", "base", "0xa", "0xb", 500) is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_malformed_declared_tier_fails_closed_never_depth_ranked(self, monkeypatch):
+        # "WETH/USDC/0" is a MALFORMED declaration, not an undeclared one —
+        # it must not silently fall through to depth-ranking.
+        import almanak.framework.data.dexscreener.client as dex_mod
+        import almanak.framework.data.tokens as tokens_mod
+
+        adapter = LPBacktestAdapter()
+        monkeypatch.setattr(
+            tokens_mod,
+            "get_token_resolver",
+            lambda: TestResolveSymbolicPoolAddress._resolver_returning(
+                {"WETH": "0x" + "a" * 40, "USDC": "0x" + "b" * 40}
+            ),
+        )
+        monkeypatch.setattr(
+            dex_mod, "DexScreenerClient", lambda: pytest.fail("malformed declared tier must not depth-rank")
+        )
+
+        async def forbidden(*_args):
+            pytest.fail("malformed declared tier must not reach the factory lane")
+
+        monkeypatch.setattr(adapter, "_resolve_fee_exact_pool", forbidden)
+
+        assert await adapter._resolve_symbolic_pool_address("WETH/USDC/0", "uniswap_v3", "base") is None
+        assert await adapter._resolve_symbolic_pool_address("WETH/USDC/1000000", "uniswap_v3", "base") is None
+        assert adapter._resolved_pool_addresses == {}
+
+    def test_malformed_declared_tier_prices_at_slug_guess(self):
+        adapter = LPBacktestAdapter()
+        intent = SimpleNamespace(pool="WETH/USDC/0", protocol_params={})
+
+        tier = adapter._lp_open_fee_tier(intent, "uniswap_v3")
+
+        assert tier == Decimal("0.003")  # slug default
+        assert adapter._last_fee_tier_explicit is False
+
+    def test_override_segment_mismatch_warns_but_override_prices(self, caplog):
+        import logging
+
+        adapter = LPBacktestAdapter()
+        intent = SimpleNamespace(pool="WETH/USDC/3000", protocol_params={"fee_tier": "0.0005"})
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.backtesting.adapters.lp_adapter"):
+            tier = adapter._lp_open_fee_tier(intent, "uniswap_v3")
+
+        assert tier == Decimal("0.0005")
+        assert adapter._last_fee_tier_explicit is True
+        assert any("differs from the tier declared in pool id" in r.message for r in caplog.records)
+
+    def test_override_matching_segment_does_not_warn(self, caplog):
+        import logging
+
+        adapter = LPBacktestAdapter()
+        intent = SimpleNamespace(pool="WETH/USDC/3000", protocol_params={"fee_tier": "0.003"})
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.backtesting.adapters.lp_adapter"):
+            tier = adapter._lp_open_fee_tier(intent, "uniswap_v3")
+
+        assert tier == Decimal("0.003")
+        assert not any("differs from the tier declared" in r.message for r in caplog.records)
+
+    def test_multi_coin_pool_name_keeps_depth_ranking_path(self, monkeypatch):
+        # "DAI/USDC/USDT" (curve tri-pool) has a TOKEN third segment — no
+        # declared fee, so the fee-exact lane must not activate and pricing
+        # stays on the slug guess.
+        adapter = LPBacktestAdapter()
+        intent = SimpleNamespace(pool="DAI/USDC/USDT", protocol_params={})
+
+        tier = adapter._lp_open_fee_tier(intent, "uniswap_v3")
+
+        assert tier == Decimal("0.003")
+        assert adapter._last_fee_tier_explicit is False

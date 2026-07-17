@@ -42,6 +42,7 @@ from almanak.framework.backtesting.pnl.intent_extraction import (
     get_intent_amount_usd,
     get_intent_tokens,
     get_lp_tick_range,
+    lp_pool_fee_units,
     lp_pool_tokens,
 )
 from almanak.framework.backtesting.pnl.position_models import PositionType, SimulatedPosition
@@ -93,6 +94,44 @@ class TestLpPoolTokens:
     def test_non_string_returns_none(self):
         assert lp_pool_tokens(None) is None
         assert lp_pool_tokens(123) is None
+
+
+class TestLpPoolFeeUnits:
+    """lp_pool_fee_units: the declared fee/step segment (ALM-2949 — this
+    segment used to be silently discarded end-to-end)."""
+
+    def test_parses_fee_segment(self):
+        assert lp_pool_fee_units("WETH/USDC/3000") == 3000
+
+    def test_strips_whitespace(self):
+        assert lp_pool_fee_units(" weth / usdc / 500 ") == 500
+
+    def test_pair_without_segment_returns_none(self):
+        assert lp_pool_fee_units("WETH/USDC") is None
+
+    def test_empty_segment_returns_none(self):
+        assert lp_pool_fee_units("WETH/USDC/") is None
+
+    def test_address_pool_returns_none(self):
+        assert lp_pool_fee_units("0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640") is None
+
+    def test_non_numeric_segment_returns_none(self):
+        assert lp_pool_fee_units("WETH/USDC/0.3%") is None
+
+    def test_multi_coin_pool_name_is_not_a_fee(self):
+        # Curve tri-pool names put a TOKEN in the third segment — it must read
+        # as "no declared fee", never as malformed.
+        assert lp_pool_fee_units("DAI/USDC/USDT") is None
+
+    def test_numeric_segments_return_raw_undomained(self):
+        # Domain validation ((0, 1_000_000) for V3) is the consumer's job so a
+        # malformed declaration can FAIL CLOSED instead of reading as absent.
+        assert lp_pool_fee_units("WETH/USDC/0") == 0
+        assert lp_pool_fee_units("WETH/USDC/1000000") == 1000000
+
+    def test_non_string_returns_none(self):
+        assert lp_pool_fee_units(None) is None
+        assert lp_pool_fee_units(123) is None
 
 
 class TestGetIntentTokensForLpIntents:
