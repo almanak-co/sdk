@@ -1,7 +1,7 @@
 """Exit-code contract tests for `almanak strat backtest pnl`.
 
 The PnL engine's `BacktestErrorHandler` captures fatal simulation errors
-(e.g. the LP adapter's missing-volume `DataSourceUnavailableError`) and
+(e.g. the LP adapter's missing-volume `NoAcceptableDataSourceError`) and
 returns a partial `BacktestResult` with `error` set instead of raising
 (`build_error_result`, pnl/_engine_helpers.py). Before this contract the
 CLI printed the (empty) results block and exited 0, so scripts/CI could

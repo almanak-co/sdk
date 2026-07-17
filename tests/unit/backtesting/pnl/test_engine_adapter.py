@@ -7,6 +7,7 @@ Tests verify that the PnLBacktester correctly:
 4. Handles explicit strategy_type configuration
 5. Calls adapter's execute_intent when adapter exists
 """
+
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -317,7 +318,6 @@ def test_router_swap_lane_stays_generic_by_default(backtester, registered_adapte
 
     assert backtester._adapter._config.swap_lane == "generic"
     assert backtester._adapter._config.reconcile_positions is False
-
 
 
 def test_router_swap_lane_arbitrage_for_detected_arbitrage(backtester, registered_adapters):
@@ -877,9 +877,9 @@ class _RaisingAdapter(StrategyBacktestAdapter):
         elapsed_seconds: float,
         timestamp: Any = None,
     ) -> None:
-        from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+        from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 
-        raise DataSourceUnavailableError(
+        raise NoAcceptableDataSourceError(
             data_type="volume",
             identifier="0xdeadbeef",
             remediation="provide explicit_pool_volume_usd_daily or opt into the fallback",
@@ -917,7 +917,6 @@ def _portfolio_with_position():
     return portfolio
 
 
-
 def _strict(backtester):
     """ALM-2930: the fail-loud missing-data contract now applies in strict mode."""
     from almanak.framework.backtesting.config import BacktestDataConfig
@@ -928,19 +927,19 @@ def _strict(backtester):
 
 def test_missing_volume_error_propagates_when_no_handler(backtester):
     _strict(backtester)
-    """VIB-4849 (P1): DataSourceUnavailableError must NOT be swallowed to DEBUG.
+    """VIB-4849 (P1): NoAcceptableDataSourceError must NOT be swallowed to DEBUG.
 
     With no error handler configured, the engine must re-raise so the backtest
     fails loudly rather than silently accruing zero fees for the tick.
     """
-    from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+    from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 
     backtester._adapter = _RaisingAdapter()
     backtester._error_handler = None
     portfolio = _portfolio_with_position()
     market_state = MockMarketState()
 
-    with pytest.raises(DataSourceUnavailableError):
+    with pytest.raises(NoAcceptableDataSourceError):
         backtester._update_positions_via_adapter(portfolio, market_state, datetime.now(UTC))
 
 
@@ -949,7 +948,7 @@ def test_missing_volume_error_is_not_downgraded_to_debug(backtester, caplog):
     """VIB-4849 (P1): the missing-data signal is surfaced at ERROR, not hidden at DEBUG."""
     import logging
 
-    from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+    from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 
     backtester._adapter = _RaisingAdapter()
     backtester._error_handler = None
@@ -957,7 +956,7 @@ def test_missing_volume_error_is_not_downgraded_to_debug(backtester, caplog):
     market_state = MockMarketState()
 
     with caplog.at_level(logging.DEBUG, logger="almanak.framework.backtesting.pnl.engine"):
-        with pytest.raises(DataSourceUnavailableError):
+        with pytest.raises(NoAcceptableDataSourceError):
             backtester._update_positions_via_adapter(portfolio, market_state, datetime.now(UTC))
 
     # Must be surfaced loudly (ERROR), never quietly logged at DEBUG.
@@ -970,7 +969,7 @@ def test_missing_volume_error_is_not_downgraded_to_debug(backtester, caplog):
 def test_missing_volume_error_routes_to_handler_stop(backtester):
     _strict(backtester)
     """VIB-4849 (P1): with a stop-policy handler, the error still surfaces (raises)."""
-    from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+    from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 
     class _StopResult:
         should_stop = True
@@ -987,7 +986,7 @@ def test_missing_volume_error_routes_to_handler_stop(backtester):
     portfolio = _portfolio_with_position()
     market_state = MockMarketState()
 
-    with pytest.raises(DataSourceUnavailableError):
+    with pytest.raises(NoAcceptableDataSourceError):
         backtester._update_positions_via_adapter(portfolio, market_state, datetime.now(UTC))
 
 
@@ -1028,7 +1027,7 @@ def test_missing_volume_error_handler_continue_does_not_swallow_silently(backtes
 def test_first_mark_skip_tolerates_naive_entry_time(backtester):
     """A tz-naive entry_time (e.g. an adapter's datetime.now() fallback) must
     not crash the comparison against the aware tick timestamp."""
-    from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+    from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 
     _strict(backtester)
     backtester._adapter = _RaisingAdapter()
@@ -1043,7 +1042,7 @@ def test_first_mark_skip_tolerates_naive_entry_time(backtester):
 
     # Naive entry before the tick: routed to the adapter (which raises).
     position.entry_time = (now - timedelta(hours=1)).replace(tzinfo=None)
-    with pytest.raises(DataSourceUnavailableError):
+    with pytest.raises(NoAcceptableDataSourceError):
         backtester._update_positions_via_adapter(portfolio, MockMarketState(), now)
 
 
@@ -1127,9 +1126,7 @@ async def test_accrual_gap_memo_resets_per_run(backtester, monkeypatch):
         tokens=["WETH", "USDC"],
     )
     with pytest.raises(_Sentinel):
-        await backtester._run_backtest(
-            SimpleNamespace(), config, "run-2", SimpleNamespace(), datetime.now(UTC)
-        )
+        await backtester._run_backtest(SimpleNamespace(), config, "run-2", SimpleNamespace(), datetime.now(UTC))
 
     assert backtester._accrual_data_gap_positions == set(), "memo must clear at run start"
 

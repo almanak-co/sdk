@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+# Intentionally imports via the deprecated DataSourceUnavailableError alias to pin back-compat.
 from almanak.framework.backtesting.exceptions import DataSourceUnavailableError, HistoricalDataUnavailableError
 from almanak.framework.backtesting.models import BacktestEngine, BacktestMetrics, BacktestResult
 from almanak.framework.backtesting.pnl.error_handling import (
@@ -177,7 +178,9 @@ class TestErrorClassification:
         classification = classify_error(error)
 
         assert classification.suggested_action
-        assert "retry" in classification.suggested_action.lower() or "backoff" in classification.suggested_action.lower()
+        assert (
+            "retry" in classification.suggested_action.lower() or "backoff" in classification.suggested_action.lower()
+        )
 
 
 # =============================================================================
@@ -310,10 +313,7 @@ class TestBacktestErrorHandler:
         """Fatal errors should return should_stop=True."""
         handler = BacktestErrorHandler()
 
-        result = handler.handle_error(
-            Exception("Invalid config error"),
-            context="initialization"
-        )
+        result = handler.handle_error(Exception("Invalid config error"), context="initialization")
 
         assert result.should_stop is True
         assert result.should_retry is False
@@ -324,10 +324,7 @@ class TestBacktestErrorHandler:
         """Recoverable errors should return should_retry=True."""
         handler = BacktestErrorHandler()
 
-        result = handler.handle_error(
-            Exception("Rate limit exceeded"),
-            context="price_fetch"
-        )
+        result = handler.handle_error(Exception("Rate limit exceeded"), context="price_fetch")
 
         assert result.should_retry is True
         assert result.should_stop is False
@@ -338,10 +335,7 @@ class TestBacktestErrorHandler:
         config = BacktestErrorConfig(continue_on_non_critical=True)
         handler = BacktestErrorHandler(config)
 
-        result = handler.handle_error(
-            Exception("Missing price for token"),
-            context="tick_42"
-        )
+        result = handler.handle_error(Exception("Missing price for token"), context="tick_42")
 
         assert result.should_continue is True
         assert result.should_stop is False
@@ -354,17 +348,11 @@ class TestBacktestErrorHandler:
 
         # First two failures should allow retry
         for i in range(2):
-            result = handler.handle_error(
-                Exception("Rate limit exceeded"),
-                context=f"fetch_{i}"
-            )
+            result = handler.handle_error(Exception("Rate limit exceeded"), context=f"fetch_{i}")
             assert result.should_retry is True
 
         # Third failure trips the breaker
-        result = handler.handle_error(
-            Exception("Rate limit exceeded"),
-            context="fetch_2"
-        )
+        result = handler.handle_error(Exception("Rate limit exceeded"), context="fetch_2")
         assert result.should_stop is True
         assert handler.circuit_breaker.is_open is True
 
@@ -434,17 +422,11 @@ class TestBacktestErrorHandler:
 
         # First 3 non-critical errors should continue
         for i in range(3):
-            result = handler.handle_error(
-                Exception("Missing price"),
-                context=f"tick_{i}"
-            )
+            result = handler.handle_error(Exception("Missing price"), context=f"tick_{i}")
             assert result.should_continue is True
 
         # 4th non-critical error should stop
-        result = handler.handle_error(
-            Exception("Missing price"),
-            context="tick_3"
-        )
+        result = handler.handle_error(Exception("Missing price"), context="tick_3")
         assert result.should_stop is True
 
 
@@ -652,10 +634,7 @@ class TestRetryBehavior:
         """should_retry should be True for rate limit errors."""
         handler = BacktestErrorHandler()
 
-        result = handler.handle_error(
-            Exception("Rate limit exceeded"),
-            context="api_call"
-        )
+        result = handler.handle_error(Exception("Rate limit exceeded"), context="api_call")
 
         assert result.should_retry is True
         assert result.should_stop is False
@@ -664,10 +643,7 @@ class TestRetryBehavior:
         """should_retry should be True for timeout errors."""
         handler = BacktestErrorHandler()
 
-        result = handler.handle_error(
-            TimeoutError("Connection timed out"),
-            context="api_call"
-        )
+        result = handler.handle_error(TimeoutError("Connection timed out"), context="api_call")
 
         assert result.should_retry is True
 
@@ -675,10 +651,7 @@ class TestRetryBehavior:
         """should_retry should be True for connection errors."""
         handler = BacktestErrorHandler()
 
-        result = handler.handle_error(
-            ConnectionError("Connection refused"),
-            context="api_call"
-        )
+        result = handler.handle_error(ConnectionError("Connection refused"), context="api_call")
 
         assert result.should_retry is True
 
@@ -686,10 +659,7 @@ class TestRetryBehavior:
         """should_retry should be False for fatal errors."""
         handler = BacktestErrorHandler()
 
-        result = handler.handle_error(
-            Exception("Invalid configuration error"),
-            context="init"
-        )
+        result = handler.handle_error(Exception("Invalid configuration error"), context="init")
 
         assert result.should_retry is False
         assert result.should_stop is True
@@ -730,10 +700,7 @@ class TestRetryBehavior:
         contexts = ["price_fetch", "balance_query", "tx_submission"]
 
         for ctx in contexts:
-            result = handler.handle_error(
-                Exception("Rate limit exceeded"),
-                context=ctx
-            )
+            result = handler.handle_error(Exception("Rate limit exceeded"), context=ctx)
             assert result.should_retry is True
             assert result.error_record.context == ctx
 
@@ -741,10 +708,7 @@ class TestRetryBehavior:
         """Error record should contain how it was handled."""
         handler = BacktestErrorHandler()
 
-        result = handler.handle_error(
-            Exception("Rate limit exceeded"),
-            context="test"
-        )
+        result = handler.handle_error(Exception("Rate limit exceeded"), context="test")
 
         assert result.error_record is not None
         assert result.error_record.handled == "retry"

@@ -698,3 +698,99 @@ def test_liquidity_depth_hook_serves_medium_confidence_and_falls_back_on_miss():
         )
     assert result.source_info.source == DATA_SOURCE_FALLBACK
     assert result.source_info.confidence == DataConfidence.LOW
+
+
+# =============================================================================
+# Single-flight coalescing (ALM-2956)
+# =============================================================================
+
+
+def test_concurrent_same_pool_day_coalesces_to_one_fetch():
+    import threading
+
+    fallback = _fallback_with_history({"1d": ([_snap(_DAY_START, tvl=Decimal("1"), volume=Decimal("2"))], "the_graph")})
+    release = threading.Event()
+    entered = threading.Event()
+    barrier = threading.Barrier(4)
+    original = fallback._get_history
+
+    def slow_get_history(**kwargs):
+        entered.set()  # owner is inside the fetch; waiters must coalesce
+        release.wait(timeout=5)
+        return original(**kwargs)
+
+    fallback._get_history = slow_get_history  # type: ignore[method-assign]
+
+    results: list = []
+
+    def worker():
+        barrier.wait(timeout=5)
+        results.append(fallback.daily_history(pool_address=_POOL, chain="base", protocol="aerodrome", day=_DAY))
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    entered.wait(timeout=5)  # release only once the owner holds the flight
+    release.set()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(results) == 4
+    assert all(r == results[0] for r in results)
+    assert fallback._calls == ["1d"]  # type: ignore[attr-defined]  # one shared fetch
+
+
+def test_single_flight_retains_nothing_after_completion():
+    """Completed flights leave no per-pool-day state behind (leak guard)."""
+    fallback = _fallback_with_history({"1d": ([_snap(_DAY_START, tvl=Decimal("1"), volume=Decimal("2"))], "the_graph")})
+    fallback.daily_history(pool_address=_POOL, chain="base", protocol="aerodrome", day=_DAY)
+
+    assert fallback._inflight == {}
+    assert not hasattr(fallback, "_inflight_outcomes")
+
+
+def test_waiters_share_a_non_cacheable_outcome():
+    import threading
+
+    fallback = PoolHistoryFallback()
+    fallback._calls = []  # type: ignore[attr-defined]
+    release = threading.Event()
+    entered = threading.Event()
+    barrier = threading.Barrier(3)
+
+    def failing_fetch(**kwargs):
+        fallback._calls.append("fetch")  # type: ignore[attr-defined]
+        entered.set()  # owner is inside the fetch; waiters must coalesce
+        release.wait(timeout=5)
+        return None, False  # retryable miss: not memoized in the day cache
+
+    fallback._fetch_daily = failing_fetch  # type: ignore[method-assign]
+
+    outcomes: list = []
+
+    def worker():
+        barrier.wait(timeout=5)
+        outcomes.append(
+            fallback.daily_history_outcome(pool_address=_POOL, chain="base", protocol="aerodrome", day=_DAY)
+        )
+
+    threads = [threading.Thread(target=worker) for _ in range(3)]
+    for t in threads:
+        t.start()
+    entered.wait(timeout=5)  # owner holds the flight...
+    # ...and BOTH waiters are parked on it. Without this, a slow waiter can
+    # arrive after the flight is popped and become a second owner (the
+    # non-cacheable path has no day cache to absorb it) — flaky under load.
+    import time as _time
+
+    flight = fallback._inflight[(_POOL, "base", "aerodrome", _DAY)]
+    deadline = _time.time() + 5
+    while len(flight["event"]._cond._waiters) < 2 and _time.time() < deadline:
+        _time.sleep(0.01)
+    release.set()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(outcomes) == 3
+    assert all(o.history is None and o.cacheable is False for o in outcomes)
+    assert fallback._calls == ["fetch"]  # type: ignore[attr-defined]  # waiters shared it

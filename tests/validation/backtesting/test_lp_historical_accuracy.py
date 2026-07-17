@@ -319,7 +319,7 @@ def lp_adapter():
     These integration tests deliberately validate the heuristic fee-accrual / IL
     path WITHOUT a live subgraph (no API key in CI). Post-VIB-4849 the adapter
     refuses to silently fabricate volume by default and raises
-    ``DataSourceUnavailableError`` instead. We therefore opt into the heuristic
+    ``NoAcceptableDataSourceError`` instead. We therefore opt into the heuristic
     explicitly via ``allow_volume_fallback=True`` so the path under test runs;
     production callers keep the safe fail-loud default.
     """
@@ -478,9 +478,7 @@ class TestILUSDValueAccuracy:
         )
 
         # Calculate hold value (what tokens would be worth if held)
-        hold_value = (
-            position.entry_token0_amount * position.exit_eth_price + position.entry_token1_amount
-        )
+        hold_value = position.entry_token0_amount * position.exit_eth_price + position.entry_token1_amount
 
         # Calculate IL in USD
         calculated_il_usd = il_pct * hold_value

@@ -91,14 +91,6 @@ _HYPER_MARKET_TO_COIN: dict[str, str] = {
 _HOURS_PER_YEAR = 8760
 
 
-def _safe_decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
-    """Best-effort Decimal coercion (matches history.py helper)."""
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, TypeError, ValueError):
-        return default
-
-
 def _hyperliquid_resolve_coin(market: str) -> str:
     """Resolve the Hyperliquid coin code for ``market``.
 
@@ -210,7 +202,15 @@ def _hyperliquid_build_funding_point(
     if timestamp < start_dt or timestamp > end_dt:
         return None
 
-    rate = _safe_decimal(item.get("fundingRate", "0"))
+    raw_rate = item.get("fundingRate")
+    if raw_rate in (None, ""):
+        # Unmeasured hour: skip, never manufacture a measured 0.
+        return None
+    # Strict parse: a malformed or non-finite rate must not become a
+    # measured 0 — raise so the caller demotes to a skip.
+    rate = Decimal(str(raw_rate))
+    if not rate.is_finite():
+        raise ValueError(f"fundingRate must be finite, got {raw_rate!r}")
     annualized = rate * Decimal(str(_HOURS_PER_YEAR))
 
     return FundingRatePoint(

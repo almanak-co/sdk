@@ -46,8 +46,8 @@ from enum import Enum
 from typing import Any, NamedTuple
 
 from almanak.framework.backtesting.exceptions import (
-    DataSourceUnavailableError,
     HistoricalDataUnavailableError,
+    NoAcceptableDataSourceError,
     UnsupportedIntentError,
 )
 
@@ -128,7 +128,7 @@ class _ErrorPattern(NamedTuple):
 
 # Typed fail-loud errors: classified UNKNOWN -> FATAL -> stop, never pattern-matched
 # into a recoverable bucket by message keywords.
-_FAIL_LOUD_DATA_ERRORS = (DataSourceUnavailableError, HistoricalDataUnavailableError, UnsupportedIntentError)
+_FAIL_LOUD_DATA_ERRORS = (NoAcceptableDataSourceError, HistoricalDataUnavailableError, UnsupportedIntentError)
 
 _ERROR_PATTERNS = (
     _ErrorPattern(ErrorType.RATE_LIMIT, ("rate limit", "too many requests", "429", "throttl")),

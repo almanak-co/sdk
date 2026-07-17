@@ -79,7 +79,7 @@ class BacktestDataConfig:
         allow_volume_fallback: Explicit opt-in to the LOW-confidence
             ``volume_fallback_multiplier`` heuristic when no real volume data
             is available. Defaults to False: the LP adapter fails loud
-            (``DataSourceUnavailableError``) rather than silently fabricating
+            (``NoAcceptableDataSourceError``) rather than silently fabricating
             ``position_value_usd * multiplier`` (VIB-4849).
 
         use_historical_funding: Whether to fetch historical funding rates

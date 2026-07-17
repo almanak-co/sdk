@@ -27,7 +27,7 @@ from ...backtesting import (
     PnLBacktester,
 )
 from ...backtesting.config import BacktestDataConfig
-from ...backtesting.exceptions import DataSourceUnavailableError
+from ...backtesting.exceptions import NoAcceptableDataSourceError
 from ...backtesting.models import BacktestResult
 from ...backtesting.pnl.config_loader import ConfigLoadError, load_config_from_result
 from ...backtesting.pnl.error_handling import PreflightValidationError
@@ -807,13 +807,13 @@ def _run_backtest(
     `asyncio.run(backtester.backtest(...))` is surfaced via stderr and ends
     the process.
 
-    A missing-volume `DataSourceUnavailableError` (the VIB-4849 fail-loud) is
+    A missing-volume `NoAcceptableDataSourceError` (the VIB-4849 fail-loud) is
     additionally followed by a hint pointing at the CLI flags that resolve it,
     since the engine-level remediation speaks in config-field terms.
     """
     try:
         return asyncio.run(backtester.backtest(strategy_instance, pnl_config))
-    except DataSourceUnavailableError as e:
+    except NoAcceptableDataSourceError as e:
         click.echo(f"Error running backtest: {e}", err=True)
         if e.data_type == "volume":
             click.echo(_MISSING_VOLUME_HINT, err=True)
@@ -842,7 +842,7 @@ def _emit_missing_volume_hint_for_result(result: BacktestResult) -> None:
     """Surface the CLI-flag hint when a result carries a missing-volume error.
 
     The engine's `BacktestErrorHandler` classifies the LP adapter's
-    `DataSourceUnavailableError` as fatal and *stops* the simulation, but
+    `NoAcceptableDataSourceError` as fatal and *stops* the simulation, but
     `backtester.backtest(...)` then returns the partial result (with the error
     recorded in `result.error` / `result.errors`) instead of raising. Without
     this check the CLI would print an empty results block and exit 0 with the
@@ -852,7 +852,8 @@ def _emit_missing_volume_hint_for_result(result: BacktestResult) -> None:
     if result.error:
         candidates.append(result.error)
     for record in result.errors:
-        if record.get("error_type") == "DataSourceUnavailableError":
+        # Accept the pre-rename name too: serialized artifacts carry the old string.
+        if record.get("error_type") in ("NoAcceptableDataSourceError", "DataSourceUnavailableError"):
             candidates.append(str(record.get("error_message", "")))
 
     if not any("volume data source" in message for message in candidates):

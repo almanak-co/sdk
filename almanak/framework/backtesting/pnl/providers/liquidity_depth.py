@@ -38,7 +38,7 @@ from typing import Any
 from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
 from almanak.core.chains import ChainRegistry
 
-from ...exceptions import DataSourceUnavailableError
+from ...exceptions import NoAcceptableDataSourceError
 from ..types import DataConfidence, DataSourceInfo, LiquidityResult
 from .base import HistoricalLiquidityProvider
 from .subgraph_client import (
@@ -781,7 +781,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             )
         except (SubgraphRateLimitError, SubgraphQueryError) as e:
             # Match every sibling handler: a transient query failure degrades to
-            # None, but DataSourceUnavailableError (e.g. pagination overflow from
+            # None, but NoAcceptableDataSourceError (e.g. pagination overflow from
             # query_with_pagination) MUST propagate — a broad `except Exception`
             # here silently broke the fail-loud pagination guarantee for the
             # messari family (curve, sushiswap_v3) (CodeRabbit #3271).
@@ -1152,7 +1152,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 timestamp=timestamp,
                 protocol_id=protocol_id,
             )
-        except DataSourceUnavailableError:
+        except NoAcceptableDataSourceError:
             # Pagination overflow must stay loud (VIB-5089): a partial series
             # silently swapped for fallback would be silent truncation.
             raise

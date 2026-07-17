@@ -28,7 +28,7 @@ from almanak.connectors.spark.backtest_apy import (
 from almanak.connectors.spark.backtest_apy import (
     SparkAPYProvider,
 )
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphQueryError,
 )
@@ -70,8 +70,8 @@ class StubSubgraphClient:
         self.closed = True
 
 
-def _fallback_overflow_error() -> DataSourceUnavailableError:
-    return DataSourceUnavailableError(
+def _fallback_overflow_error() -> NoAcceptableDataSourceError:
+    return NoAcceptableDataSourceError(
         data_type="apy",
         identifier="market",
         remediation="Narrow the APY query window.",
@@ -158,7 +158,7 @@ class TestAaveV3ProtocolAPYProvider:
         )
         provider = AaveV3APYProvider(client=client)
 
-        with pytest.raises(DataSourceUnavailableError, match="pagination window"):
+        with pytest.raises(NoAcceptableDataSourceError, match="pagination window"):
             await provider.get_apy(
                 "aave_v3",
                 "USDC",
@@ -311,7 +311,7 @@ class TestMessariProtocolAPYProviders:
         client = StubSubgraphClient(pagination_error=_fallback_overflow_error())
         provider = provider_factory(client)
 
-        with pytest.raises(DataSourceUnavailableError, match="pagination window"):
+        with pytest.raises(NoAcceptableDataSourceError, match="pagination window"):
             await provider.get_apy(
                 protocol,
                 "0x1234567890abcdef123456",

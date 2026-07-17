@@ -837,7 +837,7 @@ class TestCursorPaginationThroughProvider:
         LOW-confidence fallback values - that would be silent truncation.
         """
         import almanak.connectors.aave_v3.backtest_apy as aave_module
-        from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+        from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 
         monkeypatch.setattr(aave_module, "MAX_PAGINATION_PAGES", 2)
 
@@ -857,7 +857,7 @@ class TestCursorPaginationThroughProvider:
         provider._client = mock_client
         provider._owns_client = False
 
-        with pytest.raises(DataSourceUnavailableError, match="max_pages=2"):
+        with pytest.raises(NoAcceptableDataSourceError, match="max_pages=2"):
             await provider.get_apy(
                 protocol="aave_v3",
                 market="USDC",

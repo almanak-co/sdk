@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.core.chains import ChainRegistry
 from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+from almanak.core.chains import ChainRegistry
+from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 from almanak.framework.backtesting.pnl.providers.liquidity_depth import (
     DATA_SOURCE_FALLBACK,
     DEFAULT_TWAP_WINDOW_HOURS,
@@ -282,7 +282,6 @@ class TestV3LiquidityQuery:
 
         assert result.depth == Decimal("42000000")
         assert result.source_info.confidence == DataConfidence.HIGH
-
 
     @pytest.mark.asyncio
     async def test_query_pancakeswap_v3_liquidity(self, provider, mock_subgraph_client):
@@ -699,7 +698,7 @@ class TestLiquidityDepthRouting:
     @pytest.mark.asyncio
     async def test_pagination_overflow_stays_loud(self, provider):
         provider._query_v3_liquidity = AsyncMock(  # type: ignore[method-assign]
-            side_effect=DataSourceUnavailableError(
+            side_effect=NoAcceptableDataSourceError(
                 data_type="liquidity",
                 identifier="0xpool",
                 remediation="narrow the query window",
@@ -707,7 +706,7 @@ class TestLiquidityDepthRouting:
             )
         )
 
-        with pytest.raises(DataSourceUnavailableError, match="window too large"):
+        with pytest.raises(NoAcceptableDataSourceError, match="window too large"):
             await provider.get_liquidity_depth(
                 pool_address="0xpool",
                 chain="arbitrum",
@@ -718,12 +717,12 @@ class TestLiquidityDepthRouting:
     @pytest.mark.asyncio
     async def test_messari_pagination_overflow_stays_loud(self, provider, monkeypatch):
         # Regression (CodeRabbit #3271): the messari-standard handler must let
-        # DataSourceUnavailableError (pagination overflow) propagate like every
+        # NoAcceptableDataSourceError (pagination overflow) propagate like every
         # sibling family — a broad `except Exception` previously swallowed it,
         # breaking the fail-loud guarantee for curve / sushiswap_v3.
         monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
         provider._client.query_with_pagination = AsyncMock(  # type: ignore[method-assign]
-            side_effect=DataSourceUnavailableError(
+            side_effect=NoAcceptableDataSourceError(
                 data_type="liquidity",
                 identifier="0xpool",
                 remediation="narrow the query window",
@@ -731,7 +730,7 @@ class TestLiquidityDepthRouting:
             )
         )
 
-        with pytest.raises(DataSourceUnavailableError, match="window too large"):
+        with pytest.raises(NoAcceptableDataSourceError, match="window too large"):
             await provider._query_messari_liquidity(
                 pool_address="0xpool",
                 chain="ethereum",

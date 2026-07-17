@@ -43,7 +43,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from almanak.core.chains import ChainRegistry
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalAPYProvider
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
@@ -521,7 +521,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
                 start_date=start_date,
                 end_date=end_date,
             )
-        except DataSourceUnavailableError:
+        except NoAcceptableDataSourceError:
             # Pagination overflow must stay loud (VIB-5089): a partial series
             # silently swapped for fallback would be silent truncation.
             raise

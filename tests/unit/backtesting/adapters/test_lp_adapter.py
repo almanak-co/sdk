@@ -23,7 +23,7 @@ from almanak.framework.backtesting.adapters.lp_adapter import (
     RangeStatus,
     RangeStatusResult,
 )
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 from almanak.framework.backtesting.pnl.portfolio import (
     PositionType,
     SimulatedPosition,
@@ -1699,7 +1699,7 @@ class TestHistoricalVolumeIntegration:
             timestamp=datetime.now(),
         )
 
-        with pytest.raises(DataSourceUnavailableError) as exc_info:
+        with pytest.raises(NoAcceptableDataSourceError) as exc_info:
             adapter.update_position(position, market, elapsed_seconds=86400)
 
         # Error must tell the user exactly what to provide.
@@ -1743,7 +1743,7 @@ class TestHistoricalVolumeIntegration:
             timestamp=datetime.now(),
         )
 
-        with pytest.raises(DataSourceUnavailableError):
+        with pytest.raises(NoAcceptableDataSourceError):
             adapter.update_position(position, market, elapsed_seconds=86400)
 
         assert position.amounts == before_amounts
@@ -1801,7 +1801,7 @@ class TestHistoricalVolumeIntegration:
             timestamp=datetime.now(),
         )
 
-        with pytest.raises(DataSourceUnavailableError):
+        with pytest.raises(NoAcceptableDataSourceError):
             adapter.update_position(position, market, elapsed_seconds=86400)
         assert position.accumulated_fees_usd == Decimal("0")
 
@@ -2022,7 +2022,7 @@ class TestMeasuredZeroVolume:
     """VIB-4849 (P2): Empty != Zero -- a measured zero volume is a valid source.
 
     A real ``0`` daily volume (explicit or observed) must produce zero fees, NOT
-    trigger the missing-source ``DataSourceUnavailableError``. Only an *absent*
+    trigger the missing-source ``NoAcceptableDataSourceError``. Only an *absent*
     (unmeasured) source raises.
     """
 
@@ -2142,7 +2142,7 @@ class TestMeasuredZeroVolume:
         position = create_lp_position()
         position.metadata["pool_address"] = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
 
-        with pytest.raises(DataSourceUnavailableError):
+        with pytest.raises(NoAcceptableDataSourceError):
             adapter._resolve_pool_volume(
                 position=position,
                 position_value_usd=Decimal("10000"),
@@ -2320,7 +2320,7 @@ class TestVolumePolicyViaDataConfig:
         )
         position = create_lp_position()
 
-        with pytest.raises(DataSourceUnavailableError):
+        with pytest.raises(NoAcceptableDataSourceError):
             adapter._resolve_pool_volume(
                 position=position,
                 position_value_usd=Decimal("10000"),

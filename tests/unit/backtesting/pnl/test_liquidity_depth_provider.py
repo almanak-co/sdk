@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 from almanak.framework.backtesting.pnl.providers.liquidity_depth import (
     DATA_SOURCE_FALLBACK,
     LiquidityDepthProvider,
@@ -29,8 +29,8 @@ def _measured_result(timestamp: datetime) -> LiquidityResult:
     )
 
 
-def _data_unavailable_error() -> DataSourceUnavailableError:
-    return DataSourceUnavailableError(
+def _data_unavailable_error() -> NoAcceptableDataSourceError:
+    return NoAcceptableDataSourceError(
         data_type="liquidity",
         identifier="pool",
         remediation="Narrow the liquidity query window.",
@@ -172,7 +172,7 @@ class TestLiquidityDepthProviderRouting:
             "_query_liquidity_by_family",
             AsyncMock(side_effect=_data_unavailable_error()),
         ):
-            with pytest.raises(DataSourceUnavailableError, match="pagination window"):
+            with pytest.raises(NoAcceptableDataSourceError, match="pagination window"):
                 await provider.get_liquidity_depth(
                     "0x0000000000000000000000000000000000000001",
                     "ethereum",

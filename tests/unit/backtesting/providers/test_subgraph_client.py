@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 from almanak.framework.backtesting.pnl.providers.rate_limiter import (
     TokenBucketRateLimiter,
 )
@@ -39,7 +39,6 @@ from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     create_subgraph_client,
     paginate_subgraph_query,
 )
-
 
 # =============================================================================
 # Test SubgraphClientConfig
@@ -197,7 +196,9 @@ class TestSuccessfulQueryExecution:
             mock_response = AsyncMock()
             mock_response.status = 200
             mock_response.json = AsyncMock(return_value=mock_response_data)
-            mock_session.post = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response), __aexit__=AsyncMock()))
+            mock_session.post = MagicMock(
+                return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response), __aexit__=AsyncMock())
+            )
             mock_get_session.return_value = mock_session
 
             result = await client.query(
@@ -249,7 +250,9 @@ class TestSuccessfulQueryExecution:
             mock_response = AsyncMock()
             mock_response.status = 200
             mock_response.json = AsyncMock(return_value=mock_response_data)
-            mock_session.post = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response), __aexit__=AsyncMock()))
+            mock_session.post = MagicMock(
+                return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response), __aexit__=AsyncMock())
+            )
             mock_get_session.return_value = mock_session
 
             await client.query(subgraph_id="test", query="{ pools { id } }")
@@ -274,7 +277,9 @@ class TestSuccessfulQueryExecution:
             mock_response = AsyncMock()
             mock_response.status = 200
             mock_response.json = AsyncMock(return_value=mock_response_data)
-            mock_session.post = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response), __aexit__=AsyncMock()))
+            mock_session.post = MagicMock(
+                return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response), __aexit__=AsyncMock())
+            )
             mock_get_session.return_value = mock_session
 
             result = await client.query(subgraph_id="test", query="{ pools { id } }")
@@ -411,7 +416,9 @@ class TestRateLimiterIntegration:
             mock_response = AsyncMock()
             mock_response.status = 200
             mock_response.json = AsyncMock(return_value=mock_response_data)
-            mock_session.post = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response), __aexit__=AsyncMock()))
+            mock_session.post = MagicMock(
+                return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response), __aexit__=AsyncMock())
+            )
             mock_get_session.return_value = mock_session
 
             with patch.object(client.rate_limiter, "retry_with_backoff") as mock_retry:
@@ -593,7 +600,9 @@ class TestErrorHandlingMalformedResponses:
             mock_response = AsyncMock()
             mock_response.status = 200
             mock_response.json = AsyncMock(return_value=mock_response_data)
-            mock_session.post = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response), __aexit__=AsyncMock()))
+            mock_session.post = MagicMock(
+                return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response), __aexit__=AsyncMock())
+            )
             mock_get_session.return_value = mock_session
 
             result = await client._execute_query(
@@ -679,7 +688,7 @@ class TestPaginationSupport:
         """Exhausting max_pages with full pages raises instead of truncating.
 
         VIB-5089: silent truncation is never acceptable - a window that
-        cannot be fully fetched must fail with DataSourceUnavailableError.
+        cannot be fully fetched must fail with NoAcceptableDataSourceError.
         """
         client = SubgraphClient()
 
@@ -688,7 +697,7 @@ class TestPaginationSupport:
             return {"pools": [{"id": str(variables["skip"])}]}
 
         with patch.object(client, "query", side_effect=mock_query):
-            with pytest.raises(DataSourceUnavailableError, match="max_pages=3"):
+            with pytest.raises(NoAcceptableDataSourceError, match="max_pages=3"):
                 await client.query_with_pagination(
                     subgraph_id="test",
                     query="query($first: Int!, $skip: Int!) { pools(first: $first, skip: $skip) { id } }",
@@ -715,7 +724,7 @@ class TestPaginationSupport:
             return {"pools": [{"id": f"{skip}-{i}"} for i in range(variables["first"])]}
 
         with patch.object(client, "query", side_effect=mock_query):
-            with pytest.raises(DataSourceUnavailableError, match="caps skip at 5000"):
+            with pytest.raises(NoAcceptableDataSourceError, match="caps skip at 5000"):
                 await client.query_with_pagination(
                     subgraph_id="test",
                     query="query($first: Int!, $skip: Int!) { pools(first: $first, skip: $skip) { id } }",
@@ -901,7 +910,7 @@ class TestCursorPagination:
         rows = _make_rows([100] * 8)  # 8 rows, all the same timestamp
 
         with patch.object(client, "query", side_effect=_fake_cursor_subgraph(rows)):
-            with pytest.raises(DataSourceUnavailableError, match="stalled"):
+            with pytest.raises(NoAcceptableDataSourceError, match="stalled"):
                 await client.query_with_pagination(
                     subgraph_id="test",
                     query=CURSOR_QUERY,
@@ -922,7 +931,7 @@ class TestCursorPagination:
         rows = _make_rows(list(range(100, 200)))  # 100 rows
 
         with patch.object(client, "query", side_effect=_fake_cursor_subgraph(rows)):
-            with pytest.raises(DataSourceUnavailableError, match="max_pages=2"):
+            with pytest.raises(NoAcceptableDataSourceError, match="max_pages=2"):
                 await client.query_with_pagination(
                     subgraph_id="test",
                     query=CURSOR_QUERY,

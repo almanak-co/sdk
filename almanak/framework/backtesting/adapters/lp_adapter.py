@@ -63,8 +63,8 @@ from almanak.framework.backtesting.adapters.base import (
     register_adapter,
 )
 from almanak.framework.backtesting.exceptions import (
-    DataSourceUnavailableError,
     HistoricalDataUnavailableError,
+    NoAcceptableDataSourceError,
 )
 from almanak.framework.backtesting.models import FeeAccrualResult
 from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
@@ -223,7 +223,7 @@ class LPBacktestConfig(StrategyBacktestConfig):
             liquidity-share denominator instead of ``base_liquidity``.
         allow_volume_fallback: Opt-in to the ``volume_multiplier`` heuristic when no
             real volume is available. Defaults to False -> the adapter raises
-            ``DataSourceUnavailableError`` rather than silently fabricating a number
+            ``NoAcceptableDataSourceError`` rather than silently fabricating a number
             (VIB-4849).
 
     Example:
@@ -262,7 +262,7 @@ class LPBacktestConfig(StrategyBacktestConfig):
     for fee calculation. When the lookup fails (gateway unreachable / no data)
     the adapter does NOT silently fabricate a number: it either uses explicit
     inputs, the opt-in heuristic (``allow_volume_fallback``), or raises
-    ``DataSourceUnavailableError``."""
+    ``NoAcceptableDataSourceError``."""
 
     explicit_pool_volume_usd_daily: Decimal | None = None
     """Caller-provided daily pool volume in USD. When set, fee accrual uses this
@@ -280,7 +280,7 @@ class LPBacktestConfig(StrategyBacktestConfig):
     allow_volume_fallback: bool = False
     """Explicit opt-in to the ``volume_multiplier`` heuristic when no real volume
     data is available. Defaults to False: the adapter fails loud
-    (``DataSourceUnavailableError``) rather than silently fabricating
+    (``NoAcceptableDataSourceError``) rather than silently fabricating
     ``position_value_usd * volume_multiplier``. Set True only when you knowingly
     accept a rough, order-of-magnitude-uncertain fee estimate (e.g. quick
     parameter sweeps), and understand the result is LOW confidence."""
@@ -3630,7 +3630,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
            ``allow_volume_fallback=True`` on either config surface. LOW confidence.
 
         When none of the above yields a usable number, this raises
-        :class:`DataSourceUnavailableError` rather than silently fabricating a value
+        :class:`NoAcceptableDataSourceError` rather than silently fabricating a value
         (VIB-4849). The error message tells the caller exactly what to provide.
 
         Args:
@@ -3644,7 +3644,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             A :class:`_VolumeResolution` describing the chosen volume and its source.
 
         Raises:
-            DataSourceUnavailableError: If no acceptable, non-fabricated volume
+            NoAcceptableDataSourceError: If no acceptable, non-fabricated volume
                 source is available and the heuristic fallback is not opted into.
         """
         explicit_resolution = self._explicit_pool_volume_resolution()
@@ -3743,7 +3743,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
 
     @staticmethod
     def _raise_pool_volume_unavailable(position: "SimulatedPosition", pool_address: str | None) -> NoReturn:
-        raise DataSourceUnavailableError(
+        raise NoAcceptableDataSourceError(
             data_type="volume",
             identifier=pool_address or f"position:{position.position_id}",
             remediation=(

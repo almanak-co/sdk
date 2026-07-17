@@ -45,7 +45,7 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from almanak.framework.data.pools.history import PoolSnapshot
@@ -117,6 +117,12 @@ class PoolHistoryFallback:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._daily_cache: dict[tuple[str, str, str, date], DailyPoolHistory | None] = {}
+        # Single-flight (ALM-2956): concurrent callers for one pool-day share
+        # one fetch. The volume (sync) and liquidity (async-executor) paths
+        # can race on the same day; without coalescing both spend the fetch.
+        # Each flight is {"event", "outcome"}; waiters keep a local reference,
+        # so popping the flight leaves nothing retained per pool-day.
+        self._inflight: dict[tuple[str, str, str, date], dict[str, Any]] = {}
         self._disabled_reason: str | None = None
         self._transport_failure_streak = 0
         #: Wall-clock deadline until which the transport breaker keeps the
@@ -166,34 +172,55 @@ class PoolHistoryFallback:
         # Solana address. Mixed-case EVM callers at worst duplicate a
         # cache entry.
         pool_key = (pool_address, chain, protocol, day)
-        with self._lock:
-            if self._disabled_reason is not None:
-                return DailyPoolHistoryOutcome(history=None, cacheable=True)
-            if self._transport_disabled_until is not None:
-                if datetime.now(UTC) < self._transport_disabled_until:
-                    return DailyPoolHistoryOutcome(history=None, cacheable=False)
-                # Cooldown elapsed: the transient outage may have cleared.
-                # Re-arm the breaker with a fresh streak and let this lookup
-                # retry, so one blip does not disable the ladder for every
-                # later backtest in the process (Codex/Grok PR review, #3283).
-                self._transport_disabled_until = None
-                self._transport_failure_streak = 0
-            if (protocol, chain) in self._unsupported_pairs:
-                return DailyPoolHistoryOutcome(history=None, cacheable=True)
-            if pool_key in self._daily_cache:
-                return DailyPoolHistoryOutcome(history=self._daily_cache[pool_key], cacheable=True)
-
-        result, cacheable = self._fetch_daily(pool_address=pool_address, chain=chain, protocol=protocol, day=day)
-        if cacheable:
-            # Only DEFINITIVE outcomes are memoized: a served day with these
-            # exact measurements (or a served both-legs miss). A day whose
-            # fetch FAILED (gateway blip, empty rate bucket) stays uncached
-            # so a later lookup retries once the condition clears —
-            # permanently caching a TVL-only partial would strand measured
-            # volume for the rest of the run (Codex PR review, #3283).
+        while True:
             with self._lock:
-                self._daily_cache[pool_key] = result
-        return DailyPoolHistoryOutcome(history=result, cacheable=cacheable)
+                if self._disabled_reason is not None:
+                    return DailyPoolHistoryOutcome(history=None, cacheable=True)
+                if self._transport_disabled_until is not None:
+                    if datetime.now(UTC) < self._transport_disabled_until:
+                        return DailyPoolHistoryOutcome(history=None, cacheable=False)
+                    # Cooldown elapsed: the transient outage may have cleared.
+                    # Re-arm the breaker with a fresh streak and let this lookup
+                    # retry, so one blip does not disable the ladder for every
+                    # later backtest in the process (Codex/Grok PR review, #3283).
+                    self._transport_disabled_until = None
+                    self._transport_failure_streak = 0
+                if (protocol, chain) in self._unsupported_pairs:
+                    return DailyPoolHistoryOutcome(history=None, cacheable=True)
+                if pool_key in self._daily_cache:
+                    return DailyPoolHistoryOutcome(history=self._daily_cache[pool_key], cacheable=True)
+                flight = self._inflight.get(pool_key)
+                if flight is None:
+                    flight = {"event": threading.Event(), "outcome": None}
+                    self._inflight[pool_key] = flight
+                    break  # this caller owns the fetch
+            # Another caller is fetching this exact pool-day: share its
+            # outcome instead of double-spending the fetch (ALM-2956).
+            flight["event"].wait()
+            shared = flight["outcome"]
+            if shared is not None:
+                return shared
+            # Owner died without recording (process-level error): loop and
+            # re-evaluate gates/cache; at worst this caller fetches itself.
+
+        try:
+            result, cacheable = self._fetch_daily(pool_address=pool_address, chain=chain, protocol=protocol, day=day)
+            outcome = DailyPoolHistoryOutcome(history=result, cacheable=cacheable)
+            if cacheable:
+                # Only DEFINITIVE outcomes are memoized: a served day with these
+                # exact measurements (or a served both-legs miss). A day whose
+                # fetch FAILED (gateway blip, empty rate bucket) stays uncached
+                # so a later lookup retries once the condition clears —
+                # permanently caching a TVL-only partial would strand measured
+                # volume for the rest of the run (Codex PR review, #3283).
+                with self._lock:
+                    self._daily_cache[pool_key] = result
+            flight["outcome"] = outcome
+            return outcome
+        finally:
+            with self._lock:
+                self._inflight.pop(pool_key, None)
+            flight["event"].set()
 
     async def daily_history_async(
         self,

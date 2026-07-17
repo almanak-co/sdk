@@ -24,7 +24,7 @@ class BacktestError(Exception):
     pass
 
 
-class DataSourceUnavailableError(BacktestError):
+class NoAcceptableDataSourceError(BacktestError):
     """Raised when a required data source is unavailable and no safe fallback exists.
 
     Unlike :class:`HistoricalDataUnavailableError` (which signals a missing
@@ -47,7 +47,7 @@ class DataSourceUnavailableError(BacktestError):
         remediation: Concrete, actionable guidance on how to make the call succeed.
 
     Example:
-        raise DataSourceUnavailableError(
+        raise NoAcceptableDataSourceError(
             data_type="volume",
             identifier="WETH/USDC",
             remediation=(
@@ -88,11 +88,15 @@ class DataSourceUnavailableError(BacktestError):
     def __repr__(self) -> str:
         """Return a detailed representation of the exception."""
         return (
-            f"DataSourceUnavailableError("
+            f"NoAcceptableDataSourceError("
             f"data_type={self.data_type!r}, "
             f"identifier={self.identifier!r}, "
             f"remediation={self.remediation!r})"
         )
+
+
+# Deprecated alias, remove after one release.
+DataSourceUnavailableError = NoAcceptableDataSourceError
 
 
 class HistoricalDataUnavailableError(BacktestError):
@@ -220,6 +224,7 @@ class UnsupportedIntentError(BacktestError):
 
 __all__ = [
     "BacktestError",
+    "NoAcceptableDataSourceError",
     "DataSourceUnavailableError",
     "HistoricalDataUnavailableError",
     "UnsupportedIntentError",

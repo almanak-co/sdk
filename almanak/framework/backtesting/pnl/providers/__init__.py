@@ -89,28 +89,6 @@ from .chainlink import (
     PersistentCacheConfig,
     PriceCache,
 )
-from .circuit_breaker import (
-    CHAINLINK_CONFIG,
-    COINGECKO_CONFIG,
-    ETHERSCAN_CONFIG,
-    RPC_CONFIG,
-    SUBGRAPH_CONFIG,
-    CircuitBreaker,
-    CircuitBreakerConfig,
-    CircuitBreakerError,
-    CircuitBreakerMetrics,
-    CircuitBreakerOpenError,
-    CircuitBreakerRegistry,
-    CircuitBreakerState,
-    create_chainlink_circuit_breaker,
-    create_coingecko_circuit_breaker,
-    create_etherscan_circuit_breaker,
-    create_rpc_circuit_breaker,
-    create_subgraph_circuit_breaker,
-    get_all_circuit_breaker_metrics,
-    get_circuit_breaker,
-    get_open_circuits,
-)
 from .coingecko import CoinGeckoDataProvider
 from .data_validation import (
     DataQualityIssue,
@@ -172,14 +150,9 @@ from .rate_limiter import (
     create_coingecko_rate_limiter,
 )
 from .registry import ProviderMetadata, ProviderRegistry
-from .subgraph import (
-    CachedVolume,
-    PoolNotFoundError,
-    PoolVolumeData,
-    SubgraphError,
+from .subgraph_client import (
     SubgraphQueryError,
     SubgraphRateLimitError,
-    SubgraphVolumeProvider,
 )
 from .twap import (
     CachedTWAP,
@@ -242,14 +215,9 @@ __all__ = [
     "get_benchmark_price_series",
     "get_benchmark_returns",
     "get_benchmark_total_return",
-    # Subgraph Volume Provider
-    "SubgraphVolumeProvider",
-    "PoolVolumeData",
-    "CachedVolume",
-    "SubgraphError",
+    # Subgraph exception taxonomy (canonical: subgraph_client)
     "SubgraphRateLimitError",
     "SubgraphQueryError",
-    "PoolNotFoundError",
     # Multi-DEX Volume Provider
     "MultiDEXVolumeProvider",
     # Funding Rate Provider
@@ -282,27 +250,6 @@ __all__ = [
     "DataQualityIssue",
     "DataQualityIssueType",
     "DataQualitySeverity",
-    # Circuit Breaker
-    "CircuitBreaker",
-    "CircuitBreakerConfig",
-    "CircuitBreakerState",
-    "CircuitBreakerMetrics",
-    "CircuitBreakerRegistry",
-    "CircuitBreakerError",
-    "CircuitBreakerOpenError",
-    "get_circuit_breaker",
-    "get_all_circuit_breaker_metrics",
-    "get_open_circuits",
-    "create_coingecko_circuit_breaker",
-    "create_chainlink_circuit_breaker",
-    "create_subgraph_circuit_breaker",
-    "create_etherscan_circuit_breaker",
-    "create_rpc_circuit_breaker",
-    "COINGECKO_CONFIG",
-    "CHAINLINK_CONFIG",
-    "SUBGRAPH_CONFIG",
-    "ETHERSCAN_CONFIG",
-    "RPC_CONFIG",
     # Liquidity Depth Provider
     "LiquidityDepthProvider",
     "LIQUIDITY_DATA_SOURCE_FALLBACK",

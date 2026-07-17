@@ -504,3 +504,31 @@ class TestGranularityHandoff:
         await backtester.backtest(strategy, _config(num_hours=40))
 
         assert any(strategy.served)  # warm-up refuses, then 1h RSI serves
+
+
+class TestLendingRateServe:
+    """decide()-time lending_rate served from the sim's own APY tables."""
+
+    def test_lending_rate_serves_the_accrued_constant(self) -> None:
+        from decimal import Decimal
+
+        from tests.validation.backtesting.trust_matrix import ScriptedStrategy, flat_series, run_backtest
+
+        seen: list = []
+
+        class RateProbe(ScriptedStrategy):
+            def decide(self, market):
+                seen.append(market.lending_rate("aave_v3", "USDC", "supply"))
+                return super().decide(market)
+
+        result = run_backtest(RateProbe([None, None]), flat_series(6), hours=3)
+
+        assert result.success
+        assert seen, "decide() never ran"
+        rate = seen[0]
+        # The connector-declared aave_v3 supply default the sim accrues.
+        assert rate.apy_percent == Decimal("3.00")
+        assert rate.side == "supply"
+        # Served every tick, never a hollow unconfigured failure.
+        assert all(r is not None for r in seen)
+        assert not any(entry["source"] == "lending_rate" for entry in (result.decision_input_failures or []))

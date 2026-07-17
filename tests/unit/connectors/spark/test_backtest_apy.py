@@ -28,7 +28,7 @@ from almanak.connectors.spark.backtest_apy import (
     SparkAPYProvider,
     SparkClientConfig,
 )
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
     SubgraphClientConfig,
@@ -435,7 +435,7 @@ class TestAPYFetching:
         """Pagination overflow is not silently replaced with fallback data."""
         provider = SparkAPYProvider(client=mock_client)
         provider._client.query_with_pagination = AsyncMock(
-            side_effect=DataSourceUnavailableError(
+            side_effect=NoAcceptableDataSourceError(
                 data_type="apy",
                 identifier="0xmarket123",
                 remediation="narrow the query window",
@@ -443,7 +443,7 @@ class TestAPYFetching:
             )
         )
 
-        with pytest.raises(DataSourceUnavailableError, match="window too large"):
+        with pytest.raises(NoAcceptableDataSourceError, match="window too large"):
             await provider.get_apy(
                 protocol="spark",
                 market="0xmarket123",

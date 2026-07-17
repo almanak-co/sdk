@@ -12,12 +12,11 @@ $10k/84-trade run). These tests pin the replacement behaviour:
   source, ``ParameterSource.DEFAULT``) and the compliance fallback counter
   still fires -- a default is still a fabrication, just a plausible one.
 - Institutional mode refuses to fabricate: an unset gas price with no
-  historical/market datum raises ``DataSourceUnavailableError`` instead of
+  historical/market datum raises ``NoAcceptableDataSourceError`` instead of
   silently costing trades from a guess.
 """
 
 from __future__ import annotations
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -27,11 +26,9 @@ from typing import Any
 import pytest
 
 from almanak.core.chains import ChainRegistry
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 from almanak.framework.backtesting.models import ParameterSource
 from almanak.framework.backtesting.pnl._engine_helpers import (
-
-
     _append_fallback_compliance_violations,
 )
 from almanak.framework.backtesting.pnl.config import (
@@ -49,6 +46,7 @@ from almanak.framework.backtesting.pnl.error_handling import (
     BacktestErrorHandler,
 )
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 # =============================================================================
 # Helpers (minimal stand-ins; same shape as test_engine_characterization.py)
@@ -340,7 +338,7 @@ class TestInstitutionalModeGasFabrication:
         engine = _backtester()
         config = _config(institutional_mode=True)
 
-        with pytest.raises(DataSourceUnavailableError, match="refuses to fabricate"):
+        with pytest.raises(NoAcceptableDataSourceError, match="refuses to fabricate"):
             await _execute_swap(engine, config, _market_state())
 
     @pytest.mark.asyncio
@@ -379,7 +377,7 @@ class TestInstitutionalModeGasFabrication:
         market_state = _market_state()
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
 
-        with pytest.raises(DataSourceUnavailableError):
+        with pytest.raises(NoAcceptableDataSourceError):
             await engine._process_pending_intents(
                 [(_FakeSwapIntent(), START, 0)],
                 portfolio,
@@ -397,7 +395,7 @@ class TestInstitutionalModeGasFabrication:
         market_state = _market_state()
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
 
-        with pytest.raises(DataSourceUnavailableError):
+        with pytest.raises(NoAcceptableDataSourceError):
             await engine._process_pending_intents(
                 [(_FakeSwapIntent(), START, 0)],
                 portfolio,
@@ -421,7 +419,7 @@ class TestInstitutionalModeGasFabrication:
             def on_intent_executed(self, notified_intent: Any, success: bool, result: Any) -> None:
                 notifications.append((notified_intent, success))
 
-        with pytest.raises(DataSourceUnavailableError):
+        with pytest.raises(NoAcceptableDataSourceError):
             await engine._process_pending_intents(
                 [(intent, START, 0)],
                 portfolio,

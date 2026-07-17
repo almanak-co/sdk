@@ -28,7 +28,6 @@ from almanak.framework.data.market_snapshot import (
     FundingRateHistoryUnavailableError,
     LendingRateHistoryUnavailableError,
 )
-from almanak.framework.market import MarketSnapshot
 from almanak.framework.data.models import DataClassification, DataEnvelope
 from almanak.framework.data.rates.history import (
     FundingRateSnapshot,
@@ -40,6 +39,7 @@ from almanak.framework.data.rates.history import (
     _serialize_funding_snapshots,
     _serialize_lending_snapshots,
 )
+from almanak.framework.market import MarketSnapshot
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -645,10 +645,7 @@ class TestFundingRateFromHyperliquid:
 
 
 @pytest.mark.skip(
-    reason=(
-        "VIB-4859 W7: cache integration tests need rewriting to use gateway-mocked "
-        "data flow; tracked in VIB-4869."
-    )
+    reason=("VIB-4859 W7: cache integration tests need rewriting to use gateway-mocked data flow; tracked in VIB-4869.")
 )
 class TestRateHistoryCache:
     def test_lending_cache_hit(self, reader: RateHistoryReader) -> None:
@@ -970,10 +967,7 @@ class TestMarketSnapshotFundingRateHistory:
 
 
 @pytest.mark.skip(
-    reason=(
-        "VIB-4859 W7: integration test needs rewriting to mock the gateway "
-        "stub; tracked in VIB-4869."
-    )
+    reason=("VIB-4859 W7: integration test needs rewriting to mock the gateway stub; tracked in VIB-4869.")
 )
 class TestDataEnvelopeIntegration:
     def test_lending_envelope_classification(self, reader: RateHistoryReader) -> None:
@@ -1028,3 +1022,78 @@ class TestDataEnvelopeIntegration:
         assert envelope.meta.finality == "off_chain"
         assert envelope.meta.confidence == 0.85
         assert envelope.meta.latency_ms >= 0
+
+
+class TestFundingDecoderContract:
+    """Shared decoder semantics with the backtest lane (ALM-2943 ph3)."""
+
+    def test_unmeasured_points_are_skipped_never_zeroed(self) -> None:
+        from types import SimpleNamespace
+
+        from almanak.framework.data.rates.history import _funding_points_to_snapshots
+
+        points = [
+            SimpleNamespace(timestamp=1_700_000_000, rate_hourly="0.0004", rate_annualized=""),
+            SimpleNamespace(timestamp=1_700_003_600, rate_hourly="", rate_annualized=""),
+            SimpleNamespace(timestamp=1_700_007_200, rate_hourly=None, rate_annualized=""),
+        ]
+
+        snapshots = _funding_points_to_snapshots(points)
+
+        assert [s.rate for s in snapshots] == [Decimal("0.0004")]
+
+    def test_malformed_points_are_skipped_never_zeroed(self) -> None:
+        from types import SimpleNamespace
+
+        from almanak.framework.data.rates.history import _funding_points_to_snapshots
+
+        points = [
+            SimpleNamespace(timestamp=1_700_000_000, rate_hourly="garbage", rate_annualized=""),
+            SimpleNamespace(timestamp=1_700_003_600, rate_hourly="NaN", rate_annualized=""),
+            # Valid hourly with malformed annualized: annualized derives from hourly.
+            SimpleNamespace(timestamp=1_700_007_200, rate_hourly="0.0002", rate_annualized="bogus"),
+        ]
+
+        snapshots = _funding_points_to_snapshots(points)
+
+        assert [s.rate for s in snapshots] == [Decimal("0.0002")]
+        assert snapshots[0].annualized_rate == Decimal("0.0002") * 8760
+
+    def test_wide_windows_chunk_instead_of_truncating(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from almanak.framework.data.rates.history import (
+            _MAX_FUNDING_WINDOW_SECONDS,
+            RateHistoryReader,
+        )
+
+        calls: list[tuple[int, int]] = []
+
+        def fake_call(client, gateway_pb2, *, venue, market, start_ts, end_ts):
+            calls.append((start_ts, end_ts))
+            return SimpleNamespace(
+                success=True,
+                points=[SimpleNamespace(timestamp=start_ts, rate_hourly="0.0001", rate_annualized="")],
+            )
+
+        reader = RateHistoryReader()
+        with (
+            patch(
+                "almanak.framework.data.rates.history._rate_history_get_connected_gateway_client",
+                return_value=(object(), object()),
+            ),
+            patch("almanak.framework.data.rates.history._call_get_funding_rate_history", side_effect=fake_call),
+        ):
+            snapshots = reader._fetch_funding_via_gateway("hyperliquid", "ETH-USD", start_ts=0, end_ts=1200 * 3600)
+
+        # 1200h window: 500h + 500h + 200h — three RPCs, no silent tail drop.
+        assert len(calls) == 3
+        # Inclusive bounds (mirrors the backtest decoder): each chunk spans at
+        # most 500 hourly points, so the ~500-row venue cap can't drop a tail.
+        assert calls[0] == (0, _MAX_FUNDING_WINDOW_SECONDS - 1)
+        assert calls[1] == (_MAX_FUNDING_WINDOW_SECONDS, 2 * _MAX_FUNDING_WINDOW_SECONDS - 1)
+        assert calls[-1][1] == 1200 * 3600
+        assert all(end - start < _MAX_FUNDING_WINDOW_SECONDS for start, end in calls)
+        assert [s.timestamp for s in snapshots] == sorted(s.timestamp for s in snapshots)
+        assert len(snapshots) == 3

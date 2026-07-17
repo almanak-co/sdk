@@ -2,7 +2,7 @@
 
 The PnL engine's LP adapter refuses to fabricate pool volume by default
 (VIB-4849): with no acceptable volume source it raises
-`DataSourceUnavailableError` instead of inventing a number. Before these
+`NoAcceptableDataSourceError` instead of inventing a number. Before these
 flags existed the CLI exposed no way to provide a source, so no LP PnL
 backtest could complete through the CLI. Covered contracts:
 
@@ -10,7 +10,7 @@ backtest could complete through the CLI. Covered contracts:
   backtester keeps its historical no-data_config behaviour), maps each flag
   onto `BacktestDataConfig`, and emits the LOW-confidence warning when
   `--allow-volume-fallback` is used.
-- `_run_backtest`: a missing-volume `DataSourceUnavailableError` keeps the
+- `_run_backtest`: a missing-volume `NoAcceptableDataSourceError` keeps the
   grep-asserted `"Error running backtest: ..."` line and adds a hint naming
   the new flags.
 - `pnl_backtest` wiring: the built config reaches `PnLBacktester(data_config=...)`;
@@ -29,7 +29,7 @@ from click.testing import CliRunner
 
 from almanak.framework.backtesting import PnLBacktestConfig
 from almanak.framework.backtesting.config import BacktestDataConfig
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 from almanak.framework.backtesting.models import (
     BacktestEngine,
     BacktestMetrics,
@@ -187,9 +187,7 @@ class TestBuildVolumeDataConfig:
         assert enabled is not None and enabled.use_historical_volume is True
         assert disabled is not None and disabled.use_historical_volume is False
 
-    def test_allow_volume_fallback_sets_flag_and_warns(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_allow_volume_fallback_sets_flag_and_warns(self, capsys: pytest.CaptureFixture[str]) -> None:
         config = _build_volume_data_config(
             historical_volume=None,
             pool_volume_usd_daily=None,
@@ -203,9 +201,7 @@ class TestBuildVolumeDataConfig:
         assert "LOW-confidence" in captured.err
         assert "order of magnitude" in captured.err
 
-    def test_no_warning_without_fallback_optin(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_no_warning_without_fallback_optin(self, capsys: pytest.CaptureFixture[str]) -> None:
         _build_volume_data_config(
             historical_volume=None,
             pool_volume_usd_daily=1000.0,
@@ -234,16 +230,14 @@ class TestBuildVolumeDataConfig:
 
 
 class TestRunBacktestVolumeHint:
-    def _volume_error(self) -> DataSourceUnavailableError:
-        return DataSourceUnavailableError(
+    def _volume_error(self) -> NoAcceptableDataSourceError:
+        return NoAcceptableDataSourceError(
             data_type="volume",
             identifier="position:LP_TEST",
             remediation="set use_historical_volume=True ...",
         )
 
-    def test_missing_volume_error_adds_flag_hint(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_missing_volume_error_adds_flag_hint(self, capsys: pytest.CaptureFixture[str]) -> None:
         backtester = MagicMock()
         backtester.backtest = AsyncMock(side_effect=self._volume_error())
 
@@ -261,12 +255,10 @@ class TestRunBacktestVolumeHint:
         assert "--allow-volume-fallback" in captured.err
         assert "--historical-volume" in captured.err
 
-    def test_non_volume_data_source_error_gets_no_volume_hint(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_non_volume_data_source_error_gets_no_volume_hint(self, capsys: pytest.CaptureFixture[str]) -> None:
         backtester = MagicMock()
         backtester.backtest = AsyncMock(
-            side_effect=DataSourceUnavailableError(
+            side_effect=NoAcceptableDataSourceError(
                 data_type="funding",
                 identifier="perp:TEST",
                 remediation="provide funding data",
@@ -292,13 +284,10 @@ class TestEmitMissingVolumeHintForResult:
 
     def _volume_error_message(self) -> str:
         return (
-            "No acceptable volume data source for 'position:LP_TEST' and "
-            "refusing to fabricate a value. To proceed: ..."
+            "No acceptable volume data source for 'position:LP_TEST' and refusing to fabricate a value. To proceed: ..."
         )
 
-    def test_hint_emitted_for_result_carried_volume_error(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_hint_emitted_for_result_carried_volume_error(self, capsys: pytest.CaptureFixture[str]) -> None:
         result = _make_result()
         result.error = self._volume_error_message()
         result.errors = [
@@ -332,9 +321,7 @@ class TestEmitMissingVolumeHintForResult:
         _emit_missing_volume_hint_for_result(result)
         assert capsys.readouterr().err == ""
 
-    def test_cli_run_with_result_carried_volume_error_shows_hint(
-        self, cli_runner: CliRunner
-    ) -> None:
+    def test_cli_run_with_result_carried_volume_error_shows_hint(self, cli_runner: CliRunner) -> None:
         """End-to-end through `pnl_backtest`: partial result -> hint in output."""
         failed = _make_result()
         failed.error = self._volume_error_message()
@@ -401,10 +388,10 @@ def _invoke_pnl(cli_runner: CliRunner, extra_args: list[str]) -> tuple[Any, Magi
             "almanak.framework.cli.backtest.pnl.get_strategy",
             return_value=_DummyStrategy,
         ),
-            patch(
-                "almanak.framework.cli.backtest.pnl.load_strategy_config",
-                return_value=_strategy_config(),
-            ),
+        patch(
+            "almanak.framework.cli.backtest.pnl.load_strategy_config",
+            return_value=_strategy_config(),
+        ),
         patch("almanak.framework.cli.backtest.pnl.CoinGeckoDataProvider"),
         patch("almanak.framework.cli.backtest.pnl._print_benchmark_comparison"),
         patch("almanak.framework.cli.backtest.pnl.PnLBacktester") as mock_backtester,
@@ -415,9 +402,7 @@ def _invoke_pnl(cli_runner: CliRunner, extra_args: list[str]) -> tuple[Any, Magi
 
 
 class TestPnLBacktestVolumeWiring:
-    def test_explicit_volume_flags_reach_backtester_data_config(
-        self, cli_runner: CliRunner
-    ) -> None:
+    def test_explicit_volume_flags_reach_backtester_data_config(self, cli_runner: CliRunner) -> None:
         result, mock_backtester = _invoke_pnl(
             cli_runner,
             ["--pool-volume-usd-daily", "5000000", "--pool-liquidity-usd", "2000000"],
@@ -430,9 +415,7 @@ class TestPnLBacktestVolumeWiring:
         assert data_config.explicit_pool_liquidity_usd == Decimal("2000000.0")
         assert data_config.allow_volume_fallback is False
 
-    def test_allow_volume_fallback_flag_reaches_backtester(
-        self, cli_runner: CliRunner
-    ) -> None:
+    def test_allow_volume_fallback_flag_reaches_backtester(self, cli_runner: CliRunner) -> None:
         result, mock_backtester = _invoke_pnl(cli_runner, ["--allow-volume-fallback"])
 
         assert result.exit_code == 0, f"CLI failed: {result.output}"

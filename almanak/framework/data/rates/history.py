@@ -131,11 +131,25 @@ def _call_get_funding_rate_history(
 
 
 def _funding_points_to_snapshots(points: Any) -> list[FundingRateSnapshot]:
-    """Convert proto funding points into ``FundingRateSnapshot`` rows."""
+    """Convert proto funding points into ``FundingRateSnapshot`` rows.
+
+    Points without a measured ``rate_hourly`` are SKIPPED, never zeroed —
+    an unmeasured funding hour must not masquerade as a measured 0 (same
+    contract as the backtest decoder in ``pnl/providers/perp``).
+    """
     snapshots: list[FundingRateSnapshot] = []
     for point in points:
-        rate = _safe_decimal(point.rate_hourly or "0")
-        annualized = _safe_decimal(point.rate_annualized or str(rate * Decimal(_HOURS_PER_YEAR)))
+        if not point.rate_hourly:
+            continue
+        try:
+            rate = Decimal(str(point.rate_hourly))
+        except (InvalidOperation, TypeError, ValueError):
+            continue  # malformed measurement: skip, never a measured 0
+        if not rate.is_finite():
+            continue
+        annualized = _decimal_or_none(point.rate_annualized)
+        if annualized is None:
+            annualized = rate * Decimal(_HOURS_PER_YEAR)
         snapshots.append(
             FundingRateSnapshot(
                 rate=rate,
@@ -292,6 +306,21 @@ class FundingRateSnapshot:
 # Hours per year for annualization (preserved for back-compat with
 # pre-W7 callers that imported the constant).
 _HOURS_PER_YEAR = 8760
+#: Venue backends cap one funding-history response at ~500 entries; mirrors
+#: the backtest decoder's MAX_WINDOW_SECONDS so wide windows chunk instead
+#: of silently truncating the tail.
+_MAX_FUNDING_WINDOW_SECONDS = 500 * 3600
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    """Parse a finite Decimal, or None for missing/malformed/non-finite input."""
+    if value in (None, ""):
+        return None
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return result if result.is_finite() else None
 
 
 def _safe_decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
@@ -658,21 +687,37 @@ class RateHistoryReader:
         start_ts: int,
         end_ts: int,
     ) -> list[FundingRateSnapshot]:
-        """Translate the ``GetFundingRateHistory`` RPC into ``FundingRateSnapshot``s."""
-        self._metrics["gateway"].requests += 1
+        """Translate the ``GetFundingRateHistory`` RPC into ``FundingRateSnapshot``s.
 
+        Windows are chunked to ``_MAX_FUNDING_WINDOW_SECONDS``: venue
+        backends cap one response at ~500 entries, so a single wide RPC
+        silently drops the tail (same chunking the backtest decoder uses).
+        """
         client, gateway_pb2 = _rate_history_get_connected_gateway_client()
-        response = _call_get_funding_rate_history(
-            client,
-            gateway_pb2,
-            venue=venue,
-            market=market,
-            start_ts=start_ts,
-            end_ts=end_ts,
-        )
-        snapshots = _funding_points_to_snapshots(response.points)
-
-        self._metrics["gateway"].successes += 1
+        snapshots: list[FundingRateSnapshot] = []
+        seen_ts: set[datetime] = set()
+        chunk_start = start_ts
+        while chunk_start <= end_ts:
+            # Inclusive bounds, mirroring the backtest decoder: [start, start
+            # + window - 1] is exactly 500 hourly points, so the ~500-row
+            # venue cap can never drop the tail hour of a chunk.
+            chunk_end = min(chunk_start + _MAX_FUNDING_WINDOW_SECONDS - 1, end_ts)
+            self._metrics["gateway"].requests += 1
+            response = _call_get_funding_rate_history(
+                client,
+                gateway_pb2,
+                venue=venue,
+                market=market,
+                start_ts=chunk_start,
+                end_ts=chunk_end,
+            )
+            for snapshot in _funding_points_to_snapshots(response.points):
+                if snapshot.timestamp not in seen_ts:
+                    seen_ts.add(snapshot.timestamp)
+                    snapshots.append(snapshot)
+            self._metrics["gateway"].successes += 1
+            chunk_start = chunk_end + 1
+        snapshots.sort(key=lambda snapshot: snapshot.timestamp)
         return snapshots
 
 

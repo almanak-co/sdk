@@ -60,7 +60,7 @@ Examples:
 
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 # Note: There's a naming conflict between fee_models.py (module) and fee_models/ (package)
@@ -85,7 +85,7 @@ from almanak.framework.backtesting.adapters.registry import (
     get_adapter_for_strategy_with_config,
 )
 from almanak.framework.backtesting.config import BacktestDataConfig
-from almanak.framework.backtesting.exceptions import DataSourceUnavailableError, UnsupportedIntentError
+from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError, UnsupportedIntentError
 from almanak.framework.backtesting.models import (
     BacktestMetrics,
     BacktestResult,
@@ -456,6 +456,7 @@ def create_market_snapshot_from_state(
     gas_view: Any | None = None,
     default_timeframe: str | None = None,
     ohlcv_module: Any | None = None,
+    lending_rates: "list[Any] | None" = None,
 ) -> MarketSnapshot:
     """Create a MarketSnapshot from historical MarketState data.
 
@@ -513,9 +514,53 @@ def create_market_snapshot_from_state(
     # the same keys (the cash lane's symbol writes land on address keys).
     _register_snapshot_symbol_aliases(snapshot, token_addresses, chain)
     _seed_snapshot_prices(snapshot, market_state)
+    if lending_rates:
+        # decide()-time lending_rate reads served from the same constants the
+        # simulation accrues (ALM-2951); rate-branching strategies stop going
+        # hollow on "no RateMonitor configured".
+        for rate in lending_rates:
+            snapshot.set_lending_rate(rate.protocol, rate.token, rate.side, rate)
     if portfolio:
         _seed_snapshot_balances(snapshot, market_state, portfolio, token_addresses)
     return snapshot
+
+
+def build_backtest_lending_rates(
+    token_symbols: "Iterable[str]",
+    chain: str,
+    timestamp: "datetime",
+) -> list[Any]:
+    """Prebuild decide()-time lending rates from the connector-declared APY tables.
+
+    One list per run (the defaults are constant); the snapshot factory seeds
+    it each tick. This is the connector-default plane — the same tables the
+    lending lane falls back to. When ``use_historical_apy`` serves measured
+    rates for a protocol, accrual can diverge from these seeded defaults;
+    aligning decide()-time rates with the measured plane needs the run-scoped
+    as-of data plane (ALM-2943 broker remainder).
+    """
+    from almanak.framework.backtesting.pnl.calculators import InterestCalculator
+    from almanak.framework.data.rates.monitor import LendingRate
+
+    calculator = InterestCalculator()
+    rates: list[Any] = []
+    symbols = sorted({str(symbol).upper() for symbol in token_symbols})
+    tables = (("supply", calculator.protocol_supply_apys), ("borrow", calculator.protocol_borrow_apys))
+    for side, table in tables:
+        for protocol, apy in table.items():
+            for symbol in symbols:
+                rates.append(
+                    LendingRate(
+                        protocol=protocol,
+                        token=symbol,
+                        side=side,
+                        apy_ray=apy * Decimal(10) ** 27,
+                        apy_percent=apy * Decimal(100),
+                        timestamp=timestamp,
+                        chain=chain,
+                    )
+                )
+    return rates
 
 
 class BacktestOHLCVView:
@@ -1429,7 +1474,7 @@ class PnLBacktester:
     def _notify_intent_failure(self, strategy: Any, intent: Any, error: Exception) -> None:
         """Notify the strategy that an intent failed to execute.
 
-        Shared by the missing-data (``DataSourceUnavailableError``) and generic
+        Shared by the missing-data (``NoAcceptableDataSourceError``) and generic
         execution-error paths so a strategy state machine never advances past an
         intent that silently vanished. Best-effort: a raising callback is logged
         at debug, never propagated (a notification failure must not mask the
@@ -2437,7 +2482,7 @@ class PnLBacktester:
                 self._position_update_elapsed(position, timestamp, portfolio_elapsed_seconds),
                 timestamp,
             )
-        except DataSourceUnavailableError as exc:
+        except NoAcceptableDataSourceError as exc:
             self._handle_adapter_update_missing_data(position, timestamp, exc)
         except Exception as exc:
             self._handle_adapter_update_error(position, timestamp, exc)
@@ -2457,7 +2502,7 @@ class PnLBacktester:
         self,
         position: SimulatedPosition,
         timestamp: datetime,
-        exc: DataSourceUnavailableError,
+        exc: NoAcceptableDataSourceError,
     ) -> None:
         # A data gap on ONE position's accrual tick must not kill the whole
         # simulation (ALM-2930: every LP backtest returned empty because the
@@ -2598,7 +2643,7 @@ class PnLBacktester:
                 config=config,
                 data_quality_tracker=data_quality_tracker,
             )
-        except DataSourceUnavailableError as exc:
+        except NoAcceptableDataSourceError as exc:
             self._handle_pending_missing_data(intent, strategy, market_state.timestamp, exc)
             return
         except Exception as exc:
@@ -2641,7 +2686,7 @@ class PnLBacktester:
         intent: Any,
         strategy: Any,
         timestamp: datetime,
-        exc: DataSourceUnavailableError,
+        exc: NoAcceptableDataSourceError,
     ) -> None:
         # VIB-5088 (pattern from VIB-4849): missing data is a deliberate
         # fail-loud signal, not a warn-and-skip. Notify the strategy before
@@ -3437,7 +3482,7 @@ class PnLBacktester:
             Tuple of (gas_price_gwei, gas_gwei_source)
 
         Raises:
-            DataSourceUnavailableError: In institutional mode when the gas
+            NoAcceptableDataSourceError: In institutional mode when the gas
                 price would fall back to the chain-registry default (i.e. no
                 user-set value, no historical/market datum).
         """
@@ -3520,7 +3565,7 @@ class PnLBacktester:
     ) -> None:
         if resolution.source != "chain_default" or not config.institutional_mode:
             return
-        raise DataSourceUnavailableError(
+        raise NoAcceptableDataSourceError(
             data_type="gas_price",
             identifier=config.chain,
             remediation=(

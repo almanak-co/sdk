@@ -45,7 +45,7 @@ import aiohttp
 
 from almanak.config.backtest import backtest_config_from_env
 
-from ...exceptions import DataSourceUnavailableError
+from ...exceptions import NoAcceptableDataSourceError
 from .gateway_transport import GatewaySubgraphTransport, gateway_backtest_configured
 from .rate_limiter import TokenBucketRateLimiter
 
@@ -174,15 +174,15 @@ def _extract_data_path(data: Any, data_path: str) -> list[Any]:
     return result if isinstance(result, list) else []
 
 
-def _window_too_large_error(context: str, message: str, remediation: str) -> DataSourceUnavailableError:
+def _window_too_large_error(context: str, message: str, remediation: str) -> NoAcceptableDataSourceError:
     """Build the loud-failure error for pagination overflow.
 
     Pagination must never silently truncate (VIB-5089): when a window cannot
     be fully fetched, the caller gets a
-    :class:`~almanak.framework.backtesting.exceptions.DataSourceUnavailableError`
+    :class:`~almanak.framework.backtesting.exceptions.NoAcceptableDataSourceError`
     with concrete remediation instead of a partial series.
     """
-    return DataSourceUnavailableError(
+    return NoAcceptableDataSourceError(
         data_type="subgraph",
         identifier=context,
         message=message,
@@ -231,7 +231,7 @@ async def paginate_subgraph_query(
     :data:`THE_GRAPH_MAX_SKIP` (5000); needing to page past the cap fails
     loudly.
 
-    Both modes fail loudly (``DataSourceUnavailableError``) instead of
+    Both modes fail loudly (``NoAcceptableDataSourceError``) instead of
     silently truncating when more data remains after ``max_pages``.
 
     Args:
@@ -253,7 +253,7 @@ async def paginate_subgraph_query(
         order.
 
     Raises:
-        DataSourceUnavailableError: When the window cannot be fetched without
+        NoAcceptableDataSourceError: When the window cannot be fetched without
             truncation (skip cap, max_pages exhaustion, or a stalled cursor).
         ValueError: When cursor mode is misconfigured (missing
             ``cursor_variable`` or initial cursor value).
@@ -904,7 +904,7 @@ class SubgraphClient:
         ``first: $first, skip: $skip``. Fails loudly at the skip cap.
 
         Both modes raise
-        :class:`~almanak.framework.backtesting.exceptions.DataSourceUnavailableError`
+        :class:`~almanak.framework.backtesting.exceptions.NoAcceptableDataSourceError`
         instead of silently truncating when more data remains (VIB-5089).
 
         Args:
