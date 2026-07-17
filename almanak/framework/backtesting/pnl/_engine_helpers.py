@@ -553,9 +553,9 @@ async def execute_iteration_loop(
     # initialize_backtest, before this loop starts.
     token_addresses = _registered_token_addresses(backtester)
 
-    # Stable for the whole run: provider registrations happen during
-    # initialize_backtest, before this loop starts.
-    token_addresses = _registered_token_addresses(backtester)
+    # Credits must land on the funding identity plane (ALM-2960) — same map
+    # the snapshot registers as symbol aliases.
+    state.portfolio.register_token_identities(token_addresses)
 
     # decide()-time data lanes (ALM-2951): on-demand indicators (any period,
     # tick-derivable timeframes) and engine-modeled gas, per-tick bound.

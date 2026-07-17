@@ -401,3 +401,56 @@ class TestRunLevelReport:
         payload = serialize_result(result)
         assert payload["decision_input_failures"]
         assert payload["decision_input_failures"][0]["source"] == "twap"
+
+
+class TestIdentityRegistrationSeam:
+    """ALM-2960 (#3310 review round): the iteration loop must register the
+    run's token identities on the portfolio, and credits must then land on
+    the address-native plane."""
+
+    @pytest.mark.asyncio
+    async def test_loop_registers_identities_and_credits_land_address_keyed(self, monkeypatch):
+        from decimal import Decimal as D
+
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedFill, SimulatedPortfolio
+
+        captured: list[tuple[SimulatedPortfolio, dict]] = []
+        orig = SimulatedPortfolio.register_token_identities
+
+        def spy(self, token_addresses):
+            captured.append((self, dict(token_addresses or {})))
+            return orig(self, token_addresses)
+
+        monkeypatch.setattr(SimulatedPortfolio, "register_token_identities", spy)
+
+        weth_key = ("arbitrum", "0x82af49447d8a07e3bd95bd0d56f35241523fbab1")
+        backtester = _backtester(num_ticks=8)
+        backtester.data_provider._token_addresses = {"WETH": weth_key}
+        strategy = _TwapReadingStrategy()
+
+        await backtester.backtest(strategy, _config(num_hours=8))
+
+        # The loop registered the provider's identity map on the run's portfolio...
+        assert captured, "execute_iteration_loop never registered token identities"
+        portfolio, registered_map = captured[-1]
+        assert registered_map.get("WETH") == weth_key
+
+        # ...and a symbol-shaped credit on that SAME portfolio lands on the
+        # address-native key (the ALM-2960 fix, engine seam included).
+        fill = SimulatedFill(
+            timestamp=datetime(2024, 1, 1, 6, tzinfo=UTC),
+            intent_type=IntentType.LP_CLOSE,
+            protocol="uniswap_v3",
+            tokens=["WETH"],
+            executed_price=D("3000"),
+            amount_usd=D("0"),
+            fee_usd=D("0"),
+            slippage_usd=D("0"),
+            gas_cost_usd=D("0"),
+            tokens_in={"WETH": D("0.5")},
+            tokens_out={},
+        )
+        assert portfolio.apply_fill(fill) is True
+        assert portfolio.tokens.get(weth_key) == D("0.5")
+        assert "WETH" not in portfolio.tokens

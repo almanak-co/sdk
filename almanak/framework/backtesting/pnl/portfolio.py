@@ -11,6 +11,7 @@ Models:
 """
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -279,6 +280,9 @@ class SimulatedPortfolio:
 
     _STABLECOIN_SYMBOLS: frozenset[str] = STABLECOINS
     _cash_equivalent_token_keys: frozenset[TokenKey] = field(default_factory=frozenset, init=False)
+    # symbol (upper) -> address-native key: the run's funding identity plane,
+    # registered by the engine so credits land where funding seeds (ALM-2960).
+    _registered_identities: dict[str, TokenKey] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         """Initialize cash from initial capital if not set."""
@@ -594,10 +598,16 @@ class SimulatedPortfolio:
                 self.tokens[token] = new_amount
         self._debit_cash_like(cash_debit)
 
-        # Update token balances - add tokens_in
+        # Update token balances - add tokens_in. Credits resolve to the SAME
+        # key identity debits use: a close crediting plain "WETH" beside an
+        # address-keyed funding plane split-brains the portfolio — the
+        # balance seeding then judges the address form unheld and zero-seeds
+        # over the real balance, freezing re-entries (found via the CLMM
+        # 6-month run: WETH read 0 forever after the first close).
         for token, amount in fill.tokens_in.items():
-            current = self.tokens.get(token, Decimal("0"))
-            self.tokens[token] = current + amount
+            credit_token = self._credit_target(token)
+            current = self.tokens.get(credit_token, Decimal("0"))
+            self.tokens[credit_token] = current + amount
 
         # Handle cash-equivalent stablecoins as cash.
         for token in list(self.tokens):
@@ -658,12 +668,25 @@ class SimulatedPortfolio:
         out_value: Decimal,
         market_state: MarketState | None,
     ) -> None:
-        acquired = {
-            token: amount
-            for token, amount in fill.tokens_in.items()
-            if amount > Decimal("0") and not self._is_cash_equivalent(token)
+        # Basis keys must match the balance-credit keys (ALM-2960): the sell
+        # side debits and realizes by the held identity, so a basis recorded
+        # under the raw fill key would never be found again. Pricing still
+        # tries the fill's own key form first — a symbol the market quotes
+        # directly must not degrade to the even-split fallback.
+        acquired: dict[TokenRef, Decimal] = {}
+        price_lookup: dict[TokenRef, TokenRef] = {}
+        for token, amount in fill.tokens_in.items():
+            if amount <= Decimal("0") or self._is_cash_equivalent(token):
+                continue
+            key = self._credit_target(token)
+            acquired[key] = acquired.get(key, Decimal("0")) + amount
+            price_lookup.setdefault(key, token)
+        # _token_price returns None (never 0) when unavailable, so `or`
+        # short-circuits safely and each lookup evaluates once (review, #3310).
+        acquired_prices = {
+            token: self._token_price(token, market_state) or self._token_price(price_lookup[token], market_state)
+            for token in acquired
         }
-        acquired_prices = {token: self._token_price(token, market_state) for token in acquired}
         use_even_split = any(price is None for price in acquired_prices.values())
         acquired_units_value = Decimal("0")
         if not use_even_split:
@@ -898,6 +921,40 @@ class SimulatedPortfolio:
             return token.upper() in CASH_EQUIVALENT_STABLECOIN_SYMBOLS
         return False
 
+    def register_token_identities(self, token_addresses: Mapping[str, tuple[str, str]] | None) -> None:
+        """Register the run's symbol -> address-native key plane (ALM-2960).
+
+        The engine calls this once with the same map it registers as
+        market-state symbol aliases, so CREDITS land on the identity plane
+        token_funding seeds — a symbol-shaped LP-close credit must never
+        mint a parallel key beside the (possibly fully-deployed, hence
+        empty) address-keyed plane, or the snapshot's unheld-token zero-seed
+        erases the real balance and re-entries freeze.
+        """
+        if not token_addresses:
+            return
+        for symbol, entry in token_addresses.items():
+            if is_token_key(entry):
+                self._registered_identities[str(symbol).upper()] = normalize_token_key(entry[0], entry[1])
+
+    def _credit_target(self, token: TokenRef) -> TokenRef:
+        """Return the key identity to CREDIT ``token`` under.
+
+        Prefer the form already held (an existing balance accretes); else a
+        REGISTERED identity (the run's funding plane) wins for symbol-shaped
+        credits. Unregistered portfolios keep the raw key — legacy
+        symbol-keyed flows are untouched.
+        """
+        normalized = self._normalize_token_ref(token)
+        if normalized in self.tokens:
+            return normalized
+        if not isinstance(normalized, str) or is_address_like(normalized):
+            return normalized
+        registered = self._registered_identities.get(normalized.upper())
+        if registered is not None:
+            return registered
+        return normalized
+
     def _held_debit_source(self, token: TokenRef) -> TokenRef:
         """Return the held token identity to debit for ``token`` when possible."""
         normalized = self._normalize_token_ref(token)
@@ -905,6 +962,15 @@ class SimulatedPortfolio:
             return normalized
         if not isinstance(normalized, str) or is_address_like(normalized):
             return normalized
+
+        # The run's registered identity plane first (review, #3310): a
+        # token_funding symbol with an explicit address may be UNKNOWN to the
+        # global registry, so a credit landed on the registered key would be
+        # invisible to the resolver path below and the debit would miss the
+        # held balance.
+        registered = self._registered_identities.get(normalized.upper())
+        if registered is not None and registered in self.tokens:
+            return registered
 
         try:
             resolved = get_token_resolver().resolve(

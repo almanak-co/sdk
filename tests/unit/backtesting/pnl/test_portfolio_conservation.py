@@ -756,3 +756,127 @@ class TestProducerFailedFills:
         assert portfolio.trades[0].success is False
         # The producer's reason is preserved, not overwritten
         assert portfolio.trades[0].metadata["failure_reason"] == "Health factor would be below 1.0"
+
+
+class TestCreditKeyIdentity:
+    """ALM-2960: credits resolve to the same key identity debits use — a
+    symbol-shaped credit must never mint a parallel entry beside the
+    address-keyed funding plane (the unheld-token zero-seed then erases the
+    real balance and re-entries freeze)."""
+
+    BASE_WETH = ("base", "0x4200000000000000000000000000000000000006")
+
+    def _address_keyed_portfolio(self) -> SimulatedPortfolio:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"), chain="base")
+        # The funding plane: registered identities (what the engine loop
+        # registers from the run's token_addresses map), fully deployed (no
+        # dust) — the exact state in which the split-brain froze the
+        # 6-month run.
+        portfolio.register_token_identities({"WETH": self.BASE_WETH})
+        return portfolio
+
+    def test_symbol_credit_lands_on_the_address_key(self) -> None:
+        portfolio = self._address_keyed_portfolio()
+
+        fill = make_swap_fill(
+            tokens_out={},
+            tokens_in={"WETH": Decimal("0.65")},
+        )
+        fill.intent_type = IntentType.LP_CLOSE
+        applied = portfolio.apply_fill(fill)
+
+        assert applied is True
+        assert portfolio.tokens.get(self.BASE_WETH) == Decimal("0.65")
+        assert "WETH" not in portfolio.tokens  # no parallel symbol identity
+
+    def test_credit_accretes_onto_a_held_address_key(self) -> None:
+        portfolio = self._address_keyed_portfolio()
+        portfolio.tokens[self.BASE_WETH] = Decimal("0.1")
+
+        fill = make_swap_fill(tokens_out={}, tokens_in={"WETH": Decimal("0.65")})
+        fill.intent_type = IntentType.LP_CLOSE
+        portfolio.apply_fill(fill)
+
+        assert portfolio.tokens[self.BASE_WETH] == Decimal("0.75")
+        assert "WETH" not in portfolio.tokens
+
+    def test_credit_prefers_an_existing_symbol_holding(self) -> None:
+        # A portfolio already keyed by symbol keeps accreting there — the fix
+        # unifies identity, it does not force-migrate legacy holdings.
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"), chain="base")
+        portfolio.tokens["WETH"] = Decimal("1")
+
+        fill = make_swap_fill(tokens_out={}, tokens_in={"WETH": Decimal("0.5")})
+        fill.intent_type = IntentType.LP_CLOSE
+        portfolio.apply_fill(fill)
+
+        assert portfolio.tokens["WETH"] == Decimal("1.5")
+        assert self.BASE_WETH not in portfolio.tokens
+
+    def test_unregistered_symbol_credits_under_its_own_key(self) -> None:
+        # Symbols outside the run's registered plane keep legacy behavior.
+        portfolio = self._address_keyed_portfolio()
+
+        fill = make_swap_fill(tokens_out={}, tokens_in={"NOT-A-REAL-TOKEN": Decimal("5")})
+        fill.intent_type = IntentType.LP_CLOSE
+        portfolio.apply_fill(fill)
+
+        assert portfolio.tokens.get("NOT-A-REAL-TOKEN") == Decimal("5")
+
+    def test_unregistered_portfolio_keeps_symbol_keys(self) -> None:
+        # Bare portfolios (no engine registration) are untouched by ALM-2960.
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"), chain="base")
+
+        fill = make_swap_fill(tokens_out={}, tokens_in={"WETH": Decimal("0.5")})
+        fill.intent_type = IntentType.LP_CLOSE
+        portfolio.apply_fill(fill)
+
+        assert portfolio.tokens.get("WETH") == Decimal("0.5")
+        assert self.BASE_WETH not in portfolio.tokens
+
+    def test_stablecoin_credit_still_sweeps_to_cash(self) -> None:
+        portfolio = self._address_keyed_portfolio()
+
+        fill = make_swap_fill(tokens_out={}, tokens_in={"USDC": Decimal("2861")})
+        fill.intent_type = IntentType.LP_CLOSE
+        portfolio.apply_fill(fill)
+
+        assert portfolio.cash_usd == Decimal("2861")
+        assert all("USDC" not in str(k).upper() or portfolio.tokens[k] == 0 for k in portfolio.tokens)
+
+    def test_registered_stablecoin_credit_sweeps_through_the_address_key(self) -> None:
+        # Review round (#3310): with USDC itself REGISTERED, the credit maps
+        # to its address-native key first — the cash-equivalent sweep must
+        # recognize that key and still move the proceeds into cash_usd.
+        base_usdc = ("base", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"), chain="base")
+        portfolio.register_token_identities({"WETH": self.BASE_WETH, "USDC": base_usdc})
+
+        fill = make_swap_fill(tokens_out={}, tokens_in={"USDC": Decimal("2861")})
+        fill.intent_type = IntentType.LP_CLOSE
+        portfolio.apply_fill(fill)
+
+        assert portfolio.cash_usd == Decimal("2861")
+        assert base_usdc not in portfolio.tokens  # swept, not left as a token
+        assert "USDC" not in portfolio.tokens
+
+    def test_registered_identity_debits_find_the_credited_balance(self) -> None:
+        # Review round (#3310, Codex): a symbol UNKNOWN to the global token
+        # registry but registered via token_funding must round-trip — credit
+        # lands on the registered key, and a later symbol-shaped DEBIT must
+        # find it there instead of rejecting a funded fill.
+        fantasy_key = ("base", "0x00000000000000000000000000000000000fee75")
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"), chain="base")
+        portfolio.register_token_identities({"FANTASYTOKEN": fantasy_key})
+
+        credit = make_swap_fill(tokens_out={}, tokens_in={"FANTASYTOKEN": Decimal("10")})
+        credit.intent_type = IntentType.LP_CLOSE
+        assert portfolio.apply_fill(credit) is True
+        assert portfolio.tokens.get(fantasy_key) == Decimal("10")
+
+        debit = make_swap_fill(
+            tokens_out={"FANTASYTOKEN": Decimal("4")},
+            tokens_in={"WETH": Decimal("0.001")},
+        )
+        assert portfolio.apply_fill(debit) is True
+        assert portfolio.tokens.get(fantasy_key) == Decimal("6")
