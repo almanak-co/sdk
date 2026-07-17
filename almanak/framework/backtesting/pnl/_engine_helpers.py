@@ -559,7 +559,7 @@ async def execute_iteration_loop(
 
     # decide()-time data lanes (ALM-2951): on-demand indicators (any period,
     # tick-derivable timeframes) and engine-modeled gas, per-tick bound.
-    from almanak.framework.backtesting.pnl.engine import SimulatedGasView
+    from almanak.framework.backtesting.pnl.engine import BacktestOHLCVView, SimulatedGasView
     from almanak.framework.backtesting.pnl.indicator_engine import timeframe_label
 
     tick_timeframe = timeframe_label(config.interval_seconds)
@@ -567,6 +567,9 @@ async def execute_iteration_loop(
         state.strategy_config, config.interval_seconds
     )
     gas_view = SimulatedGasView(backtester, config)
+    # market.ohlcv() served from the run's own close series (ALM-2962) —
+    # candle-reading strategies froze while the same code traded live.
+    ohlcv_view = BacktestOHLCVView(state.indicator_engine, config.interval_seconds, token_addresses)
 
     with bt_logger.phase("simulation"):
         # Iterate through historical data
@@ -599,6 +602,7 @@ async def execute_iteration_loop(
 
             # Create market snapshot for strategy
             gas_view.bind(market_state, timestamp)
+            ohlcv_view.bind(timestamp)
             snapshot = create_market_snapshot_from_state(
                 market_state=market_state,
                 chain=config.chain,
@@ -609,6 +613,7 @@ async def execute_iteration_loop(
                 indicator_provider=indicator_provider,
                 gas_view=gas_view,
                 default_timeframe=tick_timeframe,
+                ohlcv_module=ohlcv_view,
             )
 
             # Cache available_tokens once per tick: the property returns a

@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 # Python prefers the package, so we need to use an alternative import approach
 # We define the protocols inline and create simple default implementations
 from dataclasses import dataclass as _dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 
@@ -452,6 +452,7 @@ def create_market_snapshot_from_state(
     indicator_provider: Any | None = None,
     gas_view: Any | None = None,
     default_timeframe: str | None = None,
+    ohlcv_module: Any | None = None,
 ) -> MarketSnapshot:
     """Create a MarketSnapshot from historical MarketState data.
 
@@ -492,6 +493,7 @@ def create_market_snapshot_from_state(
         rsi_provider=rsi_provider,
         indicator_provider=indicator_provider,
         default_timeframe=default_timeframe,
+        ohlcv_module=ohlcv_module,
     )
     if gas_view is not None:
         # decide()-time gas reads served by the engine's own gas model
@@ -511,6 +513,135 @@ def create_market_snapshot_from_state(
     if portfolio:
         _seed_snapshot_balances(snapshot, market_state, portfolio, token_addresses)
     return snapshot
+
+
+class BacktestOHLCVView:
+    """Serves ``market.ohlcv()`` from the run's own price series (ALM-2962).
+
+    The accessor was ``unconfigured`` in backtests, so candle-reading
+    strategies (momentum from closes) held every tick while the SAME strategy
+    traded live. This view answers the legacy ``ohlcv_module`` contract from
+    the indicator engine's tick buffers:
+
+    - **Close-only honesty**: the run's data is close prices, so bars carry
+      ``open == high == low == close`` and ``volume`` NaN — explicitly NOT
+      fabricated spreads. Close-to-close consumers are exact; spread/volume
+      consumers see the degenerate columns for what they are (attrs mark the
+      source). Same doctrine as the close-derived indicators (#3303).
+    - **No look-ahead by construction**: the buffers only ever contain ticks
+      already served; timestamps are reconstructed back from the bound tick.
+    - **Timeframes** resample through the indicator engine's ``_series_for``
+      (whole multiples of the tick interval; anything else refuses), which
+      also inherits the measured-granularity refusal (ALM-2957) when present.
+    - ``pool_address`` reads refuse loudly via the accessor's existing legacy
+      guard — pool-scoped candles need historical pool data (the ALM-2943
+      broker), not this view.
+
+    Bound per tick via :meth:`bind`.
+    """
+
+    def __init__(
+        self,
+        indicator_engine: Any,
+        tick_interval_seconds: int,
+        token_addresses: Mapping[str, tuple[str, str]] | None = None,
+    ) -> None:
+        self._engine = indicator_engine
+        self._tick_seconds = int(tick_interval_seconds)
+        self._token_addresses = dict(token_addresses or {})
+        self._timestamp: datetime | None = None
+        self._truncation_warned: set[tuple[str, str]] = set()
+
+    def bind(self, timestamp: datetime) -> None:
+        self._timestamp = timestamp
+
+    def _buffer_key(self, token: str) -> str | None:
+        """Resolve a strategy-facing token string to an indicator-buffer key."""
+        buffers = getattr(self._engine, "_price_buffers", {})
+        candidates = [token, token.upper()]
+        entry = self._token_addresses.get(token.upper())
+        if entry is not None and isinstance(entry, tuple) and len(entry) == 2:
+            candidates.append(token_ref_display(normalize_token_key(entry[0], entry[1])))
+        for candidate in candidates:
+            if candidate in buffers:
+                return candidate
+        return None
+
+    def get_ohlcv(
+        self,
+        token: str,
+        timeframe: str = "1h",
+        limit: int = 100,
+        quote: str = "USD",
+        gap_strategy: str = "nan",
+    ) -> Any:
+        import pandas as pd
+
+        from almanak.framework.backtesting.pnl.indicator_engine import _timeframe_seconds
+
+        _ = gap_strategy  # the tick grid is gapless by construction
+        if self._timestamp is None:
+            raise ValueError("ohlcv unavailable: backtest OHLCV view is not bound to a tick")
+        if str(quote).upper() != "USD":
+            # The run's series is USD-quoted; serving another quote would be
+            # a silent unit lie.
+            raise ValueError(f"ohlcv unavailable in backtest for quote={quote!r}: the run's price series is USD-quoted")
+        base = token.split("/")[0].strip() if "/" in token else token
+        key = self._buffer_key(base)
+        if key is None:
+            raise ValueError(f"ohlcv unavailable: no backtest price series for token {token!r}")
+
+        resampled = self._engine._series_for(key, timeframe, self._tick_seconds)
+        limit_val = int(limit)
+        closes = resampled[-limit_val:] if limit_val > 0 else []
+        # Honesty on depth (review, #3312): the tick buffer is finite, so a
+        # coarse-timeframe request can be capacity-truncated below the asked
+        # limit even though the RUN saw older prices (e.g. 4h x 100 needs 400
+        # retained ticks). Mark it and warn once — a candle strategy must see
+        # a short frame as short, not as "all the history there is".
+        capacity_truncated = (
+            limit_val > 0
+            and len(resampled) < limit_val
+            and self._engine.get_buffer_size(key) >= getattr(self._engine, "_max_history", 0) > 0
+        )
+        if capacity_truncated:
+            warn_key = (key, timeframe)
+            if warn_key not in self._truncation_warned:
+                self._truncation_warned.add(warn_key)
+                logger.warning(
+                    "market.ohlcv(%r, timeframe=%r, limit=%d) served only %d candles: the tick "
+                    "buffer retains %d ticks and older history has been dropped (ALM-2962). "
+                    "Consumers needing deeper lookback should use finer timeframes or shorter limits.",
+                    token,
+                    timeframe,
+                    limit_val,
+                    len(resampled),
+                    self._engine.get_buffer_size(key),
+                )
+        step_seconds = _timeframe_seconds(timeframe) if timeframe else self._tick_seconds
+        n = len(closes)
+        prices = [float(close) for close in closes]
+        timestamps = [self._timestamp - timedelta(seconds=step_seconds * (n - 1 - i)) for i in range(n)]
+        df = pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "open": prices,
+                "high": prices,
+                "low": prices,
+                "close": prices,
+                "volume": [float("nan")] * n,
+            },
+            columns=["timestamp", "open", "high", "low", "close", "volume"],
+        )
+        df.attrs = {
+            "base": base.upper(),
+            "quote": "USD",
+            "timeframe": timeframe,
+            "source": "backtest_price_series:close_only",
+            "confidence": "close_only",
+            "capacity_truncated": capacity_truncated,
+        }
+        return df
 
 
 class SimulatedGasView:

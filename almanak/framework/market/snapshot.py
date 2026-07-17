@@ -5310,6 +5310,12 @@ class MarketSnapshot:
         # the worst-class failure for an indicator-driven strategy. Fail
         # loudly so the caller wires the OHLCV router instead.
         if pool_address is not None:
+            self._record_critical_data_failure(
+                "ohlcv",
+                f"{token_str}:pool_scoped",
+                "ohlcv unavailable: pool-scoped candles need an OHLCV router; the configured "
+                "module is token-scoped only (pass pool_address=None for token candles)",
+            )
             raise ValueError(
                 "pool_address requires an OHLCV router (DEX-aware path); the "
                 "legacy ohlcv_module is token-scoped only and cannot fetch "
@@ -5411,11 +5417,17 @@ class MarketSnapshot:
                 quote=quote,
                 gap_strategy=gap_strategy,
             )
-        except ValueError:
+        except ValueError as e:
+            # A configured module's refusal is a decision-input failure too
+            # (ALM-2962): unrecorded, a candle-gated strategy's freeze would
+            # be invisible to the ledger exactly like the unconfigured case.
+            self._record_critical_data_failure("ohlcv", str(legacy_token), str(e))
             raise
         except DataSourceError as e:
+            self._record_critical_data_failure("ohlcv", str(legacy_token), str(e))
             raise OHLCVUnavailableError(legacy_token, str(e)) from e
         except Exception as e:  # noqa: BLE001
+            self._record_critical_data_failure("ohlcv", str(legacy_token), f"Unexpected error: {e}")
             raise OHLCVUnavailableError(legacy_token, f"Unexpected error: {e}") from e
 
     # and ``balances(tokens)`` documented in SKILL.md exist on the deprecated
