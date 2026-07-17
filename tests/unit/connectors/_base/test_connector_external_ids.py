@@ -70,7 +70,7 @@ def test_vendor_protocol_map_defillama_exact_nine_entries() -> None:
         "aave_v3": "aave-v3",
         "compound_v3": "compound-v3",
         "uniswap_v3": "uniswap-v3",
-        "aerodrome": "aerodrome-v2",
+        "aerodrome": "aerodrome-v1",
         "lido": "lido",
         "pancakeswap_v3": "pancakeswap-amm-v3",
         "kamino": "kamino-lending",

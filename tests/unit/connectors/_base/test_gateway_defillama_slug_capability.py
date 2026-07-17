@@ -75,8 +75,9 @@ def test_defillama_slug_table_matches_legacy_dict() -> None:
 
     expected = {
         "uniswap_v3": "uniswap-v3",
-        "aerodrome": "aerodrome-v2",
+        "aerodrome": "aerodrome-v1",
         "aerodrome_slipstream": "aerodrome-slipstream",
+        "traderjoe_v2": "joe-v2.2",
         "pancakeswap_v3": "pancakeswap-amm-v3",
         "aave_v3": "aave-v3",
         "morpho": "morpho-blue",

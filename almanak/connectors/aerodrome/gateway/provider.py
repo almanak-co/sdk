@@ -7,7 +7,7 @@ boundary. Aerodrome contributes:
   only. Previously this was the single ``("base", "aerodrome")`` entry
   in ``almanak.gateway.services.pool_history_service.SUPPORTED_POOL_PAIRS``.
 * ``GatewayDefillamaSlugCapability`` — DefiLlama project slug
-  (``"aerodrome-v2"`` plus the ``"aerodrome_slipstream"`` alias).
+  (``"aerodrome-v1"`` plus the ``"aerodrome_slipstream"`` alias).
 * ``GatewayPriceIdCapability`` — AERO CoinGecko slug
   (``aerodrome-finance``).
 
@@ -85,8 +85,15 @@ class AerodromeGatewayConnector(
         return frozenset({"base"})
 
     def defillama_slug(self) -> str | None:
-        """DefiLlama project slug for Aerodrome V2."""
-        return "aerodrome-v2"
+        """DefiLlama project slug for Aerodrome classic (Solidly vAMM/sAMM).
+
+        The yields catalog tracks classic Aerodrome pools under project
+        ``"aerodrome-v1"``. The previously declared ``"aerodrome-v2"`` exists
+        in no DefiLlama namespace (yields projects are ``aerodrome-v1`` /
+        ``aerodrome-slipstream``; the protocols API 404s on it), so every
+        project-filtered pool match was an always-miss.
+        """
+        return "aerodrome-v1"
 
     def defillama_slug_aliases(self) -> dict[str, str]:
         """Aerodrome's Slipstream concentrated-liquidity product rides the

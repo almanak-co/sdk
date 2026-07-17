@@ -21,6 +21,16 @@ W7-followup (VIB-4870) adds:
   Trader Joe V2 (Liquidity Book) has no Uniswap-style ``observe()`` TWAP
   primitive, so it implements volume only — not
   ``GatewayDexTwapCapability``.
+
+Backtest data-ladder follow-up (ALM-2940) adds:
+
+* ``GatewayPoolHistoryCapability`` — Avalanche. Registers the
+  ``(avalanche, traderjoe_v2)`` pair with ``PoolHistoryService`` so the
+  backtest volume/liquidity fallback can serve LB pools from the
+  DefiLlama + CoinGecko Onchain providers (the LB volume subgraph above
+  is the primary lane; pool history is the measured fallback).
+* ``GatewayDefillamaSlugCapability`` — ``"joe-v2.2"`` (current-generation
+  Liquidity Book project in the DefiLlama yields catalog).
 """
 
 from __future__ import annotations
@@ -30,7 +40,9 @@ from typing import Any, ClassVar
 
 from almanak.connectors._base.gateway_capabilities import (
     GatewayAddressCapability,
+    GatewayDefillamaSlugCapability,
     GatewayDexVolumeCapability,
+    GatewayPoolHistoryCapability,
     GatewayPriceIdCapability,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
@@ -52,6 +64,8 @@ class TraderJoeV2GatewayConnector(
     GatewayAddressCapability,
     GatewayPriceIdCapability,
     GatewayDexVolumeCapability,
+    GatewayPoolHistoryCapability,
+    GatewayDefillamaSlugCapability,
 ):
     """Gateway-side connector for Trader Joe V2."""
 
@@ -65,6 +79,29 @@ class TraderJoeV2GatewayConnector(
     def address_supported_chains(self) -> frozenset[str]:
         """Chains for which Trader Joe V2 addresses are registered."""
         return frozenset(TRADERJOE_V2.keys())
+
+    def pool_history_supported_chains(self) -> frozenset[str]:
+        """Pool history is served on Avalanche (Liquidity Book home chain).
+
+        Trader Joe publishes no ``GatewaySubgraphCapability`` endpoint, so the
+        TheGraph pool-history provider skips it locally; coverage comes from
+        the DefiLlama (daily TVL) and CoinGecko Onchain (OHLCV volume)
+        fallback providers.
+        """
+        return frozenset({"avalanche"})
+
+    def defillama_slug(self) -> str | None:
+        """DefiLlama yields project slug for current-generation Liquidity Book.
+
+        The yields catalog splits Trader Joe LB by contract generation into
+        ``joe-v2.1`` and ``joe-v2.2`` projects; current-generation pools (the
+        ones the LB router deploys today) are tracked under ``joe-v2.2``.
+        """
+        return "joe-v2.2"
+
+    def defillama_slug_aliases(self) -> dict[str, str]:
+        """No variant products ride this connector — no alias entries."""
+        return {}
 
     def coingecko_ids(self) -> dict[str, str]:
         """CoinGecko slug for the Trader Joe governance token."""

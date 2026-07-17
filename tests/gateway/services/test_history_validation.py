@@ -219,8 +219,9 @@ def test_supported_pool_pairs_set_includes_base_aerodrome():
 
 def test_pool_protocol_allowlist_locked():
     """Anti-regression: extending the allowlist requires a CODE change
-    here, not a silent table edit. POOL-5 adds providers, not protocols."""
-    assert POOL_PROTOCOL_ALLOWLIST == frozenset({"uniswap_v3", "aerodrome"})
+    here, not a silent table edit. POOL-5 adds providers, not protocols.
+    ALM-2940 adds ``traderjoe_v2`` (backtest data-ladder fallback)."""
+    assert POOL_PROTOCOL_ALLOWLIST == frozenset({"uniswap_v3", "aerodrome", "traderjoe_v2"})
 
 
 # ============================================================================

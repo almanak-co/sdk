@@ -61,16 +61,18 @@ def test_pool_history_capability_does_not_imply_other_caps() -> None:
 
 
 def test_pool_history_tables_match_legacy_set() -> None:
-    """The registry-derived tables match the Phase-2 hardcoded sets.
+    """The registry-derived tables match the declared connector set.
 
-    Locks the dispatch behaviour byte-identically across the refactor.
+    Originally locked the Phase-2 hardcoded sets byte-identically across
+    the VIB-4811 refactor; ALM-2940 extends the table with the
+    ``(avalanche, traderjoe_v2)`` pair (backtest data-ladder fallback).
     """
     from almanak.gateway.services.pool_history_service import (
         POOL_PROTOCOL_ALLOWLIST,
         SUPPORTED_POOL_PAIRS,
     )
 
-    assert POOL_PROTOCOL_ALLOWLIST == frozenset({"uniswap_v3", "aerodrome"})
+    assert POOL_PROTOCOL_ALLOWLIST == frozenset({"uniswap_v3", "aerodrome", "traderjoe_v2"})
     assert SUPPORTED_POOL_PAIRS == frozenset(
         {
             ("ethereum", "uniswap_v3"),
@@ -79,6 +81,7 @@ def test_pool_history_tables_match_legacy_set() -> None:
             ("optimism", "uniswap_v3"),
             ("polygon", "uniswap_v3"),
             ("base", "aerodrome"),
+            ("avalanche", "traderjoe_v2"),
         }
     )
 

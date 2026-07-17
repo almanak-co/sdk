@@ -17,6 +17,23 @@ Two-step lookup:
    cached + in-flight-deduped (ported from ``pool_analytics_service``).
 2. Fetch ``/chart/{pool_id}`` for the daily series and translate to
    ``PoolSnapshot`` with Empty != Zero decimals.
+
+UUID-id catalog reality (ALM-2940): every ``pool`` id in today's live
+``/pools`` catalog is an opaque UUID — the ``chain-0xaddress`` id style the
+address-segment matcher was written against no longer appears at all (0 of
+~15.4k entries as of 2026-07-15), so step 1 alone is an always-miss. The
+matcher therefore falls back to **token-set matching**: resolve the pool's
+underlying token addresses via the caller-supplied ``pool_token_resolver``
+(the dispatcher backs it with one CoinGecko Onchain pool-info call) and
+match catalog entries on (project slug, chain, exact ``underlyingTokens``
+set). HONESTY CAVEAT: the free-tier yields catalog exposes no pool address
+for UUID-id entries (the address-bearing ``/poolsOld`` endpoint is
+paid-tier), so a token-set match asserts pool identity WITHOUT address-level
+verification. The guardrails: a registry project slug is REQUIRED (no
+cross-project token matching), the token set must match exactly, and the
+match is refused when more than one candidate survives (e.g. multiple
+Liquidity Book bin-steps of the same pair) — ambiguity yields not-found,
+never a guess.
 """
 
 from __future__ import annotations
@@ -25,7 +42,9 @@ import asyncio
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import aiohttp
@@ -56,6 +75,31 @@ _DEFILLAMA_RESOLUTION = gateway_pb2.Resolution.RESOLUTION_1D
 _CATALOG_TTL_SECONDS = 60.0
 
 
+@dataclass(frozen=True)
+class ResolvedPoolIdentity:
+    """A pool's on-chain identity as resolved by the dispatcher's token resolver.
+
+    ``tokens`` is the underlying token-address set (chain-aware casing).
+    ``reserve_usd`` is the pool's LIVE reserve from the same CoinGecko
+    Onchain pool-info response (``None`` when unmeasured) — used as the
+    measured cross-check when several catalog entries share a token set
+    (e.g. a Solidly pair's volatile + stable twins).
+    """
+
+    tokens: frozenset[str]
+    reserve_usd: Decimal | None
+
+
+#: TVL-consistency band for multi-candidate disambiguation: a candidate is
+#: consistent when ``catalog tvlUsd / live reserve_usd`` falls in
+#: ``[0.5, 2.0]``. Catalog TVL is refreshed daily and the live reserve moves
+#: with prices, so same-day drift beyond 2x means "different pool" far more
+#: often than "volatile day"; the aerodrome-v1 WETH-USDC twins this exists
+#: for differ by ~300x ($7.6M vAMM vs $24k sAMM).
+_TVL_CONSISTENCY_MIN_RATIO = 0.5
+_TVL_CONSISTENCY_MAX_RATIO = 2.0
+
+
 class DefiLlamaPoolHistoryProvider:
     """1d-only fallback pool-history provider backed by DefiLlama yields."""
 
@@ -67,14 +111,22 @@ class DefiLlamaPoolHistoryProvider:
         session_getter: Callable[[], Any],
         slug_resolver: Callable[[str], str | None],
         rate_limiter: _TokenBucket,
+        pool_token_resolver: Callable[[str, str], Awaitable[ResolvedPoolIdentity | None]] | None = None,
     ) -> None:
         # ``session_getter`` is an async callable returning the shared
         # gateway ``aiohttp.ClientSession`` (mirrors analytics
         # ``_get_http_session``). ``slug_resolver(protocol) -> slug | None``
         # reads the registry ``GatewayDefillamaSlugCapability``.
+        # ``pool_token_resolver(chain, pool_address)`` is an async callable
+        # returning the pool's resolved token identity
+        # (``ResolvedPoolIdentity | None``); the dispatcher backs it with a
+        # CoinGecko Onchain pool-info lookup. ``None`` (default) disables
+        # the UUID-id token-set match path — the legacy address-segment
+        # match still runs.
         self._session_getter = session_getter
         self._slug_resolver = slug_resolver
         self._rate_limiter = rate_limiter
+        self._pool_token_resolver = pool_token_resolver
         self._catalog_cache: tuple[list[dict[str, Any]], float] | None = None
         self._catalog_inflight: asyncio.Task[list[dict[str, Any]]] | None = None
         self._cache_lock = threading.Lock()
@@ -121,6 +173,16 @@ class DefiLlamaPoolHistoryProvider:
             pool_address=pool_address,
             protocol=protocol,
         )
+        if pool_id is None:
+            # UUID-id catalog fallback (ALM-2940): the address-segment match
+            # cannot hit an opaque-UUID pool id; try token-set matching.
+            pool_id = await self._match_pool_id_by_tokens(
+                pools,
+                chain=chain,
+                llama_chain=llama_chain,
+                pool_address=pool_address,
+                protocol=protocol,
+            )
         if pool_id is None:
             return None  # reached upstream, no matching pool: not-found.
 
@@ -174,6 +236,144 @@ class DefiLlamaPoolHistoryProvider:
                 continue
             return pool_id
         return None
+
+    # -- UUID-id token-set matching (ALM-2940) -----------------------------
+
+    async def _match_pool_id_by_tokens(
+        self,
+        pools: list[dict[str, Any]],
+        *,
+        chain: str,
+        llama_chain: str,
+        pool_address: str,
+        protocol: str,
+    ) -> str | None:
+        """Match a UUID-id catalog entry by (project, chain, underlying-token set).
+
+        The live yields catalog exposes no pool address on UUID-id entries
+        (see module docstring), so identity is asserted via the underlying
+        token addresses resolved from the pool contract by
+        ``pool_token_resolver``. Guardrails, in order:
+
+        * a registry project slug is REQUIRED — matching token pairs across
+          all of DeFi would collide on every popular pair;
+        * the resolver must return the full token set (both sides of the
+          pair; ``None`` on any failure means no match, never a guess);
+        * the entry's ``underlyingTokens`` must equal the resolved set
+          EXACTLY (chain-aware casing: EVM lowercased, Solana preserved);
+        * ONE surviving candidate matches on the token set alone; SEVERAL
+          candidates (a Solidly pair's volatile + stable twins, multiple
+          Liquidity Book bin-steps) are disambiguated by the MEASURED
+          TVL-consistency cross-check — the candidate whose catalog
+          ``tvlUsd`` is consistent with the pool's live ``reserve_usd``
+          (from the same pool-info response that resolved the tokens) wins,
+          and the match is refused unless exactly one candidate is
+          consistent. No reserve measurement + several candidates refuses —
+          ambiguity is not-found, never "pick one".
+        """
+        if self._pool_token_resolver is None:
+            return None
+        llama_project = self._slug_resolver(protocol) if protocol else None
+        if not llama_project:
+            return None
+        try:
+            identity = await self._pool_token_resolver(chain, pool_address)
+        except Exception as exc:  # noqa: BLE001 — assist path; a resolver crash must not abort the provider chain
+            logger.debug("DefiLlama token-set match: resolver failed for %s/%s: %s", chain, pool_address, exc)
+            return None
+        if identity is None or not identity.tokens or len(identity.tokens) < 2:
+            # Single-token / unresolved pools are unmatchable: one token
+            # address matches every pool that includes the token.
+            return None
+
+        solana = is_solana_family(chain)
+        llama_chain_lower = llama_chain.lower()
+        candidates: list[dict[str, Any]] = []
+        for pool in pools:
+            if str(pool.get("chain", "")).lower() != llama_chain_lower:
+                continue
+            if str(pool.get("project", "")).lower() != llama_project:
+                continue
+            underlying = pool.get("underlyingTokens")
+            if not isinstance(underlying, list) or not underlying:
+                continue
+            entry_tokens = frozenset(str(t) if solana else str(t).lower() for t in underlying if t)
+            if entry_tokens != identity.tokens:
+                continue
+            if str(pool.get("pool", "")):
+                candidates.append(pool)
+
+        # Cross-check catalog TVL against the live reserve whenever one is
+        # available — even for a LONE candidate. The free-tier catalog omits
+        # many pools, so a same-token-set SIBLING can be the only listed pool
+        # while the strategy's actual pool is absent; returning the sibling's
+        # history on token-set alone is a silent wrong-pool match under a
+        # measured-looking MEDIUM label. With no reserve we cannot cross-check:
+        # a lone candidate then stands on token-set alone (the documented
+        # address-less caveat), but multiple candidates still refuse.
+        has_reserve = identity.reserve_usd is not None and identity.reserve_usd > 0
+        if has_reserve or len(candidates) > 1:
+            candidates = self._tvl_consistent_candidates(candidates, identity, chain, pool_address, llama_project)
+
+        if len(candidates) == 1:
+            pool_id = str(candidates[0].get("pool", ""))
+            logger.debug(
+                "DefiLlama token-set match: %s/%s -> %s (project=%s)",
+                chain,
+                pool_address,
+                pool_id,
+                llama_project,
+            )
+            return pool_id
+        return None
+
+    def _tvl_consistent_candidates(
+        self,
+        candidates: list[dict[str, Any]],
+        identity: ResolvedPoolIdentity,
+        chain: str,
+        pool_address: str,
+        llama_project: str,
+    ) -> list[dict[str, Any]]:
+        """Narrow same-token-set candidates by catalog-TVL vs live-reserve consistency.
+
+        Returns the consistent subset; the caller matches only when exactly
+        one survives. With no reserve measurement every candidate is
+        inconsistent (empty list) — refusing beats guessing.
+        """
+        if identity.reserve_usd is None or identity.reserve_usd <= 0:
+            logger.info(
+                "DefiLlama token-set match refused for %s/%s: %d candidates in project %s share the "
+                "token set and no live reserve measurement is available to disambiguate",
+                chain,
+                pool_address,
+                len(candidates),
+                llama_project,
+            )
+            return []
+        consistent: list[dict[str, Any]] = []
+        for pool in candidates:
+            try:
+                tvl = Decimal(str(pool.get("tvlUsd")))
+            except (InvalidOperation, ValueError, TypeError):
+                continue
+            if not tvl.is_finite() or tvl <= 0:
+                continue
+            ratio = float(tvl / identity.reserve_usd)
+            if _TVL_CONSISTENCY_MIN_RATIO <= ratio <= _TVL_CONSISTENCY_MAX_RATIO:
+                consistent.append(pool)
+        if len(consistent) != 1:
+            logger.info(
+                "DefiLlama token-set match refused for %s/%s: %d of %d same-token-set candidates in "
+                "project %s are TVL-consistent with the live reserve ($%s) — need exactly 1",
+                chain,
+                pool_address,
+                len(consistent),
+                len(candidates),
+                llama_project,
+                identity.reserve_usd,
+            )
+        return consistent
 
     # -- catalog cache (ported from pool_analytics_service) ---------------
 

@@ -16,7 +16,11 @@ from almanak.connectors._strategy_base.address_table import AddressTableSpec
 CONNECTOR = Connector(
     name="aerodrome",
     kind=ProtocolKind.LP,
-    external_ids={"defillama": "aerodrome-v2"},
+    # DefiLlama's yields catalog tracks Aerodrome classic (Solidly vAMM/sAMM)
+    # under project "aerodrome-v1"; "aerodrome-v2" exists in no DefiLlama
+    # namespace (yields projects are aerodrome-v1 / aerodrome-slipstream, and
+    # api.llama.fi/protocol/aerodrome-v2 is Protocol-not-found).
+    external_ids={"defillama": "aerodrome-v1"},
     dex_volume=DexVolumeDecl(
         chains=("base",),
         amm_family="solidly_v2",

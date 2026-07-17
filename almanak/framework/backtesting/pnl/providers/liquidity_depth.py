@@ -1139,10 +1139,10 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         timestamp = self._ensure_utc_timestamp(timestamp)
         protocol_id = self._resolve_protocol_id(protocol, chain, pool_address)
         if protocol_id is None:
-            return self._create_fallback_result(timestamp)
+            return await self._ladder_or_fallback(pool_address, chain, timestamp, protocol)
 
         if not self._protocol_supports_chain(protocol_id, chain):
-            return self._create_fallback_result(timestamp)
+            return await self._ladder_or_fallback(pool_address, chain, timestamp, protocol_id)
 
         result: LiquidityResult | None = None
         try:
@@ -1165,11 +1165,82 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 str(e),
             )
 
-        # Return result or fallback
+        # Return result, or try the measured pool-history ladder before
+        # conceding to the zero-depth fallback.
         if result is not None:
             return result
 
+        return await self._ladder_or_fallback(pool_address, chain, timestamp, protocol_id)
+
+    # -- Pool-history ladder rescue (ALM-2940) -------------------------------
+
+    async def _ladder_or_fallback(
+        self,
+        pool_address: str,
+        chain: str,
+        timestamp: datetime,
+        protocol_label: str | None,
+    ) -> LiquidityResult:
+        """Try the measured gateway pool-history ladder, else the LOW fallback."""
+        ladder = await self._pool_history_ladder_liquidity(pool_address, chain, timestamp, protocol_label)
+        if ladder is not None:
+            return ladder
         return self._create_fallback_result(timestamp)
+
+    async def _pool_history_ladder_liquidity(
+        self,
+        pool_address: str,
+        chain: str,
+        timestamp: datetime,
+        protocol_label: str | None,
+    ) -> LiquidityResult | None:
+        """Measured TVL rescue after the liquidity subgraph lane missed (ALM-2940).
+
+        Consults the gateway pool-history ladder (TheGraph -> DefiLlama ->
+        CoinGecko Onchain) for the pool-day's TVL. The daily TVL the ladder
+        serves (DefiLlama for subgraph-dead venues) carries the same
+        semantics as the ``tvlUSD`` / ``totalValueLockedUSD`` /
+        ``reserveUSD`` fields every family query above reads, so it feeds
+        the depth consumers (slippage model, fee-share denominator)
+        unchanged — at MEDIUM confidence with the serving provider named in
+        the source label. Returns ``None`` on any miss so the caller's
+        existing zero-depth fallback runs unchanged.
+        """
+        if not protocol_label:
+            return None
+        try:
+            from .pool_history_fallback import (
+                POOL_HISTORY_SOURCE_PREFIX,
+                get_pool_history_fallback,
+            )
+
+            history = await get_pool_history_fallback().daily_history_async(
+                pool_address=pool_address,
+                chain=chain,
+                protocol=protocol_label,
+                day=timestamp.date(),
+            )
+        except Exception as e:  # noqa: BLE001 — the rescue path must never out-fail the failed primary lane
+            logger.debug("Pool-history ladder liquidity lookup failed for %s: %s", pool_address[:10], e)
+            return None
+        if history is None or history.tvl is None:
+            return None
+        logger.info(
+            "Liquidity depth for pool %s on %s served by the gateway pool-history ladder "
+            "(source=%s:%s, MEDIUM confidence)",
+            pool_address[:10],
+            timestamp.date(),
+            POOL_HISTORY_SOURCE_PREFIX,
+            history.tvl_source,
+        )
+        return LiquidityResult(
+            depth=history.tvl,
+            source_info=DataSourceInfo(
+                source=f"{POOL_HISTORY_SOURCE_PREFIX}:{history.tvl_source}",
+                confidence=DataConfidence.MEDIUM,
+                timestamp=timestamp,
+            ),
+        )
 
     @staticmethod
     def _ensure_utc_timestamp(timestamp: datetime) -> datetime:

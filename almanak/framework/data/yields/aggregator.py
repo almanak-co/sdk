@@ -83,7 +83,12 @@ _PROJECT_TYPE: dict[str, str] = {
     "compound-v3": "lending",
     "spark-lending": "lending",
     "uniswap-v3": "lp",
-    "aerodrome-v2": "lp",
+    # Live yields projects for Aerodrome are "aerodrome-v1" (classic Solidly
+    # pairs) and "aerodrome-slipstream" (CL); "aerodrome-v2" exists in no
+    # DefiLlama namespace (a guessed slug from the original quant-data-layer
+    # PR, validated only against its own synthetic fixture).
+    "aerodrome-v1": "lp",
+    "aerodrome-slipstream": "lp",
     "pancakeswap-amm-v3": "lp",
     "sushiswap": "lp",
     "lido": "staking",

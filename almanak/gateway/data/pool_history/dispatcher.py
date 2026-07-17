@@ -33,10 +33,12 @@ increment structurally; do NOT add new health() keys).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 
 import aiohttp
 
@@ -51,7 +53,7 @@ from ._base import (
     _ProviderError,
 )
 from ._graphql import GatewayGraphQLClient
-from .defillama import DefiLlamaPoolHistoryProvider
+from .defillama import DefiLlamaPoolHistoryProvider, ResolvedPoolIdentity
 from .geckoterminal import GeckoTerminalPoolHistoryProvider
 from .thegraph import TheGraphPoolHistoryProvider
 
@@ -83,6 +85,15 @@ _DEFAULT_FINALITY_CUTOFFS: dict[str, int] = {
 }
 #: Ultimate fallback for an unknown provider id absent from the merged map.
 _DEFAULT_FINALITY_CUTOFF_SECONDS = 86400
+
+#: FIFO cap on the pool -> identity cache backing the DefiLlama UUID-id
+#: matcher (ALM-2940); bounds memory across long uptimes.
+_POOL_TOKEN_CACHE_MAX_ENTRIES = 512
+#: Identity-cache TTL. The token SET is immutable on-chain, but the cached
+#: ``reserve_usd`` (the TVL-consistency cross-check input) is a live
+#: measurement — a stale reserve would erode the consistency band over a
+#: long gateway uptime.
+_POOL_TOKEN_CACHE_TTL_SECONDS = 3600.0
 
 
 # =============================================================================
@@ -219,10 +230,28 @@ class PoolHistoryDispatcher:
             rate_limiter=self._thegraph_bucket,
             budget=self._budget,
         )
+        # CoinGecko Onchain key, mirrored from the GT provider's defaulting so
+        # the pool-token resolver (below) and the OHLCV provider agree on
+        # keyed-vs-keyless behaviour.
+        from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
+
+        self._coingecko_api_key = (
+            coingecko_api_key if coingecko_api_key is not None else _get_gateway_api_key("COINGECKO_API_KEY")
+        )
+        # pool -> ResolvedPoolIdentity cache for the DefiLlama UUID-id
+        # matcher (ALM-2940). TTL'd because the identity carries a live
+        # reserve measurement; FIFO cap bounds memory on long uptimes.
+        # Concurrent misses for one key coalesce onto a single in-flight
+        # task (mirrors the defillama catalog's _catalog_inflight) so bursty
+        # fallback traffic can't double-spend the CG bucket on one pool.
+        self._pool_token_cache: dict[tuple[str, str], tuple[ResolvedPoolIdentity, float]] = {}
+        self._pool_token_inflight: dict[tuple[str, str], asyncio.Task[ResolvedPoolIdentity | None]] = {}
+
         self._defillama = DefiLlamaPoolHistoryProvider(
             session_getter=self._get_http_session,
             slug_resolver=_resolve_defillama_slug,
             rate_limiter=self._defillama_bucket,
+            pool_token_resolver=self._resolve_pool_token_set,
         )
         self._geckoterminal = GeckoTerminalPoolHistoryProvider(
             session_getter=self._get_http_session,
@@ -252,6 +281,132 @@ class PoolHistoryDispatcher:
         if self._http_session is not None and not self._http_session.closed:
             await self._http_session.close()
             self._http_session = None
+
+    # -- Pool token-set resolver (ALM-2940) --------------------------------
+
+    async def _resolve_pool_token_set(self, chain: str, pool_address: str) -> ResolvedPoolIdentity | None:
+        """Resolve a pool's underlying token set + live reserve via CoinGecko Onchain.
+
+        Backs the DefiLlama provider's UUID-id token-set matcher: one
+        ``/networks/{network}/pools/{address}`` pool-info call, parsed for
+        the base/quote token relationship ids plus the pool's live
+        ``reserve_in_usd`` (the matcher's TVL-consistency cross-check when
+        several catalog entries share a token set). Returns ``None`` on ANY
+        failure (no key, unsupported chain, bucket empty, HTTP error, missing
+        relationships) — the matcher treats ``None`` as no-match, so this
+        assist path can degrade the DefiLlama lane to not-found but can never
+        fail the provider chain or invent an identity.
+
+        The fetch intentionally mirrors (rather than imports) the analytics
+        servicer's ``_query_coingecko_onchain_pool``: the two callers own
+        distinct error taxonomies and session lifecycles, and the shared
+        parts (API base, headers, network map, relationship-id parsing)
+        already live in shared homes. Consumes the shared CoinGecko bucket so
+        resolver traffic honours the same upstream throttle as OHLCV
+        fetches.
+        """
+        from almanak.gateway.data._history_common import _CHAIN_TO_GT_NETWORK
+
+        network = _CHAIN_TO_GT_NETWORK.get(chain)
+        if network is None or not self._coingecko_api_key:
+            return None
+
+        cache_key = (chain, pool_address)
+        cached = self._pool_token_cache.get(cache_key)
+        if cached is not None:
+            identity, cached_at = cached
+            if self._clock() - cached_at <= _POOL_TOKEN_CACHE_TTL_SECONDS:
+                return identity
+            del self._pool_token_cache[cache_key]
+
+        # Coalesce concurrent misses onto one fetch (CodeRabbit PR review,
+        # #3283): two in-flight lookups for the same pool must not each spend a
+        # CG bucket token. Shield the shared task so ONE waiter's cancellation
+        # can't cancel the fetch for the others, and remove it via an
+        # identity-checked done-callback so a later replacement task under the
+        # same key is never popped by a stale finally (CodeRabbit #3283).
+        task = self._pool_token_inflight.get(cache_key)
+        if task is None or task.done():
+            task = asyncio.ensure_future(self._fetch_pool_token_identity(cache_key, network))
+            self._pool_token_inflight[cache_key] = task
+
+            def _discard(
+                finished: asyncio.Future[ResolvedPoolIdentity | None], key: tuple[str, str] = cache_key
+            ) -> None:
+                # Identity-checked so a later replacement task under the same key
+                # is never popped by a stale completion.
+                if self._pool_token_inflight.get(key) is finished:
+                    self._pool_token_inflight.pop(key, None)
+
+            task.add_done_callback(_discard)
+        return await asyncio.shield(task)
+
+    async def _fetch_pool_token_identity(
+        self,
+        cache_key: tuple[str, str],
+        network: str,
+    ) -> ResolvedPoolIdentity | None:
+        """The uncoalesced fetch behind :meth:`_resolve_pool_token_set`."""
+        chain, pool_address = cache_key
+        if not self._geckoterminal_bucket.acquire():
+            logger.debug("Pool token resolver: CoinGecko bucket empty for %s/%s", chain, pool_address)
+            return None
+
+        from almanak.gateway.data._history_common import (
+            coingecko_onchain_api_base,
+            coingecko_onchain_headers,
+        )
+
+        url = f"{coingecko_onchain_api_base(self._coingecko_api_key)}/networks/{network}/pools/{pool_address}"
+        try:
+            session = await self._get_http_session()
+            async with session.get(url, headers=coingecko_onchain_headers(self._coingecko_api_key)) as response:
+                if response.status != 200:
+                    logger.debug("Pool token resolver: HTTP %s for %s/%s", response.status, chain, pool_address)
+                    return None
+                payload = await response.json()
+        except (TimeoutError, aiohttp.ClientError, ValueError) as exc:
+            logger.debug("Pool token resolver: fetch failed for %s/%s: %s", chain, pool_address, exc)
+            return None
+
+        # Lazy import for the same services -> data cycle-safety reason as
+        # ``_compute_finality``; reuses the exact-prefix-strip + chain-aware
+        # normalize/validate parsing the analytics servicer locked in.
+        from almanak.gateway.services.pool_analytics_service import (
+            _token_address_from_relationship_id,
+        )
+
+        data = payload.get("data") if isinstance(payload, dict) else None
+        relationships = data.get("relationships") if isinstance(data, dict) else None
+        if not isinstance(relationships, dict):
+            return None
+        tokens: set[str] = set()
+        for side in ("base_token", "quote_token"):
+            token_id = ((relationships.get(side) or {}).get("data") or {}).get("id")
+            address = _token_address_from_relationship_id(token_id, network, chain)
+            if not address:
+                # Half-resolved identity is unusable — a one-token set would
+                # match every pool containing that token.
+                return None
+            tokens.add(address)
+        if len(tokens) < 2:
+            return None
+
+        attributes = data.get("attributes") if isinstance(data, dict) else None
+        reserve_usd: Decimal | None = None
+        if isinstance(attributes, dict):
+            try:
+                parsed = Decimal(str(attributes.get("reserve_in_usd")))
+                if parsed.is_finite() and parsed > 0:
+                    reserve_usd = parsed
+            except (InvalidOperation, ValueError, TypeError):
+                reserve_usd = None
+
+        resolved = ResolvedPoolIdentity(tokens=frozenset(tokens), reserve_usd=reserve_usd)
+        while len(self._pool_token_cache) >= _POOL_TOKEN_CACHE_MAX_ENTRIES:
+            self._pool_token_cache.pop(next(iter(self._pool_token_cache)))
+        self._pool_token_cache[cache_key] = (resolved, self._clock())
+        return resolved
 
     # -- Budget read surface (servicer health() reads these) --------------
 

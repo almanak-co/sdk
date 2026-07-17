@@ -93,6 +93,9 @@ if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.providers.multi_dex_volume import (
         MultiDEXVolumeProvider,
     )
+    from almanak.framework.backtesting.pnl.providers.pool_history_fallback import (
+        DailyPoolHistory,
+    )
     from almanak.framework.backtesting.pnl.types import LiquidityResult, VolumeResult
     from almanak.framework.intents.vocabulary import Intent, LPOpenIntent
 
@@ -106,6 +109,12 @@ TICK_BASE = Decimal("1.0001")
 
 _RAISE_PLAIN: Final = object()
 """Sentinel for ``_volume_data_unavailable``: raise without a ``from`` clause."""
+
+# Keep primary volume prewarm requests bounded while avoiding one gateway RPC
+# per pool-day. A failed multi-day request falls back to the per-day recovery
+# path, so this bound affects healthy-path scalability without weakening the
+# two-consecutive-error policy.
+_VOLUME_PREWARM_CHUNK_DAYS = 30
 
 
 class RangeStatus(StrEnum):
@@ -393,6 +402,17 @@ class _VolumeResolution:
     volume_usd: Decimal
     source: Literal["explicit", "historical", "fallback"]
     confidence: DataConfidence
+    data_source_label: str | None = None
+    """Durable provenance override for the fee result. Set when the volume was
+    served by the gateway pool-history ladder (``gateway_pool_history:<provider>``)
+    so result metadata names the real source instead of the generic
+    ``multi_dex:<chain>``; ``None`` keeps the legacy label."""
+
+
+@dataclass(frozen=True)
+class _LadderVolumeOutcome:
+    value: tuple[Decimal, DataConfidence] | None
+    cacheable: bool
 
 
 @dataclass(frozen=True)
@@ -664,6 +684,10 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         # Cache for volume data to avoid repeated queries
         # Key: (pool_address, date) -> (volume_usd, confidence)
         self._volume_cache: dict[tuple[str, date], tuple[Decimal | None, DataConfidence]] = {}
+        # Per-pool-day provenance for volume days the pool-history ladder served
+        # (ALM-2940). Written only by _apply_ladder_volume; keys mirror
+        # _volume_cache so the fee source can label ladder-served accrual.
+        self._volume_source_labels: dict[tuple[str, date], str] = {}
 
         # Cache for liquidity depth data to avoid repeated queries
         # Key: (pool_address, date) -> LiquidityResult
@@ -1258,48 +1282,176 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         return False
 
     async def _prewarm_volume_lane(self, pool_lower: str, protocol: str, chain: str, days: list[date]) -> None:
-        volume_provider = self._ensure_volume_provider()
-        if volume_provider is None:
+        """Warm ``_volume_cache`` for the window: primary DEX-volume lane, then
+        the measured pool-history ladder per day (ALM-2940).
+
+        This prewarm is the hook that actually feeds accrual: the sync per-tick
+        path refuses to fetch inside the event loop, so an unwarmed day is a
+        guaranteed accrual gap. The primary gateway DEX-volume lane is fetched
+        in bounded contiguous ranges and its rows are applied per day. If a
+        range request fails, that range retries per day until TWO CONSECUTIVE
+        errors mark the primary sick (a single transient blip must not silence
+        the window — ALM-2953). Every primary miss still tries the independent
+        measured ladder (MEDIUM confidence).
+        """
+        if not self._use_historical_volume():
             return
+        # The pool-history ladder is INDEPENDENT of the primary DEX-volume
+        # provider — when the primary can't be constructed we must still iterate
+        # so the ladder warms the window (CodeRabbit #3283). A missing provider
+        # simply starts the primary lane already aborted.
+        volume_provider = self._ensure_volume_provider()
+        pending_days = [day for day in days if (pool_lower, day) not in self._volume_cache]
+        attempted = len(pending_days)
         warmed = 0
+        ladder_warmed = 0
         failed_days = 0
+        primary_aborted = volume_provider is None
+        last_primary_error: Exception | None = None
+
+        for chunk in self._volume_prewarm_chunks(pending_days):
+            rows_by_day: dict[date, VolumeResult] = {}
+            batch_failed = False
+            if volume_provider is not None and not primary_aborted and len(chunk) > 1:
+                try:
+                    batch_results = await volume_provider.get_volume(
+                        pool_address=pool_lower,
+                        chain=chain,
+                        start_date=chunk[0],
+                        end_date=chunk[-1],
+                        protocol=protocol,
+                    )
+                except Exception as exc:  # noqa: BLE001 — retry this range per day below
+                    batch_failed = True
+                    last_primary_error = exc
+                    logger.warning(
+                        "Volume history range prewarm failed for pool %s on %s..%s; retrying per day: %s",
+                        pool_lower[:10],
+                        chunk[0],
+                        chunk[-1],
+                        exc,
+                    )
+                else:
+                    failed_days = 0
+                    rows_by_day = self._volume_rows_by_day(batch_results, chunk)
+
+            for day in chunk:
+                row = rows_by_day.get(day)
+                if volume_provider is not None and not primary_aborted and (len(chunk) == 1 or batch_failed):
+                    try:
+                        day_results = await volume_provider.get_volume(
+                            pool_address=pool_lower,
+                            chain=chain,
+                            start_date=day,
+                            end_date=day,
+                            protocol=protocol,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — best-effort, per-day
+                        failed_days += 1
+                        last_primary_error = exc
+                        logger.warning(
+                            "Volume history prewarm failed for pool %s on %s (%d consecutive): %s",
+                            pool_lower[:10],
+                            day,
+                            failed_days,
+                            exc,
+                        )
+                        if self._prewarm_lane_aborts(pool_lower, "Volume", failed_days):
+                            primary_aborted = True
+                    else:
+                        failed_days = 0
+                        row = self._volume_rows_by_day(day_results, [day]).get(day)
+
+                outcome = await self._prewarm_volume_day(
+                    pool_lower=pool_lower,
+                    protocol=protocol,
+                    chain=chain,
+                    day=day,
+                    primary_row=row,
+                )
+                if outcome == "primary":
+                    warmed += 1
+                elif outcome == "ladder":
+                    ladder_warmed += 1
+        missing = attempted - warmed - ladder_warmed
+        if missing > 0:
+            logger.warning(
+                "Volume history prewarm left %d/%d days unwarmed for pool %s (%s/%s) — accrual will use "
+                "fallback/refusal semantics for those days%s",
+                missing,
+                attempted,
+                pool_lower[:10],
+                protocol,
+                chain,
+                f" (primary lane error: {last_primary_error})" if last_primary_error is not None else "",
+            )
+        elif ladder_warmed:
+            logger.info(
+                "Volume prewarm: primary DEX-volume lane %s for pool %s (%s/%s); %d/%d days served by "
+                "the gateway pool-history ladder (MEDIUM confidence)",
+                "failed" if last_primary_error is not None else "returned no data",
+                pool_lower[:10],
+                protocol,
+                chain,
+                ladder_warmed,
+                attempted,
+            )
+        else:
+            logger.info(
+                "Prewarmed %d/%d days of volume history for pool %s (%s/%s)",
+                warmed,
+                len(days),
+                pool_lower[:10],
+                protocol,
+                chain,
+            )
+
+    @staticmethod
+    def _volume_prewarm_chunks(days: list[date]) -> list[list[date]]:
+        """Group ordered days into bounded contiguous ranges."""
+        chunks: list[list[date]] = []
         for day in days:
-            cache_key = (pool_lower, day)
-            if cache_key in self._volume_cache:
-                continue
-            try:
-                results = await volume_provider.get_volume(
-                    pool_address=pool_lower, chain=chain, start_date=day, end_date=day, protocol=protocol
-                )
-            except Exception as exc:  # noqa: BLE001 — best-effort, per-day
-                # A transient per-day fetch error must NOT abandon the rest of
-                # the window: later days still prewarm so accrual keeps a warm
-                # cache and does not fall back to the chain-default DEX miss
-                # path. An empty (non-raising) day is a legitimate "no volume"
-                # and resets the streak below.
-                failed_days += 1
-                logger.warning(
-                    "Volume history prewarm failed for pool %s on %s (%d consecutive): %s",
-                    pool_lower[:10],
-                    day,
-                    failed_days,
-                    exc,
-                )
-                if self._prewarm_lane_aborts(pool_lower, "Volume", failed_days):
-                    break
-                continue
-            failed_days = 0
-            if results:
-                self._cache_volume_success(cache_key, results[0])
-                warmed += 1
-        logger.info(
-            "Prewarmed %d/%d days of volume history for pool %s (%s/%s)",
-            warmed,
-            len(days),
-            pool_lower[:10],
-            protocol,
-            chain,
-        )
+            if not chunks or len(chunks[-1]) >= _VOLUME_PREWARM_CHUNK_DAYS or day != chunks[-1][-1] + timedelta(days=1):
+                chunks.append([day])
+            else:
+                chunks[-1].append(day)
+        return chunks
+
+    @staticmethod
+    def _volume_rows_by_day(results: list["VolumeResult"], requested_days: list[date]) -> dict[date, "VolumeResult"]:
+        """Index returned range rows by UTC date, ignoring out-of-range rows."""
+        requested = set(requested_days)
+        rows: dict[date, VolumeResult] = {}
+        for result in results:
+            result_day = result.source_info.timestamp.date()
+            if result_day in requested and result_day not in rows:
+                rows[result_day] = result
+        return rows
+
+    async def _prewarm_volume_day(
+        self,
+        *,
+        pool_lower: str,
+        protocol: str,
+        chain: str,
+        day: date,
+        primary_row: "VolumeResult | None",
+    ) -> Literal["primary", "ladder", "missing"]:
+        """Apply one primary row or rescue its miss through the ladder."""
+        cache_key = (pool_lower, day)
+        if primary_row is not None and primary_row.source_info.confidence != DataConfidence.LOW:
+            self._cache_volume_success(cache_key, primary_row)
+            return "primary"
+
+        ladder = await self._pool_history_ladder_volume_outcome_async(pool_lower, chain, protocol, day, cache_key)
+        if ladder.value is not None:
+            return "ladder"
+        if primary_row is not None and ladder.cacheable:
+            # A LOW routing-mismatch row is definitive, but only memoize it
+            # after the measured ladder also returned a definitive miss.
+            self._cache_volume_success(cache_key, primary_row)
+            return "primary"
+        return "missing"
 
     async def _prewarm_liquidity_lane(self, pool_lower: str, protocol: str, chain: str, days: list[date]) -> None:
         liquidity_provider = self._ensure_liquidity_provider()
@@ -1983,26 +2135,52 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 timeout=30,
             )
             if volume_results and len(volume_results) > 0:
-                return self._cache_volume_success(cache_key, volume_results[0])
+                row = volume_results[0]
+                if row.source_info.confidence != DataConfidence.LOW:
+                    return self._cache_volume_success(cache_key, row)
+                # A LOW row is the provider's routing-mismatch placeholder
+                # (unknown protocol / unsupported chain), which the accrual
+                # resolution treats as a miss — try the measured ladder
+                # before caching it (ALM-2940).
+                ladder = self._pool_history_ladder_volume_outcome(
+                    pool_address_lower, chain, protocol, target_date, cache_key
+                )
+                if ladder.value is not None:
+                    return ladder.value
+                if ladder.cacheable:
+                    return self._cache_volume_success(cache_key, row)
+                return None, DataConfidence.LOW
+            ladder = self._pool_history_ladder_volume_outcome(
+                pool_address_lower, chain, protocol, target_date, cache_key
+            )
+            if ladder.value is not None:
+                return ladder.value
             return self._volume_data_unavailable(
                 identifier=pool_address_lower,
                 timestamp=timestamp,
                 message="No historical volume data returned from the gateway DEX-volume lane (GetDexVolumeHistory)",
                 chain=chain_label,
                 protocol=protocol,
-                cache_key=cache_key,
+                cache_key=cache_key if ladder.cacheable else None,
             )
         except HistoricalDataUnavailableError:
             raise
         except Exception as e:
             fetch_error = e
+            ladder = self._pool_history_ladder_volume_outcome(
+                pool_address_lower, chain, protocol, target_date, cache_key
+            )
+            if ladder.value is not None:
+                return ladder.value
             return self._volume_data_unavailable(
                 identifier=pool_address_lower,
                 timestamp=timestamp,
                 message=f"Failed to fetch historical volume: {fetch_error}",
                 chain=chain_label,
                 protocol=protocol,
-                cache_key=cache_key,
+                # The primary exception is retryable regardless of whether the
+                # ladder miss was definitive, so never poison the adapter cache.
+                cache_key=None,
                 cause=fetch_error,
                 on_fallback=lambda: logger.debug(
                     "Failed to fetch historical volume for pool %s on %s: %s",
@@ -2011,6 +2189,138 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                     fetch_error,
                 ),
             )
+
+    def _pool_history_ladder_volume(
+        self,
+        pool_address_lower: str,
+        chain: str,
+        protocol: str | None,
+        target_date: date,
+        cache_key: tuple[str, date],
+    ) -> tuple[Decimal, DataConfidence] | None:
+        """Measured rescue after the DEX-volume lane missed (ALM-2940).
+
+        Consults the gateway pool-history ladder (TheGraph -> DefiLlama ->
+        CoinGecko Onchain) for the pool-day's real traded volume. Runs
+        BEFORE ``_volume_data_unavailable`` on both the empty-result and
+        exception paths — including strict historical mode, where measured
+        ladder data legitimately satisfies the no-fabricated-data contract
+        (it is fetched history, just from a secondary source, hence MEDIUM
+        confidence). Returns ``None`` on any miss so the caller's existing
+        degradation path runs unchanged.
+        """
+        return self._pool_history_ladder_volume_outcome(
+            pool_address_lower,
+            chain,
+            protocol,
+            target_date,
+            cache_key,
+        ).value
+
+    def _pool_history_ladder_volume_outcome(
+        self,
+        pool_address_lower: str,
+        chain: str,
+        protocol: str | None,
+        target_date: date,
+        cache_key: tuple[str, date],
+    ) -> _LadderVolumeOutcome:
+        """Measured rescue retaining whether a miss is safe to memoize."""
+        if not protocol:
+            return _LadderVolumeOutcome(value=None, cacheable=True)
+        try:
+            from almanak.framework.backtesting.pnl.providers.pool_history_fallback import (
+                get_pool_history_fallback,
+            )
+
+            outcome = get_pool_history_fallback().daily_history_outcome(
+                pool_address=pool_address_lower,
+                chain=chain,
+                protocol=protocol,
+                day=target_date,
+            )
+        except Exception as e:  # noqa: BLE001 — the rescue path must never out-fail the failed primary lane
+            logger.debug("Pool-history ladder volume lookup failed for %s: %s", pool_address_lower[:10], e)
+            return _LadderVolumeOutcome(value=None, cacheable=False)
+        return _LadderVolumeOutcome(
+            value=self._apply_ladder_volume(outcome.history, pool_address_lower, target_date, cache_key),
+            cacheable=outcome.cacheable,
+        )
+
+    async def _pool_history_ladder_volume_async(
+        self,
+        pool_address_lower: str,
+        chain: str,
+        protocol: str | None,
+        target_date: date,
+        cache_key: tuple[str, date],
+    ) -> tuple[Decimal, DataConfidence] | None:
+        """Async form of :meth:`_pool_history_ladder_volume` for the prewarm hook."""
+        return (
+            await self._pool_history_ladder_volume_outcome_async(
+                pool_address_lower,
+                chain,
+                protocol,
+                target_date,
+                cache_key,
+            )
+        ).value
+
+    async def _pool_history_ladder_volume_outcome_async(
+        self,
+        pool_address_lower: str,
+        chain: str,
+        protocol: str | None,
+        target_date: date,
+        cache_key: tuple[str, date],
+    ) -> _LadderVolumeOutcome:
+        """Async measured rescue retaining definitive-vs-retryable state."""
+        if not protocol:
+            return _LadderVolumeOutcome(value=None, cacheable=True)
+        try:
+            from almanak.framework.backtesting.pnl.providers.pool_history_fallback import (
+                get_pool_history_fallback,
+            )
+
+            outcome = await get_pool_history_fallback().daily_history_outcome_async(
+                pool_address=pool_address_lower,
+                chain=chain,
+                protocol=protocol,
+                day=target_date,
+            )
+        except Exception as e:  # noqa: BLE001 — the rescue path must never out-fail the failed primary lane
+            logger.debug("Pool-history ladder volume lookup failed for %s: %s", pool_address_lower[:10], e)
+            return _LadderVolumeOutcome(value=None, cacheable=False)
+        return _LadderVolumeOutcome(
+            value=self._apply_ladder_volume(outcome.history, pool_address_lower, target_date, cache_key),
+            cacheable=outcome.cacheable,
+        )
+
+    def _apply_ladder_volume(
+        self,
+        history: "DailyPoolHistory | None",
+        pool_address_lower: str,
+        target_date: date,
+        cache_key: tuple[str, date],
+    ) -> tuple[Decimal, DataConfidence] | None:
+        from almanak.framework.backtesting.pnl.providers.pool_history_fallback import (
+            POOL_HISTORY_SOURCE_PREFIX,
+        )
+
+        if history is None or history.volume_24h is None:
+            return None
+        result = (history.volume_24h, DataConfidence.MEDIUM)
+        self._volume_cache[cache_key] = result
+        self._volume_source_labels[cache_key] = f"{POOL_HISTORY_SOURCE_PREFIX}:{history.volume_source}"
+        logger.info(
+            "Historical volume for pool %s on %s served by the gateway pool-history ladder "
+            "(source=%s:%s, MEDIUM confidence)",
+            pool_address_lower[:10],
+            target_date,
+            POOL_HISTORY_SOURCE_PREFIX,
+            history.volume_source,
+        )
+        return result
 
     def _get_historical_volume(
         self,
@@ -2049,22 +2359,69 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 protocol=protocol,
             )
 
+        pool_address_lower = pool_address.lower()
+        target_date = timestamp.date() if isinstance(timestamp, datetime) else timestamp
+        cache_key = (pool_address_lower, target_date)
+
+        # Cache check FIRST — before the provider check: a ladder-warmed day
+        # (from a prewarm where the primary DEX-volume provider was absent) must
+        # be consumable even without a provider now (CodeRabbit #3283).
+        if cache_key in self._volume_cache:
+            return self._volume_cache[cache_key]
+
         provider = self._ensure_volume_provider()
         if provider is None:
+            # Distinguish the two provider-None cases: historical volume ENABLED
+            # but the primary provider failed to build (the INDEPENDENT ladder
+            # can still serve — CodeRabbit #3283) vs historical volume DISABLED
+            # (no measured lane at all; the ladder is historical data too, so
+            # don't dial it, and don't cache).
+            if self._use_historical_volume():
+                # The direct ladder call below (_pool_history_ladder_volume ->
+                # daily_history) is a BLOCKING gateway read. Refuse to block when
+                # called from inside the engine's async iteration task (mirrors
+                # _fetch_and_cache_volume) — the async prewarm already warms the
+                # cache via the ASYNC ladder, so accrual reads a hit there
+                # (CodeRabbit #3283).
+                if in_running_event_loop_task():
+                    return self._volume_data_unavailable(
+                        identifier=pool_address,
+                        timestamp=timestamp,
+                        message="Cannot fetch historical volume in async context (no primary provider)",
+                        chain=self._config.chain,
+                        protocol=protocol,
+                        cache_key=cache_key,
+                        on_fallback=lambda: logger.debug(
+                            "Ladder volume fetch skipped in async context (no primary provider); using fallback."
+                        ),
+                    )
+                resolved_chain = (
+                    chain if chain is not None else self._resolve_volume_chain(timestamp, protocol, cache_key)
+                )
+                ladder = _LadderVolumeOutcome(value=None, cacheable=True)
+                if resolved_chain is not None:
+                    ladder = self._pool_history_ladder_volume_outcome(
+                        pool_address_lower, resolved_chain, protocol, target_date, cache_key
+                    )
+                    if ladder.value is not None:
+                        return ladder.value
+                # Memoize only a definitive ladder miss; transport failures and
+                # provisional days must remain recoverable on the next lookup.
+                return self._volume_data_unavailable(
+                    identifier=pool_address,
+                    timestamp=timestamp,
+                    message="Primary volume provider unavailable and pool-history ladder missed",
+                    chain=self._config.chain,
+                    protocol=protocol,
+                    cache_key=cache_key if ladder.cacheable else None,
+                )
             return self._volume_data_unavailable(
                 identifier=pool_address,
                 timestamp=timestamp,
-                message="Volume provider not available (historical volume disabled or failed to initialize)",
+                message="Volume provider not available (historical volume disabled)",
                 chain=self._config.chain,
                 protocol=protocol,
             )
-
-        pool_address_lower = pool_address.lower()
-        target_date = timestamp.date() if isinstance(timestamp, datetime) else timestamp
-
-        cache_key = (pool_address_lower, target_date)
-        if cache_key in self._volume_cache:
-            return self._volume_cache[cache_key]
 
         if chain is None:
             chain = self._resolve_volume_chain(timestamp, protocol, cache_key)
@@ -3147,10 +3504,14 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         )
         if actual_volume is None or actual_volume < 0 or volume_confidence == DataConfidence.LOW:
             return None
+        target_date = timestamp.date() if isinstance(timestamp, datetime) else timestamp
         return _VolumeResolution(
             volume_usd=actual_volume,
             source="historical",
             confidence=volume_confidence,
+            # Ladder-served days carry a per-provider provenance label so the
+            # fee result names the real source (ALM-2940).
+            data_source_label=self._volume_source_labels.get((pool_address.lower(), target_date)),
         )
 
     def _fallback_pool_volume_resolution(
@@ -3434,7 +3795,13 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             )
 
         self._log_real_volume_fee_source(resolution, volume_based_fees, pool_address, timestamp)
-        data_source = "explicit_volume" if resolution.source == "explicit" else f"multi_dex:{self._config.chain}"
+        if resolution.source == "explicit":
+            data_source = "explicit_volume"
+        else:
+            # Ladder-served days carry their own per-provider label
+            # ("gateway_pool_history:<provider>"); everything else keeps the
+            # legacy DEX-volume-lane label (ALM-2940).
+            data_source = resolution.data_source_label or f"multi_dex:{self._config.chain}"
         fee_confidence: FeeConfidence = resolution.confidence.value
         if tier_is_guess:
             # The tier is an unverified guess (no v3-schema subgraph to read

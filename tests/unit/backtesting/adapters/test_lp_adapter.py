@@ -1859,8 +1859,8 @@ class TestHistoricalVolumeIntegration:
         assert result.pct == Decimal("0.0125")
         assert result.liquidity_usd == Decimal("2500000")
 
-    def test_adapter_caches_volume_lookups(self) -> None:
-        """Test that volume lookups are cached."""
+    def test_adapter_does_not_cache_retryable_volume_misses(self) -> None:
+        """Transport/retryable misses must not poison the per-day cache."""
         from almanak.framework.backtesting.pnl.types import DataConfidence
 
         config = LPBacktestConfig(
@@ -1869,25 +1869,21 @@ class TestHistoricalVolumeIntegration:
         )
         adapter = LPBacktestAdapter(config)
 
-        # Simulate a failed lookup that gets cached
+        # With no connected gateway both measured lanes miss retryably.
         pool_address = "0xtest"
         timestamp = datetime.now()
 
-        # First call - will fail but cache the result (tuple of value, confidence)
         result1_volume, result1_confidence = adapter._get_historical_volume(pool_address, timestamp)
 
-        # Verify it's cached (cache key exists)
         cache_key = (pool_address.lower(), timestamp.date())
-        assert cache_key in adapter._volume_cache
+        assert cache_key not in adapter._volume_cache
 
-        # Second call should return cached result
         result2_volume, result2_confidence = adapter._get_historical_volume(pool_address, timestamp)
 
         # Both should have LOW confidence (cached failure or fallback result)
         # The volume value may be 0 (fallback) or None depending on provider behavior
         assert result1_confidence == DataConfidence.LOW
         assert result2_confidence == DataConfidence.LOW
-        # Verify cached values match
         assert result1_volume == result2_volume
         assert result1_confidence == result2_confidence
 
@@ -2705,7 +2701,7 @@ class TestGetHistoricalVolumeOrchestration:
         )
         assert adapter._volume_cache == {}
 
-    def test_provider_error_non_strict_caches_low(self) -> None:
+    def test_provider_error_non_strict_retryable_ladder_miss_stays_uncached(self) -> None:
         from almanak.framework.backtesting.pnl.types import DataConfidence
 
         stub = StubVolumeProvider(error=RuntimeError("provider down"))
@@ -2713,7 +2709,7 @@ class TestGetHistoricalVolumeOrchestration:
         ts = datetime(2024, 1, 15)
 
         assert adapter._get_historical_volume("0xpool", ts) == (None, DataConfidence.LOW)
-        assert adapter._volume_cache[("0xpool", ts.date())] == (None, DataConfidence.LOW)
+        assert ("0xpool", ts.date()) not in adapter._volume_cache
 
     def test_provider_error_strict_chains_cause(self) -> None:
         from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
@@ -2743,6 +2739,28 @@ class TestGetHistoricalVolumeOrchestration:
         assert asyncio.run(lookup()) == (None, DataConfidence.LOW)
         assert adapter._volume_cache[("0xpool", ts.date())] == (None, DataConfidence.LOW)
         assert stub.calls == []
+
+    def test_no_provider_ladder_refuses_to_block_inside_async_task(self, monkeypatch) -> None:
+        # CodeRabbit #3283: the no-primary-provider branch dials the ladder via a
+        # BLOCKING daily_history() call — inside the engine's async task it must
+        # refuse to block (not call the blocking ladder), mirroring
+        # _fetch_and_cache_volume's guard.
+        import asyncio
+
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = LPBacktestAdapter()  # use_historical_volume defaults True
+        adapter._volume_provider = None  # no primary provider
+        adapter._volume_provider_initialized = True
+        called: list[int] = []
+        monkeypatch.setattr(adapter, "_pool_history_ladder_volume", lambda *a, **k: (called.append(1), None)[1])
+        ts = datetime(2024, 1, 15)
+
+        async def lookup() -> tuple:
+            return adapter._get_historical_volume("0xpool", ts)
+
+        assert asyncio.run(lookup()) == (None, DataConfidence.LOW)
+        assert called == []  # the blocking ladder was NOT dialed inside the loop
 
     def test_refuses_to_block_inside_async_task_strict(self) -> None:
         import asyncio
@@ -3192,11 +3210,22 @@ class TestPrewarmHistory:
         )
 
         adapter = LPBacktestAdapter()
+
+        def volume_row(day: int) -> VolumeResult:
+            return VolumeResult(
+                value=Decimal("1000000"),
+                source_info=DataSourceInfo(
+                    source="test",
+                    confidence=DataConfidence.HIGH,
+                    timestamp=datetime(2026, 6, day, tzinfo=UTC),
+                ),
+            )
+
         source = DataSourceInfo(
             source="test", confidence=DataConfidence.HIGH, timestamp=datetime(2026, 6, 20, tzinfo=UTC)
         )
         volume_provider = SimpleNamespace(
-            get_volume=AsyncMock(return_value=[VolumeResult(value=Decimal("1000000"), source_info=source)])
+            get_volume=AsyncMock(return_value=[volume_row(20), volume_row(21), volume_row(22)])
         )
         liquidity_provider = SimpleNamespace(
             get_liquidity_depth=AsyncMock(return_value=LiquidityResult(depth=Decimal("5000000"), source_info=source))
@@ -3219,7 +3248,7 @@ class TestPrewarmHistory:
         assert (pool, date(2026, 6, 22)) in adapter._volume_cache
         assert adapter._volume_cache[(pool, date(2026, 6, 21))][0] == Decimal("1000000")
         assert (pool, date(2026, 6, 21)) in adapter._liquidity_cache
-        assert volume_provider.get_volume.await_count == 3
+        assert volume_provider.get_volume.await_count == 1
         assert liquidity_provider.get_liquidity_depth.await_count == 3
 
     @pytest.mark.asyncio
@@ -3241,13 +3270,25 @@ class TestPrewarmHistory:
         )
 
         adapter = LPBacktestAdapter()
-        source = DataSourceInfo(
-            source="test", confidence=DataConfidence.HIGH, timestamp=datetime(2026, 6, 20, tzinfo=UTC)
-        )
-        ok = [VolumeResult(value=Decimal("1000000"), source_info=source)]
-        # day0 ok, day1 raises (isolated), day2 ok — day2 must still be warmed.
+
+        def ok(day: int) -> list[VolumeResult]:
+            return [
+                VolumeResult(
+                    value=Decimal("1000000"),
+                    source_info=DataSourceInfo(
+                        source="test",
+                        confidence=DataConfidence.HIGH,
+                        timestamp=datetime(2026, 6, day, tzinfo=UTC),
+                    ),
+                )
+            ]
+
+        # Range fails, then day0 ok, day1 raises (isolated), day2 ok — day2
+        # must still be warmed by the bounded per-day recovery path.
         volume_provider = SimpleNamespace(
-            get_volume=AsyncMock(side_effect=[ok, RuntimeError("transient"), ok])
+            get_volume=AsyncMock(
+                side_effect=[RuntimeError("range transient"), ok(20), RuntimeError("transient"), ok(22)]
+            )
         )
         adapter._volume_provider = volume_provider
         adapter._volume_provider_initialized = True
@@ -3263,7 +3304,7 @@ class TestPrewarmHistory:
         )
 
         pool = intent.pool.lower()
-        assert volume_provider.get_volume.await_count == 3  # NOT aborted after day1
+        assert volume_provider.get_volume.await_count == 4  # range attempt + all 3 per-day retries
         assert (pool, date(2026, 6, 20)) in adapter._volume_cache
         assert (pool, date(2026, 6, 22)) in adapter._volume_cache  # day AFTER the error still warmed
         assert (pool, date(2026, 6, 21)) not in adapter._volume_cache  # the erroring day is skipped
@@ -3286,12 +3327,20 @@ class TestPrewarmHistory:
         )
 
         adapter = LPBacktestAdapter()
-        source = DataSourceInfo(
-            source="test", confidence=DataConfidence.HIGH, timestamp=datetime(2026, 6, 20, tzinfo=UTC)
-        )
-        ok = [VolumeResult(value=Decimal("1000000"), source_info=source)]
+        ok = [
+            VolumeResult(
+                value=Decimal("1000000"),
+                source_info=DataSourceInfo(
+                    source="test",
+                    confidence=DataConfidence.HIGH,
+                    timestamp=datetime(2026, 6, 20, tzinfo=UTC),
+                ),
+            )
+        ]
         volume_provider = SimpleNamespace(
-            get_volume=AsyncMock(side_effect=[ok, RuntimeError("down"), RuntimeError("down"), ok])
+            get_volume=AsyncMock(
+                side_effect=[RuntimeError("range down"), ok, RuntimeError("down"), RuntimeError("down")]
+            )
         )
         adapter._volume_provider = volume_provider
         adapter._volume_provider_initialized = True
@@ -3305,7 +3354,7 @@ class TestPrewarmHistory:
             start_time=datetime(2026, 6, 20, tzinfo=UTC),
             end_time=datetime(2026, 6, 23, tzinfo=UTC),  # 4 days
         )
-        assert volume_provider.get_volume.await_count == 3  # aborted, never dialed day3
+        assert volume_provider.get_volume.await_count == 4  # range + day0/day1/day2; never dialed day3
 
     @pytest.mark.asyncio
     async def test_prewarm_liquidity_survives_a_transient_mid_window_error(self):

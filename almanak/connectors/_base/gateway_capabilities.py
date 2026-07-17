@@ -383,7 +383,7 @@ class GatewayDefillamaSlugCapability(Protocol):
 
     Returns the canonical DefiLlama slug for the connector's protocol
     (e.g. Aave v3 returns ``"aave-v3"``, Aerodrome returns
-    ``"aerodrome-v2"``). The dispatcher keys the result by
+    ``"aerodrome-v1"``). The dispatcher keys the result by
     ``GatewayConnector.protocol``.
 
     ``defillama_slug_aliases`` lets a connector publish additional
