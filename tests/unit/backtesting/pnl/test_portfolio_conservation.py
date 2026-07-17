@@ -627,15 +627,22 @@ class TestImplicitCashConversion:
 
 
 class TestAggregateCashValidation:
-    """All cash draws of a fill are validated as one sum, plus gas.
+    """All STRATEGY-CAPITAL cash draws of a fill are validated as one sum.
 
     Split checks (stable debits in _plan_token_debits, perp collateral in
-    its own gate) could each pass while their sum overdrew cash_usd. Fills
-    that draw nothing from cash keep gas unconditional so risk-reducing
-    sells/closes are never blocked for being cash-poor.
+    its own gate) could each pass while their sum overdrew cash_usd. GAS is
+    deliberately NOT part of the gate (ALM-2958): live gas is EOA-paid
+    native ETH the strategy never sizes for, so a fill whose capital legs
+    are fully funded must apply, with gas charged unconditionally (cash may
+    go transiently negative -- a debit cannot mint value). Fills that draw
+    nothing from cash keep gas unconditional so risk-reducing sells/closes
+    are never blocked for being cash-poor.
     """
 
-    def test_stable_spend_plus_gas_beyond_cash_is_rejected(self) -> None:
+    def test_full_capital_spend_applies_with_gas_charged_beyond_cash(self) -> None:
+        # ALM-2958: 100% of cash into the swap + $1 gas. Live this fills
+        # (the EOA pays gas); the backtest must too, with the gas debit
+        # driving cash exactly -1 so PnL stays net-of-gas.
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
 
         applied = portfolio.apply_fill(
@@ -644,6 +651,24 @@ class TestAggregateCashValidation:
                 tokens_in={"WETH": Decimal("100") / WETH_PRICE},
                 amount_usd=Decimal("100"),
                 gas_cost_usd=Decimal("1"),
+            )
+        )
+
+        assert applied is True
+        assert portfolio.cash_usd == Decimal("-1")  # gas, and only gas
+        assert portfolio.tokens["WETH"] == Decimal("100") / WETH_PRICE
+
+    def test_capital_legs_beyond_cash_still_rejected(self) -> None:
+        # The gate itself survives ALM-2958: spending MORE CAPITAL than the
+        # portfolio holds is still refused -- only gas left the sum.
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
+
+        applied = portfolio.apply_fill(
+            make_swap_fill(
+                tokens_out={"USDC": Decimal("101")},
+                tokens_in={"WETH": Decimal("101") / WETH_PRICE},
+                amount_usd=Decimal("101"),
+                gas_cost_usd=Decimal("0"),
             )
         )
 

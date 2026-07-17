@@ -170,19 +170,31 @@ class TestPerpOpenConservation:
         assert portfolio.trades[0].success is False
         assert portfolio.get_total_value_usd(market(ENTRY_PRICE)) == Decimal("500")
 
-    def test_open_where_gas_pushes_required_cash_over_balance_is_rejected(self) -> None:
-        """Gas is deducted in the same fill, so collateral + gas must fit in cash."""
+    def test_open_with_full_collateral_applies_despite_gas(self) -> None:
+        """ALM-2958: collateral (strategy capital) gates; gas (EOA-paid live)
+        does not. Full-cash collateral + gas fills, cash goes negative by
+        exactly the gas debit."""
         portfolio = SimulatedPortfolio(initial_capital_usd=COLLATERAL)
         fill = open_fill(perp_long())  # collateral == full cash balance
         fill.gas_cost_usd = Decimal("5")
 
         portfolio.apply_fill(fill)
 
+        assert fill.success is True
+        assert portfolio.cash_usd == Decimal("-5")  # gas, and only gas
+        assert len(portfolio.positions) == 1
+
+    def test_open_where_collateral_alone_exceeds_cash_is_rejected(self) -> None:
+        """The collateral gate survives ALM-2958 -- only gas left the sum."""
+        portfolio = SimulatedPortfolio(initial_capital_usd=COLLATERAL - Decimal("1"))
+        fill = open_fill(perp_long())  # collateral > cash balance
+        fill.gas_cost_usd = Decimal("0")
+
+        portfolio.apply_fill(fill)
+
         assert fill.success is False
-        assert portfolio.cash_usd == COLLATERAL  # no gas charged on rejection
+        assert portfolio.cash_usd == COLLATERAL - Decimal("1")
         assert portfolio.positions == []
-        # _record_failed_fill stashes the unapplied gas for the books.
-        assert fill.metadata["gas_cost_usd_unapplied"] == "5"
 
 
 class TestPerpCloseConservation:

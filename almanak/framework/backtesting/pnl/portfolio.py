@@ -997,9 +997,18 @@ class SimulatedPortfolio:
 
         Aggregates every cash draw the fill will make -- the planned
         stablecoin-outflow / implicit-conversion debit plus perp-open
-        collateral -- and requires gas and non-embedded venue costs
+        collateral -- and requires non-embedded venue costs
         (:meth:`_venue_cash_costs`) on top, so partial checks cannot each
         pass while their sum overdraws ``cash_usd``.
+
+        GAS is deliberately NOT gated (ALM-2958): live, gas is native ETH
+        paid by the agent EOA -- platform-funded, never sized or managed by
+        the strategy -- so a fill whose STRATEGY-CAPITAL legs are fully
+        funded must never be rejected over gas the token portfolio does not
+        pay for in production. Gas stays charged unconditionally at apply
+        time (the same "a debit cannot mint value" treatment the exempt
+        fills below get), so PnL remains net-of-gas; only admission ignores
+        it. Venue costs (fee/slippage) ARE strategy capital and stay gated.
 
         Fills that draw nothing from cash (sells, closes, inflow-only
         fills) are exempt: gas and venue costs stay charged unconditionally
@@ -1014,12 +1023,12 @@ class SimulatedPortfolio:
         if required_cash <= Decimal("0"):
             return None
         venue_costs = self._venue_cash_costs(fill)
-        required_with_costs = required_cash + fill.gas_cost_usd + venue_costs
+        required_with_costs = required_cash + venue_costs
         cash_like_available = self._cash_like_available(token_debits)
         if required_with_costs > cash_like_available:
             return (
                 f"insufficient cash for fill: required {required_with_costs} "
-                f"(cash legs {required_cash} + gas {fill.gas_cost_usd} + venue costs {venue_costs}), "
+                f"(cash legs {required_cash} + venue costs {venue_costs}; gas is EOA-paid, not gated), "
                 f"cash-like {cash_like_available}"
             )
         return None
