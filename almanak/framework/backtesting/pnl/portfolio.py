@@ -47,6 +47,7 @@ from almanak.framework.backtesting.pnl.data_provider import (
     normalize_token_ref,
     token_ref_display,
 )
+from almanak.framework.backtesting.pnl.money import TokenIdentity
 
 # Position models extracted to position_models.py for module size management
 from almanak.framework.backtesting.pnl.position_models import (  # noqa: F401
@@ -278,11 +279,16 @@ class SimulatedPortfolio:
     #: by symbol; this key is the authoritative lookup path for those runs.
     _numeraire_token: TokenRef | None = field(default=None)
 
+    #: Operational gas ledger: gas is EOA-paid, never strategy capital.
+    #: ``None`` budget = unlimited (metered, never binds).
+    gas_tank_budget_usd: Decimal | None = field(default=None)
+    gas_tank_spent_usd: Decimal = field(default=Decimal("0"))
+
     _STABLECOIN_SYMBOLS: frozenset[str] = STABLECOINS
     _cash_equivalent_token_keys: frozenset[TokenKey] = field(default_factory=frozenset, init=False)
-    # symbol (upper) -> address-native key: the run's funding identity plane,
-    # registered by the engine so credits land where funding seeds (ALM-2960).
-    _registered_identities: dict[str, TokenKey] = field(default_factory=dict, init=False)
+    # symbol (upper) -> typed identity; all balance-key decisions resolve
+    # through _resolve_key against this one table (ALM-2960).
+    _identity_table: dict[str, TokenIdentity] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         """Initialize cash from initial capital if not set."""
@@ -468,6 +474,10 @@ class SimulatedPortfolio:
         if funding_failure is not None:
             return None, funding_failure
 
+        gas_failure = self._gas_exhaustion_failure(fill)
+        if gas_failure is not None:
+            return None, gas_failure
+
         reduce_failure = self._position_reduce_failure(fill)
         if reduce_failure is not None:
             return None, reduce_failure
@@ -605,7 +615,7 @@ class SimulatedPortfolio:
         # over the real balance, freezing re-entries (found via the CLMM
         # 6-month run: WETH read 0 forever after the first close).
         for token, amount in fill.tokens_in.items():
-            credit_token = self._credit_target(token)
+            credit_token = self._resolve_key(token)
             current = self.tokens.get(credit_token, Decimal("0"))
             self.tokens[credit_token] = current + amount
 
@@ -616,8 +626,10 @@ class SimulatedPortfolio:
                 # Swept to cash at $1: no spot basis to carry.
                 self._cost_basis.pop(token, None)
 
-        # Deduct gas and non-embedded venue costs (fee/slippage) from cash-like assets.
-        self._debit_cash_like(fill.gas_cost_usd + self._venue_cash_costs(fill))
+        # Gas draws from the operational tank; venue costs (fee/slippage)
+        # are strategy capital and debit cash-like assets.
+        self._draw_gas_tank(fill.gas_cost_usd)
+        self._debit_cash_like(self._venue_cash_costs(fill))
 
     def _swap_disposed_tokens(
         self,
@@ -678,7 +690,7 @@ class SimulatedPortfolio:
         for token, amount in fill.tokens_in.items():
             if amount <= Decimal("0") or self._is_cash_equivalent(token):
                 continue
-            key = self._credit_target(token)
+            key = self._resolve_key(token)
             acquired[key] = acquired.get(key, Decimal("0")) + amount
             price_lookup.setdefault(key, token)
         # _token_price returns None (never 0) when unavailable, so `or`
@@ -848,7 +860,7 @@ class SimulatedPortfolio:
         for token, amount in tokens_out.items():
             if amount <= Decimal("0"):
                 continue
-            debit_token = self._held_debit_source(token)
+            debit_token = self._resolve_key(token)
             held = self.tokens.get(debit_token, Decimal("0"))
             from_tokens = min(held, amount)
             shortfall = amount - from_tokens
@@ -922,55 +934,42 @@ class SimulatedPortfolio:
         return False
 
     def register_token_identities(self, token_addresses: Mapping[str, tuple[str, str]] | None) -> None:
-        """Register the run's symbol -> address-native key plane (ALM-2960).
+        """Build the run's typed identity table from the registered token map.
 
-        The engine calls this once with the same map it registers as
-        market-state symbol aliases, so CREDITS land on the identity plane
-        token_funding seeds — a symbol-shaped LP-close credit must never
-        mint a parallel key beside the (possibly fully-deployed, hence
-        empty) address-keyed plane, or the snapshot's unheld-token zero-seed
-        erases the real balance and re-entries freeze.
+        Every balance-key decision (credit, debit, cost basis, balance read)
+        resolves through :meth:`_resolve_key` against this table.
         """
         if not token_addresses:
             return
         for symbol, entry in token_addresses.items():
             if is_token_key(entry):
-                self._registered_identities[str(symbol).upper()] = normalize_token_key(entry[0], entry[1])
+                chain, address = normalize_token_key(entry[0], entry[1])
+                if not is_address_like(address):
+                    continue
+                if chain != self.chain:
+                    # Foreign-chain entries never join this portfolio's key
+                    # plane (mirrors the snapshot's same-chain alias filter).
+                    continue
+                self._identity_table[str(symbol).upper()] = TokenIdentity(
+                    chain=chain, address=address, symbol=str(symbol)
+                )
 
-    def _credit_target(self, token: TokenRef) -> TokenRef:
-        """Return the key identity to CREDIT ``token`` under.
+    def _resolve_key(self, token: TokenRef) -> TokenRef:
+        """Resolve a token reference to its single balance key.
 
-        Prefer the form already held (an existing balance accretes); else a
-        REGISTERED identity (the run's funding plane) wins for symbol-shaped
-        credits. Unregistered portfolios keep the raw key — legacy
-        symbol-keyed flows are untouched.
+        Order: held form, address form, identity table, registry-resolved key
+        if held, raw. Credits and debits use the same resolution, so one
+        asset can never occupy two keys (ALM-2960).
         """
         normalized = self._normalize_token_ref(token)
         if normalized in self.tokens:
             return normalized
         if not isinstance(normalized, str) or is_address_like(normalized):
             return normalized
-        registered = self._registered_identities.get(normalized.upper())
-        if registered is not None:
-            return registered
-        return normalized
 
-    def _held_debit_source(self, token: TokenRef) -> TokenRef:
-        """Return the held token identity to debit for ``token`` when possible."""
-        normalized = self._normalize_token_ref(token)
-        if normalized in self.tokens:
-            return normalized
-        if not isinstance(normalized, str) or is_address_like(normalized):
-            return normalized
-
-        # The run's registered identity plane first (review, #3310): a
-        # token_funding symbol with an explicit address may be UNKNOWN to the
-        # global registry, so a credit landed on the registered key would be
-        # invisible to the resolver path below and the debit would miss the
-        # held balance.
-        registered = self._registered_identities.get(normalized.upper())
-        if registered is not None and registered in self.tokens:
-            return registered
+        identity = self._identity_table.get(normalized.upper())
+        if identity is not None:
+            return identity.key
 
         try:
             resolved = get_token_resolver().resolve(
@@ -1067,21 +1066,14 @@ class SimulatedPortfolio:
         (:meth:`_venue_cash_costs`) on top, so partial checks cannot each
         pass while their sum overdraws ``cash_usd``.
 
-        GAS is deliberately NOT gated (ALM-2958): live, gas is native ETH
-        paid by the agent EOA -- platform-funded, never sized or managed by
-        the strategy -- so a fill whose STRATEGY-CAPITAL legs are fully
-        funded must never be rejected over gas the token portfolio does not
-        pay for in production. Gas stays charged unconditionally at apply
-        time (the same "a debit cannot mint value" treatment the exempt
-        fills below get), so PnL remains net-of-gas; only admission ignores
-        it. Venue costs (fee/slippage) ARE strategy capital and stay gated.
+        Gas is not part of this gate: it draws from the operational gas
+        tank (:meth:`_gas_exhaustion_failure`), never from strategy cash.
+        Venue costs (fee/slippage) are strategy capital and stay gated.
 
         Fills that draw nothing from cash (sells, closes, inflow-only
-        fills) are exempt: gas and venue costs stay charged unconditionally
-        there so a risk-reducing close is never blocked for being low on
-        cash (the close itself replenishes it). Those debits may
-        transiently drive ``cash_usd`` negative -- an accepted modeling
-        choice, since a debit cannot mint value.
+        fills) are exempt so a risk-reducing close is never blocked for
+        being low on cash; their venue costs stay charged unconditionally
+        and may transiently drive ``cash_usd`` negative.
         """
         required_cash = cash_debit
         if fill.position_delta is not None and fill.position_delta.is_perp:
@@ -1094,10 +1086,34 @@ class SimulatedPortfolio:
         if required_with_costs > cash_like_available:
             return (
                 f"insufficient cash for fill: required {required_with_costs} "
-                f"(cash legs {required_cash} + venue costs {venue_costs}; gas is EOA-paid, not gated), "
+                f"(cash legs {required_cash} + venue costs {venue_costs}), "
                 f"cash-like {cash_like_available}"
             )
         return None
+
+    def _gas_exhaustion_failure(self, fill: SimulatedFill) -> str | None:
+        """Reason a finite gas tank cannot cover this fill's gas, or None."""
+        if self.gas_tank_budget_usd is None or fill.gas_cost_usd <= Decimal("0"):
+            return None
+        remaining = self.gas_tank_budget_usd - self.gas_tank_spent_usd
+        if fill.gas_cost_usd > remaining:
+            return (
+                f"gas tank exhausted: fill needs ${fill.gas_cost_usd} gas, "
+                f"${max(remaining, Decimal('0'))} of ${self.gas_tank_budget_usd} remaining — "
+                "increase gas_funding_usd or reduce trading activity"
+            )
+        return None
+
+    def _draw_gas_tank(self, gas_cost_usd: Decimal) -> None:
+        if gas_cost_usd > Decimal("0"):
+            self.gas_tank_spent_usd += gas_cost_usd
+
+    @property
+    def gas_tank_remaining_usd(self) -> Decimal | None:
+        """Remaining tank budget, or None for an unlimited tank."""
+        if self.gas_tank_budget_usd is None:
+            return None
+        return self.gas_tank_budget_usd - self.gas_tank_spent_usd
 
     def _apply_perp_close_credit(
         self,
@@ -3454,7 +3470,7 @@ class SimulatedPortfolio:
         Returns:
             Amount held, or 0 if not held
         """
-        return self.tokens.get(self._normalize_token_ref(token), Decimal("0"))
+        return self.tokens.get(self._resolve_key(token), Decimal("0"))
 
     def get_lending_liquidations(self) -> list[LendingLiquidationEvent]:
         """Get all lending liquidation events that occurred during the backtest.
@@ -3504,6 +3520,11 @@ class SimulatedPortfolio:
             # realized_pnl, not 0 until the next close (VIB-5083, CodeRabbit).
             "realized_pnl": str(self._realized_pnl),
             "unrealized_pnl": str(self._unrealized_pnl),
+            "gas_tank_budget_usd": str(self.gas_tank_budget_usd) if self.gas_tank_budget_usd is not None else None,
+            "gas_tank_spent_usd": str(self.gas_tank_spent_usd),
+            "token_identities": {
+                symbol: [identity.chain, identity.address] for symbol, identity in self._identity_table.items()
+            },
             "lending_liquidations": [ll.to_dict() for ll in self._lending_liquidations],
             "perp_liquidations": [pl.to_dict() for pl in self._perp_liquidations],
             # Per-token average cost basis is live attribution state: without it
@@ -3623,6 +3644,15 @@ class SimulatedPortfolio:
         # realized trades so resumed portfolios stay consistent.
         portfolio._realized_pnl = cls._restored_realized_pnl(portfolio, data)
         portfolio._unrealized_pnl = Decimal(str(data.get("unrealized_pnl", "0")))
+        budget = data.get("gas_tank_budget_usd")
+        portfolio.gas_tank_budget_usd = Decimal(str(budget)) if budget is not None else None
+        portfolio.gas_tank_spent_usd = Decimal(str(data.get("gas_tank_spent_usd", "0")))
+        # Restore the identity table: a resumed run must keep resolving
+        # symbol-shaped credits onto the registered plane (review, #3314).
+        identities = data.get("token_identities") or {}
+        portfolio.register_token_identities(
+            {symbol: (entry[0], entry[1]) for symbol, entry in identities.items() if len(entry) == 2}
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SimulatedPortfolio":

@@ -373,6 +373,7 @@ def initialize_backtest(
             initial_capital_usd=Decimal("0"),
             cash_usd=Decimal("0"),
             chain=config.chain,
+            gas_tank_budget_usd=config.gas_funding_usd,
         )
         # The portfolio captures the numeraire price per equity point; value_usd
         # stays USD (the conservation core is untouched).

@@ -421,8 +421,9 @@ class TestPortfolioApplyFill:
         assert portfolio.tokens.get("USDC", Decimal("0")) == Decimal("0")
         # WETH should be added
         assert portfolio.tokens.get("WETH") == Decimal("0.332")
-        # Gas cost should be deducted from cash
-        assert portfolio.cash_usd == Decimal("9000") - Decimal("0.50")
+        # Gas meters to the tank, not cash
+        assert portfolio.cash_usd == Decimal("9000")
+        assert portfolio.gas_tank_spent_usd == Decimal("0.50")
         # Trade should be recorded
         assert len(portfolio.trades) == 1
         assert portfolio.trades[0].intent_type == IntentType.SWAP
@@ -486,8 +487,8 @@ class TestPortfolioApplyFill:
 
         # USDC should be converted to cash automatically
         assert "USDC" not in portfolio.tokens
-        # Cash should increase by USDC received minus gas
-        expected_cash = initial_cash + Decimal("2987") - Decimal("1")
+        # Cash increases by USDC received; gas meters to the tank
+        expected_cash = initial_cash + Decimal("2987")
         assert portfolio.cash_usd == expected_cash
 
     def test_address_keyed_stable_spend_debits_cash(self, base_timestamp: datetime) -> None:
@@ -542,7 +543,8 @@ class TestPortfolioApplyFill:
         assert applied is True
         assert self.BASE_USDC not in portfolio.tokens
         assert self.BASE_WETH not in portfolio.tokens
-        assert portfolio.cash_usd == Decimal("12999")
+        assert portfolio.cash_usd == Decimal("13000")
+        assert portfolio.gas_tank_spent_usd == Decimal("1")
 
     def test_apply_fill_opens_position(self, portfolio: SimulatedPortfolio, base_timestamp: datetime) -> None:
         """Test that fill with position_delta adds position."""
@@ -1531,7 +1533,7 @@ class TestPortfolioIntegration:
 
         # After swap 1: have WETH, less cash
         assert portfolio.tokens.get("WETH") == Decimal("0.996")
-        assert portfolio.cash_usd == Decimal("7000") - Decimal("1")  # Gas deducted
+        assert portfolio.cash_usd == Decimal("7000")  # gas meters to the tank
 
         # Mark to market with WETH at $3300 (10% up)
         market_state = MarketState(

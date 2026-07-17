@@ -85,6 +85,8 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "unsupported_intent_refused",
     "price_series_consistency",
     "numeraire_canonical_metrics",
+    "key_plane_uniqueness",
+    "gas_tank_conservation",
 )
 
 
@@ -355,6 +357,22 @@ CELLS: tuple[TrustCell, ...] = (
         "rejection_no_state_change",
         "perp",
         "A PERP_OPEN whose collateral exceeds cash is rejected with zero state mutation.",
+    ),
+    # --- key-plane uniqueness (re-cut phase 1: single-owner token identity) ---
+    _cell(
+        "key_plane_uniqueness",
+        "swap",
+        "REGISTERED-plane swap round trip through the real loop conserves equity Decimal-exact (the 2960 erasure class is unwritable).",
+    ),
+    _cell(
+        "key_plane_uniqueness",
+        "lp",
+        "REGISTERED-plane LP open/close: credits land on the funding identity key, never a parallel symbol key, and value conserves.",
+    ),
+    _cell(
+        "gas_tank_conservation",
+        "swap",
+        "Gas draws from the operational tank, never strategy capital: charged-gas equity equals zero-gas equity; metered gas is reported.",
     ),
 )
 
@@ -695,6 +713,7 @@ def run_backtest(
     slippage_pct: Decimal = Decimal("0"),
     strategy_type: str | None = None,
     data_config: Any | None = None,
+    token_addresses: dict[str, tuple[str, str]] | None = None,
     **config_overrides: Any,
 ) -> Any:
     """Run the REAL PnL engine loop over synthetic data and return BacktestResult.
@@ -730,8 +749,15 @@ def run_backtest(
     }
     config_kwargs.update(config_overrides)
     config = PnLBacktestConfig(**config_kwargs)
+    provider = SyntheticPriceProvider(provider_series)
+    if token_addresses:
+        # REGISTERED-plane runs: production ingress attaches the run's
+        # identity map on the provider (CoinGeckoDataProvider(token_addresses=...)
+        # in backtest_runner) and the engine reads it back — without this,
+        # cells exercise only the unregistered legacy world.
+        provider._token_addresses = dict(token_addresses)
     backtester = PnLBacktester(
-        data_provider=SyntheticPriceProvider(provider_series),
+        data_provider=provider,
         fee_models={"default": DefaultFeeModel(fee_pct=fee_pct)},
         slippage_models={"default": DefaultSlippageModel(slippage_pct=slippage_pct)},
         strategy_type=strategy_type,

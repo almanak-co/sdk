@@ -195,6 +195,17 @@ class PnLBacktestConfig:
 
     # Gas cost configuration
     include_gas_costs: bool = True
+    gas_funding_usd: Decimal | None = None
+    """Operational gas tank funded at run start, in USD (ALM-2958 structural).
+
+    Live, gas is native ETH paid by the agent EOA — platform-funded, never
+    strategy capital. The tank models that wallet: every fill's gas draws
+    from it, never from strategy cash, and when a finite tank cannot cover a
+    fill's gas the fill is REJECTED ("gas tank exhausted") exactly as the
+    live wallet would fail. ``None`` (the default) is an unlimited tank:
+    gas is metered but never binds, so existing configs are unaffected.
+    The phase-5 behavior replay revisits the default.
+    """
     gas_price_gwei: Decimal | None = None
     """Static gas price in gwei for cost simulation (default: None = chain-aware).
 
@@ -532,6 +543,8 @@ class PnLBacktestConfig:
             raise ValueError("reconciliation_alert_threshold_pct cannot be negative")
 
     def _validate_data_quality_config(self) -> None:
+        if self.gas_funding_usd is not None and self.gas_funding_usd < 0:
+            raise ValueError(f"gas_funding_usd cannot be negative: {self.gas_funding_usd}")
         if self.staleness_threshold_seconds < 0:
             raise ValueError("staleness_threshold_seconds cannot be negative")
 
@@ -624,6 +637,7 @@ class PnLBacktestConfig:
             "slippage_model": self.slippage_model,
             "include_gas_costs": self.include_gas_costs,
             "gas_price_gwei": str(self.gas_price_gwei),
+            "gas_funding_usd": str(self.gas_funding_usd) if self.gas_funding_usd is not None else None,
             "gas_price_gwei_is_default": self.gas_price_gwei_is_default,
             "inclusion_delay_blocks": self.inclusion_delay_blocks,
             "chain": self.chain,
@@ -739,6 +753,7 @@ class PnLBacktestConfig:
             # gas_price_gwei equal to the chain default hashes identically
             # (and pre-VIB-5088 hashes of explicitly-set configs are stable).
             "gas_price_gwei": str(self.gas_price_gwei),
+            "gas_funding_usd": str(self.gas_funding_usd) if self.gas_funding_usd is not None else None,
             "inclusion_delay_blocks": self.inclusion_delay_blocks,
             "chain": self.chain,
             "tokens": _tokens_for_hash(self.tokens),
@@ -837,6 +852,12 @@ class PnLBacktestConfig:
             if isinstance(data.get("min_data_coverage"), str)
             else data.get("min_data_coverage", Decimal("0.98"))
         )
+        gas_funding_usd_raw = data.get("gas_funding_usd")
+        gas_funding_usd = (
+            Decimal(gas_funding_usd_raw)
+            if gas_funding_usd_raw is not None and isinstance(gas_funding_usd_raw, str)
+            else gas_funding_usd_raw
+        )
         gas_eth_price_override_raw = data.get("gas_eth_price_override")
         gas_eth_price_override = (
             Decimal(gas_eth_price_override_raw)
@@ -852,6 +873,7 @@ class PnLBacktestConfig:
             fee_model=data.get("fee_model", "realistic"),
             slippage_model=data.get("slippage_model", "realistic"),
             include_gas_costs=data.get("include_gas_costs", True),
+            gas_funding_usd=gas_funding_usd,
             gas_price_gwei=gas_price,
             inclusion_delay_blocks=data.get("inclusion_delay_blocks", 1),
             chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),

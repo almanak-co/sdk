@@ -477,7 +477,8 @@ class TestRealLpOpenIntentEndToEnd:
 
         assert len(result.trades) == 1
         trade = result.trades[0]
-        costs = trade.fee_usd + trade.slippage_usd + trade.gas_cost_usd
+        # Gas meters to the operational tank, outside portfolio value.
+        costs = trade.fee_usd + trade.slippage_usd
 
         values = [point.value_usd for point in result.equity_curve]
         final_delta = values[-1] - Decimal("10000")

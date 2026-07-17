@@ -22,6 +22,7 @@ Companion to ``test_portfolio_conservation.py`` (VIB-5082), which covers
 the token-flow lanes (SWAP / LP / lending); this file covers the
 collateral lane.
 """
+
 from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from dataclasses import dataclass, field
@@ -33,8 +34,6 @@ import pytest
 from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
-
-
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktestConfig,
@@ -172,8 +171,8 @@ class TestPerpOpenConservation:
 
     def test_open_with_full_collateral_applies_despite_gas(self) -> None:
         """ALM-2958: collateral (strategy capital) gates; gas (EOA-paid live)
-        does not. Full-cash collateral + gas fills, cash goes negative by
-        exactly the gas debit."""
+        does not. Full-cash collateral fills and gas meters to the tank, so
+        cash lands at exactly 0 rather than going negative."""
         portfolio = SimulatedPortfolio(initial_capital_usd=COLLATERAL)
         fill = open_fill(perp_long())  # collateral == full cash balance
         fill.gas_cost_usd = Decimal("5")
@@ -181,7 +180,8 @@ class TestPerpOpenConservation:
         portfolio.apply_fill(fill)
 
         assert fill.success is True
-        assert portfolio.cash_usd == Decimal("-5")  # gas, and only gas
+        assert portfolio.cash_usd == Decimal("0")  # collateral drawn; gas meters to tank
+        assert portfolio.gas_tank_spent_usd == Decimal("5")
         assert len(portfolio.positions) == 1
 
     def test_open_where_collateral_alone_exceeds_cash_is_rejected(self) -> None:

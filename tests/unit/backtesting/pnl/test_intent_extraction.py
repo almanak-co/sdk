@@ -266,9 +266,7 @@ class TestLpClosePositionIdAddressCarrier:
             entry_time=datetime(2024, 1, 1, tzinfo=UTC),
             metadata={"pool_address": "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"},
         )
-        close = SimpleNamespace(
-            position_id="0xB2cC224c1c9feE385f8ad6a55b4d94E92359DC59", pool=None, protocol="curve"
-        )
+        close = SimpleNamespace(position_id="0xB2cC224c1c9feE385f8ad6a55b4d94E92359DC59", pool=None, protocol="curve")
 
         assert find_lp_close_position_id(close, [position]) == "LP_curve_USDC_USDT_1700000000"
 
@@ -297,3 +295,44 @@ class TestLpClosePositionIdAddressCarrier:
 
         # Listed newest-first to prove the sort, not the input order, decides.
         assert find_lp_close_position_id(close, [newer, oldest]) == "LP_curve_USDC_USDT_oldest"
+
+
+class TestWalletBalanceCategoryParity:
+    """Cross-layer guard: the backtest's wallet-balance-sized set tracks the
+    live resolver's WALLET_BALANCE category, with every divergence named.
+
+    The two constants live in different layers with no shared owner (ALM-2943
+    phase 1 replaces both with one resolver; this test is deleted with them).
+    Until then, a new WALLET_BALANCE intent type added live must fail here and
+    force an explicit backtest decision - not silently $0-placeholder or fall
+    through to an unhandled lane.
+    """
+
+    # Live sizes these from wallet balance but the backtest deliberately does
+    # not: BRIDGE is refused wholesale by the generic lane (any amount, not
+    # just "all"); STAKE and WRAP/UNWRAP_NATIVE have no backtest IntentType or
+    # engine lane at all (yield family is an ALM-2940 decision).
+    DOCUMENTED_BACKTEST_EXCLUSIONS = frozenset({"BRIDGE", "STAKE", "WRAP_NATIVE", "UNWRAP_NATIVE"})
+
+    def test_backtest_set_is_live_category_minus_documented_exclusions(self) -> None:
+        from almanak.framework.backtesting.pnl.intent_extraction import WALLET_BALANCE_ALL_INTENT_TYPES
+        from almanak.framework.intents.amount_resolver import (
+            _INTENT_TYPE_TO_CATEGORY,
+            AmountResolutionCategory,
+        )
+
+        live = {
+            name for name, cat in _INTENT_TYPE_TO_CATEGORY.items() if cat is AmountResolutionCategory.WALLET_BALANCE
+        }
+        backtest = {t.name for t in WALLET_BALANCE_ALL_INTENT_TYPES}
+        assert backtest | self.DOCUMENTED_BACKTEST_EXCLUSIONS == live
+        assert backtest & self.DOCUMENTED_BACKTEST_EXCLUSIONS == set()
+
+    def test_exclusions_are_actually_outside_the_generic_lane(self) -> None:
+        # Each documented exclusion must remain un-simulated; if an engine lane
+        # ever appears for one, this forces the exclusion list (and the fate of
+        # its "all" sizing) to be revisited rather than staying stale.
+        from almanak.framework.backtesting.pnl._engine_helpers import GENERIC_SIMULATED_INTENT_TYPES
+
+        simulated = {t.name for t in GENERIC_SIMULATED_INTENT_TYPES}
+        assert self.DOCUMENTED_BACKTEST_EXCLUSIONS & simulated == set()

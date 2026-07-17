@@ -1392,3 +1392,99 @@ def test_every_registered_cell_has_exactly_one_test() -> None:
             assert xfail.kwargs.get("strict") is True, f"{cell_id} xfail must be strict"
         else:
             assert not has_xfail, f"{test_name} has an xfail mark but {cell_id} declares no ticket"
+
+
+# =============================================================================
+# key_plane_uniqueness - re-cut phase 1: single-owner token identity
+# =============================================================================
+
+#: The registered identity map production runs carry (build_backtest_token_address_map).
+_REGISTERED_PLANE = {
+    "WETH": ("arbitrum", "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"),
+    "USDC": ("arbitrum", USDC_ARBITRUM),
+}
+
+
+@pytest.mark.trust_cell("swap:key_plane_uniqueness")
+def test_swap_registered_plane_round_trip_conserves() -> None:
+    """REGISTERED-plane swap round trip conserves equity Decimal-exact.
+
+    The ALM-2960 class (a credit minting a parallel symbol key beside the
+    address-native funding plane, then the snapshot zero-seed erasing the
+    real balance) breaks this cell before it breaks anything else: the sell
+    leg finds no balance and equity walks away from initial capital. With
+    identity resolution single-owner, the erasure is unwritable.
+    """
+    intents = [
+        SwapDuck(amount_usd=Decimal("5000")),
+        SwapDuck(from_token="WETH", to_token="USDC", amount_usd=Decimal("5000")),
+    ]
+    result = run_backtest(
+        ScriptedStrategy(intents),
+        flat_series(12),
+        hours=8,
+        token_addresses=_REGISTERED_PLANE,
+    )
+
+    assert result.success
+    assert result.metrics.total_trades == 2
+    assert all(trade.success for trade in result.trades)
+    assert result.final_capital_usd == INITIAL_CAPITAL
+    assert all(point.value_usd == INITIAL_CAPITAL for point in result.equity_curve)
+
+
+@pytest.mark.trust_cell("lp:key_plane_uniqueness")
+def test_lp_registered_plane_credits_land_on_one_key() -> None:
+    """REGISTERED-plane LP close credits the funding identity key, exactly once.
+
+    Drives the real LP adapter against a portfolio carrying the registered
+    identity plane (as every production run does) and asserts the literal
+    key-plane property the swap cell asserts economically: after the close,
+    WETH lives under its address-native key, a bare "WETH" key never exists,
+    and the round trip conserves value.
+    """
+    adapter, portfolio = _lp_adapter_and_portfolio()
+    portfolio.register_token_identities(_REGISTERED_PLANE)
+    weth_key = ("arbitrum", "0x82af49447d8a07e3bd95bd0d56f35241523fbab1")
+
+    open_state = _market_state(0)
+    open_fill = adapter.execute_intent(_lp_open_intent(), portfolio, open_state)
+    assert open_fill is not None and open_fill.success
+    assert portfolio.apply_fill(open_fill, market_state=open_state)
+    portfolio.mark_to_market(open_state, open_state.timestamp, adapter=adapter)
+
+    close_state = _market_state(1)
+    position_id = portfolio.positions[0].position_id
+    close_fill = adapter.execute_intent(
+        LPCloseIntent(position_id=position_id, protocol="uniswap_v3"), portfolio, close_state
+    )
+    assert close_fill is not None and close_fill.success
+    assert portfolio.apply_fill(close_fill, market_state=close_state)
+    portfolio.mark_to_market(close_state, close_state.timestamp, adapter=adapter)
+
+    # The literal key-plane property: one key per asset, on the identity plane.
+    assert "WETH" not in portfolio.tokens
+    assert portfolio.tokens.get(weth_key, Decimal("0")) > 0  # credited back on close
+    weth_like = [k for k in portfolio.tokens if k == weth_key or (isinstance(k, str) and k.upper() == "WETH")]
+    assert weth_like == [weth_key]
+    # Zero-volume pool + flat price: the close returns exactly the deposit.
+    assert portfolio.get_total_value_usd(close_state) == INITIAL_CAPITAL
+
+
+@pytest.mark.trust_cell("swap:gas_tank_conservation")
+def test_swap_gas_draws_from_tank_not_equity() -> None:
+    """Gas is operational spend: equity is identical with and without gas.
+
+    Same swap, gas on and off: gas is metered and reported but never debits
+    strategy capital, so both runs end at the same equity. A finite tank that
+    cannot cover a fill's gas rejects it with zero portfolio drift (pinned at
+    the unit level in test_gas_tank.py).
+    """
+    intents = [SwapDuck(amount_usd=Decimal("1000"))]
+    without_gas = run_backtest(ScriptedStrategy(list(intents)), flat_series(8), hours=4)
+    with_gas = run_backtest(ScriptedStrategy(list(intents)), flat_series(8), hours=4, include_gas_costs=True)
+
+    assert without_gas.success and with_gas.success
+    assert with_gas.metrics.total_gas_usd > Decimal("0")
+    assert with_gas.final_capital_usd == without_gas.final_capital_usd
+    assert [p.value_usd for p in with_gas.equity_curve] == [p.value_usd for p in without_gas.equity_curve]

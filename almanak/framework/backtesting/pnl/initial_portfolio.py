@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -15,6 +16,8 @@ from almanak.framework.backtesting.pnl.data_provider import (
 )
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 from almanak.framework.models.token_funding import AmountType, TokenFunding, parse_token_funding
+
+logger = logging.getLogger(__name__)
 
 
 class TokenFundingInitializationError(ValueError):
@@ -46,8 +49,18 @@ def active_token_funding_entries(
         )
 
     normalized_chain = chain.lower()
-    active = [(entry if entry.chain else entry.model_copy(update={"chain": normalized_chain})) for entry in funding]
-    active = [entry for entry in active if (entry.chain or normalized_chain).lower() == normalized_chain]
+    defaulted = [(entry if entry.chain else entry.model_copy(update={"chain": normalized_chain})) for entry in funding]
+    active = [entry for entry in defaulted if (entry.chain or normalized_chain).lower() == normalized_chain]
+    # Declared capital filtered off the run must be loud, not a silent shrink.
+    for entry in defaulted:
+        if entry not in active:
+            logger.warning(
+                "token_funding entry DROPPED (chain mismatch): %s on chain '%s' is not on the active chain '%s' "
+                "— this capital is NOT funded in the backtest",
+                entry.symbol or entry.address,
+                entry.chain,
+                normalized_chain,
+            )
     if not active:
         raise TokenFundingInitializationError(
             f"Historical PnL backtests require token_funding entries for active chain '{normalized_chain}'."

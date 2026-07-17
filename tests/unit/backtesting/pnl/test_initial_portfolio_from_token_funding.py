@@ -201,3 +201,25 @@ def test_zero_amount_does_not_require_first_tick_price() -> None:
 def test_missing_active_chain_funding_fails_loud() -> None:
     with pytest.raises(TokenFundingInitializationError, match="active chain"):
         active_token_funding_entries([_funding_entry(chain="arbitrum", address=ARB_USDC)], chain="base")
+
+
+def test_cross_chain_drop_is_loud(caplog) -> None:
+    # Declared capital filtered off the run (chain mismatch) must WARN per
+    # entry - the CLI echoes the pre-filter count, so a silent drop just
+    # looks like a poorer backtest (re-cut phase 1; harness audit item).
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="almanak.framework.backtesting.pnl.initial_portfolio"):
+        active = active_token_funding_entries(
+            [
+                _funding_entry(),
+                _funding_entry(chain="arbitrum", address=ARB_USDC),
+            ],
+            chain="base",
+        )
+
+    assert len(active) == 1
+    dropped_warnings = [r for r in caplog.records if "DROPPED" in r.message]
+    assert len(dropped_warnings) == 1
+    assert "arbitrum" in dropped_warnings[0].message
+    assert "NOT funded" in dropped_warnings[0].message

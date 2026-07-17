@@ -133,9 +133,10 @@ class TestSwapCostsStayEmbedded:
         )
 
         assert applied is True
-        # Cash drops by notional + gas only; fee/slippage live in the haircut inflow.
-        assert portfolio.cash_usd == Decimal("10000") - amount - GAS
-        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE - SLIPPAGE - GAS
+        # Cash drops by notional only; gas meters to the tank, fee/slippage live in the haircut inflow.
+        assert portfolio.cash_usd == Decimal("10000") - amount
+        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE - SLIPPAGE
+        assert portfolio.gas_tank_spent_usd == GAS
 
 
 class TestLpVenueCosts:
@@ -153,10 +154,11 @@ class TestLpVenueCosts:
         applied = portfolio.apply_fill(fill, market_state=market_state)
 
         assert applied is True
-        # 10000 - 3000 (implicit WETH conversion) - 3000 (USDC leg) - 15 - 5 - 2
-        assert portfolio.cash_usd == Decimal("3978")
+        # 10000 - 3000 (implicit WETH conversion) - 3000 (USDC leg) - 15 - 5; gas meters to tank
+        assert portfolio.cash_usd == Decimal("3980")
         # Position is worth its 6000 notional, so total drops by exactly the costs.
-        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE - SLIPPAGE - GAS
+        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE - SLIPPAGE
+        assert portfolio.gas_tank_spent_usd == GAS
 
     def test_lp_close_charges_fee_and_slippage(self, portfolio: SimulatedPortfolio, market_state: MarketState) -> None:
         position = lp_position()
@@ -176,9 +178,10 @@ class TestLpVenueCosts:
         )
 
         assert applied is True
-        # 10000 + 3000 swept USDC - 15 - 5 - 2
-        assert portfolio.cash_usd == Decimal("12978")
-        assert portfolio.get_total_value_usd(market_state) == value_before - FEE - SLIPPAGE - GAS
+        # 10000 + 3000 swept USDC - 15 - 5; gas meters to tank
+        assert portfolio.cash_usd == Decimal("12980")
+        assert portfolio.get_total_value_usd(market_state) == value_before - FEE - SLIPPAGE
+        assert portfolio.gas_tank_spent_usd == GAS
 
 
 class TestPerpVenueCosts:
@@ -207,10 +210,11 @@ class TestPerpVenueCosts:
         )
 
         assert applied is True
-        # Collateral + fee + gas leave cash; slippage_usd does NOT (it is
-        # embodied in executed_price and would double-count).
-        assert portfolio.cash_usd == Decimal("10000") - Decimal("1000") - FEE - GAS
-        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE - GAS
+        # Collateral + fee leave cash; gas meters to tank; slippage_usd does
+        # NOT (it is embodied in executed_price and would double-count).
+        assert portfolio.cash_usd == Decimal("10000") - Decimal("1000") - FEE
+        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE
+        assert portfolio.gas_tank_spent_usd == GAS
 
     def test_perp_close_charges_fee_but_not_slippage(
         self, portfolio: SimulatedPortfolio, market_state: MarketState
@@ -238,9 +242,10 @@ class TestPerpVenueCosts:
         applied = portfolio.apply_fill(fill, market_state=market_state)
 
         assert applied is True
-        # 9000 + collateral + realized PnL - fee - gas; slippage_usd untouched.
-        assert portfolio.cash_usd == Decimal("9000") + Decimal("1000") + realized - FEE - GAS
-        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") + realized - FEE - GAS
+        # 9000 + collateral + realized PnL - fee; gas meters to tank; slippage_usd untouched.
+        assert portfolio.cash_usd == Decimal("9000") + Decimal("1000") + realized - FEE
+        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") + realized - FEE
+        assert portfolio.gas_tank_spent_usd == GAS
 
 
 class TestLendingAndVaultVenueCosts:
@@ -267,8 +272,9 @@ class TestLendingAndVaultVenueCosts:
         )
 
         assert applied is True
-        assert portfolio.cash_usd == Decimal("10000") - Decimal("5000") - FEE - SLIPPAGE - GAS
-        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE - SLIPPAGE - GAS
+        assert portfolio.cash_usd == Decimal("10000") - Decimal("5000") - FEE - SLIPPAGE
+        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE - SLIPPAGE
+        assert portfolio.gas_tank_spent_usd == GAS
 
     def test_withdraw_charges_fee_and_slippage(self, portfolio: SimulatedPortfolio, market_state: MarketState) -> None:
         position = SimulatedPosition.supply(
@@ -294,8 +300,9 @@ class TestLendingAndVaultVenueCosts:
         )
 
         assert applied is True
-        assert portfolio.cash_usd == Decimal("15000") - FEE - SLIPPAGE - GAS
-        assert portfolio.get_total_value_usd(market_state) == value_before - FEE - SLIPPAGE - GAS
+        assert portfolio.cash_usd == Decimal("15000") - FEE - SLIPPAGE
+        assert portfolio.get_total_value_usd(market_state) == value_before - FEE - SLIPPAGE
+        assert portfolio.gas_tank_spent_usd == GAS
 
     def test_borrow_charges_fee_and_slippage(self, portfolio: SimulatedPortfolio, market_state: MarketState) -> None:
         position = SimulatedPosition.borrow(
@@ -319,8 +326,9 @@ class TestLendingAndVaultVenueCosts:
 
         assert applied is True
         # Borrowed stables sweep into cash; the debt position offsets them.
-        assert portfolio.cash_usd == Decimal("15000") - FEE - SLIPPAGE - GAS
-        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE - SLIPPAGE - GAS
+        assert portfolio.cash_usd == Decimal("15000") - FEE - SLIPPAGE
+        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE - SLIPPAGE
+        assert portfolio.gas_tank_spent_usd == GAS
 
     def test_repay_charges_fee_and_slippage(self, portfolio: SimulatedPortfolio, market_state: MarketState) -> None:
         position = SimulatedPosition.borrow(
@@ -346,8 +354,9 @@ class TestLendingAndVaultVenueCosts:
         )
 
         assert applied is True
-        assert portfolio.cash_usd == Decimal("5000") - FEE - SLIPPAGE - GAS
-        assert portfolio.get_total_value_usd(market_state) == value_before - FEE - SLIPPAGE - GAS
+        assert portfolio.cash_usd == Decimal("5000") - FEE - SLIPPAGE
+        assert portfolio.get_total_value_usd(market_state) == value_before - FEE - SLIPPAGE
+        assert portfolio.gas_tank_spent_usd == GAS
 
     def test_vault_deposit_charges_fee_and_slippage(
         self, portfolio: SimulatedPortfolio, market_state: MarketState
@@ -373,8 +382,9 @@ class TestLendingAndVaultVenueCosts:
         )
 
         assert applied is True
-        assert portfolio.cash_usd == Decimal("10000") - Decimal("5000") - FEE - SLIPPAGE - GAS
-        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE - SLIPPAGE - GAS
+        assert portfolio.cash_usd == Decimal("10000") - Decimal("5000") - FEE - SLIPPAGE
+        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE - SLIPPAGE
+        assert portfolio.gas_tank_spent_usd == GAS
 
     def test_vault_redeem_charges_fee_and_slippage(
         self, portfolio: SimulatedPortfolio, market_state: MarketState
@@ -402,7 +412,8 @@ class TestLendingAndVaultVenueCosts:
         )
 
         assert applied is True
-        assert portfolio.get_total_value_usd(market_state) == value_before - FEE - SLIPPAGE - GAS
+        assert portfolio.get_total_value_usd(market_state) == value_before - FEE - SLIPPAGE
+        assert portfolio.gas_tank_spent_usd == GAS
 
 
 class TestNoFlowIntentVenueCosts:
@@ -425,8 +436,9 @@ class TestNoFlowIntentVenueCosts:
         )
 
         assert applied is True
-        assert portfolio.cash_usd == Decimal("10000") - FEE - SLIPPAGE - GAS
-        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE - SLIPPAGE - GAS
+        assert portfolio.cash_usd == Decimal("10000") - FEE - SLIPPAGE
+        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - FEE - SLIPPAGE
+        assert portfolio.gas_tank_spent_usd == GAS
 
 
 class TestVenueCostFunding:
@@ -514,7 +526,8 @@ class TestVenueCostFunding:
 
         assert applied is True
         assert portfolio.positions == []
-        assert portfolio.cash_usd == Decimal("1000") - FEE - GAS
+        assert portfolio.cash_usd == Decimal("1000") - FEE  # gas meters to tank
+        assert portfolio.gas_tank_spent_usd == GAS
 
     def test_zero_cost_fill_is_unaffected(self, portfolio: SimulatedPortfolio, market_state: MarketState) -> None:
         """Zero fee/slippage/gas keeps every lane value-neutral (regression

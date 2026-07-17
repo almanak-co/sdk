@@ -2,7 +2,8 @@
 
 These are model-free invariants: at constant prices, no fill may create or
 destroy portfolio value beyond its explicitly charged execution costs
-(fee/slippage embedded in the flow legs, gas debited from cash).
+(fee/slippage embedded in the flow legs); gas meters to the operational gas
+tank, outside portfolio value.
 
 Regression guard for the apply_fill clamp bug (2026-06): tokens_out of a
 cash-equivalent stablecoin debited nothing (stables live in cash_usd, and
@@ -108,10 +109,11 @@ class TestSingleTradeClosedForm:
         )
 
         assert applied is True
-        assert portfolio.cash_usd == Decimal("9930")  # 10000 - 50 - 20
+        assert portfolio.cash_usd == Decimal("9950")  # 10000 - 50; gas meters to tank
         assert portfolio.tokens["WETH"] == Decimal("0.0165")
-        # 9930 cash + 0.0165 * 3000 = 9979.50
-        assert portfolio.get_total_value_usd(market_state) == Decimal("9979.50")
+        # 9950 cash + 0.0165 * 3000 = 9999.50
+        assert portfolio.get_total_value_usd(market_state) == Decimal("9999.50")
+        assert portfolio.gas_tank_spent_usd == Decimal("20")
 
     def test_symbol_debit_uses_exact_address_native_funding_without_cash_sweep(self) -> None:
         portfolio = SimulatedPortfolio(
@@ -144,7 +146,7 @@ class TestSingleTradeClosedForm:
     def test_buy_value_change_equals_embedded_costs(
         self, portfolio: SimulatedPortfolio, market_state: MarketState
     ) -> None:
-        """value_after = initial - fee - slippage - gas at constant prices."""
+        """value_after = initial - fee - slippage at constant prices; gas meters to the tank."""
         fee = Decimal("9")
         slippage = Decimal("3")
         gas = Decimal("1")
@@ -163,8 +165,9 @@ class TestSingleTradeClosedForm:
             )
         )
 
-        expected = Decimal("10000") - fee - slippage - gas
+        expected = Decimal("10000") - fee - slippage
         assert portfolio.get_total_value_usd(market_state) == expected
+        assert portfolio.gas_tank_spent_usd == gas
 
     def test_address_keyed_stable_buy_conserves_value(self) -> None:
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"), chain="base")
@@ -189,7 +192,8 @@ class TestSingleTradeClosedForm:
             )
         )
 
-        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - fee - slippage - gas
+        assert portfolio.get_total_value_usd(market_state) == Decimal("10000") - fee - slippage
+        assert portfolio.gas_tank_spent_usd == gas
 
 
 class TestRoundTripConservation:
@@ -593,9 +597,7 @@ class TestImplicitCashConversion:
         assert applied is False
         assert "no market price available" in portfolio.trades[0].metadata["failure_reason"]
 
-    def test_swap_is_never_funded_by_conversion(
-        self, portfolio: SimulatedPortfolio, market_state: MarketState
-    ) -> None:
+    def test_swap_is_never_funded_by_conversion(self, portfolio: SimulatedPortfolio, market_state: MarketState) -> None:
         """A SWAP selling unheld WETH must fail even when cash could cover it."""
         applied = portfolio.apply_fill(
             make_swap_fill(
@@ -633,16 +635,16 @@ class TestAggregateCashValidation:
     its own gate) could each pass while their sum overdrew cash_usd. GAS is
     deliberately NOT part of the gate (ALM-2958): live gas is EOA-paid
     native ETH the strategy never sizes for, so a fill whose capital legs
-    are fully funded must apply, with gas charged unconditionally (cash may
-    go transiently negative -- a debit cannot mint value). Fills that draw
-    nothing from cash keep gas unconditional so risk-reducing sells/closes
-    are never blocked for being cash-poor.
+    are fully funded must apply, with gas metered to the operational gas
+    tank rather than drawn from strategy cash. Fills that draw nothing from
+    cash still apply so risk-reducing sells/closes are never blocked for
+    being cash-poor.
     """
 
-    def test_full_capital_spend_applies_with_gas_charged_beyond_cash(self) -> None:
-        # ALM-2958: 100% of cash into the swap + $1 gas. Live this fills
-        # (the EOA pays gas); the backtest must too, with the gas debit
-        # driving cash exactly -1 so PnL stays net-of-gas.
+    def test_full_capital_spend_applies_with_gas_metered_to_tank(self) -> None:
+        # ALM-2958: 100% of cash into the swap + $1 gas. The fill applies and
+        # gas meters to the tank, so cash lands at exactly 0 -- gas never
+        # drives strategy cash negative.
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
 
         applied = portfolio.apply_fill(
@@ -655,7 +657,8 @@ class TestAggregateCashValidation:
         )
 
         assert applied is True
-        assert portfolio.cash_usd == Decimal("-1")  # gas, and only gas
+        assert portfolio.cash_usd == Decimal("0")  # capital spent; gas meters to tank
+        assert portfolio.gas_tank_spent_usd == Decimal("1")
         assert portfolio.tokens["WETH"] == Decimal("100") / WETH_PRICE
 
     def test_capital_legs_beyond_cash_still_rejected(self) -> None:
@@ -678,8 +681,8 @@ class TestAggregateCashValidation:
         assert "insufficient cash" in portfolio.trades[0].metadata["failure_reason"]
 
     def test_cash_neutral_sell_is_never_blocked_by_gas(self) -> None:
-        """A sell that draws nothing from cash must apply even when cash
-        cannot cover gas -- the sale itself replenishes cash."""
+        """A cash-neutral sell must apply even when cash cannot cover gas;
+        the proceeds sweep to cash and gas meters to the tank."""
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
         portfolio.tokens["WETH"] = Decimal("1")
 
@@ -693,7 +696,8 @@ class TestAggregateCashValidation:
         )
 
         assert applied is True
-        assert portfolio.cash_usd == Decimal("2999")  # proceeds swept, gas debited
+        assert portfolio.cash_usd == Decimal("3000")  # proceeds swept; gas meters to tank
+        assert portfolio.gas_tank_spent_usd == Decimal("1")
         assert portfolio.tokens == {}
 
     def test_perp_collateral_plus_stable_debit_validated_as_one_sum(self) -> None:
@@ -880,3 +884,74 @@ class TestCreditKeyIdentity:
         )
         assert portfolio.apply_fill(debit) is True
         assert portfolio.tokens.get(fantasy_key) == Decimal("6")
+
+
+class TestSymmetricKeyResolution:
+    """Re-cut phase 1: ONE resolution owner for credits and debits.
+
+    The former credit/debit pair diverged at exactly one step - credits never
+    consulted the global token registry - leaving one representable
+    split-brain: an unregistered run holding a registry-resolved address key
+    still credited a bare symbol beside it. `_resolve_key` closes it.
+    """
+
+    ARBITRUM_WETH = ("arbitrum", "0x82af49447d8a07e3bd95bd0d56f35241523fbab1")
+
+    def test_unregistered_credit_lands_on_registry_resolved_held_key(self) -> None:
+        # No engine registration at all - but the balance is held under the
+        # address the GLOBAL registry resolves WETH to on this chain. The
+        # credit must accrete there (pre-fix: minted a parallel "WETH" key,
+        # exactly the ALM-2960 shape one plane further out).
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"), chain="arbitrum")
+        portfolio.tokens[self.ARBITRUM_WETH] = Decimal("1")
+
+        fill = make_swap_fill(tokens_out={}, tokens_in={"WETH": Decimal("0.5")})
+        fill.intent_type = IntentType.LP_CLOSE
+        portfolio.apply_fill(fill)
+
+        assert portfolio.tokens[self.ARBITRUM_WETH] == Decimal("1.5")
+        assert "WETH" not in portfolio.tokens
+
+    def test_unheld_unregistered_credit_still_keeps_raw_symbol(self) -> None:
+        # Nothing held, nothing registered: raw-symbol world is untouched -
+        # the resolver step only redirects onto a key that actually holds.
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"), chain="arbitrum")
+
+        fill = make_swap_fill(tokens_out={}, tokens_in={"WETH": Decimal("0.5")})
+        fill.intent_type = IntentType.LP_CLOSE
+        portfolio.apply_fill(fill)
+
+        assert portfolio.tokens.get("WETH") == Decimal("0.5")
+        assert self.ARBITRUM_WETH not in portfolio.tokens
+
+    def test_balance_read_resolves_through_the_same_owner(self) -> None:
+        # get_token_balance must answer through _resolve_key too: a symbol
+        # read of a registered-key holding returned 0 pre-unification.
+        base_weth = ("base", "0x4200000000000000000000000000000000000006")
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"), chain="base")
+        portfolio.register_token_identities({"WETH": base_weth})
+        portfolio.tokens[base_weth] = Decimal("0.6509")
+
+        assert portfolio.get_token_balance("WETH") == Decimal("0.6509")
+
+
+class TestIdentityTablePersistence:
+    BASE_WETH = ("base", "0x4200000000000000000000000000000000000006")
+
+    def test_round_trip_preserves_registered_resolution(self) -> None:
+        # A resumed run must keep resolving symbol credits onto the
+        # registered plane (review, #3314).
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"), chain="base")
+        portfolio.register_token_identities({"WETH": self.BASE_WETH})
+
+        restored = SimulatedPortfolio.from_dict(portfolio.to_dict())
+
+        assert restored._resolve_key("WETH") == self.BASE_WETH
+
+    def test_foreign_chain_registrations_are_ignored(self) -> None:
+        # A base portfolio must never resolve onto an arbitrum key plane.
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"), chain="base")
+        portfolio.register_token_identities({"WETH": ("arbitrum", "0x82af49447d8a07e3bd95bd0d56f35241523fbab1")})
+
+        assert portfolio._identity_table == {}
+        assert portfolio._resolve_key("NOT-A-REAL-TOKEN") == "NOT-A-REAL-TOKEN"
