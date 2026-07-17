@@ -138,6 +138,106 @@ def price_to_sqrt_price_x96(price: Decimal | float | int | str) -> int:
         return int(sqrt_price * Q96)
 
 
+with localcontext() as _ctx:
+    _ctx.prec = 50
+    _LN_1_0001 = Decimal("1.0001").ln()
+
+
+def tick_to_sqrt_price_decimal(tick: int) -> Decimal:
+    """Convert a CL tick to sqrt(raw price) as a high-precision Decimal.
+
+    Decimal counterpart of :func:`tick_to_sqrt_price_x96` for valuation code
+    that works in Decimal planes (ALM-2948): sqrt(1.0001^tick) computed as
+    exp(tick/2 * ln(1.0001)) under 50-digit precision.
+    """
+    if tick < MIN_TICK or tick > MAX_TICK:
+        raise ValueError(f"tick must be between {MIN_TICK} and {MAX_TICK}, got {tick}")
+    with localcontext() as ctx:
+        ctx.prec = 50
+        return (Decimal(tick) / 2 * _LN_1_0001).exp()
+
+
+def sqrt_price_decimal(price: Decimal | float | int | str) -> Decimal:
+    """sqrt() of a positive price as a high-precision Decimal."""
+    price_dec = _as_decimal(price)
+    if price_dec <= 0:
+        raise ValueError("Price must be positive")
+    with localcontext() as ctx:
+        ctx.prec = 50
+        return price_dec.sqrt()
+
+
+def position_token_amounts(
+    liquidity: Decimal,
+    sqrt_price: Decimal,
+    sqrt_price_lower: Decimal,
+    sqrt_price_upper: Decimal,
+) -> tuple[Decimal, Decimal]:
+    """V3 position composition (amount0, amount1) for liquidity L.
+
+    The canonical three-case formula, plane-agnostic: pass raw-plane sqrt
+    prices for on-chain composition or human-plane sqrt ratios for
+    valuation — the caller owns plane consistency (ALM-2948: the live IL
+    bug was mixing the two).
+    """
+    if liquidity < 0:
+        raise ValueError("liquidity must be non-negative")
+    if sqrt_price_lower > sqrt_price_upper:
+        sqrt_price_lower, sqrt_price_upper = sqrt_price_upper, sqrt_price_lower
+    if sqrt_price_lower <= 0:
+        raise ValueError("sqrt_price_lower must be positive")
+    with localcontext() as ctx:
+        ctx.prec = 50
+        if sqrt_price <= sqrt_price_lower:
+            amount0 = liquidity * (Decimal(1) / sqrt_price_lower - Decimal(1) / sqrt_price_upper)
+            amount1 = Decimal(0)
+        elif sqrt_price >= sqrt_price_upper:
+            amount0 = Decimal(0)
+            amount1 = liquidity * (sqrt_price_upper - sqrt_price_lower)
+        else:
+            amount0 = liquidity * (Decimal(1) / sqrt_price - Decimal(1) / sqrt_price_upper)
+            amount1 = liquidity * (sqrt_price - sqrt_price_lower)
+        return max(Decimal(0), amount0), max(Decimal(0), amount1)
+
+
+def concentrated_il(
+    entry_price: Decimal,
+    current_price: Decimal,
+    price_lower: Decimal,
+    price_upper: Decimal,
+) -> tuple[Decimal, tuple[Decimal, Decimal], tuple[Decimal, Decimal]]:
+    """True V3 impermanent loss for a concentrated position (ALM-2948).
+
+    All four prices live on ONE plane (token1 per token0 — human or raw,
+    caller's choice, but consistently). Composition is computed at entry and
+    now for a unit of liquidity; IL is scale-free.
+
+    Returns ``(il_ratio, entry_amounts, current_amounts)`` where ``il_ratio``
+    is negative on loss (``pool_value / hold_value - 1``) and the amount
+    tuples are per unit liquidity.
+    """
+    if price_lower > price_upper:
+        price_lower, price_upper = price_upper, price_lower
+    sqrt_lower = sqrt_price_decimal(price_lower)
+    sqrt_upper = sqrt_price_decimal(price_upper)
+    if sqrt_lower == sqrt_upper:
+        raise ValueError("Degenerate range: price_lower == price_upper")
+    entry_amount0, entry_amount1 = position_token_amounts(
+        Decimal(1), sqrt_price_decimal(entry_price), sqrt_lower, sqrt_upper
+    )
+    now_amount0, now_amount1 = position_token_amounts(
+        Decimal(1), sqrt_price_decimal(current_price), sqrt_lower, sqrt_upper
+    )
+    with localcontext() as ctx:
+        ctx.prec = 50
+        current = _as_decimal(current_price)
+        hold_value = entry_amount0 * current + entry_amount1
+        pool_value = now_amount0 * current + now_amount1
+        if hold_value <= 0:
+            return Decimal(0), (entry_amount0, entry_amount1), (now_amount0, now_amount1)
+        return pool_value / hold_value - 1, (entry_amount0, entry_amount1), (now_amount0, now_amount1)
+
+
 def require_tick_spacing(fee_tier: int, tick_spacing: dict[int, int] | None = None) -> int:
     """Return tick spacing for a fee tier, raising for unsupported tiers."""
     spacing_map = tick_spacing or V3_TICK_SPACING
@@ -182,12 +282,16 @@ __all__ = [
     "get_max_tick",
     "get_min_tick",
     "get_nearest_tick",
+    "concentrated_il",
+    "position_token_amounts",
     "price_to_sqrt_price_x96",
     "price_to_tick",
     "require_tick_spacing",
+    "sqrt_price_decimal",
     "sqrt_price_x96_to_price",
     "sqrt_price_x96_to_tick",
     "tick_spacing_or_default",
     "tick_to_price",
+    "tick_to_sqrt_price_decimal",
     "tick_to_sqrt_price_x96",
 ]

@@ -26,7 +26,6 @@ MIN_TICK = -887272
 MAX_TICK = 887272
 
 # ln(1.0001) pre-computed to high precision
-_LN_TICK_BASE = Decimal("0.0000999950003333083340832824")
 
 
 @dataclass
@@ -211,58 +210,25 @@ def _compute_amounts(
     sqrt_price_lower: Decimal,
     sqrt_price_upper: Decimal,
 ) -> LPTokenAmounts:
-    """Core V3 token amount calculation.
+    """Core V3 token amount calculation — delegates to the shared CL kernel.
 
-    Three cases based on where current price sits:
-    1. Below range → 100% token0
-    2. Above range → 100% token1
-    3. In range → mix of both
+    The three-case formula lives in
+    ``connectors/_strategy_base/concentrated_liquidity_math.position_token_amounts``
+    (ALM-2948: one composition implementation for live valuation, live IL,
+    and — via 2943 phase 4 — the backtest lanes).
     """
-    # Case 1: Price below range — all token0
-    if sqrt_price <= sqrt_price_lower:
-        token0 = liquidity * (Decimal("1") / sqrt_price_lower - Decimal("1") / sqrt_price_upper)
-        token1 = Decimal("0")
+    from almanak.connectors._strategy_base.concentrated_liquidity_math import position_token_amounts
 
-    # Case 2: Price above range — all token1
-    elif sqrt_price >= sqrt_price_upper:
-        token0 = Decimal("0")
-        token1 = liquidity * (sqrt_price_upper - sqrt_price_lower)
-
-    # Case 3: Price within range — mix of both
-    else:
-        token0 = liquidity * (Decimal("1") / sqrt_price - Decimal("1") / sqrt_price_upper)
-        token1 = liquidity * (sqrt_price - sqrt_price_lower)
-
-    return LPTokenAmounts(amount0=max(Decimal("0"), token0), amount1=max(Decimal("0"), token1))
+    amount0, amount1 = position_token_amounts(liquidity, sqrt_price, sqrt_price_lower, sqrt_price_upper)
+    return LPTokenAmounts(amount0=amount0, amount1=amount1)
 
 
 def _tick_to_sqrt_price(tick: int) -> Decimal:
-    """Convert a V3 tick to sqrt(price).
+    """Convert a V3 tick to sqrt(raw price) — delegates to the shared CL kernel.
 
-    In Uniswap V3: price = 1.0001^tick
-    Therefore: sqrt(price) = 1.0001^(tick/2) = e^(tick/2 * ln(1.0001))
+    Replaces the previous hand-rolled Taylor-series ``exp`` (LB-6): stdlib
+    ``Decimal.ln()/.exp()`` under 50-digit precision in the kernel.
     """
-    half_tick = Decimal(tick) / Decimal("2")
-    exponent = half_tick * _LN_TICK_BASE
+    from almanak.connectors._strategy_base.concentrated_liquidity_math import tick_to_sqrt_price_decimal
 
-    return _decimal_exp(exponent)
-
-
-def _decimal_exp(x: Decimal) -> Decimal:
-    """Calculate e^x using Taylor series with range reduction."""
-    if abs(x) > Decimal("10"):
-        ln2 = Decimal("0.693147180559945309417232121458")
-        n = int(x / ln2)
-        r = x - Decimal(n) * ln2
-        return (Decimal("2") ** n) * _decimal_exp(r)
-
-    result = Decimal("1")
-    term = Decimal("1")
-
-    for i in range(1, 100):
-        term = term * x / Decimal(i)
-        result += term
-        if abs(term) < Decimal("1e-28"):
-            break
-
-    return result
+    return tick_to_sqrt_price_decimal(tick)

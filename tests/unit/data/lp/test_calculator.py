@@ -287,26 +287,35 @@ class TestStablePoolIL:
 
 
 class TestConcentratedLiquidityIL:
-    """Tests for concentrated liquidity IL calculations (Uniswap V3 style)."""
+    """Tests for concentrated liquidity IL calculations (Uniswap V3 style).
+
+    ALM-2948: real V3 math via the shared CL kernel. Fixtures use raw
+    on-chain WETH/USDC ticks with explicit decimals0=18/decimals1=6 — the
+    decimal adjustment the pre-2948 heuristic ignored.
+    """
 
     def test_concentrated_il_in_range(self, calculator: ILCalculator) -> None:
-        """IL for concentrated position when price stays in range."""
+        """In-range move produces a real, negative IL bounded by the move."""
         result = calculator.calculate_il_concentrated(
             entry_price_a=Decimal("2000"),
             entry_price_b=Decimal("1"),
             current_price_a=Decimal("2200"),  # +10%, still in range
             current_price_b=Decimal("1"),
-            tick_lower=-887220,
-            tick_upper=-201180,
+            tick_lower=-201180,  # ~1831 on the human plane (18/6)
+            tick_upper=-190000,  # ~5602
+            decimals0=18,
+            decimals1=6,
         )
 
         assert result.pool_type == PoolType.CONCENTRATED
-        # IL should be calculable
-        assert result.il_ratio is not None
+        assert Decimal("-0.05") < result.il_ratio < 0
+        # Entry near the range floor: composition is mostly token0, not the
+        # old hardcoded 0.5/0.5.
+        assert result.weight_a > Decimal("0.8")
+        assert result.weight_a + result.weight_b == Decimal("1")
 
     def test_concentrated_vs_full_range(self, calculator: ILCalculator) -> None:
-        """Concentrated positions can have higher IL than full range."""
-        # Full range (constant product)
+        """A narrow concentrated range loses more than full-range V2."""
         result_full = calculator.calculate_il(
             entry_price_a=Decimal("2000"),
             entry_price_b=Decimal("1"),
@@ -315,19 +324,145 @@ class TestConcentratedLiquidityIL:
             pool_type=PoolType.CONSTANT_PRODUCT,
         )
 
-        # Narrow concentrated range
+        # Narrow range around entry: ~[1831, 2211] on the human plane.
         result_concentrated = calculator.calculate_il_concentrated(
             entry_price_a=Decimal("2000"),
             entry_price_b=Decimal("1"),
             current_price_a=Decimal("3000"),
             current_price_b=Decimal("1"),
-            tick_lower=-200000,  # Very narrow range
-            tick_upper=-190000,
+            tick_lower=-201180,
+            tick_upper=-199290,
+            decimals0=18,
+            decimals1=6,
         )
 
-        # Both should have IL
         assert result_full.il_ratio < 0
-        assert result_concentrated.il_ratio < 0
+        assert result_concentrated.il_ratio < result_full.il_ratio
+
+    def test_no_move_is_exactly_zero(self, calculator: ILCalculator) -> None:
+        result = calculator.calculate_il_concentrated(
+            entry_price_a=Decimal("2000"),
+            entry_price_b=Decimal("1"),
+            current_price_a=Decimal("2000"),
+            current_price_b=Decimal("1"),
+            tick_lower=-201180,
+            tick_upper=-190000,
+            decimals0=18,
+            decimals1=6,
+        )
+        assert result.il_ratio == 0
+
+    def test_position_out_of_range_at_entry_has_no_il(self, calculator: ILCalculator) -> None:
+        """Entry above the range: all-token1 at entry and now — IL is zero."""
+        result = calculator.calculate_il_concentrated(
+            entry_price_a=Decimal("6000"),  # above the ~5602 upper bound
+            entry_price_b=Decimal("1"),
+            current_price_a=Decimal("7000"),
+            current_price_b=Decimal("1"),
+            tick_lower=-201180,
+            tick_upper=-190000,
+            decimals0=18,
+            decimals1=6,
+        )
+        assert result.il_ratio == 0
+        assert result.weight_a == 0 and result.weight_b == 1
+
+    def test_partial_decimals_rejected(self, calculator: ILCalculator) -> None:
+        """One decimal supplied without the other is a caller error, not a
+        silent equal-decimals fallback that discards the supplied value."""
+        with pytest.raises(ValueError, match="must be provided together"):
+            calculator.calculate_il_concentrated(
+                entry_price_a=Decimal("2000"),
+                entry_price_b=Decimal("1"),
+                current_price_a=Decimal("2200"),
+                current_price_b=Decimal("1"),
+                tick_lower=-201180,
+                tick_upper=-190000,
+                decimals0=18,
+                decimals1=None,
+            )
+
+    def test_missing_decimals_warns_about_degraded_plane(
+        self, calculator: ILCalculator, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Both decimals omitted assumes an equal-decimals plane; the degraded
+        plane must be surfaced, not silent (asymmetric pairs mis-score to ~0)."""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            calculator.calculate_il_concentrated(
+                entry_price_a=Decimal("2000"),
+                entry_price_b=Decimal("1"),
+                current_price_a=Decimal("2200"),
+                current_price_b=Decimal("1"),
+                tick_lower=-201180,
+                tick_upper=-190000,
+            )
+        assert any("equal-decimals plane" in r.message for r in caplog.records)
+
+
+class TestTrackedExposureDecimals:
+    """ALM-2948 review round: tracked positions must carry token decimals —
+    without them, asymmetric pools' raw ticks land on the 18/18 plane and the
+    exposure path silently reports zero IL."""
+
+    def test_tracked_weth_usdc_exposure_uses_decimals(self, calculator: ILCalculator) -> None:
+        from datetime import UTC, datetime
+
+        position = LPPosition(
+            position_id="weth-usdc-cl",
+            pool_address="0x" + "1" * 40,
+            token_a="WETH",
+            token_b="USDC",
+            entry_price_a=Decimal("2000"),
+            entry_price_b=Decimal("1"),
+            amount_a=Decimal("1"),
+            amount_b=Decimal("2000"),
+            weight_a=Decimal("0.5"),
+            weight_b=Decimal("0.5"),
+            pool_type=PoolType.CONCENTRATED,
+            chain="base",
+            entry_timestamp=datetime.now(UTC),
+            tick_lower=-201180,
+            tick_upper=-190000,
+            decimals0=18,
+            decimals1=6,
+        )
+        calculator.add_position(position)
+
+        exposure = calculator.calculate_il_exposure(
+            "weth-usdc-cl",
+            current_price_a=Decimal("2400"),
+            current_price_b=Decimal("1"),
+        )
+
+        # In-range move on the correctly-placed plane: real, negative IL.
+        assert exposure.current_il.il_ratio < 0
+
+    def test_to_dict_carries_decimals(self) -> None:
+        from datetime import UTC, datetime
+
+        position = LPPosition(
+            position_id="p",
+            pool_address="0x" + "2" * 40,
+            token_a="WETH",
+            token_b="USDC",
+            entry_price_a=Decimal("2000"),
+            entry_price_b=Decimal("1"),
+            amount_a=Decimal("1"),
+            amount_b=Decimal("2000"),
+            weight_a=Decimal("0.5"),
+            weight_b=Decimal("0.5"),
+            pool_type=PoolType.CONCENTRATED,
+            chain="base",
+            entry_timestamp=datetime.now(UTC),
+            tick_lower=-201180,
+            tick_upper=-190000,
+            decimals0=18,
+            decimals1=6,
+        )
+        data = position.to_dict()
+        assert data["decimals0"] == 18 and data["decimals1"] == 6
 
 
 # =============================================================================

@@ -239,6 +239,10 @@ class LPPosition:
         chain: Blockchain network
         entry_timestamp: When the position was opened
         tick_lower: Lower tick bound (for concentrated liquidity)
+        decimals0: token A's ERC-20 decimals (concentrated positions; the raw
+            tick plane is off by 10^(decimals0-decimals1) without them).
+            None = equal-decimals plane assumed (Empty != Zero: no 18 guess)
+        decimals1: token B's ERC-20 decimals (None = equal-decimals assumed)
         tick_upper: Upper tick bound (for concentrated liquidity)
     """
 
@@ -257,6 +261,8 @@ class LPPosition:
     entry_timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     tick_lower: int | None = None
     tick_upper: int | None = None
+    decimals0: int | None = None
+    decimals1: int | None = None
 
     @property
     def entry_value(self) -> Decimal:
@@ -286,6 +292,8 @@ class LPPosition:
             "entry_timestamp": self.entry_timestamp.isoformat(),
             "tick_lower": self.tick_lower,
             "tick_upper": self.tick_upper,
+            "decimals0": self.decimals0,
+            "decimals1": self.decimals1,
         }
 
 
@@ -499,81 +507,109 @@ class ILCalculator:
         tick_lower: int,
         tick_upper: int,
         entry_value: Decimal | None = None,
+        decimals0: int | None = None,
+        decimals1: int | None = None,
     ) -> ILResult:
         """Calculate IL for concentrated liquidity positions (Uniswap V3).
 
-        Concentrated liquidity amplifies both gains and IL compared to
-        full-range positions. The IL is higher when price moves outside
-        the range.
+        True V3 math (ALM-2948): position composition at entry and now via
+        the shared CL kernel's three-case formula, IL = pool_value /
+        hold_value - 1. Replaces the previous heuristic (V2 IL times an
+        ad-hoc range-width amplification), which also compared raw tick
+        planes against human price ratios.
+
+        Ticks are raw on-chain ticks; ``decimals0``/``decimals1`` bring the
+        range onto the human-price plane (token A = token0). ``None`` means
+        the pair is assumed equal-decimals (no plane adjustment) — pass real
+        decimals for asymmetric pairs (e.g. WETH/USDC = 18/6), otherwise the
+        range is misplaced by 10^(decimals0-decimals1).
 
         Args:
-            entry_price_a: Entry price of token A
-            entry_price_b: Entry price of token B
+            entry_price_a: Entry price of token A (token0)
+            entry_price_b: Entry price of token B (token1)
             current_price_a: Current price of token A
             current_price_b: Current price of token B
-            tick_lower: Lower tick bound of the position
-            tick_upper: Upper tick bound of the position
+            tick_lower: Lower tick bound of the position (raw on-chain tick)
+            tick_upper: Upper tick bound of the position (raw on-chain tick)
             entry_value: Optional initial position value
+            decimals0: token A's ERC-20 decimals (None = equal-decimals plane)
+            decimals1: token B's ERC-20 decimals (None = equal-decimals plane)
 
         Returns:
             ILResult with IL metrics for concentrated position
 
         Raises:
             InvalidPriceError: If any price is zero or negative
+            ValueError: If the tick range is degenerate
         """
+        from almanak.connectors._strategy_base.concentrated_liquidity_math import (
+            concentrated_il,
+            tick_to_price,
+        )
+
         # Validate prices
         self._validate_price(entry_price_a, "entry_price_a")
         self._validate_price(entry_price_b, "entry_price_b")
         self._validate_price(current_price_a, "current_price_a")
         self._validate_price(current_price_b, "current_price_b")
 
-        # Calculate price bounds from ticks
-        # price = 1.0001^tick
-        price_lower = Decimal(str(math.pow(1.0001, tick_lower)))
-        price_upper = Decimal(str(math.pow(1.0001, tick_upper)))
+        # Human-plane range bounds from raw ticks (decimals-adjusted). None =
+        # equal-decimals plane: zero adjustment, never a fabricated 18.
+        # Partial specification is a caller error: silently discarding the one
+        # supplied decimal would misplace the range by orders of magnitude.
+        if (decimals0 is None) != (decimals1 is None):
+            raise ValueError("decimals0 and decimals1 must be provided together, or neither")
+        if decimals0 is not None and decimals1 is not None:
+            plane0, plane1 = decimals0, decimals1
+        else:
+            # Both None: assume equal decimals. Correct for symmetric pairs
+            # (both 18, both 6), but WRONG for decimal-asymmetric pairs
+            # (WETH/USDC 18/6), where the range lands 10^(decimals0-decimals1)
+            # off and IL can read a spurious zero. Surface the degraded plane
+            # instead of silently mis-scoring risk (ALM-2948 review).
+            plane0 = plane1 = 0
+            logger.warning(
+                "calculate_il_concentrated: token decimals not provided for a "
+                "concentrated position (ticks %s..%s); assuming an equal-decimals "
+                "plane. IL is WRONG for decimal-asymmetric pairs (e.g. WETH/USDC "
+                "18/6) — pass decimals0/decimals1 for correct IL.",
+                tick_lower,
+                tick_upper,
+            )
+        price_lower = tick_to_price(tick_lower, plane0, plane1)
+        price_upper = tick_to_price(tick_upper, plane0, plane1)
 
-        # Current price ratio
+        # Token0 priced in token1 — the plane the range lives on.
         entry_ratio = entry_price_a / entry_price_b
         current_ratio = current_price_a / current_price_b
         price_ratio = current_ratio / entry_ratio
 
-        # Adjust current price for bounds
-        effective_ratio = price_ratio
-        if price_ratio < price_lower / entry_ratio:
-            effective_ratio = price_lower / entry_ratio
-        elif price_ratio > price_upper / entry_ratio:
-            effective_ratio = price_upper / entry_ratio
+        il_ratio, entry_amounts, _now_amounts = concentrated_il(entry_ratio, current_ratio, price_lower, price_upper)
 
-        # Calculate concentrated IL using the effective range
-        # Concentration factor increases IL impact
-        range_factor = (price_upper / price_lower).ln() if price_upper > price_lower else Decimal("1")
-
-        # Base IL for full range
-        base_il = self._calculate_constant_product_il(effective_ratio)
-
-        # Amplification based on range width (narrower = higher amplification)
-        # For a typical full range, range_factor ≈ 10-20
-        # For a narrow range, range_factor ≈ 0.1-1
-        if range_factor < Decimal("1"):
-            amplification = Decimal("1") + (Decimal("1") - range_factor)
+        # Entry composition weights (value shares in token1 terms) — real
+        # weights instead of the previous hardcoded 0.5/0.5.
+        entry_amount0, entry_amount1 = entry_amounts
+        entry_value_t1 = entry_amount0 * entry_ratio + entry_amount1
+        if entry_value_t1 > 0:
+            weight_a = (entry_amount0 * entry_ratio / entry_value_t1).quantize(Decimal("0.0001"))
+            weight_b = Decimal("1") - weight_a
         else:
-            amplification = Decimal("1")
+            weight_a = Decimal("0")
+            weight_b = Decimal("1")
 
-        il_ratio = base_il * amplification
-
-        # Convert to percentage and bps
-        il_percent = il_ratio * Decimal("100")
-        il_bps = int((il_ratio * Decimal("10000")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-
-        # Calculate values
+        # USD values: hold the entry composition to now, then apply IL.
         base_value = entry_value or Decimal("1000")
-        weight_a = Decimal("0.5")
-        weight_b = Decimal("0.5")
-        value_if_held = base_value * (
-            weight_a * (current_price_a / entry_price_a) + weight_b * (current_price_b / entry_price_b)
-        )
+        held_now_t1 = entry_amount0 * current_ratio + entry_amount1
+        if entry_value_t1 > 0:
+            hold_growth = (held_now_t1 * current_price_b) / (entry_value_t1 * entry_price_b)
+        else:
+            hold_growth = Decimal("1")
+        value_if_held = base_value * hold_growth
         value_in_pool = value_if_held * (Decimal("1") + il_ratio)
         loss_absolute = value_if_held - value_in_pool
+
+        il_percent = il_ratio * Decimal("100")
+        il_bps = int((il_ratio * Decimal("10000")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
         return ILResult(
             il_ratio=il_ratio.quantize(Decimal("0.000001")),
@@ -757,6 +793,8 @@ class ILCalculator:
                 tick_lower=position.tick_lower,
                 tick_upper=position.tick_upper,
                 entry_value=position.entry_value,
+                decimals0=position.decimals0,
+                decimals1=position.decimals1,
             )
         else:
             il_result = self.calculate_il(
