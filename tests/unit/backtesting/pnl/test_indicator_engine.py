@@ -643,3 +643,82 @@ class TestEmaDefaultAndWarmup:
         assert engine.is_warming_up("ETH", cfg) is True  # 54 < 55
         engine.append_price("ETH", Decimal("3055"))
         assert engine.is_warming_up("ETH", cfg) is False  # 55 >= 55
+
+
+class TestGranularityHonesty:
+    """ALM-2957 backstop: indicators finer than the DATA's measured resolution
+    refuse instead of serving values computed from flat upsampled ticks."""
+
+    @staticmethod
+    def _daily_under_hourly_engine() -> BacktestIndicatorEngine:
+        # 10 daily prices upsampled onto an hourly tick grid — the exact
+        # plane that pinned RSI at ~0/100 for months on staging.
+        daily = [3000.0, 3050.0, 2990.0, 2940.0, 2970.0, 3010.0, 2950.0, 2900.0, 2930.0, 2960.0]
+        hourly = [p for p in daily for _ in range(24)]
+        engine = _create_engine_with_prices("WETH", hourly, {"rsi"})
+        engine.set_data_granularity(86400, 3600)
+        return engine
+
+    def test_on_demand_finer_than_data_refuses(self) -> None:
+        engine = self._daily_under_hourly_engine()
+        rsi_provider, _ = engine.snapshot_providers(None, 3600)
+
+        with pytest.raises(ValueError, match="resolution"):
+            rsi_provider("WETH", period=14, timeframe="1h")
+        with pytest.raises(ValueError, match="ALM-2957"):
+            rsi_provider("WETH", period=14)  # default = tick timeframe
+
+    def test_on_demand_at_data_resolution_serves(self) -> None:
+        engine = self._daily_under_hourly_engine()
+        rsi_provider, _ = engine.snapshot_providers(None, 3600)
+
+        # "1d" resamples the buffer back to the REAL daily closes — served.
+        rsi = rsi_provider("WETH", period=5, timeframe="1d")
+        assert Decimal("0") <= rsi.value <= Decimal("100")
+
+    def test_eager_population_skipped_when_degenerate(self) -> None:
+        engine = self._daily_under_hourly_engine()
+        snapshot = _make_snapshot()
+        engine.populate_snapshot(snapshot)
+
+        with pytest.raises(ValueError):
+            snapshot.rsi("WETH")
+
+    def test_matching_granularity_is_unchanged(self) -> None:
+        prices = _generate_prices(3500.0, 30)
+        engine = _create_engine_with_prices("WETH", prices, {"rsi"})
+        engine.set_data_granularity(3600, 3600)
+
+        snapshot = _make_snapshot()
+        engine.populate_snapshot(snapshot)
+        assert snapshot.rsi("WETH").period == 14
+
+        rsi_provider, _ = engine.snapshot_providers(None, 3600)
+        rsi = rsi_provider("WETH", period=14, timeframe="1h")
+        assert Decimal("0") <= rsi.value <= Decimal("100")
+
+    def test_retention_scales_so_native_indicators_can_warm_up(self) -> None:
+        # Review round (#3311, Codex): with daily data under hourly ticks the
+        # default 200-tick buffer resamples to ~8 daily bars — the "request
+        # 1d instead" fallback could never warm a realistic RSI(14). The
+        # granularity handoff must scale retention by the coarseness ratio.
+        engine = BacktestIndicatorEngine(required_indicators={"rsi"})
+        engine.set_data_granularity(86400, 3600)
+
+        # 20 days of daily prices upsampled onto the hourly grid (480 ticks —
+        # far beyond the unscaled 200-tick cap).
+        daily = [3000.0 + 13 * ((i * 7) % 11) for i in range(20)]
+        for price in daily:
+            for _ in range(24):
+                engine.append_price("WETH", Decimal(str(price)))
+
+        rsi_provider, _ = engine.snapshot_providers(None, 3600)
+        rsi = rsi_provider("WETH", period=14, timeframe="1d")
+        assert Decimal("0") <= rsi.value <= Decimal("100")
+
+    def test_retention_scaling_is_idempotent(self) -> None:
+        engine = BacktestIndicatorEngine(required_indicators={"rsi"})
+        engine.set_data_granularity(86400, 3600)
+        first = engine._max_history
+        engine.set_data_granularity(86400, 3600)
+        assert engine._max_history == first  # a second call must not compound

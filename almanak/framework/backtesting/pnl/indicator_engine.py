@@ -121,8 +121,18 @@ class BacktestIndicatorEngine:
         if max_history < 1:
             raise ValueError("max_history must be >= 1")
         self._max_history = max_history
+        # Constructed capacity: the base the granularity retention scale
+        # multiplies (ALM-2957 review round) — kept so rescaling is idempotent.
+        self._base_max_history = max_history
         # token -> rolling deque of close prices (oldest first)
         self._price_buffers: dict[str, deque[Decimal]] = {}
+        # Measured resolution of the UNDERLYING price data (ALM-2957). When
+        # coarser than the tick interval (e.g. daily CG data under hourly
+        # ticks), the tick buffer is an upsampled flat-within-period plane:
+        # indicators at the tick timeframe are degenerate (RSI pins ~0/100)
+        # and must refuse, not serve. None = data matches the tick grid.
+        self._data_granularity_seconds: int | None = None
+        self._tick_interval_seconds: int | None = None
 
         unknown = self._required - SUPPORTED_INDICATORS
         if unknown:
@@ -161,6 +171,14 @@ class BacktestIndicatorEngine:
                     the current tick's market data.
         """
         config = config or {}
+
+        if self._degenerate_at_tick():
+            # The tick buffer is upsampled coarser data (ALM-2957): eager
+            # tick-timeframe values would be confidently degenerate. Skip —
+            # reads route to the on-demand providers, which refuse finer-
+            # than-data timeframes and get RECORDED in the decision-input
+            # ledger, instead of silently serving saturated values.
+            return
 
         for token, prices in self._price_buffers.items():
             # Skip tokens not present in the current tick to avoid stale indicators
@@ -663,6 +681,57 @@ class BacktestIndicatorEngine:
     # On-demand snapshot providers (ALM-2951)
     # ------------------------------------------------------------------
 
+    #: Retention scale ceiling when data is coarser than the tick grid: the
+    #: buffer holds tick-resolution samples, so serving DEFAULT_MAX_HISTORY
+    #: bars at the NATIVE timeframe needs ratio× more of them. 96 covers a
+    #: daily-over-15-minute grid at ~19k Decimals per token — cheap; anything
+    #: coarser is capped rather than unbounded.
+    _MAX_GRANULARITY_RETENTION_SCALE = 96
+
+    def set_data_granularity(self, granularity_seconds: int | None, tick_interval_seconds: int) -> None:
+        """Record the measured resolution of the underlying price data.
+
+        Called once per run after prefetch (ALM-2957). When the data is
+        coarser than the tick grid, ``_series_for`` refuses timeframes finer
+        than the data and eager population is skipped — a refusal the
+        decision-input ledger records beats a confidently served value
+        computed from flat upsampled ticks.
+
+        Retention is scaled by the coarseness ratio (review round, #3311):
+        the buffers hold TICK samples, so with e.g. daily data under hourly
+        ticks the default 200-sample window resamples to only ~8 native bars
+        and a 1d RSI(14) could never warm up — the very fallback the refusal
+        message directs callers to. Existing buffers are rebuilt with the
+        scaled capacity.
+        """
+        self._data_granularity_seconds = granularity_seconds
+        self._tick_interval_seconds = tick_interval_seconds
+        if (
+            granularity_seconds is not None
+            and tick_interval_seconds > 0
+            and granularity_seconds > tick_interval_seconds
+        ):
+            ratio = min(
+                -(-granularity_seconds // tick_interval_seconds),  # ceil div
+                self._MAX_GRANULARITY_RETENTION_SCALE,
+            )
+            # Scale from the CONSTRUCTED capacity (idempotent — a second call
+            # must not compound the scale).
+            scaled = self._base_max_history * ratio
+            if scaled > self._max_history:
+                self._max_history = scaled
+                self._price_buffers = {
+                    token: deque(buffer, maxlen=scaled) for token, buffer in self._price_buffers.items()
+                }
+
+    def _degenerate_at_tick(self) -> bool:
+        """True when the tick buffer is an upsampled coarser-data plane."""
+        return (
+            self._data_granularity_seconds is not None
+            and self._tick_interval_seconds is not None
+            and self._data_granularity_seconds > self._tick_interval_seconds
+        )
+
     def _series_for(self, token: str, timeframe: str | None, tick_interval_seconds: int) -> list[Decimal]:
         """Close series for ``timeframe``, resampled from the tick series.
 
@@ -670,12 +739,21 @@ class BacktestIndicatorEngine:
         that is a whole multiple of the tick interval is resampled (buckets
         aligned to end at the current tick, bucket close = last close).
         Anything else raises — never silently serve tick bars for a
-        different requested timeframe.
+        different requested timeframe, and never serve a timeframe FINER
+        than the underlying data's measured resolution (ALM-2957: daily CG
+        points under hourly ticks pinned RSI at ~0/100 for months).
         """
         prices = list(self._price_buffers.get(token, []))
         if not prices:
             raise InsufficientDataError(required=1, available=0, indicator="price history")
         requested = _timeframe_seconds(timeframe) if timeframe else tick_interval_seconds
+        native = self._data_granularity_seconds
+        if native is not None and native > tick_interval_seconds and requested < native:
+            raise ValueError(
+                f"underlying price data has {timeframe_label(native)} resolution; a "
+                f"{timeframe_label(requested)} indicator would be computed from flat upsampled "
+                f"ticks and saturate (ALM-2957) — request {timeframe_label(native)} or coarser"
+            )
         if requested == tick_interval_seconds:
             return prices
         if requested % tick_interval_seconds != 0:

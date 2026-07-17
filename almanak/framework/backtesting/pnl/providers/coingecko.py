@@ -108,6 +108,12 @@ class CoinGeckoRateLimitError(Exception):
 _TRANSIENT_REQUEST_MARKERS: tuple[str, ...] = ("Request timed out", "Network error")
 _HTTP_STATUS_RE = re.compile(r"CoinGecko API error (\d{3}):")
 
+#: Per-request range ceiling for market_chart/range (ALM-2957). CoinGecko
+#: serves HOURLY points only for ranges up to 90 days and silently degrades
+#: to DAILY above; 80 days keeps a safety margin under the cliff. Longer
+#: windows are fetched in chunks of this size and stitched.
+_CG_HOURLY_SAFE_RANGE_SECONDS = 80 * 86400
+
 
 def _is_transient_request_error(exc: BaseException) -> bool:
     """Return True if ``exc`` is a transient request failure, not a resolution miss.
@@ -773,6 +779,10 @@ class CoinGeckoDataProvider:
         # is the fallback).
         self._api_key = self._resolve_api_key(api_key)
         self._request_timeout = request_timeout
+        # Coarsest measured candle spacing of the last prefetch (ALM-2957);
+        # None until a prefetch runs. Read by the engine loop to make
+        # indicator serving refuse finer-than-data timeframes.
+        self.measured_granularity_seconds: int | None = None
         self._min_request_interval = self._effective_request_interval(self._api_key, min_request_interval)
         self._retry_config = retry_config or RetryConfig()
         self._data_config = data_config
@@ -1365,10 +1375,18 @@ class CoinGeckoDataProvider:
 
         Uses the CoinGecko /coins/{id}/market_chart/range endpoint.
 
-        Note: CoinGecko's free API has granularity limits:
+        CoinGecko decides granularity from the REQUESTED RANGE LENGTH:
         - 1-2 days: 5-minute intervals
         - 3-90 days: hourly intervals
         - >90 days: daily intervals
+
+        Ranges longer than 90 days are therefore fetched in ≤80-day CHUNKS
+        and stitched (ALM-2957): a single 6-month request silently came back
+        DAILY, the engine spread ~182 points across hourly ticks, and hourly
+        indicators saturated on the flat-within-day plane (RSI pinned ~0/100,
+        band-gated strategies froze). Chunking keeps every fetched point
+        hourly for any window length. A failed chunk fails the whole fetch —
+        a silently missing span would re-create the degenerate plane.
 
         Args:
             token: ``(chain, address)`` token identity or token symbol.
@@ -1394,15 +1412,40 @@ class CoinGeckoDataProvider:
         start_ts = int(start.timestamp())
         end_ts = int(end.timestamp())
 
-        params = {
-            "vs_currency": "usd",
-            "from": str(start_ts),
-            "to": str(end_ts),
-        }
+        # Chunking exists to keep CG in its HOURLY auto-granularity regime;
+        # a backtest ticking at daily-or-coarser is honestly served by daily
+        # points, so it keeps the single request (the granularity backstop
+        # still measures and enforces whatever comes back).
+        chunk_size = _CG_HOURLY_SAFE_RANGE_SECONDS if interval_seconds < 86400 else max(end_ts - start_ts, 1)
 
-        data = await self._make_request(f"/coins/{token_id}/market_chart/range", params)
+        prices: list[list[float]] = []
+        seen_ts: set[float] = set()
+        chunk_start = start_ts
+        chunk_count = 0
+        while chunk_start < end_ts or chunk_count == 0:
+            chunk_end = min(chunk_start + chunk_size, end_ts)
+            params = {
+                "vs_currency": "usd",
+                "from": str(chunk_start),
+                "to": str(chunk_end),
+            }
+            data = await self._make_request(f"/coins/{token_id}/market_chart/range", params)
+            chunk_count += 1
+            for row in data.get("prices", []):
+                # Chunk edges are inclusive both sides — dedup the seam candle.
+                if row[0] not in seen_ts:
+                    seen_ts.add(row[0])
+                    prices.append(row)
+            chunk_start = chunk_end
+        if chunk_count > 1:
+            logger.info(
+                "Fetched %s in %d chunks (%d points) to keep hourly granularity over a %.0f-day range (ALM-2957)",
+                token_ref_display(token),
+                chunk_count,
+                len(prices),
+                (end_ts - start_ts) / 86400,
+            )
 
-        prices = data.get("prices", [])
         if not prices:
             raise ValueError(f"No price data available for {token_ref_display(token)} in range")
 
@@ -1488,7 +1531,28 @@ class CoinGeckoDataProvider:
             data[cache_key] = ohlcv
             logger.info(f"Prefetched {len(ohlcv)} data points for {token_ref_display(fetch_token)}")
 
+        # Measure the ACTUAL resolution the vendor served (ALM-2957): the
+        # coarsest per-token median spacing. The indicator engine uses it to
+        # refuse timeframes finer than the data instead of serving values
+        # computed from flat upsampled ticks.
+        self.measured_granularity_seconds = self._measure_granularity(data)
+
         return OHLCVCache(data=data, fetched_at=datetime.now(UTC), default_chain=default_chain)
+
+    @staticmethod
+    def _measure_granularity(data: dict[TokenRef, list[OHLCV]]) -> int | None:
+        """Coarsest per-token median candle spacing, in seconds (ALM-2957)."""
+        import statistics
+
+        per_token: list[int] = []
+        for candles in data.values():
+            if len(candles) < 2:
+                continue
+            spacings = [
+                int((b.timestamp - a.timestamp).total_seconds()) for a, b in zip(candles, candles[1:], strict=False)
+            ]
+            per_token.append(int(statistics.median(spacings)))
+        return max(per_token) if per_token else None
 
     async def _fetch_prior_candle(
         self,

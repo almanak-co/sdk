@@ -59,9 +59,7 @@ class TestCompletedIndicatorSet:
 
     def test_new_indicators_prepopulate_on_required_declaration(self):
         # Declaring required_indicators opts into the eager fast path.
-        engine = BacktestIndicatorEngine(
-            required_indicators={"stochastic", "adx", "cci", "ichimoku", "sma"}
-        )
+        engine = BacktestIndicatorEngine(required_indicators={"stochastic", "adx", "cci", "ichimoku", "sma"})
         for i in range(120):
             engine.append_price("WETH", Decimal("3000") + Decimal(i % 10) * 3 - Decimal(i % 7))
         snapshot = _snapshot()
@@ -454,3 +452,55 @@ class TestIdentityRegistrationSeam:
         assert portfolio.apply_fill(fill) is True
         assert portfolio.tokens.get(weth_key) == D("0.5")
         assert "WETH" not in portfolio.tokens
+
+
+class _RsiReadingStrategy:
+    """Reads 1h RSI every tick and remembers whether it was served or refused."""
+
+    def __init__(self) -> None:
+        self._deployment_id = "rsi_reader"
+        self.served: list[bool] = []
+
+    @property
+    def deployment_id(self) -> str:
+        return self._deployment_id
+
+    def decide(self, market: Any) -> Any:
+        try:
+            market.rsi("WETH", period=5, timeframe="1h")
+            self.served.append(True)
+        except ValueError:
+            self.served.append(False)
+        return None
+
+
+class TestGranularityHandoff:
+    """ALM-2957 (#3311 review round): the loop's first tick must thread the
+    provider's MEASURED data granularity into the indicator engine — a daily
+    plane under hourly ticks makes 1h indicator reads refuse-and-record
+    instead of serving saturated values."""
+
+    @pytest.mark.asyncio
+    async def test_first_tick_threads_measured_granularity(self):
+        backtester = _backtester(num_ticks=40)
+        backtester.data_provider.measured_granularity_seconds = 86400
+        strategy = _RsiReadingStrategy()
+
+        result = await backtester.backtest(strategy, _config(num_hours=40))
+
+        # Every read refused (never served a degenerate 1h RSI)...
+        assert strategy.served and not any(strategy.served)
+        # ...and the refusals are on the decision-input ledger.
+        rsi_entries = [f for f in result.decision_input_failures if f.get("source") == "rsi"]
+        assert rsi_entries, result.decision_input_failures
+        assert any("resolution" in str(f.get("detail")) for f in rsi_entries)
+
+    @pytest.mark.asyncio
+    async def test_matching_granularity_serves_after_warmup(self):
+        backtester = _backtester(num_ticks=40)
+        backtester.data_provider.measured_granularity_seconds = 3600
+        strategy = _RsiReadingStrategy()
+
+        await backtester.backtest(strategy, _config(num_hours=40))
+
+        assert any(strategy.served)  # warm-up refuses, then 1h RSI serves

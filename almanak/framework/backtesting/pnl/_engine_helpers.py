@@ -576,6 +576,20 @@ async def execute_iteration_loop(
         async for timestamp, market_state in backtester.data_provider.iterate(state.data_config):
             state.tick_count += 1
 
+            if state.tick_count == 1:
+                # Prefetch has run by the first yield: thread the vendor's
+                # MEASURED data resolution into the indicator engine so
+                # finer-than-data timeframes refuse instead of serving
+                # values computed from flat upsampled ticks (ALM-2957).
+                measured = getattr(backtester.data_provider, "measured_granularity_seconds", None)
+                state.indicator_engine.set_data_granularity(measured, config.interval_seconds)
+                if measured is not None and measured > config.interval_seconds:
+                    bt_logger.warning(
+                        f"Price data resolution is {timeframe_label(measured)} but the backtest ticks at "
+                        f"{tick_timeframe}: indicators finer than {timeframe_label(measured)} will refuse "
+                        f"and be recorded as decision-input failures (ALM-2957)"
+                    )
+
             # Bridge engine-internal plain-symbol reads (intent USD sizing,
             # adapter valuation, health-factor collateral) onto the
             # address-native state keys through the run's registered map —
