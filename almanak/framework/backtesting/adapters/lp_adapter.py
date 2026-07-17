@@ -2764,14 +2764,28 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         return token0_price, token1_price
 
     def _lp_open_range(self, intent: "LPOpenIntent") -> tuple[Decimal, Decimal, int, int]:
-        range_lower = Decimal(str(intent.range_lower))
-        range_upper = Decimal(str(intent.range_upper))
-        tick_lower = self._price_to_tick_int(range_lower)
-        tick_upper = self._price_to_tick_int(range_upper)
+        # Resolve through the shared extractor — tick/price discrimination and
+        # decimals-aware raw-tick conversion (ALM-2948) — so the routed lane
+        # can never re-interpret a range differently from the generic lane.
+        from almanak.framework.backtesting.pnl.engine import _lp_pair_decimals
+        from almanak.framework.backtesting.pnl.intent_extraction import get_lp_tick_range
+        from almanak.framework.intents.vocabulary import lp_range_bounds
+
+        token0, token1 = self._lp_open_tokens(intent.pool)
+        chain = str(getattr(intent, "chain", None) or self._config.chain)
+        tick_lower, tick_upper = get_lp_tick_range(
+            intent, self._price_to_tick_int, decimals=_lp_pair_decimals(token0, token1, chain)
+        )
         if tick_upper <= tick_lower:
             # Degenerate range (both bounds floor to the same tick): widen by
             # one tick so the position has a valid V3 range and non-zero value.
             tick_upper = tick_lower + 1
+        bounds = lp_range_bounds(intent)
+        if bounds is not None:
+            range_lower, range_upper = bounds
+        else:
+            range_lower = Decimal(str(intent.range_lower))
+            range_upper = Decimal(str(intent.range_upper))
         return range_lower, range_upper, tick_lower, tick_upper
 
     @staticmethod
@@ -3297,29 +3311,14 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         return current_tick < int(tick_lower) or current_tick >= int(tick_upper)
 
     def _price_to_tick_int(self, price: Decimal) -> int:
-        """Convert a price ratio to a Uniswap V3 tick.
+        """Convert a price ratio to a Uniswap V3 tick (clamped to V3 bounds).
 
-        Uses the formula: tick = floor(log(price) / log(1.0001))
-
-        Args:
-            price: Price ratio (token0 in terms of token1)
-
-        Returns:
-            Tick value (clamped to V3 min/max tick bounds)
+        Delegates to the shared CL kernel — Decimal logs, same floor/clamp
+        semantics, no float boundary drift near tick edges.
         """
-        import math
+        from almanak.connectors._strategy_base.concentrated_liquidity_math import price_to_tick
 
-        MIN_TICK = -887272
-        MAX_TICK = 887272
-
-        if price <= 0:
-            return MIN_TICK
-
-        try:
-            tick = math.floor(math.log(float(price), 1.0001))
-            return max(MIN_TICK, min(MAX_TICK, tick))
-        except (ValueError, OverflowError):
-            return MIN_TICK if float(price) < 1 else MAX_TICK
+        return price_to_tick(price, non_positive="min_tick")
 
     def update_position(
         self,

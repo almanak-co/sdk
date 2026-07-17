@@ -443,6 +443,34 @@ class BacktestableStrategy(Protocol):
 # =============================================================================
 
 
+def _lp_pair_decimals(token0: Any, token1: Any, chain: str) -> tuple[int, int] | None:
+    """Best-effort ``(decimals0, decimals1)`` for an LP pair via the token registry.
+
+    None when either token cannot be resolved offline — callers keep the
+    symmetric-decimals behavior rather than guessing.
+    """
+    from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
+
+    resolver = get_token_resolver()
+    decimals: list[int] = []
+    for token in (token0, token1):
+        # Address-native refs are (chain, address) tuples — resolve by the
+        # address on the ref's own chain; str(tuple) is never resolvable.
+        if is_token_key(token):
+            ref_chain, ref = token
+        else:
+            ref_chain, ref = chain, str(token)
+        try:
+            resolved = resolver.resolve(ref, ref_chain, log_errors=False, skip_gateway=True)
+        except TokenResolutionError:
+            return None
+        token_decimals = getattr(resolved, "decimals", None) if resolved else None
+        if token_decimals is None:
+            return None
+        decimals.append(int(token_decimals))
+    return decimals[0], decimals[1]
+
+
 def create_market_snapshot_from_state(
     market_state: MarketState,
     chain: str = DEFAULT_CHAIN,
@@ -3864,7 +3892,10 @@ class PnLBacktester:
             fee_tier = Decimal(str(fee_tier))
 
         calculator = ImpermanentLossCalculator()
-        tick_lower, tick_upper = get_lp_tick_range(intent, calculator.price_to_tick)
+        pair_chain = str(getattr(market_state, "chain", None) or DEFAULT_CHAIN)
+        tick_lower, tick_upper = get_lp_tick_range(
+            intent, calculator.price_to_tick, decimals=_lp_pair_decimals(token0, token1, pair_chain)
+        )
         if tick_upper <= tick_lower:
             # Degenerate range: widen by one tick so the position has a valid
             # V3 range and non-zero value (same handling as the adapter lane).

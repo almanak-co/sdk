@@ -416,7 +416,11 @@ def get_intent_tokens(intent: Any) -> list[str]:
 _FULL_RANGE_TICKS = (-887272, 887272)
 
 
-def get_lp_tick_range(intent: Any, price_to_tick: Callable[[Decimal], int]) -> tuple[int, int]:
+def get_lp_tick_range(
+    intent: Any,
+    price_to_tick: Callable[[Decimal], int],
+    decimals: tuple[int, int] | None = None,
+) -> tuple[int, int]:
     """Resolve the ``(tick_lower, tick_upper)`` range for an LP intent.
 
     Explicit ``tick_lower``/``tick_upper`` attributes win. LP vocabulary
@@ -467,14 +471,20 @@ def get_lp_tick_range(intent: Any, price_to_tick: Callable[[Decimal], int]) -> t
 
     if lp_range_is_ticks(intent):
         # Raw ticks are on-chain (raw-price) space; the caller's ``price_to_tick``
-        # and the IL model it feeds work in human-price space. For a decimal-
-        # ASYMMETRIC pool these spaces differ by the constant decimals shift, so a
-        # raw TickBand can read as out-of-range against a human-price reference.
-        # This is a pre-existing limitation of the tick escape hatch (every
-        # Slipstream backtest hit it before price bands existed); the canonical
-        # price-band path below is decimals-consistent with the model and is the
-        # common case. Closing it fully needs decimals threaded into the backtest
-        # value model -- tracked as a follow-up, not silently converted wrong here.
+        # and the IL model it feeds work in human-price space. With token
+        # decimals known, convert raw ticks through the shared CL kernel into
+        # the human plane so a decimals-asymmetric pool (WETH/USDC 18/6) no
+        # longer reads as permanently out-of-range (ALM-2948 backtest half).
+        if decimals is not None:
+            from almanak.connectors._strategy_base.concentrated_liquidity_math import tick_to_price
+
+            decimals0, decimals1 = decimals
+            lower_price = tick_to_price(int(range_lower), decimals0, decimals1)
+            upper_price = tick_to_price(int(range_upper), decimals0, decimals1)
+            if Decimal("0") < lower_price < upper_price:
+                return price_to_tick(lower_price), price_to_tick(upper_price)
+        # Decimals unknown: the pre-existing hatch stands (correct only for
+        # symmetric-decimals pools); never silently convert wrong.
         return int(range_lower), int(range_upper)
     if range_lower <= 0:
         return _FULL_RANGE_TICKS
