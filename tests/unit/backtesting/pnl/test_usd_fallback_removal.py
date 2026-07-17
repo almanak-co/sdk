@@ -650,7 +650,6 @@ class TestAmountAllFailsClosed:
 
         from almanak.framework.backtesting.models import IntentType
         from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
-        from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 
         class PriceDialingFeeModel:
@@ -658,8 +657,8 @@ class TestAmountAllFailsClosed:
                 return amount_usd * market_state.prices["MISSING_TOKEN"]  # KeyError if ever run
 
         backtester.fee_models = {"default": PriceDialingFeeModel()}
-        intent = SimpleNamespace(intent_type=IntentType.SWAP, from_token="USDC", to_token="WETH", amount="all")
-        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("500"))
+        intent = SimpleNamespace(intent_type=IntentType.SWAP, from_token="WETH", to_token="USDC", amount="all")
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=1),
@@ -674,7 +673,8 @@ class TestAmountAllFailsClosed:
         )
 
         assert trade.success is False
-        assert trade.metadata.get("failure_reason") == UNSUPPORTED_ALL_SIZING_REASON
+        assert trade.metadata.get("rejection_code") == "INSUFFICIENT_BALANCE"
+        assert "no spendable" in trade.metadata.get("failure_reason", "")
         assert trade.fee_usd == Decimal("0")
         assert trade.slippage_usd == Decimal("0")
 

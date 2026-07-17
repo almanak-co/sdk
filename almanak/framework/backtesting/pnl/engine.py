@@ -69,7 +69,10 @@ from dataclasses import dataclass, field
 from dataclasses import dataclass as _dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from almanak.framework.backtesting.pnl.sizing import SizingRejection
 
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.core.chains._helpers import native_symbols_for
@@ -1167,6 +1170,7 @@ class _CloseResolution:
     interest_usd: Decimal = Decimal("0")
     reduce_amounts: dict[TokenRef, Decimal] | None = None
     failure_reason: str | None = None
+    failure_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2224,9 +2228,16 @@ class PnLBacktester:
         # Cleanup is gated on close_providers_on_finish: orchestrators that share
         # one provider across runs own its lifetime and close it themselves
         # (VIB-5621).
+        # Strictness propagation is PER-RUN: initialize_backtest aligns the
+        # shared data_config to this run's fidelity; restore the caller's
+        # value afterwards so a strict run cannot ratchet later runs on a
+        # reused backtester (sweeps/optimize share one instance).
+        original_strict_historical = self.data_config.strict_historical_mode if self.data_config is not None else None
         try:
             return await self._run_backtest(strategy, config, backtest_id, bt_logger, run_started_at)
         finally:
+            if self.data_config is not None and original_strict_historical is not None:
+                self.data_config.strict_historical_mode = original_strict_historical
             if self.close_providers_on_finish:
                 try:
                     await self.close()
@@ -2694,19 +2705,21 @@ class PnLBacktester:
         Returns:
             TradeRecord with all execution details including fees, slippage, and gas
         """
-        from .intent_extraction import intent_has_unresolved_all_sizing
+        from .sizing import ResolvedAllSizing, SizingRejection, apply_resolved_sizing, resolve_all_sizing
 
-        # Lane INGRESS gate: an unresolved "all" sizing sentinel is decided
-        # here — before adapters, pricing, portfolio reads, or USD extraction
-        # — so the rejection is uniform (same machine-visible reason) instead
-        # of depending on which adapter or oracle happens to see the intent
-        # first. Adapters keep their own fail-closed checks as
-        # defense-in-depth for direct callers.
-        unresolved_all_sizing = intent_has_unresolved_all_sizing(intent, self._get_intent_type(intent))
+        # Lane INGRESS: "all" sizing is resolved (or rejected) exactly once,
+        # before adapters, pricing, or USD extraction. Downstream lanes see a
+        # concrete amount, never the sentinel.
+        sizing_rejection: SizingRejection | None = None
+        resolution = resolve_all_sizing(intent, self._get_intent_type(intent), portfolio, market_state)
+        if isinstance(resolution, ResolvedAllSizing):
+            intent = apply_resolved_sizing(intent, resolution)
+        elif isinstance(resolution, SizingRejection):
+            sizing_rejection = resolution
 
         adapter_record = (
             None
-            if unresolved_all_sizing
+            if sizing_rejection is not None
             else await self._execute_with_adapter_if_available(
                 intent=intent,
                 portfolio=portfolio,
@@ -2723,7 +2736,7 @@ class PnLBacktester:
 
         self._refuse_unsupported_intent(intent)
 
-        details = self._generic_intent_details(intent, portfolio, market_state, config)
+        details = self._generic_intent_details(intent, portfolio, market_state, config, sizing_rejection)
         costs = await self._generic_execution_costs(
             details=details,
             market_state=market_state,
@@ -2875,6 +2888,7 @@ class PnLBacktester:
         portfolio: SimulatedPortfolio,
         market_state: MarketState,
         config: PnLBacktestConfig,
+        sizing_rejection: "SizingRejection | None" = None,
     ) -> _GenericIntentDetails:
         from .intent_extraction import (
             UNSUPPORTED_ALL_SIZING_REASON,
@@ -2889,17 +2903,12 @@ class PnLBacktester:
         chain = str(getattr(market_state, "chain", None) or config.chain)
         tokens = self._get_intent_tokens(intent, chain=chain)
 
-        # An "all" sizing sentinel on ANY sizing attribute is a live-execution
-        # construct with no backtest sizing lane (ALM-2943): fail closed with
-        # a machine-visible reason instead of trading a silent $0 or
-        # re-sizing from unrelated fields. Decided BEFORE USD extraction — a
-        # rejected intent must reject identically whether or not its tokens
-        # happen to be priceable (strict-mode extraction raises on missing
-        # prices, which would replace the promised rejection with an
-        # oracle-dependent crash). The gate is general — per-attribute patches
-        # kept leaving the next attribute executable. Close-shaped intents
-        # keep their position-close resolution below.
-        if intent_has_unresolved_all_sizing(intent, intent_type):
+        # Sizing is resolved once at lane ingress; a rejection from the
+        # resolver (or a sentinel from a direct caller that bypassed ingress)
+        # fails closed here, before USD extraction, with the typed reason.
+        if sizing_rejection is not None or intent_has_unresolved_all_sizing(intent, intent_type):
+            reason = sizing_rejection.detail if sizing_rejection is not None else UNSUPPORTED_ALL_SIZING_REASON
+            code = sizing_rejection.code.value if sizing_rejection is not None else None
             return _GenericIntentDetails(
                 intent_type=intent_type,
                 protocol=protocol,
@@ -2907,7 +2916,8 @@ class PnLBacktester:
                 amount_usd=Decimal("0"),
                 close_resolution=_CloseResolution(
                     amount_usd=Decimal("0"),
-                    failure_reason=UNSUPPORTED_ALL_SIZING_REASON,
+                    failure_reason=reason,
+                    failure_code=code,
                 ),
             )
 
@@ -3074,6 +3084,8 @@ class PnLBacktester:
         }
         if close_resolution.failure_reason is not None:
             metadata["failure_reason"] = close_resolution.failure_reason
+        if close_resolution.failure_code is not None:
+            metadata["rejection_code"] = close_resolution.failure_code
         if close_resolution.interest_usd != Decimal("0"):
             # str() round-trips Decimal losslessly; _calculate_trade_pnl reads
             # this back as the trade's realized interest PnL.

@@ -923,6 +923,10 @@ class SimulatedPortfolio:
             return None
         return price
 
+    def is_cash_equivalent(self, token: Any) -> bool:
+        """Public read: is ``token`` a stablecoin held as ``cash_usd``."""
+        return self._is_cash_equivalent(token)
+
     def _is_cash_equivalent(self, token: Any) -> bool:
         """True if ``token`` is a stablecoin the portfolio holds as ``cash_usd``."""
         if is_token_key(token):

@@ -1315,12 +1315,12 @@ class TestExecuteIntentBranches:
         assert fill.metadata["max_hops"] == 2
 
 
-class TestSwapAllFailsClosed:
-    """amount="all" has no backtest sizing lane (ALM-2943): fail closed.
+class TestSwapAllResolvesFromHoldings:
+    """amount="all" resolves once, from the simulated portfolio (ALM-2943).
 
-    execute_intent must reject the intent BEFORE any price/route lookup —
-    a rejected fill with a machine-visible reason, never a raise and never
-    a silent $0 trade.
+    A held balance fills at its full size; an empty balance rejects with a
+    typed reason before any price/route lookup — never a raise, never a
+    silent $0 trade.
     """
 
     @staticmethod
@@ -1345,35 +1345,63 @@ class TestSwapAllFailsClosed:
 
         return SimpleNamespace(prices=prices, get_price=get_price, timestamp=None, chain="ethereum")
 
-    def test_swap_all_rejected_not_filled(self) -> None:
+    def test_swap_all_fills_from_held_balance(self) -> None:
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 
-        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
-        portfolio.tokens["USDC"] = Decimal("10")
-        intent = SwapIntent(from_token="USDC", to_token="WETH", amount="all")
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["WETH"] = Decimal("2")
+        intent = SwapIntent(from_token="WETH", to_token="USDC", amount="all")
+        market = self._market({"USDC": Decimal("1"), "WETH": Decimal("2000")})
+
+        fill = self._adapter().execute_intent(intent, portfolio, market)
+
+        assert fill is not None
+        assert fill.success is True
+        assert fill.amount_usd == Decimal("4000")
+
+    def test_swap_all_empty_balance_rejects_with_typed_code(self) -> None:
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        intent = SwapIntent(from_token="WETH", to_token="USDC", amount="all")
         market = self._market({"USDC": Decimal("1"), "WETH": Decimal("2000")})
 
         fill = self._adapter().execute_intent(intent, portfolio, market)
 
         assert fill is not None
         assert fill.success is False
-        assert 'amount="all"' in fill.metadata["failure_reason"]
+        assert fill.metadata["rejection_code"] == "INSUFFICIENT_BALANCE"
         assert fill.amount_usd == Decimal("0")
 
-    def test_swap_all_rejected_off_par_regardless_of_price(self) -> None:
-        """No price-dependent sizing: rejection is identical at any stable price."""
+    def test_swap_all_fills_and_conserves_off_par(self) -> None:
+        """The r3_p0 acceptance shape: the OUTPUT leg varies off-par; the
+        sized input (WETH) fills at its full holding regardless."""
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 
         for price in ("0.90", "1.10"):
-            portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
-            portfolio.tokens["USDC"] = Decimal("10")
-            intent = SwapIntent(from_token="USDC", to_token="WETH", amount="all")
+            portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+            portfolio.tokens["WETH"] = Decimal("2")
+            intent = SwapIntent(from_token="WETH", to_token="USDC", amount="all")
             market = self._market({"USDC": Decimal(price), "WETH": Decimal("2000")})
 
             fill = self._adapter().execute_intent(intent, portfolio, market)
 
-            assert fill is not None and fill.success is False, price
-            assert 'amount="all"' in fill.metadata["failure_reason"], price
+            assert fill is not None and fill.success is True, price
+            assert fill.amount_usd == Decimal("4000"), price
+
+    def test_swap_all_depegged_stable_input_sizes_from_cash_dollars(self) -> None:
+        # Input-side depeg (review): "all" of a cash-held stable is the
+        # cash-like dollar balance, never that balance re-priced at market.
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("500"))
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount="all")
+        market = self._market({"USDC": Decimal("0.98"), "WETH": Decimal("2000")})
+
+        fill = self._adapter().execute_intent(intent, portfolio, market)
+
+        assert fill is not None and fill.success is True
+        assert fill.tokens_out == {"USDC": Decimal("500")}  # the spendable dollars, not 510.2 "units"
 
     def test_swap_all_strict_empty_wallet_rejects_without_raising(self) -> None:
         # Strict mode + no price data must reject cleanly, never raise a

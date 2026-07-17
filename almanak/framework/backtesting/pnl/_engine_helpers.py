@@ -88,6 +88,7 @@ from almanak.framework.backtesting.pnl.intent_extraction import (
     lp_pool_tokens,
 )
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+from almanak.framework.backtesting.pnl.run_context import BacktestRunContext
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
@@ -176,6 +177,7 @@ class BacktestState:
     strategy_config: dict[str, Any]
     parameter_sources: ParameterSourceTracker
     total_ticks: int
+    run_context: BacktestRunContext | None = None
     # Mutated during execute_iteration_loop
     pending_intents: list[tuple[Any, datetime, int]] = field(default_factory=list)
     last_market_state: MarketState | None = None
@@ -369,11 +371,16 @@ def initialize_backtest(
 
         # Initialize an empty wallet. Token funding is converted to explicit
         # units at the first market tick, when first historical prices exist.
+        run_context = BacktestRunContext.from_configs(config, backtester.data_config)
+        if backtester.data_config is not None:
+            # One strictness answer for the whole run: no plane can stay soft.
+            backtester.data_config.strict_historical_mode = run_context.fidelity.strict
         portfolio = SimulatedPortfolio(
             initial_capital_usd=Decimal("0"),
             cash_usd=Decimal("0"),
             chain=config.chain,
             gas_tank_budget_usd=config.gas_funding_usd,
+            strict_reproducibility=run_context.fidelity.strict,
         )
         # The portfolio captures the numeraire price per equity point; value_usd
         # stays USD (the conservation core is untouched).
@@ -464,6 +471,11 @@ def initialize_backtest(
         # Iteration counter for logging
         total_ticks = config.estimated_ticks
 
+    adapter = getattr(backtester, "_adapter", None)
+    adapter_config = getattr(adapter, "_config", None) if adapter is not None else None
+    if adapter_config is not None and hasattr(adapter_config, "strict_reproducibility"):
+        adapter_config.strict_reproducibility = run_context.fidelity.strict
+
     return BacktestState(
         portfolio=portfolio,
         data_config=data_config,
@@ -475,6 +487,7 @@ def initialize_backtest(
         strategy_config=strategy_config,
         parameter_sources=parameter_sources,
         total_ticks=total_ticks,
+        run_context=run_context,
     )
 
 

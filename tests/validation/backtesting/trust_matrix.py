@@ -87,6 +87,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "numeraire_canonical_metrics",
     "key_plane_uniqueness",
     "gas_tank_conservation",
+    "single_owner_resolution",
 )
 
 
@@ -373,6 +374,11 @@ CELLS: tuple[TrustCell, ...] = (
         "gas_tank_conservation",
         "swap",
         "Gas draws from the operational tank, never strategy capital: charged-gas equity equals zero-gas equity; metered gas is reported.",
+    ),
+    _cell(
+        "single_owner_resolution",
+        "swap",
+        "amount=\"all\" resolves once at lane ingress: a sell-all through the real loop fills at full held size and conserves.",
     ),
 )
 

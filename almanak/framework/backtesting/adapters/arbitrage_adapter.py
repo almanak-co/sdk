@@ -502,28 +502,35 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
         token_in = intent.from_token
         token_out = intent.to_token
         if intent.amount == "all" and getattr(intent, "amount_usd", None) is None:
-            # No backtest sizing lane for the "all" sentinel (ALM-2943): fail
-            # closed BEFORE any price/route lookup — strict mode must not
-            # raise over data a rejected intent does not need.
+            # Sizing has one owner: delegate to the shared resolver (direct
+            # callers bypass the engine ingress, so the adapter delegates too).
             from almanak.framework.backtesting.models import IntentType
-            from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
             from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
-
-            return SimulatedFill(
-                timestamp=market_state.timestamp,
-                intent_type=IntentType.SWAP,
-                protocol=intent.protocol or "arbitrage",
-                tokens=[token_in, token_out],
-                executed_price=Decimal("0"),
-                amount_usd=Decimal("0"),
-                fee_usd=Decimal("0"),
-                slippage_usd=Decimal("0"),
-                gas_cost_usd=Decimal("0"),
-                tokens_in={},
-                tokens_out={},
-                success=False,
-                metadata={"failure_reason": UNSUPPORTED_ALL_SIZING_REASON},
+            from almanak.framework.backtesting.pnl.sizing import (
+                SizingRejection,
+                apply_resolved_sizing,
+                resolve_all_sizing,
             )
+
+            resolution = resolve_all_sizing(intent, IntentType.SWAP, portfolio, market_state)
+            if isinstance(resolution, SizingRejection):
+                return SimulatedFill(
+                    timestamp=market_state.timestamp,
+                    intent_type=IntentType.SWAP,
+                    protocol=intent.protocol or "arbitrage",
+                    tokens=[token_in, token_out],
+                    executed_price=Decimal("0"),
+                    amount_usd=Decimal("0"),
+                    fee_usd=Decimal("0"),
+                    slippage_usd=Decimal("0"),
+                    gas_cost_usd=Decimal("0"),
+                    tokens_in={},
+                    tokens_out={},
+                    success=False,
+                    metadata={"failure_reason": resolution.detail, "rejection_code": resolution.code.value},
+                )
+            if resolution is not None:
+                intent = apply_resolved_sizing(intent, resolution)
         amount_usd = self._swap_amount_usd(intent, portfolio, market_state)
         price_in = self._swap_price(token_in, market_state, intent.protocol)
         price_out = self._swap_price(token_out, market_state, intent.protocol)

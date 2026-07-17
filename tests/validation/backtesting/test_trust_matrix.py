@@ -33,6 +33,7 @@ from __future__ import annotations
 import inspect
 import math
 import sys
+from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 
@@ -1488,3 +1489,34 @@ def test_swap_gas_draws_from_tank_not_equity() -> None:
     assert with_gas.metrics.total_gas_usd > Decimal("0")
     assert with_gas.final_capital_usd == without_gas.final_capital_usd
     assert [p.value_usd for p in with_gas.equity_curve] == [p.value_usd for p in without_gas.equity_curve]
+
+
+@dataclass
+class SwapAllDuck:
+    intent_type: str = "SWAP"
+    from_token: str = "WETH"
+    to_token: str = "USDC"
+    amount: str = "all"
+
+
+@pytest.mark.trust_cell("swap:single_owner_resolution")
+def test_swap_all_resolves_once_at_ingress_and_conserves() -> None:
+    """A sell-all through the real loop fills at full held size and conserves.
+
+    Buy 2.5 WETH, then sell "all" of it: the sentinel resolves at lane
+    ingress from the simulated portfolio, both fills succeed, and the zero-
+    cost round trip returns exactly the initial capital.
+    """
+    intents = [
+        SwapDuck(amount_usd=Decimal("5000")),
+        SwapAllDuck(),
+    ]
+    result = run_backtest(ScriptedStrategy(intents), flat_series(12), hours=8)
+
+    assert result.success
+    assert result.metrics.total_trades == 2
+    assert all(trade.success for trade in result.trades)
+    sell = result.trades[-1]
+    assert sell.amount_usd == Decimal("5000")  # 2.5 WETH x $2000, the full holding
+    assert result.final_capital_usd == INITIAL_CAPITAL
+    assert all(point.value_usd == INITIAL_CAPITAL for point in result.equity_curve)
