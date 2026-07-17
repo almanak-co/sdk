@@ -7,8 +7,10 @@ carrying their own interpretation (the perp/generic split-brain read the
 same intent as $1,000 and $50).
 
 Wallet-balance-sized intent types (SWAP, SUPPLY, VAULT_DEPOSIT) resolve to
-the portfolio's held units of the spent token. Everything else stays
-fail-closed with a typed rejection code.
+the portfolio's held units of the spent token; PERP_OPEN collateral "all"
+resolves to the spendable collateral balance (phase-5 replay — safe once
+sizing has one owner). Everything else stays fail-closed with a typed
+rejection code.
 """
 
 from __future__ import annotations
@@ -61,6 +63,7 @@ _SPEND_TOKEN_ATTRIBUTES: dict[IntentType, tuple[str, ...]] = {
     IntentType.SWAP: ("from_token", "token_in", "token"),
     IntentType.SUPPLY: ("token", "asset"),
     IntentType.VAULT_DEPOSIT: ("token", "deposit_token", "asset"),
+    IntentType.PERP_OPEN: ("collateral_token",),
 }
 
 
@@ -80,7 +83,7 @@ def resolve_all_sizing(
     if not intent_has_unresolved_all_sizing(intent, intent_type):
         return None
 
-    if intent_type not in WALLET_BALANCE_ALL_INTENT_TYPES:
+    if intent_type not in WALLET_BALANCE_ALL_INTENT_TYPES and intent_type is not IntentType.PERP_OPEN:
         return SizingRejection(code=RejectionCode.UNSUPPORTED_ALL_SIZING, detail=UNSUPPORTED_ALL_SIZING_REASON)
 
     token = _spend_token(intent, intent_type)
@@ -88,6 +91,18 @@ def resolve_all_sizing(
         return SizingRejection(
             code=RejectionCode.UNSUPPORTED_ALL_SIZING,
             detail=f'{intent_type.value} intent carries amount="all" but no spend token to size from',
+        )
+
+    if intent_type is IntentType.PERP_OPEN and not portfolio.is_cash_equivalent(token):
+        # The simulated portfolio funds perp margin from cash-like balances,
+        # so sizing "all" from a held non-cash token would debit a DIFFERENT
+        # balance than the one measured (sized-from-WETH, debited-from-cash).
+        return SizingRejection(
+            code=RejectionCode.UNSUPPORTED_ALL_SIZING,
+            detail=(
+                f'perp collateral="all" requires a cash-equivalent collateral token '
+                f"(simulated perps fund margin from cash); swap {token} to cash first"
+            ),
         )
 
     units = _spendable_units(portfolio, token)

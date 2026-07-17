@@ -793,21 +793,31 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         params = self._perp_open_params(intent)
 
         if params.collateral_amount == "all":
-            # Sizing has one owner: the shared resolver rejects perp
-            # collateral "all" (no wallet-sizing lane yet) with a typed code.
+            # Sizing has one owner: delegate to the shared resolver, which
+            # sizes collateral "all" from the spendable balance (phase 5).
             from almanak.framework.backtesting.models import IntentType
-            from almanak.framework.backtesting.pnl.sizing import SizingRejection, resolve_all_sizing
+            from almanak.framework.backtesting.pnl.sizing import (
+                ResolvedAllSizing,
+                SizingRejection,
+                apply_resolved_sizing,
+                resolve_all_sizing,
+            )
 
             resolution = resolve_all_sizing(intent, IntentType.PERP_OPEN, portfolio, market_state)
-            reason = resolution.detail if isinstance(resolution, SizingRejection) else "unsupported collateral sizing"
-            return self._perp_margin_failure_fill(
-                params,
-                market_state,
-                collateral_usd=Decimal("0"),
-                required_margin_ratio=self._config.initial_margin_ratio,
-                reason=reason,
-                validation_type="sizing",
-            )
+            if isinstance(resolution, ResolvedAllSizing):
+                params = self._perp_open_params(apply_resolved_sizing(intent, resolution))
+            else:
+                reason = (
+                    resolution.detail if isinstance(resolution, SizingRejection) else "unsupported collateral sizing"
+                )
+                return self._perp_margin_failure_fill(
+                    params,
+                    market_state,
+                    collateral_usd=Decimal("0"),
+                    required_margin_ratio=self._config.initial_margin_ratio,
+                    reason=reason,
+                    validation_type="sizing",
+                )
 
         collateral_usd = self._perp_collateral_usd(params, market_state)
         required_margin_ratio = self._perp_required_margin_ratio(params.leverage)

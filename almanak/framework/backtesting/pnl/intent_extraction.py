@@ -882,10 +882,10 @@ def _collateral_usd_from_intent(
 ) -> Decimal | None:
     """Price a perp intent's declared collateral, or None when unresolvable.
 
-    A ``collateral_amount="all"`` sentinel resolves to None here, but the
-    engine's fail-closed gate (``perp_collateral_is_all``) rejects such
-    intents before this sizing runs — the size_usd/leverage fallback below
-    only serves unpriceable explicit collateral, never the sentinel.
+    A ``collateral_amount="all"`` sentinel resolves to None here; the
+    sizing resolver replaces the sentinel with concrete units at lane
+    ingress, so the size_usd/leverage fallback below only serves
+    unpriceable explicit collateral, never the sentinel.
     """
     collateral_amount = getattr(intent, "collateral_amount", None)
     if collateral_amount is None or str(collateral_amount).lower() == "all":
@@ -925,9 +925,8 @@ def get_perp_open_params(
     """Resolve ``(collateral_usd, leverage)`` for a PERP_OPEN intent.
 
     PRECONDITION: ``collateral_amount="all"`` never reaches this helper —
-    the engine's ingress gate (``perp_collateral_is_all`` /
-    ``intent_has_unresolved_all_sizing``) rejects such intents fail-closed
-    upstream. Collateral comes from ``collateral_amount *
+    the sizing resolver replaces the sentinel with concrete units at lane
+    ingress. Collateral comes from ``collateral_amount *
     price(collateral_token)``; an UNPRICEABLE explicit collateral token
     falls back to ``size_usd / leverage``. Intents without perp fields
     (duck-typed test intents) keep the legacy semantics:

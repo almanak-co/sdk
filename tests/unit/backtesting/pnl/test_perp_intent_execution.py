@@ -290,22 +290,19 @@ class TestPerpOpenExecution:
         assert position.leverage == Decimal("2")
 
     @pytest.mark.asyncio
-    async def test_open_collateral_all_fails_closed(self):
-        """collateral_amount='all' has no backtest sizing lane: the generic
-        lane must reject it exactly like the perp adapter does — re-sizing
-        it as size_usd / leverage opens a position the strategy never
-        collateralized that way."""
-        from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
-
+    async def test_open_collateral_all_resolves_identically_in_both_lanes(self):
+        """collateral_amount='all' resolves once at ingress (phase 5): the
+        generic lane opens the position collateralized at the full spendable
+        balance — the same figure the adapter lane reads."""
         backtester = make_backtester()
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100000"))
         intent = make_open_intent(collateral_amount="all")
 
         trade = await execute(backtester, intent, portfolio)
 
-        assert portfolio.positions == []
-        assert trade.success is False
-        assert trade.metadata.get("failure_reason") == UNSUPPORTED_ALL_SIZING_REASON
+        assert trade.success is True
+        assert len(portfolio.positions) == 1
+        assert portfolio.positions[0].collateral_usd == Decimal("100000")
 
     @pytest.mark.asyncio
     async def test_open_fee_charged_on_notional(self):

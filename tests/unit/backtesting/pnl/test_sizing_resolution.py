@@ -84,6 +84,25 @@ class TestResolveAllSizing:
         assert isinstance(resolution, SizingRejection)
         assert resolution.code is RejectionCode.UNSUPPORTED_ALL_SIZING
 
+    def test_perp_non_cash_collateral_all_rejects_typed(self) -> None:
+        # Sizing from held WETH while the portfolio debits cash for margin
+        # would measure one balance and spend another — refused, typed.
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["WETH"] = Decimal("2")
+        intent = SimpleNamespace(
+            intent_type=IntentType.PERP_OPEN,
+            market="ETH",
+            collateral_token="WETH",
+            collateral_amount="all",
+            size_usd=None,
+        )
+
+        resolution = resolve_all_sizing(intent, IntentType.PERP_OPEN, portfolio, _market({"WETH": "2000"}))
+
+        assert isinstance(resolution, SizingRejection)
+        assert resolution.code is RejectionCode.UNSUPPORTED_ALL_SIZING
+        assert "cash-equivalent" in resolution.detail
+
     def test_close_shaped_intents_are_not_resolved_here(self) -> None:
         # LP_CLOSE "all" is the close-in-full sentinel, owned by
         # position-close resolution.

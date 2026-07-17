@@ -1725,28 +1725,34 @@ class TestExecuteIntentUsesRealPortfolioCash:
                 market,
             )
 
-    def test_open_all_collateral_fails_closed(self) -> None:
-        """collateral_amount='all' has no backtest sizing lane (ALM-2943).
+    def test_open_all_collateral_resolves_from_spendable_balance(self) -> None:
+        """collateral_amount='all' sizes from the shared resolver (phase 5).
 
-        Sizing it from cash-like while the debit side resolves independently
-        splits the two figures, so the open is rejected with a
-        machine-visible reason regardless of how much cash is available.
+        Both lanes read the SAME resolution, so the old $1,000-vs-$50
+        split-brain is unrepresentable; margin checks still gate the open.
         """
-        from almanak.framework.backtesting.pnl.intent_extraction import UNSUPPORTED_ALL_SIZING_REASON
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 
+        # Full-wallet margin needs the utilization cap opened: "all" is by
+        # definition 100% of cash-like, so the default 90% cap rejects it —
+        # sizing is resolved either way; RISK POLICY decides, not a sizing gap.
+        # On success the perp adapter validates and DEFERS to the generic lane
+        # (returns None); the engine-level pin asserts the filled position.
+        permissive = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
+        permissive._margin_validator.max_margin_utilization_ratio = Decimal("1.0")
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+        fill = permissive.execute_intent(self._open_intent("all"), portfolio, self._market_state())
+        assert fill is None  # validated at $10,000 collateral, generic lane fills
+
+        # Default risk policy: resolved sizing, margin-rejected — the reason
+        # is the utilization cap, never the old unsupported-sizing wall.
         adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
-
-        for capital in (Decimal("100"), Decimal("10000")):
-            portfolio = SimulatedPortfolio(initial_capital_usd=capital)
-
-            fill = adapter.execute_intent(self._open_intent("all"), portfolio, self._market_state())
-
-            assert fill is not None, capital
-            assert fill.success is False, capital
-            assert fill.metadata["validation_type"] == "sizing", capital
-            assert fill.metadata["failure_reason"] == UNSUPPORTED_ALL_SIZING_REASON, capital
-            assert fill.metadata["attempted_collateral_amount"] == "all", capital
+        rejected = adapter.execute_intent(
+            self._open_intent("all"), SimulatedPortfolio(initial_capital_usd=Decimal("10000")), self._market_state()
+        )
+        assert rejected is not None and rejected.success is False
+        assert rejected.metadata["validation_type"] == "margin"
+        assert rejected.metadata["attempted_collateral_amount"] == "10000"
 
 
 class TestFundingProviderChainRouting:
