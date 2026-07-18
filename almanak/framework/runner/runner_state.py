@@ -1299,6 +1299,32 @@ def _native_gas_symbol_for_intent(intent: AnyIntent) -> str | None:
     return symbol or None
 
 
+def resolve_tracked_tokens(strategy: Any) -> list[str]:
+    """Best-effort ``strategy._get_tracked_tokens()``, or ``[]``.
+
+    VIB-5866 (leg A). The strategy's tracked-token set is the SAME token
+    universe the NAV side values (``PortfolioValuer._fetch_wallet_balances_and_prices``
+    reads ``strategy._get_tracked_tokens()``). Returning it lets the first-action
+    "Deployed" anchor cover that universe too, generalizing VIB-4979's
+    native-gas symmetry to every held token. Never raises — a strategy without
+    the hook (mock/legacy) simply yields no extra tokens, and the anchor stays
+    exactly as it was before this change.
+    """
+    getter = getattr(strategy, "_get_tracked_tokens", None)
+    if not callable(getter):
+        return []
+    try:
+        tokens = getter()
+        # Filter INSIDE the try: a strategy that returns a truthy non-iterable
+        # (or a set of non-strings) must not raise out of here — this runs at
+        # run_iteration start, before that method's own try block, so an escape
+        # would bypass the structured ACCOUNTING_FAILED path for an inert helper.
+        return [t for t in tokens if isinstance(t, str) and t] if tokens else []
+    except Exception as exc:  # noqa: BLE001 — never block the snapshot on this
+        logger.debug("Balance snapshot: tracked-token resolve failed: %s", exc)
+        return []
+
+
 async def snapshot_balances_for_intent(
     runner: Any,
     intent: AnyIntent,
@@ -1319,30 +1345,59 @@ async def snapshot_balances_for_intent(
     path byte-for-byte identical.
     """
     bp = balance_provider or runner.balance_provider
-    tokens = extract_intent_tokens(intent)
+
+    # Assemble the capture set with case-insensitive dedup. Order matters:
+    #   1. intent tokens — ORIGINAL casing. These must key-match the post
+    #      snapshot, which is rebuilt from extract_intent_tokens (same casing),
+    #      so reconciliation's compute_actual_deltas(pre∩post) still intersects.
+    #   2. native gas (VIB-4979) — original casing (native_token_for_chain).
+    #   3. tracked tokens (VIB-5866 leg A) — UPPERCASED (see below).
+    tokens: list[str] = []
+    canon: set[str] = set()
+
+    def _add(symbol: Any, *, upper: bool = False) -> None:
+        if not isinstance(symbol, str) or not symbol:
+            return
+        key = symbol.upper()
+        if key in canon:
+            return
+        tokens.append(key if upper else symbol)
+        canon.add(key)
+
+    for t in extract_intent_tokens(intent):
+        _add(t)
+
+    # VIB-4979: capture the chain's native gas token so the "Wallet deployed"
+    # anchor (transaction_ledger.pre_state_json, read by
+    # _wallet_value_at_first_action) covers the SAME token universe as NAV
+    # (intent_strategy._append_native_gas_to_wallet adds native gas to
+    # available_cash). Without it, lifetime_pnl = NAV - Deployed inherited the
+    # gas reserve as phantom profit. Additive to the pre-snapshot only; inert
+    # for reconciliation (native is never in the extract_intent_tokens-rebuilt
+    # post, so it drops from the pre∩post intersection).
+    _add(_native_gas_symbol_for_intent(intent))
+
+    # VIB-5866 (leg A): generalize VIB-4979 to the FULL tracked-token universe —
+    # the SAME set NAV values (strategy._get_tracked_tokens). A wallet token the
+    # strategy holds but the first intent doesn't name was dropped from Deployed
+    # while counted in NAV → phantom PnL. Two correctness points:
+    #   - UPPERCASE the key: price_inputs_json keys are always upper
+    #     (get_price_oracle_dict normalizes) and the anchor's prices.get() is an
+    #     EXACT match, so a mixed-case asset (wstETH/cbETH/sUSDe) stored verbatim
+    #     would never be valued. Upper-casing makes it commensurable; the balance
+    #     read tolerates upper for the common set, and a symbol the provider can
+    #     only resolve mixed-case is simply skipped (Empty≠Zero, no regression).
+    #   - Seed even when the intent named NO tokens (vault deposit / stake /
+    #     prediction first action): the tracked-token anchor must still be
+    #     written, so this runs before the "nothing to capture" guard below.
+    # Additive to the pre-snapshot only; tracked keys are never in post, so they
+    # are inert for the delta math (VIB-4979's argument, generalized). Prices land
+    # via the matching _refresh_price_oracle_for_ledger top-off.
+    for tracked in getattr(runner, "_current_tracked_tokens", None) or []:
+        _add(tracked, upper=True)
+
     if not tokens:
         return None
-
-    # VIB-4979: capture the chain's native gas token alongside the intent
-    # tokens so the pre-state (transaction_ledger.pre_state_json) — the data
-    # source for the dashboard "Wallet deployed" anchor — covers the SAME
-    # token universe as the NAV snapshot (intent_strategy._append_native_gas_to_wallet
-    # adds native gas to available_cash). Without this, Deployed excludes
-    # native gas while NAV includes it, so lifetime_pnl = NAV - Deployed
-    # inherited the entire gas reserve as phantom profit. The native key is
-    # additive to the pre-snapshot only; reconciliation's delta math
-    # (compute_actual_deltas) intersects pre∩post, and the post snapshot is
-    # rebuilt from extract_intent_tokens, so a native-only pre key is inert
-    # for non-native swaps and the native-from swap already lists native as
-    # an intent token (deduped below).
-    native_symbol = _native_gas_symbol_for_intent(intent)
-    if native_symbol is not None:
-        # Case-insensitive dedupe against the intent tokens, tolerating
-        # non-string entries (defensive: extract_intent_tokens can yield
-        # ``None`` for malformed intents — those simply can't shadow native).
-        tokens_canon = {t.upper() for t in tokens if isinstance(t, str)}
-        if native_symbol.upper() not in tokens_canon:
-            tokens = [*tokens, native_symbol]
 
     balances: dict[str, Decimal] = {}
     for token_symbol in tokens:

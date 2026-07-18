@@ -856,6 +856,13 @@ class StrategyRunner:
         self._total_iterations = 0
         self._successful_iterations = 0
 
+        # VIB-5866 (leg A): the current iteration's tracked-token universe,
+        # stamped at run_iteration start. Read by snapshot_balances_for_intent
+        # and _merge_oracle_for_ledger so the first-action "Deployed" anchor
+        # covers the SAME token set as NAV. Empty until an iteration runs
+        # (teardown / pre-iteration paths then leave the anchor unchanged).
+        self._current_tracked_tokens: list[str] = []
+
         # VIB-5155 / ALM-2719: one-shot post-resume side-state reconciliation.
         # After a restart, a strategy that caches a position-side flag (e.g.
         # "holding base token") may resume a flag that disagrees with live
@@ -1388,6 +1395,13 @@ class StrategyRunner:
         # all reuse ONE snapshot instance (and its pre-warmed _price_cache)
         # instead of re-minting cold snapshots and re-fetching every price.
         self._begin_market_snapshot_iteration(strategy, cycle_id)
+
+        # VIB-5866 (leg A): stamp this iteration's tracked-token universe so the
+        # first-action balance snapshot + its price-oracle top-off cover the same
+        # tokens NAV values (making the "Deployed" anchor commensurable with NAV).
+        from .runner_state import resolve_tracked_tokens
+
+        self._current_tracked_tokens = resolve_tracked_tokens(strategy)
 
         logger.info(f"Starting iteration for strategy: {deployment_id}")
 
@@ -7840,7 +7854,9 @@ class StrategyRunner:
             return None
 
     @staticmethod
-    def _refresh_price_oracle_for_ledger(market: Any | None, intent: AnyIntent) -> dict | None:
+    def _refresh_price_oracle_for_ledger(
+        market: Any | None, intent: AnyIntent, extra_tokens: list[str] | None = None
+    ) -> dict | None:
         """Best-effort price-oracle refresh at ledger-write time.
 
         ``state.price_oracle`` is captured at intent-init time. For an
@@ -7859,6 +7875,16 @@ class StrategyRunner:
         already reference the gas token (e.g. a Polygon USDC→WETH swap that
         never names MATIC). Failure is silent (returns None); the writer
         falls back to the unpriced path rather than raising.
+
+        VIB-5866 (leg A): ``extra_tokens`` (the iteration's tracked-token
+        universe) are priced in the same top-off so ``price_inputs_json``
+        carries them — the first-action "Deployed" anchor
+        (``_wallet_value_at_first_action``) can then VALUE the tracked-token
+        balances now captured in ``pre_state_json`` and stay commensurable
+        with NAV. Best-effort and guarded like the native top-off: a token
+        that can't be priced is simply absent (the anchor skips it — Empty≠Zero,
+        never $0), and an all-placeholder oracle is never flipped to
+        partially-priced.
         """
         if market is None or not hasattr(market, "get_price_oracle_dict"):
             return None
@@ -7895,10 +7921,37 @@ class StrategyRunner:
                             )
                         oracle = market.get_price_oracle_dict() or oracle
 
+            # VIB-5866 (leg A): top off the strategy's tracked-token prices so the
+            # first-action anchor can value the tracked-token balances captured in
+            # pre_state_json. Warming market._price_cache here also feeds the
+            # nested with_sources oracle _merge_oracle_for_ledger reads next, so
+            # the prices reach price_inputs_json in both the flat and nested paths.
+            # Same non-empty guard as the native top-off (never flip an
+            # all-placeholder oracle to partially-priced).
+            if oracle and extra_tokens and hasattr(market, "price"):
+                oracle_keys = {str(k).upper() for k in oracle}
+                priced_any = False
+                for token in extra_tokens:
+                    if not isinstance(token, str) or not token or token.upper() in oracle_keys:
+                        continue
+                    try:
+                        market.price(token)
+                        priced_any = True
+                    except Exception:
+                        logger.debug("VIB-5866: tracked-token price top-off failed for %s", token)
+                if priced_any:
+                    oracle = market.get_price_oracle_dict() or oracle
+
             return oracle or None
         except Exception:  # noqa: BLE001 — never raise on a best-effort refresh
             return None
 
+    # crap-allowlist: VIB-5866 — this edit is a MECHANICAL extra_tokens pass-through to
+    # _refresh_price_oracle_for_ledger (no branches added); the function is pre-existing
+    # high-CRAP/low-coverage on main (cc=14, ~4% cov — nested with_sources + address/coin
+    # backfill + legacy paths). The added tracked-token pricing is fully tested in
+    # _refresh_price_oracle_for_ledger; broadening _merge_oracle_for_ledger coverage is
+    # pre-existing debt, not introduced here.
     def _merge_oracle_for_ledger(self, state: Any, intent: AnyIntent, result: Any | None = None) -> dict | None:
         """Refresh the market oracle and merge with the cached one.
 
@@ -7937,7 +7990,18 @@ class StrategyRunner:
         connector whose receipt exposes token addresses.
         """
         cached = getattr(state, "price_oracle", None) or {}
-        refreshed = self._refresh_price_oracle_for_ledger(getattr(state, "market", None), intent) or {}
+        # VIB-5866 (leg A): pass the iteration's tracked-token universe so the
+        # refresh warms their prices into price_inputs_json (see
+        # _refresh_price_oracle_for_ledger) — keeping the "Deployed" anchor
+        # commensurable with NAV.
+        refreshed = (
+            self._refresh_price_oracle_for_ledger(
+                getattr(state, "market", None),
+                intent,
+                extra_tokens=getattr(self, "_current_tracked_tokens", None),
+            )
+            or {}
+        )
 
         # VIB-3889: prefer the nested shape with sources when the market
         # supports it. The ledger writer at observability/ledger.py:529-545

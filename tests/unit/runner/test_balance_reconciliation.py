@@ -538,3 +538,275 @@ class TestSnapshotNativeGasSymmetry:
         # ETH fetched exactly once (intent token), never duplicated.
         assert seen.count("ETH") == 1
         assert set(snap.balances.keys()) == {"ETH", "USDC"}
+
+
+# =============================================================================
+# Tests: snapshot_balances_for_intent tracked-token universe (VIB-5866 leg A)
+# =============================================================================
+
+
+class TestSnapshotTrackedTokenUniverse:
+    """Generalizes VIB-4979: the pre-state anchor must cover the strategy's FULL
+    tracked-token universe (the same set NAV values), not just the first intent's
+    tokens + native. A held token the first intent doesn't name must be captured
+    so it stops booking as phantom PnL (NAV counts it, Deployed didn't)."""
+
+    @pytest.mark.asyncio
+    async def test_tracked_token_not_in_intent_is_captured(self):
+        """USDC->WETH swap, wallet also holds ARB (a tracked token the intent
+        never names): ARB must appear in the pre-state anchor."""
+        balances = {
+            "USDC": Decimal("100"),
+            "WETH": Decimal("0.05"),
+            "ETH": Decimal("0.002"),
+            "ARB": Decimal("42"),
+        }
+
+        async def get_bal(token):
+            bal = MagicMock()
+            bal.balance = balances.get(token, Decimal("0"))
+            return bal
+
+        bp = MagicMock()
+        bp.get_balance = AsyncMock(side_effect=get_bal)
+        runner = _make_runner(balance_provider=bp)
+        runner._current_tracked_tokens = ["USDC", "WETH", "ARB"]
+
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"), chain="arbitrum")
+        snap = await runner._snapshot_balances_for_intent(intent)
+
+        assert snap is not None
+        # The tracked-but-not-in-intent token is now anchored.
+        assert "ARB" in snap.balances
+        assert snap.balances["ARB"] == Decimal("42")
+        # Intent tokens + native still present.
+        assert {"USDC", "WETH", "ETH"} <= set(snap.balances)
+
+    @pytest.mark.asyncio
+    async def test_tracked_tokens_deduped_against_intent_and_native(self):
+        """Tracked set overlapping the intent tokens / native must not double-fetch."""
+        seen: list[str] = []
+
+        async def get_bal(token):
+            seen.append(token)
+            bal = MagicMock()
+            bal.balance = Decimal("1")
+            return bal
+
+        bp = MagicMock()
+        bp.get_balance = AsyncMock(side_effect=get_bal)
+        runner = _make_runner(balance_provider=bp)
+        # Mixed case + overlap with intent (USDC/WETH) and native (ETH).
+        runner._current_tracked_tokens = ["usdc", "WETH", "eth", "ARB"]
+
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"), chain="arbitrum")
+        snap = await runner._snapshot_balances_for_intent(intent)
+
+        assert snap is not None
+        # Each token fetched exactly once despite case-mismatched overlap.
+        assert seen.count("USDC") == 1
+        assert seen.count("WETH") == 1
+        assert seen.count("ETH") == 1
+        assert "ARB" in snap.balances
+
+    @pytest.mark.asyncio
+    async def test_mixed_case_tracked_token_stored_uppercase(self):
+        """A canonical mixed-case tracked asset (wstETH) is stored under its
+        UPPERCASE key so it matches the uppercase price_inputs the anchor's
+        exact `prices.get()` reads (Codex P1) — else it would never be valued."""
+        balances = {
+            "USDC": Decimal("100"),
+            "WETH": Decimal("0.05"),
+            "ETH": Decimal("0.002"),
+            "WSTETH": Decimal("3"),
+        }
+
+        async def get_bal(token):
+            bal = MagicMock()
+            bal.balance = balances.get(token, Decimal("0"))
+            return bal
+
+        bp = MagicMock()
+        bp.get_balance = AsyncMock(side_effect=get_bal)
+        runner = _make_runner(balance_provider=bp)
+        runner._current_tracked_tokens = ["wstETH"]  # canonical mixed-case
+
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"), chain="arbitrum")
+        snap = await runner._snapshot_balances_for_intent(intent)
+
+        assert snap is not None
+        assert "WSTETH" in snap.balances  # uppercased to match uppercase price keys
+        assert "wstETH" not in snap.balances
+        assert snap.balances["WSTETH"] == Decimal("3")
+
+    @pytest.mark.asyncio
+    async def test_tracked_captured_when_intent_names_no_tokens(self):
+        """First action names no extractor-recognized tokens (vault deposit /
+        stake / prediction, here stood in by HOLD → extract returns []): the
+        tracked-token anchor is STILL written (Codex P2 — previously the early
+        `if not tokens: return None` skipped it, leaving no Deployed anchor)."""
+        balances = {"ARB": Decimal("42")}
+
+        async def get_bal(token):
+            bal = MagicMock()
+            bal.balance = balances.get(token, Decimal("0"))
+            return bal
+
+        bp = MagicMock()
+        bp.get_balance = AsyncMock(side_effect=get_bal)
+        runner = _make_runner(balance_provider=bp)
+        runner._current_tracked_tokens = ["ARB"]
+
+        intent = HoldIntent(reason="no tokens")  # extract_intent_tokens -> []
+        snap = await runner._snapshot_balances_for_intent(intent)
+
+        assert snap is not None
+        assert snap.balances == {"ARB": Decimal("42")}
+
+    @pytest.mark.asyncio
+    async def test_no_tokens_and_no_tracked_still_returns_none(self):
+        """Empty intent + empty tracked set → None (legacy post-only fallback),
+        unchanged: the moved guard only fires when there is truly nothing."""
+        bp = MagicMock()
+        bp.get_balance = AsyncMock(return_value=MagicMock(balance=Decimal("0")))
+        runner = _make_runner(balance_provider=bp)
+        assert runner._current_tracked_tokens == []
+
+        snap = await runner._snapshot_balances_for_intent(HoldIntent(reason="x"))
+        assert snap is None
+
+    @pytest.mark.asyncio
+    async def test_no_tracked_tokens_preserves_prefix_behaviour(self):
+        """Empty tracked set (default / teardown / legacy): capture is byte-for-byte
+        the pre-VIB-5866 intent-tokens + native shape."""
+        balances = {"USDC": Decimal("100"), "WETH": Decimal("0.05"), "ETH": Decimal("0.002")}
+
+        async def get_bal(token):
+            bal = MagicMock()
+            bal.balance = balances.get(token, Decimal("0"))
+            return bal
+
+        bp = MagicMock()
+        bp.get_balance = AsyncMock(side_effect=get_bal)
+        runner = _make_runner(balance_provider=bp)
+        assert runner._current_tracked_tokens == []  # __init__ default
+
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"), chain="arbitrum")
+        snap = await runner._snapshot_balances_for_intent(intent)
+
+        assert snap is not None
+        assert set(snap.balances.keys()) == {"USDC", "WETH", "ETH"}
+
+
+class TestResolveTrackedTokens:
+    """`resolve_tracked_tokens` is best-effort and never raises (VIB-5866)."""
+
+    def test_returns_strategy_tracked_tokens(self):
+        from almanak.framework.runner.runner_state import resolve_tracked_tokens
+
+        strategy = MagicMock()
+        strategy._get_tracked_tokens.return_value = ["USDC", "WETH", "ARB"]
+        assert resolve_tracked_tokens(strategy) == ["USDC", "WETH", "ARB"]
+
+    def test_missing_hook_returns_empty(self):
+        from almanak.framework.runner.runner_state import resolve_tracked_tokens
+
+        strategy = object()  # no _get_tracked_tokens
+        assert resolve_tracked_tokens(strategy) == []
+
+    def test_raising_hook_returns_empty(self):
+        from almanak.framework.runner.runner_state import resolve_tracked_tokens
+
+        strategy = MagicMock()
+        strategy._get_tracked_tokens.side_effect = RuntimeError("boom")
+        assert resolve_tracked_tokens(strategy) == []
+
+    def test_filters_non_string_and_empty(self):
+        from almanak.framework.runner.runner_state import resolve_tracked_tokens
+
+        strategy = MagicMock()
+        strategy._get_tracked_tokens.return_value = ["USDC", "", None, 123, "ARB"]
+        assert resolve_tracked_tokens(strategy) == ["USDC", "ARB"]
+
+
+class _StatefulMarket:
+    """Minimal market: price(token) marks it priced; get_price_oracle_dict()
+    returns the priced set. Lets the refresh helper's top-off be observed."""
+
+    def __init__(self, chain="arbitrum", initially_priceable=None):
+        self.chain = chain
+        # Tokens the market CAN price (price() only succeeds for these).
+        self._priceable = {t.upper() for t in (initially_priceable or [])}
+        self._priced: dict[str, Decimal] = {}
+
+    def price(self, token):
+        key = str(token).upper()
+        if key not in self._priceable:
+            raise ValueError(f"no price for {token}")
+        self._priced[key] = Decimal("1")
+        return Decimal("1")
+
+    def get_price_oracle_dict(self, with_sources=False):
+        return dict(self._priced)
+
+
+class TestRefreshPriceOracleExtraTokens:
+    """`_refresh_price_oracle_for_ledger` prices the tracked-token top-off so
+    price_inputs_json can value the anchor (VIB-5866 leg A)."""
+
+    def test_extra_tokens_priced_into_oracle(self):
+        # Intent tokens + native + ARB are all priceable → non-empty oracle,
+        # so the tracked-token ARB is topped off and lands in the result.
+        market = _StatefulMarket(chain="arbitrum", initially_priceable=["USDC", "WETH", "ETH", "ARB"])
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"), chain="arbitrum")
+
+        oracle = StrategyRunner._refresh_price_oracle_for_ledger(market, intent, extra_tokens=["ARB"])
+
+        assert oracle is not None
+        assert "ARB" in oracle  # the tracked-but-not-in-intent token got priced
+
+    def test_extra_tokens_skipped_when_oracle_empty(self):
+        # Nothing is priceable → oracle stays empty after the intent loop, so the
+        # non-empty guard must skip the ARB top-off (never flip placeholder→priced).
+        market = _StatefulMarket(chain="arbitrum", initially_priceable=[])
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"), chain="arbitrum")
+
+        oracle = StrategyRunner._refresh_price_oracle_for_ledger(market, intent, extra_tokens=["ARB"])
+
+        # Empty oracle → None (unpriced path); ARB was never priced.
+        assert not oracle
+        assert "ARB" not in market._priced
+
+    def test_none_extra_tokens_is_prefix_behaviour(self):
+        # extra_tokens=None → behaves exactly as before (intent + native only).
+        market = _StatefulMarket(chain="arbitrum", initially_priceable=["USDC", "WETH", "ETH"])
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"), chain="arbitrum")
+
+        oracle = StrategyRunner._refresh_price_oracle_for_ledger(market, intent, extra_tokens=None)
+
+        assert oracle is not None
+        assert set(oracle) == {"USDC", "WETH", "ETH"}
+
+    def test_none_market_returns_none(self):
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"), chain="arbitrum")
+        assert StrategyRunner._refresh_price_oracle_for_ledger(None, intent, extra_tokens=["ARB"]) is None
+
+    def test_market_without_oracle_method_returns_none(self):
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"), chain="arbitrum")
+        market = object()  # no get_price_oracle_dict
+        assert StrategyRunner._refresh_price_oracle_for_ledger(market, intent, extra_tokens=["ARB"]) is None
+
+    def test_oracle_fetch_exception_is_swallowed(self):
+        """Best-effort: a raising market yields None, never propagates."""
+
+        class _Boom:
+            chain = "arbitrum"
+
+            def get_price_oracle_dict(self, with_sources=False):
+                raise RuntimeError("oracle down")
+
+            def price(self, token):
+                raise RuntimeError("oracle down")
+
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"), chain="arbitrum")
+        assert StrategyRunner._refresh_price_oracle_for_ledger(_Boom(), intent, extra_tokens=["ARB"]) is None
