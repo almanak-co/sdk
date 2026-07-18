@@ -70,6 +70,26 @@ def _references_emit_commit(node: ast.AST) -> bool:
     return False
 
 
+def _references_teardown_commit(node: ast.AST) -> bool:
+    """True if ``node`` invokes a ``commit(...)`` callback — the pairing used by the
+    VIB-5667 vault-RELEASE legs (Open->Closing->Closed on teardown).
+
+    Release executes through the SAME orchestrator but is TEARDOWN-lane, not
+    settlement-lane: each leg pairs with the ``commit`` callback the runner binds to
+    ``commit_teardown_intent`` (ledger -> outbox+fire -> sidecar), NOT
+    ``_emit_settlement_commit``. It is guarded end-to-end by the teardown anti-bypass
+    test (``tests/unit/teardown/test_teardown_accounting_anti_bypass.py``). Recognize
+    that pairing here so this settlement guard does not false-trip on the single
+    release execution site (``_execute_release_leg``) while still catching a bare,
+    unpaired settlement execute (settlement functions carry no ``commit`` param —
+    they use ``_emit_settlement_commit``, so this does not weaken SETTLE-1).
+    """
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == "commit":
+            return True
+    return False
+
+
 def test_settle1_orchestrator_execute_paired_with_emit_commit() -> None:
     """Every ``self._execution_orchestrator.execute(...)`` in ``vault/lifecycle.py``
     must live in a function that also calls ``_emit_settlement_commit``.
@@ -81,13 +101,19 @@ def test_settle1_orchestrator_execute_paired_with_emit_commit() -> None:
     tree = ast.parse(src, filename=str(VAULT_LIFECYCLE))
 
     offenders: list[str] = []
+    teardown_paired: list[str] = []
     found_any_execute = False
     for node in ast.walk(tree):
         if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
             if _calls_orchestrator_execute(node):
                 found_any_execute = True
-                if not _references_emit_commit(node):
+                emit_paired = _references_emit_commit(node)
+                if not (emit_paired or _references_teardown_commit(node)):
                     offenders.append(node.name)
+                elif not emit_paired:
+                    # Paired ONLY via the teardown commit(...) form, not
+                    # _emit_settlement_commit — the vault-release lane.
+                    teardown_paired.append(node.name)
 
     assert found_any_execute, (
         "No self._execution_orchestrator.execute call found in vault/lifecycle.py — "
@@ -100,6 +126,17 @@ def test_settle1_orchestrator_execute_paired_with_emit_commit() -> None:
         "pipeline (ledger -> outbox+fire -> sidecar) so transaction_ledger / accounting_events "
         "rows land. See docs/internal/blueprints/27-accounting.md and CLAUDE.md §Teardown "
         "(settlement shares the inverted loud-but-never-block semantics)."
+    )
+    # Precision guard: the teardown-commit(...) pairing exemption is for the vault-
+    # RELEASE lane ONLY. Exactly one function may rely on it — `_execute_release_leg`.
+    # If a NEW execute-bearing function pairs via commit(...) instead of
+    # _emit_settlement_commit, it is a new lane that needs its own anti-bypass
+    # scrutiny (and its own guard), not a silent ride on this exemption.
+    assert set(teardown_paired) <= {"_execute_release_leg"}, (
+        f"New execute-bearing function(s) {sorted(set(teardown_paired) - {'_execute_release_leg'})} "
+        "pair with a teardown commit(...) callback instead of _emit_settlement_commit. Only "
+        "_execute_release_leg (the vault-release lane, guarded by the teardown anti-bypass test) "
+        "is allowed this exemption — a new one needs its own commit-pairing scrutiny."
     )
 
 

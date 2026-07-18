@@ -11,15 +11,52 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 from almanak.core.models.config import VaultVersion
-from almanak.core.models.params import SettleDepositParams, SettleRedeemParams, UpdateTotalAssetsParams
+from almanak.core.models.params import (
+    CloseVaultParams,
+    InitiateClosingParams,
+    RedeemVaultParams,
+    SettleDepositParams,
+    SettleRedeemParams,
+    UpdateTotalAssetsParams,
+)
 from almanak.framework.data.tokens import get_token_resolver
 from almanak.framework.vault.capability import default_vault_protocol
-from almanak.framework.vault.config import SettlementPhase, SettlementResult, VaultAction, VaultConfig, VaultState
+from almanak.framework.vault.config import (
+    ReleaseResult,
+    SettlementPhase,
+    SettlementResult,
+    VaultAction,
+    VaultConfig,
+    VaultReleasePhase,
+    VaultState,
+)
 
 logger = logging.getLogger(__name__)
 
 # Key used to store vault state within the strategy state dict
 VAULT_STATE_KEY = "vault_state"
+
+# Lagoon v0.5.0 ``State`` enum labels as returned by the vault SDK handle's
+# ``get_vault_state`` (see :class:`VaultSDKHandle`). Kept as local constants (not
+# imported from the connector) so the framework lifecycle stays connector-agnostic;
+# the connector owns the ordinal->label map.
+_VAULT_STATE_OPEN = "Open"
+_VAULT_STATE_CLOSING = "Closing"
+_VAULT_STATE_CLOSED = "Closed"
+
+# VIB-5667 vault-release NAV safety (§f4). Post-unwind the Safe holds all cash;
+# the proposed final NAV must be BACKED by the Safe's underlying balance so
+# ``close()``'s ``transferFrom(safe, vault, totalAssets)`` cannot revert. A small
+# realized-vs-settled shortfall (rounding / fee-share drag / benign LP slippage)
+# is clamped down and the close proceeds. A shortfall LARGER than this tolerance
+# is a genuine loss vs depositor obligations: we do NOT force a haircut close —
+# release degrades loudly and a human decides (top up the Safe, or accept the
+# haircut deliberately). Expressed in basis points of the settled obligations.
+_RELEASE_HAIRCUT_TOLERANCE_BPS = 500  # 5%
+
+# ``approve(spender, amount)`` amount used when authorising the vault to pull the
+# Safe's underlying at close. MAX is idempotent + cheap to re-issue on resume.
+_MAX_UINT256 = (1 << 256) - 1
 
 
 class VaultSDKHandle(Protocol):
@@ -43,6 +80,23 @@ class VaultSDKHandle(Protocol):
 
     def get_underlying_balance(self, vault_address: str, wallet_address: str) -> int: ...
 
+    # --- VIB-5667 vault-release reads ---
+    def get_vault_state(self, vault_address: str) -> str: ...
+
+    def get_new_total_assets(self, vault_address: str) -> int: ...
+
+    def get_owner(self, vault_address: str) -> str: ...
+
+    def get_roles_storage(self, vault_address: str) -> dict: ...
+
+    def get_underlying_token_address(self, vault_address: str) -> str: ...
+
+    def convert_to_assets(self, vault_address: str, shares: int) -> int: ...
+
+    def build_approve_deposit_tx(
+        self, underlying_token: str, vault_address: str, depositor: str, amount: int
+    ) -> dict: ...
+
 
 class VaultAdapterHandle(Protocol):
     """Runtime adapter surface the vault lifecycle manager consumes."""
@@ -52,6 +106,13 @@ class VaultAdapterHandle(Protocol):
     def build_settle_deposit_bundle(self, params: SettleDepositParams) -> Any: ...
 
     def build_settle_redeem_bundle(self, params: SettleRedeemParams) -> Any: ...
+
+    # --- VIB-5667 vault-release bundles ---
+    def build_initiate_closing_bundle(self, params: InitiateClosingParams) -> Any: ...
+
+    def build_close_bundle(self, params: CloseVaultParams) -> Any: ...
+
+    def build_redeem_bundle(self, params: RedeemVaultParams) -> Any: ...
 
 
 class VaultReceiptParserHandle(Protocol):
@@ -1281,6 +1342,488 @@ class VaultLifecycleManager:
         )
         return result
 
+    # ------------------------------------------------------------------
+    # VIB-5667 — vault-safe teardown (release depositor capital)
+    # ------------------------------------------------------------------
+    async def release_on_teardown(
+        self,
+        strategy: Any,
+        market: Any,
+        *,
+        commit: Any | None = None,
+    ) -> ReleaseResult:
+        """Transition the vault Open->Closing->Closed on teardown (VIB-5667).
+
+        Runs AFTER the strategy's position-closure teardown intents have unwound
+        the LP to underlying in the Safe. Releasing the vault makes EVERY
+        depositor's capital claimable — including a deposit-only user who never
+        requested a redemption and otherwise could never withdraw once the manager
+        stops settling (the stranding bug this closes).
+
+        The sequence is idempotent + crash-resumable, anchored on the live
+        on-chain ``state()``:
+
+        - ``Open``:    propose final NAV -> ``initiateClosing`` -> read NAV back ->
+                       ``close`` -> redeem manager's own shares.
+        - ``Closing``: read NAV back (re-propose if consumed) -> ``close`` -> redeem.
+        - ``Closed``:  redeem manager's own residual shares only.
+
+        ``commit`` is an optional async callback ``commit(*, action_type, bundle,
+        execution_result, signer)`` bound by the runner to
+        ``commit_teardown_intent`` so every release leg drives the teardown
+        accounting pipeline (ledger / outbox / sidecar). Every orchestrator
+        execution is funnelled through :meth:`_execute_release_leg`, which pairs it
+        with ``commit`` — the anti-bypass invariant (CLAUDE.md §Teardown).
+
+        Never raises: a failure degrades loudly (``ReleaseResult.degraded``) but
+        never blocks the caller's next risk-reducing action (teardown's inverted
+        failure semantics).
+        """
+        if not self._config.release_on_teardown:
+            logger.info("Vault release_on_teardown disabled by config — skipping (vault stays Open)")
+            return ReleaseResult(skipped=True, reason="release_on_teardown disabled")
+
+        vault_address = self._config.vault_address
+
+        # VIB-5667 (audit #7): the release path reads and mutates version-specific
+        # storage — ``get_vault_state`` decodes the Lagoon v0.5.0 ``State`` enum
+        # from a hard-coded ERC-7201 slot, and ``close``/``initiateClosing`` target
+        # v0.5.0 selectors. Verify the on-chain implementation IS the expected
+        # version BEFORE interpreting that slot; on a version mismatch the slot
+        # read is meaningless and closing legs could misbehave, so degrade loudly
+        # rather than act on a misread state.
+        try:
+            self._vault_sdk.verify_version(vault_address, self._config.version)
+        except Exception as e:  # noqa: BLE001 — version fault must not raise into teardown
+            logger.error("Vault release: version verification failed for %s: %s", vault_address, e, exc_info=True)
+            return ReleaseResult(degraded=True, reason=f"vault version verification failed: {e}")
+
+        try:
+            state = self._vault_sdk.get_vault_state(vault_address)
+        except Exception as e:  # noqa: BLE001 — read fault must not raise into teardown
+            logger.error("Vault release: could not read vault state for %s: %s", vault_address, e, exc_info=True)
+            return ReleaseResult(degraded=True, reason=f"could not read vault state: {e}")
+
+        vault_state = self.get_vault_state()
+        logger.info(
+            "Vault release starting: on-chain state=%s, persisted phase=%s", state, vault_state.release_phase.value
+        )
+
+        try:
+            # Already Closed (or a resumed run past close): only the manager's own
+            # residual shares remain to sweep. External depositors redeem themselves.
+            if state == _VAULT_STATE_CLOSED:
+                vault_state.release_phase = VaultReleasePhase.CLOSED
+                self.save_vault_state()
+                return await self._release_redeem_manager_shares(strategy, vault_state, commit, final_state=state)
+
+            # Any leg from here signs a closing transaction — enforce single-signer
+            # alignment (owner == safe == valuator == gateway key) as a HARD preflight.
+            guard_reason = self._release_preflight(strategy)
+            if guard_reason is not None:
+                logger.error("Vault release preflight FAILED: %s", guard_reason)
+                return ReleaseResult(degraded=True, final_state=state, reason=guard_reason)
+
+            if state == _VAULT_STATE_CLOSING:
+                return await self._release_from_closing(strategy, market, vault_state, commit)
+
+            # state == Open — full sequence.
+            final_nav, degrade_reason = self._resolve_release_nav(strategy, market)
+            if degrade_reason is not None:
+                return ReleaseResult(degraded=True, final_state=state, reason=degrade_reason)
+            assert final_nav is not None  # noqa: S101 — narrowed by degrade_reason is None
+            return await self._release_open_to_closed(strategy, market, vault_state, final_nav, commit)
+        except Exception as e:  # noqa: BLE001 — release must never raise into teardown
+            logger.error("Vault release errored for %s: %s", vault_address, e, exc_info=True)
+            return ReleaseResult(degraded=True, reason=f"release errored: {e}")
+
+    async def _execute_release_leg(
+        self,
+        action_type: str,
+        bundle: Any,
+        signer: str,
+        commit: Any | None,
+    ) -> Any:
+        """Execute one vault-release bundle and pair it with the commit pipeline.
+
+        The SINGLE orchestrator-execution site for the release sequence. Pairing
+        the execute with ``commit`` here (never a bare ``orchestrator.execute``)
+        is the anti-bypass invariant — every successful teardown intent must drive
+        the runner's ledger/accounting commit. A commit failure is loud but never
+        blocks the next risk-reducing leg (teardown's inverted semantics).
+        """
+        result = await self._execution_orchestrator.execute(bundle, wallet_address=signer)
+        if commit is not None and getattr(result, "success", False):
+            try:
+                await commit(action_type=action_type, bundle=bundle, execution_result=result, signer=signer)
+            except Exception:  # noqa: BLE001 — accounting is loud-but-never-block
+                logger.error(
+                    "Vault release: commit pipeline failed for %s leg (chain-side OK) — continuing",
+                    action_type,
+                    exc_info=True,
+                )
+        return result
+
+    def _release_preflight(self, strategy: Any) -> str | None:
+        """Single-signer alignment hard preflight (§f2). Returns a reason on failure.
+
+        The MVP release path signs ``updateNewTotalAssets`` (valuator),
+        ``initiateClosing`` (owner) and ``close`` (safe) with ONE gateway key. If
+        those roles are distinct the closing legs are unsignable and the vault would
+        be left Open with depositors stranded — so a mismatch fails LOUDLY and
+        actionably rather than silently skipping the release. Dual-key release is a
+        deferred Phase-5 concern.
+        """
+        wallet = (getattr(strategy, "wallet_address", "") or "").lower()
+        if not wallet:
+            return "strategy has no wallet_address — cannot verify single-signer alignment for vault release"
+        vault_address = self._config.vault_address
+        try:
+            roles = self._vault_sdk.get_roles_storage(vault_address) or {}
+            on_chain_safe = (roles.get("safe") or "").lower()
+            on_chain_valuator = (roles.get("valuationManager") or "").lower()
+            on_chain_owner = (self._vault_sdk.get_owner(vault_address) or "").lower()
+        except Exception as e:  # noqa: BLE001
+            return f"could not read vault roles/owner for single-signer preflight: {e}"
+
+        mismatches: list[str] = []
+        if on_chain_safe != wallet:
+            mismatches.append(f"safe({on_chain_safe})")
+        if on_chain_valuator != wallet:
+            mismatches.append(f"valuationManager({on_chain_valuator})")
+        if on_chain_owner != wallet:
+            mismatches.append(f"owner({on_chain_owner})")
+        if self._config.valuator_address.lower() != wallet:
+            mismatches.append(f"config.valuator({self._config.valuator_address.lower()})")
+        if mismatches:
+            return (
+                "vault-release requires single-signer alignment owner==safe==valuator==gateway key "
+                f"({wallet}); mismatched roles: {', '.join(mismatches)}. The closing legs "
+                "(initiateClosing/close/updateNewTotalAssets) are unsignable — teardown left the "
+                "LP closed but the vault OPEN. A human must align the roles (or run a dual-key "
+                "release) so depositors are not stranded."
+            )
+        return None
+
+    def _resolve_release_nav(self, strategy: Any, market: Any) -> tuple[int | None, str | None]:
+        """Compute the final NAV to propose for ``close()`` (§c / §f4).
+
+        Two constraints:
+
+        1. The NAV must be BACKED by the Safe's realized post-unwind underlying
+           balance so ``close()``'s ``transferFrom(safe, vault, totalAssets)``
+           cannot revert.
+        2. The NAV must back the DEPOSITOR OBLIGATIONS (the settled share value,
+           ``totalAssets()``), NOT the full Safe balance — the Safe may also hold
+           the manager's own uncounted capital (e.g. seed funds not represented by
+           shares), and proposing the full balance would hand that capital to
+           depositors at close.
+
+        So, with ``obligations = totalAssets()`` and ``realized = Safe balance``:
+
+        - ``realized >= obligations`` -> propose ``obligations`` (back the shares
+          exactly; leave any non-depositor excess in the Safe).
+        - ``realized < obligations`` within tolerance -> propose ``realized``
+          (clamp down; a small rounding / fee-drag / benign-slippage haircut).
+        - shortfall LARGER than tolerance -> genuine loss vs obligations; DO NOT
+          force a haircut close. Degrade + surface for a human (§f4).
+        - ``obligations <= 0`` (no settled depositor backing) -> propose realized.
+
+        Returns ``(final_nav, None)`` on success or ``(None, reason)`` to degrade.
+        """
+        if market is None:
+            return None, "no market snapshot available to measure post-unwind Safe balance for vault release"
+        realized = self._read_safe_underlying_raw(strategy, market)
+        if realized is None:
+            return (
+                None,
+                "could not measure Safe underlying balance (Empty != Zero) — refusing to propose an unbacked NAV",
+            )
+
+        try:
+            obligations = self._vault_sdk.get_total_assets(self._config.vault_address)
+        except Exception as e:  # noqa: BLE001
+            return None, f"could not read vault obligations (totalAssets) for NAV safety check: {e}"
+
+        if obligations <= 0:
+            # No settled depositor backing (zero share-value). Propose ZERO, NOT the
+            # realized Safe balance (audit #6): with no shares to redeem, proposing
+            # the full balance would pull the Safe's (entirely non-depositor) capital
+            # into a Closed vault where nobody can redeem it — a strand/loss path.
+            # Closing at zero leaves that capital in the Safe for the manager to
+            # recover. (A teardown racing UNSETTLED pending deposits is out of scope
+            # here — that needs protocol-aware pending handling; tracked with the #4
+            # composite-close accounting follow-up.)
+            logger.info(
+                "Vault release: no settled obligations (totalAssets<=0) — proposing NAV=0 "
+                "(leave non-depositor Safe capital in place, do not transfer to a closed vault)"
+            )
+            return 0, None
+
+        if realized >= obligations:
+            # Back the shares exactly; leave any non-depositor excess (e.g. the
+            # manager's own seed capital) in the Safe rather than paying it out.
+            return obligations, None
+
+        shortfall = obligations - realized
+        shortfall_bps = shortfall * 10000 // obligations
+        if shortfall_bps > _RELEASE_HAIRCUT_TOLERANCE_BPS:
+            return None, (
+                f"vault-release NAV shortfall too large to auto-close: Safe holds {realized} underlying "
+                f"but obligations are {obligations} ({shortfall_bps} bps short > "
+                f"{_RELEASE_HAIRCUT_TOLERANCE_BPS} bps tolerance). Refusing to force a haircut close "
+                "(would dilute all depositors). Human decision required: top up the Safe or accept the haircut."
+            )
+        logger.warning(
+            "Vault release: realized %d < obligations %d (%d bps) within tolerance — clamping NAV to realized",
+            realized,
+            obligations,
+            shortfall_bps,
+        )
+        return realized, None
+
+    def _read_safe_underlying_raw(self, strategy: Any, market: Any) -> int | None:
+        """Read the Safe's underlying-token balance in raw units, or None if unmeasured."""
+        underlying = self._config.underlying_token
+        # VIB-5667 (audit #2): the teardown MarketSnapshot was built BEFORE the
+        # closing intents unwound the LP to underlying, so its balance cache holds
+        # a PRE-unwind figure. Release NAV must reflect the realized POST-unwind
+        # Safe balance — evict the memo so ``balance`` does a fresh live read
+        # (mirrors the teardown exec lanes' VIB-5465/5074 invalidate-before-read).
+        invalidate = getattr(market, "invalidate_balance", None)
+        if callable(invalidate):
+            try:
+                invalidate(underlying)
+            except Exception:  # noqa: BLE001 — best-effort; a stale read still degrades safely
+                logger.debug(
+                    "Vault release: invalidate_balance(%s) failed; using cached balance", underlying, exc_info=True
+                )
+        try:
+            bal = market.balance(underlying)
+        except Exception:  # noqa: BLE001 — Empty != Zero: an unread balance is not zero
+            logger.warning("Vault release: could not read Safe %s balance for NAV", underlying, exc_info=True)
+            return None
+        raw = bal.balance if hasattr(bal, "balance") else bal
+        if raw is None:
+            return None
+        try:
+            decimals = get_token_resolver().get_decimals(strategy.chain, underlying)
+            return int(Decimal(str(raw)) * Decimal(10) ** decimals)
+        except Exception:  # noqa: BLE001
+            logger.warning("Vault release: could not convert Safe %s balance to raw units", underlying, exc_info=True)
+            return None
+
+    async def _release_open_to_closed(
+        self,
+        strategy: Any,
+        market: Any,
+        vault_state: VaultState,
+        final_nav: int,
+        commit: Any | None,
+    ) -> ReleaseResult:
+        """Open->Closing->Closed: propose NAV, initiateClosing, then close + redeem."""
+        vault_address = self._config.vault_address
+        wallet = strategy.wallet_address
+
+        # 2b: propose final NAV [valuator].
+        propose_bundle = self._vault_adapter.build_propose_valuation_bundle(
+            UpdateTotalAssetsParams(
+                vault_address=vault_address,
+                valuator_address=self._config.valuator_address,
+                new_total_assets=final_nav,
+                pending_deposits=0,
+            )
+        )
+        propose_result = await self._execute_release_leg(
+            "PROPOSE_VAULT_VALUATION", propose_bundle, self._config.valuator_address, commit
+        )
+        if not getattr(propose_result, "success", False):
+            return ReleaseResult(
+                degraded=True, final_state=_VAULT_STATE_OPEN, reason="vault-release propose NAV failed"
+            )
+        vault_state.release_phase = VaultReleasePhase.PROPOSED
+        vault_state.release_final_nav = final_nav
+        self.save_vault_state()
+
+        # 2d: initiateClosing [owner] -> Open becomes Closing (re-proposes NAV).
+        initiate_bundle = self._vault_adapter.build_initiate_closing_bundle(
+            InitiateClosingParams(vault_address=vault_address, owner_address=wallet)
+        )
+        initiate_result = await self._execute_release_leg("INITIATE_VAULT_CLOSING", initiate_bundle, wallet, commit)
+        if not getattr(initiate_result, "success", False):
+            return ReleaseResult(
+                degraded=True, final_state=_VAULT_STATE_OPEN, reason="vault-release initiateClosing failed"
+            )
+        vault_state.release_phase = VaultReleasePhase.CLOSING_INITIATED
+        self.save_vault_state()
+
+        return await self._release_from_closing(strategy, market, vault_state, commit, approved_nav=final_nav)
+
+    async def _release_from_closing(
+        self,
+        strategy: Any,
+        market: Any,
+        vault_state: VaultState,
+        commit: Any | None,
+        *,
+        approved_nav: int | None = None,
+    ) -> ReleaseResult:
+        """Closing->Closed: close with the SAFETY-APPROVED NAV, then redeem.
+
+        ``approved_nav`` is the obligations-capped / backing-checked value from
+        :meth:`_resolve_release_nav` (passed by :meth:`_release_open_to_closed`).
+        When ``None`` — a run that resumed directly into on-chain ``Closing`` — it is
+        recovered from the persisted ``release_final_nav`` if a prior run reached the
+        PROPOSED/CLOSING phase, else recomputed under the same safety rules. It is
+        NEVER taken from whatever the on-chain slot currently holds.
+        """
+        vault_address = self._config.vault_address
+        wallet = strategy.wallet_address
+
+        # The safety-approved NAV is the SOURCE OF TRUTH for close() (audit #4).
+        if approved_nav is None:
+            if vault_state.release_phase in (VaultReleasePhase.PROPOSED, VaultReleasePhase.CLOSING_INITIATED):
+                approved_nav = vault_state.release_final_nav
+            else:
+                approved_nav, degrade_reason = self._resolve_release_nav(strategy, market)
+                if degrade_reason is not None:
+                    return ReleaseResult(degraded=True, final_state=_VAULT_STATE_CLOSING, reason=degrade_reason)
+                assert approved_nav is not None  # noqa: S101
+
+        # ``close(nav)`` reverts ``WrongNewTotalAssets`` unless ``nav`` matches the
+        # on-chain ``newTotalAssets()`` slot EXACTLY, so we must READ the slot. But we
+        # must NEVER close with whatever the slot happens to hold (audit #4): the slot
+        # may be consumed (max sentinel), stale, or a divergent proposal, and closing
+        # with it would BYPASS the obligations cap ``_resolve_release_nav`` enforced —
+        # pulling non-depositor Safe capital into a Closed vault nobody can redeem. So
+        # require the slot to hold EXACTLY ``approved_nav``; if it does not, re-propose
+        # the approved value; if it still cannot be established, degrade (never close).
+        nta = self._vault_sdk.get_new_total_assets(vault_address)
+        if nta != approved_nav:
+            logger.warning(
+                "Vault release: newTotalAssets slot=%s != approved NAV=%s — re-proposing the approved value before close",
+                nta,
+                approved_nav,
+            )
+            propose_bundle = self._vault_adapter.build_propose_valuation_bundle(
+                UpdateTotalAssetsParams(
+                    vault_address=vault_address,
+                    valuator_address=self._config.valuator_address,
+                    new_total_assets=approved_nav,
+                    pending_deposits=0,
+                )
+            )
+            propose_result = await self._execute_release_leg(
+                "PROPOSE_VAULT_VALUATION", propose_bundle, self._config.valuator_address, commit
+            )
+            if not getattr(propose_result, "success", False):
+                return ReleaseResult(
+                    degraded=True, final_state=_VAULT_STATE_CLOSING, reason="vault-release re-propose (Closing) failed"
+                )
+            nta = self._vault_sdk.get_new_total_assets(vault_address)
+            if nta != approved_nav:
+                return ReleaseResult(
+                    degraded=True,
+                    final_state=_VAULT_STATE_CLOSING,
+                    reason=(
+                        f"vault-release could not establish the approved newTotalAssets ({approved_nav}); "
+                        f"slot still reads {nta} — refusing to close() with an unvetted NAV"
+                    ),
+                )
+
+        vault_state.release_final_nav = approved_nav
+        self.save_vault_state()
+
+        # Ensure the vault is authorised to pull the Safe's underlying at close.
+        approve_bundle = self._build_release_approve_bundle(wallet)
+        if approve_bundle is not None:
+            await self._execute_release_leg("APPROVE", approve_bundle, wallet, commit)
+
+        # 2e: close(approved_nav) [safe] — atomic takeFees->settleDeposit->
+        # settleRedeem->state=Closed->transferFrom(safe, vault, totalAssets). Reverts
+        # if Safe short. Closes with the VETTED value, never the raw slot readback.
+        close_bundle = self._vault_adapter.build_close_bundle(
+            CloseVaultParams(vault_address=vault_address, safe_address=wallet, new_total_assets=approved_nav)
+        )
+        close_result = await self._execute_release_leg("CLOSE_VAULT", close_bundle, wallet, commit)
+        if not getattr(close_result, "success", False):
+            return ReleaseResult(
+                degraded=True,
+                final_state=_VAULT_STATE_CLOSING,
+                reason="vault-release close() failed (Safe may not back totalAssets — do NOT force; human check)",
+            )
+        vault_state.release_phase = VaultReleasePhase.CLOSED
+        self.save_vault_state()
+        logger.info("Vault release: close() landed — vault CLOSED, all depositor capital now claimable")
+
+        return await self._release_redeem_manager_shares(strategy, vault_state, commit, final_state=_VAULT_STATE_CLOSED)
+
+    async def _release_redeem_manager_shares(
+        self,
+        strategy: Any,
+        vault_state: VaultState,
+        commit: Any | None,
+        *,
+        final_state: str,
+    ) -> ReleaseResult:
+        """Redeem the manager's own residual shares post-close (permissionless, sync).
+
+        External depositors (already-redeemed or deposit-only) redeem THEMSELVES via
+        ``vault.redeem`` — teardown neither can nor should pull their shares. This
+        only sweeps the manager's own shares back to underlying. No-op when the
+        manager holds none.
+        """
+        vault_address = self._config.vault_address
+        wallet = strategy.wallet_address
+        redeemed = 0
+        try:
+            shares = self._vault_sdk.get_underlying_balance(vault_address, wallet)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Vault release: could not read manager share balance for redeem: %s", e)
+            shares = 0
+
+        if shares > 0:
+            redeem_bundle = self._vault_adapter.build_redeem_bundle(
+                RedeemVaultParams(vault_address=vault_address, controller_address=wallet, shares=shares)
+            )
+            redeem_result = await self._execute_release_leg("REDEEM_VAULT", redeem_bundle, wallet, commit)
+            if getattr(redeem_result, "success", False):
+                redeemed = shares
+                logger.info("Vault release: redeemed manager's own %d shares back to underlying", shares)
+            else:
+                # A failed self-redeem does NOT strand depositors (the vault is
+                # Closed; the manager can retry). Degrade but report release done.
+                logger.warning("Vault release: manager self-redeem failed (vault still Closed; retryable)")
+        else:
+            logger.info("Vault release: manager holds no residual shares — nothing to redeem")
+
+        vault_state.release_phase = VaultReleasePhase.DEPOSITORS_RELEASED
+        self.save_vault_state()
+        return ReleaseResult(
+            released=True,
+            final_state=final_state,
+            final_nav=vault_state.release_final_nav,
+            manager_shares_redeemed=redeemed,
+        )
+
+    def _build_release_approve_bundle(self, safe_address: str) -> Any | None:
+        """Build a Safe->vault MAX approve for the underlying (idempotent), or None."""
+        from almanak.core.enums import ActionType
+        from almanak.framework.models.reproduction_bundle import ActionBundle
+
+        vault_address = self._config.vault_address
+        try:
+            underlying_token = self._vault_sdk.get_underlying_token_address(vault_address)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Vault release: could not read underlying token address for approve: %s", e)
+            return None
+        tx = self._vault_sdk.build_approve_deposit_tx(underlying_token, vault_address, safe_address, _MAX_UINT256)
+        return ActionBundle(
+            intent_type=ActionType.APPROVE.value,
+            transactions=[tx],
+            metadata={"vault_address": vault_address, "spender": vault_address, "token": underlying_token},
+        )
+
     def get_vault_state(self) -> VaultState:
         """Get the current vault state, loading from initial state if needed.
 
@@ -1351,6 +1894,8 @@ class VaultLifecycleManager:
             "settlement_phase": vault_state.settlement_phase.value,
             "initialized": vault_state.initialized,
             "settlement_nonce": vault_state.settlement_nonce,
+            "release_phase": vault_state.release_phase.value,
+            "release_final_nav": vault_state.release_final_nav,
         }
 
     @staticmethod
@@ -1369,4 +1914,6 @@ class VaultLifecycleManager:
             settlement_phase=SettlementPhase(data.get("settlement_phase", "idle")),
             initialized=data.get("initialized", False),
             settlement_nonce=data.get("settlement_nonce", 0),
+            release_phase=VaultReleasePhase(data.get("release_phase", "not_started")),
+            release_final_nav=data.get("release_final_nav", 0),
         )

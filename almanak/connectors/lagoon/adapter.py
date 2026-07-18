@@ -25,6 +25,9 @@ import logging
 from almanak.connectors.lagoon.sdk import LagoonVaultSDK
 from almanak.core.enums import ActionType
 from almanak.core.models.params import (
+    CloseVaultParams,
+    InitiateClosingParams,
+    RedeemVaultParams,
     SettleDepositParams,
     SettleRedeemParams,
     UpdateTotalAssetsParams,
@@ -119,5 +122,72 @@ class LagoonVaultAdapter:
             metadata={
                 "vault_address": params.vault_address,
                 "total_assets": params.total_assets,
+            },
+        )
+
+    def build_initiate_closing_bundle(self, params: InitiateClosingParams) -> ActionBundle:
+        """Build an ActionBundle for ``initiateClosing()`` (Open->Closing).
+
+        Args:
+            params: Parameters containing vault address and owner address.
+
+        Returns:
+            ActionBundle with a single initiateClosing transaction.
+        """
+        tx = self._sdk.build_initiate_closing_tx(
+            vault_address=params.vault_address,
+            owner_address=params.owner_address,
+        )
+        return ActionBundle(
+            intent_type=ActionType.INITIATE_VAULT_CLOSING.value,
+            transactions=[tx],
+            metadata={"vault_address": params.vault_address},
+        )
+
+    def build_close_bundle(self, params: CloseVaultParams) -> ActionBundle:
+        """Build an ActionBundle for ``close(uint256)`` (Closing->Closed).
+
+        Args:
+            params: Parameters containing vault address, safe address, and the
+                exact ``new_total_assets`` read back from chain.
+
+        Returns:
+            ActionBundle with a single close transaction.
+        """
+        tx = self._sdk.build_close_tx(
+            vault_address=params.vault_address,
+            safe_address=params.safe_address,
+            new_total_assets=params.new_total_assets,
+        )
+        return ActionBundle(
+            intent_type=ActionType.CLOSE_VAULT.value,
+            transactions=[tx],
+            metadata={
+                "vault_address": params.vault_address,
+                "new_total_assets": params.new_total_assets,
+            },
+        )
+
+    def build_redeem_bundle(self, params: RedeemVaultParams) -> ActionBundle:
+        """Build an ActionBundle for ERC-4626 ``redeem`` (post-close sweep).
+
+        Args:
+            params: Parameters containing vault address, controller address, and
+                the share amount to redeem.
+
+        Returns:
+            ActionBundle with a single redeem transaction.
+        """
+        tx = self._sdk.build_redeem_tx(
+            vault_address=params.vault_address,
+            controller_address=params.controller_address,
+            shares=params.shares,
+        )
+        return ActionBundle(
+            intent_type=ActionType.REDEEM_VAULT.value,
+            transactions=[tx],
+            metadata={
+                "vault_address": params.vault_address,
+                "shares": params.shares,
             },
         )

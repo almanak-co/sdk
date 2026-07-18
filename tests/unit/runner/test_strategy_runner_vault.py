@@ -233,3 +233,184 @@ class TestNonVaultStrategyUnaffected:
             state_manager=MagicMock(),
         )
         assert runner._vault_lifecycle is None
+
+
+# --- VIB-5667 vault-safe teardown: execute_vault_release wiring ---
+
+
+class TestExecuteVaultRelease:
+    """The teardown vault-release step (runner_teardown.execute_vault_release)."""
+
+    def test_noop_for_plain_strategy(self):
+        """A strategy with no vault lifecycle -> release is a no-op (None)."""
+        import asyncio
+
+        from almanak.framework.runner.runner_teardown import execute_vault_release
+
+        runner = MagicMock()
+        runner._vault_lifecycle = None
+        strategy = MagicMock()
+        strategy.deployment_id = "plain"
+        strategy.chain = "base"
+
+        result = asyncio.run(
+            execute_vault_release(runner, strategy, MagicMock(), teardown_cycle_id="teardown-x")
+        )
+        assert result is None
+
+    def test_invokes_release_with_bound_commit(self):
+        """For a vault strategy, release_on_teardown is called with a commit callback."""
+        import asyncio
+
+        from almanak.framework.runner.runner_teardown import execute_vault_release
+        from almanak.framework.vault.config import ReleaseResult
+
+        runner = MagicMock()
+        vault_lifecycle = MagicMock()
+        vault_lifecycle._config.vault_address = "0xVAULT"
+        vault_lifecycle.release_on_teardown = AsyncMock(
+            return_value=ReleaseResult(released=True, final_state="Closed", final_nav=1000)
+        )
+        runner._vault_lifecycle = vault_lifecycle
+        runner.commit_teardown_intent = AsyncMock()
+
+        strategy = MagicMock()
+        strategy.deployment_id = "vaulted"
+        strategy.chain = "base"
+
+        result = asyncio.run(
+            execute_vault_release(runner, strategy, MagicMock(), teardown_cycle_id="teardown-y")
+        )
+        assert result.released is True
+        vault_lifecycle.release_on_teardown.assert_awaited_once()
+        # A commit callback was bound and threaded in.
+        _, kwargs = vault_lifecycle.release_on_teardown.await_args
+        assert callable(kwargs["commit"])
+
+    def test_bound_commit_drives_commit_teardown_intent(self):
+        """The bound commit callback routes each leg through commit_teardown_intent."""
+        import asyncio
+
+        from almanak.framework.runner.runner_teardown import execute_vault_release
+        from almanak.framework.vault.config import ReleaseResult
+
+        captured = {}
+
+        async def _fake_release(strategy, market, *, commit):
+            # Simulate one successful release leg driving the commit callback.
+            await commit(
+                action_type="CLOSE_VAULT",
+                bundle=MagicMock(metadata={"vault_address": "0xVAULT"}),
+                execution_result=MagicMock(success=True),
+                signer="0xWALLET",
+            )
+            return ReleaseResult(released=True)
+
+        runner = MagicMock()
+        vault_lifecycle = MagicMock()
+        vault_lifecycle._config.vault_address = "0xVAULT"
+        vault_lifecycle.release_on_teardown = _fake_release
+        runner._vault_lifecycle = vault_lifecycle
+
+        async def _capture_commit(strategy, intent, **kwargs):
+            captured["intent_type"] = intent.intent_type.value
+            captured["cycle_id"] = kwargs["teardown_cycle_id"]
+
+        runner.commit_teardown_intent = _capture_commit
+
+        strategy = MagicMock()
+        strategy.deployment_id = "vaulted"
+        strategy.chain = "base"
+
+        asyncio.run(execute_vault_release(runner, strategy, MagicMock(), teardown_cycle_id="teardown-z"))
+        assert captured["intent_type"] == "CLOSE_VAULT"
+        assert captured["cycle_id"] == "teardown-z"
+
+
+class TestMaybeReleaseVaultAfterTeardown:
+    """The fold helper only releases on a successful teardown + present vault."""
+
+    def _result(self, success=True):
+        r = MagicMock()
+        r.success = success
+        r.accounting_degraded = False
+        r.accounting_degraded_count = 0
+        return r
+
+    def test_skips_when_no_vault_lifecycle(self):
+        import asyncio
+
+        from almanak.framework.runner.runner_teardown import _maybe_release_vault_after_teardown
+
+        runner = MagicMock()
+        runner._vault_lifecycle = None
+        runner._execute_vault_release = AsyncMock()
+        tr = self._result(success=True)
+        asyncio.run(_maybe_release_vault_after_teardown(runner, MagicMock(), MagicMock(), "cyc", tr, "dep"))
+        runner._execute_vault_release.assert_not_awaited()
+
+    def test_skips_when_teardown_failed(self):
+        import asyncio
+
+        from almanak.framework.runner.runner_teardown import _maybe_release_vault_after_teardown
+
+        runner = MagicMock()
+        runner._vault_lifecycle = MagicMock()
+        runner._execute_vault_release = AsyncMock()
+        tr = self._result(success=False)
+        asyncio.run(_maybe_release_vault_after_teardown(runner, MagicMock(), MagicMock(), "cyc", tr, "dep"))
+        runner._execute_vault_release.assert_not_awaited()
+
+    def test_degraded_release_flags_accounting_degraded(self):
+        import asyncio
+
+        from almanak.framework.runner.runner_teardown import _maybe_release_vault_after_teardown
+        from almanak.framework.vault.config import ReleaseResult
+
+        runner = MagicMock()
+        runner._vault_lifecycle = MagicMock()
+        runner._teardown_recovery_incomplete = False
+        runner._execute_vault_release = AsyncMock(
+            return_value=ReleaseResult(degraded=True, reason="single-signer mismatch")
+        )
+        tr = self._result(success=True)
+        asyncio.run(_maybe_release_vault_after_teardown(runner, MagicMock(), MagicMock(), "cyc", tr, "dep"))
+        runner._execute_vault_release.assert_awaited_once()
+        assert tr.accounting_degraded is True
+        assert tr.accounting_degraded_count == 1
+
+    def test_skips_when_recovery_incomplete(self):
+        """VIB-5667 audit #1: a deployment-owned orphan may still be open when
+        recovery is incomplete — refuse the irreversible vault close, flag degraded,
+        and leave the vault Open (never release around an un-unwound position)."""
+        import asyncio
+
+        from almanak.framework.runner.runner_teardown import _maybe_release_vault_after_teardown
+
+        runner = MagicMock()
+        runner._vault_lifecycle = MagicMock()
+        runner._teardown_recovery_incomplete = True
+        runner._execute_vault_release = AsyncMock()
+        tr = self._result(success=True)
+        asyncio.run(_maybe_release_vault_after_teardown(runner, MagicMock(), MagicMock(), "cyc", tr, "dep"))
+        runner._execute_vault_release.assert_not_awaited()
+        assert tr.accounting_degraded is True
+        assert tr.accounting_degraded_count == 1
+
+    def test_release_exception_flags_degraded_never_faults_teardown(self):
+        """A raising _execute_vault_release must NOT propagate into the teardown lane —
+        it is caught, logged, and folded into accounting_degraded (VIB-5667)."""
+        import asyncio
+
+        from almanak.framework.runner.runner_teardown import _maybe_release_vault_after_teardown
+
+        runner = MagicMock()
+        runner._vault_lifecycle = MagicMock()
+        runner._teardown_recovery_incomplete = False
+        runner._execute_vault_release = AsyncMock(side_effect=RuntimeError("release rpc exploded"))
+        tr = self._result(success=True)
+        # Must not raise despite the release blowing up.
+        asyncio.run(_maybe_release_vault_after_teardown(runner, MagicMock(), MagicMock(), "cyc", tr, "dep"))
+        runner._execute_vault_release.assert_awaited_once()
+        assert tr.accounting_degraded is True
+        assert tr.accounting_degraded_count == 1

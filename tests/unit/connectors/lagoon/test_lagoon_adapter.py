@@ -288,3 +288,47 @@ class TestAdapterConstruction:
             new_total_assets=100,
         )
         assert bundle.transactions[0]["data"] == "0xtest"
+
+
+# --- VIB-5667 vault-release bundles ---
+
+from almanak.core.enums import ActionType  # noqa: E402
+from almanak.core.models.params import (  # noqa: E402
+    CloseVaultParams,
+    InitiateClosingParams,
+    RedeemVaultParams,
+)
+
+WALLET = "0xcccccccccccccccccccccccccccccccccccccccc"
+
+
+class TestVaultReleaseBundles:
+    def test_initiate_closing_bundle(self, mock_sdk):
+        adapter = LagoonVaultAdapter(mock_sdk)
+        bundle = adapter.build_initiate_closing_bundle(
+            InitiateClosingParams(vault_address=VAULT_ADDRESS, owner_address=WALLET)
+        )
+        assert bundle.intent_type == ActionType.INITIATE_VAULT_CLOSING.value
+        assert len(bundle.transactions) == 1
+        assert bundle.transactions[0]["data"][:10] == "0xa4393915"
+        assert bundle.transactions[0]["from"] == WALLET
+
+    def test_close_bundle(self, mock_sdk):
+        adapter = LagoonVaultAdapter(mock_sdk)
+        bundle = adapter.build_close_bundle(
+            CloseVaultParams(vault_address=VAULT_ADDRESS, safe_address=WALLET, new_total_assets=5_000)
+        )
+        assert bundle.intent_type == ActionType.CLOSE_VAULT.value
+        assert len(bundle.transactions) == 1
+        assert bundle.transactions[0]["data"] == "0x0aebeb4e" + _encode_uint256(5_000)
+        assert bundle.metadata["new_total_assets"] == 5_000
+
+    def test_redeem_bundle(self, mock_sdk):
+        adapter = LagoonVaultAdapter(mock_sdk)
+        bundle = adapter.build_redeem_bundle(
+            RedeemVaultParams(vault_address=VAULT_ADDRESS, controller_address=WALLET, shares=777)
+        )
+        assert bundle.intent_type == ActionType.REDEEM_VAULT.value
+        assert len(bundle.transactions) == 1
+        assert bundle.transactions[0]["data"][:10] == "0xba087652"
+        assert bundle.metadata["shares"] == 777

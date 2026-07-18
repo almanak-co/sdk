@@ -37,11 +37,32 @@ TOTAL_SUPPLY_SELECTOR = "0x18160ddd"  # totalSupply()
 VERSION_SELECTOR = "0x54fd4d50"  # version()
 GET_ROLES_STORAGE_SELECTOR = "0x937147e3"  # getRolesStorage()
 ASSET_SELECTOR = "0x38d52e0f"  # asset()
+OWNER_SELECTOR = "0x8da5cb5b"  # owner()
 
 # Write operation selectors (keccak256 of canonical signatures, first 4 bytes)
 UPDATE_NEW_TOTAL_ASSETS_SELECTOR = "0xbcd1bf34"  # updateNewTotalAssets(uint256)
 SETTLE_DEPOSIT_SELECTOR = "0xd24ca58a"  # settleDeposit(uint256)
 SETTLE_REDEEM_SELECTOR = "0xa627df66"  # settleRedeem(uint256)
+
+# Vault-release (teardown) selectors — Lagoon v0.5.0 Open->Closing->Closed (VIB-5667).
+INITIATE_CLOSING_SELECTOR = "0xa4393915"  # initiateClosing()
+CLOSE_SELECTOR = "0x0aebeb4e"  # close(uint256)
+REDEEM_SELECTOR = "0xba087652"  # redeem(uint256,address,address)
+
+# Lagoon v0.5.0 ``State`` enum (Enums.sol): Open=0, Closing=1, Closed=2.
+VAULT_STATE_OPEN = "Open"
+VAULT_STATE_CLOSING = "Closing"
+VAULT_STATE_CLOSED = "Closed"
+_VAULT_STATE_BY_ORDINAL = {0: VAULT_STATE_OPEN, 1: VAULT_STATE_CLOSING, 2: VAULT_STATE_CLOSED}
+
+# ERC-7201 storage slot of the Vault ``state`` field.
+# Namespace: keccak256(abi.encode(uint256(keccak256("hopper.storage.vault")) - 1)) & ~0xff.
+# Lagoon v0.5.0 does NOT expose a public ``state()`` getter (the selector is
+# absent from the deployed implementation bytecode), so the lifecycle state is
+# read directly from storage. Verified on a Base fork: this slot holds 0 (Open)
+# and flips to 1 (Closing) after ``initiateClosing()`` (emitting StateUpdated),
+# then 2 (Closed) after ``close()``. The ordinal is the low byte of the word.
+VAULT_STATE_SLOT = 0x0E6B3200A60A991C539F47DDDACA04A18EB4BCF2B53906FB44751D827F001400
 
 # ERC-7540 deposit selectors
 REQUEST_DEPOSIT_SELECTOR = "0x85b77f45"  # requestDeposit(uint256,address,address)
@@ -103,8 +124,25 @@ class LagoonVaultSDK:
         self._gateway_client = gateway_client
         self._chain = chain.lower()
 
+    def _ensure_gateway_client(self) -> None:
+        """Fail fast with a clear cause when the gateway client is unavailable.
+
+        The vault reads (including the release-lifecycle reads used during teardown)
+        route through ``self._gateway_client.rpc``. A missing / unwired client should
+        surface an actionable error BEFORE an RPC is issued, not an opaque
+        ``AttributeError`` deep in the call — otherwise a disconnected client during a
+        teardown release reads as an inscrutable failure rather than "no gateway".
+        """
+        client = self._gateway_client
+        if client is None or getattr(client, "rpc", None) is None:
+            raise RuntimeError(
+                "Lagoon SDK gateway client is unavailable (no RPC channel) — cannot issue on-chain reads. "
+                "The strategy container reaches chain state only through a connected gateway."
+            )
+
     def _eth_call(self, to: str, data: str, request_id: str = "lagoon_sdk") -> str:
         """Make an eth_call via the gateway and return the hex result."""
+        self._ensure_gateway_client()
         request = gateway_pb2.RpcRequest(
             chain=self._chain,
             method="eth_call",
@@ -119,6 +157,7 @@ class LagoonVaultSDK:
 
     def _eth_get_storage_at(self, address: str, slot: int, request_id: str = "lagoon_sdk") -> str:
         """Read a storage slot via eth_getStorageAt."""
+        self._ensure_gateway_client()
         request = gateway_pb2.RpcRequest(
             chain=self._chain,
             method="eth_getStorageAt",
@@ -292,6 +331,50 @@ class LagoonVaultSDK:
         )
         return _decode_address(result)
 
+    def get_new_total_assets(self, vault_address: str) -> int:
+        """Read the live proposed ``newTotalAssets()`` slot (VIB-5667).
+
+        Alias of :meth:`get_proposed_total_assets` — Lagoon's ``newTotalAssets``
+        lives at ``PROPOSED_TOTAL_ASSETS_SLOT`` (base+1). The vault-release path
+        reads this back from chain AFTER ``updateNewTotalAssets`` and passes the
+        exact value to ``close(uint256)`` so the call cannot revert
+        ``WrongNewTotalAssets``. Returns ``PROPOSAL_CONSUMED`` (``type(uint256).max``)
+        when no live proposal exists.
+
+        Returns:
+            The proposed total assets in underlying units (raw integer).
+        """
+        return self.get_proposed_total_assets(vault_address)
+
+    def get_vault_state(self, vault_address: str) -> str:
+        """Read the vault's lifecycle state: Open / Closing / Closed.
+
+        Lagoon v0.5.0 does NOT expose a public ``state()`` getter, so the ``State``
+        enum (Open=0, Closing=1, Closed=2) is read directly from its ERC-7201
+        storage slot (``VAULT_STATE_SLOT``). Used by the vault-release state machine
+        for idempotent resume (skip already-completed phases after a crash).
+
+        Returns:
+            One of ``"Open"``, ``"Closing"``, ``"Closed"``.
+
+        Raises:
+            RuntimeError: If the stored ordinal is not a known state (fail loud
+                rather than silently treating an unknown state as Open).
+        """
+        result = self._eth_get_storage_at(
+            address=vault_address,
+            slot=VAULT_STATE_SLOT,
+            request_id="lagoon_vault_state",
+        )
+        # The State enum ordinal is the low byte of the slot word; mask it so a
+        # future packing of adjacent fields into this ERC-7201 slot can't turn a
+        # valid 0/1/2 into a spurious "unknown ordinal" (or a chance misread).
+        ordinal = _decode_uint256(result) & 0xFF
+        state = _VAULT_STATE_BY_ORDINAL.get(ordinal)
+        if state is None:
+            raise RuntimeError(f"Unknown Lagoon vault state ordinal {ordinal} for {vault_address}")
+        return state
+
     def get_underlying_token_address(self, vault_address: str) -> str:
         """Read the vault's underlying token address (ERC-4626 asset()).
 
@@ -330,6 +413,23 @@ class LagoonVaultSDK:
             "feeRegistry": _decode_address(raw[192:256]),
             "valuationManager": _decode_address(raw[256:320]),
         }
+
+    def get_owner(self, vault_address: str) -> str:
+        """Read the vault owner (``owner()`` — the ``init.admin``, Ownable).
+
+        The owner is the only address authorised to call ``initiateClosing()``.
+        The vault-release single-signer preflight asserts owner == safe == valuator
+        == the gateway's signing key before attempting a close (VIB-5667).
+
+        Returns:
+            Owner address as a hex string.
+        """
+        result = self._eth_call(
+            to=vault_address,
+            data=OWNER_SELECTOR,
+            request_id="lagoon_owner",
+        )
+        return _decode_address(result)
 
     def get_valuation_manager(self, vault_address: str) -> str:
         """Read the vault's valuation manager address.
@@ -469,6 +569,84 @@ class LagoonVaultSDK:
             "data": calldata,
             "value": "0",
             "gas_estimate": 200_000,
+        }
+
+    def build_initiate_closing_tx(self, vault_address: str, owner_address: str) -> dict:
+        """Build an unsigned transaction for ``initiateClosing()`` (VIB-5667).
+
+        Called by the vault owner (``init.admin``) to transition Open->Closing.
+        Re-proposes the pending NAV if one is defined. No calldata arguments.
+
+        Args:
+            vault_address: The vault contract address.
+            owner_address: The vault owner's address (tx sender).
+
+        Returns:
+            Unsigned transaction dict with keys: to, from, data, value, gas_estimate.
+        """
+        return {
+            "to": vault_address,
+            "from": owner_address,
+            "data": INITIATE_CLOSING_SELECTOR,
+            "value": "0",
+            "gas_estimate": 200_000,
+        }
+
+    def build_close_tx(self, vault_address: str, safe_address: str, new_total_assets: int) -> dict:
+        """Build an unsigned transaction for ``close(uint256)`` (VIB-5667).
+
+        Called by the Safe (Closing->Closed). Atomically takes fees, settles
+        deposits + redeems, sets ``state=Closed`` and pulls ``new_total_assets``
+        underlying from the Safe into the vault. ``new_total_assets`` MUST equal
+        the on-chain ``newTotalAssets()`` slot exactly (read it back via
+        :meth:`get_new_total_assets` between propose and close), otherwise the
+        call reverts ``WrongNewTotalAssets``.
+
+        Args:
+            vault_address: The vault contract address.
+            safe_address: The Safe wallet address (tx sender).
+            new_total_assets: Final NAV; must equal the live ``newTotalAssets()``.
+
+        Returns:
+            Unsigned transaction dict with keys: to, from, data, value, gas_estimate.
+        """
+        calldata = CLOSE_SELECTOR + _encode_uint256(new_total_assets)
+        return {
+            "to": vault_address,
+            "from": safe_address,
+            "data": calldata,
+            "value": "0",
+            "gas_estimate": 500_000,
+        }
+
+    def build_redeem_tx(self, vault_address: str, controller_address: str, shares: int) -> dict:
+        """Build an unsigned tx for ERC-4626 ``redeem(uint256,address,address)``.
+
+        Post-close synchronous redemption: burns ``shares`` and transfers the
+        underlying to ``controller_address``. Calls
+        ``redeem(shares, receiver=controller, owner=controller)`` — used to sweep
+        the manager's own residual shares after the vault is Closed (VIB-5667).
+
+        Args:
+            vault_address: The vault contract address.
+            controller_address: The share owner/receiver (tx sender).
+            shares: Number of shares to redeem (raw 18-decimal units).
+
+        Returns:
+            Unsigned transaction dict with keys: to, from, data, value, gas_estimate.
+        """
+        calldata = (
+            REDEEM_SELECTOR
+            + _encode_uint256(shares)
+            + _encode_address(controller_address)
+            + _encode_address(controller_address)
+        )
+        return {
+            "to": vault_address,
+            "from": controller_address,
+            "data": calldata,
+            "value": "0",
+            "gas_estimate": 250_000,
         }
 
     # --- ERC-7540 Deposit Operations ---

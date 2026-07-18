@@ -36,6 +36,28 @@ class SettlementPhase(Enum):
     SETTLING_REDEEM = "settling_redeem"
 
 
+class VaultReleasePhase(Enum):
+    """Phases of the teardown vault-release sequence (VIB-5667).
+
+    Persisted so the release is crash-resumable: on restart the manager reads the
+    on-chain ``state()`` and the persisted phase and resumes from the interrupted
+    point without re-issuing a completed leg.
+
+    ``NOT_STARTED -> PROPOSED -> CLOSING_INITIATED -> CLOSED -> DEPOSITORS_RELEASED``
+
+    - PROPOSED: ``updateNewTotalAssets`` landed (vault still Open).
+    - CLOSING_INITIATED: ``initiateClosing`` landed (vault Closing).
+    - CLOSED: ``close`` landed (vault Closed; all depositor capital claimable).
+    - DEPOSITORS_RELEASED: manager's own residual shares redeemed (terminal).
+    """
+
+    NOT_STARTED = "not_started"
+    PROPOSED = "release_proposed"
+    CLOSING_INITIATED = "closing_initiated"
+    CLOSED = "closed"
+    DEPOSITORS_RELEASED = "depositors_released"
+
+
 class VaultAction(Enum):
     """Actions the vault lifecycle manager can take."""
 
@@ -67,6 +89,13 @@ class VaultConfig(BaseModel):
     max_valuation_change_up_bps: int = Field(default=1000)
     auto_settle_redeems: bool = Field(default=True)
     redeem_failure_fatal: bool = Field(default=True)
+    # VIB-5667: on teardown, transition the vault Open->Closing->Closed so ALL
+    # depositors (including a deposit-only user who never requested redemption)
+    # can redeem their capital. Default ON — NOT releasing strands depositors.
+    # The escape hatch (False) is only for handing an open vault to a successor
+    # manager. Irreversible (Open->Closed is one-way), so default-true + explicit
+    # is the correct safety posture.
+    release_on_teardown: bool = Field(default=True)
 
     # --- Share-backed AUM invariant (VIB-5672, vault ship-gate #1) ---
     # The vault Safe must hold ONLY share-backed AUM: capital that flowed through
@@ -114,6 +143,10 @@ class VaultState:
     settlement_phase: SettlementPhase = SettlementPhase.IDLE
     initialized: bool = False
     settlement_nonce: int = 0  # Incrementing counter to disambiguate same-value settlements
+    # VIB-5667: teardown vault-release phase (crash-resumable). Independent of the
+    # settlement phase — release only runs during teardown, after position closure.
+    release_phase: VaultReleasePhase = VaultReleasePhase.NOT_STARTED
+    release_final_nav: int = 0  # Final NAV proposed for close() (underlying units)
 
 
 @dataclass
@@ -133,3 +166,23 @@ class SettlementResult:
     # this only signals the books did not fully tie for this cycle and an operator
     # / reconcile pass should replay the deferred writes. Never blocks settlement.
     accounting_degraded: bool = False
+
+
+@dataclass
+class ReleaseResult:
+    """Result of a teardown vault-release sequence (VIB-5667).
+
+    ``released`` is True when the vault reached ``Closed`` (depositor capital is
+    claimable) OR was already Closed on entry. ``skipped`` is True when release
+    was disabled or not applicable (no vault state to release). ``degraded`` marks
+    a genuine shortfall / preflight failure that could NOT force a safe close —
+    the operator must intervene; teardown still continues to reduce on-chain risk.
+    """
+
+    released: bool = False
+    skipped: bool = False
+    degraded: bool = False
+    final_state: str = ""
+    final_nav: int = 0
+    manager_shares_redeemed: int = 0
+    reason: str = ""

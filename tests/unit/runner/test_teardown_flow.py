@@ -1967,6 +1967,7 @@ class TestInlineLanePositionCounts:
         )
 
         runner = MagicMock()
+        runner._vault_lifecycle = None  # non-vault strategy — inline lane fail-closed guard (VIB-5667 #5) must not fire
         runner._execute_single_chain = AsyncMock(return_value=SimpleNamespace(success=True, error=None, status=None))
         runner._calculate_duration_ms = MagicMock(return_value=1)
         runner.request_shutdown = MagicMock()
@@ -2023,6 +2024,90 @@ class TestInlineLanePositionCounts:
         assert mark_result["positions_closed"] == 2
         assert mark_result["positions_total"] == 2
         assert mark_result["intents_succeeded"] == 3
+
+    @pytest.mark.asyncio
+    async def test_inline_lane_fails_closed_for_vault_strategy(self):
+        """VIB-5667 audit #5: a vault strategy reaching the inline fallback lane
+        (which has no vault-release path) must NOT certify a clean completion — that
+        would leave the vault Open and strand depositors. It fails closed
+        (mark_failed + teardown-failure shutdown), never mark_completed."""
+        from types import SimpleNamespace
+
+        from almanak.framework.runner import runner_teardown as rt
+
+        runner = MagicMock()
+        runner._vault_lifecycle = MagicMock()  # vault strategy on the inline lane
+        runner._execute_single_chain = AsyncMock(return_value=SimpleNamespace(success=True, error=None, status=None))
+        runner._calculate_duration_ms = MagicMock(return_value=1)
+        runner.request_shutdown = MagicMock()
+        runner._lifecycle_write_state = MagicMock()
+        runner._record_success = MagicMock()
+        runner._request_teardown_failure_shutdown = MagicMock()
+        runner.state_manager = MagicMock()
+
+        strategy = MagicMock()
+        strategy.deployment_id = "dep"
+
+        intents = [_make_intent()]
+        state_manager = MagicMock()
+        request = MagicMock()
+
+        with patch.object(rt.Intent, "has_chained_amount", return_value=False):
+            result, _degraded = await rt._execute_teardown_inline_body(
+                runner,
+                strategy,
+                intents,
+                None,
+                datetime.now(UTC),
+                request,
+                state_manager,
+                teardown_cycle_id="teardown-x",
+                deferred_append=lambda **_k: None,
+            )
+
+        assert result.status != IterationStatus.TEARDOWN
+        state_manager.mark_completed.assert_not_called()
+        state_manager.mark_failed.assert_called_once()
+        runner._request_teardown_failure_shutdown.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_inline_lane_empty_intents_fails_closed_for_vault_strategy(self):
+        """VIB-5667 audit #3: a vault strategy reaching the inline lane with ZERO
+        teardown intents (last_result stays None) must ALSO fail closed — otherwise
+        the no-intents branch marks completed + TERMINATED while the vault is Open,
+        stranding depositors."""
+        from almanak.framework.runner import runner_teardown as rt
+
+        runner = MagicMock()
+        runner._vault_lifecycle = MagicMock()  # vault strategy
+        runner._calculate_duration_ms = MagicMock(return_value=1)
+        runner.request_shutdown = MagicMock()
+        runner._lifecycle_write_state = MagicMock()
+        runner._record_success = MagicMock()
+        runner._request_teardown_failure_shutdown = MagicMock()
+
+        strategy = MagicMock()
+        strategy.deployment_id = "dep"
+        state_manager = MagicMock()
+        request = MagicMock()
+
+        result, _degraded = await rt._execute_teardown_inline_body(
+            runner,
+            strategy,
+            [],  # NO teardown intents
+            None,
+            datetime.now(UTC),
+            request,
+            state_manager,
+            teardown_cycle_id="teardown-x",
+            deferred_append=lambda **_k: None,
+        )
+
+        assert result.status != IterationStatus.TEARDOWN
+        state_manager.mark_completed.assert_not_called()
+        state_manager.mark_failed.assert_called_once()
+        runner._request_teardown_failure_shutdown.assert_called_once()
+        runner._record_success.assert_not_called()  # never certify a clean shutdown
 
     def test_positions_completion_result_omits_positions_when_count_unknown(self):
         """VIB-5085: the shared payload helper carries position counts only when

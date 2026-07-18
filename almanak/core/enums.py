@@ -18,6 +18,13 @@ class ActionType(Enum):
     PROPOSE_VAULT_VALUATION = "PROPOSE_VAULT_VALUATION"
     SETTLE_VAULT_DEPOSIT = "SETTLE_VAULT_DEPOSIT"
     SETTLE_VAULT_REDEEM = "SETTLE_VAULT_REDEEM"
+    # Vault-release (teardown) lifecycle — Lagoon v0.5.0 Open->Closing->Closed.
+    # These transition the vault to Closed on teardown so ALL depositors
+    # (including a deposit-only user who never requested redemption) can redeem
+    # their capital synchronously post-close (VIB-5667).
+    INITIATE_VAULT_CLOSING = "INITIATE_VAULT_CLOSING"
+    CLOSE_VAULT = "CLOSE_VAULT"
+    REDEEM_VAULT = "REDEEM_VAULT"
     DEPOSIT = "DEPOSIT"
     WITHDRAW = "WITHDRAW"
     SUPPLY = "SUPPLY"

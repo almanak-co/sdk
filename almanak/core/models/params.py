@@ -436,6 +436,92 @@ class SettleRedeemParams(Params):
         return f"SettleRedeemParams(vault_address={self.vault_address}, safe_address={self.safe_address}, total_assets={self.total_assets})"
 
 
+class InitiateClosingParams(Params):
+    """Params for Lagoon v0.5.0 ``initiateClosing()`` (owner, Open->Closing).
+
+    Signed by the vault owner (``init.admin``). Transitions the vault from
+    ``Open`` to ``Closing`` and re-proposes the pending NAV. Used only on the
+    teardown vault-release path (VIB-5667).
+    """
+
+    type: ActionType = ActionType.INITIATE_VAULT_CLOSING
+    vault_address: str
+    owner_address: str
+
+    @field_validator("owner_address", "vault_address")
+    @classmethod
+    def must_not_be_empty(cls, v: str) -> str:
+        if not v:
+            raise ValueError("Field must not be empty")
+        return v
+
+    def validate_params(self):
+        # No numeric fields; presence validation is done by the field validator.
+        return None
+
+    def __str__(self):
+        return f"InitiateClosingParams(vault_address={self.vault_address}, owner_address={self.owner_address})"
+
+
+class CloseVaultParams(Params):
+    """Params for Lagoon v0.5.0 ``close(uint256)`` (safe, Closing->Closed).
+
+    Signed by the Safe. Atomically takes fees, settles deposits + redeems, sets
+    ``state=Closed`` and pulls ``new_total_assets`` underlying from the Safe into
+    the vault (``transferFrom`` — reverts if the Safe is short). ``new_total_assets``
+    MUST equal the on-chain ``newTotalAssets()`` slot exactly, or the call reverts
+    ``WrongNewTotalAssets`` (VIB-5667).
+    """
+
+    type: ActionType = ActionType.CLOSE_VAULT
+    vault_address: str
+    safe_address: str
+    new_total_assets: int
+
+    @field_validator("safe_address", "vault_address")
+    @classmethod
+    def must_not_be_empty(cls, v: str) -> str:
+        if not v:
+            raise ValueError("Field must not be empty")
+        return v
+
+    def validate_params(self):
+        if self.new_total_assets < 0:
+            raise ValueError("new_total_assets must be non-negative")
+
+    def __str__(self):
+        return f"CloseVaultParams(vault_address={self.vault_address}, safe_address={self.safe_address}, new_total_assets={self.new_total_assets})"
+
+
+class RedeemVaultParams(Params):
+    """Params for ERC-4626 ``redeem(uint256,address,address)`` post-close.
+
+    Signed by the share controller (the manager's own Safe). After the vault is
+    ``Closed`` a shareholder with no pending redeem request redeems synchronously
+    (burns shares, receives underlying). Used to sweep the manager's own residual
+    shares on the teardown vault-release path (VIB-5667).
+    """
+
+    type: ActionType = ActionType.REDEEM_VAULT
+    vault_address: str
+    controller_address: str
+    shares: int
+
+    @field_validator("controller_address", "vault_address")
+    @classmethod
+    def must_not_be_empty(cls, v: str) -> str:
+        if not v:
+            raise ValueError("Field must not be empty")
+        return v
+
+    def validate_params(self):
+        if self.shares < 0:
+            raise ValueError("shares must be non-negative")
+
+    def __str__(self):
+        return f"RedeemVaultParams(vault_address={self.vault_address}, controller_address={self.controller_address}, shares={self.shares})"
+
+
 class DepositParams(Params):
     type: ActionType = ActionType.DEPOSIT
     token_address: str

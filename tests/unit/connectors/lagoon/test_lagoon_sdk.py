@@ -420,6 +420,23 @@ class TestConstructor:
         assert sdk._gateway_client is mock_gateway_client
 
 
+class TestGatewayConnectivityGuard:
+    """VIB-5667 (audit): on-chain reads fail fast with a clear cause when the
+    gateway client is unavailable, rather than an opaque AttributeError deep in RPC."""
+
+    def test_none_client_fails_fast_on_eth_call(self):
+        sdk = LagoonVaultSDK(None, chain="ethereum")
+        with pytest.raises(RuntimeError, match="gateway client is unavailable"):
+            sdk.get_total_assets(VAULT_ADDRESS)  # routes through _eth_call
+
+    def test_client_without_rpc_fails_fast_on_storage_read(self):
+        client = MagicMock()
+        client.rpc = None
+        sdk = LagoonVaultSDK(client, chain="ethereum")
+        with pytest.raises(RuntimeError, match="gateway client is unavailable"):
+            sdk.get_vault_state(VAULT_ADDRESS)  # routes through _eth_get_storage_at
+
+
 # --- Write Operations (build unsigned transactions) ---
 
 VALUATOR_ADDRESS = "0x1111111111111111111111111111111111111111"
@@ -576,3 +593,77 @@ class TestWriteMethodCalldata:
             tx_redeem["data"][:10],
         }
         assert len(selectors) == 3, "All three write methods should have distinct selectors"
+
+
+# --- VIB-5667 vault-release builders + reads ---
+
+WALLET = "0x3333333333333333333333333333333333333333"
+
+
+class TestVaultReleaseBuilders:
+    """build_initiate_closing_tx / build_close_tx / build_redeem_tx encoding."""
+
+    def test_initiate_closing_tx(self, sdk):
+        from almanak.connectors.lagoon.sdk import INITIATE_CLOSING_SELECTOR
+
+        tx = sdk.build_initiate_closing_tx(VAULT_ADDRESS, WALLET)
+        assert tx["to"] == VAULT_ADDRESS
+        assert tx["from"] == WALLET
+        assert tx["data"] == INITIATE_CLOSING_SELECTOR  # no args
+        assert tx["value"] == "0"
+
+    def test_close_tx_encodes_new_total_assets(self, sdk):
+        from almanak.connectors.lagoon.sdk import CLOSE_SELECTOR, _encode_uint256
+
+        tx = sdk.build_close_tx(VAULT_ADDRESS, WALLET, 123_456)
+        assert tx["from"] == WALLET
+        assert tx["data"] == CLOSE_SELECTOR + _encode_uint256(123_456)
+        # Selector (0x + 8) + one 32-byte word.
+        assert len(tx["data"]) == 74
+
+    def test_redeem_tx_encodes_shares_and_two_addresses(self, sdk):
+        from almanak.connectors.lagoon.sdk import REDEEM_SELECTOR, _encode_address, _encode_uint256
+
+        tx = sdk.build_redeem_tx(VAULT_ADDRESS, WALLET, 999)
+        expected = REDEEM_SELECTOR + _encode_uint256(999) + _encode_address(WALLET) + _encode_address(WALLET)
+        assert tx["data"] == expected
+        assert tx["from"] == WALLET
+        # Selector + 3 words.
+        assert len(tx["data"]) == 10 + 64 * 3
+
+    def test_release_selectors_are_distinct(self, sdk):
+        selectors = {
+            sdk.build_initiate_closing_tx(VAULT_ADDRESS, WALLET)["data"][:10],
+            sdk.build_close_tx(VAULT_ADDRESS, WALLET, 1)["data"][:10],
+            sdk.build_redeem_tx(VAULT_ADDRESS, WALLET, 1)["data"][:10],
+        }
+        assert len(selectors) == 3
+
+
+class TestVaultReleaseReads:
+    """get_vault_state / get_new_total_assets / get_owner decode."""
+
+    def test_get_vault_state_open(self, sdk, mock_gateway_client):
+        mock_gateway_client.rpc.Call.return_value = _make_rpc_response("0x" + "0" * 64)
+        assert sdk.get_vault_state(VAULT_ADDRESS) == "Open"
+
+    def test_get_vault_state_closing(self, sdk, mock_gateway_client):
+        mock_gateway_client.rpc.Call.return_value = _make_rpc_response("0x" + "0" * 63 + "1")
+        assert sdk.get_vault_state(VAULT_ADDRESS) == "Closing"
+
+    def test_get_vault_state_closed(self, sdk, mock_gateway_client):
+        mock_gateway_client.rpc.Call.return_value = _make_rpc_response("0x" + "0" * 63 + "2")
+        assert sdk.get_vault_state(VAULT_ADDRESS) == "Closed"
+
+    def test_get_vault_state_unknown_ordinal_raises(self, sdk, mock_gateway_client):
+        mock_gateway_client.rpc.Call.return_value = _make_rpc_response("0x" + "0" * 63 + "9")
+        with pytest.raises(RuntimeError, match="Unknown Lagoon vault state"):
+            sdk.get_vault_state(VAULT_ADDRESS)
+
+    def test_get_new_total_assets_reads_proposal_slot(self, sdk, mock_gateway_client):
+        mock_gateway_client.rpc.Call.return_value = _make_rpc_response("0x" + f"{4242:064x}")
+        assert sdk.get_new_total_assets(VAULT_ADDRESS) == 4242
+
+    def test_get_owner_decodes_address(self, sdk, mock_gateway_client):
+        mock_gateway_client.rpc.Call.return_value = _make_rpc_response("0x" + WALLET[2:].zfill(64))
+        assert sdk.get_owner(VAULT_ADDRESS).lower() == WALLET.lower()

@@ -1431,11 +1431,23 @@ async def execute_teardown_via_manager(
             state_manager,
         )
 
+        # VIB-5667 Phase 8a: vault-safe release. After the strategy's closing
+        # intents unwound the LP to underlying in the Safe (and consolidation ran),
+        # transition the vault Open->Closing->Closed so ALL depositors can redeem.
+        # Runs BEFORE the post-teardown snapshot bracket (audit #3) so ``close()``'s
+        # Safe->vault transfer and the manager self-redeem are reflected in the
+        # FINAL wallet snapshot that fund-NAV / dashboards read — otherwise the
+        # "final" row would predate the release fund movements. Delegated to a
+        # helper so this coordinator stays under the CRAP threshold.
+        await _maybe_release_vault_after_teardown(
+            runner, strategy, teardown_market, teardown_cycle_id, teardown_result, deployment_id
+        )
+
         # VIB-3773 Phase 7.5: post-teardown snapshot bracket. Fires after
-        # the unwind (and the verifier) completes so the SDK records
-        # final wallet state — the row that fund-NAV / dashboards
-        # actually need post-shutdown. Same degraded-but-continue
-        # contract.
+        # the unwind (and the verifier) — and the vault release above —
+        # completes so the SDK records final wallet state — the row that
+        # fund-NAV / dashboards actually need post-shutdown. Same
+        # degraded-but-continue contract.
         if teardown_mgr.runner_helpers.has_snapshot:
             post_bracket_outcome = await teardown_mgr.runner_helpers.capture_snapshot(
                 strategy,
@@ -1530,6 +1542,174 @@ async def execute_teardown_via_manager(
 
     # Phase 9: map TeardownResult -> IterationResult + terminal side effects.
     return _h.map_teardown_result(runner, strategy, start_time, teardown_result, teardown_mode, request, state_manager)
+
+
+# -------------------------------------------------------------------------
+# Vault-safe teardown — release depositor capital (VIB-5667)
+# -------------------------------------------------------------------------
+
+
+class _VaultReleaseIntent:
+    """Lightweight teardown-lane intent for a vault-release leg (VIB-5667).
+
+    The vault-release legs (propose NAV / initiateClosing / close / redeem /
+    approve) execute as raw ``ActionBundle``s, not framework ``Intent``s. This
+    duck-typed adapter carries just the surface ``commit_teardown_intent`` reads
+    off an intent (``intent_type`` with a ``.value``, ``protocol``, ``chain``) so
+    each release leg drives the SAME teardown accounting/ledger pipeline as a
+    normal closing intent — the loud-but-never-block commit path. The
+    position-event builder returns ``None`` for these management action types
+    (they are not positions), so no spurious CLOSE row is written.
+    """
+
+    __slots__ = ("intent_type", "protocol", "chain", "vault_address")
+
+    def __init__(self, action_type: str, protocol: str, chain: str, vault_address: str) -> None:
+        from types import SimpleNamespace
+
+        # ``.value`` mirrors an enum member — ``_intent_type_str`` / ledger reads it.
+        self.intent_type = SimpleNamespace(value=action_type)
+        self.protocol = protocol
+        self.chain = chain
+        self.vault_address = vault_address
+
+
+async def execute_vault_release(
+    runner: Any,
+    strategy: StrategyProtocol,
+    teardown_market: Any | None,
+    *,
+    teardown_cycle_id: str,
+) -> Any | None:
+    """Release the vault (Open->Closing->Closed) after position closure (VIB-5667).
+
+    Invoked from ``execute_teardown_via_manager`` AFTER the strategy's closing
+    intents (LP_CLOSE + consolidation SWAP -> underlying) have run and the Safe
+    holds the unwound capital in the vault's underlying token — so ``close()``'s
+    ``transferFrom(safe, vault, totalAssets)`` is backed. Releasing transitions the
+    vault to ``Closed`` so EVERY depositor (including a deposit-only user who never
+    requested redemption) can synchronously redeem their capital.
+
+    No-op for a plain (non-vault) strategy — ``runner._vault_lifecycle is None``.
+
+    Every orchestrator execution inside ``release_on_teardown`` is paired with the
+    ``commit`` callback bound here (``runner.commit_teardown_intent``) so ledger /
+    accounting rows are written — the teardown anti-bypass invariant. A degraded
+    release is loud but never blocks (teardown's inverted failure semantics); the
+    caller folds ``ReleaseResult.degraded`` into the TeardownResult.
+    """
+    vault_lifecycle = getattr(runner, "_vault_lifecycle", None)
+    if vault_lifecycle is None:
+        return None
+
+    from almanak.framework.vault.capability import default_vault_protocol
+
+    vault_protocol = default_vault_protocol()
+    chain = getattr(strategy, "chain", "") or ""
+
+    async def _commit(*, action_type: str, bundle: Any, execution_result: Any, signer: str) -> None:  # noqa: ARG001
+        # Pair every successful release execute with the teardown commit pipeline
+        # (enrich -> ledger -> outbox+fire -> sidecar) under the teardown cycle id.
+        intent = _VaultReleaseIntent(
+            action_type=action_type,
+            protocol=vault_protocol,
+            chain=chain,
+            vault_address=(
+                getattr(_cfg, "vault_address", "") if (_cfg := getattr(vault_lifecycle, "_config", None)) else ""
+            ),
+        )
+        await runner.commit_teardown_intent(
+            strategy,
+            intent,
+            execution_result=execution_result,
+            execution_context=None,
+            bundle_metadata=getattr(bundle, "metadata", None),
+            teardown_cycle_id=teardown_cycle_id,
+        )
+
+    logger.info(
+        "🛑 %s vault-release: transitioning vault Open->Closing->Closed to free depositor capital",
+        strategy.deployment_id,
+    )
+    release_result = await vault_lifecycle.release_on_teardown(strategy, teardown_market, commit=_commit)
+
+    if release_result.skipped:
+        logger.info("🛑 %s vault-release skipped: %s", strategy.deployment_id, release_result.reason)
+    elif release_result.degraded:
+        logger.error(
+            "🛑 %s vault-release DEGRADED — depositors may be stranded: %s",
+            strategy.deployment_id,
+            release_result.reason,
+        )
+    elif release_result.released:
+        logger.info(
+            "🛑 %s vault-release complete: vault %s, final_nav=%d, manager_shares_redeemed=%d — "
+            "all depositor capital is now claimable",
+            strategy.deployment_id,
+            release_result.final_state,
+            release_result.final_nav,
+            release_result.manager_shares_redeemed,
+        )
+    return release_result
+
+
+async def _maybe_release_vault_after_teardown(
+    runner: Any,
+    strategy: StrategyProtocol,
+    teardown_market: Any | None,
+    teardown_cycle_id: str,
+    teardown_result: Any,
+    deployment_id: str,
+) -> None:
+    """Fold vault-release into the manager-lane result (VIB-5667).
+
+    No-op for a non-vault strategy (``_vault_lifecycle is None``) or when position
+    closure did not succeed (a failed unwind means the Safe may not hold the
+    underlying that ``close()``'s ``transferFrom`` requires — releasing then would
+    just revert). A degraded release is loud but never blocks — teardown's first
+    job (removing on-chain risk) is already done; it only flags accounting-degraded
+    so the operator knows depositors may still need a manual release. Never raises
+    into the teardown lane.
+
+    Releasing the vault is IRREVERSIBLE (Open->Closed is one-way). So it must NOT
+    run while an on-chain position may still be open (audit #1): if LP-orphan
+    discovery / pending-order recovery came back INCOMPLETE
+    (``runner._teardown_recovery_incomplete`` — the same signal that refuses to
+    certify a clean teardown just below the call site), a deployment-owned position
+    could still be live even though every executed intent succeeded. Closing the
+    vault then would lock depositors into a Closed vault around an un-unwound
+    position. Skip the release, flag degraded, and leave the vault Open — the
+    operator re-runs teardown once the orphan is resolved (which then releases).
+    """
+    if not teardown_result.success or getattr(runner, "_vault_lifecycle", None) is None:
+        return
+    if getattr(runner, "_teardown_recovery_incomplete", False):
+        logger.error(
+            "🛑 %s vault-release SKIPPED — teardown recovery incomplete (a deployment-owned LP orphan "
+            "or pending order may still be open); refusing the IRREVERSIBLE vault close until positions "
+            "are certified gone. Vault left OPEN; re-run teardown after the orphan is resolved to release "
+            "depositor capital.",
+            deployment_id,
+        )
+        teardown_result.accounting_degraded = True
+        teardown_result.accounting_degraded_count += 1
+        return
+    try:
+        release_result = await runner._execute_vault_release(
+            strategy, teardown_market, teardown_cycle_id=teardown_cycle_id
+        )
+        if release_result is not None and release_result.degraded:
+            teardown_result.accounting_degraded = True
+            teardown_result.accounting_degraded_count += 1
+    except Exception:  # noqa: BLE001 — release must never fault the teardown lane
+        logger.error(
+            "🛑 %s vault-release raised unexpectedly — teardown risk reduction already complete; "
+            "depositors may need manual release",
+            deployment_id,
+            exc_info=True,
+        )
+        teardown_result.accounting_degraded = True
+        teardown_result.accounting_degraded_count += 1
 
 
 # -------------------------------------------------------------------------
@@ -1947,6 +2127,26 @@ async def _execute_teardown_inline_body(  # noqa: C901
             logger.error(f"🛑 Teardown intent {i + 1} failed: {result.error}")
             break  # Stop on first chain-side failure
 
+    # VIB-5667 (audit #5): the inline fallback lane has NO vault-release path (only
+    # the TeardownManager lane calls ``_maybe_release_vault_after_teardown``). A
+    # vault strategy that reaches this lane has closed its positions but the vault
+    # is still OPEN — certifying a clean completion here would strand depositors
+    # (a deposit-only holder could never redeem with no manager running). Fail
+    # CLOSED: the operator restarts the runner and re-runs teardown, whose manager
+    # lane releases the vault (Class-B ``ax vault takeover`` is the future automated
+    # path, gated on VIB-5683+). Vault strategies normally never take this fallback;
+    # this guards the defensive case rather than silently mis-certifying.
+    if all_success and last_result is not None and getattr(runner, "_vault_lifecycle", None) is not None:
+        all_success = False
+        last_result.error = (
+            "vault strategy reached the inline teardown fallback, which cannot release the vault; "
+            "positions closed but the vault is still OPEN (depositors would be stranded). Restart the "
+            "runner and re-run teardown so the manager lane releases depositor capital."
+        )
+        logger.error(
+            "🛑 %s inline teardown cannot release vault — failing closed: %s", deployment_id, last_result.error
+        )
+
     if last_result:
         if all_success:
             last_result.status = IterationStatus.TEARDOWN
@@ -1971,7 +2171,33 @@ async def _execute_teardown_inline_body(  # noqa: C901
             runner._request_teardown_failure_shutdown(last_result.error or "inline teardown execution failed")
         return last_result, inline_degraded_count
 
-    # Edge case: no intents executed (all positions already closed)
+    # Edge case: no intents executed (all positions already closed).
+    # VIB-5667 (audit #3): a vault strategy reaching this no-intents branch on the
+    # inline lane STILL has an Open vault (this lane has no release path). Certifying
+    # a clean completion here would strand depositors just as the executed-intents
+    # case above would — ``last_result`` is None so the guard above was skipped, so
+    # fail closed here too rather than mark_completed + TERMINATED clean.
+    if getattr(runner, "_vault_lifecycle", None) is not None:
+        err = (
+            "vault strategy reached the inline teardown fallback with no executed intents; the vault "
+            "is still OPEN (depositors would be stranded). Restart the runner and re-run teardown so "
+            "the manager lane releases depositor capital."
+        )
+        logger.error("🛑 %s inline teardown (no intents) cannot release vault — failing closed: %s", deployment_id, err)
+        if request:
+            _safe_mark(state_manager, "mark_failed", deployment_id, error=err)
+        runner._request_teardown_failure_shutdown(err)
+        return (
+            IterationResult(
+                status=IterationStatus.EXECUTION_FAILED,
+                intent=None,
+                error=err,
+                deployment_id=deployment_id,
+                duration_ms=runner._calculate_duration_ms(start_time),
+            ),
+            inline_degraded_count,
+        )
+
     logger.info(f"🛑 {deployment_id} teardown: all positions already closed, shutting down")
     runner.request_shutdown()
     runner._lifecycle_write_state(deployment_id, "TERMINATED")

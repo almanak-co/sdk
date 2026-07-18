@@ -26,6 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 TEARDOWN_MANAGER = ROOT / "almanak" / "framework" / "teardown" / "teardown_manager.py"
 RUNNER_TEARDOWN = ROOT / "almanak" / "framework" / "runner" / "runner_teardown.py"
+VAULT_LIFECYCLE = ROOT / "almanak" / "framework" / "vault" / "lifecycle.py"
 TEARDOWN_COMMIT = ROOT / "almanak" / "framework" / "runner" / "teardown_commit.py"
 CLI_TEARDOWN = ROOT / "almanak" / "framework" / "cli" / "teardown.py"
 # PR #2093: execute_teardown was refactored from a 880-LOC click body
@@ -456,6 +457,97 @@ def test_vib5011_run_token_consolidation_routes_through_execute_intents():
         f"run_token_consolidation accesses `orchestrator` directly at lines "
         f"{orchestrator_accesses} — execution must go through _execute_intents "
         "only (VIB-5011 anti-bypass)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# VIB-5667 — vault-release execute sites are paired with commit_teardown_intent
+# ---------------------------------------------------------------------------
+
+
+def test_vib5667_release_leg_pairs_execute_with_commit():
+    """The vault-release lane (``lifecycle.py``) must route EVERY
+    ``self._execution_orchestrator.execute`` through a helper that also calls
+    ``commit`` in the same function. Without the pairing, a teardown vault-release
+    would transition the vault on-chain (Open->Closing->Closed) while writing zero
+    rows to transaction_ledger / accounting_events — the exact silent-failure class
+    VIB-3773 closed for the runner-loop lane, re-introduced on a new execute site.
+
+    Static AST guard, two parts:
+
+    1. The single release execute site ``_execute_release_leg`` references BOTH
+       ``self._execution_orchestrator.execute`` AND a ``commit(...)`` call.
+    2. No other release-lane function (``release_on_teardown`` / ``_release_*``)
+       calls ``self._execution_orchestrator.execute`` directly — every release
+       execution MUST funnel through ``_execute_release_leg`` so the pairing can
+       never be bypassed by adding a new leg. (The settlement lane's own
+       ``_execute_*`` methods are out of scope — they belong to the iteration
+       lane, which has snapshot-based accounting, not the teardown commit path.)
+    """
+    src = VAULT_LIFECYCLE.read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=str(VAULT_LIFECYCLE))
+
+    def _calls_orchestrator_execute(node: ast.AST) -> bool:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Attribute) and sub.attr == "execute":
+                val = sub.value
+                if isinstance(val, ast.Attribute) and val.attr == "_execution_orchestrator":
+                    return True
+        return False
+
+    def _references_commit(node: ast.AST) -> bool:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == "commit":
+                return True
+        return False
+
+    def _is_release_lane(name: str) -> bool:
+        return name == "release_on_teardown" or name.startswith("_release_")
+
+    leg = _find_function(tree, "_execute_release_leg")
+    assert _calls_orchestrator_execute(leg), (
+        "_execute_release_leg no longer calls self._execution_orchestrator.execute — "
+        "did the vault-release execute site move? Update this guard (VIB-5667)."
+    )
+    assert _references_commit(leg), (
+        "VIB-5667 anti-bypass: _execute_release_leg calls orchestrator.execute WITHOUT a "
+        "paired commit(...) — every successful release leg must drive the teardown commit "
+        "pipeline (ledger / accounting_events / outbox / sidecar). See CLAUDE.md §Teardown."
+    )
+
+    direct_offenders = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+        and _is_release_lane(node.name)
+        and _calls_orchestrator_execute(node)
+    ]
+    assert not direct_offenders, (
+        f"VIB-5667 anti-bypass: release-lane functions {direct_offenders} call "
+        "self._execution_orchestrator.execute directly instead of routing through "
+        "_execute_release_leg — a bare execute bypasses the commit pairing. Route every "
+        "release execution through _execute_release_leg (VIB-5667)."
+    )
+
+
+def test_vib5667_execute_vault_release_threads_commit_into_release():
+    """``execute_vault_release`` (runner_teardown.py) must pass a ``commit=`` kwarg
+    into ``release_on_teardown`` so the release legs are commit-paired. Without it
+    the lifecycle manager executes bundles with no accounting binding."""
+    src = RUNNER_TEARDOWN.read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=str(RUNNER_TEARDOWN))
+    fn = _find_function(tree, "execute_vault_release")
+
+    threads_commit = False
+    for sub in ast.walk(fn):
+        if isinstance(sub, ast.Call):
+            f = sub.func
+            is_release_call = isinstance(f, ast.Attribute) and f.attr == "release_on_teardown"
+            if is_release_call and any(kw.arg == "commit" for kw in sub.keywords):
+                threads_commit = True
+    assert threads_commit, (
+        "execute_vault_release does not pass commit= into release_on_teardown — the "
+        "vault-release legs would execute without driving commit_teardown_intent (VIB-5667)."
     )
 
 

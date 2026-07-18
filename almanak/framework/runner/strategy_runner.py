@@ -11281,6 +11281,11 @@ class StrategyRunner:
             self, strategy, teardown_intents, teardown_market, start_time, request, state_manager
         )
 
+    async def _execute_vault_release(self, strategy, teardown_market, *, teardown_cycle_id):
+        from .runner_teardown import execute_vault_release
+
+        return await execute_vault_release(self, strategy, teardown_market, teardown_cycle_id=teardown_cycle_id)
+
     def _build_teardown_compiler(self, strategy, market):
         from .runner_teardown import build_teardown_compiler
 
