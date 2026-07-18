@@ -7,7 +7,7 @@ authority: no connector under ``ProtocolKind.VAULT`` (``beefy``, ``lagoon``,
 was structurally pinned at ``UNVERIFIED`` — a partial / incomplete redeem was
 reported as a (degraded-confidence) success and a residual was invisible. This is
 the exact gap that stranded a MetaMorpho position in the 20260630 overnight batch
-(``docs/internal/fund-recovery-investigation-20260701.md`` §Position 1).
+(``docs/internal/archive/reports/fund-recovery-investigation-20260701.md`` §Position 1).
 
 This is a **framework default keyed on the VAULT kind** (registered in
 ``almanak.framework.teardown.post_conditions``), the vault analogue of the
