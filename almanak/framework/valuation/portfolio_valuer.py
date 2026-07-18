@@ -21,7 +21,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
@@ -130,6 +130,43 @@ def _chain_key(chain: str | None) -> str | None:
     identical to the inline ``chain or None`` but keeps the caller's cc flat.
     """
     return chain or None
+
+
+def _finite_positive_decimal(raw: object, *, allow_zero: bool = False) -> Decimal | None:
+    """Coerce ``raw`` to a FINITE, non-negative ``Decimal`` or ``None``.
+
+    Guards a valuation input against the ways a "number" can poison a mark:
+    unparsable text, a non-finite ``Decimal`` (``NaN`` / ``Infinity`` — which
+    raise ``InvalidOperation`` on an ordering comparison, so the finiteness check
+    MUST precede any ``<`` / ``==`` compare), and a non-positive value. A rejected
+    input returns ``None`` so the caller can treat it as *unmeasured* (Empty ≠
+    Zero) rather than crashing the snapshot or booking a fabricated number.
+
+    ``allow_zero`` distinguishes the two legitimate readings of ``0``:
+    ``False`` (default) rejects it — a zero price / zero cached amount is
+    "no signal"; ``True`` accepts a *measured* zero — a live wallet balance of
+    ``0`` (the holding was emptied) and the ``amount × price`` product of such a
+    holding are genuine measured zeros, not "unmeasured".
+    """
+    if raw is None:
+        return None
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    # Short-circuit: ``not is_finite()`` catches NaN/Inf BEFORE the ordering
+    # comparison, which would itself raise ``InvalidOperation`` on a NaN.
+    if not value.is_finite():
+        return None
+    if value < 0 or (value == 0 and not allow_zero):
+        return None
+    return value
+
+
+# VIB-5890: the carry strategy tags its borrowed-and-held (swapped) inventory
+# TOKEN position with this ``details["origin"]`` marker. The spot-TOKEN repricer
+# is scoped to EXACTLY this shape (see ``_reprice_token_holding_enriched``).
+_SWAPPED_FROM_BORROW_ORIGIN = "swapped_from_borrow"
 
 
 def _looks_like_evm_address(value: object) -> bool:
@@ -1727,8 +1764,21 @@ class PortfolioValuer:
                 stable_depeg=bool(stable_depeg),
             )
 
-            # Step 6: Build audit-safe token price map (chain:address keyed)
-            token_price_records = self._build_token_price_records(chain, prices, tracked_tokens)
+            # Step 6: Build audit-safe token price map (chain:address keyed).
+            # VIB-5890: include any spot-priced TOKEN holding's asset (its mark was
+            # recorded into ``prices`` in ``_get_positions``) so a repriced row in
+            # positions_json always has a matching token_prices_json entry, even
+            # when the asset is not in the strategy's tracked-token set (the carry's
+            # held USDT is not tracked). ``_build_token_price_records`` iterates the
+            # token list, so the asset must be added here, not only to ``prices``.
+            spot_priced_assets = [
+                p.details["asset"]
+                for p in positions
+                if p.details.get("valuation_source") == "spot_amount_price"
+                and isinstance(p.details.get("asset"), str)
+                and p.details["asset"]
+            ]
+            token_price_records = self._build_token_price_records(chain, prices, [*tracked_tokens, *spot_priced_assets])
 
             # VIB-4909: ``PositionType.TOKEN`` is sometimes a wallet
             # pseudo-position (SWAP-class strategies surface a tracked wallet
@@ -2909,6 +2959,18 @@ class PortfolioValuer:
             # Merge enriched valuer details into position details
             merged_details = {**p.details, **enriched_details}
 
+            # VIB-5890: record the mark a spot TOKEN holding was priced at into the
+            # shared ``prices`` map so ``_build_token_price_records`` emits a
+            # matching ``token_prices_json`` entry — otherwise a repriced TOKEN row
+            # persists in ``positions_json`` with no auditable price. Keyed by the
+            # asset symbol (the map's convention); ``setdefault`` never clobbers a
+            # wallet-valuation price already recorded for the same symbol.
+            if enriched_details.get("valuation_source") == "spot_amount_price":
+                spot_price = _finite_positive_decimal(enriched_details.get("spot_price_usd"))
+                spot_asset = merged_details.get("asset")
+                if spot_price is not None and isinstance(spot_asset, str) and spot_asset:
+                    prices.setdefault(spot_asset, spot_price)
+
             pos = PositionValue(
                 position_type=p.position_type,
                 protocol=p.protocol,
@@ -3421,7 +3483,181 @@ class PortfolioValuer:
                 return result[0], result[1], True
             return position.value_usd, {}, True
 
+        if position.position_type == PositionType.TOKEN:
+            token_holding = self._reprice_token_holding_enriched(position, chain, market)
+            if token_holding is not None:
+                return token_holding
+            # Not a priceable held-token shape (no amount+asset, or it already
+            # carries a measured value) — keep the strategy-reported value.
+            return position.value_usd, {}, True
+
         return position.value_usd, {}, True
+
+    def _reprice_token_holding_enriched(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any], bool] | None:
+        """Price the carry's borrowed-and-held spot ``TOKEN`` inventory.
+
+        VIB-5890: the carry strategy reports its swapped-and-held ERC20 as a
+        ``PositionType.TOKEN`` position carrying ``details["amount"]`` +
+        ``details["asset"]`` and tagged ``origin == "swapped_from_borrow"``, but
+        leaves ``value_usd`` unmeasured (``0``). Unlike LP / lending / perp / vault
+        positions a bare spot holding has no protocol repricer, so it previously
+        fell through to the verbatim strategy value (``$0``). The debt-netted NAV
+        read path (:mod:`almanak.framework.valuation.net_debt`;
+        ``NAV = total_value_usd − debt_mark``) then subtracted the borrow leg
+        WITHOUT the offsetting held inventory, producing a phantom NAV cliff and
+        an inflated drawdown on an economically flat position.
+
+        Price it here with the canonical spot rule (blueprint 27 §7.4,
+        ``balance × price``) so the held inventory enters ``total_value_usd`` and
+        nets the debt correctly. NAV stays consistent by construction: the same
+        priced ``value_usd`` feeds both the positive ``total_value_usd`` sum and
+        the ``positions_json`` the read-path ``debt_mark`` is computed from.
+
+        **Scope (narrow by design — codex review #1):** gated on the exact
+        ``origin == "swapped_from_borrow"`` marker. A spot strategy's
+        intentionally-``$0`` TOKEN, an intermittent-``$0`` open LP (VIB-4970), and
+        a swap-inventory row (VIB-5057) are OTHER tickets' scope and MUST NOT be
+        repriced here.
+
+        Amount source: the LIVE on-chain wallet balance is preferred over the
+        strategy's cached ``details["amount"]``, so the mark self-corrects for
+        drift between the cached figure (the carry's ``_swapped_amount``, which
+        entry slippage / rebasing can stale — its own teardown deliberately sweeps
+        ``amount="all"`` for the same reason) and the real holding. A *measured*
+        live zero (the holding was emptied) is authoritative and is NOT overridden
+        by a stale cached amount (codex #2). The cached amount is the fallback only
+        when the live read is unavailable / corrupt. (The deeper structural fix is
+        tracking the held token into ``wallet_balances`` — the VIB-5057 family — so
+        this row derives from the same measured balance set as wallet cash.)
+
+        Returns ``None`` when the position is NOT this shape (already measured, or
+        not ``origin == swapped_from_borrow``) so the caller keeps the verbatim
+        value. Once the shape matches, an inability to measure the holding (no
+        asset, no usable amount, unavailable/non-finite/non-positive price, or a
+        non-finite ``amount × price`` product) returns an UNMEASURED marker
+        (``repriced=False`` → the snapshot drops to UNAVAILABLE), NEVER a verbatim
+        measured ``$0`` or a ``NaN`` mark (Empty ≠ Zero, codex #3/#4).
+        """
+        # Only FILL an unmeasured holding — never override a strategy that already
+        # priced its TOKEN row.
+        if position.value_usd != 0:
+            return None
+        details = getattr(position, "details", None) or {}
+        # Scope gate (codex #1): EXACTLY the carry's swapped-from-borrow inventory.
+        if details.get("origin") != _SWAPPED_FROM_BORROW_ORIGIN:
+            return None
+
+        # From here the position IS declared held inventory, so an inability to
+        # measure it is UNMEASURED (repriced=False → UNAVAILABLE), never a verbatim
+        # measured $0 (Empty ≠ Zero). Return the unmeasured marker, not ``None``.
+        asset = details.get("asset")
+        if not isinstance(asset, str) or not asset:
+            return Decimal("0"), {}, False
+
+        resolved = self._resolve_held_token_amount(asset, chain, market, details)
+        if resolved is None:
+            return Decimal("0"), {}, False
+        amount, amount_source = resolved
+
+        price = self._safe_spot_price(asset, chain, market)
+        if price is None:
+            return Decimal("0"), {}, False
+
+        value_usd = self._safe_spot_product(amount, price)
+        if value_usd is None:
+            # Extreme-exponent overflow/underflow of the mark — degrade to
+            # UNAVAILABLE rather than aborting the snapshot or booking a NaN/$0.
+            return Decimal("0"), {}, False
+        return (
+            value_usd,
+            {
+                "valuation_source": "spot_amount_price",
+                "spot_price_usd": str(price),
+                "spot_amount": str(amount),
+                "spot_amount_source": amount_source,
+            },
+            True,
+        )
+
+    def _resolve_held_token_amount(
+        self,
+        asset: str,
+        chain: str,
+        market: MarketDataSource,
+        details: dict[str, Any],
+    ) -> tuple[Decimal, str] | None:
+        """Resolve the held-token quantity, preferring the LIVE wallet balance.
+
+        Returns ``(amount, source)`` with ``source`` in
+        ``{"live_balance", "cached_amount"}``, or ``None`` when neither yields a
+        usable quantity.
+
+        A SUCCESSFUL live read is authoritative — INCLUDING a *measured zero* (the
+        wallet was emptied, e.g. after the position closed): a measured-live-zero
+        holding is genuinely worth ``$0``, so it MUST NOT fall back to a stale
+        positive cached amount that no longer exists on-chain (codex #2). The
+        cached amount is the fallback ONLY when the live read fails (exception) or
+        returns a corrupt value (``None`` / ``NaN`` / ``Inf`` / negative) — i.e. we
+        have no live measurement at all.
+        """
+        live_read_ok = True
+        try:
+            raw = market.balance(asset, chain=_chain_key(chain))
+            raw = raw.balance if hasattr(raw, "balance") else raw
+        except Exception as e:  # noqa: BLE001 — typed fallback (Empty ≠ Zero)
+            logger.debug("spot TOKEN holding live-balance fetch failed for %s: %s", asset, e)
+            raw = None
+            live_read_ok = False
+        if live_read_ok:
+            # A measured, finite, NON-NEGATIVE live balance is authoritative — a
+            # measured zero included. Do NOT fall back to a stale cached amount.
+            live = _finite_positive_decimal(raw, allow_zero=True)
+            if live is not None:
+                return live, "live_balance"
+            # ``raw`` was None / NaN / Inf / negative — a corrupt read, not a
+            # measurement; fall through to the cached amount.
+        cached = _finite_positive_decimal(details.get("amount"))
+        if cached is not None:
+            return cached, "cached_amount"
+        return None
+
+    @staticmethod
+    def _safe_spot_price(asset: str, chain: str, market: MarketDataSource) -> Decimal | None:
+        """Fetch a FINITE, strictly-positive USD price for ``asset`` or ``None``.
+
+        A missing, non-finite (``NaN`` / ``Inf``), zero, or negative oracle price
+        is unmeasured — never coerced to a fabricated mark.
+        """
+        try:
+            raw = market.price(asset, chain=_chain_key(chain))
+        except Exception as e:  # noqa: BLE001 — typed status path (Empty ≠ Zero)
+            logger.debug("spot TOKEN holding price fetch failed for %s: %s", asset, e)
+            return None
+        return _finite_positive_decimal(raw)
+
+    @staticmethod
+    def _safe_spot_product(amount: Decimal, price: Decimal) -> Decimal | None:
+        """``amount × price`` guarded against Decimal overflow/underflow (codex #4).
+
+        Both operands are already finite (``amount`` non-negative, ``price``
+        positive), but an extreme-exponent product can still raise (the default
+        Decimal context traps ``Overflow``) or, with traps disabled, yield a
+        non-finite ``Decimal``. Returns the finite, non-negative product (a
+        measured ZERO — from a measured-zero holding — is a valid result) or
+        ``None`` so the caller degrades to UNAVAILABLE rather than aborting the
+        snapshot or persisting a ``NaN`` / ``Inf`` mark.
+        """
+        try:
+            product = amount * price
+        except DecimalException as e:
+            logger.debug("spot TOKEN holding product overflow (%s × %s): %s", amount, price, e)
+            return None
+        return _finite_positive_decimal(product, allow_zero=True)
 
     def _reprice_principal_token_shape(
         self,
