@@ -611,6 +611,63 @@ def list_available_strategies() -> list[str]:
     return list_strategies()
 
 
+#: Sub-hourly candles exist on the price source only near real time
+#: (CoinGecko serves 5-minutely data for roughly the trailing day; any
+#: earlier window comes back hourly regardless of its length — verified
+#: empirically: a 1-day window ending yesterday measured 3604s resolution).
+_SUB_HOURLY_MAX_WINDOW_SECONDS = 86_400
+_SUB_HOURLY_MAX_END_AGE_SECONDS = 6 * 3_600
+_DEFAULT_INTERVAL_SECONDS = 3_600
+_MIN_INTERVAL_SECONDS = 300
+
+
+def _derive_interval_seconds(
+    strategy_timeframe: Any,
+    window_seconds: float,
+    *,
+    quick: bool,
+    end_age_seconds: float = 0.0,
+) -> int:
+    """Tick interval derived from the strategy's declared timeframe.
+
+    The strategy author writes ``timeframe: "15m"`` and nothing else — the
+    tick choice is the system's, so the system must follow the declaration
+    where the data source honestly can, and say so in one sentence when it
+    cannot (instead of refusing the author's timeframe tick-by-tick over a
+    grid it never chose).
+    """
+    if quick:
+        return 86_400
+    if not strategy_timeframe:
+        return _DEFAULT_INTERVAL_SECONDS
+    from almanak.framework.backtesting.pnl.indicator_engine import _timeframe_seconds
+
+    try:
+        declared = int(_timeframe_seconds(str(strategy_timeframe)))
+    except ValueError:
+        logger.warning("Unrecognized strategy timeframe %r; ticking hourly", strategy_timeframe)
+        return _DEFAULT_INTERVAL_SECONDS
+    if declared >= _DEFAULT_INTERVAL_SECONDS:
+        # Coarser-than-hourly candles derive cleanly from hourly ticks;
+        # keeping the finer grid preserves fill timing.
+        return _DEFAULT_INTERVAL_SECONDS
+    if (
+        window_seconds <= _SUB_HOURLY_MAX_WINDOW_SECONDS
+        and end_age_seconds <= _SUB_HOURLY_MAX_END_AGE_SECONDS
+        and declared >= _MIN_INTERVAL_SECONDS
+    ):
+        return declared
+    logger.warning(
+        "Strategy timeframe %s is finer than the price source serves for this window "
+        "(sub-hourly data exists only for the trailing ~day): ticking hourly, and %s candle "
+        "reads will refuse. Run a <=1-day window ending near now for sub-hourly candles, or "
+        "use a 1h+ timeframe.",
+        strategy_timeframe,
+        strategy_timeframe,
+    )
+    return _DEFAULT_INTERVAL_SECONDS
+
+
 def build_backtest_config(
     spec: StrategySpec | None,
     timeframe: TimeframeSpec,
@@ -654,8 +711,22 @@ def build_backtest_config(
         resolved_tokens = normalize_backtest_token_refs(raw_tokens, resolved_chain)
         fee_model = "realistic"
 
-    # Quick mode: shorter interval, simplified
-    interval = 3600 if not quick else 86400  # 1h vs 1d
+    strategy_timeframe = spec.parameters.get("timeframe") if spec is not None else None
+    now = datetime.now(UTC)
+    # Date-only request models normalize `end` to midnight UTC. When the end
+    # DATE is today, the user means "up to now": the WHOLE config (end_time,
+    # window, recency) moves to now coherently — deriving sub-hourly ticks
+    # while the engine still stopped at midnight would re-create the exact
+    # staleness the clamp guards against. Historical end dates keep their
+    # midnight bound unchanged.
+    if end == end.replace(hour=0, minute=0, second=0, microsecond=0) and end <= now < end + timedelta(days=1):
+        end = now
+    interval = _derive_interval_seconds(
+        strategy_timeframe,
+        (end - start).total_seconds(),
+        quick=quick,
+        end_age_seconds=max(0.0, (now - min(now, end)).total_seconds()),
+    )
 
     return PnLBacktestConfig(
         start_time=start,

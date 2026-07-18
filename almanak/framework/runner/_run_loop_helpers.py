@@ -617,6 +617,34 @@ async def initialize_run_loop(  # noqa: C901
             # boot" rather than bricking an otherwise-healthy strategy.
             logger.warning("Boot strand detection skipped (unexpected error): %s", e)
 
+    # VIB-5887 — boot-time resume-into-terminal-state guard. deployment_id is a
+    # deterministic sha256(wallet:chain), so a redeploy onto the same wallet+chain
+    # RESUMES the prior run's persisted strategy_state (restored above, before
+    # run_loop). If that state was terminal (lifecycle complete / position fully
+    # unwound) and the wallet now holds fresh idle capital, decide() HOLDs forever
+    # and silently no-ops the run. Emit a loud, un-missable RESUMED-TERMINAL signal
+    # (WARNING + structured sentinel naming the idle capital). Warn-only: no halt,
+    # no auto-reinitialize (see resume_terminal_guard docstring). Runs after the
+    # gateway client is wired (needed for the balance read) and before the first
+    # iteration. Never raises.
+    if gateway_client is not None:
+        try:
+            from .resume_terminal_guard import warn_on_resume_into_terminal
+
+            # Resume signal: a prior run persisted state for this deployment. Uses the
+            # canonical StateManager read (backend-agnostic — local SQLite or the
+            # hosted gateway-proxied store), mirroring the CLI's _detect_state_resume.
+            is_resume = False
+            if state_manager_ready:
+                try:
+                    is_resume = await runner.state_manager.load_state(deployment_id) is not None
+                except Exception:  # noqa: BLE001 - resume-signal read is best-effort
+                    logger.debug("resume-signal state read failed; treating as fresh", exc_info=True)
+
+            warn_on_resume_into_terminal(runner, strategy, deployment_id, is_resume=is_resume)
+        except Exception as e:  # noqa: BLE001 - a boot advisory must never crash boot
+            logger.warning("Resume-into-terminal guard skipped (unexpected error): %s", e)
+
     # Register this strategy instance with the gateway
     runner._register_with_gateway(strategy)
 

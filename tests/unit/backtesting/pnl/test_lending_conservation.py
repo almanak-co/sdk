@@ -44,6 +44,7 @@ equity). The fixed semantics (engine ``_resolve_repay_close``):
 Companion to ``test_perp_conservation.py`` (collateral lane) and
 ``test_portfolio_conservation.py`` (token-flow lanes).
 """
+
 from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from datetime import UTC, datetime, timedelta
@@ -56,8 +57,6 @@ from almanak.framework.backtesting.adapters.lending_adapter import LendingBackte
 from almanak.framework.backtesting.models import EquityPoint, IntentType
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
-
-
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktestConfig,
@@ -89,8 +88,11 @@ TS = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
 INITIAL_CASH = Decimal("10000")
 SUPPLY_AMOUNT = Decimal("5000")
 BORROW_AMOUNT = Decimal("2000")
-#: The engine's default borrow APY (_borrow_delta) for intents without one.
-BORROW_APY = Decimal("0.08")
+from almanak.framework.backtesting.pnl.calculators import InterestCalculator
+
+#: Connector-declared defaults — the same table the engine stamps at entry.
+SUPPLY_APY = InterestCalculator().get_supply_apy_for_protocol("aave_v3")
+BORROW_APY = InterestCalculator().get_borrow_apy_for_protocol("aave_v3")
 
 
 def market(usdc: Decimal = Decimal("1")) -> MarketState:
@@ -111,7 +113,7 @@ def supply_position(
     position = SimulatedPosition.supply(
         token=token,
         amount=amount,
-        apy=Decimal("0.05"),
+        apy=SUPPLY_APY,
         entry_price=Decimal("1"),
         entry_time=entry_time,
         protocol=protocol,
@@ -178,7 +180,7 @@ def _config() -> PnLBacktestConfig:
     )
 
 
-def _exact_interest(principal: Decimal, hours: int, apy: Decimal = Decimal("0.05")) -> Decimal:
+def _exact_interest(principal: Decimal, hours: int, apy: Decimal = SUPPLY_APY) -> Decimal:
     """The exact interest both accrual lanes produce for the interval.
 
     Mirrors ``_mark_lending_position`` / ``LendingBacktestAdapter
@@ -364,9 +366,7 @@ class TestEngineWithdrawClose:
         portfolio.positions[0].interest_accrued = interest
 
         # Covers all $5,000 principal + $10 of the $25 earned interest.
-        await backtester._execute_intent(
-            withdraw_intent(SUPPLY_AMOUNT + Decimal("10")), portfolio, state, TS, config
-        )
+        await backtester._execute_intent(withdraw_intent(SUPPLY_AMOUNT + Decimal("10")), portfolio, state, TS, config)
 
         assert len(portfolio.positions) == 1
         position = portfolio.positions[0]
@@ -769,7 +769,9 @@ class TestAccrueBeforeReduce:
         assert spot.last_updated is None
         assert spot.amounts["USDC"] == SUPPLY_AMOUNT
 
-    def test_adapter_accrual_failure_is_swallowed_without_state_mutation(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_adapter_accrual_failure_is_swallowed_without_state_mutation(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """A failed pre-reduce accrual does not half-commit the position."""
 
         class FailingAdapter:
@@ -827,7 +829,8 @@ class TestEngineLoopBothLanes:
         drift = result.final_capital_usd - INITIAL_CAPITAL
         # The only equity source is interest accrued while the supply was
         # open (a few cents over a few hours); it is realized on close.
-        assert drift == result.trades[-1].pnl_usd
+        # Dust bound absorbs 28-digit context rounding in equity accumulation.
+        assert abs(drift - result.trades[-1].pnl_usd) < Decimal("1e-18")
         assert Decimal("0") < drift < Decimal("1")
 
     @pytest.mark.parametrize("strategy_type", [None, "lending"])
@@ -1624,9 +1627,7 @@ class TestAdapterLaneHealthFactor:
     a $2,000 borrow (true HF = 5000 * 0.825 / 2000 = 2.0625).
     """
 
-    def test_no_false_critical_hf_warning_with_ample_collateral(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_no_false_critical_hf_warning_with_ample_collateral(self, caplog: pytest.LogCaptureFixture) -> None:
         backtester = _backtester()
         backtester._adapter = LendingBacktestAdapter()
         portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)

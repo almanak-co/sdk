@@ -131,12 +131,15 @@ class TestSnapshotIntegration:
         failures = getattr(snapshot, "_critical_data_failures", {})
         assert any(source == "ohlcv" for (source, _key) in failures), failures
 
-    def test_pool_scoped_reads_still_refuse_loudly(self):
+    def test_unknown_pool_scoped_reads_still_refuse_loudly(self):
+        # A pool the registry cannot resolve to a pair keeps the recorded
+        # refusal; only registry-known pools get the pair proxy.
         view = _view(_engine_with_series("WETH", [1.0] * 20))
         snapshot = self._snapshot(view)
 
-        with pytest.raises(ValueError, match="pool_address requires an OHLCV router"):
+        with pytest.raises(ValueError, match="not a registry-known pool"):
             snapshot.ohlcv("WETH", pool_address="0x" + "d" * 40)
+        assert snapshot._critical_data_failures
 
 
 class TestReviewRound:
@@ -171,3 +174,88 @@ class TestReviewRound:
         view = _view(_engine_with_series("WETH", [1.0] * 100))
         df = view.get_ohlcv("WETH", timeframe="1h", limit=50)
         assert df.attrs["capacity_truncated"] is False
+
+
+class TestPoolPairProxy:
+    """Pool-scoped requests served as the pool pair's price series, labeled."""
+
+    BASE_WETH_USDC_POOL = "0xd0b53D9277642d899DF5C87A3966A349A798F224"
+
+    def test_known_pool_serves_pair_proxy_with_provenance(self):
+        engine = _engine_with_series("WETH", [3000.0 + i for i in range(30)])
+        view = _view(engine)
+
+        df = view.get_pool_ohlcv(self.BASE_WETH_USDC_POOL, chain="base", timeframe="1h", limit=10)
+
+        assert len(df) == 10
+        assert df.attrs["source"].endswith(":pool_pair_proxy")
+        assert df.attrs["pool_address"] == self.BASE_WETH_USDC_POOL
+        assert df.attrs["base"] == "WETH"
+        assert df.attrs["quote"] == "USD"  # USDC leg is cash-equivalent
+
+    ETH_USDC_WETH_POOL = "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"  # registry key order (USDC, WETH)
+
+    def test_requested_orientation_wins_over_registry_key_order(self):
+        engine = _engine_with_series("WETH", [3000.0 + i for i in range(30)])
+        view = _view(engine)
+
+        df = view.get_pool_ohlcv(
+            self.ETH_USDC_WETH_POOL, chain="ethereum", timeframe="1h", limit=10, requested_symbol="WETH/USDC"
+        )
+
+        assert df.attrs["base"] == "WETH"  # requested orientation, not the registry's USDC-first key
+        assert float(df["close"].iloc[-1]) > 1  # ~3000, never the inverted ~1/3000
+
+    def test_single_token_request_orients_to_that_base(self):
+        engine = _engine_with_series("WETH", [3000.0 + i for i in range(30)])
+        view = _view(engine)
+
+        df = view.get_pool_ohlcv(
+            self.ETH_USDC_WETH_POOL, chain="ethereum", timeframe="1h", limit=10, requested_symbol="WETH"
+        )
+
+        assert df.attrs["base"] == "WETH"
+
+    def test_mismatched_pair_pin_refuses(self):
+        view = _view(_engine_with_series("WETH", [3000.0] * 10))
+        with pytest.raises(ValueError, match="check the pool pin"):
+            view.get_pool_ohlcv(
+                self.ETH_USDC_WETH_POOL, chain="ethereum", timeframe="1h", requested_symbol="WBTC/USDC"
+            )
+
+    def test_unknown_pool_still_refuses(self):
+        view = _view(_engine_with_series("WETH", [3000.0] * 10))
+        with pytest.raises(ValueError, match="not a registry-known pool"):
+            view.get_pool_ohlcv("0x" + "9" * 40, chain="base")
+
+    def test_snapshot_pool_scoped_call_serves_via_capability(self):
+        engine = _engine_with_series("WETH", [3000.0 + i for i in range(30)])
+        view = _view(engine)
+        snapshot = TestSnapshotIntegration()._snapshot(view)
+
+        df = snapshot.ohlcv("WETH", timeframe="1h", limit=5, pool_address=self.BASE_WETH_USDC_POOL)
+
+        assert len(df) == 5
+        assert df.attrs["source"].endswith(":pool_pair_proxy")
+        # Served, not a decision-input failure.
+        assert not snapshot._critical_data_failures
+
+
+class TestPairRatioCandles:
+    def test_non_stable_quote_serves_ratio(self):
+        engine = _engine_with_series("WETH", [3000.0] * 20)
+        for value in [0.05] * 20:
+            engine.append_price("CBBTC", Decimal(str(value)))
+        view = _view(engine)
+
+        df = view.get_ohlcv("WETH/CBBTC", timeframe="1h", limit=5)
+
+        assert df.attrs["quote"] == "CBBTC"
+        assert df.attrs["source"].endswith(":pair_ratio")
+        assert all(abs(c - 3000.0 / 0.05) < 1e-6 for c in df["close"])
+
+    def test_stable_quote_keeps_usd_series(self):
+        view = _view(_engine_with_series("WETH", [3000.0] * 20))
+        df = view.get_ohlcv("WETH/USDC", timeframe="1h", limit=5)
+        assert df.attrs["quote"] == "USD"
+        assert all(c == 3000.0 for c in df["close"])

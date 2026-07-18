@@ -490,6 +490,39 @@ def _detect_state_resume(state_db_path: Path, deployment_id: str) -> ResumeInfo:
         return ResumeInfo(is_resume=False, version=None, state_keys=[])
 
 
+def _echo_resume_banner(strategy_instance: Any) -> None:
+    """Echo the state-restore banner, distinguishing RESUMED vs RESUMED-TERMINAL.
+
+    Called after ``load_state_async()`` returned True (persisted state restored).
+    A normal mid-lifecycle resume is benign (crash-recovery rehydration). A resume
+    into a **terminal** lifecycle state — reported by the strategy's optional
+    ``is_lifecycle_complete()`` hook (VIB-5887) — means ``decide()`` will HOLD for
+    the run; combined with fresh wallet capital that is the silent-no-op class the
+    runner-side ``resume_terminal_guard`` warns on (with the balance number). Here
+    we only surface the distinction on stdout for the local operator; the
+    substantive, balance-aware warning + structured sentinel lives in the runner.
+
+    The literal ``"Strategy state restored from persistence"`` is preserved in both
+    branches (operator log filters + tests key on it).
+    """
+    terminal = False
+    hook = getattr(strategy_instance, "is_lifecycle_complete", None)
+    if callable(hook):
+        try:
+            terminal = bool(hook())
+        except Exception:  # noqa: BLE001 - a strategy-owned hook must never fault boot
+            terminal = False
+    if terminal:
+        click.secho(
+            "  Strategy state restored from persistence — RESUMED-TERMINAL "
+            "(prior lifecycle COMPLETE; will HOLD unless state is reset — see VIB-5887 warning)",
+            fg="red",
+            bold=True,
+        )
+    else:
+        click.secho("  Strategy state restored from persistence (RESUMED)", fg="yellow")
+
+
 # Strategy DECISION state + derived aggregates + pending signals. Safe to wipe
 # on every ``--fresh`` (Anvil AND real networks): these carry no record of real
 # executed on-chain activity, so resetting them just makes the strategy

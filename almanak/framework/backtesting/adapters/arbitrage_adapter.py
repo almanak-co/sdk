@@ -779,6 +779,16 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
         from almanak.framework.backtesting.models import IntentType
         from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
 
+        # Record exactly what the hop model charged: slippage applies to the
+        # full notional (hops take slippage first), fees apply to the
+        # post-slippage amount — so the fee is the exact residual and
+        # amount == out_value + fee + slippage holds to the digit. The old
+        # ``amount * total_fees_pct`` recording overstated fees by the
+        # fee x slippage cross-term (and by fee-fee compounding on multi-hop).
+        slippage_usd = amount_usd * execution_result.total_slippage_pct
+        out_value_usd = actual_amount_out * price_out
+        fee_usd = max(amount_usd - out_value_usd - slippage_usd, Decimal("0"))
+
         return SimulatedFill(
             timestamp=market_state.timestamp,
             intent_type=IntentType.SWAP,
@@ -786,8 +796,8 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
             tokens=[token_in, token_out],
             executed_price=price_out,
             amount_usd=amount_usd,
-            fee_usd=amount_usd * execution_result.total_fees_pct,
-            slippage_usd=amount_usd * execution_result.total_slippage_pct,
+            fee_usd=fee_usd,
+            slippage_usd=slippage_usd,
             gas_cost_usd=Decimal("0"),  # Engine stamps chain-aware gas (PnLBacktester._execute_intent)
             tokens_in={token_out: actual_amount_out},  # Tokens received from the pool
             tokens_out={token_in: amount_in_tokens},  # Tokens sent to the pool

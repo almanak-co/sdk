@@ -658,6 +658,18 @@ class BenqiLoopingStrategy(IntentStrategy):
             "pending_withdraw_avax": str(self._pending_withdraw_avax),
         }
 
+    def is_lifecycle_complete(self) -> bool:
+        """Terminal when the leverage loop has been fully unwound.
+
+        Feeds the resume-into-terminal-state boot guard (VIB-5887): resuming this
+        deployment at ``"complete"`` (all loops repaid + collateral reclaimed)
+        means ``decide()`` will HOLD forever, so if the wallet holds fresh capital
+        the runner warns instead of silently no-oping. Note ``"levered"`` (holding
+        a built leverage position) is deliberately NOT terminal — that HOLD is an
+        active position, not a finished lifecycle.
+        """
+        return self._state == "complete"
+
     def load_persistent_state(self, state: dict[str, Any]) -> None:
         if state.get("state") in _VALID_STATES:
             self._state = state["state"]

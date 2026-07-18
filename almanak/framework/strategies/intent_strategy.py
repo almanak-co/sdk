@@ -620,6 +620,42 @@ class IntentStrategy(StrategyBase[ConfigT]):
         """
         return None
 
+    def is_lifecycle_complete(self) -> bool:
+        """Report whether the RESTORED lifecycle state is terminal.
+
+        Optional boot hook for the resume-into-terminal-state guard
+        (VIB-5887). ``deployment_id = sha256(wallet:chain)`` is deterministic,
+        so redeploying onto the same wallet+chain RESUMES the prior run's
+        persisted ``strategy_state``. If that prior state was terminal — a
+        lifecycle strategy that finished (``SUPPLY→BORROW→REPAY→WITHDRAW``) or a
+        position fully unwound — ``decide()`` reads "nothing to do" and HOLDs
+        forever, silently no-oping the whole run *even when the wallet now holds
+        fresh capital*. On a hosted redeploy (no operator state reset) this
+        presents as a healthy green run doing nothing with user funds.
+
+        A strategy that models a terminal / "complete" state should override
+        this to return ``True`` once its restored state has reached it (e.g.
+        ``return self._loop_state == "complete"``). The boot guard combines it
+        with a fresh-wallet-balance read: **terminal state + non-trivial idle
+        capital** emits a distinct ``RESUMED-TERMINAL`` boot signal + a loud
+        WARNING naming the idle capital, so the no-op can never be silent.
+
+        Terminal-ness is deliberately strategy-owned: the framework persists an
+        opaque ``get_persistent_state()`` dict and has no generic notion of a
+        completed business lifecycle (blueprint 06 §StateData; blueprint 29).
+        Returning ``True`` mid-lifecycle (or on a fresh boot) would mis-fire the
+        guard, so the default is conservative: ``False`` — a strategy that never
+        reaches a terminal state (a perpetual / rebalancing strategy) is never
+        flagged, and a legitimate mid-lifecycle crash-recovery resume never
+        trips the guard.
+
+        Returns:
+            ``True`` when the restored state is terminal (lifecycle complete /
+            all positions unwound and ``decide()`` will HOLD indefinitely);
+            ``False`` otherwise (the default).
+        """
+        return False
+
     # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def save_state(self) -> None:
         """Save current strategy state to persistence.

@@ -1332,6 +1332,22 @@ _READER_CLASS_BY_KIND: dict[str, type[UniswapV3PoolPriceReader]] = {
 }
 
 
+def known_pool_pair(chain: str, pool_address: str) -> tuple[str, str] | None:
+    """Resolve a known pool address to its ``(token0, token1)`` addresses.
+
+    Registry-only inverse lookup over every reader spec's static known-pool
+    table — offline, no RPC. None when the address is not a known pool.
+    """
+    chain_lower = chain.lower()
+    target = pool_address.lower()
+    for spec in POOL_READER_REGISTRY.all():
+        chain_pools = spec.known_pools.get(chain_lower, {})
+        for (token0, token1, _fee), address in chain_pools.items():
+            if address.lower() == target:
+                return token0, token1
+    return None
+
+
 class PoolReaderRegistry:
     """Maps (chain, protocol) to PoolReader instances for dynamic dispatch.
 

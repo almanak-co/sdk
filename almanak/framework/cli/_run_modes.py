@@ -25,6 +25,7 @@ from ._run_setup import (
     _detect_state_resume,
     _discover_and_load_config,
     _DryRunVaultEarlyExit,
+    _echo_resume_banner,
     _handle_list_all,
     _load_strategy_class,
     _require_strategy_deployment_id,
@@ -521,7 +522,7 @@ def _run_once(  # noqa: C901
             # Restore persisted strategy state (e.g. position_id after restart)
             if hasattr(strategy_instance, "load_state_async"):
                 if await strategy_instance.load_state_async():
-                    click.secho("  Strategy state restored from persistence", fg="yellow")
+                    _echo_resume_banner(strategy_instance)
                 else:
                     click.echo("  No previous state found (fresh start)")
 
@@ -1168,7 +1169,7 @@ def _run_continuous(
             # Restore persisted strategy state (e.g. position_id after restart)
             if hasattr(strategy_instance, "load_state_async"):
                 if await strategy_instance.load_state_async():
-                    click.secho("  Strategy state restored from persistence", fg="yellow")
+                    _echo_resume_banner(strategy_instance)
                 else:
                     click.echo("  No previous state found (fresh start)")
 

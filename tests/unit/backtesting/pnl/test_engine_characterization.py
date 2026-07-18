@@ -26,8 +26,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from almanak.framework.backtesting.models import (
-
-
     BacktestEngine,
     IntentType,
     ParameterSourceTracker,
@@ -1430,7 +1428,10 @@ class TestCreatePositionDelta:
         assert position is not None
         assert position.position_type == PositionType.SUPPLY
         assert position.amounts["ARB"] == Decimal("500")
-        assert position.apy_at_entry == Decimal("0.05")
+        # Connector-declared default for the protocol — the one APY table.
+        from almanak.framework.backtesting.pnl.calculators import InterestCalculator
+
+        assert position.apy_at_entry == InterestCalculator().get_supply_apy_for_protocol("test_protocol")
 
     def test_supply_missing_price_uses_usd_amount(self):
         engine = _backtester_for_flows()
@@ -1461,6 +1462,7 @@ class TestCreatePositionDelta:
         assert position.position_type == PositionType.SUPPLY
         assert position.tokens == ["USDC"]
         assert position.amounts["USDC"] == Decimal("1000")
+        # Vault surrogate keeps its documented flat 5% pending VIB-3367.
         assert position.apy_at_entry == Decimal("0.05")
 
     def test_vault_deposit_missing_token_warns_and_defaults(self, caplog):
@@ -1520,7 +1522,10 @@ class TestCreatePositionDelta:
 
         assert with_apy is not None and with_apy.apy_at_entry == Decimal("0.02")
         assert with_borrow_apy is not None and with_borrow_apy.apy_at_entry == Decimal("0.03")
-        assert default is not None and default.apy_at_entry == Decimal("0.08")
+        from almanak.framework.backtesting.pnl.calculators import InterestCalculator
+
+        assert default is not None
+        assert default.apy_at_entry == InterestCalculator().get_borrow_apy_for_protocol("test_protocol")
         assert default.position_type == PositionType.BORROW
         assert default.amounts["USDC"] == Decimal("1000")
 

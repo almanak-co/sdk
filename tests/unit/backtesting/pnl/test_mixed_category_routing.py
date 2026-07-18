@@ -58,15 +58,14 @@ def test_mixed_strategy_accrues_both_categories() -> None:
     assert routed.metrics.total_trades == 2
 
     # Hand-computed. The generic lane creates the SUPPLY position (the
-    # lending adapter declines creation) and stamps the engine's default
-    # entry APY (engine.py _supply_delta: getattr(intent, "apy", 0.05));
-    # the lending sub-adapter then accrues one compound increment per mark,
-    # starting the tick AFTER the fill (zero elapsed time at the fill mark).
-    # NOTE: the connector-declared aave_v3 supply default is 3% — a second,
-    # disagreeing default plane. Ticketed for the phase-3 parameter collapse.
-    hourly = InterestCalculator().calculate_interest(
+    # lending adapter declines creation) and stamps the connector-declared
+    # default APY for the protocol — the ONE table the accrual lane and
+    # market.lending_rate() share; the sub-adapter then accrues one compound
+    # increment per mark, starting the tick AFTER the fill.
+    calculator = InterestCalculator()
+    hourly = calculator.calculate_interest(
         principal=SUPPLY_PRINCIPAL,
-        apy=Decimal("0.05"),
+        apy=calculator.get_supply_apy_for_protocol("aave_v3"),
         time_delta=Decimal(TICK_SECONDS) / Decimal(86400),
         compound=True,
     ).interest

@@ -58,6 +58,7 @@ Examples:
             print(f"Sources used: {result.data_quality.source_breakdown}")
 """
 
+import functools
 import logging
 import uuid
 from collections.abc import Iterable, Mapping
@@ -443,6 +444,18 @@ class BacktestableStrategy(Protocol):
 # =============================================================================
 
 
+@functools.lru_cache(maxsize=1)
+def _default_apy_tables() -> Any:
+    """One connector-declared APY table for the generic lane (ALM-2943).
+
+    The same tables the lending lane accrues with and ``lending_rate``
+    serves — the engine must not carry a second, disagreeing default.
+    """
+    from almanak.framework.backtesting.pnl.calculators import InterestCalculator
+
+    return InterestCalculator()
+
+
 def _lp_pair_decimals(token0: Any, token1: Any, chain: str) -> tuple[int, int] | None:
     """Best-effort ``(decimals0, decimals1)`` for an LP pair via the token registry.
 
@@ -627,6 +640,7 @@ class BacktestOHLCVView:
         self._token_addresses = dict(token_addresses or {})
         self._timestamp: datetime | None = None
         self._truncation_warned: set[tuple[str, str]] = set()
+        self._pool_proxy_warned: set[tuple[str, str]] = set()
 
     def bind(self, timestamp: datetime) -> None:
         self._timestamp = timestamp
@@ -663,11 +677,30 @@ class BacktestOHLCVView:
             # a silent unit lie.
             raise ValueError(f"ohlcv unavailable in backtest for quote={quote!r}: the run's price series is USD-quoted")
         base = token.split("/")[0].strip() if "/" in token else token
+        quote_leg = token.split("/")[1].strip().upper() if "/" in token else None
         key = self._buffer_key(base)
         if key is None:
             raise ValueError(f"ohlcv unavailable: no backtest price series for token {token!r}")
 
         resampled = self._engine._series_for(key, timeframe, self._tick_seconds)
+        pair_quote: str | None = None
+        from almanak.framework.backtesting.pnl.portfolio import CASH_EQUIVALENT_STABLECOIN_SYMBOLS
+
+        if quote_leg and quote_leg not in CASH_EQUIVALENT_STABLECOIN_SYMBOLS:
+            # Non-stable quote leg: pair candles are the RATIO of the two USD
+            # series — serving the base's USD series as "BASE/QUOTE" would be
+            # a silent unit lie for e.g. WETH/cbBTC.
+            quote_key = self._buffer_key(quote_leg)
+            if quote_key is None:
+                raise ValueError(f"ohlcv unavailable: no backtest price series for pair quote leg {quote_leg!r}")
+            quote_resampled = self._engine._series_for(quote_key, timeframe, self._tick_seconds)
+            paired = min(len(resampled), len(quote_resampled))
+            resampled = [
+                base_close / quote_close
+                for base_close, quote_close in zip(resampled[-paired:], quote_resampled[-paired:], strict=True)
+                if quote_close
+            ]
+            pair_quote = quote_leg
         limit_val = int(limit)
         closes = resampled[-limit_val:] if limit_val > 0 else []
         # Honesty on depth (review, #3312): the tick buffer is finite, so a
@@ -711,12 +744,87 @@ class BacktestOHLCVView:
         )
         df.attrs = {
             "base": base.upper(),
-            "quote": "USD",
+            "quote": pair_quote or "USD",
             "timeframe": timeframe,
-            "source": "backtest_price_series:close_only",
+            "source": "backtest_price_series:close_only" + (":pair_ratio" if pair_quote else ""),
             "confidence": "close_only",
             "capacity_truncated": capacity_truncated,
         }
+        return df
+
+    def get_pool_ohlcv(
+        self,
+        pool_address: str,
+        chain: str,
+        timeframe: str = "1h",
+        limit: int = 100,
+        gap_strategy: str = "nan",
+        requested_symbol: str | None = None,
+    ) -> Any:
+        """Serve a pool-scoped candle request as the pool PAIR's price series.
+
+        Registry-only pool→pair resolution; the served candles are the pair's
+        close series standing in for the pool's own prints, and the attrs say
+        so — never venue-specific data. Unknown pools raise (recorded by the
+        snapshot's existing refusal path).
+        """
+        from almanak.framework.data.pools.reader import known_pool_pair
+        from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
+
+        pair = known_pool_pair(chain, pool_address)
+        if pair is None:
+            raise ValueError(
+                f"ohlcv unavailable: pool {pool_address!r} is not a registry-known pool on {chain!r}; "
+                "pass token-scoped candles (e.g. market.ohlcv('WETH')) or omit pool_address"
+            )
+        resolver = get_token_resolver()
+        symbols: list[str] = []
+        for token_address in pair:
+            try:
+                resolved = resolver.resolve(token_address, chain, log_errors=False, skip_gateway=True)
+            except TokenResolutionError:
+                resolved = None
+            if resolved is None or not getattr(resolved, "symbol", None):
+                raise ValueError(
+                    f"ohlcv unavailable: pool {pool_address!r} token {token_address!r} is not registry-resolvable"
+                )
+            symbols.append(str(resolved.symbol).upper())
+
+        # The registry key order is arbitrary (e.g. (USDC, WETH)); the
+        # REQUESTED orientation decides which side is base, or an inverted
+        # series would corrupt every downstream signal (~1/3000 vs ~3000).
+        base, quote = symbols[0], symbols[1]
+        if requested_symbol:
+            requested = str(requested_symbol).upper()
+            if "/" in requested:
+                req_base, req_quote = (part.strip() for part in requested.split("/", 1))
+                if {req_base, req_quote} != {base, quote}:
+                    raise ValueError(
+                        f"ohlcv unavailable: pool {pool_address!r} is a {base}/{quote} pool, "
+                        f"not {req_base}/{req_quote}; check the pool pin"
+                    )
+                base, quote = req_base, req_quote
+            elif requested.strip() in (base, quote):
+                if requested.strip() == quote:
+                    base, quote = quote, base
+            else:
+                raise ValueError(
+                    f"ohlcv unavailable: token {requested!r} is not in pool {pool_address!r} "
+                    f"({base}/{quote}); check the pool pin"
+                )
+
+        pool_key = (pool_address.lower(), chain.lower())
+        if pool_key not in self._pool_proxy_warned:
+            self._pool_proxy_warned.add(pool_key)
+            logger.warning(
+                "market.ohlcv(pool_address=%s) served as the %s/%s price-series proxy — the run has no "
+                "venue-specific candle data; attrs.source marks the proxy",
+                pool_address,
+                base,
+                quote,
+            )
+        df = self.get_ohlcv(f"{base}/{quote}", timeframe=timeframe, limit=limit, gap_strategy=gap_strategy)
+        df.attrs = {**df.attrs, "pool_address": pool_address, "source": df.attrs["source"] + ":pool_pair_proxy"}
         return df
 
 
@@ -3996,8 +4104,11 @@ class PnLBacktester:
             )
         amount = amount_usd / price if price is not None and price > 0 else amount_usd
 
-        # Get APY if available
-        apy = getattr(intent, "apy", Decimal("0.05"))
+        # Intent-declared APY wins; otherwise the connector-declared default
+        # for the protocol — the single table the accrual lane uses.
+        apy = getattr(intent, "apy", None)
+        if apy is None:
+            apy = _default_apy_tables().get_supply_apy_for_protocol(protocol)
         if isinstance(apy, int | float):
             apy = Decimal(str(apy))
 
@@ -4079,8 +4190,11 @@ class PnLBacktester:
             )
         amount = amount_usd / price if price is not None and price > 0 else amount_usd
 
-        # Get APY if available
-        apy = getattr(intent, "apy", getattr(intent, "borrow_apy", Decimal("0.08")))
+        # Intent-declared APY wins; otherwise the connector-declared default
+        # for the protocol — the single table the accrual lane uses.
+        apy = getattr(intent, "apy", getattr(intent, "borrow_apy", None))
+        if apy is None:
+            apy = _default_apy_tables().get_borrow_apy_for_protocol(protocol)
         if isinstance(apy, int | float):
             apy = Decimal(str(apy))
 

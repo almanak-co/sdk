@@ -5307,9 +5307,26 @@ class MarketSnapshot:
         # tape via ``OHLCVProvider``); it has no ``pool_address`` parameter.
         # Silently dropping ``pool_address`` would let a pool-scoped call
         # appear to succeed while returning candles for a different market —
-        # the worst-class failure for an indicator-driven strategy. Fail
-        # loudly so the caller wires the OHLCV router instead.
+        # the worst-class failure for an indicator-driven strategy. A module
+        # may opt in to an explicit pool serve (``get_pool_ohlcv`` — the
+        # backtest view resolves the pool to its pair and serves the pair's
+        # series with proxy provenance); otherwise fail loudly so the caller
+        # wires the OHLCV router instead.
         if pool_address is not None:
+            pool_serve = getattr(self._ohlcv_module, "get_pool_ohlcv", None)
+            if callable(pool_serve):
+                try:
+                    return pool_serve(
+                        pool_address=pool_address,
+                        chain=self._chain,
+                        timeframe=timeframe,
+                        limit=limit,
+                        gap_strategy=gap_strategy,
+                        requested_symbol=token_str,
+                    )
+                except ValueError as e:
+                    self._record_critical_data_failure("ohlcv", f"{token_str}:pool_scoped", str(e))
+                    raise
             self._record_critical_data_failure(
                 "ohlcv",
                 f"{token_str}:pool_scoped",

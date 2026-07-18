@@ -323,6 +323,16 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
             "borrowed_amount": str(self._borrowed_amount),
         }
 
+    def is_lifecycle_complete(self) -> bool:
+        """Terminal when the borrow→repay→withdraw lifecycle has finished.
+
+        Feeds the resume-into-terminal-state boot guard (VIB-5887): resuming this
+        deployment at ``"complete"`` means ``decide()`` will HOLD forever, so if
+        the wallet holds fresh capital the runner warns instead of silently
+        no-oping.
+        """
+        return self._loop_state == "complete"
+
     _VALID_STATES = frozenset(
         {"idle", "supplying", "supplied", "borrowing", "borrowed", "repaying", "repaid", "withdrawing", "complete"}
     )
