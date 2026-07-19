@@ -1860,6 +1860,22 @@ def _pg_row_to_portfolio_snapshot(row: Any) -> "PortfolioSnapshot":
     )
 
 
+def _optional_flow_from_row(row: Any, column: str) -> Decimal | None:
+    """Read a capital-flow column as ``Decimal | None`` (Empty≠Zero).
+
+    Only an EXPLICIT ``''`` — the unmeasured sentinel this writer emits for a
+    ``None`` flow (blueprint 27 §10.10) — decodes to ``None``. A missing key or
+    SQL ``NULL`` is not a measurement claim: those are legacy rows that predate
+    the sentinel, so they keep the historical ``Decimal("0")``. VIB-5866.
+    """
+    from almanak.framework.portfolio.models import decode_optional_flow
+
+    raw = row.get(column)
+    if raw is None:
+        return Decimal("0")
+    return decode_optional_flow(raw)
+
+
 def _pg_row_to_portfolio_metrics(row: Any) -> "PortfolioMetrics":
     """Convert a ``portfolio_metrics`` row to a ``PortfolioMetrics``.
 
@@ -1880,8 +1896,8 @@ def _pg_row_to_portfolio_metrics(row: Any) -> "PortfolioMetrics":
         timestamp=initial_timestamp,
         total_value_usd=Decimal(row.get("total_value_usd") or "0"),
         initial_value_usd=Decimal(row["initial_value_usd"]),
-        deposits_usd=Decimal(row.get("deposits_usd") or "0"),
-        withdrawals_usd=Decimal(row.get("withdrawals_usd") or "0"),
+        deposits_usd=_optional_flow_from_row(row, "deposits_usd"),
+        withdrawals_usd=_optional_flow_from_row(row, "withdrawals_usd"),
         gas_spent_usd=Decimal(row.get("gas_spent_usd") or "0"),
         positions_json=row.get("positions_text") or "[]",
         cycle_id=row.get("cycle_id"),

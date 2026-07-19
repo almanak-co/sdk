@@ -2144,6 +2144,8 @@ class SQLiteStore:
         Returns:
             Row ID of the inserted snapshot.
         """
+        from almanak.framework.portfolio.models import encode_optional_flow
+
         if not self._initialized:
             await self.initialize()
 
@@ -2258,8 +2260,11 @@ class SQLiteStore:
                             _canonical_deployment_id(metrics),
                             str(metrics.initial_value_usd),
                             metrics.timestamp.isoformat(),
-                            str(metrics.deposits_usd),
-                            str(metrics.withdrawals_usd),
+                            # Empty≠Zero: an unmeasured flow persists as '' (the
+                            # TEXT column's unmeasured sentinel), never the
+                            # literal "None" (VIB-5866).
+                            encode_optional_flow(metrics.deposits_usd),
+                            encode_optional_flow(metrics.withdrawals_usd),
                             str(metrics.gas_spent_usd),
                             str(metrics.total_value_usd),
                             getattr(metrics, "positions_json", "[]"),
@@ -2778,6 +2783,7 @@ class SQLiteStore:
         Returns:
             True if successful.
         """
+        from almanak.framework.portfolio.models import encode_optional_flow
 
         if not self._initialized:
             await self.initialize()
@@ -2798,8 +2804,9 @@ class SQLiteStore:
                     _canonical_deployment_id(metrics),
                     str(metrics.initial_value_usd),
                     metrics.timestamp.isoformat(),
-                    str(metrics.deposits_usd),
-                    str(metrics.withdrawals_usd),
+                    # Empty≠Zero: unmeasured flows persist as '' (VIB-5866).
+                    encode_optional_flow(metrics.deposits_usd),
+                    encode_optional_flow(metrics.withdrawals_usd),
                     str(metrics.gas_spent_usd),
                     str(metrics.total_value_usd),
                     getattr(metrics, "positions_json", "[]"),
@@ -2826,7 +2833,7 @@ class SQLiteStore:
         """
         from decimal import Decimal
 
-        from almanak.framework.portfolio.models import PortfolioMetrics
+        from almanak.framework.portfolio.models import PortfolioMetrics, decode_optional_flow
 
         if not self._initialized:
             await self.initialize()
@@ -2877,8 +2884,13 @@ class SQLiteStore:
                 timestamp=updated_at,
                 total_value_usd=Decimal(row["total_value_usd"] or "0"),
                 initial_value_usd=Decimal(row["initial_value_usd"]),
-                deposits_usd=Decimal(row["deposits_usd"]),
-                withdrawals_usd=Decimal(row["withdrawals_usd"]),
+                # Empty≠Zero: '' (the unmeasured sentinel) decodes to None;
+                # SQL NULL predates the sentinel (legacy row) and stays a
+                # measured zero, matching the Postgres reader; legacy '0'
+                # rows still decode to a measured zero. The unguarded
+                # Decimal(...) this replaces raised on ''/NULL (VIB-5866).
+                deposits_usd=decode_optional_flow("0" if row["deposits_usd"] is None else row["deposits_usd"]),
+                withdrawals_usd=decode_optional_flow("0" if row["withdrawals_usd"] is None else row["withdrawals_usd"]),
                 gas_spent_usd=Decimal(row["gas_spent_usd"]),
                 positions_json=row["positions_json"] or "[]",
                 cycle_id=row["cycle_id"],

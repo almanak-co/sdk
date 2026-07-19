@@ -180,10 +180,15 @@ async def test_malformed_decimal_rejected(service, context, field):
 
 @pytest.mark.asyncio
 async def test_empty_decimal_strings_coerced_to_zero(service, context):
-    """Empty strings across all 4 currency fields are treated as ``"0"``.
+    """Empty strings: ``"0"`` for the baselines, UNMEASURED for the flows.
 
-    Exercises the ``request.field or "0"`` defensive coalescing before the
-    ``Decimal(...)`` call.
+    ``initial_value_usd`` / ``gas_spent_usd`` keep the ``request.field or "0"``
+    defensive coalescing before the ``Decimal(...)`` call.
+
+    VIB-5866 splits the two capital-flow fields off that rule: Empty≠Zero
+    (blueprint 27 §10.10) makes ``''`` their UNMEASURED sentinel on the wire, so
+    they parse to ``None`` rather than fabricating a measured zero. Real clients
+    always populate both fields, so this only re-labels the never-set case.
     """
     warm = AsyncMock()
     warm.save_portfolio_metrics = AsyncMock(return_value=True)
@@ -197,8 +202,8 @@ async def test_empty_decimal_strings_coerced_to_zero(service, context):
 
     saved: PortfolioMetrics = warm.save_portfolio_metrics.call_args[0][0]
     assert saved.initial_value_usd == Decimal("0")
-    assert saved.deposits_usd == Decimal("0")
-    assert saved.withdrawals_usd == Decimal("0")
+    assert saved.deposits_usd is None
+    assert saved.withdrawals_usd is None
     assert saved.gas_spent_usd == Decimal("0")
 
 

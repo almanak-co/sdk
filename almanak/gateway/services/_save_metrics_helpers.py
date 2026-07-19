@@ -76,8 +76,11 @@ class ParsedMetricsInputs:
 
     deployment_id: str  # post-validate_deployment_id; the canonical deployment_id
     initial_value_usd: Decimal
-    deposits_usd: Decimal
-    withdrawals_usd: Decimal
+    # Empty≠Zero (blueprint 27 §10.10): ``None`` = the caller sent the
+    # unmeasured sentinel ('') for this capital flow; it is written back out as
+    # '' rather than fabricated as a measured zero. VIB-5866.
+    deposits_usd: Decimal | None
+    withdrawals_usd: Decimal | None
     gas_spent_usd: Decimal
     timestamp: datetime
 
@@ -102,10 +105,14 @@ def parse_metrics_inputs(
             wording for malformed decimals, negative timestamps, and
             out-of-range timestamps.
     """
+    from almanak.framework.portfolio.models import decode_optional_flow
+
     try:
         initial_value_usd = Decimal(request.initial_value_usd or "0")
-        deposits_usd = Decimal(request.deposits_usd or "0")
-        withdrawals_usd = Decimal(request.withdrawals_usd or "0")
+        # Empty≠Zero: '' on the wire is the UNMEASURED sentinel for the two
+        # capital flows and is carried through as None (VIB-5866).
+        deposits_usd = decode_optional_flow(request.deposits_usd)
+        withdrawals_usd = decode_optional_flow(request.withdrawals_usd)
         gas_spent_usd = Decimal(request.gas_spent_usd or "0")
     except InvalidOperation as exc:
         raise MetricsValidationError("metrics fields must be valid decimal strings") from exc
@@ -194,12 +201,15 @@ def build_pg_upsert_args(
     doesn't carry positions; ``PortfolioMetrics.positions_json`` defaults to
     ``"[]"`` and SQLite's writer pulls it via ``getattr``).
     """
+    from almanak.framework.portfolio.models import encode_optional_flow
+
     return (
         inputs.deployment_id,
         str(inputs.initial_value_usd),
         inputs.timestamp,
-        str(inputs.deposits_usd),
-        str(inputs.withdrawals_usd),
+        # Empty≠Zero: unmeasured flows persist as '' (VIB-5866).
+        encode_optional_flow(inputs.deposits_usd),
+        encode_optional_flow(inputs.withdrawals_usd),
         str(inputs.gas_spent_usd),
         request.cycle_id or "",
         request.execution_mode or "",

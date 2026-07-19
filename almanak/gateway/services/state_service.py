@@ -1241,8 +1241,12 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         return gateway_pb2.PortfolioMetricsData(
             initial_value_usd=row["initial_value_usd"],
             initial_timestamp=int(row["initial_timestamp"].timestamp()),
-            deposits_usd=row["deposits_usd"] or "0",
-            withdrawals_usd=row["withdrawals_usd"] or "0",
+            # Empty≠Zero: '' is the UNMEASURED sentinel for these two columns
+            # and must reach the client verbatim — coercing it to "0" would
+            # fabricate a measured zero. SQL NULL keeps the historical "0"
+            # (legacy rows predate the sentinel). VIB-5866.
+            deposits_usd=row["deposits_usd"] if row["deposits_usd"] is not None else "0",
+            withdrawals_usd=row["withdrawals_usd"] if row["withdrawals_usd"] is not None else "0",
             gas_spent_usd=row["gas_spent_usd"] or "0",
             updated_at=int(row["updated_at"].timestamp()),
             found=True,
@@ -1254,11 +1258,14 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
     @staticmethod
     def _sqlite_portfolio_metrics_to_proto(metrics: Any) -> gateway_pb2.PortfolioMetricsData:
+        from almanak.framework.portfolio.models import encode_optional_flow
+
         return gateway_pb2.PortfolioMetricsData(
             initial_value_usd=str(metrics.initial_value_usd),
             initial_timestamp=int(metrics.timestamp.timestamp()),
-            deposits_usd=str(metrics.deposits_usd),
-            withdrawals_usd=str(metrics.withdrawals_usd),
+            # Empty≠Zero: unmeasured flows travel as '' (VIB-5866).
+            deposits_usd=encode_optional_flow(metrics.deposits_usd),
+            withdrawals_usd=encode_optional_flow(metrics.withdrawals_usd),
             gas_spent_usd=str(metrics.gas_spent_usd),
             updated_at=int(metrics.timestamp.timestamp()),
             found=True,

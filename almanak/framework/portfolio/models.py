@@ -350,6 +350,44 @@ class PortfolioSnapshot:
         return [], {}
 
 
+#: Storage / wire text for an UNMEASURED capital-flow amount (VIB-5866).
+#:
+#: Empty≠Zero (blueprint 27 §10.10): ``Decimal("0")`` is a measured zero,
+#: ``None`` is unmeasured. The ``deposits_usd`` / ``withdrawals_usd`` columns
+#: are ``TEXT DEFAULT '0'`` in both backends and the proto fields are plain
+#: strings, so the empty string is the only value that can carry "unmeasured"
+#: across those seams without a schema or proto change — ``str(None)`` would
+#: persist the literal ``"None"`` and ``"0"`` would fabricate a measured zero.
+UNMEASURED_FLOW_TEXT = ""
+
+
+def encode_optional_flow(value: Decimal | None) -> str:
+    """Serialize a capital-flow amount to storage / wire text.
+
+    ``None`` (unmeasured) becomes :data:`UNMEASURED_FLOW_TEXT`, never
+    ``"None"`` and never ``"0"``.
+    """
+    return UNMEASURED_FLOW_TEXT if value is None else str(value)
+
+
+def decode_optional_flow(raw: str | None) -> Decimal | None:
+    """Parse storage / wire text back into a capital-flow amount.
+
+    ``''`` (the unmeasured sentinel) and an explicit ``None`` (a JSON ``null``
+    from ``to_dict``/``from_dict`` round-trips) decode to ``None``; every other
+    value is parsed verbatim, so legacy ``'0'`` rows still decode to
+    ``Decimal("0")`` (measured zero).
+
+    SQL ``NULL`` is NOT routed here as ``None``: a NULL column predates the
+    sentinel (legacy row), so backend readers map it to ``"0"`` *before*
+    calling this codec — both backends agree (SQLite reader, Postgres
+    ``_optional_flow_from_row``).
+    """
+    if raw is None or raw == UNMEASURED_FLOW_TEXT:
+        return None
+    return Decimal(raw)
+
+
 @dataclass
 class PortfolioMetrics:
     """Computed metrics for PnL tracking.
@@ -374,9 +412,14 @@ class PortfolioMetrics:
     # Baseline tracking (persisted, survives restarts)
     initial_value_usd: Decimal  # Set once on first run
 
-    # Capital flow tracking for accurate PnL
-    deposits_usd: Decimal = Decimal("0")  # Cumulative deposits
-    withdrawals_usd: Decimal = Decimal("0")  # Cumulative withdrawals
+    # Capital flow tracking for accurate PnL.
+    # ``None`` = unmeasured (Empty≠Zero, blueprint 27 §10.10): a read path that
+    # cannot source the cumulative flows must NOT fabricate ``Decimal("0")`` —
+    # that silently books every external deposit as profit in
+    # ``pnl_before_gas``. The default stays ``Decimal("0")`` (measured zero):
+    # producers that genuinely measure "no flows" are unchanged. VIB-5866.
+    deposits_usd: Decimal | None = Decimal("0")  # Cumulative deposits
+    withdrawals_usd: Decimal | None = Decimal("0")  # Cumulative withdrawals
     gas_spent_usd: Decimal = Decimal("0")  # Cumulative gas costs
 
     # Phase 1a: rich accounting fields (persisted in SQLite, round-tripped)
@@ -389,9 +432,10 @@ class PortfolioMetrics:
     def __post_init__(self) -> None:
         """Normalize numeric fields to Decimal.
 
-        ``total_value_usd`` may legitimately be ``None`` (unmeasured,
-        Empty≠Zero) — the ``isinstance`` guard skips it, so ``None`` is
-        preserved rather than coerced to ``Decimal("0")``.
+        ``total_value_usd`` / ``deposits_usd`` / ``withdrawals_usd`` may
+        legitimately be ``None`` (unmeasured, Empty≠Zero) — the ``isinstance``
+        guard skips ``None``, so it is preserved rather than coerced to
+        ``Decimal("0")``.
         """
         for attr in ["total_value_usd", "initial_value_usd", "deposits_usd", "withdrawals_usd", "gas_spent_usd"]:
             value = getattr(self, attr)
@@ -407,8 +451,12 @@ class PortfolioMetrics:
         Returns ``None`` (unmeasured — Empty≠Zero, blueprint 27 §10.10) when
         ``total_value_usd`` was not measured, rather than fabricating a PnL off
         a zero current value (which reads as ≈ −initial). VIB-2475.
+
+        The same rule applies to the capital flows (VIB-5866): an unmeasured
+        deposit / withdrawal total cannot be substituted with zero — that books
+        external capital as profit — so the whole PnL is ``None``.
         """
-        if self.total_value_usd is None:
+        if self.total_value_usd is None or self.deposits_usd is None or self.withdrawals_usd is None:
             return None
         return self.total_value_usd - self.initial_value_usd - self.deposits_usd + self.withdrawals_usd
 
@@ -442,8 +490,10 @@ class PortfolioMetrics:
             # than serialising "None" / coercing to "0" (VIB-2475).
             "total_value_usd": None if self.total_value_usd is None else str(self.total_value_usd),
             "initial_value_usd": str(self.initial_value_usd),
-            "deposits_usd": str(self.deposits_usd),
-            "withdrawals_usd": str(self.withdrawals_usd),
+            # Empty≠Zero: unmeasured flows serialise to JSON null, never "None"
+            # / "0" (VIB-5866).
+            "deposits_usd": None if self.deposits_usd is None else str(self.deposits_usd),
+            "withdrawals_usd": None if self.withdrawals_usd is None else str(self.withdrawals_usd),
             "gas_spent_usd": str(self.gas_spent_usd),
             "positions_json": self.positions_json,
             "cycle_id": self.cycle_id,
@@ -461,8 +511,12 @@ class PortfolioMetrics:
             # (unmeasured), never Decimal("None")/Decimal("0") (VIB-2475).
             total_value_usd=(None if data.get("total_value_usd") is None else Decimal(data["total_value_usd"])),
             initial_value_usd=Decimal(data["initial_value_usd"]),
-            deposits_usd=Decimal(data.get("deposits_usd", "0")),
-            withdrawals_usd=Decimal(data.get("withdrawals_usd", "0")),
+            # Empty≠Zero: an explicit null / '' deserialises to None
+            # (unmeasured); a MISSING key keeps the legacy "0" default —
+            # absence of the key predates the field, it is not a measurement
+            # claim of "unmeasured" (VIB-5866).
+            deposits_usd=decode_optional_flow(data.get("deposits_usd", "0")),
+            withdrawals_usd=decode_optional_flow(data.get("withdrawals_usd", "0")),
             gas_spent_usd=Decimal(data.get("gas_spent_usd", "0")),
             positions_json=data.get("positions_json", "[]"),
             cycle_id=data.get("cycle_id"),

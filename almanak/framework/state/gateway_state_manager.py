@@ -506,12 +506,16 @@ class GatewayStateManager:
         Returns:
             True if save succeeded.
         """
+        from almanak.framework.portfolio.models import encode_optional_flow
+
         try:
             request = gateway_pb2.SaveMetricsRequest(
                 initial_value_usd=str(metrics.initial_value_usd),
                 initial_timestamp=int(metrics.timestamp.timestamp()),
-                deposits_usd=str(metrics.deposits_usd),
-                withdrawals_usd=str(metrics.withdrawals_usd),
+                # Empty≠Zero: an unmeasured flow travels as '' (the wire
+                # sentinel), never the literal "None" (VIB-5866).
+                deposits_usd=encode_optional_flow(metrics.deposits_usd),
+                withdrawals_usd=encode_optional_flow(metrics.withdrawals_usd),
                 gas_spent_usd=str(metrics.gas_spent_usd),
                 # Phase 4 accounting identity fields (VIB-2835/2837/2839)
                 deployment_id=getattr(metrics, "deployment_id", "") or "",
@@ -554,7 +558,7 @@ class GatewayStateManager:
         """
         from decimal import Decimal
 
-        from almanak.framework.portfolio.models import PortfolioMetrics
+        from almanak.framework.portfolio.models import PortfolioMetrics, decode_optional_flow
 
         try:
             request = gateway_pb2.GetMetricsRequest(deployment_id=deployment_id)
@@ -585,8 +589,13 @@ class GatewayStateManager:
                 else datetime.now(UTC),
                 total_value_usd=total_value_usd,
                 initial_value_usd=Decimal(response.initial_value_usd or "0"),
-                deposits_usd=Decimal(response.deposits_usd or "0"),
-                withdrawals_usd=Decimal(response.withdrawals_usd or "0"),
+                # Empty≠Zero: '' on the wire means UNMEASURED (VIB-5866). Both
+                # server-side response builders always populate these fields
+                # for a found row — a legacy '0' column serialises as '0' — so
+                # '' can only be the sentinel, never proto3's absent-field
+                # default. (An absent row returns early above on ``found``.)
+                deposits_usd=decode_optional_flow(response.deposits_usd),
+                withdrawals_usd=decode_optional_flow(response.withdrawals_usd),
                 gas_spent_usd=Decimal(response.gas_spent_usd or "0"),
                 # Phase 4 accounting identity fields (VIB-2835/2837/2839)
                 deployment_id=response.deployment_id or "",
