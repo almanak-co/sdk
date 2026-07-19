@@ -1296,6 +1296,7 @@ class TeardownManager:
             ConsolidationOutcome,
             derive_strategy_token_universe,
             plan_consolidation,
+            resolve_chain_swap_protocol,
             resolve_chain_target_token,
             resolve_consolidation_targets,
         )
@@ -1342,6 +1343,27 @@ class TeardownManager:
                 accounting_events=accounting_events,
             )
 
+            # ALM-2886 / VIB-5865: route the swap-back through the strategy's own
+            # swap-capable DEX (read from its closing-intent protocols) instead of
+            # the compiler's hardcoded uniswap_v3 default — an Aerodrome LP unwind
+            # must consolidate on Aerodrome. None (lending/perp, or no closing
+            # intents) preserves the exact pre-VIB-5865 default. Candidates are
+            # scoped to intents on the consolidation `chain` (chain-less intents
+            # are implicitly on it) so a router from a different chain's intent is
+            # never chosen for this chain's swap (pr-auditor hardening).
+            same_chain_protocols = [
+                _intent_field(i, "protocol")
+                for i in closing
+                if (ic := _intent_field(i, "chain")) is None or (chain is not None and ic.lower() == chain.lower())
+            ]
+            swap_protocol = resolve_chain_swap_protocol(same_chain_protocols)
+            if swap_protocol is not None:
+                logger.info(
+                    "Token consolidation routing swaps through strategy DEX %s for %s",
+                    swap_protocol,
+                    strategy.deployment_id,
+                )
+
             plan = plan_consolidation(
                 market=market,
                 chain=chain,
@@ -1351,6 +1373,7 @@ class TeardownManager:
                 token_universe=token_universe,
                 mode=mode,
                 targets=targets,
+                swap_protocol=swap_protocol,
             )
             warnings = [*chain_target_warnings, *target_warnings, *plan.warnings]
             if plan.intents:

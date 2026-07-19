@@ -402,6 +402,92 @@ def resolve_chain_target_token(
     return None, warnings
 
 
+# General-purpose swap routers that can execute an ARBITRARY consolidation pair
+# (residual → target). A protocol merely *declaring* the ``SWAP`` intent is NOT
+# sufficient — several swap-declarers only route specialized pairs:
+#   * ``pendle`` swaps are PT/YT-only (``compiler.py`` gates on a PT/YT leg);
+#   * ``fluid`` / ``fluid_lending`` route only specific deployed pairs — the
+#     fluid compiler itself says "use a routed protocol (uniswap_v3, enso) for
+#     arbitrary pairs";
+#   * ``curve`` swaps are pool-specific; ``jupiter`` is Solana-only.
+# Routing a generic WETH→USDC consolidation swap through any of those would be
+# rejected at compile/execute, and — because consolidation failure is non-fatal
+# (keeps ``success=True``) — would strand the residual while teardown reports
+# success, i.e. WORSE than the uniswap_v3 default (Codex audit). So the override
+# is confined to constant-product / concentrated-liquidity AMM routers + routed
+# aggregators, which swap any pooled pair. Anything not on this list falls back
+# to ``None`` (the exact pre-VIB-5865 uniswap_v3 default — no regression). The
+# principled long-term home is a connector-manifest capability flag (VIB-5901);
+# this framework-level set is the contained-fix stand-in.
+#
+# MAINTENANCE (until VIB-5901): when adding a new general-purpose AMM / router
+# connector, add its protocol key here — an AMM omitted from this set silently
+# falls back to the uniswap_v3 default, re-introducing the VIB-5865 mis-routing
+# for that connector. The drift guard test only checks the REMOVAL direction
+# (every entry still declares SWAP); it cannot see a missing addition.
+_GENERAL_PURPOSE_SWAP_ROUTERS: frozenset[str] = frozenset(
+    {
+        "uniswap_v3",
+        "uniswap_v4",
+        "aerodrome",
+        "aerodrome_slipstream",
+        "pancakeswap_v3",
+        "sushiswap_v3",
+        "traderjoe_v2",
+        "camelot",
+        "agni_finance",
+        "enso",
+        "lifi",
+    }
+)
+
+
+def resolve_chain_swap_protocol(candidate_protocols: Iterable[str | None]) -> str | None:
+    """Pick the strategy's own general-purpose swap DEX for the consolidation swap-back.
+
+    Returns the loader-key protocol name (e.g. ``"aerodrome"``) to route the
+    Phase-2 consolidation swaps through, or ``None`` to defer to the compiler's
+    default (exact pre-VIB-5865 behaviour).
+
+    ALM-2886 / VIB-5865 (contained half): an Aerodrome LP strategy's residual
+    WETH must swap back **on Aerodrome**, not silently through the compiler's
+    hardcoded ``uniswap_v3`` default (``compiler.py`` ``_resolve_protocol(None)``).
+    The strategy's own DEX is read from its closing-intent protocols
+    (``candidate_protocols`` — an ``LP_CLOSE`` on aerodrome names ``aerodrome``);
+    the first that is a **general-purpose swap router** wins. A lending/perp
+    strategy's closing intents (aave/gmx) name no such router → ``None`` → the
+    compiler default is preserved, which is correct: those venues have no
+    arbitrary-pair swap DEX to route through.
+
+    Eligibility requires BOTH swap-capability (declares ``SWAP`` in the live
+    registry — guards against a connector dropping the intent) AND membership in
+    :data:`_GENERAL_PURPOSE_SWAP_ROUTERS` (excludes specialized swap-declarers
+    like pendle/fluid/curve whose swap cannot service an arbitrary consolidation
+    pair — routing through them would strand funds; see that constant).
+
+    Eligibility is deliberately NOT re-screened against an execution-side chain
+    registry: the candidate comes from an intent that already compiled and
+    executed on this chain, so its chain support is proven — and
+    ``supported_chains_for`` is empty for exactly these DEXes (aerodrome,
+    uniswap_v4 register no execution-chains today), so a chain screen would
+    wrongly reject the very protocol this fix exists to select.
+    """
+    from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+    from almanak.framework.intents.vocabulary import IntentType
+
+    swap_capable = set(CompilerRegistry.protocols_for_intent(IntentType.SWAP))
+    for protocol in candidate_protocols:
+        if isinstance(protocol, str) and protocol:
+            # Normalize exactly as the registry keys are produced (strip / lower /
+            # hyphen→underscore) so a closing intent carrying `aerodrome-slipstream`
+            # or padded casing still matches (gemini) — `protocols_for_intent` and
+            # `_GENERAL_PURPOSE_SWAP_ROUTERS` are both in this normalized form.
+            key = CompilerRegistry._normalize_protocol(protocol)
+            if key in _GENERAL_PURPOSE_SWAP_ROUTERS and key in swap_capable:
+                return key
+    return None
+
+
 def resolve_consolidation_targets(
     asset_policy: TeardownAssetPolicy | str,
     target_token: str | None,
@@ -674,6 +760,7 @@ def plan_consolidation(
     mode: TeardownMode,
     targets: set[str] | None = None,
     wallet_tokens: Iterable[str] | None = None,
+    swap_protocol: str | None = None,
 ) -> ConsolidationPlan:
     """Plan Phase-2 consolidation swaps from live post-closure balances.
 
@@ -692,6 +779,10 @@ def plan_consolidation(
             present here but OUTSIDE the strategy universe get a skip decision
             with reason ``not_in_universe`` (shared-wallet protection made
             visible). They are never swapped.
+        swap_protocol: DEX to route every consolidation swap through
+            (:func:`resolve_chain_swap_protocol`). ``None`` emits
+            ``protocol=None`` — the pre-VIB-5865 behaviour where the compiler
+            resolves its hardcoded ``uniswap_v3`` default.
     """
     warnings: list[str] = []
     decisions: list[ConsolidationDecision] = []
@@ -769,7 +860,7 @@ def plan_consolidation(
                 to_token=primary_target,
                 amount="all",
                 chain=chain,
-                protocol=None,
+                protocol=swap_protocol,
             )
         )
 
@@ -802,6 +893,7 @@ __all__ = [
     "derive_strategy_token_universe",
     "fold_consolidation_outcome",
     "plan_consolidation",
+    "resolve_chain_swap_protocol",
     "resolve_chain_target_token",
     "resolve_consolidation_targets",
 ]

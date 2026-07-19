@@ -27,6 +27,7 @@ from almanak.framework.teardown.consolidation import (
     derive_strategy_token_universe,
     fold_consolidation_outcome,
     plan_consolidation,
+    resolve_chain_swap_protocol,
     resolve_consolidation_targets,
 )
 from almanak.framework.teardown.models import (
@@ -74,6 +75,7 @@ def _plan(
     cfg=None,
     targets=None,
     wallet_tokens=None,
+    swap_protocol=None,
 ):
     return plan_consolidation(
         market=market,
@@ -85,6 +87,7 @@ def _plan(
         mode=mode,
         targets=targets,
         wallet_tokens=wallet_tokens,
+        swap_protocol=swap_protocol,
     )
 
 
@@ -777,3 +780,110 @@ class TestCanonicalCasing:
         # "weth" IS the universe token (case-insensitively) — it must not be
         # recorded as a shared-wallet out-of-universe exclusion.
         assert not any(d.reason == "not_in_universe" for d in plan.decisions)
+
+
+class TestSwapProtocolRouting:
+    """VIB-5865 / ALM-2886 contained half: consolidation swaps route through the
+    strategy's own DEX, not the compiler's hardcoded ``uniswap_v3`` default."""
+
+    def test_default_emits_protocol_none_unchanged(self):
+        """No swap_protocol → ``protocol=None`` (exact pre-VIB-5865 behaviour;
+        the compiler then resolves its uniswap_v3 default)."""
+        market = FakeMarket(
+            balances={"WETH": Decimal("0.011"), "USDC": Decimal("12")},
+            prices={"WETH": Decimal("1650"), "USDC": Decimal("1")},
+        )
+        plan = _plan(market=market, universe={"WETH", "USDC"})
+        assert _swap_tokens(plan) == [("WETH", "USDC")]
+        assert plan.intents[0].protocol is None
+
+    def test_swap_protocol_threaded_onto_every_swap(self):
+        """An Aerodrome LP strategy's residual WETH swaps back ON Aerodrome."""
+        market = FakeMarket(
+            balances={"WETH": Decimal("0.011"), "USDC": Decimal("12")},
+            prices={"WETH": Decimal("1650"), "USDC": Decimal("1")},
+        )
+        plan = _plan(market=market, universe={"WETH", "USDC"}, swap_protocol="aerodrome")
+        assert _swap_tokens(plan) == [("WETH", "USDC")]
+        assert plan.intents[0].protocol == "aerodrome"
+
+    def test_swap_protocol_applied_to_all_intents(self):
+        """Multi-residual sweeps all carry the same routed protocol."""
+        market = FakeMarket(
+            balances={"WETH": Decimal("0.011"), "ARB": Decimal("50"), "USDC": Decimal("12")},
+            prices={"WETH": Decimal("1650"), "ARB": Decimal("1.2"), "USDC": Decimal("1")},
+        )
+        plan = _plan(
+            market=market, universe={"WETH", "ARB", "USDC"}, swap_protocol="aerodrome"
+        )
+        assert len(plan.intents) == 2
+        assert {i.protocol for i in plan.intents} == {"aerodrome"}
+
+
+class TestResolveChainSwapProtocol:
+    """The pure resolver that picks the strategy's own swap-capable DEX from its
+    closing-intent protocols (VIB-5865). Screened by swap-capability only —
+    never by an execution-side chain registry (empty for aerodrome et al.)."""
+
+    def test_aerodrome_lp_close_resolves_to_aerodrome(self):
+        # THE reported case: an Aerodrome LP strategy strands residual WETH.
+        assert resolve_chain_swap_protocol(["aerodrome"]) == "aerodrome"
+
+    def test_mixed_case_normalised_to_loader_key(self):
+        assert resolve_chain_swap_protocol(["Aerodrome"]) == "aerodrome"
+
+    def test_hyphenated_and_padded_protocols_normalise(self):
+        # Normalize exactly as the registry keys are produced (strip / lower /
+        # hyphen→underscore) so a hyphenated or padded slug still matches (gemini).
+        assert resolve_chain_swap_protocol(["aerodrome-slipstream"]) == "aerodrome_slipstream"
+        assert resolve_chain_swap_protocol(["  PancakeSwap-V3 "]) == "pancakeswap_v3"
+
+    def test_lending_perp_protocols_yield_none(self):
+        # aave_v3 / gmx_v2 are not swap-capable → defer to the compiler default,
+        # which is correct: those venues have no swap DEX to route through.
+        assert resolve_chain_swap_protocol(["aave_v3", "gmx_v2"]) is None
+
+    def test_specialized_swap_declarers_are_excluded(self):
+        # pendle (PT/YT-only), fluid / fluid_lending (specific pairs), curve
+        # (pool-specific), jupiter (Solana) DECLARE the SWAP intent but cannot
+        # service an arbitrary consolidation pair — routing through them would
+        # strand funds (Codex audit), so each falls back to the compiler default.
+        assert resolve_chain_swap_protocol(["pendle"]) is None
+        assert resolve_chain_swap_protocol(["fluid"]) is None
+        assert resolve_chain_swap_protocol(["fluid_lending"]) is None
+        assert resolve_chain_swap_protocol(["curve"]) is None
+        assert resolve_chain_swap_protocol(["jupiter"]) is None
+
+    def test_general_router_wins_over_specialized_declarer(self):
+        # A Pendle LP strategy that ALSO swapped on Aerodrome: the specialized
+        # pendle declarer is skipped; the first general-purpose router wins.
+        assert resolve_chain_swap_protocol(["pendle", "aerodrome"]) == "aerodrome"
+
+    def test_every_allowlisted_router_is_actually_swap_capable(self):
+        # Guard: the allowlist must not drift ahead of the registry — every
+        # general-purpose router must still declare the SWAP intent (else the
+        # AND-guard silently drops it and the override never fires).
+        from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+        from almanak.framework.intents.vocabulary import IntentType
+        from almanak.framework.teardown.consolidation import _GENERAL_PURPOSE_SWAP_ROUTERS
+
+        swap_capable = set(CompilerRegistry.protocols_for_intent(IntentType.SWAP))
+        drifted = _GENERAL_PURPOSE_SWAP_ROUTERS - swap_capable
+        assert not drifted, f"allowlisted routers no longer declare SWAP: {sorted(drifted)}"
+
+    def test_no_closing_intents_yields_none(self):
+        assert resolve_chain_swap_protocol([]) is None
+
+    def test_none_and_empty_protocol_entries_skipped(self):
+        # Closing intents that carry no protocol field must not crash or match.
+        assert resolve_chain_swap_protocol([None, ""]) is None
+
+    def test_first_swap_capable_wins_in_order(self):
+        # A non-swap protocol earlier in the sequence is skipped; the first
+        # swap-capable one wins.
+        assert resolve_chain_swap_protocol(["gmx_v2", "aerodrome"]) == "aerodrome"
+
+    def test_uniswap_v3_resolves_to_itself(self):
+        # A uniswap_v3 LP strategy resolves uniswap_v3 explicitly — same DEX the
+        # default would have picked, so no behaviour change for that class.
+        assert resolve_chain_swap_protocol(["uniswap_v3"]) == "uniswap_v3"

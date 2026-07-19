@@ -488,6 +488,136 @@ class TestRunTokenConsolidationExecution:
         assert any("wallet-scoped" in w for w in outcome.warnings)
 
     @pytest.mark.asyncio
+    async def test_aerodrome_closing_intents_route_consolidation_through_aerodrome(self):
+        """WIRING (VIB-5865 / ALM-2886 spec-critique): the live
+        ``run_token_consolidation`` must READ the strategy's closing-intent
+        protocols and route the residual-WETH swap-back through its own DEX.
+        An Aerodrome ``LP_CLOSE`` ⇒ the compiled consolidation swap carries
+        ``protocol="aerodrome"`` — NOT the compiler's hardcoded uniswap_v3
+        default. Closes the "resolver exists but is never wired in" gap that
+        the component-isolation tests alone cannot catch."""
+        mgr, _ = self._manager()
+
+        seen_protocols: list[object] = []
+        real_compile_result = mgr.compiler.compile.return_value
+
+        def _spy_compile(intent, *args, **kwargs):
+            seen_protocols.append(getattr(intent, "protocol", "MISSING"))
+            return real_compile_result
+
+        mgr.compiler.compile = MagicMock(side_effect=_spy_compile)
+
+        market = FakeMarket(
+            balances={"WETH": Decimal("0.011"), "USDC": Decimal("12")},
+            prices={"WETH": Decimal("1650"), "USDC": Decimal("1")},
+        )
+        state = _make_state(pending=[{"intent_type": "LP_CLOSE", "chain": CHAIN}], completed=1)
+
+        outcome = await mgr.run_token_consolidation(
+            _make_strategy(),
+            teardown_id=state.teardown_id,
+            teardown_state=state,
+            mode=TeardownMode.SOFT,
+            market=market,
+            price_oracle={"WETH": Decimal("1650"), "USDC": Decimal("1")},
+            positions=_make_positions(),
+            closing_intents=[{"intent_type": "LP_CLOSE", "protocol": "aerodrome", "chain": CHAIN}],
+            is_auto_mode=True,
+        )
+
+        assert outcome.planned == 1
+        assert outcome.succeeded == 1
+        # The compiled consolidation swap was routed through the strategy's DEX.
+        assert seen_protocols == ["aerodrome"], seen_protocols
+
+    @pytest.mark.asyncio
+    async def test_lending_closing_intents_preserve_default_protocol_none(self):
+        """WIRING negative case: a lending strategy's closing intents
+        (``WITHDRAW`` on aave_v3 — not swap-capable) name no swap DEX, so the
+        consolidation swap is emitted with ``protocol=None`` (byte-identical to
+        the pre-VIB-5865 behaviour; the compiler resolves its own default).
+        Proves the wiring is a genuine READ of the closing intents, not a
+        blanket override that would mis-route non-DEX strategies."""
+        mgr, _ = self._manager()
+
+        seen_protocols: list[object] = []
+        real_compile_result = mgr.compiler.compile.return_value
+
+        def _spy_compile(intent, *args, **kwargs):
+            seen_protocols.append(getattr(intent, "protocol", "MISSING"))
+            return real_compile_result
+
+        mgr.compiler.compile = MagicMock(side_effect=_spy_compile)
+
+        market = FakeMarket(
+            balances={"WETH": Decimal("0.011"), "USDC": Decimal("12")},
+            prices={"WETH": Decimal("1650"), "USDC": Decimal("1")},
+        )
+        state = _make_state(pending=[{"intent_type": "WITHDRAW", "chain": CHAIN}], completed=1)
+
+        outcome = await mgr.run_token_consolidation(
+            _make_strategy(),
+            teardown_id=state.teardown_id,
+            teardown_state=state,
+            mode=TeardownMode.SOFT,
+            market=market,
+            price_oracle={"WETH": Decimal("1650"), "USDC": Decimal("1")},
+            positions=_make_positions(),
+            closing_intents=[{"intent_type": "WITHDRAW", "protocol": "aave_v3", "chain": CHAIN}],
+            is_auto_mode=True,
+        )
+
+        assert outcome.planned == 1
+        assert outcome.succeeded == 1
+        assert seen_protocols == [None], seen_protocols
+
+    @pytest.mark.asyncio
+    async def test_router_from_a_different_chain_intent_is_not_selected(self):
+        """WIRING hardening (pr-auditor): the swap-back DEX is resolved only from
+        closing intents on the consolidation chain. An `aerodrome` closing intent
+        on a DIFFERENT chain than the one driving consolidation must NOT route
+        this chain's swap through aerodrome — it falls back to `protocol=None`."""
+        mgr, _ = self._manager()
+
+        seen_protocols: list[object] = []
+        real_compile_result = mgr.compiler.compile.return_value
+
+        def _spy_compile(intent, *args, **kwargs):
+            seen_protocols.append(getattr(intent, "protocol", "MISSING"))
+            return real_compile_result
+
+        mgr.compiler.compile = MagicMock(side_effect=_spy_compile)
+
+        market = FakeMarket(
+            balances={"WETH": Decimal("0.011"), "USDC": Decimal("12")},
+            prices={"WETH": Decimal("1650"), "USDC": Decimal("1")},
+        )
+        # Consolidation chain resolves to CHAIN (the first chain-bearing intent);
+        # the aerodrome router is named only by an intent on a different chain.
+        state = _make_state(pending=[{"intent_type": "LP_CLOSE", "chain": CHAIN}], completed=1)
+
+        outcome = await mgr.run_token_consolidation(
+            _make_strategy(),
+            teardown_id=state.teardown_id,
+            teardown_state=state,
+            mode=TeardownMode.SOFT,
+            market=market,
+            price_oracle={"WETH": Decimal("1650"), "USDC": Decimal("1")},
+            positions=_make_positions(),
+            closing_intents=[
+                {"intent_type": "WITHDRAW", "protocol": "aave_v3", "chain": CHAIN},
+                {"intent_type": "LP_CLOSE", "protocol": "aerodrome", "chain": "base"},
+            ],
+            is_auto_mode=True,
+        )
+
+        assert outcome.planned == 1
+        assert outcome.succeeded == 1
+        # aerodrome belongs to a base intent; the ethereum consolidation swap is
+        # NOT routed through it.
+        assert seen_protocols == [None], seen_protocols
+
+    @pytest.mark.asyncio
     async def test_consolidation_swap_runs_standard_slippage_ladder(self):
         """Consolidation swaps ride the SAME slippage machinery as closing
         intents (UAT card D4 / spec-critique finding): the first attempt
