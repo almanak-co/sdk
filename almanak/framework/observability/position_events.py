@@ -264,6 +264,15 @@ class PositionEvent:
     attribution_json: str = "{}"
     attribution_version: int = 0
 
+    # VIB-5896 — pool-coin-ordered universe for N-coin fungible pools (Curve,
+    # Balancer), stamped by ``_apply_lp_open`` from ``lp_open_data.coin_symbols``.
+    # IN-MEMORY ONLY: the position_events row schema is 2-slot and this field is
+    # deliberately NOT persisted (``save_position_event`` maps columns
+    # explicitly); its one consumer is ``stamp_entry_state_on_open``, which
+    # carries it into the OPEN row's ``attribution_json["entry_state"]`` so
+    # CLOSE-time IL can fail closed on >2-coin pools. ``None`` for 2-coin venues.
+    coin_symbols: list[str] | None = None
+
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["timestamp"] = self.timestamp.isoformat()
@@ -694,6 +703,14 @@ def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
         event.amount0 = str(amount0)
     if amount1 is not None:
         event.amount1 = str(amount1)
+    # VIB-5896 — carry the N-coin pool universe (when the connector stamped it
+    # on lp_open_data) so ``stamp_entry_state_on_open`` can persist it into
+    # entry_state and CLOSE-time IL fails closed on >2-coin pools instead of
+    # computing a subset-HODL off the 2-slot amounts above. Transient field —
+    # never persisted as a column (see the PositionEvent field comment).
+    raw_coins = getattr(lp_open, "coin_symbols", None)
+    if isinstance(raw_coins, list | tuple) and raw_coins:
+        event.coin_symbols = [str(c) for c in raw_coins]
     # Token symbols: LPOpenData doesn't carry them directly. Resolve from the
     # intent attrs / pool descriptor (e.g. "WETH/USDC/3000", "USDC/DAI/stable").
     t0, t1 = _pair_tokens_from_intent(ctx.intent)

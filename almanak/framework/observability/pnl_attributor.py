@@ -461,6 +461,18 @@ def compute_impermanent_loss(
     entry = _entry_state_from_open(open_event)
     if entry is None:
         return None
+    # VIB-5896 — N-coin (>2) fungible pools (Curve 3pool/4pool, Balancer
+    # weighted) have no two-token HODL anchor: entry_state's amount0/amount1
+    # structurally carry only 2 of the N deposited coins, so the 2-slot hodl
+    # below would be a subset-HODL and emit a wrong (not merely imprecise)
+    # impermanent_loss_usd. ``coin_symbols`` is stamped into entry_state by
+    # ``stamp_entry_state_on_open`` when the connector declared the pool-coin
+    # universe; >2 coins ⇒ IL unmeasurable on this 2-token rail (Empty ≠ Zero
+    # — None, never a 2-of-N approximation). Mirrors the identical gate in
+    # ``lp_handler._compute_lp_impermanent_loss`` (accounting_events lane).
+    entry_coins = entry.get("coin_symbols")
+    if isinstance(entry_coins, list | tuple) and len(entry_coins) > 2:
+        return None
     prices = _current_prices_from_close(close_event)
     if prices is None:
         return None
@@ -1183,6 +1195,7 @@ def build_entry_state(
     amount1: Any,
     price0: Any = None,
     price1: Any = None,
+    coin_symbols: list[str] | None = None,
 ) -> dict[str, Any]:
     """Package initial token amounts and prices for later IL attribution.
 
@@ -1190,6 +1203,12 @@ def build_entry_state(
     that the subsequent CLOSE-time ``compute_impermanent_loss`` can evaluate
     HODL value without re-reading the OPEN's raw tx. Normalises to strings
     for JSON fidelity; callers may pass Decimal / int / str.
+
+    ``coin_symbols`` (VIB-5896) is the pool-coin-ordered universe for N-coin
+    fungible pools (Curve, Balancer) — stamped so the CLOSE-time
+    ``compute_impermanent_loss`` can detect that the 2-slot amounts are a
+    subset of the deposit and fail closed instead of computing a subset-HODL.
+    Omitted for 2-coin venues (key absent — never a fabricated placeholder).
     """
 
     def _s(v: Any) -> str | None:
@@ -1197,7 +1216,7 @@ def build_entry_state(
             return None
         return str(v)
 
-    return {
+    state: dict[str, Any] = {
         "token0": token0 or "",
         "token1": token1 or "",
         # Empty != Zero: an unmeasured amount stays null, NOT a fabricated "0".
@@ -1207,6 +1226,9 @@ def build_entry_state(
         "price0": _s(price0),
         "price1": _s(price1),
     }
+    if coin_symbols:
+        state["coin_symbols"] = [str(c) for c in coin_symbols]
+    return state
 
 
 async def _fetch_latest_token_prices(
@@ -1313,6 +1335,13 @@ async def stamp_entry_state_on_open(
         price0 = _price_for_token(prices, token0) if prices else None
         price1 = _price_for_token(prices, token1) if prices else None
 
+        # VIB-5896 — thread the pool-coin universe (stamped transiently on the
+        # in-memory PositionEvent by ``_apply_lp_open`` for N-coin fungible
+        # venues) into entry_state so CLOSE-time IL can fail closed on >2-coin
+        # pools instead of computing a subset-HODL off the 2-slot amounts.
+        raw_coins = getattr(open_event, "coin_symbols", None)
+        coin_symbols = [str(c) for c in raw_coins] if isinstance(raw_coins, list | tuple) and raw_coins else None
+
         entry_state = build_entry_state(
             token0=token0,
             token1=token1,
@@ -1320,6 +1349,7 @@ async def stamp_entry_state_on_open(
             amount1=amount1,
             price0=price0,
             price1=price1,
+            coin_symbols=coin_symbols,
         )
 
         # Merge with any existing attribution_json content to preserve

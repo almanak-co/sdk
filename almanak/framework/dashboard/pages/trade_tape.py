@@ -619,15 +619,85 @@ def _format_direction(row: TradeTapeRow) -> tuple[str, str]:
     return in_part or out_part, ""
 
 
+def _format_ncoin_lp_direction(row: TradeTapeRow, *, is_close: bool) -> str | None:
+    """N-coin (>2) fungible LP headline — every pool coin, in pool order (VIB-5896).
+
+    A Curve 3pool/4pool (or Balancer weighted) LP_OPEN/LP_CLOSE touches N
+    coins, but both the accounting payload and the ledger row are 2-slot —
+    rendering from them shows 2 of N legs (the blind dashboard-auditor read a
+    $300 3-coin deposit as "$200, 2 coins"). The receipt-parsed
+    ``lp_open_data`` / ``lp_close_data`` on ``extracted_data_json`` carry the
+    FULL pool-coin-ordered vector (``coin_symbols`` + ``amount0/amount1`` +
+    ``additional_amounts``), so the tape renders from that instead.
+
+    Returns ``None`` for 2-coin / concentrated-liquidity venues (or when the
+    extracted data is absent/misaligned) — caller falls through to the
+    canonical 2-slot path unchanged. Amounts are raw on-chain integers scaled
+    via the token resolver; an unscalable amount renders raw (never a guessed
+    scale), and an unmeasured (null) amount renders ``—`` (Empty ≠ Zero).
+    """
+    data = _parse_extracted_data(row)
+    lp = data.get("lp_close_data" if is_close else "lp_open_data")
+    if not isinstance(lp, dict):
+        return None
+    coins = lp.get("coin_symbols")
+    if not isinstance(coins, list) or len(coins) <= 2:
+        return None
+
+    if is_close:
+        amounts: list[Any] = [lp.get("amount0_collected"), lp.get("amount1_collected")]
+    else:
+        amounts = [lp.get("amount0"), lp.get("amount1")]
+    # Coins 2+ live in ``additional_amounts`` keyed by pool-coin index. Require
+    # the index set to be EXACTLY 2..N-1 (values may be None = unmeasured):
+    # a missing or gappy index set is a malformed/misaligned payload, and
+    # rendering its absent legs as "—" would dress incomplete receipt data up
+    # as intentionally-unmeasured — fall through to the canonical 2-slot path
+    # instead (CodeRabbit on PR #3329).
+    additional = lp.get("additional_amounts")
+    if not isinstance(additional, dict):
+        return None
+    try:
+        extra_keys = sorted(additional, key=int)
+    except (TypeError, ValueError):
+        return None
+    if [int(k) for k in extra_keys] != list(range(2, len(coins))):
+        return None
+    amounts.extend(additional[k] for k in extra_keys)
+
+    chain = row.chain or ""
+    parts: list[str] = []
+    for i, sym in enumerate(coins):
+        symbol = str(sym or "")
+        raw = amounts[i] if i < len(amounts) else None
+        if raw is None:
+            amt_str = "—"
+        else:
+            # ``_scale_lp_amount`` returns None when decimals can't be
+            # resolved — render the raw integer then (honest, if ugly)
+            # rather than guess a scale.
+            amt_str = _scale_lp_amount(raw, symbol, chain) or str(raw)
+        parts.append(f"<code>{_e(amt_str)}</code> {_e(symbol)}")
+    return " + ".join(parts)
+
+
 def _format_lp_direction(row: TradeTapeRow, *, is_close: bool) -> tuple[str, str]:
     """Render the LP_OPEN / LP_CLOSE headline + (CLOSE only) fee sub-line.
 
-    Prefer the accounting payload's ``token0/token1/amount0/amount1`` —
+    N-coin (>2) fungible pools render every pool coin from the receipt-parsed
+    extracted data (VIB-5896 — see ``_format_ncoin_lp_direction``). Otherwise
+    prefer the accounting payload's ``token0/token1/amount0/amount1`` —
     those are post-decoded human Decimals stamped at execution block. Fall
     back to the ledger ``token_in/amount_in/token_out/amount_out`` when the
     payload is absent (pre-VIB-3417 rows, accounting events that haven't
     landed yet, etc.) so the tape still renders something useful.
     """
+    ncoin = _format_ncoin_lp_direction(row, is_close=is_close)
+    if ncoin:
+        # N-coin fungible closes carry no separable per-coin fee fields
+        # (fees are BUNDLED into the returned amounts), so no fee sub-line.
+        return ncoin, ""
+
     payload = _parse_accounting_payload(row)
     token0 = payload.get("token0") or row.token_in or ""
     token1 = payload.get("token1") or row.token_out or ""

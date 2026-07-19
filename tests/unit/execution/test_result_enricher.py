@@ -1377,6 +1377,36 @@ class TestExtractionSpecPerProtocolOverlay:
         # A parser without the attribute is a no-op (never raises).
         assert ResultEnricher._with_parser_extra_extractions(base, object(), "WITHDRAW") == base
 
+    def test_with_parser_extraction_removals_drops_connector_declared_fields(self) -> None:
+        """A parser's connector-DECLARED ``EXTRACTION_REMOVALS_BY_INTENT`` is
+        applied generically (VIB-5896) — subtractive sibling of the additive
+        merge above: order-preserving on survivors, intent-scoped, and a no-op
+        for parsers without it.
+        """
+        base = ["position_id", "tick_lower", "tick_upper", "liquidity", "lp_open_data"]
+
+        class _StubParser:
+            EXTRACTION_REMOVALS_BY_INTENT = {"LP_OPEN": frozenset({"tick_lower", "tick_upper"})}
+
+        removed = ResultEnricher._with_parser_extraction_removals(base, _StubParser(), "LP_OPEN")
+        assert removed == ["position_id", "liquidity", "lp_open_data"]
+        # A different intent type is untouched.
+        assert ResultEnricher._with_parser_extraction_removals(base, _StubParser(), "LP_CLOSE") == base
+        # A parser without the attribute is a no-op (never raises).
+        assert ResultEnricher._with_parser_extraction_removals(base, object(), "LP_OPEN") == base
+
+    def test_curve_tickless_removals_are_connector_owned_not_framework_overlay(self) -> None:
+        """The Curve tickless LP_OPEN removals live on the connector parser, NOT
+        as a protocol-named framework entry (VIB-5896 — the coupling /
+        literal-dispatch ratchets forbid a new ``"curve"`` literal here)."""
+        from almanak.connectors.curve.receipt_parser import CurveReceiptParser
+
+        assert CurveReceiptParser.EXTRACTION_REMOVALS_BY_INTENT["LP_OPEN"] == frozenset(
+            {"tick_lower", "tick_upper"}
+        )
+        assert "lp_close_data" not in CurveReceiptParser.EXTRACTION_REMOVALS_BY_INTENT["LP_CLOSE"]
+        assert "curve" not in ResultEnricher.EXTRACTION_SPECS_REMOVE_BY_PROTOCOL
+
     def test_pendle_withdraw_money_legs_is_connector_owned_not_framework_overlay(self) -> None:
         """The Pendle PT-redeem ``primitive_money_legs`` extraction is declared on
         the connector parser, NOT as a protocol-named framework overlay (VIB-4988;

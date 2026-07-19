@@ -914,6 +914,22 @@ class Connector:
     backtest_strategy_type: BacktestStrategyTypeDecl | None = None
     backtest_risk: BacktestRiskDecl | None = None
     metadata_amount_encoding: MetadataAmountEncoding | None = None
+    # True for pool-based LP venues whose position is a fungible ERC-20 LP/share
+    # token (Curve StableSwap, Fluid DEX shares) rather than an NFT.
+    #
+    # LOAD-BEARING TEARDOWN INVARIANT (VIB-5896 / VIB-5795): declaring
+    # ``fungible_lp=True`` auto-registers the framework-default fungible-LP
+    # teardown post-condition (``_strategy_base/fungible_lp_post_condition.py``),
+    # which chain-verifies closure by reading ``balanceOf(wallet)`` on the
+    # LP-token contract resolved from ``position.details['lp_token'|
+    # 'lp_token_address']`` or an address-shaped ``position_id``. A connector
+    # (or strategy) that puts the POOL address in those slots on a legacy venue
+    # where pool != LP token (e.g. Curve 3pool vs 3Crv) would make the verifier
+    # read a balance the wallet never holds -> 0 -> a FALSE CHAIN_VERIFIED on a
+    # possibly-unclosed position. Every ``fungible_lp=True`` connector MUST
+    # ensure its positions resolve the ERC-20 LP/share-token address there —
+    # never the pool — or publish its own manifest ``teardown_post_condition``
+    # (connector-owned hooks win over the default).
     fungible_lp: bool = False
     prediction_read: ImportRef | None = None
     prediction_execute: ImportRef | None = None

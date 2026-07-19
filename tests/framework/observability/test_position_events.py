@@ -1200,6 +1200,12 @@ _POSITION_EVENT_GOLDEN_KEYS: frozenset[str] = frozenset(
         # Versioned attribution
         "attribution_json",
         "attribution_version",
+        # VIB-5896 — N-coin pool universe. DELIBERATELY TRANSIENT: not a
+        # SQLite/Postgres column and intentionally ABSENT from the positional
+        # INSERT in backends/sqlite.py (the persisted carrier is
+        # attribution_json["entry_state"]["coin_symbols"], written by
+        # stamp_entry_state_on_open). Do NOT add it to the INSERT list.
+        "coin_symbols",
     }
 )
 
@@ -1257,10 +1263,13 @@ class TestPositionEventGoldenKeyset:
         actual = frozenset(f.name for f in fields(PositionEvent))
         assert actual == _POSITION_EVENT_GOLDEN_KEYS
 
-    def test_dataclass_field_count_is_32(self):
+    def test_dataclass_field_count_is_33(self):
         """Hard-coded field count.  Cheap redundant check that forces any
-        additive/subtractive change to touch this test explicitly."""
-        assert len(fields(PositionEvent)) == 32
+        additive/subtractive change to touch this test explicitly.
+
+        32 persisted fields + the transient ``coin_symbols`` (VIB-5896 — see
+        the golden-keyset comment; NOT a SQLite column by design)."""
+        assert len(fields(PositionEvent)) == 33
 
 
 class TestPositionEventToDictValueShape:

@@ -818,6 +818,19 @@ def _compute_lp_impermanent_loss(
     if not prior_open_payload:
         return None, None
 
+    # VIB-5896 — N-coin (>2) fungible pools (Curve 3pool/4pool, Balancer
+    # weighted) have NO two-token HODL anchor: the payload's ``amount0`` /
+    # ``amount1`` structurally carry only 2 of the N deposited coins, so the
+    # 2-token V_hodl below would be computed over a SUBSET of the deposit and
+    # emit a phantom ``il_usd`` ≈ the missing coins' notional (observed:
+    # +$100.046 on a break-even 3pool close). The OPEN payload cannot
+    # reconstruct the full N-coin HODL (coins 2+ have symbols via
+    # ``coin_symbols`` but no amounts), so IL is genuinely unmeasurable here —
+    # ``None`` per Empty ≠ Zero, never a 2-of-N approximation.
+    open_coins = prior_open_payload.get("coin_symbols")
+    if isinstance(open_coins, list | tuple) and len(open_coins) > 2:
+        return None, None
+
     amount0_open = _safe_decimal(prior_open_payload.get("amount0"))
     amount1_open = _safe_decimal(prior_open_payload.get("amount1"))
     # Either leg ``None`` ⇒ V_hodl is not computable, so fail closed (return

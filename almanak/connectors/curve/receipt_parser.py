@@ -528,6 +528,20 @@ class CurveReceiptParser:
         "LP_OPEN": ("primitive_money_legs",),
     }
 
+    # VIB-5896 — venue-shape removals (the subtractive sibling of the additive
+    # declaration above; read generically by ResultEnricher._with_parser_
+    # extraction_removals). Curve StableSwap is tickless (pool-based fungible
+    # LP, no concentrated-liquidity bracket), so the V3-shaped LP_OPEN
+    # ``tick_lower``/``tick_upper`` expectations would only produce the chronic
+    # "parser does not declare support for 'tick_lower'" WARN on every Curve
+    # LP_OPEN. The LP_CLOSE flat fields ship inside ``lp_close_data`` (no
+    # standalone extractors), same rationale as the V3 forks' framework-side
+    # removal entries.
+    EXTRACTION_REMOVALS_BY_INTENT: dict[str, frozenset[str]] = {
+        "LP_OPEN": frozenset({"tick_lower", "tick_upper"}),
+        "LP_CLOSE": frozenset({"amount0_collected", "amount1_collected", "fees0", "fees1"}),
+    }
+
     # VIB-5432 — Capability surface for the ResultEnricher SUPPORTED_EXTRACTIONS
     # check. Each entry maps to a present ``extract_<field>`` method on this class.
     # Declaring the FULL set of currently-served fields is deliberately behaviour-

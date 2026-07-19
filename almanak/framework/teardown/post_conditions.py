@@ -42,6 +42,9 @@ from typing import Any
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import CONNECTOR_REGISTRY, ConnectorDiscoveryError
 from almanak.connectors._strategy_base.address_registry import AbiFamily, AddressRegistry
+from almanak.connectors._strategy_base.fungible_lp_post_condition import (
+    fungible_lp_teardown_post_condition,
+)
 from almanak.connectors._strategy_base.teardown_post_condition import (
     NFT_ID_DETAIL_KEYS,
     ClosureCheckResult,
@@ -514,9 +517,35 @@ def _register_default_vault_post_conditions() -> None:
                 _register_teardown_post_condition(slug, erc4626_vault_teardown_post_condition)
 
 
+def _register_default_fungible_lp_post_conditions() -> None:
+    """Register the generic ERC-20 LP-token hook for every fungible-LP connector.
+
+    VIB-5795 / VIB-5896: before this, no ``ProtocolKind.LP`` connector with
+    ``fungible_lp=True`` (``curve``, ``fluid_dex_lp``) had a post-condition, so
+    a fungible-LP teardown was pinned at ``UNVERIFIED`` even when the LP-token
+    balance was provably 0 on-chain, and a residual was invisible. This default
+    gives the fungible-LP capability an on-chain closure check via a plain
+    ``balanceOf(wallet)`` read on the LP-token contract. A position with no
+    resolvable LP-token address degrades to ``unmeasured`` (→ ``UNVERIFIED``),
+    never a false result.
+
+    Keyed on the manifest ``fungible_lp`` capability (not a protocol-name list)
+    so future fungible-LP connectors are covered automatically — same
+    discipline as the VAULT default above, and same no-clobber rule
+    (connector-owned manifest hooks win).
+    """
+    for connector in CONNECTOR_REGISTRY.all():
+        if connector.kind is not ProtocolKind.LP or not getattr(connector, "fungible_lp", False):
+            continue
+        for slug in _connector_teardown_slugs(connector):
+            if not has_teardown_post_condition(slug):
+                _register_teardown_post_condition(slug, fungible_lp_teardown_post_condition)
+
+
 _register_default_v3_post_conditions()
 _register_lp_v4_primitive_alias()
 _register_default_vault_post_conditions()
+_register_default_fungible_lp_post_conditions()
 
 
 __all__ = [

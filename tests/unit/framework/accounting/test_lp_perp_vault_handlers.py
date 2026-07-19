@@ -3057,6 +3057,76 @@ class TestLpImpermanentLoss:
         )
         assert result.hodl_value_usd is None
 
+    def test_lp_close_ncoin_pool_nulls_il_and_hodl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """VIB-5896 — an N-coin (>2) fungible pool has no 2-token HODL anchor.
+
+        A Curve 3pool OPEN payload carries ``coin_symbols`` for all 3 coins but
+        amounts for only 2 (the payload schema is 2-slot), so the 2-token
+        V_hodl would be computed over a SUBSET of the deposit and emit a
+        phantom ``il_usd`` ≈ the missing coin's notional (the observed
+        +$100.046 on a break-even 3pool close). The gate must fail closed —
+        BOTH fields ``None`` — even though every present leg is priced and the
+        2-token math would happily produce a (wrong) number.
+        """
+        self._patch_token_resolver(monkeypatch, {"DAI": 18, "USDC": 6})
+        prior_open = {
+            "event_type": "LP_OPEN",
+            "token0": "DAI",
+            "token1": "USDC",
+            "amount0": "100.0",
+            "amount1": "100.0",
+            "cost_basis_usd": "300.0",
+            # The 3-coin universe (VIB-5429) — the third coin's amount is
+            # structurally absent from the 2-slot payload.
+            "coin_symbols": ["DAI", "USDC", "USDT"],
+        }
+        outbox, ledger = self._close_inputs(
+            prices={"DAI": "1.00", "USDC": "1.00", "USDT": "1.00"},
+            prior_open=prior_open,
+            amount0_collected_raw="100000000000000000000",  # 100 DAI
+            amount1_collected_raw="100000000",  # 100 USDC
+            fees0_raw="0",
+            fees1_raw="0",
+        )
+
+        result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
+        assert result is not None
+        assert result.il_usd is None, (
+            "N-coin (>2) pool must fail closed on IL — a 2-of-N V_hodl "
+            "fabricates a phantom il_usd equal to the missing coins' notional."
+        )
+        assert result.hodl_value_usd is None
+
+    def test_lp_close_two_coin_symbols_keeps_il(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """VIB-5896 guard-rail — a 2-entry ``coin_symbols`` must NOT trip the N-coin gate.
+
+        2-coin fungible pools (Curve 2pool) have a well-defined 2-token HODL;
+        only >2 coins are unmeasurable on the 2-slot payload.
+        """
+        self._patch_token_resolver(monkeypatch, {"USDC": 6, "WETH": 18})
+        prior_open = {
+            "event_type": "LP_OPEN",
+            "token0": "USDC",
+            "token1": "WETH",
+            "amount0": "100.0",
+            "amount1": "0.05",
+            "cost_basis_usd": "200.0",
+            "coin_symbols": ["USDC", "WETH"],
+        }
+        outbox, ledger = self._close_inputs(
+            prices={"USDC": "1.00", "WETH": "3000.00"},
+            prior_open=prior_open,
+            amount0_collected_raw="120000000",  # 120 USDC
+            amount1_collected_raw="40000000000000000",  # 0.04 WETH
+            fees0_raw="0",
+            fees1_raw="0",
+        )
+
+        result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
+        assert result is not None
+        assert result.hodl_value_usd == Decimal("250.00")
+        assert result.il_usd == Decimal("-10.00")
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # VIB-5553 — Curve crypto-numeraire close: fee-unavailability reason + ESTIMATED

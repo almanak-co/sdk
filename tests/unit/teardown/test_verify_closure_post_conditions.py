@@ -381,3 +381,81 @@ async def test_verification_status_in_memory_fallback_is_unverified_or_failed():
     residual = await mgr._verify_closure_detailed(strategy=_make_strategy(open_positions=[object()]))
     assert residual.all_closed is False
     assert residual.verification_status is VerificationStatus.FAILED
+
+
+# ─── VIB-5795 / VIB-5896 — curve (fungible-LP default) through the dispatch ───
+
+_CURVE_3CRV = "0x6c3F90f043a72FA612cbac8115EE7e52BDe6E490"
+
+
+class _CurveFakeGateway:
+    """Scripted ``query_erc20_balance`` double for the fungible-LP hook."""
+
+    def __init__(self, balance):
+        self._balance = balance
+
+    def query_erc20_balance(self, *, chain, token_address, wallet_address, block=None):
+        return self._balance
+
+
+def _curve_position() -> SimpleNamespace:
+    return SimpleNamespace(
+        protocol="curve",
+        position_id="curve-3pool-lp",
+        chain="ethereum",
+        details={"lp_token": _CURVE_3CRV},
+    )
+
+
+@pytest.mark.asyncio
+async def test_curve_teardown_is_chain_verified_via_fungible_lp_default():
+    """A closed Curve LP (3Crv balanceOf == 0) now reaches CHAIN_VERIFIED.
+
+    Pre-fix, no hook was registered under ``curve`` so the dispatch skipped the
+    position and the teardown was structurally pinned at UNVERIFIED — the
+    20260718-0026 quant-test false-negative (VIB-5795 curve facet). Uses the
+    REAL registered framework default, not a stub, so this also guards the
+    fungible-LP registration itself.
+    """
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(gateway_client=_CurveFakeGateway(balance=0))
+
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_strategy(open_positions=[]),
+        pre_execution_positions=_make_position_snapshot(_curve_position()),
+    )
+
+    assert detailed.all_closed is True
+    assert detailed.positions_total == 1
+    assert detailed.positions_closed == 1
+    assert detailed.verification_status is VerificationStatus.CHAIN_VERIFIED
+
+
+@pytest.mark.asyncio
+async def test_curve_teardown_residual_balance_is_failed():
+    """A MEASURED residual 3Crv balance must surface as FAILED, not silently pass."""
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(gateway_client=_CurveFakeGateway(balance=288_540_000_000_000_000_000))
+
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_strategy(open_positions=[]),
+        pre_execution_positions=_make_position_snapshot(_curve_position()),
+    )
+
+    assert detailed.all_closed is False
+    assert detailed.verification_status is VerificationStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_curve_teardown_unreadable_balance_is_unverified_not_failed():
+    """A read fault (None after retry) lowers to UNVERIFIED — never a fabricated FAILED."""
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(gateway_client=_CurveFakeGateway(balance=None))
+
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_strategy(open_positions=[]),
+        pre_execution_positions=_make_position_snapshot(_curve_position()),
+    )
+
+    assert detailed.all_closed is True
+    assert detailed.verification_status is VerificationStatus.UNVERIFIED

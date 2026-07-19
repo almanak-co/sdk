@@ -598,6 +598,33 @@ class ResultEnricher:
                 seen.add(field)
         return merged
 
+    @staticmethod
+    def _with_parser_extraction_removals(spec: list[str], parser: Any, intent_type: str) -> list[str]:
+        """Drop a parser's CONNECTOR-DECLARED per-intent non-applicable fields.
+
+        Subtractive sibling of :meth:`_with_parser_extra_extractions`
+        (VIB-5896). A receipt parser may publish
+        ``EXTRACTION_REMOVALS_BY_INTENT`` — ``{intent_type: frozenset(field,
+        ...)}`` — naming base-spec fields that structurally do not exist for its
+        venue (e.g. Curve StableSwap is tickless, so the V3-shaped
+        ``tick_lower``/``tick_upper`` LP_OPEN expectations would only produce
+        the chronic "parser does not declare support" WARN; its LP_CLOSE flat
+        fields ship inside ``lp_close_data``, same as the V3 forks). Declared
+        connector-side so the venue-shape knowledge lives in the connector, not
+        as a protocol-named entry in this framework's
+        ``EXTRACTION_SPECS_REMOVE_BY_PROTOCOL`` (which the coupling /
+        literal-dispatch ratchets rightly flag for migrated connectors).
+        Applied after the additive merges, mirroring the two-phase
+        ``_merge_spec_with_overlay`` semantics.
+        """
+        removals = getattr(parser, "EXTRACTION_REMOVALS_BY_INTENT", None)
+        if not isinstance(removals, dict):
+            return spec
+        fields = removals.get(intent_type)
+        if not fields:
+            return spec
+        return [field for field in spec if field not in fields]
+
     def __init__(
         self,
         parser_registry: ReceiptParserRegistry | None = None,
@@ -820,6 +847,10 @@ class ResultEnricher:
                 # extractions (e.g. the US-009 ``primitive_money_legs`` seam) — kept
                 # connector-side, not as a protocol-named overlay in this framework.
                 spec = self._with_parser_extra_extractions(spec, parser, intent_type)
+                # ...then its connector-DECLARED removals (VIB-5896: venue-shape
+                # fields that structurally don't exist, e.g. ticks on a tickless
+                # fungible pool). Subtractive last, mirroring _merge_spec_with_overlay.
+                spec = self._with_parser_extraction_removals(spec, parser, intent_type)
 
                 # On-chain extraction skips fields already populated off-chain so
                 # the CLOB-authoritative values are not overwritten by speculative
