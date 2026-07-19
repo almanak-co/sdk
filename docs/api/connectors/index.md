@@ -6,7 +6,7 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each g
 
 | Protocol | Type | Chains | Intent Types | Module |
 |----------|------|--------|--------------|--------|
-| [Aave V3](aave_v3.md) | Lending | [Arbitrum](../../chains/arbitrum.md), [Avalanche](../../chains/avalanche.md), [Base](../../chains/base.md), [BNB Chain](../../chains/bsc.md), [Ethereum](../../chains/ethereum.md), [Mantle](../../chains/mantle.md), [Optimism](../../chains/optimism.md), [Polygon](../../chains/polygon.md), [X-Layer](../../chains/xlayer.md) | ``BORROW``, ``FLASH_LOAN``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` | ``almanak.connectors.aave_v3`` |
+| [Aave V3](aave_v3.md) | Lending | [Arbitrum](../../chains/arbitrum.md), [Avalanche](../../chains/avalanche.md), [Base](../../chains/base.md), [BNB Chain](../../chains/bsc.md), [Ethereum](../../chains/ethereum.md), [Linea](../../chains/linea.md), [Mantle](../../chains/mantle.md), [Optimism](../../chains/optimism.md), [Polygon](../../chains/polygon.md), [X-Layer](../../chains/xlayer.md) | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` | ``almanak.connectors.aave_v3`` |
 | [Across](across.md) | Bridge | [Arbitrum](../../chains/arbitrum.md), [Base](../../chains/base.md), [Ethereum](../../chains/ethereum.md), [Linea](../../chains/linea.md), [Optimism](../../chains/optimism.md), [Polygon](../../chains/polygon.md) | ``BRIDGE`` | ``almanak.connectors.across`` |
 | [Aerodrome](aerodrome.md) | DEX | [Base](../../chains/base.md), [Optimism](../../chains/optimism.md) | ``LP_CLOSE``, ``LP_OPEN``, ``SWAP`` | ``almanak.connectors.aerodrome`` |
 | [Aster Perps](aster_perps.md) | Perp | [BNB Chain](../../chains/bsc.md) | ``PERP_CLOSE``, ``PERP_OPEN`` | ``almanak.connectors.aster_perps`` |

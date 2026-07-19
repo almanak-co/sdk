@@ -66,6 +66,7 @@ def strategy(strategy_config):
     instance.ltv_target = Decimal("0.3")
     instance.force_action = "lifecycle"
     instance._check_frozen_reserve = False
+    instance._lifecycle_stop_after = None
     instance._frozen_detected = False
     instance._state = "idle"
     instance._previous_stable_state = "idle"

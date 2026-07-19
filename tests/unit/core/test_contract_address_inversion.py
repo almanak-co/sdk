@@ -162,6 +162,10 @@ MULTISEND_CREATE2 = "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"
 # "robinhood" (4663) likewise declares the full stack via safe_stack_contracts()
 # (VIB-5708): the Zodiac ModuleProxyFactory + Roles v2 mastercopy were deployed
 # at canonical CREATE2 addresses on 2026-07-09, so it is in BOTH sets too.
+# "linea" (59144) declares the full stack via safe_stack_contracts() (VIB-5916):
+# the Safe v1.4.1 MultiSend + proxy/singleton and the Zodiac ModuleProxyFactory +
+# Roles mastercopy are all live at their canonical CREATE2 addresses on Linea
+# (eth_getCode verified 2026-07-19), so it is in BOTH sets too.
 FROZEN_MULTISEND_CHAINS = frozenset(
     {
         "ethereum",
@@ -176,6 +180,7 @@ FROZEN_MULTISEND_CHAINS = frozenset(
         "xlayer",
         "hyperevm",
         "robinhood",
+        "linea",
     }
 )
 FROZEN_SAFE_STACK_CHAINS = FROZEN_MULTISEND_CHAINS - {"gnosis", "mantle", "xlayer"}

@@ -10,7 +10,6 @@ from almanak.connectors._connector import (
     ImportRef,
     LendingReadDecl,
     MetadataAmountEncoding,
-    StrategyMatrixEntry,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
@@ -119,31 +118,32 @@ CONNECTOR = Connector(
     # on every tick (VIB-2630 spike). If a storage-writing poke is ever
     # needed, use a 1-wei supply with prior approval.
     backtest_risk=_BACKTEST_RISK,
-    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
-    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "mantle", "xlayer"),
-    # Matrix output stays lending-only for now; Aave flash-loan support exists
-    # but historically has not rendered as its own support-matrix row.
-    strategy_matrix_entries=(
-        StrategyMatrixEntry(
-            matrix_name="aave_v3",
-            category="lending",
-            chains=frozenset(
-                (
-                    "ethereum",
-                    "arbitrum",
-                    "optimism",
-                    "polygon",
-                    "base",
-                    "avalanche",
-                    "bsc",
-                    "linea",
-                    "plasma",
-                    "sonic",
-                    "mantle",
-                    "xlayer",
-                )
-            ),
-        ),
+    # Strategy support declares ONLY the four executable lending intents.
+    # FLASH_LOAN is intentionally absent (VIB-5916): the flash-loan lane
+    # compiles but has no receiver/accounting execution support, so it must
+    # not be advertised as strategy support. The flash-loan PROVIDER stays
+    # registered/discoverable through the dedicated flash_loan_* descriptor
+    # fields below (with_flash_loan / FLASH_LOAN_PROVIDER_REGISTRY), which are
+    # keyed independently of strategy_intents — see
+    # tests/unit/connectors/aave_v3/test_manifest_truthfulness_vib5916.py.
+    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+    # linea added (VIB-5916) after Phase-0 live-reserve verification. plasma
+    # and sonic are deliberately NOT declared: plasma's token catalogue is
+    # incomplete and sonic is untested — they stay out until their own proof
+    # runs. The support matrix now DERIVES from (intents, chains) — no manual
+    # matrix override — so the displayed lending row equals strategy_chains
+    # exactly and cannot outrun this declaration.
+    strategy_chains=(
+        "ethereum",
+        "arbitrum",
+        "optimism",
+        "polygon",
+        "base",
+        "avalanche",
+        "bsc",
+        "mantle",
+        "xlayer",
+        "linea",
     ),
 )
 

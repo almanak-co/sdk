@@ -153,9 +153,13 @@ EXPECTED_ALIASES = {
 }
 
 MIGRATED_STRATEGY_REGISTRATION = {
+    # VIB-5916: FLASH_LOAN removed from strategy support (lane compiles but has
+    # no executable receiver/accounting support); linea added after Phase-0
+    # live-reserve verification. The flash-loan PROVIDER stays registered via
+    # the descriptor's flash_loan_* fields (see EXPECTED_FLASH_LOAN_MODULES).
     "aave_v3": (
-        ("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
-        ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "mantle", "xlayer"),
+        ("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+        ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "mantle", "xlayer", "linea"),
     ),
     "across": (("BRIDGE",), ("ethereum", "arbitrum", "base", "optimism", "polygon", "linea")),
     "aerodrome": (("SWAP", "LP_OPEN", "LP_CLOSE"), ("base", "optimism")),
@@ -216,28 +220,10 @@ MIGRATED_STRATEGY_REGISTRATION = {
 }
 
 EXPECTED_STRATEGY_MATRIX_ENTRIES = {
-    "aave_v3": (
-        StrategyMatrixEntry(
-            matrix_name="aave_v3",
-            category="lending",
-            chains=frozenset(
-                (
-                    "ethereum",
-                    "arbitrum",
-                    "optimism",
-                    "polygon",
-                    "base",
-                    "avalanche",
-                    "bsc",
-                    "linea",
-                    "plasma",
-                    "sonic",
-                    "mantle",
-                    "xlayer",
-                )
-            ),
-        ),
-    ),
+    # VIB-5916: aave_v3 no longer declares a manual matrix override. The
+    # lending matrix row now DERIVES from (strategy_intents, strategy_chains),
+    # which drops the optimistic plasma/sonic claims. None = no override.
+    "aave_v3": None,
     "balancer_v2": (
         StrategyMatrixEntry(
             matrix_name="balancer",

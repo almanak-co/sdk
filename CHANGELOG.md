@@ -8,6 +8,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Aave V3 on Linea (VIB-5916).** The aave_v3 connector now declares `linea`
+  in `strategy_chains`, backed by the full proof chain: four-layer Zodiac-on
+  intent tests on a Linea fork, an exact-surface Safe permission regression,
+  managed-Anvil lifecycle + separate-signal teardown E2E, and a chain-confirmed
+  ≤5 USDC mainnet round trip (`tests/reports/aave_v3_lending_linea_e2e_*.md`).
+  The Linea chain descriptor gains the canonical Safe v1.4.1 + Zodiac Roles
+  stack (verified live on 59144), enabling Safe-wallet execution on Linea
+  framework-wide (hosted review: VIB-5918).
+- **`lifecycle_stop_after="borrowed"`** on the chain-generic
+  `aave_v3_lending` strategy: deterministically HOLD an open, healthy borrow
+  for a separate teardown signal, with boot-time validation, warn-only
+  health-factor telemetry (`stop_after_min_health_factor`, default 1.5), and a
+  documented debt-token interest-buffer requirement for `repay_full` teardown
+  (automatic shortfall top-up tracked in VIB-5919).
+
+### Changed
+
+- **Aave V3 support claims are now derived, not asserted.** `FLASH_LOAN` was
+  removed from aave_v3 `strategy_intents` (the flash-loan *provider* stays
+  registered for the compile lane — decoupling is regression-tested), the
+  hand-typed support-matrix override was deleted so `almanak info matrix`
+  derives the aave_v3 row from the tested manifest, and the unproven `sonic`
+  claim was dropped from the strategy metadata.
+
+### Removed
+
+- **BREAKING (config-level): aave_v3 on `plasma` no longer passes the runtime
+  chain gate.** The chain was never proven (incomplete token catalogue, no
+  intent tests) and is no longer advertised; a config pairing `aave_v3` with
+  `plasma` now fails at boot with a `ConfigurationError` instead of failing
+  on-chain later. Pool address data is retained in `addresses.py`; re-enabling
+  requires a manifest + proof run (see the VIB-5916 pattern).
+
 - **Robinhood Chain (id 4663).** Chain descriptor for the Arbitrum Orbit L2
   (ETH gas, Blockscout explorer, Arbitrum `ArbGasInfo` L1-fee oracle) plus the
   token layer (WETH, USDG, USDe — no canonical USDC/USDT exists on 4663 with

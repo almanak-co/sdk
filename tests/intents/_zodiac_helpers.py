@@ -468,6 +468,7 @@ _CHAIN_ID_TO_MULTISEND_KEY: dict[int, str] = {
     8453: "base",
     42161: "arbitrum",
     43114: "avalanche",
+    59144: "linea",
 }
 
 

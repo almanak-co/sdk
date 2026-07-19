@@ -2,6 +2,7 @@
 
 from almanak.core.enums import ChainFamily
 
+from ._contracts import safe_stack_contracts
 from ._descriptor import (
     AnvilProfile,
     ChainDescriptor,
@@ -51,6 +52,13 @@ DESCRIPTOR = register_chain(
             "usdt": "0xA219439258ca9da29E9Cc4cE5596924745e12B93",
             "weth": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",
         },
+        # Safe v1.4.1 + Zodiac Roles stack (canonical CREATE2 addresses, verified
+        # deployed on Linea mainnet). Declaring it enables Safe-wallet execution
+        # and the Zodiac Roles permission path for Linea strategies (VIB-5916) —
+        # without it MULTISEND_ADDRESSES has no Linea entry and every
+        # execTransactionWithRole batch fails. Matches the fragment every other
+        # Safe-enabled chain uses.
+        contracts=safe_stack_contracts(),
         simulation=SimulationProfile(tenderly_supported=True),
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
         # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
