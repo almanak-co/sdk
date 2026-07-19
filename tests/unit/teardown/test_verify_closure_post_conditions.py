@@ -459,3 +459,247 @@ async def test_curve_teardown_unreadable_balance_is_unverified_not_failed():
 
     assert detailed.all_closed is True
     assert detailed.verification_status is VerificationStatus.UNVERIFIED
+
+
+class _LendingFakeGateway:
+    """Scripted double for the lending hooks (VIB-5795).
+
+    ``query_erc20_balance`` serves the ERC-4626 shares read (supply leg);
+    ``eth_call`` serves ``debtOf`` (debt leg) with a single scripted word
+    (``None`` = read fault).
+    """
+
+    def __init__(self, *, shares=0, debt_word=0):
+        self._shares = shares
+        self._debt_word = debt_word
+
+    def query_erc20_balance(self, *, chain, token_address, wallet_address, block=None):
+        return self._shares
+
+    def eth_call(self, *, chain, to, data, block=None):
+        if self._debt_word is None:
+            return None
+        return "0x" + format(self._debt_word, "064x")
+
+
+def _make_lending_strategy() -> MagicMock:
+    """Like ``_make_strategy`` but with a REAL-shaped wallet address.
+
+    The lending debt read validates the wallet as an EVM address before
+    encoding it into calldata; the ``"0xabc"`` stub would (correctly) resolve
+    to unmeasured.
+    """
+    strategy = _make_strategy(open_positions=[])
+    strategy.wallet_address = "0x" + "11" * 20
+    return strategy
+
+
+def _euler_supply_position() -> SimpleNamespace:
+    return SimpleNamespace(
+        protocol="euler_v2",
+        position_id="euler_v2-collateral-WETH-ethereum",
+        chain="ethereum",
+        position_type="SUPPLY",
+        details={"asset": "WETH", "type": "collateral"},
+    )
+
+
+def _euler_borrow_position() -> SimpleNamespace:
+    return SimpleNamespace(
+        protocol="euler_v2",
+        position_id="euler_v2-borrow-USDC-ethereum",
+        chain="ethereum",
+        position_type="BORROW",
+        details={"asset": "USDC", "type": "borrow"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_lending_teardown_both_legs_flat_is_chain_verified():
+    """A flat euler_v2 account (0 shares, 0 debt) now reaches CHAIN_VERIFIED.
+
+    Pre-fix, no hook was registered for any LENDING protocol so the dispatch
+    skipped both positions and the teardown was structurally pinned at
+    UNVERIFIED — the VIB-5795 field runs. Uses the REAL manifest-registered
+    hook, so this also guards the registration itself.
+    """
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(gateway_client=_LendingFakeGateway(shares=0, debt_word=0))
+
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_lending_strategy(),
+        pre_execution_positions=_make_position_snapshot(
+            _euler_supply_position(), _euler_borrow_position()
+        ),
+    )
+
+    assert detailed.all_closed is True
+    assert detailed.positions_total == 2
+    assert detailed.positions_closed == 2
+    assert detailed.verification_status is VerificationStatus.CHAIN_VERIFIED
+
+
+@pytest.mark.asyncio
+async def test_lending_teardown_residual_debt_is_failed_despite_clean_collateral():
+    """THE debt-leg trap: clean collateral must not green a live debt leg.
+
+    The supply position measures closed (0 shares) but the borrow position
+    reads residual debt — the teardown must be FAILED, never CHAIN_VERIFIED.
+    Kills the mutant that drops the BORROW dispatch branch.
+    """
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(gateway_client=_LendingFakeGateway(shares=0, debt_word=5_000_000))
+
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_lending_strategy(),
+        pre_execution_positions=_make_position_snapshot(
+            _euler_supply_position(), _euler_borrow_position()
+        ),
+    )
+
+    assert detailed.all_closed is False
+    assert detailed.verification_status is VerificationStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_lending_teardown_unmeasured_leg_is_unverified_not_failed():
+    """A debt-read fault lowers to UNVERIFIED — never a fabricated FAILED."""
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(gateway_client=_LendingFakeGateway(shares=0, debt_word=None))
+
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_lending_strategy(),
+        pre_execution_positions=_make_position_snapshot(
+            _euler_supply_position(), _euler_borrow_position()
+        ),
+    )
+
+    assert detailed.all_closed is True
+    assert detailed.verification_status is VerificationStatus.UNVERIFIED
+
+
+def _silo_supply_position() -> SimpleNamespace:
+    return SimpleNamespace(
+        protocol="silo_v2",
+        position_id="silo_v2-supply-USDC-avalanche",
+        chain="avalanche",
+        position_type="SUPPLY",
+        details={"asset": "USDC", "type": "deposit"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_silo_teardown_flat_supply_is_chain_verified():
+    """A flat silo_v2 supply position reaches CHAIN_VERIFIED via the REAL hook.
+
+    Same seam as the euler tests — guards silo_v2's own manifest registration
+    and its multi-market catalogue read through the final verdict composition.
+    """
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(gateway_client=_LendingFakeGateway(shares=0, debt_word=0))
+
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_lending_strategy(),
+        pre_execution_positions=_make_position_snapshot(_silo_supply_position()),
+    )
+
+    assert detailed.all_closed is True
+    assert detailed.positions_closed == 1
+    assert detailed.verification_status is VerificationStatus.CHAIN_VERIFIED
+
+
+@pytest.mark.asyncio
+async def test_silo_teardown_residual_shares_is_failed():
+    """A MEASURED silo share residual (worth > dust) surfaces as FAILED."""
+    mgr = TeardownManager()
+
+    class _SiloResidualGateway:
+        def query_erc20_balance(self, *, chain, token_address, wallet_address, block=None):
+            return 10**18  # live shares in every catalogued USDC silo
+
+        def eth_call(self, *, chain, to, data, block=None):
+            # convertToAssets echoes a material asset value.
+            return "0x" + format(5_000_000, "064x")
+
+    mgr.compiler = SimpleNamespace(gateway_client=_SiloResidualGateway())
+
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_lending_strategy(),
+        pre_execution_positions=_make_position_snapshot(_silo_supply_position()),
+    )
+
+    assert detailed.all_closed is False
+    assert detailed.verification_status is VerificationStatus.FAILED
+
+
+def _benqi_snapshot_blob(error: int, qi_balance: int, borrow_balance: int, exchange_rate: int) -> str:
+    return "0x" + "".join(format(v, "064x") for v in (error, qi_balance, borrow_balance, exchange_rate))
+
+
+class _BenqiSnapshotGateway:
+    """eth_call double returning a scripted getAccountSnapshot blob."""
+
+    def __init__(self, blob: str):
+        self._blob = blob
+
+    def eth_call(self, *, chain, to, data, block=None):
+        return self._blob
+
+
+def _benqi_positions() -> tuple[SimpleNamespace, SimpleNamespace]:
+    supply = SimpleNamespace(
+        protocol="benqi",
+        position_id="benqi-collateral-AVAX-avalanche",
+        chain="avalanche",
+        position_type="SUPPLY",
+        details={"asset": "AVAX", "type": "collateral"},
+    )
+    borrow = SimpleNamespace(
+        protocol="benqi",
+        position_id="benqi-borrow-USDC-avalanche",
+        chain="avalanche",
+        position_type="BORROW",
+        details={"asset": "USDC", "type": "borrow"},
+    )
+    return supply, borrow
+
+
+@pytest.mark.asyncio
+async def test_benqi_teardown_flat_account_is_chain_verified_at_td14_seam():
+    """A flat benqi account (0 qiTokens, 0 debt) is CHAIN_VERIFIED at TD-14.
+
+    This is the seam the benqi real-fork Run 2 proved ("2 position(s) passed
+    on-chain post-condition checks"); the OVERALL CLI verdict additionally
+    passes through the TD-15 pre-reconcile gate, whose benqi price-injection
+    gap is ticketed separately (VIB-5911) and is not this seam's authority.
+    """
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(
+        gateway_client=_BenqiSnapshotGateway(_benqi_snapshot_blob(0, 0, 0, 20_000_000_000_000_000))
+    )
+
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_lending_strategy(),
+        pre_execution_positions=_make_position_snapshot(*_benqi_positions()),
+    )
+
+    assert detailed.all_closed is True
+    assert detailed.positions_closed == 2
+    assert detailed.verification_status is VerificationStatus.CHAIN_VERIFIED
+
+
+@pytest.mark.asyncio
+async def test_benqi_teardown_residual_debt_is_failed():
+    """Residual benqi borrow balance → FAILED even with zero qiToken collateral."""
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(
+        gateway_client=_BenqiSnapshotGateway(_benqi_snapshot_blob(0, 0, 123_456, 20_000_000_000_000_000))
+    )
+
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_lending_strategy(),
+        pre_execution_positions=_make_position_snapshot(*_benqi_positions()),
+    )
+
+    assert detailed.all_closed is False
+    assert detailed.verification_status is VerificationStatus.FAILED

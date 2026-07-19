@@ -39,6 +39,13 @@ CONNECTOR = Connector(
         account_state=ImportRef(module="almanak.connectors.benqi.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"),
         market_table=ImportRef(module="almanak.connectors.benqi.lending_read", attribute="BENQI_ACCOUNT_STATE_MARKETS"),
     ),
+    # TD-14 post-close on-chain closure verifier (VIB-5795): getAccountSnapshot
+    # per position leg (supplied value / borrow balance ≤ dust); Compound-V2
+    # shape, NOT ERC-4626.
+    teardown_post_condition=ImportRef(
+        module="almanak.connectors.benqi.teardown_post_condition",
+        attribute="benqi_teardown_post_condition",
+    ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("avalanche",),
 )

@@ -295,26 +295,90 @@ def _lending_market_id(position: PositionInfo) -> str:
     ``"weth"``, ``"usdc_e"``) that is the SAME string the strategy already threads
     through its own ``Intent.supply(..., market_id=self.market, ...)`` /
     ``Intent.borrow(..., market_id=self.market, ...)`` calls. Try both known
-    conventions before falling back to ``position_id``.
+    conventions first.
+
+    **Synthetic-market fallback (VIB-5795).** Euler V2 / Silo V2 / BENQI positions
+    carry NEITHER detail key: their ``get_open_positions()`` emits a single-leg
+    ``details={"asset": <symbol>, "type": ...}`` and a synthetic ``position_id``
+    (``"euler_v2-collateral-WETH-ethereum"``) that is not a market key. Their real
+    id is a token-derived synthetic id (euler/silo: ``"<col>/<loan>"`` or the
+    collateral-only ``"<col>"``; BENQI: a fixed whole-account id). Before the
+    ``position_id`` last-resort, reconstruct it from the position's own asset via
+    the SAME VIB-5775 resolution seam the valuation guard and ``get_health`` use
+    (:meth:`~almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.resolve_market_id`)
+    — a SUPPLY leg names the collateral, a BORROW leg names the loan. The resolver
+    is contracted to fail **closed** to ``None`` (never guess) on ambiguity (a
+    BORROW-only ref whose debt token is backed by several collaterals), an
+    uncatalogued token, or a protocol with no ref resolver — so those keep today's
+    fail-closed behaviour below rather than binding a wrong market (Empty ≠ Zero).
 
     ``position_id`` is a **last-resort** fallback, not a market key. For
     whole-account protocols (the Aave family) ``position_health`` ignores
     ``market_id`` entirely, so an arbitrary ``position_id`` string is harmless
-    there. But for a per-market protocol whose position carries neither detail
-    key (e.g. a future connector, or Silo V2 / Euler V2 / BENQI's synthetic
-    ``"<col>"`` / ``"<col>/<loan>"`` ids, which are not surfaced via either key
-    today), ``position_health`` raises ``market '<position_id>' not found`` —
-    caught by :func:`~almanak.framework.teardown.live_position_reads.
-    redrive_lending_position` and surfaced as a fail-closed ``UNVERIFIABLE``
-    Plan-A verdict (Empty ≠ Zero: an unresolvable market never masquerades as a
-    confirmed reconciliation), never a wrong-market false verify.
+    there. But for a per-market protocol whose position carries neither detail key
+    AND whose asset the resolver could not turn into a catalogued market,
+    ``position_health`` raises ``market '<position_id>' not found`` — caught by
+    :func:`~almanak.framework.teardown.live_position_reads.redrive_lending_position`
+    and surfaced as a fail-closed ``UNVERIFIABLE`` Plan-A verdict (an unresolvable
+    market never masquerades as a confirmed reconciliation), never a wrong-market
+    false verify.
     """
     details = position.details if isinstance(position.details, dict) else {}
     for key in ("market_id", "market"):
         value = details.get(key)
         if value:
             return str(value)
+    resolved = _resolve_synthetic_market_id(position, details)
+    if resolved:
+        return resolved
     return str(position.position_id)
+
+
+def _resolve_synthetic_market_id(position: PositionInfo, details: dict[str, Any]) -> str | None:
+    """Reconstruct a synthetic-market id from a single-leg lending position (VIB-5795).
+
+    Builds a :class:`~almanak.connectors._strategy_base.lending_read_base.LendingPositionRef`
+    from the position's ``protocol`` / ``chain`` and its one known leg token
+    (``details['asset']`` — the collateral for a SUPPLY, the loan for a BORROW) and
+    routes it through the VIB-5775
+    :meth:`~almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.resolve_market_id`
+    seam. Returns the resolved id, or ``None`` when the seam fails closed
+    (ambiguous / uncatalogued token, no ref resolver, unknown protocol) — the
+    caller then keeps its ``position_id`` last-resort (Empty ≠ Zero: never a
+    guessed market). BENQI's whole-account resolver returns its fixed id for any
+    (or no) token, so a BENQI leg resolves regardless of which asset it names.
+    """
+    protocol = str(getattr(position, "protocol", "") or "")
+    chain = str(getattr(position, "chain", "") or "")
+    if not protocol or not chain:
+        return None
+    asset = details.get("asset") or details.get("asset_symbol")
+    asset = str(asset) if asset else None
+    # ``==`` (not ``is``): PositionType is a StrEnum, and a position rebuilt
+    # from persisted state may carry the plain string — identity would silently
+    # misroute a "SUPPLY" string to the loan leg (gemini/CodeRabbit, PR #3336).
+    is_supply = position.position_type == PositionType.SUPPLY
+    try:
+        from almanak.connectors._strategy_base.lending_read_base import LendingPositionRef
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        ref = LendingPositionRef(
+            protocol=protocol,
+            chain=chain,
+            collateral_token=asset if is_supply else None,
+            loan_token=asset if not is_supply else None,
+        )
+        return LendingReadRegistry.resolve_market_id(ref)
+    except Exception:  # noqa: BLE001 — resolution must never fault the teardown lane
+        logger.debug(
+            "TD-15 _lending_market_id: synthetic market-id resolution raised for %s %s on %s "
+            "— falling through to position_id (UNVERIFIABLE)",
+            protocol,
+            position.position_id,
+            chain,
+            exc_info=True,
+        )
+        return None
 
 
 def _is_nft_lp_protocol(protocol: str) -> bool:

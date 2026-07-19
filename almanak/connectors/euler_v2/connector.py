@@ -36,6 +36,12 @@ CONNECTOR = Connector(
             module="almanak.connectors.euler_v2.lending_read", attribute="EULER_V2_ACCOUNT_STATE_MARKETS"
         ),
     ),
+    # TD-14 post-close on-chain closure verifier (VIB-5795): supply value /
+    # debt ≤ dust per position leg, read from the connector's own vault tables.
+    teardown_post_condition=ImportRef(
+        module="almanak.connectors.euler_v2.teardown_post_condition",
+        attribute="euler_v2_teardown_post_condition",
+    ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("ethereum", "avalanche", "base", "arbitrum"),
 )

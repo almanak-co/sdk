@@ -162,12 +162,14 @@ def test_teardown_unwinds_with_wrap_swap_legs():
             break
     intents = s.generate_teardown_intents(mode=None, market=_market(20.0))
     types = [i.intent_type.value for i in intents]
-    # Each staircase round is WITHDRAW -> WRAP -> SWAP -> REPAY; ends with an
-    # explicit-amount WITHDRAW (BENQI rejects withdraw_all without a redeem_amount).
+    # Each staircase round is WITHDRAW -> WRAP -> SWAP -> REPAY; ends with a
+    # withdraw_all WITHDRAW (compiles redeem(<full qiToken balance>) since
+    # VIB-5404 — reclaims accrued interest, leaves a truly flat position for
+    # the VIB-5795 post-close verification; the old explicit-amount workaround
+    # stranded interest and tripped the residual check).
     assert types[:4] == ["WITHDRAW", "WRAP_NATIVE", "SWAP", "REPAY"]
     assert types[-1] == "WITHDRAW"
-    assert intents[-1].withdraw_all is False
-    assert Decimal(str(intents[-1].amount)) > Decimal("0")
+    assert intents[-1].withdraw_all is True
 
 
 def test_teardown_empty_when_flat():

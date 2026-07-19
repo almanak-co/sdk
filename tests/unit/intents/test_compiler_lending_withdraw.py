@@ -828,6 +828,66 @@ class TestBenqiHelper:
             intent = _withdraw_intent(protocol="benqi", withdraw_all=True, amount=Decimal("1"))
             result = cl._compile_withdraw_benqi(compiler, intent, _mock_token("USDC"), None, [])
         assert result.status == CompilationStatus.SUCCESS
+
+    def test_withdraw_all_redeems_full_qitoken_balance_vib5404(self):
+        """withdraw_all compiles redeem(<full qiToken balance>) from a live read.
+
+        The qiToken share count is stable under interest accrual (the exchange
+        rate grows, not the balance), so redeeming the compile-time balance is
+        exact and strands zero accrued interest — the legacy
+        redeemUnderlying(tracked) path stranded every wei of interest accrued
+        since tracking and tripped the VIB-5795 post-close residual check.
+        """
+        compiler = _mock_compiler(chain="avalanche")
+        compiler._query_erc20_balance.return_value = 500_000_000
+        with patch(BENQI_ADAPTER) as mock_cls, patch(BENQI_CONFIG):
+            mock_adapter = MagicMock()
+            mock_adapter.comptroller_address = "0xcomp"
+            market = MagicMock()
+            market.qi_token_address = "0xqi"
+            mock_adapter.get_market_info.return_value = market
+            mock_adapter.withdraw.return_value = _mock_tx_result()
+            mock_cls.return_value = mock_adapter
+            intent = _withdraw_intent(protocol="benqi", withdraw_all=True)
+            result = cl._compile_withdraw_benqi(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.SUCCESS
+        compiler._query_erc20_balance.assert_called_once_with("0xqi", compiler.wallet_address)
+        assert mock_adapter.withdraw.call_args.kwargs["redeem_amount"] == 500_000_000
+        assert mock_adapter.withdraw.call_args.kwargs["withdraw_all"] is True
+
+    def test_withdraw_all_zero_qitoken_balance_fails_loud(self):
+        """A zero qiToken balance is a loud FAILED, never a no-op redeem(0)."""
+        compiler = _mock_compiler(chain="avalanche")
+        compiler._query_erc20_balance.return_value = 0
+        with patch(BENQI_ADAPTER) as mock_cls, patch(BENQI_CONFIG):
+            mock_adapter = MagicMock()
+            market = MagicMock()
+            market.qi_token_address = "0xqi"
+            mock_adapter.get_market_info.return_value = market
+            mock_cls.return_value = mock_adapter
+            intent = _withdraw_intent(protocol="benqi", withdraw_all=True)
+            result = cl._compile_withdraw_benqi(compiler, intent, _mock_token("USDC"), None, [])
+        assert result.status == CompilationStatus.FAILED
+        assert "nothing to withdraw" in result.error
+        mock_adapter.withdraw.assert_not_called()
+
+    def test_withdraw_all_balance_read_fault_falls_back_to_tracked_amount(self):
+        """A balance read fault with a supplied amount degrades LOUDLY to redeemUnderlying."""
+        compiler = _mock_compiler(chain="avalanche")
+        compiler._query_erc20_balance.return_value = None
+        with patch(BENQI_ADAPTER) as mock_cls, patch(BENQI_CONFIG):
+            mock_adapter = MagicMock()
+            mock_adapter.comptroller_address = "0xcomp"
+            market = MagicMock()
+            market.qi_token_address = "0xqi"
+            mock_adapter.get_market_info.return_value = market
+            mock_adapter.withdraw.return_value = _mock_tx_result()
+            mock_cls.return_value = mock_adapter
+            intent = _withdraw_intent(protocol="benqi", withdraw_all=True, amount=Decimal("2"))
+            result = cl._compile_withdraw_benqi(compiler, intent, _mock_token("USDC"), Decimal("2"), [])
+        assert result.status == CompilationStatus.SUCCESS
+        assert mock_adapter.withdraw.call_args.kwargs["redeem_amount"] is None
+        assert any("falling back to redeemUnderlying" in w for w in result.warnings)
         assert result.action_bundle.metadata["withdraw_all"] is True
         assert result.action_bundle.metadata["withdraw_amount"] == "all"
         kwargs = mock_adapter.withdraw.call_args.kwargs

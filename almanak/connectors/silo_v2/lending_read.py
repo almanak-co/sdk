@@ -230,18 +230,36 @@ def _silo_query_inputs_from_intent(intent: Any) -> dict[str, Any]:
 def _silo_market_id_from_ref(ref: LendingPositionRef) -> str | None:
     """Reconstruct Silo's synthetic ``market_id`` from a typed position ref (VIB-5775).
 
-    Pure token-attribute logic: the ref names both legs explicitly, so this is a thin
-    adapter over :func:`_synthesize_market_id` (the SAME derivation the intent path's
-    ``query_inputs_fn`` uses) keyed off ``ref.collateral_token`` / ``ref.loan_token``.
-    Silo's catalogue is Avalanche-only, so ``ref.chain`` is not consulted (mirrors
-    ``_synthesize_market_id``, which is chain-agnostic). Sharing ``_synthesize_market_id``
-    with the intent path keeps the two ids drift-proof for the same tokens.
+    Pure token-attribute logic. A ref naming BOTH legs uses the exact-pair
+    derivation shared with the intent path (:func:`_synthesize_market_id`), so
+    the two ids stay drift-proof for the same tokens. Silo's catalogue is
+    Avalanche-only, so ``ref.chain`` is not consulted.
 
-    Unlike the intent path, this does NOT do catalogue collateral-recovery: the ref
-    already carries the collateral token. Returns ``None`` (never a guessed silo —
-    Empty ≠ Zero) when the tokens name no catalogued market.
+    **Single-token refs must be UNIQUE, never first-match (VIB-5795).** The
+    intent path's ``_synthesize_market_id`` is allowed a most-liquid-first pick
+    for a single token because the strategy's own trade context disambiguates.
+    A ref, by contrast, arrives from post-hoc reconciliation of a position that
+    names only one asset — and Silo markets are ISOLATED directed pairs, so a
+    token appearing in several markets (WAVAX spans three on each side) is
+    genuinely ambiguous: binding the first match would read an unrelated
+    market's state as this position's (a wrong-market read, worse than no
+    read). So a single-token ref resolves only when exactly ONE catalogue
+    entry matches that leg; otherwise ``None`` (fail closed — the caller keeps
+    its own fail-closed fallback). Returns ``None`` likewise when the tokens
+    name no catalogued market (never a guessed silo — Empty ≠ Zero).
     """
-    return _synthesize_market_id(ref.collateral_token, ref.loan_token)
+    if ref.collateral_token and ref.loan_token:
+        return _synthesize_market_id(ref.collateral_token, ref.loan_token)
+    table = SILO_V2_ACCOUNT_STATE_MARKETS.get("avalanche", {})
+    if ref.collateral_token:
+        col = ref.collateral_token.lower()
+        matches = [mid for mid in table if mid.split("/", 1)[0] == col]
+        return matches[0] if len(matches) == 1 else None
+    if ref.loan_token:
+        debt = ref.loan_token.lower()
+        matches = [mid for mid, params in table.items() if str(params.get("loan_token", "")).lower() == debt]
+        return matches[0] if len(matches) == 1 else None
+    return None
 
 
 def _decode_uint(blob: str | None) -> int | None:

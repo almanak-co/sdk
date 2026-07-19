@@ -301,15 +301,16 @@ class BenqiLoopingStrategy(IntentStrategy):
             debt_usd = self._debt_usdc * usdc_price
             if debt_usd <= _DUST_USD:
                 # Debt cleared — reclaim remaining AVAX collateral and finish.
-                # Use the tracked amount (redeemUnderlying), NOT withdraw_all: BENQI's
-                # compiler rejects withdraw_all without a qiToken redeem_amount (VIB-5404),
-                # and supply accrues interest so on-chain collateral >= tracked, making an
-                # explicit redeemUnderlying(tracked) always funded (leaves only dust).
+                # withdraw_all compiles redeem(<full qiToken balance>) since
+                # VIB-5404, so the close reclaims accrued interest too and
+                # leaves a truly flat position (the old redeemUnderlying(tracked)
+                # workaround stranded every wei of accrued interest and tripped
+                # the VIB-5795 post-close residual check).
                 if self._collateral_avax > _DUST_AVAX:
                     self._enter_transitional("withdrawing")
                     self._pending_withdraw_avax = self._collateral_avax
                     logger.info("UNWIND: final WITHDRAW of %s residual collateral", self._fmt_avax(self._collateral_avax))
-                    return self._withdraw_intent(amount=self._collateral_avax)
+                    return self._withdraw_intent(withdraw_all=True)
                 self._state = "complete"
                 return Intent.hold(reason="Position flat — nothing left to unwind")
 
@@ -619,10 +620,10 @@ class BenqiLoopingStrategy(IntentStrategy):
             collateral_avax -= slice_avax
 
         if collateral_avax > _DUST_AVAX:
-            # Explicit redeemUnderlying (not withdraw_all — BENQI's compiler rejects
-            # withdraw_all without a qiToken redeem_amount, VIB-5404); on-chain collateral
-            # >= tracked (interest), so this is always funded and leaves only dust.
-            intents.append(self._withdraw_intent(amount=collateral_avax))
+            # withdraw_all compiles redeem(<full qiToken balance>) since VIB-5404 —
+            # reclaims accrued interest too, leaving a truly flat position for the
+            # VIB-5795 post-close on-chain verification.
+            intents.append(self._withdraw_intent(withdraw_all=True))
 
         logger.info("Teardown: %d intents to unwind %d-loop position", len(intents), self._loops_done)
         return intents

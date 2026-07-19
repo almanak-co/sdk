@@ -395,3 +395,30 @@ def test_generate_lending_unwind_chain_none_inherits_snapshot_chain() -> None:
     ref = market.captured_ref
     assert ref.chain == "avalanche"  # inherited from the snapshot, not empty
     assert LendingReadRegistry.resolve_market_id(ref) == "wavax/usdc"  # resolves (would be None if chain="")
+
+
+def test_silo_single_token_ref_requires_uniqueness_never_first_match() -> None:
+    """VIB-5795 (Codex P2): silo markets are ISOLATED directed pairs, so a
+    single-token ref resolves only when exactly one catalogue entry matches
+    that leg. WAVAX spans three markets on each side → fail closed (None);
+    USDC / sAVAX / BTC.b legs are unique → resolve. First-match guessing is
+    reserved for the INTENT path, where trade context disambiguates."""
+    from almanak.connectors._strategy_base.lending_read_base import LendingPositionRef
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    def ref(collateral=None, loan=None):
+        return LendingPositionRef(
+            protocol="silo_v2", chain="avalanche", collateral_token=collateral, loan_token=loan
+        )
+
+    # Ambiguous on both sides — must fail closed.
+    assert LendingReadRegistry.resolve_market_id(ref(collateral="WAVAX")) is None
+    assert LendingReadRegistry.resolve_market_id(ref(loan="WAVAX")) is None
+    # Unique legs — must resolve to the one directed pair.
+    assert LendingReadRegistry.resolve_market_id(ref(collateral="USDC")) == "usdc/wavax"
+    assert LendingReadRegistry.resolve_market_id(ref(loan="USDC")) == "wavax/usdc"
+    assert LendingReadRegistry.resolve_market_id(ref(collateral="sAVAX")) == "savax/wavax"
+    assert LendingReadRegistry.resolve_market_id(ref(collateral="BTC.b")) == "btc.b/wavax"
+    assert LendingReadRegistry.resolve_market_id(ref(loan="BTC.b")) == "wavax/btc.b"
+    # Both tokens named keeps the exact-pair contract (unchanged).
+    assert LendingReadRegistry.resolve_market_id(ref(collateral="WAVAX", loan="USDC")) == "wavax/usdc"

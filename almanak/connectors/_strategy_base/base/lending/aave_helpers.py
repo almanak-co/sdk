@@ -5643,11 +5643,48 @@ def _compile_withdraw_benqi(
             intent_id=intent.intent_id,
         )
 
+    # VIB-5404: "withdraw all" on a Compound-V2 fork is redeem(<full qiToken
+    # balance>) — the share count is STABLE under interest accrual (the exchange
+    # rate grows, not the balance), so a compile-time balance read is exact and
+    # race-free, and redeeming it strands zero accrued interest. The legacy
+    # redeemUnderlying(<tracked amount>) path strands every wei of interest
+    # accrued since the amount was tracked (and trips the VIB-5795 post-close
+    # residual check on an economically clean close).
+    redeem_amount: int | None = None
+    if intent.withdraw_all:
+        qi_balance = compiler._query_erc20_balance(withdraw_market.qi_token_address, compiler.wallet_address)
+        try:
+            qi_balance = int(qi_balance) if qi_balance is not None else None
+        except (TypeError, ValueError):
+            qi_balance = None
+        if qi_balance is not None and qi_balance > 0:
+            redeem_amount = qi_balance
+        elif qi_balance == 0:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"BENQI withdraw_all: wallet holds no qi{withdraw_symbol} (qiToken balance is 0) "
+                    "— nothing to withdraw"
+                ),
+                intent_id=intent.intent_id,
+            )
+        elif withdraw_amount_decimal is not None and withdraw_amount_decimal > 0:
+            # Read fault, but the caller supplied a tracked amount: fall back to
+            # the legacy redeemUnderlying(tracked) rather than stranding the
+            # whole unwind on a transient read failure. Loud, never silent.
+            warnings.append(
+                "withdraw_all: qiToken balance read failed; falling back to redeemUnderlying of the "
+                "provided amount (may leave accrued-interest dust on-chain)"
+            )
+        # else: no balance read and no amount — the adapter returns its explicit
+        # "withdraw_all requires redeem_amount" failure below (legacy error).
+
     # Build withdraw (redeem) TX
     withdraw_result = benqi_adapter.withdraw(
         asset=withdraw_symbol,
         amount=withdraw_amount_decimal if withdraw_amount_decimal else Decimal("0"),
         withdraw_all=intent.withdraw_all,
+        redeem_amount=redeem_amount,
     )
 
     if not withdraw_result.success:

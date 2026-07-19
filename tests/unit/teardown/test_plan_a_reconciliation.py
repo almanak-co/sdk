@@ -480,6 +480,139 @@ async def test_compound_v3_symbol_resolved_from_asset_detail_not_empty():
 
 
 # ---------------------------------------------------------------------------
+# Synthetic-market lending resolution (VIB-5795) — euler_v2 / silo_v2 / benqi
+# carry NEITHER ``market_id`` NOR ``market``; their single-leg ``details['asset']``
+# resolves the real synthetic id via the VIB-5775 ref seam.
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_lending(
+    leg: PositionType, *, protocol: str, chain: str, asset: str, position_id: str | None = None
+) -> PositionInfo:
+    """A euler_v2 / silo_v2 / benqi lending leg exactly as those strategies emit it:
+
+    a single-leg ``details={"asset": <symbol>, "type": ...}`` with a synthetic,
+    human-readable ``position_id`` that is NOT a market key, and neither a
+    ``market_id`` nor a ``market`` detail.
+    """
+    kind = "collateral" if leg is PositionType.SUPPLY else "borrow"
+    return PositionInfo(
+        position_type=leg,
+        position_id=position_id or f"{protocol}-{kind}-{asset}-{chain}",
+        chain=chain,
+        protocol=protocol,
+        value_usd=Decimal("0"),
+        details={"asset": asset, "type": kind},
+    )
+
+
+def test_lending_market_id_resolves_euler_supply_via_ref_seam():
+    """A euler_v2 SUPPLY leg (asset-only details) resolves to the collateral-only
+    synthetic id (``"weth"``) via ``LendingReadRegistry.resolve_market_id`` — NOT
+    the synthetic ``position_id`` — before the fail-closed fallback (VIB-5795)."""
+    pos = _synthetic_lending(PositionType.SUPPLY, protocol="euler_v2", chain="ethereum", asset="WETH")
+    assert pos.position_id == "euler_v2-collateral-WETH-ethereum"  # sanity: id is NOT a market key
+    assert _lending_market_id(pos) == "weth"
+
+
+def test_lending_market_id_euler_borrow_ambiguous_stays_position_id():
+    """A euler_v2 BORROW leg naming only the loan token (USDC) on a chain where
+    several collaterals back it (avalanche) is AMBIGUOUS — the resolver fails
+    closed to None and ``_lending_market_id`` keeps the synthetic ``position_id``,
+    which downstream surfaces as UNVERIFIABLE (never a guessed collateral vault)."""
+    pos = _synthetic_lending(PositionType.BORROW, protocol="euler_v2", chain="avalanche", asset="USDC")
+    assert _lending_market_id(pos) == "euler_v2-borrow-USDC-avalanche"  # unresolved → position_id
+
+
+def test_lending_market_id_resolves_silo_supply_via_ref_seam():
+    """A silo_v2 SUPPLY leg whose collateral names exactly ONE catalogued
+    market (USDC) resolves to that directed-pair id (``"usdc/wavax"``) — the
+    real silo E2E proof case."""
+    pos = _synthetic_lending(PositionType.SUPPLY, protocol="silo_v2", chain="avalanche", asset="USDC")
+    assert _lending_market_id(pos) == "usdc/wavax"
+
+
+def test_lending_market_id_silo_ambiguous_single_token_fails_closed():
+    """A silo_v2 leg whose one asset spans SEVERAL isolated markets (WAVAX is
+    collateral in three) must NOT bind a first-match guess: the ref resolver
+    fails closed and ``_lending_market_id`` keeps its position_id last-resort
+    (→ UNVERIFIABLE), never a wrong-market read (Codex P2 on the VIB-5795
+    branch review)."""
+    supply = _synthetic_lending(PositionType.SUPPLY, protocol="silo_v2", chain="avalanche", asset="WAVAX")
+    assert _lending_market_id(supply) == supply.position_id
+    borrow = _synthetic_lending(PositionType.BORROW, protocol="silo_v2", chain="avalanche", asset="WAVAX")
+    assert _lending_market_id(borrow) == borrow.position_id
+
+
+def test_lending_market_id_resolves_benqi_whole_account_regardless_of_asset():
+    """BENQI is a pooled whole-account read: any leg resolves to its fixed id."""
+    from almanak.connectors.benqi.lending_read import _BENQI_MARKET_ID
+
+    supply = _synthetic_lending(PositionType.SUPPLY, protocol="benqi", chain="avalanche", asset="WAVAX")
+    borrow = _synthetic_lending(PositionType.BORROW, protocol="benqi", chain="avalanche", asset="USDC")
+    assert _lending_market_id(supply) == _BENQI_MARKET_ID
+    assert _lending_market_id(borrow) == _BENQI_MARKET_ID
+
+
+@pytest.mark.asyncio
+async def test_euler_supply_confirmed_open_via_ref_resolution():
+    """End-to-end (VIB-5795): a euler_v2 SUPPLY leg reconciles CONFIRMED_OPEN using
+    the ref-resolved collateral-only market id (``"weth"``). Before the fix the
+    synthetic ``position_id`` was sent as the market key and the strict-market stub
+    would raise → stuck UNVERIFIABLE forever."""
+    market = _MarketKeyStrictMarket(expected_market_id="weth", health=_Health(Decimal("1000"), Decimal("0")))
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_synthetic_lending(PositionType.SUPPLY, protocol="euler_v2", chain="ethereum", asset="WETH")),
+        gateway_client=None,
+        market=market,
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.CONFIRMED_OPEN
+
+
+@pytest.mark.asyncio
+async def test_euler_borrow_ambiguous_stays_unverifiable_fail_closed():
+    """A euler_v2 BORROW leg whose loan token is ambiguously backed keeps today's
+    fail-closed behaviour: the resolver returns None, the synthetic ``position_id``
+    is sent, the strict-market stub raises, and the verdict is UNVERIFIABLE (never a
+    guessed market → never a false CONFIRMED/DIVERGED)."""
+    market = _MarketKeyStrictMarket(expected_market_id="wavax/usdc", health=_Health(Decimal("1000"), Decimal("0")))
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_synthetic_lending(PositionType.BORROW, protocol="euler_v2", chain="avalanche", asset="USDC")),
+        gateway_client=None,
+        market=market,
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.UNVERIFIABLE
+
+
+@pytest.mark.asyncio
+async def test_benqi_supply_confirmed_open_via_ref_resolution():
+    """A BENQI SUPPLY leg reconciles CONFIRMED_OPEN using the fixed whole-account id."""
+    from almanak.connectors.benqi.lending_read import _BENQI_MARKET_ID
+
+    market = _MarketKeyStrictMarket(expected_market_id=_BENQI_MARKET_ID, health=_Health(Decimal("500"), Decimal("0")))
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_synthetic_lending(PositionType.SUPPLY, protocol="benqi", chain="avalanche", asset="WAVAX")),
+        gateway_client=None,
+        market=market,
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.CONFIRMED_OPEN
+
+
+@pytest.mark.asyncio
+async def test_silo_supply_diverged_closed_via_ref_resolution():
+    """A cleanly-closed silo_v2 SUPPLY leg (collateral back to zero) resolves the
+    real directed-pair market id and reconciles DIVERGED_CLOSED — the GOOD
+    post-teardown outcome — instead of being stuck UNVERIFIABLE by a bogus key."""
+    market = _MarketKeyStrictMarket(expected_market_id="usdc/wavax", health=_Health(Decimal("0"), Decimal("0")))
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_synthetic_lending(PositionType.SUPPLY, protocol="silo_v2", chain="avalanche", asset="USDC")),
+        gateway_client=None,
+        market=market,
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.DIVERGED_CLOSED
+
+
+# ---------------------------------------------------------------------------
 # Unsupported primitives + empty
 # ---------------------------------------------------------------------------
 
@@ -583,11 +716,16 @@ def test_post_teardown_confirmed_open_dominates_mixed_report():
         deployment_id="d",
         entries=(
             PositionReconciliation("PositionType.LP", "1", "arbitrum", "lp", ReconciliationVerdict.DIVERGED_CLOSED),
-            PositionReconciliation("PositionType.SUPPLY", "2", "ethereum", "aave_v3", ReconciliationVerdict.CONFIRMED_OPEN),
+            PositionReconciliation(
+                "PositionType.SUPPLY", "2", "ethereum", "aave_v3", ReconciliationVerdict.CONFIRMED_OPEN
+            ),
         ),
     )
     assert report.has_confirmed_open
-    assert report.apply_post_teardown_to_verification_status(VerificationStatus.CHAIN_VERIFIED) is VerificationStatus.FAILED
+    assert (
+        report.apply_post_teardown_to_verification_status(VerificationStatus.CHAIN_VERIFIED)
+        is VerificationStatus.FAILED
+    )
 
 
 def test_post_teardown_empty_report_passes_through():

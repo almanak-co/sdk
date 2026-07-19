@@ -36,6 +36,12 @@ CONNECTOR = Connector(
             module="almanak.connectors.silo_v2.lending_read", attribute="SILO_V2_ACCOUNT_STATE_MARKETS"
         ),
     ),
+    # TD-14 post-close on-chain closure verifier (VIB-5795): supply value /
+    # debt ≤ dust per position leg, read from the connector's own silo tables.
+    teardown_post_condition=ImportRef(
+        module="almanak.connectors.silo_v2.teardown_post_condition",
+        attribute="silo_v2_teardown_post_condition",
+    ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("avalanche",),
 )

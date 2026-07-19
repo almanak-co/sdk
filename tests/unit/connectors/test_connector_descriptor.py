@@ -663,8 +663,13 @@ EXPECTED_SWAP_ROUTE_INFERENCE_MODULES = {
 }
 
 EXPECTED_TEARDOWN_POST_CONDITION_MODULES = {
+    # VIB-5795: lending closure verifiers (per-connector manifest hooks over the
+    # shared _strategy_base/lending_post_condition.py template).
+    "benqi": "almanak.connectors.benqi.teardown_post_condition",
+    "euler_v2": "almanak.connectors.euler_v2.teardown_post_condition",
     "gmx_v2": "almanak.connectors.gmx_v2.teardown_post_condition",
     "pendle": "almanak.connectors.pendle.teardown_post_condition",
+    "silo_v2": "almanak.connectors.silo_v2.teardown_post_condition",
     "traderjoe_v2": "almanak.connectors.traderjoe_v2.teardown_post_condition",
     "uniswap_v4": "almanak.connectors.uniswap_v4.teardown_post_condition",
 }

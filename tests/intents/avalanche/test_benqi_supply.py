@@ -558,6 +558,154 @@ class TestBenqiSupplyIntent:
             "Unmatched WITHDRAW (no Layer-5 SUPPLY lot) must degrade interest to None — never a fabricated 0"
         )
 
+    @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
+    @pytest.mark.asyncio
+    async def test_withdraw_all_full_close_redeems_entire_qitoken_balance(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
+    ):
+        """withdraw_all=True compiles redeem(<full qiToken balance>) and leaves ZERO shares (VIB-5404).
+
+        Pre-fix, withdraw_all without a redeem_amount FAILED to compile, forcing
+        strategies into a redeemUnderlying(tracked-amount) workaround that
+        stranded every wei of accrued interest — measured on a real fork as a
+        26.79B-wei residual by the VIB-5795 TD-14 post-close verifier. This
+        test pins the fixed contract at all four layers: the compile-time
+        gateway balance read → redeem-by-share calldata → on-chain execution →
+        the wallet's qiToken balance is EXACTLY zero afterwards (the full-close
+        invariant the teardown verifier asserts).
+        """
+        from almanak.connectors.benqi.adapter import BENQI_REDEEM_SELECTOR
+
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc = tokens["USDC"]
+        decimals = get_token_decimals(web3, usdc)
+
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+
+        # Supply first so there is a live qiToken position to fully close.
+        supply_amount = Decimal("2000")
+        supply_result = compiler.compile(
+            SupplyIntent(protocol="benqi", token="USDC", amount=supply_amount, chain=CHAIN_NAME)
+        )
+        assert supply_result.status.value == "SUCCESS"
+        supply_exec = await orchestrator.execute(supply_result.action_bundle)
+        assert supply_exec.success, f"Initial supply failed: {supply_exec.error}"
+
+        qi_before = get_token_balance(web3, BENQI_QI_USDC, funded_wallet)
+        assert qi_before > 0, "Supply must have minted qiUSDC"
+        usdc_before = get_token_balance(web3, usdc, funded_wallet)
+
+        # Layer 1 — compile the full close: withdraw_all with NO amount (the
+        # exact shape that failed pre-VIB-5404).
+        intent = WithdrawIntent(
+            protocol="benqi",
+            token="USDC",
+            amount=Decimal("0"),
+            withdraw_all=True,
+            chain=CHAIN_NAME,
+        )
+        compilation_result = compiler.compile(intent)
+        assert compilation_result.status.value == "SUCCESS", (
+            f"withdraw_all must compile without a redeem_amount (VIB-5404): {compilation_result.error}"
+        )
+        assert compilation_result.action_bundle is not None
+        assert compilation_result.action_bundle.metadata["withdraw_all"] is True
+        withdraw_txs = [
+            tx
+            for tx in compilation_result.action_bundle.transactions
+            if str(tx.get("data", "")).lower().startswith(BENQI_REDEEM_SELECTOR)
+        ]
+        assert len(withdraw_txs) == 1, (
+            "withdraw_all must compile the redeem-by-share path (redeem(uint256), "
+            f"selector {BENQI_REDEEM_SELECTOR}), never redeemUnderlying — that path strands interest"
+        )
+        # The redeem argument is the compile-time-read FULL qiToken balance.
+        compiled_redeem_shares = int(str(withdraw_txs[0]["data"])[10:74], 16)
+        assert compiled_redeem_shares == qi_before, (
+            f"redeem amount must be the full qiToken balance: {compiled_redeem_shares} != {qi_before}"
+        )
+
+        # Layer 5 pre-state (mirrors the runner), then Layer 2 — execute.
+        pre_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False)
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert execution_result.success, f"Execution failed: {execution_result.error}"
+
+        # Layer 3 — receipt parse: one Redeem event burning the FULL share balance.
+        found_withdraw_event = False
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt:
+                parser = BenqiReceiptParser(underlying_decimals=decimals)
+                parse_result = parser.parse_receipt(
+                    tx_result.receipt.to_dict(),
+                    qi_token_address=BENQI_QI_USDC,
+                )
+                if parse_result.success and parse_result.withdraw_amount > 0:
+                    # Parser reports qiTokens scaled by the qiToken's 8 decimals;
+                    # qi_before is raw units.
+                    assert int(parse_result.qi_tokens_redeemed * 10**8) == qi_before, (
+                        "Redeem event must burn the entire qiToken balance"
+                    )
+                    found_withdraw_event = True
+        assert found_withdraw_event, "Receipt parser must find the Redeem (withdraw) event"
+
+        # Layer 4 — bilateral balance deltas: ALL shares spent, underlying received.
+        qi_after = get_token_balance(web3, BENQI_QI_USDC, funded_wallet)
+        assert qi_after == 0, (
+            f"Full close must leave EXACTLY zero qiTokens (the VIB-5795 TD-14 invariant); got {qi_after}"
+        )
+        usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        usdc_received = usdc_after - usdc_before
+        expected_floor = int(supply_amount * Decimal(10**decimals)) - 2  # mint/redeem floor rounding
+        assert usdc_received >= expected_floor, (
+            f"Full close must return the whole position (principal + accrued interest): "
+            f"received {usdc_received} < floor {expected_floor}"
+        )
+
+        # Layer 5 — real accounting pipeline: typed WITHDRAW event persists and
+        # collateral goes to (measured) zero.
+        enriched = _enrich_for_accounting(
+            execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
+        )
+        post_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=True)
+        row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=intent,
+            result=enriched,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="WITHDRAW",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            pre_state=pre_state,
+            post_state=post_state,
+        )
+        _assert_identity(row, event_type="WITHDRAW", wallet=funded_wallet)
+        payload = _payload(row)
+        _assert_no_lot_id(row, payload)
+        _assert_high_confidence_state(payload)
+        assert payload["asset"] == "USDC"
+        assert Decimal(payload["collateral_value_after_usd"]) < Decimal(payload["collateral_value_before_usd"]), (
+            "Full-close WITHDRAW must decrease on-chain collateral value"
+        )
+        assert Decimal(payload["collateral_value_after_usd"]) == 0, (
+            "Full close must read MEASURED zero collateral afterwards"
+        )
+        assert payload["interest_delta_usd"] is None, (
+            "Unmatched WITHDRAW (no Layer-5 SUPPLY lot) must degrade interest to None — never a fabricated 0"
+        )
+
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.intent(IntentType.SUPPLY)
