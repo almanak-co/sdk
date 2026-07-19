@@ -52,6 +52,13 @@ Any provider works: Infura, QuickNode, self-hosted, Alchemy, etc. `ALCHEMY_API_K
     RPC_URL=https://your-archive-endpoint         # generic
     ```
 
+    Alchemy does **not** cover every chain (e.g. 0G / HyperEVM). Known-good archive
+    endpoints for the chains Alchemy misses:
+
+    | Chain | Archive endpoint (verified) | Notes |
+    |---|---|---|
+    | 0G | `ZEROG_RPC_URL=https://0g-mainnet.drpc.org` | dRPC free tier serves archive state (verified 2026-07-18, `0g_swap` WRAP ran clean on an Anvil fork); QuickNode for paid/reliable. |
+
     Live (non-fork) usage on public RPCs is unaffected — only reads of *historical* state are.
 
 | Variable | Description |
