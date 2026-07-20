@@ -135,6 +135,15 @@ class TestFluidDexLpLifecycleArbitrum:
 
     @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason=(
+            "fSL9 (sUSDai/USDC) at governance maxSupplyShares cap on-chain as of 2026-07-20 (#3347) — "
+            "Fluid error 51064 DexT1__SupplySharesOverflow, size-independent; strict: when governance "
+            "raises the cap this XPASSes and CI forces removal of the marker"
+        ),
+    )
     async def test_lp_open_single_sided_usdc(
         self,
         web3: Web3,
@@ -208,6 +217,15 @@ class TestFluidDexLpLifecycleArbitrum:
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason=(
+            "fSL9 (sUSDai/USDC) at governance maxSupplyShares cap on-chain as of 2026-07-20 (#3347) — "
+            "Fluid error 51064 DexT1__SupplySharesOverflow, size-independent; strict: when governance "
+            "raises the cap this XPASSes and CI forces removal of the marker"
+        ),
+    )
     async def test_lp_open_then_close(
         self,
         web3: Web3,

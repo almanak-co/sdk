@@ -393,8 +393,24 @@ CURVE_GAS_ESTIMATES: dict[str, int] = {
     # they cost more than a single flat add/remove. 700K headroom.
     "metapool_zap_add_liquidity": 700000,
     "metapool_zap_remove_liquidity": 600000,
+    # StableSwap floors — pool_type-scoped. StableSwap pools never run the
+    # CryptoSwap ``tweak_price`` rebalance, and ``_resolve_gas`` clamps even a
+    # successful live estimate with ``max(buffered, static_gas)``, so an
+    # inflated shared floor over-reserves gas for 3pool-style adds and can trip
+    # the orchestrator's per-tx gas-COST cap at high gwei. Keep the measured
+    # StableSwap floors here; volatile pools use the ``_crypto`` keys below.
     "add_liquidity_2": 250000,
     "add_liquidity_3": 350000,
+    # CryptoSwap/Tricrypto pools run a state-dependent price_scale rebalance
+    # inside ``tweak_price`` (newton_D + extra SSTOREs) whenever accrued profit
+    # crosses ``allowed_extra_profit`` — the FIRST liquidity op after the gate
+    # opens pays ~75-95K extra gas. Measured on tricrypto2 @ eth block
+    # 25,570,573: add_liquidity_3 needed 425K (vs 329K with the gate closed at
+    # block 25,520,000); the old 350K floor (x1.1 orchestrator buffer = 385K
+    # limit) died out-of-gas with empty revert data. Floors sized to cover the
+    # rebalance path with headroom; this is a LIMIT, not a spend.
+    "add_liquidity_2_crypto": 450000,
+    "add_liquidity_3_crypto": 600000,
     # A 4-coin add — especially aave-type, which wraps each underlying into an
     # aToken — was under-sized at 450K. 600K conservative floor (VIB-5440).
     "add_liquidity_4": 600000,
@@ -407,9 +423,14 @@ CURVE_GAS_ESTIMATES: dict[str, int] = {
     "remove_liquidity_2": 250000,
     "remove_liquidity_3": 350000,
     "remove_liquidity_4": 450000,
-    # Single-coin exit recomputes the invariant and, for CryptoSwap/Tricrypto,
-    # the price scale — heavier than the prior 250K floor (VIB-5440).
+    # Single-coin exit recomputes the invariant — heavier than the prior 250K
+    # floor (VIB-5440). StableSwap-scoped; volatile pools use the key below.
     "remove_liquidity_one_coin": 350000,
+    # CryptoSwap/Tricrypto single-coin exit also recomputes the price scale.
+    # Measured 349,838 on tricrypto2 @ eth block 25,570,573 with the rebalance
+    # gate open — one hair under the old 350K x1.1 = 385K limit. Same
+    # state-dependent exposure as the ``_crypto`` add floors above; 500K headroom.
+    "remove_liquidity_one_coin_crypto": 500000,
     # Imbalanced 4-coin exit is the heaviest withdrawal shape (VIB-5440).
     "remove_liquidity_imbalance": 450000,
     "router_exchange": 400000,
@@ -1811,6 +1832,7 @@ class CurveAdapter:
                 value=native_value,
                 pool_name=pool_info.name,
                 is_ng=pool_info.is_ng,
+                is_cryptoswap=pool_info.pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO),
             )
             transactions.append(add_liq_tx)
 
@@ -2806,13 +2828,21 @@ class CurveAdapter:
         value: int = 0,
         pool_name: str = "",
         is_ng: bool = False,
+        is_cryptoswap: bool = False,
     ) -> TransactionData:
         """Build add_liquidity transaction.
 
         Legacy:        add_liquidity(uint256[N_COINS] amounts, uint256 min_mint_amount)
         StableSwap NG: add_liquidity(uint256[] amounts, uint256 min_mint_amount)
+
+        ``is_cryptoswap`` selects the family-scoped static gas floor: only
+        CryptoSwap/Tricrypto pools pay the ``tweak_price`` rebalance surcharge.
         """
-        gas_estimate = CURVE_GAS_ESTIMATES.get(f"add_liquidity_{n_coins}", CURVE_GAS_ESTIMATES["add_liquidity_4"])
+        suffix = "_crypto" if is_cryptoswap else ""
+        gas_estimate = CURVE_GAS_ESTIMATES.get(
+            f"add_liquidity_{n_coins}{suffix}",
+            CURVE_GAS_ESTIMATES.get(f"add_liquidity_{n_coins}", CURVE_GAS_ESTIMATES["add_liquidity_4"]),
+        )
 
         if is_ng:
             # Dynamic-array ABI: head = [offset_to_amounts, min_mint]; tail = [length, *amounts]
@@ -2979,7 +3009,11 @@ class CurveAdapter:
                 to=pool_address,
                 data=calldata,
                 value=0,
-                static_gas=CURVE_GAS_ESTIMATES["remove_liquidity_one_coin"],
+                # Family-scoped floor: only CryptoSwap/Tricrypto pay the
+                # price-scale rebalance surcharge on single-coin exits.
+                static_gas=CURVE_GAS_ESTIMATES[
+                    "remove_liquidity_one_coin_crypto" if is_cryptoswap else "remove_liquidity_one_coin"
+                ],
             ),
             description=f"Remove {coin_symbol} from Curve {pool_name}",
             tx_type="remove_liquidity",

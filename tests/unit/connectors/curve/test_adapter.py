@@ -1604,3 +1604,57 @@ class TestStaticGasFloors:
 
     def test_four_coin_add_floor_raised(self) -> None:
         assert CURVE_GAS_ESTIMATES["add_liquidity_4"] >= 600_000
+
+    def test_rebalance_floors_scoped_by_pool_family(self) -> None:
+        """CryptoSwap ``tweak_price`` rebalance floors must NOT leak onto StableSwap.
+
+        StableSwap pools never run the price_scale rebalance, and ``_resolve_gas``
+        clamps live estimates with ``max(buffered, static_gas)`` — an inflated
+        shared floor would over-reserve gas on 3pool-style adds and can trip the
+        orchestrator's per-tx gas-cost cap at high gwei.
+        """
+        # StableSwap keeps the original measured floors.
+        assert CURVE_GAS_ESTIMATES["add_liquidity_2"] == 250_000
+        assert CURVE_GAS_ESTIMATES["add_liquidity_3"] == 350_000
+        assert CURVE_GAS_ESTIMATES["remove_liquidity_one_coin"] == 350_000
+        # CryptoSwap/Tricrypto floors cover the rebalance-gate-open path
+        # (425K measured on tricrypto2 add_liquidity_3).
+        assert CURVE_GAS_ESTIMATES["add_liquidity_2_crypto"] >= 450_000
+        assert CURVE_GAS_ESTIMATES["add_liquidity_3_crypto"] >= 600_000
+        assert CURVE_GAS_ESTIMATES["remove_liquidity_one_coin_crypto"] >= 500_000
+
+    def test_add_liquidity_builder_selects_family_floor(self, adapter: CurveAdapter) -> None:
+        stable_tx = adapter._build_add_liquidity_tx(
+            pool_address="0x" + "11" * 20,
+            amounts=[10**18, 10**18, 10**18],
+            min_lp_tokens=1,
+            n_coins=3,
+            is_cryptoswap=False,
+        )
+        crypto_tx = adapter._build_add_liquidity_tx(
+            pool_address="0x" + "11" * 20,
+            amounts=[10**18, 10**18, 10**18],
+            min_lp_tokens=1,
+            n_coins=3,
+            is_cryptoswap=True,
+        )
+        assert stable_tx.gas_estimate == CURVE_GAS_ESTIMATES["add_liquidity_3"]
+        assert crypto_tx.gas_estimate == CURVE_GAS_ESTIMATES["add_liquidity_3_crypto"]
+
+    def test_remove_liquidity_one_builder_selects_family_floor(self, adapter: CurveAdapter) -> None:
+        stable_tx = adapter._build_remove_liquidity_one_tx(
+            pool_address="0x" + "11" * 20,
+            lp_amount=10**18,
+            coin_index=0,
+            min_amount=1,
+            is_cryptoswap=False,
+        )
+        crypto_tx = adapter._build_remove_liquidity_one_tx(
+            pool_address="0x" + "11" * 20,
+            lp_amount=10**18,
+            coin_index=0,
+            min_amount=1,
+            is_cryptoswap=True,
+        )
+        assert stable_tx.gas_estimate == CURVE_GAS_ESTIMATES["remove_liquidity_one_coin"]
+        assert crypto_tx.gas_estimate == CURVE_GAS_ESTIMATES["remove_liquidity_one_coin_crypto"]
