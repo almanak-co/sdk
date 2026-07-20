@@ -477,13 +477,21 @@ class PnLSummary:
     # Money trail (G1, G4, G5)
     deployed_usd: Decimal = Decimal("0")
     nav_usd: Decimal = Decimal("0")
-    lifetime_pnl_usd: Decimal = Decimal("0")
-    lifetime_pnl_pct: Decimal = Decimal("0")
-    net_apr_pct: Decimal = Decimal("0")
+    # VIB-5866: ``None`` = SUPPRESSED because the capital flows behind the
+    # ``deployed_usd`` baseline are unmeasured (Empty≠Zero, blueprint 27
+    # §10.10) — never a measured zero. Same presence-aware "" wire encoding as
+    # ``CostStack.inventory_unrealized_usd`` (VIB-4984).
+    lifetime_pnl_usd: Decimal | None = Decimal("0")
+    lifetime_pnl_pct: Decimal | None = Decimal("0")
+    net_apr_pct: Decimal | None = Decimal("0")
     max_drawdown_pct: Decimal = Decimal("0")
     current_drawdown_pct: Decimal = Decimal("0")
     value_confidence: str = "UNAVAILABLE"
     age_days: int = 0
+    # VIB-5866: True when ``deposits_usd`` / ``withdrawals_usd`` could not be
+    # measured, so the three metrics above are suppressed. Diagnostic for local
+    # renderers; the gateway wire signal is the empty string on those fields.
+    capital_flows_unmeasured: bool = False
 
     # Position + cash
     deployed_capital_usd: Decimal = Decimal("0")
@@ -514,13 +522,15 @@ class QuantHeader:
 
     deployed_usd: Decimal = Decimal("0")
     nav_usd: Decimal = Decimal("0")
-    lifetime_pnl_usd: Decimal = Decimal("0")
-    lifetime_pnl_pct: Decimal = Decimal("0")
-    net_apr_pct: Decimal = Decimal("0")
+    # VIB-5866: mirrors PnLSummary — ``None`` = suppressed (unmeasured flows).
+    lifetime_pnl_usd: Decimal | None = Decimal("0")
+    lifetime_pnl_pct: Decimal | None = Decimal("0")
+    net_apr_pct: Decimal | None = Decimal("0")
     max_drawdown_pct: Decimal = Decimal("0")
     current_drawdown_pct: Decimal = Decimal("0")
     value_confidence: str = "UNAVAILABLE"
     age_days: int = 0
+    capital_flows_unmeasured: bool = False
     deployed_capital_usd: Decimal = Decimal("0")
     available_cash_usd: Decimal = Decimal("0")
     open_position_count: int = 0
@@ -1478,18 +1488,40 @@ def compute_pnl_summary(
     # reference walk inside _ledger_stats.
     wallet_anchored = _ledger_stats(ledger_entries).first_action_wallet_value_usd
 
-    deposits = Decimal("0")
-    withdrawals = Decimal("0")
+    # VIB-5866: read the flows PRESENCE-AWARE (``_to_decimal_or_none``). The
+    # old ``_to_decimal`` coerced an unmeasured flow to ``Decimal("0")`` — a
+    # read-side zero fabrication that books an external deposit as profit in
+    # the lifetime-PnL headline (nav − deployed). ``None`` here means the
+    # producer could not measure the cumulative flows: the honest response is a
+    # suppressed headline, not a confident wrong number. A legacy row storing
+    # ``'0'`` (measured zero) still parses to ``Decimal("0")`` and is
+    # byte-identical to before; an explicit ``None``, ``''`` (the PR-C1
+    # unmeasured sentinel), and unparseable text all read as unmeasured. A SQL
+    # NULL column never reaches here as unmeasured — both storage read seams
+    # normalise it to the legacy ``Decimal("0")`` (c65fa094c), since a NULL
+    # predates the sentinel and is a legacy row, not an unmeasured claim.
+    deposits: Decimal | None = Decimal("0")
+    withdrawals: Decimal | None = Decimal("0")
     if portfolio_metrics is not None:
-        deposits = _to_decimal(getattr(portfolio_metrics, "deposits_usd", "0"))
-        withdrawals = _to_decimal(getattr(portfolio_metrics, "withdrawals_usd", "0"))
+        deposits = _to_decimal_or_none(getattr(portfolio_metrics, "deposits_usd", "0"))
+        withdrawals = _to_decimal_or_none(getattr(portfolio_metrics, "withdrawals_usd", "0"))
         pnl.age_days = _strategy_age_days(portfolio_metrics)
 
+    if deposits is None or withdrawals is None:
+        # No flow adjustment at all — adding a half-measured flow would be as
+        # dishonest as adding zero. ``deployed_usd`` stays the wallet anchor /
+        # initial baseline and remains VISIBLE (it is measured); only the three
+        # metrics derived from the flow-adjusted baseline are suppressed below.
+        pnl.capital_flows_unmeasured = True
+        net_flow = Decimal("0")
+    else:
+        net_flow = deposits - withdrawals
+
     if wallet_anchored is not None:
-        pnl.deployed_usd = wallet_anchored + deposits - withdrawals
+        pnl.deployed_usd = wallet_anchored + net_flow
     elif portfolio_metrics is not None:
         initial = _to_decimal(getattr(portfolio_metrics, "initial_value_usd", "0"))
-        pnl.deployed_usd = initial + deposits - withdrawals
+        pnl.deployed_usd = initial + net_flow
 
     # VIB-3884 (Codex F1): the snapshot's ``total_value_usd`` column is
     # *positive position values only* (per VIB-3614 / portfolio_valuer.py
@@ -1499,10 +1531,21 @@ def compute_pnl_summary(
     # report to an LP. That's ``total_value_usd + available_cash_usd``.
     wallet_nav = deployed_value_usd + pnl.available_cash_usd
     pnl.nav_usd = wallet_nav
-    pnl.lifetime_pnl_usd = wallet_nav - pnl.deployed_usd
-    if pnl.deployed_usd > Decimal("0"):
-        pnl.lifetime_pnl_pct = (pnl.lifetime_pnl_usd / pnl.deployed_usd) * Decimal("100")
-    pnl.net_apr_pct = _annualised_return(pnl.deployed_usd, wallet_nav, pnl.age_days)
+    if pnl.capital_flows_unmeasured:
+        # VIB-5866: lifetime PnL is ``nav − (baseline + deposits − withdrawals)``.
+        # With the flows unmeasured the baseline is unknown, so all three
+        # flow-derived metrics are SUPPRESSED (None) rather than computed off a
+        # fabricated zero flow — that reads every external deposit as profit.
+        # ``deployed_usd`` / ``nav_usd`` / positions / cash stay visible: they
+        # are measured, and hiding them would degrade a working card.
+        pnl.lifetime_pnl_usd = None
+        pnl.lifetime_pnl_pct = None
+        pnl.net_apr_pct = None
+    else:
+        pnl.lifetime_pnl_usd = wallet_nav - pnl.deployed_usd
+        if pnl.deployed_usd > Decimal("0"):
+            pnl.lifetime_pnl_pct = (pnl.lifetime_pnl_usd / pnl.deployed_usd) * Decimal("100")
+        pnl.net_apr_pct = _annualised_return(pnl.deployed_usd, wallet_nav, pnl.age_days)
 
     # VIB-3914: Open exposure must read from accounting_events when the
     # snapshot writer has not summed open-position cost basis (the
@@ -1694,6 +1737,7 @@ def build_quant_header(
         current_drawdown_pct=pnl.current_drawdown_pct,
         value_confidence=pnl.value_confidence,
         age_days=pnl.age_days,
+        capital_flows_unmeasured=pnl.capital_flows_unmeasured,
         deployed_capital_usd=pnl.deployed_capital_usd,
         available_cash_usd=pnl.available_cash_usd,
         open_position_count=pnl.open_position_count,

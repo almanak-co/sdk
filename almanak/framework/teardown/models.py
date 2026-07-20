@@ -420,6 +420,16 @@ class ClosureVerification:
     positions_closed: int = 0
     has_position_breakdown: bool = False
     verification_status: VerificationStatus = VerificationStatus.NOT_RUN
+    # VIB-5936: full identities — lowercased ``(protocol, chain, position_id)``
+    # triples — of positions whose registered TD-14 post-condition hook MEASURED the
+    # position closed on-chain (zero residual — not unmeasured, not counted-by-
+    # execution). TD-15's post-teardown fold uses this to refuse re-opening a
+    # hook-proven position off a WHOLE-account aggregate read that cannot scope its
+    # residual to the position. The FULL triple (never the bare position_id) is
+    # load-bearing: two positions from different protocols/chains may share a
+    # position_id, and an id-only match could mark one hook-proven off the other's
+    # proof (Codex P1). Empty on the fallback/no-hook paths.
+    hook_proven_position_keys: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass

@@ -2603,6 +2603,14 @@ class TeardownManager:
             # closure is reported but only counted closed-by-execution
             # (UNVERIFIED) — the count must not masquerade as chain-confirmed.
             positions_with_hook = 0
+            # VIB-5936: full identities — lowercased (protocol, chain, position_id)
+            # triples — the hook MEASURED closed (zero residual). Threaded onto the
+            # ClosureVerification so TD-15's post-teardown fold can refuse to re-open
+            # a hook-proven position off a whole-account aggregate read. The FULL
+            # triple, never the bare id (Codex P1: same-id positions across
+            # protocols/chains must not share proofs), and NEVER an empty id
+            # (CodeRabbit major: "" would match an unidentified entry → fail-open).
+            hook_proven_keys: list[tuple[str, str, str]] = []
             for position in snapshot_positions:
                 protocol = (getattr(position, "protocol", "") or "").lower()
                 hook = get_teardown_post_condition(protocol)
@@ -2661,6 +2669,19 @@ class TeardownManager:
                 positions_with_hook += 1
                 if not check.closed:
                     failed_results.append(check)
+                else:
+                    proven_id = str(getattr(position, "position_id", "") or "").strip()
+                    if proven_id:
+                        # Fully lowercased triple — matches _entry_key below and the
+                        # report-side _key (CodeRabbit: position_id embeds EVM addresses
+                        # whose case is a checksum, not identity).
+                        hook_proven_keys.append(
+                            (
+                                protocol.strip(),
+                                str(getattr(position, "chain", "") or "").strip().lower(),
+                                proven_id.lower(),
+                            )
+                        )
 
             positions_total = len(snapshot_positions)
             if failed_results:
@@ -2730,6 +2751,7 @@ class TeardownManager:
                 positions_closed=positions_total,
                 has_position_breakdown=True,
                 verification_status=status,
+                hook_proven_position_keys=tuple(hook_proven_keys),
             )
 
         # Last-resort: legacy in-memory state read. Used when neither a
@@ -2858,6 +2880,59 @@ class TeardownManager:
                 deployment_id,
             )
             return verification
+
+        # VIB-5936: a POST-teardown CONFIRMED_OPEN whose evidence is a WHOLE-account
+        # aggregate read cannot be attributed to a specific tracked position — the
+        # residual may belong entirely to OTHER markets the wallet holds (pre-existing
+        # history unrelated to this strategy; the benqi dogfooding-wallet case). When
+        # this exact position was hook-proven closed by its TD-14 post-condition
+        # (measured zero — the finer-grained, position-scoped authority), downgrade
+        # the entry to NOT_APPLICABLE (the designed no-op) with a LOUD warning naming
+        # the unattributable residual. Hook-less positions (aave family until
+        # VIB-5910) and market-scoped reads (morpho/silo/euler) are untouched — their
+        # conservative fail-closed path below stands.
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        def _entry_key(entry: Any) -> tuple[str, str, str]:
+            # FULL, fully-lowercased identity, mirroring how the hook loop records
+            # proofs and the report-side _key: two positions may share a bare
+            # position_id across protocols/chains (Codex P1), an empty id must never
+            # match anything (CodeRabbit), and position_id case is a checksum not
+            # identity (CodeRabbit) — so all three components lowercase.
+            return (
+                str(entry.protocol or "").strip().lower(),
+                str(entry.chain or "").strip().lower(),
+                str(entry.position_id or "").strip().lower(),
+            )
+
+        proven_keys = set(verification.hook_proven_position_keys)
+        unattributable = tuple(
+            entry
+            for entry in post_report.confirmed
+            if str(entry.position_id or "").strip()
+            and _entry_key(entry) in proven_keys
+            and LendingReadRegistry.whole_account_read(entry.protocol)
+        )
+        if unattributable:
+            for entry in unattributable:
+                logger.warning(
+                    "TD-15 (VIB-5936): %s %s (%s) on %s — whole-account read reports residual "
+                    "exposure (%s), but this position was hook-proven CLOSED on-chain by its "
+                    "TD-14 post-condition. The residual cannot be attributed to this position "
+                    "and likely belongs to OTHER %s markets this wallet holds; NOT failing the "
+                    "teardown on it. Inspect the wallet's remaining %s exposure separately.",
+                    entry.protocol,
+                    entry.position_type,
+                    entry.position_id,
+                    entry.chain,
+                    entry.detail,
+                    entry.protocol,
+                    entry.protocol,
+                )
+            post_report = post_report.downgrade_unattributable_confirmed_open(
+                frozenset(_entry_key(entry) for entry in unattributable),
+                "whole-account aggregate unattributable to this hook-proven-closed position (VIB-5936)",
+            )
 
         # Fold the POST-teardown reconciliation into the status, then the
         # PRE-teardown report. Neither can raise confidence; the POST report only

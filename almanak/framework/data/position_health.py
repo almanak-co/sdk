@@ -338,8 +338,9 @@ class PositionHealthProvider:
             # Per-market protocol (Morpho Blue, Silo V2, Euler V2, BENQI): the
             # caller's market id scopes the read, and the legacy collateral/debt
             # price overrides are translated onto the connector-declared
-            # valuation roles via ``_build_price_oracle_dict`` (``None`` for a
-            # USD-native per-market protocol that declares no roles).
+            # valuation roles via ``_build_price_oracle_dict``. A per-market
+            # protocol that declares no roles (BENQI) gets a best-effort
+            # USD-oracle map over its ``collaterals`` table instead (VIB-5911).
             price_oracle, price_source = self._build_price_oracle_dict(
                 protocol_lower, market_id, collateral_price_usd, debt_price_usd
             )
@@ -651,9 +652,15 @@ class PositionHealthProvider:
         * **Off-catalogue market** (``market_params`` is ``None``): fail closed
           consistently with a ``ValueError`` -- we cannot name the legs to value.
 
-        A USD-native per-market protocol that declares no valuation roles
-        (BENQI — its qiToken reads price legs on-chain) returns ``(None, "")``:
-        there is nothing to inject.
+        A per-market protocol that declares no valuation roles (BENQI) is NOT
+        USD-native — its reducer values every held leg from the injected
+        ``query.prices``, keyed by the market table's ``collaterals`` map
+        (``_inject_whole_account_collateral_prices``). For it this method
+        builds a best-effort ``{symbol: USD price}`` map from the wired USD
+        oracle / stablecoin table via :meth:`_whole_account_usd_prices`
+        (VIB-5911); an unpriced symbol is LEFT OUT (fatal only if the wallet
+        holds it — the reducer fails closed), and ``(None, "")`` is returned
+        only when no symbol prices at all.
         """
         from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 
@@ -711,7 +718,7 @@ class PositionHealthProvider:
                     f"{protocol} market {market_id} on {self._chain} has no collateral/loan "
                     f"token symbols; cannot value the position."
                 )
-            return None, ""
+            return self._whole_account_usd_prices(protocol, market_id, params)
 
         collateral_symbol = roles.get("collateral_token")
         loan_symbol = roles.get("loan_token")
@@ -776,6 +783,45 @@ class PositionHealthProvider:
             f"own oracle could not be read, and no USD price source answered for both "
             f"legs. Pass collateral_price_usd / debt_price_usd, or wire a price oracle."
         )
+
+    def _whole_account_usd_prices(
+        self,
+        protocol: str,
+        market_id: str,
+        params: dict[str, Any],
+    ) -> tuple[dict[str, Decimal] | None, str]:
+        """Best-effort USD price map for a no-valuation-roles market table (VIB-5911).
+
+        BENQI's whole-account reducer values every HELD leg from the injected
+        ``query.prices`` keyed by the market table's ``collaterals`` map — but
+        this method's caller used to return ``(None, "")`` for it, so the
+        reducer failed closed on every held asset and TD-08's pre-reconcile
+        read of an open loop raised ``HealthUnavailableError``, demoting an
+        otherwise-clean chain_verified teardown verdict to UNVERIFIED.
+
+        Prices every ``collaterals``-map symbol the wired USD oracle (or the
+        stablecoin table) answers for. Fail-closed contract preserved: an
+        unanswered symbol is LEFT OUT — never priced 1 or 0 — which is fatal
+        only if the wallet actually holds it (the reducer decides, Empty ≠
+        Zero); when nothing prices, ``(None, "")`` keeps today's unmeasured
+        behaviour.
+        """
+        prices: dict[str, Decimal] = {}
+        for symbol in params.get("collaterals") or {}:
+            price = self._try_resolve_usd_price(symbol)
+            if price is not None and price > 0:
+                prices[symbol] = price
+        if not prices:
+            logger.warning(
+                "%s market %s on %s declares no valuation roles and no USD price source "
+                "answered for any of its listed collateral symbols; the account-state read "
+                "will be unmeasured for any held asset.",
+                protocol,
+                market_id,
+                self._chain,
+            )
+            return None, ""
+        return prices, PRICE_SOURCE_USD_ORACLE
 
     def _default_cross_asset_prices(
         self,

@@ -507,6 +507,16 @@ class AccountStateReadSpec:
     # for protocols that publish no such read; the framework's position-health
     # default-pricing path then falls back to a generic USD oracle or fails closed.
     market_oracle_price: MarketOraclePriceSpec | None = None
+    # Connector-declared: this account-state read returns the wallet's WHOLE-account
+    # aggregate for the protocol, not a single market's legs (VIB-5936). BENQI sets
+    # True — its market table has one fixed synthetic id ("benqi") and the read sums
+    # every entered qiToken market. Consumers that need to ATTRIBUTE the read's
+    # collateral/debt to a specific tracked position must treat a True here as
+    # "structurally unattributable": a nonzero aggregate may belong entirely to OTHER
+    # markets the wallet holds. Protocols that publish NO market table (the Aave
+    # family) are whole-account by construction and need not set this — the registry
+    # predicate (``LendingReadRegistry.whole_account_read``) covers them.
+    whole_account: bool = False
 
     def query_inputs_from_intent(self, intent: Any) -> dict[str, Any]:
         """Extract the per-read query inputs this protocol needs from an intent.

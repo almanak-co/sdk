@@ -13,6 +13,13 @@ Background — the cascade
 ``strat_pnl._populate_gross_net_pnl`` before this module's verdict is consulted,
 so the cascade below describes the *measured* case only.)
 
+(VIB-5866: ``deposits_usd`` / ``withdrawals_usd`` are ``Decimal | None`` on the
+same terms.  An **absent** flow does NOT mean "no capital moved" — that
+assumption is what books an external deposit as profit.  ``Decimal("0")`` is a
+measured zero; ``None`` is unmeasured and propagates through ``pnl_before_gas``
+to a suppressed headline, so the B-open derivation below is skipped rather than
+computed off a fabricated zero flow.)
+
 Under VIB-3614 ``total_value_usd`` is **positive-position-scoped**: it counts
 Aave **collateral** (SUPPLY) but EXCLUDES the wallet balance and does NOT
 subtract **debt** (BORROW).  That scope is correct for the dashboard but wrong
@@ -230,7 +237,9 @@ class LeveragedLendingVerdict:
             Σ |BORROW value|).  Populated only for the ``"open"`` state; the
             B-open headline is ``net_lending_nav_usd − initial − deposits +
             withdrawals`` (NOT the NAV itself — see the Codex note in the
-            ticket).  ``None`` otherwise (unmeasured / not applicable).
+            ticket), and is derived only when ``initial`` and BOTH flows are
+            measured (VIB-5866).  ``None`` otherwise (unmeasured / not
+            applicable).
         reason:
             Single-line plain-English explanation for the closed-state
             suppression notice.  Empty string when the headline is not

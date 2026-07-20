@@ -203,9 +203,13 @@ class PnLSummary:
 
     deployed_usd: Decimal
     nav_usd: Decimal
-    lifetime_pnl_usd: Decimal
-    lifetime_pnl_pct: Decimal
-    net_apr_pct: Decimal
+    # VIB-5866: presence-aware — "" on the wire means the gateway SUPPRESSED
+    # the metric because the capital flows behind the deployed baseline are
+    # unmeasured (Empty≠Zero). ``None`` here, never Decimal("0"): a zero would
+    # render a confident-wrong "$0.00 lifetime PnL".
+    lifetime_pnl_usd: Decimal | None
+    lifetime_pnl_pct: Decimal | None
+    net_apr_pct: Decimal | None
     max_drawdown_pct: Decimal
     current_drawdown_pct: Decimal
     value_confidence: str
@@ -343,9 +347,11 @@ def _convert_pnl_summary(proto: gateway_pb2.PnLSummary) -> PnLSummary:
     return PnLSummary(
         deployed_usd=_safe_decimal(proto.deployed_usd),
         nav_usd=_safe_decimal(proto.nav_usd),
-        lifetime_pnl_usd=_safe_decimal(proto.lifetime_pnl_usd),
-        lifetime_pnl_pct=_safe_decimal(proto.lifetime_pnl_pct),
-        net_apr_pct=_safe_decimal(proto.net_apr_pct),
+        # VIB-5866: presence-aware — "" => None (suppressed: unmeasured capital
+        # flows), never Decimal("0").
+        lifetime_pnl_usd=_safe_optional_decimal(proto.lifetime_pnl_usd),
+        lifetime_pnl_pct=_safe_optional_decimal(proto.lifetime_pnl_pct),
+        net_apr_pct=_safe_optional_decimal(proto.net_apr_pct),
         max_drawdown_pct=_safe_decimal(proto.max_drawdown_pct),
         current_drawdown_pct=_safe_decimal(proto.current_drawdown_pct),
         value_confidence=proto.value_confidence or "UNAVAILABLE",

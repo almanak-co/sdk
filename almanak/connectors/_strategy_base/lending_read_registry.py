@@ -415,6 +415,34 @@ class LendingReadRegistry:
         return cls._normalize(protocol) in cls._dispatch().market_table_loaders
 
     @classmethod
+    def whole_account_read(cls, protocol: str) -> bool:
+        """Return True when ``protocol``'s account-state read is a WHOLE-account aggregate.
+
+        VIB-5936: a whole-account read (BENQI's summed qiToken markets; the Aave
+        family's ``getUserAccountData``) reports the wallet's ENTIRE exposure for
+        the protocol — its collateral/debt cannot be attributed to any single
+        tracked position (a nonzero aggregate may belong entirely to OTHER markets
+        the wallet holds, e.g. pre-existing history unrelated to the strategy).
+        Consumers that fail-closed on "position still open" evidence must treat a
+        True here as structurally position-unscoped. Two connector-declared paths:
+
+        * the spec sets ``whole_account=True`` (BENQI — publishes a market table,
+          but with one fixed synthetic id covering the whole account), or
+        * the protocol publishes NO market table at all (the Aave family) — whole
+          account by construction.
+
+        Per-market protocols (Morpho Blue, Compound V3, Silo V2, Euler V2) return
+        False: their reads ARE scoped to the tracked position's market.
+        """
+        key = cls._normalize(protocol)
+        if key not in cls._dispatch().account_state_loaders:
+            return False
+        if key not in cls._dispatch().market_table_loaders:
+            return True
+        spec = cls._load_account_state_spec(key)
+        return spec is not None and bool(getattr(spec, "whole_account", False))
+
+    @classmethod
     def declares_valuation_roles(cls, protocol: str) -> bool:
         """Return True when ``protocol``'s account-state spec declares valuation roles.
 

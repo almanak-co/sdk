@@ -305,6 +305,40 @@ def test_reduce_held_leg_missing_price_fails_closed() -> None:
     assert ACCOUNT_STATE_READ_SPEC.reduce_calls(_two_market_query({"USDC": Decimal("1")}), results) is None
 
 
+def test_vib5911_partial_usd_dict_still_fails_closed_on_held_unpriced_leg() -> None:
+    # Composition link for VIB-5911: the fixed ``_build_price_oracle_dict`` LEAVES
+    # OUT a symbol the oracle cannot answer for; a reducer that then sees that
+    # symbol HELD+ENTERED must still fail the whole read closed (Empty ≠ Zero).
+    # The fix must never introduce a path that values a held leg it has no price
+    # for — this drives the REAL builder output into the REAL reducer.
+    from unittest.mock import patch
+
+    from almanak.framework.data.position_health import PositionHealthProvider
+
+    def _usdc_only_oracle(symbol: str):
+        if symbol == "USDC":
+            return "1"
+        raise ValueError(f"no price source for {symbol}")
+
+    provider = PositionHealthProvider(chain=_CHAIN, gateway_client=MagicMock(), price_oracle=_usdc_only_oracle)
+    with patch(
+        "almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.market_params",
+        return_value=_TWO_MARKET_PARAMS,
+    ):
+        prices, _source = provider._build_price_oracle_dict("benqi", "benqi", None, None)
+    assert prices == {"USDC": Decimal("1")}, "WAVAX must be LEFT OUT — never priced 1 or 0"
+
+    results = [
+        _snapshot(10 * 10**8, 0, _RATE_18),  # WAVAX HELD + entered — but unpriced
+        _markets(6 * 10**17),
+        _membership(True),
+        _snapshot(0, 50 * 10**6, _RATE_6),  # USDC debt (priced)
+        _markets(8 * 10**17),
+        _membership(False),
+    ]
+    assert ACCOUNT_STATE_READ_SPEC.reduce_calls(_two_market_query(prices), results) is None
+
+
 def test_reduce_held_collateral_unreadable_factor_fails_closed() -> None:
     # REACHABLE dangerous branch: the wallet HOLDS+ENTERED WAVAX collateral but its
     # markets() collateral-factor read failed (None blob). The HF would be

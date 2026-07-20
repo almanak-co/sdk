@@ -2574,9 +2574,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         return gateway_pb2.PnLSummary(
             deployed_usd=str(pnl.deployed_usd),
             nav_usd=str(pnl.nav_usd),
-            lifetime_pnl_usd=str(pnl.lifetime_pnl_usd),
-            lifetime_pnl_pct=f"{pnl.lifetime_pnl_pct:.2f}",
-            net_apr_pct=f"{pnl.net_apr_pct:.2f}",
+            # VIB-5866: a suppressed (None) metric goes on the wire as the
+            # empty string — the same presence-aware "" => unmeasured encoding
+            # CostStackInfo.inventory_unrealized_usd uses (VIB-4984), so no
+            # proto change is needed. str()/f"{:.2f}" on None would serialise
+            # the literal "None" / raise TypeError and kill the RPC.
+            lifetime_pnl_usd=("" if pnl.lifetime_pnl_usd is None else str(pnl.lifetime_pnl_usd)),
+            lifetime_pnl_pct=("" if pnl.lifetime_pnl_pct is None else f"{pnl.lifetime_pnl_pct:.2f}"),
+            net_apr_pct=("" if pnl.net_apr_pct is None else f"{pnl.net_apr_pct:.2f}"),
             max_drawdown_pct=f"{pnl.max_drawdown_pct:.2f}",
             current_drawdown_pct=f"{pnl.current_drawdown_pct:.2f}",
             value_confidence=pnl.value_confidence,

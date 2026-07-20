@@ -34,7 +34,7 @@ direct RPC / HTTP is opened here, and no new egress is introduced.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -268,6 +268,58 @@ class ReconciliationReport:
         if self.has_confirmed_open:
             return VerificationStatus.FAILED
         return proposed
+
+    def downgrade_unattributable_confirmed_open(
+        self, position_keys: frozenset[tuple[str, str, str]], reason: str
+    ) -> ReconciliationReport:
+        """Return a copy with the named ``CONFIRMED_OPEN`` entries downgraded to ``NOT_APPLICABLE``.
+
+        VIB-5936: a POST-teardown ``CONFIRMED_OPEN`` whose evidence is a
+        WHOLE-account aggregate read (BENQI's summed qiToken markets; the Aave
+        family's ``getUserAccountData``) is structurally unscoped — a nonzero
+        aggregate may belong entirely to OTHER markets the wallet holds
+        (pre-existing history unrelated to the strategy). When the position's own
+        TD-14 post-condition hook already MEASURED it closed on-chain, the
+        finer-grained proof is final (the ``NOT_APPLICABLE`` contract above:
+        Surface-A authority, no-op here) and the aggregate residual must not
+        re-open it. The CALLER owns both predicates (hook-proven + whole-account
+        read) and passes only the position identities that satisfy them —
+        lowercased ``(protocol, chain, position_id)`` triples, matching on the
+        FULL identity because a bare ``position_id`` can collide across
+        protocols/chains and an empty id must never match; entries not
+        named, or not ``CONFIRMED_OPEN``, pass through byte-identical.
+
+        Only ever downgrades attribution — never flips a verdict toward closed,
+        never touches ``DIVERGED_CLOSED`` / ``UNVERIFIABLE``, and the residual
+        itself stays visible in the entry ``detail`` (appended ``reason``).
+        """
+        if not position_keys:
+            return self
+
+        def _key(e: PositionReconciliation) -> tuple[str, str, str]:
+            # All three components lowercased for a case-insensitive match
+            # (CodeRabbit): synthetic lending position_ids embed EVM addresses,
+            # whose case is a checksum, not identity — two ids differing only by
+            # case are the SAME position. The caller normalizes identically.
+            return (
+                str(e.protocol or "").strip().lower(),
+                str(e.chain or "").strip().lower(),
+                str(e.position_id or "").strip().lower(),
+            )
+
+        entries = tuple(
+            replace(
+                e,
+                verdict=ReconciliationVerdict.NOT_APPLICABLE,
+                detail=f"{e.detail} — {reason}" if e.detail else reason,
+            )
+            if e.verdict is ReconciliationVerdict.CONFIRMED_OPEN
+            and str(e.position_id or "").strip()
+            and _key(e) in position_keys
+            else e
+            for e in self.entries
+        )
+        return replace(self, entries=entries)
 
     def to_dict(self) -> dict[str, Any]:
         """Structured form for the loud divergence log / future TD-15 surface."""

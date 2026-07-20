@@ -479,4 +479,7 @@ ACCOUNT_STATE_READ_SPEC: AccountStateReadSpec = AccountStateReadSpec(
     # VIB-5775: teardown/valuation/health carry a typed LendingPositionRef (no intent,
     # no market_id). BENQI's whole-account read is token-agnostic → the fixed id.
     market_id_from_ref=_benqi_market_id_from_ref,
+    # VIB-5936: the read sums EVERY entered qiToken market — a nonzero aggregate
+    # cannot be attributed to any single tracked position (pooled cross-collateral).
+    whole_account=True,
 )

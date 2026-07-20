@@ -1415,7 +1415,12 @@ class TestMarketScopedHealthSeam:
         assert mock_seam.call_args.kwargs["market_id"] == "weth"
 
     def test_benqi_usd_native_injects_no_prices(self):
-        """BENQI declares no valuation roles: market id flows, oracle stays None."""
+        """A no-roles params entry WITHOUT a ``collaterals`` map keeps oracle=None.
+
+        (VIB-5911 builds the whole-account price dict ONLY from the market
+        table's ``collaterals`` map; a params shape with none stays unpriced —
+        fail-closed downstream, exactly the pre-fix behaviour.)
+        """
         benqi_params = {
             "comet_address": "0xqiavax",
             "comptroller_address": "0xcomptroller",
@@ -1454,6 +1459,145 @@ class TestMarketScopedHealthSeam:
         # error (rather than the account-state read) proves the routing.
         with pytest.raises(ValueError, match="GatewayClient is required to read compound_v3 health"):
             provider.get_health("compound_v3", "usdc", "0xabc")
+
+
+class TestVib5911WholeAccountUsdPrices:
+    """VIB-5911: a per-market protocol with NO valuation roles (BENQI) gets a
+    best-effort USD-oracle dict over its ``collaterals`` map instead of ``None``.
+
+    Root cause of the benqi TD-08/TD-15 UNVERIFIED demotion: ``price_oracle=None``
+    meant ``_inject_whole_account_collateral_prices`` had nothing to inject, the
+    reducer failed closed on every held asset, and the pre-reconcile read raised
+    ``HealthUnavailableError`` on a loop TD-14 had already chain-verified.
+    """
+
+    _SEAM_TARGET = "almanak.framework.accounting.lending_reads.read_lending_account_state"
+    _MARKET_PARAMS_TARGET = "almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.market_params"
+    _ROLES_TARGET = "almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.valuation_roles"
+    _DECLARES_TARGET = (
+        "almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.declares_valuation_roles"
+    )
+
+    _BENQI_PARAMS = {
+        "comptroller_address": "0xcomptroller",
+        "collaterals": {
+            "WAVAX": {"address": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7"},
+            "SAVAX": {"address": "0x2b2C81e08f1Af8835a78Bb2A90AE924ACE0eA4bE"},
+        },
+    }
+
+    @staticmethod
+    def _oracle(answers: dict[str, str]):
+        """Plain-callable oracle: answers listed symbols, raises for the rest."""
+
+        def _price(symbol: str):
+            if symbol in answers:
+                return answers[symbol]
+            raise ValueError(f"no price source for {symbol}")
+
+        return _price
+
+    def test_vib5911_benqi_no_roles_builds_usd_dict_from_collaterals(self):
+        """Every collaterals-map symbol the oracle answers for is priced and
+        injected into the seam; provenance is the USD-oracle constant."""
+        from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
+        from almanak.framework.data.position_health import PRICE_SOURCE_USD_ORACLE
+
+        provider = PositionHealthProvider(
+            chain="avalanche",
+            gateway_client=MagicMock(),
+            price_oracle=self._oracle({"WAVAX": "25.4", "SAVAX": "30.1"}),
+        )
+        with patch(self._MARKET_PARAMS_TARGET, return_value=self._BENQI_PARAMS):
+            oracle_dict, source = provider._build_price_oracle_dict("benqi", "benqi", None, None)
+        assert oracle_dict == {"WAVAX": Decimal("25.4"), "SAVAX": Decimal("30.1")}
+        assert source == PRICE_SOURCE_USD_ORACLE
+
+        # End-to-end: get_health threads the dict into the account-state seam.
+        crafted = LendingAccountState(
+            collateral_usd=Decimal("200"),
+            debt_usd=Decimal("50"),
+            health_factor=Decimal("2.4"),
+            liquidation_threshold_bps=None,
+            e_mode_category=None,
+            lltv=None,
+        )
+        with (
+            patch(self._SEAM_TARGET, return_value=crafted) as mock_seam,
+            patch(self._MARKET_PARAMS_TARGET, return_value=self._BENQI_PARAMS),
+        ):
+            health = provider.get_health("benqi", "benqi", "0xabc")
+        assert health.health_factor == Decimal("2.4")
+        assert health.price_source == PRICE_SOURCE_USD_ORACLE
+        assert mock_seam.call_args.kwargs["price_oracle"] == {
+            "WAVAX": Decimal("25.4"),
+            "SAVAX": Decimal("30.1"),
+        }
+
+    def test_vib5911_unpriced_symbol_left_out_never_unit_or_zero(self):
+        """A symbol the oracle cannot answer for is ABSENT from the dict — never
+        priced 1 or 0 (fatal only if held; the reducer decides, Empty ≠ Zero)."""
+        from almanak.framework.data.position_health import PRICE_SOURCE_USD_ORACLE
+
+        provider = PositionHealthProvider(
+            chain="avalanche",
+            gateway_client=MagicMock(),
+            price_oracle=self._oracle({"WAVAX": "25.4"}),  # SAVAX unanswered
+        )
+        with patch(self._MARKET_PARAMS_TARGET, return_value=self._BENQI_PARAMS):
+            oracle_dict, source = provider._build_price_oracle_dict("benqi", "benqi", None, None)
+        assert oracle_dict == {"WAVAX": Decimal("25.4")}
+        assert "SAVAX" not in oracle_dict
+        assert source == PRICE_SOURCE_USD_ORACLE
+
+    def test_vib5911_no_symbol_prices_returns_none_unmeasured(self):
+        """No answered symbol at all (non-stables, no working oracle) keeps
+        today's ``(None, "")`` — unmeasured downstream, never fabricated."""
+        provider = PositionHealthProvider(
+            chain="avalanche",
+            gateway_client=MagicMock(),
+            price_oracle=self._oracle({}),  # answers nothing
+        )
+        with patch(self._MARKET_PARAMS_TARGET, return_value=self._BENQI_PARAMS):
+            oracle_dict, source = provider._build_price_oracle_dict("benqi", "benqi", None, None)
+        assert oracle_dict is None
+        assert source == ""
+
+    def test_vib5911_stablecoin_table_answers_without_wired_oracle(self):
+        """No wired oracle: stablecoins price from the $1 table, non-stables are
+        left out — the no-oracle monitor context (unwind guard) can now measure
+        a stable-only account instead of always failing."""
+        from almanak.framework.data.position_health import PRICE_SOURCE_USD_ORACLE
+
+        params = {
+            "comptroller_address": "0xcomptroller",
+            "collaterals": {
+                "USDC": {"address": "0xusdc"},
+                "WAVAX": {"address": "0xwavax"},
+            },
+        }
+        provider = PositionHealthProvider(chain="avalanche", gateway_client=MagicMock())
+        with patch(self._MARKET_PARAMS_TARGET, return_value=params):
+            oracle_dict, source = provider._build_price_oracle_dict("benqi", "benqi", None, None)
+        assert oracle_dict == {"USDC": Decimal("1")}
+        assert "WAVAX" not in oracle_dict
+        assert source == PRICE_SOURCE_USD_ORACLE
+
+    def test_vib5911_declared_roles_resolving_empty_still_raises(self):
+        """The malformed-catalogue guard is untouched: DECLARED roles that
+        resolve to no symbols still fail closed (never a best-effort dict)."""
+        provider = PositionHealthProvider(
+            chain="avalanche",
+            gateway_client=MagicMock(),
+            price_oracle=self._oracle({"WAVAX": "25.4"}),
+        )
+        with (
+            patch(self._MARKET_PARAMS_TARGET, return_value=self._BENQI_PARAMS),
+            patch(self._ROLES_TARGET, return_value={}),
+            patch(self._DECLARES_TARGET, return_value=True),
+        ):
+            with pytest.raises(ValueError, match="no collateral/loan"):
+                provider._build_price_oracle_dict("benqi", "benqi", None, None)
 
 
 class TestMorphoOracleDefaultPricing:

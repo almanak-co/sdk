@@ -160,6 +160,47 @@ async def test_verify_closure_treats_hook_raise_as_unmeasured_unverified(
 
 
 @pytest.mark.asyncio
+async def test_vib5936_hook_proven_ids_threaded_onto_verification(
+    _restore_traderjoe_v2_hook,
+):
+    """VIB-5936: a hook that MEASURED the position closed lands its full identity on
+    ``ClosureVerification.hook_proven_position_keys`` — the signal TD-15's fold uses
+    to refuse re-opening it off a whole-account aggregate. An UNMEASURED result
+    must NOT count as hook-proven (Empty ≠ Zero — an unproven closure cannot
+    suppress a residual)."""
+    hook = MagicMock(return_value=ClosureCheckResult(closed=True, protocol="traderjoe_v2"))
+    _register_teardown_post_condition("traderjoe_v2", hook)
+
+    mgr = TeardownManager()
+    snapshot = _make_position_snapshot(
+        SimpleNamespace(
+            protocol="traderjoe_v2",
+            position_id="pos-1",
+            chain="avalanche",
+            details={"pool_address": "0xpool", "bin_ids": [1]},
+        )
+    )
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_strategy(open_positions=[]),
+        pre_execution_positions=snapshot,
+    )
+    assert detailed.hook_proven_position_keys == (("traderjoe_v2", "avalanche", "pos-1"),)
+    assert detailed.verification_status is VerificationStatus.CHAIN_VERIFIED
+
+    # UNMEASURED (hook returned unmeasured=True) → NOT hook-proven.
+    unmeasured_hook = MagicMock(
+        return_value=ClosureCheckResult(closed=False, protocol="traderjoe_v2", unmeasured=True, error="rpc blip")
+    )
+    _register_teardown_post_condition("traderjoe_v2", unmeasured_hook)
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_strategy(open_positions=[]),
+        pre_execution_positions=snapshot,
+    )
+    assert detailed.hook_proven_position_keys == ()
+    assert detailed.verification_status is VerificationStatus.UNVERIFIED
+
+
+@pytest.mark.asyncio
 async def test_verify_closure_falls_back_to_in_memory_when_no_snapshot():
     """Legacy path (no pre_execution_positions) — uses get_open_positions()."""
     mgr = TeardownManager()

@@ -79,6 +79,13 @@ _STABLE_SYMBOLS: frozenset[str] = frozenset(
 
 _MISSING = "—"  # em dash: signals "not yet available"
 
+#: Sentinel for "the metrics object has no such capital-flow attribute at all"
+#: (VIB-5866). Distinct from ``None``, which is an explicit UNMEASURED claim:
+#: absence of the attribute predates the field and keeps the legacy
+#: measured-zero behaviour, while an explicit ``None`` suppresses the
+#: derivation (Empty≠Zero, blueprint 27 §10.10).
+_MISSING_FLOW = object()
+
 
 # ---------------------------------------------------------------------------
 # Data-loading helpers
@@ -683,10 +690,12 @@ def _populate_gross_net_pnl(breakdown: PnLBreakdown, metrics: Any) -> None:
     Three states (Empty≠Zero — blueprint 27 §10.10 / VIB-2475):
 
     1. **No metrics row** — leave gross/net ``None``, emit the "no row" warning.
-    2. **Row present, ``total_value_usd`` unmeasured** (``pnl_before_gas`` is
-       ``None``) — leave gross/net ``None``, emit the "unmeasured" warning. We
-       must NOT let ``_dec`` swallow the ``None`` into ``Decimal("0")``: that
-       would re-fabricate the confident-wrong $0 headline this fix removes.
+    2. **Row present, an input unmeasured** (``pnl_before_gas`` is ``None`` —
+       ``total_value_usd`` per VIB-2475, or a capital flow per VIB-5866) —
+       leave gross/net ``None``, emit the "unmeasured" warning naming the
+       inputs actually missing. We must NOT let ``_dec`` swallow the ``None``
+       into ``Decimal("0")``: that would re-fabricate the confident-wrong $0
+       headline this fix removes.
     3. **Row present and measured** — populate gross/net verbatim.
     """
     if metrics is None:
@@ -698,10 +707,21 @@ def _populate_gross_net_pnl(breakdown: PnLBreakdown, metrics: Any) -> None:
     gross = metrics.pnl_before_gas
     net = metrics.pnl_after_gas
     if gross is None or net is None:
+        # VIB-5866: name the unmeasured inputs. The pre-existing wording blamed
+        # ``total_value_usd`` unconditionally, which mis-reports the operator's
+        # diagnosis when the missing input is actually a capital flow.
+        # ``_MISSING_FLOW`` default: an attribute-less legacy shape is not an
+        # "unmeasured" claim — only an explicit None names the column here.
+        unmeasured = [
+            name
+            for name in ("total_value_usd", "deposits_usd", "withdrawals_usd")
+            if getattr(metrics, name, _MISSING_FLOW) is None
+        ]
+        detail = ", ".join(unmeasured) if unmeasured else "an input"
         breakdown.warnings.append(
-            "PortfolioMetrics present but total_value_usd is unmeasured "
-            "(no portfolio snapshot yet) — gross/net PnL unavailable rather "
-            "than fabricated as $0 (VIB-2475, Empty≠Zero)."
+            f"PortfolioMetrics present but {detail} is unmeasured — gross/net "
+            "PnL unavailable rather than fabricated as $0 (VIB-2475 / "
+            "VIB-5866, Empty≠Zero)."
         )
         return
     breakdown.gross_pnl_usd = _dec(gross)
@@ -732,10 +752,13 @@ def _apply_open_leveraged_headline(breakdown: PnLBreakdown, metrics: Any, verdic
     Likewise when ``initial_value_usd`` is ``None`` (unmeasured baseline):
     deriving ``NAV − 0 − flows`` off a zero-defaulted baseline would emit a
     confident wrong PnL, so we skip the derivation rather than guess (Gemini
-    review).  ``deposits`` / ``withdrawals`` / ``gas`` keep the measured-zero
-    default — an absent flow legitimately means "no capital moved", and the
-    verbatim ``PortfolioMetrics.pnl_before_gas`` it mirrors treats them the
-    same way.
+    review).  VIB-5866: an UNMEASURED capital flow (``None``) is treated the
+    same way — deriving ``NAV − initial − 0`` off a fabricated zero flow books
+    external capital as profit, so the derivation is skipped and the (already
+    unavailable) verbatim headline stands.  A MISSING attribute or a measured
+    ``Decimal("0")`` still means "no capital moved" and derives normally, as
+    the verbatim ``PortfolioMetrics.pnl_before_gas`` it mirrors does.  ``gas``
+    keeps the measured-zero default.
     """
     if metrics is None or verdict.net_lending_nav_usd is None:
         return
@@ -744,10 +767,17 @@ def _apply_open_leveraged_headline(breakdown: PnLBreakdown, metrics: Any, verdic
     initial_raw = getattr(metrics, "initial_value_usd", None)
     if initial_raw is None:
         return
+    # VIB-5866: same rule for the two capital flows. ``_MISSING_FLOW`` keeps a
+    # metrics shape that never had the attribute on the legacy measured-zero
+    # path; an explicit ``None`` is unmeasured and aborts the derivation.
+    deposits_raw = getattr(metrics, "deposits_usd", _MISSING_FLOW)
+    withdrawals_raw = getattr(metrics, "withdrawals_usd", _MISSING_FLOW)
+    if deposits_raw is None or withdrawals_raw is None:
+        return
     net_nav = _dec(verdict.net_lending_nav_usd)
     initial = _dec(initial_raw)
-    deposits = _dec(getattr(metrics, "deposits_usd", None))
-    withdrawals = _dec(getattr(metrics, "withdrawals_usd", None))
+    deposits = _dec(deposits_raw)
+    withdrawals = _dec(withdrawals_raw)
     gas_spent = _dec(getattr(metrics, "gas_spent_usd", None))
     gross = net_nav - initial - deposits + withdrawals
     breakdown.gross_pnl_usd = gross
