@@ -18,7 +18,10 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover — typing-only; runtime lookups stay function-level.
+    from almanak.framework.primitives.types import WalletDeltaLane
 
 MATCHING_POLICY_VERSION = 3
 
@@ -1606,43 +1609,58 @@ def _timestamp_to_iso(value: Any) -> str | None:
     return str(value)
 
 
-def _is_no_accounting_ledger_row(row: Any) -> bool:
-    """True iff *row* is a SUCCESSFUL ``transaction_ledger`` row whose ``intent_type``
-    classifies to :attr:`AccountingCategory.NO_ACCOUNTING` (VIB-5416 / VIB-5471).
+def _declared_wallet_delta_lane(intent_or_event_type: Any) -> WalletDeltaLane | None:
+    """Return the :class:`WalletDeltaLane` declared for *intent_or_event_type*, or ``None``.
 
-    Single classification seam shared by every measured-ledger NO_ACCOUNTING
+    VIB-5865. Single lookup seam for both wallet-delta consumers below (the
+    ledger-projection predicate and the UNMEASURED poison fold). ``record_for``
+    raises ``UnknownIntentTypeError`` for an UNREGISTERED intent — unlike
+    ``classify``, which deliberately returns NO_ACCOUNTING for unknowns. An
+    unknown / typo'd / empty type therefore yields ``None`` ("no declared lane"),
+    which every caller treats as "not my lane" — the safe under-sweep direction,
+    and byte-identical to the pre-VIB-5865 handling of unknown types.
+    """
+    # Function-level import to avoid any module-load cycle (basis is a low layer).
+    from almanak.framework.primitives.taxonomy import record_for
+
+    text = str(intent_or_event_type or "")
+    if not text:
+        return None
+    try:
+        return record_for(text).wallet_delta
+    except Exception:  # noqa: BLE001 — unknown/unregistered type or malformed record → no lane
+        return None
+
+
+def _is_ledger_projected_row(row: Any) -> bool:
+    """True iff *row* is a SUCCESSFUL ``transaction_ledger`` row whose ``intent_type``
+    declares :attr:`WalletDeltaLane.LEDGER_PROJECTION` (VIB-5416 / VIB-5471 / VIB-5865).
+
+    Single classification seam shared by every measured-ledger projection
     consumer — the swap-back clamp's synthetic-event projection
     (:func:`synthetic_wallet_movement_events`) and the consolidation token
     universe's footprint extractor (:func:`no_accounting_ledger_token_footprint`)
     — so the two teardown fund-safety lanes can never drift on *which* primitives
-    count as NO_ACCOUNTING.
+    are recovered from the measured ledger.
 
-    ``record_for`` raises ``UnknownIntentTypeError`` for an UNREGISTERED intent —
-    unlike ``classify``, which deliberately returns NO_ACCOUNTING for unknowns. A
-    typo'd / unknown intent string must NOT be treated as NO_ACCOUNTING (it would
+    VIB-5865 generalises the predicate from "``accounting_category`` is
+    NO_ACCOUNTING" to "the taxonomy row DECLARES the projection lane". The
+    declared LEDGER_PROJECTION set is EXACTLY the NO_ACCOUNTING set in this
+    revision, so the change is behaviour-preserving by construction — pinned by
+    ``tests/unit/primitives/test_wallet_delta_lane_vib5865.py`` (whole-taxonomy
+    old-predicate vs new-predicate parity). The declaration, not the category, is
+    the seam a future lane move goes through.
+
+    A typo'd / unknown intent string must NOT be treated as projected (it would
     over-count a token the deployment never acquired), so we require a REGISTERED
-    primitive AND the NO_ACCOUNTING category. Best-effort: an unreadable row,
-    empty intent type, or unregistered intent returns ``False``.
+    primitive whose declaration is LEDGER_PROJECTION. Best-effort: an unreadable
+    row, empty intent type, or unregistered intent returns ``False``.
     """
-    # Function-level import to avoid any module-load cycle (basis is a low layer).
-    from almanak.framework.primitives.taxonomy import record_for
-    from almanak.framework.primitives.types import AccountingCategory
+    from almanak.framework.primitives.types import WalletDeltaLane
 
     if not _ledger_field(row, "success"):
         return False
-    intent_type = str(_ledger_field(row, "intent_type") or "")
-    if not intent_type:
-        return False
-    # ``record_for`` is typed ``-> PrimitiveRecord`` (which always carries
-    # ``accounting_category``) and raises ``UnknownIntentTypeError`` for an
-    # unregistered intent — it never returns ``None``. The attribute access is
-    # kept INSIDE the ``try`` anyway so any unexpected lookup shape degrades to
-    # "not our lane" (the safe under-sweep direction) rather than raising
-    # (gemini-code-assist).
-    try:
-        return record_for(intent_type).accounting_category is AccountingCategory.NO_ACCOUNTING
-    except Exception:  # noqa: BLE001 — unknown/unregistered intent or malformed record → not our lane
-        return False
+    return _declared_wallet_delta_lane(_ledger_field(row, "intent_type")) is WalletDeltaLane.LEDGER_PROJECTION
 
 
 def no_accounting_ledger_token_footprint(ledger_rows: list[Any] | None) -> set[str]:
@@ -1670,7 +1688,7 @@ def no_accounting_ledger_token_footprint(ledger_rows: list[Any] | None) -> set[s
     """
     tokens: set[str] = set()
     for row in ledger_rows or []:
-        if not _is_no_accounting_ledger_row(row):
+        if not _is_ledger_projected_row(row):
             continue
         for leg in ("token_in", "token_out"):
             val = str(_ledger_field(row, leg) or "")
@@ -1721,13 +1739,14 @@ def synthetic_wallet_movement_events(
 
     out: list[dict[str, Any]] = []
     for row in ledger_rows or []:
-        # Shared classification seam (:func:`_is_no_accounting_ledger_row`): only a
-        # SUCCESSFUL row whose ``intent_type`` is a REGISTERED NO_ACCOUNTING primitive
-        # is projected. SWAP/BORROW/WITHDRAW/PT rows already replay through their own
-        # dispatch entries (disjoint by accounting category, no double-count); an
+        # Shared classification seam (:func:`_is_ledger_projected_row`): only a
+        # SUCCESSFUL row whose ``intent_type`` DECLARES ``WalletDeltaLane.
+        # LEDGER_PROJECTION`` is projected. SWAP/BORROW/WITHDRAW/PT rows declare
+        # EVENT_REPLAY and already replay through their own dispatch entries (the
+        # lanes are disjoint by declaration, so no lot is double-counted); an
         # unknown/typo'd intent is skipped so it can't over-count a token the
         # deployment never acquired.
-        if not _is_no_accounting_ledger_row(row):
+        if not _is_ledger_projected_row(row):
             continue
         token_in = str(_ledger_field(row, "token_in") or "")
         token_out = str(_ledger_field(row, "token_out") or "")
@@ -1812,6 +1831,170 @@ def _merge_events_by_timestamp(
     return sorted([*real_events, *synthetic_events], key=lambda ev: (_sortkey(ev), 0 if ev.get("synthetic") else 1))
 
 
+# VIB-5865 — payload keys that name a token symbol on UNMEASURED-lane events but
+# are NOT part of the shared ``sweep_warning._PAYLOAD_TOKEN_KEYS`` scan (whose key
+# set is shaped by the SWAP / lending payloads it was written for). Verified
+# against real persisted payloads: an LP_OPEN / LP_CLOSE row keys its legs
+# ``token0`` / ``token1`` (Curve N-coin additionally carries a ``coin_symbols``
+# LIST — and a Curve *proportional* close leaves ``token0``/``token1`` EMPTY, so
+# the list is the only identity there), VAULT_* / SETTLE_* key theirs
+# ``asset_token``, and the perp writer keys its collateral ``collateral_token``.
+# ``asset`` (lending / TRANSFER) and ``token_in`` / ``token_out`` (SWAP) are
+# already in the shared scan.
+#
+# Deliberately kept LOCAL to the poison fold rather than widened into
+# ``sweep_warning``: that helper also feeds the teardown consolidation token
+# universe, and broadening it there would change a second fund-safety lane in a
+# PR whose contract is "no measured-lane behaviour change".
+#
+# NOT every UNMEASURED payload names a wallet token — a PERP_OPEN names a
+# ``market``, not the collateral token, and PENDLE_LP rows name none at all.
+# Those are covered by the ledger leg scan (:func:`_unmeasured_ledger_token_footprint`,
+# where LP/perp/vault rows do carry ``token_in`` / ``token_out``) and WARN when
+# neither source can attribute a symbol.
+_UNMEASURED_EXTRA_TOKEN_KEYS: tuple[str, ...] = (
+    "token0",
+    "token1",
+    "asset_token",
+    "collateral_token",
+    "coin_symbols",
+)
+
+
+def _extra_payload_tokens(event: dict[str, Any]) -> set[str]:
+    """Token symbols under :data:`_UNMEASURED_EXTRA_TOKEN_KEYS` in *event*'s payload.
+
+    Accepts a string value (``token0``) or a list of strings (``coin_symbols``).
+    Best-effort and pure: a malformed payload contributes nothing.
+    """
+    import json as _json
+
+    raw = event.get("payload_json")
+    if not raw:
+        return set()
+    try:
+        payload = _json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return set()
+    if not isinstance(payload, dict):
+        return set()
+    tokens: set[str] = set()
+    for key in _UNMEASURED_EXTRA_TOKEN_KEYS:
+        val = payload.get(key)
+        if isinstance(val, str) and val:
+            tokens.add(val)
+        elif isinstance(val, list):
+            tokens |= {v for v in val if isinstance(v, str) and v}
+    return tokens
+
+
+def _unmeasured_event_token_footprint(events: list[dict[str, Any]]) -> set[str]:
+    """Token symbols touched by UNMEASURED-lane accounting events (VIB-5865).
+
+    Reuses :func:`...teardown.sweep_warning.extract_token_footprint` — the single
+    definition of the swap/lending payload-key token scan — and unions the
+    LP/settlement keys in :data:`_UNMEASURED_EXTRA_TOKEN_KEYS`. The import is
+    function-level: ``basis`` is a low layer and must not take a module-level
+    dependency on the teardown package.
+
+    An UNMEASURED event whose payload names NO token is WARNed and skipped: we
+    cannot attribute the unmeasured movement to a symbol, and poisoning the whole
+    map on an unattributable row would refuse every swap-back on the deployment
+    (a strand of its own). The narrower failure is the right one — the event's
+    absence from the map still leaves the clamp's ``untracked_token`` behaviour
+    unchanged for that token.
+    """
+    import logging as _logging
+
+    from almanak.framework.teardown.sweep_warning import extract_token_footprint
+
+    _log = _logging.getLogger(__name__)
+    tokens: set[str] = set()
+    for ev in events:
+        found = extract_token_footprint([ev]) | _extra_payload_tokens(ev)
+        if not found:
+            _log.warning(
+                "VIB-5865: UNMEASURED-lane event %s (deployment=%s) names no token in its payload — "
+                "cannot poison a token identity; this movement stays invisible to the teardown clamp",
+                ev.get("event_type"),
+                ev.get("deployment_id"),
+            )
+            continue
+        tokens |= found
+    return tokens
+
+
+def _unmeasured_ledger_token_footprint(ledger_rows: list[Any]) -> set[str]:
+    """Token symbols touched by SUCCESSFUL UNMEASURED-lane ``transaction_ledger`` rows (VIB-5865).
+
+    The ledger analogue of :func:`_unmeasured_event_token_footprint`: an
+    UNMEASURED primitive (LP / vault / perp / bridge / settlement) writes a
+    measured ledger row even when its accounting-event reconstruction does not
+    exist, and BOTH legs count — an undrained debit is the over-sweep direction.
+    A row with no readable token leg is WARNed and skipped (same narrow-failure
+    rationale as the event scan).
+    """
+    import logging as _logging
+
+    from almanak.framework.primitives.types import WalletDeltaLane
+
+    _log = _logging.getLogger(__name__)
+    tokens: set[str] = set()
+    for row in ledger_rows:
+        if not _ledger_field(row, "success"):
+            continue
+        if _declared_wallet_delta_lane(_ledger_field(row, "intent_type")) is not WalletDeltaLane.UNMEASURED:
+            continue
+        found = {str(_ledger_field(row, leg) or "") for leg in ("token_in", "token_out")}
+        found.discard("")
+        if not found:
+            _log.warning(
+                "VIB-5865: UNMEASURED-lane ledger row (intent=%s, id=%s) names no token leg — "
+                "cannot poison a token identity; this movement stays invisible to the teardown clamp",
+                _ledger_field(row, "intent_type"),
+                _ledger_field(row, "id"),
+            )
+            continue
+        tokens |= found
+    return tokens
+
+
+def _poison_unmeasured_tokens(
+    by_token: dict[str, Decimal | None],
+    scoped_events: list[dict[str, Any]],
+    ledger_rows: list[Any] | None,
+) -> None:
+    """Set every UNMEASURED-lane token in ``by_token`` to ``None``, in place (VIB-5865).
+
+    Empty ≠ Zero. A token touched by a primitive whose wallet delta cannot be
+    reconstructed has an UNPROVABLE total, so it must not be presented to the
+    teardown clamp as a measured quantity — **even when a measured SWAP lot for
+    the same symbol exists**. The override is deliberate and one-directional:
+    once any UNMEASURED primitive has touched a symbol, the sum of the measured
+    lots is a LOWER bound of unknown tightness, and sweeping ``min(that, live)``
+    can still touch commingled funds (LP_OPEN consumed inventory the replay never
+    decremented) or strand proceeds (LP_CLOSE credited inventory the replay never
+    saw).
+
+    ``decide_swap_clamp`` maps the ``None`` to ``tracked_qty_unmeasured`` — skip +
+    ``degraded=True`` — so the refusal is VISIBLE in the teardown decision log and
+    on ``TeardownResult.accounting_degraded``, instead of the silent
+    ``untracked_token`` / ``degraded=False`` strand these primitives produced
+    before VIB-5865.
+    """
+    from almanak.framework.primitives.types import WalletDeltaLane
+
+    unmeasured_events = [
+        ev for ev in scoped_events if _declared_wallet_delta_lane(ev.get("event_type")) is WalletDeltaLane.UNMEASURED
+    ]
+    poisoned = _unmeasured_event_token_footprint(unmeasured_events)
+    poisoned |= _unmeasured_ledger_token_footprint(ledger_rows or [])
+    for raw in poisoned:
+        sym = canonical_pt_symbol(raw)
+        if sym:
+            by_token[sym] = None
+
+
 def sum_open_wallet_basis_by_token(
     events: list[dict[str, Any]],
     deployment_id: str,
@@ -1819,7 +2002,7 @@ def sum_open_wallet_basis_by_token(
     ledger_rows: list[Any] | None = None,
     chain: str = "",
     wallet_address: str = "",
-) -> dict[str, Decimal] | None:
+) -> dict[str, Decimal | None] | None:
     """Tracked wallet inventory per token for ``deployment_id`` (ALM-2766).
 
     Reconstructs FIFO lots from ``events`` via
@@ -1855,6 +2038,18 @@ def sum_open_wallet_basis_by_token(
     identically to real swaps). ``ledger_rows=None`` (every non-clamp caller) is
     byte-identical to the pre-VIB-5416 behaviour.
 
+    VIB-5865: the map value widens to ``Decimal | None``. After the measured folds
+    above, every token touched by a primitive declaring
+    :attr:`WalletDeltaLane.UNMEASURED` (LP / vault / perp / bridge / settlement —
+    the ~26 verbs the FIFO replay cannot reconstruct) is POISONED to ``None``,
+    OVERRIDING any measured quantity for that symbol (Empty ≠ Zero — see
+    :func:`_poison_unmeasured_tokens` for why a measured lower bound is not a safe
+    clamp). ``decide_swap_clamp`` already maps ``None`` to
+    ``tracked_qty_unmeasured`` (skip + ``degraded=True``), so these tokens flip
+    from a SILENT strand (``untracked_token`` / ``degraded=False``) to a VISIBLE
+    degraded refusal. A history containing only measured-lane primitives is
+    byte-identical to the pre-VIB-5865 map.
+
     Deployment-scoped: only events whose ``deployment_id`` matches are replayed
     (a shared wallet's sibling-strategy lots are not ours). An empty / missing
     ``deployment_id`` returns the UNMEASURED sentinel ``None`` (Empty ≠ Zero) —
@@ -1873,12 +2068,12 @@ def sum_open_wallet_basis_by_token(
             scoped = _merge_events_by_timestamp(scoped, synthetic)
     store = FIFOBasisStore()
     store.reconstruct_from_events(scoped)
-    by_token: dict[str, Decimal] = {}
+    by_token: dict[str, Decimal | None] = {}
     for _position_key, token, remaining, _cost in store.iter_open_wallet_basis_lots():
         sym = canonical_pt_symbol(token)
         if not sym:
             continue
-        by_token[sym] = by_token.get(sym, Decimal("0")) + remaining
+        by_token[sym] = (by_token.get(sym) or Decimal("0")) + remaining
     # VIB-5353: fold held-PT inventory into the same tracked map (maturity-less
     # canonical key) so a swap-acquired PT's teardown swap-back is clamped, not
     # stranded as untracked. iter_open_pt_lots yields the open PT_BUY residual.
@@ -1886,7 +2081,9 @@ def sum_open_wallet_basis_by_token(
         sym = canonical_pt_symbol(pt_token)
         if not sym:
             continue
-        by_token[sym] = by_token.get(sym, Decimal("0")) + remaining_pt
+        by_token[sym] = (by_token.get(sym) or Decimal("0")) + remaining_pt
+    # VIB-5865: LAST, so the poison overrides every measured quantity above.
+    _poison_unmeasured_tokens(by_token, scoped, ledger_rows)
     return by_token
 
 

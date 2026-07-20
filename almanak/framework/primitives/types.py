@@ -165,6 +165,65 @@ class EventKind(StrEnum):
     NONE = "none"
 
 
+class WalletDeltaLane(StrEnum):
+    """How a primitive's **fungible wallet-token movement** is reconstructed.
+
+    VIB-5865 (defect #1). The teardown swap-back clamp answers one question —
+    *how much of this wallet balance is provably ours to sweep?* — by
+    reconstructing tracked inventory from history
+    (``accounting.basis.sum_open_wallet_basis_by_token``). Before this enum the
+    answer was implicit: a primitive was visible iff someone had remembered to
+    add it to ``basis._REPLAY_DISPATCH``, and every other wallet-moving verb
+    (the LP, vault, perp, bridge/transfer, settlement and prediction-collateral
+    families — 22 rows in this revision) was **silently** invisible. The clamp then skipped the strategy's own closing swap with
+    ``untracked_token`` / ``degraded=False`` and the proceeds stranded.
+
+    Declaring the lane on every taxonomy row makes that blindness structurally
+    impossible: :class:`PrimitiveRecord` has no default for ``wallet_delta``,
+    so a new row without a reviewed declaration is an **import-time
+    ``TypeError``**, and a row declared ``UNMEASURED`` fails the clamp CLOSED
+    and VISIBLY instead of stranding in silence.
+
+    Lanes:
+
+    ``EVENT_REPLAY``
+        The wallet delta is reconstructed from persisted ``accounting_events``
+        by a handler in ``basis._REPLAY_DISPATCH`` (SWAP, the lending family,
+        the Pendle PT family, the prediction family). Measured — contributes a
+        ``Decimal`` quantity to the tracked map.
+
+    ``LEDGER_PROJECTION``
+        The primitive writes NO ``accounting_events`` at all
+        (``AccountingCategory.NO_ACCOUNTING``), so its delta is recovered by
+        projecting MEASURED ``transaction_ledger`` rows into synthetic
+        ``WALLET_MOVEMENT`` events (VIB-5416 / VIB-5471 — STAKE, WRAP_NATIVE,
+        CDP MINT_STABLE, …). Measured, via a different source.
+
+    ``UNMEASURED``
+        A declared wallet-mover whose delta CANNOT currently be reconstructed
+        from either source. Empty ≠ Zero: the tokens such a primitive touches
+        have an unprovable total, so they **poison** the tracked map to ``None``
+        (overriding any measured quantity) and the clamp refuses the swap with
+        ``tracked_qty_unmeasured`` / ``degraded=True``. This is the safe on-ramp
+        for every new primitive: visible refusal, never a silent strand.
+
+    ``NONE``
+        Reviewed as moving no fungible wallet token at all (snapshots, risk
+        updates, aggregate markers). Each such row carries a justification
+        comment on its taxonomy entry.
+
+    A row must NOT be declared ``EVENT_REPLAY`` without a matching
+    ``_REPLAY_DISPATCH`` handler, and a ``NONE`` / ``LEDGER_PROJECTION`` row
+    must NOT have one — the lanes are disjoint by construction and
+    ``tests/unit/primitives/test_wallet_delta_lane_vib5865.py`` enforces it.
+    """
+
+    EVENT_REPLAY = "event_replay"
+    LEDGER_PROJECTION = "ledger_projection"
+    UNMEASURED = "unmeasured"
+    NONE = "none"
+
+
 @dataclass(frozen=True)
 class PrimitiveRecord:
     """One row of the primitives taxonomy.
@@ -192,6 +251,11 @@ class PrimitiveRecord:
             atomically and a separate claim/settle step is required.
         lifecycle_phase: Where this step sits inside the primitive's
             lifecycle.
+        wallet_delta: How this primitive's fungible wallet-token movement is
+            reconstructed (:class:`WalletDeltaLane`). **Required, no default**
+            (VIB-5865): a taxonomy row that omits it is an import-time
+            ``TypeError``, so a new primitive cannot silently join the set the
+            teardown clamp is blind to.
         required_lifecycle: Tuple of intent strings that a complete
             Accountant Test fixture must exercise for this primitive to be
             considered fully-covered. Empty tuple = atomic; the fixture only
@@ -206,3 +270,4 @@ class PrimitiveRecord:
     is_async: bool
     lifecycle_phase: LifecyclePhase
     required_lifecycle: tuple[str, ...]
+    wallet_delta: WalletDeltaLane

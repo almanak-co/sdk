@@ -69,13 +69,19 @@ class SwapClampDecision:
 def decide_swap_clamp(
     *,
     live_balance: Decimal,
-    tracked_map: dict[str, Decimal] | None,
+    tracked_map: dict[str, Decimal | None] | None,
     from_token: str,
 ) -> SwapClampDecision:
     """Decide how to resolve an ``amount='all'`` teardown swap-back (ALM-2766).
 
-    ``tracked_map`` is the deployment-scoped ``{canonical_symbol: Decimal}`` from
-    :func:`read_tracked_swap_inventory`, or the UNMEASURED sentinel ``None``.
+    ``tracked_map`` is the deployment-scoped ``{canonical_symbol: Decimal | None}``
+    from :func:`read_tracked_swap_inventory`, or the UNMEASURED sentinel ``None``.
+    A per-token ``None`` value means that symbol's total is UNPROVABLE — since
+    VIB-5865 that is how a token touched by a ``WalletDeltaLane.UNMEASURED``
+    primitive (LP / vault / perp / bridge / settlement) is presented. The decision
+    table below is UNCHANGED; those tokens simply now reach the
+    ``tracked_qty_unmeasured`` branch (visible, degraded) instead of the
+    ``untracked_token`` branch (silent).
 
     Fail-closed decision table:
 
@@ -164,7 +170,7 @@ def read_tracked_swap_inventory(
     deployment_id: str,
     chain: str = "",
     wallet_address: str = "",
-) -> dict[str, Decimal] | None:
+) -> dict[str, Decimal | None] | None:
     """Deployment-scoped tracked wallet inventory, or the UNMEASURED sentinel.
 
     Returns ``None`` (unmeasured) when the deployment id is empty, the state

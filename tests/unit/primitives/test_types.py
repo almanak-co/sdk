@@ -26,6 +26,7 @@ from almanak.framework.primitives.types import (
     PositionKind,
     Primitive,
     PrimitiveRecord,
+    WalletDeltaLane,
 )
 
 
@@ -151,6 +152,7 @@ def test_primitive_record_is_frozen_dataclass() -> None:
         is_async=False,
         lifecycle_phase=LifecyclePhase.ATOMIC,
         required_lifecycle=(),
+        wallet_delta=WalletDeltaLane.EVENT_REPLAY,
     )
     with pytest.raises(FrozenInstanceError):
         record.intent_type = "LP_OPEN"  # type: ignore[misc]
@@ -167,6 +169,7 @@ def test_primitive_record_is_hashable() -> None:
         is_async=False,
         lifecycle_phase=LifecyclePhase.ATOMIC,
         required_lifecycle=(),
+        wallet_delta=WalletDeltaLane.EVENT_REPLAY,
     )
     assert hash(record) == hash(record)
     assert {record} == {record}

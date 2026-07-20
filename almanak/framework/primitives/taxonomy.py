@@ -30,6 +30,7 @@ from almanak.framework.primitives.types import (
     PositionKind,
     Primitive,
     PrimitiveRecord,
+    WalletDeltaLane,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,11 +57,19 @@ def _record(
     position_type: PositionKind | None,
     event_kind: EventKind,
     *,
+    wallet_delta: WalletDeltaLane,
     is_async: bool = False,
     lifecycle_phase: LifecyclePhase = LifecyclePhase.ATOMIC,
     required_lifecycle: tuple[str, ...] = (),
 ) -> tuple[str, PrimitiveRecord]:
-    """Construct a (key, record) pair for the TAXONOMY table."""
+    """Construct a (key, record) pair for the TAXONOMY table.
+
+    ``wallet_delta`` is a REQUIRED keyword (VIB-5865) — it has no default here
+    and none on :class:`PrimitiveRecord`, so a row added without a reviewed
+    wallet-delta declaration fails at import with a ``TypeError`` rather than
+    silently joining the set of primitives the teardown swap-back clamp cannot
+    see. See :class:`WalletDeltaLane` for the four lanes.
+    """
     return intent_type, PrimitiveRecord(
         intent_type=intent_type,
         primitive=primitive,
@@ -70,6 +79,7 @@ def _record(
         is_async=is_async,
         lifecycle_phase=lifecycle_phase,
         required_lifecycle=required_lifecycle,
+        wallet_delta=wallet_delta,
     )
 
 
@@ -96,6 +106,34 @@ _PREDICTION_LIFECYCLE: tuple[str, ...] = (
 )
 
 
+# VIB-5865 — every row below declares a ``wallet_delta`` lane
+# (:class:`WalletDeltaLane`). The declarations in THIS revision encode CURRENT
+# truth, not aspiration, so no fold mechanics change for measured lanes:
+#
+#   * ``EVENT_REPLAY``      == exactly the taxonomy-backed keys of
+#                              ``accounting.basis._REPLAY_DISPATCH``.
+#   * ``LEDGER_PROJECTION`` == exactly the ``AccountingCategory.NO_ACCOUNTING``
+#                              rows (the VIB-5416 / VIB-5471 measured-ledger
+#                              lane). Kept an EXACT match so the generalized
+#                              predicate ``basis._is_ledger_projected_row`` is
+#                              behaviour-preserving BY CONSTRUCTION — pinned by
+#                              a parity test against the old category check.
+#                              This deliberately includes rows that move nothing
+#                              (``HOLD`` / ``ENSURE_BALANCE``) and the
+#                              compile-blocked CDP / ``LIQUIDATE`` placeholders:
+#                              they write no token-legged ``transaction_ledger``
+#                              row, so projecting them is a no-op, whereas
+#                              demoting them to ``NONE`` would silently narrow a
+#                              fund-safety lane. A later PR may demote them with
+#                              its own evidence.
+#   * ``UNMEASURED``        == every other wallet-moving row (LP, vault, perp,
+#                              bridge/transfer, settlement, prediction BUY/SELL).
+#                              These POISON their token footprint in the teardown
+#                              clamp's tracked map (Empty ≠ Zero) so the strand is
+#                              a visible degraded refusal, not silence. PR-2+ move
+#                              rows out of this lane as real replay folds land.
+#   * ``NONE``              == reviewed as moving no fungible wallet token; each
+#                              such row carries a justification comment.
 TAXONOMY: dict[str, PrimitiveRecord] = dict(
     [
         # ──────────────────────────────────────────────────────────────────
@@ -107,6 +145,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.SWAP,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         # ──────────────────────────────────────────────────────────────────
         # LP
@@ -118,6 +157,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.LP,
             event_kind=EventKind.OPEN,
             required_lifecycle=_LP_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "LP_CLOSE",
@@ -126,6 +166,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.LP,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_LP_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "LP_COLLECT_FEES",
@@ -134,6 +175,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.LP,
             event_kind=EventKind.COLLECT,
             required_lifecycle=_LP_LIFECYCLE_WITH_FEES,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         # ──────────────────────────────────────────────────────────────────
         # Lending
@@ -145,6 +187,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.LENDING_COLLATERAL,
             event_kind=EventKind.OPEN,
             required_lifecycle=_LENDING_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         _record(
             "WITHDRAW",
@@ -153,6 +196,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.LENDING_COLLATERAL,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_LENDING_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         _record(
             "BORROW",
@@ -161,6 +205,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.LENDING_DEBT,
             event_kind=EventKind.OPEN,
             required_lifecycle=_LENDING_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         _record(
             "REPAY",
@@ -169,6 +214,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.LENDING_DEBT,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_LENDING_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         _record(
             "DELEVERAGE",
@@ -177,6 +223,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.LENDING_DEBT,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_LENDING_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         # ──────────────────────────────────────────────────────────────────
         # Perp
@@ -188,6 +235,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.PERP,
             event_kind=EventKind.OPEN,
             required_lifecycle=_PERP_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "PERP_CLOSE",
@@ -196,6 +244,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.PERP,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_PERP_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         # PERP_CANCEL_ORDER (VIB-5568) — cancel a pending (unfilled) perp order and
         # refund its committed collateral. Deliberately NOT AccountingCategory.PERP:
@@ -214,6 +263,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
         # PERP_WITHDRAW (VIB-5617) — withdraw free margin off the venue's off-chain
         # account back to L1 (Hyperliquid: a CoreWriter spotSend HyperCore→HyperEVM
@@ -234,6 +284,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
         # ──────────────────────────────────────────────────────────────────
         # Vault (ERC-4626)
@@ -245,6 +296,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.VAULT,
             event_kind=EventKind.OPEN,
             required_lifecycle=_VAULT_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "VAULT_REDEEM",
@@ -253,6 +305,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.VAULT,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_VAULT_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "VAULT_REALLOCATE",
@@ -261,6 +314,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.VAULT,
             event_kind=EventKind.ADJUST,
             required_lifecycle=_VAULT_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "VAULT_MANAGE",
@@ -269,6 +323,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.VAULT,
             event_kind=EventKind.ADJUST,
             required_lifecycle=_VAULT_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         # ──────────────────────────────────────────────────────────────────
         # Vault SETTLEMENT (Lagoon ERC-7540 operator side) — VIB-5666
@@ -294,6 +349,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=None,
             event_kind=EventKind.NONE,
             required_lifecycle=_SETTLEMENT_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "SETTLE_REDEEM",
@@ -302,6 +358,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=None,
             event_kind=EventKind.NONE,
             required_lifecycle=_SETTLEMENT_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         # ──────────────────────────────────────────────────────────────────
         # Staking
@@ -313,6 +370,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.STAKING,
             event_kind=EventKind.OPEN,
             required_lifecycle=_STAKING_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
         _record(
             "UNSTAKE",
@@ -321,6 +379,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.STAKING,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_STAKING_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
         # ──────────────────────────────────────────────────────────────────
         # Bridge / Transfer (VIB-4164, T4)
@@ -340,6 +399,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.TRANSFER,
             is_async=True,
             lifecycle_phase=LifecyclePhase.REQUEST,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         # Payload-only event-type row (mirrors the VIB-4162 payload-only
         # rows for PT_BUY / PERP_INCREASE / etc.). The writer's augment
@@ -357,6 +417,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.TRANSFER,
             is_async=True,
             lifecycle_phase=LifecyclePhase.REQUEST,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         # ──────────────────────────────────────────────────────────────────
         # Prediction markets (Polymarket)
@@ -368,6 +429,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=None,
             event_kind=EventKind.OPEN,
             required_lifecycle=_PREDICTION_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "PREDICTION_SELL",
@@ -376,6 +438,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=None,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_PREDICTION_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "PREDICTION_REDEEM",
@@ -384,6 +447,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=None,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_PREDICTION_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         # ──────────────────────────────────────────────────────────────────
         # Flash loan
@@ -394,6 +458,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
         # ──────────────────────────────────────────────────────────────────
         # Payload-only event types — emitted by typed accounting models
@@ -414,6 +479,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.SWAP,
             position_type=PositionKind.PENDLE_PT,
             event_kind=EventKind.OPEN,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         _record(
             "PT_SELL",
@@ -421,6 +487,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.SWAP,
             position_type=PositionKind.PENDLE_PT,
             event_kind=EventKind.CLOSE,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         _record(
             "PT_REDEEM",
@@ -428,6 +495,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.SWAP,
             position_type=PositionKind.PENDLE_PT,
             event_kind=EventKind.CLOSE,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         _record(
             "PENDLE_LP_OPEN",
@@ -436,6 +504,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.LP,
             event_kind=EventKind.OPEN,
             required_lifecycle=_LP_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "PENDLE_LP_CLOSE",
@@ -444,13 +513,19 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.LP,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_LP_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
+        # VIB-5865 wallet_delta=NONE: a snapshot is a periodic *observation* of an
+        # already-open LP position (``event_kind=NONE``) — it moves no fungible
+        # wallet token. The wallet-moving legs are LP_OPEN / LP_CLOSE /
+        # LP_COLLECT_FEES, which carry their own (UNMEASURED) declarations.
         _record(
             "LP_SNAPSHOT",
             Primitive.LP,
             AccountingCategory.LP,
             position_type=PositionKind.LP,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.NONE,
         ),
         _record(
             "LP_REBALANCE",
@@ -458,6 +533,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.LP,
             position_type=PositionKind.LP,
             event_kind=EventKind.ADJUST,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "PERP_INCREASE",
@@ -466,6 +542,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.PERP,
             event_kind=EventKind.ADJUST,
             required_lifecycle=_PERP_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "PERP_DECREASE",
@@ -474,6 +551,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.PERP,
             event_kind=EventKind.ADJUST,
             required_lifecycle=_PERP_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "PERP_LIQUIDATE",
@@ -482,6 +560,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.PERP,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_PERP_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         _record(
             "VAULT_HARVEST",
@@ -490,27 +569,44 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.VAULT,
             event_kind=EventKind.COLLECT,
             required_lifecycle=_VAULT_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
+        # VIB-5865 wallet_delta=NONE: observation-only, same rationale as
+        # LP_SNAPSHOT. The vault's wallet-moving legs are VAULT_DEPOSIT /
+        # VAULT_REDEEM / VAULT_HARVEST / VAULT_REALLOCATE / VAULT_MANAGE.
         _record(
             "VAULT_SNAPSHOT",
             Primitive.VAULT,
             AccountingCategory.VAULT,
             position_type=PositionKind.VAULT,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.NONE,
         ),
+        # VIB-5865 wallet_delta=NONE (reviewed judgment call — brief Q8). ``CLOSE``
+        # is the lending *aggregate marker* consumed by
+        # ``accounting/reporting/lending_report.py`` to flag a lending summary as
+        # closed; it has no position_type and no token legs of its own. Every
+        # fungible movement of the close is carried by the constituent WITHDRAW /
+        # REPAY events, which are EVENT_REPLAY. Declaring it UNMEASURED would
+        # poison the very tokens those measured legs just reconstructed — an
+        # over-degradation with no fund-safety gain.
         _record(
             "CLOSE",
             Primitive.LENDING,
             AccountingCategory.LENDING,
             position_type=None,
             event_kind=EventKind.CLOSE,
+            wallet_delta=WalletDeltaLane.NONE,
         ),
+        # VIB-5865 wallet_delta=NONE: a health-factor/risk observation
+        # (``event_kind=NONE``) emitted between lending legs — no token moves.
         _record(
             "LIQUIDATION_RISK_UPDATE",
             Primitive.LENDING,
             AccountingCategory.LENDING,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.NONE,
         ),
         _record(
             "PREDICTION_OPEN",
@@ -519,6 +615,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=None,
             event_kind=EventKind.OPEN,
             required_lifecycle=_PREDICTION_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         _record(
             "PREDICTION_INCREASE",
@@ -527,6 +624,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=None,
             event_kind=EventKind.ADJUST,
             required_lifecycle=_PREDICTION_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         _record(
             "PREDICTION_REDUCE",
@@ -535,6 +633,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=None,
             event_kind=EventKind.ADJUST,
             required_lifecycle=_PREDICTION_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         _record(
             "PREDICTION_CLOSE",
@@ -543,6 +642,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=None,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_PREDICTION_LIFECYCLE,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         # ──────────────────────────────────────────────────────────────────
         # P0 placeholders (VIB-4165, T5 of VIB-4160) — locked design item #5.
@@ -581,6 +681,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
         _record(
             "OPEN_CDP",
@@ -588,6 +689,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
         _record(
             "MINT_STABLE",
@@ -595,6 +697,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
         _record(
             "REPAY_STABLE",
@@ -602,6 +705,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
         _record(
             "CLOSE_CDP",
@@ -609,6 +713,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
         # ──────────────────────────────────────────────────────────────────
         # Utility intents (no position, no accounting row)
@@ -619,6 +724,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
         _record(
             "ENSURE_BALANCE",
@@ -626,6 +732,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
         _record(
             "WRAP_NATIVE",
@@ -633,6 +740,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
         _record(
             "UNWRAP_NATIVE",
@@ -640,6 +748,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             AccountingCategory.NO_ACCOUNTING,
             position_type=None,
             event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
     ]
 )
