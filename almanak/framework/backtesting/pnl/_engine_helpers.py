@@ -580,24 +580,59 @@ async def execute_iteration_loop(
     # tick-derivable timeframes) and engine-modeled gas, per-tick bound.
     from almanak.framework.backtesting.pnl.engine import (
         BacktestOHLCVView,
+        BacktestPoolPriceView,
+        BacktestVolatilityCalculator,
         SimulatedGasView,
+        SimulatedPositionView,
+        SimulatedSlippageView,
         build_backtest_lending_rates,
+        sync_il_calculator_positions,
     )
     from almanak.framework.backtesting.pnl.indicator_engine import cadence_is_coarser, timeframe_label
+    from almanak.framework.data.lp import ILCalculator
+    from almanak.framework.data.risk.metrics import PortfolioRiskCalculator
 
     tick_timeframe = timeframe_label(config.interval_seconds)
     rsi_provider, indicator_provider = state.indicator_engine.snapshot_providers(
         state.strategy_config, config.interval_seconds
     )
     gas_view = SimulatedGasView(backtester, config)
+    # market.position_health / aave_health_factor / lp_position_value served
+    # from the engine's own tracked positions (ALM-2943) — leverage-loop and
+    # LP-rebalance strategies froze on their own sim positions.
+    position_view = SimulatedPositionView(state.portfolio)
     # market.ohlcv() served from the run's own close series (ALM-2962) —
     # candle-reading strategies froze while the same code traded live.
     ohlcv_view = BacktestOHLCVView(state.indicator_engine, config.interval_seconds, token_addresses)
+    # ALM-2943: pool_price / pool_price_by_pair as the labeled pair-ratio
+    # proxy, estimate_slippage from the engine's own fill models, and
+    # realized_vol / vol_cone over the run's close series — all data the
+    # engine already owns; the accessors refused it at decide() time.
+    pool_price_view = BacktestPoolPriceView(config.chain, token_addresses)
+    slippage_view = SimulatedSlippageView(backtester)
+    # Retention for the DEFAULT vol windows (review, #3346) is sized LAZILY by
+    # the calculator on the first realized_vol/vol_cone call: sizing it eagerly
+    # here for every run made the per-tick indicator plane pay for 90 days of
+    # history whether or not the strategy ever reads vol, tripping the 1-year
+    # perf SLAs (throughput must not degrade with duration).
+    volatility_calculator = BacktestVolatilityCalculator(
+        indicator_engine=state.indicator_engine,
+        tick_interval_seconds=config.interval_seconds,
+    )
     lending_rates = build_backtest_lending_rates(
         [*token_addresses, *(str(token) for token in config.tokens if isinstance(token, str))],
         config.chain,
         config.start_time,
     )
+    # Pure-math decision-input lanes (ALM-2943): one run-scoped instance each.
+    # The IL calculator accumulates the sim's own LP opens (synced per tick
+    # below) so ``il_exposure(position_id)`` serves; the risk calculator is
+    # stateless math over the caller-supplied PnL series.
+    il_calculator = ILCalculator()
+    risk_calculator = PortfolioRiskCalculator()
+    # Once-per-RUN dedup for the documented-soft empty lanes
+    # (wallet_activity / prediction_price ledger notes).
+    soft_empty_noted: set[str] = set()
 
     with bt_logger.phase("simulation"):
         # Iterate through historical data
@@ -645,6 +680,9 @@ async def execute_iteration_loop(
             # Create market snapshot for strategy
             gas_view.bind(market_state, timestamp)
             ohlcv_view.bind(timestamp)
+            position_view.bind(market_state, timestamp)
+            pool_price_view.bind(market_state, timestamp)
+            slippage_view.bind(market_state, timestamp)
             snapshot = create_market_snapshot_from_state(
                 market_state=market_state,
                 chain=config.chain,
@@ -657,6 +695,13 @@ async def execute_iteration_loop(
                 default_timeframe=tick_timeframe,
                 ohlcv_module=ohlcv_view,
                 lending_rates=lending_rates,
+                position_view=position_view,
+                pool_price_view=pool_price_view,
+                slippage_view=slippage_view,
+                volatility_calculator=volatility_calculator,
+                il_calculator=il_calculator,
+                risk_calculator=risk_calculator,
+                soft_empty_noted=soft_empty_noted,
             )
 
             # Cache available_tokens once per tick: the property returns a
@@ -711,6 +756,12 @@ async def execute_iteration_loop(
                 data_quality_tracker=state.data_quality_tracker,
                 strategy=strategy,
             )
+
+            # Mirror the sim's open LP positions into the run's IL calculator
+            # AFTER fills, BEFORE decide(): a position filled this tick is
+            # registered at this tick's (fill-exact) prices, and decide() can
+            # immediately read il_exposure on it (ALM-2943).
+            sync_il_calculator_positions(il_calculator, state.portfolio, market_state, config.chain)
 
             # Get strategy decision (warm-up + error-handler branch)
             decide_result = _invoke_strategy_decide(
@@ -1665,6 +1716,120 @@ def _calculate_lp_close_flows(
     return tokens_in, tokens_out
 
 
+def _calculate_lp_collect_fees_flows(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
+    """LP_COLLECT_FEES: accrued fees return to the wallet, position stays open.
+
+    ``amount_usd`` is the matched position's accrued-uncollected fee value
+    (sized by ``_resolve_lp_collect_fees``); the payout mirrors the generic
+    LP_CLOSE plane exactly — the USD value split 50/50 across the pair tokens
+    at current prices, ONE plane. The per-token ``fees_token0``/``fees_token1``
+    attribution units are deliberately NOT paid out: they are valued at the
+    position's entry price, so crediting them at current prices would mint or
+    burn value relative to the ``fees_earned`` USD the equity curve carried.
+    """
+    return _calculate_lp_close_flows(intent, amount_usd, market_state, token_addresses)
+
+
+def resolve_native_wrap_pair(chain: str | None) -> tuple[str, str] | None:
+    """Return ``(native_symbol, wrapped_symbol)`` for ``chain``, or None.
+
+    The repo's canonical native↔wrapped mapping is the chain registry's
+    native descriptor (the same source the gas lane's price ladder and the
+    OHLCV wrapped-proxy use). ``None`` means the chain has no registered
+    wrapped-native mapping — WRAP_NATIVE/UNWRAP_NATIVE must refuse, not guess.
+    """
+    if not chain:
+        return None
+    descriptor = ChainRegistry.try_resolve(str(chain))
+    if descriptor is None or not descriptor.native.wrapped_symbol:
+        return None
+    return descriptor.native.symbol.upper(), descriptor.native.wrapped_symbol.upper()
+
+
+def _wrap_conversion_legs(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+    token_addresses: Mapping[str, tuple[str, str]] | None,
+) -> tuple[Any, Any, Decimal] | None:
+    """Shared WRAP/UNWRAP leg resolution: ``(native, wrapped, units)``.
+
+    Both legs are sized from ONE price so the conversion is exactly 1:1 in
+    token units. The wrapped side prices first (it is the registered ERC-20;
+    the native symbol usually aliases to it), then the native symbol; with
+    neither priced the conversion raises :class:`PriceUnavailableError` via
+    the typed plane, like every other flow helper (ALM-2943 — a raw-USD-as-
+    units fallback would mis-size the wrap and the strict-balance check).
+    Returns None when the chain has no registered native↔wrapped mapping
+    (the resolution lane has already rejected the fill in that case; flows
+    fall through to no-op).
+    """
+    chain = str(getattr(intent, "chain", None) or _market_state_chain(market_state))
+    pair = resolve_native_wrap_pair(chain)
+    if pair is None:
+        return None
+    native_symbol, wrapped_symbol = pair
+    declared = getattr(intent, "token", None)
+    if isinstance(declared, str) and declared.strip():
+        wrapped_symbol = declared.strip().upper()
+    wrapped = _normalize_token(wrapped_symbol, chain, token_addresses)
+    # Natives are not ERC-20s: the native side keeps its plain symbol key.
+    native = native_symbol
+
+    price: Decimal | None = None
+    priced_leg: Any = wrapped
+    for leg in (wrapped, native):
+        try:
+            candidate = market_state.get_price(leg)
+        except KeyError:
+            continue
+        if candidate > 0:
+            price, priced_leg = candidate, leg
+            break
+    units = typed_units_from_usd(
+        priced_leg,
+        price,
+        amount_usd,
+        chain=chain,
+        token_addresses=token_addresses,
+        context="wrap_native.conversion",
+    )
+    return native, wrapped, units
+
+
+def _calculate_wrap_native_flows(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
+    """WRAP_NATIVE: native units leave the wallet, wrapped units arrive 1:1."""
+    legs = _wrap_conversion_legs(intent, amount_usd, market_state, token_addresses)
+    if legs is None:
+        return {}, {}
+    native, wrapped, units = legs
+    return {wrapped: units}, {native: units}
+
+
+def _calculate_unwrap_native_flows(
+    intent: Any,
+    amount_usd: Decimal,
+    market_state: MarketState,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
+) -> tuple[dict[TokenRef, Decimal], dict[TokenRef, Decimal]]:
+    """UNWRAP_NATIVE: wrapped units leave the wallet, native units arrive 1:1."""
+    legs = _wrap_conversion_legs(intent, amount_usd, market_state, token_addresses)
+    if legs is None:
+        return {}, {}
+    native, wrapped, units = legs
+    return {native: units}, {wrapped: units}
+
+
 def _resolve_vault_token(
     intent: Any,
     chain: str | None = None,
@@ -1743,8 +1908,15 @@ _SIMPLE_FLOW_HANDLERS: dict[IntentType, object] = {
     IntentType.WITHDRAW: _calculate_withdraw_flows,
     IntentType.BORROW: _calculate_borrow_flows,
     IntentType.REPAY: _calculate_repay_flows,
+    # DELEVERAGE is structurally a REPAY (lending_intents.DeleverageIntent):
+    # same outflow shape, same close resolution — only the recorded
+    # intent_type differs so accounting can tell forced unwinds apart.
+    IntentType.DELEVERAGE: _calculate_repay_flows,
     IntentType.LP_OPEN: _calculate_lp_open_flows,
     IntentType.LP_CLOSE: _calculate_lp_close_flows,
+    IntentType.LP_COLLECT_FEES: _calculate_lp_collect_fees_flows,
+    IntentType.WRAP_NATIVE: _calculate_wrap_native_flows,
+    IntentType.UNWRAP_NATIVE: _calculate_unwrap_native_flows,
     IntentType.VAULT_DEPOSIT: _calculate_vault_deposit_flows,
     IntentType.VAULT_REDEEM: _calculate_vault_redeem_flows,
 }

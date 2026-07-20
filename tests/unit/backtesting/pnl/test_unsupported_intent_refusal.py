@@ -5,7 +5,8 @@ is a fatal, run-stopping error — never a costed no-op. Before this change the
 generic lane recorded a trade with fees/slippage/gas for ANY intent type while
 moving zero tokens and creating no position, silently diverging the backtest
 from live behaviour (~15 vocabulary intent types were affected, e.g.
-WRAP_NATIVE, BRIDGE, STAKE, LP_COLLECT_FEES, PERP_CANCEL_ORDER).
+BRIDGE, STAKE, PERP_CANCEL_ORDER; WRAP_NATIVE/UNWRAP_NATIVE, LP_COLLECT_FEES
+and DELEVERAGE have since gained real simulation lanes and left this set).
 """
 
 from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
@@ -40,10 +41,10 @@ class _EmptyDataProvider:
             yield
 
 
-class _WrapNativeDuck:
+class _StakeDuck:
     """Intent type with no simulation lane (maps to IntentType.UNKNOWN)."""
 
-    intent_type = "WRAP_NATIVE"
+    intent_type = "STAKE"
     token = "ETH"
     amount = Decimal("1")
 
@@ -98,13 +99,13 @@ class TestUnsupportedIntentRefusal:
 
     @pytest.mark.asyncio
     async def test_unknown_intent_type_is_refused(self):
-        """A WRAP_NATIVE-style intent (UNKNOWN to the engine) raises, names the intent."""
+        """A STAKE-style intent (UNKNOWN to the engine) raises, names the intent."""
         engine = _engine()
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"), chain="ethereum")
         state = _market_state()
 
-        with pytest.raises(UnsupportedIntentError, match=r"WRAP_NATIVE \(_WrapNativeDuck\)"):
-            await engine._execute_intent(_WrapNativeDuck(), portfolio, state, state.timestamp, _config())
+        with pytest.raises(UnsupportedIntentError, match=r"STAKE \(_StakeDuck\)"):
+            await engine._execute_intent(_StakeDuck(), portfolio, state, state.timestamp, _config())
 
     @pytest.mark.asyncio
     async def test_bridge_intent_is_refused(self):
@@ -136,7 +137,7 @@ class TestUnsupportedIntentRefusal:
         tokens_before = dict(portfolio.tokens)
 
         with pytest.raises(UnsupportedIntentError):
-            await engine._execute_intent(_WrapNativeDuck(), portfolio, state, state.timestamp, _config())
+            await engine._execute_intent(_StakeDuck(), portfolio, state, state.timestamp, _config())
 
         assert portfolio.cash_usd == cash_before
         assert portfolio.tokens == tokens_before

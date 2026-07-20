@@ -59,11 +59,15 @@ class ResolvedAllSizing:
 
 
 #: The token attribute each wallet-sized intent type spends from.
+#: WRAP_NATIVE is absent by design: it spends the chain's NATIVE token, which
+#: no intent attribute names (``intent.token`` is the wrapped token RECEIVED)
+#: — ``_spend_token`` derives it from the chain registry instead.
 _SPEND_TOKEN_ATTRIBUTES: dict[IntentType, tuple[str, ...]] = {
     IntentType.SWAP: ("from_token", "token_in", "token"),
     IntentType.SUPPLY: ("token", "asset"),
     IntentType.VAULT_DEPOSIT: ("token", "deposit_token", "asset"),
     IntentType.PERP_OPEN: ("collateral_token",),
+    IntentType.UNWRAP_NATIVE: ("token",),
 }
 
 
@@ -86,7 +90,7 @@ def resolve_all_sizing(
     if intent_type not in WALLET_BALANCE_ALL_INTENT_TYPES and intent_type is not IntentType.PERP_OPEN:
         return SizingRejection(code=RejectionCode.UNSUPPORTED_ALL_SIZING, detail=UNSUPPORTED_ALL_SIZING_REASON)
 
-    token = _spend_token(intent, intent_type)
+    token = _spend_token(intent, intent_type, chain=getattr(portfolio, "chain", None))
     if token is None:
         return SizingRejection(
             code=RejectionCode.UNSUPPORTED_ALL_SIZING,
@@ -128,7 +132,15 @@ def resolve_all_sizing(
     return ResolvedAllSizing(token=token, units=units, amount_usd=units * price)
 
 
-def _spend_token(intent: Any, intent_type: IntentType) -> Any | None:
+def _spend_token(intent: Any, intent_type: IntentType, chain: Any = None) -> Any | None:
+    if intent_type is IntentType.WRAP_NATIVE:
+        # A wrap spends the chain's native token; ``intent.token`` names the
+        # WRAPPED token received, so the spend side comes from the registry's
+        # native↔wrapped mapping (the same map the wrap flow converts on).
+        from almanak.framework.backtesting.pnl._engine_helpers import resolve_native_wrap_pair
+
+        pair = resolve_native_wrap_pair(str(getattr(intent, "chain", None) or chain or ""))
+        return pair[0] if pair is not None else None
     for attribute in _SPEND_TOKEN_ATTRIBUTES.get(intent_type, ()):
         token = getattr(intent, attribute, None)
         if token:

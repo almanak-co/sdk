@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 # Minimum observations required for valid volatility estimation.
 MIN_OBSERVATIONS = 30
 
+# Default lookback windows (days) for ``vol_cone``. Shared with the
+# ``MarketSnapshot.vol_cone`` accessor and the backtest engine's retention
+# sizing (the tick buffer must retain enough history to cover the largest
+# default window, or default calls refuse forever mid-run).
+DEFAULT_VOL_CONE_WINDOWS_DAYS: tuple[int, ...] = (7, 14, 30, 90)
+
 # Annualization factors: periods per year for each timeframe.
 _PERIODS_PER_YEAR: dict[str, int] = {
     "1m": 525_600,  # 365 * 24 * 60
@@ -212,7 +218,7 @@ class RealizedVolatilityCalculator:
             ValueError: If timeframe is unsupported.
         """
         if windows is None:
-            windows = [7, 14, 30, 90]
+            windows = list(DEFAULT_VOL_CONE_WINDOWS_DAYS)
 
         if timeframe not in _PERIODS_PER_YEAR:
             raise ValueError(f"Unsupported timeframe '{timeframe}'. Supported: {sorted(_PERIODS_PER_YEAR.keys())}")
@@ -299,10 +305,18 @@ class RealizedVolatilityCalculator:
         return window
 
     def _window_to_candles(self, window_days: int, timeframe: str) -> int:
-        """Convert a window in days to an approximate number of candles."""
+        """Convert a window in days to an approximate number of candles.
+
+        Floors at ``MIN_OBSERVATIONS + 1`` candles: the close-to-close
+        estimator consumes N candles as N-1 log returns and requires
+        ``MIN_OBSERVATIONS`` returns, so a floor of exactly
+        ``MIN_OBSERVATIONS`` candles could never serve a boundary window
+        (e.g. ``window_days=1`` at 1h -> 30 candles -> 29 returns ->
+        InsufficientDataError, unconditionally).
+        """
         hours_per_candle = _HOURS_PER_CANDLE[timeframe]
         total_hours = window_days * 24
-        return max(int(total_hours / hours_per_candle), MIN_OBSERVATIONS)
+        return max(int(total_hours / hours_per_candle), MIN_OBSERVATIONS + 1)
 
     def _close_to_close_vol(self, candles: list[OHLCVCandle]) -> tuple[float, int]:
         """Compute per-period volatility using close-to-close log returns.

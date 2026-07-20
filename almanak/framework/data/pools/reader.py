@@ -130,7 +130,9 @@ class PoolPrice:
             concept (e.g. Curve) — never fabricated as 0 (Empty != Zero).
         liquidity: Current in-range liquidity from the pool (v3 family), or
             the reader-documented depth proxy for non-tick AMMs (Curve: the
-            pool's coin0 reserve, raw units).
+            pool's coin0 reserve, raw units). ``None`` when liquidity is not
+            measured at all (e.g. the backtest pair-ratio proxy, which has no
+            venue depth data) — never fabricated as 0 (Empty != Zero).
         fee_tier: Pool fee in v3 units (1e-6 fractions, e.g. 500 = 0.05%).
         block_number: Block at which the data was read.
         timestamp: UTC datetime of the observation.
@@ -141,7 +143,7 @@ class PoolPrice:
 
     price: Decimal
     tick: int | None
-    liquidity: int
+    liquidity: int | None
     fee_tier: int
     block_number: int
     timestamp: datetime
@@ -515,6 +517,11 @@ class UniswapV3PoolPriceReader:
         chain_lower = chain.lower()
         best_addr: str | None = None
         best_liquidity = -1
+        # Fallback tiering: measured liquidity always wins; among unrankable
+        # candidates a READABLE pool (liquidity=None) must beat an UNREADABLE
+        # one, regardless of enumeration order — an unreadable pool seen first
+        # must not lock out a readable candidate behind it.
+        best_readable = False
         for fee_tier in fee_tiers:
             pool_addr = self.resolve_pool_address(token_a, token_b, chain_lower, fee_tier)
             if pool_addr is None:
@@ -524,13 +531,23 @@ class UniswapV3PoolPriceReader:
             except DataUnavailableError:
                 # Pool resolved but unreadable (e.g. uninitialized) — still a
                 # candidate the caller could use, but we cannot rank it. Keep it
-                # as a last-resort fallback if nothing readable shows up.
+                # as a last-resort fallback if nothing better shows up.
                 if best_addr is None:
                     best_addr = pool_addr
+                continue
+            if liquidity is None:
+                # Unmeasured liquidity (Empty != Zero): the pool is readable
+                # but unrankable. It outranks an unreadable fallback (it can at
+                # least be read), never a measured pool; ties among readable
+                # unmeasured candidates keep the first seen (tier order).
+                if best_liquidity < 0 and not best_readable:
+                    best_addr = pool_addr
+                    best_readable = True
                 continue
             if liquidity > best_liquidity:
                 best_liquidity = liquidity
                 best_addr = pool_addr
+                best_readable = True
         return best_addr
 
     def clear_cache(self) -> None:

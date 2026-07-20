@@ -145,14 +145,16 @@ class TestPoolContribution:
         assert pc.weight == 0.6
         assert pc.liquidity == 1000000
 
-    def test_default_liquidity(self):
+    def test_default_liquidity_is_unmeasured_none(self):
+        # Empty != Zero: a contribution constructed without liquidity (the
+        # TWAP path) must read as UNMEASURED (None), never as a measured 0.
         pc = PoolContribution(
             pool_address="0xabc",
             protocol="uniswap_v3",
             price=Decimal("1800"),
             weight=1.0,
         )
-        assert pc.liquidity == 0
+        assert pc.liquidity is None
 
     def test_frozen(self):
         pc = PoolContribution(

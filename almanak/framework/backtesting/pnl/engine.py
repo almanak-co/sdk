@@ -238,9 +238,13 @@ _ZERO_FEE_INTENTS: frozenset[IntentType] = frozenset(
         IntentType.SUPPLY,
         IntentType.WITHDRAW,
         IntentType.REPAY,
+        IntentType.DELEVERAGE,
         IntentType.BORROW,
         IntentType.VAULT_DEPOSIT,
         IntentType.VAULT_REDEEM,
+        IntentType.LP_COLLECT_FEES,
+        IntentType.WRAP_NATIVE,
+        IntentType.UNWRAP_NATIVE,
     }
 )
 
@@ -251,9 +255,26 @@ _ZERO_SLIPPAGE_INTENTS: frozenset[IntentType] = frozenset(
         IntentType.SUPPLY,
         IntentType.WITHDRAW,
         IntentType.REPAY,
+        IntentType.DELEVERAGE,
         IntentType.BORROW,
         IntentType.VAULT_DEPOSIT,
         IntentType.VAULT_REDEEM,
+        IntentType.LP_COLLECT_FEES,
+        IntentType.WRAP_NATIVE,
+        IntentType.UNWRAP_NATIVE,
+    }
+)
+
+# Intent types the GENERIC lane charges no protocol fee for, regardless of the
+# pluggable fee model: an LP fee harvest and a native wrap/unwrap have no venue
+# fee on-chain (gas is still charged). Deliberately engine-owned rather than an
+# entry in DefaultFeeModel._ZERO_FEE_INTENTS so custom fee models cannot
+# accidentally re-introduce a fabricated fee on these types either.
+_GENERIC_LANE_ZERO_FEE_INTENTS: frozenset[IntentType] = frozenset(
+    {
+        IntentType.LP_COLLECT_FEES,
+        IntentType.WRAP_NATIVE,
+        IntentType.UNWRAP_NATIVE,
     }
 )
 
@@ -560,6 +581,13 @@ def create_market_snapshot_from_state(
     default_timeframe: str | None = None,
     ohlcv_module: Any | None = None,
     lending_rates: "list[Any] | None" = None,
+    position_view: "SimulatedPositionView | None" = None,
+    pool_price_view: Any | None = None,
+    slippage_view: Any | None = None,
+    volatility_calculator: Any | None = None,
+    il_calculator: Any | None = None,
+    risk_calculator: Any | None = None,
+    soft_empty_noted: "set[str] | None" = None,
 ) -> MarketSnapshot:
     """Create a MarketSnapshot from historical MarketState data.
 
@@ -585,10 +613,37 @@ def create_market_snapshot_from_state(
             funding-gated strategies read the historical (or configured
             fallback) rate in effect at the tick instead of raising
             "No funding rate provider configured".
+        il_calculator: Run-scoped ``ILCalculator``. Pass the SAME instance
+            every tick so LP positions registered at fill time (see
+            ``sync_il_calculator_positions``) stay visible to
+            ``il_exposure``. ``None`` constructs a fresh default — the
+            pure-math surface (``projected_il``) still serves (ALM-2943:
+            args-only math must not refuse in backtest).
+        risk_calculator: ``PortfolioRiskCalculator`` for ``portfolio_risk`` /
+            ``rolling_sharpe`` — pure math over the caller-supplied PnL
+            series. ``None`` constructs the stateless default.
+        soft_empty_noted: Run-scoped once-per-run dedup set for the
+            documented-soft empty accessors (``wallet_activity`` -> ``[]``,
+            ``prediction_price`` -> ``None``): the first soft-empty per
+            source records a decision-input ledger entry naming the
+            unsimulated lane. ``None`` falls back to a per-snapshot set
+            (per-tick dedup) so direct factory callers still get the ledger.
 
     Returns:
         MarketSnapshot populated with historical price data
     """
+    # Pure-math calculators are ALWAYS wired in backtest (ALM-2943): these
+    # accessors need no external data plane, so "no calculator configured"
+    # was a wiring gap, not an honest refusal.
+    if il_calculator is None:
+        from almanak.framework.data.lp import ILCalculator
+
+        il_calculator = ILCalculator()
+    if risk_calculator is None:
+        from almanak.framework.data.risk.metrics import PortfolioRiskCalculator
+
+        risk_calculator = PortfolioRiskCalculator()
+
     # Create market snapshot with historical timestamp
     snapshot = MarketSnapshot(
         chain=chain,
@@ -601,11 +656,33 @@ def create_market_snapshot_from_state(
         indicator_provider=indicator_provider,
         default_timeframe=default_timeframe,
         ohlcv_module=ohlcv_module,
+        # decide()-time aave_health_factor served from the sim's own lending
+        # state (ALM-2943); None keeps the documented no-provider contract.
+        aave_health_factor_provider=(position_view.aave_health_factor if position_view is not None else None),
+        pool_reader_registry=pool_price_view,
+        slippage_estimator=slippage_view,
+        volatility_calculator=volatility_calculator,
+        il_calculator=il_calculator,
+        risk_calculator=risk_calculator,
     )
+    # Soft-empty lanes explain themselves once per run (ALM-2943): live
+    # snapshots leave this None, which disables the ledger notes.
+    snapshot._backtest_soft_empty_noted = soft_empty_noted if soft_empty_noted is not None else set()
+    # Views that refuse must land their refusals in THIS tick's
+    # decision-input ledger (the snapshot is fresh per tick).
+    for view in (pool_price_view, slippage_view):
+        bind_snapshot = getattr(view, "bind_snapshot", None)
+        if callable(bind_snapshot):
+            bind_snapshot(snapshot)
     if gas_view is not None:
         # decide()-time gas reads served by the engine's own gas model
         # (ALM-2951); the accessor reads this attribute via getattr.
         snapshot._gas_oracle = gas_view
+    if position_view is not None:
+        # decide()-time position_health / lp_position_value served from the
+        # engine's own tracked positions (ALM-2943); the accessors read this
+        # attribute via getattr, mirroring the gas view.
+        snapshot._simulated_position_view = position_view
     _ = token_aliases
     # Canonicalize map keys ONCE at ingress: alias registration upper-cases
     # alias names, so every downstream probe (the cash lane's held-key guard
@@ -626,6 +703,97 @@ def create_market_snapshot_from_state(
     if portfolio:
         _seed_snapshot_balances(snapshot, market_state, portfolio, token_addresses)
     return snapshot
+
+
+def sync_il_calculator_positions(
+    il_calculator: Any,
+    portfolio: SimulatedPortfolio,
+    market_state: MarketState,
+    chain: str,
+) -> None:
+    """Mirror the portfolio's open LP positions into the run's ILCalculator.
+
+    Serve-from-sim-state (ALM-2943 / ALM-2951 pattern): the engine owns every
+    LP open — entry amounts, tick range, and the fill-tick prices — so
+    ``market.il_exposure(position_id)`` must answer for the sim's own
+    positions instead of refusing with "position not found".
+
+    Called by the iteration loop each tick AFTER pending-intent execution and
+    BEFORE ``decide()``: a position filled this tick is registered against
+    THIS tick's ``market_state`` prices — the same state the fill executed
+    against — so entry prices are fill-exact, never look-ahead. Positions no
+    longer open in the portfolio (LP_CLOSE) are dropped, restoring the typed
+    position-not-found refusal (or the caller's ``default``).
+
+    Registration is best-effort per position: a token whose price is missing
+    at the fill tick is retried on later ticks (entry prices then drift from
+    the fill tick — strictly better than refusing the position forever).
+    Concentrated positions carry their tick bounds plus registry-resolved
+    token decimals (``_lp_pair_decimals``) so the V3 IL plane is correct for
+    decimal-asymmetric pairs; unresolvable decimals fall back to the
+    calculator's documented equal-decimals plane.
+    """
+    from almanak.framework.data.lp import LPPosition as ILTrackedPosition
+    from almanak.framework.data.lp import PoolType
+
+    open_lp = {
+        position.position_id: position
+        for position in portfolio.positions
+        if getattr(position, "is_lp", False) and position.position_id
+    }
+    tracked = {position.position_id for position in il_calculator.get_all_positions()}
+
+    # Closed positions leave the tracker so il_exposure refuses (typed) again.
+    for position_id in tracked - set(open_lp):
+        il_calculator.remove_position(position_id)
+
+    for position_id, position in open_lp.items():
+        if position_id in tracked:
+            continue
+        tokens = list(position.tokens or [])
+        if len(tokens) < 2:
+            continue
+        token0, token1 = tokens[0], tokens[1]
+
+        def _state_price(token: Any) -> Decimal | None:
+            try:
+                price = market_state.get_price(token)
+            except KeyError:
+                return None
+            return price if price is not None and price > 0 else None
+
+        price0 = _state_price(token0)
+        price1 = _state_price(token1)
+        if price0 is None or price1 is None:
+            # No invented entry price: retry on a later tick.
+            continue
+
+        amounts = position.amounts or {}
+        amount0 = amounts.get(token0, Decimal("0"))
+        amount1 = amounts.get(token1, Decimal("0"))
+
+        concentrated = position.tick_lower is not None and position.tick_upper is not None
+        decimals = _lp_pair_decimals(token0, token1, chain) if concentrated else None
+
+        il_calculator.add_position(
+            ILTrackedPosition(
+                position_id=position_id,
+                pool_address=str((position.metadata or {}).get("pool_address", "") or ""),
+                token_a=token_ref_display(token0),
+                token_b=token_ref_display(token1),
+                entry_price_a=price0,
+                entry_price_b=price1,
+                amount_a=amount0,
+                amount_b=amount1,
+                pool_type=PoolType.CONCENTRATED if concentrated else PoolType.CONSTANT_PRODUCT,
+                chain=chain,
+                entry_timestamp=position.entry_time,
+                tick_lower=position.tick_lower,
+                tick_upper=position.tick_upper,
+                decimals0=decimals[0] if decimals else None,
+                decimals1=decimals[1] if decimals else None,
+            )
+        )
 
 
 def build_backtest_lending_rates(
@@ -939,6 +1107,705 @@ class SimulatedGasView:
             estimated_cost_usd=cost_usd,
             timestamp=self._timestamp,
         )
+
+
+class SimulatedPositionView:
+    """Serves decide()-time position reads from the engine's own tracked state (ALM-2943).
+
+    ``position_health`` / ``aave_health_factor`` refused (or went silently
+    ``None``) on the SIM'S OWN lending position, and ``lp_position_value``
+    returned a silent ``None`` for the engine's own open LP position — the
+    whole leverage-loop and LP-rebalance strategy families held forever in
+    backtest while the same code traded live. This view answers those reads
+    from the state the engine already owns, on the SAME planes it marks with
+    (serve-from-sim-state, the ALM-2951 ``SimulatedGasView`` /
+    ``build_backtest_lending_rates`` doctrine):
+
+    - **Lending health**: the exact collateral/debt/threshold math the
+      liquidation guard runs each tick (``liquidation_simulator.
+      update_health_factors`` — total SUPPLY value as collateral, borrow value
+      + accrued interest as debt, connector-default liquidation threshold).
+      One plane, never a second disagreeing formula.
+    - **LP value**: the portfolio marker's own repricing plane
+      (``SimulatedPortfolio.reprice_lp_position_amounts`` — V3 amount math at
+      tick prices) plus the fees the marker has accrued so far. Unknown
+      position ids raise (refuse + ledger at the accessor; never silent None).
+
+    Bound per tick via :meth:`bind`.
+    """
+
+    def __init__(self, portfolio: "SimulatedPortfolio") -> None:
+        self._portfolio = portfolio
+        self._market_state: MarketState | None = None
+        self._timestamp: datetime | None = None
+
+    def bind(self, market_state: MarketState, timestamp: datetime) -> None:
+        self._market_state = market_state
+        self._timestamp = timestamp
+
+    def position_health(self, protocol: str, market_id: str = "") -> Any:
+        """Health of the sim's lending state for ``protocol``, as :class:`PositionHealth`.
+
+        Mirrors the live no-position contract: a protocol the sim holds no
+        lending position for returns the empty-account shape (no debt ⇒
+        ``Infinity`` health factor, zero collateral/debt) — exactly what an
+        on-chain ``getUserAccountData`` read of an empty account yields.
+
+        With positions, collateral is the sim's TOTAL supply value — the same
+        cross-position simplification the liquidation guard applies (all
+        SUPPLY positions collateralize all BORROWs; see
+        ``liquidation_simulator.update_health_factors``) — and debt sums the
+        requested protocol's BORROW positions. ``market_id`` is echoed into
+        the result (the sim models one market per protocol).
+        """
+        from almanak.framework.backtesting.pnl import liquidation_simulator as _liq
+        from almanak.framework.backtesting.pnl.position_models import PositionType
+        from almanak.framework.data.position_health import PositionHealth
+
+        if self._market_state is None:
+            raise ValueError("SimulatedPositionView not bound to a tick")
+
+        protocol_norm = str(protocol).lower()
+        calculator = _liq._health_factor_calculator(self._portfolio)
+        lltv = calculator.get_liquidation_threshold_for_protocol(protocol_norm)
+        protocol_positions = [
+            pos for pos in self._portfolio.positions if pos.is_lending and str(pos.protocol).lower() == protocol_norm
+        ]
+        if not protocol_positions:
+            # Documented no-position contract: empty account, no debt ⇒ Infinity.
+            return PositionHealth(
+                health_factor=Decimal("Infinity"),
+                collateral_value_usd=Decimal("0"),
+                debt_value_usd=Decimal("0"),
+                lltv=lltv,
+                max_borrow_usd=Decimal("0"),
+                protocol=protocol_norm,
+                market_id=market_id,
+                price_source="backtest_simulation",
+            )
+
+        collateral_value = _liq._total_collateral_usd(self._portfolio, self._market_state)
+        debt_value = sum(
+            (
+                _liq._position_value_usd(pos, self._market_state)
+                for pos in protocol_positions
+                if pos.position_type == PositionType.BORROW
+            ),
+            Decimal("0"),
+        )
+        if debt_value <= Decimal("0"):
+            # Public contract: no debt ⇒ Infinity (the sim's guard has no
+            # borrow position to compute for, so no plane disagrees).
+            health_factor = Decimal("Infinity")
+        else:
+            health_factor = calculator.calculate_health_factor(
+                collateral_value_usd=collateral_value,
+                debt_value_usd=debt_value,
+                liquidation_threshold=lltv,
+            ).health_factor
+        return PositionHealth(
+            health_factor=health_factor,
+            collateral_value_usd=collateral_value,
+            debt_value_usd=debt_value,
+            lltv=lltv,
+            max_borrow_usd=max(collateral_value * lltv - debt_value, Decimal("0")),
+            protocol=protocol_norm,
+            market_id=market_id,
+            price_source="backtest_simulation",
+        )
+
+    def health_factor(self, protocol: str, chain: str | None = None) -> Decimal | None:
+        """Health factor for ``protocol`` from the sim's state; ``None`` = truly no position."""
+        _ = chain  # single-chain simulation; the run's chain is the only one
+        protocol_norm = str(protocol).lower()
+        has_position = any(
+            pos.is_lending and str(pos.protocol).lower() == protocol_norm for pos in self._portfolio.positions
+        )
+        if not has_position:
+            return None
+        return self.position_health(protocol_norm).health_factor
+
+    def aave_health_factor(self, chain: str | None = None) -> Decimal | None:
+        """Aave V3 health factor from the sim's state; ``None`` = truly no position.
+
+        Blueprint 22: the protocol slug is derived from the connector-owned
+        ``AAVE_V3`` protocol family (exactly how ``AAVE_COMPATIBLE_PROTOCOLS``
+        derives in ``compiler_constants``), so this engine module carries no
+        protocol-name string literal. First family member the sim holds a
+        lending position for wins (the family is the set of connectors sharing
+        the Aave V3 Pool ABI — the same account the live accessor reads).
+        """
+        from almanak.connectors._strategy_protocol_family_registry import (
+            PROTOCOL_FAMILY_REGISTRY,
+            ProtocolFamily,
+        )
+
+        for slug in sorted(PROTOCOL_FAMILY_REGISTRY.members(ProtocolFamily.AAVE_V3)):
+            hf = self.health_factor(slug, chain)
+            if hf is not None:
+                return hf
+        return None
+
+    def lp_position_value(self, position_id: str) -> Any:
+        """Value the engine's tracked LP position ``position_id``.
+
+        Same repricing plane as the per-tick marker
+        (``reprice_lp_position_amounts``); fees are the marker's accrued
+        ``fees_earned`` (no decide()-time accrual — the marker owns accrual).
+
+        Raises:
+            KeyError: Unknown position id, or the id is not an LP position
+                (the accessor converts this to refuse + ledger).
+        """
+        from almanak.framework.valuation.lp_repricer import LPPositionValueResult
+
+        if self._market_state is None:
+            raise ValueError("SimulatedPositionView not bound to a tick")
+        position = self._portfolio.get_position(str(position_id))
+        if position is None:
+            raise KeyError(
+                f"unknown LP position id {position_id!r}: the backtest engine tracks no open position with this id"
+            )
+        if not position.is_lp:
+            raise KeyError(f"position {position_id!r} is not an LP position (type={position.position_type.value})")
+
+        token0_price, token1_price, amount0, amount1 = self._portfolio.reprice_lp_position_amounts(
+            position, self._market_state
+        )
+        token0_value = amount0 * token0_price
+        token1_value = amount1 * token1_price
+        value_usd = token0_value + token1_value
+        fees_usd = position.fees_earned
+        try:
+            liquidity = int(position.liquidity)
+        except (ValueError, TypeError, ArithmeticError):
+            liquidity = 0
+        return LPPositionValueResult(
+            value_usd=value_usd,
+            fees_usd=fees_usd,
+            total_usd=value_usd + fees_usd,
+            amount0=amount0,
+            amount1=amount1,
+            # The V3 amount math is the range source of truth: out-of-range
+            # positions are single-sided, in-range holds both tokens.
+            in_range=amount0 > 0 and amount1 > 0,
+            position_id=str(position_id),
+            liquidity=liquidity,
+            token0_symbol=token_ref_display(normalize_token_ref(position.tokens[0], self._portfolio_chain())),
+            token1_symbol=token_ref_display(normalize_token_ref(position.tokens[1], self._portfolio_chain())),
+            enriched={
+                "token0_value_usd": str(token0_value),
+                "token1_value_usd": str(token1_value),
+                "fees_usd": str(fees_usd),
+                "source": "backtest_simulation",
+            },
+        )
+
+    def _portfolio_chain(self) -> str:
+        chain = getattr(self._market_state, "chain", None)
+        return chain if isinstance(chain, str) and chain else DEFAULT_CHAIN
+
+
+class BacktestPoolPriceView:
+    """Serves ``pool_price`` / ``pool_price_by_pair`` as the run's labeled
+    PAIR-RATIO proxy (ALM-2943).
+
+    The accessors were ``unconfigured`` in backtests, so LP strategies that
+    gate every action on the venue pool price held forever while the same
+    code traded live (staging backtest 031b0dd6: one Aave supply, then six
+    months of "pool_price_by_pair unavailable" holds). This view is
+    registry-shaped (``protocols_for_chain`` / ``get_reader`` /
+    ``resolve_pool_address`` / ``read_pool_price``) so the live accessor
+    code paths run unchanged against it.
+
+    What it serves — and what it does NOT claim:
+
+    - ``PoolPrice.price`` is the tick's TOKEN-PAIR PRICE RATIO
+      ``token0_usd / token1_usd`` from the run's own price series — the same
+      plane the engine prices LP entries with (``token0_price /
+      token1_price``, see ``SimulatedPortfolio``). One plane, no second
+      price source.
+    - Orientation matches live: token0 is the lower-sorted address (Uniswap
+      convention — registry known-pool keys are stored sorted), and
+      ``price`` is token0 expressed in token1 units, regardless of the
+      caller's argument order.
+    - It is NOT venue pool spot: ``tick=None`` (no venue tick concept here),
+      ``liquidity=None`` (unmeasured — Empty != Zero, never a fabricated
+      measured-empty pool), the envelope is
+      INFORMATIONAL (never EXECUTION_GRADE), ``meta.source`` /
+      ``meta.proxy_source`` mark the proxy, and a warn-once names it —
+      the same doctrine as the pool-candle proxy
+      (:meth:`BacktestOHLCVView.get_pool_ohlcv`).
+    - Pool-address-scoped calls resolve ONLY registry-known pools; unknown
+      addresses refuse + ledger. Unpriceable legs (no price in the run's
+      series) refuse + ledger, as the unconfigured accessor did.
+
+    Bound per tick via :meth:`bind`; :meth:`bind_snapshot` attaches the
+    tick's snapshot so refusals land in the decision-input ledger.
+    """
+
+    _PAIR_SENTINEL = "backtest-pair-ratio:"
+    PROTOCOL = "backtest_pair_ratio_proxy"
+
+    def __init__(
+        self,
+        chain: str,
+        token_addresses: Mapping[str, tuple[str, str]] | None = None,
+    ) -> None:
+        self._chain = str(chain).lower()
+        self._token_addresses = _normalized_token_address_map(token_addresses) or {}
+        self._market_state: MarketState | None = None
+        self._timestamp: datetime | None = None
+        self._snapshot: MarketSnapshot | None = None
+        self._proxy_warned: set[str] = set()
+
+    def bind(self, market_state: MarketState, timestamp: datetime) -> None:
+        self._market_state = market_state
+        self._timestamp = timestamp
+
+    def bind_snapshot(self, snapshot: MarketSnapshot) -> None:
+        self._snapshot = snapshot
+
+    # ----- registry protocol -------------------------------------------------
+
+    def protocols_for_chain(self, chain: str) -> list[str]:
+        return [self.PROTOCOL] if str(chain).lower() == self._chain else []
+
+    def get_reader(self, chain: str, protocol: str) -> "BacktestPoolPriceView":
+        # The pair ratio is venue-independent; any requested protocol gets
+        # the same labeled proxy.
+        _ = chain, protocol
+        return self
+
+    # ----- reader protocol ---------------------------------------------------
+
+    def resolve_pool_address(
+        self,
+        token_a: str,
+        token_b: str,
+        chain: str,
+        fee_tier: int = 3000,
+    ) -> str | None:
+        """Resolve to a registry-known pool address, or a pair sentinel.
+
+        Mirrors the live reader's resolution order (known-pool table keyed by
+        sorted addresses + fee) but never touches a chain; pairs without a
+        curated pool still serve — the proxy value is the pair ratio either
+        way. ``None`` (accessor-level refusal) only for unresolvable or
+        degenerate legs.
+        """
+        if str(chain).lower() != self._chain:
+            return None
+        addr_a = self._resolve_leg_address(token_a)
+        addr_b = self._resolve_leg_address(token_b)
+        if addr_a is None or addr_b is None:
+            missing = token_a if addr_a is None else token_b
+            self._record(
+                "pool_price_by_pair",
+                f"{token_a}/{token_b}:unresolvable",
+                f"pool_price_by_pair unavailable: token {missing!r} is not offline-resolvable on {self._chain}",
+            )
+            return None
+        if addr_a == addr_b:
+            self._record(
+                "pool_price_by_pair",
+                f"{token_a}/{token_b}:same_token",
+                f"pool_price_by_pair unavailable: {token_a!r} and {token_b!r} resolve to the same token",
+            )
+            return None
+        token0, token1 = (addr_a, addr_b) if addr_a < addr_b else (addr_b, addr_a)
+        known = self._known_pool_address(token0, token1, int(fee_tier))
+        if known is not None:
+            return known
+        return f"{self._PAIR_SENTINEL}{token0}:{token1}:{int(fee_tier)}"
+
+    def read_pool_price(self, pool_address: str, chain: str) -> Any:
+        """Serve the pair ratio as a ``DataEnvelope[PoolPrice]`` proxy."""
+        from almanak.framework.data.market_snapshot import PoolPriceUnavailableError
+        from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
+        from almanak.framework.data.pools.reader import PoolPrice
+
+        chain_lower = str(chain).lower()
+        if self._market_state is None or self._timestamp is None:
+            raise PoolPriceUnavailableError(pool_address, "backtest pool-price view is not bound to a tick")
+        if chain_lower != self._chain:
+            raise PoolPriceUnavailableError(
+                pool_address, f"backtest run is on {self._chain!r}; no data for chain {chain_lower!r}"
+            )
+
+        if pool_address.startswith(self._PAIR_SENTINEL):
+            token0, token1, fee_raw = pool_address[len(self._PAIR_SENTINEL) :].split(":")
+            fee_tier = int(fee_raw)
+            ledger_source = "pool_price_by_pair"
+            venue_pool = ""
+        else:
+            entry = self._known_pool_entry(pool_address)
+            if entry is None:
+                self._record(
+                    "pool_price",
+                    f"{pool_address}:unknown_pool",
+                    f"pool_price unavailable: {pool_address!r} is not a registry-known pool on "
+                    f"{self._chain!r}; the run has no venue data to price it",
+                )
+                raise PoolPriceUnavailableError(
+                    pool_address,
+                    f"pool {pool_address!r} is not a registry-known pool on {self._chain!r}; "
+                    "the backtest serves only the pair-ratio proxy for known pools",
+                )
+            token0, token1, fee_tier = entry
+            ledger_source = "pool_price"
+            venue_pool = pool_address
+
+        price0 = self._usd_price(token0)
+        price1 = self._usd_price(token1)
+        if price0 is None or price1 is None or price1 <= 0 or price0 <= 0:
+            missing = token0 if (price0 is None or price0 <= 0) else token1
+            self._record(
+                ledger_source,
+                f"{venue_pool or f'{token0}/{token1}'}:unpriceable",
+                f"{ledger_source} unavailable: no usable price for token {missing!r} in the run's series",
+            )
+            raise PoolPriceUnavailableError(
+                pool_address, f"no usable price for token {missing!r} in the run's price series"
+            )
+
+        sym0, sym1 = self._display_symbol(token0), self._display_symbol(token1)
+        warn_key = venue_pool or f"{token0}/{token1}"
+        if warn_key not in self._proxy_warned:
+            self._proxy_warned.add(warn_key)
+            logger.warning(
+                "market.%s(%s) served as the %s/%s PAIR-RATIO proxy from the run's price series — "
+                "not venue pool spot (no tick, no liquidity); envelope meta.source marks the proxy",
+                ledger_source,
+                warn_key,
+                sym0,
+                sym1,
+            )
+
+        decimals = _lp_pair_decimals(token0, token1, self._chain)
+        token0_decimals, token1_decimals = decimals if decimals is not None else (18, 6)
+        value = PoolPrice(
+            price=price0 / price1,
+            tick=None,
+            # Empty != Zero: the proxy has no venue depth data, and a zero
+            # here would read as a MEASURED empty pool to any strategy gating
+            # on liquidity. ``None`` = unmeasured (same doctrine as ``tick``).
+            liquidity=None,
+            fee_tier=int(fee_tier),
+            block_number=int(getattr(self._market_state, "block_number", None) or 0),
+            timestamp=self._timestamp,
+            pool_address=venue_pool,
+            token0_decimals=token0_decimals,
+            token1_decimals=token1_decimals,
+        )
+        meta = DataMeta(
+            source="backtest_price_series:pair_ratio_proxy",
+            observed_at=self._timestamp,
+            block_number=None,
+            finality="off_chain",
+            confidence=1.0,
+            cache_hit=False,
+            proxy_source=f"{sym0}/{sym1}",
+        )
+        return DataEnvelope(value=value, meta=meta, classification=DataClassification.INFORMATIONAL)
+
+    # ----- internals ---------------------------------------------------------
+
+    def _record(self, source: str, key: str, detail: str) -> None:
+        if self._snapshot is not None:
+            self._snapshot._record_critical_data_failure(source, key, detail)
+
+    def _resolve_leg_address(self, token: str) -> str | None:
+        """Offline symbol/address -> lowercase address on the run's chain."""
+        text = str(token).strip()
+        if text.lower().startswith("0x") and len(text) == 42:
+            return text.lower()
+        entry = self._token_addresses.get(text.upper())
+        if entry is not None and is_token_key(entry):
+            key_chain, address = normalize_token_key(entry[0], entry[1])
+            if key_chain == self._chain:
+                return address
+        from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
+
+        try:
+            resolved = get_token_resolver().resolve(text, self._chain, log_errors=False, skip_gateway=True)
+        except TokenResolutionError:
+            return None
+        resolved_address = getattr(resolved, "address", None) if resolved is not None else None
+        return str(resolved_address).lower() if resolved_address else None
+
+    def _usd_price(self, address: str) -> Decimal | None:
+        assert self._market_state is not None
+        try:
+            return self._market_state.get_price((self._chain, address))
+        except KeyError:
+            return None
+
+    def _display_symbol(self, address: str) -> str:
+        for symbol, entry in self._token_addresses.items():
+            if is_token_key(entry):
+                key_chain, key_address = normalize_token_key(entry[0], entry[1])
+                if key_chain == self._chain and key_address == address:
+                    return symbol
+        from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
+
+        try:
+            resolved = get_token_resolver().resolve(address, self._chain, log_errors=False, skip_gateway=True)
+        except TokenResolutionError:
+            resolved = None
+        resolved_symbol = getattr(resolved, "symbol", None) if resolved is not None else None
+        return str(resolved_symbol).upper() if resolved_symbol else address
+
+    def _known_pool_address(self, token0: str, token1: str, fee_tier: int) -> str | None:
+        from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+
+        for spec in POOL_READER_REGISTRY.all():
+            known = spec.known_pools.get(self._chain, {}).get((token0, token1, fee_tier))
+            if known:
+                return known
+        return None
+
+    def _known_pool_entry(self, pool_address: str) -> tuple[str, str, int] | None:
+        """Registry-only inverse lookup: pool address -> (token0, token1, fee)."""
+        from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+
+        target = pool_address.lower()
+        for spec in POOL_READER_REGISTRY.all():
+            for (token0, token1, fee), address in spec.known_pools.get(self._chain, {}).items():
+                if address.lower() == target:
+                    # Registry token keys are lowercase by convention, but
+                    # normalize here so downstream compares/lookups
+                    # (``_usd_price`` / ``_display_symbol``) never depend on
+                    # a connector author's casing.
+                    return token0.lower(), token1.lower(), int(fee)
+        return None
+
+
+class BacktestVolatilityCalculator:
+    """Close-to-close realized vol over the run's own close series (ALM-2943).
+
+    ``realized_vol`` / ``vol_cone`` refused ("no volatility calculator")
+    while ``ohlcv()`` served the same token — vol-targeting strategies held
+    forever in backtest. This wraps the live
+    :class:`~almanak.framework.data.volatility.realized.RealizedVolatilityCalculator`
+    over the candles the snapshot already fetches through
+    :class:`BacktestOHLCVView` (close-only bars, no look-ahead).
+
+    Honesty: ONLY ``estimator="close_to_close"`` serves. The backtest bars
+    carry ``open == high == low == close``, so an intrabar-range estimator
+    (Parkinson) would silently compute a fabricated 0 vol — it refuses
+    loudly instead.
+
+    Retention (review, #3346 round 2): vol_cone's default [7, 14, 30, 90]-day
+    windows read up to 90 days of tick history through BacktestOHLCVView, but
+    the indicator buffer's default 200-tick retention would make those
+    default calls refuse FOREVER mid-run. Sizing the buffer eagerly for
+    every run regressed the throughput-consistency perf gate (per-tick
+    indicator cost grows with buffer depth), so the capacity raise is LAZY:
+    it happens on the FIRST vol accessor call — a run that never reads vol
+    keeps the cheap 200-tick buffer, and a vol-reading strategy (which in
+    practice reads every tick) accrues the deep history from its first read.
+
+    Args:
+        indicator_engine: The run's ``BacktestIndicatorEngine`` whose tick
+            buffers back the OHLCV view. ``None`` (e.g. bare construction in
+            tests) disables the lazy capacity raise.
+        tick_interval_seconds: The run's tick interval, used to convert the
+            largest default vol window into a tick count.
+    """
+
+    def __init__(
+        self,
+        indicator_engine: Any | None = None,
+        tick_interval_seconds: int | None = None,
+    ) -> None:
+        from almanak.framework.data.volatility.realized import RealizedVolatilityCalculator
+
+        self._calc = RealizedVolatilityCalculator()
+        self._indicator_engine = indicator_engine
+        self._tick_interval_seconds = tick_interval_seconds
+        self._capacity_requested = False
+
+    def _ensure_vol_retention(self) -> None:
+        """Raise the tick buffer to the largest default vol window, once."""
+        if self._capacity_requested or self._indicator_engine is None:
+            return
+        self._capacity_requested = True
+        from almanak.framework.data.volatility.realized import DEFAULT_VOL_CONE_WINDOWS_DAYS
+
+        interval = max(int(self._tick_interval_seconds or 0), 1)
+        ticks = -(-(max(DEFAULT_VOL_CONE_WINDOWS_DAYS) * 86400) // interval)
+        self._indicator_engine.ensure_capacity(ticks)
+
+    @staticmethod
+    def _check_estimator(estimator: str, accessor: str) -> None:
+        if estimator != "close_to_close":
+            raise ValueError(
+                f"{accessor} unavailable in backtest for estimator={estimator!r}: the run's price "
+                "series is close-only (bars carry open == high == low == close), so intrabar-range "
+                "estimators would compute a fabricated 0 vol; use estimator='close_to_close'"
+            )
+
+    def realized_vol(
+        self,
+        candles: Any,
+        window_days: int = 30,
+        timeframe: str = "1h",
+        estimator: str = "close_to_close",
+    ) -> Any:
+        self._ensure_vol_retention()
+        self._check_estimator(estimator, "realized_vol")
+        return self._calc.realized_vol(
+            candles=candles, window_days=window_days, timeframe=timeframe, estimator=estimator
+        )
+
+    def vol_cone(
+        self,
+        candles: Any,
+        windows: list[int] | None = None,
+        timeframe: str = "1h",
+        estimator: str = "close_to_close",
+        token: str = "",
+    ) -> Any:
+        self._ensure_vol_retention()
+        self._check_estimator(estimator, "vol_cone")
+        return self._calc.vol_cone(
+            candles=candles, windows=windows, timeframe=timeframe, estimator=estimator, token=token
+        )
+
+
+class SimulatedSlippageView:
+    """Serves ``market.estimate_slippage`` from the engine's own slippage
+    models (ALM-2943).
+
+    The accessor refused ("no slippage estimator configured") while the
+    engine executed every fill with a configured ``SlippageModel``. One
+    plane: the SAME per-protocol model the fills charge
+    (``PnLBacktester.get_slippage_model``) answers decide()-time quotes for
+    a swap-shaped trade. Pre-MEV: when ``mev_simulation_enabled`` the fill
+    may carry an additional MEV surcharge on top of this number.
+
+    Return shape mirrors the live estimator's ``DataEnvelope[SlippageEstimate]``:
+
+    - ``effective_slippage_bps == price_impact_bps == round(model_pct * 10000)``
+      — exactly the engine's fill slippage for the same notional.
+    - ``expected_price`` is CALLER-oriented (token_out per token_in):
+      ``mid * (1 - slippage)`` with ``mid = usd(token_in) / usd(token_out)``
+      from the tick's price series (the live stableswap-quote lane's
+      orientation — the only one derivable without a venue pool binding).
+    - ``recommended_max_size`` linearly extrapolates the model to the
+      100 bps budget (the live estimator's ``recommended_max`` convention).
+
+    Bound per tick via :meth:`bind`; :meth:`bind_snapshot` attaches the
+    tick's snapshot so refusals land in the decision-input ledger.
+    """
+
+    def __init__(self, backtester: Any) -> None:
+        self._backtester = backtester
+        self._market_state: MarketState | None = None
+        self._timestamp: datetime | None = None
+        self._snapshot: MarketSnapshot | None = None
+        self._model_warned = False
+
+    def bind(self, market_state: MarketState, timestamp: datetime) -> None:
+        self._market_state = market_state
+        self._timestamp = timestamp
+
+    def bind_snapshot(self, snapshot: MarketSnapshot) -> None:
+        self._snapshot = snapshot
+
+    def _record(self, key: str, detail: str) -> None:
+        if self._snapshot is not None:
+            self._snapshot._record_critical_data_failure("estimate_slippage", key, detail)
+
+    def _refuse(self, pair: str, key: str, reason: str) -> Exception:
+        from almanak.framework.data.market_snapshot import SlippageEstimateUnavailableError
+
+        self._record(key, f"estimate_slippage unavailable: {reason}")
+        return SlippageEstimateUnavailableError(pair, reason)
+
+    def estimate_slippage(
+        self,
+        token_in: str,
+        token_out: str,
+        amount: Decimal,
+        chain: str,
+        protocol: str | None = None,
+        pool_address: str | None = None,
+        fee_tier: int | None = None,
+    ) -> Any:
+        from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
+        from almanak.framework.data.pools.liquidity import SlippageEstimate
+
+        _ = pool_address, fee_tier  # the engine model is notional-scoped, not pool-scoped
+        pair = f"{token_in}/{token_out}"
+        chain_lower = str(chain).lower()
+        state = self._market_state
+        if state is None or self._timestamp is None:
+            raise self._refuse(pair, f"{pair}:unbound", "backtest slippage view is not bound to a tick")
+        run_chain = str(getattr(state, "chain", chain_lower)).lower()
+        if chain_lower != run_chain:
+            raise self._refuse(
+                pair, f"{pair}:chain", f"backtest run is on {run_chain!r}; no data for chain {chain_lower!r}"
+            )
+        amount = Decimal(str(amount))
+        if amount <= 0:
+            raise self._refuse(pair, f"{pair}:amount", f"amount must be > 0 (got {amount})")
+
+        try:
+            price_in = state.get_price(token_in)
+        except KeyError:
+            raise self._refuse(
+                pair, f"{pair}:unpriceable", f"no price for token {token_in!r} in the run's series"
+            ) from None
+        try:
+            price_out = state.get_price(token_out)
+        except KeyError:
+            raise self._refuse(
+                pair, f"{pair}:unpriceable", f"no price for token {token_out!r} in the run's series"
+            ) from None
+        if price_in <= 0 or price_out <= 0:
+            raise self._refuse(pair, f"{pair}:unpriceable", "non-positive price in the run's series")
+
+        amount_usd = amount * price_in
+        model = self._backtester.get_slippage_model(protocol or "")
+        slippage_pct = Decimal(
+            str(
+                model.calculate_slippage(
+                    intent_type=IntentType.SWAP,
+                    amount_usd=amount_usd,
+                    market_state=state,
+                    protocol=protocol or "",
+                )
+            )
+        )
+        mid_price = price_in / price_out
+        expected_price = mid_price * (Decimal("1") - slippage_pct)
+        slippage_bps = int(slippage_pct * 10000)
+        if slippage_bps > 0:
+            recommended_max = amount * Decimal(100) / Decimal(slippage_bps)
+        else:
+            recommended_max = amount * Decimal(10)
+
+        model_name = str(getattr(model, "model_name", "unknown"))
+        estimate = SlippageEstimate(
+            expected_price=expected_price,
+            price_impact_bps=slippage_bps,
+            effective_slippage_bps=slippage_bps,
+            recommended_max_size=recommended_max,
+        )
+        meta = DataMeta(
+            source=f"backtest_slippage_model:{model_name}",
+            observed_at=self._timestamp,
+            block_number=None,
+            finality="off_chain",
+            confidence=1.0,
+            cache_hit=False,
+        )
+        # EXECUTION_GRADE mirrors the live estimator's classification and is
+        # truthful here: these ARE the numbers the engine charges fills with
+        # (pre-MEV) — the whole point of the one-plane serve.
+        return DataEnvelope(value=estimate, meta=meta, classification=DataClassification.EXECUTION_GRADE)
 
 
 def _normalized_token_address_map(
@@ -1370,7 +2237,19 @@ def _build_token_availability_check(
 # Intent types whose $0 notional is legitimate: close-in-full sentinels (sized
 # by position-close resolution) and HOLD. Everything else with $0 rejects.
 _ZERO_NOTIONAL_EXEMPT_INTENT_TYPES = frozenset(
-    {IntentType.PERP_CLOSE, IntentType.WITHDRAW, IntentType.REPAY, IntentType.LP_CLOSE, IntentType.HOLD}
+    {
+        IntentType.PERP_CLOSE,
+        IntentType.WITHDRAW,
+        IntentType.REPAY,
+        # DELEVERAGE(repay_full=True) legitimately carries amount=0 — the
+        # close-in-full sentinel, sized by the repay close resolution.
+        IntentType.DELEVERAGE,
+        IntentType.LP_CLOSE,
+        # A collect against a position with zero accrued fees is a valid $0
+        # fill (on-chain it succeeds and pays dust), not a zero-notional bug.
+        IntentType.LP_COLLECT_FEES,
+        IntentType.HOLD,
+    }
 )
 
 
@@ -1410,6 +2289,10 @@ class _CloseResolution:
     amount_usd: Decimal
     position_close_id: str | None = None
     position_reduce_id: str | None = None
+    #: LP position whose accrued fees an LP_COLLECT_FEES fill harvests. The
+    #: position stays OPEN; apply_fill resets its uncollected-fee counters so a
+    #: later close pays only fees accrued since (the double-pay guard).
+    position_collect_id: str | None = None
     interest_usd: Decimal = Decimal("0")
     reduce_amounts: dict[TokenRef, Decimal] | None = None
     failure_reason: str | None = None
@@ -3032,16 +3915,23 @@ class PnLBacktester:
             details.intent_type,
         )
 
-        # Calculate token flows
-        tokens_in, tokens_out = self._calculate_token_flows(
-            intent=intent,
-            intent_type=details.intent_type,
-            amount_usd=details.amount_usd,
-            executed_price=executed_price,
-            fee_usd=costs.fee_usd,
-            slippage_usd=costs.slippage_usd,
-            market_state=market_state,
-        )
+        # Calculate token flows. A rejected fill is TERMINAL (same doctrine as
+        # the cost guard above): it moves nothing, so no flow leg may be priced
+        # for it — leg pricing raises typed refusals over data a rejected
+        # trade does not need.
+        if details.close_resolution.failure_reason is not None:
+            tokens_in: dict[TokenRef, Decimal] = {}
+            tokens_out: dict[TokenRef, Decimal] = {}
+        else:
+            tokens_in, tokens_out = self._calculate_token_flows(
+                intent=intent,
+                intent_type=details.intent_type,
+                amount_usd=details.amount_usd,
+                executed_price=executed_price,
+                fee_usd=costs.fee_usd,
+                slippage_usd=costs.slippage_usd,
+                market_state=market_state,
+            )
 
         # Create position delta if this intent creates/modifies a position
         position_delta = self._create_position_delta(
@@ -3281,17 +4171,22 @@ class PnLBacktester:
                 estimated_mev_cost_usd=None,
             )
 
-        # TODO(ALM-2943): wire FeeModelRegistry connector models into
-        # create_backtester so per-protocol fee models apply on the generic
-        # path (changes swap fee numbers per-protocol — deliberately out of
-        # scope here; today only the "default" model is wired).
-        fee_usd = _invoke_fee_model(
-            self.get_fee_model(details.protocol),
-            intent_type=details.intent_type,
-            amount_usd=details.amount_usd,
-            market_state=market_state,
-            protocol=details.protocol,
-        )
+        if details.intent_type in _GENERIC_LANE_ZERO_FEE_INTENTS:
+            # Fee-free by construction (fee harvest / native wrap): the engine
+            # owns this zero — no pluggable fee model runs for these types.
+            fee_usd = Decimal("0")
+        else:
+            # TODO(ALM-2943): wire FeeModelRegistry connector models into
+            # create_backtester so per-protocol fee models apply on the generic
+            # path (changes swap fee numbers per-protocol — deliberately out of
+            # scope here; today only the "default" model is wired).
+            fee_usd = _invoke_fee_model(
+                self.get_fee_model(details.protocol),
+                intent_type=details.intent_type,
+                amount_usd=details.amount_usd,
+                market_state=market_state,
+                protocol=details.protocol,
+            )
         slippage_pct = self.get_slippage_model(details.protocol).calculate_slippage(
             intent_type=details.intent_type,
             amount_usd=details.amount_usd,
@@ -3352,6 +4247,7 @@ class PnLBacktester:
             position_delta=position_delta,
             position_close_id=close_resolution.position_close_id,
             position_reduce_id=close_resolution.position_reduce_id,
+            position_collect_id=close_resolution.position_collect_id,
             position_reduce_amounts=self._generic_position_reduce_amounts(
                 details.intent_type,
                 close_resolution,
@@ -3378,7 +4274,9 @@ class PnLBacktester:
             return close_resolution.reduce_amounts
         if not close_resolution.position_reduce_id:
             return {}
-        return dict(tokens_out if intent_type == IntentType.REPAY else tokens_in)
+        # Debt-side reductions (REPAY and its DELEVERAGE twin) extinguish the
+        # position by the fill's OUTFLOW; asset-side reductions by the inflow.
+        return dict(tokens_out if intent_type in (IntentType.REPAY, IntentType.DELEVERAGE) else tokens_in)
 
     @staticmethod
     def _generic_fill_metadata(
@@ -4410,8 +5308,15 @@ class PnLBacktester:
             return _CloseResolution(amount_usd=amount_usd, position_close_id=position_close_id)
         if intent_type == IntentType.WITHDRAW:
             return self._resolve_withdraw_close(intent, portfolio, amount_usd, market_state)
-        if intent_type == IntentType.REPAY:
-            return self._resolve_repay_close(intent, portfolio, amount_usd, market_state)
+        if intent_type in (IntentType.REPAY, IntentType.DELEVERAGE):
+            # DELEVERAGE rides REPAY's lane verbatim ("structurally identical
+            # to a RepayIntent at the protocol level" — DeleverageIntent
+            # docstring); only the recorded intent_type label differs.
+            return self._resolve_repay_close(intent, portfolio, amount_usd, market_state, action=intent_type.value)
+        if intent_type == IntentType.LP_COLLECT_FEES:
+            return self._resolve_lp_collect_fees(intent, portfolio)
+        if intent_type in (IntentType.WRAP_NATIVE, IntentType.UNWRAP_NATIVE):
+            return self._resolve_wrap_native(intent, intent_type, amount_usd, market_state)
         return _CloseResolution(amount_usd=amount_usd, position_close_id=self._get_position_close_id(intent))
 
     def _resolve_withdraw_close(
@@ -4472,6 +5377,7 @@ class PnLBacktester:
         portfolio: SimulatedPortfolio,
         amount_usd: Decimal,
         market_state: MarketState,
+        action: str = "REPAY",
     ) -> _CloseResolution:
         """Resolve the BORROW position a REPAY intent closes or reduces.
 
@@ -4504,11 +5410,11 @@ class PnLBacktester:
         if position is None:
             return _CloseResolution(
                 amount_usd=amount_usd,
-                failure_reason="REPAY matched no open borrow position to repay",
+                failure_reason=f"{action} matched no open borrow position to repay",
             )
 
         return self._resolve_interest_bearing_close(
-            action="REPAY",
+            action=action,
             amount_usd=amount_usd,
             position=position,
             value=self._position_value_with_interest(position, market_state),
@@ -4520,6 +5426,66 @@ class PnLBacktester:
             interest_only_label="borrow position",
             threshold_action="repay",
         )
+
+    def _resolve_lp_collect_fees(
+        self,
+        intent: Any,
+        portfolio: SimulatedPortfolio,
+    ) -> _CloseResolution:
+        """Resolve the LP position an LP_COLLECT_FEES intent harvests.
+
+        Matching reuses LP_CLOSE's resolver (pair/protocol, pool-address
+        metadata, FIFO-oldest) so a collect can never target a position its
+        own close could not. The fill's notional is the position's
+        accrued-uncollected fee value on the SAME plane LP_CLOSE pays out
+        (``SimulatedPortfolio._lp_fees_earned``: adapter-accrued
+        ``accumulated_fees_usd`` primary, marker ``fees_earned`` fallback).
+        The position stays open; ``apply_fill`` resets its fee counters so a
+        later close pays only fees accrued since the collect.
+
+        Semantics:
+
+        - No open LP position matches -> the fill is rejected
+          (``failure_reason``), zero state mutation — mirroring the
+          LP_CLOSE/WITHDRAW not-found contract.
+        - Zero accrued fees -> a valid $0 fill (gas still charged).
+        """
+        from .intent_extraction import find_lp_close_position_id
+
+        position_close_id = find_lp_close_position_id(intent, portfolio.positions)
+        position = portfolio.get_position(position_close_id) if position_close_id else None
+        if position is None or not position.is_lp:
+            return _CloseResolution(
+                amount_usd=Decimal("0"),
+                failure_reason="LP_COLLECT_FEES matched no open LP position to collect fees from",
+            )
+        fees_usd = SimulatedPortfolio._lp_fees_earned(position)
+        return _CloseResolution(amount_usd=fees_usd, position_collect_id=position.position_id)
+
+    def _resolve_wrap_native(
+        self,
+        intent: Any,
+        intent_type: IntentType,
+        amount_usd: Decimal,
+        market_state: MarketState,
+    ) -> _CloseResolution:
+        """Validate the chain's native↔wrapped mapping for WRAP/UNWRAP.
+
+        The conversion itself is pure token flows (1:1, priced by
+        ``_engine_helpers._wrap_conversion_legs``); this gate only refuses
+        chains without a registered wrapped-native mapping — a wrap the repo
+        cannot name has no honest simulation.
+        """
+        chain = str(getattr(intent, "chain", None) or getattr(market_state, "chain", None) or DEFAULT_CHAIN)
+        if _engine_helpers.resolve_native_wrap_pair(chain) is None:
+            return _CloseResolution(
+                amount_usd=amount_usd,
+                failure_reason=(
+                    f"{intent_type.value} has no registered native<->wrapped token mapping "
+                    f"for chain '{chain}' — cannot simulate the conversion"
+                ),
+            )
+        return _CloseResolution(amount_usd=amount_usd)
 
     def _position_value_with_interest(self, position: SimulatedPosition, market_state: MarketState) -> _PositionValue:
         price = self._position_principal_price(position, market_state)
@@ -4802,5 +5768,7 @@ __all__ = [
     "PnLBacktester",
     "BacktestableStrategy",
     "DataQualityTracker",
+    "SimulatedPositionView",
     "create_market_snapshot_from_state",
+    "sync_il_calculator_positions",
 ]

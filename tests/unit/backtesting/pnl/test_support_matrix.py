@@ -544,14 +544,27 @@ class TestPerpFundingLane:
 
 class TestIntentsLane:
     def test_partial_envelope_gap_warns_but_stays_supported(self) -> None:
+        # morpho_blue declares FLASH_LOAN beside four simulated lending
+        # intents — a partial gap. (uniswap_v3 previously served this role via
+        # LP_COLLECT_FEES, which has since gained a real simulation lane.)
+        report = evaluate_backtest_support(_config(), strategy_config={"protocol": "morpho_blue"})
+
+        lane = _lane(report, LANE_INTENTS, "morpho_blue")
+        assert lane.status == "supported"
+        assert "FLASH_LOAN" in lane.detail
+        warning = next(w for w in report.warnings if "FLASH_LOAN" in w)
+        assert "UnsupportedIntentError" in warning
+        assert "FAILS" in warning
+
+    def test_lp_collect_fees_now_inside_envelope(self) -> None:
+        # The full V3 LP intent family (SWAP/LP_OPEN/LP_CLOSE/LP_COLLECT_FEES)
+        # is simulated: no envelope warning for uniswap_v3.
         report = evaluate_backtest_support(_config(), strategy_config={"protocol": "uniswap_v3"})
 
         lane = _lane(report, LANE_INTENTS, "uniswap_v3")
         assert lane.status == "supported"
-        assert "LP_COLLECT_FEES" in lane.detail
-        warning = next(w for w in report.warnings if "LP_COLLECT_FEES" in w)
-        assert "UnsupportedIntentError" in warning
-        assert "FAILS" in warning
+        assert lane.detail == "all connector-declared intents are inside the simulated envelope"
+        assert not [w for w in report.warnings if "LP_COLLECT_FEES" in w]
 
     def test_fully_simulatable_connector_has_no_warning(self) -> None:
         report = evaluate_backtest_support(_config(chain="base"), strategy_config={"protocol": "aerodrome"})

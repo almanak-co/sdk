@@ -1488,6 +1488,14 @@ class IntentType(StrEnum):
     BRIDGE = "BRIDGE"
     VAULT_DEPOSIT = "VAULT_DEPOSIT"
     VAULT_REDEEM = "VAULT_REDEEM"
+    # LP fee harvest without removing liquidity (CollectFeesIntent).
+    LP_COLLECT_FEES = "LP_COLLECT_FEES"
+    # 1:1 native <-> wrapped conversions (WrapNativeIntent / UnwrapNativeIntent).
+    WRAP_NATIVE = "WRAP_NATIVE"
+    UNWRAP_NATIVE = "UNWRAP_NATIVE"
+    # Emergency deleverage — structurally a REPAY, kept distinct so accounting
+    # can tell forced unwinds from routine repays (DeleverageIntent).
+    DELEVERAGE = "DELEVERAGE"
     HOLD = "HOLD"
     UNKNOWN = "UNKNOWN"
 

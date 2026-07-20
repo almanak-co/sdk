@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.models import DataClassification
 from almanak.framework.data.null_readers import NullPoolReaderRegistry, NullPriceAggregator
@@ -230,6 +231,43 @@ def test_resolve_best_pool_none_when_nothing_resolves():
     reader = UniswapV3PoolPriceReader(rpc_call=lambda *a: b"")
     reader.resolve_pool_address = lambda a, b, c, fee: None  # type: ignore[method-assign]
     assert reader.resolve_best_pool_address("ABC", "XYZ", "base") is None
+
+
+def test_resolve_best_pool_readable_unmeasured_replaces_earlier_unreadable():
+    # PR #3346 round 2: an UNREADABLE candidate seen first must not lock out a
+    # later READABLE candidate whose liquidity is unmeasured (None). Ordering:
+    # measured > readable-unmeasured > unreadable.
+    reader = UniswapV3PoolPriceReader(rpc_call=lambda *a: b"")
+    pools = {100: "0xunreadable", 500: "0xreadable_none", 3000: None, 10000: None}
+
+    def read_pool_price(addr, chain):
+        if addr == "0xunreadable":
+            raise DataUnavailableError(data_type="pool_price", instrument=addr, reason="uninitialized")
+        return SimpleNamespace(value=SimpleNamespace(liquidity=None))
+
+    reader.resolve_pool_address = lambda a, b, c, fee: pools.get(fee)  # type: ignore[method-assign]
+    reader.read_pool_price = read_pool_price  # type: ignore[method-assign]
+
+    assert reader.resolve_best_pool_address("WETH", "USDC", "base") == "0xreadable_none"
+
+
+def test_resolve_best_pool_measured_still_beats_readable_unmeasured_and_unreadable():
+    # Measured-liquidity ranking stays supreme over both fallback tiers,
+    # regardless of enumeration order.
+    reader = UniswapV3PoolPriceReader(rpc_call=lambda *a: b"")
+    pools = {100: "0xunreadable", 500: "0xreadable_none", 3000: "0xmeasured", 10000: None}
+
+    def read_pool_price(addr, chain):
+        if addr == "0xunreadable":
+            raise DataUnavailableError(data_type="pool_price", instrument=addr, reason="uninitialized")
+        if addr == "0xreadable_none":
+            return SimpleNamespace(value=SimpleNamespace(liquidity=None))
+        return SimpleNamespace(value=SimpleNamespace(liquidity=7))
+
+    reader.resolve_pool_address = lambda a, b, c, fee: pools.get(fee)  # type: ignore[method-assign]
+    reader.read_pool_price = read_pool_price  # type: ignore[method-assign]
+
+    assert reader.resolve_best_pool_address("WETH", "USDC", "base") == "0xmeasured"
 
 
 # --------------------------------------------------------------------------- #

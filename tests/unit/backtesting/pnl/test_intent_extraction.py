@@ -310,9 +310,10 @@ class TestWalletBalanceCategoryParity:
 
     # Live sizes these from wallet balance but the backtest deliberately does
     # not: BRIDGE is refused wholesale by the generic lane (any amount, not
-    # just "all"); STAKE and WRAP/UNWRAP_NATIVE have no backtest IntentType or
-    # engine lane at all (yield family is an ALM-2940 decision).
-    DOCUMENTED_BACKTEST_EXCLUSIONS = frozenset({"BRIDGE", "STAKE", "WRAP_NATIVE", "UNWRAP_NATIVE"})
+    # just "all"); STAKE has no backtest IntentType or engine lane at all
+    # (yield family is an ALM-2940 decision). WRAP/UNWRAP_NATIVE left this
+    # set when they gained a generic simulation lane with wallet-"all" sizing.
+    DOCUMENTED_BACKTEST_EXCLUSIONS = frozenset({"BRIDGE", "STAKE"})
 
     def test_backtest_set_is_live_category_minus_documented_exclusions(self) -> None:
         from almanak.framework.backtesting.pnl.intent_extraction import WALLET_BALANCE_ALL_INTENT_TYPES

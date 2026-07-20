@@ -35,6 +35,11 @@ _CLASS_NAME_INTENT_TYPES: tuple[tuple[tuple[str, ...], IntentType], ...] = (
     (("BRIDGE",), IntentType.BRIDGE),
     (("VAULTDEPOSIT", "VAULT_DEPOSIT"), IntentType.VAULT_DEPOSIT),
     (("VAULTREDEEM", "VAULT_REDEEM"), IntentType.VAULT_REDEEM),
+    (("COLLECTFEES", "COLLECT_FEES", "LP_COLLECT"), IntentType.LP_COLLECT_FEES),
+    # UNWRAP must precede WRAP: "UNWRAPNATIVE" contains the "WRAPNATIVE" marker.
+    (("UNWRAPNATIVE", "UNWRAP_NATIVE"), IntentType.UNWRAP_NATIVE),
+    (("WRAPNATIVE", "WRAP_NATIVE"), IntentType.WRAP_NATIVE),
+    (("DELEVERAGE",), IntentType.DELEVERAGE),
     (("HOLD",), IntentType.HOLD),
 )
 
@@ -726,7 +731,19 @@ def _direct_usd_amount(intent: Any) -> Decimal | None:
 # GENERIC_SIMULATED_INTENT_TYPES, so every BRIDGE intent (any amount) is
 # refused wholesale upstream with UnsupportedIntentError before this
 # rejection lane could build a blotter trade.
-WALLET_BALANCE_ALL_INTENT_TYPES = frozenset({IntentType.SWAP, IntentType.SUPPLY, IntentType.VAULT_DEPOSIT})
+# WRAP_NATIVE/UNWRAP_NATIVE joined when they gained a generic simulation lane:
+# UNWRAP spends the wallet's wrapped balance (``intent.token``), WRAP spends
+# the wallet's native-symbol balance (derived from the chain registry's
+# wrapped-native mapping in ``sizing._spend_token``).
+WALLET_BALANCE_ALL_INTENT_TYPES = frozenset(
+    {
+        IntentType.SWAP,
+        IntentType.SUPPLY,
+        IntentType.VAULT_DEPOSIT,
+        IntentType.WRAP_NATIVE,
+        IntentType.UNWRAP_NATIVE,
+    }
+)
 
 UNSUPPORTED_ALL_SIZING_REASON = (
     'unsupported: amount="all" sizing is not yet modeled by the backtest engine — pass an explicit amount'
@@ -734,8 +751,18 @@ UNSUPPORTED_ALL_SIZING_REASON = (
 
 # Intent types whose "no amount" shape means "close in full" — sized downstream
 # by position-close resolution, never by the generic scan (ALM-2936).
+# DELEVERAGE is REPAY's structural twin (its "all"/repay_full IS the
+# close-in-full sentinel); LP_COLLECT_FEES carries no amount at all — its
+# notional is the matched position's accrued fees, sized by resolution.
 _CLOSE_SHAPED_INTENT_TYPES = frozenset(
-    {IntentType.PERP_CLOSE, IntentType.WITHDRAW, IntentType.REPAY, IntentType.LP_CLOSE}
+    {
+        IntentType.PERP_CLOSE,
+        IntentType.WITHDRAW,
+        IntentType.REPAY,
+        IntentType.DELEVERAGE,
+        IntentType.LP_CLOSE,
+        IntentType.LP_COLLECT_FEES,
+    }
 )
 
 
@@ -1533,10 +1560,14 @@ def estimate_gas_for_intent(intent_type: IntentType) -> int:
         IntentType.SWAP: 180000,  # Conservative for multi-hop swaps
         IntentType.LP_OPEN: 400000,  # NFT mint + liquidity add
         IntentType.LP_CLOSE: 300000,  # NFT burn + liquidity remove
+        IntentType.LP_COLLECT_FEES: 150000,  # NFT collect() — no liquidity change
         IntentType.SUPPLY: 220000,  # Aave/Compound supply
         IntentType.WITHDRAW: 220000,  # Aave/Compound withdraw
         IntentType.BORROW: 280000,  # Includes collateral checks
         IntentType.REPAY: 220000,  # Aave/Compound repay
+        IntentType.DELEVERAGE: 220000,  # Structurally a repay
+        IntentType.WRAP_NATIVE: 50000,  # WETH9 deposit()
+        IntentType.UNWRAP_NATIVE: 50000,  # WETH9 withdraw()
         IntentType.PERP_OPEN: 450000,  # GMX V2 market increase
         IntentType.PERP_CLOSE: 350000,  # GMX V2 market decrease
         IntentType.BRIDGE: 200000,  # Cross-chain bridge

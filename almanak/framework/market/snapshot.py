@@ -241,6 +241,17 @@ class _PricesAccessor:
     probing in uniswap_rsi-style backtest adapters) and
     ``market.prices(["ETH"])`` (batch-fetch idiom from the canonical
     Quant Data Layer) working on the same attribute.
+
+    Key resolution: single-key reads (``get`` / ``[]`` / ``in``) resolve
+    through the snapshot's ``_token_cache_key`` — the SAME alias bridge
+    ``price()`` uses — so on address-native backtest snapshots (where
+    ``_prices`` is keyed ``"chain:0xaddr"``) a plain-symbol probe like
+    ``prices.get("WETH")`` lands on the seeded address key instead of
+    silently missing while ``price("WETH")`` serves (ALM-2943 audit gap
+    #6). Exact keys always win first, so address-keyed access and live
+    symbol-keyed snapshots are untouched. Iteration/keys()/items() stay
+    native (address-keyed in backtest) — the alias map is a read bridge,
+    not a re-keying.
     """
 
     __slots__ = ("_snapshot",)
@@ -248,15 +259,37 @@ class _PricesAccessor:
     def __init__(self, snapshot: MarketSnapshot) -> None:
         self._snapshot = snapshot
 
-    # Dict-like interface — delegates to ``_snapshot._prices``.
+    def _resolve_key(self, key: Any) -> Any:
+        """Resolve ``key`` onto the underlying ``_prices`` dict's keys.
+
+        Exact-match first (native keys keep working verbatim); otherwise a
+        string key is routed through the snapshot's ``_token_cache_key``
+        alias resolution (plain symbol -> seeded ``chain:0xaddr`` key on
+        backtest snapshots, address-shape normalization otherwise). A key
+        that still misses is returned unchanged so dict semantics
+        (``get`` default / bare ``KeyError``) are preserved.
+        """
+        prices = self._snapshot._prices
+        if not isinstance(key, str) or key in prices:
+            return key
+        try:
+            resolved = self._snapshot._token_cache_key(key)
+        except Exception:  # noqa: BLE001 — resolution must never break dict reads
+            return key
+        if resolved != key and resolved in prices:
+            return resolved
+        return key
+
+    # Dict-like interface — delegates to ``_snapshot._prices`` through the
+    # same alias resolution as ``price()``.
     def get(self, key: str, default: Any = None) -> Any:
-        return self._snapshot._prices.get(key, default)
+        return self._snapshot._prices.get(self._resolve_key(key), default)
 
     def __getitem__(self, key: str) -> Any:
-        return self._snapshot._prices[key]
+        return self._snapshot._prices[self._resolve_key(key)]
 
     def __contains__(self, key: object) -> bool:
-        return key in self._snapshot._prices
+        return self._resolve_key(key) in self._snapshot._prices
 
     def __iter__(self) -> Any:
         return iter(self._snapshot._prices)
@@ -544,6 +577,12 @@ class MarketSnapshot:
         # ``IntentStrategy.create_market_snapshot``.
         self._aave_health_factor_provider = aave_health_factor_provider
 
+        # ALM-2943 — backtest serve-from-sim-state position view. The engine's
+        # snapshot factory binds a SimulatedPositionView here so
+        # position_health / lp_position_value answer from the sim's own
+        # tracked positions; None everywhere else (live/gateway paths).
+        self._simulated_position_view: Any | None = None
+
         # ALM-2696 Quant Data Layer providers (ported from main 2026-05-06).
         self._pool_reader_registry = pool_reader_registry
         self._pool_reader = pool_reader
@@ -593,6 +632,11 @@ class MarketSnapshot:
         # snapshot. Runner can use this to avoid treating "HOLD forever because
         # market data is broken" as healthy behavior.
         self._critical_data_failures: dict[tuple[str, str], str] = {}
+        # Backtest-only (ALM-2943): run-scoped dedup set injected by the PnL
+        # engine's snapshot factory so documented-soft empty accessors
+        # (wallet_activity / prediction_price) ledger-note the unsimulated
+        # lane once per run. None on live snapshots = notes disabled.
+        self._backtest_soft_empty_noted: set[str] | None = None
 
         # Per-indicator caches (tuple keys for timeframe-aware caching)
         self._macd_cache: dict[tuple[str, str, int, int, int], MACDData] = {}
@@ -2085,6 +2129,31 @@ class MarketSnapshot:
         # Keep the first (most specific) failure detail for each key.
         self._critical_data_failures.setdefault((source, key), str(error))
 
+    def _note_backtest_soft_empty(self, source: str, lane: str) -> None:
+        """Once-per-run ledger note for documented-soft empty returns (ALM-2943).
+
+        ``wallet_activity`` -> ``[]`` and ``prediction_price`` -> ``None`` are
+        public soft contracts, so the return shape must stay soft — but in a
+        backtest an unwired provider means the signal lane is not simulated at
+        all, and a copy-trade/prediction run would otherwise report "no signal
+        ever" with an empty ledger. The PnL engine injects a run-scoped
+        ``_backtest_soft_empty_noted`` set; the FIRST soft-empty per source
+        records a decision-input ledger entry (drained into
+        ``result.decision_input_failures``) and logs a warning so the run
+        report explains itself. Live snapshots leave the set ``None``, so
+        this is a no-op outside backtests and the soft contract is unchanged.
+        """
+        noted = self._backtest_soft_empty_noted
+        if noted is None or source in noted:
+            return
+        noted.add(source)
+        detail = (
+            f"{source} served empty in backtest: no historical {lane} plane "
+            "(provider not simulated); the documented soft-empty return shape is preserved"
+        )
+        self._record_critical_data_failure(source, "not_simulated", detail)
+        logger.warning("%s", detail)
+
     def clear_critical_data_failures(self) -> None:
         """Clear all tracked critical data failures.
 
@@ -3171,6 +3240,13 @@ class MarketSnapshot:
         Aave V3, Morpho Blue, or Compound V3 positions. Uses gateway-routed
         eth_calls when a gateway_client was wired into this MarketSnapshot.
 
+        In backtests (ALM-2943) the engine wires a simulated position view and
+        health is served from the sim's own tracked lending positions — the
+        same collateral/debt/threshold plane the liquidation guard marks each
+        tick — with no gateway involved. No position for the protocol returns
+        the empty-account shape (no debt ⇒ ``Infinity`` health factor);
+        genuinely uncomputable reads refuse with a decision-input ledger entry.
+
         Args:
             protocol: "aave_v3", "morpho_blue", or "compound_v3"
             market_id: Protocol-specific market identifier. For Aave V3 this is
@@ -3231,6 +3307,24 @@ class MarketSnapshot:
 
         from almanak.framework.data.position_health import PositionHealthProvider
         from almanak.framework.market import HealthUnavailableError
+
+        # Backtest serve-from-sim-state (ALM-2943): when the engine wired a
+        # simulated position view, health comes from the SIM'S OWN lending
+        # state — the same collateral/debt/threshold plane the liquidation
+        # guard marks each tick (liquidation_simulator.update_health_factors)
+        # — never a live gateway read inside a historical run. Genuinely
+        # uncomputable stays an honest refusal + ledger entry.
+        sim_view = getattr(self, "_simulated_position_view", None)
+        if sim_view is not None:
+            try:
+                health = sim_view.position_health(protocol, effective_market_id)
+            except Exception as e:  # noqa: BLE001 — uncomputable ⇒ refuse + ledger, like the live path
+                self._record_critical_data_failure(
+                    "position_health", "simulation", f"position_health unavailable in backtest: {e}"
+                )
+                raise HealthUnavailableError(f"Position health unavailable in backtest: {e}") from e
+            self._position_health_cache[cache_key] = health
+            return health
 
         provider = PositionHealthProvider(
             rpc_url=rpc_url or "",
@@ -3307,6 +3401,11 @@ class MarketSnapshot:
             when the position cannot be measured (Empty ≠ Zero — an unmeasured
             read is NEVER a fabricated ``$0``). A genuinely empty position
             (zero liquidity, zero fees) returns an all-zero measured result.
+
+            In backtests (ALM-2943) the engine's own tracked LP position is
+            served from the portfolio marker's repricing plane; an unknown
+            ``position_id`` raises ``ValueError`` with a decision-input
+            ledger entry instead of returning a silent ``None``.
         """
         from almanak.framework.teardown.models import PositionInfo, PositionType
         from almanak.framework.valuation.lp_position_reader import LPPositionReader
@@ -3315,6 +3414,23 @@ class MarketSnapshot:
             default_decimals_fn,
             reprice_lp_position,
         )
+
+        # Backtest serve-from-sim-state (ALM-2943): the engine's own open LP
+        # position is valued on the SAME repricing plane the portfolio marker
+        # uses each tick (reprice_lp_position_amounts) — a real value, never a
+        # silent None. Unknown ids refuse + ledger (a live strategy would get
+        # a value here; silence hid the gap).
+        sim_view = getattr(self, "_simulated_position_view", None)
+        if sim_view is not None:
+            try:
+                return sim_view.lp_position_value(position_id)
+            except KeyError as e:
+                reason = e.args[0] if e.args else str(e)
+                self._record_critical_data_failure("lp_position_value", "unknown_position", reason)
+                raise ValueError(f"lp_position_value unavailable in backtest: {reason}") from e
+            except Exception as e:  # noqa: BLE001 — unmeasurable ⇒ refuse + ledger, never silent None
+                self._record_critical_data_failure("lp_position_value", "unavailable", str(e))
+                raise ValueError(f"lp_position_value unavailable in backtest: {e}") from e
 
         if self._gateway_client is None:
             # No gateway wired ⇒ cannot read on-chain ⇒ unmeasured, not zero.
@@ -3526,13 +3642,33 @@ class MarketSnapshot:
                 multi-chain snapshot; on a single-chain snapshot it must match
                 ``self.chain`` or be ``None``.
 
+        In backtests (ALM-2943) the engine wires the simulated position view
+        as the provider, so ``None`` truthfully means "the sim holds no Aave
+        position" and an open sim position serves its computed health factor
+        (``Infinity`` when there is no debt). When NO provider is wired, the
+        ``None`` is additionally recorded in the decision-input ledger so a
+        hollow run can name it — the return contract is unchanged.
+
         Returns:
             The Aave V3 health factor as a ``Decimal``, or ``None`` when no
             provider is wired / no live position exists.
         """
         if self._aave_health_factor_provider is None:
+            # Keep the documented soft-None contract, but leave a ledger
+            # entry: an unserved read must be nameable by the hollow-run
+            # report instead of silently reading as "no position" (ALM-2943).
+            self._record_critical_data_failure(
+                "aave_health_factor", "unconfigured", "aave_health_factor unavailable: no provider configured"
+            )
             return None
-        return self._aave_health_factor_provider(self._resolve_chain(chain))
+        resolved_chain = self._resolve_chain(chain)
+        try:
+            return self._aave_health_factor_provider(resolved_chain)
+        except Exception as e:
+            # Provider failures must surface (never coerced to None), and the
+            # ledger names them for the run report.
+            self._record_critical_data_failure("aave_health_factor", "unavailable", str(e))
+            raise
 
     def funding_rate(self, venue: str, market: str) -> FundingRate:
         """Get the current funding rate for a perpetual market on a specific venue.
@@ -3608,6 +3744,9 @@ class MarketSnapshot:
             List of CopySignal objects matching the filters
         """
         if self._wallet_activity_provider is None:
+            # Backtest: record once per run WHY the copy-trade lane is empty
+            # (ALM-2943) — the soft [] contract itself is unchanged.
+            self._note_backtest_soft_empty("wallet_activity", "copy-trade")
             return []
         return self._wallet_activity_provider.get_signals(
             action_types=action_types,
@@ -3638,6 +3777,9 @@ class MarketSnapshot:
                 return BuyIntent(...)
         """
         if self._prediction_provider is None:
+            # Backtest: record once per run WHY the prediction lane is silent
+            # (ALM-2943) — the soft None contract itself is unchanged.
+            self._note_backtest_soft_empty("prediction_price", "prediction")
             return None
 
         try:
@@ -4793,7 +4935,10 @@ class MarketSnapshot:
                 raises ``ValueError``) nor for any other unexpected exception
                 (misconfiguration / upstream bug, e.g. chain ambiguity →
                 stays loud), so a broken strategy is never silently degraded
-                to ``default`` forever.
+                to ``default`` forever. Backtest snapshots always wire the IL
+                calculator (ALM-2943), so the missing-calculator branch is
+                unreachable there — the strict raise protects live wiring
+                errors.
 
         Returns:
             ILExposure with current IL metrics, or ``default`` if supplied and
@@ -4817,6 +4962,13 @@ class MarketSnapshot:
         )
 
         if self._il_calculator is None:
+            # A missing IL calculator is a wiring error, not transient data —
+            # it raises even when ``default`` is supplied (pinned by
+            # test_il_exposure_default_does_not_mask_missing_calculator).
+            # Backtest wires the calculator on every snapshot (ALM-2943), so
+            # this branch is unreachable in backtest; the strict raise
+            # protects live wiring errors. The gap is still recorded on the
+            # decision-input ledger before raising.
             self._record_critical_data_failure(
                 "il_exposure", "unconfigured", "il_exposure unavailable: no provider configured"
             )
@@ -4828,18 +4980,20 @@ class MarketSnapshot:
             current_price_a: Decimal | None = None
             current_price_b: Decimal | None = None
 
-            if self._price_oracle is not None:
-                # Use this snapshot's ``price`` (carries cache + critical-failure
-                # plumbing) rather than the raw oracle so behaviour matches
-                # the documented API.
-                try:
-                    current_price_a = self.price(position.token_a)
-                except (PriceUnavailableError, ValueError):
-                    pass
-                try:
-                    current_price_b = self.price(position.token_b)
-                except (PriceUnavailableError, ValueError):
-                    pass
+            # Use this snapshot's ``price`` (carries cache + critical-failure
+            # plumbing, seeded backtest prices, AND the symbol-alias bridge)
+            # rather than the raw oracle so behaviour matches the documented
+            # API. Not gated on ``_price_oracle``: backtest snapshots have no
+            # oracle but serve seeded per-tick prices through ``price()``
+            # (ALM-2943) — a miss still degrades to None below.
+            try:
+                current_price_a = self.price(position.token_a)
+            except (PriceUnavailableError, ValueError):
+                pass
+            try:
+                current_price_b = self.price(position.token_b)
+            except (PriceUnavailableError, ValueError):
+                pass
 
             return self._il_calculator.calculate_il_exposure(
                 position_id=position_id,
@@ -4864,7 +5018,8 @@ class MarketSnapshot:
             # this method's contract (see the ``default`` docstring) such a
             # broken-strategy condition must stay loud and must NOT be silently
             # degraded to ``default`` forever. ``default`` is honoured ONLY for
-            # the typed, transient IL-unavailability branches above.
+            # the typed, transient IL-unavailability branches above (pinned by
+            # test_il_exposure_default_does_not_mask_unexpected_error).
             raise ILExposureUnavailableError(position_id, f"Unexpected error: {e}") from e
 
     def projected_il(
@@ -5016,7 +5171,9 @@ class MarketSnapshot:
             raise ValueError("No volatility calculator configured for MarketSnapshot")
 
         if windows is None:
-            windows = [7, 14, 30, 90]
+            from almanak.framework.data.volatility.realized import DEFAULT_VOL_CONE_WINDOWS_DAYS
+
+            windows = list(DEFAULT_VOL_CONE_WINDOWS_DAYS)
 
         try:
             max_window = max(windows)
@@ -5722,6 +5879,13 @@ class MarketSnapshot:
         # downstream provider error at call time.
         gateway_connected = self._gateway_client is not None and getattr(self._gateway_client, "is_connected", False)
         if not rpc_url and not gateway_connected:
+            # Ledger consistency with position_health (ALM-2943): a refusal a
+            # strategy holds on must be nameable in decision_input_failures.
+            self._record_critical_data_failure(
+                "pt_position_health",
+                "unconfigured",
+                "pt_position_health unavailable: no gateway/rpc transport configured",
+            )
             raise HealthUnavailableError(
                 "pt_position_health requires either a connected GatewayClient "
                 "or an explicit rpc_url; neither was available on this "
@@ -5746,6 +5910,9 @@ class MarketSnapshot:
         except HealthUnavailableError:
             raise
         except Exception as e:  # noqa: BLE001
+            self._record_critical_data_failure(
+                "pt_position_health", "unavailable", f"PT position health unavailable: {e}"
+            )
             raise HealthUnavailableError(f"PT position health unavailable: {e}") from e
 
     def to_dict(self) -> dict[str, Any]:

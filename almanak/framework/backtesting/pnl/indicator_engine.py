@@ -166,9 +166,46 @@ class BacktestIndicatorEngine:
             self._price_buffers[token] = deque(maxlen=self._max_history)
         self._price_buffers[token].append(price)
 
+    def ensure_capacity(self, min_history: int) -> None:
+        """Raise the per-token retention to at least ``min_history`` ticks.
+
+        Used by the backtest wiring to size retention for consumers with a
+        known lookback (e.g. the default ``vol_cone`` windows need up to 90
+        days of tick history — with the default 200-tick buffer those calls
+        would refuse FOREVER mid-run, however long the run). Memory stays
+        bounded by the run's own tick count: a larger ``maxlen`` only permits
+        growth, it does not preallocate. Never shrinks; existing buffers are
+        rebuilt with the raised capacity. ``_base_max_history`` is left
+        untouched so the granularity retention scale (ALM-2957) stays
+        idempotent — ``set_data_granularity`` already only ever raises
+        ``_max_history``, so the two interact monotonically.
+        """
+        if min_history <= self._max_history:
+            return
+        self._max_history = int(min_history)
+        self._price_buffers = {
+            token: deque(buffer, maxlen=self._max_history) for token, buffer in self._price_buffers.items()
+        }
+
     def get_buffer_size(self, token: str) -> int:
         """Return number of prices buffered for a token."""
         return len(self._price_buffers.get(token, []))
+
+    def _eager_price_window(self, prices: deque[Decimal]) -> list[Decimal]:
+        """The price window the EAGER per-tick indicator plane computes over.
+
+        At most the CONSTRUCTED capacity (default 200 ticks — sized to cover
+        every standard indicator period), even when a deep-lookback consumer
+        (vol_cone's 90-day windows, #3346) has raised the buffer's retention:
+        RSI/MACD/ATR/EMA over thousands of prices per tick per token made
+        per-tick cost grow with buffer depth and tripped the 1-year perf
+        SLAs. On-demand reads (``_series_for``) still see the full retained
+        history.
+        """
+        price_list = list(prices)
+        if len(price_list) > self._base_max_history:
+            return price_list[-self._base_max_history :]
+        return price_list
 
     def populate_snapshot(
         self,
@@ -203,7 +240,7 @@ class BacktestIndicatorEngine:
             if active_tokens is not None and token not in active_tokens:
                 continue
 
-            price_list = list(prices)
+            price_list = self._eager_price_window(prices)
 
             if "rsi" in self._required:
                 self._populate_rsi(snapshot, token, price_list, config, timeframe)

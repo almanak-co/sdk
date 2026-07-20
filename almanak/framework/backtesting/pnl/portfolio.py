@@ -86,6 +86,16 @@ _DEBIT_DUST_RELATIVE_TOLERANCE = Decimal("1e-9")
 #: slippage), so charging ``fee_usd`` against cash would double-count.
 _FEE_EMBEDDED_IN_FLOWS: frozenset[IntentType] = frozenset({IntentType.SWAP})
 
+#: Intent types whose source-token leg must be funded from the HELD balance
+#: only — never via the implicit cash-conversion fallback. SWAP because
+#: funding a sell from cash is short-from-nothing; WRAP/UNWRAP because
+#: ``weth.deposit()``/``withdraw()`` revert on-chain when the wallet lacks
+#: the native/wrapped amount, so silently converting cash would overstate
+#: capital efficiency vs live.
+_STRICT_BALANCE_FUNDED_INTENTS: frozenset[IntentType] = frozenset(
+    {IntentType.SWAP, IntentType.WRAP_NATIVE, IntentType.UNWRAP_NATIVE}
+)
+
 #: Intent types whose slippage is already embodied in portfolio value:
 #: SWAP nets it out of ``tokens_in``; perp intents carry it in
 #: ``executed_price`` (adverse per side, see ``get_executed_price``), which
@@ -487,6 +497,10 @@ class SimulatedPortfolio:
         if close_failure is not None:
             return None, close_failure
 
+        collect_failure = self._position_collect_failure(fill)
+        if collect_failure is not None:
+            return None, collect_failure
+
         return _DebitPlan(token_debits, cash_debit, conversions), None
 
     @staticmethod
@@ -506,6 +520,11 @@ class SimulatedPortfolio:
 
         if fill.position_close_id:
             closed_position = self._close_position(fill.position_close_id, fill.timestamp)
+        elif fill.position_collect_id:
+            # LP fee harvest: the fees moved to the wallet via tokens_in above;
+            # reset the position's uncollected counters so a later close pays
+            # only fees accrued SINCE (never double-pays). Position stays open.
+            self._collect_lp_position_fees(fill)
         elif fill.position_reduce_id:
             # Partially reduce a position (validated in _position_reduce_failure).
             # Accrue interest through the fill instant FIRST: pending intents
@@ -551,6 +570,12 @@ class SimulatedPortfolio:
             if (pnl_usd is None or pnl_usd == Decimal("0")) and net_lp_pnl_usd is not None:
                 pnl_usd = net_lp_pnl_usd
 
+        # LP fee harvest: surface the collected fees on the trade record's
+        # fees_earned_usd column (pnl_usd already carries them via
+        # _calculate_trade_pnl reading metadata["collected_fees_usd"]).
+        if fill.intent_type == IntentType.LP_COLLECT_FEES and fill.position_collect_id and pnl_usd is not None:
+            fees_earned_usd = pnl_usd
+
         # Perp close: return collateral + realized PnL to cash, so the
         # close is value-neutral at the close instant.
         if closed_position is not None and closed_position.is_perp and fill.success:
@@ -571,7 +596,11 @@ class SimulatedPortfolio:
     def _accumulate_realized_pnl(self, fill: SimulatedFill, pnl_usd: Decimal | None) -> None:
         # Position closes lock in their PnL here (guarded by position_close_id).
         # SWAP disposals carry realized PnL via metadata["realized_pnl_usd"].
-        realizes_pnl = bool(fill.position_close_id) or fill.intent_type == IntentType.SWAP
+        # LP fee harvests realize the collected fees (the later close's
+        # realized PnL excludes them — the collect reset the accrual counters).
+        realizes_pnl = (
+            bool(fill.position_close_id) or bool(fill.position_collect_id) or fill.intent_type == IntentType.SWAP
+        )
         if realizes_pnl and pnl_usd is not None and pnl_usd != Decimal("0"):
             self._realized_pnl += pnl_usd
 
@@ -840,9 +869,10 @@ class SimulatedPortfolio:
 
         Cash-equivalent stablecoins draw from the token balance first and
         then from ``cash_usd`` at $1. Other tokens draw from the ``tokens``
-        balance; for non-SWAP intents a shortfall is planned as an implicit
-        cash conversion at the ``market_state`` price (the engine's flow
-        producers size those legs from USD notional, not held balances).
+        balance; outside :data:`_STRICT_BALANCE_FUNDED_INTENTS` a shortfall
+        is planned as an implicit cash conversion at the ``market_state``
+        price (the engine's flow producers size those legs from USD
+        notional, not held balances).
         A relative shortfall within :data:`_DEBIT_DUST_RELATIVE_TOLERANCE`
         is treated as spend-all rather than a failure. Non-positive amounts
         are ignored.
@@ -870,9 +900,10 @@ class SimulatedPortfolio:
                 continue  # Fully covered (spend-all within dust tolerance)
             if self._is_cash_equivalent(token) or self._is_cash_equivalent(debit_token):
                 cash_needed += shortfall
-            elif intent_type == IntentType.SWAP:
-                # Selling a token the portfolio does not hold is
-                # short-from-nothing; never fund a SWAP leg from cash.
+            elif intent_type in _STRICT_BALANCE_FUNDED_INTENTS:
+                # Selling (SWAP) or converting (WRAP/UNWRAP_NATIVE) a token
+                # the portfolio does not hold is short-from-nothing; live
+                # execution reverts, so never fund these legs from cash.
                 return (*no_plan, f"insufficient {token} balance: required {amount}, held {held}")
             else:
                 price = self._conversion_price(token, market_state)
@@ -1256,6 +1287,48 @@ class SimulatedPortfolio:
         if self.get_position(fill.position_close_id) is None:
             return f"position {fill.position_close_id} not found for close"
         return None
+
+    def _position_collect_failure(self, fill: SimulatedFill) -> str | None:
+        """Reason this fill's LP fee collection cannot apply, or None.
+
+        Defense-in-depth at the conservation boundary (mirroring
+        :meth:`_position_close_failure`): crediting the fee inflow without a
+        live LP position to debit the accrual from would mint value.
+        """
+        if fill.position_collect_id is None:
+            return None
+        position = self.get_position(fill.position_collect_id)
+        if position is None:
+            return f"position {fill.position_collect_id} not found for fee collection"
+        if not position.is_lp:
+            return f"position {fill.position_collect_id} is not an LP position; cannot collect fees"
+        return None
+
+    def _collect_lp_position_fees(self, fill: SimulatedFill) -> None:
+        """Commit a validated LP fee harvest: reset the accrual counters.
+
+        The harvested value already reached the wallet through the fill's
+        ``tokens_in`` (sized by the engine from the SAME
+        :meth:`_lp_fees_earned` plane LP_CLOSE pays out). Both USD counters
+        AND the per-token attribution units reset together — they are one
+        accrual expressed on two planes, and a later LP_CLOSE reads either
+        (``accumulated_fees_usd`` primary, ``fees_earned`` fallback): a
+        partial reset would double-pay on close. ``last_updated`` is NOT
+        touched — fee accrual continues from the marker's own clock.
+        """
+        if fill.position_collect_id is None:  # pragma: no cover - caller-gated
+            return
+        position = self.get_position(fill.position_collect_id)
+        if position is None:  # pragma: no cover - guarded by the plan stage
+            return
+        collected = self._lp_fees_earned(position)
+        position.fees_earned = Decimal("0")
+        position.accumulated_fees_usd = Decimal("0")
+        position.fees_token0 = Decimal("0")
+        position.fees_token1 = Decimal("0")
+        # str() round-trips Decimal losslessly; _calculate_trade_pnl reads this
+        # back as the trade's realized fee income.
+        fill.metadata["collected_fees_usd"] = str(collected)
 
     @staticmethod
     def _positive_amounts(amounts: dict[TokenRef, Decimal]) -> dict[TokenRef, Decimal]:
@@ -1888,10 +1961,20 @@ class SimulatedPortfolio:
             pnl_value = fill.metadata.get("realized_pnl_usd", Decimal("0"))
             return Decimal(str(pnl_value)) if not isinstance(pnl_value, Decimal) else pnl_value
 
-        # For lending operations, interest is typically in metadata
-        if fill.intent_type in (IntentType.WITHDRAW, IntentType.REPAY):
+        # For lending operations, interest is typically in metadata.
+        # DELEVERAGE is REPAY's structural twin and realizes borrow interest
+        # through the identical metadata plane.
+        if fill.intent_type in (IntentType.WITHDRAW, IntentType.REPAY, IntentType.DELEVERAGE):
             interest_value = fill.metadata.get("interest_usd", Decimal("0"))
             return Decimal(str(interest_value)) if not isinstance(interest_value, Decimal) else interest_value
+
+        # LP fee harvest: the collected fees are realized fee income
+        # (stamped by _collect_lp_position_fees during the position effects
+        # stage, which runs before this).
+        if fill.intent_type == IntentType.LP_COLLECT_FEES:
+            if "collected_fees_usd" not in fill.metadata:
+                return None
+            return Decimal(str(fill.metadata["collected_fees_usd"]))
 
         return None
 
@@ -3007,28 +3090,27 @@ class SimulatedPortfolio:
                 value += amount * position.entry_price
         return value
 
-    def _mark_lp_position(
+    def reprice_lp_position_amounts(
         self,
         position: SimulatedPosition,
         market_state: MarketState,
-        timestamp: datetime,
-    ) -> Decimal:
-        """Mark an LP position to market, calculating IL and accruing fees.
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+        """Reprice an LP position's token amounts at current prices, read-only.
 
-        This method:
-        1. Gets current prices for both tokens in the LP pair
-        2. Uses ImpermanentLossCalculator to compute current token amounts
-        3. Calculates impermanent loss based on price movement
-        4. Simulates fee accrual based on position value and time elapsed
-        5. Updates position's fees_earned, amounts, and last_updated
-
-        Args:
-            position: The LP position to value
-            market_state: Current market state
-            timestamp: Current timestamp for fee accrual
+        The single valuation plane for the engine's own LP positions: the
+        per-tick marker (:meth:`_mark_lp_position`) and the decide()-time
+        ``market.lp_position_value`` serve (``SimulatedPositionView``,
+        ALM-2943) both call this, so a strategy reads the SAME number the
+        equity curve is marked with. Pure — no position mutation, no fee
+        accrual (those stay in the marker).
 
         Returns:
-            Total LP position value in USD (token values + accrued fees)
+            ``(token0_price, token1_price, amount0, amount1)`` — current USD
+            prices and the V3-math token amounts at those prices.
+
+        Raises:
+            ValueError: If the position has fewer than 2 tokens, or a price is
+                missing under ``strict_reproducibility``.
         """
         # Lazy import to avoid circular dependency
         from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
@@ -3036,7 +3118,7 @@ class SimulatedPortfolio:
         )
 
         if len(position.tokens) < 2:
-            return Decimal("0")
+            raise ValueError(f"LP position {position.position_id!r} has fewer than 2 tokens; cannot reprice")
 
         token0 = position.tokens[0]
         token1 = position.tokens[1]
@@ -3073,12 +3155,45 @@ class SimulatedPortfolio:
         # Use ImpermanentLossCalculator to get current token amounts
         il_calculator = ImpermanentLossCalculator()
 
-        il_pct, current_token0, current_token1 = il_calculator.calculate_il_v3(
+        _il_pct, current_token0, current_token1 = il_calculator.calculate_il_v3(
             entry_price=position.entry_price,
             current_price=current_price,
             tick_lower=tick_lower,
             tick_upper=tick_upper,
             liquidity=position.liquidity,
+        )
+        return token0_price, token1_price, current_token0, current_token1
+
+    def _mark_lp_position(
+        self,
+        position: SimulatedPosition,
+        market_state: MarketState,
+        timestamp: datetime,
+    ) -> Decimal:
+        """Mark an LP position to market, calculating IL and accruing fees.
+
+        This method:
+        1. Reprices token amounts via :meth:`reprice_lp_position_amounts`
+           (shared plane with the decide()-time LP serve)
+        2. Simulates fee accrual based on position value and time elapsed
+        3. Updates position's fees_earned, amounts, and last_updated
+
+        Args:
+            position: The LP position to value
+            market_state: Current market state
+            timestamp: Current timestamp for fee accrual
+
+        Returns:
+            Total LP position value in USD (token values + accrued fees)
+        """
+        if len(position.tokens) < 2:
+            return Decimal("0")
+
+        token0 = position.tokens[0]
+        token1 = position.tokens[1]
+
+        token0_price, token1_price, current_token0, current_token1 = self.reprice_lp_position_amounts(
+            position, market_state
         )
 
         # Update position's current token amounts

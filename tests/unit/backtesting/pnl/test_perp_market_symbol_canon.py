@@ -107,7 +107,11 @@ class TestPerpEntryPricing:
     def test_resolve_perp_base_price_maps_native_onto_wrapped(self, market: str) -> None:
         base, priced_symbol, price = resolve_perp_base_price(market, _weth_market_state())
         assert base == "ETH"
-        assert priced_symbol == "WETH"
+        # The native symbol itself is the priceable form: MarketState serves
+        # "ETH" through the chain's wrapped-native plane (ALM-2943), so the
+        # first candidate resolves and the wrapped-form retry never engages.
+        # The price MUST still be the wrapped token's market price.
+        assert priced_symbol == "ETH"
         assert price == ETH_PRICE
 
     def test_slash_and_dash_produce_identical_executed_prices(self) -> None:
@@ -160,8 +164,10 @@ class TestEnginePerpOpenEndToEnd:
         position = portfolio.positions[0]
         # Entry price is the real market price, not the $1 fallback.
         assert position.entry_price == ETH_PRICE
-        # Position keyed by the PRICEABLE form so per-tick marks resolve.
-        assert str(position.tokens[0]).upper() == "WETH"
+        # Position keyed by the PRICEABLE form so per-tick marks resolve —
+        # "ETH" is priceable directly since MarketState serves native symbols
+        # through the wrapped-native plane (ALM-2943).
+        assert str(position.tokens[0]).upper() == "ETH"
 
         # Unrealized PnL is LIVE: a -10% move profits the short by 10% of notional.
         exit_price = ETH_PRICE * Decimal("0.9")

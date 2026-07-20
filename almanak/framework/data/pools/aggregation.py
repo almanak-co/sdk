@@ -72,14 +72,18 @@ class PoolContribution:
         protocol: Protocol name (e.g. "uniswap_v3", "aerodrome").
         price: Price from this pool.
         weight: Weight in the aggregation (liquidity share for LWAP, 1.0 for TWAP).
-        liquidity: Raw in-range liquidity from the pool.
+        liquidity: Raw in-range liquidity from the pool. ``None`` (the
+            default) when the reader did not measure liquidity (Empty !=
+            Zero) — such a pool carries no LWAP weight. TWAP contributions
+            never measure liquidity, so defaulting to ``0`` would have
+            presented "unmeasured" as a measured zero.
     """
 
     pool_address: str
     protocol: str
     price: Decimal
     weight: float
-    liquidity: int = 0
+    liquidity: int | None = None
 
 
 @dataclass(frozen=True)
@@ -475,7 +479,10 @@ class PriceAggregator:
             )
         else:
             # Compute LWAP
-            total_liquidity = sum(pp.liquidity for pp, _ in filtered)
+            # ``liquidity or 0`` here is weight math, not a zero measurement:
+            # a pool with UNMEASURED liquidity (None) simply carries no LWAP
+            # weight (live readers always measure; only proxies serve None).
+            total_liquidity = sum((pp.liquidity or 0) for pp, _ in filtered)
             if total_liquidity == 0:
                 # Equal weighting if all liquidities are zero
                 weight = Decimal(1) / Decimal(len(filtered))
@@ -494,7 +501,7 @@ class PriceAggregator:
                 weighted_price = Decimal(0)
                 contributions = []
                 for pp, proto in filtered:
-                    w = Decimal(pp.liquidity) / Decimal(total_liquidity)
+                    w = Decimal(pp.liquidity or 0) / Decimal(total_liquidity)
                     weighted_price += pp.price * w
                     contributions.append(
                         PoolContribution(
@@ -562,6 +569,11 @@ class PriceAggregator:
         threshold = self._min_liquidity_usd
         filtered = []
         for pp, proto in pool_prices:
+            if pp.liquidity is None:
+                # Unmeasured liquidity (Empty != Zero) cannot certify the pool
+                # above the threshold; exclude it here (the caller's
+                # all-filtered fallback still keeps it as best-effort).
+                continue
             if self._reference_price_usd is not None:
                 # Rough USD estimate: liquidity * reference_price / 10^token0_decimals
                 # This is a simplified estimate; real USD conversion would need

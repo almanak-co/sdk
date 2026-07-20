@@ -664,6 +664,11 @@ class SimulatedFill:
     position_delta: SimulatedPosition | None = None
     position_close_id: str | None = None
     position_reduce_id: str | None = None
+    #: LP position whose accrued fees an LP_COLLECT_FEES fill harvests.
+    #: The position stays open; apply_fill pays the fees to the wallet (via
+    #: tokens_in) and resets the position's uncollected-fee counters so a
+    #: later close pays only fees accrued since (double-pay guard).
+    position_collect_id: str | None = None
     position_reduce_amounts: dict[TokenRef, Decimal] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     gas_price_gwei: Decimal | None = None
@@ -707,7 +712,7 @@ class SimulatedFill:
         position_id = (
             self.position_delta.position_id
             if self.position_delta
-            else self.position_close_id or self.position_reduce_id
+            else self.position_close_id or self.position_reduce_id or self.position_collect_id
         )
         # For SWAP fills the actual in/out token amounts are known from the
         # flows (tokens_out = paid = amount_in; tokens_in = received =
@@ -773,6 +778,7 @@ class SimulatedFill:
             "position_delta": self.position_delta.to_dict() if self.position_delta else None,
             "position_close_id": self.position_close_id,
             "position_reduce_id": self.position_reduce_id,
+            "position_collect_id": self.position_collect_id,
             "position_reduce_amounts": {token_ref_display(k): str(v) for k, v in self.position_reduce_amounts.items()},
             "metadata": self.metadata,
             "gas_price_gwei": str(self.gas_price_gwei) if self.gas_price_gwei is not None else None,

@@ -343,7 +343,34 @@ class MarketState:
             if alias is not None:
                 add(alias)
                 add(alias[1])
+            # Native gas symbol ("ETH", "MATIC", ...): price through the
+            # chain's wrapped ERC-20 (1:1 peg — the same plane the engine's
+            # WRAP_NATIVE/UNWRAP_NATIVE conversion uses), so a wallet native
+            # balance stays valued when only the wrapped token is priced.
+            # Added after every literal candidate so a directly-priced native
+            # entry keeps precedence.
+            for wrapped_key in self._native_wrapped_lookup_keys(normalized.upper()):
+                add(wrapped_key)
 
+        return keys
+
+    def _native_wrapped_lookup_keys(self, symbol_upper: str) -> list[TokenRef]:
+        """Wrapped-token lookup candidates for this chain's native symbol."""
+        from almanak.core.chains import ChainRegistry
+
+        descriptor = ChainRegistry.try_resolve(str(self.chain))
+        if descriptor is None or not descriptor.native.wrapped_symbol:
+            return []
+        native_symbols = {descriptor.native.symbol.upper()}
+        native_symbols.update(str(s).upper() for s in descriptor.native.accepted_symbols)
+        if symbol_upper not in native_symbols:
+            return []
+        wrapped_upper = descriptor.native.wrapped_symbol.upper()
+        keys: list[TokenRef] = [wrapped_upper]
+        wrapped_alias = self.symbol_aliases.get(wrapped_upper)
+        if wrapped_alias is not None:
+            keys.append(wrapped_alias)
+            keys.append(wrapped_alias[1])
         return keys
 
     @staticmethod
