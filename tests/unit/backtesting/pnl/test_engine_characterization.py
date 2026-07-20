@@ -15,7 +15,6 @@ real control flow inside ``_run_backtest`` while staying fast and deterministic.
 """
 
 from __future__ import annotations
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -44,6 +43,7 @@ from almanak.framework.backtesting.pnl.mev_simulator import MEVSimulationResult
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 from almanak.framework.backtesting.pnl.position_models import PositionType
 from almanak.framework.backtesting.pnl.providers.gas import GasPrice
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 USDC_ARBITRUM_REF = ("arbitrum", "0xaf88d065e77c8cc2239327c5edb3a432268e5831")
 
@@ -630,8 +630,15 @@ class TestCalculateTokenFlows:
         assert "USDC" in tokens_out and "usdc" not in tokens_out
         assert "WETH" in tokens_in and "weth" not in tokens_in
 
-    def test_swap_missing_from_token_price_falls_back_to_usd_amount(self):
-        """If the source token has no price, the outflow uses the raw USD amount."""
+    def test_swap_missing_from_token_price_raises(self):
+        """If a non-cash source token has no price, the swap raises (ALM-2943).
+
+        The pre-migration behavior booked the raw USD amount as a unit count
+        (an implicit $1 price) — that mints value under degraded price data,
+        so the typed-PriceQuote lane refuses instead.
+        """
+        from almanak.framework.market.errors import PriceUnavailableError
+
         engine = _backtester_for_flows()
 
         @dataclass
@@ -640,28 +647,26 @@ class TestCalculateTokenFlows:
             from_token: str = "XYZ"  # not in MarketState
             to_token: str = "WETH"
 
-        tokens_in, tokens_out = engine._calculate_token_flows(
-            intent=_Intent(),
-            intent_type=IntentType.SWAP,
-            amount_usd=Decimal("500"),
-            executed_price=Decimal("1"),
-            fee_usd=Decimal("0"),
-            slippage_usd=Decimal("0"),
-            market_state=_market_state(),
-        )
+        with pytest.raises(PriceUnavailableError):
+            engine._calculate_token_flows(
+                intent=_Intent(),
+                intent_type=IntentType.SWAP,
+                amount_usd=Decimal("500"),
+                executed_price=Decimal("1"),
+                fee_usd=Decimal("0"),
+                slippage_usd=Decimal("0"),
+                market_state=_market_state(),
+            )
 
-        # Unknown source token uses USD amount as units.
-        assert tokens_out == {"XYZ": Decimal("500")}
-        # Known destination WETH still uses price.
-        assert tokens_in == {"WETH": Decimal("500") / Decimal("3000")}
+    def test_swap_missing_to_token_price_raises(self):
+        """If a non-cash destination token has no price, the swap raises (ALM-2943).
 
-    def test_swap_missing_to_token_price_falls_back_to_usd_amount(self):
-        """If the destination token has no price, the inflow uses the raw USD amount.
-
-        Pins the symmetric ``KeyError`` branch on the inbound side of the swap
-        (separate from the ``from_token`` branch exercised above) so a
-        destination-side regression would fail this suite.
+        Pins the symmetric branch on the inbound side of the swap (separate
+        from the ``from_token`` branch exercised above) so a destination-side
+        regression would fail this suite.
         """
+        from almanak.framework.market.errors import PriceUnavailableError
+
         engine = _backtester_for_flows()
 
         @dataclass
@@ -670,20 +675,16 @@ class TestCalculateTokenFlows:
             from_token: str = "USDC"
             to_token: str = "XYZ"  # not in MarketState
 
-        tokens_in, tokens_out = engine._calculate_token_flows(
-            intent=_Intent(),
-            intent_type=IntentType.SWAP,
-            amount_usd=Decimal("500"),
-            executed_price=Decimal("1"),
-            fee_usd=Decimal("0"),
-            slippage_usd=Decimal("0"),
-            market_state=_market_state(),
-        )
-
-        # Known source USDC still uses price (USDC = $1 => 500 units).
-        assert tokens_out == {"USDC": Decimal("500")}
-        # Unknown destination token uses USD net amount as units.
-        assert tokens_in == {"XYZ": Decimal("500")}
+        with pytest.raises(PriceUnavailableError):
+            engine._calculate_token_flows(
+                intent=_Intent(),
+                intent_type=IntentType.SWAP,
+                amount_usd=Decimal("500"),
+                executed_price=Decimal("1"),
+                fee_usd=Decimal("0"),
+                slippage_usd=Decimal("0"),
+                market_state=_market_state(),
+            )
 
     def test_supply_flows_only_out(self):
         """SUPPLY: token leaves the wallet, nothing comes in."""
@@ -988,10 +989,17 @@ async def _execute_swap(
     config: PnLBacktestConfig,
     market_state: MarketState,
     tracker: _RecordingTracker | None = None,
+    to_token: str = "WETH",
 ) -> Any:
-    """Run a USDC->WETH swap through the generic _execute_intent lane."""
+    """Run a USDC->``to_token`` swap through the generic _execute_intent lane.
+
+    ``to_token`` lets gas-chain tests drop WETH from the market state (to
+    exercise the WETH->ETH gas-symbol fallback) while the swap itself still
+    targets a priced token — the ALM-2943 typed flow lane refuses unpriced
+    non-cash destinations.
+    """
     portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
-    intent = _FakeSwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"))
+    intent = _FakeSwapIntent(from_token="USDC", to_token=to_token, amount=Decimal("100"))
     return await backtester._execute_intent(
         intent=intent,
         portfolio=portfolio,
@@ -1037,7 +1045,7 @@ class TestExecuteIntentGasEthPriceChain:
         config = _gas_config(use_historical_gas_prices=True)
         market_state = _gas_market_state(prices={"ETH": Decimal("2500"), "USDC": Decimal("1")})
 
-        record = await _execute_swap(engine, config, market_state, tracker)
+        record = await _execute_swap(engine, config, market_state, tracker, to_token="ETH")
 
         assert record.gas_cost_usd == _expected_gas_cost_usd(config.gas_price_gwei, Decimal("2500"))
         assert tracker.sources == ["historical"]
@@ -1072,7 +1080,7 @@ class TestExecuteIntentGasEthPriceChain:
         assert record.gas_cost_usd == _expected_gas_cost_usd(config.gas_price_gwei, Decimal("3000"))
 
         eth_only = _gas_market_state(prices={"ETH": Decimal("2500"), "USDC": Decimal("1")})
-        record = await _execute_swap(engine, config, eth_only, tracker)
+        record = await _execute_swap(engine, config, eth_only, tracker, to_token="ETH")
         assert record.gas_cost_usd == _expected_gas_cost_usd(config.gas_price_gwei, Decimal("2500"))
 
         assert tracker.sources == ["market", "market"]
@@ -1433,7 +1441,11 @@ class TestCreatePositionDelta:
 
         assert position.apy_at_entry == InterestCalculator().get_supply_apy_for_protocol("test_protocol")
 
-    def test_supply_missing_price_uses_usd_amount(self):
+    def test_supply_missing_price_raises(self):
+        """ALM-2943: an unpriced non-cash supply no longer books the USD
+        notional as a unit count — the typed flow lane refuses."""
+        from almanak.framework.market.errors import PriceUnavailableError
+
         engine = _backtester_for_flows()
 
         @dataclass
@@ -1442,11 +1454,8 @@ class TestCreatePositionDelta:
             apy: Decimal = Decimal("0.04")
 
         empty_market = MarketState(timestamp=datetime(2024, 1, 1, tzinfo=UTC), prices={})
-        position = self._delta(engine, _SupplyIntent(), IntentType.SUPPLY, ["ARB"], empty_market)
-
-        assert position is not None
-        assert position.amounts["ARB"] == Decimal("1000")
-        assert position.apy_at_entry == Decimal("0.04")
+        with pytest.raises(PriceUnavailableError):
+            self._delta(engine, _SupplyIntent(), IntentType.SUPPLY, ["ARB"], empty_market)
 
     def test_vault_deposit_uses_deposit_token_uppercased(self):
         engine = _backtester_for_flows()
@@ -1479,7 +1488,11 @@ class TestCreatePositionDelta:
         assert position.tokens == ["WETH"]
         assert "Vault deposit missing deposit_token, defaulting to WETH" in caplog.text
 
-    def test_vault_deposit_missing_price_uses_usd_amount(self):
+    def test_vault_deposit_missing_price_raises(self):
+        """ALM-2943: FRAX is not on the cash plane (only USDC/USDT/DAI are),
+        so an unpriced vault deposit refuses instead of assuming $1."""
+        from almanak.framework.market.errors import PriceUnavailableError
+
         engine = _backtester_for_flows()
 
         @dataclass
@@ -1488,10 +1501,8 @@ class TestCreatePositionDelta:
             deposit_token: str = "FRAX"
 
         empty_market = MarketState(timestamp=datetime(2024, 1, 1, tzinfo=UTC), prices={})
-        position = self._delta(engine, _VaultIntent(), IntentType.VAULT_DEPOSIT, [], empty_market)
-
-        assert position is not None
-        assert position.amounts["FRAX"] == Decimal("1000")
+        with pytest.raises(PriceUnavailableError):
+            self._delta(engine, _VaultIntent(), IntentType.VAULT_DEPOSIT, [], empty_market)
 
     def test_borrow_apy_preference_chain(self):
         engine = _backtester_for_flows()

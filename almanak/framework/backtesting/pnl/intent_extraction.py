@@ -15,15 +15,12 @@ from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from typing import Any
 
+from almanak.core.perp_markets import perp_market_base
 from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.data_provider import MarketState, is_address_like, is_token_key
 from almanak.framework.intents.vocabulary import lp_range_bounds, lp_range_is_ticks
 
 logger = logging.getLogger(__name__)
-
-# Separators seen in perp market identifiers: "ETH/USD" (GMX), "ETH-USD",
-# "SOL-PERP" (Drift); bare symbols ("ETH", Hyperliquid) have no separator.
-_PERP_MARKET_SEPARATORS = ("/", "-", ":", "_")
 
 _CLASS_NAME_INTENT_TYPES: tuple[tuple[tuple[str, ...], IntentType], ...] = (
     (("SWAP",), IntentType.SWAP),
@@ -96,19 +93,55 @@ def _class_name_protocols() -> tuple[tuple[tuple[str, ...], str], ...]:
 def _perp_market_base_token(market: str) -> str | None:
     """Parse the base token symbol from a perp market identifier.
 
-    Returns None for address-style identifiers (0x...), which cannot be
-    mapped to a priceable symbol without chain data.
+    Delegates to the shared canonicalizer (``almanak.core.perp_markets``) so
+    the engine, the gateway funding lanes, and the connector funding tables
+    all parse "ETH/USD" / "ETH-USD" / "ETH" identically. Returns None for
+    address-style identifiers (0x...), which cannot be mapped to a priceable
+    symbol without chain data.
     """
-    candidate = market.strip()
-    if not candidate or candidate.lower().startswith("0x"):
-        return None
-    for separator in _PERP_MARKET_SEPARATORS:
-        if separator in candidate:
-            candidate = candidate.split(separator)[0].strip()
-            break
-    if not candidate:
-        return None
-    return candidate.upper()
+    return perp_market_base(market)
+
+
+def perp_base_price_candidates(base: str) -> tuple[str, ...]:
+    """Price-lookup candidates for a perp base asset: itself, then wrapped forms.
+
+    Perp markets quote the NATIVE asset ("ETH/USD"), but backtest market
+    states usually price the wrapped ERC-20 ("WETH") — the token the run's
+    data plane actually tracks. Without the wrapped-form retry, an "ETH/USD"
+    hedge silently priced at a $1 fallback while the run had a perfectly good
+    WETH series (campaign-50 s42). The alias set is the inverse of
+    ``OHLCV_PROXY_MAP`` (the same map the funding lane uses in the unwrap
+    direction), so both lanes agree on which symbols are the same asset.
+    """
+    from almanak.framework.data.models import OHLCV_PROXY_MAP
+
+    base_upper = base.strip().upper()
+    wrapped = tuple(sorted(w for w, b in OHLCV_PROXY_MAP.items() if b == base_upper))
+    return (base_upper, *wrapped)
+
+
+def resolve_perp_base_price(
+    market: Any,
+    market_state: MarketState,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
+) -> tuple[str | None, str | None, Decimal | None]:
+    """Resolve a perp market identifier to ``(base, priced_symbol, price)``.
+
+    ``base`` is the canonical base asset symbol (None when the identifier is
+    unparseable — address-style or empty). ``priced_symbol`` is the candidate
+    (base or its wrapped-native form) that actually resolved to a positive
+    price in ``market_state``; ``price`` is that price. Both are None when the
+    base asset genuinely cannot be priced from market state — callers must
+    treat that as unpriceable and fail loudly, never substitute $1.
+    """
+    base = perp_market_base(market)
+    if base is None:
+        return None, None, None
+    for candidate in perp_base_price_candidates(base):
+        price = _positive_market_price(market_state, candidate, token_addresses)
+        if price is not None:
+            return base, candidate, price
+    return base, None, None
 
 
 def lp_pool_tokens(pool: Any) -> tuple[str, str] | None:
@@ -1000,6 +1033,23 @@ def _perp_close_base_token(market: Any) -> tuple[str | None, bool]:
     return base_token, False
 
 
+def _canonical_perp_base_label(token: Any) -> str:
+    """Canonical base-asset label for perp open/close matching.
+
+    Positions opened from an "ETH/USD" market may carry the PRICEABLE token
+    form ("WETH", or its registered ``(chain, address)`` key) rather than the
+    bare base symbol; a close intent's market always parses to the bare base
+    ("ETH"). Both sides collapse through the provider-symbol resolver with
+    wrapped-native unwrapping so the same asset always matches regardless of
+    which spelling either side carries.
+    """
+    from almanak.framework.backtesting.pnl.data_provider import token_ref_provider_symbol
+
+    if token is None:
+        return ""
+    return token_ref_provider_symbol(token, None, unwrap_wrapped_native=True).upper()
+
+
 def _perp_close_candidates(
     positions: Sequence[Any],
     base_token: str | None,
@@ -1008,15 +1058,16 @@ def _perp_close_candidates(
 ) -> list[Any]:
     from almanak.framework.backtesting.pnl.position_models import PositionType
 
+    intent_base = _canonical_perp_base_label(base_token) if base_token is not None else None
     candidates = []
     for position in positions:
         if not getattr(position, "is_perp", False):
             continue
         if (position.position_type == PositionType.PERP_LONG) != is_long:
             continue
-        if base_token is not None:
-            position_token = position.tokens[0].upper() if position.tokens else ""
-            if position_token != base_token:
+        if intent_base is not None:
+            position_token = _canonical_perp_base_label(position.tokens[0]) if position.tokens else ""
+            if position_token != intent_base:
                 continue
         if protocol and (not position.protocol or position.protocol.lower() != protocol):
             continue
@@ -1522,14 +1573,21 @@ def get_executed_price(
     tokens = get_intent_tokens(intent)
     primary_token = tokens[0] if tokens else "WETH"
 
-    # Get market price
-    try:
-        market_price = _market_price_for(primary_token, market_state, token_addresses)
-    except KeyError:
-        market_price = Decimal("1")
-
     # Apply slippage for market orders
     if intent_type in (IntentType.PERP_OPEN, IntentType.PERP_CLOSE):
+        # Perp marks resolve through the canonical market parse plus the
+        # wrapped-native retry ("ETH/USD" prices off the run's WETH series).
+        # An unpriceable base falls back to the primary-token read below —
+        # PERP_OPEN never reaches that fallback with a $1 mark, because the
+        # engine rejects unpriceable perp opens before pricing (s42).
+        _, _, perp_price = resolve_perp_base_price(getattr(intent, "market", None), market_state, token_addresses)
+        if perp_price is not None:
+            market_price = perp_price
+        else:
+            try:
+                market_price = _market_price_for(primary_token, market_state, token_addresses)
+            except KeyError:
+                market_price = Decimal("1")
         # Adverse slippage per side: open long / close short are buys
         # (higher price); open short / close long are sells (lower price).
         # Perp intents carry no to_token, so direction comes from the side.
@@ -1538,6 +1596,12 @@ def get_executed_price(
         if is_buy:
             return market_price * (Decimal("1") + slippage_pct)
         return market_price * (Decimal("1") - slippage_pct)
+
+    # Get market price
+    try:
+        market_price = _market_price_for(primary_token, market_state, token_addresses)
+    except KeyError:
+        market_price = Decimal("1")
 
     if intent_type == IntentType.SWAP:
         # Slippage is adverse: buying gets a higher price, selling gets a lower price.

@@ -94,11 +94,14 @@ _HOURS_PER_YEAR = 8760
 def _hyperliquid_resolve_coin(market: str) -> str:
     """Resolve the Hyperliquid coin code for ``market``.
 
+    Accepts any canonical spelling ("ETH-USD", "ETH/USD", "ETH") — the table
+    is keyed by the dash form, so the market is canonicalized first.
     Raises ``RateHistoryUnavailable`` if the market is not in the supported set.
     """
+    from almanak.core.perp_markets import perp_market_funding_key
     from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
 
-    coin = _HYPER_MARKET_TO_COIN.get(market)
+    coin = _HYPER_MARKET_TO_COIN.get(perp_market_funding_key(market) or market)
     if coin is None:
         raise RateHistoryUnavailable("hyperliquid", f"Unsupported market: {market!r}")
     return coin
@@ -416,7 +419,9 @@ class HyperliquidGatewayConnector(
         return "hyperliquid"
 
     def default_funding_rate(self, market: str) -> Decimal:
-        return _HYPERLIQUID_DEFAULT_RATES.get(market, _UNKNOWN_MARKET_DEFAULT)
+        from almanak.core.perp_markets import perp_market_funding_key
+
+        return _HYPERLIQUID_DEFAULT_RATES.get(perp_market_funding_key(market) or market, _UNKNOWN_MARKET_DEFAULT)
 
     async def fetch_funding_rate(
         self,

@@ -100,6 +100,16 @@ def token_ref_provider_symbol(
         )
         if registry_symbol is not None:
             return registry_symbol
+        return normalized
+    if unwrap_wrapped_native:
+        # Plain-symbol refs unwrap through the same proxy map as
+        # address-resolved refs: a perp position keyed "WETH" must produce
+        # the same provider symbol ("ETH" -> "ETH-USD" funding key) as one
+        # keyed by the WETH address, or the funding cache/prewarm key parity
+        # silently breaks for symbol-keyed runs.
+        from almanak.framework.data.models import OHLCV_PROXY_MAP
+
+        return OHLCV_PROXY_MAP.get(normalized.upper(), normalized)
     return normalized
 
 

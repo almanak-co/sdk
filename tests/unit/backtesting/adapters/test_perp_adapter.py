@@ -1733,25 +1733,31 @@ class TestExecuteIntentUsesRealPortfolioCash:
         """
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 
-        # Full-wallet margin needs the utilization cap opened: "all" is by
-        # definition 100% of cash-like, so the default 90% cap rejects it —
-        # sizing is resolved either way; RISK POLICY decides, not a sizing gap.
-        # On success the perp adapter validates and DEFERS to the generic lane
-        # (returns None); the engine-level pin asserts the filled position.
-        permissive = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
-        permissive._margin_validator.max_margin_utilization_ratio = Decimal("1.0")
+        # "all" posts the full wallet as collateral, but the utilization gate
+        # measures the position's initial-margin REQUIREMENT (size * ratio),
+        # not the posted collateral — excess collateral is free equity. A
+        # comfortable size ($5,000 at the 10% floor = 5% of the wallet)
+        # validates under the DEFAULT risk policy and DEFERS to the generic
+        # lane (returns None); the engine-level pin asserts the filled
+        # position. (Counting posted collateral made "all" identically 100%
+        # utilized and unfillable at any size — campaign-50 s36.)
+        adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
-        fill = permissive.execute_intent(self._open_intent("all"), portfolio, self._market_state())
+        fill = adapter.execute_intent(self._open_intent("all"), portfolio, self._market_state())
         assert fill is None  # validated at $10,000 collateral, generic lane fills
 
-        # Default risk policy: resolved sizing, margin-rejected — the reason
-        # is the utilization cap, never the old unsupported-sizing wall.
-        adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
+        # RISK POLICY still decides: a size whose initial margin genuinely
+        # needs >90% of the wallet ($95,000 * 10% = $9,500 on $10,000)
+        # margin-rejects on the utilization cap, never the old
+        # unsupported-sizing wall — sizing is resolved either way.
         rejected = adapter.execute_intent(
-            self._open_intent("all"), SimulatedPortfolio(initial_capital_usd=Decimal("10000")), self._market_state()
+            self._open_intent("all", size_usd="95000", leverage="9.5"),
+            SimulatedPortfolio(initial_capital_usd=Decimal("10000")),
+            self._market_state(),
         )
         assert rejected is not None and rejected.success is False
         assert rejected.metadata["validation_type"] == "margin"
+        assert "exceed max margin utilization" in rejected.metadata["failure_reason"]
         assert rejected.metadata["attempted_collateral_amount"] == "10000"
 
 

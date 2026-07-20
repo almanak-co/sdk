@@ -470,6 +470,7 @@ class SimulatedPortfolio:
         # perp-open collateral draw from the same cash_usd, so they must be
         # validated as one sum (each passing individually could still
         # overdraw) before any state mutation.
+        self._absorb_perp_open_venue_costs(fill, cash_debit, token_debits)
         funding_failure = self._cash_funding_failure(fill, cash_debit, token_debits)
         if funding_failure is not None:
             return None, funding_failure
@@ -1055,6 +1056,46 @@ class SimulatedPortfolio:
         if fill.intent_type not in _SLIPPAGE_EMBEDDED_IN_PRICE:
             costs += fill.slippage_usd
         return costs
+
+    def _absorb_perp_open_venue_costs(
+        self,
+        fill: SimulatedFill,
+        cash_debit: Decimal,
+        token_debits: dict[TokenRef, Decimal],
+    ) -> None:
+        """Carve a perp open's venue costs out of its collateral when the
+        wallet cannot pay them on top.
+
+        Live venues charge the open fee against the deposited margin, so a
+        wallet that can fund the collateral but not fee-on-top — the
+        resolved-``"all"`` full-wallet open (campaign-50 s36) — still opens
+        live, with the fee reducing the margin balance. Mirror that here
+        instead of rejecting a fill live execution would accept: shrink the
+        posted collateral by exactly the shortfall (never more than the venue
+        costs), keeping the notional fixed and re-deriving leverage.
+
+        Opens with wallet headroom are untouched: the pre-existing
+        fee-from-cash accounting applies whenever it CAN fund, so
+        explicit-collateral opens keep bit-identical numbers. If the
+        collateral itself is unfundable, this is a no-op and the funding
+        gate rejects as before.
+        """
+        delta = fill.position_delta
+        if delta is None or not delta.is_perp or fill.intent_type != IntentType.PERP_OPEN:
+            return
+        required_cash = cash_debit + delta.collateral_usd
+        if required_cash <= Decimal("0"):
+            return
+        venue_costs = self._venue_cash_costs(fill)
+        shortfall = required_cash + venue_costs - self._cash_like_available(token_debits)
+        if shortfall <= Decimal("0"):
+            return  # headroom covers costs on top of the collateral
+        if shortfall > venue_costs or shortfall >= delta.collateral_usd:
+            return  # collateral itself overdraws — let the funding gate reject
+        delta.collateral_usd -= shortfall
+        if delta.collateral_usd > Decimal("0") and delta.notional_usd > Decimal("0"):
+            delta.leverage = delta.notional_usd / delta.collateral_usd
+        fill.metadata["venue_costs_absorbed_into_collateral_usd"] = str(shortfall)
 
     def _cash_funding_failure(
         self,

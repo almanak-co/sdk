@@ -918,16 +918,28 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         borrow_amount = Decimal(str(intent.borrow_amount))
         protocol = intent.protocol or self._config.protocol
 
-        # Get token price to convert to USD
-        try:
-            borrow_price = market_state.get_price(borrow_token)
-        except KeyError:
-            borrow_price = Decimal("1")  # Assume stablecoin if not found
+        # Convert to USD through a typed PriceQuote (ALM-2943): a missing
+        # market price must not understate debt at $1. Cash-equivalent
+        # stables stay on the deliberate $1 cash plane; any other unpriced
+        # borrow token raises PriceUnavailableError instead of guessing.
+        from almanak.framework.backtesting.pnl._engine_helpers import (
+            _market_price_or_none,
+            typed_usd_from_units,
+        )
 
-        if borrow_price is None or borrow_price <= 0:
-            borrow_price = Decimal("1")
-
-        borrow_usd = borrow_amount * borrow_price
+        market_price = _market_price_or_none(market_state, borrow_token)
+        borrow_usd = typed_usd_from_units(
+            borrow_token,
+            market_price,
+            borrow_amount,
+            chain=getattr(market_state, "chain", None) or getattr(self._config, "chain", None),
+            token_addresses=None,
+            context="lending.borrow_health",
+        )
+        # The effective per-unit price backing borrow_usd (cash-equivalent
+        # stables without a quote sit on the $1 plane) — recorded on the
+        # rejection fill as executed_price.
+        borrow_price = market_price if market_price is not None else Decimal("1")
 
         # Calculate current collateral value from supply positions
         collateral_value = self._get_total_collateral_value(portfolio, market_state)

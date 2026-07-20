@@ -403,7 +403,10 @@ class MarginValidator:
         Checks:
         1. Is collateral sufficient for the position size?
         2. Is there enough available capital for the collateral?
-        3. Would this exceed maximum margin utilization?
+        3. Would the position's initial-margin requirement (position_size *
+           margin_ratio) push margin utilization past the maximum? Excess
+           collateral posted beyond the requirement is free collateral, not
+           used margin, so it does not count toward utilization.
 
         Args:
             position_size: Notional size of proposed position
@@ -439,8 +442,22 @@ class MarginValidator:
             )
 
         # Check 3: Would this exceed max utilization?
-        new_margin_used = current_margin_used + collateral
-        new_available = available_capital - collateral
+        #
+        # The margin the new position COMMITS is its initial-margin
+        # requirement (position_size * required_ratio), not the collateral
+        # posted: collateral above the requirement stays withdrawable equity
+        # (venue "free collateral"), so counting it as used margin would
+        # punish conservative over-collateralization. In particular,
+        # collateral="all" resolves to the full spendable balance — measuring
+        # THAT as used margin collapses utilization to
+        # (margin_used + capital) / (margin_used + capital) = 100% identically,
+        # rejecting every wallet-funded open regardless of size (campaign-50
+        # s36). Utilization is (margin_used + required) / (margin_used +
+        # available_capital); checks 1-2 guarantee required <= collateral <=
+        # available_capital, so the new available term never goes negative.
+        required_margin = position_size * required_ratio
+        new_margin_used = current_margin_used + required_margin
+        new_available = available_capital - required_margin
         utilization = self.calculate_margin_utilization(
             total_margin_used=new_margin_used,
             total_notional=position_size,  # Simplified - doesn't include other positions

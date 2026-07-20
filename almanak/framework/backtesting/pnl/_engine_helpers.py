@@ -87,8 +87,13 @@ from almanak.framework.backtesting.pnl.intent_extraction import (
     lp_explicit_pair,
     lp_pool_tokens,
 )
-from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+from almanak.framework.backtesting.pnl.money import PriceQuote, TokenIdentity, TokenUnits, UsdAmount
+from almanak.framework.backtesting.pnl.portfolio import (
+    CASH_EQUIVALENT_STABLECOIN_SYMBOLS,
+    SimulatedPortfolio,
+)
 from almanak.framework.backtesting.pnl.run_context import BacktestRunContext
+from almanak.framework.market.errors import PriceUnavailableError
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
@@ -578,7 +583,7 @@ async def execute_iteration_loop(
         SimulatedGasView,
         build_backtest_lending_rates,
     )
-    from almanak.framework.backtesting.pnl.indicator_engine import timeframe_label
+    from almanak.framework.backtesting.pnl.indicator_engine import cadence_is_coarser, timeframe_label
 
     tick_timeframe = timeframe_label(config.interval_seconds)
     rsi_provider, indicator_provider = state.indicator_engine.snapshot_providers(
@@ -606,7 +611,7 @@ async def execute_iteration_loop(
                 # values computed from flat upsampled ticks (ALM-2957).
                 measured = getattr(backtester.data_provider, "measured_granularity_seconds", None)
                 state.indicator_engine.set_data_granularity(measured, config.interval_seconds)
-                if measured is not None and measured > config.interval_seconds:
+                if measured is not None and cadence_is_coarser(measured, config.interval_seconds):
                     bt_logger.warning(
                         f"Price data resolution is {timeframe_label(measured)} but the backtest ticks at "
                         f"{tick_timeframe}: indicators finer than {timeframe_label(measured)} will refuse "
@@ -1224,6 +1229,135 @@ def _market_state_chain(market_state: MarketState) -> str:
     return str(getattr(market_state, "chain", DEFAULT_CHAIN))
 
 
+def _market_price_or_none(market_state: MarketState, token: Any) -> Decimal | None:
+    """Positive market price for ``token``, or None when absent or non-positive.
+
+    A zero/negative price is a data defect masquerading as a measurement
+    (Empty != Zero) and is reported as absence, matching the PriceQuote
+    construction contract in :mod:`almanak.framework.backtesting.pnl.money`.
+    """
+    try:
+        price = market_state.get_price(token)
+    except KeyError:
+        return None
+    if price is None or price <= 0:
+        return None
+    return price
+
+
+def _flow_token_identity(
+    token: Any,
+    chain: str | None,
+    token_addresses: Mapping[str, tuple[str, str]] | None,
+) -> TokenIdentity:
+    """Canonical :class:`TokenIdentity` for a (normalized) flow-lane token ref.
+
+    Address-shaped refs keep their ``(chain, address)`` key; plain symbols
+    resolve through the engine's registered ``{SYMBOL: (chain, address)}``
+    map when available, otherwise stay symbol-keyed on the run's chain.
+    ``UNRESOLVED`` is a display-only placeholder — identity hashing uses the
+    address, never the symbol, when an address exists.
+    """
+    resolved_chain = (chain or DEFAULT_CHAIN).lower()
+    if isinstance(token, tuple) and len(token) == 2:
+        token_chain = str(token[0]).lower()
+        raw_address = str(token[1])
+        address = raw_address.lower()
+        for symbol, entry in (token_addresses or {}).items():
+            if is_token_key(entry) and normalize_token_key(str(entry[0]), str(entry[1])) == (token_chain, address):
+                if is_address_like(address):
+                    return TokenIdentity(chain=token_chain, address=address, symbol=symbol)
+                # Non-EVM key (e.g. a base58 mint): TokenIdentity's address
+                # slot is EVM-only — keep identity via the registered symbol.
+                return TokenIdentity(chain=token_chain, address=None, symbol=symbol)
+        if is_address_like(address):
+            return TokenIdentity(chain=token_chain, address=address, symbol="UNRESOLVED")
+        # Unregistered non-EVM key: the raw key doubles as the symbol so two
+        # distinct mints never collapse to one identity.
+        return TokenIdentity(chain=token_chain, address=None, symbol=raw_address)
+    symbol = str(token).strip()
+    if is_address_like(symbol):
+        return TokenIdentity(chain=resolved_chain, address=symbol.lower(), symbol="UNRESOLVED")
+    symbol = symbol.upper()
+    registered = (token_addresses or {}).get(symbol)
+    if registered is not None and is_token_key(registered):
+        reg_chain, reg_address = str(registered[0]), str(registered[1])
+        if is_address_like(reg_address):
+            return TokenIdentity(chain=reg_chain, address=reg_address, symbol=symbol)
+        return TokenIdentity(chain=reg_chain, address=None, symbol=symbol)
+    return TokenIdentity(chain=resolved_chain, address=None, symbol=symbol)
+
+
+def _typed_price_quote(
+    identity: TokenIdentity,
+    price: Decimal | None,
+    context: str,
+) -> PriceQuote | None:
+    """Build the PriceQuote for a conversion site, or None when truly absent.
+
+    A positive market price is used as-is (provenance ``market_state:...``).
+    With no market price, cash-equivalent stables resolve on the deliberate
+    $1 cash plane (#3318 doctrine — inside the sim those balances ARE
+    ``cash_usd`` at face value); everything else is absence and the caller's
+    to_usd/to_units conversion raises instead of guessing.
+    """
+    if price is not None and price > 0:
+        return PriceQuote(token=identity, usd_per_unit=price, source=f"market_state:{context}")
+    if identity.symbol in CASH_EQUIVALENT_STABLECOIN_SYMBOLS:
+        return PriceQuote(token=identity, usd_per_unit=Decimal("1"), source=f"cash-equivalent-plane:{context}")
+    return None
+
+
+def typed_units_from_usd(
+    token: Any,
+    price: Decimal | None,
+    amount_usd: Decimal,
+    *,
+    chain: str | None,
+    token_addresses: Mapping[str, tuple[str, str]] | None,
+    context: str,
+) -> Decimal:
+    """Convert a USD notional to token units through a typed PriceQuote (ALM-2943).
+
+    A positive market ``price`` yields exactly the pre-migration
+    ``amount_usd / price`` — this is a no-op on healthy data. An absent or
+    non-positive price is *absence*: cash-equivalent stables stay on the $1
+    cash plane (units == USD), and every other token raises
+    :class:`PriceUnavailableError` instead of minting units at $1 or
+    silently skipping the leg.
+    """
+    identity = _flow_token_identity(token, chain, token_addresses)
+    quote = _typed_price_quote(identity, price, context)
+    if quote is None:
+        raise PriceUnavailableError(
+            identity.display(),
+            f"no market price in {context} — refusing to size token units from USD "
+            "(a raw-USD-as-units fallback mints value)",
+        )
+    return UsdAmount(amount_usd).to_units(quote).units
+
+
+def typed_usd_from_units(
+    token: Any,
+    price: Decimal | None,
+    units: Decimal,
+    *,
+    chain: str | None,
+    token_addresses: Mapping[str, tuple[str, str]] | None,
+    context: str,
+) -> Decimal:
+    """Value token units in USD through a typed PriceQuote (ALM-2943).
+
+    Mirror of :func:`typed_units_from_usd`: positive market prices convert
+    exactly as before, cash-equivalent stables fall back to the $1 cash
+    plane only when no market price exists, and any other absent price
+    raises :class:`PriceUnavailableError` instead of valuing at $1.
+    """
+    identity = _flow_token_identity(token, chain, token_addresses)
+    quote = _typed_price_quote(identity, price, context)
+    return TokenUnits(token=identity, units=units).to_usd(quote).value
+
+
 def _normalize_token(
     token: Any,
     chain: str | None = None,
@@ -1265,8 +1399,9 @@ def _calculate_swap_flows(
     """SWAP: one token leaves (``from_token``), another arrives (``to_token``).
 
     Outflow uses ``amount_usd`` at ``from_token`` price. Inflow uses
-    ``amount_usd - fee_usd - slippage_usd`` at ``to_token`` price. Unknown
-    prices fall back to the raw USD amount as a unit count.
+    ``amount_usd - fee_usd - slippage_usd`` at ``to_token`` price. USD↔unit
+    conversion goes through a typed PriceQuote (ALM-2943): an absent price
+    raises for non-cash tokens instead of booking USD as a unit count.
     """
     tokens_in: dict[TokenRef, Decimal] = {}
     tokens_out: dict[TokenRef, Decimal] = {}
@@ -1276,22 +1411,24 @@ def _calculate_swap_flows(
     to_token = _normalize_token(getattr(intent, "to_token", "WETH"), chain, token_addresses)
 
     # Amount out is the trade amount
-    amount_out = amount_usd
-    try:
-        from_price = market_state.get_price(from_token)
-        if from_price > 0:
-            tokens_out[from_token] = amount_out / from_price
-    except KeyError:
-        tokens_out[from_token] = amount_out  # Assume $1 price
+    tokens_out[from_token] = typed_units_from_usd(
+        from_token,
+        _market_price_or_none(market_state, from_token),
+        amount_usd,
+        chain=chain,
+        token_addresses=token_addresses,
+        context="swap.from_leg",
+    )
 
     # Amount in is after fees and slippage
-    amount_in_usd = amount_usd - fee_usd - slippage_usd
-    try:
-        to_price = market_state.get_price(to_token)
-        if to_price > 0:
-            tokens_in[to_token] = amount_in_usd / to_price
-    except KeyError:
-        tokens_in[to_token] = amount_in_usd  # Assume $1 price
+    tokens_in[to_token] = typed_units_from_usd(
+        to_token,
+        _market_price_or_none(market_state, to_token),
+        amount_usd - fee_usd - slippage_usd,
+        chain=chain,
+        token_addresses=token_addresses,
+        context="swap.to_leg",
+    )
 
     return tokens_in, tokens_out
 
@@ -1320,14 +1457,17 @@ def _calculate_supply_flows(
     tokens_in: dict[TokenRef, Decimal] = {}
     tokens_out: dict[TokenRef, Decimal] = {}
 
-    token = _resolve_single_token(intent, "WETH", _market_state_chain(market_state), token_addresses)
+    chain = _market_state_chain(market_state)
+    token = _resolve_single_token(intent, "WETH", chain, token_addresses)
 
-    try:
-        price = market_state.get_price(token)
-        if price > 0:
-            tokens_out[token] = amount_usd / price
-    except KeyError:
-        tokens_out[token] = amount_usd
+    tokens_out[token] = typed_units_from_usd(
+        token,
+        _market_price_or_none(market_state, token),
+        amount_usd,
+        chain=chain,
+        token_addresses=token_addresses,
+        context="supply",
+    )
 
     return tokens_in, tokens_out
 
@@ -1342,14 +1482,17 @@ def _calculate_withdraw_flows(
     tokens_in: dict[TokenRef, Decimal] = {}
     tokens_out: dict[TokenRef, Decimal] = {}
 
-    token = _resolve_single_token(intent, "WETH", _market_state_chain(market_state), token_addresses)
+    chain = _market_state_chain(market_state)
+    token = _resolve_single_token(intent, "WETH", chain, token_addresses)
 
-    try:
-        price = market_state.get_price(token)
-        if price > 0:
-            tokens_in[token] = amount_usd / price
-    except KeyError:
-        tokens_in[token] = amount_usd
+    tokens_in[token] = typed_units_from_usd(
+        token,
+        _market_price_or_none(market_state, token),
+        amount_usd,
+        chain=chain,
+        token_addresses=token_addresses,
+        context="withdraw",
+    )
 
     return tokens_in, tokens_out
 
@@ -1376,12 +1519,14 @@ def _calculate_borrow_flows(
     else:
         token = _resolve_single_token(intent, "USDC", chain, token_addresses)
 
-    try:
-        price = market_state.get_price(token)
-        if price > 0:
-            tokens_in[token] = amount_usd / price
-    except KeyError:
-        tokens_in[token] = amount_usd
+    tokens_in[token] = typed_units_from_usd(
+        token,
+        _market_price_or_none(market_state, token),
+        amount_usd,
+        chain=chain,
+        token_addresses=token_addresses,
+        context="borrow",
+    )
 
     return tokens_in, tokens_out
 
@@ -1396,14 +1541,17 @@ def _calculate_repay_flows(
     tokens_in: dict[TokenRef, Decimal] = {}
     tokens_out: dict[TokenRef, Decimal] = {}
 
-    token = _resolve_single_token(intent, "USDC", _market_state_chain(market_state), token_addresses)
+    chain = _market_state_chain(market_state)
+    token = _resolve_single_token(intent, "USDC", chain, token_addresses)
 
-    try:
-        price = market_state.get_price(token)
-        if price > 0:
-            tokens_out[token] = amount_usd / price
-    except KeyError:
-        tokens_out[token] = amount_usd
+    tokens_out[token] = typed_units_from_usd(
+        token,
+        _market_price_or_none(market_state, token),
+        amount_usd,
+        chain=chain,
+        token_addresses=token_addresses,
+        context="repay",
+    )
 
     return tokens_in, tokens_out
 
@@ -1452,22 +1600,28 @@ def _calculate_lp_open_flows(
     tokens_in: dict[TokenRef, Decimal] = {}
     tokens_out: dict[TokenRef, Decimal] = {}
 
-    token0, token1 = _resolve_lp_tokens(intent, _market_state_chain(market_state), token_addresses)
+    chain = _market_state_chain(market_state)
+    token0, token1 = _resolve_lp_tokens(intent, chain, token_addresses)
 
     # Split the USD amount roughly 50/50
     half_amount = amount_usd / Decimal("2")
 
-    try:
-        price0 = market_state.get_price(token0)
-        tokens_out[token0] = half_amount / price0
-    except KeyError:
-        tokens_out[token0] = half_amount
-
-    try:
-        price1 = market_state.get_price(token1)
-        tokens_out[token1] = half_amount / price1
-    except KeyError:
-        tokens_out[token1] = half_amount
+    tokens_out[token0] = typed_units_from_usd(
+        token0,
+        _market_price_or_none(market_state, token0),
+        half_amount,
+        chain=chain,
+        token_addresses=token_addresses,
+        context="lp_open.token0",
+    )
+    tokens_out[token1] = typed_units_from_usd(
+        token1,
+        _market_price_or_none(market_state, token1),
+        half_amount,
+        chain=chain,
+        token_addresses=token_addresses,
+        context="lp_open.token1",
+    )
 
     return tokens_in, tokens_out
 
@@ -1485,22 +1639,28 @@ def _calculate_lp_close_flows(
     tokens_in: dict[TokenRef, Decimal] = {}
     tokens_out: dict[TokenRef, Decimal] = {}
 
-    token0, token1 = _resolve_lp_tokens(intent, _market_state_chain(market_state), token_addresses)
+    chain = _market_state_chain(market_state)
+    token0, token1 = _resolve_lp_tokens(intent, chain, token_addresses)
 
     # Approximate tokens received (actual depends on IL)
     half_amount = amount_usd / Decimal("2")
 
-    try:
-        price0 = market_state.get_price(token0)
-        tokens_in[token0] = half_amount / price0
-    except KeyError:
-        tokens_in[token0] = half_amount
-
-    try:
-        price1 = market_state.get_price(token1)
-        tokens_in[token1] = half_amount / price1
-    except KeyError:
-        tokens_in[token1] = half_amount
+    tokens_in[token0] = typed_units_from_usd(
+        token0,
+        _market_price_or_none(market_state, token0),
+        half_amount,
+        chain=chain,
+        token_addresses=token_addresses,
+        context="lp_close.token0",
+    )
+    tokens_in[token1] = typed_units_from_usd(
+        token1,
+        _market_price_or_none(market_state, token1),
+        half_amount,
+        chain=chain,
+        token_addresses=token_addresses,
+        context="lp_close.token1",
+    )
 
     return tokens_in, tokens_out
 
@@ -1532,13 +1692,17 @@ def _calculate_vault_token_amount(
     ``_calculate_vault_redeem_flows``: the only per-branch difference is
     whether the resulting amount lands in ``tokens_in`` or ``tokens_out``.
     """
-    token = _resolve_vault_token(intent, _market_state_chain(market_state), token_addresses)
+    chain = _market_state_chain(market_state)
+    token = _resolve_vault_token(intent, chain, token_addresses)
 
-    try:
-        price = market_state.get_price(token)
-        amount = amount_usd / price if price > 0 else amount_usd
-    except KeyError:
-        amount = amount_usd
+    amount = typed_units_from_usd(
+        token,
+        _market_price_or_none(market_state, token),
+        amount_usd,
+        chain=chain,
+        token_addresses=token_addresses,
+        context="vault",
+    )
 
     return token, amount
 

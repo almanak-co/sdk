@@ -716,6 +716,37 @@ class TestGranularityHonesty:
         rsi = rsi_provider("WETH", period=14, timeframe="1d")
         assert Decimal("0") <= rsi.value <= Decimal("100")
 
+    def test_jittered_hourly_cadence_serves_hourly(self) -> None:
+        # ALM-2962: CoinGecko hourly points are sometimes spaced 3601s apart,
+        # so short windows measure 3601s cadence. That is jitter, not coarser
+        # data — 1h indicators must still serve.
+        prices = _generate_prices(3500.0, 30)
+        engine = _create_engine_with_prices("WETH", prices, {"rsi"})
+        engine.set_data_granularity(3601, 3600)
+
+        assert engine._degenerate_at_tick() is False
+        snapshot = _make_snapshot()
+        engine.populate_snapshot(snapshot)
+        assert snapshot.rsi("WETH").period == 14
+
+        rsi_provider, _ = engine.snapshot_providers(None, 3600)
+        rsi = rsi_provider("WETH", period=14, timeframe="1h")
+        assert Decimal("0") <= rsi.value <= Decimal("100")
+
+    def test_jitter_tolerance_does_not_loosen_upsampling_refusal(self) -> None:
+        # Jittered hourly data (3601s) on a 15m tick grid: 1h serves, but a
+        # 15m request is genuine upsampling and must keep refusing (ALM-2957).
+        hourly = [3000.0 + 13 * ((i * 7) % 11) for i in range(20)]
+        quarter_hourly = [p for p in hourly for _ in range(4)]
+        engine = _create_engine_with_prices("WETH", quarter_hourly, {"rsi"})
+        engine.set_data_granularity(3601, 900)
+
+        rsi_provider, _ = engine.snapshot_providers(None, 900)
+        with pytest.raises(ValueError, match="ALM-2957"):
+            rsi_provider("WETH", period=14, timeframe="15m")
+        rsi = rsi_provider("WETH", period=14, timeframe="1h")
+        assert Decimal("0") <= rsi.value <= Decimal("100")
+
     def test_retention_scaling_is_idempotent(self) -> None:
         engine = BacktestIndicatorEngine(required_indicators={"rsi"})
         engine.set_data_granularity(86400, 3600)

@@ -103,6 +103,16 @@ def make_open_intent(**overrides: Any) -> PerpOpenIntent:
     return PerpOpenIntent(**params)
 
 
+def _make_perp_adapter():
+    """The real registered-adapter wiring (the lane campaign-50 s36 found dead)."""
+    from almanak.framework.backtesting.adapters.perp_adapter import (
+        PerpBacktestAdapter,
+        PerpBacktestConfig,
+    )
+
+    return PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
+
+
 def make_close_intent(**overrides: Any) -> PerpCloseIntent:
     params: dict[str, Any] = {
         "market": "ETH/USD",
@@ -290,11 +300,20 @@ class TestPerpOpenExecution:
         assert position.leverage == Decimal("2")
 
     @pytest.mark.asyncio
-    async def test_open_collateral_all_resolves_identically_in_both_lanes(self):
+    @pytest.mark.parametrize("with_perp_adapter", [False, True], ids=["generic-lane", "registered-adapter"])
+    async def test_open_collateral_all_resolves_identically_in_both_lanes(self, with_perp_adapter):
         """collateral_amount='all' resolves once at ingress (phase 5): the
         generic lane opens the position collateralized at the full spendable
-        balance — the same figure the adapter lane reads."""
+        balance — the same figure the adapter lane reads.
+
+        Runs BOTH with and without a registered perp adapter: the adapter's
+        margin gate must measure the position's initial-margin requirement,
+        not the posted collateral — measuring the resolved-"all" figure as
+        used margin made utilization identically 100% and the adapter lane
+        unfillable at any size (campaign-50 s36)."""
         backtester = make_backtester()
+        if with_perp_adapter:
+            backtester._adapter = _make_perp_adapter()
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100000"))
         intent = make_open_intent(collateral_amount="all")
 
@@ -303,6 +322,51 @@ class TestPerpOpenExecution:
         assert trade.success is True
         assert len(portfolio.positions) == 1
         assert portfolio.positions[0].collateral_usd == Decimal("100000")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_perp_adapter", [False, True], ids=["generic-lane", "registered-adapter"])
+    async def test_open_collateral_all_with_fees_absorbs_costs_into_collateral(self, with_perp_adapter):
+        """A full-wallet 'all' open cannot pay the venue fee on top of the
+        collateral. Live venues charge the open fee against the deposited
+        margin, so the fill absorbs it into the posted collateral (keeping
+        the notional fixed) instead of rejecting a fill live execution
+        would accept. Opens with wallet headroom keep fee-from-cash
+        accounting (test_open_fee_charged_on_notional)."""
+        backtester = make_backtester(fee_pct=Decimal("0.001"))
+        if with_perp_adapter:
+            backtester._adapter = _make_perp_adapter()
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100000"))
+        intent = make_open_intent(collateral_amount="all")
+
+        trade = await execute(backtester, intent, portfolio)
+
+        assert trade.success is True
+        assert len(portfolio.positions) == 1
+        # fee = 0.1% of the $5,000 notional = $5, carved out of collateral
+        assert portfolio.positions[0].collateral_usd == Decimal("99995")
+        assert portfolio.positions[0].notional_usd == Decimal("5000")
+        assert portfolio.cash_usd == Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_open_collateral_all_overextended_still_rejects_on_margin(self):
+        """The fix measures utilization correctly; it does not bypass the cap
+        (ph5 risk doctrine): 'all' with a size whose initial margin genuinely
+        needs >90% of the wallet ($950,000 * 10% floor = $95,000 on a
+        $100,000 wallet = 95%) still rejects with the margin message."""
+        backtester = make_backtester()
+        backtester._adapter = _make_perp_adapter()
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100000"))
+        intent = make_open_intent(
+            collateral_amount="all",
+            size_usd=Decimal("950000"),
+            leverage=Decimal("9.5"),
+        )
+
+        trade = await execute(backtester, intent, portfolio)
+
+        assert trade.success is False
+        assert "exceed max margin utilization" in (trade.error or "")
+        assert portfolio.positions == []
 
     @pytest.mark.asyncio
     async def test_open_fee_charged_on_notional(self):

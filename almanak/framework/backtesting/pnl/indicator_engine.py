@@ -92,6 +92,24 @@ def _timeframe_seconds(timeframe: str) -> int:
     raise ValueError(f"unknown timeframe {timeframe!r}")
 
 
+#: Cadence jitter cap (ALM-2962): vendors emit slightly irregular timestamps
+#: (CoinGecko hourly points are sometimes spaced 3601s apart), so on short
+#: windows the measured cadence can read a hair coarser than the true one.
+_CADENCE_JITTER_CAP_SECONDS = 60
+
+
+def cadence_is_coarser(cadence_seconds: int, timeframe_seconds: int) -> bool:
+    """True when a measured data cadence is GENUINELY coarser than a timeframe.
+
+    Measured cadence within 2% of the timeframe (capped at 60s absolute)
+    counts as matching: 3601s-spaced hourly points still serve 1h candles.
+    Real upsampling still refuses (ALM-2957 doctrine) — 1h data asked for
+    15m candles is 2700s coarser, far past any jitter tolerance.
+    """
+    tolerance = min(_CADENCE_JITTER_CAP_SECONDS, int(timeframe_seconds) * 2 // 100)
+    return int(cadence_seconds) - int(timeframe_seconds) > tolerance
+
+
 # Maximum price history to keep per token (covers all standard indicator periods)
 DEFAULT_MAX_HISTORY = 200
 
@@ -709,7 +727,7 @@ class BacktestIndicatorEngine:
         if (
             granularity_seconds is not None
             and tick_interval_seconds > 0
-            and granularity_seconds > tick_interval_seconds
+            and cadence_is_coarser(granularity_seconds, tick_interval_seconds)
         ):
             ratio = min(
                 -(-granularity_seconds // tick_interval_seconds),  # ceil div
@@ -729,7 +747,7 @@ class BacktestIndicatorEngine:
         return (
             self._data_granularity_seconds is not None
             and self._tick_interval_seconds is not None
-            and self._data_granularity_seconds > self._tick_interval_seconds
+            and cadence_is_coarser(self._data_granularity_seconds, self._tick_interval_seconds)
         )
 
     def _series_for(self, token: str, timeframe: str | None, tick_interval_seconds: int) -> list[Decimal]:
@@ -748,7 +766,14 @@ class BacktestIndicatorEngine:
             raise InsufficientDataError(required=1, available=0, indicator="price history")
         requested = _timeframe_seconds(timeframe) if timeframe else tick_interval_seconds
         native = self._data_granularity_seconds
-        if native is not None and native > tick_interval_seconds and requested < native:
+        # Both comparisons tolerate vendor timestamp jitter (ALM-2962): a
+        # 3601s-measured hourly cadence must still serve 1h candles, while
+        # genuinely finer-than-data requests keep refusing (ALM-2957).
+        if (
+            native is not None
+            and cadence_is_coarser(native, tick_interval_seconds)
+            and cadence_is_coarser(native, requested)
+        ):
             raise ValueError(
                 f"underlying price data has {timeframe_label(native)} resolution; a "
                 f"{timeframe_label(requested)} indicator would be computed from flat upsampled "

@@ -354,7 +354,9 @@ class TestAddressKeyedSnapshotResolutionAllReads:
         from almanak.framework.market import MACDData
 
         snap = self._snapshot()
-        snap.set_macd(self.CB_ADDR, MACDData(macd_line=Decimal("1"), signal_line=Decimal("0.5"), histogram=Decimal("0.5")))
+        snap.set_macd(
+            self.CB_ADDR, MACDData(macd_line=Decimal("1"), signal_line=Decimal("0.5"), histogram=Decimal("0.5"))
+        )
         assert snap.macd(self.CB_ADDR).macd_line == Decimal("1")
 
     def test_atr_resolves_by_address(self):
@@ -517,9 +519,7 @@ class TestSymbolAliasBridge:
             chain="solana",
             prices={self.SOL_KEY: Decimal("150")},
         )
-        snapshot = create_market_snapshot_from_state(
-            state, chain="solana", token_addresses={"SOL": self.SOL_KEY}
-        )
+        snapshot = create_market_snapshot_from_state(state, chain="solana", token_addresses={"SOL": self.SOL_KEY})
         assert snapshot.price("SOL") == Decimal("150")
         assert snapshot.price(f"solana:{self.SOL_MINT}") == Decimal("150")
 
@@ -581,17 +581,23 @@ class TestSymbolIntentFlows:
         assert tokens_out == {self.WETH_KEY: Decimal("31") / Decimal("2000")}
         assert tokens_in == {self.USDC_KEY: Decimal("31")}
 
-    def test_swap_flows_keep_legacy_fallback_for_unregistered_symbols(self):
+    def test_swap_flows_refuse_unpriced_unregistered_symbols(self):
+        """ALM-2943: the legacy $1-per-unit fallback for unregistered symbols
+        was silent value minting (a $31 USD swap booked as 31 CBBTC). The
+        typed flow lane now refuses to size an unpriced non-cash leg."""
         from types import SimpleNamespace
+
+        import pytest
 
         from almanak.framework.backtesting.models import IntentType
         from almanak.framework.backtesting.pnl._engine_helpers import calculate_token_flows
+        from almanak.framework.market.errors import PriceUnavailableError
 
         intent = SimpleNamespace(from_token="CBBTC", to_token="USDC")
-        _tokens_in, tokens_out = calculate_token_flows(
-            intent, IntentType.SWAP, Decimal("31"), Decimal("0"), Decimal("0"), self._state(), self.TOKEN_ADDRESSES
-        )
-        assert tokens_out == {"CBBTC": Decimal("31")}
+        with pytest.raises(PriceUnavailableError):
+            calculate_token_flows(
+                intent, IntentType.SWAP, Decimal("31"), Decimal("0"), Decimal("0"), self._state(), self.TOKEN_ADDRESSES
+            )
 
     def test_supply_flows_resolve_symbol_through_registered_map(self):
         from types import SimpleNamespace

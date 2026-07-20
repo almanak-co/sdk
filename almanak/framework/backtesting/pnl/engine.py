@@ -59,6 +59,7 @@ Examples:
 """
 
 import functools
+import inspect as _inspect
 import logging
 import uuid
 from collections.abc import Iterable, Mapping
@@ -227,10 +228,19 @@ class SlippageModel(Protocol):
         ...
 
 
-# Zero-fee intent types
+# Zero-fee intent types: non-swap intents carry no swap-style protocol fee on
+# the generic path (mirrors _ZERO_SLIPPAGE_INTENTS — lending/vault operations
+# are not market trades; charging the 0.3% swap fee on SUPPLY/WITHDRAW turned
+# a profitable supply-hold into a phantom loss).
 _ZERO_FEE_INTENTS: frozenset[IntentType] = frozenset(
     {
         IntentType.HOLD,
+        IntentType.SUPPLY,
+        IntentType.WITHDRAW,
+        IntentType.REPAY,
+        IntentType.BORROW,
+        IntentType.VAULT_DEPOSIT,
+        IntentType.VAULT_REDEEM,
     }
 )
 
@@ -246,6 +256,58 @@ _ZERO_SLIPPAGE_INTENTS: frozenset[IntentType] = frozenset(
         IntentType.VAULT_REDEEM,
     }
 )
+
+
+# Fee models come in two calling conventions:
+#   1. Engine protocol (this module's FeeModel Protocol / DefaultFeeModel):
+#      calculate_fee(intent_type, amount_usd, market_state, protocol, **kwargs)
+#   2. fee_models ABC (pnl/fee_models/base.py, all connector fee models):
+#      calculate_fee(trade_amount, **kwargs)
+# The engine call site dispatches per-model so ABC-convention connector models
+# (e.g. AaveV3FeeModel) are wireable without a TypeError. Convention is
+# detected once per model class and cached.
+_FEE_MODEL_CONVENTION_CACHE: dict[type, bool] = {}
+
+
+def _fee_model_takes_trade_amount(model: Any) -> bool:
+    """Return True when ``model.calculate_fee`` follows the fee_models ABC
+    convention (leading ``trade_amount`` parameter) rather than the engine
+    protocol (``intent_type, amount_usd, ...``)."""
+    model_cls = type(model)
+    cached = _FEE_MODEL_CONVENTION_CACHE.get(model_cls)
+    if cached is None:
+        try:
+            params: Mapping[str, Any] = _inspect.signature(model.calculate_fee).parameters
+        except (TypeError, ValueError):  # builtins / C-level callables
+            params = {}
+        cached = "trade_amount" in params and "amount_usd" not in params
+        _FEE_MODEL_CONVENTION_CACHE[model_cls] = cached
+    return cached
+
+
+def _invoke_fee_model(
+    model: Any,
+    intent_type: IntentType,
+    amount_usd: Decimal,
+    market_state: MarketState,
+    protocol: str,
+) -> Decimal:
+    """Invoke ``model.calculate_fee`` under whichever convention it declares."""
+    if _fee_model_takes_trade_amount(model):
+        # fee_models ABC convention (connectors/*/fee_model.py):
+        # calculate_fee(trade_amount, **kwargs)
+        return model.calculate_fee(
+            amount_usd,
+            intent_type=intent_type,
+            market_state=market_state,
+            protocol=protocol,
+        )
+    return model.calculate_fee(
+        intent_type=intent_type,
+        amount_usd=amount_usd,
+        market_state=market_state,
+        protocol=protocol,
+    )
 
 
 @_dataclass
@@ -3163,6 +3225,30 @@ class PnLBacktester:
                 amount_usd=Decimal("0"),
                 failure_reason="zero-notional intent: amount resolved to $0 (empty balance or unresolvable size)",
             )
+        # A perp open whose base asset has no price in market state must be a
+        # NAMED rejection, not a silent $1 entry: the $1 mark froze unrealized
+        # PnL and made the hedge economically inert with a "filled" blotter
+        # (campaign-50 s42). The resolver already retries the wrapped-native
+        # form (ETH -> WETH), so this only fires for genuinely unpriceable
+        # markets. Fail-honest doctrine: mirror the zero-notional rejection.
+        if close_resolution.failure_reason is None and intent_type == IntentType.PERP_OPEN:
+            market = getattr(intent, "market", None)
+            if isinstance(market, str) and market.strip():
+                from .intent_extraction import perp_base_price_candidates, resolve_perp_base_price
+
+                base, priced_symbol, _price = resolve_perp_base_price(
+                    market, market_state, self._registered_token_addresses()
+                )
+                if priced_symbol is None:
+                    tried = ", ".join(perp_base_price_candidates(base)) if base is not None else market
+                    close_resolution = _CloseResolution(
+                        amount_usd=close_resolution.amount_usd,
+                        failure_reason=(
+                            f"PERP_OPEN market {market!r}: base asset is not priceable from market state "
+                            f"(tried {tried}) — cannot establish an entry price; "
+                            "include the asset in the backtest token set"
+                        ),
+                    )
         return _GenericIntentDetails(
             intent_type=intent_type,
             protocol=protocol,
@@ -3195,7 +3281,12 @@ class PnLBacktester:
                 estimated_mev_cost_usd=None,
             )
 
-        fee_usd = self.get_fee_model(details.protocol).calculate_fee(
+        # TODO(ALM-2943): wire FeeModelRegistry connector models into
+        # create_backtester so per-protocol fee models apply on the generic
+        # path (changes swap fee numbers per-protocol — deliberately out of
+        # scope here; today only the "default" model is wired).
+        fee_usd = _invoke_fee_model(
+            self.get_fee_model(details.protocol),
             intent_type=details.intent_type,
             amount_usd=details.amount_usd,
             market_state=market_state,
@@ -3822,6 +3913,30 @@ class PnLBacktester:
         except KeyError:
             return resolved, None
 
+    def _position_units_from_usd(
+        self,
+        token: Any,
+        price: Decimal | None,
+        amount_usd: Decimal,
+        market_state: MarketState,
+        *,
+        context: str,
+    ) -> Decimal:
+        """USD notional → position token units through a typed PriceQuote.
+
+        ALM-2943: a missing/non-positive price no longer books the raw USD
+        figure as a unit count — cash-equivalent stables stay on the $1 cash
+        plane, everything else raises PriceUnavailableError.
+        """
+        return _engine_helpers.typed_units_from_usd(
+            token,
+            price if price is not None and price > 0 else None,
+            amount_usd,
+            chain=str(getattr(market_state, "chain", DEFAULT_CHAIN)),
+            token_addresses=self._registered_token_addresses(),
+            context=context,
+        )
+
     def _get_intent_amount_usd(
         self,
         intent: Any,
@@ -4102,7 +4217,7 @@ class PnLBacktester:
             amount_usd = self._get_intent_amount_usd(
                 intent, market_state, strict_reproducibility=strict_reproducibility
             )
-        amount = amount_usd / price if price is not None and price > 0 else amount_usd
+        amount = self._position_units_from_usd(token, price, amount_usd, market_state, context="position_delta.supply")
 
         # Intent-declared APY wins; otherwise the connector-declared default
         # for the protocol — the single table the accrual lane uses.
@@ -4149,7 +4264,7 @@ class PnLBacktester:
             amount_usd = self._get_intent_amount_usd(
                 intent, market_state, strict_reproducibility=strict_reproducibility
             )
-        amount = amount_usd / price if price is not None and price > 0 else amount_usd
+        amount = self._position_units_from_usd(token, price, amount_usd, market_state, context="position_delta.vault")
 
         # ERC-4626 vault yield: pending PPFS-curve replay via gateway
         # MarketService.GetSharePriceHistory (VIB-3367). Until that ships,
@@ -4188,7 +4303,7 @@ class PnLBacktester:
             amount_usd = self._get_intent_amount_usd(
                 intent, market_state, strict_reproducibility=strict_reproducibility
             )
-        amount = amount_usd / price if price is not None and price > 0 else amount_usd
+        amount = self._position_units_from_usd(token, price, amount_usd, market_state, context="position_delta.borrow")
 
         # Intent-declared APY wins; otherwise the connector-declared default
         # for the protocol — the single table the accrual lane uses.
@@ -4228,9 +4343,22 @@ class PnLBacktester:
         """
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
 
-        from .intent_extraction import get_perp_open_params, intent_is_long
+        from .intent_extraction import get_perp_open_params, intent_is_long, resolve_perp_base_price
 
-        token = tokens[0] if tokens else "WETH"
+        token: TokenRef = tokens[0] if tokens else "WETH"
+        # Key the position by the PRICEABLE form of the market's base asset:
+        # an "ETH/USD" market on a run whose data plane tracks WETH must yield
+        # a WETH-keyed position, or every per-tick mark falls back to the
+        # entry price and unrealized PnL freezes (campaign-50 s42). The
+        # resolved symbol is normalized through the engine's registered map so
+        # address-native market states stay priceable too; the funding lane
+        # unwraps it back to the bare base for its "<BASE>-USD" keys.
+        _, priced_symbol, _price = resolve_perp_base_price(
+            getattr(intent, "market", None), market_state, self._registered_token_addresses()
+        )
+        if priced_symbol is not None:
+            resolved, resolved_price = self._position_token_and_price(priced_symbol, market_state)
+            token = resolved if resolved_price is not None and resolved_price > 0 else priced_symbol
         if amount_usd is None:
             amount_usd = self._get_intent_amount_usd(
                 intent, market_state, strict_reproducibility=strict_reproducibility

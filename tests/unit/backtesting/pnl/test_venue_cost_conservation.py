@@ -472,9 +472,44 @@ class TestVenueCostFunding:
         assert trade.slippage_usd == Decimal("0")
         assert trade.metadata["fee_usd_unapplied"] == str(FEE)
 
-    def test_perp_open_funding_check_includes_fee(self, market_state: MarketState) -> None:
-        """Collateral alone fits, collateral + fee + gas does not -> reject."""
+    def test_perp_open_fee_beyond_headroom_is_absorbed_into_collateral(self, market_state: MarketState) -> None:
+        """Collateral alone fits, collateral + fee does not -> the fee is
+        carved out of the posted collateral (live venues charge the open fee
+        against deposited margin), not rejected. Wallet 1010, collateral
+        1000, fee 15: shortfall 5 shrinks collateral to 995; the wallet pays
+        995 + 15 = 1010 exactly. Conservation still holds — nothing is
+        minted, the fee just reduces margin instead of blocking the open
+        (campaign-50 s36: a resolved-"all" open can never pay fee-on-top)."""
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("1010"))
+        position = SimulatedPosition.perp_long(
+            token="WETH",
+            collateral_usd=Decimal("1000"),
+            leverage=Decimal("5"),
+            entry_price=WETH_PRICE,
+            entry_time=TS,
+            protocol="gmx",
+        )
+
+        fill = make_fill(
+            IntentType.PERP_OPEN,
+            protocol="gmx",
+            amount_usd=Decimal("5000"),
+            position_delta=position,
+        )
+        applied = portfolio.apply_fill(fill, market_state=market_state)
+
+        assert applied is True
+        assert portfolio.cash_usd == Decimal("0")
+        assert len(portfolio.positions) == 1
+        assert portfolio.positions[0].collateral_usd == Decimal("995")
+        # Notional is preserved; leverage re-derives from the reduced margin.
+        assert portfolio.positions[0].notional_usd == Decimal("5000")
+        assert fill.metadata["venue_costs_absorbed_into_collateral_usd"] == "5"
+
+    def test_perp_open_unfundable_collateral_still_rejects(self, market_state: MarketState) -> None:
+        """Absorption only covers venue costs: when the collateral itself
+        overdraws the wallet, the open rejects with no state mutation."""
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("900"))
         position = SimulatedPosition.perp_long(
             token="WETH",
             collateral_usd=Decimal("1000"),
@@ -495,7 +530,7 @@ class TestVenueCostFunding:
         )
 
         assert applied is False
-        assert portfolio.cash_usd == Decimal("1010")
+        assert portfolio.cash_usd == Decimal("900")
         assert portfolio.positions == []
 
     def test_cash_poor_close_still_applies_and_charges_costs(self, market_state: MarketState) -> None:

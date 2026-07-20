@@ -79,6 +79,29 @@ class TestBacktestOHLCVView:
         with pytest.raises(ValueError, match="derivable"):
             view.get_ohlcv("WETH", timeframe="90m")
 
+    def test_jittered_hourly_cadence_serves_hourly_candles(self):
+        # CoinGecko hourly points are sometimes spaced 3601s apart; on short
+        # windows the measured cadence reads 3601s. That 1s jitter must not
+        # masquerade as coarser data — 1h candles still serve.
+        engine = _engine_with_series("WETH", [3000.0 + i for i in range(30)])
+        engine.set_data_granularity(3601, 3600)
+        view = _view(engine)
+
+        df = view.get_ohlcv("WETH", timeframe="1h", limit=10)
+        assert len(df) == 10
+
+    def test_hourly_cadence_still_refuses_finer_candles(self):
+        # Jitter tolerance must not loosen the upsampling refusal (ALM-2957):
+        # genuinely hourly data on a 15m tick grid never serves 15m candles.
+        engine = _engine_with_series("WETH", [3000.0 + i for i in range(80)])
+        engine.set_data_granularity(3600, 900)
+        view = BacktestOHLCVView(engine, 900, None)
+        view.bind(BOUND_TS)
+
+        with pytest.raises(ValueError, match="ALM-2957"):
+            view.get_ohlcv("WETH", timeframe="15m")
+        assert len(view.get_ohlcv("WETH", timeframe="1h", limit=10)) == 10
+
     def test_symbol_resolves_through_registered_addresses(self):
         # The engine buffers are keyed address-native in real runs; a
         # strategy-facing "WETH" read must find them via the run's map.

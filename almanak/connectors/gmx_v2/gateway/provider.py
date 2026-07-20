@@ -100,7 +100,9 @@ class GmxV2GatewayConnector(
         return "gmx_v2"
 
     def default_funding_rate(self, market: str) -> Decimal:
-        return _GMX_V2_DEFAULT_RATES.get(market, _UNKNOWN_MARKET_DEFAULT)
+        from almanak.core.perp_markets import perp_market_funding_key
+
+        return _GMX_V2_DEFAULT_RATES.get(perp_market_funding_key(market) or market, _UNKNOWN_MARKET_DEFAULT)
 
     async def fetch_funding_rate(
         self,

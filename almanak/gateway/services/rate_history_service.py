@@ -998,7 +998,12 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.FundingRateHistoryResponse:
         venue = _normalize_key(request.venue)
-        market = request.market.strip().upper()
+        # Canonicalize the market spelling at ingress ("ETH/USD" == "ETH-USD"):
+        # connector funding tables are keyed by the dash form, and the SDK's
+        # documented slash form must resolve to the same rows (campaign-50 s38).
+        from almanak.core.perp_markets import perp_market_funding_key
+
+        market = perp_market_funding_key(request.market) or request.market.strip().upper()
         chain = _normalize_key(request.chain)
 
         if not venue:

@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
+from almanak.core.perp_markets import perp_market_base
 from almanak.framework.backtesting.adapters.base import (
     StrategyBacktestAdapter,
     StrategyBacktestConfig,
@@ -567,12 +568,14 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         if provider is None:
             return
         # Cache market key must match _funding_lookup's "<BASE>-USD". Both
-        # sides normalize through the SAME token_ref_provider_symbol call
-        # (which unwraps address-resolved wrapped natives) — key parity is
-        # the contract; a divergent key is a guaranteed cache miss that
-        # silently defeats the prewarm.
-        base = raw_market.replace("/", "-").split("-")[0].strip().upper()
-        base = token_ref_provider_symbol(base, chain, unwrap_wrapped_native=True).upper()
+        # sides normalize through the SAME canonical parse + provider-symbol
+        # call (which unwraps wrapped natives) — key parity is the contract;
+        # a divergent key is a guaranteed cache miss that silently defeats
+        # the prewarm.
+        parsed_base = perp_market_base(raw_market)
+        if parsed_base is None:
+            return
+        base = token_ref_provider_symbol(parsed_base, chain, unwrap_wrapped_native=True).upper()
         market = f"{base}-USD"
         try:
             rates = await provider.get_funding_rates(market=market, start_date=start_time, end_date=end_time)
@@ -958,8 +961,10 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         required_margin_ratio: Decimal,
     ) -> None:
         try:
-            market_token = intent.market.split("/")[0]  # e.g., "ETH/USD" -> "ETH"
-            entry_price = market_state.get_price(market_token)
+            from almanak.framework.backtesting.pnl.intent_extraction import resolve_perp_base_price
+
+            _, _, resolved_price = resolve_perp_base_price(getattr(intent, "market", None), market_state)
+            entry_price = resolved_price if resolved_price is not None else Decimal("0")
         except (KeyError, IndexError):
             entry_price = Decimal("0")
 

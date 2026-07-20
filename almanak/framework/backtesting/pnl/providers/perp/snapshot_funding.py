@@ -44,6 +44,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
+from almanak.core.perp_markets import perp_market_funding_key
 from almanak.framework.data.funding import (
     HOURS_PER_YEAR,
     FundingRate,
@@ -115,7 +116,12 @@ class SnapshotFundingRateSource:
                 measured point covers the hour (never fabricates under strict).
         """
         venue_value = str(venue).lower()
-        market_upper = market.upper()
+        # Canonicalize the market spelling ("ETH/USD" == "ETH-USD" == the
+        # venue-form "ETH-USD") so slash-form strategy reads hit the same
+        # cache entries and gateway funding tables as dash-form ones
+        # (campaign-50 s38). Unparseable identifiers pass through upper-cased
+        # and fail downstream with the venue's own unsupported-market error.
+        market_upper = perp_market_funding_key(market) or market.upper()
         hour = _hour_utc(timestamp)
         key = (venue_value, market_upper, hour)
         cached = self._cache.get(key)
@@ -226,7 +232,7 @@ class SnapshotFundingRateView:
         rate_a = await self.get_funding_rate(venue_a, market)
         rate_b = await self.get_funding_rate(venue_b, market)
         return FundingRateSpread(
-            market=market.upper(),
+            market=perp_market_funding_key(market) or market.upper(),
             venue_a=rate_a.venue,
             venue_b=rate_b.venue,
             rate_a=rate_a,

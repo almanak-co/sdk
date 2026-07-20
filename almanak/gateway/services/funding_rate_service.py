@@ -24,6 +24,7 @@ from almanak.connectors._base.gateway_capabilities import (
     GatewayFundingRateCapability,
 )
 from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+from almanak.core.perp_markets import perp_market_base, perp_market_funding_key
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.utils import get_rpc_url
@@ -342,14 +343,18 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
 
     async def _fetch_hyperliquid_rate(self, market: str) -> FundingRateData:
         """Fetch Hyperliquid funding rate from their public API."""
+        # Canonicalize defensively (the RPC ingress already does): default
+        # rate/mark tables are keyed by the dash form.
+        market = perp_market_funding_key(market) or market
         rate_hourly = self._get_default_rate("hyperliquid", market)
         open_interest_long = Decimal("85000000")
         open_interest_short = Decimal("82000000")
         mark_price = self._get_default_mark_price(market)
         is_live_data = False
 
-        # Map market format (ETH-USD) to Hyperliquid format (ETH)
-        coin = market.split("-")[0].upper()
+        # Map any market spelling (ETH-USD / ETH/USD / ETH) to the
+        # Hyperliquid coin format (ETH) via the canonical parse.
+        coin = perp_market_base(market) or market.upper()
 
         try:
             session = await self._get_http_session()
@@ -406,8 +411,12 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
             is_live_data=is_live_data,
         )
 
+    # crap-allowlist: pre-existing complexity (cc=8, low direct coverage); this PR only routed its market-symbol parsing through core.perp_markets, which is pinned by tests/gateway/services/test_funding_market_canon.py
     async def _fetch_gmx_v2_rate(self, market: str, chain: str) -> FundingRateData:
         """Fetch GMX V2 funding rate from on-chain contract."""
+        # Canonicalize defensively (the RPC ingress already does): the GMX
+        # market-address table is keyed by the dash form.
+        market = perp_market_funding_key(market) or market
         rate_hourly = self._get_default_rate("gmx_v2", market)
         open_interest_long = Decimal("125000000")
         open_interest_short = Decimal("118000000")
@@ -522,7 +531,11 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
             FundingRateResponse with rate data
         """
         venue = request.venue.lower()
-        market = request.market.upper()
+        # Canonicalize the market spelling at gateway ingress: venue tables
+        # (GMX market addresses, default-rate maps) are keyed by the dash form
+        # ("ETH-USD"); the SDK's documented slash form ("ETH/USD") must map to
+        # the same rows (campaign-50 s38).
+        market = perp_market_funding_key(request.market) or request.market.upper()
         chain = request.chain.lower() or "arbitrum"
 
         start_time = time.time()
@@ -565,7 +578,7 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
         Returns:
             FundingRateSpreadResponse with spread and individual rates
         """
-        market = request.market.upper()
+        market = perp_market_funding_key(request.market) or request.market.upper()
         venue_a = request.venue_a.lower()
         venue_b = request.venue_b.lower()
         chain = request.chain.lower() or "arbitrum"
