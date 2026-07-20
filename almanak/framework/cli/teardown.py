@@ -663,7 +663,10 @@ def teardown():
     "-n",
     default=None,
     type=click.Choice(["mainnet", "anvil"], case_sensitive=False),
-    help="Network type: 'mainnet' (default) or 'anvil' to connect to an already-running Anvil fork.",
+    help=(
+        "Network type: 'mainnet' or 'anvil' (local fork). Overrides the strategy config's "
+        "'network' field; when neither is set, defaults to 'mainnet'."
+    ),
 )
 @click.option(
     "--no-accounting",

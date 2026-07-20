@@ -284,14 +284,26 @@ def setup_gateway(
 
     session_auth_token = uuid.uuid4().hex
 
-    resolved_network = network or "mainnet"
+    # VIB-5920: same shared resolver as `strat run`, so a teardown launched
+    # without `--network` against an Anvil-declaring config does not silently
+    # target mainnet. `--anvil-port` is not a teardown flag, hence no inference.
+    from ._network_resolution import resolve_network
+
+    resolved = resolve_network(flag_network=network, strategy_config=config_dict)
+    resolved_network = resolved.network
+    # VIB-5920 (audit round): dropping gateway auth on Anvil is a local-dev
+    # convenience that stays tied to an explicit `--network anvil`. A
+    # config-sourced anvil keeps the AuthInterceptor on (allow_insecure=False +
+    # the session token above, which this CLI's own client already sends) so a
+    # copied config.json can never disarm a gateway holding the real key.
+    allow_insecure = resolved_network == "anvil" and resolved.operator_signalled
     # Phase 1: route through the config service so the same env-fallback
     # ladders apply here as for the gateway subcommand and managed gateway.
     gateway_settings = gateway_config_from_env(
         grpc_host=effective_host,
         grpc_port=gateway_port,
         network=resolved_network,
-        allow_insecure=resolved_network == "anvil",
+        allow_insecure=allow_insecure,
         metrics_enabled=False,
         audit_enabled=False,
         chains=[chain] if chain else [],

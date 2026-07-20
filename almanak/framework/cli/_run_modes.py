@@ -246,11 +246,22 @@ def _echo_anvil_network_banner(*, config_chain: str | None) -> None:
     click.echo(f"Network: ANVIL (local fork at http://127.0.0.1:{anvil_port})")
 
 
-def _resolve_network_with_echo(*, network: str | None, config_chain: str | None) -> str:
-    """Resolve the effective network and preserve the Anvil banner."""
-    resolved_network = "mainnet"
-    if network:
-        resolved_network = network
+def _echo_runtime_network(*, resolved_network: str, config_chain: str | None) -> str:
+    """Echo the Anvil banner for the ALREADY-resolved network; never re-resolve.
+
+    VIB-5920 (audit round): the network is resolved exactly once per process,
+    in ``_run_gateway._setup_gateway``, and threaded here as
+    ``gateway_network``. A second resolution at this site would not merely be
+    redundant — it can legitimately disagree: ``_run_setup`` falls back to
+    ``load_strategy_config(<ClassName>)``, which resolves a strategy directory
+    via ``find_strategy_dir`` that the gateway's pre-boot peek never looked at,
+    so the runtime could read a *different* config.json than the one the
+    gateway (and its Anvil fork, and its auth posture) was built from.
+
+    Attribution of an implicitly-resolved network ("from config.json") is
+    echoed at the gateway site instead, before any fork or gateway starts.
+    This banner is therefore byte-identical to its pre-VIB-5920 output.
+    """
     if resolved_network == "anvil":
         _echo_anvil_network_banner(config_chain=config_chain)
     return resolved_network
@@ -260,19 +271,26 @@ def _prepare_runtime_bootstrap(
     *,
     strategy_bootstrap: StrategyBootstrap,
     no_gateway: bool,
-    network: str | None,
     gateway_client: Any,
     gateway_network: str,
     fresh: bool,
 ) -> RuntimeBootstrap:
-    """Resolve runtime config and stable identity for `run()`."""
+    """Resolve runtime config and stable identity for `run()`.
+
+    VIB-5920: the runtime network is no longer resolved here — it CONSUMES
+    ``gateway_network``, the single resolution produced by ``_setup_gateway``
+    (flag > ``--anvil-port`` > config ``network`` > mainnet). That is what
+    closes the gateway-vs-runtime split brain for good: there is exactly one
+    answer per process, so the runtime config can never describe a different
+    network than the gateway it is talking to.
+    """
     config_chain = _resolve_config_chain_with_echo(
         strategy_class=strategy_bootstrap.strategy_class,
         strategy_config=strategy_bootstrap.strategy_config,
         multi_chain=strategy_bootstrap.multi_chain,
     )
-    resolved_network = _resolve_network_with_echo(
-        network=network,
+    resolved_network = _echo_runtime_network(
+        resolved_network=gateway_network,
         config_chain=config_chain,
     )
     runtime_config, chain_wallets = _build_runtime_config(

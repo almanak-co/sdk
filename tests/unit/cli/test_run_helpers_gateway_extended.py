@@ -100,7 +100,9 @@ class TestSetupGatewayManagedErrors:
                 once=False,
             )
         text = out.getvalue().decode()
-        assert "--keep-anvil has no effect without --network anvil" in text
+        # VIB-5920: an Anvil network can now also come from config "network",
+        # so the warning no longer names only the flag.
+        assert "--keep-anvil has no effect off an Anvil network" in text
 
     def test_reset_fork_with_once_prints_note(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

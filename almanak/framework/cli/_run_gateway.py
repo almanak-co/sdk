@@ -17,6 +17,7 @@ from ._run_setup import _anchor_strategy_folder_env, _runtime_private_key_overri
 
 if TYPE_CHECKING:
     from ..strategies.intent_strategy import IntentStrategy
+    from ._network_resolution import ResolvedNetwork
 
 logger = logging.getLogger(
     "almanak.framework.cli.run_helpers"
@@ -289,6 +290,97 @@ def _resolve_quick_config_path(working_dir: str, config_file: str | None) -> Pat
     return None
 
 
+def _load_quick_config(working_dir: str, config_file: str | None) -> dict[str, Any] | None:
+    """Load + schema-validate the strategy config for a pre-boot peek (or ``None``).
+
+    Same shared validated parse the Anvil / mainnet chain probes use (#2101) —
+    ``warn_unknown_keys=False`` so the typo warning still fires exactly once at
+    the canonical load.
+
+    The ``ALMANAK_STRATEGY_CONFIG`` env override IS applied (codex P1, VIB-5920):
+    the canonical loader deep-merges it unconditionally, so a peek that read only
+    the on-disk file would resolve the gateway network (and the Anvil
+    chain/funding probes) from a DIFFERENT config than the runtime bootstrap —
+    recreating the exact gateway-vs-runtime split brain this module exists to
+    close (gateway on mainnet while the runtime believes it is on a fork).
+    ``echo=False`` so the "Applied … env override" notice still prints exactly
+    once, at the canonical load.
+    """
+    from .run import _apply_env_strategy_config_override, parse_strategy_config_file
+
+    config_path = _resolve_quick_config_path(working_dir, config_file)
+    if not config_path or not config_path.exists():
+        return None
+    config = parse_strategy_config_file(config_path, warn_unknown_keys=False)
+    if config is None:
+        return None
+    return _apply_env_strategy_config_override(config, echo=False)
+
+
+def _quick_config_loader(working_dir: str, config_file: str | None) -> Callable[[], dict[str, Any] | None]:
+    """Return a memoized zero-arg loader so one gateway setup parses the config at most once."""
+    cache: list[dict[str, Any] | None] = []
+
+    def _load() -> dict[str, Any] | None:
+        if not cache:
+            cache.append(_load_quick_config(working_dir, config_file))
+        return cache[0]
+
+    return _load
+
+
+def _resolve_gateway_network(
+    *,
+    network: str | None,
+    anvil_ports: tuple[str, ...],
+    no_gateway: bool,
+    load_quick_config: Callable[[], dict[str, Any] | None],
+) -> ResolvedNetwork:
+    """Resolve the network for the whole `strat run` process (VIB-5920).
+
+    This is the ONLY network resolution in the run lane: the runtime bootstrap
+    (``_run_modes``) consumes the value produced here rather than re-resolving,
+    because a second resolution can legitimately see a *different* config —
+    ``_run_setup`` falls back to ``load_strategy_config(<ClassName>)``, which
+    resolves a strategy directory the gateway probe never looked at.
+
+    Returns the full :class:`ResolvedNetwork` (network **and** source): the
+    source decides the gateway's auth posture (see ``operator_signalled``), so
+    it must not be discarded here.
+
+    The config is read lazily — only when neither the flag nor the
+    ``--anvil-port`` inference already decided, and only in local mode. That
+    keeps hosted boot byte-identical (hosted ignores the key and never invokes
+    the loader). It does mean a **local** ``--no-gateway`` run now parses the
+    config here where it previously did not; a malformed config therefore
+    fails at gateway setup instead of a few steps later at the canonical load,
+    with the same ``ClickException`` naming the file.
+    """
+    from ._network_resolution import resolve_network
+
+    return resolve_network(
+        flag_network=network,
+        anvil_ports_present=bool(anvil_ports),
+        no_gateway=no_gateway,
+        config_loader=load_quick_config,
+    )
+
+
+def _echo_resolved_network(resolved: ResolvedNetwork) -> None:
+    """Announce an *implicitly* resolved network before anything is started.
+
+    Only fires when the operator did not type the network on this invocation
+    (config-sourced or ``--anvil-port``-inferred). Printed here — before the
+    gateway boots and before any Anvil fork starts — because this is the point
+    of no return for the auth posture and the fork lifecycle; the runtime
+    banner in ``_run_modes`` prints much later.
+    """
+    if resolved.source == "config":
+        click.echo(f"Network: {resolved.network.upper()} (resolved from config.json 'network')")
+    elif resolved.source == "anvil-ports":
+        click.echo(f"Network: {resolved.network.upper()} (inferred from --anvil-port)")
+
+
 def _chains_from_quick_config(quick_config: dict[str, Any]) -> list[str]:
     """Extract `chains` (preferred) or `chain` from a quick-config dict."""
     chains_val = quick_config.get("chains")
@@ -312,27 +404,32 @@ def _resolve_anvil_chains_and_funding(
     config_file: str | None,
     early_strategy_class: type[IntentStrategy[Any]] | None,
     external_anvil_ports: dict[str, int],
+    quick_config: dict[str, Any] | None = None,
 ) -> tuple[list[str], dict[str, float | int | str]]:
-    """Resolve EVM chains needing Anvil forks (and their funding) for `--network anvil`."""
+    """Resolve EVM chains needing Anvil forks (and their funding) for `--network anvil`.
+
+    ``quick_config`` lets a caller that already parsed the config (VIB-5920's
+    network resolution) hand it in so the file is parsed once per gateway
+    setup; when omitted the config is loaded here as before.
+    """
     # Import get_default_chain lazily from .run to avoid circular-import.
     from .run import get_default_chain
 
     anvil_chains: list[str] = []
     anvil_funding: dict[str, float | int | str] = {}
 
-    config_path = _resolve_quick_config_path(working_dir, config_file)
-    if config_path and config_path.exists():
-        # Parse + schema-validate ONCE through the shared loader (#2101). A
-        # malformed config now fails fast here with a ``click.ClickException``
-        # naming the file + line, instead of being swallowed into the
-        # misleading "no chain found" warning below while the real error
-        # surfaces only later in the runner. ``warn_unknown_keys=False`` so the
-        # typo warning fires exactly once, at the canonical load — not on this
-        # pre-boot peek. The hosted ``ALMANAK_STRATEGY_CONFIG`` override is NOT
-        # applied here; it belongs to the canonical loader only.
-        from .run import parse_strategy_config_file
-
-        quick_config = parse_strategy_config_file(config_path, warn_unknown_keys=False)
+    # Parse + schema-validate ONCE through the shared loader (#2101). A
+    # malformed config fails fast with a ``click.ClickException`` naming the
+    # file + line, instead of being swallowed into the misleading "no chain
+    # found" warning below while the real error surfaces only later in the
+    # runner. ``warn_unknown_keys=False`` so the typo warning fires exactly
+    # once, at the canonical load — not on this pre-boot peek. The
+    # ``ALMANAK_STRATEGY_CONFIG`` env override IS applied inside
+    # ``_load_quick_config`` (VIB-5920 codex P1) so the Anvil chain/funding
+    # probe sees the same merged config the runtime will use.
+    if quick_config is None:
+        quick_config = _load_quick_config(working_dir, config_file)
+    if quick_config is not None:
         anvil_chains = _chains_from_quick_config(quick_config)
         anvil_funding = _normalize_anvil_funding(quick_config.get("anvil_funding", {}))
 
@@ -368,19 +465,24 @@ def _resolve_gateway_chains_for_mainnet(
     working_dir: str,
     config_file: str | None,
     early_strategy_class: type[IntentStrategy[Any]] | None,
+    quick_config: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Resolve the chain list passed to the gateway for non-anvil networks."""
+    """Resolve the chain list passed to the gateway for non-anvil networks.
+
+    ``quick_config`` lets the caller hand in an already-parsed config (see
+    ``_resolve_anvil_chains_and_funding``).
+    """
     from .run import get_default_chain
 
     chains: list[str] = []
-    config_path = _resolve_quick_config_path(working_dir, config_file)
-    if config_path and config_path.exists():
-        # Same shared validated parse as the Anvil probe (#2101): one parse,
-        # fail-fast with a file-naming error rather than swallowing. Probe peek
-        # only — no typo warning, no hosted override here.
-        from .run import parse_strategy_config_file
-
-        chains = _chains_from_quick_config(parse_strategy_config_file(config_path, warn_unknown_keys=False))
+    # Same shared validated parse as the Anvil probe (#2101): one parse,
+    # fail-fast with a file-naming error rather than swallowing. Probe peek
+    # only — no typo warning; the ``ALMANAK_STRATEGY_CONFIG`` env override IS
+    # applied inside ``_load_quick_config`` (VIB-5920 codex P1).
+    if quick_config is None:
+        quick_config = _load_quick_config(working_dir, config_file)
+    if quick_config is not None:
+        chains = _chains_from_quick_config(quick_config)
 
     # Fall back to decorator metadata if config has no chain
     if not chains and early_strategy_class:
@@ -467,16 +569,29 @@ def _build_gateway_settings(
     gateway_network: str,
     gateway_chains: list[str],
     gateway_private_key: str | None,
+    operator_signalled_network: bool = True,
 ) -> tuple[Any, str | None]:
-    """Assemble `gateway_kwargs` and call `gateway_config_from_env`; returns (settings, session_token)."""
+    """Assemble `gateway_kwargs` and call `gateway_config_from_env`; returns (settings, session_token).
+
+    ``operator_signalled_network`` (VIB-5920): the unauthenticated test-network
+    posture below is a *local-dev convenience* that must stay tied to an
+    explicit operator signal (``--network anvil`` / ``--anvil-port``). When the
+    network came from a config file instead, the gateway still boots with a
+    random session token and ``allow_insecure=False`` — a committed / copied
+    ``"network": "anvil"`` must not be able to disarm a gateway that may hold
+    the real ``ALMANAK_PRIVATE_KEY``. Costs the operator nothing: the CLI owns
+    both ends and hands the token to its own client. Defaults to ``True`` so
+    non-VIB-5920 callers keep the historical behaviour.
+    """
     import uuid
 
     from almanak.config.env import gateway_config_from_env
 
     # Security: generate a random session token for the managed gateway so it
     # is never running without authentication, even on mainnet (VIB-520).
-    # For anvil/sepolia we still use allow_insecure for convenience.
-    is_test_network = gateway_network in ("anvil", "sepolia")
+    # For operator-requested anvil/sepolia we still use allow_insecure for
+    # convenience (VIB-5920 scopes that to an explicit CLI signal).
+    is_test_network = gateway_network in ("anvil", "sepolia") and operator_signalled_network
     session_auth_token = None if is_test_network else uuid.uuid4().hex
 
     gateway_kwargs: dict[str, Any] = {
@@ -488,10 +603,11 @@ def _build_gateway_settings(
         "audit_enabled": False,
         "chains": gateway_chains,
     }
-    # On test networks, force auth_token=None as an explicit kwarg so it wins
-    # over any ALMANAK_GATEWAY_AUTH_TOKEN loaded from .env. Without this, the
-    # server attaches AuthInterceptor while the client (allow_insecure=True)
-    # sends no token, producing UNAUTHENTICATED on every gRPC call (VIB-3032).
+    # On operator-signalled test networks, force auth_token=None as an explicit
+    # kwarg so it wins over any ALMANAK_GATEWAY_AUTH_TOKEN loaded from .env.
+    # Without this, the server attaches AuthInterceptor while the client
+    # (allow_insecure=True) sends no token, producing UNAUTHENTICATED on every
+    # gRPC call (VIB-3032).
     if is_test_network:
         gateway_kwargs["auth_token"] = None
     elif session_auth_token:
@@ -675,10 +791,18 @@ def _setup_gateway(
     effective_host = "127.0.0.1" if gateway_host == "localhost" else gateway_host
 
     # Resolve network mode early because later runner setup uses the same value
-    # for both managed and pre-existing gateway flows.
-    if anvil_ports and not network and not no_gateway:
-        network = "anvil"
-    gateway_network = network or "mainnet"
+    # for both managed and pre-existing gateway flows. VIB-5920: routed through
+    # the shared resolver so the config's ``network`` key is honoured (local
+    # mode) and all three CLI sites agree on the answer.
+    load_quick_config = _quick_config_loader(working_dir, config_file)
+    resolved_network = _resolve_gateway_network(
+        network=network,
+        anvil_ports=anvil_ports,
+        no_gateway=no_gateway,
+        load_quick_config=load_quick_config,
+    )
+    gateway_network = resolved_network.network
+    _echo_resolved_network(resolved_network)
 
     # --wallet isolated requires a managed gateway (derives wallet + funds Anvil fork)
     if wallet == "isolated" and no_gateway:
@@ -701,7 +825,9 @@ def _setup_gateway(
     external_anvil_ports = _parse_anvil_port_overrides(anvil_ports)
 
     if keep_anvil and gateway_network != "anvil":
-        click.echo("Warning: --keep-anvil has no effect without --network anvil or --anvil-port.")
+        click.echo(
+            'Warning: --keep-anvil has no effect off an Anvil network (--network anvil, --anvil-port, or config "network": "anvil").'
+        )
 
     # Early-load strategy class so decorator metadata is available for chain detection.
     # This must happen before gateway startup so Anvil forks target the correct chain.
@@ -716,6 +842,7 @@ def _setup_gateway(
             config_file=config_file,
             early_strategy_class=early_strategy_class,
             external_anvil_ports=external_anvil_ports,
+            quick_config=load_quick_config(),
         )
 
     # Wallet isolation: derive a unique wallet per strategy on Anvil
@@ -726,9 +853,13 @@ def _setup_gateway(
         runtime_private_key=runtime_private_key,
     )
 
-    # Validate --reset-fork requires --network anvil
+    # Validate --reset-fork requires an Anvil network (flag, --anvil-port, or
+    # the config's "network": "anvil" — VIB-5920)
     if reset_fork and gateway_network != "anvil":
-        raise click.ClickException("--reset-fork is only supported with --network anvil")
+        raise click.ClickException(
+            "--reset-fork is only supported on an Anvil network "
+            '(pass --network anvil, or set "network": "anvil" in the strategy config)'
+        )
     if reset_fork and once:
         click.echo("Note: --reset-fork has no effect with --once (fork is already fresh at startup)")
 
@@ -741,7 +872,10 @@ def _setup_gateway(
     # For mainnet, read chain from config or decorator metadata so the MarketService
     # uses the correct Chainlink oracle chain instead of defaulting to arbitrum.
     gateway_chains = anvil_chains or _resolve_gateway_chains_for_mainnet(
-        working_dir=working_dir, config_file=config_file, early_strategy_class=early_strategy_class
+        working_dir=working_dir,
+        config_file=config_file,
+        early_strategy_class=early_strategy_class,
+        quick_config=load_quick_config(),
     )
 
     gateway_settings, session_auth_token = _build_gateway_settings(
@@ -750,6 +884,7 @@ def _setup_gateway(
         gateway_network=gateway_network,
         gateway_chains=gateway_chains,
         gateway_private_key=gateway_private_key,
+        operator_signalled_network=resolved_network.operator_signalled,
     )
 
     gateway_client, managed_gateway = _start_managed_gateway_and_connect(

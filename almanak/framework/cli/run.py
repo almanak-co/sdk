@@ -180,7 +180,7 @@ def _deep_merge_configs(base: dict[str, Any], override: dict[str, Any]) -> dict[
     return result
 
 
-def _apply_env_strategy_config_override(config: dict[str, Any]) -> dict[str, Any]:
+def _apply_env_strategy_config_override(config: dict[str, Any], *, echo: bool = True) -> dict[str, Any]:
     """Deep-merge the hosted-platform ``ALMANAK_STRATEGY_CONFIG`` env override onto ``config``.
 
     Re-validates the merged dict through ``StrategyConfig`` so env-supplied
@@ -188,6 +188,12 @@ def _apply_env_strategy_config_override(config: dict[str, Any]) -> dict[str, Any
     file-loaded path. Returns ``config`` unchanged when the env var is unset
     or empty. The env read itself lives in ``almanak.config.strategy``
     (config-service boundary, scripts/ci/check_config_boundary.py).
+
+    ``echo=False`` is for the gateway-setup pre-boot peek
+    (``_run_gateway._load_quick_config``), which applies the SAME merge so the
+    gateway's network/chain resolution can never diverge from the canonical
+    config (VIB-5920 codex P1) — the visible "Applied … env override" notice
+    still prints exactly once, at the canonical load.
     """
     from pydantic import ValidationError
 
@@ -212,7 +218,10 @@ def _apply_env_strategy_config_override(config: dict[str, Any]) -> dict[str, Any
     except ValidationError as e:
         raise click.ClickException(f"{STRATEGY_CONFIG_OVERRIDE_ENV} env override failed schema validation:\n{e}") from e
 
-    click.echo(f"Applied {STRATEGY_CONFIG_OVERRIDE_ENV} env override for top-level fields: {sorted(overrides.keys())}")
+    if echo:
+        click.echo(
+            f"Applied {STRATEGY_CONFIG_OVERRIDE_ENV} env override for top-level fields: {sorted(overrides.keys())}"
+        )
     return validated.model_dump(mode="python", exclude_unset=True)
 
 
@@ -1362,7 +1371,10 @@ def run(  # noqa: C901
         strategy_bootstrap=strategy_bootstrap,
         no_gateway=no_gateway,
         gateway_client=gateway_client,
-        network=network,
+        # No `network=` here (VIB-5920): the runtime consumes `gateway_network`,
+        # the single resolution `_setup_gateway` produced from the flag, the
+        # --anvil-port inference and the config's "network" key. Passing the raw
+        # flag was the split brain — gateway on Anvil, runtime on mainnet.
         gateway_network=gateway_network,
         fresh=fresh,
     )

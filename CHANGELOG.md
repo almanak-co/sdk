@@ -70,6 +70,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cross-checking `factory()`. The `uniswap_rsi`, `uniswap_lp`, and
   `morpho_looping` demos ship a `config.robinhood.json`. (#3238)
 
+### Fixed
+
+- **The config `network` key is no longer decorative (VIB-5920).** `almanak
+  strat run` and `almanak strat teardown execute` now honour `config.json`'s
+  `"network"` in local mode, restoring the contract the `--network` help text
+  has always promised ("Overrides config.json 'network' field"). Previously a
+  bare `almanak strat run -c config-anvil.json` silently booted **mainnet**
+  against a config written for an Anvil fork — a real-money footgun.
+  Precedence is now single-sourced: `--network` flag > `--anvil-port`
+  inference (managed gateway only) > `config.json` `"network"` > `mainnet`
+  default. An unrecognized value fails loudly instead of falling back to
+  mainnet, and a value that is really a chain name (`"network": "base"`) gets
+  told to use `chain` / `chains` instead. The network is now resolved **once
+  per process** — the runtime config consumes the gateway's answer instead of
+  re-resolving — which also closes a split brain where `--anvil-port` without
+  `--network` left the runtime config on mainnet while the gateway forked
+  Anvil. An implicitly-resolved network (config or `--anvil-port`) is
+  announced before the gateway or any fork starts. **Hosted deployments are
+  unaffected** — the platform owns the network and the config key stays
+  ignored there.
+- **A config file can no longer disarm gateway authentication (VIB-5920).**
+  The managed gateway drops auth (`allow_insecure=true`, no token) on Anvil
+  for local-dev convenience; that posture is now tied to an explicit operator
+  signal (`--network anvil` / `--anvil-port`). A config-sourced `anvil` — from
+  a copied or committed `config.json` — boots the gateway **with** a random
+  session token and `allow_insecure=false` instead, on both `strat run` and
+  `strat teardown`. Zero operator cost (the CLI hands the token to its own
+  client), and a gateway holding the real `ALMANAK_PRIVATE_KEY` can no longer
+  be silently unauthenticated.
+
 ## [2.21.0] - 2026-07-04
 
 ### Added

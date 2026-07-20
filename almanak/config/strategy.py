@@ -52,7 +52,13 @@ class StrategyConfig(BaseModel):
     # mutually exclusive (single-chain vs multi-chain strategies).
     chain: str | None = None
     chains: list[str] | None = None
-    network: str | None = None  # mainnet | anvil | sepolia | fork
+    # Deployment target: "mainnet" (real RPC) or "anvil" (local fork) — the same
+    # two values `--network` accepts. Honoured by `strat run` / `strat teardown`
+    # in LOCAL mode only (hosted platform owns the network); `--network` wins.
+    # Any other value fails loudly at boot — see
+    # `almanak/framework/cli/_network_resolution.py` (VIB-5920). NOT a chain
+    # selector: use `chain` / `chains` for that.
+    network: str | None = None
 
     # Identity — framework auto-fills from wallet derivation / decorator name
     # if absent.
