@@ -46,6 +46,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   token layer (WETH, USDG, USDe — no canonical USDC/USDT exists on 4663 with
   real liquidity, so none is registered), managed-Anvil funding profile, and
   the canonical Safe v1.4.1 + Zodiac Roles v2 stack. (#3234)
+
+### Fixed
+
+- **Across bridges from a Safe wallet no longer revert (VIB-5921).** The across
+  connector shipped an empty `permission_hints.py`, so its Zodiac Roles manifest
+  contained **zero** Across targets on every chain and each bridge failed at
+  `execTransactionWithRole` (unauthorized) — silently, because the connector
+  coverage gate only checks the file exists. `BRIDGE` cannot use synthetic
+  discovery (it is not a valid synthetic intent type, and the bridge compiler
+  needs a live Across quote), so the SpokePool permission is now declared via
+  `static_permissions`: `depositV3` with native-value send, scoped to `BRIDGE`,
+  on each of the six chains the connector declares — built from the connector's
+  own address/selector constants so it cannot drift. The hand-typed `depositV3`
+  selector is now validated against the real signature by
+  `tests/unit/permissions/test_across_manifest.py`.
 - **Uniswap V3 and Morpho Blue on Robinhood Chain.** Both connectors now
   advertise `robinhood` in their manifests and appear in
   `almanak info matrix`: Uniswap V3 for `SWAP` + the LP lifecycle, Morpho Blue

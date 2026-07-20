@@ -133,6 +133,19 @@ ACROSS_SPOKE_POOL_ADDRESSES: dict[int, str] = {
     324: "0xE0B015E54d54fc84a6cB9B666099c46adE9335FF",  # zkSync
 }
 
+# SpokePool ``depositV3`` 4-byte selector — the ONLY SpokePool function this
+# connector calls (see ``build_deposit_tx``). Full signature:
+#   depositV3(address depositor, address recipient, address inputToken,
+#             address outputToken, uint256 inputAmount, uint256 outputAmount,
+#             uint256 destinationChainId, address exclusiveRelayer,
+#             uint32 quoteTimestamp, uint32 fillDeadline,
+#             uint32 exclusivityDeadline, bytes message)
+# i.e. keccak("depositV3(address,address,address,address,uint256,uint256,"
+#             "uint256,address,uint32,uint32,uint32,bytes)")[:4] == 7b939232.
+# Named here so the Safe/Zodiac manifest (``permission_hints.py``) authorises
+# byte-identically to the calldata built below — it cannot drift.
+DEPOSIT_V3_SELECTOR: bytes = bytes.fromhex("7b939232")
+
 # Supported tokens on Across
 ACROSS_SUPPORTED_TOKENS: list[str] = ["ETH", "WETH", "USDC", "USDT", "WBTC", "DAI"]
 
@@ -399,6 +412,12 @@ class AcrossBridgeAdapter(BridgeAdapter):
         except (KeyError, ValueError) as e:
             raise AcrossQuoteError(f"Failed to parse quote response: {e}") from e
 
+    # crap-allowlist: VIB-5939 — pre-existing cc=19 / 2%-cov function; VIB-5921's
+    # diff here is a single mechanical line (inline selector literal -> the
+    # DEPOSIT_V3_SELECTOR constant the Safe manifest single-sources). Decomposing
+    # a money-path bridge encoder with near-zero coverage inside a permissions PR
+    # is the regression risk the CRAP protocol warns about; the refactor + tests
+    # are tracked in VIB-5939 (dated 2026-07-20).
     def build_deposit_tx(
         self,
         quote: BridgeQuote,
@@ -471,7 +490,7 @@ class AcrossBridgeAdapter(BridgeAdapter):
             #   uint32 exclusivityDeadline,
             #   bytes message
             # )
-            function_selector = bytes.fromhex("7b939232")  # depositV3 selector
+            function_selector = DEPOSIT_V3_SELECTOR
 
             # For quoteTimestamp, use current timestamp if not in route_data
             quote_timestamp = quote.route_data.get("timestamp")
