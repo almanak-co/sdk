@@ -8,17 +8,51 @@ via a thin delegation stub in StrategyRunner.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import json
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from ..accounting.capital_flows import (
+    ScanStatus,
+    TokenInfo,
+    TransferObservation,
+    normalize_address,
+    normalize_tx_hash,
+    scan_chain_transfers,
+)
 from ..intents.vocabulary import AnyIntent, BorrowIntent, HoldIntent, PerpCloseIntent, PerpOpenIntent
 from ..portfolio import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
 from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
 from ..state.state_manager import StateConflictError, StateData, StateNotFoundError
+from .capital_flow_state import (
+    DETAIL_NO_GATEWAY,
+    DETAIL_SCAN_DEFERRED,
+    REASON_CHAIN_UNSCANNABLE,
+    REASON_SCAN_GAP,
+    REASON_SHARED_WALLET,
+    STATUS_MEASURED,
+    STATUS_PENDING,
+    STATUS_UNMEASURED,
+    CapitalFlowRecord,
+    PendingTally,
+    apply_interval,
+    is_canonical_deployment_id,
+    materiality_threshold,
+    pending_record,
+    poison,
+    project_columns,
+    recover_record,
+    start_era,
+    summarize_interval,
+    tally_pending,
+    unmatched_pending,
+)
 from .reconciliation import BalanceSnapshot, build_reconciliation_report
 from .runner_models import IterationStatus
 
@@ -819,6 +853,13 @@ async def _write_valuation_into_strategy_state(
                 state.state[key] = str(snapshot.snapshot_metadata[key])
             else:
                 state.state.pop(key, None)
+        # VIB-5866: second mirror of the wholesale capital-flow record. The
+        # per-cycle ``status_detail`` is stripped — it describes this cycle,
+        # not the era — so the two mirrors stay byte-comparable on recovery.
+        flow_record = (snapshot.snapshot_metadata or {}).get(CAPITAL_FLOWS_KEY)
+        if isinstance(flow_record, dict):
+            durable = {k: v for k, v in flow_record.items() if k != "status_detail"}
+            state.state[CAPITAL_FLOWS_KEY] = json.dumps(durable, sort_keys=True)
         await runner.state_manager.save_state(state, expected_version=state.version)
     except Exception as ve:
         logger.debug("Failed to write valuation into strategy state: %s", ve)
@@ -1060,6 +1101,523 @@ async def _populate_gas_spent_usd(
     _stamp("ok")
 
 
+# -------------------------------------------------------------------------
+# Capital flows (VIB-5866 leg B) — deposits_usd / withdrawals_usd producer
+# -------------------------------------------------------------------------
+
+#: Key under which the wholesale flow record rides in both mirrors:
+#: ``snapshot.snapshot_metadata`` (→ ``portfolio_snapshots.positions_json``)
+#: and ``StateData.state`` (→ ``strategy_state``, JSON-encoded).
+CAPITAL_FLOWS_KEY = "capital_flows"
+
+#: One page of ledger rows is enough to (a) decide emptiness, (b) find the
+#: era anchor, (c) collect the tx hashes that must be excluded from the
+#: freshly scanned block window. The window is at most
+#: ``MAX_BLOCKS_PER_CYCLE`` blocks, so a deployment cannot have committed
+#: more strategy transactions inside it than this page holds.
+CAPITAL_FLOW_LEDGER_PAGE = 500
+
+
+def _ledger_field(row: Any, key: str) -> Any:
+    """Read a ledger row field; rows are ``LedgerEntry`` or gateway dicts."""
+    if isinstance(row, dict):
+        return row.get(key)
+    return getattr(row, key, None)
+
+
+def _ledger_sort_key(row: Any) -> float:
+    """Sortable timestamp for a ledger row (datetime, epoch seconds, or ISO)."""
+    ts = _ledger_field(row, "timestamp")
+    if isinstance(ts, datetime):
+        return ts.timestamp()
+    if isinstance(ts, int | float):
+        return float(ts)
+    if isinstance(ts, str):
+        try:
+            return datetime.fromisoformat(ts).timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+async def _load_capital_flow_ledger(runner: Any, deployment_id: str) -> list[Any] | None:
+    """One page of ledger rows, or ``None`` when the backend cannot serve them.
+
+    ``None`` is "unknown", never "empty": an unknown ledger must not be read
+    as a fresh deployment, because that would start an era at the wrong block.
+    """
+    state_manager = getattr(runner, "state_manager", None)
+    getter = getattr(state_manager, "get_ledger_entries", None)
+    if callable(getter):
+        entries = await getter(deployment_id, limit=CAPITAL_FLOW_LEDGER_PAGE)
+        return list(entries or [])
+
+    # GatewayStateManager exposes a sync, measured-or-not reader instead.
+    reader = getattr(state_manager, "read_ledger_entries_measured", None)
+    if callable(reader):
+        rows, measured = reader(deployment_id)
+        return list(rows or []) if measured else None
+    return None
+
+
+async def _capital_flow_wallet_is_shared(runner: Any, deployment_id: str) -> bool:
+    """True when another deployment demonstrably shares this state backend.
+
+    VIB-4927 boundary: transfer provenance is only attributable when exactly
+    one deployment owns the wallet. ``get_all_deployment_ids`` is the only
+    enumeration seam the backends expose; when it is absent we have *no
+    evidence* of sharing and must not poison on a guess (the canonical-id
+    check above is the other half of the gate).
+    """
+    state_manager = getattr(runner, "state_manager", None)
+    lister = getattr(state_manager, "get_all_deployment_ids", None)
+    if not callable(lister):
+        return False
+    try:
+        ids = await lister()
+    except Exception as exc:  # noqa: BLE001 — absence of evidence, not evidence
+        logger.debug("capital_flows: deployment enumeration failed: %s", exc)
+        return False
+    return any(str(other) and str(other) != deployment_id for other in (ids or []))
+
+
+async def _recover_capital_flow_record(
+    runner: Any,
+    deployment_id: str,
+) -> CapitalFlowRecord | None:
+    """Recover the freshest mirror wholesale (snapshot metadata vs strategy state)."""
+    state_manager = getattr(runner, "state_manager", None)
+    candidates: list[Any] = []
+
+    getter = getattr(state_manager, "get_latest_snapshot", None)
+    if callable(getter):
+        latest = await getter(deployment_id)
+        metadata = getattr(latest, "snapshot_metadata", None)
+        if isinstance(metadata, dict):
+            candidates.append(metadata.get(CAPITAL_FLOWS_KEY))
+
+    loader = getattr(state_manager, "load_state", None)
+    if callable(loader):
+        state = await loader(deployment_id)
+        raw = (getattr(state, "state", None) or {}).get(CAPITAL_FLOWS_KEY)
+        if isinstance(raw, str) and raw:
+            try:
+                candidates.append(json.loads(raw))
+            except ValueError:
+                logger.debug("capital_flows: unreadable strategy-state mirror for %s", deployment_id)
+        else:
+            candidates.append(raw)
+
+    return recover_record(candidates)
+
+
+def _capital_flow_chains(runner: Any, snapshot: PortfolioSnapshot, ledger_rows: list[Any]) -> list[str]:
+    """Primary chain plus every distinct chain the ledger has transacted on."""
+    chains: list[str] = []
+    for candidate in (
+        getattr(runner, "_primary_chain_lower", None),
+        getattr(snapshot, "chain", "") or "",
+        *(_ledger_field(row, "chain") or "" for row in ledger_rows),
+    ):
+        name = str(candidate or "").strip().lower()
+        if name and name not in chains:
+            chains.append(name)
+    return chains
+
+
+def _capital_flow_wallet(runner: Any, chain: str) -> str | None:
+    """Execution wallet for ``chain`` (Safe wallets share one address)."""
+    resolver = getattr(runner, "_multichain_wallet_for", None)
+    wallet = resolver(chain) if callable(resolver) else None
+    if not wallet:
+        wallet = getattr(getattr(runner, "balance_provider", None), "wallet_address", None)
+    return str(wallet).lower() if wallet else None
+
+
+def _capital_flow_token_universe(snapshot: PortfolioSnapshot, chain: str, *, primary: bool) -> dict[str, TokenInfo]:
+    """Token universe for one chain: priced tokens plus this chain's wallet holdings.
+
+    Wallet balances carry no chain of their own, so they are attributed to the
+    snapshot's own chain only. A holding with no price entry still enters the
+    universe with unknown decimals — a transfer on it then reads as
+    unmeasurable and poisons the era rather than being silently skipped.
+    """
+    universe: dict[str, TokenInfo] = {}
+    for key, meta in (getattr(snapshot, "token_prices", None) or {}).items():
+        key_chain, _, address = str(key).partition(":")
+        if key_chain.strip().lower() != chain or not address:
+            continue
+        decimals = meta.get("decimals") if isinstance(meta, dict) else None
+        symbol = meta.get("symbol") if isinstance(meta, dict) else None
+        universe[normalize_address(address)] = TokenInfo(
+            symbol=str(symbol) if symbol else None,
+            decimals=int(decimals) if isinstance(decimals, int) else None,
+        )
+    if primary:
+        for balance in getattr(snapshot, "wallet_balances", None) or []:
+            address = getattr(balance, "address", "") or ""
+            if address:
+                universe.setdefault(normalize_address(address), TokenInfo(symbol=getattr(balance, "symbol", None)))
+    return universe
+
+
+def _capital_flow_price_lookup(snapshot: PortfolioSnapshot) -> Callable[[str, str], Decimal | None]:
+    """Price resolver over the *current* snapshot's audit-trail prices."""
+    prices: dict[tuple[str, str], Decimal] = {}
+    for key, meta in (getattr(snapshot, "token_prices", None) or {}).items():
+        chain, _, address = str(key).partition(":")
+        raw = meta.get("price_usd") if isinstance(meta, dict) else None
+        if not address or raw in (None, ""):
+            continue
+        try:
+            prices[(chain.strip().lower(), normalize_address(address))] = Decimal(str(raw))
+        except (ArithmeticError, ValueError):
+            continue
+
+    def _price_of(chain: str, token_address: str) -> Decimal | None:
+        return prices.get((chain.strip().lower(), normalize_address(token_address)))
+
+    return _price_of
+
+
+def _open_capital_flow_handles(runner: Any, chains: list[str]) -> tuple[dict[str, Any], str]:
+    """Build a gateway-backed web3 handle per chain.
+
+    Returns ``(handles, failure)`` where ``failure`` is ``""`` on success,
+    ``"no_gateway"`` when the runner has no gateway client at all (a paper /
+    dry-run wiring detail, not an accounting gap), or ``"unscannable"`` when
+    a chain we must scan has no reachable handle.
+    """
+    client = runner._get_gateway_client() if hasattr(runner, "_get_gateway_client") else None
+    if client is None:
+        return {}, "no_gateway"
+
+    from almanak.framework.web3 import get_gateway_web3
+
+    handles: dict[str, Any] = {}
+    for chain in chains:
+        try:
+            handles[chain] = get_gateway_web3(client, chain)
+        except Exception as exc:  # noqa: BLE001 — provider construction errors are opaque
+            logger.warning("capital_flows: no web3 handle for %s: %s", chain, exc)
+            return {}, "unscannable"
+    return handles, ""
+
+
+def _read_head_block(web3: Any) -> int:
+    """Blocking ``eth_blockNumber`` read; offloaded by :func:`_read_head_blocks`."""
+    return int(web3.eth.block_number)
+
+
+async def _read_head_blocks(handles: dict[str, Any]) -> dict[str, int] | None:
+    """Current head per chain, or ``None`` on a transient read failure."""
+    heads: dict[str, int] = {}
+    for chain, web3 in handles.items():
+        try:
+            heads[chain] = int(await asyncio.to_thread(_read_head_block, web3))
+        except Exception as exc:  # noqa: BLE001 — provider errors are opaque
+            logger.warning("capital_flows: head-block read failed on %s: %s", chain, exc)
+            return None
+    return heads
+
+
+async def _anchor_block_for_era(
+    handles: dict[str, Any],
+    ledger_rows: list[Any],
+) -> tuple[str, int] | None:
+    """``(chain, block)`` of the earliest ledger transaction, or ``None``.
+
+    This is the tx₁ anchor: the read side values the deployment as
+    ``wallet_anchored(tx₁ pre-state) + deposits − withdrawals``, so every
+    transfer at or before tx₁'s block is already inside the anchor and must
+    never be booked again.
+    """
+    oldest = min(ledger_rows, key=_ledger_sort_key)
+    chain = str(_ledger_field(oldest, "chain") or "").strip().lower()
+    tx_hash = _ledger_field(oldest, "tx_hash")
+    web3 = handles.get(chain)
+    if web3 is None or not tx_hash:
+        return None
+    tx = await asyncio.to_thread(web3.eth.get_transaction, normalize_tx_hash(tx_hash))
+    block = tx.get("blockNumber") if isinstance(tx, dict) else getattr(tx, "blockNumber", None)
+    return None if block is None else (chain, int(block))
+
+
+async def _initialize_capital_flow_era(
+    *,
+    prior: CapitalFlowRecord | None,
+    metrics: PortfolioMetrics,
+    ledger_rows: list[Any],
+    handles: dict[str, Any],
+    heads: dict[str, int],
+) -> tuple[CapitalFlowRecord | None, str | None]:
+    """Open the era without ever booking a historical transfer.
+
+    Two discriminators, deliberately simple and exactly testable:
+
+    - **No prior record at all** (upgrade day, or any deployment that already
+      traded before this feature existed): the era starts *now* — cursors are
+      the current heads. Nothing before this instant is booked, which keeps
+      upgrade day quiet instead of replaying months of history through a
+      classifier that was never run against it.
+    - **A pending record** (this producer saw the deployment before it had a
+      ledger, i.e. a genuinely fresh deployment): the era starts at the block
+      of the deployment's first ledger transaction, so the window aligns
+      exactly with the read side's tx₁ anchor.
+
+    Known limitation (v1): the scan range is ``(cursor, head]``, so transfers
+    inside tx₁'s own block are excluded. That one-block window is the price of
+    aligning with a pre-state anchor without a log-index-precise cursor.
+    """
+    deposits = metrics.deposits_usd or Decimal("0")
+    withdrawals = metrics.withdrawals_usd or Decimal("0")
+
+    if prior is None:
+        return start_era(prior, cursors=heads, deposits_usd=deposits, withdrawals_usd=withdrawals), None
+
+    anchor = await _anchor_block_for_era(handles, ledger_rows)
+    if anchor is None:
+        # The anchor tx is not readable yet (reorg lag / transient RPC).
+        # Stay pending; a later cycle opens the era at the right block.
+        return prior, DETAIL_SCAN_DEFERRED
+
+    anchor_chain, anchor_block = anchor
+    cursors = dict(heads)
+    cursors[anchor_chain] = anchor_block
+    return start_era(prior, cursors=cursors, deposits_usd=deposits, withdrawals_usd=withdrawals), None
+
+
+async def _scan_capital_flow_interval(
+    runner: Any,
+    snapshot: PortfolioSnapshot,
+    *,
+    record: CapitalFlowRecord,
+    chains: list[str],
+    handles: dict[str, Any],
+    heads: dict[str, int],
+    ledger_rows: list[Any],
+) -> tuple[CapitalFlowRecord | None, str | None]:
+    """Scan ``(cursor, head]`` on every chain and fold the interval in.
+
+    Deferred unclassified transfers from earlier cycles are rechecked against
+    the freshly fetched ledger page *before* anything else, so a strategy tx
+    whose ledger row was still in flight when it was first scanned is now
+    recognised as ours and dropped instead of poisoning the era.
+    """
+    primary = (getattr(runner, "_primary_chain_lower", None) or getattr(snapshot, "chain", "") or "").strip().lower()
+    ledger_hashes = [h for h in (_ledger_field(row, "tx_hash") for row in ledger_rows) if h]
+
+    resolved = tally_pending(unmatched_pending(record.pending_unclassified, ledger_hashes))
+
+    observations: list[TransferObservation] = []
+    cursors: dict[str, int] = {}
+
+    for chain in chains:
+        cursor = record.cursors.get(chain)
+        if cursor is None:
+            # A chain that joined after era start begins at head — the read
+            # side's anchor already contains whatever it held before now.
+            cursors[chain] = heads[chain]
+            continue
+
+        wallet = _capital_flow_wallet(runner, chain)
+        if not wallet:
+            return poison(record, REASON_CHAIN_UNSCANNABLE), None
+
+        result = await asyncio.to_thread(
+            scan_chain_transfers,
+            handles[chain],
+            chain=chain,
+            wallet=wallet,
+            from_block_exclusive=cursor,
+            head_block=heads[chain],
+            token_universe=_capital_flow_token_universe(snapshot, chain, primary=chain == primary),
+            ledger_tx_hashes=ledger_hashes,
+        )
+
+        if result.status is ScanStatus.TRANSIENT_FAILURE:
+            # Keep the ENTIRE prior record — cursor unmoved, columns unchanged.
+            # Partially folding this interval would double-count it next cycle.
+            logger.warning("capital_flows: scan deferred on %s: %s", chain, result.error)
+            return record, DETAIL_SCAN_DEFERRED
+        if result.status is ScanStatus.RANGE_UNMEASURABLE:
+            advanced = {**record.cursors, **cursors, chain: result.to_block}
+            return dataclasses.replace(poison(record, REASON_SCAN_GAP), cursors=advanced), None
+
+        cursors[chain] = result.to_block
+        observations.extend(result.observations)
+
+    summary = summarize_interval(observations, _capital_flow_price_lookup(snapshot))
+    nav = (snapshot.total_value_usd or Decimal("0")) + (snapshot.available_cash_usd or Decimal("0"))
+    folded = apply_interval(record, summary, nav_usd=nav, cursors=cursors, resolved=resolved)
+    _log_capital_flow_poisoning(folded, prior_status=record.status, resolved=resolved, nav_usd=nav)
+    return folded, None
+
+
+def _log_capital_flow_poisoning(
+    folded: CapitalFlowRecord,
+    *,
+    prior_status: str,
+    resolved: PendingTally,
+    nav_usd: Decimal,
+) -> None:
+    """Emit one structured WARNING when an era transitions to unmeasured.
+
+    Run 2 of the real-fork proof poisoned with empty forensics and no log line,
+    which made the cause invisible until the DB was read by hand. Naming the
+    reason, the USD totals and the offending tx hashes makes the next
+    occurrence self-diagnosing.
+    """
+    if folded.status != STATUS_UNMEASURED or prior_status == STATUS_UNMEASURED:
+        return
+    logger.warning(
+        "capital_flows: era poisoned",
+        reason=folded.unmeasured_reason,
+        unclassified_in_usd=str(resolved.in_usd),
+        unclassified_out_usd=str(resolved.out_usd),
+        unpriceable_unclassified=resolved.has_unpriceable,
+        materiality_threshold_usd=str(materiality_threshold(nav_usd)),
+        nav_usd=str(nav_usd),
+        tx_hashes=list(resolved.tx_hashes),
+        pending_deferred=len(folded.pending_unclassified),
+    )
+
+
+async def _advance_capital_flows(
+    runner: Any,
+    metrics: PortfolioMetrics,
+    snapshot: PortfolioSnapshot,
+    *,
+    deployment_id: str,
+) -> tuple[CapitalFlowRecord | None, str | None]:
+    """Resolve this cycle's record. ``(None, detail)`` means "change nothing"."""
+    prior = await _recover_capital_flow_record(runner, deployment_id)
+
+    # Attribution gate first: an unattributable wallet is permanently
+    # unmeasured no matter what the chain says.
+    if not is_canonical_deployment_id(deployment_id) or await _capital_flow_wallet_is_shared(runner, deployment_id):
+        return poison(prior, REASON_SHARED_WALLET), None
+
+    # Sticky: v1 never re-baselines a poisoned era, but the record is still
+    # carried forward so the reason survives every restart.
+    if prior is not None and prior.status == STATUS_UNMEASURED:
+        return prior, None
+
+    ledger_rows = await _load_capital_flow_ledger(runner, deployment_id)
+    if ledger_rows is None:
+        return prior, None
+    if not ledger_rows and (prior is None or prior.status == STATUS_PENDING):
+        # No anchor transaction yet — the era cannot start, and the columns
+        # keep whatever they already hold.
+        return pending_record(), None
+
+    chains = _capital_flow_chains(runner, snapshot, ledger_rows)
+    handles, failure = _open_capital_flow_handles(runner, chains)
+    if failure == "no_gateway":
+        return prior, DETAIL_NO_GATEWAY
+    if failure:
+        return poison(prior, REASON_CHAIN_UNSCANNABLE), None
+
+    heads = await _read_head_blocks(handles)
+    if heads is None:
+        return prior, DETAIL_SCAN_DEFERRED
+
+    if prior is None or prior.status != STATUS_MEASURED:
+        return await _initialize_capital_flow_era(
+            prior=prior,
+            metrics=metrics,
+            ledger_rows=ledger_rows,
+            handles=handles,
+            heads=heads,
+        )
+
+    return await _scan_capital_flow_interval(
+        runner,
+        snapshot,
+        record=prior,
+        chains=chains,
+        handles=handles,
+        heads=heads,
+        ledger_rows=ledger_rows,
+    )
+
+
+def _stamp_capital_flow_record(
+    snapshot: PortfolioSnapshot,
+    record: CapitalFlowRecord,
+    detail: str | None,
+) -> None:
+    """Mirror the record onto the snapshot (rides ``positions_json``).
+
+    ``status_detail`` is stamped on this copy only — it describes *this cycle*
+    ("we skipped a scan"), never the durable cumulative, so it must not travel
+    into the strategy-state mirror and be mistaken for an era verdict.
+    """
+    metadata = getattr(snapshot, "snapshot_metadata", None)
+    if not isinstance(metadata, dict):
+        return
+    payload = record.to_record()
+    if detail:
+        payload["status_detail"] = detail
+    metadata[CAPITAL_FLOWS_KEY] = payload
+
+
+async def _populate_capital_flows(
+    runner: Any,
+    metrics: PortfolioMetrics,
+    snapshot: PortfolioSnapshot,
+    *,
+    deployment_id: str,
+) -> None:
+    """Populate ``metrics.deposits_usd`` / ``withdrawals_usd`` (VIB-5866 leg B).
+
+    Reads ERC-20 ``Transfer`` provenance since the last scanned block on every
+    chain the deployment touches, folds genuine deposits / withdrawals into a
+    cumulative kept in a wholesale flow record, and projects that record onto
+    the two metrics columns. The columns are a **pure projection**: measured →
+    the cumulative, anything else → ``None`` (the ``''`` unmeasured sentinel
+    from PR-C1). Without this, an operator wiring $500 into the wallet shows
+    up as $500 of profit in ``pnl_before_gas``.
+
+    Era alignment is the correctness-critical part. The read side values a
+    deployment as ``wallet_anchored(tx₁ pre-state) + deposits − withdrawals``,
+    so any transfer before tx₁ is *already inside the anchor*; booking it
+    again would subtract capital twice and print a phantom loss. The era
+    therefore starts at the tx₁ block for deployments this producer watched
+    from birth, and at "now" for every pre-existing deployment — never
+    earlier. See :mod:`almanak.framework.runner.capital_flow_state`.
+
+    **Deliberate divergence from ``_populate_gas_spent_usd``: this never
+    raises, in any mode.** The gas aggregator reads the local ledger, so a
+    failure there is local-DB integrity damage and live mode must halt. This
+    reads a remote chain; an RPC hiccup is an expected, recoverable condition
+    that must not stop a strategy that is otherwise healthy. A failed cycle
+    keeps the prior record verbatim (cursor unmoved, columns unchanged) and
+    stamps a ``status_detail`` so the gap is visible on the snapshot row —
+    the next cycle re-scans the same window.
+
+    Known v1 gaps: native-coin transfers are not observed (ERC-20 logs only —
+    VIB-4979 scope), and transfers inside tx₁'s own block fall in the
+    one-block anchor window described in ``_initialize_capital_flow_era``.
+    """
+    try:
+        record, detail = await _advance_capital_flows(runner, metrics, snapshot, deployment_id=deployment_id)
+    except Exception as exc:  # noqa: BLE001 — never let a chain read break metrics
+        logger.error(
+            "capital_flows: producer failed for deployment_id=%s; keeping prior record: %s",
+            deployment_id,
+            exc,
+        )
+        return
+
+    if record is None:
+        return
+
+    if record.status != STATUS_PENDING:
+        metrics.deposits_usd, metrics.withdrawals_usd = project_columns(record)
+    _stamp_capital_flow_record(snapshot, record, detail)
+
+
 # crap-allowlist: VIB-4248 — function predates VIB-4225 (cc=24 on main); branches are mode-aware accounting-failure paths covered by test_portfolio_baseline.py + test_stamp_snapshot_identity.py + test_portfolio_metrics_gas_aggregator.py. Refactor protocol (.claude/rules/crap-refactor.md) requires fresh-context Plan agent; deferred to VIB-4248 alongside other test-quality follow-ups.
 async def _build_metrics_for_snapshot(  # noqa: C901
     runner: Any,
@@ -1173,6 +1731,7 @@ async def _build_metrics_for_snapshot(  # noqa: C901
                 deployment_id=deployment_id,
                 is_live=execution_mode == "live",
             )
+            await _populate_capital_flows(runner, metrics, snapshot, deployment_id=deployment_id)
             return metrics
 
         existing.timestamp = snapshot.timestamp
@@ -1189,6 +1748,7 @@ async def _build_metrics_for_snapshot(  # noqa: C901
             deployment_id=deployment_id,
             is_live=execution_mode == "live",
         )
+        await _populate_capital_flows(runner, existing, snapshot, deployment_id=deployment_id)
         return existing
 
     except AccountingPersistenceError:

@@ -199,6 +199,32 @@ def test_client_available_with_rows_is_measured():
     assert rows[0]["intent_type"] == "STAKE" and rows[0]["token_out"] == "wstETH"
 
 
+def test_client_projection_carries_tx_hash():
+    """VIB-5866: ``tx_hash`` must survive the wire→dict projection.
+
+    The projection was written for the teardown clamp, which does not read
+    ``tx_hash``, so the field was dropped while the servicer had always
+    populated it. The capital-flow producer keys its own-transaction
+    exclusion on exactly this field: with it missing, a gateway-managed run
+    scans its own trades as unclassified external flows and self-poisons the
+    era (found live in real-fork proof run 3, invisible to every fake that
+    served attribute-style rows).
+    """
+    entry = gateway_pb2.LedgerEntryInfo(
+        id="led-1",
+        deployment_id=_DEPLOYMENT_ID,
+        intent_type="SUPPLY",
+        chain="arbitrum",
+        tx_hash="0x160a765a",
+        success=True,
+    )
+    gsm = _make_gsm(gateway_pb2.ACCOUNTING_BACKEND_STATUS_AVAILABLE, entries=[entry])
+    rows, measured = gsm.read_ledger_entries_measured(_DEPLOYMENT_ID)
+    assert measured is True
+    assert "tx_hash" in rows[0], "projection must not drop tx_hash"
+    assert rows[0]["tx_hash"] == "0x160a765a"
+
+
 def test_client_absent_is_unmeasured():
     gsm = _make_gsm(gateway_pb2.ACCOUNTING_BACKEND_STATUS_ABSENT)
     rows, measured = gsm.read_ledger_entries_measured(_DEPLOYMENT_ID)

@@ -1915,6 +1915,12 @@ def _proto_ledger_to_dict(entry: "gateway_pb2.LedgerEntryInfo") -> dict:
         "chain": entry.chain,
         "timestamp": entry.timestamp,
         "success": entry.success,
+        # The capital-flow producer keys its own-tx exclusion on tx_hash
+        # (VIB-5866): without it every gateway-managed run scans its own
+        # trades as unclassified external flows and self-poisons the era.
+        # The servicer has always populated the field; only this projection
+        # dropped it.
+        "tx_hash": entry.tx_hash,
     }
 
 
