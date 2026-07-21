@@ -2872,6 +2872,11 @@ class TeardownManager:
                 gateway_client=gateway_client,
                 market=post_market,
                 network=network,
+                # VIB-5923: POST phase — here "chain reports CLOSED" is the
+                # EXPECTED success signal for every properly closed position, so
+                # the CHECK must not page ERROR per position on a healthy
+                # teardown. Severity only; verdicts and the report are unchanged.
+                phase="post",
             )
         except Exception:  # noqa: BLE001 — the CHECK must never fault the teardown lane
             logger.exception(

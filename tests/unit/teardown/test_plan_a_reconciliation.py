@@ -779,3 +779,175 @@ async def test_runner_helper_none_when_enumeration_fails(monkeypatch):
     monkeypatch.setattr(registry_enumeration, "resolve_open_positions_with_registry", _boom)
     report = await runner_teardown.reconcile_known_positions(_FakeRunner(), _FakeStrategy(), None)
     assert report is None
+
+
+# ---------------------------------------------------------------------------
+# VIB-5923 — phase-aware SEVERITY (verdicts/report identical in both phases)
+#
+# The same CHECK serves the PRE-execution callers (runner lane; CLI
+# ``_pre_teardown_reconciliation``) and the TD-15 POST-teardown re-read. PRE, a
+# DIVERGED_CLOSED verdict means the enumeration was stale -> ERROR. POST, the
+# exact same verdict is the EXPECTED closure signal for a position that just
+# closed -> INFO, never a page on the happy path.
+# ---------------------------------------------------------------------------
+
+
+def _closed_lp_market_free(monkeypatch):
+    """Chain says the LP is closed (ledger believed open) -> DIVERGED_CLOSED."""
+
+    async def _verify(*, gateway_client, position, network=""):
+        return False
+
+    monkeypatch.setattr(live_position_reads, "chain_verify_lp_open", _verify)
+
+
+@pytest.mark.asyncio
+async def test_pre_phase_divergence_still_logs_error(monkeypatch, caplog):
+    """Default (``phase="pre"``) severity is unchanged: a stale-enumeration
+    divergence still pages ERROR, per-entry and in the summary."""
+    _closed_lp_market_free(monkeypatch)
+    with caplog.at_level(logging.DEBUG):
+        report = await reconcile_known_positions_against_chain(
+            summary=_summary(_lp()), gateway_client=object(), market=None, phase="pre"
+        )
+    assert report.has_divergence
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("DIVERGENCE" in msg for msg in errors)
+
+
+@pytest.mark.asyncio
+async def test_post_phase_divergence_is_info_not_error(monkeypatch, caplog):
+    """POST-teardown: "chain reports CLOSED" is the expected success signal, so
+    it must NOT emit a single ERROR record — per-entry or summary."""
+    _closed_lp_market_free(monkeypatch)
+    with caplog.at_level(logging.DEBUG):
+        report = await reconcile_known_positions_against_chain(
+            summary=_summary(_lp()), gateway_client=object(), market=None, phase="post"
+        )
+    assert report.has_divergence  # verdict is unchanged; only severity moved
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("chain-confirmed CLOSED after teardown" in msg for msg in infos)
+    assert any("chain-confirmed CLOSED post-teardown" in msg for msg in infos)
+
+
+@pytest.mark.asyncio
+async def test_post_phase_unverifiable_stays_warning(monkeypatch, caplog):
+    """An unreadable POST-teardown position (e.g. a burned LP NFT) is a
+    deliberate verification no-op — informative WARNING, never ERROR."""
+    with caplog.at_level(logging.DEBUG):
+        report = await reconcile_known_positions_against_chain(
+            summary=_summary(_lp()), gateway_client=None, market=None, phase="post"
+        )
+    assert report.entries[0].verdict is ReconciliationVerdict.UNVERIFIABLE
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("UNVERIFIABLE" in msg and "no-op" in msg for msg in warnings)
+
+
+@pytest.mark.asyncio
+async def test_post_phase_confirmed_open_is_not_double_logged(monkeypatch, caplog):
+    """A residual-open POST-teardown position is real risk, but the loud
+    fail-closed ERROR belongs to the TD-15 caller
+    (``verify_closure_against_chain``) — this CHECK must not double-page."""
+
+    async def _verify(*, gateway_client, position, network=""):
+        return True
+
+    monkeypatch.setattr(live_position_reads, "chain_verify_lp_open", _verify)
+    with caplog.at_level(logging.DEBUG):
+        report = await reconcile_known_positions_against_chain(
+            summary=_summary(_lp()), gateway_client=object(), market=None, phase="post"
+        )
+    assert report.has_confirmed_open
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    # ...and the summary must not read HEALTHY at the moment of maximum residual
+    # risk: it is a WARNING naming the still-open positions, never the PRE lane's
+    # "chain-confirmed open" INFO (VIB-5923 audit round 2).
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("1/1 known positions STILL read OPEN on-chain after teardown" in msg for msg in warnings)
+    assert not [r.getMessage() for r in caplog.records if "chain-confirmed open" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_post_phase_all_closed_summary_is_info_without_stop_prefix(monkeypatch, caplog):
+    """POST-teardown with nothing still open: an INFO summary, no 🛑, no page."""
+    _closed_lp_market_free(monkeypatch)
+    with caplog.at_level(logging.DEBUG):
+        report = await reconcile_known_positions_against_chain(
+            summary=_summary(_lp()), gateway_client=object(), market=None, phase="post"
+        )
+    assert not report.has_confirmed_open
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    summaries = [m for m in (r.getMessage() for r in caplog.records) if "post-teardown reconciliation:" in m]
+    assert any("0 still open" in m and "🛑" not in m for m in summaries)
+
+
+@pytest.mark.asyncio
+async def test_post_phase_mixed_residual_open_summary_warns(monkeypatch, caplog):
+    """One leg closed, one still open POST-teardown: the residual open decides the
+    summary severity (WARNING), not the closure."""
+    market = _FakeMarket(health=_Health(Decimal("1000"), Decimal("0")))
+    # SUPPLY leg reads collateral $1000 -> CONFIRMED_OPEN; BORROW leg reads debt
+    # $0 -> DIVERGED_CLOSED. A mixed post-teardown report.
+    positions = _summary(_lending(PositionType.SUPPLY), _lending(PositionType.BORROW))
+    with caplog.at_level(logging.DEBUG):
+        report = await reconcile_known_positions_against_chain(
+            summary=positions, gateway_client=None, market=market, phase="post"
+        )
+    assert report.has_confirmed_open and report.has_divergence
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("1/2 known positions STILL read OPEN on-chain after teardown" in msg for msg in warnings)
+
+
+@pytest.mark.asyncio
+async def test_pre_phase_clean_summary_unchanged(monkeypatch, caplog):
+    """PRE-phase summary wording/severity is byte-identical to pre-VIB-5923."""
+
+    async def _verify(*, gateway_client, position, network=""):
+        return True
+
+    monkeypatch.setattr(live_position_reads, "chain_verify_lp_open", _verify)
+    with caplog.at_level(logging.DEBUG):
+        await reconcile_known_positions_against_chain(summary=_summary(_lp()), gateway_client=object(), market=None)
+    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("🛑 TD-08 Plan-A reconciliation: 1/1 known positions chain-confirmed open" in m for m in infos)
+
+
+@pytest.mark.asyncio
+async def test_phase_changes_severity_only_not_verdicts(monkeypatch):
+    """Same inputs, both phases -> byte-identical report contents."""
+    _closed_lp_market_free(monkeypatch)
+    kwargs = {"gateway_client": object(), "market": None}
+    pre = await reconcile_known_positions_against_chain(summary=_summary(_lp()), phase="pre", **kwargs)
+    post = await reconcile_known_positions_against_chain(summary=_summary(_lp()), phase="post", **kwargs)
+    assert pre.entries == post.entries
+    assert pre.to_dict() == post.to_dict()
+    assert pre.apply_to_verification_status(VerificationStatus.CHAIN_VERIFIED) is post.apply_to_verification_status(
+        VerificationStatus.CHAIN_VERIFIED
+    )
+    assert pre.apply_post_teardown_to_verification_status(
+        VerificationStatus.CHAIN_VERIFIED
+    ) is post.apply_post_teardown_to_verification_status(VerificationStatus.CHAIN_VERIFIED)
+
+
+@pytest.mark.asyncio
+async def test_invalid_phase_degrades_loud_instead_of_raising(monkeypatch, caplog):
+    """A typo'd phase must NOT raise: both callers wrap this CHECK in a broad
+    ``except Exception`` that fails OPEN (the TD-15 caller would silently skip its
+    residual-open -> FAILED fold), so a raise would convert a typo into a
+    swallowed money-safety check. Instead: loud ERROR + degrade to "pre" severity,
+    report still produced (VIB-5923 audit round 2)."""
+    _closed_lp_market_free(monkeypatch)
+    with caplog.at_level(logging.DEBUG):
+        report = await reconcile_known_positions_against_chain(
+            summary=_summary(_lp()), gateway_client=object(), market=None, phase="POST"
+        )
+    # The CHECK still ran and still produced its verdicts.
+    assert report.checked_count == 1
+    assert report.has_divergence
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("invalid phase 'POST'" in msg and "treating as 'pre'" in msg for msg in errors)
+    # Degraded to the conservative PRE severity, not silently post.
+    assert any("DIVERGENCE" in msg for msg in errors)

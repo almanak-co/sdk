@@ -241,6 +241,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **TD-08 reconciliation no longer false-pages on a healthy teardown
+  (VIB-5923).** `reconcile_known_positions_against_chain` takes a keyword-only
+  `phase` (`"pre"` default / `"post"`). The TD-15 post-teardown caller
+  (`verify_closure_against_chain`) deliberately re-reads the pre-execution KNOWN
+  set AFTER every closing intent fired, where "chain reports CLOSED" is the
+  EXPECTED success signal — yet the shared CHECK still logged a 🛑 ERROR per
+  closed position plus an ERROR summary, on every normal closure. Post-phase
+  divergence now logs INFO ("chain-confirmed CLOSED after teardown"), and the
+  post-phase summary is keyed on residual risk instead of divergence — any
+  position still read OPEN makes it a WARNING ("N/M known positions STILL read
+  OPEN on-chain after teardown") rather than the pre lane's healthy-sounding
+  "chain-confirmed open". Severity and wording only: verdicts, the
+  `ReconciliationReport`, and both `apply_*_to_verification_status` folds are
+  unchanged, and the loud per-position fail-closed "STILL OPEN on-chain" ERROR
+  stays with the TD-15 caller (no double-paging). Pre-phase callers keep ERROR.
+  An unrecognised `phase` never raises — both callers wrap the CHECK in a
+  fail-OPEN `except Exception`, so it logs ERROR and degrades to `"pre"`.
 - **Teardown correctness.** V4 LP_CLOSE post-close verification treats an
   empty position read as CLOSED (+ `lp_v4` label bridge) (#3193);
   target-token no-op close + multi-position disambiguation (#3190);

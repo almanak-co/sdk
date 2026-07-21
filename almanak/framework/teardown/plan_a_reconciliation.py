@@ -10,6 +10,15 @@ the TD-15 fail-closed verification step consumes (see
 :meth:`ReconciliationReport.apply_to_verification_status`, which composes with the
 TD-14 :class:`VerificationStatus` rather than fighting it).
 
+**Severity is phase-aware; verdicts are not (VIB-5923).** The same function
+serves the PRE-execution callers and the TD-15 POST-teardown re-read. PRE, a
+``DIVERGED_CLOSED`` verdict means the enumeration is STALE — an anomaly worth an
+ERROR page. POST (``phase="post"``), the exact same verdict is the EXPECTED
+SUCCESS signal for a position that just closed, so it logs INFO. Only the log
+severity/wording branches on ``phase``: verdicts, the returned
+:class:`ReconciliationReport`, and both ``apply_*_to_verification_status`` folds
+are identical in either phase.
+
 **This is a CHECK, not an action.** Nothing here closes, sweeps, repays, or
 withdraws anything. It emits no :class:`Intent`. It reads chain state for the
 positions the framework *already knows* and returns an observation. The teardown
@@ -37,7 +46,7 @@ import logging
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from almanak.framework.teardown.models import PositionType, VerificationStatus
 
@@ -51,6 +60,25 @@ logger = logging.getLogger(__name__)
 # measured-closed, mirroring ``LiveLendingPosition.has_exposure``'s default so a
 # market the WARM ledger still lists is not flagged "diverged" over rounding dust.
 _DUST_USD = Decimal("0.01")
+
+# Which teardown lane called the CHECK (VIB-5923). This selects **log severity
+# only** — verdicts, the returned :class:`ReconciliationReport`, and the
+# ``apply_*_to_verification_status`` folds are byte-identical in both phases.
+#
+# - ``"pre"`` (default) — the PRE-execution callers (runner lane
+#   ``runner_teardown``; CLI lane ``TeardownManager._pre_teardown_reconciliation``).
+#   There, "the WARM ledger believes OPEN but chain reports CLOSED" means the
+#   enumeration is STALE — an anomaly that must page: ERROR.
+# - ``"post"`` — the TD-15 POST-teardown caller
+#   (``TeardownManager.verify_closure_against_chain``), which deliberately
+#   re-reads the SAME pre-execution KNOWN set AFTER every closing intent fired.
+#   There, "chain reports CLOSED" is the EXPECTED SUCCESS signal for every
+#   properly closed position, so paging ERROR on it false-alarms on every
+#   healthy teardown. Post-phase divergence is INFO.
+ReconciliationPhase = Literal["pre", "post"]
+_PHASE_PRE: ReconciliationPhase = "pre"
+_PHASE_POST: ReconciliationPhase = "post"
+_VALID_PHASES: tuple[ReconciliationPhase, ...] = (_PHASE_PRE, _PHASE_POST)
 
 
 class ReconciliationVerdict(StrEnum):
@@ -583,12 +611,75 @@ async def _reconcile_one(
         return ReconciliationVerdict.UNVERIFIABLE, "chain read raised (treated as unverifiable)"
 
 
+def _log_reconciliation_summary(report: ReconciliationReport, *, is_post: bool) -> None:
+    """Emit the one-line phase-appropriate summary for a finished CHECK.
+
+    Severity mirrors what the verdict MEANS in each lane (VIB-5923) — the
+    verdicts themselves are phase-invariant:
+
+    - PRE: divergence = stale enumeration ⇒ ERROR; otherwise "chain-confirmed
+      open" is the healthy reading ⇒ INFO. Byte-identical to pre-VIB-5923.
+    - POST: still-OPEN is the anomaly (residual on-chain risk at the moment of
+      maximum exposure), closed is the expected success signal. So the summary
+      is keyed on ``has_confirmed_open``, not on divergence: any residual open
+      ⇒ WARNING, otherwise ⇒ INFO.
+
+    **Division of responsibility**: POST-teardown this function never ERRORs on
+    a residual-open position. The loud fail-closed per-position
+    "🛑 TD-15 fail-closed: … STILL OPEN" ERROR and the ``FAILED`` flip belong to
+    the TD-15 caller (``TeardownManager.verify_closure_against_chain``), which
+    runs immediately after; paging here as well would double-page the operator.
+    """
+    if not report.checked_count:
+        return
+    if is_post:
+        if report.has_confirmed_open:
+            logger.warning(
+                "TD-08 post-teardown reconciliation: %d/%d known positions STILL read OPEN on-chain "
+                "after teardown — residual risk; TD-15 fail-closed verification owns the page. "
+                "%d chain-confirmed CLOSED, %d unverifiable, %d not-applicable.",
+                len(report.confirmed),
+                report.checked_count,
+                len(report.diverged),
+                len(report.unverifiable),
+                len(report.not_applicable),
+            )
+        else:
+            logger.info(
+                "TD-08 Plan-A post-teardown reconciliation: %d/%d known positions chain-confirmed CLOSED "
+                "post-teardown (expected closure signal), 0 still open, %d unverifiable (deliberate "
+                "no-op), %d not-applicable.",
+                len(report.diverged),
+                report.checked_count,
+                len(report.unverifiable),
+                len(report.not_applicable),
+            )
+        return
+    if report.has_divergence:
+        logger.error(
+            "🛑 TD-08 Plan-A reconciliation found %d divergence(s) across %d known position(s): %s",
+            len(report.diverged),
+            report.checked_count,
+            report.to_dict(),
+        )
+        return
+    logger.info(
+        "🛑 TD-08 Plan-A reconciliation: %d/%d known positions chain-confirmed open, %d unverifiable, "
+        "%d not-applicable",
+        len(report.confirmed),
+        report.checked_count,
+        len(report.unverifiable),
+        len(report.not_applicable),
+    )
+
+
 async def reconcile_known_positions_against_chain(
     *,
     summary: TeardownPositionSummary,
     gateway_client: Any,
     market: MarketSnapshot | None,
     network: str = "",
+    phase: ReconciliationPhase = "pre",
 ) -> ReconciliationReport:
     """Plan-A reconciliation CHECK: confirm each KNOWN position's live chain state.
 
@@ -609,13 +700,42 @@ async def reconcile_known_positions_against_chain(
             read. ``None`` ⇒ lending positions reconcile as ``UNVERIFIABLE``.
         network: Gateway network override (``""`` uses the gateway's configured
             network — the fork on a managed-Anvil run).
+        phase: Which teardown lane is calling — ``"pre"`` (default; before any
+            closing intent fired) or ``"post"`` (the TD-15 re-read after every
+            closing intent fired). **Log severity only** (VIB-5923): a
+            ``DIVERGED_CLOSED`` verdict is an anomaly PRE-teardown (stale
+            enumeration → ERROR) but the EXPECTED SUCCESS signal POST-teardown
+            (the position closed → INFO), while a still-``CONFIRMED_OPEN``
+            position is healthy PRE-teardown but residual risk POST-teardown
+            (→ WARNING summary; the fail-closed ERROR page belongs to the TD-15
+            caller). Verdicts, the returned report, and the
+            ``apply_*_to_verification_status`` folds are identical in both phases.
+            An unrecognised value logs ERROR and degrades to ``"pre"``.
 
     Returns:
         A :class:`ReconciliationReport`. An empty ``summary`` yields an empty
         report (``checked_count == 0``) — nothing to reconcile.
 
-    Never raises — reconciliation must never fault the teardown lane.
+    Never raises — reconciliation must never fault the teardown lane. That
+    includes an unrecognised ``phase``: both callers wrap this call in a broad
+    ``except Exception`` that fails **OPEN** (the TD-15 caller would silently
+    skip its AC-(a) residual-open → ``FAILED`` fold), so raising here would
+    convert a typo into a swallowed money-safety check. An unrecognised value
+    logs ERROR and degrades to ``"pre"`` — the loud/conservative severity.
     """
+    if phase not in _VALID_PHASES:
+        # Fail LOUD but never fault the lane: degrade to the conservative
+        # (pre) severity rather than raise into the callers' fail-open
+        # ``except Exception`` handlers (VIB-5923 audit round 2).
+        logger.error(
+            "TD-08 reconciliation called with invalid phase %r — treating as %r "
+            "(loud/conservative severity). Valid phases: %r.",
+            phase,
+            _PHASE_PRE,
+            _VALID_PHASES,
+        )
+        phase = _PHASE_PRE
+    is_post = phase == _PHASE_POST
     positions = list(getattr(summary, "positions", []) or [])
     entries: list[PositionReconciliation] = []
     # Reconcile sequentially (not via asyncio.gather): the KNOWN set is small
@@ -637,11 +757,42 @@ async def reconcile_known_positions_against_chain(
             detail=detail,
         )
         entries.append(entry)
-        if entry.diverged:
+        if entry.diverged and is_post:
+            # POST-teardown: this is the happy path — the position the ledger
+            # believed open before teardown is now chain-confirmed CLOSED. INFO,
+            # no 🛑, no page (VIB-5923).
+            logger.info(
+                "TD-08 post-teardown reconciliation: %s %s (%s) on %s chain-confirmed CLOSED after "
+                "teardown — expected closure signal (was OPEN pre-teardown). %s",
+                entry.protocol,
+                entry.position_type,
+                entry.position_id,
+                entry.chain,
+                entry.detail,
+            )
+        elif entry.diverged:
             logger.error(
                 "🛑 TD-08 reconciliation DIVERGENCE: WARM ledger believes %s %s (%s) on %s is OPEN "
                 "but chain reports CLOSED — %s. CHECK only: not closing/sweeping; signalling for "
                 "fail-closed verification.",
+                entry.protocol,
+                entry.position_type,
+                entry.position_id,
+                entry.chain,
+                entry.detail,
+            )
+        elif entry.unverifiable and is_post:
+            # POST-teardown an unreadable position (e.g. a burned LP NFT reading
+            # back "not found") is a deliberate NO-OP for verification — it never
+            # lowers a proposed CHAIN_VERIFIED (see
+            # ``apply_post_teardown_to_verification_status`` and the TD-15
+            # ``verify_closure_against_chain`` docstring). Still WARNING: it is
+            # informative (closure could not be positively proven for this leg),
+            # just not an anomaly to page on.
+            logger.warning(
+                "TD-08 post-teardown reconciliation UNVERIFIABLE: could not re-read %s %s (%s) on %s "
+                "after teardown — %s. Deliberate no-op for verification (an unreadable post-teardown "
+                "position, e.g. a burned LP NFT, never lowers the closure confidence).",
                 entry.protocol,
                 entry.position_type,
                 entry.position_id,
@@ -675,27 +826,13 @@ async def reconcile_known_positions_against_chain(
     report = ReconciliationReport(
         deployment_id=str(getattr(summary, "deployment_id", "") or ""), entries=tuple(entries)
     )
-    if report.has_divergence:
-        logger.error(
-            "🛑 TD-08 Plan-A reconciliation found %d divergence(s) across %d known position(s): %s",
-            len(report.diverged),
-            report.checked_count,
-            report.to_dict(),
-        )
-    elif report.checked_count:
-        logger.info(
-            "🛑 TD-08 Plan-A reconciliation: %d/%d known positions chain-confirmed open, %d unverifiable, "
-            "%d not-applicable",
-            len(report.confirmed),
-            report.checked_count,
-            len(report.unverifiable),
-            len(report.not_applicable),
-        )
+    _log_reconciliation_summary(report, is_post=is_post)
     return report
 
 
 __all__ = [
     "PositionReconciliation",
+    "ReconciliationPhase",
     "ReconciliationReport",
     "ReconciliationVerdict",
     "reconcile_known_positions_against_chain",
