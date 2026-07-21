@@ -78,6 +78,19 @@ def _lp_event(event_type, *, token0="WETH", token1="USDC", ts="2026-07-20T00:00:
     }
 
 
+def _vault_event(token="WETH", ts="2026-07-20T00:00:01+00:00"):
+    """A still-UNMEASURED wallet mover (VIB-5865 PR-2 left VAULT_* in that lane)."""
+    return {
+        "event_type": "VAULT_REDEEM",
+        "deployment_id": _DEP,
+        "position_key": "vault:erc4626:arbitrum:0xvault",
+        "chain": _CHAIN,
+        "wallet_address": _WALLET,
+        "timestamp": ts,
+        "payload_json": json.dumps({"asset_token": token, "assets_amount": "1.5", "confidence": "HIGH"}),
+    }
+
+
 def _ledger_row(intent_type, token_in, token_out, *, success=True, _id="r1"):
     return {
         "intent_type": intent_type,
@@ -137,14 +150,13 @@ def test_unmeasured_event_poisons_token_even_with_a_measured_swap_lot() -> None:
     ``_poison_unmeasured_tokens`` (or applying the poison BEFORE the measured
     folds) leaves ``WETH`` at ``Decimal("5")`` and fails this test.
     """
-    out = _tracked([_swap_event("WETH", "5"), _lp_event("LP_OPEN")])
+    out = _tracked([_swap_event("WETH", "5"), _vault_event("WETH")])
     assert out["WETH"] is None
-    assert out["USDC"] is None  # the LP's second leg is equally unprovable
 
 
 def test_poisoned_token_yields_visible_degraded_refusal() -> None:
     """The clamp turns the ``None`` into ``tracked_qty_unmeasured`` + ``degraded=True``."""
-    out = _tracked([_swap_event("WETH", "5"), _lp_event("LP_OPEN")])
+    out = _tracked([_swap_event("WETH", "5"), _vault_event("WETH")])
     decision = decide_swap_clamp(live_balance=Decimal("5"), tracked_map=out, from_token="WETH")
     assert decision.reason == "tracked_qty_unmeasured"
     assert decision.skip is True
@@ -152,29 +164,51 @@ def test_poisoned_token_yields_visible_degraded_refusal() -> None:
     assert decision.amount is None
 
 
-def test_trace_baseline_flips_from_silent_strand_to_visible_refusal() -> None:
+def test_trace_baseline_now_measures_the_lp_proceeds() -> None:
     """Regression pinned to the real FLOW-A trace (deployment b3816ff5ddb8).
 
-    BEFORE: ``{'USDC': 3726.460265}`` — no ``WETH`` key at all — and the clamp
-    silently skipped 2.0006 WETH with ``untracked_token`` / ``degraded=False``.
-    AFTER: both LP legs are poisoned; the same live balance now produces a
-    VISIBLE degraded refusal. (``USDC`` is poisoned too — the LP consumed and
-    returned both legs, so neither total is provable.)
+    THE FIX'S SIGNATURE, in three revisions of this one history:
+
+    * pre-VIB-5865:  ``{'USDC': 3726.460265}`` — no ``WETH`` key at all. Clamp
+      silently skipped 2.0006 WETH (``untracked_token`` / ``degraded=False``);
+      the proceeds stranded.
+    * PR-1 (poison):  ``{'WETH': None, 'USDC': None}`` — visible degraded refusal.
+    * PR-2 (this):    ``WETH`` is MEASURED at the LP_CLOSE credit, so the clamp
+      sweeps exactly the LP proceeds and leaves the pre-funded buffer alone.
+
+    History is the clamp-time one — LP_OPEN then LP_CLOSE, WITHOUT the
+    consolidation SWAP, because the clamp is what DECIDES that swap.
+
+    The numbers are the trace's real ones: LP_OPEN consumed 1.708743113797863
+    WETH (receipt-confirmed, NOT the 1.9006 requested), LP_CLOSE returned
+    1.708743113797862999, and the wallet held 2.000596102324696795 — the
+    difference being a 0.291852988526833796 WETH buffer that was NEVER deployed.
+    Sweeping that buffer is the ~$546 over-sweep quantified in the trace report
+    §5; the clamp now refuses it by construction.
     """
     events = [
         _lp_event("LP_OPEN", ts="2026-07-20T13:47:49+00:00"),
-        _lp_event("LP_CLOSE", ts="2026-07-20T13:51:02+00:00"),
-        # the teardown's own consolidation swap — the one lane that DID replay
-        _swap_event("USDC", "3726.460265", token_in="WETH", amount_in="2.000596102324696795",
-                    ts="2026-07-20T13:52:10+00:00"),
+        _lp_event(
+            "LP_CLOSE",
+            ts="2026-07-20T13:51:02+00:00",
+            amount0="1.708743113797862999",
+            amount1="3562.499998",
+            fees0_collected="0",
+            fees1_collected="0",
+        ),
     ]
     out = _tracked(events)
-    assert out["WETH"] is None
-    assert out["USDC"] is None
+    assert out["WETH"] == Decimal("1.708743113797862999")
 
     live = Decimal("2.000596102324696795")
     decision = decide_swap_clamp(live_balance=live, tracked_map=out, from_token="WETH")
-    assert (decision.reason, decision.skip, decision.degraded) == ("tracked_qty_unmeasured", True, True)
+    assert decision.reason == "clamped"
+    assert decision.skip is False
+    assert decision.degraded is False
+    assert decision.amount == Decimal("1.708743113797862999")
+    # The never-deployed buffer is left untouched — the over-sweep the manual
+    # lane performed for real (~$546) is exactly this delta.
+    assert live - decision.amount == Decimal("0.291852988526833796")
 
 
 def test_unmeasured_ledger_row_poisons_both_legs() -> None:
@@ -183,14 +217,14 @@ def test_unmeasured_ledger_row_poisons_both_legs() -> None:
     An undrained DEBIT is the over-sweep direction, so the consumed leg matters as
     much as the credited one.
     """
-    out = _tracked([_swap_event("USDC", "3726.46")], [_ledger_row("LP_OPEN", "WETH", "USDC")])
+    out = _tracked([_swap_event("USDC", "3726.46")], [_ledger_row("PERP_OPEN", "WETH", "USDC")])
     assert out["WETH"] is None
     assert out["USDC"] is None
 
 
 def test_failed_unmeasured_ledger_row_does_not_poison() -> None:
     """A reverted tx moved nothing — it must not degrade an otherwise measured map."""
-    out = _tracked([_swap_event("USDC", "10")], [_ledger_row("LP_OPEN", "WETH", "USDC", success=False)])
+    out = _tracked([_swap_event("USDC", "10")], [_ledger_row("PERP_OPEN", "WETH", "USDC", success=False)])
     assert out == {"USDC": Decimal("10")}
 
 
@@ -209,16 +243,34 @@ def test_settlement_asset_token_key_is_scanned() -> None:
     assert out["USDC"] is None
 
 
-def test_curve_coin_symbols_list_is_scanned() -> None:
-    """Curve N-coin LP payloads carry a ``coin_symbols`` LIST."""
+def test_curve_ncoin_tail_is_poisoned_by_the_replay() -> None:
+    """Curve N-coin: legs 0/1 are measured by the replay, coins at index >= 2 are POISONED.
+
+    The LP payload persists amounts only for ``amount0``/``amount1``, so a coin at
+    index >= 2 has a known identity and an unknowable amount — Empty ≠ Zero. Since
+    VIB-5865 PR-2 the LP rows are EVENT_REPLAY, so this poison comes from the
+    replay itself (``FIFOBasisStore._mark_token_unmeasured``), not from the
+    taxonomy lane.
+
+    A Curve *proportional* close also leaves ``token0``/``token1`` empty, so
+    ``coin_symbols`` is the only identity for legs 0/1 too — exercised here.
+    """
     out = _tracked(
         [
-            _swap_event("USDT", "10"),
-            _lp_event("LP_OPEN", token0="", token1="", coin_symbols=["USDC", "USDT", "DAI"]),
+            _lp_event(
+                "LP_CLOSE",
+                token0="",
+                token1="",
+                coin_symbols=["USDC", "USDT", "DAI"],
+                amount0="100",
+                amount1="200",
+            )
         ]
     )
-    assert out["USDT"] is None
-    assert out["USDC"] is None
+    # Legs 0/1 resolved from coin_symbols and credited at the collected amounts.
+    assert out["USDC"] == Decimal("100")
+    assert out["USDT"] == Decimal("200")
+    # The tail coin is unprovable → visible refusal, never a silent absence.
     assert out["DAI"] is None
 
 

@@ -157,7 +157,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.LP,
             event_kind=EventKind.OPEN,
             required_lifecycle=_LP_LIFECYCLE,
-            wallet_delta=WalletDeltaLane.UNMEASURED,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         _record(
             "LP_CLOSE",
@@ -166,7 +166,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.LP,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_LP_LIFECYCLE,
-            wallet_delta=WalletDeltaLane.UNMEASURED,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         _record(
             "LP_COLLECT_FEES",
@@ -175,7 +175,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             position_type=PositionKind.LP,
             event_kind=EventKind.COLLECT,
             required_lifecycle=_LP_LIFECYCLE_WITH_FEES,
-            wallet_delta=WalletDeltaLane.UNMEASURED,
+            wallet_delta=WalletDeltaLane.EVENT_REPLAY,
         ),
         # ──────────────────────────────────────────────────────────────────
         # Lending
@@ -527,6 +527,14 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.NONE,
             wallet_delta=WalletDeltaLane.NONE,
         ),
+        # VIB-5865 PR-2: stays UNMEASURED while LP_OPEN/LP_CLOSE/LP_COLLECT_FEES
+        # move to EVENT_REPLAY. ``LPEventType.LP_REBALANCE`` is a RESERVED event
+        # type — no handler emits it today (``observability/pnl_attributor.py``
+        # §"The alternative model — explicit LP_REBALANCE lifecycle events — is
+        # reserved"), so there is no payload shape to fold and no real row to
+        # prove a fold against. Folding a hypothetical shape would be
+        # unverifiable guesswork on a money path; the UNMEASURED declaration
+        # keeps the safe visible-refusal behaviour until the lane actually ships.
         _record(
             "LP_REBALANCE",
             Primitive.LP,

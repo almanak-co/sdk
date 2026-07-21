@@ -186,8 +186,21 @@ def test_declared_no_wallet_movement_rows(name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES", "VAULT_REDEEM", "PERP_CLOSE", "BRIDGE", "SETTLE_REDEEM"],
+    ["VAULT_REDEEM", "PERP_CLOSE", "BRIDGE", "SETTLE_REDEEM", "LP_REBALANCE", "PENDLE_LP_CLOSE"],
 )
 def test_known_blind_primitives_are_declared_unmeasured(name: str) -> None:
-    """The primitives the clamp was blind to must fail CLOSED, not silently."""
+    """The primitives the clamp is still blind to must fail CLOSED, not silently.
+
+    VIB-5865 PR-2 moved LP_OPEN / LP_CLOSE / LP_COLLECT_FEES OUT of this list
+    into EVENT_REPLAY (they now have a real measured fold — see
+    ``test_lp_replay_fold_vib5865.py``). ``LP_REBALANCE`` stays UNMEASURED: the
+    event type is reserved and no handler emits it, so there is no payload shape
+    to fold. ``PENDLE_LP_*`` stays until its connector-owned extractor lands.
+    """
     assert TAXONOMY[name].wallet_delta is WalletDeltaLane.UNMEASURED
+
+
+@pytest.mark.parametrize("name", ["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"])
+def test_lp_family_is_measured_by_replay(name: str) -> None:
+    """VIB-5865 PR-2: the LP family folds through ``_replay_lp`` (the headline fix)."""
+    assert TAXONOMY[name].wallet_delta is WalletDeltaLane.EVENT_REPLAY

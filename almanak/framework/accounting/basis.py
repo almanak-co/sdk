@@ -112,6 +112,15 @@ class FIFOBasisStore:
 
     def __init__(self) -> None:
         self._lots: dict[str, list[dict[str, Any]]] = {}
+        # VIB-5865 PR-2: token symbols whose wallet delta a replay handler
+        # encountered but could NOT measure (an LP leg with a token identity but
+        # an absent/unparseable amount; a Curve N-coin leg at index >= 2, whose
+        # amount the LP payload does not persist). Empty ≠ Zero: these are
+        # UNPROVABLE totals, not zero ones, so the teardown clamp's tracked map
+        # poisons them to ``None`` (visible degraded refusal) exactly as a
+        # ``WalletDeltaLane.UNMEASURED`` row does. Read via
+        # :meth:`iter_unmeasured_tokens`.
+        self._unmeasured_tokens: set[str] = set()
 
     def reconstruct_from_events(self, events: list[dict[str, Any]]) -> int:
         """Replay durable accounting events to rebuild open FIFO lots.
@@ -134,6 +143,10 @@ class FIFOBasisStore:
         _log = _logging.getLogger(__name__)
 
         self._lots.clear()
+        # VIB-5865 PR-2: the unmeasured-token set is replay-scoped, exactly like
+        # ``_lots`` — a fresh reconstruction must not inherit a prior replay's
+        # poison (that would strand a token this history proves is measured).
+        self._unmeasured_tokens.clear()
 
         replayed = 0
         v1_skipped: dict[str, int] = {}  # event_type → count, for aggregated warning at end
@@ -545,6 +558,186 @@ class FIFOBasisStore:
             timestamp=ctx.timestamp,
         )
         return 1
+
+    def _mark_token_unmeasured(self, token: str) -> None:
+        """Record that *token*'s wallet delta was encountered but not measurable (VIB-5865)."""
+        if token:
+            self._unmeasured_tokens.add(token)
+
+    def iter_unmeasured_tokens(self) -> set[str]:
+        """Token symbols this replay could not measure a wallet delta for (VIB-5865 PR-2)."""
+        return set(self._unmeasured_tokens)
+
+    def _lp_legs(self, ctx: _ReplayContext) -> list[tuple[str, Decimal | None, Decimal | None]]:
+        """Return the ``(token, amount, fees)`` legs of an LP event (VIB-5865 PR-2).
+
+        Legs 0/1 come from ``token0``/``token1`` + ``amount0``/``amount1`` — the
+        RECEIPT-CONFIRMED amounts the handler wrote (``LPOpenData.amount{0,1}``
+        on an open, ``LPCloseData.amount{0,1}_collected`` on a close), never the
+        intent's REQUESTED amounts. That distinction is load-bearing: the real
+        FLOW-A trace requested 1.9006 WETH but the tick-aligned compile consumed
+        1.708743113797863, and decrementing the request would over-drain the
+        wallet lot by ~0.19 WETH on a NORMAL run.
+
+        ``fees`` are the per-leg ``fees{0,1}_collected`` the handler persisted
+        (``_to_human(LPCloseData.fees{0,1})`` — ``lp_accounting.py``). The caller
+        credits ``max(amount, fees)`` so a fees-separate writer (traderjoe_v2 /
+        uniswap_v4 fee-only collect: ``amount_collected == 0``, real fee on the
+        separate rail landing in ``fees{0,1}``) is not dropped, while a
+        fee-inclusive writer (V3-family / Curve / Fluid / Pendle, where
+        ``amount_collected`` already contains the fees) is not double-counted.
+        LP_OPEN payloads carry no fee field, so ``fees`` is ``None`` there and the
+        open (disposal) path ignores it. Full convention survey:
+        ``tests/reports/vib5865-pr2-fee-convention-survey.md``.
+
+        A leg with a token identity but an absent/unparseable amount AND fee
+        yields ``(None, None)`` — the caller marks it unmeasured rather than
+        skipping it (an undrained debit is the OVER-sweep direction).
+
+        Curve N-coin: ``coin_symbols`` names every pool coin, but the payload
+        persists amounts only for indices 0/1, so coins at index >= 2 are
+        returned with ``None`` (unmeasured). A Curve *proportional* close also
+        leaves ``token0``/``token1`` empty, so ``coin_symbols`` is the only token
+        identity available — it is consulted for legs 0/1 as a fallback.
+        """
+        from almanak.connectors._strategy_base.base import resolve_swap_token_symbol
+
+        coin_symbols = ctx.payload.get("coin_symbols")
+        # list | tuple for the same reason as ``_extra_payload_tokens`` (#3349
+        # review deferral): an in-process caller may hand ``coin_symbols`` in as
+        # a tuple, and missing it here would drop every Curve N-coin leg.
+        # Non-string entries become "" IN PLACE — filtering would shift the
+        # positional coin↔leg mapping (an idx-2 extra coin masquerading as
+        # token1's identity is the over-credit direction).
+        coins: list[str] = (
+            [c if isinstance(c, str) else "" for c in coin_symbols] if isinstance(coin_symbols, list | tuple) else []
+        )
+
+        legs: list[tuple[str, Decimal | None, Decimal | None]] = []
+        for idx, (token_key, amount_key, fees_key) in enumerate(
+            (("token0", "amount0", "fees0_collected"), ("token1", "amount1", "fees1_collected"))
+        ):
+            raw_token = ctx.payload.get(token_key) or (coins[idx] if idx < len(coins) else "")
+            token = resolve_swap_token_symbol(raw_token or "", ctx.chain) or ""
+            if not token:
+                continue
+            legs.append((token, _parse_decimal(ctx.payload.get(amount_key)), _parse_decimal(ctx.payload.get(fees_key))))
+
+        # N-coin tail (index >= 2): identity known, amount never persisted.
+        for extra in coins[2:]:
+            token = resolve_swap_token_symbol(extra, ctx.chain) or ""
+            if token:
+                legs.append((token, None, None))
+        return legs
+
+    def _replay_lp(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
+        """Replay an LP event's fungible wallet-token flow (VIB-5865 PR-2).
+
+        The replay analogue of the live ``lp_handler._apply_lp_wallet_basis_hooks``
+        (VIB-4262) — the two MUST agree or a runner restart silently re-bases the
+        wallet pool (pinned by the restart-parity test in
+        ``tests/unit/accounting/test_lp_replay_fold_vib5865.py``).
+
+        * ``LP_OPEN`` DRAINS the wallet: each leg's consumed amount is matched
+          against prior SWAP / BORROW / WITHDRAW lots via
+          :meth:`match_swap_disposal`. This decrement is the whole reason a naive
+          "credit the proceeds" handler is unsafe — without it an LP_OPEN's
+          inputs stay counted as tracked inventory AND the LP_CLOSE proceeds are
+          added on top, so the clamp would sweep ~2x the position and eat
+          commingled user funds. Unmatched excess simply drops (pre-funded
+          inventory the strategy never acquired through a tracked lane stays
+          untracked — :meth:`match_swap_disposal` never mints a negative lot).
+        * ``LP_CLOSE`` / ``LP_COLLECT_FEES`` CREDIT the wallet at
+          ``max(amount_collected, fees)`` per leg — convention-robust across BOTH
+          LPCloseData writer conventions (survey:
+          ``tests/reports/vib5865-pr2-fee-convention-survey.md`` — no writer emits
+          ``amount_collected > 0`` AND a disjoint additive ``fees > 0``, so ``max``
+          never under- or over-credits):
+            - FEE-INCLUSIVE (V3-family / Curve / Fluid / Pendle / Aerodrome):
+              ``amount_collected`` is the full wallet transfer and ``fees`` is a
+              component inside it (V3: ``fees = max(collect - burn, 0)``) or
+              pool-retained-and-already-deducted (Curve) ⇒ ``amount ≥ fees`` ⇒
+              ``max = amount``. Crediting ``amount + fees`` double-counted (100%
+              on a fee-only V3 harvest, where ``amount_collected == fees``).
+            - FEES-SEPARATE (traderjoe_v2 / uniswap_v4 fee-only collect):
+              ``amount_collected == 0`` and the real fee ships on the separate
+              extract-fees rail, landing in ``fees`` by the time this replays ⇒
+              ``max(0, fees) = fees``. Crediting ``amount`` alone dropped it.
+          This mirrors the live ``_apply_lp_wallet_basis_hooks`` credit exactly.
+
+        ``cost_usd=None``: this fold exists to answer "how much is ours to sweep",
+        a QUANTITY question. The USD basis of an LP exit is the live handler's
+        value-weighted job (VIB-4264); fabricating one here from an un-priced
+        replay would poison realized-PnL matching. ``source`` is the event type so
+        the lot stays out of the SWAP-only dashboard tile while still counting in
+        the source-agnostic :meth:`iter_open_wallet_basis_lots` the clamp sums.
+        """
+        # LP lots live in the fungible wallet pool, NOT under the row's
+        # ``lp:...`` position key — the same ``swap:{chain}:{wallet}`` key the
+        # live hook builds. Without chain+wallet the key is unresolvable, so the
+        # legs stay untracked (the safe under-sweep direction).
+        swap_position_key = ctx.swap_wallet_key
+        if not swap_position_key:
+            return 0
+
+        legs = self._lp_legs(ctx)
+        if not legs:
+            return 0
+
+        is_open = ctx.event_type == "LP_OPEN"
+        is_collect = ctx.event_type == "LP_COLLECT_FEES"
+
+        acted = 0
+        for token, amount, fees in legs:
+            if is_open:
+                # DRAIN: the disposal amount is the consumed input; fees do not
+                # apply to an open. Unmeasurable amount → poison (an undrained
+                # debit is the OVER-sweep direction); measured zero → idle.
+                if amount is None:
+                    self._mark_token_unmeasured(token)
+                elif amount > 0:
+                    self.match_swap_disposal(
+                        deployment_id=ctx.deployment_id,
+                        position_key=swap_position_key,
+                        token=token,
+                        amount=amount,
+                    )
+                    acted = 1
+                continue
+
+            # CREDIT (close / collect): convention-robust ``max(amount, fees)``.
+            # Inline the ``is not None`` guards (not the ``*_measured`` bools) so the
+            # type-checker narrows each operand to ``Decimal`` inside ``max``.
+            a_measured = amount is not None
+            f_measured = fees is not None
+            credit = max(
+                amount if amount is not None else Decimal("0"),
+                fees if fees is not None else Decimal("0"),
+            )
+            if credit > 0:
+                self.record_swap_acquisition(
+                    deployment_id=ctx.deployment_id,
+                    position_key=swap_position_key,
+                    token=token,
+                    amount=credit,
+                    cost_usd=None,
+                    timestamp=ctx.timestamp,
+                    source=ctx.event_type,
+                )
+                acted = 1
+                continue
+
+            # credit == 0. Distinguish a MEASURED idle leg from an UNMEASURED one
+            # (Empty ≠ Zero). Poison when the component that would carry the
+            # credit was absent rather than measured-zero:
+            #   * principal unmeasured (``amount is None``) — could be any size; OR
+            #   * a fee-only collect whose fee is unmeasured (``fees is None``) —
+            #     traderjoe_v2 / uniswap_v4 emit ``amount == 0`` and ship the real
+            #     fee on a separate rail this payload may not carry.
+            if not a_measured or (is_collect and not f_measured):
+                self._mark_token_unmeasured(token)
+            # else: both relevant components measured zero → genuinely idle, skip.
+        return acted
 
     def _replay_wallet_movement(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
         """Replay a synthetic NO_ACCOUNTING wallet movement (VIB-5416).
@@ -1623,10 +1816,15 @@ def _declared_wallet_delta_lane(intent_or_event_type: Any) -> WalletDeltaLane | 
     # Function-level import to avoid any module-load cycle (basis is a low layer).
     from almanak.framework.primitives.taxonomy import record_for
 
-    text = str(intent_or_event_type or "")
-    if not text:
-        return None
+    # #3349 review deferral (Gemini): the ``str()`` / truthiness conversion lives
+    # INSIDE the guard. A payload value whose ``__str__`` / ``__bool__`` raises is
+    # attacker- or corruption-shaped input on a fund-safety path; letting it
+    # escape would abort the whole tracked read instead of degrading this one row
+    # to "no declared lane" (the safe under-sweep direction).
     try:
+        text = str(intent_or_event_type or "")
+        if not text:
+            return None
         return record_for(text).wallet_delta
     except Exception:  # noqa: BLE001 — unknown/unregistered type or malformed record → no lane
         return None
@@ -1883,7 +2081,12 @@ def _extra_payload_tokens(event: dict[str, Any]) -> set[str]:
         val = payload.get(key)
         if isinstance(val, str) and val:
             tokens.add(val)
-        elif isinstance(val, list):
+        elif isinstance(val, list | tuple):
+            # #3349 review deferral (Gemini): accept a TUPLE as well as a list.
+            # ``coin_symbols`` is persisted as a JSON array (always a list after a
+            # round-trip) but is passed as a tuple by in-process callers that hand
+            # a payload dict straight in — a list-only check would silently miss
+            # every Curve N-coin leg on that path.
             tokens |= {v for v in val if isinstance(v, str) and v}
     return tokens
 
@@ -1963,6 +2166,7 @@ def _poison_unmeasured_tokens(
     by_token: dict[str, Decimal | None],
     scoped_events: list[dict[str, Any]],
     ledger_rows: list[Any] | None,
+    replay_unmeasured: set[str] | None = None,
 ) -> None:
     """Set every UNMEASURED-lane token in ``by_token`` to ``None``, in place (VIB-5865).
 
@@ -1989,6 +2193,10 @@ def _poison_unmeasured_tokens(
     ]
     poisoned = _unmeasured_event_token_footprint(unmeasured_events)
     poisoned |= _unmeasured_ledger_token_footprint(ledger_rows or [])
+    # VIB-5865 PR-2: a token an EVENT_REPLAY handler admitted but could not
+    # measure (LP leg with an absent amount; Curve N-coin index >= 2) is just as
+    # unprovable as an UNMEASURED-lane row — same poison, same visible refusal.
+    poisoned |= replay_unmeasured or set()
     for raw in poisoned:
         sym = canonical_pt_symbol(raw)
         if sym:
@@ -2083,7 +2291,7 @@ def sum_open_wallet_basis_by_token(
             continue
         by_token[sym] = (by_token.get(sym) or Decimal("0")) + remaining_pt
     # VIB-5865: LAST, so the poison overrides every measured quantity above.
-    _poison_unmeasured_tokens(by_token, scoped, ledger_rows)
+    _poison_unmeasured_tokens(by_token, scoped, ledger_rows, store.iter_unmeasured_tokens())
     return by_token
 
 
@@ -2101,6 +2309,16 @@ _REPLAY_DISPATCH: dict[str, _ReplayCallable] = {
     "PT_SELL": FIFOBasisStore._replay_pt_sell,
     "PT_REDEEM": FIFOBasisStore._replay_pt_redeem,
     "SWAP": FIFOBasisStore._replay_swap,
+    # VIB-5865 PR-2: the LP family folds into the fungible wallet pool —
+    # LP_OPEN drains its consumed legs, LP_CLOSE / LP_COLLECT_FEES credit the
+    # fee-INCLUSIVE collected legs. Mirrors the live
+    # ``lp_handler._apply_lp_wallet_basis_hooks`` so a runner restart
+    # reconstructs the identical wallet pool. Applied globally (not clamp-only,
+    # no flag) because the same blindness also produced post-restart
+    # realized-PnL drift on any SWAP disposing LP proceeds.
+    "LP_OPEN": FIFOBasisStore._replay_lp,
+    "LP_CLOSE": FIFOBasisStore._replay_lp,
+    "LP_COLLECT_FEES": FIFOBasisStore._replay_lp,
     # VIB-5416: synthetic event type emitted ONLY by the teardown clamp's
     # tracked-inventory read (synthetic_wallet_movement_events) — never persisted
     # to accounting_events. Replays a NO_ACCOUNTING ledger row into the wallet-basis
