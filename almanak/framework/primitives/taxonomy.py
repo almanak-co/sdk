@@ -399,6 +399,24 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.TRANSFER,
             is_async=True,
             lifecycle_phase=LifecyclePhase.REQUEST,
+            # VIB-5865 PR-4: stays UNMEASURED — the source leg is NOT
+            # receipt-measured on any surface the clamp can fold. The persisted
+            # ledger ``amount_in`` (and the ``TransferAccountingEvent.asset`` /
+            # ``amount`` derived from it) come from the INTENT via
+            # ``ledger._extract_from_intent_fallback`` → ``BridgeIntent.token`` /
+            # ``BridgeIntent.amount`` (no connector declares money-legs; bridges
+            # emit no ``swap_amounts``). Folding an intent-requested amount is the
+            # exact anti-pattern the LP FLOW-A trace disproved (requested 1.9006 vs
+            # consumed 1.7087). The receipt-measured ``amount_sent`` exists only in
+            # ``bridge_data`` / ``extracted_data_json`` (e.g.
+            # ``stargate/receipt_parser.py``), never in ``amount_in`` and never in
+            # the ``TransferAccountingEvent`` payload — so neither a LEDGER_PROJECTION
+            # (empty-safe on ``amount_in``, but that value is a guess) nor an
+            # EVENT_REPLAY handler can read a trustworthy source amount today.
+            # UNMEASURED poisons the bridged token → VISIBLE degraded refusal
+            # (the safe direction; live balance is the real over-sweep cap). A
+            # measured fold requires first surfacing ``amount_sent`` into the
+            # ledger / transfer-event payload (follow-up), then a ``_replay_transfer``.
             wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         # Payload-only event-type row (mirrors the VIB-4162 payload-only
@@ -417,11 +435,39 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.TRANSFER,
             is_async=True,
             lifecycle_phase=LifecyclePhase.REQUEST,
+            # VIB-5865 PR-4: same as BRIDGE (this is the payload-only twin the
+            # ``TransferAccountingEvent`` writer routes through) — the persisted
+            # ``asset`` / ``amount`` are the intent-requested source values, not
+            # receipt-measured, so it stays UNMEASURED. See the BRIDGE note above.
             wallet_delta=WalletDeltaLane.UNMEASURED,
         ),
         # ──────────────────────────────────────────────────────────────────
         # Prediction markets (Polymarket)
         # ──────────────────────────────────────────────────────────────────
+        # VIB-5865 PR-4: PREDICTION_BUY / PREDICTION_SELL stay UNMEASURED.
+        # LEDGER_PROJECTION is NOT viable and a lane flip alone wires in zero:
+        #   1. These are OFF-CHAIN CLOB fills. The measured values (filled shares,
+        #      ``cost_basis`` on BUY / ``proceeds`` on SELL) live in
+        #      ``extracted_data_json`` (``polymarket/receipt_parser.py``
+        #      SUPPORTED_EXTRACTIONS), NOT in the ledger ``token_in`` /
+        #      ``token_out`` / ``amount_in`` / ``amount_out`` columns — those are
+        #      EMPTY (``PredictionIntent`` has no from_token/token/amount, and
+        #      ``amount_usd`` is deliberately excluded from the fallback,
+        #      ``ledger.py`` VIB-5060). ``synthetic_wallet_movement_events`` reads
+        #      exactly those empty columns and its has_in/has_out guard skips the
+        #      row → projects nothing.
+        #   2. Category is PREDICTION, not NO_ACCOUNTING, so declaring
+        #      LEDGER_PROJECTION would break the PR-1 parity invariants
+        #      (``test_ledger_projection_lane_equals_no_accounting_category`` +
+        #      ``test_ledger_predicate_matches_old_category_predicate_on_every_row``).
+        # A measured fold would need a ``_replay_prediction`` EVENT_REPLAY handler
+        # sourcing the fill's cost_basis (USDC debit) / proceeds (USDC credit) —
+        # today those live only in the ledger row's ``extracted_data_json`` (the
+        # persisted PredictionAccountingEvent payload carries ``usd_delta``, not
+        # the split legs), so the handler needs a payload-surfacing change first.
+        # Its own design with real evidence (follow-up).
+        # PREDICTION_REDEEM already declares EVENT_REPLAY, so the redemption USDC
+        # return is already folded; only BUY-cost / SELL-proceeds remain the gap.
         _record(
             "PREDICTION_BUY",
             Primitive.PREDICTION,

@@ -186,7 +186,17 @@ def test_declared_no_wallet_movement_rows(name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["VAULT_REDEEM", "PERP_CLOSE", "BRIDGE", "SETTLE_REDEEM", "LP_REBALANCE", "PENDLE_LP_CLOSE"],
+    [
+        "VAULT_REDEEM",
+        "PERP_CLOSE",
+        "BRIDGE",
+        "TRANSFER",
+        "SETTLE_REDEEM",
+        "LP_REBALANCE",
+        "PENDLE_LP_CLOSE",
+        "PREDICTION_BUY",
+        "PREDICTION_SELL",
+    ],
 )
 def test_known_blind_primitives_are_declared_unmeasured(name: str) -> None:
     """The primitives the clamp is still blind to must fail CLOSED, not silently.
@@ -196,6 +206,21 @@ def test_known_blind_primitives_are_declared_unmeasured(name: str) -> None:
     ``test_lp_replay_fold_vib5865.py``). ``LP_REBALANCE`` stays UNMEASURED: the
     event type is reserved and no handler emits it, so there is no payload shape
     to fold. ``PENDLE_LP_*`` stays until its connector-owned extractor lands.
+
+    VIB-5865 PR-4 (evidence-pinned, see
+    ``tests/reports/vib5865-pr4-transfer-prediction-evidence.md``): BRIDGE /
+    TRANSFER and PREDICTION_BUY / PREDICTION_SELL stay UNMEASURED —
+    * BRIDGE / TRANSFER: the ledger ``amount_in`` (and the
+      ``TransferAccountingEvent.amount`` derived from it) is INTENT-requested,
+      not receipt-measured; the measured ``amount_sent`` lives only in
+      ``bridge_data`` / ``extracted_data_json``. Folding a requested amount is
+      the anti-pattern the LP trace disproved — no guessing on a fund-safety lane.
+    * PREDICTION_BUY / SELL: the measured fill (shares / cost_basis / proceeds)
+      lives in ``extracted_data_json``; the ledger token/amount columns are EMPTY,
+      so a LEDGER_PROJECTION flip would project nothing AND would break the
+      LEDGER_PROJECTION == NO_ACCOUNTING parity invariants (category is
+      PREDICTION). A real fold needs a ``_replay_prediction`` handler (follow-up).
+    This test is the guard that a future silent / guess flip is caught.
     """
     assert TAXONOMY[name].wallet_delta is WalletDeltaLane.UNMEASURED
 

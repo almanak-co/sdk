@@ -23,6 +23,8 @@ import json
 import logging
 from decimal import Decimal
 
+import pytest
+
 from almanak.framework.accounting.basis import sum_open_wallet_basis_by_token
 from almanak.framework.teardown.swap_clamp import decide_swap_clamp
 
@@ -241,6 +243,85 @@ def test_settlement_asset_token_key_is_scanned() -> None:
     }
     out = _tracked([_swap_event("USDC", "10"), ev])
     assert out["USDC"] is None
+
+
+def test_bridge_ledger_row_poisons_its_source_token() -> None:
+    """VIB-5865 PR-4: a BRIDGE ledger row poisons the bridged token → visible refusal.
+
+    BRIDGE stays UNMEASURED (the amount is intent-requested, not receipt-measured;
+    see the taxonomy note + tests/reports/vib5865-pr4-transfer-prediction-evidence.md),
+    but its ledger row DOES name the source token in ``token_in``. So the honest
+    behaviour is a VISIBLE degraded refusal on that token, not a silent strand:
+    the clamp cannot certify how much of it is ours to sweep, and the live balance
+    is the real over-sweep cap.
+    """
+    out = _tracked([_swap_event("USDC", "3726.46")], [_ledger_row("BRIDGE", "USDC", "")])
+    assert out["USDC"] is None
+    decision = decide_swap_clamp(live_balance=Decimal("3726.46"), tracked_map=out, from_token="USDC")
+    assert (decision.reason, decision.skip, decision.degraded) == ("tracked_qty_unmeasured", True, True)
+    # Full fail-closed contract: a refusal must never carry a sweepable amount.
+    assert decision.amount is None
+
+
+def test_transfer_event_asset_key_poisons_its_token() -> None:
+    """VIB-5865 PR-4: a TRANSFER accounting event names its token under ``asset`` → poison.
+
+    The ``TransferAccountingEvent`` (``event_type="TRANSFER"``) persists a single
+    ``asset`` symbol, which ``extract_token_footprint`` scans (``_PAYLOAD_TOKEN_KEYS``
+    includes ``asset``). UNMEASURED ⇒ that token is poisoned.
+    """
+    ev = {
+        "event_type": "TRANSFER",
+        "deployment_id": _DEP,
+        "position_key": "",
+        "chain": _CHAIN,
+        "wallet_address": _WALLET,
+        "timestamp": "2026-07-20T00:00:05+00:00",
+        "payload_json": json.dumps(
+            {"event_type": "TRANSFER", "asset": "USDC", "amount": "500", "confidence": "HIGH"}
+        ),
+    }
+    out = _tracked([_swap_event("USDC", "10"), ev])
+    assert out["USDC"] is None
+    # The poison must surface as the visible degraded refusal, end to end.
+    decision = decide_swap_clamp(live_balance=Decimal("510"), tracked_map=out, from_token="USDC")
+    assert (decision.reason, decision.skip, decision.degraded) == ("tracked_qty_unmeasured", True, True)
+    assert decision.amount is None
+
+
+@pytest.mark.parametrize(
+    ("intent_type", "event_kind", "delta_sign"),
+    [("PREDICTION_BUY", "PREDICTION_OPEN", "-"), ("PREDICTION_SELL", "PREDICTION_REDUCE", "")],
+)
+def test_prediction_event_names_no_poisonable_token(intent_type: str, event_kind: str, delta_sign: str) -> None:
+    """VIB-5865 PR-4: a PREDICTION_BUY/SELL event exposes NO scanned token key.
+
+    Honest limitation documented in the taxonomy note: the ``PredictionAccountingEvent``
+    payload carries ``market_id`` / ``outcome`` / ``shares_delta`` / ``usd_delta`` —
+    none of the scanned token keys (``token_in``/``token_out``/``token``/``asset``/
+    ``from_token``/``to_token``) nor the LP/settlement extras
+    (``token0``/``token1``/``asset_token``/``collateral_token``/``coin_symbols``).
+    The ledger columns are empty too. So declaring PREDICTION_BUY/SELL UNMEASURED is
+    correct but currently INERT on the clamp's token map — nothing is poisoned, and
+    the live-balance cap is the only safety net. A real fold must surface the
+    collateral token + measured cost_basis/proceeds (follow-up ``_replay_prediction``).
+    """
+    from almanak.framework.accounting.basis import _extra_payload_tokens
+    from almanak.framework.teardown.sweep_warning import extract_token_footprint
+
+    prediction_payload = {
+        "event_type": event_kind,
+        "position_key": "prediction:polymarket:polygon:0xw:0xmarket:YES",
+        "market_id": "0xmarket",
+        "outcome": "YES",
+        "intent_type": intent_type,
+        "shares_delta": f"{delta_sign}5.45",
+        "usd_delta": f"{delta_sign}2.9975",
+        "confidence": "HIGH",
+    }
+    ev = {"payload_json": json.dumps(prediction_payload)}
+    assert extract_token_footprint([ev]) == set()
+    assert _extra_payload_tokens(ev) == set()
 
 
 def test_curve_ncoin_tail_is_poisoned_by_the_replay() -> None:
