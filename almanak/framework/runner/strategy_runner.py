@@ -3319,6 +3319,50 @@ class StrategyRunner:
             return
         extracted.setdefault("leverage_requested", str(leverage))
 
+    @staticmethod
+    def _stamp_perp_intent_fields(result: Any, intent: Any) -> None:
+        """Stamp a perp intent's intent-known identity fields onto ``extracted_data`` (VIB-5941).
+
+        ``is_long`` and ``size_usd`` are known the moment the compiler builds the
+        MARKET_INCREASE / MARKET_DECREASE — they are NOT receipt-derived and must
+        not wait on the (still-pending) perp receipt parser (VIB-5717). This is the
+        single seam where both the intent and the result are in scope, so the two
+        fields are copied here and read back by the perp category handler
+        (``category_handlers/perp_handler.py``) when it builds the typed
+        PERP_OPEN / PERP_CLOSE accounting event from the persisted ledger row.
+
+        Without this stamp the handler has no source for ``is_long`` (it has no
+        live intent), the payload lands with ``is_long=None`` + ``size`` absent,
+        and it FAILs the frozen ``PerpOpenEventPayload`` / ``PerpCloseEventPayload``
+        schema — silently blocking G6 / G13 / P3 / P5 on the perp Accountant Test.
+
+        Empty ≠ Zero: ``is_long`` is stamped whenever the intent carries it (both
+        open and close intents always do); ``size_usd`` is stamped only when the
+        intent actually declares one — a full-close ``PerpCloseIntent`` leaves
+        ``size_usd=None`` (measured-unmeasured), which stays ``None`` rather than a
+        fabricated zero. ``setdefault`` so a venue-measured value already present
+        wins. No-op for non-perp intents or a non-dict ``extracted_data``.
+        """
+        it = getattr(intent, "intent_type", None)
+        if it is None:
+            return
+        it_str = it.value if hasattr(it, "value") else str(it)
+        # IntentType only defines PERP_OPEN / PERP_CLOSE for size-bearing perp
+        # actions (plus PERP_CANCEL_ORDER / PERP_WITHDRAW, which carry no side or
+        # size). No PERP_INCREASE / PERP_DECREASE verb exists, so they are not
+        # matched here.
+        if it_str not in ("PERP_OPEN", "PERP_CLOSE"):
+            return
+        extracted = getattr(result, "extracted_data", None)
+        if not isinstance(extracted, dict):
+            return
+        is_long = getattr(intent, "is_long", None)
+        if is_long is not None:
+            extracted.setdefault("intent_is_long", bool(is_long))
+        size_usd = getattr(intent, "size_usd", None)
+        if size_usd is not None:
+            extracted.setdefault("intent_size_usd", str(size_usd))
+
     def _maybe_enrich_result_with_runner_hooks(self, result: Any, chain: str, wallet_address: str = "") -> None:
         """Run connector-owned best-effort result enrichment before ledger writes.
 
@@ -3428,6 +3472,10 @@ class StrategyRunner:
             # Class-qualified (not self.): commit-path tests drive this method with
             # duck-typed runner doubles that don't carry the staticmethod.
             StrategyRunner._stamp_perp_requested_leverage(result, intent)
+            # VIB-5941: stamp the intent-known is_long + size_usd so the perp
+            # category handler can emit a schema-valid PERP_OPEN / PERP_CLOSE
+            # payload (both are intent-known, not receipt-derived — see method).
+            StrategyRunner._stamp_perp_intent_fields(result, intent)
 
             self._maybe_enrich_result_with_runner_hooks(
                 result,

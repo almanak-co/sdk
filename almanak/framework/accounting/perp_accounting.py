@@ -23,6 +23,27 @@ logger = logging.getLogger(__name__)
 
 _PERP_OPEN_CLOSE_TYPES = frozenset({"PERP_OPEN", "PERP_CLOSE"})
 
+# VIB-5717: the perp receipt parser that would measure entry/exit price and
+# realized PnL is not yet wired, so every perp event is ESTIMATED with this
+# reason. VIB-5941: when ``size`` itself is unmeasured (a full close declares no
+# size — see ``PerpCloseIntent``), the reason must NAME the missing size too, so
+# the audit trail explains the ``size=None`` the ``PerpCloseEventPayload``
+# validator requires a reason for.
+_BASE_UNAVAILABLE_REASON = "entry_price and realized_pnl require perp receipt parser (pending)"
+_SIZE_UNAVAILABLE_CLAUSE = "; position size requires perp receipt parser (pending)"
+
+
+def perp_unavailable_reason(size_usd: Decimal | None) -> str:
+    """The ESTIMATED ``unavailable_reason`` for a perp event, size-aware (VIB-5941).
+
+    Names the missing size when ``size_usd`` is unmeasured (a full close declares
+    no size) so the ``PerpCloseEventPayload`` ``size=None`` state is self-explained
+    rather than "covered" by a reason that only mentions entry/realized PnL.
+    """
+    if size_usd is None:
+        return _BASE_UNAVAILABLE_REASON + _SIZE_UNAVAILABLE_CLAUSE
+    return _BASE_UNAVAILABLE_REASON
+
 
 class PerpAccountingEvent:
     """Duck-typed perp accounting event consumed by AccountingWriter and both backends."""
@@ -31,8 +52,13 @@ class PerpAccountingEvent:
     # VIB-4166 (T6) — see ``almanak.framework.accounting.payload_schemas`` module
     # docstring for the bump policy. Class attribute so the augment chokepoint
     # has a sane fallback when writers don't override it; the chokepoint
-    # overwrites with the canonical per-primitive value at write time.
-    primitive_version: int = 1
+    # overwrites with the canonical per-primitive value
+    # (``PRIMITIVE_VERSIONS[Primitive.PERP]``) at write time.
+    # VIB-5941 (v1→v2): kept in lock-step with ``PRIMITIVE_VERSIONS[Primitive.PERP]``
+    # so the unaugmented ``to_payload_json`` fallback (tests / debug) matches the
+    # production augment stamp — the perp payload field-set changed (size_usd→size,
+    # intent-known is_long, nullable close-size + unavailable_reason invariant).
+    primitive_version: int = 2
 
     def __init__(
         self,
@@ -95,7 +121,13 @@ class PerpAccountingEvent:
                 "position_key": self.position_key,
                 "market": self.market,
                 "collateral_token": self.collateral_token,
-                "size_usd": _enc(self.size_usd),
+                # VIB-5941: the frozen ``PerpOpenEventPayload`` /
+                # ``PerpCloseEventPayload`` schema names this field ``size`` (a
+                # required Decimal). It is the position's USD notional — the
+                # intent's ``size_usd`` — carried under the canonical schema key;
+                # emitting it as ``size_usd`` left ``size`` absent and FAILed
+                # Pydantic validation, silently blocking G6 / G13 / P3 / P5.
+                "size": _enc(self.size_usd),
                 "collateral_amount": _enc(self.collateral_amount),
                 "is_long": self.is_long,
                 "leverage": _enc(self.leverage),
@@ -208,5 +240,5 @@ def build_perp_accounting_event(
         realized_pnl_usd=None,
         funding_paid_usd=None,
         confidence=AccountingConfidence.ESTIMATED,
-        unavailable_reason="entry_price and realized_pnl require perp receipt parser (pending)",
+        unavailable_reason=perp_unavailable_reason(size_usd),
     )

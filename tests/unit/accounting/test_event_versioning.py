@@ -310,7 +310,9 @@ def test_primitive_versions_explicit_per_primitive_pinning() -> None:
         Primitive.LENDING: 1,
         Primitive.CDP: 1,
         Primitive.LIQUIDATION: 1,
-        Primitive.PERP: 1,
+        # VIB-5941: perp payload contract bumped v1→v2 (size_usd→size key,
+        # intent-known is_long, nullable close-size + unavailable_reason invariant).
+        Primitive.PERP: 2,
         Primitive.UTILITY: 1,
         # VIB-4905 (F1): bumped 1→2 — SwapEventPayload partial-match contract.
         # VIB-4988: bumped 2→3 — Pendle PT now emits PT_SELL / PT_REDEEM

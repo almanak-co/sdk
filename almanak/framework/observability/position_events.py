@@ -556,6 +556,44 @@ def _seed_event(ctx: IntentEventContext) -> PositionEvent | None:
     elif hasattr(intent, "position_id") and intent.position_id:
         position_id = str(intent.position_id)
 
+    # VIB-5941: perps carry no venue NFT/position id (GMX V2 keys a position on
+    # market + side, not a token id, and ``PerpOpenIntent`` has no position_id
+    # field). Without a stable id the θ final-guard drops EVERY perp OPEN/CLOSE
+    # event → 0 rows in position_events → P1 XFAIL and no lifecycle. Derive a
+    # deterministic id (mirroring the lending
+    # ``<primitive>:<chain>:<protocol>:<wallet>:<key>`` shape) so OPEN and CLOSE
+    # on the SAME position share an id and the lifecycle pairs. Intent-known,
+    # receipt-independent.
+    #
+    # The discriminator is (market, side, collateral_token) — all REQUIRED on
+    # BOTH ``PerpOpenIntent`` and ``PerpCloseIntent`` (``market: str``,
+    # ``is_long: bool``, ``collateral_token: str``), so an OPEN and its CLOSE mint
+    # the SAME id and the lifecycle pairs deterministically. Market alone would
+    # collapse a long and a short in the same market (or two positions on the same
+    # market backed by different collateral) into ONE lifecycle, netting distinct
+    # positions. GMX V2 itself keys a position on (market, collateralToken,
+    # isLong), so this mirrors the venue's identity.
+    #
+    # NOT the accounting ``position_key`` (``perp_accounting.py`` →
+    # ``perp:{protocol}:{chain}:{wallet}:{market}``): the segment ORDER differs
+    # (protocol/chain swapped) and the accounting key is market-only, so the two
+    # are DIFFERENT namespaces and must never be equality-joined. Re-keying the
+    # accounting key to include side/collateral is a lot-matching contract change
+    # (matching_policy_version bump + historical-row join semantics) tracked
+    # separately in VIB-5946.
+    if not position_id and position_type == PositionType.PERP:
+        # strip THEN replace: " BTC-USD " must normalize to "btc-usd", not
+        # "_btc-usd_", so whitespace-differing payloads can't mint distinct ids.
+        market_key = str(getattr(intent, "market", "") or "").strip().lower().replace(" ", "_")
+        if market_key and protocol and ctx.chain:
+            is_long = getattr(intent, "is_long", None)
+            side = "long" if is_long else "short" if is_long is not None else "na"
+            collateral = str(getattr(intent, "collateral_token", "") or "").strip().lower()
+            # ``wallet_address`` defaults to "" but a caller may pass None; guard
+            # so the id build never AttributeErrors on ``.lower()`` (CodeRabbit).
+            wallet = (ctx.wallet_address or "").lower()
+            position_id = f"perp:{ctx.chain.lower()}:{protocol.lower()}:{wallet}:{market_key}:{side}:{collateral}"
+
     tx_hash, gas_usd = _tx_and_gas_details(ctx, result)
 
     return PositionEvent(

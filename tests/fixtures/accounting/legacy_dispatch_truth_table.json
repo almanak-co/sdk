@@ -181,7 +181,7 @@
         "position_key": "perp:gmx_v2:arbitrum:WETH",
         "market": "WETH",
         "collateral_token": "USDC",
-        "size_usd": null,
+        "size": null,
         "collateral_amount": null,
         "is_long": null,
         "leverage": null,
@@ -192,9 +192,9 @@
         "venue_margin_mode": null,
         "requested_leverage": null,
         "confidence": "ESTIMATED",
-        "unavailable_reason": "entry_price and realized_pnl require perp receipt parser (pending)",
+        "unavailable_reason": "entry_price and realized_pnl require perp receipt parser (pending); position size requires perp receipt parser (pending)",
         "schema_version": 1,
-        "primitive_version": 1
+        "primitive_version": 2
       }
     },
     {

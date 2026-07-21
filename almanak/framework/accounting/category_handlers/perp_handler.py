@@ -12,11 +12,11 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, NamedTuple
 
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, PerpEventType
-from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
+from almanak.framework.accounting.perp_accounting import PerpAccountingEvent, perp_unavailable_reason
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,57 @@ def _venue_truth_fields(perp_data: Any) -> tuple[Decimal | None, str | None, Dec
         getattr(perp_data, "venue_margin_mode", None) or None,
         _safe_decimal(getattr(perp_data, "leverage_requested", None)),
     )
+
+
+class _PerpMetrics(NamedTuple):
+    """Resolved perp payload fields (VIB-5941)."""
+
+    is_long: bool | None
+    size_usd: Decimal | None
+    leverage: Decimal | None
+    entry_price: Decimal | None
+    realized_pnl_usd: Decimal | None
+    funding_paid_usd: Decimal | None
+
+
+def _resolve_perp_size_and_side(extracted: dict[str, Any], perp_data: Any) -> _PerpMetrics:
+    """Resolve the perp payload's measured fields from the runner-stamped intent
+    truth (``intent_is_long`` / ``intent_size_usd``) plus venue-observed PerpData.
+
+    ``is_long`` and ``size_usd`` are intent-known (the compiler built the
+    MARKET_INCREASE with them), stamped onto extracted_data at the single
+    intent+result runner seam so this handler — which has no live intent — can
+    emit a schema-valid payload without waiting on the perp receipt parser
+    (VIB-5717). A venue read OVERRIDES the intent request, but only when it is
+    actually present/convertible (Empty ≠ Zero): a full-close stamps no size
+    (stays None, never a fabricated zero), and a present-but-malformed/NaN venue
+    ``size_delta`` must NOT clobber a valid ``intent_size_usd``. Venue
+    ``Decimal("0")`` is a valid measured-zero override.
+    """
+    is_long: bool | None = None
+    raw_is_long = extracted.get("intent_is_long")
+    if isinstance(raw_is_long, bool):
+        is_long = raw_is_long
+    size_usd: Decimal | None = _safe_decimal(extracted.get("intent_size_usd"))
+    leverage = entry_price = realized_pnl_usd = funding_paid_usd = None
+
+    if perp_data is not None:
+        venue_size = _safe_decimal(getattr(perp_data, "size_delta", None))
+        if venue_size is not None:
+            size_usd = venue_size
+        venue_is_long = getattr(perp_data, "is_long", None)
+        if isinstance(venue_is_long, bool):
+            is_long = venue_is_long
+        leverage = _safe_decimal(getattr(perp_data, "leverage", None))
+        entry_price = _safe_decimal(getattr(perp_data, "entry_price", None))
+        realized_pnl_raw = getattr(perp_data, "realized_pnl", None)
+        if realized_pnl_raw is not None:
+            realized_pnl_usd = _safe_decimal(realized_pnl_raw)
+        funding_fee_raw = getattr(perp_data, "funding_fee_usd", None)
+        if funding_fee_raw is not None:
+            funding_paid_usd = _safe_decimal(funding_fee_raw)
+
+    return _PerpMetrics(is_long, size_usd, leverage, entry_price, realized_pnl_usd, funding_paid_usd)
 
 
 def handle_perp(
@@ -120,26 +171,8 @@ def handle_perp(
     extracted = deserialize_extracted_data(ledger_row.get("extracted_data_json") or "")
     perp_data = extracted.get("perp_data")
 
-    size_usd: Decimal | None = None
-    is_long: bool | None = None
-    leverage: Decimal | None = None
-    entry_price: Decimal | None = None
-    realized_pnl_usd: Decimal | None = None
-    funding_paid_usd: Decimal | None = None
-
-    if perp_data is not None:
-        # PerpData may expose size_delta, leverage, entry_price, realized_pnl, funding_fee_usd
-        size_delta_raw = getattr(perp_data, "size_delta", None)
-        if size_delta_raw is not None:
-            size_usd = _safe_decimal(size_delta_raw)
-        leverage = _safe_decimal(getattr(perp_data, "leverage", None))
-        entry_price = _safe_decimal(getattr(perp_data, "entry_price", None))
-        realized_pnl_raw = getattr(perp_data, "realized_pnl", None)
-        if realized_pnl_raw is not None:
-            realized_pnl_usd = _safe_decimal(realized_pnl_raw)
-        funding_fee_raw = getattr(perp_data, "funding_fee_usd", None)
-        if funding_fee_raw is not None:
-            funding_paid_usd = _safe_decimal(funding_fee_raw)
+    # ── Intent-known identity + venue-observed truth (VIB-5941) ───────────────
+    metrics = _resolve_perp_size_and_side(extracted, perp_data)
     venue_leverage, venue_margin_mode, requested_leverage = _venue_truth_fields(perp_data)
 
     # ── Identity / ID ────────────────────────────────────────────────────────
@@ -163,15 +196,15 @@ def handle_perp(
         position_key=position_key,
         market=market,
         collateral_token=collateral_token,
-        size_usd=size_usd,
+        size_usd=metrics.size_usd,
         collateral_amount=collateral_amount,
-        is_long=is_long,
-        leverage=leverage,
-        entry_price=entry_price,
-        realized_pnl_usd=realized_pnl_usd,
-        funding_paid_usd=funding_paid_usd,
+        is_long=metrics.is_long,
+        leverage=metrics.leverage,
+        entry_price=metrics.entry_price,
+        realized_pnl_usd=metrics.realized_pnl_usd,
+        funding_paid_usd=metrics.funding_paid_usd,
         confidence=AccountingConfidence.ESTIMATED,
-        unavailable_reason="entry_price and realized_pnl require perp receipt parser (pending)",
+        unavailable_reason=perp_unavailable_reason(metrics.size_usd),
         venue_leverage=venue_leverage,
         venue_margin_mode=venue_margin_mode,
         requested_leverage=requested_leverage,

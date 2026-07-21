@@ -293,7 +293,13 @@ class TestPerpAccountingBuilder:
         payload = json.loads(event.to_payload_json())
         assert payload["event_type"] == "PERP_OPEN"
         assert payload["market"] == "ETH/USD"
-        assert payload["size_usd"] == "1000"
+        # VIB-5941: the accounting payload now emits the canonical schema key
+        # ``size`` (was the non-schema ``size_usd``), plus intent-known ``is_long``,
+        # and the perp primitive contract bumped to v2.
+        assert payload["size"] == "1000"
+        assert "size_usd" not in payload
+        assert payload["is_long"] is True
+        assert payload["primitive_version"] == 2
 
 
 # ---------------------------------------------------------------------------

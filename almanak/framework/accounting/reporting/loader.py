@@ -20,6 +20,7 @@ from almanak.framework.accounting.models import (
     AccountingIdentity,
     LendingAccountingEvent,
     LendingEventType,
+    PerpEventType,
 )
 
 
@@ -28,9 +29,21 @@ class StrategyClass(StrEnum):
     SWAP = "swap"
     LP = "lp"
     LENDING = "lending"
+    # VIB-5943: perps were mis-classified "unknown" because nothing here mapped
+    # the PERP position_type / PERP_OPEN|PERP_CLOSE event markers to a class.
+    PERP = "perp"
 
 
 _LENDING_TYPES: frozenset[str] = frozenset(e.value for e in LendingEventType)
+
+# VIB-5943: perp accounting-event markers used to classify a deployment as PERP
+# even when the typed payload failed to deserialize (e.g. a pre-VIB-5941
+# malformed row). Derived from the full ``PerpEventType`` enum — NOT just
+# OPEN/CLOSE — so a deployment whose only rows are PERP_INCREASE / PERP_DECREASE
+# / PERP_LIQUIDATE (e.g. a liquidation-only or increase-only history) still
+# classifies PERP instead of falling through to "unknown". (These are accounting
+# EVENT types, distinct from the intent verbs — there is no PERP_INCREASE intent.)
+_PERP_TYPES: frozenset[str] = frozenset(e.value for e in PerpEventType)
 
 # VIB-5084: how many recent Track-C rows to pull for the live-HF lookup. The
 # latest portfolio snapshot's lending legs sit at the head of the ``captured_at
@@ -150,6 +163,7 @@ def _detect_strategy_classes(
     ledger_entries: list[Any],
     unavailable_records: list[dict] | None = None,
     connector_events: dict[str, list[Any]] | None = None,
+    raw_accounting_events: list[dict] | None = None,
 ) -> frozenset[StrategyClass | str]:
     from almanak.connectors._strategy_accounting_report_registry import ACCOUNTING_REPORT_REGISTRY
 
@@ -157,6 +171,18 @@ def _detect_strategy_classes(
 
     if lending_events:
         classes.add(StrategyClass.LENDING)
+
+    # VIB-5943: classify PERP from the RAW accounting rows' event_type markers,
+    # BEFORE/independent of payload deserialization. A malformed perp payload
+    # (e.g. a pre-VIB-5941 row with is_long=None / no size) fails
+    # ``_deserialize_events`` and is dropped into ``parse_errors`` — it never
+    # reaches ``connector_events`` NOR the ESTIMATED-confidence ``unavailable``
+    # bucket, so a deserialize-gated check would leave such a historical
+    # deployment mis-labelled "unknown". The raw event_type survives regardless.
+    for row in raw_accounting_events or []:
+        if (row.get("event_type") or "").upper() in _PERP_TYPES:
+            classes.add(StrategyClass.PERP)
+            break
     for key, events in (connector_events or {}).items():
         if not events:
             continue
@@ -170,14 +196,23 @@ def _detect_strategy_classes(
         if et in _LENDING_TYPES:
             classes.add(StrategyClass.LENDING)
             continue
+        # VIB-5943: PERP_OPEN / PERP_CLOSE markers classify as PERP even when the
+        # typed payload failed to deserialize (a pre-VIB-5941 malformed row).
+        if et in _PERP_TYPES:
+            classes.add(StrategyClass.PERP)
+            continue
         connector_class = ACCOUNTING_REPORT_REGISTRY.strategy_class_for_event_type(et)
         if connector_class is not None:
             classes.add(_strategy_class_label(connector_class))
 
     for ev in position_events:
-        if (ev.get("position_type") or "").upper() == "LP":
+        pt = (ev.get("position_type") or "").upper()
+        if pt == "LP":
             classes.add(StrategyClass.LP)
-            break
+        elif pt == "PERP":
+            # VIB-5943: perp position_events now land (VIB-5941 gave perps a
+            # deterministic position_id) — classify the deployment as PERP.
+            classes.add(StrategyClass.PERP)
 
     if not classes and any((getattr(e, "intent_type", "") or "").upper() == "SWAP" for e in ledger_entries):
         classes.add(StrategyClass.SWAP)
@@ -240,6 +275,7 @@ async def load_accounting_data(
         ledger_entries or [],
         unavailable,
         connector_events=connector_events,
+        raw_accounting_events=raw_accounting or [],
     )
 
     return AccountingData(

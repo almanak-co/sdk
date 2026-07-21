@@ -200,7 +200,19 @@ PRIMITIVE_VERSIONS: dict[Primitive, int] = {
     Primitive.LENDING: PRIMITIVE_VERSION_DEFAULT,
     Primitive.CDP: PRIMITIVE_VERSION_DEFAULT,
     Primitive.LIQUIDATION: PRIMITIVE_VERSION_DEFAULT,
-    Primitive.PERP: PRIMITIVE_VERSION_DEFAULT,
+    # VIB-5941 (v1→v2): the PERP payload contract changed — the position size is
+    # now emitted under the canonical schema key ``size`` (was the non-schema
+    # ``size_usd``, which left the required ``size`` field absent and FAILed
+    # validation), ``PERP_OPEN.is_long`` is now the intent-known truth instead of
+    # a dropped ``None``, and ``PERP_CLOSE.size`` is required-but-nullable with a
+    # new invariant (``unavailable_reason`` required when size is None — a full
+    # close's size is unmeasured until the perp receipt parser, VIB-5717). The
+    # SET of fields the primitive emits changed, so the primitive contract bumps
+    # (mirrors the VIB-4905 SWAP v1→v2 field-set bump above). Old rows on disk
+    # keep their v1 stamp; new rows stamp v2 — exactly the disambiguation the
+    # per-primitive version exists for. The lot-matching ALGORITHM is unchanged,
+    # so ``MATCHING_POLICY_VERSIONS[Primitive.PERP]`` is NOT bumped.
+    Primitive.PERP: 2,
     Primitive.UTILITY: PRIMITIVE_VERSION_DEFAULT,
     # VIB-4905 (v1→v2): SwapEventPayload contract extension — additive
     # three-field bundle for partial-match disposals
@@ -542,7 +554,19 @@ class PerpCloseEventPayload(_Versioned):
     position_key: str
     market: str
     is_long: bool
-    size: Decimal
+    # VIB-5941: ``size`` is ``Decimal | None`` per AGENTS.md Empty ≠ Zero — the
+    # same required-but-nullable treatment ``WithdrawEventPayload.amount`` /
+    # ``SwapEventPayload.amount_in`` / ``LPCloseEventPayload.amount0`` carry. A
+    # FULL close (``PerpCloseIntent.size_usd is None`` → "close the whole
+    # position") does not know the close notional at intent time — the measured
+    # close size requires the perp receipt parser / a position read (VIB-5717),
+    # so it stays ``None`` (measured-unmeasured) rather than a fabricated zero.
+    # A PARTIAL close stamps its intent ``size_usd`` and carries a real Decimal.
+    # ``Field(...)`` (Pydantic v2 "required key, no default") preserves the
+    # discipline: a writer that drops the key entirely FAILs loud, while an
+    # honest full-close ``None`` validates. The writer always emits the key
+    # (``PerpAccountingEvent.to_payload_json`` → ``_enc``).
+    size: Decimal | None = Field(...)
     exit_price: Decimal | None = None
     close_fee_usd: Decimal | None = None
     price_impact_usd: Decimal | None = None
@@ -551,6 +575,22 @@ class PerpCloseEventPayload(_Versioned):
     realized_pnl_usd: Decimal | None = None
     confidence: ConfidenceLiteral
     unavailable_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _enforce_unmeasured_size_reason(self) -> PerpCloseEventPayload:
+        """Require ``unavailable_reason`` when ``size`` is None (Empty ≠ Zero audit
+        trail — mirrors ``SwapEventPayload._enforce_unmeasured_reason``).
+
+        A full-close leaves ``size`` unmeasured; making that state auditable stops
+        a future writer regression from silently emitting a sizeless close that
+        validates but tells auditors nothing about why the size disappeared.
+        """
+        if self.size is None and not (self.unavailable_reason or "").strip():
+            raise ValueError(
+                "PerpCloseEventPayload: a non-blank unavailable_reason is required when size is None "
+                "(Empty ≠ Zero audit trail)."
+            )
+        return self
 
 
 # ─── Swap ─────────────────────────────────────────────────────────────────

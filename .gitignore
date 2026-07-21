@@ -81,6 +81,8 @@ scripts/kitchenloop/kitchenloop.log
 scripts/pr-manager/pr-manager.log
 scripts/pr-manager/state.json
 docs/internal/notes/.tmp/
+# Disposable harness scratch output (e.g. scripts/dev/vib5941_rebuild_perp_payloads.py --out .scratch/...)
+.scratch/
 # Guard: no root-level notes/. Canonical scratch + notes live under
 # docs/internal/notes/ (durable .md tracked; docs/internal/notes/.tmp/ ignored
 # above). This keeps the repo root clean if a tool ever writes here by accident.
