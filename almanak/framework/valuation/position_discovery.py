@@ -268,10 +268,19 @@ class PositionDiscoveryService:
                 result.errors.append(error_msg)
 
     def _discover_perps(self, config: DiscoveryConfig, result: DiscoveryResult) -> None:
-        """Scan for perpetual positions across every connector-owned perp venue.
+        """Scan for perpetual positions across the strategy's DECLARED perp venues.
 
-        Iterates :meth:`PerpsReadRegistry.supported_protocols` so discovery names
-        no venue of its own — adding a perp connector extends discovery with no
+        Iterates :func:`_perps_protocols_to_scan` — the intersection of the
+        strategy's declared ``protocols`` and the connector-owned perps-read
+        registry — NOT the full ``PerpsReadRegistry.supported_protocols`` set.
+        This mirrors :meth:`_discover_lending` (declared ∩ registry), and is a
+        least-privilege boundary: scanning every registered venue would fold an
+        UNDECLARED venue's wallet position into this strategy's NAV. Concretely,
+        a strategy that declares only ``hyperliquid`` (plus, say, spot on
+        Arbitrum) must not have its Arbitrum wallet scanned for a GMX perp it
+        never opened — that position belongs to a different deployment's books.
+        Discovery still names no venue of its own (the set is registry-derived),
+        so adding a perp connector a strategy declares extends discovery with no
         framework edit. Each venue's read is routed with its OWN ``protocol`` so
         the emitted positions carry the venue that produced them (and the
         valuation repricing path re-queries the same venue).
@@ -300,7 +309,7 @@ class PositionDiscoveryService:
         ``read_positions`` call below then surfaces any genuine failure.
         """
         result.perps_scanned = True
-        for protocol in PerpsReadRegistry.supported_protocols():
+        for protocol in _perps_protocols_to_scan(config.protocols):
             probe = PerpsPositionQuery(chain=config.chain, wallet_address=config.wallet_address)
             try:
                 is_deployed = PerpsReadRegistry.resolve_plan(protocol, probe) is not None
@@ -432,25 +441,50 @@ def _has_lp_protocol(protocols: list[str]) -> bool:
     return bool({p.lower() for p in protocols} & lp_protocols)
 
 
-def _has_perps_protocol(protocols: list[str]) -> bool:
-    """Check if any protocol in the list is a perpetuals protocol.
+def _perps_protocols_to_scan(protocols: list[str]) -> list[str]:
+    """Perp protocols to scan during discovery, in deterministic registry order.
 
-    Reads the same connector-declared perp membership as the synthetic
-    permission-discovery path (``_PERP_PROTOCOLS`` in
-    ``almanak/framework/permissions/synthetic_intents.py``, itself derived from
-    each connector's ``PermissionHints.synthetic_discovery_intents``), so that
-    every perp venue whose synthetic intents are generated for permission
-    discovery is also discovered/valued by the position-discovery flow.
+    The intersection of the strategy's declared ``protocols`` and the registry's
+    connector-owned perps reads (GMX V2 / Aster / Hyperliquid / …). Mirrors
+    :func:`_lending_protocols_to_scan`: the read registry — NOT the synthetic
+    permission-discovery membership (``_PERP_PROTOCOLS``) — is the single source
+    of truth for what discovery can actually read.
 
-    The ``"gmx"`` alias is added on top of the derived set: position-discovery
-    callers may pass the historical short protocol name, but ``gmx_v2`` is the
-    canonical connector slug that declares perp participation (so the derived
-    set carries ``gmx_v2``, not ``gmx``).
+    This is the same reader-set gate ``boot_strand_detection`` already uses for
+    perp scannability (``PerpsReadRegistry.canonical`` is non-None only for
+    venues with a registered read). The two must agree: gating on the broader
+    conceptual perp membership silently drops a venue that has a perps read but
+    declares its permissions statically instead of via
+    ``synthetic_discovery_intents`` — e.g. Hyperliquid, whose CoreWriter is a
+    fixed system contract registered through ``static_permissions``. That venue
+    is absent from ``_PERP_PROTOCOLS`` yet fully readable via the
+    ``0x0800`` position precompile, so the old membership gate left its live
+    HyperCore position undiscovered and unvalued (VIB-5768 / VIB-5576).
+
+    ``PerpsReadRegistry.canonical`` resolves aliases (e.g. ``"gmx"`` ->
+    ``"gmx_v2"``, ``"pancakeswap_perps"`` -> ``"aster_perps"``), so the historical
+    short protocol names a strategy may declare still map onto their canonical
+    reader — no ``"gmx"`` special-case needed.
     """
-    from almanak.framework.permissions.synthetic_intents import _PERP_PROTOCOLS
+    declared: set[str] = set()
+    for p in protocols:
+        canonical = PerpsReadRegistry.canonical(p)
+        if canonical is not None:
+            declared.add(canonical)
+    return [p for p in PerpsReadRegistry.supported_protocols() if p in declared]
 
-    perps_protocols = _PERP_PROTOCOLS | {"gmx"}
-    return bool({p.lower() for p in protocols} & perps_protocols)
+
+def _has_perps_protocol(protocols: list[str]) -> bool:
+    """Return True when any declared protocol has a connector-owned perps read.
+
+    Gates the ``_discover_perps`` scan on the ACTUAL reader set
+    (:class:`PerpsReadRegistry`) rather than the synthetic permission-discovery
+    membership, so every venue with a registered perps read — including those
+    that declare permissions statically (Hyperliquid CoreWriter) and are absent
+    from ``_PERP_PROTOCOLS`` — is discovered and valued. See
+    :func:`_perps_protocols_to_scan`.
+    """
+    return bool(_perps_protocols_to_scan(protocols))
 
 
 def _lending_to_position_infos(

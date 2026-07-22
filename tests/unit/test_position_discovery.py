@@ -13,16 +13,42 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak.framework.teardown.models import PositionInfo, PositionType
+from almanak.framework.valuation.lending_position_reader import LendingPositionOnChain
+from almanak.framework.valuation.perps_position_reader import PerpsPositionOnChain, PerpsReadResult
 from almanak.framework.valuation.position_discovery import (
     DiscoveryConfig,
     DiscoveryResult,
     PositionDiscoveryService,
     _has_lending_protocol,
     _has_lp_protocol,
+    _has_perps_protocol,
     _lending_protocols_to_scan,
     _lending_to_position_infos,
+    _perps_protocols_to_scan,
 )
-from almanak.framework.valuation.lending_position_reader import LendingPositionOnChain
+
+
+def _hl_eth_long(wallet: str = "0x1234567890abcdef1234567890abcdef12345678") -> PerpsPositionOnChain:
+    """A HyperCore ETH long as the hyperliquid perps_read reducer emits it.
+
+    Symbol-keyed market (no address), USDC-margined, 1e6-USD notional/collateral,
+    szi at ``10**szDecimals`` (ETH szDecimals = 4). Matches the layout proven
+    against live mainnet (perps_read.py docstring).
+    """
+    return PerpsPositionOnChain(
+        account=wallet,
+        market="ETH",  # symbol is the valuation join key; HyperCore has no market address
+        collateral_token="USDC",
+        size_in_usd=20_000_000,  # $20 entry notional at 1e6 USD
+        size_in_tokens=100,  # 0.01 ETH at 10**4 (szDecimals)
+        collateral_amount=1_000_000,  # $1 margin at 1e6 USD
+        is_long=True,
+        borrowing_factor=0,
+        funding_fee_amount_per_size=0,
+        increased_at_time=0,
+        decreased_at_time=0,
+        key_prefix="hyperliquid",
+    )
 
 
 # =============================================================================
@@ -70,6 +96,66 @@ class TestHasLpProtocol:
 
     def test_empty(self):
         assert _has_lp_protocol([]) is False
+
+
+class TestHasPerpsProtocol:
+    """The perp-discovery gate is driven by the ACTUAL reader set
+    (:class:`PerpsReadRegistry`), NOT the synthetic permission-discovery
+    membership (``_PERP_PROTOCOLS``). Regression guard for VIB-5768 / VIB-5576:
+    hyperliquid publishes a perps read but declares its CoreWriter permissions
+    statically (``static_permissions``), so it is absent from ``_PERP_PROTOCOLS``.
+    The old membership gate left its live HyperCore position undiscovered and
+    the whole snapshot valued at $0.
+    """
+
+    def test_hyperliquid_recognized(self):
+        # The bug: hyperliquid has a perps read but no synthetic_discovery_intents.
+        assert _has_perps_protocol(["hyperliquid"]) is True
+        assert _perps_protocols_to_scan(["hyperliquid"]) == ["hyperliquid"]
+
+    def test_gmx_v2(self):
+        assert _has_perps_protocol(["gmx_v2"]) is True
+
+    def test_gmx_alias(self):
+        """The historical short ``gmx`` slug resolves to its canonical reader."""
+        assert _has_perps_protocol(["gmx"]) is True
+        assert _perps_protocols_to_scan(["gmx"]) == ["gmx_v2"]
+
+    def test_aster_perps(self):
+        assert _has_perps_protocol(["aster_perps"]) is True
+
+    def test_pancakeswap_perps_alias(self):
+        assert _has_perps_protocol(["pancakeswap_perps"]) is True
+        assert _perps_protocols_to_scan(["pancakeswap_perps"]) == ["aster_perps"]
+
+    def test_case_insensitive(self):
+        assert _has_perps_protocol(["HYPERLIQUID"]) is True
+
+    def test_non_perp(self):
+        assert _has_perps_protocol(["uniswap_v3"]) is False
+        assert _has_perps_protocol(["aave_v3"]) is False
+
+    def test_empty(self):
+        assert _has_perps_protocol([]) is False
+
+    def test_mixed(self):
+        assert _has_perps_protocol(["uniswap_v3", "hyperliquid"]) is True
+        assert _perps_protocols_to_scan(["uniswap_v3", "hyperliquid"]) == ["hyperliquid"]
+
+    def test_every_registered_perp_venue_passes_the_gate(self):
+        """Drift-proof regression pin (the test that would have caught VIB-5768):
+        EVERY venue with a connector-owned perps read must clear the discovery
+        gate. Iterates the registry so a future perp connector — statically
+        permissioned or not — is covered with no test edit. Under the old
+        ``_PERP_PROTOCOLS`` gate, ``hyperliquid`` failed this.
+        """
+        from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+
+        venues = PerpsReadRegistry.supported_protocols()
+        assert "hyperliquid" in venues  # sanity: the registry actually knows the venue
+        for venue in venues:
+            assert _has_perps_protocol([venue]) is True, f"{venue} has a perps read but fails the discovery gate"
+            assert _perps_protocols_to_scan([venue]) == [venue]
 
 
 # =============================================================================
@@ -409,6 +495,192 @@ class TestPositionDiscoveryService:
         assert result.has_positions is False
         assert result.lp_ids_scanned == 1
 
+    def test_no_perps_protocol_skips_perps_scan(self):
+        """A strategy declaring no perp venue never triggers the perps scan."""
+        service = PositionDiscoveryService(gateway_client=None)
+        config = DiscoveryConfig(
+            chain="arbitrum",
+            wallet_address="0xwallet",
+            protocols=["uniswap_v3"],
+            tracked_tokens=["USDC", "WETH"],
+        )
+        result = service.discover(config)
+        assert result.perps_scanned is False
+
+    def test_hyperliquid_perps_discovered(self):
+        """VIB-5768/VIB-5576: a live HyperCore perp is now discovered + stamped
+        with the wallet the repricer needs. Before the gate fix, discovery was
+        never triggered for hyperliquid (absent from ``_PERP_PROTOCOLS``), so the
+        position was invisible and the snapshot valued the perp at $0.
+        """
+        wallet = "0x1234567890abcdef1234567890abcdef12345678"
+        service = PositionDiscoveryService(gateway_client=None)
+        config = DiscoveryConfig(
+            chain="hyperevm",
+            wallet_address=wallet,
+            protocols=["hyperliquid"],
+            tracked_tokens=["USDC"],
+        )
+        # Only hyperliquid resolves a plan on hyperevm; gmx_v2 / aster_perps are
+        # not deployed there and are skipped by the resolve_plan gate, so the
+        # faked reader is exercised exactly for hyperliquid.
+        with patch.object(
+            service._perps_reader,
+            "read_positions",
+            return_value=PerpsReadResult(positions=(_hl_eth_long(wallet),), ok=True),
+        ):
+            result = service.discover(config)
+
+        assert result.perps_scanned is True
+        assert "hyperliquid" in result.perp_protocols_ok
+        perps = [p for p in result.positions if p.position_type == PositionType.PERP]
+        assert len(perps) == 1
+        pos = perps[0]
+        assert pos.protocol == "hyperliquid"
+        assert pos.chain == "hyperevm"
+        assert pos.details["market"] == "ETH"
+        assert pos.details["is_long"] is True
+        # The wallet the on-chain repricer (``_value_matched_perp``) reads from.
+        assert pos.details["wallet_address"] == wallet
+        assert result.errors == []
+
+    def test_hyperliquid_pending_fill_degrades_leg_only(self):
+        """Pending fill (CoreWriter order not yet settled on HyperCore) reads as a
+        MEASURED empty book (``ok=True``, no positions). Discovery marks the venue
+        authoritative and emits NO perp position and NO error — so the leg is
+        simply absent (unmeasured), never a read failure that would collapse the
+        snapshot. ``perp_protocols_ok`` lets the merge drop any notional stub.
+        """
+        wallet = "0x1234567890abcdef1234567890abcdef12345678"
+        service = PositionDiscoveryService(gateway_client=None)
+        config = DiscoveryConfig(
+            chain="hyperevm",
+            wallet_address=wallet,
+            protocols=["hyperliquid"],
+            tracked_tokens=["USDC"],
+        )
+        with patch.object(
+            service._perps_reader,
+            "read_positions",
+            return_value=PerpsReadResult(positions=(), ok=True),  # pending fill
+        ):
+            result = service.discover(config)
+
+        assert result.perps_scanned is True
+        assert "hyperliquid" in result.perp_protocols_ok  # authoritative flat book
+        assert [p for p in result.positions if p.position_type == PositionType.PERP] == []
+        assert result.errors == []  # empty book is measured, NOT a failure
+
+    def test_hyperliquid_read_failure_is_surfaced_not_silent(self):
+        """A genuine gateway/RPC/decode failure on the deployed venue (``ok=False``)
+        is recorded as an error and does NOT mark the venue authoritative — so a
+        strategy's notional stub survives the merge (Empty≠Zero) rather than
+        being silently dropped as if the book were flat.
+        """
+        wallet = "0x1234567890abcdef1234567890abcdef12345678"
+        service = PositionDiscoveryService(gateway_client=None)
+        config = DiscoveryConfig(
+            chain="hyperevm",
+            wallet_address=wallet,
+            protocols=["hyperliquid"],
+            tracked_tokens=["USDC"],
+        )
+        with patch.object(
+            service._perps_reader,
+            "read_positions",
+            return_value=PerpsReadResult(positions=(), ok=False),  # read failed
+        ):
+            result = service.discover(config)
+
+        assert result.perps_scanned is True
+        assert "hyperliquid" not in result.perp_protocols_ok
+        assert any("hyperliquid" in e for e in result.errors)
+
+    def test_perps_scan_excludes_undeclared_venue(self):
+        """Least-privilege scan set (Codex P2): a strategy that declares ONLY
+        hyperliquid must never have its (e.g. Arbitrum) wallet scanned for GMX —
+        an undeclared venue's position would otherwise leak into this
+        deployment's NAV. ``_discover_perps`` iterates the declared ∩ registry
+        set, NOT every ``supported_protocols()`` entry.
+        """
+        wallet = "0x1234567890abcdef1234567890abcdef12345678"
+        service = PositionDiscoveryService(gateway_client=None)
+        # Arbitrum is where GMX V2 resolves a plan; if the scan set were the full
+        # registry, GMX would be read here even though only hyperliquid is declared.
+        config = DiscoveryConfig(
+            chain="arbitrum",
+            wallet_address=wallet,
+            protocols=["hyperliquid"],
+            tracked_tokens=["USDC"],
+        )
+        gmx_pos = PerpsPositionOnChain(
+            account=wallet,
+            market="0x70d95587d40A2caf56bd97485aB3Eec10Bee6336",  # GMX ETH market address
+            collateral_token="USDC",
+            size_in_usd=10_000 * 10**30,
+            size_in_tokens=5 * 10**18,
+            collateral_amount=2000 * 10**6,
+            is_long=True,
+            borrowing_factor=0,
+            funding_fee_amount_per_size=0,
+            increased_at_time=0,
+            decreased_at_time=0,
+        )
+
+        def fake_read(chain, wallet_address, protocol):
+            if protocol == "gmx_v2":
+                return PerpsReadResult(positions=(gmx_pos,), ok=True)
+            return PerpsReadResult(positions=(), ok=True)
+
+        with patch.object(service._perps_reader, "read_positions", side_effect=fake_read) as m:
+            result = service.discover(config)
+
+        scanned_protocols = {c.kwargs["protocol"] for c in m.call_args_list}
+        assert "gmx_v2" not in scanned_protocols  # undeclared venue never read
+        assert all(p.protocol != "gmx_v2" for p in result.positions)  # no GMX leaked into NAV
+        assert "gmx_v2" not in result.perp_protocols_ok
+
+    def test_perps_scan_includes_every_declared_venue(self):
+        """The mirror of the exclusion test: a strategy that DOES declare a venue
+        has it scanned. Declaring hyperliquid + gmx scans GMX on the chain where
+        it is deployed (Arbitrum) and folds its position in.
+        """
+        wallet = "0x1234567890abcdef1234567890abcdef12345678"
+        service = PositionDiscoveryService(gateway_client=None)
+        config = DiscoveryConfig(
+            chain="arbitrum",
+            wallet_address=wallet,
+            protocols=["hyperliquid", "gmx"],  # "gmx" alias → gmx_v2
+            tracked_tokens=["USDC"],
+        )
+        gmx_pos = PerpsPositionOnChain(
+            account=wallet,
+            market="0x70d95587d40A2caf56bd97485aB3Eec10Bee6336",
+            collateral_token="USDC",
+            size_in_usd=10_000 * 10**30,
+            size_in_tokens=5 * 10**18,
+            collateral_amount=2000 * 10**6,
+            is_long=True,
+            borrowing_factor=0,
+            funding_fee_amount_per_size=0,
+            increased_at_time=0,
+            decreased_at_time=0,
+        )
+
+        def fake_read(chain, wallet_address, protocol):
+            if protocol == "gmx_v2":
+                return PerpsReadResult(positions=(gmx_pos,), ok=True)
+            return PerpsReadResult(positions=(), ok=True)
+
+        with patch.object(service._perps_reader, "read_positions", side_effect=fake_read) as m:
+            result = service.discover(config)
+
+        scanned_protocols = {c.kwargs["protocol"] for c in m.call_args_list}
+        assert "gmx_v2" in scanned_protocols  # declared venue IS read
+        gmx_positions = [p for p in result.positions if p.protocol == "gmx_v2"]
+        assert len(gmx_positions) == 1
+        assert "gmx_v2" in result.perp_protocols_ok
+
     def test_set_gateway_client_updates_readers(self):
         """set_gateway_client refreshes both readers."""
         service = PositionDiscoveryService(gateway_client=None)
@@ -530,6 +802,80 @@ class TestPortfolioValuerDiscoveryIntegration:
         # the trust-the-strategy path and remain ``unavailable=False``.
         assert unavailable is True
         assert positions[0].details.get("valuation_status") == "no_path"
+
+    def test_hyperliquid_perp_valued_in_snapshot(self):
+        """End-to-end (VIB-5768/VIB-5576): a discovered HyperCore perp is
+        MEASURED into the snapshot via the connector's mark-to-market formula —
+        NOT the $0/empty collapse the live mainnet run produced.
+        """
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        wallet = "0x1234567890abcdef1234567890abcdef12345678"
+        valuer = self._make_valuer()
+        strategy = self._make_strategy(chain="hyperevm", protocols=["hyperliquid"], tracked_tokens=["USDC"])
+        market = self._make_market(prices={"ETH": Decimal("2100"), "USDC": Decimal("1")})
+
+        discovered = PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="hyperliquid-ETH-long",
+            chain="hyperevm",
+            protocol="hyperliquid",
+            value_usd=Decimal("0"),  # repriced by the valuer
+            details={
+                "market": "ETH",
+                "collateral_token": "USDC",
+                "is_long": True,
+                "wallet_address": wallet,
+                "side": "long",
+            },
+        )
+        mock_result = DiscoveryResult(positions=[discovered], perps_scanned=True, perp_protocols_ok={"hyperliquid"})
+
+        with (
+            patch.object(valuer._discovery, "discover", return_value=mock_result),
+            patch.object(
+                valuer._perps_reader,
+                "read_positions",
+                return_value=PerpsReadResult(positions=(_hl_eth_long(wallet),), ok=True),
+            ),
+            pytest.MonkeyPatch.context() as mp,
+        ):
+            mp.setattr(PortfolioValuer, "_resolve_token_symbol", lambda self, addr, p, k: "USDC")
+            mp.setattr(PortfolioValuer, "_get_token_decimals", lambda self, sym, chain: 6)
+            positions, total, unavailable = valuer._get_positions(strategy, market, {})
+
+        assert len(positions) == 1
+        perp = positions[0]
+        assert perp.position_type == PositionType.PERP
+        # Repriced on-chain (collateral $1 + uPnL $1 = $2 net at mark $2100 vs entry $2000).
+        assert perp.details.get("valuation_status") != "no_path"
+        assert perp.details.get("valuation_source") == "on_chain"
+        assert Decimal(perp.details["unrealized_pnl_usd"]) == Decimal("1")
+        assert perp.value_usd == Decimal("2")
+        assert total == Decimal("2")
+        assert unavailable is False  # a MEASURED perp, never the $0/UNAVAILABLE collapse
+
+    def test_hyperliquid_pending_fill_stub_dropped_leg_only(self):
+        """VIB-5768 leg-only degrade: while a CoreWriter order is pending fill,
+        discovery returns a MEASURED-empty book. The strategy's notional perp
+        stub is dropped by the merge (``perp_protocols_ok``) rather than kept as
+        an unrepriceable ``no_path`` row — so the leg is simply absent and the
+        rest of the snapshot (wallet value) is NOT collapsed to UNAVAILABLE.
+        """
+        valuer = self._make_valuer()
+        stub = PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="hyperliquid-ETH-hyperevm",
+            chain="hyperevm",
+            protocol="hyperliquid",
+            value_usd=Decimal("20"),  # gross notional stub (no wallet → cannot reprice)
+            details={"market": "ETH", "is_long": True, "collateral_token": "USDC"},
+        )
+        # Discovery scanned hyperliquid ok on hyperevm (flat/pending book).
+        merged = valuer._merge_position_sources(
+            [stub], [], "hyperevm", perp_protocols_ok={("hyperevm", "hyperliquid")}
+        )
+        assert merged == []  # stub dropped — no no_path row, snapshot not collapsed
 
     def test_strategy_only_no_discovery(self):
         """Strategy reports a perp, discovery confirms nothing for it.

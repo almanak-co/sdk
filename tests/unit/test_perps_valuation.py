@@ -377,6 +377,62 @@ class TestPortfolioValuerPerpsIntegration:
         result = valuer._reprice_perps_on_chain(pos, "arbitrum", MagicMock())
         assert result is None
 
+    def test_reprice_hyperliquid_perp_success(self):
+        """VIB-5768/VIB-5576: a HyperCore perp reprices through the registry via
+        the connector's own mark-to-market formula (symbol-keyed market, USDC
+        margin, 1e6-USD scales, szDecimals=4). Proves the valuation path the live
+        mainnet run never reached — the position is MEASURED, not $0.
+        """
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        wallet = "0x1234567890abcdef1234567890abcdef12345678"
+        valuer = self._make_valuer()
+        pos = PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="hyperliquid-ETH-long",
+            chain="hyperevm",
+            protocol="hyperliquid",
+            value_usd=Decimal("0"),
+            details={
+                "market": "ETH",  # HyperCore markets are symbol-keyed (no address)
+                "collateral_token": "USDC",
+                "is_long": True,
+                "wallet_address": wallet,
+            },
+        )
+        hl_pos = PerpsPositionOnChain(
+            account=wallet,
+            market="ETH",
+            collateral_token="USDC",
+            size_in_usd=20_000_000,  # $20 notional at 1e6 USD
+            size_in_tokens=100,  # 0.01 ETH at 10**4 szDecimals
+            collateral_amount=1_000_000,  # $1 margin at 1e6 USD
+            is_long=True,
+            borrowing_factor=0,
+            funding_fee_amount_per_size=0,
+            increased_at_time=0,
+            decreased_at_time=0,
+            key_prefix="hyperliquid",
+        )
+        valuer._perps_reader = MagicMock()
+        valuer._perps_reader.read_positions.return_value = PerpsReadResult(positions=(hl_pos,), ok=True)
+        market = MagicMock()
+        market.price.side_effect = lambda token, *a, **k: {"ETH": Decimal("2100"), "USDC": Decimal("1")}.get(
+            token, Decimal("0")
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(PortfolioValuer, "_resolve_token_symbol", lambda self, addr, p, k: "USDC")
+            mp.setattr(PortfolioValuer, "_get_token_decimals", lambda self, sym, chain: 6)
+            out = valuer._reprice_perps_on_chain_enriched(pos, "hyperevm", market)
+
+        assert out is not None
+        net, enriched = out
+        # entry = 20/0.01 = 2000; mark 2100 => uPnL = 0.01*100 = 1; net = $1 collat + $1 = $2.
+        assert net == Decimal("2")
+        assert Decimal(enriched["unrealized_pnl_usd"]) == Decimal("1")
+        assert Decimal(enriched["size_usd"]) == Decimal("20")
+        assert enriched["valuation_source"] == "on_chain"
+
     def test_reprice_position_delegates_to_perps(self):
         """_reprice_position dispatches PERP to _reprice_perps_on_chain."""
         from unittest.mock import patch
