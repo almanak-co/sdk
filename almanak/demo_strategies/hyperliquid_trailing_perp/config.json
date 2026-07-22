@@ -5,6 +5,7 @@
     "collateral_token": "USDC",
     "size_usd": "15",
     "leverage": "2.0",
+    "accept_venue_leverage": true,
     "is_long": true,
     "max_slippage": "0.01",
     "take_profit_pct": "0.02",

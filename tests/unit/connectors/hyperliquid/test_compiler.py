@@ -75,11 +75,55 @@ class TestCompileOpen:
         assert result.action_bundle.metadata["reduce_only"] is False
         assert result.action_bundle.metadata["is_long"] is True
 
-    def test_open_leverage_warns_but_succeeds(self) -> None:
+    def test_open_leverage_optin_warns_but_succeeds(self) -> None:
+        # VIB-5724: a divergent leverage compiles ONLY with the explicit opt-in;
+        # the compile-time warning still surfaces that leverage is not set on-venue.
         ctx = _ctx(lambda to, data, chain=None: _oracle_return(Decimal("59897"), 5))
-        result = HyperliquidCompiler().compile_perp_open(ctx, _open_intent(leverage=Decimal("5")))
+        result = HyperliquidCompiler().compile_perp_open(
+            ctx, _open_intent(leverage=Decimal("5"), accept_venue_leverage=True)
+        )
         assert result.status == CompilationStatus.SUCCESS
         assert any("cannot set leverage" in w for w in result.warnings)
+        assert result.action_bundle.metadata["accept_venue_leverage"] is True
+        assert result.action_bundle.metadata["leverage_requested"] == "5"
+
+    def test_open_leverage_without_optin_fails_closed(self) -> None:
+        # VIB-5724 core gate: leverage != 1x and no opt-in → hard compile FAIL,
+        # no tx emitted, BEFORE any oracle/position read (guard runs pre-read).
+        def eth_call(*a, **k):  # pragma: no cover — asserts guard runs pre-read
+            raise AssertionError("leverage gate must fail before any eth_call")
+
+        ctx = _ctx(eth_call)
+        result = HyperliquidCompiler().compile_perp_open(ctx, _open_intent(leverage=Decimal("2")))
+        assert result.status == CompilationStatus.FAILED
+        assert result.action_bundle is None  # no tx emitted
+        # Pre-execution SAFETY refusal → classified GUARD_REFUSED so the runner's
+        # failure circuit-breaker does not count it toward an emergency stop.
+        assert result.is_safety_refusal is True
+        # Actionable error names the value, the cause, and both remedies.
+        assert "leverage=2x" in result.error
+        assert "cannot set leverage on-venue" in result.error
+        assert "accept_venue_leverage=true" in result.error
+        assert "updateLeverage" in result.error
+
+    def test_open_default_leverage_no_optin_succeeds(self) -> None:
+        # leverage defaults to 1x = no specific request → gate does not fire even
+        # without the opt-in (the default open path must keep working).
+        ctx = _ctx(lambda to, data, chain=None: _oracle_return(Decimal("59897"), 5))
+        result = HyperliquidCompiler().compile_perp_open(ctx, _open_intent())
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.action_bundle.metadata["accept_venue_leverage"] is False
+        assert result.warnings == []  # 1x → no leverage warning either
+
+    def test_open_optin_alone_does_not_fabricate_leverage_warning(self) -> None:
+        # Opt-in at the default 1x must NOT invent a divergence warning: nothing
+        # was requested that the venue can't honour.
+        ctx = _ctx(lambda to, data, chain=None: _oracle_return(Decimal("59897"), 5))
+        result = HyperliquidCompiler().compile_perp_open(
+            ctx, _open_intent(accept_venue_leverage=True)
+        )
+        assert result.status == CompilationStatus.SUCCESS
+        assert result.warnings == []
 
     def test_open_wrong_chain_fails(self) -> None:
         ctx = _ctx(lambda *a, **k: None)

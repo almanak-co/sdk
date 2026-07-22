@@ -37,6 +37,25 @@ def _load_module():
     return module
 
 
+def _SEED_CONFIG():
+    """The demo's on-disk config.json as a fresh dict."""
+    return json.loads((_SEED_DIR / "config.json").read_text(encoding="utf-8"))
+
+
+def _make_from_cfg(module, cfg):
+    """Construct the strategy from an explicit config dict (no seed merge)."""
+    cls = module.HyperliquidTrailingPerp
+    with patch(
+        "almanak.framework.strategies.intent_strategy.IntentStrategy.__init__",
+        return_value=None,
+    ):
+        strat = cls.__new__(cls)
+        strat._config = cfg
+        strat.get_config = lambda k, d=None: cfg.get(k, d)
+        cls.__init__(strat)
+    return strat
+
+
 def _make(module, **overrides):
     """Construct the strategy with the demo config, applying any overrides."""
     cls = module.HyperliquidTrailingPerp
@@ -152,6 +171,42 @@ class TestConfigValidation:
     def test_rejects_sub_minimum_leverage(self, module):
         with pytest.raises(ValueError, match="leverage"):
             _make(module, leverage="0.5")
+
+    def test_accept_venue_leverage_string_false_does_not_opt_in(self, module):
+        # The classic bool-coercion trap: the STRING "false" must NOT opt in.
+        # bool("false") is True; the strict parser must resolve it to False so a
+        # non-1x leverage still fails closed at compile.
+        strat = _make(module, accept_venue_leverage="false")
+        assert strat.accept_venue_leverage is False
+
+    def test_accept_venue_leverage_real_bool_true_opts_in(self, module):
+        strat = _make(module, accept_venue_leverage=True)
+        assert strat.accept_venue_leverage is True
+
+    def test_accept_venue_leverage_string_true_opts_in(self, module):
+        strat = _make(module, accept_venue_leverage="true")
+        assert strat.accept_venue_leverage is True
+
+    def test_accept_venue_leverage_default_is_fail_closed(self, module):
+        # Omitted entirely → runtime default False (fail-closed).
+        cfg = {k: v for k, v in _SEED_CONFIG().items() if k != "accept_venue_leverage"}
+        strat = _make_from_cfg(module, cfg)
+        assert strat.accept_venue_leverage is False
+
+    def test_accept_venue_leverage_garbage_raises(self, module):
+        with pytest.raises(ValueError, match="accept_venue_leverage"):
+            _make(module, accept_venue_leverage="maybe")
+
+    def test_accept_venue_leverage_int_0_1_contract(self, module):
+        # Documented 0/1 int contract: 1 opts in, 0 does not.
+        assert _make(module, accept_venue_leverage=1).accept_venue_leverage is True
+        assert _make(module, accept_venue_leverage=0).accept_venue_leverage is False
+
+    @pytest.mark.parametrize("bad_int", [2, -1])
+    def test_accept_venue_leverage_out_of_contract_int_raises(self, module, bad_int):
+        # A stray nonzero int must NOT silently opt in — fail fast like bad strings.
+        with pytest.raises(ValueError, match="accept_venue_leverage"):
+            _make(module, accept_venue_leverage=bad_int)
 
 
 class TestLifecycleState:

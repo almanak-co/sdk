@@ -41,6 +41,47 @@ Consequently the take-profit, hard-stop, and trailing-stop are all evaluated
 threshold trips. Do **not** read them as on-chain bracket orders resting on the
 book — there are none.
 
+## Leverage on HyperCore is venue-controlled — `accept_venue_leverage` (VIB-5724)
+
+Hyperliquid via **CoreWriter has no set-leverage action**. A `leverage` you put
+in `config.json` is therefore **NOT applied on-venue**: the position opens at
+your account's **existing per-asset leverage** — which for a fresh account is the
+**20x cross default**, not the `2.0` this demo configures. Left unguarded that is
+a 10x divergence between the risk you configured and the risk you actually take,
+on a real-money path.
+
+To make that honest, the compiler **fails closed**: a `PERP_OPEN` requesting a
+non-`1x` leverage is **rejected at compile time** unless the strategy explicitly
+opts in with `accept_venue_leverage: true`. The **runtime default is `false`**
+(fail-closed) — this demo's `config.json` sets it to `true` as a sample value so
+the demo keeps running, but understand what that means:
+
+- `leverage` here is **advisory / local-only**: the strategy uses it for margin
+  sizing (`collateral_amount = size_usd / leverage`) and to sanity-check the stop
+  against the liquidation distance. It does **not** set the on-venue leverage.
+- The **true on-venue leverage** is read from the position precompile after the
+  fill and recorded on the perp accounting record, with a loud WARNING when it
+  diverges from the configured value. Accounting always stores the venue truth,
+  never the configured value.
+- Setting `updateLeverage` out-of-band does **not** remove the opt-in requirement:
+  the compiler never reads venue state, so `accept_venue_leverage: true` is
+  required either way. To actually run at `2.0x`, set your account's ETH per-asset
+  leverage to `2x` out-of-band (Hyperliquid L1 `updateLeverage`) **before**
+  running AND keep the opt-in; that makes the recorded venue leverage MATCH your
+  config (no divergence), rather than satisfying the compiler.
+
+Note that `leverage: 1` (or omitting it) is **not** a way to be "on-venue safe":
+the account's per-asset default still applies to the venue *setting*, so a fresh
+account can still be at 20x. A 1x-*sized* open (collateral == full notional) is
+effectively 1x regardless of the account setting because HyperCore liquidation is
+driven by posted collateral vs notional, not the leverage setting — but if you
+want the *recorded* venue leverage to read `1x`, pre-configure it via
+`updateLeverage`. (VIB-5945 tracks gating an *explicit* `1x` request too.)
+
+If you set `accept_venue_leverage: false` (or omit it) with a non-`1x`
+`leverage`, the first open fails closed with an actionable error rather than
+silently opening at 20x.
+
 ## Funding (HyperCore margin is off-EVM)
 
 There is **no EVM-wallet collateral gate** in this strategy: margin lives on
@@ -58,12 +99,16 @@ closes are exempt); the strategy warns at construction if it does not.
 
 ## Configuration (`config.json`)
 
-| Key | Default | Meaning |
+The **Value** column is this demo's `config.json` sample, not necessarily the
+framework's runtime default (called out below where they differ).
+
+| Key | Value (this demo) | Meaning |
 |---|---|---|
 | `market` | `ETH/USD` | HyperCore perp market |
 | `base_token` | `ETH` | Symbol the price oracle is keyed on for PnL |
 | `size_usd` | `15` | Position notional (must be ≥ ~$10) |
-| `leverage` | `2.0` | Advisory on HyperCore (≥ 1x, ≤ 50x) |
+| `leverage` | `2.0` | Advisory/local-only sizing (≥ 1x, ≤ 50x); NOT set on-venue — see "Leverage on HyperCore" above |
+| `accept_venue_leverage` | `true` (runtime default `false`) | Opt-in (VIB-5724) acknowledging the position opens at the account's venue-default leverage; required for a non-`1x` `leverage` or the open fails closed. The framework default is **`false`** (fail-closed); this demo sets `true` as its sample so it runs |
 | `is_long` | `true` | Fixed direction |
 | `take_profit_pct` | `0.02` | Close at +2% |
 | `stop_loss_pct` | `0.03` | Hard stop at −3% |

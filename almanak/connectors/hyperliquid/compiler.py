@@ -21,8 +21,18 @@ vocabulary): this compiles **market** open (IOC) and **market** close
 no native trigger orders, and the vocabulary's ``PerpOpenIntent`` carries no
 limit-price/TIF/order-type field — so resting limits, TP/SL, and leverage
 changes are NOT reachable through this path (they require the L1 EIP-712 API).
-``intent.leverage`` is recorded and surfaced as a warning, never silently
-ignored and never faked.
+
+Leverage fail-closed gate (VIB-5724)
+------------------------------------
+Because CoreWriter has no set-leverage action, a submitted ``leverage`` is NOT
+applied on-venue — the position opens at the account's existing per-asset
+leverage (e.g. the 20x cross default), a divergence between configured and
+actual risk that a warning alone does not prevent. So a ``PERP_OPEN`` that
+requests a non-default leverage (``!= 1x``) is **rejected at compile time**
+unless the strategy explicitly opts in with ``accept_venue_leverage=True``.
+With the opt-in the open proceeds and the divergence is recorded loudly
+(compile-time warning + post-fill venue-truth record via ``fill_accounting``),
+never silently as the requested value.
 """
 
 from __future__ import annotations
@@ -70,6 +80,12 @@ logger = logging.getLogger(__name__)
 # CoreWriter open/close is a single ~47k-gas call; budget generously.
 _CORE_WRITER_GAS = 150_000
 
+# CoreWriter has no set-leverage action (the action set is IDs 1-13,15,16;
+# ``updateLeverage`` lives only on the L1 EIP-712 exchange endpoint). This
+# connector therefore CANNOT enforce a requested leverage on-venue — the guard
+# below fails closed on a divergent request absent an explicit opt-in.
+_CAN_SET_LEVERAGE_ON_VENUE = False
+
 
 class HyperliquidCompiler(BasePerpCompiler):
     """Compile Hyperliquid perp intents into CoreWriter transactions on HyperEVM."""
@@ -85,6 +101,13 @@ class HyperliquidCompiler(BasePerpCompiler):
         chain_err = self._require_hyperevm(ctx, intent.intent_id)
         if chain_err is not None:
             return chain_err
+
+        # VIB-5724 — fail closed on an unenforceable leverage BEFORE any read or
+        # calldata build. CoreWriter cannot set leverage on-venue; a divergent
+        # request without an explicit opt-in must not reach the chain.
+        leverage_err = self._leverage_gate(intent)
+        if leverage_err is not None:
+            return leverage_err
 
         try:
             market = resolve_market(intent.market)
@@ -157,6 +180,7 @@ class HyperliquidCompiler(BasePerpCompiler):
                 "tif": "IOC",
                 "reduce_only": False,
                 "leverage_requested": str(intent.leverage),
+                "accept_venue_leverage": bool(getattr(intent, "accept_venue_leverage", False)),
                 "chain": ctx.chain,
             },
             warnings=self._leverage_warnings(intent.leverage),
@@ -451,6 +475,59 @@ class HyperliquidCompiler(BasePerpCompiler):
         """Deterministic non-zero uint128 client-order-id from the intent id."""
         return int.from_bytes(keccak(intent_id.encode())[:16], "big") or 1
 
+    def _leverage_gate(self, intent: PerpOpenIntent) -> CompilationResult | None:
+        """Fail closed on a leverage this connector cannot enforce on-venue (VIB-5724).
+
+        Returns a FAILED (safety-refusal) ``CompilationResult`` when the intent
+        requests a non-default leverage (``!= 1x``) but the strategy has not opted
+        in via ``accept_venue_leverage=True`` — because CoreWriter cannot set
+        leverage, so the position would open at the account's per-asset default
+        (e.g. 20x cross) rather than the requested value. The refusal is flagged
+        ``is_safety_refusal=True`` so it is classified GUARD_REFUSED and does NOT
+        count toward the runner's failure circuit-breaker (a strategy correctly
+        refusing an unsafe open must not be halted). Returns ``None`` (proceed)
+        when the venue CAN set leverage, when no specific leverage was requested
+        (default 1x), or when the strategy explicitly accepts venue leverage.
+
+        1x carve-out (VIB-5945 — Optional/None leverage to gate explicit 1x):
+        the field defaults to ``1``, so ``leverage == 1`` cannot be distinguished
+        from "no request" and is treated as no-request here. That is acceptable on
+        HyperCore because *effective* leverage is driven by posted collateral vs
+        notional, not the account's leverage *setting*: a 1x-sized open (collateral
+        == full notional) is effectively 1x regardless of the account setting, and
+        even if the account setting is higher the extra margin is simply unused.
+        The post-fill venue-truth record (``fill_accounting.read_venue_leverage``)
+        fires unconditionally, so a genuine venue divergence at 1x is still
+        surfaced loudly — never silenced. VIB-5945 tracks making ``leverage``
+        ``Optional``/``None`` so an *explicit* 1x can be gated too.
+
+        The error text tells the operator exactly how to proceed.
+        """
+        if _CAN_SET_LEVERAGE_ON_VENUE:
+            return None
+        leverage = intent.leverage
+        if leverage is None or Decimal(leverage) == Decimal("1"):
+            return None
+        if getattr(intent, "accept_venue_leverage", False):
+            return None
+        return self._fail(
+            intent.intent_id,
+            f"PERP_OPEN requested leverage={leverage}x, but Hyperliquid via CoreWriter "
+            "cannot set leverage on-venue (no set-leverage action exists in the CoreWriter "
+            "action set). The position would open at the account's existing per-asset "
+            "leverage (e.g. the 20x cross default) — a divergence between configured and "
+            "actual risk the connector cannot enforce. Refusing to open a position whose "
+            "leverage the strategy cannot control. To proceed: set accept_venue_leverage=true "
+            "in the strategy config to explicitly accept the account's venue-default leverage "
+            "(the divergence is then recorded and warned, not silenced), and size margin for "
+            "that leverage. This opt-in is required either way — the compiler does not read "
+            f"venue state, so setting the account's per-asset leverage to {leverage}x "
+            "out-of-band via the L1 EIP-712 updateLeverage endpoint does NOT satisfy the "
+            "compiler; updateLeverage is how you make the on-venue truth MATCH your config so "
+            "the post-fill record shows no divergence, not a substitute for the opt-in.",
+            is_safety_refusal=True,
+        )
+
     @staticmethod
     def _leverage_warnings(leverage: Decimal) -> list[str]:
         if leverage is not None and Decimal(leverage) != Decimal("1"):
@@ -461,8 +538,18 @@ class HyperliquidCompiler(BasePerpCompiler):
             ]
         return []
 
-    def _fail(self, intent_id: str, error: str) -> CompilationResult:
-        return CompilationResult(status=CompilationStatus.FAILED, intent_id=intent_id, error=error)
+    def _fail(self, intent_id: str, error: str, *, is_safety_refusal: bool = False) -> CompilationResult:
+        # ``is_safety_refusal`` marks a pre-execution SAFETY refusal (no tx built,
+        # nothing mutated) so the runner classifies it GUARD_REFUSED and the
+        # failure circuit-breaker does NOT count it toward an emergency stop
+        # (state_machine excludes only is_safety_refusal=True). Ordinary compile
+        # faults leave it False.
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent_id,
+            error=error,
+            is_safety_refusal=is_safety_refusal,
+        )
 
     def _success(
         self,

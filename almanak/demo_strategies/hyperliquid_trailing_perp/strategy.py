@@ -130,6 +130,23 @@ class HyperliquidTrailingPerp(IntentStrategy):
 
         self.size_usd = Decimal(str(self.get_config("size_usd", "15")))
         self.leverage = Decimal(str(self.get_config("leverage", "2.0")))
+        # VIB-5724: Hyperliquid via CoreWriter CANNOT set leverage on-venue — the
+        # position opens at the account's existing per-asset leverage (default 20x
+        # cross), NOT the configured ``leverage``. The compiler fails closed on a
+        # non-1x leverage unless the strategy explicitly accepts this. This demo
+        # sets it True to keep running while being honest that ``leverage`` here is
+        # advisory (used for local sizing/stop math); the true on-venue leverage is
+        # recorded and warned post-fill. See README "Leverage on HyperCore".
+        #
+        # This is a SAFETY opt-in, so it is parsed strictly: a bare ``bool(...)``
+        # would coerce the STRING ``"false"`` (from an env / JSON-string override)
+        # to True and silently opt in. ``_coerce_bool`` accepts real bools and the
+        # canonical true/false string forms, and rejects anything else at
+        # construction (fail-fast) rather than defaulting a malformed value to a
+        # risk-accepting True.
+        self.accept_venue_leverage = self._coerce_bool(
+            self.get_config("accept_venue_leverage", False), "accept_venue_leverage"
+        )
         self.max_slippage = Decimal(str(self.get_config("max_slippage", "0.01")))
         self.is_long = bool(self.get_config("is_long", True))
 
@@ -257,6 +274,7 @@ class HyperliquidTrailingPerp(IntentStrategy):
             size_usd=self.size_usd,
             is_long=self.is_long,
             leverage=self.leverage,
+            accept_venue_leverage=self.accept_venue_leverage,
             max_slippage=self.max_slippage,
             protocol=_PROTOCOL,
         )
@@ -339,6 +357,7 @@ class HyperliquidTrailingPerp(IntentStrategy):
                 size_usd=self.size_usd,
                 is_long=is_long,
                 leverage=self.leverage,
+                accept_venue_leverage=self.accept_venue_leverage,
                 max_slippage=self.max_slippage,
                 protocol=_PROTOCOL,
             )
@@ -418,6 +437,35 @@ class HyperliquidTrailingPerp(IntentStrategy):
             self._fill_confirmed = False
         else:
             logger.info("Fill still unconfirmed (%s) for %s — staying PENDING", status, self._position_side)
+
+    @staticmethod
+    def _coerce_bool(value: Any, key: str) -> bool:
+        """Strictly parse a config value as a bool (fail-fast on garbage).
+
+        ``bool(x)`` is unsafe for config: the STRING ``"false"`` (from an env
+        override or a JSON string) is truthy, so a safety opt-in would silently
+        flip on. This accepts genuine bools, 0/1 ints, and the canonical
+        true/false string spellings (case-insensitive); anything else raises
+        ``ValueError`` at construction rather than defaulting a malformed value to
+        a risk-accepting True.
+        """
+        # bool is checked BEFORE int (bool subclasses int) so True/False are not
+        # funnelled through the int branch.
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            # Only the documented 0/1 contract — a stray 2 / -1 must NOT silently
+            # enable a safety opt-in, so anything else fails fast like a bad string.
+            if value in (0, 1):
+                return value == 1
+            raise ValueError(f"{key} must be a boolean (true/false) or 0/1, got {value!r}")
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("true", "1", "yes", "on"):
+                return True
+            if v in ("false", "0", "no", "off", ""):
+                return False
+        raise ValueError(f"{key} must be a boolean (true/false), got {value!r}")
 
     @staticmethod
     def _resolve_fill_price(result: Any) -> Decimal | None:

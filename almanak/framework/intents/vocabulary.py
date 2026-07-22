@@ -2011,6 +2011,7 @@ class Intent:
         protocol: str = "gmx_v2",
         chain: str | None = None,
         registry_handle: str | None = None,
+        accept_venue_leverage: bool = False,
     ) -> PerpOpenIntent:
         """Create a perpetual position open intent.
 
@@ -2024,6 +2025,10 @@ class Intent:
             max_slippage: Maximum acceptable slippage (default 1%)
             protocol: Perpetuals protocol (default "gmx_v2")
             chain: Target chain for execution (defaults to strategy's primary chain)
+            accept_venue_leverage: Explicit opt-in (default False, fail-closed) that
+                the venue may open at its account-default leverage when it cannot
+                set the requested ``leverage`` on-venue (Hyperliquid/CoreWriter —
+                VIB-5724). Without it, such a venue rejects a leverage-carrying open.
 
         Returns:
             PerpOpenIntent: The created perp open intent
@@ -2057,6 +2062,7 @@ class Intent:
             size_usd=size_usd,
             is_long=is_long,
             leverage=leverage,
+            accept_venue_leverage=accept_venue_leverage,
             max_slippage=max_slippage,
             protocol=protocol,
             chain=chain,

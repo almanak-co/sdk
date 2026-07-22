@@ -73,6 +73,16 @@ class PerpOpenIntent(BaseIntent):
         size_usd: Position size in USD terms
         is_long: True for long position, False for short
         leverage: Target leverage for the position (protocol-specific limits apply)
+        accept_venue_leverage: Explicit opt-in acknowledging that the target venue
+            may be UNABLE to set the requested ``leverage`` on-venue, in which case
+            the position opens at the account's existing per-asset leverage/margin
+            mode (a risk divergence the connector cannot enforce). Defaults to
+            ``False`` (fail-closed): a connector that cannot enforce leverage
+            REJECTS a leverage-carrying open unless this is ``True``. Relevant only
+            to venues without a set-leverage action — notably **Hyperliquid via
+            CoreWriter** (VIB-5724); venues that DO set leverage on-venue (e.g.
+            GMX V2) ignore this flag. When ``True`` the divergence is not silenced —
+            it is recorded and warned (compile-time + post-fill venue-truth record).
         max_slippage: Maximum acceptable slippage (e.g., 0.01 = 1%)
         protocol: Perpetuals protocol (default "gmx_v2")
         chain: Optional target chain for execution (defaults to strategy's primary chain)
@@ -95,6 +105,10 @@ class PerpOpenIntent(BaseIntent):
     size_usd: SafeDecimal
     is_long: bool = True
     leverage: SafeDecimal = Field(default=Decimal("1"))
+    # Fail-closed opt-in for venues that cannot set leverage on-venue (VIB-5724).
+    # Default False: a connector unable to enforce ``leverage`` rejects the open
+    # unless the strategy explicitly accepts the account-default venue leverage.
+    accept_venue_leverage: bool = False
     max_slippage: SafeDecimal = Field(default=Decimal("0.01"))
     protocol: str = "gmx_v2"
     chain: str | None = None
