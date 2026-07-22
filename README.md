@@ -34,7 +34,7 @@
 
 ---
 
-Almanak is an intent-based Python framework for developing, testing, and deploying autonomous DeFi strategies. Express trading logic as high-level intents - the framework handles compilation, execution, and state management across 18 chains and 46 protocol connectors.
+Almanak is an intent-based Python framework for developing, testing, and deploying autonomous DeFi strategies. Express trading logic as high-level intents - the framework handles compilation, execution, and state management across 19 chains and 46 protocol connectors.
 
 ## Features
 
@@ -203,7 +203,15 @@ from decimal import Decimal
 config = PnLBacktestConfig(
     start_time=datetime(2024, 1, 1, tzinfo=UTC),
     end_time=datetime(2024, 6, 1, tzinfo=UTC),
-    initial_capital_usd=Decimal("10000"),
+    token_funding=[
+        {
+            "symbol": "USDC",
+            "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "chain": "arbitrum",
+            "amount": "10000",
+            "amount_type": "usd",
+        }
+    ],
 )
 
 backtester = PnLBacktester(data_provider, fee_models, slippage_models)
@@ -240,9 +248,11 @@ runnable end to end (see the Demo Strategies table above) and double as backtest
 subjects:
 
 ```bash
-almanak strat backtest run -d almanak/demo_strategies/uniswap_rsi   # RSI mean reversion
-almanak strat backtest run -d almanak/demo_strategies/uniswap_lp    # Concentrated LP
-almanak strat backtest run -d almanak/demo_strategies/morpho_looping # Leveraged yield
+# From inside a demo directory (the backtester reads token_funding from config.json)
+cd almanak/demo_strategies/uniswap_rsi
+uv run almanak strat backtest pnl -s demo_uniswap_rsi --start 2024-01-01 --end 2024-06-01
+
+# Other runnable subjects: uniswap_lp (-s demo_uniswap_lp), morpho_looping (-s demo_morpho_looping)
 ```
 
 > Standalone backtest example scripts are being reorganized into a dedicated
@@ -316,10 +326,13 @@ The SDK includes educational demo strategies to help you learn:
 | `spark_lender` | Supply DAI for lending yield | Ethereum | Spark |
 | `euler_v2_supply_ethereum` | Supply/withdraw USDC lifecycle | Ethereum | Euler V2 |
 | `benqi_lending_lifecycle` | Borrow → repay → withdraw lending lifecycle | Avalanche | BENQI |
+| `benqi_looping` | Leveraged AVAX loop — supply, borrow, swap back, health-factor-aware unwind | Avalanche | BENQI |
+| `curve_3pool_lp` | 3-coin stable liquidity on Curve 3pool (DAI/USDC/USDT) | Ethereum | Curve |
 | `pancakeswap_aave_carry_bsc` | Borrow → swap → repay carry trade | BSC | PancakeSwap V3, Aave V3 |
 | `lido_staker` | Stake ETH for liquid staking yield | Ethereum | Lido |
 | `gmx_perp_lifecycle` | Perpetual futures lifecycle (open + close) | Arbitrum | GMX V2 |
 | `gmx_v2_directional_perp` | Directional perp — EMA crossover, close-before-reverse, funding gate, stop-loss | Arbitrum | GMX V2 |
+| `hyperliquid_trailing_perp` | Perp with ratcheting trailing-stop, take-profit, and hard stop via CoreWriter | HyperEVM | Hyperliquid |
 | `mantle_mnt_accumulator` | Multi-signal MNT accumulation | Mantle | Agni Finance |
 | `0g_swap` | Wrap native A0GI into W0G | 0G Chain | 0G |
 
@@ -339,11 +352,11 @@ almanak/
     state/             # Three-tier state management
     execution/         # Transaction orchestration
     backtesting/       # PnL, paper trading, sweeps
-    connectors/        # Protocol adapters
     data/              # Price oracles, indicators
     alerting/          # Slack/Telegram notifications
     services/          # Stuck detection, emergency mgmt
-  transaction_builder/ # Low-level tx building
+  connectors/          # Protocol adapters (SDK, adapter, receipt parser)
+  gateway/             # gRPC gateway sidecar
   core/                # Enums, models, utilities
   cli/                 # Command-line interface
 ```

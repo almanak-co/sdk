@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.22.0] - 2026-07-21
+
 ### Added
 
 - **Aave V3 on Linea (VIB-5916).** The aave_v3 connector now declares `linea`
@@ -15,13 +17,75 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ≤5 USDC mainnet round trip (`tests/reports/aave_v3_lending_linea_e2e_*.md`).
   The Linea chain descriptor gains the canonical Safe v1.4.1 + Zodiac Roles
   stack (verified live on 59144), enabling Safe-wallet execution on Linea
-  framework-wide (hosted review: VIB-5918).
+  framework-wide (hosted review: VIB-5918). (#3338)
 - **`lifecycle_stop_after="borrowed"`** on the chain-generic
   `aave_v3_lending` strategy: deterministically HOLD an open, healthy borrow
   for a separate teardown signal, with boot-time validation, warn-only
   health-factor telemetry (`stop_after_min_health_factor`, default 1.5), and a
   documented debt-token interest-buffer requirement for `repay_full` teardown
-  (automatic shortfall top-up tracked in VIB-5919).
+  (automatic shortfall top-up tracked in VIB-5919). (#3338)
+- **Robinhood Chain (id 4663).** Chain descriptor for the Arbitrum Orbit L2
+  (ETH gas, Blockscout explorer, Arbitrum `ArbGasInfo` L1-fee oracle) plus the
+  token layer (WETH, USDG, USDe — no canonical USDC/USDT exists on 4663 with
+  real liquidity, so none is registered), managed-Anvil funding profile, and
+  the canonical Safe v1.4.1 + Zodiac Roles v2 stack. (#3234)
+- **Uniswap V3 and Morpho Blue on Robinhood Chain.** Both connectors now
+  advertise `robinhood` in their manifests and appear in
+  `almanak info matrix`: Uniswap V3 for `SWAP` + the LP lifecycle, Morpho Blue
+  for the lending lifecycle. Uniswap V3 on Robinhood is a **non-canonical
+  deployment** — the periphery addresses differ from every other chain and
+  same-named forks exist on the explorer, so each address was verified by
+  cross-checking `factory()`. The `uniswap_rsi`, `uniswap_lp`, and
+  `morpho_looping` demos ship a `config.robinhood.json`. (#3238)
+- **Backtesting engine re-cut (ALM-2943).** Typed money/identity primitives
+  with a single-owner token-identity table and an operational gas tank outside
+  strategy capital; single-owner sizing resolution with `RunContext` + typed
+  rejections; per-intent capability routing; data-lane collapse (dead-code
+  deletion, single-flight fetching, shared funding decoder, lending-rate
+  serve); impermanent-loss tick-plane folded onto the shared
+  concentrated-liquidity kernel; behavior replay lifts perp
+  `collateral="all"`; pool-pinned candles with the tick interval derived from
+  the strategy timeframe, connector-declared APY tables (hardcoded 5%/8%
+  deleted), and cost-exact swap recording. (#3314, #3318, #3319, #3320,
+  #3321, #3322, #3325)
+- **Backtests serve the decision-input surface from engine-owned state.**
+  Lending health, LP position value, pool price, realized vol, slippage
+  estimates, and calculators are answered from simulated state instead of live
+  reads (#3346); the full indicator set, engine-modeled gas, real 24h
+  `price_data`, and hollow-run self-reporting (ALM-2951) (#3303);
+  `market.ohlcv` served from the run price series (ALM-2962) (#3312); and a
+  measured volume/liquidity ladder via gateway pool history (ALM-2940)
+  (#3283).
+- **Capital-flow accounting (VIB-5866 leg B).** Deposits and withdrawals are
+  read from ERC-20 Transfer provenance (#3334),
+  `PortfolioMetrics.deposits_usd` / `withdrawals_usd` are None-capable end to
+  end (#3335), and the capital-flow producer populates them at the metrics
+  hook — an operator wiring $500 into the wallet stops showing up as $500 of
+  profit. (#3337)
+- **Teardown measured-lane taxonomy (VIB-5865).** Which wallet-moving verbs
+  the teardown swap-back clamp can see is now an explicit `WalletDeltaLane`
+  taxonomy — blind primitives fail closed and visible instead of silently
+  skipping the strategy's own closing swap (#3349); the LP family flips to
+  measured event-replay so the clamp sweeps exactly the LP proceeds net of
+  consumed inputs and leaves commingled user funds alone (#3350);
+  transfer/bridge and prediction verbs are pinned UNMEASURED with
+  evidence-backed regression guards so they cannot be silently flipped later
+  (#3351).
+- **Lending post-close chain verification** for `euler_v2` / `silo_v2` /
+  `benqi` (VIB-5795) — per-position-type dispatch where a shares-only read
+  never greens a live debt leg — plus BENQI `withdraw_all` (VIB-5404).
+  (#3336)
+- **Vault-safe teardown (VIB-5667).** Teardown now transitions a Lagoon
+  ERC-7540 vault Open → Closing → Closed so **all** depositors — including
+  deposit-only users who never requested a redemption — can synchronously
+  redeem their capital after the strategy unwinds. (#3226)
+- **Resume-terminal guard + `is_lifecycle_complete` strategy hook
+  (VIB-5887).** Relaunching a strategy whose persisted state is terminal but
+  whose wallet holds fresh capital no longer silently HOLDs the whole run.
+  (#3324)
+- **Strategy-configurable token-consolidation floor (VIB-5844).** Teardown's
+  consolidation dust floor (default $5) can be lowered per strategy so
+  small-capital runs consolidate residuals instead of stranding them. (#3297)
 
 ### Changed
 
@@ -30,7 +94,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   registered for the compile lane — decoupling is regression-tested), the
   hand-typed support-matrix override was deleted so `almanak info matrix`
   derives the aave_v3 row from the tested manifest, and the unproven `sonic`
-  claim was dropped from the strategy metadata.
+  claim was dropped from the strategy metadata. (#3338)
+- **0G local development is documented** — dRPC archive-RPC env vars in
+  `.env.example` and `docs/environment-variables.md`. (#3332)
 
 ### Removed
 
@@ -39,13 +105,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   intent tests) and is no longer advertised; a config pairing `aave_v3` with
   `plasma` now fails at boot with a `ConfigurationError` instead of failing
   on-chain later. Pool address data is retained in `addresses.py`; re-enabling
-  requires a manifest + proof run (see the VIB-5916 pattern).
-
-- **Robinhood Chain (id 4663).** Chain descriptor for the Arbitrum Orbit L2
-  (ETH gas, Blockscout explorer, Arbitrum `ArbGasInfo` L1-fee oracle) plus the
-  token layer (WETH, USDG, USDe — no canonical USDC/USDT exists on 4663 with
-  real liquidity, so none is registered), managed-Anvil funding profile, and
-  the canonical Safe v1.4.1 + Zodiac Roles v2 stack. (#3234)
+  requires a manifest + proof run (see the VIB-5916 pattern). (#3338)
 
 ### Fixed
 
@@ -60,18 +120,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on each of the six chains the connector declares — built from the connector's
   own address/selector constants so it cannot drift. The hand-typed `depositV3`
   selector is now validated against the real signature by
-  `tests/unit/permissions/test_across_manifest.py`.
-- **Uniswap V3 and Morpho Blue on Robinhood Chain.** Both connectors now
-  advertise `robinhood` in their manifests and appear in
-  `almanak info matrix`: Uniswap V3 for `SWAP` + the LP lifecycle, Morpho Blue
-  for the lending lifecycle. Uniswap V3 on Robinhood is a **non-canonical
-  deployment** — the periphery addresses differ from every other chain and
-  same-named forks exist on the explorer, so each address was verified by
-  cross-checking `factory()`. The `uniswap_rsi`, `uniswap_lp`, and
-  `morpho_looping` demos ship a `config.robinhood.json`. (#3238)
-
-### Fixed
-
+  `tests/unit/permissions/test_across_manifest.py`. (#3344)
 - **The config `network` key is no longer decorative (VIB-5920).** `almanak
   strat run` and `almanak strat teardown execute` now honour `config.json`'s
   `"network"` in local mode, restoring the contract the `--network` help text
@@ -89,7 +138,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Anvil. An implicitly-resolved network (config or `--anvil-port`) is
   announced before the gateway or any fork starts. **Hosted deployments are
   unaffected** — the platform owns the network and the config key stays
-  ignored there.
+  ignored there. (#3341)
 - **A config file can no longer disarm gateway authentication (VIB-5920).**
   The managed gateway drops auth (`allow_insecure=true`, no token) on Anvil
   for local-dev convenience; that posture is now tied to an explicit operator
@@ -98,7 +147,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   session token and `allow_insecure=false` instead, on both `strat run` and
   `strat teardown`. Zero operator cost (the CLI hands the token to its own
   client), and a gateway holding the real `ALMANAK_PRIVATE_KEY` can no longer
-  be silently unauthenticated.
+  be silently unauthenticated. (#3341)
+- **`almanak strat run` flag drift (VIB-5846).** The user-facing wrapper and
+  the framework command are collapsed onto one shared option decorator;
+  `--debug`, `--list`, `--dashboard-mode`, and `--simulate-tx` had silently
+  become unreachable through the real CLI. (#3305)
+- **True V3 concentrated-liquidity impermanent loss (ALM-2948).** The
+  heuristic CL IL estimate is replaced with exact V3 math on the shared CL
+  kernel (token decimals threaded through, 50-digit contexts, wrapper
+  parity), and `lp_valuer` is folded onto the same kernel. (#3306)
+- **N-coin LP accounting** — null 2-token IL for N-coin pools, an N-leg trade
+  tape, and the fungible-LP teardown post-condition (VIB-5896, VIB-5795).
+  (#3329)
+- **Wallet PnL anchor token-universe symmetry (VIB-5866 leg A).** (#3328)
+- **Lifetime PnL is suppressed when capital flows are unmeasured (VIB-5866
+  PR-C2)** — the dashboard no longer fabricates a zero-deposit baseline and
+  books an unmeasured external deposit as profit. (#3348)
+- **`portfolio_valuer` prices borrowed-and-held TOKEN inventory (VIB-5890).**
+  (#3323)
+- **Perp accounting payloads carry the intent-known `is_long` + size and
+  write `position_events` (VIB-5941).** (#3357)
+- **Teardown consolidation swap-back routes through the strategy's own DEX
+  (VIB-5865).** (#3330)
+- **Benqi teardown reconciliation** — TD-08 whole-account price injection
+  (VIB-5911) and TD-15 whole-account-residual attribution (VIB-5936). (#3345)
+- **Phase-aware TD-08 reconciliation severity (VIB-5923)** — a position that
+  closed *during* teardown reports INFO, not ERROR. (#3343)
+- **Curve CryptoSwap gas floors raised** — rebalance-gate liquidity operations
+  no longer run out of gas at the 350K static floor. (#3347)
+- **Backtest correctness sweep** — phantom lending/vault swap fees zeroed,
+  perp `collateral="all"` fill, perp symbol canonicalization, candle cadence
+  jitter tolerance, `PriceQuote` migration (#3333); fee-exact factory pool
+  resolution honours the declared `/FEE` segment (ALM-2949) (#3308);
+  >90-day CoinGecko ranges are chunked to keep hourly granularity and
+  indicators refuse finer-than-data timeframes (ALM-2957) (#3311); funding
+  credits land on the registered funding-identity plane (ALM-2960) (#3310);
+  gas never gates a fill — EOA-paid live, charged unconditionally in sim
+  (ALM-2958) (#3309); data-lane hardening — Balancer poolId/cumulative
+  volume, schema families, symbolic-pool resolution, schema-parity audit
+  (ALM-2939) (#3271).
+
+### Security
+
+- **Scrubbed a sample Alchemy API key and PII from public-synced paths.**
+  (#3307)
 
 ## [2.21.0] - 2026-07-04
 

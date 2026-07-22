@@ -13,7 +13,7 @@ The Almanak backtesting system provides two complementary engines:
 
 ## Quick Start
 
-> **🚀 New to backtesting?** The demo strategies under [`almanak/demo_strategies/`](../../demo_strategies/) are runnable backtest subjects (e.g. `almanak strat backtest run -d almanak/demo_strategies/uniswap_rsi`). Standalone, copy-paste backtest example scripts are being reorganized into a dedicated `Tutorials/` folder (VIB-5332).
+> **🚀 New to backtesting?** The demo strategies under [`almanak/demo_strategies/`](../../demo_strategies/) are runnable backtest subjects (e.g. `cd almanak/demo_strategies/uniswap_rsi && almanak strat backtest pnl -s demo_uniswap_rsi --start 2024-01-01 --end 2024-06-01`). Standalone, copy-paste backtest example scripts are being reorganized into a dedicated `Tutorials/` folder (VIB-5332).
 
 ### PnL Backtesting (Recommended for Historical Analysis)
 
@@ -316,17 +316,21 @@ or from a prior historical-volume run) — and returns a
 
 > **📚 Runnable subjects**: The demo strategies under [`almanak/demo_strategies/`](../../demo_strategies/) double as backtest subjects. Standalone backtest example scripts are being reorganized into a dedicated `Tutorials/` folder (VIB-5332).
 
-Backtest a demo strategy directly:
+Backtest a demo strategy directly (run from inside the demo directory so the
+strategy and its `token_funding` config are discovered):
 
 ```bash
 # RSI mean reversion
-almanak strat backtest run -d almanak/demo_strategies/uniswap_rsi
+cd almanak/demo_strategies/uniswap_rsi
+almanak strat backtest pnl -s demo_uniswap_rsi --start 2024-01-01 --end 2024-06-01
 
 # Concentrated LP
-almanak strat backtest run -d almanak/demo_strategies/uniswap_lp
+cd almanak/demo_strategies/uniswap_lp
+almanak strat backtest pnl -s demo_uniswap_lp --start 2024-01-01 --end 2024-06-01
 
 # Leveraged looping
-almanak strat backtest run -d almanak/demo_strategies/morpho_looping
+cd almanak/demo_strategies/morpho_looping
+almanak strat backtest pnl -s demo_morpho_looping --start 2024-01-01 --end 2024-06-01
 ```
 
 The demo strategies include:
@@ -344,7 +348,8 @@ The demo strategies include:
 
 2. **Run a backtest**:
    ```bash
-   almanak strat backtest run -d almanak/demo_strategies/uniswap_rsi
+   cd almanak/demo_strategies/uniswap_rsi
+   almanak strat backtest pnl -s demo_uniswap_rsi --start 2024-01-01 --end 2024-06-01
    ```
 
 ## Crisis Scenario Testing

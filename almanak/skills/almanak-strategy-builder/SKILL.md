@@ -12,7 +12,7 @@ description: >-
   debugging strategy execution on Anvil forks. Do NOT use for general
   smart contract development, Solidity code, or non-strategy SDK internals.
 metadata:
-  version: "2.21.0"
+  version: "2.22.0"
   author: Almanak
   license: Apache-2.0
   type: documentation
@@ -59,7 +59,7 @@ Always do this as a final step after writing or editing strategy code.
 pipx install almanak
 
 # Scaffold a new strategy (creates a self-contained Python project)
-almanak strat new --template mean_reversion --name my_rsi --chain arbitrum
+almanak strat new --template ta_swap --name my_rsi --chain arbitrum
 
 # Run on local Anvil fork (auto-starts gateway + Anvil)
 cd my_rsi
@@ -1223,6 +1223,8 @@ The `chains` field lists the chains the strategy operates on and is read by the 
 deployment time. It should match `supported_chains` from the `@almanak_strategy` decorator.
 For single-chain strategies, `chain` (singular) is also accepted. `anvil_funding` is flat --
 the same tokens are funded on all chains.
+An optional `"network"` field (`"mainnet"` or `"anvil"`) sets the default network for
+`almanak strat run` when no `--network` flag is passed (local runs only; the flag always wins).
 All other fields are strategy-specific and accessed via `self.config.get(key, default)`.
 
 ### .env (local development only)
@@ -1316,16 +1318,18 @@ Never default to 18 decimals. If the token is unknown, `TokenNotFoundError` is r
 
 ```bash
 almanak strat backtest pnl -s my_strategy \
-    --start 2024-01-01 --end 2024-06-01 \
-    --initial-capital 10000
+    --start 2024-01-01 --end 2024-06-01
 ```
+
+Starting capital comes from the `token_funding` list in the strategy's
+`config.json` (see [Configuration](#configuration)) — PnL backtests fail with a
+usage error when it is missing.
 
 ### Paper Trading (Anvil fork with real execution, PnL tracking)
 
 ```bash
-almanak strat backtest paper -s my_strategy \
-    --duration 3600 --interval 60 \
-    --initial-capital 10000
+almanak strat backtest paper start -s my_strategy \
+    --chain arbitrum --duration 1h --tick-interval 60
 ```
 
 Paper trading runs the full strategy loop on an Anvil fork with real transaction
@@ -1345,21 +1349,33 @@ Runs the PnL backtest across all parameter combinations and ranks by Sharpe rati
 ### Programmatic Backtesting
 
 ```python
-from almanak.framework.backtesting import BacktestEngine
+from datetime import UTC, datetime
 
-engine = BacktestEngine(
-    strategy_class=MyStrategy,
-    config={...},
-    start_date="2024-01-01",
-    end_date="2024-06-01",
-    initial_capital=10000,
+from almanak.framework.backtesting import PnLBacktestConfig, PnLBacktester
+
+config = PnLBacktestConfig(
+    start_time=datetime(2024, 1, 1, tzinfo=UTC),
+    end_time=datetime(2024, 6, 1, tzinfo=UTC),
+    token_funding=[
+        {
+            "symbol": "USDC",
+            "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "chain": "arbitrum",
+            "amount": "10000",
+            "amount_type": "usd",
+        }
+    ],
 )
-results = engine.run()
-results.sharpe_ratio
-results.max_drawdown
-results.total_return
-results.plot()  # Matplotlib equity curve
+
+backtester = PnLBacktester(data_provider, fee_models, slippage_models)
+result = await backtester.backtest(strategy, config)
+result.metrics.sharpe_ratio
+result.metrics.max_drawdown_pct
+result.metrics.total_return_pct
 ```
+
+The CLI (`almanak strat backtest pnl`) wires the data provider and fee/slippage
+models for you — prefer it unless you need custom providers.
 
 ### Backtesting Limitations
 
@@ -1409,23 +1425,27 @@ almanak strat run --network anvil --once   # Local Anvil fork
 almanak strat run --interval 30       # Continuous (30s between iterations)
 almanak strat run --dry-run --once    # No transactions submitted
 almanak strat run --fresh --once      # Clear state before running
-almanak strat run --id abc123 --once  # Resume previous run
 almanak strat run --dashboard         # Launch live monitoring dashboard
 ```
+
+There is no `--id` flag: the deployment ID is derived deterministically from the
+wallet address and chain, so re-running the same strategy resumes the same
+deployment automatically (use `--fresh` to start over instead).
 
 ### Backtesting
 
 ```bash
 almanak strat backtest pnl -s my_strategy            # Historical PnL simulation
-almanak strat backtest paper -s my_strategy            # Paper trading on Anvil fork
+almanak strat backtest paper start -s my_strategy    # Paper trading on Anvil fork
 almanak strat backtest sweep -s my_strategy           # Parameter sweep optimization
 ```
 
 ### Teardown
 
 ```bash
-almanak strat teardown plan           # Preview teardown intents
-almanak strat teardown execute        # Execute teardown
+almanak strat teardown request -s <deployment_id>   # Request teardown (runner unwinds on its loop)
+almanak strat teardown status -s <deployment_id>    # Check teardown progress
+almanak strat teardown execute                      # Execute directly from the strategy working directory
 ```
 
 ### Permissions
@@ -1645,13 +1665,13 @@ The connector registry (`ConnectorRegistry.all()`) is the post-VIB-4298 source o
 
 | Connector | Type | Config Name | Chains |
 |-----------|------|-------------|--------|
-| Across | Bridge | `across` | Ethereum, Arbitrum, Optimism, Base, Polygon |
+| Across | Bridge | `across` | Ethereum, Arbitrum, Optimism, Base, Polygon, Linea |
 | Aster Perps | Perp | `aster_perps` | BNB Chain |
 | Camelot | DEX | `camelot` | Arbitrum |
 | Curvance | Lending | `curvance` | Monad |
 | Drift | Perp | `drift` | Solana |
 | Ethena | Staking | `ethena` | Ethereum |
-| Fluid | DEX | `fluid` | Arbitrum |
+| Fluid | DEX | `fluid` | Ethereum, Arbitrum, Base, Polygon |
 | Fluid DEX LP | DEX / LP | `fluid_dex_lp` | Arbitrum |
 | Fluid Vault | Lending | `fluid_vault` | Arbitrum, Base |
 | Gimo | Staking | `gimo` | 0G |
@@ -2153,7 +2173,7 @@ Before deploying to mainnet:
 - [ ] Generate Zodiac permissions: `almanak strat permissions -o permissions.json`
 - [ ] Verify token approvals for all protocols used (auto-handled for most, but verify on first run)
 - [ ] Fund wallet on the correct chain with sufficient tokens plus gas (ETH/AVAX/MATIC)
-- [ ] Note your instance ID after first successful iteration (needed for `--id` resume)
+- [ ] Note your deployment ID after first successful iteration (derived from wallet + chain; a restart resumes the same deployment automatically, and teardown commands need it for `-s`)
 - [ ] Start with small amounts and monitor the first few iterations
 
 <!-- almanak-sdk-end: going-live -->
@@ -2182,6 +2202,6 @@ Before deploying to mainnet:
 - Use `--dry-run` to test decide() without submitting transactions
 - Use `--log-file out.json` for machine-readable JSON logs
 - Check strategy state: `self.state` persists between iterations
-- Paper trade first: `almanak strat backtest paper -s my_strategy` runs real execution on Anvil
+- Paper trade first: `almanak strat backtest paper start -s my_strategy` runs real execution on Anvil
 
 <!-- almanak-sdk-end: troubleshooting -->
