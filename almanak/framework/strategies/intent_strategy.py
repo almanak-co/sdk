@@ -2238,16 +2238,20 @@ class IntentStrategy(StrategyBase[ConfigT]):
         pass
 
     def get_teardown_profile(self) -> "TeardownProfile":
-        """Get teardown profile metadata for UX display.
+        """Get teardown profile metadata for UX display and exit-policy defaults.
 
         Override to provide better information about teardown expectations.
-        This helps the dashboard show more accurate previews.
+        This helps the dashboard show more accurate previews. Set
+        ``preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS`` when the
+        strategy must not perform terminal consolidation swaps (e.g. a no-swap
+        mandate) — teardowns created without an explicit operator choice
+        (platform Stop, dashboard close, ``strat test --teardown``) honor it.
 
         Returns:
             TeardownProfile with strategy-specific metadata
 
         Example:
-            from almanak.framework.teardown import TeardownProfile
+            from almanak.framework.teardown import TeardownAssetPolicy, TeardownProfile
 
             def get_teardown_profile(self) -> TeardownProfile:
                 return TeardownProfile(
@@ -2257,6 +2261,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                     estimated_steps=3,
                     chains_involved=[self.chain],
                     has_lp_positions=True,
+                    preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS,
                 )
         """
         from almanak.framework.teardown import TeardownProfile

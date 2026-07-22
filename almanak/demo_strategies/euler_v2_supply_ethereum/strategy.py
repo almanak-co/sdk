@@ -34,7 +34,7 @@ from almanak.framework.utils.log_formatters import format_token_amount_human
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
+    from almanak.framework.teardown import TeardownMode, TeardownPositionSummary, TeardownProfile
 
 # Stable states
 IDLE = "idle"
@@ -71,6 +71,19 @@ class EulerV2SupplyEthereumStrategy(IntentStrategy):
     def supports_teardown(self) -> bool:
         return True
 
+    def get_teardown_profile(self) -> "TeardownProfile":
+        from almanak.framework.teardown import TeardownAssetPolicy, TeardownProfile
+
+        # Supply-only: teardown withdraws the supplied token — nothing to consolidate.
+        return TeardownProfile(
+            natural_exit_assets=[self.supply_token],
+            recommended_target=self.supply_token,
+            estimated_steps=1,
+            chains_involved=[self.chain],
+            has_lending_positions=True,
+            preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS,
+        )
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
@@ -84,10 +97,7 @@ class EulerV2SupplyEthereumStrategy(IntentStrategy):
         # Position tracking
         self._supplied_amount = Decimal("0")
 
-        logger.info(
-            f"EulerV2SupplyEthereum initialized: "
-            f"supply={self.supply_amount} {self.supply_token}"
-        )
+        logger.info(f"EulerV2SupplyEthereum initialized: supply={self.supply_amount} {self.supply_token}")
 
     def decide(self, market: MarketSnapshot) -> Intent | None:
         """Advance the supply lifecycle.
@@ -121,8 +131,7 @@ class EulerV2SupplyEthereumStrategy(IntentStrategy):
         # Step 2: WITHDRAW (use withdraw_all to fully clear the ERC-4626 position)
         if self._loop_state == SUPPLIED:
             logger.info(
-                f"Step 2: WITHDRAW {format_token_amount_human(self._supplied_amount, self.supply_token)} "
-                f"from Euler V2"
+                f"Step 2: WITHDRAW {format_token_amount_human(self._supplied_amount, self.supply_token)} from Euler V2"
             )
             self._transition(WITHDRAWING)
 
@@ -136,9 +145,7 @@ class EulerV2SupplyEthereumStrategy(IntentStrategy):
 
         # Done
         if self._loop_state == COMPLETE:
-            return Intent.hold(
-                reason="Full supply lifecycle complete: deposit -> withdraw"
-            )
+            return Intent.hold(reason="Full supply lifecycle complete: deposit -> withdraw")
 
         return Intent.hold(reason=f"Unknown state: {self._loop_state}")
 
@@ -160,9 +167,7 @@ class EulerV2SupplyEthereumStrategy(IntentStrategy):
                 self._loop_state = SUPPLIED
                 self._previous_stable_state = SUPPLIED
                 self._supplied_amount = self.supply_amount
-                logger.info(
-                    f"SUPPLY succeeded: deposited {self._supplied_amount} {self.supply_token} to Euler V2"
-                )
+                logger.info(f"SUPPLY succeeded: deposited {self._supplied_amount} {self.supply_token} to Euler V2")
                 self._log_result_details("SUPPLY", result)
 
             elif intent_type_val == "WITHDRAW":

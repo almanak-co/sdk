@@ -1430,6 +1430,12 @@ def _get_template_teardown(
     # get_persistent_state()/load_persistent_state() (both sides), or re-derive
     # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
+    # Exit assets: after positions close, the framework's consolidation phase
+    # swaps recovered tokens to a target token by default. Declaring
+    # get_teardown_profile() with preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS
+    # skips ONLY that consolidation swap — swap intents emitted by
+    # generate_teardown_intents() itself are unaffected, so a no-swap mandate
+    # also requires a swap-free unwind above.
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1466,6 +1472,12 @@ def _get_template_teardown(
     # get_persistent_state()/load_persistent_state() (both sides), or re-derive
     # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
+    # Exit assets: after positions close, the framework's consolidation phase
+    # swaps recovered tokens to a target token by default. Declaring
+    # get_teardown_profile() with preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS
+    # skips ONLY that consolidation swap — swap intents emitted by
+    # generate_teardown_intents() itself are unaffected, so a no-swap mandate
+    # also requires a swap-free unwind above.
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1558,6 +1570,12 @@ def _get_template_teardown(
     # get_persistent_state()/load_persistent_state() (both sides), or re-derive
     # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
+    # Exit assets: after positions close, the framework's consolidation phase
+    # swaps recovered tokens to a target token by default. Declaring
+    # get_teardown_profile() with preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS
+    # skips ONLY that consolidation swap — swap intents emitted by
+    # generate_teardown_intents() itself are unaffected, so a no-swap mandate
+    # also requires a swap-free unwind above.
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1636,6 +1654,12 @@ def _get_template_teardown(
     # get_persistent_state()/load_persistent_state() (both sides), or re-derive
     # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
+    # Exit assets: after positions close, the framework's consolidation phase
+    # swaps recovered tokens to a target token by default. Declaring
+    # get_teardown_profile() with preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS
+    # skips ONLY that consolidation swap — swap intents emitted by
+    # generate_teardown_intents() itself are unaffected, so a no-swap mandate
+    # also requires a swap-free unwind above.
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1722,6 +1746,24 @@ def _get_template_teardown(
             mode=mode,
         )
 
+    def get_teardown_profile(self):
+        """Teardown metadata + exit asset policy."""
+        from almanak.framework.teardown import TeardownProfile
+
+        return TeardownProfile(
+            natural_exit_assets=[self.collateral_token, self.borrow_token],
+            has_lending_positions=True,
+            chains_involved=[self.chain],
+            # TODO: exit asset policy. Default (None) consolidation-swaps
+            # recovered tokens to a target token after positions close. If the
+            # approved spec forbids swaps, set
+            # preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS
+            # (import from almanak.framework.teardown) — this skips only the
+            # consolidation swap; generate_lending_unwind() above may still
+            # emit staircase swaps when wallet balance cannot cover the debt.
+            preferred_asset_policy=None,
+        )
+
 '''
 
     elif template == StrategyTemplate.BASIS_TRADE:
@@ -1733,6 +1775,12 @@ def _get_template_teardown(
     # get_persistent_state()/load_persistent_state() (both sides), or re-derive
     # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
+    # Exit assets: after positions close, the framework's consolidation phase
+    # swaps recovered tokens to a target token by default. Declaring
+    # get_teardown_profile() with preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS
+    # skips ONLY that consolidation swap — swap intents emitted by
+    # generate_teardown_intents() itself are unaffected, so a no-swap mandate
+    # also requires a swap-free unwind above.
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1845,6 +1893,12 @@ def _get_template_teardown(
     # get_persistent_state()/load_persistent_state() (both sides), or re-derive
     # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
+    # Exit assets: after positions close, the framework's consolidation phase
+    # swaps recovered tokens to a target token by default. Declaring
+    # get_teardown_profile() with preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS
+    # skips ONLY that consolidation swap — swap intents emitted by
+    # generate_teardown_intents() itself are unaffected, so a no-swap mandate
+    # also requires a swap-free unwind above.
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -1910,6 +1964,12 @@ def _get_template_teardown(
     # get_persistent_state()/load_persistent_state() (both sides), or re-derive
     # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
+    # Exit assets: after positions close, the framework's consolidation phase
+    # swaps recovered tokens to a target token by default. Declaring
+    # get_teardown_profile() with preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS
+    # skips ONLY that consolidation swap — swap intents emitted by
+    # generate_teardown_intents() itself are unaffected, so a no-swap mandate
+    # also requires a swap-free unwind above.
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -2035,6 +2095,12 @@ def _get_template_teardown(
     # get_persistent_state()/load_persistent_state() (both sides), or re-derive
     # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
+    # Exit assets: after positions close, the framework's consolidation phase
+    # swaps recovered tokens to a target token by default. Declaring
+    # get_teardown_profile() with preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS
+    # skips ONLY that consolidation swap — swap intents emitted by
+    # generate_teardown_intents() itself are unaffected, so a no-swap mandate
+    # also requires a swap-free unwind above.
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -2108,6 +2174,12 @@ def _get_template_teardown(
     # get_persistent_state()/load_persistent_state() (both sides), or re-derive
     # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
+    # Exit assets: after positions close, the framework's consolidation phase
+    # swaps recovered tokens to a target token by default. Declaring
+    # get_teardown_profile() with preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS
+    # skips ONLY that consolidation swap — swap intents emitted by
+    # generate_teardown_intents() itself are unaffected, so a no-swap mandate
+    # also requires a swap-free unwind above.
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -2186,6 +2258,12 @@ def _get_template_teardown(
     # get_persistent_state()/load_persistent_state() (both sides), or re-derive
     # it purely from chain and set teardown_state_derived_from_chain = True.
     # See: docs/internal/blueprints/14-teardown-system.md
+    # Exit assets: after positions close, the framework's consolidation phase
+    # swaps recovered tokens to a target token by default. Declaring
+    # get_teardown_profile() with preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS
+    # skips ONLY that consolidation swap — swap intents emitted by
+    # generate_teardown_intents() itself are unaffected, so a no-swap mandate
+    # also requires a swap-free unwind above.
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
@@ -2259,6 +2337,12 @@ def _get_template_teardown(
     return f'''    # -------------------------------------------------------------------------
     # TEARDOWN (required) - implement so operators can safely close positions
     # See: docs/internal/blueprints/14-teardown-system.md
+    # Exit assets: after positions close, the framework's consolidation phase
+    # swaps recovered tokens to a target token by default. Declaring
+    # get_teardown_profile() with preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS
+    # skips ONLY that consolidation swap — swap intents emitted by
+    # generate_teardown_intents() itself are unaffected, so a no-swap mandate
+    # also requires a swap-free unwind above.
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):

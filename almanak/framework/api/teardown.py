@@ -32,6 +32,7 @@ from ..teardown import (
     TeardownStatus,
     calculate_max_acceptable_loss,
     get_teardown_state_manager,
+    resolve_preferred_asset_policy,
 )
 from .actions import emit_audit_event, verify_api_key
 from .timeline import TimelineEvent, TimelineEventType, add_event
@@ -558,6 +559,14 @@ async def start_close(
     try:
         teardown_manager = get_teardown_state_manager()
         internal_mode = TeardownMode.SOFT if request.mode == "graceful" else TeardownMode.HARD
+        # No operator asset-policy choice on this path either — honor the
+        # strategy's declared preference (same as lifecycle STOP).
+        request_kwargs: dict[str, Any] = {}
+        strategy_instance = _strategy_registry.get_strategy(deployment_id) if _strategy_registry is not None else None
+        if strategy_instance is not None:
+            preferred_policy = resolve_preferred_asset_policy(strategy_instance)
+            if preferred_policy is not None:
+                request_kwargs["asset_policy"] = preferred_policy
         persisted_request = TeardownRequest(
             deployment_id=deployment_id,
             mode=internal_mode,
@@ -565,6 +574,7 @@ async def start_close(
             requested_by="dashboard_api",
             status=TeardownStatus.CANCEL_WINDOW,
             cancel_deadline=cancel_until,
+            **request_kwargs,
         )
         teardown_manager.create_request(persisted_request)
     except Exception as e:

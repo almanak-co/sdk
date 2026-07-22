@@ -63,7 +63,7 @@ from almanak.framework.utils.log_formatters import format_token_amount_human, fo
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
+    from almanak.framework.teardown import TeardownMode, TeardownPositionSummary, TeardownProfile
 
 
 @almanak_strategy(
@@ -129,8 +129,7 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
                 collateral_price = market.price(self.collateral_token)
                 borrow_price = market.price(self.borrow_token)
                 logger.info(
-                    f"Prices: {self.collateral_token}=${collateral_price:.2f}, "
-                    f"{self.borrow_token}=${borrow_price:.2f}"
+                    f"Prices: {self.collateral_token}=${collateral_price:.2f}, {self.borrow_token}=${borrow_price:.2f}"
                 )
             except (PriceUnavailableError, MarketSnapshotError, ValueError, KeyError) as e:
                 # market.price raises PriceUnavailableError (-> MarketSnapshotError),
@@ -168,9 +167,7 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
         # Stuck in transitional state -- revert to last stable state
         if self._loop_state in ("supplying", "borrowing", "repaying", "withdrawing"):
             revert_to = self._previous_stable_state
-            logger.warning(
-                f"Stuck in transitional state '{self._loop_state}' -- reverting to '{revert_to}'"
-            )
+            logger.warning(f"Stuck in transitional state '{self._loop_state}' -- reverting to '{revert_to}'")
             self._loop_state = revert_to
 
         return Intent.hold(reason=f"Waiting for state transition (current: {self._loop_state})")
@@ -207,7 +204,9 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
         would collapse the supply into the BORROW accounting event.
         """
         collateral_value = self.collateral_amount * collateral_price
-        borrow_amount = (collateral_value * self.ltv_target / borrow_price).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+        borrow_amount = (collateral_value * self.ltv_target / borrow_price).quantize(
+            Decimal("0.01"), rounding=ROUND_DOWN
+        )
 
         if borrow_amount <= 0:
             self._loop_state = "supplied"
@@ -356,6 +355,20 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
 
     def supports_teardown(self) -> bool:
         return True
+
+    def get_teardown_profile(self) -> "TeardownProfile":
+        from almanak.framework.teardown import TeardownAssetPolicy, TeardownProfile
+
+        # Repay + withdraw only — end in the natural exit tokens, no
+        # consolidation swap.
+        return TeardownProfile(
+            natural_exit_assets=[self.collateral_token, self.borrow_token],
+            recommended_target=self.borrow_token,
+            estimated_steps=2,
+            chains_involved=[self.chain],
+            has_lending_positions=True,
+            preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS,
+        )
 
     # Teardown interface
     def get_open_positions(self) -> "TeardownPositionSummary":

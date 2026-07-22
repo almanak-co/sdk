@@ -411,17 +411,25 @@ def lifecycle_handle_stop(runner: Any, deployment_id: str, strategy: Any) -> Non
         TeardownMode,
         TeardownRequest,
         get_teardown_state_manager_for_runtime,
+        resolve_preferred_asset_policy,
     )
 
     runner._lifecycle_write_state(deployment_id, "STOPPING")
 
     try:
         manager = get_teardown_state_manager_for_runtime(gateway_client=runner._get_gateway_client())
+        # STOP carries no operator asset-policy choice — honor the strategy's
+        # declared preference over the consolidation default (ALM-2900).
+        request_kwargs: dict[str, Any] = {}
+        preferred_policy = resolve_preferred_asset_policy(strategy)
+        if preferred_policy is not None:
+            request_kwargs["asset_policy"] = preferred_policy
         teardown_request = TeardownRequest(
             deployment_id=deployment_id,
             mode=TeardownMode.SOFT,
             reason="Lifecycle STOP command",
             requested_by="lifecycle",
+            **request_kwargs,
         )
         manager.create_request(teardown_request)
         logger.info("Created teardown request for %s from STOP command", deployment_id)

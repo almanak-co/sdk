@@ -202,7 +202,9 @@ class SparkLenderStrategy(IntentStrategy):
         # =================================================================
 
         if self._supplied:
-            return Intent.hold(reason=f"Already supplied {self._supplied_amount} {self.supply_token} -> sp{self.supply_token}")
+            return Intent.hold(
+                reason=f"Already supplied {self._supplied_amount} {self.supply_token} -> sp{self.supply_token}"
+            )
 
         # =================================================================
         # STEP 3: Check supply-token balance
@@ -344,6 +346,19 @@ class SparkLenderStrategy(IntentStrategy):
     def supports_teardown(self) -> bool:
         return True
 
+    def get_teardown_profile(self):
+        from almanak.framework.teardown import TeardownAssetPolicy, TeardownProfile
+
+        # Supply-only: teardown withdraws the supplied token — nothing to consolidate.
+        return TeardownProfile(
+            natural_exit_assets=[self.supply_token],
+            recommended_target=self.supply_token,
+            estimated_steps=1,
+            chains_involved=[self.chain],
+            has_lending_positions=True,
+            preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS,
+        )
+
     def get_open_positions(self):
         """Return the open Spark supply position (interest-bearing Spark token).
 
@@ -410,4 +425,3 @@ if __name__ == "__main__":
     print(f"\nDescription: {SparkLenderStrategy.STRATEGY_METADATA.description}")
     print("\nTo run this strategy:")
     print("  python -m src.cli.run --strategy demo_spark_lender --once")
-

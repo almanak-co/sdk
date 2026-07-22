@@ -13,6 +13,24 @@ To support teardown, a strategy implements `get_open_positions()` and `generate_
 | `get_open_positions()` | **Yes** | Return a `TeardownPositionSummary` listing all open positions (queried from on-chain state). |
 | `generate_teardown_intents(mode, market)` | **Yes** | Return an ordered list of `Intent` objects that unwind positions |
 | `supports_teardown() -> bool` | Optional | **Authoritative** teardown opt-in. Defaults to `True` — the runner may auto-close your positions on an operator teardown signal. Override to `False` **only** for a strategy that must NOT be force-closed by the framework; the runner honours that and refuses the auto-teardown (logging loudly) rather than ignoring it. Strategies that hold no positions should extend `StatelessStrategy` instead of returning `False`. |
+| `get_teardown_profile() -> TeardownProfile` | Optional | Teardown metadata: expected exit assets, position types, and the strategy's `preferred_asset_policy` (see below). |
+
+### Exit Asset Policy
+
+After closing positions, teardown runs a token-consolidation phase that by default swaps recovered tokens into a target token (USDC). A strategy whose mandate forbids swaps — or that must end in its natural exit assets — declares `KEEP_OUTPUTS`:
+
+```python
+from almanak.framework.teardown import TeardownAssetPolicy, TeardownProfile
+
+def get_teardown_profile(self) -> TeardownProfile:
+    return TeardownProfile(
+        natural_exit_assets=[self.collateral_token, self.borrow_token],
+        has_lending_positions=True,
+        preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS,  # no terminal swaps
+    )
+```
+
+The preference is honored whenever a teardown is created without an explicit operator choice (platform Stop, dashboard close, `strat test --teardown`); an explicit `--asset-policy` always wins. `KEEP_OUTPUTS` suppresses **only** the framework's consolidation swap — swap intents emitted by `generate_teardown_intents()` itself are unaffected. So a spec that forbids swaps requires both: a swap-free unwind in `generate_teardown_intents()` **and** `KEEP_OUTPUTS` declared here.
 
 ### Execution Order
 

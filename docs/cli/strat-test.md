@@ -74,6 +74,13 @@ Usage: almanak strat test [OPTIONS]
     After the action sequence completes, run a teardown iteration that closes any open positions via the strategy's generate_teardown_intents().
 
 
+* `asset_policy`:
+    * Type: Choice(['target_token', 'entry_token', 'keep_outputs'])
+    * Default: `None`
+    * Usage: `--asset-policy`
+    Asset policy for the --teardown iteration's token-consolidation phase. 'keep_outputs' skips the terminal consolidation swap — required to validate strategies whose spec forbids swaps. Default: the strategy's get_teardown_profile().preferred_asset_policy if set, else the framework default (target_token).
+
+
 * `inject`:
     * Type: STRING
     * Default: `None`
@@ -161,48 +168,66 @@ Usage: almanak strat test [OPTIONS]
       # from a file
 
 Options:
-  -d, --working-dir PATH  Working directory containing the strategy files.
-                          Defaults to the current directory.
-  -c, --config PATH       Path to strategy config JSON file (overrides the one
-                          in --working-dir).
-  --actions TEXT          Comma-separated force_action values to drive (e.g.
-                          'open,collect' or 'supply'). Run in the order given.
-                          Each value mutates strategy.force_action between
-                          iterations; in-memory strategy state (position id,
-                          etc.) flows through naturally. Skip values that
-                          match what generate_teardown_intents() emits — let
-                          --teardown handle those.
-  --teardown              After the action sequence completes, run a teardown
-                          iteration that closes any open positions via the
-                          strategy's generate_teardown_intents().
-  --inject TEXT           Seed synthetic market conditions into the
-                          MarketSnapshot decide() consumes, so condition-
-                          triggered logic runs (VIB-5529). Inline JSON or a
-                          path to a .json file: '{"prices": {"USDC": "0.95"},
-                          "balances": {"USDC": "10000"}, "indicators": {"rsi":
-                          {"WETH": 25}}}'. Without --actions, this exercises
-                          the real condition branches (depeg = off-peg price;
-                          drawdown = lowered price/balance). Overrides win
-                          over live provider reads.
-  --json                  Emit a structured JSON result on stdout. The
-                          structured payload is the LAST top-level JSON object
-                          in stdout — startup/setup diagnostics from the
-                          framework's anvil + gateway boot may print human-
-                          readable lines BEFORE it. Parsers should extract the
-                          final JSON object (e.g. `python -c 'import json,sys;
-                          ...JSONDecoder().raw_decode(...)'`), not assume
-                          stdout is JSON-only. Exit code is 0 if every step
-                          passed (or run was skipped), non-zero otherwise.
-  --anvil-port TEXT       Use existing Anvil instance: CHAIN=PORT (e.g.,
-                          --anvil-port arbitrum=8545). Repeatable.
-  --gateway-host TEXT     Gateway sidecar hostname.
-  --gateway-port INTEGER  Gateway sidecar gRPC port.
-  --no-gateway            Connect to an existing gateway at --gateway-
-                          host:--gateway-port instead of auto-starting a
-                          managed one. Useful when a long-lived gateway
-                          sidecar is already running (e.g. in a Cloud Run
-                          multi-container revision); skips ManagedGateway boot
-                          and the per-test Anvil cold-start.
-  --help                  Show this message and exit.
+  -d, --working-dir PATH          Working directory containing the strategy
+                                  files. Defaults to the current directory.
+  -c, --config PATH               Path to strategy config JSON file (overrides
+                                  the one in --working-dir).
+  --actions TEXT                  Comma-separated force_action values to drive
+                                  (e.g. 'open,collect' or 'supply'). Run in
+                                  the order given. Each value mutates
+                                  strategy.force_action between iterations;
+                                  in-memory strategy state (position id, etc.)
+                                  flows through naturally. Skip values that
+                                  match what generate_teardown_intents() emits
+                                  — let --teardown handle those.
+  --teardown                      After the action sequence completes, run a
+                                  teardown iteration that closes any open
+                                  positions via the strategy's
+                                  generate_teardown_intents().
+  --asset-policy [target_token|entry_token|keep_outputs]
+                                  Asset policy for the --teardown iteration's
+                                  token-consolidation phase. 'keep_outputs'
+                                  skips the terminal consolidation swap —
+                                  required to validate strategies whose spec
+                                  forbids swaps. Default: the strategy's get_t
+                                  eardown_profile().preferred_asset_policy if
+                                  set, else the framework default
+                                  (target_token).
+  --inject TEXT                   Seed synthetic market conditions into the
+                                  MarketSnapshot decide() consumes, so
+                                  condition-triggered logic runs (VIB-5529).
+                                  Inline JSON or a path to a .json file:
+                                  '{"prices": {"USDC": "0.95"}, "balances":
+                                  {"USDC": "10000"}, "indicators": {"rsi":
+                                  {"WETH": 25}}}'. Without --actions, this
+                                  exercises the real condition branches (depeg
+                                  = off-peg price; drawdown = lowered
+                                  price/balance). Overrides win over live
+                                  provider reads.
+  --json                          Emit a structured JSON result on stdout. The
+                                  structured payload is the LAST top-level
+                                  JSON object in stdout — startup/setup
+                                  diagnostics from the framework's anvil +
+                                  gateway boot may print human-readable lines
+                                  BEFORE it. Parsers should extract the final
+                                  JSON object (e.g. `python -c 'import
+                                  json,sys;
+                                  ...JSONDecoder().raw_decode(...)'`), not
+                                  assume stdout is JSON-only. Exit code is 0
+                                  if every step passed (or run was skipped),
+                                  non-zero otherwise.
+  --anvil-port TEXT               Use existing Anvil instance: CHAIN=PORT
+                                  (e.g., --anvil-port arbitrum=8545).
+                                  Repeatable.
+  --gateway-host TEXT             Gateway sidecar hostname.
+  --gateway-port INTEGER          Gateway sidecar gRPC port.
+  --no-gateway                    Connect to an existing gateway at --gateway-
+                                  host:--gateway-port instead of auto-starting
+                                  a managed one. Useful when a long-lived
+                                  gateway sidecar is already running (e.g. in
+                                  a Cloud Run multi-container revision); skips
+                                  ManagedGateway boot and the per-test Anvil
+                                  cold-start.
+  --help                          Show this message and exit.
 ```
 

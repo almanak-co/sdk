@@ -66,6 +66,7 @@ from almanak.framework.teardown.models import (
     TeardownStatus,
     VerificationStatus,
     calculate_max_acceptable_loss,
+    resolve_preferred_asset_policy,
 )
 from almanak.framework.teardown.post_conditions import (
     ClosureCheckResult,
@@ -102,6 +103,7 @@ __all__ = [
     "TeardownRequest",
     "TeardownProfile",
     "VerificationStatus",
+    "resolve_preferred_asset_policy",
     # Models - Escalation
     "EscalationLevel",
     "ApprovalRequest",

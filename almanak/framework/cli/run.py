@@ -1234,6 +1234,7 @@ def run(  # noqa: C901
     test_actions: list[str] | None = None,
     test_json: bool = False,
     test_inject: Any | None = None,
+    test_asset_policy: str | None = None,
 ) -> None:
     """
     Run a strategy from its working directory.
@@ -1460,6 +1461,7 @@ def run(  # noqa: C901
         teardown_after=teardown_after,
         test_json=test_json,
         test_inject=test_inject,
+        test_asset_policy=test_asset_policy,
         runner=runner,
         strategy_instance=strategy_instance,
         state_manager=state_manager,

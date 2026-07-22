@@ -1356,6 +1356,17 @@ def _strat_test_skip_reason(working_dir: str, config_file: str | None) -> str | 
     "open positions via the strategy's generate_teardown_intents().",
 )
 @click.option(
+    "--asset-policy",
+    "asset_policy",
+    type=click.Choice(["target_token", "entry_token", "keep_outputs"]),
+    default=None,
+    help="Asset policy for the --teardown iteration's token-consolidation phase. "
+    "'keep_outputs' skips the terminal consolidation swap — required to validate "
+    "strategies whose spec forbids swaps. Default: the strategy's "
+    "get_teardown_profile().preferred_asset_policy if set, else the framework "
+    "default (target_token).",
+)
+@click.option(
     "--inject",
     "inject",
     type=str,
@@ -1413,6 +1424,7 @@ def strategy_test(
     config_file,
     actions,
     teardown,
+    asset_policy,
     inject,
     json_output,
     anvil_ports,
@@ -1569,6 +1581,7 @@ def strategy_test(
             test_actions=parsed_actions,
             test_json=json_output,
             test_inject=parsed_inject,
+            test_asset_policy=asset_policy,
             fresh=True,
         )
     except click.Abort:

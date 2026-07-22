@@ -445,6 +445,7 @@ def _execute_run_mode(
     reset_fork: bool,
     managed_gateway: Any,
     test_inject: Any | None = None,
+    test_asset_policy: str | None = None,
 ) -> int:
     """Dispatch to the lifecycle, once, or continuous execution lane."""
     if test_actions is not None:
@@ -457,6 +458,7 @@ def _execute_run_mode(
             teardown=teardown_after,
             json_output=test_json,
             inject=test_inject,
+            asset_policy=test_asset_policy,
         )
 
     if once:
@@ -707,6 +709,59 @@ def _run_once(  # noqa: C901
 # ---------------------------------------------------------------------------
 
 
+def _measure_open_positions_after_teardown(strategy_instance: Any) -> tuple[list[dict], str | None]:
+    """Re-read the strategy's open positions after a teardown iteration.
+
+    Returns ``(residuals, error)``: positions still open above dust ($0.01), or
+    ``([], "<reason>")`` when the read itself failed — an unmeasured read must
+    never be treated as a residual (Empty ≠ Zero). The inverse also holds: a
+    reported position whose ``value_usd`` is missing/unparseable counts as a
+    residual with value "unknown" — only a MEASURED dust value excuses it.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    dust_usd = Decimal("0.01")
+    try:
+        summary = strategy_instance.get_open_positions()
+        positions = getattr(summary, "positions", None)
+        if positions is None:
+            # Fail closed: a summary with no positions collection is a broken
+            # hook, not a clean teardown.
+            return [], f"get_open_positions() returned no positions collection ({type(summary).__name__})"
+        residuals = []
+        for p in positions:
+            raw_value = getattr(p, "value_usd", None)
+            value_usd: Decimal | None
+            try:
+                value_usd = Decimal(str(raw_value)) if raw_value is not None and str(raw_value).strip() != "" else None
+            except (InvalidOperation, ValueError):
+                value_usd = None
+            if value_usd is not None and not value_usd.is_finite():
+                value_usd = None  # NaN/Infinity → "unknown" residual, not a comparison crash
+            if value_usd is not None and value_usd <= dust_usd:
+                continue
+            position_type = getattr(p, "position_type", None)
+            residuals.append(
+                {
+                    "position_id": str(getattr(p, "position_id", "")),
+                    "position_type": str(getattr(position_type, "value", position_type or "")),
+                    "protocol": str(getattr(p, "protocol", "")),
+                    "value_usd": str(value_usd) if value_usd is not None else "unknown",
+                }
+            )
+        return residuals, None
+    except Exception as exc:  # noqa: BLE001 — a broken read must degrade to UNMEASURED, not crash the ladder
+        logger.warning("post-teardown open-positions check failed (unmeasured): %r", exc)
+        return [], repr(exc)
+
+
+def _teardown_step_ok(step: dict) -> bool:
+    """Pass criterion for a teardown step: completed as TEARDOWN with no measured residual (ALM-2900)."""
+    from ..runner import IterationStatus
+
+    return step["status"] == IterationStatus.TEARDOWN.value and not step.get("open_positions_after_teardown")
+
+
 def _run_test_lifecycle(  # noqa: C901
     *,
     runner: Any,
@@ -717,6 +772,7 @@ def _run_test_lifecycle(  # noqa: C901
     teardown: bool,
     json_output: bool,
     inject: Any | None = None,
+    asset_policy: str | None = None,
 ) -> int:
     """Execute a force-action lifecycle test.
 
@@ -917,7 +973,12 @@ def _run_test_lifecycle(  # noqa: C901
             # position is open.
             if teardown:
                 from almanak.framework.teardown import get_teardown_state_manager
-                from almanak.framework.teardown.models import TeardownMode, TeardownRequest
+                from almanak.framework.teardown.models import (
+                    TeardownAssetPolicy,
+                    TeardownMode,
+                    TeardownRequest,
+                    resolve_preferred_asset_policy,
+                )
 
                 strategy_instance.force_action = ""
                 deployment_id = _require_strategy_deployment_id(
@@ -926,6 +987,15 @@ def _run_test_lifecycle(  # noqa: C901
                 )
                 if not json_output:
                     click.echo("\n→ teardown")
+                # Explicit --asset-policy wins over the strategy's declared preference.
+                resolved_policy = (
+                    TeardownAssetPolicy(asset_policy)
+                    if asset_policy
+                    else resolve_preferred_asset_policy(strategy_instance)
+                )
+                request_kwargs: dict[str, Any] = (
+                    {"asset_policy": resolved_policy} if resolved_policy is not None else {}
+                )
                 # Capture log cursor BEFORE create_request so a state-manager
                 # failure here (locked DB / schema mismatch) is also surfaced as
                 # a synthetic teardown step instead of escaping to the outer handler.
@@ -937,6 +1007,7 @@ def _run_test_lifecycle(  # noqa: C901
                             mode=TeardownMode.SOFT,
                             reason="strat test --teardown",
                             requested_by="cli",
+                            **request_kwargs,
                         )
                     )
                     td_iteration_start = time.monotonic()
@@ -978,14 +1049,32 @@ def _run_test_lifecycle(  # noqa: C901
                         click.echo(f"  teardown raised: {exc!r}", err=True)
                 else:
                     teardown_result_dict = {"action": "teardown", **td_result.to_dict()}
-                    teardown_passed = td_result.status.value == IterationStatus.TEARDOWN.value
+                    # A TEARDOWN-status iteration can still leave positions open
+                    # (repay-only teardown, ALM-2900) — verify independently.
+                    residuals, residual_check_error = _measure_open_positions_after_teardown(strategy_instance)
+                    if residual_check_error is not None:
+                        teardown_result_dict["open_positions_check"] = f"unmeasured: {residual_check_error}"
+                    elif residuals:
+                        teardown_result_dict["open_positions_after_teardown"] = residuals
+                    teardown_passed = _teardown_step_ok(teardown_result_dict)
                     if not teardown_passed:
                         teardown_result_dict["failure_logs"] = log_buffer.slice_since(logs_before)
                         if not json_output:
-                            click.echo(
-                                f"  teardown failed: {td_result.error or td_result.status.value}",
-                                err=True,
-                            )
+                            # Surface both signals: the iteration failure (when the
+                            # status itself is bad) AND any residual positions.
+                            if td_result.status.value != IterationStatus.TEARDOWN.value:
+                                click.echo(
+                                    f"  teardown failed: {td_result.error or td_result.status.value}",
+                                    err=True,
+                                )
+                            if residuals:
+                                click.echo(
+                                    f"  teardown left {len(residuals)} open position(s): "
+                                    + ", ".join(
+                                        f"{r['protocol']}/{r['position_id']} (${r['value_usd']})" for r in residuals
+                                    ),
+                                    err=True,
+                                )
 
             # Persist copy trading cursor state (mirrors _run_once).
             if activity_provider is not None:
@@ -1037,7 +1126,7 @@ def _run_test_lifecycle(  # noqa: C901
             elif teardown_result_dict is None:
                 partial_teardown_ok = False
             else:
-                partial_teardown_ok = teardown_result_dict["status"] == IterationStatus.TEARDOWN.value
+                partial_teardown_ok = _teardown_step_ok(teardown_result_dict)
             click.echo(
                 json.dumps(
                     {
@@ -1062,7 +1151,7 @@ def _run_test_lifecycle(  # noqa: C901
         _logging.getLogger().removeHandler(log_buffer)
 
     # teardown_passed is None ("not applicable") when --teardown wasn't requested,
-    # True when teardown ran and reached IterationStatus.TEARDOWN, False otherwise.
+    # True when the teardown step passed (see _teardown_step_ok), False otherwise.
     # Same convention as the exception path, so JSON consumers see one shape.
     teardown_ok: bool | None
     if not teardown:
@@ -1070,7 +1159,7 @@ def _run_test_lifecycle(  # noqa: C901
     elif teardown_result_dict is None:
         teardown_ok = False  # asked for but never executed (logic error)
     else:
-        teardown_ok = teardown_result_dict["status"] == IterationStatus.TEARDOWN.value
+        teardown_ok = _teardown_step_ok(teardown_result_dict)
     # all([]) is True — teardown-only runs (no actions) correctly identity to True here
     # and rely on teardown_ok for the final verdict.
     actions_ok = all(r["status"] in (IterationStatus.SUCCESS.value, IterationStatus.HOLD.value) for r in action_results)

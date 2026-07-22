@@ -13,11 +13,14 @@ Defines the core types used throughout the teardown process:
 """
 
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Sentinel for "the operator expressed no target-token preference" (VIB-5727).
 #
@@ -953,3 +956,26 @@ class TeardownProfile:
     has_perp_positions: bool = False
     has_lending_positions: bool = False
     has_lp_positions: bool = False
+    # Honored by teardown creators that carry no explicit operator choice
+    # (lifecycle STOP, strat test --teardown); None = framework default (ALM-2900).
+    preferred_asset_policy: TeardownAssetPolicy | None = None
+
+
+def resolve_preferred_asset_policy(strategy: Any) -> TeardownAssetPolicy | None:
+    """The strategy's declared teardown asset-policy preference, or None.
+
+    Best-effort: ``get_teardown_profile()`` is strategy-authored code, so any
+    exception or malformed value degrades to None — a teardown must never be
+    blocked by a broken UX-metadata hook.
+    """
+    try:
+        profile = strategy.get_teardown_profile()
+        policy = getattr(profile, "preferred_asset_policy", None)
+        if policy is None:
+            return None
+        return policy if isinstance(policy, TeardownAssetPolicy) else TeardownAssetPolicy(str(policy))
+    except Exception:  # noqa: BLE001 — UX-metadata hook must not block teardown
+        logger.warning(
+            "get_teardown_profile() raised while resolving asset policy — using framework default", exc_info=True
+        )
+        return None
