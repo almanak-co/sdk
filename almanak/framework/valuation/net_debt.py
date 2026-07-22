@@ -72,7 +72,42 @@ __all__ = [
     "net_debt_from_snapshot",
     "parse_positions_payload",
     "read_position_decimal",
+    "wallet_nav_usd",
 ]
+
+
+def wallet_nav_usd(
+    total_value_usd: Decimal,
+    debt_mark: Decimal,
+    available_cash_usd: Decimal,
+) -> Decimal:
+    """Wallet NAV (VIB-3884) = net position equity + idle wallet cash.
+
+    ``net position equity = total_value_usd − debt_mark`` (the VIB-5201 baseline
+    netting; ``total_value_usd`` is already positive-position-scoped per VIB-3614,
+    so the BORROW debt leg is re-subtracted once here). Idle wallet cash lives in a
+    separate column (``available_cash_usd``) and must be ADDED back to recover the
+    net asset value an operator marks to market.
+
+    This is the **single definition** shared by (all routed through THIS helper):
+
+    * the "NAV now" tile (``quant_aggregations.compute_pnl_summary`` calls
+      ``wallet_nav_usd(total_value_usd, debt_mark, available_cash_usd)`` — the
+      former inline ``deployed_value_usd + available_cash_usd`` and its
+      ``deployed_value_usd`` local were removed in VIB-5942),
+    * the recent-window and lifetime drawdown series
+      (``quant_aggregations._drawdowns`` / ``_wallet_navs_from_nav_text``), and
+    * the NAV-history chart series (``dashboard_service`` recent + windowed PnL
+      history builders, VIB-5942).
+
+    Routing all of them through one function is why they agree by construction — the
+    VIB-5942 defect was the chart builders computing net equity ALONE (cash
+    dropped), so a post-close snapshot (position value 0, funds returned to cash)
+    plotted NAV 0 and collapsed the chart. Empty≠Zero is the caller's job: pass a
+    measured ``Decimal`` for each term, or drop the sample upstream — never coerce
+    an unmeasured column to ``Decimal("0")`` here.
+    """
+    return total_value_usd - debt_mark + available_cash_usd
 
 
 def read_position_decimal(pos: Any, key: str) -> Decimal | None:

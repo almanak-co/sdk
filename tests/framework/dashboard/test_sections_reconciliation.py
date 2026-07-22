@@ -469,6 +469,28 @@ class TestRenderReconciliationReportSection:
         mock_success.assert_called_once()
         mock_df.assert_not_called()
 
+    def test_renders_scope_label_distinguishing_from_g6(self, fake_client: MagicMock) -> None:
+        """VIB-5942: the report must carry an explicit position-STRUCTURE scope
+        label so it never reads as a contradiction of the header's PnL-identity
+        G6 tile (both can be simultaneously true)."""
+        fake_client.get_reconciliation_report.return_value = self._report()
+        captions: list[str] = []
+        successes: list[str] = []
+        with (
+            patch.object(sec.st, "divider"),
+            patch.object(sec.st, "markdown"),
+            patch.object(sec.st, "caption", side_effect=lambda t, *a, **k: captions.append(t)),
+            patch.object(sec.st, "columns") as mock_cols,
+            patch.object(sec.st, "success", side_effect=lambda t, *a, **k: successes.append(t)),
+            patch.object(sec.st, "dataframe"),
+        ):
+            mock_cols.return_value = (MagicMock(), MagicMock(), MagicMock())
+            sec.render_reconciliation_report_section("sid", fake_client)
+        # A scope caption naming "structure" and pointing at the G6 tile is present.
+        assert any("structure" in c.lower() and "g6" in c.lower() for c in captions), captions
+        # The no-findings success text is scoped to structure, not a global "all agree".
+        assert successes and "structural" in successes[0].lower()
+
     def test_findings_render_dataframe_with_severity_column(self, fake_client: MagicMock) -> None:
         findings = [
             ReconciliationFinding(
@@ -511,6 +533,7 @@ class TestRenderReconciliationReportSection:
             patch.object(sec.st, "caption") as mock_caption,
             patch.object(sec.st, "columns") as mock_cols,
             patch.object(sec.st, "success"),
+            patch.object(sec.st, "info"),
         ):
             mock_cols.return_value = (MagicMock(), MagicMock(), MagicMock())
             sec.render_reconciliation_report_section("sid", fake_client)
@@ -519,6 +542,48 @@ class TestRenderReconciliationReportSection:
         caption_texts = [c.args[0] for c in mock_caption.call_args_list]
         assert any("VIB-4501" in t for t in caption_texts)
         assert any("VIB-4202" in t for t in caption_texts)
+
+    def test_no_findings_with_stubs_qualifies_success_to_covered_set(self, fake_client: MagicMock) -> None:
+        """VIB-5942 audit (CodeRabbit): with 0 findings BUT uncovered primitive stubs,
+        the banner must NOT claim everything reconciles — coverage is partial. It is
+        qualified to the COVERED set (st.info), not an unqualified green st.success,
+        and the stub caption calls out that those primitives were NOT reconciled."""
+        stubs = [PrimitiveCoverageStub(primitive="perp", message="parser pending", ticket="VIB-5717")]
+        fake_client.get_reconciliation_report.return_value = self._report(stubs=stubs)
+        infos: list[str] = []
+        markdowns: list[str] = []
+        with (
+            patch.object(sec.st, "divider"),
+            patch.object(sec.st, "markdown", side_effect=lambda t, *a, **k: markdowns.append(t)),
+            patch.object(sec.st, "caption"),
+            patch.object(sec.st, "columns") as mock_cols,
+            patch.object(sec.st, "success") as mock_success,
+            patch.object(sec.st, "info", side_effect=lambda t, *a, **k: infos.append(t)),
+            patch.object(sec.st, "dataframe") as mock_df,
+        ):
+            mock_cols.return_value = (MagicMock(), MagicMock(), MagicMock())
+            sec.render_reconciliation_report_section("sid", fake_client)
+        mock_df.assert_not_called()  # no findings
+        mock_success.assert_not_called()  # NOT an unqualified green banner
+        assert infos and "covered" in infos[0].lower() and "partial" in infos[0].lower()
+        # The stubs list explicitly marks the uncovered primitives as NOT reconciled.
+        assert any("NOT reconciled" in m for m in markdowns)
+
+    def test_no_findings_no_stubs_stays_full_success(self, fake_client: MagicMock) -> None:
+        """Full coverage + 0 findings keeps the unqualified success banner."""
+        fake_client.get_reconciliation_report.return_value = self._report()  # no stubs
+        with (
+            patch.object(sec.st, "divider"),
+            patch.object(sec.st, "markdown"),
+            patch.object(sec.st, "caption"),
+            patch.object(sec.st, "columns") as mock_cols,
+            patch.object(sec.st, "success") as mock_success,
+            patch.object(sec.st, "info") as mock_info,
+        ):
+            mock_cols.return_value = (MagicMock(), MagicMock(), MagicMock())
+            sec.render_reconciliation_report_section("sid", fake_client)
+        mock_success.assert_called_once()
+        mock_info.assert_not_called()
 
     def test_client_error_degrades(self, fake_client: MagicMock) -> None:
         fake_client.get_reconciliation_report.side_effect = DashboardClientError("nope")

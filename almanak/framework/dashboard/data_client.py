@@ -93,17 +93,25 @@ class TradeRecord:
 
 @dataclass
 class PnLDataPoint:
-    """A single PnL data point for charting."""
+    """A single PnL data point for charting.
+
+    Empty≠Zero (VIB-5942 CodeRabbit): ``pnl_usd`` is ``None`` when UNMEASURED (the
+    wire carried no pnl for this sample), never coerced to ``Decimal("0")`` — a
+    fabricated measured zero would show as $0 profit on the exported series.
+    ``value_usd`` is always present: ``get_pnl_history`` drops unmeasured-NAV
+    samples upstream, so a point only exists when its NAV was measured.
+    """
 
     timestamp: datetime
     value_usd: Decimal
-    pnl_usd: Decimal
+    pnl_usd: Decimal | None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "timestamp": self.timestamp.isoformat(),
             "value_usd": str(self.value_usd),
-            "pnl_usd": str(self.pnl_usd),
+            # Empty≠Zero: unmeasured pnl exports as "" (blank), not "0" or "None".
+            "pnl_usd": "" if self.pnl_usd is None else str(self.pnl_usd),
         }
 
 
@@ -265,11 +273,19 @@ class DashboardDataClient:
                 # Legacy client-side narrowing; the server already bounds the
                 # windowed path, so don't double-filter it.
                 continue
+            value_usd = entry.get("value_usd")
+            if value_usd is None:
+                # Empty != Zero (VIB-5942): an UNMEASURED NAV sample — skip it
+                # rather than fabricate a $0 point in the exported series. A
+                # measured zero (Decimal("0")) is not None and is kept.
+                continue
+            # Empty≠Zero (VIB-5942 CodeRabbit): keep an unmeasured pnl as None —
+            # never coerce to Decimal("0") (a fabricated measured zero).
             points.append(
                 PnLDataPoint(
                     timestamp=ts,
-                    value_usd=entry.get("value_usd", Decimal("0")),
-                    pnl_usd=entry.get("pnl_usd", Decimal("0")),
+                    value_usd=value_usd,
+                    pnl_usd=entry.get("pnl_usd"),
                 )
             )
         return points

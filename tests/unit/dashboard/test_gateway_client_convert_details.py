@@ -154,3 +154,25 @@ def test_convert_details_empty_position_is_safe():
     assert details.position.strategy_positions == []
     assert details.timeline == []
     assert details.pnl_history == []
+
+
+def test_convert_details_empty_pnl_and_value_are_none_not_zero():
+    """VIB-5942 CodeRabbit #1: an empty ``value_usd`` / ``pnl_usd`` on the wire is
+    UNMEASURED → None in the converted dict, never Decimal("0"). A measured "0"
+    stays Decimal("0")."""
+    proto = gateway_pb2.StrategyDetails()
+    unmeasured = proto.pnl_history.add()
+    unmeasured.timestamp = 1_700_000_000
+    unmeasured.value_usd = ""  # unmeasured NAV
+    unmeasured.pnl_usd = ""  # unmeasured pnl
+    measured_zero = proto.pnl_history.add()
+    measured_zero.timestamp = 1_700_000_100
+    measured_zero.value_usd = "0"  # MEASURED zero
+    measured_zero.pnl_usd = "0"
+
+    details = _client()._convert_details(proto)
+    assert len(details.pnl_history) == 2
+    assert details.pnl_history[0]["value_usd"] is None
+    assert details.pnl_history[0]["pnl_usd"] is None
+    assert details.pnl_history[1]["value_usd"] == Decimal("0")  # measured zero preserved
+    assert details.pnl_history[1]["pnl_usd"] == Decimal("0")

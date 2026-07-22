@@ -192,6 +192,31 @@ class ActivityFeedResponse:
 
 
 @dataclass
+class PerpPositionInfo:
+    """One snapshot-derived open perp position (``PerpPositionSummary`` proto,
+    VIB-5942 / ALM-2977).
+
+    Empty≠Zero per field: price / leverage / notional / collateral / unrealized
+    are ``None`` (not ``Decimal("0")``) when the snapshot did not measure them, so
+    the renderer shows "— unmeasured", never a fabricated "$0.00". ``is_long`` is
+    ``None`` when unmeasured; ``direction`` is "" then. ``market`` / ``protocol`` /
+    ``chain`` are plain strings ("" = unmeasured).
+    """
+
+    market: str = ""
+    direction: str = ""
+    is_long: bool | None = None
+    entry_price_usd: Decimal | None = None
+    mark_price_usd: Decimal | None = None
+    leverage: Decimal | None = None
+    notional_usd: Decimal | None = None
+    collateral_usd: Decimal | None = None
+    unrealized_pnl_usd: Decimal | None = None
+    protocol: str = ""
+    chain: str = ""
+
+
+@dataclass
 class PnLSummary:
     """5-second-eyeball card from ``GetPnLSummary`` (VIB-3969).
 
@@ -221,6 +246,10 @@ class PnLSummary:
     primary_risk_label: str
     primary_risk_value: str
     primary_risk_color: str
+    # VIB-5942 (ALM-2977): snapshot-derived perp story. Empty on an old gateway →
+    # the client renders no perp section (additive/optional; degrades cleanly).
+    perp_positions: list[PerpPositionInfo] = field(default_factory=list)
+    positions_as_of: str = ""  # ISO ts of the source snapshot ("" if none)
 
 
 @dataclass
@@ -228,8 +257,11 @@ class CostStackInfo:
     """Life-to-date cost / earn decomposition from ``GetCostStack`` (VIB-3969)."""
 
     cost_gas_usd: Decimal
-    cost_protocol_fees_usd: Decimal
-    cost_slippage_usd: Decimal
+    # Empty≠Zero (VIB-5942): None = UNMEASURED (renders "—"), a measured value
+    # (incl. Decimal("0")) renders "$0.00". Set presence-aware from the ""-sentinel
+    # on the wire, same as inventory_unrealized_usd.
+    cost_protocol_fees_usd: Decimal | None
+    cost_slippage_usd: Decimal | None
     fees_earned_usd: Decimal
     interest_paid_usd: Decimal
     interest_earned_usd: Decimal
@@ -329,18 +361,23 @@ def _safe_decimal(s: str) -> Decimal:
 
 
 def _safe_optional_decimal(s: str) -> Decimal | None:
-    """Presence-aware proto-string → Decimal (VIB-4984; Empty≠Zero).
+    """Presence-aware proto-string → finite Decimal (VIB-4984; Empty≠Zero).
 
-    Returns ``None`` for an empty / unparseable proto string (unmeasured),
-    NOT ``Decimal("0")``. Use for optional proto fields where "" carries the
-    "the gateway did not measure this" signal (e.g. inventory_unrealized_usd).
+    Returns ``None`` for an empty / unparseable / **non-finite** proto string
+    (unmeasured), NOT ``Decimal("0")``. Use for optional proto fields where "" (and
+    now a corrupt ``"NaN"`` / ``"Infinity"``) carries the "the gateway did not
+    measure this" signal (e.g. inventory_unrealized_usd, cost fees/slippage, perp
+    prices). VIB-5942 CodeRabbit: ``Decimal("NaN")`` / ``Decimal("Infinity")``
+    parse successfully but are non-finite — reject them here so a corrupt wire
+    value never reaches money math / a chart as a garbage magnitude.
     """
     if not s:
         return None
     try:
-        return Decimal(s)
+        parsed = Decimal(s)
     except (InvalidOperation, ValueError, TypeError):
         return None
+    return parsed if parsed.is_finite() else None
 
 
 def _convert_pnl_summary(proto: gateway_pb2.PnLSummary) -> PnLSummary:
@@ -363,14 +400,39 @@ def _convert_pnl_summary(proto: gateway_pb2.PnLSummary) -> PnLSummary:
         primary_risk_label=proto.primary_risk_label or "No active positions",  # VIB-3925
         primary_risk_value=proto.primary_risk_value or "",
         primary_risk_color=proto.primary_risk_color or "neutral",
+        # VIB-5942 (ALM-2977): snapshot-derived perp story. An old gateway leaves
+        # ``perp_positions`` empty → no perp section (clean degrade, never a crash).
+        perp_positions=[_convert_perp_position(p) for p in proto.perp_positions],
+        positions_as_of=proto.positions_as_of or "",
+    )
+
+
+def _convert_perp_position(proto: gateway_pb2.PerpPositionSummary) -> PerpPositionInfo:
+    """Proto → ``PerpPositionInfo`` (Empty≠Zero: "" price/leverage → None → "—")."""
+    # ``is_long`` is a proto3 ``optional bool`` — HasField distinguishes an
+    # unmeasured absent field (None) from a measured False (SHORT).
+    is_long = proto.is_long if proto.HasField("is_long") else None
+    direction = proto.direction or ("" if is_long is None else ("LONG" if is_long else "SHORT"))
+    return PerpPositionInfo(
+        market=proto.market or "",
+        direction=direction,
+        is_long=is_long,
+        entry_price_usd=_safe_optional_decimal(proto.entry_price_usd),
+        mark_price_usd=_safe_optional_decimal(proto.mark_price_usd),
+        leverage=_safe_optional_decimal(proto.leverage),
+        notional_usd=_safe_optional_decimal(proto.notional_usd),
+        collateral_usd=_safe_optional_decimal(proto.collateral_usd),
+        unrealized_pnl_usd=_safe_optional_decimal(proto.unrealized_pnl_usd),
+        protocol=proto.protocol or "",
+        chain=proto.chain or "",
     )
 
 
 def _convert_cost_stack(proto: gateway_pb2.CostStackInfo) -> CostStackInfo:
     return CostStackInfo(
         cost_gas_usd=_safe_decimal(proto.cost_gas_usd),
-        cost_protocol_fees_usd=_safe_decimal(proto.cost_protocol_fees_usd),
-        cost_slippage_usd=_safe_decimal(proto.cost_slippage_usd),
+        cost_protocol_fees_usd=_safe_optional_decimal(proto.cost_protocol_fees_usd),
+        cost_slippage_usd=_safe_optional_decimal(proto.cost_slippage_usd),
         fees_earned_usd=_safe_decimal(proto.fees_earned_usd),
         interest_paid_usd=_safe_decimal(proto.interest_paid_usd),
         interest_earned_usd=_safe_decimal(proto.interest_earned_usd),
@@ -1084,12 +1146,18 @@ class GatewayDashboardClient:
         # Convert timeline
         timeline = [self._convert_timeline_event(e) for e in proto.timeline]
 
-        # Convert pnl_history - filter out entries without valid timestamps
+        # Convert pnl_history - filter out entries without valid timestamps.
+        # Empty≠Zero (VIB-5942): an empty ``value_usd`` on the wire is an UNMEASURED
+        # NAV sample, converted to None so the chart skips it — never coerced to a
+        # measured Decimal("0") that would plot a fabricated $0 trough. A wire "0"
+        # is a MEASURED zero and stays Decimal("0") (it plots). The server already
+        # drops unmeasured windowed samples, so None here is the belt-and-braces
+        # boundary contract, not a hot path.
         pnl_history = [
             {
                 "timestamp": datetime.fromtimestamp(p.timestamp, tz=UTC),
-                "value_usd": Decimal(p.value_usd) if p.value_usd else Decimal("0"),
-                "pnl_usd": Decimal(p.pnl_usd) if p.pnl_usd else Decimal("0"),
+                "value_usd": Decimal(p.value_usd) if p.value_usd else None,
+                "pnl_usd": Decimal(p.pnl_usd) if p.pnl_usd else None,
             }
             for p in proto.pnl_history
             if p.timestamp  # Only include entries with valid timestamps

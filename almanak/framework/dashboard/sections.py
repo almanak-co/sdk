@@ -44,6 +44,7 @@ data they don't render.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 from typing import Any
@@ -103,6 +104,138 @@ def render_pnl_section(deployment_id: str) -> None:
     except GatewayConnectionError:
         cost = None
     render_money_trail(pnl, cost)
+
+
+# Latest-snapshot age past which the perp story is flagged stale on-screen — a
+# snapshot is not live venue truth, and at the ~5-min snapshot cadence anything
+# older than ~3 cadences means the run has likely stopped writing (VIB-5942).
+_PERP_SNAPSHOT_STALE_SECONDS = 900
+
+
+def _format_snapshot_provenance(positions_as_of: str) -> tuple[str, bool]:
+    """(caption, is_stale) for a snapshot ISO timestamp (VIB-5942 / ALM-2977).
+
+    Returns a human "as of <ts> (<age> ago)" caption and whether the snapshot is
+    older than :data:`_PERP_SNAPSHOT_STALE_SECONDS`. An unparseable / empty
+    timestamp degrades to ``("", False)`` — the caller still renders the section,
+    just without a provenance line.
+    """
+    from datetime import UTC, datetime
+
+    if not positions_as_of:
+        return "", False
+    try:
+        ts = datetime.fromisoformat(positions_as_of)
+    except (ValueError, TypeError):
+        return "", False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    age_s = (datetime.now(UTC) - ts).total_seconds()
+    if age_s < 0:
+        age_s = 0.0
+    if age_s < 90:
+        age_txt = f"{int(age_s)}s ago"
+    elif age_s < 5400:
+        age_txt = f"{int(age_s // 60)}m ago"
+    else:
+        age_txt = f"{age_s / 3600:.1f}h ago"
+    return f"as of {ts.isoformat(timespec='seconds')} ({age_txt})", age_s > _PERP_SNAPSHOT_STALE_SECONDS
+
+
+def _perp_field_rows(pos: Any) -> list[tuple[str, str]]:
+    """Build ``(label, value)`` rows for one perp position, Empty≠Zero per field.
+
+    An unmeasured field (None / "") renders "— unmeasured", never a fabricated
+    "$0.00" or a default direction. VIB-5942 / ALM-2977.
+    """
+    from almanak.framework.dashboard.utils import format_usd
+
+    def _money(v: Any) -> str:
+        return "— unmeasured" if v is None else format_usd(v, precise_small=True)
+
+    def _lev(v: Any) -> str:
+        return "— unmeasured" if v is None else f"{v:.2f}×"
+
+    direction = getattr(pos, "direction", "") or ""
+    dir_txt = direction if direction in ("LONG", "SHORT") else "— unmeasured"
+    market = getattr(pos, "market", "") or "— unmeasured"
+    protocol = getattr(pos, "protocol", "") or "— unmeasured"
+    return [
+        ("Protocol", protocol),
+        ("Market", market),
+        ("Direction", dir_txt),
+        ("Leverage", _lev(getattr(pos, "leverage", None))),
+        ("Notional", _money(getattr(pos, "notional_usd", None))),
+        ("Entry price", _money(getattr(pos, "entry_price_usd", None))),
+        ("Mark price", _money(getattr(pos, "mark_price_usd", None))),
+        ("Collateral", _money(getattr(pos, "collateral_usd", None))),
+        ("Unrealized PnL", _money(getattr(pos, "unrealized_pnl_usd", None))),
+    ]
+
+
+def render_perp_positions_section(deployment_id: str) -> None:
+    """Render the snapshot-derived perp position story (VIB-5942 / ALM-2977).
+
+    Direction (long/short), market, leverage, notional, entry / mark price and
+    collateral for each open perp — sourced from the LATEST portfolio snapshot's
+    PERP positions (``GetPnLSummary.perp_positions``). Per-field Empty≠Zero: a
+    value the snapshot did not measure renders "— unmeasured", never "$0.00" or a
+    default direction. The section is stamped with the snapshot's timestamp so a
+    stale snapshot is never mistaken for live venue truth.
+
+    Degrades cleanly: an old gateway that doesn't populate ``perp_positions`` (or
+    a strategy with no perp positions) renders a caption, not a crash. Place it in
+    a perp dashboard between the PnL card and the cost stack.
+    """
+    st.divider()
+    st.markdown("### Perp Positions")
+    try:
+        pnl = get_pnl_summary(deployment_id)
+    except GatewayConnectionError as exc:
+        from almanak.framework.dashboard.error_ui import render_gateway_error
+
+        render_gateway_error(exc, context="Perp positions", raw=str(exc))
+        return
+    if pnl is None:
+        # Empty != Zero on money VISIBILITY (VIB-5942 CodeRabbit): get_pnl_summary
+        # swallows a gateway outage / RPC failure and returns None. That is NOT an
+        # empty book — rendering "no open perp positions" here would fail-silent a
+        # data outage as a healthy flat portfolio. Surface it as an explicit
+        # unavailable state instead.
+        st.info(
+            "Perp positions unavailable — the gateway returned no live data (outage or RPC failure), not an empty book."
+        )
+        return
+    if not getattr(pnl, "perp_positions", None):
+        st.caption("No open perp positions in the latest snapshot.")
+        return
+
+    caption, is_stale = _format_snapshot_provenance(getattr(pnl, "positions_as_of", "") or "")
+    if caption:
+        st.caption(f"Snapshot-derived · {caption}")
+    if is_stale:
+        st.warning(
+            "This perp story is from a stale snapshot — it may not reflect the live "
+            "venue position. Values are as-of the timestamp above, not current."
+        )
+
+    for pos in pnl.perp_positions:
+        rows = _perp_field_rows(pos)
+        # Defense-in-depth (VIB-5942 audit): market / protocol / direction are
+        # data-derived strings interpolated into unsafe_allow_html — escape every
+        # value (the "—"-prefix color check runs on the raw string first, so an
+        # escaped em-dash never changes the measured/unmeasured styling).
+        cells = "".join(
+            f"<div style='display:flex;justify-content:space-between;gap:1rem;'>"
+            f"<span style='color:#888;'>{html.escape(label)}</span>"
+            f"<span style='color:{'#888' if val.startswith('—') else '#ddd'};'>{html.escape(val)}</span></div>"
+            for label, val in rows
+        )
+        st.markdown(
+            f"<div style='background:#1e1e1e;border:1px solid #333;border-radius:4px;"
+            f"padding:0.6rem 0.85rem;margin-bottom:0.5rem;font-size:0.9rem;line-height:1.7;'>{cells}</div>",
+            unsafe_allow_html=True,
+        )
 
 
 # Preset NAV/PnL chart ranges (VIB-5059 Phase 2). "All" (0 seconds) = full
@@ -194,13 +327,19 @@ def _fetch_windowed_nav(deployment_id: str, range_label: str) -> list[dict[str, 
         if ts is None:
             continue
         value = entry.get("value_usd") if isinstance(entry, dict) else getattr(entry, "value_usd", None)
-        if not value:
-            # Empty != Zero: the gateway already drops unmeasured NAV samples; this
-            # is belt-and-braces — skip rather than plot a fake $0 trough. ("0" is
-            # truthy, so a measured zero is preserved.)
+        if value is None:
+            # Empty != Zero (VIB-5942): None is an UNMEASURED NAV sample — skip it,
+            # never plot a fabricated $0 trough. A MEASURED zero (Decimal("0")) is
+            # NOT None, so it falls through and PLOTS: a wallet that genuinely marks
+            # to $0 must show the drop, and (the original bug) dropping it collapsed
+            # a post-close 2-point series to 1 point and a ~2ms degenerate x-axis.
             continue
         pnl = entry.get("pnl_usd") if isinstance(entry, dict) else getattr(entry, "pnl_usd", None)
-        points.append({"timestamp": ts, "value": float(value), "pnl": float(pnl) if pnl else 0.0})
+        # Empty != Zero (VIB-5942 CodeRabbit): an UNMEASURED pnl (None) stays None so
+        # the PnL-tab series renders a GAP — never a fabricated float(0.0) that would
+        # plant a measured $0 on the PnL chart (the same Empty≠Zero fix as the value
+        # series, threaded through the boundary's None instead of coerced away here).
+        points.append({"timestamp": ts, "value": float(value), "pnl": float(pnl) if pnl is not None else None})
     return points
 
 

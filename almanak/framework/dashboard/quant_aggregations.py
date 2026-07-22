@@ -40,6 +40,7 @@ from almanak.framework.valuation.net_debt import (
     net_debt_from_positions_json,
     net_debt_from_snapshot,
     read_position_decimal,
+    wallet_nav_usd,
 )
 
 logger = logging.getLogger(__name__)
@@ -181,6 +182,31 @@ def _payload_decimal(payload: dict[str, Any], *keys: str, default: str = "0") ->
     return Decimal(default)
 
 
+def _payload_decimal_or_none(payload: dict[str, Any], *keys: str) -> Decimal | None:
+    """Presence-aware twin of :func:`_payload_decimal` (Empty≠Zero, VIB-5942).
+
+    Returns the first present-and-**parseable** value across ``keys`` as a finite
+    Decimal, or ``None`` when none of the keys yields one — so the caller can tell
+    a MEASURED zero (``"0"`` on a key) from an UNMEASURED bucket (no key at all,
+    e.g. a perp fee the receipt parser has not populated yet).
+
+    A present-but-**malformed / non-finite** value (``"N/A"``, ``"NaN"``,
+    ``"Infinity"``, a corrupt legacy row) is treated as UNMEASURED (``None``), NOT
+    coerced to a measured ``Decimal("0")`` — VIB-5942 audit fix: the earlier
+    ``_to_decimal`` fallback marked corrupt rows as a confident measured zero,
+    exactly the fabrication this presence-aware path exists to prevent. A malformed
+    value does not short-circuit the alternate-key walk, so a valid alternate still
+    wins (legacy vs spec-name keys).
+    """
+    for key in keys:
+        v = payload.get(key)
+        if v is not None and v != "":
+            parsed = _to_decimal_or_none(v)
+            if parsed is not None:
+                return parsed
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Cost stack + reconciliation components
 # ---------------------------------------------------------------------------
@@ -193,6 +219,15 @@ class CostStack:
     gas_usd: Decimal = Decimal("0")
     protocol_fees_usd: Decimal = Decimal("0")
     slippage_usd: Decimal = Decimal("0")
+    # VIB-5942 (Empty≠Zero): the fee / slippage buckets aggregate to Decimal("0")
+    # BOTH when a measured zero was recorded AND when NO contributing event carried
+    # the term (e.g. a GMX perp whose receipt parser has not populated open/close
+    # fees yet — the VIB-5941 payload gap). These flags carry that distinction so
+    # the cost-stack tile can render "$0.00" (measured) vs "—" (unmeasured) instead
+    # of a fabricated "$0.00" for an unmeasured cost. Gas is always measured (every
+    # tx pays it), so it needs no flag.
+    protocol_fees_measured: bool = False
+    slippage_measured: bool = False
     fees_earned_usd: Decimal = Decimal("0")  # LP fees collected
     interest_paid_usd: Decimal = Decimal("0")
     interest_earned_usd: Decimal = Decimal("0")
@@ -544,6 +579,27 @@ class QuantHeader:
     posture: AccountantPosture = field(default_factory=AccountantPosture)
 
 
+def _accumulate_term(stack: CostStack, attr: str, meter: list[int], value: Decimal | None) -> None:
+    """Accumulate one APPLICABLE cost term and record coverage (VIB-5942 audit fix).
+
+    ``meter`` is ``[applicable, measured]``. Every call marks one applicable event
+    for the bucket (``meter[0] += 1``); a MEASURED term (``value is not None``) is
+    summed into ``stack.<attr>`` and counted (``meter[1] += 1``).
+
+    The bucket is measured **only if every applicable event contributed its term**
+    — the caller resolves ``meter[1] == meter[0] > 0``. A single applicable event
+    missing its term (``value is None``) leaves ``meter[1] < meter[0]`` → the whole
+    bucket is UNMEASURED. This kills the "first measured component flips the flag"
+    fabrication: a measured ``PERP_OPEN.open_fee_usd`` followed by a ``PERP_CLOSE``
+    with the close fee absent yields a partial total that must NOT be presented as
+    a confident measured lifetime number (it renders "— unmeasured" instead).
+    """
+    meter[0] += 1
+    if value is not None:
+        setattr(stack, attr, getattr(stack, attr) + value)
+        meter[1] += 1
+
+
 def compute_cost_stack(
     ledger_entries: list[Any] | LedgerQuantStats,
     accounting_events: list[dict[str, Any]],
@@ -559,6 +615,10 @@ def compute_cost_stack(
     decoded here.
     """
     stack = CostStack()
+    # [applicable, measured] coverage meters (VIB-5942): a fee/slippage bucket is
+    # measured only when EVERY applicable event contributed its term.
+    fee_meter = [0, 0]
+    slip_meter = [0, 0]
 
     stack.gas_usd += _ledger_stats(ledger_entries).gas_usd_sum
 
@@ -579,15 +639,16 @@ def compute_cost_stack(
 
         # SWAP — slippage is a cost; swap-gas already counted on ledger.
         if event_type == "SWAP":
-            slip = _payload_decimal(payload, "slippage_usd")
-            stack.slippage_usd += slip
+            _accumulate_term(stack, "slippage_usd", slip_meter, _payload_decimal_or_none(payload, "slippage_usd"))
             # VIB-4905 (F1): prefer ``realized_pnl_usd_matched`` (matched-
             # portion PnL, populated on partial matches too) and fall back
             # to legacy ``realized_pnl_usd`` (null on partial matches under
             # the v1 contract).  Pre-v2 payloads on disk only carry the
             # legacy key — the precedence walk handles both.
             stack.realized_pnl_usd += _payload_decimal(payload, "realized_pnl_usd_matched", "realized_pnl_usd")
-            stack.protocol_fees_usd += _payload_decimal(payload, "protocol_fee_usd", "fee_usd")
+            _accumulate_term(
+                stack, "protocol_fees_usd", fee_meter, _payload_decimal_or_none(payload, "protocol_fee_usd", "fee_usd")
+            )
             continue
 
         # LENDING family
@@ -612,12 +673,12 @@ def compute_cost_stack(
 
         # PERP family
         if event_type == "PERP_OPEN":
-            stack.protocol_fees_usd += _payload_decimal(payload, "open_fee_usd")
-            stack.slippage_usd += _payload_decimal(payload, "price_impact_usd")
+            _accumulate_term(stack, "protocol_fees_usd", fee_meter, _payload_decimal_or_none(payload, "open_fee_usd"))
+            _accumulate_term(stack, "slippage_usd", slip_meter, _payload_decimal_or_none(payload, "price_impact_usd"))
             continue
         if event_type == "PERP_CLOSE":
-            stack.protocol_fees_usd += _payload_decimal(payload, "close_fee_usd")
-            stack.slippage_usd += _payload_decimal(payload, "price_impact_usd")
+            _accumulate_term(stack, "protocol_fees_usd", fee_meter, _payload_decimal_or_none(payload, "close_fee_usd"))
+            _accumulate_term(stack, "slippage_usd", slip_meter, _payload_decimal_or_none(payload, "price_impact_usd"))
             stack.realized_pnl_usd += _payload_decimal(payload, "realized_pnl_usd")
             paid = _payload_decimal(payload, "funding_paid_usd")
             recv = _payload_decimal(payload, "funding_received_usd")
@@ -625,6 +686,11 @@ def compute_cost_stack(
             stack.funding_earned_usd += recv
             continue
 
+    # A bucket is MEASURED only if every applicable event contributed its term
+    # (meter[1] == meter[0]) and at least one applicable event existed (> 0).
+    # Any-missing → unmeasured ("" sentinel on the wire → "— unmeasured").
+    stack.protocol_fees_measured = fee_meter[0] > 0 and fee_meter[1] == fee_meter[0]
+    stack.slippage_measured = slip_meter[0] > 0 and slip_meter[1] == slip_meter[0]
     return stack
 
 
@@ -1173,7 +1239,10 @@ def _drawdowns(snapshots: list[Any]) -> tuple[Decimal, Decimal]:
         if cash is None and isinstance(snap, dict):
             cash = snap.get("available_cash_usd")
         _count, debt_mark, _debt_cost, _net_cost = net_debt_from_snapshot(snap)
-        wallet_nav = _to_decimal(v) - debt_mark + _to_decimal(cash)
+        # VIB-5942: one shared wallet-NAV definition (total − debt + cash) — the
+        # same helper the NAV-history chart, the drawdown text reader, and the
+        # NAV-now tile use, so the recent-window drawdown cannot drift from them.
+        wallet_nav = wallet_nav_usd(_to_decimal(v), debt_mark, _to_decimal(cash))
         if wallet_nav > Decimal("0"):
             values.append(wallet_nav)
     return _drawdown_stats(values)
@@ -1304,7 +1373,10 @@ def _wallet_navs_from_nav_text(rows: Iterable[tuple[Any, ...]]) -> list[Decimal]
         debt_mark = Decimal("0")
         if len(row) > 4:
             _count, debt_mark, _debt_cost = net_debt_from_positions_json(row[4])
-        wallet_nav = _to_decimal(row[1]) - debt_mark + _to_decimal(row[2])
+        # VIB-5942: one wallet-NAV definition (total − debt + cash) shared with the
+        # NAV-now tile and the NAV-history chart series. Byte-identical to the prior
+        # inline expression; routed through the helper so the three cannot drift.
+        wallet_nav = wallet_nav_usd(_to_decimal(row[1]), debt_mark, _to_decimal(row[2]))
         if wallet_nav > Decimal("0"):
             navs.append(wallet_nav)
     return navs
@@ -1436,7 +1508,12 @@ def compute_pnl_summary(
     pnl = PnLSummary()
 
     # ── Latest snapshot first: needed to compute wallet NAV (VIB-3884) ───
-    deployed_value_usd = Decimal("0")
+    # Raw ``total_value_usd`` + debt kept separately so the "NAV now" tile below
+    # computes wallet NAV through the ONE shared ``wallet_nav_usd`` helper with
+    # honest (total, debt, cash) args (VIB-5942) — same definition as the NAV
+    # chart + drawdown series. Hoisted so they are bound when there is no snapshot.
+    _raw_total_value_usd = Decimal("0")
+    _debt_to_net = Decimal("0")
     _debt_cost_to_net = Decimal("0")
     # VIB-5339/VIB-5738: the dust-aware DISPLAY count for a typed snapshot, or
     # None for dict/legacy shapes (and when there is no snapshot). Hoisted to
@@ -1453,7 +1530,7 @@ def compute_pnl_summary(
         if confidence:
             pnl.value_confidence = confidence
         pnl.deployed_capital_usd = _to_decimal(getattr(latest, "deployed_capital_usd", "0"))
-        deployed_value_usd = _to_decimal(getattr(latest, "total_value_usd", "0"))
+        _raw_total_value_usd = _to_decimal(getattr(latest, "total_value_usd", "0"))
         # Open position count + leverage debt-netting from positions_json.
         # VIB-4983: net the BORROW debt leg (negative value_usd) that
         # total_value_usd (positive-position-scoped, VIB-3614) dropped, so an
@@ -1476,7 +1553,6 @@ def compute_pnl_summary(
         _display_count = _count_open_positions(latest)
         if _display_count is not None:
             pnl.open_position_count = _display_count
-        deployed_value_usd -= _debt_to_net
 
     # VIB-3914: Anchor "Deployed" to the wallet snapshot the strategy
     # itself captured at first intent, not the ``portfolio_metrics``
@@ -1528,8 +1604,10 @@ def compute_pnl_summary(
     # 241-247) — undeployed wallet capital lives in ``available_cash_usd``.
     # The Senior-Quant audience reads "NAV now" as wallet net asset value
     # — what the strategy would mark to market right now if you had to
-    # report to an LP. That's ``total_value_usd + available_cash_usd``.
-    wallet_nav = deployed_value_usd + pnl.available_cash_usd
+    # report to an LP. That's ``total_value_usd − debt + available_cash_usd``,
+    # computed through the ONE shared helper so this tile, the NAV-history chart,
+    # and the drawdown series are provably one definition (VIB-5942).
+    wallet_nav = wallet_nav_usd(_raw_total_value_usd, _debt_to_net, pnl.available_cash_usd)
     pnl.nav_usd = wallet_nav
     if pnl.capital_flows_unmeasured:
         # VIB-5866: lifetime PnL is ``nav − (baseline + deposits − withdrawals)``.

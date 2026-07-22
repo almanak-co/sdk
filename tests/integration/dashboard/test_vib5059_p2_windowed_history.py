@@ -227,7 +227,7 @@ async def test_nav_window_bounds_and_budget(big_sm: StateManager) -> None:
     assert rows, "7-day window must contain snapshots"
 
     # Build NavPoints exactly as the gateway builder does, then decimate.
-    points = [NavPoint(ts, Decimal(v)) for ts, v, _c, _pj in rows if v]
+    points = [NavPoint(ts, Decimal(v)) for ts, v, _cash, _c, _pj in rows if v]
     out = decimate_nav(points, clamp_max_points(max_points))
 
     # Every returned point lies inside the requested window.
@@ -243,8 +243,8 @@ async def test_nav_window_bounds_and_budget(big_sm: StateManager) -> None:
     assert len(set(times)) == len(times)
 
     # Endpoints are anchors — the window's earliest + latest raw rows verbatim.
-    first_raw_ts, first_raw_val, _, _ = rows[0]
-    last_raw_ts, last_raw_val, _, _ = rows[-1]
+    first_raw_ts, first_raw_val, _, _, _ = rows[0]
+    last_raw_ts, last_raw_val, _, _, _ = rows[-1]
     assert out[0].timestamp == first_raw_ts
     assert str(out[0].value) == str(Decimal(first_raw_val))
     assert out[-1].timestamp == last_raw_ts
@@ -264,7 +264,7 @@ async def test_nav_decimation_preserves_spike(big_sm: StateManager) -> None:
     assert not truncated
     assert len(rows) == _TOTAL_SNAPSHOTS
 
-    points = [NavPoint(ts, Decimal(v)) for ts, v, _c, _pj in rows if v]
+    points = [NavPoint(ts, Decimal(v)) for ts, v, _cash, _c, _pj in rows if v]
     out = decimate_nav(points, clamp_max_points(DEFAULT_MAX_POINTS))
 
     # Decimation actually occurred.
@@ -479,7 +479,7 @@ async def test_window_size_sweep(big_sm: StateManager) -> None:
         raw_in_window = len(rows)
         assert raw_in_window >= 1, f"{label}: window must contain >=1 snapshot"
 
-        points = [NavPoint(ts, Decimal(v)) for ts, v, _c, _pj in rows if v]
+        points = [NavPoint(ts, Decimal(v)) for ts, v, _cash, _c, _pj in rows if v]
         out = decimate_nav(points, clamp_max_points(max_points))
 
         assert out, f"{label}: non-empty window must not decimate to empty"
@@ -553,6 +553,7 @@ async def test_postgres_window_sql_shape_and_parity(big_sm: StateManager) -> Non
     assert "timestamp >=" in sql  # lower bound
     assert "timestamp <=" in sql  # upper bound
     assert "total_value_usd::text" in sql  # cast for Empty!=Zero ownership
+    assert "available_cash_usd::text" in sql  # VIB-5942: wallet-NAV (total-debt+cash)
     assert "value_confidence" in sql
     # VIB-5170: positions_json::text projected for per-row debt netting; other JSON
     # blobs still excluded (transfer-size discipline).
@@ -576,8 +577,14 @@ async def test_postgres_window_sql_shape_and_parity(big_sm: StateManager) -> Non
     # The PG method reverses a DESC fetch to oldest-first; emulate the DB by
     # handing the fake conn the same rows newest-first.
     pg_db_rows = [
-        {"timestamp": ts, "total_value_text": val, "value_confidence": conf, "positions_text": pj}
-        for ts, val, conf, pj in reversed(sqlite_rows)
+        {
+            "timestamp": ts,
+            "total_value_text": val,
+            "available_cash_text": cash,
+            "value_confidence": conf,
+            "positions_text": pj,
+        }
+        for ts, val, cash, conf, pj in reversed(sqlite_rows)
     ]
     conn2 = _FakeConn(fetch_rows=pg_db_rows)
     store2 = _make_pg_store(conn2)
@@ -585,7 +592,7 @@ async def test_postgres_window_sql_shape_and_parity(big_sm: StateManager) -> Non
     assert not pg_trunc
 
     def _to_points(rows):
-        return [NavPoint(ts, Decimal(v)) for ts, v, _c, _pj in rows if v]
+        return [NavPoint(ts, Decimal(v)) for ts, v, _cash, _c, _pj in rows if v]
 
     sqlite_out = decimate_nav(_to_points(sqlite_rows), clamp_max_points(1500))
     pg_out = decimate_nav(_to_points(pg_rows), clamp_max_points(1500))
@@ -594,14 +601,27 @@ async def test_postgres_window_sql_shape_and_parity(big_sm: StateManager) -> Non
 
     # --- (c) Empty!=Zero: a PG row with total_value_usd text "" is unmeasured.
     empty_rows = [
-        {"timestamp": _snap_ts(1), "total_value_text": "1000.00", "value_confidence": "HIGH", "positions_text": "[]"},
+        {
+            "timestamp": _snap_ts(1),
+            "total_value_text": "1000.00",
+            "available_cash_text": "0",
+            "value_confidence": "HIGH",
+            "positions_text": "[]",
+        },
         {
             "timestamp": _snap_ts(2),
             "total_value_text": "",
+            "available_cash_text": "0",
             "value_confidence": "HIGH",
             "positions_text": "[]",
         },  # unmeasured
-        {"timestamp": _snap_ts(3), "total_value_text": "1001.00", "value_confidence": "HIGH", "positions_text": "[]"},
+        {
+            "timestamp": _snap_ts(3),
+            "total_value_text": "1001.00",
+            "available_cash_text": "0",
+            "value_confidence": "HIGH",
+            "positions_text": "[]",
+        },
     ]
     conn3 = _FakeConn(fetch_rows=list(reversed(empty_rows)))  # DB hands DESC
     store3 = _make_pg_store(conn3)
@@ -715,7 +735,7 @@ async def test_inverted_window_rejected(golden_store: SQLiteStore) -> None:
 @pytest.mark.asyncio
 async def test_max_points_bounded(big_sm: StateManager) -> None:
     rows, _ = await big_sm.get_snapshots_in_window(_DEPLOYMENT_ID, None, None)
-    points = [NavPoint(ts, Decimal(v)) for ts, v, _c, _pj in rows if v]
+    points = [NavPoint(ts, Decimal(v)) for ts, v, _cash, _c, _pj in rows if v]
 
     # max_points = 10_000_000 -> clamped to CEILING.
     huge = clamp_max_points(10_000_000)
@@ -807,7 +827,7 @@ async def test_nonempty_window_never_empty(tmp_path) -> None:
     await _seed_snapshot(store1, 0, Decimal("100"))
     sm1 = _make_state_manager(store1)
     rows1, _ = await sm1.get_snapshots_in_window(_DEPLOYMENT_ID, None, None)
-    out1 = decimate_nav([NavPoint(ts, Decimal(v)) for ts, v, _c, _pj in rows1 if v], clamp_max_points(1500))
+    out1 = decimate_nav([NavPoint(ts, Decimal(v)) for ts, v, _cash, _c, _pj in rows1 if v], clamp_max_points(1500))
     assert len(out1) == 1, "1-row window returns that row, never empty"
 
     store2 = await _make_store(str(tmp_path / "two.db"))
@@ -815,7 +835,7 @@ async def test_nonempty_window_never_empty(tmp_path) -> None:
     await _seed_snapshot(store2, 1, Decimal("101"))
     sm2 = _make_state_manager(store2)
     rows2, _ = await sm2.get_snapshots_in_window(_DEPLOYMENT_ID, None, None)
-    out2 = decimate_nav([NavPoint(ts, Decimal(v)) for ts, v, _c, _pj in rows2 if v], clamp_max_points(1500))
+    out2 = decimate_nav([NavPoint(ts, Decimal(v)) for ts, v, _cash, _c, _pj in rows2 if v], clamp_max_points(1500))
     assert len(out2) == 2, "2-row window returns both rows, never empty"
 
     # max_points+1 case (over budget): returns <= budget but >= 2 (anchors).
@@ -826,7 +846,7 @@ async def test_nonempty_window_never_empty(tmp_path) -> None:
     smN = _make_state_manager(storeN)
     rowsN, _ = await smN.get_snapshots_in_window(_DEPLOYMENT_ID, None, None)
     assert len(rowsN) == budget + 1
-    outN = decimate_nav([NavPoint(ts, Decimal(v)) for ts, v, _c, _pj in rowsN if v], budget)
+    outN = decimate_nav([NavPoint(ts, Decimal(v)) for ts, v, _cash, _c, _pj in rowsN if v], budget)
     assert outN, "over-budget non-empty window must not decimate to empty"
     assert len(outN) <= budget
     assert len(outN) >= 2

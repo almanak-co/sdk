@@ -45,6 +45,7 @@ from almanak.framework.dashboard.plots import (
 )
 from almanak.framework.dashboard.sections import (
     render_cost_stack_section,
+    render_perp_positions_section,
     render_pnl_section,
     render_trade_tape_section,
 )
@@ -114,6 +115,10 @@ def render_perp_dashboard(
 
     # Eyeball — am I making or losing money?
     render_pnl_section(deployment_id)
+
+    # Snapshot-derived perp story (direction / market / leverage / notional /
+    # entry / mark), Empty≠Zero per field with snapshot provenance (VIB-5942).
+    render_perp_positions_section(deployment_id)
 
     # Position Overview
     if config.show_position_dashboard and session_state.get("has_position"):

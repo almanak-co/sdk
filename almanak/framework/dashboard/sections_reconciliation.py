@@ -326,6 +326,19 @@ def render_reconciliation_report_section(
     if heading:
         st.markdown(heading)
 
+    # VIB-5942: this report is a position-STRUCTURE three-way diff (does the
+    # same physical position appear consistently across ledger, snapshots, and
+    # registry). It deliberately does NOT check the PnL value identity — that is
+    # the header's "PnL reconciliation (G6)" tile (wallet PnL ≡ Σ component PnL).
+    # Both can hold at once: positions can agree structurally (0 findings here)
+    # while the PnL identity has a gap (G6 FAIL). The explicit scope label stops
+    # the two surfaces from reading as a self-contradiction.
+    st.caption(
+        "Scope: position **structure** across ledger / snapshots / registry — "
+        "not PnL values. PnL value identity lives in the header's "
+        "*PnL reconciliation (G6)* tile."
+    )
+
     try:
         report = client.get_reconciliation_report(deployment_id)
     except DashboardClientError as exc:
@@ -347,11 +360,26 @@ def render_reconciliation_report_section(
             hide_index=True,
             use_container_width=True,
         )
+    elif report.primitive_stubs:
+        # VIB-5942 audit: "no findings" does NOT mean "everything reconciles" when
+        # primitives below have no v1 parser — those positions were NOT checked, so
+        # a green success banner would overstate coverage. Qualify to the COVERED
+        # set and point at the uncovered stubs listed right below.
+        st.info(
+            "No structural findings among the **covered** positions (ledger ↔ snapshots ↔ "
+            "registry agree). Coverage is partial — the primitives listed below have no v1 "
+            "parser and were not reconciled. (Position structure only; PnL value identity is "
+            "the header's G6 tile.)"
+        )
     else:
-        st.success("No reconciliation findings — ledger, snapshots, and registry agree.")
+        st.success(
+            "No structural findings — every position appears consistently across "
+            "ledger, snapshots, and registry. (Position structure only; PnL value "
+            "identity is the header's G6 tile.)"
+        )
 
     if report.primitive_stubs:
-        st.markdown("**Coverage stubs** — primitives without a v1 parser:")
+        st.markdown("**Coverage stubs** — primitives without a v1 parser (NOT reconciled):")
         for stub in report.primitive_stubs:
             st.caption(f"• {stub.primitive}: {stub.message} ({stub.ticket})")
 

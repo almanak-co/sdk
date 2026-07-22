@@ -872,16 +872,17 @@ class PostgresStore:
         to_ts: datetime | None,
         *,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, str | None]], bool]:
+    ) -> tuple[list[tuple[datetime, str | None, str | None, str | None, str | None]], bool]:
         """Projected NAV samples inside a time window (VIB-5059 P2). Postgres twin
         of :meth:`SQLiteStore.get_snapshots_in_window` — identical contract.
 
         Returns ``(rows, truncated)`` with ``rows`` = ``(timestamp,
-        total_value_usd_text, value_confidence_text, positions_json_text)``
-        oldest-first. Projects the chart columns plus ``positions_json`` (VIB-5170,
-        for per-row BORROW debt netting), casting text columns ``::text`` so the
-        caller owns the Empty≠Zero decision. Newest ``scan_cap`` in-window rows;
-        ``truncated`` when the window held more.
+        total_value_usd_text, available_cash_usd_text, value_confidence_text,
+        positions_json_text)`` oldest-first. Projects the chart columns plus
+        ``available_cash_usd`` (VIB-5942, for the wallet-NAV ``total − debt + cash``
+        series) and ``positions_json`` (VIB-5170, for per-row BORROW debt netting),
+        casting text columns ``::text`` so the caller owns the Empty≠Zero decision.
+        Newest ``scan_cap`` in-window rows; ``truncated`` when the window held more.
         """
         if scan_cap <= 0:
             raise ValueError(f"scan_cap must be positive, got {scan_cap}")
@@ -902,7 +903,8 @@ class PostgresStore:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT timestamp, total_value_usd::text AS total_value_text, value_confidence,
+                SELECT timestamp, total_value_usd::text AS total_value_text,
+                       available_cash_usd::text AS available_cash_text, value_confidence,
                        positions_json::text AS positions_text
                 FROM portfolio_snapshots
                 WHERE {" AND ".join(clauses)}
@@ -916,7 +918,14 @@ class PostgresStore:
             rows = rows[:scan_cap]  # newest scan_cap (DESC order)
         # DESC fetch -> emit oldest-first.
         return [
-            (r["timestamp"], r["total_value_text"], r["value_confidence"], r["positions_text"]) for r in reversed(rows)
+            (
+                r["timestamp"],
+                r["total_value_text"],
+                r["available_cash_text"],
+                r["value_confidence"],
+                r["positions_text"],
+            )
+            for r in reversed(rows)
         ], truncated
 
     async def get_nav_series(
@@ -2904,10 +2913,13 @@ class StateManager:
         to_ts: datetime | None,
         *,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, str | None]], bool]:
+    ) -> tuple[list[tuple[datetime, str | None, str | None, str | None, str | None]], bool]:
         """Projected NAV samples inside a time window, for windowed charts (VIB-5059 P2).
 
-        Returns ``(rows, truncated)`` — see the backend method for the row shape.
+        Returns ``(rows, truncated)`` — see the backend method for the row shape
+        (``(timestamp, total_value_text, available_cash_text, value_confidence,
+        positions_text)``; ``available_cash_text`` added in VIB-5942 for the
+        wallet-NAV series).
 
         **Loud, not graceful.** Unlike :meth:`get_snapshots_since` /
         :meth:`get_recent_snapshots` (which swallow backend errors and return ``[]``

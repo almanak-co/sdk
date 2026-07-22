@@ -17,6 +17,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
 from almanak.framework.dashboard.quant_aggregations import (
     PnLSummary,
     _apply_primary_risk_gauge,
@@ -154,6 +156,77 @@ def test_cost_stack_perp_funding_split():
     assert cs.protocol_fees_usd == Decimal("0.40")  # close fee on PERP_CLOSE
     assert cs.funding_paid_usd == Decimal("0.20")
     assert cs.funding_earned_usd == Decimal("0.05")
+
+
+def test_cost_stack_measured_flags_set_when_terms_present():
+    """VIB-5942: a SWAP that carries fee + slippage marks BOTH buckets measured."""
+    cs = compute_cost_stack([], [_event("SWAP", {"protocol_fee_usd": "0.20", "slippage_usd": "0.10"})])
+    assert cs.protocol_fees_measured is True
+    assert cs.slippage_measured is True
+
+
+def test_cost_stack_perp_without_fee_payload_is_unmeasured():
+    """VIB-5942 Empty≠Zero: a GMX perp round-trip whose receipt parser has NOT
+    populated fee / price-impact keys (the VIB-5941 payload gap) leaves the buckets
+    UNMEASURED (flag False), so the tile can render "—" not a fabricated "$0.00".
+    Gas (from the ledger) is still measured independently."""
+    ledger = [_ledger(gas_usd="0.0008")]
+    events = [_event("PERP_OPEN", {"is_long": None}), _event("PERP_CLOSE", {"realized_pnl_usd": "1.10"})]
+    cs = compute_cost_stack(ledger, events)
+    assert cs.protocol_fees_measured is False
+    assert cs.slippage_measured is False
+    assert cs.protocol_fees_usd == Decimal("0")  # aggregate is 0 BUT unmeasured
+    assert cs.gas_usd == Decimal("0.0008")  # gas is measured
+
+
+def test_cost_stack_measured_zero_fee_sets_flag():
+    """A PRESENT "0" fee is a MEASURED zero: flag True, value 0 (renders $0.00)."""
+    cs = compute_cost_stack([], [_event("SWAP", {"protocol_fee_usd": "0"})])
+    assert cs.protocol_fees_measured is True
+    assert cs.protocol_fees_usd == Decimal("0")
+
+
+def test_cost_stack_partial_fee_coverage_is_unmeasured():
+    """VIB-5942 audit (Codex P1): the bucket is measured only if EVERY applicable
+    event contributed its term. A measured PERP_OPEN.open_fee_usd followed by a
+    PERP_CLOSE with the close fee ABSENT is a partial (incomplete) lifetime total —
+    it must NOT flip the flag to measured, or the tile shows a confident-but-wrong
+    number. Any-missing → unmeasured."""
+    events = [
+        _event("PERP_OPEN", {"open_fee_usd": "0.30", "price_impact_usd": "0.05"}),
+        _event("PERP_CLOSE", {"realized_pnl_usd": "1.10"}),  # close_fee_usd + price_impact ABSENT
+    ]
+    cs = compute_cost_stack([], events)
+    # OPEN measured both terms; CLOSE measured neither → 1 of 2 applicable → UNMEASURED.
+    assert cs.protocol_fees_measured is False
+    assert cs.slippage_measured is False
+    # And the inverse: when EVERY applicable event contributes, the bucket is measured.
+    events_full = [
+        _event("PERP_OPEN", {"open_fee_usd": "0.30", "price_impact_usd": "0.05"}),
+        _event("PERP_CLOSE", {"close_fee_usd": "0.40", "price_impact_usd": "0.15"}),
+    ]
+    cs_full = compute_cost_stack([], events_full)
+    assert cs_full.protocol_fees_measured is True
+    assert cs_full.slippage_measured is True
+    assert cs_full.protocol_fees_usd == Decimal("0.70")  # 0.30 + 0.40
+
+
+@pytest.mark.parametrize("bad", ["N/A", "NaN", "Infinity", "-Infinity", "not-a-number", "1,234"])
+def test_cost_stack_malformed_fee_is_unmeasured_not_zero(bad):
+    """VIB-5942 audit (Codex P2): a present-but-malformed / non-finite fee value on
+    a corrupt or legacy row must read as UNMEASURED (None), never coerced to a
+    measured Decimal("0"). It is the ONLY applicable event → bucket unmeasured."""
+    cs = compute_cost_stack([], [_event("SWAP", {"protocol_fee_usd": bad, "slippage_usd": bad})])
+    assert cs.protocol_fees_measured is False, f"{bad!r} must not mark a measured zero"
+    assert cs.slippage_measured is False
+    assert cs.protocol_fees_usd == Decimal("0")  # nothing summed
+
+
+def test_cost_stack_malformed_alternate_key_falls_through_to_valid():
+    """A malformed primary key does not defeat a valid alternate (legacy vs spec)."""
+    cs = compute_cost_stack([], [_event("SWAP", {"protocol_fee_usd": "N/A", "fee_usd": "0.25"})])
+    assert cs.protocol_fees_measured is True
+    assert cs.protocol_fees_usd == Decimal("0.25")
 
 
 def test_cost_stack_lending_interest_split():

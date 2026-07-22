@@ -3306,6 +3306,41 @@ message PnLSummary {
   string primary_risk_label = 31;   // "Range" | "Health Factor" | "Leverage"
   string primary_risk_value = 32;   // "in-range YES" | "1.78" | "1.7×"
   string primary_risk_color = 33;   // "green" | "yellow" | "red" | "neutral"
+
+  // VIB-5942 (ALM-2977): snapshot-derived perp position story (direction,
+  // market, leverage, notional, entry / mark price). ADDITIVE + optional — an
+  // old gateway leaves this empty and the client simply renders no perp section
+  // (never a crash / fabricated zeros); a new gateway talking to an old client
+  // is ignored. Populated from the LATEST portfolio_snapshot's PERP positions
+  // (plural). ``positions_as_of`` is that snapshot's ISO timestamp so the UI can
+  // stamp provenance / staleness — a snapshot is not live venue truth.
+  repeated PerpPositionSummary perp_positions = 40;
+  string positions_as_of = 41;      // ISO-8601 ts of the source snapshot ("" if none)
+}
+
+// PerpPositionSummary — one open perp position as MEASURED by the latest
+// portfolio snapshot (VIB-5942 / ALM-2977). Every string field follows the
+// project-wide Empty≠Zero contract: "" => UNMEASURED (render "— unmeasured"),
+// a present value (incl. "0") => measured. Perp receipt-parser-pending fields
+// (VIB-5717) simply arrive "" until the snapshot measures them. All decimals
+// serialized as strings to preserve precision.
+message PerpPositionSummary {
+  string market = 1;                // e.g. "ETH/USD" or a market address ("" unmeasured)
+  // direction and is_long are INDEPENDENTLY measurable: the server sets is_long
+  // from a measured boolean when present, else derives direction from a measured
+  // ``side`` string ("LONG"/"SHORT") while leaving is_long absent. So direction
+  // MAY be "LONG"/"SHORT" with is_long unset (measured via side), or "" with
+  // is_long set (a bool but no textual side). Both "" (unmeasured).
+  string direction = 2;             // "LONG" | "SHORT" | "" (unmeasured)
+  optional bool is_long = 3;        // absent => is_long unmeasured (direction may still be measured via side)
+  string entry_price_usd = 4;
+  string mark_price_usd = 5;
+  string leverage = 6;
+  string notional_usd = 7;          // position size in USD
+  string collateral_usd = 8;
+  string unrealized_pnl_usd = 9;
+  string protocol = 10;             // e.g. "gmx_v2"
+  string chain = 11;
 }
 
 // CostStackInfo — life-to-date cost & earn decomposition. Same numbers

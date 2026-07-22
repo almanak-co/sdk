@@ -8401,6 +8401,8 @@ class PnLSummary(_message.Message):
     PRIMARY_RISK_LABEL_FIELD_NUMBER: _builtins.int
     PRIMARY_RISK_VALUE_FIELD_NUMBER: _builtins.int
     PRIMARY_RISK_COLOR_FIELD_NUMBER: _builtins.int
+    PERP_POSITIONS_FIELD_NUMBER: _builtins.int
+    POSITIONS_AS_OF_FIELD_NUMBER: _builtins.int
     deployed_usd: _builtins.str
     """Money trail (G1, G4, G5)
     initial + deposits - withdrawals
@@ -8435,6 +8437,19 @@ class PnLSummary(_message.Message):
     """"in-range YES" | "1.78" | "1.7×" """
     primary_risk_color: _builtins.str
     """"green" | "yellow" | "red" | "neutral" """
+    positions_as_of: _builtins.str
+    """ISO-8601 ts of the source snapshot ("" if none)"""
+    @_builtins.property
+    def perp_positions(self) -> _containers.RepeatedCompositeFieldContainer[Global___PerpPositionSummary]:
+        """VIB-5942 (ALM-2977): snapshot-derived perp position story (direction,
+        market, leverage, notional, entry / mark price). ADDITIVE + optional — an
+        old gateway leaves this empty and the client simply renders no perp section
+        (never a crash / fabricated zeros); a new gateway talking to an old client
+        is ignored. Populated from the LATEST portfolio_snapshot's PERP positions
+        (plural). ``positions_as_of`` is that snapshot's ISO timestamp so the UI can
+        stamp provenance / staleness — a snapshot is not live venue truth.
+        """
+
     def __init__(
         self,
         *,
@@ -8454,11 +8469,83 @@ class PnLSummary(_message.Message):
         primary_risk_label: _builtins.str = ...,
         primary_risk_value: _builtins.str = ...,
         primary_risk_color: _builtins.str = ...,
+        perp_positions: _abc.Iterable[Global___PerpPositionSummary] | None = ...,
+        positions_as_of: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["age_days", b"age_days", "available_cash_usd", b"available_cash_usd", "current_drawdown_pct", b"current_drawdown_pct", "deployed_capital_usd", b"deployed_capital_usd", "deployed_usd", b"deployed_usd", "lifetime_pnl_pct", b"lifetime_pnl_pct", "lifetime_pnl_usd", b"lifetime_pnl_usd", "max_drawdown_pct", b"max_drawdown_pct", "nav_usd", b"nav_usd", "net_apr_pct", b"net_apr_pct", "open_position_count", b"open_position_count", "primary_risk_color", b"primary_risk_color", "primary_risk_kind", b"primary_risk_kind", "primary_risk_label", b"primary_risk_label", "primary_risk_value", b"primary_risk_value", "value_confidence", b"value_confidence"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["age_days", b"age_days", "available_cash_usd", b"available_cash_usd", "current_drawdown_pct", b"current_drawdown_pct", "deployed_capital_usd", b"deployed_capital_usd", "deployed_usd", b"deployed_usd", "lifetime_pnl_pct", b"lifetime_pnl_pct", "lifetime_pnl_usd", b"lifetime_pnl_usd", "max_drawdown_pct", b"max_drawdown_pct", "nav_usd", b"nav_usd", "net_apr_pct", b"net_apr_pct", "open_position_count", b"open_position_count", "perp_positions", b"perp_positions", "positions_as_of", b"positions_as_of", "primary_risk_color", b"primary_risk_color", "primary_risk_kind", b"primary_risk_kind", "primary_risk_label", b"primary_risk_label", "primary_risk_value", b"primary_risk_value", "value_confidence", b"value_confidence"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PnLSummary: _TypeAlias = PnLSummary  # noqa: Y015
+
+@_typing.final
+class PerpPositionSummary(_message.Message):
+    """PerpPositionSummary — one open perp position as MEASURED by the latest
+    portfolio snapshot (VIB-5942 / ALM-2977). Every string field follows the
+    project-wide Empty≠Zero contract: "" => UNMEASURED (render "— unmeasured"),
+    a present value (incl. "0") => measured. Perp receipt-parser-pending fields
+    (VIB-5717) simply arrive "" until the snapshot measures them. All decimals
+    serialized as strings to preserve precision.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    MARKET_FIELD_NUMBER: _builtins.int
+    DIRECTION_FIELD_NUMBER: _builtins.int
+    IS_LONG_FIELD_NUMBER: _builtins.int
+    ENTRY_PRICE_USD_FIELD_NUMBER: _builtins.int
+    MARK_PRICE_USD_FIELD_NUMBER: _builtins.int
+    LEVERAGE_FIELD_NUMBER: _builtins.int
+    NOTIONAL_USD_FIELD_NUMBER: _builtins.int
+    COLLATERAL_USD_FIELD_NUMBER: _builtins.int
+    UNREALIZED_PNL_USD_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    market: _builtins.str
+    """e.g. "ETH/USD" or a market address ("" unmeasured)"""
+    direction: _builtins.str
+    """direction and is_long are INDEPENDENTLY measurable: the server sets is_long
+    from a measured boolean when present, else derives direction from a measured
+    ``side`` string ("LONG"/"SHORT") while leaving is_long absent. So direction
+    MAY be "LONG"/"SHORT" with is_long unset (measured via side), or "" with
+    is_long set (a bool but no textual side). Both "" (unmeasured).
+    "LONG" | "SHORT" | "" (unmeasured)
+    """
+    is_long: _builtins.bool
+    """absent => is_long unmeasured (direction may still be measured via side)"""
+    entry_price_usd: _builtins.str
+    mark_price_usd: _builtins.str
+    leverage: _builtins.str
+    notional_usd: _builtins.str
+    """position size in USD"""
+    collateral_usd: _builtins.str
+    unrealized_pnl_usd: _builtins.str
+    protocol: _builtins.str
+    """e.g. "gmx_v2" """
+    chain: _builtins.str
+    def __init__(
+        self,
+        *,
+        market: _builtins.str = ...,
+        direction: _builtins.str = ...,
+        is_long: _builtins.bool | None = ...,
+        entry_price_usd: _builtins.str = ...,
+        mark_price_usd: _builtins.str = ...,
+        leverage: _builtins.str = ...,
+        notional_usd: _builtins.str = ...,
+        collateral_usd: _builtins.str = ...,
+        unrealized_pnl_usd: _builtins.str = ...,
+        protocol: _builtins.str = ...,
+        chain: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_is_long", b"_is_long", "is_long", b"is_long"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_is_long", b"_is_long", "chain", b"chain", "collateral_usd", b"collateral_usd", "direction", b"direction", "entry_price_usd", b"entry_price_usd", "is_long", b"is_long", "leverage", b"leverage", "mark_price_usd", b"mark_price_usd", "market", b"market", "notional_usd", b"notional_usd", "protocol", b"protocol", "unrealized_pnl_usd", b"unrealized_pnl_usd"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType__is_long: _TypeAlias = _typing.Literal["is_long"]  # noqa: Y015
+    _WhichOneofArgType__is_long: _TypeAlias = _typing.Literal["_is_long", b"_is_long"]  # noqa: Y015
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__is_long) -> _WhichOneofReturnType__is_long | None: ...
+
+Global___PerpPositionSummary: _TypeAlias = PerpPositionSummary  # noqa: Y015
 
 @_typing.final
 class CostStackInfo(_message.Message):

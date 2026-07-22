@@ -2250,8 +2250,12 @@ class TestGetTradeTape:
 
 
 class TestPnLHistoryDebtNetting:
-    """VIB-5170: both PnL-history builders must debt-net the BORROW leg so the
-    chart matches the debt-netted "NAV now" tile for leveraged-lending loops."""
+    """VIB-5170 + VIB-5942: both PnL-history builders must produce WALLET NAV =
+    total_value_usd − BORROW debt + idle wallet cash — the SAME definition the
+    "NAV now" tile and the drawdown series use (via ``wallet_nav_usd``). VIB-5170
+    added the debt netting; VIB-5942 added the missing ``+ available_cash_usd``
+    term (whose omission collapsed the post-close chart to a degenerate ~2ms
+    x-axis when the position value went to 0 but the funds sat in cash)."""
 
     @staticmethod
     def _leverage_snapshot() -> PortfolioSnapshot:
@@ -2294,8 +2298,9 @@ class TestPnLHistoryDebtNetting:
         points = await dashboard_service._build_pnl_history_recent("d")
 
         assert len(points) == 1
-        # total_value_usd 9.79845700 − BORROW 3.90821500 = 5.89024200 (netted, NOT gross 9.80).
-        assert points[0].value_usd == "5.89024200"
+        # Wallet NAV: total 9.79845700 − BORROW 3.90821500 + cash 2.59891741
+        # = 8.48915941 (netted AND cash-inclusive, NOT gross 9.80, NOT cash-less 5.89).
+        assert points[0].value_usd == "8.48915941"
 
     @pytest.mark.asyncio
     async def test_windowed_pnl_history_nets_borrow_leg(self, dashboard_service):
@@ -2306,7 +2311,15 @@ class TestPnLHistoryDebtNetting:
         sm = AsyncMock()
         sm.get_snapshots_in_window = AsyncMock(
             return_value=(
-                [(datetime(2026, 1, 1, 1, tzinfo=UTC), "9.79845700", "HIGH", _json.dumps(positions_json))],
+                [
+                    (
+                        datetime(2026, 1, 1, 1, tzinfo=UTC),
+                        "9.79845700",
+                        "2.59891741",  # available_cash_usd (VIB-5942)
+                        "HIGH",
+                        _json.dumps(positions_json),
+                    )
+                ],
                 False,
             )
         )
@@ -2316,5 +2329,78 @@ class TestPnLHistoryDebtNetting:
         points = await dashboard_service._build_pnl_history_windowed("d", None, None, 1500)
 
         assert len(points) == 1
-        # Windowed value nets the BORROW leg too: 9.79845700 − 3.90821500 = 5.89024200.
-        assert points[0].value_usd == "5.89024200"
+        # Windowed value is wallet NAV too: 9.79845700 − 3.90821500 + 2.59891741 = 8.48915941.
+        assert points[0].value_usd == "8.48915941"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "value_text,cash_text",
+        [("NaN", "2.59891741"), ("9.79845700", "Infinity"), ("Infinity", "NaN"), ("-Infinity", "1.0")],
+    )
+    async def test_windowed_pnl_history_drops_non_finite(self, dashboard_service, value_text, cash_text):
+        """VIB-5942 CodeRabbit #3: Decimal('NaN')/Decimal('Infinity') parse OK but
+        are non-finite — a corrupt persisted NAV/cash must be DROPPED (unmeasured),
+        never summed into a garbage wallet-NAV magnitude on the windowed chart."""
+        import json as _json
+
+        positions_json = self._leverage_snapshot().to_positions_payload()
+        sm = AsyncMock()
+        sm.get_snapshots_in_window = AsyncMock(
+            return_value=(
+                [(datetime(2026, 1, 1, 1, tzinfo=UTC), value_text, cash_text, "HIGH", _json.dumps(positions_json))],
+                False,
+            )
+        )
+        sm.get_portfolio_metrics = AsyncMock(return_value=MagicMock(initial_value_usd=Decimal("0")))
+        dashboard_service._state_manager = sm
+
+        points = await dashboard_service._build_pnl_history_windowed("d", None, None, 1500)
+        assert points == []  # the non-finite sample is dropped, not plotted
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value_text,cash_text", [("", "5.0"), ("5.0", ""), (None, "5.0"), ("5.0", None)])
+    async def test_windowed_pnl_history_drops_only_empty_not_measured_zero(
+        self, dashboard_service, value_text, cash_text
+    ):
+        """gemini: an UNMEASURED component (None/"") drops the point, but a MEASURED
+        numeric zero must be KEPT — the check is `in (None, "")`, not a truthy-trap."""
+        sm = AsyncMock()
+        sm.get_snapshots_in_window = AsyncMock(
+            return_value=([(datetime(2026, 1, 1, 1, tzinfo=UTC), value_text, cash_text, "HIGH", "[]")], False)
+        )
+        sm.get_portfolio_metrics = AsyncMock(return_value=MagicMock(initial_value_usd=Decimal("0")))
+        dashboard_service._state_manager = sm
+        assert await dashboard_service._build_pnl_history_windowed("d", None, None, 1500) == []
+
+    @pytest.mark.asyncio
+    async def test_windowed_keeps_measured_zero_total(self, dashboard_service):
+        """A measured "0" total (post-close position) is KEPT — wallet NAV = 0 + cash."""
+        sm = AsyncMock()
+        sm.get_snapshots_in_window = AsyncMock(
+            return_value=([(datetime(2026, 1, 1, 1, tzinfo=UTC), "0", "11.30", "HIGH", "[]")], False)
+        )
+        sm.get_portfolio_metrics = AsyncMock(return_value=MagicMock(initial_value_usd=Decimal("0")))
+        dashboard_service._state_manager = sm
+        points = await dashboard_service._build_pnl_history_windowed("d", None, None, 1500)
+        assert len(points) == 1
+        assert points[0].value_usd == "11.30"  # 0 total + 11.30 cash
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["total_value_usd", "available_cash_usd"])
+    @pytest.mark.parametrize("bad_value", [None, Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")])
+    async def test_recent_pnl_history_skips_none_or_non_finite_component(self, dashboard_service, field, bad_value):
+        """The recent builder must SKIP a typed snapshot whose NAV component is None
+        (gemini — None − Decimal TypeError) OR non-finite (CodeRabbit — NaN/Infinity
+        would sum into a garbage wallet-NAV), exactly like the windowed builder."""
+        good = self._leverage_snapshot()
+        bad = MagicMock()
+        bad.timestamp = datetime(2026, 1, 1, 2, tzinfo=UTC)
+        bad.total_value_usd = bad_value if field == "total_value_usd" else Decimal("9.79845700")
+        bad.available_cash_usd = bad_value if field == "available_cash_usd" else Decimal("2.59891741")
+        sm = AsyncMock()
+        sm.get_recent_snapshots = AsyncMock(return_value=[good, bad])  # one valid + one bad-component
+        sm.get_portfolio_metrics = AsyncMock(return_value=MagicMock(initial_value_usd=Decimal("0")))
+        dashboard_service._state_manager = sm
+        points = await dashboard_service._build_pnl_history_recent("d")  # must not raise
+        assert len(points) == 1  # only the valid snapshot yields a point
+        assert points[0].value_usd == "8.48915941"

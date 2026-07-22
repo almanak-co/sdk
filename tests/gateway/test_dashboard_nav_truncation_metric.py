@@ -23,13 +23,17 @@ from almanak.gateway.services.dashboard_service import DashboardServiceServicer
 _DEPLOYMENT_ID = "WindowTruncMetricStrategy:abc123"
 
 
-def _rows(n: int) -> list[tuple[datetime, str, str, str]]:
+def _rows(n: int) -> list[tuple[datetime, str, str, str, str]]:
     base = datetime(2026, 1, 1, tzinfo=UTC)
-    # VIB-5170: get_snapshots_in_window rows carry positions_json (4th element).
-    return [(base + timedelta(minutes=5 * i), str(Decimal(1000 + i)), "HIGH", "[]") for i in range(n)]
+    # get_snapshots_in_window rows: (ts, total_value, available_cash, confidence,
+    # positions_json). VIB-5170 added positions_json; VIB-5942 added available_cash
+    # ("0" here) for the wallet-NAV series.
+    return [(base + timedelta(minutes=5 * i), str(Decimal(1000 + i)), "0", "HIGH", "[]") for i in range(n)]
 
 
-def _servicer_with_window(rows: list[tuple[datetime, str, str, str]], *, truncated: bool) -> DashboardServiceServicer:
+def _servicer_with_window(
+    rows: list[tuple[datetime, str, str, str, str]], *, truncated: bool
+) -> DashboardServiceServicer:
     svc = DashboardServiceServicer(GatewaySettings())
     sm = AsyncMock()
     sm.get_snapshots_in_window = AsyncMock(return_value=(rows, truncated))

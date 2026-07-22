@@ -123,6 +123,41 @@ class TestDashboardDataClient:
         assert isinstance(points[0], PnLDataPoint)
         assert points[0].value_usd == Decimal("1000")
 
+    def test_get_pnl_history_unmeasured_pnl_stays_none_not_zero(self, client, mock_gw):
+        """VIB-5942 CodeRabbit #1: a measured NAV with an UNMEASURED pnl (None) keeps
+        pnl_usd=None — never coerced to Decimal('0') — and to_dict() exports it blank."""
+        mock_gw.get_strategy_details.return_value = StrategyDetails(
+            summary=StrategySummary(
+                deployment_id="s1", name="T", status="RUNNING", chain="", protocol="",
+                total_value_usd=Decimal("0"), pnl_24h_usd=Decimal("0"), last_action_at=None,
+                attention_required=False, attention_reason="", is_multi_chain=False,
+            ),
+            position=PositionInfo(),
+            pnl_history=[
+                {"timestamp": datetime(2026, 4, 5, 12, 0, tzinfo=UTC), "value_usd": Decimal("1000"), "pnl_usd": None},
+            ],
+        )
+        points = client.get_pnl_history("s1")
+        assert len(points) == 1
+        assert points[0].value_usd == Decimal("1000")
+        assert points[0].pnl_usd is None  # NOT Decimal("0")
+        assert points[0].to_dict()["pnl_usd"] == ""  # blank in the exported CSV, not "0"/"None"
+
+    def test_get_pnl_history_drops_unmeasured_nav(self, client, mock_gw):
+        """A sample whose NAV is unmeasured (value_usd None) is dropped entirely."""
+        mock_gw.get_strategy_details.return_value = StrategyDetails(
+            summary=StrategySummary(
+                deployment_id="s1", name="T", status="RUNNING", chain="", protocol="",
+                total_value_usd=Decimal("0"), pnl_24h_usd=Decimal("0"), last_action_at=None,
+                attention_required=False, attention_reason="", is_multi_chain=False,
+            ),
+            position=PositionInfo(),
+            pnl_history=[
+                {"timestamp": datetime(2026, 4, 5, 12, 0, tzinfo=UTC), "value_usd": None, "pnl_usd": None},
+            ],
+        )
+        assert client.get_pnl_history("s1") == []
+
     def test_get_portfolio_metrics(self, client, mock_gw):
         mock_gw.get_strategy_details.return_value = StrategyDetails(
             summary=StrategySummary(

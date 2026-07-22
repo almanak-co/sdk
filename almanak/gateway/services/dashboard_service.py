@@ -1098,7 +1098,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         returns the latest window. Backend errors degrade to an empty series (the
         default render has other panels); the windowed path is the loud one.
         """
-        from almanak.framework.valuation.net_debt import net_debt_from_snapshot
+        from almanak.framework.valuation.net_debt import net_debt_from_snapshot, wallet_nav_usd
         from almanak.gateway.proto import gateway_pb2
 
         pnl_points: list[gateway_pb2.PnLDataPoint] = []
@@ -1115,13 +1115,29 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 ts = snap.timestamp
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=UTC)
-                # VIB-4983 follow-up: net the BORROW debt leg so the chart NAV
-                # matches the debt-netted "NAV now" tile. Reads the TYPED
-                # PortfolioSnapshot.positions (a real snapshot has no
-                # positions_json attribute); non-leveraged snapshots net
-                # Decimal("0") and stay byte-identical.
+                # Empty != Zero + crash-safety (gemini): an unmeasured NAV component
+                # (a legacy/partial typed snapshot with total_value_usd or
+                # available_cash_usd == None) makes wallet NAV unmeasured — SKIP it,
+                # never feed None into wallet_nav_usd (None − Decimal → TypeError).
+                # Mirrors the windowed builder's None/"" guard.
+                if snap.total_value_usd is None or snap.available_cash_usd is None:
+                    continue
+                # And, like the windowed path (CodeRabbit): a non-finite Decimal
+                # (NaN/Infinity) on a typed snapshot is unmeasured/corrupt — drop it
+                # rather than sum it into a garbage wallet-NAV magnitude.
+                if not snap.total_value_usd.is_finite() or not snap.available_cash_usd.is_finite():
+                    continue
+                # VIB-5942: the chart NAV must be WALLET NAV = net position equity
+                # (total_value_usd − debt) + idle wallet cash, the SAME definition
+                # the "NAV now" tile (compute_pnl_summary) and the drawdown series
+                # (_wallet_navs_from_nav_text) use — one formula via wallet_nav_usd.
+                # Netting alone (the pre-VIB-5942 ``total − debt``) dropped cash, so
+                # a post-close snapshot (position 0, funds back in the wallet) read
+                # NAV 0 and collapsed the chart. Reads the TYPED
+                # PortfolioSnapshot.positions (a real snapshot has no positions_json
+                # attribute); non-leveraged snapshots net Decimal("0") debt.
                 _count, debt_mark, _debt_cost, _net_cost = net_debt_from_snapshot(snap)
-                net_value = snap.total_value_usd - debt_mark
+                net_value = wallet_nav_usd(snap.total_value_usd, debt_mark, snap.available_cash_usd)
                 pnl = net_value - initial_value if initial_value > 0 else Decimal("0")
                 pnl_points.append(
                     gateway_pb2.PnLDataPoint(
@@ -1166,28 +1182,45 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         rows, truncated = await self._state_manager.get_snapshots_in_window(deployment_id, from_dt, to_dt)
 
-        from almanak.framework.valuation.net_debt import net_debt_from_positions_json
+        from almanak.framework.valuation.net_debt import net_debt_from_positions_json, wallet_nav_usd
 
         points: list[NavPoint] = []
         dropped = 0
         # value_confidence is carried in the store projection (the minimal chart
         # column set) for forthcoming confidence-aware NAV rendering; PnLDataPoint
         # has no confidence field yet, so it is intentionally unused here.
-        for ts, value_text, _confidence, positions_text in rows:
-            if not value_text:  # "" or None -> Empty != Zero (unmeasured); never $0
+        for ts, value_text, cash_text, _confidence, positions_text in rows:
+            # Empty != Zero: an unmeasured NAV component (total_value OR the idle
+            # cash it must be summed with) makes the wallet-NAV point unmeasured —
+            # drop it, never coerce a missing column to a measured $0. Check None/""
+            # EXPLICITLY (gemini): a measured numeric 0 / "0" must be KEPT, so a bare
+            # ``not value_text`` (truthy-trap) would wrongly skip a measured zero.
+            # Spelled out as ``is None or == ""`` (not ``in (None, "")``) so mypy
+            # narrows value_text/cash_text to ``str`` for the Decimal() calls below.
+            if value_text is None or value_text == "" or cash_text is None or cash_text == "":
                 dropped += 1
                 continue
             try:
                 value = Decimal(value_text)
+                cash = Decimal(cash_text)
             except (InvalidOperation, ValueError, TypeError):
                 dropped += 1
                 continue
-            # VIB-5170: net the BORROW debt leg per point so the windowed chart
-            # matches the debt-netted "NAV now" tile and the recent-window chart.
-            # positions_json (raw text, projected by get_snapshots_in_window) is the
-            # netting input; non-leveraged points net Decimal("0") (byte-identical).
+            # VIB-5942 CodeRabbit: Decimal("NaN")/Decimal("Infinity") parse OK but are
+            # non-finite — a corrupt persisted NAV/cash must be treated as UNMEASURED
+            # (dropped), never summed into a garbage wallet-NAV magnitude on the chart.
+            if not value.is_finite() or not cash.is_finite():
+                dropped += 1
+                continue
+            # VIB-5170: net the BORROW debt leg per point; VIB-5942: add idle cash so
+            # the windowed chart is WALLET NAV (total − debt + cash) — the SAME
+            # definition the "NAV now" tile and drawdown series use (via
+            # wallet_nav_usd), not net position equity alone (which dropped to 0 on a
+            # post-close snapshot and collapsed the chart). positions_json (raw text,
+            # projected by get_snapshots_in_window) is the debt-netting input;
+            # non-leveraged points net Decimal("0") debt.
             _count, debt_mark, _debt_cost = net_debt_from_positions_json(positions_text)
-            value -= debt_mark
+            value = wallet_nav_usd(value, debt_mark, cash)
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=UTC)
             points.append(NavPoint(ts, value))
@@ -2526,6 +2559,79 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             truncated=ckpt.truncated,
         )
 
+    @staticmethod
+    def _perp_summaries_from_snapshot(
+        snapshot: Any,
+    ) -> tuple[list[gateway_pb2.PerpPositionSummary], str]:
+        """Build the snapshot-derived perp story (VIB-5942 / ALM-2977).
+
+        Returns ``(perp_position_summaries, positions_as_of)`` from the LATEST
+        snapshot's PERP positions (plural). Every field honours Empty≠Zero: a
+        details value that is absent / ``None`` / empty goes on the wire as ``""``
+        (UNMEASURED → the client renders "— unmeasured"), never a fabricated ``0``.
+        ``is_long`` is only set when the snapshot actually measured it; otherwise
+        the direction string stays ``""`` and the optional bool is absent.
+        """
+        if snapshot is None:
+            return [], ""
+        positions = getattr(snapshot, "positions", None) or []
+
+        def _measured(details: dict[str, Any], key: str) -> str:
+            v = details.get(key)
+            return "" if v is None or v == "" else str(v)
+
+        summaries: list[gateway_pb2.PerpPositionSummary] = []
+        for pos in positions:
+            ptype = getattr(pos, "position_type", "")
+            ptype_str = ptype.value if hasattr(ptype, "value") else str(ptype)
+            if ptype_str != "PERP":
+                continue
+            # Guard against a non-dict ``details`` (corrupt/legacy row, malformed JSON
+            # round-trip): an unguarded ``.get(...)`` would AttributeError and take
+            # down the whole GetPnLSummary RPC for this deployment (gateway = security
+            # boundary — no stack traces to clients). Degrade to {} → every field reads
+            # UNMEASURED, consistent with the section's Empty≠Zero rendering. CodeRabbit.
+            raw_details = getattr(pos, "details", None)
+            details = raw_details if isinstance(raw_details, dict) else {}
+
+            entry = gateway_pb2.PerpPositionSummary(
+                market=_measured(details, "market"),
+                entry_price_usd=_measured(details, "entry_price_usd"),
+                mark_price_usd=_measured(details, "mark_price_usd"),
+                leverage=_measured(details, "leverage"),
+                notional_usd=_measured(details, "size_usd"),
+                collateral_usd=_measured(details, "collateral_value_usd"),
+                unrealized_pnl_usd=_measured(details, "unrealized_pnl_usd"),
+                protocol=str(getattr(pos, "protocol", "") or ""),
+                chain=str(getattr(pos, "chain", "") or ""),
+            )
+            # Direction: prefer the measured boolean; fall back to a measured
+            # ``side`` string; else leave "" (unmeasured — never default to LONG).
+            is_long = details.get("is_long")
+            if isinstance(is_long, bool):
+                entry.is_long = is_long
+                entry.direction = "LONG" if is_long else "SHORT"
+            else:
+                side = str(details.get("side") or "").upper()
+                if side in ("LONG", "SHORT"):
+                    entry.direction = side
+            summaries.append(entry)
+
+        as_of = ""
+        ts = getattr(snapshot, "timestamp", None)
+        if ts is not None:
+            if hasattr(ts, "isoformat"):
+                # Stamp naive timestamps as UTC before serializing (VIB-5942) — the
+                # NAV builders normalize tz the same way, and the original defect
+                # family was a time-axis lie; a naive "as of" the client reads in
+                # local time would be a subtler version of it.
+                if getattr(ts, "tzinfo", None) is None:
+                    ts = ts.replace(tzinfo=UTC)
+                as_of = ts.isoformat()
+            else:
+                as_of = str(ts)
+        return summaries, as_of
+
     async def GetPnLSummary(
         self,
         request: gateway_pb2.GetPnLSummaryRequest,
@@ -2571,9 +2677,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             lifetime_drawdown=lifetime_drawdown,
         )
 
+        # VIB-5942 (ALM-2977): snapshot-derived perp story from the LATEST snapshot.
+        perp_positions, positions_as_of = self._perp_summaries_from_snapshot(snapshots[-1] if snapshots else None)
+
         return gateway_pb2.PnLSummary(
             deployed_usd=str(pnl.deployed_usd),
             nav_usd=str(pnl.nav_usd),
+            perp_positions=perp_positions,
+            positions_as_of=positions_as_of,
             # VIB-5866: a suppressed (None) metric goes on the wire as the
             # empty string — the same presence-aware "" => unmeasured encoding
             # CostStackInfo.inventory_unrealized_usd uses (VIB-4984), so no
@@ -2661,8 +2772,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         return gateway_pb2.CostStackInfo(
             cost_gas_usd=str(cs.gas_usd),
-            cost_protocol_fees_usd=str(cs.protocol_fees_usd),
-            cost_slippage_usd=str(cs.slippage_usd),
+            # Empty≠Zero (VIB-5942): "" => UNMEASURED (no contributing event carried
+            # the term, e.g. a perp whose receipt parser hasn't populated fees yet),
+            # presence-aware on the client. A MEASURED value (incl. a measured "0")
+            # is stringified. Same ""-sentinel convention as inventory_unrealized.
+            cost_protocol_fees_usd=(str(cs.protocol_fees_usd) if cs.protocol_fees_measured else ""),
+            cost_slippage_usd=(str(cs.slippage_usd) if cs.slippage_measured else ""),
             fees_earned_usd=str(cs.fees_earned_usd),
             interest_paid_usd=str(cs.interest_paid_usd),
             interest_earned_usd=str(cs.interest_earned_usd),

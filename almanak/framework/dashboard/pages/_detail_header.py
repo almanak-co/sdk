@@ -508,15 +508,31 @@ def render_cost_stack(cost: CostStackInfo) -> None:
             f"<span style='color:{inv_color};'>Inventory MTM "
             f"{inv_sign}{format_usd(abs(inv), precise_small=True)}</span>"
         )
+    # Empty≠Zero (VIB-5942): an UNMEASURED fee / slippage bucket (None — no
+    # contributing event carried the term, e.g. a perp whose receipt parser is
+    # pending) renders "— unmeasured", NEVER a fabricated "−$0.00". A measured value
+    # (incl. a measured zero) uses the precise-small formatter. Gas is always
+    # measured (every tx pays it) and can be legitimately sub-cent, so it too uses
+    # precise_small — a real $0.0008 gas cost no longer collapses to "−$0.00".
+    fees_html = (
+        "<span style='color:#888;'>Fees — unmeasured</span>"
+        if cost.cost_protocol_fees_usd is None
+        else f"<span style='color:#f44336;'>Fees −{format_usd(cost.cost_protocol_fees_usd, precise_small=True)}</span>"
+    )
+    slip_html = (
+        "<span style='color:#888;'>Slip — unmeasured</span>"
+        if cost.cost_slippage_usd is None
+        else f"<span style='color:#f44336;'>Slip −{format_usd(cost.cost_slippage_usd, precise_small=True)}</span>"
+    )
     cost_html = (
         f"<div style='color:#888;font-size:0.85rem;'>Cost stack (LTD)</div>"
         f"<div style='font-size:0.95rem;line-height:1.5;'>"
-        f"<span style='color:#f44336;'>Gas −{format_usd(cost.cost_gas_usd)}</span><br>"
-        # VIB-4980: Fees / Slip / Earn are captured to full Decimal precision
-        # and can legitimately be sub-cent; render them with adaptive
-        # precision so a real $0.0023 fee no longer reads as "+$0.00".
-        f"<span style='color:#f44336;'>Fees −{format_usd(cost.cost_protocol_fees_usd, precise_small=True)}</span><br>"
-        f"<span style='color:#f44336;'>Slip −{format_usd(cost.cost_slippage_usd, precise_small=True)}</span><br>"
+        f"<span style='color:#f44336;'>Gas −{format_usd(cost.cost_gas_usd, precise_small=True)}</span><br>"
+        # VIB-4980 / VIB-5942: Fees / Slip / Earn are full-precision and can be
+        # sub-cent; render with adaptive precision so a real $0.0023 fee no longer
+        # reads as "$0.00", and honour Empty≠Zero for the unmeasured fee/slip case.
+        f"{fees_html}<br>"
+        f"{slip_html}<br>"
         f"<span style='color:#00c853;'>Earn +{format_usd(cost.fees_earned_usd + cost.interest_earned_usd, precise_small=True)}</span><br>"
         # VIB-4984: swap-inventory unrealized as its own line.
         f"{inv_html}"
@@ -645,12 +661,17 @@ def _render_audit_row(audit: AuditPosture) -> None:
             <div style="background:#1e1e1e;border:1px solid #333;
                         border-left:3px solid {color};border-radius:4px;
                         padding:0.5rem 0.75rem;">
-              <div style="color:#888;font-size:0.85rem;">Reconciliation (G6)</div>
+              <div style="color:#888;font-size:0.85rem;">PnL reconciliation (G6)</div>
               <div style="color:{color};font-weight:600;font-size:1.2rem;">{badge}</div>
               <div style="color:#aaa;font-size:0.8rem;">{sub}</div>
               <div style="color:#aaa;font-size:0.8rem;">
                 wallet: <code>{format_usd(audit.g6_wallet_pnl_usd)}</code> ·
                 comp: <code>{format_usd(audit.g6_component_pnl_usd)}</code>
+              </div>
+              <div style="color:#666;font-size:0.72rem;margin-top:0.2rem;">
+                Scope: wallet PnL ≡ Σ component PnL (value identity). Distinct from
+                the Reconciliation Report, which diffs position <em>structure</em>
+                across ledger / snapshots / registry.
               </div>
             </div>
             """,

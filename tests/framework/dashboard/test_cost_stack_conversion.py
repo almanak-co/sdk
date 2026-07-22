@@ -41,3 +41,27 @@ def test_convert_cost_stack_inventory_value_round_trips() -> None:
     proto = gateway_pb2.CostStackInfo(inventory_unrealized_usd="-0.0038")
     cs = _convert_cost_stack(proto)
     assert cs.inventory_unrealized_usd == Decimal("-0.0038")
+
+
+def test_convert_cost_stack_unmeasured_fees_and_slippage_are_none() -> None:
+    """VIB-5942: an empty fee / slippage proto string is UNMEASURED (None → "—"),
+    never Decimal("0"). Mirrors the inventory_unrealized ""-sentinel."""
+    proto = gateway_pb2.CostStackInfo(
+        cost_gas_usd="0.0008",
+        cost_protocol_fees_usd="",  # unmeasured (perp parser pending)
+        cost_slippage_usd="",  # unmeasured
+    )
+    cs = _convert_cost_stack(proto)
+    assert cs.cost_protocol_fees_usd is None
+    assert cs.cost_slippage_usd is None
+    # Gas is always measured and survives as a sub-cent Decimal.
+    assert cs.cost_gas_usd == Decimal("0.0008")
+
+
+def test_convert_cost_stack_measured_zero_fee_is_decimal_zero_not_none() -> None:
+    """Empty≠Zero the OTHER direction: a wire "0" is a MEASURED zero → Decimal("0")
+    (renders "$0.00"), distinct from unmeasured None."""
+    proto = gateway_pb2.CostStackInfo(cost_protocol_fees_usd="0", cost_slippage_usd="0.25")
+    cs = _convert_cost_stack(proto)
+    assert cs.cost_protocol_fees_usd == Decimal("0")
+    assert cs.cost_slippage_usd == Decimal("0.25")

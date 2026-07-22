@@ -2448,19 +2448,25 @@ class SQLiteStore:
         to_ts: datetime | None,
         *,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, str | None]], bool]:
+    ) -> tuple[list[tuple[datetime, str | None, str | None, str | None, str | None]], bool]:
         """Projected NAV samples inside a time window, for windowed charts (VIB-5059 P2).
 
         Returns ``(rows, truncated)`` where ``rows`` is ``(timestamp,
-        total_value_usd_text, value_confidence_text, positions_json_text)``
-        oldest-first. The chart-relevant columns plus ``positions_json`` (VIB-5170,
-        for per-row BORROW debt netting) are projected; the other JSON blobs
-        (``token_prices_json`` / ``wallet_balances_json``) are still excluded as
-        they dominate transfer size and the NAV line does not need them.
+        total_value_usd_text, available_cash_usd_text, value_confidence_text,
+        positions_json_text)`` oldest-first. The chart-relevant columns plus
+        ``positions_json`` (VIB-5170, for per-row BORROW debt netting) are
+        projected; the other JSON blobs (``token_prices_json`` /
+        ``wallet_balances_json``) are still excluded as they dominate transfer size
+        and the NAV line does not need them.
 
-        ``total_value_usd`` is returned as its **raw stored text** (not parsed to
-        ``Decimal``) so the caller owns the Empty≠Zero decision: ``""`` / ``None``
-        is an unmeasured sample, never a measured ``$0``.
+        ``available_cash_usd`` (VIB-5942) is projected so the windowed chart series
+        can be WALLET NAV (``total − debt + cash``) — the same definition the "NAV
+        now" tile and drawdown series use — rather than net position equity alone,
+        which dropped to ``0`` on a post-close snapshot and collapsed the chart.
+
+        ``total_value_usd`` / ``available_cash_usd`` are returned as their **raw
+        stored text** (not parsed to ``Decimal``) so the caller owns the Empty≠Zero
+        decision: ``""`` / ``None`` is an unmeasured sample, never a measured ``$0``.
 
         Window bounds are open when ``None`` (``from_ts=None`` → from inception,
         ``to_ts=None`` → until now). ``scan_cap`` bounds the fetch: the newest
@@ -2474,7 +2480,7 @@ class SQLiteStore:
         if not self._initialized:
             await self.initialize()
 
-        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None, str | None]], bool]:
+        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None, str | None, str | None]], bool]:
             clauses = ["deployment_id = ?"]
             params: list[object] = [deployment_id]
             if from_ts is not None:
@@ -2486,7 +2492,7 @@ class SQLiteStore:
             params.append(scan_cap + 1)
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 f"""
-                SELECT timestamp, total_value_usd, value_confidence, positions_json
+                SELECT timestamp, total_value_usd, available_cash_usd, value_confidence, positions_json
                 FROM portfolio_snapshots
                 WHERE {" AND ".join(clauses)}
                 ORDER BY timestamp DESC, id DESC
@@ -2501,12 +2507,20 @@ class SQLiteStore:
                 # them first, so the surplus (oldest) tail is dropped.
                 fetched = fetched[:scan_cap]
 
-            rows: list[tuple[datetime, str | None, str | None, str | None]] = []
+            rows: list[tuple[datetime, str | None, str | None, str | None, str | None]] = []
             for row in reversed(fetched):  # DESC fetch -> emit oldest-first
                 ts = row["timestamp"]
                 if isinstance(ts, str):
                     ts = datetime.fromisoformat(ts)
-                rows.append((ts, row["total_value_usd"], row["value_confidence"], row["positions_json"]))
+                rows.append(
+                    (
+                        ts,
+                        row["total_value_usd"],
+                        row["available_cash_usd"],
+                        row["value_confidence"],
+                        row["positions_json"],
+                    )
+                )
             return rows, truncated
 
         loop = asyncio.get_event_loop()
