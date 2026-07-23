@@ -834,7 +834,15 @@ class MarketSnapshot:
         if chain is None or requested_chain == self._chain:
             seeded = self._seeded_price_for_symbol(token)
             if seeded is not None:
-                return seeded
+                in_quote = self._seeded_price_in_quote(seeded, quote, requested_chain)
+                if in_quote is not None:
+                    return in_quote
+                # Non-USD quote whose leg has no seeded/derivable USD price:
+                # fall through to the cache/oracle path (which honors
+                # ``quote``) — never return the raw seeded USD number for a
+                # non-USD quote (live/backtest parity: a PnL backtest served
+                # ~1880 for ``price("WETH", "ETH")`` and a peg-guarded
+                # strategy held every tick while working live).
 
         # Check cache
         if cache_key in self._price_cache:
@@ -2424,6 +2432,81 @@ class MarketSnapshot:
             if key.upper() == token_upper:
                 return val
         return None
+
+    def _seeded_price_in_quote(
+        self,
+        seeded_usd: Decimal,
+        quote: str | None,
+        requested_chain: str,
+    ) -> Decimal | None:
+        """Convert a ``set_price()``-seeded USD price into ``quote`` terms.
+
+        Seeded prices are USD-denominated (the only thing ``set_price``
+        stores), but ``price()`` promises the caller's quote currency — live
+        reads honor ``quote`` because the gateway oracle passes it upstream to
+        every price source, so the seeded fast path must too or backtests
+        silently diverge from live. A USD or empty quote returns the seeded
+        price verbatim (mirrors the gateway's ``request.quote or "USD"``
+        normalization). Any other quote resolves the quote leg's own seeded
+        USD price and returns the ``base_usd / quote_usd`` cross rate. An
+        unresolvable or non-positive quote leg returns ``None`` so ``price()``
+        falls through to the cache/oracle path — an honest miss, never the raw
+        USD number under a non-USD quote label.
+        """
+        if not isinstance(quote, str) or not quote.strip() or quote.strip().upper() == "USD":
+            return seeded_usd
+        quote_usd = self._seeded_quote_leg_usd(quote, requested_chain)
+        if quote_usd is None or quote_usd <= 0:
+            return None
+        return seeded_usd / quote_usd
+
+    def _seeded_quote_leg_usd(self, quote: str, requested_chain: str) -> Decimal | None:
+        """Resolve ``quote``'s seeded USD price for the seeded-ratio path.
+
+        Tries the quote exactly as the base leg would (alias-mapped cache key,
+        case-insensitive seeded lookup), then the chain registry's
+        native<->wrapped equivalents: the wrapped native is redeemable 1:1 for
+        the gas coin, so ``quote="ETH"`` may price off a seeded ``WETH`` (and
+        vice versa) — the PnL engine seeds only the tokens a run actually
+        tracks, which for the gas asset is the wrapped ERC-20. Registry-derived
+        and never guessed: a quote with no seeded price and no native/wrapped
+        equivalence stays an honest miss (``None``).
+        """
+        candidates = [quote, *self._native_wrapped_equivalents(quote, requested_chain)]
+        for candidate in candidates:
+            seeded = self._seeded_price_for_symbol(self._token_cache_key(candidate, requested_chain))
+            if seeded is not None:
+                return seeded
+        return None
+
+    @staticmethod
+    def _native_wrapped_equivalents(symbol: str, chain: str) -> list[str]:
+        """Registry-derived 1:1 price equivalents of ``symbol`` on ``chain``.
+
+        A native gas symbol maps to the chain's declared wrapped-native ERC-20
+        and the wrapped symbol maps back to the native symbols —
+        ``ChainDescriptor.native`` is the single source of truth (primary
+        symbol first, then accepted aliases such as polygon's MATIC/POL).
+        Unknown chains, chains without a declared wrapped native, and
+        unrelated symbols return ``[]``.
+        """
+        from almanak.core.chains import ChainRegistry
+        from almanak.core.chains._helpers import native_symbols_for
+
+        if not isinstance(symbol, str):
+            return []
+        descriptor = ChainRegistry.try_resolve(chain)
+        if descriptor is None:
+            return []
+        wrapped = descriptor.native.wrapped_symbol
+        if not wrapped:
+            return []
+        upper = symbol.strip().upper()
+        if upper == wrapped.upper():
+            return [descriptor.native.symbol, *descriptor.native.accepted_symbols]
+        if upper in native_symbols_for(chain):
+            return [wrapped]
+        return []
 
     def _cached_price_for(self, token: str, requested_chain: str) -> Decimal | None:
         """Return an already-known USD price for ``token`` WITHOUT a fetch.

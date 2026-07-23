@@ -382,6 +382,77 @@ class TestPriceCaseInsensitive:
             market.price("ARB")
 
 
+class TestPriceSeededQuoteParity:
+    """The seeded fast path honors the ``quote`` argument (live/backtest parity).
+
+    Regression: seeded reads returned the engine-seeded USD price regardless
+    of ``quote``, so a PnL backtest served ~$1880 for
+    ``price("WETH", "ETH")`` while live (gateway oracle, which passes
+    ``quote`` upstream to every price source) served ~1.0. A strategy guarding
+    ``abs(price("WETH", "ETH") - 1) > 0.01`` therefore held every tick in
+    backtest (0 trades) while working live.
+    """
+
+    def test_usd_quote_returns_seeded_price_verbatim(self):
+        market = MarketSnapshot(chain="base", wallet_address="0xtest")
+        market.set_price("WETH", Decimal("1880"))
+        assert market.price("WETH") == Decimal("1880")
+        assert market.price("WETH", "USD") == Decimal("1880")
+        assert market.price("WETH", "usd") == Decimal("1880")
+
+    def test_native_quote_prices_off_seeded_wrapped_native(self):
+        """``quote="ETH"`` resolves through the chain's wrapped native (WETH is 1:1)."""
+        market = MarketSnapshot(chain="base", wallet_address="0xtest")
+        market.set_price("WETH", Decimal("1880"))
+        assert market.price("WETH", "ETH") == Decimal("1")
+
+    def test_wrapped_quote_prices_off_seeded_native(self):
+        """The equivalence works in the other direction too (only ETH seeded)."""
+        market = MarketSnapshot(chain="ethereum", wallet_address="0xtest")
+        market.set_price("ETH", Decimal("2000"))
+        market.set_price("WBTC", Decimal("50000"))
+        assert market.price("WBTC", "WETH") == Decimal("25")
+
+    def test_cross_rate_between_two_seeded_tokens(self):
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        market.set_price("WBTC", Decimal("47000"))
+        market.set_price("WETH", Decimal("1880"))
+        assert market.price("WBTC", "WETH") == Decimal("25")
+
+    def test_stable_quote_uses_its_seeded_price(self):
+        market = MarketSnapshot(chain="base", wallet_address="0xtest")
+        market.set_price("WETH", Decimal("1880"))
+        market.set_price("USDC", Decimal("1"))
+        assert market.price("WETH", "USDC") == Decimal("1880")
+
+    def test_unresolvable_quote_leg_raises_not_usd(self):
+        """No seeded quote leg and no oracle: loud miss, never the USD number."""
+        market = MarketSnapshot(chain="base", wallet_address="0xtest")
+        market.set_price("WETH", Decimal("1880"))
+        with pytest.raises(ValueError, match="Cannot determine price"):
+            market.price("WETH", "ARB")
+
+    def test_unresolvable_quote_leg_falls_through_to_oracle(self):
+        """With an oracle configured the non-USD quote is delegated (the live path)."""
+        captured = []
+
+        def oracle(token: str, quote: str = "USD", chain: str | None = None) -> Decimal:
+            captured.append((token, quote))
+            return Decimal("0.05")
+
+        market = MarketSnapshot(chain="base", wallet_address="0xtest", price_oracle=oracle)
+        market.set_price("WETH", Decimal("1880"))
+        assert market.price("WETH", "WBTC") == Decimal("0.05")
+        assert captured == [("WETH", "WBTC")]
+
+    def test_zero_seeded_quote_leg_is_a_miss_not_a_crash(self):
+        market = MarketSnapshot(chain="base", wallet_address="0xtest")
+        market.set_price("WETH", Decimal("1880"))
+        market.set_price("USDC", Decimal("0"))
+        with pytest.raises(ValueError, match="Cannot determine price"):
+            market.price("WETH", "USDC")
+
+
 class TestMarketSnapshotTimeframeResolution:
     """Tests for _resolve_timeframe() priority: explicit > config default > 4h fallback."""
 

@@ -543,6 +543,54 @@ class TestSymbolAliasBridge:
         assert snapshot.balance("CBBTC").balance == Decimal("0.05")
 
 
+class TestSeededPriceHonorsQuote:
+    """Engine-seeded snapshot reads honor ``quote`` — live/backtest parity.
+
+    Regression (2026-07-24): the seeded fast path returned the engine-seeded
+    USD price regardless of ``quote``, so a PnL backtest served ~$1880 for
+    ``price("WETH", "ETH")`` on Base while live (gateway oracle, which passes
+    ``quote`` upstream) served ~1.0. A strategy guarding
+    ``abs(price("WETH", "ETH") - 1) > 0.01`` held every tick in backtest
+    (0 trades) while trading live.
+    """
+
+    WETH_ADDR = "0x4200000000000000000000000000000000000006"
+    USDC_ADDR = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    WETH_KEY = ("base", WETH_ADDR)
+    USDC_KEY = ("base", USDC_ADDR)
+    TOKEN_ADDRESSES = {"WETH": WETH_KEY, "USDC": USDC_KEY}
+
+    def _snapshot(self):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        state = MarketState(
+            timestamp=datetime(2026, 3, 23, tzinfo=UTC),
+            chain="base",
+            prices={self.WETH_KEY: Decimal("1880"), self.USDC_KEY: Decimal("1")},
+        )
+        return create_market_snapshot_from_state(state, chain="base", token_addresses=self.TOKEN_ADDRESSES)
+
+    def test_weth_eth_quote_is_a_ratio_not_usd(self):
+        # ETH is not a registered/seeded token; the quote leg resolves through
+        # the chain registry's native<->wrapped equivalence onto seeded WETH.
+        snapshot = self._snapshot()
+        assert snapshot.price("WETH", "ETH") == Decimal("1")
+
+    def test_usd_quote_still_returns_seeded_usd(self):
+        snapshot = self._snapshot()
+        assert snapshot.price("WETH") == Decimal("1880")
+        assert snapshot.price("WETH", "USD") == Decimal("1880")
+
+    def test_registered_token_quote_is_a_cross_rate(self):
+        snapshot = self._snapshot()
+        assert snapshot.price("WETH", "USDC") == Decimal("1880")
+
+    def test_unregistered_quote_stays_honest_miss(self):
+        snapshot = self._snapshot()
+        with pytest.raises(ValueError, match="Cannot determine price"):
+            snapshot.price("WETH", "CBBTC")
+
+
 class TestSymbolIntentFlows:
     """Symbol-carrying intents resolve through the engine's registered map.
 
