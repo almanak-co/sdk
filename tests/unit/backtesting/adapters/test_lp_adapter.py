@@ -1061,15 +1061,85 @@ class TestExecuteIntentLPOpen:
         fill = adapter.execute_intent(mock_intent, portfolio, market)
         assert fill is None
 
-    def test_execute_lp_open_with_address_pool(self) -> None:
-        """Test LP open intent with address-based pool identifier."""
+    def test_execute_lp_open_with_address_pool_resolves_registry_pair(self) -> None:
+        """Address pools resolve via the pool registry in registry orientation.
+
+        0x88e6...5640 is the ethereum USDC/WETH 0.05% pool with token0=USDC,
+        token1=WETH — the old fabricated ("WETH", "USDC") default swapped the
+        legs, pricing amount0 as WETH (~1000x notional on a USDC amount0).
+        """
         from almanak.framework.intents.vocabulary import LPOpenIntent
 
         adapter = LPBacktestAdapter()
 
-        # Using an address-like pool identifier
         intent = LPOpenIntent(
-            pool="0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8",  # Address format
+            pool="0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
+            amount0=Decimal("1000"),  # token0 = USDC
+            amount1=Decimal("0.25"),  # token1 = WETH
+            range_lower=Decimal("0.0002"),
+            range_upper=Decimal("0.0008"),
+            protocol="uniswap_v3",
+            chain="ethereum",
+        )
+
+        market = MockMarketStateWithTimestamp(
+            prices={"WETH": Decimal("2000"), "USDC": Decimal("1")},
+            timestamp=datetime.now(),
+        )
+        portfolio = MockPortfolio()
+
+        fill = adapter.execute_intent(intent, portfolio, market)
+
+        assert fill is not None
+        assert fill.success is True
+        # Registry orientation: token0=USDC, token1=WETH (NOT the old WETH/USDC default)
+        assert fill.tokens == ["USDC", "WETH"]
+        # Notional derives from the correctly-oriented legs: 1000 USDC + 0.25 WETH
+        assert fill.amount_usd == Decimal("1000") * Decimal("1") + Decimal("0.25") * Decimal("2000")
+        assert fill.tokens_out == {"USDC": Decimal("1000"), "WETH": Decimal("0.25")}
+
+    def test_execute_lp_open_with_unknown_address_pool_rejects(self) -> None:
+        """Registry-unknown address pools reject with a named reason."""
+        from almanak.framework.intents.vocabulary import LPOpenIntent
+
+        adapter = LPBacktestAdapter()
+
+        intent = LPOpenIntent(
+            pool="0x000000000000000000000000000000000000dEaD",
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+            range_lower=Decimal("0.5"),
+            range_upper=Decimal("2.0"),
+            protocol="uniswap_v3",
+            chain="ethereum",
+        )
+
+        market = MockMarketStateWithTimestamp(
+            prices={"WETH": Decimal("2000"), "USDC": Decimal("1")},
+            timestamp=datetime.now(),
+        )
+        portfolio = MockPortfolio()
+
+        fill = adapter.execute_intent(intent, portfolio, market)
+
+        assert fill is not None
+        assert fill.success is False
+        reason = fill.metadata["failure_reason"]
+        assert "0x000000000000000000000000000000000000dead" in reason.lower()
+        assert "not registry-known" in reason
+        assert "ethereum" in reason
+        # Fail-honest: no fabricated WETH/USDC legs on the reject
+        assert fill.tokens == []
+        assert fill.amount_usd == Decimal("0")
+
+    def test_execute_lp_open_with_unparseable_pool_name_rejects(self) -> None:
+        """Non-address pool names without a '/' pair reject instead of defaulting."""
+        from almanak.framework.intents.vocabulary import LPOpenIntent
+
+        adapter = LPBacktestAdapter()
+
+        intent = LPOpenIntent(
+            pool="weird_pool_name",
             amount0=Decimal("1"),
             amount1=Decimal("2000"),
             range_lower=Decimal("0.5"),
@@ -1086,8 +1156,27 @@ class TestExecuteIntentLPOpen:
         fill = adapter.execute_intent(intent, portfolio, market)
 
         assert fill is not None
-        # Should default to WETH/USDC when pool is an address
-        assert fill.tokens == ["WETH", "USDC"]
+        assert fill.success is False
+        reason = fill.metadata["failure_reason"]
+        assert "weird_pool_name" in reason
+        assert "does not declare a token pair" in reason
+
+    def test_lp_open_tokens_slash_path_unchanged(self) -> None:
+        """The symbolic TOKEN0/TOKEN1[/fee] parse is byte-for-byte unchanged."""
+        from almanak.framework.intents.vocabulary import LPOpenIntent
+
+        adapter = LPBacktestAdapter()
+
+        intent = LPOpenIntent(
+            pool="arb/usdt/500",
+            amount0=Decimal("1"),
+            amount1=Decimal("1"),
+            range_lower=Decimal("0.5"),
+            range_upper=Decimal("2.0"),
+            protocol="uniswap_v3",
+        )
+
+        assert adapter._lp_open_tokens(intent) == ("ARB", "USDT")
 
     def test_price_to_tick_conversion(self) -> None:
         """Test internal price-to-tick conversion function."""
@@ -1605,14 +1694,15 @@ class TestHistoricalVolumeIntegration:
 
         adapter = LPBacktestAdapter()
 
-        # Use address format pool
+        # Use address format pool (registry-known ethereum USDC/WETH 0.05% pool)
         intent = LPOpenIntent(
-            pool="0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
-            amount0=Decimal("1"),
-            amount1=Decimal("2000"),
-            range_lower=Decimal("0.5"),
-            range_upper=Decimal("2.0"),
+            pool="0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
+            amount0=Decimal("1000"),
+            amount1=Decimal("0.25"),
+            range_lower=Decimal("0.0002"),
+            range_upper=Decimal("0.0008"),
             protocol="uniswap_v3",
+            chain="ethereum",
         )
 
         market = MockMarketStateWithTimestamp(
@@ -1626,7 +1716,7 @@ class TestHistoricalVolumeIntegration:
         assert fill is not None
         assert fill.position_delta is not None
         assert "pool_address" in fill.position_delta.metadata
-        assert fill.position_delta.metadata["pool_address"] == "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443"
+        assert fill.position_delta.metadata["pool_address"] == "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
 
     def test_adapter_normalizes_uppercase_pool_address_in_metadata(self) -> None:
         """Pool-address detection is case-insensitive and stores lowercase."""
@@ -1634,12 +1724,13 @@ class TestHistoricalVolumeIntegration:
 
         adapter = LPBacktestAdapter()
         intent = LPOpenIntent(
-            pool="0XC31E54C7A869B9FCBECC14363CF510D1C41FA443",
-            amount0=Decimal("1"),
-            amount1=Decimal("2000"),
-            range_lower=Decimal("0.5"),
-            range_upper=Decimal("2.0"),
+            pool="0X88E6A0C2DDD26FEEB64F039A2C41296FCB3F5640",
+            amount0=Decimal("1000"),
+            amount1=Decimal("0.25"),
+            range_lower=Decimal("0.0002"),
+            range_upper=Decimal("0.0008"),
             protocol="uniswap_v3",
+            chain="ethereum",
         )
         market = MockMarketStateWithTimestamp(
             prices={"WETH": Decimal("2000"), "USDC": Decimal("1")},
@@ -1651,7 +1742,7 @@ class TestHistoricalVolumeIntegration:
 
         assert fill is not None
         assert fill.position_delta is not None
-        assert fill.position_delta.metadata["pool_address"] == "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443"
+        assert fill.position_delta.metadata["pool_address"] == "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
 
     def test_adapter_pool_address_none_for_token_format(self) -> None:
         """Test LP open with token format pool has None pool_address."""

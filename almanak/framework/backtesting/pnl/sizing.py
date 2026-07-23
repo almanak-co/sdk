@@ -41,6 +41,12 @@ class RejectionCode(StrEnum):
     UNSUPPORTED_ALL_SIZING = "UNSUPPORTED_ALL_SIZING"
     INSUFFICIENT_BALANCE = "INSUFFICIENT_BALANCE"
     UNPRICEABLE = "UNPRICEABLE"
+    #: A lending open (SUPPLY/BORROW) targeting a protocol whose connector
+    #: DECLARES a lending chain scope that excludes the run's chain — the
+    #: engine refuses to fabricate a lending market the live compiler
+    #: fails closed on (observed: a fluid/ethereum open filled against a
+    #: surrogate rate).
+    UNDECLARED_LENDING_CHAIN = "UNDECLARED_LENDING_CHAIN"
 
 
 @dataclass(frozen=True, slots=True)

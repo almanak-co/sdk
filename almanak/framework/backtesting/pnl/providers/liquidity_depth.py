@@ -1208,13 +1208,19 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         """
         if not protocol_label:
             return None
-        try:
-            from .pool_history_fallback import (
-                POOL_HISTORY_SOURCE_PREFIX,
-                get_pool_history_fallback,
-            )
+        from almanak.framework.backtesting.pnl.data_broker import pool_history_provider, record_data_serve
+        from almanak.framework.backtesting.pnl.data_manifest import (
+            LANE_POOL_TVL,
+            OUTCOME_DEGRADED,
+            OUTCOME_SERVED,
+        )
 
-            history = await get_pool_history_fallback().daily_history_async(
+        try:
+            from .pool_history_fallback import POOL_HISTORY_SOURCE_PREFIX
+
+            # Broker seam (ALM-2943): routed through the run's data broker when
+            # one is active; the process-wide singleton serves outside a run.
+            history = await pool_history_provider().daily_history_async(
                 pool_address=pool_address,
                 chain=chain,
                 protocol=protocol_label,
@@ -1222,7 +1228,24 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             )
         except Exception as e:  # noqa: BLE001 — the rescue path must never out-fail the failed primary lane
             logger.debug("Pool-history ladder liquidity lookup failed for %s: %s", pool_address[:10], e)
+            record_data_serve(
+                lane=LANE_POOL_TVL,
+                key=f"{chain}:{pool_address}",
+                source="",
+                outcome=OUTCOME_DEGRADED,
+                at=timestamp.date(),
+                detail="ladder lookup failed",
+            )
             return None
+        served = history is not None and history.tvl is not None
+        record_data_serve(
+            lane=LANE_POOL_TVL,
+            key=f"{chain}:{pool_address}",
+            source=f"{POOL_HISTORY_SOURCE_PREFIX}:{history.tvl_source}" if served and history is not None else "",
+            outcome=OUTCOME_SERVED if served else OUTCOME_DEGRADED,
+            at=timestamp.date(),
+            detail="" if served else "pool-history ladder miss",
+        )
         if history is None or history.tvl is None:
             return None
         logger.info(

@@ -215,6 +215,34 @@ class _RiskMetrics:
     calmar: Decimal
 
 
+def _record_missing_price_serve(
+    token: Any,
+    simulation_timestamp: "datetime | None",
+    strict_price_mode: bool,
+    context: str,
+) -> None:
+    """Stamp the run manifest with a valuation-time missing price (ALM-2943).
+
+    Strict mode refuses (the run aborts on the raise that follows); non-strict
+    degrades (fallback/skip). No-op outside an active backtest run.
+    """
+    from almanak.framework.backtesting.pnl.data_broker import record_data_serve
+    from almanak.framework.backtesting.pnl.data_manifest import (
+        LANE_PRICE,
+        OUTCOME_DEGRADED,
+        OUTCOME_REFUSED,
+    )
+
+    record_data_serve(
+        lane=LANE_PRICE,
+        key=token_ref_display(token),
+        source="",
+        outcome=OUTCOME_REFUSED if strict_price_mode else OUTCOME_DEGRADED,
+        at=simulation_timestamp,
+        detail=f"missing price during {context}",
+    )
+
+
 @dataclass
 class SimulatedPortfolio:
     """Portfolio tracker for PnL backtesting.
@@ -2196,6 +2224,10 @@ class SimulatedPortfolio:
                 chain_id=chain_id,
             )
 
+        # Stamp the run manifest (ALM-2943): strict mode is a price-lane
+        # REFUSAL, non-strict a degrade — both must be answerable post-run.
+        _record_missing_price_serve(token, simulation_timestamp, strict_price_mode, context)
+
         # Log warning with context
         timestamp_str = simulation_timestamp.isoformat() if simulation_timestamp else "unknown"
         logger.warning(
@@ -2266,6 +2298,8 @@ class SimulatedPortfolio:
                         timestamp=simulation_timestamp,
                         chain_id=chain_id,
                     )
+                # Stamp the run manifest (ALM-2943), mirroring _handle_missing_price.
+                _record_missing_price_serve(token, simulation_timestamp, strict_price_mode, "portfolio valuation")
                 # Log warning with context
                 timestamp_str = simulation_timestamp.isoformat() if simulation_timestamp else "unknown"
                 logger.warning(
@@ -2891,9 +2925,17 @@ class SimulatedPortfolio:
             try:
                 value += amount * market_state.get_price(token)
             except KeyError:
+                # Provenance before the outcome either way: a strict run
+                # refuses, a non-strict run silently skips the token — both
+                # must land on the manifest as a valuation-time miss.
+                _record_missing_price_serve(
+                    token,
+                    getattr(market_state, "timestamp", None),
+                    self.strict_reproducibility,
+                    "token holdings valuation",
+                )
                 if self.strict_reproducibility:
                     raise
-                pass
         return value
 
     def _adapter_position_value(
@@ -3086,7 +3128,11 @@ class SimulatedPortfolio:
                 price = market_state.get_price(token)
                 value += amount * price
             except KeyError:
-                # Fall back to entry price if current price unavailable
+                # Fall back to entry price if current price unavailable —
+                # a degraded valuation the manifest must carry.
+                _record_missing_price_serve(
+                    token, getattr(market_state, "timestamp", None), False, "spot position mark"
+                )
                 value += amount * position.entry_price
         return value
 
@@ -3388,7 +3434,9 @@ class SimulatedPortfolio:
         try:
             current_price = market_state.get_price(token)
         except KeyError:
-            # Fall back to entry price if current price unavailable
+            # Fall back to entry price if current price unavailable —
+            # a degraded valuation the manifest must carry.
+            _record_missing_price_serve(token, getattr(market_state, "timestamp", None), False, "perp position mark")
             current_price = position.entry_price
 
         # Calculate unrealized PnL based on price movement

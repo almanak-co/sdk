@@ -673,12 +673,23 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             return None
 
         try:
-            provider = provider_cls.for_backtest(
-                BacktestProviderConfig(
-                    funding_fallback_rate=self._get_funding_fallback_rate(),
-                    chain=provider_chain,
+
+            def _build() -> HistoricalFundingProvider:
+                return provider_cls.for_backtest(
+                    BacktestProviderConfig(
+                        funding_fallback_rate=self._get_funding_fallback_rate(),
+                        chain=provider_chain,
+                    )
                 )
-            )
+
+            # Broker seam (ALM-2943): within a run, funding-provider
+            # construction is coalesced on the run's data broker so adapters
+            # share one instance per (protocol, chain); validation below and
+            # the tried/None memos stay adapter-owned.
+            from almanak.framework.backtesting.pnl.data_broker import active_data_broker
+
+            broker = active_data_broker()
+            provider = broker.funding_provider(("funding", canonical, provider_chain), _build) if broker else _build()
             # Verify BEFORE caching: connector factories fall back to their
             # default chain for unsupported requests (GMX -> arbitrum), and
             # caching that mismatch serves another chain's funding history
@@ -1390,12 +1401,27 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             timestamp=timestamp,
         )
 
+    def _record_funding_serve(self, lookup: _FundingLookup, outcome: str, source: str, detail: str = "") -> None:
+        """Stamp the run manifest with a funding-lane observation (ALM-2943)."""
+        from almanak.framework.backtesting.pnl.data_broker import record_data_serve
+        from almanak.framework.backtesting.pnl.data_manifest import LANE_FUNDING
+
+        record_data_serve(
+            lane=LANE_FUNDING,
+            key=lookup.market,
+            source=source,
+            outcome=outcome,
+            at=lookup.timestamp,
+            detail=detail,
+        )
+
     def _funding_no_timestamp_result(
         self,
         position: "SimulatedPosition",
         lookup: _FundingLookup,
     ) -> tuple[Decimal, str, str]:
         if self._is_strict_historical_mode():
+            self._record_funding_serve(lookup, "refused", "", detail="strict mode: no timestamp for funding lookup")
             raise HistoricalDataUnavailableError(
                 data_type="funding",
                 identifier=lookup.market,
@@ -1411,6 +1437,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             lookup.primary_token,
             float(default_rate),
         )
+        self._record_funding_serve(lookup, "degraded", "fallback:no_timestamp")
         return default_rate, "low", "fallback:no_timestamp"
 
     def _funding_provider_unavailable_result(
@@ -1420,6 +1447,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
     ) -> tuple[Decimal, str, str]:
         assert lookup.timestamp is not None
         if self._is_strict_historical_mode():
+            self._record_funding_serve(lookup, "refused", "", detail="strict mode: no provider for protocol")
             raise HistoricalDataUnavailableError(
                 data_type="funding",
                 identifier=lookup.market,
@@ -1435,6 +1463,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             lookup.primary_token,
             float(default_rate),
         )
+        self._record_funding_serve(lookup, "degraded", f"fallback:unsupported_protocol:{position.protocol}")
         return default_rate, "low", f"fallback:unsupported_protocol:{position.protocol}"
 
     def _funding_cache_key(self, position: "SimulatedPosition", lookup: _FundingLookup) -> tuple[str, str, datetime]:
@@ -1451,6 +1480,8 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         if cached is None:
             return None
         assert lookup.timestamp is not None
+        # A cache hit is still a serve for THIS hour of the run (aggregated).
+        self._record_funding_serve(lookup, "served", cached[2])
         logger.debug(
             "Using cached funding rate for %s %s at %s: %.6f",
             position.protocol,
@@ -1526,6 +1557,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
     ) -> tuple[Decimal, str, str]:
         assert lookup.timestamp is not None
         if self._is_strict_historical_mode():
+            self._record_funding_serve(lookup, "refused", "", detail="strict mode: provider returned no data")
             raise HistoricalDataUnavailableError(
                 data_type="funding",
                 identifier=lookup.market,
@@ -1542,6 +1574,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             lookup.timestamp.isoformat(),
             float(default_rate),
         )
+        self._record_funding_serve(lookup, "degraded", "fallback:no_data")
         return default_rate, "low", "fallback:no_data"
 
     def _cache_latest_funding_rate(
@@ -1558,6 +1591,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         source = latest_rate.source_info.source
         result = (latest_rate.rate, confidence, f"historical:{source}")
         self._funding_cache[cache_key] = result
+        self._record_funding_serve(lookup, "served", f"historical:{source}")
 
         logger.info(
             "Historical funding rate for %s %s at %s: %.6f (source=%s, confidence=%s)",
@@ -1578,6 +1612,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
     ) -> tuple[Decimal, str, str]:
         assert lookup.timestamp is not None
         if self._is_strict_historical_mode():
+            self._record_funding_serve(lookup, "refused", "", detail="strict mode: funding fetch failed")
             raise HistoricalDataUnavailableError(
                 data_type="funding",
                 identifier=lookup.market,
@@ -1595,6 +1630,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             float(default_rate),
             str(error),
         )
+        self._record_funding_serve(lookup, "degraded", "fallback:error", detail=str(error)[:200])
         return default_rate, "low", "fallback:error"
 
     def _get_historical_funding_rate(

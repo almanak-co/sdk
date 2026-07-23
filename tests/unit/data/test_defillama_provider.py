@@ -30,9 +30,9 @@ from almanak.framework.data.providers.defillama_provider import (
     LlamaPrice,
     LlamaTvl,
     LlamaYieldPool,
-    _TokenBucket,
     to_llama_coin_id,
 )
+from almanak.framework.data.ratelimit import TokenBucket
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -236,7 +236,7 @@ class TestDataProviderProtocol:
 
 class TestTokenBucket:
     def test_initial_tokens(self):
-        bucket = _TokenBucket(rate=10, period=1.0)
+        bucket = TokenBucket(rate=10, period=1.0)
         # Should allow first 10 requests
         for _ in range(10):
             assert bucket.acquire() is True
@@ -244,14 +244,14 @@ class TestTokenBucket:
         assert bucket.acquire() is False
 
     def test_refill(self):
-        bucket = _TokenBucket(rate=10, period=1.0)
+        bucket = TokenBucket(rate=10, period=1.0)
         # Drain all tokens
         for _ in range(10):
             bucket.acquire()
         assert bucket.acquire() is False
 
         # Simulate time passing
-        with patch("almanak.framework.data.providers.defillama_provider.time") as mock_time:
+        with patch("almanak.framework.data.ratelimit.time") as mock_time:
             mock_time.monotonic.return_value = bucket._last_refill + 1.0
             assert bucket.acquire() is True
 

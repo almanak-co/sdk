@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -37,6 +36,7 @@ from almanak.framework.data.models import (
     DataEnvelope,
     DataMeta,
 )
+from almanak.framework.data.ratelimit import get_bucket
 
 logger = logging.getLogger(__name__)
 
@@ -161,33 +161,6 @@ class YieldOpportunity:
 
 
 # =============================================================================
-# Token Bucket Rate Limiter
-# =============================================================================
-
-
-class _TokenBucket:
-    """Thread-safe token bucket rate limiter."""
-
-    def __init__(self, rate: int = 10, period: float = 1.0) -> None:
-        self._rate = rate
-        self._period = period
-        self._tokens = float(rate)
-        self._last_refill = time.monotonic()
-        self._lock = threading.Lock()
-
-    def acquire(self) -> bool:
-        with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_refill
-            self._tokens = min(float(self._rate), self._tokens + elapsed * (self._rate / self._period))
-            self._last_refill = now
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return True
-            return False
-
-
-# =============================================================================
 # YieldAggregator
 # =============================================================================
 
@@ -210,7 +183,9 @@ class YieldAggregator:
     ) -> None:
         self._cache_ttl = cache_ttl
         self._request_timeout = request_timeout
-        self._rate_limiter = _TokenBucket(rate=10, period=1.0)
+        # Shared process-wide DeFi Llama budget (same upstream as
+        # DefiLlamaProvider) — see almanak.framework.data.ratelimit.
+        self._rate_limiter = get_bucket("defillama", rate=10, period=1.0)
         self._cache: dict[str, tuple[Any, float]] = {}
         self._successes = 0
         self._failures = 0

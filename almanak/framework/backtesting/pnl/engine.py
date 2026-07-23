@@ -539,6 +539,107 @@ def _default_apy_tables() -> Any:
     return InterestCalculator()
 
 
+_lending_scope_hook_registered = False
+
+
+def _clear_lending_scope_caches() -> None:
+    _declared_lending_chains.cache_clear()
+    _lending_chain_scope_rejection.cache_clear()
+
+
+def _ensure_lending_scope_invalidation_hook(registry: Any) -> None:
+    # The scope caches memoize registry-derived decisions; a test-hook
+    # registry reset must not leave them stale.
+    global _lending_scope_hook_registered
+    if not _lending_scope_hook_registered:
+        registry.on_clear(_clear_lending_scope_caches)
+        _lending_scope_hook_registered = True
+
+
+@functools.cache
+def _declared_lending_chains(protocol: str) -> frozenset[str] | None:
+    """Chains the protocol's connector declares lending support on, or None.
+
+    ``None`` means "no declaration to gate on": the protocol resolves to no
+    connector manifest, or the manifest carries no lending
+    ``StrategyMatrixEntry`` — duck-typed/generic protocols (tests, synthetic
+    venues) keep today's behavior. A frozenset (union across the manifest's
+    lending rows) means the connector DECLARED its lending chain scope and
+    the engine may fail closed on chains outside it.
+    """
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    _ensure_lending_scope_invalidation_hook(CONNECTOR_REGISTRY)
+
+    # Lending-scoped aliases fold first (e.g. "fluid_lending" -> fluid,
+    # "aave" -> aave_v3) so the platform-spec spelling gates identically.
+    key = LendingReadRegistry.normalize_protocol(protocol)
+    if not key:
+        return None
+    connector = CONNECTOR_REGISTRY.get(key)
+    if connector is None:
+        return None
+    lending_chains: set[str] = set()
+    declared = False
+    for entry in connector.strategy_matrix_entries or ():
+        if entry.category == "lending":
+            declared = True
+            lending_chains.update(entry.chains)
+    if declared:
+        return frozenset(lending_chains)
+    # No lending matrix rows: most lending connectors (aave_v3, spark,
+    # compound_v3) declare via strategy_intents x strategy_chains — the same
+    # product the support matrix derives lending rows from. A connector
+    # declaring lending intents with a chain list has declared its scope;
+    # skipping it here would leave exactly the majors ungated.
+    lending_intents = {"SUPPLY", "BORROW", "REPAY", "WITHDRAW"}
+    intents = {str(i).upper() for i in (getattr(connector, "strategy_intents", None) or ())}
+    chains = tuple(getattr(connector, "strategy_chains", None) or ())
+    if intents & lending_intents and chains:
+        return frozenset(chains)
+    return None
+
+
+@functools.cache
+def _lending_chain_scope_rejection(protocol: str, chain: str) -> str | None:
+    """Typed refusal for a lending open outside the connector's declared chains.
+
+    Returns the rejection reason when ``protocol`` declares a lending
+    StrategyMatrixEntry whose chain scope excludes ``chain`` (the live
+    compiler fails closed on exactly this combination — the backtest must
+    not fill it and accrue a fabricated APY). ``None`` means no gate:
+    either the chain is declared, or the protocol declares no lending
+    matrix at all (generic protocols keep today's behavior).
+    """
+    declared = _declared_lending_chains(protocol)
+    if declared is None:
+        return None
+
+    def _canon_user(name: str) -> str:
+        from almanak.core.chains import ChainRegistry
+
+        descriptor = ChainRegistry.try_resolve(name)
+        return descriptor.name if descriptor is not None else name.strip().lower()
+
+    def _canon_declared(name: str) -> str:
+        # Connector-declared metadata is OUR code: a typo'd chain name must
+        # fail loudly (strict resolve), not silently reject valid intents
+        # through a lowercase-string fallback.
+        from almanak.core.chains import ChainRegistry
+
+        return ChainRegistry.resolve(name).name
+
+    if _canon_user(chain) in {_canon_declared(declared_chain) for declared_chain in declared}:
+        return None
+    declared_label = ", ".join(sorted(declared))
+    return (
+        f"protocol '{protocol}' declares no lending support on chain '{chain}' "
+        f"(declared lending chains: [{declared_label}]) — the engine refuses to "
+        f"fabricate a lending market the live compiler fails closed on"
+    )
+
+
 def _lp_pair_decimals(token0: Any, token1: Any, chain: str) -> tuple[int, int] | None:
     """Best-effort ``(decimals0, decimals1)`` for an LP pair via the token registry.
 
@@ -864,13 +965,32 @@ class BacktestOHLCVView:
         indicator_engine: Any,
         tick_interval_seconds: int,
         token_addresses: Mapping[str, tuple[str, str]] | None = None,
+        *,
+        manifest: Any = None,
     ) -> None:
         self._engine = indicator_engine
         self._tick_seconds = int(tick_interval_seconds)
         self._token_addresses = dict(token_addresses or {})
+        # Run data manifest (ALM-2943): engine-owned lane, so the handle is
+        # threaded explicitly instead of via the ambient broker contextvar.
+        self._manifest = manifest
         self._timestamp: datetime | None = None
         self._truncation_warned: set[tuple[str, str]] = set()
         self._pool_proxy_warned: set[tuple[str, str]] = set()
+
+    def _record_serve(self, key: str, source: str, outcome: str, detail: str = "") -> None:
+        if self._manifest is None:
+            return
+        from almanak.framework.backtesting.pnl.data_manifest import LANE_OHLCV
+
+        self._manifest.record(
+            lane=LANE_OHLCV,
+            key=key,
+            source=source,
+            outcome=outcome,
+            at=self._timestamp,
+            detail=detail,
+        )
 
     def bind(self, timestamp: datetime) -> None:
         self._timestamp = timestamp
@@ -895,6 +1015,30 @@ class BacktestOHLCVView:
         quote: str = "USD",
         gap_strategy: str = "nan",
     ) -> Any:
+        try:
+            return self._serve_ohlcv(token, timeframe=timeframe, limit=limit, quote=quote, gap_strategy=gap_strategy)
+        except ValueError as exc:
+            # Refusals stamp the manifest too (ALM-2943): a manifest that
+            # records only successes cannot answer "why did this run degrade".
+            # Covers every refusal shape — unbound view, non-USD quote, no
+            # series for token/quote leg, and the indicator engine's
+            # measured-granularity candle gate (ALM-2957).
+            self._record_serve(
+                key=f"{token}@{timeframe}",
+                source="",
+                outcome="refused",
+                detail=str(exc)[:200],
+            )
+            raise
+
+    def _serve_ohlcv(
+        self,
+        token: str,
+        timeframe: str = "1h",
+        limit: int = 100,
+        quote: str = "USD",
+        gap_strategy: str = "nan",
+    ) -> Any:
         import pandas as pd
 
         from almanak.framework.backtesting.pnl.indicator_engine import _timeframe_seconds
@@ -910,6 +1054,7 @@ class BacktestOHLCVView:
         quote_leg = token.split("/")[1].strip().upper() if "/" in token else None
         key = self._buffer_key(base)
         if key is None:
+            # The get_ohlcv wrapper stamps this (and every other) refusal.
             raise ValueError(f"ohlcv unavailable: no backtest price series for token {token!r}")
 
         resampled = self._engine._series_for(key, timeframe, self._tick_seconds)
@@ -980,6 +1125,12 @@ class BacktestOHLCVView:
             "confidence": "close_only",
             "capacity_truncated": capacity_truncated,
         }
+        self._record_serve(
+            key=f"{base.upper()}/{pair_quote or 'USD'}@{timeframe}",
+            source=str(df.attrs["source"]),
+            outcome="served",
+            detail="capacity_truncated" if capacity_truncated else "",
+        )
         return df
 
     def get_pool_ohlcv(
@@ -1003,6 +1154,14 @@ class BacktestOHLCVView:
 
         pair = known_pool_pair(chain, pool_address)
         if pair is None:
+            # Pre-delegation refusals stamp with the POOL key; refusals in the
+            # delegated get_ohlcv stamp there with the pair key (no doubles).
+            self._record_serve(
+                key=f"pool:{chain}:{pool_address}@{timeframe}",
+                source="",
+                outcome="refused",
+                detail="pool is not registry-known",
+            )
             raise ValueError(
                 f"ohlcv unavailable: pool {pool_address!r} is not a registry-known pool on {chain!r}; "
                 "pass token-scoped candles (e.g. market.ohlcv('WETH')) or omit pool_address"
@@ -1015,6 +1174,12 @@ class BacktestOHLCVView:
             except TokenResolutionError:
                 resolved = None
             if resolved is None or not getattr(resolved, "symbol", None):
+                self._record_serve(
+                    key=f"pool:{chain}:{pool_address}@{timeframe}",
+                    source="",
+                    outcome="refused",
+                    detail="pool token is not registry-resolvable",
+                )
                 raise ValueError(
                     f"ohlcv unavailable: pool {pool_address!r} token {token_address!r} is not registry-resolvable"
                 )
@@ -3442,17 +3607,49 @@ class PnLBacktester:
         if preflight_report is not None:
             state.compliance_violations.extend(boot_compliance_violations(preflight_report.support, config))
 
-        # Simulation phase
-        try:
-            await _engine_helpers.execute_iteration_loop(
-                backtester=self,
-                strategy=strategy,
+        # Run-scoped data broker (ALM-2943): activate the run's broker as the
+        # ambient seam for lanes that cannot reach BacktestState (the LP
+        # volume rescue, liquidity TVL rescue, and perp funding paths record
+        # provenance and coalesce provider construction through it). The
+        # contextvar set here is inherited by everything awaited below.
+        from almanak.framework.backtesting.pnl.data_broker import data_broker_scope
+
+        assert state.data_broker is not None  # initialize_backtest always builds one
+        with data_broker_scope(state.data_broker):
+            # Simulation phase
+            try:
+                await _engine_helpers.execute_iteration_loop(
+                    backtester=self,
+                    strategy=strategy,
+                    config=config,
+                    bt_logger=bt_logger,
+                    state=state,
+                )
+            except Exception as e:
+                return _engine_helpers.build_error_result(
+                    backtester=self,
+                    strategy=strategy,
+                    config=config,
+                    backtest_id=backtest_id,
+                    bt_logger=bt_logger,
+                    run_started_at=run_started_at,
+                    state=state,
+                    preflight_report=preflight_report,
+                    preflight_passed=preflight_passed,
+                    error=e,
+                )
+
+            # Data quality gate enforcement - check coverage ratio after simulation.
+            # Raises ValueError in institutional mode; otherwise appends compliance
+            # violation + logs warning.
+            _engine_helpers.enforce_data_quality_gate(
                 config=config,
                 bt_logger=bt_logger,
                 state=state,
             )
-        except Exception as e:
-            return _engine_helpers.build_error_result(
+
+            # Metrics calculation + BacktestResult assembly
+            return _engine_helpers.finalize_backtest_result(
                 backtester=self,
                 strategy=strategy,
                 config=config,
@@ -3462,30 +3659,7 @@ class PnLBacktester:
                 state=state,
                 preflight_report=preflight_report,
                 preflight_passed=preflight_passed,
-                error=e,
             )
-
-        # Data quality gate enforcement - check coverage ratio after simulation.
-        # Raises ValueError in institutional mode; otherwise appends compliance
-        # violation + logs warning.
-        _engine_helpers.enforce_data_quality_gate(
-            config=config,
-            bt_logger=bt_logger,
-            state=state,
-        )
-
-        # Metrics calculation + BacktestResult assembly
-        return _engine_helpers.finalize_backtest_result(
-            backtester=self,
-            strategy=strategy,
-            config=config,
-            backtest_id=backtest_id,
-            bt_logger=bt_logger,
-            run_started_at=run_started_at,
-            state=state,
-            preflight_report=preflight_report,
-            preflight_passed=preflight_passed,
-        )
 
     def _extract_intent(self, decide_result: Any) -> Any:
         """Extract the intent from a decide() result. Delegates to intent_extraction module."""
@@ -4091,6 +4265,29 @@ class PnLBacktester:
                     failure_code=code,
                 ),
             )
+
+        # Lending opens fail closed on a DECLARED-but-mismatched chain scope:
+        # a connector that pins its lending chains (fluid: arbitrum/base) must
+        # not fill on any other chain — live compilation refuses the combo,
+        # and a generic fill here would accrue a fabricated default APY
+        # (observed: fluid/ethereum). Protocols with no lending matrix
+        # declaration keep the generic duck-typed behavior.
+        if intent_type in (IntentType.SUPPLY, IntentType.BORROW):
+            scope_reason = _lending_chain_scope_rejection(protocol, chain)
+            if scope_reason is not None:
+                from .sizing import RejectionCode
+
+                return _GenericIntentDetails(
+                    intent_type=intent_type,
+                    protocol=protocol,
+                    tokens=tokens,
+                    amount_usd=Decimal("0"),
+                    close_resolution=_CloseResolution(
+                        amount_usd=Decimal("0"),
+                        failure_reason=scope_reason,
+                        failure_code=RejectionCode.UNDECLARED_LENDING_CHAIN.value,
+                    ),
+                )
 
         amount_usd = self._get_intent_amount_usd(
             intent,

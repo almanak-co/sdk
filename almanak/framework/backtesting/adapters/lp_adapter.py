@@ -468,6 +468,18 @@ class _LPCloseResult:
     net_lp_pnl_usd: Decimal
 
 
+class LPPoolResolutionError(ValueError):
+    """An LP intent's ``pool`` string cannot be resolved to a token pair.
+
+    Raised instead of fabricating a default pair: the historical
+    ``("WETH", "USDC")`` fallback gave every unparseable pool WETH/USDC
+    semantics, so an address-style USDC/WETH pool had its ``amount0``
+    priced as WETH — a ~1000x notional error on rejects and wrong fill
+    legs on fills. Callers convert this into a rejected fill whose
+    reason names the pool.
+    """
+
+
 @dataclass(frozen=True)
 class _LPOpenPlan:
     token0: str
@@ -2171,8 +2183,27 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         logging or caching. Non-strict mode runs ``on_fallback`` (the per-site
         log call), caches ``(None, LOW)`` under ``cache_key`` when one is
         given, and returns the degraded result.
+
+        Both branches stamp the run manifest (ALM-2943): a strict refusal or a
+        non-strict degrade is exactly the "why did this run degrade" record.
         """
-        if self._is_strict_historical_mode():
+        from almanak.framework.backtesting.pnl.data_broker import record_data_serve
+        from almanak.framework.backtesting.pnl.data_manifest import (
+            LANE_POOL_VOLUME,
+            OUTCOME_DEGRADED,
+            OUTCOME_REFUSED,
+        )
+
+        strict = self._is_strict_historical_mode()
+        record_data_serve(
+            lane=LANE_POOL_VOLUME,
+            key=f"{chain or ''}:{identifier}",
+            source="",
+            outcome=OUTCOME_REFUSED if strict else OUTCOME_DEGRADED,
+            at=timestamp,
+            detail=message[:200],
+        )
+        if strict:
             error = HistoricalDataUnavailableError(
                 data_type="volume",
                 identifier=identifier,
@@ -2371,11 +2402,11 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         if not protocol:
             return _LadderVolumeOutcome(value=None, cacheable=True)
         try:
-            from almanak.framework.backtesting.pnl.providers.pool_history_fallback import (
-                get_pool_history_fallback,
-            )
+            # Broker seam (ALM-2943): routed through the run's data broker when
+            # one is active; the process-wide singleton serves outside a run.
+            from almanak.framework.backtesting.pnl.data_broker import pool_history_provider
 
-            outcome = get_pool_history_fallback().daily_history_outcome(
+            outcome = pool_history_provider().daily_history_outcome(
                 pool_address=pool_address_lower,
                 chain=chain,
                 protocol=protocol,
@@ -2383,7 +2414,11 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             )
         except Exception as e:  # noqa: BLE001 — the rescue path must never out-fail the failed primary lane
             logger.debug("Pool-history ladder volume lookup failed for %s: %s", pool_address_lower[:10], e)
+            self._record_ladder_volume_serve(
+                None, pool_address_lower, chain, target_date, detail="ladder lookup failed"
+            )
             return _LadderVolumeOutcome(value=None, cacheable=False)
+        self._record_ladder_volume_serve(outcome.history, pool_address_lower, chain, target_date)
         return _LadderVolumeOutcome(
             value=self._apply_ladder_volume(outcome.history, pool_address_lower, target_date, cache_key),
             cacheable=outcome.cacheable,
@@ -2420,11 +2455,10 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         if not protocol:
             return _LadderVolumeOutcome(value=None, cacheable=True)
         try:
-            from almanak.framework.backtesting.pnl.providers.pool_history_fallback import (
-                get_pool_history_fallback,
-            )
+            # Broker seam (ALM-2943): same routing as the sync path.
+            from almanak.framework.backtesting.pnl.data_broker import pool_history_provider
 
-            outcome = await get_pool_history_fallback().daily_history_outcome_async(
+            outcome = await pool_history_provider().daily_history_outcome_async(
                 pool_address=pool_address_lower,
                 chain=chain,
                 protocol=protocol,
@@ -2432,10 +2466,43 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             )
         except Exception as e:  # noqa: BLE001 — the rescue path must never out-fail the failed primary lane
             logger.debug("Pool-history ladder volume lookup failed for %s: %s", pool_address_lower[:10], e)
+            self._record_ladder_volume_serve(
+                None, pool_address_lower, chain, target_date, detail="ladder lookup failed"
+            )
             return _LadderVolumeOutcome(value=None, cacheable=False)
+        self._record_ladder_volume_serve(outcome.history, pool_address_lower, chain, target_date)
         return _LadderVolumeOutcome(
             value=self._apply_ladder_volume(outcome.history, pool_address_lower, target_date, cache_key),
             cacheable=outcome.cacheable,
+        )
+
+    @staticmethod
+    def _record_ladder_volume_serve(
+        history: "DailyPoolHistory | None",
+        pool_address_lower: str,
+        chain: str,
+        target_date: date,
+        detail: str = "",
+    ) -> None:
+        """Stamp the run manifest with this pool-day's volume-ladder outcome (ALM-2943)."""
+        from almanak.framework.backtesting.pnl.data_broker import record_data_serve
+        from almanak.framework.backtesting.pnl.data_manifest import (
+            LANE_POOL_VOLUME,
+            OUTCOME_DEGRADED,
+            OUTCOME_SERVED,
+        )
+        from almanak.framework.backtesting.pnl.providers.pool_history_fallback import (
+            POOL_HISTORY_SOURCE_PREFIX,
+        )
+
+        served = history is not None and history.volume_24h is not None
+        record_data_serve(
+            lane=LANE_POOL_VOLUME,
+            key=f"{chain}:{pool_address_lower}",
+            source=f"{POOL_HISTORY_SOURCE_PREFIX}:{history.volume_source}" if served and history is not None else "",
+            outcome=OUTCOME_SERVED if served else OUTCOME_DEGRADED,
+            at=target_date,
+            detail=detail if detail else ("" if served else "pool-history ladder miss"),
         )
 
     def _apply_ladder_volume(
@@ -2639,7 +2706,16 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 reason="Invalid intent type",
             )
 
-        plan = self._build_lp_open_plan(intent, market_state)
+        try:
+            plan = self._build_lp_open_plan(intent, market_state)
+        except LPPoolResolutionError as exc:
+            # Fail honest: an unresolvable pool must reject with a named
+            # reason, never open a fabricated-default (WETH/USDC) position.
+            return self._failed_lp_open_fill(
+                market_state=market_state,
+                protocol=str(getattr(intent, "protocol", "") or "unknown").lower(),
+                reason=str(exc),
+            )
         coin_amounts = getattr(intent, "coin_amounts", None) or []
         has_coin_vector = any(amount and Decimal(str(amount)) > 0 for amount in coin_amounts)
         # NB: coin_amounts and amount0/amount1 are mutually exclusive — the
@@ -2700,7 +2776,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         )
 
     def _build_lp_open_plan(self, intent: "LPOpenIntent", market_state: "MarketState") -> _LPOpenPlan:
-        token0, token1 = self._lp_open_tokens(intent.pool)
+        token0, token1 = self._lp_open_tokens(intent)
         amount0 = Decimal(str(intent.amount0))
         amount1 = Decimal(str(intent.amount1))
         token0_price, token1_price = self._lp_open_prices(token0, token1, market_state)
@@ -2734,12 +2810,55 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             liquidity=liquidity,
         )
 
-    @staticmethod
-    def _lp_open_tokens(pool: str) -> tuple[str, str]:
+    def _lp_open_tokens(self, intent: "LPOpenIntent") -> tuple[str, str]:
+        """Resolve the ``(token0, token1)`` symbols an LP intent's pool declares.
+
+        ``"TOKEN0/TOKEN1[/fee]"`` parses positionally (unchanged). An
+        address-style pool resolves through the offline pool registry
+        (``known_pool_pair``) to the pool's REAL pair in registry
+        orientation, then to symbols via the token registry — mirroring
+        ``engine.get_pool_ohlcv``. Registry-unknown addresses and other
+        unparseable names raise :class:`LPPoolResolutionError` so the open
+        is rejected with a named reason instead of inheriting the old
+        fabricated ``("WETH", "USDC")`` default.
+        """
+        from almanak.framework.backtesting.pnl.data_provider import is_address_like
+        from almanak.framework.data.pools.reader import known_pool_pair
+        from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
+
+        pool = str(getattr(intent, "pool", "") or "").strip()
         if "/" in pool:
             token0, token1 = pool.split("/")[:2]
             return token0.strip().upper(), token1.strip().upper()
-        return "WETH", "USDC"
+        chain = str(getattr(intent, "chain", None) or self._config.chain)
+        if is_address_like(pool):
+            pair = known_pool_pair(chain, pool)
+            if pair is None:
+                raise LPPoolResolutionError(
+                    f"pool {pool!r} is not registry-known on {chain!r}; "
+                    "pass a TOKEN0/TOKEN1 pool or a registry-known pool address"
+                )
+            if len(pair) != 2:
+                raise LPPoolResolutionError(
+                    f"pool {pool!r} resolved to {len(pair)} tokens on {chain!r}; a token pair is required"
+                )
+            symbols: list[str] = []
+            for token_address in pair:
+                try:
+                    resolved = get_token_resolver().resolve(token_address, chain, log_errors=False, skip_gateway=True)
+                except TokenResolutionError:
+                    resolved = None
+                if resolved is None or not getattr(resolved, "symbol", None):
+                    raise LPPoolResolutionError(
+                        f"pool {pool!r} token {token_address!r} is not registry-resolvable on {chain!r}; "
+                        "pass a TOKEN0/TOKEN1 pool instead"
+                    )
+                symbols.append(str(resolved.symbol).upper())
+            return symbols[0], symbols[1]
+        raise LPPoolResolutionError(
+            f"pool {pool!r} does not declare a token pair: pass a TOKEN0/TOKEN1 pool "
+            "(e.g. 'WETH/USDC') or a registry-known pool address"
+        )
 
     def _lp_open_prices(
         self,
@@ -2771,7 +2890,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         from almanak.framework.backtesting.pnl.intent_extraction import get_lp_tick_range
         from almanak.framework.intents.vocabulary import lp_range_bounds
 
-        token0, token1 = self._lp_open_tokens(intent.pool)
+        token0, token1 = self._lp_open_tokens(intent)
         chain = str(getattr(intent, "chain", None) or self._config.chain)
         tick_lower, tick_upper = get_lp_tick_range(
             intent, self._price_to_tick_int, decimals=_lp_pair_decimals(token0, token1, chain)

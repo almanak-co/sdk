@@ -37,7 +37,6 @@ Example:
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -55,6 +54,7 @@ from almanak.framework.data.models import (
     DataEnvelope,
     DataMeta,
 )
+from almanak.framework.data.ratelimit import get_bucket
 
 logger = logging.getLogger(__name__)
 
@@ -77,34 +77,6 @@ class _HealthMetrics:
     cache_hits: int = 0
     errors: int = 0
     total_latency_ms: float = 0.0
-
-
-class _TokenBucket:
-    """Thread-safe token bucket rate limiter.
-
-    Allows `rate` requests per `period` seconds using a token bucket algorithm.
-    Tokens are refilled lazily on each call to `acquire()`.
-    """
-
-    def __init__(self, rate: int = 10, period: float = 1.0) -> None:
-        self._rate = rate
-        self._period = period
-        self._tokens = float(rate)
-        self._last_refill = time.monotonic()
-        self._lock = threading.Lock()
-
-    def acquire(self) -> bool:
-        """Try to acquire a token. Returns True if allowed, False if rate limited."""
-        with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_refill
-            self._tokens = min(float(self._rate), self._tokens + elapsed * (self._rate / self._period))
-            self._last_refill = now
-
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return True
-            return False
 
 
 def to_llama_coin_id(token_address: str, chain: str) -> str:
@@ -221,7 +193,10 @@ class DefiLlamaProvider:
         """
         self._cache_ttl = cache_ttl
         self._request_timeout = request_timeout
-        self._rate_limiter = _TokenBucket(rate=rate_limit, period=1.0)
+        # Shared process-wide bucket: all DeFi Llama call sites (this provider,
+        # YieldAggregator, ...) draw from one budget so combined egress cannot
+        # exceed the upstream cap.
+        self._rate_limiter = get_bucket("defillama", rate=rate_limit, period=1.0)
         self._metrics = _HealthMetrics()
         self._session: aiohttp.ClientSession | None = None
         self._cache: dict[str, tuple[Any, float]] = {}

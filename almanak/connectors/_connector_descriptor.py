@@ -15,7 +15,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import pkgutil
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -1652,6 +1652,15 @@ class ConnectorRegistry:
         self._package_name = package_name
         self._connectors: tuple[Connector, ...] | None = None
         self._discovering = False
+        self._invalidation_callbacks: list[Callable[[], None]] = []
+
+    def on_clear(self, callback: Callable[[], None]) -> None:
+        """Register a callback invoked whenever the discovery cache is cleared.
+
+        Consumers that memoize registry-derived decisions register their
+        cache-clear here so a test-hook reset cannot leave them stale.
+        """
+        self._invalidation_callbacks.append(callback)
 
     def all(self) -> tuple[Connector, ...]:
         """Return every discovered connector sorted by connector name."""
@@ -1863,6 +1872,8 @@ class ConnectorRegistry:
         """Test helper: clear the discovery cache."""
         self._connectors = None
         self._discovering = False
+        for callback in tuple(self._invalidation_callbacks):
+            callback()
 
     def _discover(self) -> tuple[Connector, ...]:
         """Scan connector packages and validate discovered manifest ownership."""

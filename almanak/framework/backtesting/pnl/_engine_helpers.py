@@ -61,6 +61,8 @@ from almanak.framework.backtesting.numeraire import (
     numeraire_token_address,
     resolve_numeraire_symbol,
 )
+from almanak.framework.backtesting.pnl.data_broker import BacktestDataBroker
+from almanak.framework.backtesting.pnl.data_manifest import LANE_PRICE, OUTCOME_DEGRADED, OUTCOME_SERVED
 from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataCapability,
     HistoricalDataConfig,
@@ -183,6 +185,11 @@ class BacktestState:
     parameter_sources: ParameterSourceTracker
     total_ticks: int
     run_context: BacktestRunContext | None = None
+    # Run-scoped data broker + provenance manifest (ALM-2943). Lives here
+    # (mutable run state) rather than on the frozen BacktestRunContext; the
+    # engine additionally activates it as the ambient broker for lanes that
+    # cannot reach run state (see data_broker module docstring).
+    data_broker: BacktestDataBroker | None = None
     # Mutated during execute_iteration_loop
     pending_intents: list[tuple[Any, datetime, int]] = field(default_factory=list)
     last_market_state: MarketState | None = None
@@ -493,6 +500,7 @@ def initialize_backtest(
         parameter_sources=parameter_sources,
         total_ticks=total_ticks,
         run_context=run_context,
+        data_broker=BacktestDataBroker(),
     )
 
 
@@ -603,7 +611,13 @@ async def execute_iteration_loop(
     position_view = SimulatedPositionView(state.portfolio)
     # market.ohlcv() served from the run's own close series (ALM-2962) —
     # candle-reading strategies froze while the same code traded live.
-    ohlcv_view = BacktestOHLCVView(state.indicator_engine, config.interval_seconds, token_addresses)
+    run_manifest = state.data_broker.manifest if state.data_broker is not None else None
+    ohlcv_view = BacktestOHLCVView(
+        state.indicator_engine,
+        config.interval_seconds,
+        token_addresses,
+        manifest=run_manifest,
+    )
     # ALM-2943: pool_price / pool_price_by_pair as the labeled pair-ratio
     # proxy, estimate_slippage from the engine's own fill models, and
     # realized_vol / vol_cone over the run's close series — all data the
@@ -744,8 +758,25 @@ async def execute_iteration_loop(
                         success=True,
                         source=provider_name,
                     )
+                    if run_manifest is not None:
+                        run_manifest.record(
+                            lane=LANE_PRICE,
+                            key=expected_token_label,
+                            source=provider_name,
+                            outcome=OUTCOME_SERVED,
+                            at=timestamp,
+                        )
                 else:
                     state.data_quality_tracker.record_lookup(success=False)
+                    if run_manifest is not None:
+                        run_manifest.record(
+                            lane=LANE_PRICE,
+                            key=expected_token_label,
+                            source="",
+                            outcome=OUTCOME_DEGRADED,
+                            at=timestamp,
+                            detail="no price in market state for this tick",
+                        )
 
             # Execute any pending intents that have waited long enough
             state.pending_intents = await backtester._process_pending_intents(
@@ -1041,6 +1072,7 @@ def build_error_result(
         gas_prices_used=backtester._gas_price_records or [],
         gas_price_summary=None,  # No trades on error
         parameter_sources=state.parameter_sources,
+        data_manifest=state.data_broker.manifest.to_dict() if state.data_broker is not None else None,
     )
 
 
@@ -1247,6 +1279,7 @@ def finalize_backtest_result(
         gas_price_summary=backtester._create_gas_price_summary(state.portfolio.trades),
         parameter_sources=state.parameter_sources,
         data_coverage_metrics=state.portfolio.calculate_data_coverage_metrics(),
+        data_manifest=state.data_broker.manifest.to_dict() if state.data_broker is not None else None,
     )
 
 

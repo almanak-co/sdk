@@ -11,6 +11,21 @@ Markers:
 
 import pytest
 
+from almanak.framework.data.ratelimit import reset_buckets
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_rate_limit_buckets():
+    """Isolate the process-wide shared rate-limit registry between tests.
+
+    Providers share named buckets process-wide (almanak.framework.data.ratelimit),
+    so a test that drains the "defillama" bucket would otherwise rate-limit
+    unrelated tests in the same pytest process.
+    """
+    reset_buckets()
+    yield
+    reset_buckets()
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add custom CLI options for QA tests.

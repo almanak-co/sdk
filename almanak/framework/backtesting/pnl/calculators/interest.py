@@ -97,6 +97,40 @@ class InterestResult:
         return self.principal + self.interest
 
 
+#: Protocols already warned about inheriting a GLOBAL default APY, keyed by
+#: ``(side, protocol)``. Module-level (not per-instance) because the accrual
+#: lane constructs a fresh ``InterestCalculator`` per valuation tick — a
+#: per-instance set would warn every tick.
+_GLOBAL_APY_FALLBACK_WARNED: set[tuple[str, str]] = set()
+
+
+def _warn_global_apy_fallback(side: str, protocol: str, default: Decimal) -> None:
+    """Warn ONCE per (side, protocol) that the global surrogate APY is in play.
+
+    The connector-declared tables (``LendingReadDecl.backtest_default_*_apy``)
+    are the sanctioned offline rates; a protocol absent from them accrues at
+    the framework's generic surrogate. That is fabrication — permitted for
+    duck-typed/generic protocols, but never silently (fail-honest doctrine;
+    the surrogate silently fabricated 3% on an undeclared venue with zero
+    warnings).
+    """
+    key = (side, protocol)
+    if key in _GLOBAL_APY_FALLBACK_WARNED:
+        return
+    _GLOBAL_APY_FALLBACK_WARNED.add(key)
+    logger.warning(
+        "No connector-declared %s APY for protocol '%s' — falling back to the global "
+        "surrogate %s APY of %s. This rate is fabricated; declare "
+        "backtest_default_%s_apy on the connector manifest (or supply intent.apy) "
+        "for an honest rate.",
+        side,
+        protocol,
+        side,
+        default,
+        side,
+    )
+
+
 @dataclass
 class InterestCalculator:
     """Calculator for interest on lending positions.
@@ -709,9 +743,18 @@ class InterestCalculator:
             protocol: Protocol name (e.g., "aave_v3", "compound_v3")
 
         Returns:
-            The protocol's default supply APY, or global default if not found
+            The protocol's connector-declared default supply APY. When the
+            connector declares none, the GLOBAL surrogate
+            (``default_supply_apy``, 3%) is returned — a fabricated,
+            documented last resort for duck-typed/generic protocols, and it
+            warns once per protocol so no backtest inherits it silently.
         """
-        return self.protocol_supply_apys.get(protocol.lower(), self.default_supply_apy)
+        key = protocol.lower()
+        declared = self.protocol_supply_apys.get(key)
+        if declared is not None:
+            return declared
+        _warn_global_apy_fallback("supply", key, self.default_supply_apy)
+        return self.default_supply_apy
 
     def get_borrow_apy_for_protocol(self, protocol: str) -> Decimal:
         """Get the default borrow APY for a specific protocol.
@@ -720,9 +763,18 @@ class InterestCalculator:
             protocol: Protocol name (e.g., "aave_v3", "compound_v3")
 
         Returns:
-            The protocol's default borrow APY, or global default if not found
+            The protocol's connector-declared default borrow APY. When the
+            connector declares none, the GLOBAL surrogate
+            (``default_borrow_apy``, 5%) is returned — a fabricated,
+            documented last resort for duck-typed/generic protocols, and it
+            warns once per protocol so no backtest inherits it silently.
         """
-        return self.protocol_borrow_apys.get(protocol.lower(), self.default_borrow_apy)
+        key = protocol.lower()
+        declared = self.protocol_borrow_apys.get(key)
+        if declared is not None:
+            return declared
+        _warn_global_apy_fallback("borrow", key, self.default_borrow_apy)
+        return self.default_borrow_apy
 
     def estimate_annual_interest(
         self,

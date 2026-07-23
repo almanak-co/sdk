@@ -817,6 +817,8 @@ def serialize_result(result: BacktestResult) -> dict[str, Any]:
             for pt in result.price_series
         ]
         payload["price_series_display_labels"] = dict(result.price_series_display_labels)
+    if result.data_manifest is not None:
+        payload["data_manifest"] = result.data_manifest
     return payload
 
 

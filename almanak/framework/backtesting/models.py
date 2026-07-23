@@ -2352,6 +2352,16 @@ class BacktestResult:
             print(f"Expected accuracy: {result.accuracy_estimate.confidence_interval}")
             print(f"Primary error source: {result.accuracy_estimate.primary_error_source}")
     """
+    data_manifest: dict[str, Any] | None = None
+    """Run data-provenance manifest (ALM-2943): which sources actually served the run.
+
+    Serialized ``RunDataManifest`` payload — ``{"schema_version", "source_ladder",
+    "entries"}`` with one aggregate row per (lane, key, source, outcome, ladder)
+    carrying a count and first/last time markers. Lanes cover price ticks,
+    OHLCV views, pool volume/TVL ladder serves, and funding history; lending
+    APY and pool-state history are reserved lanes (TODO ALM-2943). ``None``
+    for paper results and pre-manifest artifacts.
+    """
     data_coverage_metrics: DataCoverageMetrics | None = None
     """Data coverage metrics tracking confidence levels across all position types.
 
@@ -2719,6 +2729,10 @@ class BacktestResult:
             result["initial_capital_numeraire"] = str(self.initial_capital_numeraire)
         if self.final_capital_numeraire is not None:
             result["final_capital_numeraire"] = str(self.final_capital_numeraire)
+        # Emit-when-set (ALM-2943): paper results and legacy artifacts carry
+        # no manifest, so their payloads are unchanged.
+        if self.data_manifest is not None:
+            result["data_manifest"] = self.data_manifest
         # Emit-when-set, like the numeraire keys: paper results and legacy
         # artifacts carry no price series, so their payloads are unchanged.
         if self.price_series:
@@ -3061,6 +3075,7 @@ class BacktestResult:
             accuracy_estimate=(
                 AccuracyEstimate.from_dict(data["accuracy_estimate"]) if data.get("accuracy_estimate") else None
             ),
+            data_manifest=data.get("data_manifest"),
             data_coverage_metrics=(
                 DataCoverageMetrics.from_dict(data["data_coverage_metrics"])
                 if data.get("data_coverage_metrics")
