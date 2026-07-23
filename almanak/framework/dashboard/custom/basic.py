@@ -31,6 +31,7 @@ import streamlit as st
 from almanak.framework.dashboard.sections import (
     render_cost_stack_section,
     render_nav_history_section,
+    render_perp_positions_section,
     render_pnl_section,
     render_position_lifecycle_section,
     render_trade_tape_section,
@@ -49,11 +50,19 @@ def render_basic_dashboard(
     strategy_config: dict[str, Any],
     api_client: Any,
     session_state: dict[str, Any],
+    *,
+    include_perp_section: bool = False,
 ) -> None:
     """Render the shared, demo-agnostic charted dashboard for ``deployment_id``.
 
     Chain / protocol are read from ``strategy_config`` at runtime, so a single
     implementation serves every demo without per-strategy hardcoding.
+
+    ``include_perp_section=True`` adds the snapshot-derived perp position story
+    (:func:`render_perp_positions_section`) directly under the PnL cards — perp
+    demos opt in; the section deliberately always renders a header (outage vs
+    empty-book honesty, VIB-5942), so it is NOT wired unconditionally into the
+    non-perp demos that share this layout.
     """
     cfg = strategy_config or {}
     chain = str(cfg.get("chain", "—"))
@@ -66,6 +75,8 @@ def render_basic_dashboard(
     st.caption(caption)
 
     _safe("PnL summary", render_pnl_section, deployment_id)
+    if include_perp_section:
+        _safe("Perp positions", render_perp_positions_section, deployment_id)
     _safe("NAV / PnL / drawdown over time", render_nav_history_section, deployment_id, default_range="All")
     _safe("Cost stack", render_cost_stack_section, deployment_id)
     _safe("Positions", render_position_lifecycle_section, deployment_id, api_client)

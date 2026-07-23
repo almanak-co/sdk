@@ -124,6 +124,12 @@ def test_safe_passes_through_on_success() -> None:
     assert calls == ["ran"]
 
 
+# Perp demos deliberately WRAP the shared renderer (include_perp_section=True —
+# VIB-5942 twin-drift fix) instead of re-exporting it identically; their wiring
+# contract is pinned in tests/unit/dashboard/test_perp_demo_dashboard_wiring_vib5942.py.
+_PERP_WRAPPED_DEMOS = {"gmx_perp_lifecycle", "gmx_v2_directional_perp"}
+
+
 @pytest.mark.parametrize("demo", DEMOS)
 def test_demo_ui_reexports_shared_renderer(demo: str) -> None:
     ui_path = _REPO_ROOT / "almanak" / "demo_strategies" / demo / "dashboard" / "ui.py"
@@ -131,4 +137,9 @@ def test_demo_ui_reexports_shared_renderer(demo: str) -> None:
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert module.render_custom_dashboard is basic.render_basic_dashboard
+    if demo in _PERP_WRAPPED_DEMOS:
+        # Wrapper, not identity: same discovery interface, perp section opted in.
+        assert module.render_custom_dashboard is not basic.render_basic_dashboard
+        assert callable(module.render_custom_dashboard)
+    else:
+        assert module.render_custom_dashboard is basic.render_basic_dashboard
