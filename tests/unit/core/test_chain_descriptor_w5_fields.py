@@ -81,6 +81,8 @@ HISTORICAL_FALLBACK_GAS_PRICES: dict[str, dict[str, Decimal]] = {
     "arbitrum": {"base_fee": Decimal("0.1"), "priority_fee": Decimal("0")},
     "optimism": {"base_fee": Decimal("0.001"), "priority_fee": Decimal("0.001")},
     "base": {"base_fee": Decimal("0.001"), "priority_fee": Decimal("0.001")},
+    # polygon/bsc/avalanche legacy mirrors are superseded by the measured
+    # 2026-07-24 retunes in MEASURED_FALLBACK_GAS_PRICES (union override below).
     "polygon": {"base_fee": Decimal("30"), "priority_fee": Decimal("30")},
     "bsc": {"base_fee": Decimal("3"), "priority_fee": Decimal("0")},
     "avalanche": {"base_fee": Decimal("25"), "priority_fee": Decimal("1")},
@@ -99,7 +101,7 @@ HISTORICAL_FALLBACK_GAS_PRICES: dict[str, dict[str, Decimal]] = {
 # 1000 blocks over the last 20_000 (min 0.05293 / median 0.05328 / max 0.05427
 # gwei); 0.055 rounds the median up, the conservative direction for backtest
 # cost estimation. priority_fee is a measured 0.0 (Orbit sequencer is FCFS with
-# no priority auction), NOT an unmeasured blank — same shape as arbitrum/bsc.
+# no priority auction), NOT an unmeasured blank — same shape as arbitrum.
 #
 # ethereum (2026-07-24): retuned from the legacy 20+2=22 gwei, which was
 # calibrated for pre-blob L1 and overstated post-blob mainnet gas ~140x
@@ -108,9 +110,32 @@ HISTORICAL_FALLBACK_GAS_PRICES: dict[str, dict[str, Decimal]] = {
 # ``framework/execution/gas/constants.py``); priority_fee matches the ~0.05
 # gwei landable tip from the VIB-5673 investigation. 0.21 total rounds up
 # from observed — the conservative direction for backtest cost estimation.
+#
+# avalanche (2026-07-24): retuned from the legacy 25+1=26 gwei (the pre-Etna
+# 25 gwei minimum-base-fee era), which overstated measured live gas ~470x.
+# base_fee 0.06 rounds the 2026-07-24 sweep median up (baseFeePerGas every
+# 1000 blocks over the last 20_000: min 0.040 / median 0.055 / max 0.097
+# gwei); priority_fee 0.02 is the VIB-5673 live-lane tip floor — the observed
+# p50 tip is ~0, but our own transactions always pay at least 0.02.
+#
+# bsc (2026-07-24): retuned from the legacy 3+0=3 gwei (~60x overstatement).
+# baseFeePerGas is a measured 0 on every sampled block (BEP-227 zero base
+# fee); the whole price is the 0.05 gwei validator-minimum tip (eth_gasPrice,
+# eth_maxPriorityFeePerGas, and p50 feeHistory rewards all agree), so the
+# zero moved from priority_fee to base_fee relative to the legacy mirror.
+#
+# polygon (2026-07-24): retuned from the legacy 30+30=60 gwei, which
+# UNDERSTATED PoS-era gas ~5x. base_fee 285 rounds the 2026-05-27/28
+# OBSERVED_TYPICAL_GAS_GWEI snapshot (283.95) up — a fresh 2026-07-24 sweep
+# measured median 251.1 gwei, same magnitude, keeping the higher evidence as
+# the conservative pin; priority_fee 30 is the protocol-enforced validator
+# tip floor (mirrors the descriptor's min_priority_fee_gwei).
 MEASURED_FALLBACK_GAS_PRICES: dict[str, dict[str, Decimal]] = {
     "robinhood": {"base_fee": Decimal("0.055"), "priority_fee": Decimal("0")},
     "ethereum": {"base_fee": Decimal("0.16"), "priority_fee": Decimal("0.05")},
+    "avalanche": {"base_fee": Decimal("0.06"), "priority_fee": Decimal("0.02")},
+    "bsc": {"base_fee": Decimal("0"), "priority_fee": Decimal("0.05")},
+    "polygon": {"base_fee": Decimal("285"), "priority_fee": Decimal("30")},
 }
 
 

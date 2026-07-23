@@ -56,7 +56,21 @@ DESCRIPTOR = register_chain(
             # SANE_GWEI_CEILING (10_000).
             price_cap_gwei=1000,
             cost_cap_native=50.0,
-            fallback_base_fee_gwei=30.0,
+            # Backtest-only fallback estimate (feeds
+            # ``default_gas_price_gwei_for_chain`` and ``DEFAULT_GAS_PRICES``;
+            # the live lane uses ``min_priority_fee_gwei`` below). Retuned
+            # 2026-07-24 from the legacy 30+30=60 gwei, which UNDERSTATED
+            # PoS-era gas ~5x — the one stale fallback in this defect class
+            # (VIB-5811) that erred cheap, flattering every Polygon backtest.
+            # base 285 rounds the OBSERVED_TYPICAL_GAS_GWEI snapshot (283.95,
+            # 2026-05-27/28 multi-RPC sweep) up; a fresh 2026-07-24 sweep
+            # (baseFeePerGas every 1000 blocks over the last 20_000, blocks
+            # ~90.735M-90.755M) measured min 247.4 / median 251.1 / max 257.2
+            # gwei — same magnitude, so the higher 2026-05 evidence stays as
+            # the conservative pin. priority 30 is the protocol-enforced
+            # validator tip floor (``min_priority_fee_gwei`` below; the
+            # node's live tip suggestion measured 28.97 gwei on 2026-07-24).
+            fallback_base_fee_gwei=285.0,
             fallback_priority_fee_gwei=30.0,
             # VIB-5419: live-submit tip floor. Polygon PoS validators enforce
             # a ~30 gwei minimum priority fee (mirrors the polymarket gateway's

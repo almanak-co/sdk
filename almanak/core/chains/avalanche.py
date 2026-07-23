@@ -41,8 +41,25 @@ DESCRIPTOR = register_chain(
             operation_overrides={
                 "swap_simple": 180000,
             },
-            fallback_base_fee_gwei=25.0,
-            fallback_priority_fee_gwei=1.0,
+            # Backtest-only fallback estimate (feeds
+            # ``default_gas_price_gwei_for_chain`` and ``DEFAULT_GAS_PRICES``;
+            # the live lane uses ``min_priority_fee_gwei`` below). Retuned
+            # 2026-07-24 from the legacy 25+1=26 gwei — the pre-Etna 25 gwei
+            # minimum-base-fee era, ~470x above measured live gas: every
+            # backtest priced C-Chain txs like 2023 (same defect class as
+            # ethereum's stale 20+2=22 and robinhood's ~413x, VIB-5811).
+            # Measured live 2026-07-24 from baseFeePerGas sampled every 1000
+            # blocks over the last 20_000 (blocks ~91.044M-91.064M): min
+            # 0.040 / median 0.055 / max 0.097 gwei. 0.06 rounds the median
+            # up — the conservative direction for backtest cost estimation
+            # (same convention as robinhood.py). priority 0.02 mirrors the
+            # VIB-5673 tip floor below: the node's own suggestion and the
+            # observed p50 feeHistory tip are both ~0, but our live lane
+            # always pays at least 0.02, so the backtest models the tip our
+            # own transactions pay. OBSERVED_TYPICAL_GAS_GWEI's avalanche row
+            # was re-snapshotted in the same sweep (0.01 → 0.055).
+            fallback_base_fee_gwei=0.06,
+            fallback_priority_fee_gwei=0.02,
             # VIB-5419: live-submit tip floor (floors a node that returns 0
             # from shipping a tip≈0 tx).
             # VIB-5673: retuned 1.0 → 0.02 and made congestion-relative. Like

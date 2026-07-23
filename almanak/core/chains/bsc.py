@@ -51,8 +51,24 @@ DESCRIPTOR = register_chain(
                 "lp_collect": 300000,
                 "lp_burn": 150000,
             },
-            fallback_base_fee_gwei=3.0,
-            fallback_priority_fee_gwei=0.0,
+            # Backtest-only fallback estimate (feeds
+            # ``default_gas_price_gwei_for_chain`` and ``DEFAULT_GAS_PRICES``;
+            # BSC declares no live tip floor). Retuned 2026-07-24 from the
+            # legacy 3+0=3 gwei — a pre-2025-fee-reduction value overstating
+            # measured live gas ~60x (same defect class as ethereum's stale
+            # 20+2=22, VIB-5811). Measured live 2026-07-24 (blocks
+            # ~111.708M-111.728M): baseFeePerGas is 0 on all 21 blocks
+            # sampled 1000 apart over the last 20_000 (BEP-227 zero base
+            # fee) — the whole gas price is the validator-minimum tip, with
+            # eth_gasPrice, eth_maxPriorityFeePerGas, and the p50 feeHistory
+            # reward over 1024 blocks all agreeing at 0.05 gwei (matching
+            # the 2026-05 OBSERVED_TYPICAL_GAS_GWEI snapshot). Encoded as it
+            # is paid — the zero sits on base_fee, the 0.05 on priority.
+            # Empty≠Zero: base 0.0 is a measured zero, not an unmeasured
+            # blank; every consumer gates on ``is None`` (pnl/config.py:103,
+            # providers/gas.py:399), so it survives as data.
+            fallback_base_fee_gwei=0.0,
+            fallback_priority_fee_gwei=0.05,
         ),
         timeouts=Timeouts(
             tx_confirmation=None,  # legacy: not in CHAIN_TX_TIMEOUTS

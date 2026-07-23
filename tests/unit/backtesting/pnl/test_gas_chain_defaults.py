@@ -135,6 +135,9 @@ class TestDefaultGasPriceForChain:
             ("base", Decimal("0.002")),  # 0.001 base + 0.001 priority
             ("optimism", Decimal("0.002")),  # 0.001 base + 0.001 priority
             ("ethereum", Decimal("0.21")),  # 0.16 base + 0.05 priority (2026-07 post-blob retune)
+            ("avalanche", Decimal("0.08")),  # 0.06 base + 0.02 priority (2026-07-24 retune)
+            ("bsc", Decimal("0.05")),  # 0.0 base + 0.05 priority (2026-07-24 retune)
+            ("polygon", Decimal("315")),  # 285 base + 30 priority (2026-07-24 retune)
         ],
     )
     def test_headline_chains(self, chain: str, expected_gwei: Decimal) -> None:

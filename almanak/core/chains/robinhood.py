@@ -94,7 +94,7 @@ DESCRIPTOR = register_chain(
         # priority_fee is a measured 0.0, not an unmeasured blank: the Orbit
         # sequencer runs first-come-first-served with no priority auction, so
         # there is no tip to pay (same shape as arbitrum, which this rollup
-        # derives from, and bsc). Empty≠Zero — every consumer gates on
+        # derives from). Empty≠Zero — every consumer gates on
         # ``is None`` (pnl/config.py:103, providers/gas.py:399), so the 0.0
         # survives as a measured value rather than collapsing to "unset".
         #

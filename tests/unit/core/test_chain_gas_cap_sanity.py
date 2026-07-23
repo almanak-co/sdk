@@ -104,10 +104,10 @@ def test_chain_price_cap_stays_below_sane_ceiling(chain_name: str) -> None:
 #     the tip 86% of max_fee. Since the tip is ALWAYS paid under EIP-1559,
 #     that is a direct ~10x overpay on every transaction.
 #   * The absolute allowance stops the multiple from being absurdly strict on
-#     chains whose base fee is near zero (avalanche's observed base is 0.01
-#     gwei; 3x of that is 0.03 gwei). A tip at or below this allowance costs
-#     ~$0.02 on a 400k-gas tx regardless of chain, so it cannot be an overpay
-#     worth failing CI over.
+#     chains whose base fee is near zero (optimism and berachain snapshot at
+#     0.001 gwei; 3x of that is 0.003 gwei). A tip at or below this allowance
+#     costs ~$0.02 on a 400k-gas tx regardless of chain, so it cannot be an
+#     overpay worth failing CI over.
 TIP_FLOOR_MAX_BASE_FEE_MULTIPLE: float = 3.0
 TIP_FLOOR_ABSOLUTE_ALLOWANCE_GWEI: float = 0.05
 

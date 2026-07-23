@@ -93,7 +93,11 @@ OBSERVED_TYPICAL_GAS_GWEI: MappingProxyType[str, float] = MappingProxyType(
         "linea": 0.06,
         "polygon": 283.95,
         "bsc": 0.05,
-        "avalanche": 0.01,
+        # Re-measured 2026-07-24 (VIB-5811-class fallback retune sweep): the
+        # 2026-05 row (0.01) had drifted ~5x below live. baseFeePerGas median
+        # over the last 20k blocks was 0.055 (min 0.040 / max 0.097); the
+        # 1024-block feeHistory median was 0.043.
+        "avalanche": 0.055,
         "mantle": 50.00,
         "sonic": 55.00,
         "berachain": 0.001,
