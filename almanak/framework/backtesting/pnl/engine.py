@@ -769,6 +769,14 @@ def create_market_snapshot_from_state(
     # Soft-empty lanes explain themselves once per run (ALM-2943): live
     # snapshots leave this None, which disables the ledger notes.
     snapshot._backtest_soft_empty_noted = soft_empty_noted if soft_empty_noted is not None else set()
+    # pool_analytics/best_pool have no historical analytics plane in a
+    # backtest (TVL/volume/fee-APR would be fabricated — Empty != Zero), so
+    # the refusal stays — but under a truthful key/message instead of the
+    # live-misconfiguration "unconfigured".
+    snapshot._pool_analytics_refusal_detail = (
+        "pool_analytics is not simulated in backtests: TVL/volume/fee analytics need a historical "
+        "pool-data plane; gate on market.pool_price()/market.ohlcv() instead"
+    )
     # Views that refuse must land their refusals in THIS tick's
     # decision-input ledger (the snapshot is fresh per tick).
     for view in (pool_price_view, slippage_view):
@@ -967,6 +975,7 @@ class BacktestOHLCVView:
         token_addresses: Mapping[str, tuple[str, str]] | None = None,
         *,
         manifest: Any = None,
+        chain: str | None = None,
     ) -> None:
         self._engine = indicator_engine
         self._tick_seconds = int(tick_interval_seconds)
@@ -974,6 +983,7 @@ class BacktestOHLCVView:
         # Run data manifest (ALM-2943): engine-owned lane, so the handle is
         # threaded explicitly instead of via the ambient broker contextvar.
         self._manifest = manifest
+        self._chain = str(chain) if chain else None
         self._timestamp: datetime | None = None
         self._truncation_warned: set[tuple[str, str]] = set()
         self._pool_proxy_warned: set[tuple[str, str]] = set()
@@ -1003,6 +1013,23 @@ class BacktestOHLCVView:
         if entry is not None and isinstance(entry, tuple) and len(entry) == 2:
             candidates.append(token_ref_display(normalize_token_key(entry[0], entry[1])))
         for candidate in candidates:
+            if candidate in buffers:
+                return candidate
+        # Address-configured runs key their buffers "chain:0xaddr" while the
+        # strategy asks by SYMBOL ("WAVAX") — the run map above only covers
+        # config-declared symbols, so resolve the rest through the offline
+        # token registry (skip_gateway: registry lookup only, no I/O — same
+        # posture as get_pool_ohlcv's resolver use). Observed on staging:
+        # symbol reads held every tick on exactly this miss while the same
+        # run's price prefetch for the symbol succeeded.
+        if self._chain and not token.lower().startswith("0x"):
+            from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
+
+            try:
+                resolved = get_token_resolver().resolve(token, self._chain, log_errors=False, skip_gateway=True)
+            except TokenResolutionError:
+                return None
+            candidate = token_ref_display(normalize_token_key(self._chain, resolved.address))
             if candidate in buffers:
                 return candidate
         return None
@@ -1208,6 +1235,11 @@ class BacktestOHLCVView:
                     f"({base}/{quote}); check the pool pin"
                 )
 
+        df = self.get_ohlcv(f"{base}/{quote}", timeframe=timeframe, limit=limit, gap_strategy=gap_strategy)
+        # Warn-once AFTER the serve succeeds: this line used to fire before
+        # get_ohlcv, so a run whose every pool-scoped read refused still
+        # logged "served as the ... proxy" at startup — a log claiming a
+        # serve that never happened.
         pool_key = (pool_address.lower(), chain.lower())
         if pool_key not in self._pool_proxy_warned:
             self._pool_proxy_warned.add(pool_key)
@@ -1218,7 +1250,6 @@ class BacktestOHLCVView:
                 base,
                 quote,
             )
-        df = self.get_ohlcv(f"{base}/{quote}", timeframe=timeframe, limit=limit, gap_strategy=gap_strategy)
         df.attrs = {**df.attrs, "pool_address": pool_address, "source": df.attrs["source"] + ":pool_pair_proxy"}
         return df
 
@@ -3921,7 +3952,12 @@ class PnLBacktester:
         if trade_record.success:
             if self._error_handler:
                 self._error_handler.record_success()
-            logger.debug(
+            # INFO deliberately: this is the ONLY line entitled to say
+            # "executed" — it fires after apply_fill accepted the fill. The
+            # adapter lanes log "fill simulated (pending portfolio
+            # acceptance)" because they cannot see acceptance (a cash-rejected
+            # LP_OPEN used to log "executed" and then reject).
+            logger.info(
                 f"Executed intent at {timestamp} "
                 f"(decided at {decision_time}): "
                 f"type={trade_record.intent_type.value}, "

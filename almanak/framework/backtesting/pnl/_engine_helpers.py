@@ -202,10 +202,40 @@ class BacktestState:
     no_intent_ticks: int = 0
 
 
+def _failure_pattern(entry: dict[str, Any], total_ticks: int) -> str:
+    """Classify a decision-input failure's shape over the run.
+
+    - ``warm_up``: failures stopped within the first 10% of the run (or the
+      first 60 ticks, whichever is larger) — indicator windows filling, not a
+      data outage.
+    - ``persistent``: failed on >=90% of ticks — the input was effectively
+      never served.
+    - ``intermittent``: everything else.
+    """
+    last_tick = entry.get("last_tick")
+    if total_ticks > 0 and last_tick is not None:
+        # Persistence first: a failure covering ~the whole run is persistent
+        # even when the run is shorter than the warm-up horizon.
+        if entry["ticks"] >= total_ticks * 0.9:
+            return "persistent"
+        warm_up_horizon = max(60, total_ticks // 10)
+        if last_tick <= warm_up_horizon and entry["ticks"] <= warm_up_horizon:
+            return "warm_up"
+    return "intermittent"
+
+
 def _decision_input_failure_report(state: BacktestState) -> list[dict[str, Any]]:
     """Sorted decide()-time data-failure report entries (ALM-2951)."""
     return [
-        {"source": source, "key": key, "ticks": entry["ticks"], "detail": entry["detail"]}
+        {
+            "source": source,
+            "key": key,
+            "ticks": entry["ticks"],
+            "detail": entry["detail"],
+            "first_tick": entry.get("first_tick"),
+            "last_tick": entry.get("last_tick"),
+            "pattern": _failure_pattern(entry, state.tick_count),
+        }
         for (source, key), entry in sorted(state.decision_input_failures.items(), key=lambda item: -item[1]["ticks"])
     ]
 
@@ -617,6 +647,7 @@ async def execute_iteration_loop(
         config.interval_seconds,
         token_addresses,
         manifest=run_manifest,
+        chain=config.chain,
     )
     # ALM-2943: pool_price / pool_price_by_pair as the labeled pair-ratio
     # proxy, estimate_slippage from the engine's own fill models, and
@@ -822,9 +853,17 @@ async def execute_iteration_loop(
 
             # Aggregate decide()-time data failures for the run report
             # (ALM-2951): the snapshot records every input it could not serve.
+            # first/last tick indices let the report tell a warm-up-only gap
+            # (indicator windows filling) from a persistent outage — observed
+            # on staging: a 14-tick indicator warm-up was blamed as a data
+            # outage for a 2161-tick hold.
             for failure_key, detail in getattr(snapshot, "_critical_data_failures", {}).items():
-                entry = state.decision_input_failures.setdefault(failure_key, {"ticks": 0, "detail": str(detail)})
+                entry = state.decision_input_failures.setdefault(
+                    failure_key,
+                    {"ticks": 0, "detail": str(detail), "first_tick": state.tick_count, "last_tick": state.tick_count},
+                )
                 entry["ticks"] += 1
+                entry["last_tick"] = state.tick_count
 
             # Update positions via adapter if available
             backtester._update_positions_via_adapter(state.portfolio, market_state, timestamp)
@@ -1233,13 +1272,32 @@ def finalize_backtest_result(
 
     # decide()-time data-failure report + hollow-run detection (ALM-2951).
     decision_input_failures = _decision_input_failure_report(state)
-    if decision_input_failures and not state.portfolio.trades:
-        top = "; ".join(f"{f['source']}:{f['key']} ({f['ticks']} ticks)" for f in decision_input_failures[:3])
+    # Attribution rules (each shape observed on real staging runs):
+    # - executed fills, not the trades list — a rejections-only run is hollow
+    #   too (rejected TradeRecords used to suppress the guard);
+    # - warm-up-only failures don't count as "inputs were missing" (a 14-tick
+    #   RSI warm-up is not why a 2161-tick run held);
+    # - a run that DID trade but starved one input persistently gets its own
+    #   warning (a dead strategy leg hides behind a busy one).
+    executed_fills = [t for t in state.portfolio.trades if t.success]
+    non_warm_up = [f for f in decision_input_failures if f["pattern"] != "warm_up"]
+    if non_warm_up and not executed_fills:
+        top = "; ".join(f"{f['source']}:{f['key']} ({f['ticks']} ticks, {f['pattern']})" for f in non_warm_up[:3])
         bt_logger.warning(
-            f"HOLLOW BACKTEST: 0 trades, {state.no_intent_ticks}/{state.tick_count} no-intent ticks, "
-            f"and {len(decision_input_failures)} decision-input failure(s) — the strategy held because "
+            f"HOLLOW BACKTEST: 0 executed fills, {state.no_intent_ticks}/{state.tick_count} no-intent ticks, "
+            f"and {len(non_warm_up)} decision-input failure(s) — the strategy held because "
             f"inputs were missing, not because it chose to. Top: {top}"
         )
+    elif executed_fills:
+        starved = [f for f in non_warm_up if f["pattern"] == "persistent"]
+        if starved:
+            top = "; ".join(f"{f['source']}:{f['key']} ({f['ticks']}/{state.tick_count} ticks)" for f in starved[:3])
+            bt_logger.warning(
+                f"PARTIALLY STARVED BACKTEST: the run traded ({len(executed_fills)} fill(s)) but "
+                f"{len(starved)} decision input(s) failed persistently — strategy branches gated on "
+                f"them may never have run; the result is NOT a faithful test of the full strategy. "
+                f"Starved: {top}"
+            )
 
     return BacktestResult(
         engine=BacktestEngine.PNL,

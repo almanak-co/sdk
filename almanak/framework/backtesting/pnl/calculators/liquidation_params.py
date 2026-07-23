@@ -158,7 +158,7 @@ OFF_PLATFORM_VENUE_DEFAULTS: dict[str, "LiquidationParams"] = {
         protocol="dydx",
         asset=None,
         liquidation_threshold=Decimal("0"),
-        maintenance_margin=Decimal("0.03"),  # 3% maintenance margin
+        maintenance_margin=Decimal("0.012"),  # dYdX v4 live params
         liquidation_penalty=Decimal("0.05"),
         source=LiquidationParamSource.PROTOCOL_DEFAULT,
     ),

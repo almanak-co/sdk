@@ -118,7 +118,7 @@ class TestAliasLookupViaLiquidationRegistry:
         for venue, expected_margin in [
             ("binance_perp", Decimal("0.04")),
             ("bybit", Decimal("0.05")),
-            ("dydx", Decimal("0.03")),
+            ("dydx", Decimal("0.012")),
         ]:
             params = registry.get_params(venue)
             assert params.maintenance_margin == expected_margin, (

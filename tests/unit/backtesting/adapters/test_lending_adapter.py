@@ -264,7 +264,9 @@ class TestLendingBacktestConfig:
 
 
 class TestBorrowExecutionValidation:
-    def test_execute_borrow_rejects_low_health_factor_with_missing_price_fallback(self) -> None:
+    def test_execute_borrow_rejects_low_health_factor_with_missing_price_fallback(self, caplog) -> None:
+        import logging
+
         adapter = LendingBacktestAdapter(LendingBacktestConfig(strategy_type="lending", protocol="aave_v3"))
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
         portfolio.positions = [create_supply_position(token="WETH", amount=Decimal("10"), entry_price=Decimal("2000"))]
@@ -277,7 +279,11 @@ class TestBorrowExecutionValidation:
         )
         market = MockMarketState(prices={"WETH": Decimal("2000")})
 
-        fill = adapter._execute_borrow(intent, portfolio, market)
+        with caplog.at_level(logging.WARNING):
+            fill = adapter._execute_borrow(intent, portfolio, market)
+
+        # A hard-rejected borrow must not emit the success-style advisory.
+        assert not [r for r in caplog.records if "BORROW proceeds" in r.getMessage()]
 
         assert fill is not None
         assert fill.success is False
@@ -288,6 +294,38 @@ class TestBorrowExecutionValidation:
         assert fill.metadata["validation_type"] == "health_factor"
         assert fill.metadata["collateral_usd"] == "20000"
         assert fill.metadata["total_debt_usd"] == "20000"
+
+    def test_execute_borrow_comfort_band_warns_and_proceeds(self, caplog) -> None:
+        """Deliberate venue-faithful semantics: a borrow landing between the
+        venue floor (HF 1.0) and the advisory warning threshold PROCEEDS with
+        an advisory warning — only HF < 1.0 rejects, matching the venue."""
+        import logging
+
+        adapter = LendingBacktestAdapter(LendingBacktestConfig(strategy_type="lending", protocol="aave_v3"))
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.positions = [create_supply_position(token="WETH", amount=Decimal("10"), entry_price=Decimal("2000"))]
+        liq_threshold = adapter._health_factor_calculator.get_liquidation_threshold_for_protocol("aave_v3")
+        collateral_usd = Decimal("20000")
+        # Size the borrow so projected HF lands squarely inside (1.0, 1.2).
+        borrow_usd = collateral_usd * liq_threshold / Decimal("1.1")
+        intent = BorrowIntent(
+            protocol="aave_v3",
+            collateral_token="WETH",
+            collateral_amount=Decimal("0"),
+            borrow_token="DAI",
+            borrow_amount=borrow_usd,
+        )
+        market = MockMarketState(prices={"WETH": Decimal("2000"), "DAI": Decimal("1")})
+
+        with caplog.at_level(logging.WARNING):
+            fill = adapter._execute_borrow(intent, portfolio, market)
+
+        # None = validation passed, default execution proceeds.
+        assert fill is None
+        advisory = [r.getMessage() for r in caplog.records if "BORROW proceeds with low health factor" in r.getMessage()]
+        assert advisory, "expected the advisory low-HF warning"
+        assert "liquidation risk is the strategy's to manage" in advisory[0]
+        assert not [r for r in caplog.records if "would result in low health factor" in r.getMessage()]
 
     def test_execute_borrow_non_borrow_intent_uses_default_execution(self) -> None:
         adapter = LendingBacktestAdapter(LendingBacktestConfig(strategy_type="lending", protocol="aave_v3"))

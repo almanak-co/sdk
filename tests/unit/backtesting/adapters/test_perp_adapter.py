@@ -1183,8 +1183,9 @@ class TestIntegrationScenarios:
         liq_price = position.liquidation_price
         assert liq_price is not None
 
-        # Simulate gradual price decline
-        prices = [Decimal("1950"), Decimal("1900"), Decimal("1850")]
+        # Simulate gradual price decline crossing the venue-resolved
+        # liquidation price (gmx 1% maintenance -> 1820 at 10x from 2000).
+        prices = [Decimal("1950"), Decimal("1850"), Decimal("1800")]
         event = None
 
         for i, price in enumerate(prices):
@@ -1751,7 +1752,7 @@ class TestExecuteIntentUsesRealPortfolioCash:
         # margin-rejects on the utilization cap, never the old
         # unsupported-sizing wall — sizing is resolved either way.
         rejected = adapter.execute_intent(
-            self._open_intent("all", size_usd="95000", leverage="9.5"),
+            self._open_intent("all", size_usd="950000", leverage="9.5"),
             SimulatedPortfolio(initial_capital_usd=Decimal("10000")),
             self._market_state(),
         )

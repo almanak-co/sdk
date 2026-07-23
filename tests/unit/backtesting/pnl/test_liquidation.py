@@ -343,10 +343,10 @@ class TestMaintenanceMarginVariations:
         assert margin == Decimal("0.01")
 
     def test_protocol_specific_margin_hyperliquid(self):
-        """Test that Hyperliquid uses 0.5% maintenance margin."""
+        """Hyperliquid maintenance = 2% (venue-verified: ETH maxLeverage 25 tier)."""
         calculator = LiquidationCalculator()
         margin = calculator.get_maintenance_margin_for_protocol("hyperliquid")
-        assert margin == Decimal("0.005")
+        assert margin == Decimal("0.02")
 
     def test_protocol_specific_margin_binance(self):
         """Test that Binance uses 4% maintenance margin."""

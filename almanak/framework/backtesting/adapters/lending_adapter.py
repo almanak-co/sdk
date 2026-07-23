@@ -958,17 +958,26 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
             liquidation_threshold=liq_threshold,
         )
 
-        # Check if health factor would be below warning threshold
+        # Comfort-band semantics (deliberate, venue-faithful): the venue only
+        # refuses borrows that land below HF 1.0, so the engine does the same
+        # and the warning threshold is ADVISORY — the borrow proceeds, the
+        # liquidation risk is the strategy's to manage. The message must say
+        # so: "would result in low health factor" followed by a fill read as
+        # a failed check that leaked through.
         if health_result.health_factor < self._config.health_factor_warning_threshold:
-            logger.warning(
-                "BORROW would result in low health factor: HF=%.4f (threshold=%.2f). "
-                "Collateral=$%.2f, Current debt=$%.2f, New borrow=$%.2f",
-                float(health_result.health_factor),
-                float(self._config.health_factor_warning_threshold),
-                float(collateral_value),
-                float(current_debt),
-                float(borrow_usd),
-            )
+            # Order matters: the hard rejection (venue floor) first, so a
+            # refused borrow never logs a success-style "proceeds" line.
+            if health_result.health_factor >= Decimal("1.0"):
+                logger.warning(
+                    "BORROW proceeds with low health factor: HF=%.4f (advisory threshold=%.2f; "
+                    "venue floor=1.0). Collateral=$%.2f, Current debt=$%.2f, New borrow=$%.2f — "
+                    "liquidation risk is the strategy's to manage",
+                    float(health_result.health_factor),
+                    float(self._config.health_factor_warning_threshold),
+                    float(collateral_value),
+                    float(current_debt),
+                    float(borrow_usd),
+                )
 
             # If health factor would be below 1.0, reject the borrow
             if health_result.health_factor < Decimal("1.0"):

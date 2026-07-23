@@ -151,9 +151,16 @@ class MarginValidator:
     def __post_init__(self) -> None:
         """Initialize protocol-specific margin requirements."""
         if not self.protocol_margins:
+            # Values verified against venue sources (2026-07): GMX V2's
+            # on-chain DataStore minCollateralFactor is 0.5% for the majors
+            # (200x) — 1% here is deliberately conservative and matches the
+            # UI's 100x cap. Hyperliquid's meta API caps ETH at 25x → 4%
+            # initial / 2% maintenance (the old 1%/0.5% permitted leverage
+            # the venue refuses). dYdX v4's live params are 2%/1.2% for the
+            # majors (the old 5%/3% rejected venue-legal opens).
             self.protocol_margins = {
                 "gmx": {
-                    "initial": Decimal("0.01"),  # 1% = 100x max leverage
+                    "initial": Decimal("0.01"),  # conservative vs 0.5% on-chain
                     "maintenance": Decimal("0.01"),
                 },
                 "gmx_v2": {
@@ -161,8 +168,8 @@ class MarginValidator:
                     "maintenance": Decimal("0.01"),
                 },
                 "hyperliquid": {
-                    "initial": Decimal("0.01"),  # 1% = 100x max leverage
-                    "maintenance": Decimal("0.005"),
+                    "initial": Decimal("0.04"),  # ETH maxLeverage 25
+                    "maintenance": Decimal("0.02"),
                 },
                 "binance_perp": {
                     "initial": Decimal("0.05"),  # 5% = 20x max leverage
@@ -173,8 +180,8 @@ class MarginValidator:
                     "maintenance": Decimal("0.05"),
                 },
                 "dydx": {
-                    "initial": Decimal("0.05"),
-                    "maintenance": Decimal("0.03"),
+                    "initial": Decimal("0.02"),  # dYdX v4 live params
+                    "maintenance": Decimal("0.012"),
                 },
             }
 
@@ -251,10 +258,14 @@ class MarginValidator:
         if is_valid:
             message = f"Margin requirement met: {actual_ratio * 100:.2f}% >= {required_ratio * 100:.2f}% required"
         else:
+            # Enough precision that a boundary miss never displays as an
+            # impossibility ("10.00% < 10.00% required, need $0.00 more"):
+            # strategies sizing exactly at the venue max land dust below the
+            # floor when decide-time sizes meet fill-time prices.
             message = (
-                f"Insufficient margin: {actual_ratio * 100:.2f}% < "
-                f"{required_ratio * 100:.2f}% required. "
-                f"Need ${shortfall:.2f} more collateral"
+                f"Insufficient margin: {actual_ratio * 100:.6f}% < "
+                f"{required_ratio * 100:.6g}% required. "
+                f"Need ${shortfall:.6f} more collateral"
             )
 
         return MarginValidationResult(
@@ -437,8 +448,11 @@ class MarginValidator:
 
         # Check 2: Is there enough available capital?
         if collateral > available_capital:
+            # Full precision: a near-miss must show its true delta, never
+            # round both sides to the same figure.
             return False, (
-                f"Insufficient available capital: need ${collateral:.2f} but only ${available_capital:.2f} available"
+                f"Insufficient available capital: need ${collateral:.6f} but only "
+                f"${available_capital:.6f} available (short ${collateral - available_capital:.6f})"
             )
 
         # Check 3: Would this exceed max utilization?
@@ -465,10 +479,14 @@ class MarginValidator:
         )
 
         if utilization.utilization_ratio > self.max_margin_utilization_ratio:
+            # Say what the cap MEANS: required margin as a share of margin
+            # capital. "100.0% > 90.0% max" alone reads like a leverage rule
+            # and sends users hunting through funding instead of sizing.
             return False, (
-                f"Would exceed max margin utilization: "
-                f"{utilization.utilization_ratio * 100:.1f}% > "
-                f"{self.max_margin_utilization_ratio * 100:.1f}% max"
+                f"Would exceed max margin utilization: this open requires "
+                f"${required_margin:.6f} margin, {utilization.utilization_ratio * 100:.4f}% of the "
+                f"account's margin capital — above the {self.max_margin_utilization_ratio * 100:.6g}% cap "
+                f"(keep a cash buffer or reduce size)"
             )
 
         return True, "Position can be opened"

@@ -14,7 +14,7 @@ from almanak.connectors._connector_descriptor import BacktestRiskDecl, Liquidati
 BACKTEST_RISK = BacktestRiskDecl(
     liquidation_default=LiquidationDefault(
         liquidation_threshold=Decimal("0"),
-        maintenance_margin=Decimal("0.005"),  # 0.5% maintenance margin
+        maintenance_margin=Decimal("0.02"),  # 2% (venue meta API: ETH maxLeverage 25 tier)
         liquidation_penalty=Decimal("0.05"),
     ),
     liquidation_asset_params=None,

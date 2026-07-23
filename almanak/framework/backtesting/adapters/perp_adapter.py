@@ -834,7 +834,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
                 )
 
         collateral_usd = self._perp_collateral_usd(params, market_state)
-        required_margin_ratio = self._perp_required_margin_ratio(params.leverage)
+        required_margin_ratio = self._perp_required_margin_ratio(params.leverage, params.protocol)
 
         can_open, reason = self._margin_validator.can_open_position(
             position_size=params.size_usd,
@@ -901,7 +901,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             )
         return Decimal("1")
 
-    def _perp_required_margin_ratio(self, leverage: Decimal) -> Decimal:
+    def _perp_required_margin_ratio(self, leverage: Decimal, protocol: str | None = None) -> Decimal:
         """The venue's initial-margin floor — the only economic constraint here.
 
         The intent's declared ``leverage`` is sizing metadata already encoded in
@@ -912,8 +912,15 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         isn't exactly $1. An over-leveraged intent is
         still rejected: its actual collateral/size ratio falls below the venue
         floor regardless of what it declared.
+
+        The floor is the VENUE's, resolved from the validator's per-protocol
+        table (GMX V2 allows far more than the generic 10% default — every
+        legitimately-levered open on such venues was rejected while the table
+        sat unconsulted). Unknown protocols keep the conservative default.
         """
         del leverage  # sizing metadata, not a constraint
+        if protocol:
+            return self._margin_validator.get_margin_for_protocol(protocol)["initial"]
         return self._config.initial_margin_ratio
 
     def _perp_margin_failure_fill(
@@ -980,9 +987,10 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             entry_price = Decimal("0")
 
         if entry_price and entry_price > Decimal("0"):
-            liq_price = self.get_liquidation_price(
+            liq_price = self._liquidation_calculator.calculate_liquidation_price(
                 entry_price=entry_price,
                 leverage=self._perp_effective_leverage(params.leverage, required_margin_ratio),
+                maintenance_margin=self._liquidation_calculator.get_maintenance_margin_for_protocol(params.protocol),
                 is_long=params.is_long,
             )
             logger.info(
@@ -1099,7 +1107,10 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         funding_chain = str(getattr(market_state, "chain", self._config.chain))
         self._apply_funding_if_due(position, elapsed_seconds, funding_timestamp, funding_chain)
 
-        self._liquidation_calculator.update_position_liquidation_price(position, self._config.maintenance_margin_ratio)
+        # No override: position.protocol resolves the venue's maintenance
+        # margin from the calculator's table (a flat config override defeated
+        # the per-venue path for every protocol).
+        self._liquidation_calculator.update_position_liquidation_price(position)
         self._check_perp_liquidation_proximity(position, current_price)
 
         position.last_updated = self._resolve_perp_timestamp(position, market_state, timestamp, "")
@@ -1989,12 +2000,13 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         # Get or calculate liquidation price
         liq_price = position.liquidation_price
         if liq_price is None:
-            liq_price = self.get_liquidation_price(
-                entry_price=position.entry_price,
-                leverage=position.leverage,
-                is_long=position.position_type == PositionType.PERP_LONG,
-            )
+            # Protocol-aware, same as the periodic update: a position checked
+            # before its first update must not liquidate at the flat config
+            # margin when its venue's maintenance floor is lower.
+            liq_price = self._liquidation_calculator.calculate_liquidation_price_for_position(position)
             position.liquidation_price = liq_price
+        if liq_price is None:
+            return None
 
         # Check if liquidation is triggered
         is_long = position.position_type == PositionType.PERP_LONG

@@ -637,6 +637,11 @@ class MarketSnapshot:
         # (wallet_activity / prediction_price) ledger-note the unsimulated
         # lane once per run. None on live snapshots = notes disabled.
         self._backtest_soft_empty_noted: set[str] | None = None
+        # Backtest factories stamp a refusal detail so pool_analytics /
+        # best_pool refuse under `not_simulated` with gate-on-this-instead
+        # guidance; None on live snapshots keeps the `unconfigured`
+        # misconfiguration semantics.
+        self._pool_analytics_refusal_detail: str | None = None
 
         # Per-indicator caches (tuple keys for timeframe-aware caching)
         self._macd_cache: dict[tuple[str, str, int, int, int], MACDData] = {}
@@ -4680,10 +4685,16 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import PoolAnalyticsUnavailableError
 
         if self._pool_analytics_reader is None:
+            # A backtest factory stamps a refusal detail so the ledger key
+            # says WHY (not_simulated: no historical analytics plane in the
+            # run) instead of the live-misconfiguration "unconfigured".
+            detail = getattr(self, "_pool_analytics_refusal_detail", None)
             self._record_critical_data_failure(
-                "pool_analytics", "unconfigured", "pool_analytics unavailable: no provider configured"
+                "pool_analytics",
+                "not_simulated" if detail else "unconfigured",
+                detail or "pool_analytics unavailable: no provider configured",
             )
-            raise ValueError("No pool analytics reader configured for MarketSnapshot")
+            raise ValueError(detail or "No pool analytics reader configured for MarketSnapshot")
 
         target_chain = (chain or self._chain).lower()
         try:
@@ -4725,10 +4736,13 @@ class MarketSnapshot:
         from almanak.framework.data.market_snapshot import PoolAnalyticsUnavailableError
 
         if self._pool_analytics_reader is None:
+            detail = getattr(self, "_pool_analytics_refusal_detail", None)
             self._record_critical_data_failure(
-                "best_pool", "unconfigured", "best_pool unavailable: no provider configured"
+                "best_pool",
+                "not_simulated" if detail else "unconfigured",
+                detail or "best_pool unavailable: no provider configured",
             )
-            raise ValueError("No pool analytics reader configured for MarketSnapshot")
+            raise ValueError(detail or "No pool analytics reader configured for MarketSnapshot")
 
         target_chain = (chain or self._chain).lower()
         try:

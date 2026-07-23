@@ -102,11 +102,11 @@ class TestMarginValidationAcceptsValid:
         hl_margins = validator.get_margin_for_protocol("hyperliquid")
         result = validator.validate_margin(
             position_size=Decimal("10000"),
-            collateral=Decimal("150"),  # 1.5% > 1% required
+            collateral=Decimal("500"),  # 5% > 4% required (venue ETH cap 25x)
             margin_ratio=hl_margins["initial"],
         )
         assert result.is_valid
-        assert result.actual_margin_ratio == Decimal("0.015")
+        assert result.actual_margin_ratio == Decimal("0.05")
 
     def test_zero_position_size_is_valid(self):
         """Test that zero position size is always valid (nothing to validate)."""
@@ -606,9 +606,10 @@ class TestMarginValidatorHelperMethods:
         assert gmx["maintenance"] == Decimal("0.01")
 
         # Hyperliquid margins
+        # Venue-verified values (Hyperliquid meta API: ETH maxLeverage 25).
         hl = validator.get_margin_for_protocol("hyperliquid")
-        assert hl["initial"] == Decimal("0.01")
-        assert hl["maintenance"] == Decimal("0.005")
+        assert hl["initial"] == Decimal("0.04")
+        assert hl["maintenance"] == Decimal("0.02")
 
         # Unknown protocol gets defaults
         unknown = validator.get_margin_for_protocol("unknown_protocol")

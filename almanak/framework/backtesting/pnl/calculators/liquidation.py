@@ -129,13 +129,15 @@ class LiquidationCalculator:
     def __post_init__(self) -> None:
         """Initialize protocol-specific maintenance margins."""
         if not self.protocol_margins:
+            # Kept aligned with MarginValidator.protocol_margins
+            # "maintenance" values (venue-verified 2026-07).
             self.protocol_margins = {
                 "gmx": Decimal("0.01"),  # 1% maintenance margin
                 "gmx_v2": Decimal("0.01"),
-                "hyperliquid": Decimal("0.005"),  # 0.5% maintenance margin
+                "hyperliquid": Decimal("0.02"),  # ETH maxLeverage 25 tier
                 "binance_perp": Decimal("0.04"),  # 4% maintenance margin
                 "bybit": Decimal("0.05"),  # 5% maintenance margin
-                "dydx": Decimal("0.03"),  # 3% maintenance margin
+                "dydx": Decimal("0.012"),  # dYdX v4 live params
             }
 
     def calculate_liquidation_price(

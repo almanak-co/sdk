@@ -3045,8 +3045,13 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
 
     @staticmethod
     def _log_lp_open(pool: str, plan: _LPOpenPlan) -> None:
+        # The adapter cannot see portfolio acceptance: the fill it builds may
+        # still be rejected by apply_fill (insufficient cash). Never claim
+        # "executed" here — the authoritative executed line is the engine's
+        # post-acceptance log (_log_pending_trade_outcome).
         logger.info(
-            "LP_OPEN executed: pool=%s, amount_usd=%.2f, range=[%.6f, %.6f], ticks=[%d, %d], liquidity=%.2f",
+            "LP_OPEN fill simulated (pending portfolio acceptance): pool=%s, amount_usd=%.2f, "
+            "range=[%.6f, %.6f], ticks=[%d, %d], liquidity=%.2f",
             pool,
             float(plan.amount_usd),
             float(plan.range_lower),
@@ -3303,8 +3308,10 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
 
     @staticmethod
     def _log_lp_close(intent: Any, prices: _LPUpdatePrices, close_result: _LPCloseResult) -> None:
+        # Same contract as _log_lp_open: acceptance happens later in
+        # apply_fill, so this line must not claim execution.
         logger.info(
-            "LP_CLOSE executed: position=%s, token0_out=%.6f, token1_out=%.6f, "
+            "LP_CLOSE fill simulated (pending portfolio acceptance): position=%s, token0_out=%.6f, token1_out=%.6f, "
             "value_usd=%.2f, fees_usd=%.2f, il_pct=%.4f%%, net_pnl=%.2f",
             intent.position_id,
             float(close_result.tokens_in.get(prices.token0, Decimal("0"))),

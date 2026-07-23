@@ -29,10 +29,10 @@ EXPECTED_PROTOCOL_DEFAULTS: dict[str, tuple[Decimal, Decimal, Decimal, str]] = {
     "spark": (Decimal("0.80"), Decimal("0"), Decimal("0.08"), "spark"),
     "gmx": (Decimal("0"), Decimal("0.01"), Decimal("0.05"), "gmx"),
     "gmx_v2": (Decimal("0"), Decimal("0.01"), Decimal("0.05"), "gmx_v2"),
-    "hyperliquid": (Decimal("0"), Decimal("0.005"), Decimal("0.05"), "hyperliquid"),
+    "hyperliquid": (Decimal("0"), Decimal("0.02"), Decimal("0.05"), "hyperliquid"),
     "binance_perp": (Decimal("0"), Decimal("0.04"), Decimal("0.05"), "binance_perp"),
     "bybit": (Decimal("0"), Decimal("0.05"), Decimal("0.05"), "bybit"),
-    "dydx": (Decimal("0"), Decimal("0.03"), Decimal("0.05"), "dydx"),
+    "dydx": (Decimal("0"), Decimal("0.012"), Decimal("0.05"), "dydx"),
 }
 
 

@@ -351,14 +351,14 @@ class TestPerpOpenExecution:
     async def test_open_collateral_all_overextended_still_rejects_on_margin(self):
         """The fix measures utilization correctly; it does not bypass the cap
         (ph5 risk doctrine): 'all' with a size whose initial margin genuinely
-        needs >90% of the wallet ($950,000 * 10% floor = $95,000 on a
+        needs >90% of the wallet ($9,500,000 * 1% venue floor = $95,000 on a
         $100,000 wallet = 95%) still rejects with the margin message."""
         backtester = make_backtester()
         backtester._adapter = _make_perp_adapter()
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100000"))
         intent = make_open_intent(
             collateral_amount="all",
-            size_usd=Decimal("950000"),
+            size_usd=Decimal("9500000"),
             leverage=Decimal("9.5"),
         )
 
