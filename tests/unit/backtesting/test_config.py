@@ -75,10 +75,14 @@ class TestBacktestDataConfigDefaults:
         assert isinstance(config.borrow_apy_fallback, Decimal)
 
     def test_default_gas_fallback_gwei(self):
-        """Test that default gas_fallback_gwei is Decimal('20')."""
+        """None = fall through to the chain-aware DEFAULT_GAS_PRICES lookup.
+
+        A flat Decimal default here would pin an Ethereum-shaped gas price on
+        every chain (~200x reality on Arbitrum — the VIB-5088 defect class).
+        An explicit value is a deliberate chain-blind flat override.
+        """
         config = BacktestDataConfig()
-        assert config.gas_fallback_gwei == Decimal("20")
-        assert isinstance(config.gas_fallback_gwei, Decimal)
+        assert config.gas_fallback_gwei is None
 
     def test_default_coingecko_rate_limit_per_minute(self):
         """Test that default coingecko_rate_limit_per_minute is 10."""

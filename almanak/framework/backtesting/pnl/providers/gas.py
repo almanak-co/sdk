@@ -563,8 +563,9 @@ class EtherscanGasPriceProvider:
         return count
 
     def _get_fallback_gas_price(self, timestamp: datetime, chain: str) -> GasPrice:
-        if self._data_config is not None:
-            gas_price = self._data_config.gas_fallback_gwei
+        configured = self._data_config.gas_fallback_gwei if self._data_config is not None else None
+        if configured is not None:
+            gas_price = configured
         else:
             defaults = DEFAULT_GAS_PRICES.get(chain, DEFAULT_GAS_PRICES["ethereum"])
             gas_price = defaults["base_fee"] + defaults["priority_fee"]

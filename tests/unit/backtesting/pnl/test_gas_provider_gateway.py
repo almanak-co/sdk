@@ -9,8 +9,10 @@ from typing import Any
 
 import pytest
 
+from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.backtesting.pnl.providers import gas as gas_mod
 from almanak.framework.backtesting.pnl.providers.gas import (
+    DEFAULT_GAS_PRICES,
     EtherscanGasPriceProvider,
     GasPrice,
     GasPriceDataCache,
@@ -119,6 +121,24 @@ async def test_gateway_unavailable_falls_back_to_config_only(monkeypatch: pytest
     gas_price = await provider.get_gas_price(target, chain="ethereum")
 
     assert gas_price.gas_price_gwei == Decimal("7.5")
+    assert gas_price.source == "config_fallback"
+    assert gas_price.confidence is DataConfidence.LOW
+
+
+@pytest.mark.asyncio
+async def test_unset_gas_fallback_falls_through_to_chain_aware_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A data_config that leaves gas_fallback_gwei unset must not pin a flat
+    Ethereum-shaped fallback on other chains (the VIB-5088 defect class)."""
+    fake_client = _FakeClient(_response(success=False, chain="arbitrum", error="no data"))
+    monkeypatch.setattr(gas_mod, "_get_connected_gateway_client", lambda: (fake_client, _FakePb2()))
+
+    provider = EtherscanGasPriceProvider(data_config=BacktestDataConfig())
+    target = datetime.fromtimestamp(1_700_000_000, tz=UTC)
+
+    gas_price = await provider.get_gas_price(target, chain="arbitrum")
+
+    defaults = DEFAULT_GAS_PRICES["arbitrum"]
+    assert gas_price.gas_price_gwei == defaults["base_fee"] + defaults["priority_fee"]
     assert gas_price.source == "config_fallback"
     assert gas_price.confidence is DataConfidence.LOW
 

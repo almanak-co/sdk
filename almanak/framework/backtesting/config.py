@@ -108,6 +108,12 @@ class BacktestDataConfig:
         borrow_apy_fallback: Annual borrow APY to use when historical APY
             is unavailable (e.g., 0.05 = 5% APY).
 
+        gas_fallback_gwei: Flat gas price in gwei used when the gateway gas
+            lane is unavailable. ``None`` (default) falls through to the
+            chain-aware per-chain defaults derived from ChainDescriptor gas
+            profiles (``DEFAULT_GAS_PRICES``); a value pins the same flat
+            fallback on every chain.
+
         coingecko_rate_limit_per_minute: Rate limit for CoinGecko API calls.
             Free tier is 10-30/min, Pro tier is 500/min.
 
@@ -151,7 +157,9 @@ class BacktestDataConfig:
     funding_fallback_rate: Decimal = Decimal("0.0001")  # 0.01%/hr
     supply_apy_fallback: Decimal = Decimal("0.03")  # 3% APY
     borrow_apy_fallback: Decimal = Decimal("0.05")  # 5% APY
-    gas_fallback_gwei: Decimal = Decimal("20")  # 20 gwei default for Ethereum
+    # None -> the gas provider falls through to the chain-aware
+    # DEFAULT_GAS_PRICES; a value pins a chain-blind flat fallback everywhere.
+    gas_fallback_gwei: Decimal | None = None
 
     # Rate limiting configuration
     coingecko_rate_limit_per_minute: int = 10
@@ -177,7 +185,7 @@ class BacktestDataConfig:
             raise ValueError("supply_apy_fallback cannot be negative")
         if self.borrow_apy_fallback < Decimal("0"):
             raise ValueError("borrow_apy_fallback cannot be negative")
-        if self.gas_fallback_gwei < Decimal("0"):
+        if self.gas_fallback_gwei is not None and self.gas_fallback_gwei < Decimal("0"):
             raise ValueError("gas_fallback_gwei cannot be negative")
 
         # Validate LP volume policy fields
