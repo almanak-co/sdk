@@ -76,6 +76,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "fungible_close_by_pool_id",
     "fee_reporting_tie_out",
     "snapshot_price_case_insensitive",
+    "snapshot_total_counts_cash_once",
     "trade_pnl_attribution",
     "math_il_closed_form",
     "math_sharpe",
@@ -196,6 +197,13 @@ CELLS: tuple[TrustCell, ...] = (
         # skips part of the strategy certifies numbers it never earned.
     ),
     _cell(
+        "snapshot_total_counts_cash_once",
+        "swap",
+        "decide()-visible total_portfolio_usd equals capital exactly on every tick of an "
+        "all-cash hold run — the cash exposure mirrors (USD / stable symbols / registered "
+        "address keys) contribute ONE cash count, not one per key.",
+    ),
+    _cell(
         "price_series_consistency",
         "swap",
         "The result's price_series is aligned 1:1 with the equity curve and carries "
@@ -281,6 +289,20 @@ CELLS: tuple[TrustCell, ...] = (
         # accumulating). Fixed by sourcing the position block from the shared
         # SimulatedPortfolio.aggregate_position_metrics so the two metric paths
         # cannot drift. Reporting/KPI bug only -- conservation was always exact.
+    ),
+    _cell(
+        "snapshot_total_counts_cash_once",
+        "lp",
+        "With an LP position open, decide()-visible total_portfolio_usd is the residual "
+        "wallet only: cash counted once, position value excluded (live wallet parity — "
+        "live totals sum what the balance provider reports; value inside a position "
+        "NFT is not a wallet balance).",
+        # Guards the cash-mirror multi-count: the engine seeds cash_usd under
+        # "USD", each unheld cash-equivalent symbol, and every registered
+        # cash-equivalent address key (blueprint 31 §4.1) so per-symbol reads
+        # all observe cash. total_portfolio_usd summed every mirror, so an
+        # all-cash $19.45 portfolio reported $116.69 (6x) and sizing
+        # strategies deadlocked into Hold("insufficient token balances").
     ),
     # --- lending column ---
     _cell(
@@ -584,6 +606,26 @@ class ScriptedStrategy:
             self._cursor += 1
             return intent
         return None
+
+
+class TotalPortfolioProbeStrategy(ScriptedStrategy):
+    """ScriptedStrategy that records decide()-visible ``total_portfolio_usd``.
+
+    The wallet total sizing strategies read: cash counted once across its
+    exposure mirrors (USD / stable symbols / registered address keys), open
+    position value excluded (live wallet parity). Before the cash-mirror
+    dedup an all-cash portfolio's total was ~N x cash — one count per
+    exposure key — so sizing strategies computed unfundable targets and
+    deadlocked into Hold("insufficient token balances").
+    """
+
+    def __init__(self, intents: list[Any] | None = None) -> None:
+        super().__init__(intents or [], deployment_id="trust-matrix-total-probe")
+        self.totals_seen: list[Decimal] = []
+
+    def decide(self, market: Any) -> Any:
+        self.totals_seen.append(market.total_portfolio_usd())
+        return super().decide(market)
 
 
 class FundingGatedPerpStrategy:

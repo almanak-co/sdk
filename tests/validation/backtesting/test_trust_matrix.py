@@ -86,6 +86,7 @@ from tests.validation.backtesting.trust_matrix import (
     StakeDuck,
     SupplyDuck,
     SwapDuck,
+    TotalPortfolioProbeStrategy,
     flat_series,
     run_backtest,
 )
@@ -207,6 +208,34 @@ def test_swap_round_trip_conservation_numeraire() -> None:
     for point in result.equity_curve:
         assert point.numeraire_price_usd == Decimal("2000")
         assert point.value_usd / point.numeraire_price_usd == expected_weth
+
+
+@pytest.mark.trust_cell("swap:snapshot_total_counts_cash_once")
+def test_swap_decide_visible_total_counts_cash_once() -> None:
+    """All-cash hold run: decide() sees total_portfolio_usd == capital, every tick.
+
+    Registered-plane run so the full cash-mirror fan-out is active: cash is
+    seeded under "USD", the unheld cash-equivalent symbols (USDC landing on
+    its address-native key via the registered alias), and the registered
+    cash-equivalent address keys. All of those expose the SAME cash_usd —
+    before the cash-mirror dedup the total summed each one, reporting ~6x
+    cash, and strategies sizing from it computed unfundable targets
+    (usdt-xaut-lp-rotation-v3 deadlocked into Hold after day 5 of 91).
+    """
+    strategy = TotalPortfolioProbeStrategy()
+    result = run_backtest(
+        strategy,
+        flat_series(12),
+        hours=9,
+        token_addresses={
+            "WETH": ("arbitrum", _WETH_ARBITRUM.lower()),
+            "USDC": ("arbitrum", USDC_ARBITRUM),
+        },
+    )
+
+    assert result.success
+    assert len(strategy.totals_seen) >= 9
+    assert all(total == INITIAL_CAPITAL for total in strategy.totals_seen)
 
 
 @pytest.mark.trust_cell("swap:numeraire_canonical_metrics")
@@ -841,6 +870,38 @@ def test_lp_generic_lane_open_does_not_mint() -> None:
     assert result.trades[0].success
     # Equity at the open tick (execution happens one tick after decide).
     assert result.equity_curve[1].value_usd == INITIAL_CAPITAL
+
+
+@pytest.mark.trust_cell("lp:snapshot_total_counts_cash_once")
+def test_lp_decide_visible_total_is_residual_wallet() -> None:
+    """With an LP open, decide() sees the residual wallet — cash counted once.
+
+    A $5,000 LP open on a $10,000 all-cash portfolio: engine EQUITY stays
+    $10,000 (the position is worth its deposit), but the decide()-visible
+    total_portfolio_usd is the wallet only — $5,000 residual cash, counted
+    once across its exposure mirrors, position value excluded. That is live
+    wallet parity: live totals sum what the balance provider reports, and
+    value inside a position NFT is not a wallet balance
+    (IntentStrategy.get_total_portfolio_value documents overriding for
+    position-inclusive valuation).
+    """
+    strategy = TotalPortfolioProbeStrategy([LPOpenDuck()])
+    result = run_backtest(strategy, flat_series(8), hours=4)
+
+    assert result.success
+    assert result.metrics.total_trades == 1
+    assert result.trades[0].success
+    # Engine equity includes the position; the wallet total must not.
+    assert result.equity_curve[1].value_usd == INITIAL_CAPITAL
+    # Ticks 0-1 pre-open (decide at tick 1 snapshots before the queued fill
+    # applies): the full capital is wallet cash — counted once.
+    assert strategy.totals_seen[0] == INITIAL_CAPITAL
+    assert strategy.totals_seen[1] == INITIAL_CAPITAL
+    # From tick 2 the wallet is the $5,000 residual — counted once, not once
+    # per mirror key.
+    residual = INITIAL_CAPITAL - Decimal("5000")
+    assert len(strategy.totals_seen) >= 4
+    assert all(total == residual for total in strategy.totals_seen[2:])
 
 
 @pytest.mark.trust_cell("lp:rejection_no_state_change")

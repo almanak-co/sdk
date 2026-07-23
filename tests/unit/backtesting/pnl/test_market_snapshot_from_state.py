@@ -473,6 +473,7 @@ class TestSymbolAliasBridge:
         assert snapshot.balance("USDC").balance == Decimal("10000")
         assert snapshot.balance(bridged_usdc[1]).balance == Decimal("10000")
 
+
     def test_indicator_set_by_address_reads_by_symbol(self):
         from almanak.framework.market import RSIData
 
@@ -865,3 +866,154 @@ class TestAddressKeyedFlows:
             strict_reproducibility=False,
         )
         assert self.CB_KEY in position.tokens
+
+
+class TestTotalPortfolioUsd:
+    """``total_portfolio_usd`` counts cash ONCE and excludes open positions.
+
+    The cash lane seeds ``portfolio.cash_usd`` under "USD", each unheld
+    cash-equivalent symbol, and every registered cash-equivalent address key
+    so per-symbol balance reads all observe cash (blueprint 31 §4.1). The
+    total must count that single cash source once — before the cash-mirror
+    dedup it summed every exposure key, so an all-cash $19.45 portfolio
+    reported $116.69 (6x) and strategies sizing from the total computed
+    unfundable targets, deadlocking into Hold("insufficient token balances").
+
+    Position-value semantics are LIVE WALLET PARITY: live
+    ``total_portfolio_usd`` sums what the balance provider reports — value
+    inside an open LP/perp/lending position is not a wallet balance and is
+    not included (``IntentStrategy.get_total_portfolio_value`` documents
+    overriding for position-inclusive valuation). The backtest bridge
+    mirrors that: simulated position value stays out of the total.
+    """
+
+    WETH_ADDR = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    USDC_ADDR = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    USDT_ADDR = "0xdac17f958d2ee523a2206206994597c13d831ec7"
+    DAI_ADDR = "0x6b175474e89094c44da98b954eedeac495271d0f"
+    WETH_KEY = ("ethereum", WETH_ADDR)
+    USDC_KEY = ("ethereum", USDC_ADDR)
+    USDT_KEY = ("ethereum", USDT_ADDR)
+    DAI_KEY = ("ethereum", DAI_ADDR)
+    TOKEN_ADDRESSES = {
+        "WETH": WETH_KEY,
+        "USDC": USDC_KEY,
+        "USDT": USDT_KEY,
+        "DAI": DAI_KEY,
+    }
+
+    def _state(self):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        return MarketState(
+            timestamp=datetime(2026, 4, 24, tzinfo=UTC),
+            chain="ethereum",
+            prices={
+                self.WETH_KEY: Decimal("3000"),
+                self.USDC_KEY: Decimal("1"),
+                self.USDT_KEY: Decimal("1"),
+                self.DAI_KEY: Decimal("1"),
+            },
+        )
+
+    def _portfolio(self, cash: Decimal):
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        return SimulatedPortfolio(initial_capital_usd=cash, chain="ethereum")
+
+    def _snapshot(self, portfolio):
+        return create_market_snapshot_from_state(
+            self._state(), chain="ethereum", portfolio=portfolio, token_addresses=self.TOKEN_ADDRESSES
+        )
+
+    def test_all_cash_total_equals_cash_exactly(self):
+        """The 6x regression pin: every cash mirror observable, cash counted once."""
+        snapshot = self._snapshot(self._portfolio(Decimal("19.45")))
+
+        # Precondition for the regression: cash IS exposed under multiple keys.
+        assert snapshot.balance("USD").balance_usd == Decimal("19.45")
+        assert snapshot.balance("USDC").balance_usd == Decimal("19.45")
+        assert snapshot.balance("USDT").balance_usd == Decimal("19.45")
+        assert snapshot.balance("DAI").balance_usd == Decimal("19.45")
+        assert snapshot.balance(self.USDC_ADDR).balance_usd == Decimal("19.45")
+
+        assert snapshot.total_portfolio_usd() == Decimal("19.45")
+
+    def test_all_cash_total_without_registered_map(self):
+        """Bare-symbol mirror plane (no aliases) also counts cash once."""
+        state = _make_market_state({"WETH": Decimal("3000"), "USDC": Decimal("1")})
+        portfolio = self._portfolio(Decimal("5000"))
+        snapshot = create_market_snapshot_from_state(state, chain="ethereum", portfolio=portfolio)
+
+        assert snapshot.balance("USDC").balance_usd == Decimal("5000")
+        assert snapshot.total_portfolio_usd() == Decimal("5000")
+
+    def test_total_is_cash_plus_spot_holdings(self):
+        portfolio = self._portfolio(Decimal("4000"))
+        portfolio.tokens[self.WETH_KEY] = Decimal("2.5")
+        snapshot = self._snapshot(portfolio)
+
+        # 4000 cash (once) + 2.5 WETH x 3000
+        assert snapshot.total_portfolio_usd() == Decimal("11500")
+
+    def test_held_stable_counts_its_real_balance_beside_cash(self):
+        portfolio = self._portfolio(Decimal("10000"))
+        portfolio.tokens[self.USDC_KEY] = Decimal("500")
+        snapshot = self._snapshot(portfolio)
+
+        # The held USDC key is a real balance (500), not a cash mirror; cash
+        # still counts once through the remaining mirrors.
+        assert snapshot.balance("USDC").balance == Decimal("500")
+        assert snapshot.total_portfolio_usd() == Decimal("10500")
+
+    def test_open_position_value_is_not_in_total(self):
+        """Wallet parity: value inside an open LP position leaves the total.
+
+        While an LP is open the strategy-visible total is the residual wallet
+        (cash + spot) only — matching live, where the balance provider cannot
+        see inside a position NFT. Strategies needing position-inclusive
+        equity read position views, not ``total_portfolio_usd``.
+        """
+        from almanak.framework.backtesting.pnl.position_models import (
+            PositionType,
+            SimulatedPosition,
+        )
+
+        portfolio = self._portfolio(Decimal("19.45"))
+        portfolio.positions.append(
+            SimulatedPosition(
+                position_type=PositionType.LP,
+                protocol="uniswap_v3",
+                tokens=[self.WETH_KEY, self.USDC_KEY],
+                amounts={self.WETH_KEY: Decimal("1"), self.USDC_KEY: Decimal("3000")},
+                entry_price=Decimal("3000"),
+                entry_time=datetime(2026, 4, 24, tzinfo=UTC),
+                liquidity=Decimal("1000"),
+            )
+        )
+        snapshot = self._snapshot(portfolio)
+
+        assert snapshot.total_portfolio_usd() == Decimal("19.45")
+
+    def test_balance_reads_do_not_change_total(self):
+        """Strategy balance() reads must not re-add cash through the cache lane."""
+        snapshot = self._snapshot(self._portfolio(Decimal("19.45")))
+
+        before = snapshot.total_portfolio_usd()
+        snapshot.balance("USDC")
+        snapshot.balance("USDT")
+        snapshot.balance("USD")
+        snapshot.balance(self.USDC_ADDR)
+        assert snapshot.total_portfolio_usd() == before == Decimal("19.45")
+
+    def test_set_balance_overwrite_clears_mirror_mark(self):
+        """A direct write onto a mirror key makes it a real balance again."""
+        from almanak.framework.market.models import TokenBalance
+
+        snapshot = self._snapshot(self._portfolio(Decimal("100")))
+        snapshot.set_balance(
+            "USDT", TokenBalance(symbol="USDT", balance=Decimal("40"), balance_usd=Decimal("40"))
+        )
+
+        # 100 cash (counted once via remaining mirrors) + 40 real USDT.
+        assert snapshot.total_portfolio_usd() == Decimal("140")

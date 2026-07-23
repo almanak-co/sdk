@@ -20,7 +20,7 @@ import concurrent.futures
 import inspect
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -622,6 +622,16 @@ class MarketSnapshot:
         # never register aliases, so ``_token_cache_key`` stays a pure
         # pass-through for plain symbols outside a backtest.
         self._symbol_alias_keys: dict[str, str] = {}
+        # Balance keys that all mirror the SAME underlying cash source
+        # (``SimulatedPortfolio.cash_usd``). Populated ONLY via
+        # ``_register_cash_mirror_keys`` by the PnL engine bridge, which
+        # exposes cash under "USD", the unheld cash-equivalent symbols, and
+        # any registered cash-equivalent address keys so per-symbol balance
+        # reads all observe cash (blueprint 31 §4.1). ``total_portfolio_usd``
+        # counts the whole set as ONE cash contribution — summing every
+        # mirror would multiply cash by the number of exposure keys. Empty on
+        # live snapshots, where every balance key is a distinct wallet asset.
+        self._cash_mirror_keys: set[str] = set()
         # VIB-4843 (Empty≠Zero): cache keys whose ``balance_usd`` is the
         # *unmeasured* coerced sentinel (provider returned a bare balance with
         # no USD). Only these may be (re)filled from a price; a provider that
@@ -2409,6 +2419,23 @@ class MarketSnapshot:
                 continue
             self._symbol_alias_keys[plain.upper()] = target
 
+    def _register_cash_mirror_keys(self, tokens: Iterable[str]) -> None:
+        """Mark balance keys as mirrors of one underlying cash source.
+
+        Backtest-only bridge (same contract as ``_register_symbol_alias_keys``):
+        the PnL engine seeds ``SimulatedPortfolio.cash_usd`` under several
+        balance keys so ``balance("USDC")`` / ``balance("USDT")`` /
+        address-native reads all observe cash, then registers those keys here
+        so ``total_portfolio_usd`` counts the set as a single cash
+        contribution. Keys resolve through ``_token_cache_key`` so they land
+        on exactly the key ``set_balance`` wrote (symbol aliases included).
+        A later ``set_balance`` on a marked key clears the mark — an
+        overwritten entry is a real balance again, not a cash mirror.
+        """
+        for token in tokens:
+            if isinstance(token, str) and token:
+                self._cash_mirror_keys.add(self._token_cache_key(token, self._chain))
+
     def _seeded_price_for_symbol(self, token: str) -> Decimal | None:
         """Case-insensitive lookup in the ``set_price()``-seeded ``_prices`` map.
 
@@ -2640,24 +2667,42 @@ class MarketSnapshot:
 
         Sums ``balance_usd`` for all tokens in pre-populated balances and
         cached balances (tokens queried via ``balance()`` in this snapshot).
+        Wallet semantics on every surface: value held inside open positions
+        (LP / perp / lending) is not a wallet balance and is not included —
+        live totals only see what the balance provider reports, and the
+        backtest bridge mirrors that (blueprint 31 §4.1).
 
         ``_balance_cache`` keys are either the bare symbol (legacy single-arg
         provider path) or ``f"{symbol}@{chain}"`` (multi-chain path). Strip
         the chain suffix before dedup so a token populated via both
         ``set_balance(symbol, tb)`` (which writes both maps) is counted once.
+
+        Keys registered via ``_register_cash_mirror_keys`` (backtest bridge)
+        all expose the same underlying cash source and contribute exactly
+        once, no matter how many exposure keys carry the face value.
         """
         total = Decimal("0")
         seen: set[str] = set()
+        cash_counted = False
 
         for token, balance in self._balances.items():
-            total += balance.balance_usd
             seen.add(token)
+            if token in self._cash_mirror_keys:
+                if cash_counted:
+                    continue
+                cash_counted = True
+            total += balance.balance_usd
 
         for cache_key, balance in self._balance_cache.items():
             symbol = cache_key.split("@", 1)[0] if "@" in cache_key else cache_key
-            if symbol not in seen:
-                total += balance.balance_usd
-                seen.add(symbol)
+            if symbol in seen:
+                continue
+            seen.add(symbol)
+            if symbol in self._cash_mirror_keys:
+                if cash_counted:
+                    continue
+                cash_counted = True
+            total += balance.balance_usd
 
         return total
 
@@ -2770,6 +2815,9 @@ class MarketSnapshot:
             # the bare-symbol legacy key.
             self._balance_usd_unmeasured.discard(f"{token}@{self._chain}")
             self._balance_usd_unmeasured.discard(token)
+            # A direct write makes this key a real balance again; a stale
+            # cash-mirror mark would collapse it into the single cash count.
+            self._cash_mirror_keys.discard(token)
             return
         chain = str(balance_data_or_chain)
         if not isinstance(balance_data, TokenBalance):
@@ -2779,6 +2827,7 @@ class MarketSnapshot:
             )
         if chain == self._chain:
             self._balances[self._token_cache_key(token, chain)] = balance_data
+            self._cash_mirror_keys.discard(self._token_cache_key(token, chain))
         token = self._token_cache_key(token, chain)
         self._balance_cache[f"{token}@{chain}"] = balance_data
         # VIB-4843 (Codex re-audit): clear any stale unmeasured marker for the

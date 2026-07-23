@@ -2531,6 +2531,16 @@ def _seed_cash_balances(
     portfolio: SimulatedPortfolio,
     token_addresses: Mapping[str, tuple[str, str]] | None = None,
 ) -> None:
+    """Expose ``portfolio.cash_usd`` under every cash-observation key.
+
+    Blueprint 31 §4.1: ``balance("USDC")`` / ``balance("USDT")`` and
+    address-native reads must all observe cash. Every key written here
+    carries the SAME face value, so the full set is registered as cash
+    mirrors — ``total_portfolio_usd`` counts it once, not once per key.
+    Registration happens after the writes because ``set_balance`` clears
+    the mirror mark on the key it writes.
+    """
+    cash_keys: list[str] = ["USD"]
     snapshot.set_balance("USD", _face_value_balance("USD", portfolio.cash_usd))
     for stable in CASH_EQUIVALENT_STABLECOINS:
         if stable in portfolio.tokens:
@@ -2541,12 +2551,15 @@ def _seed_cash_balances(
         if _registered_key_held(stable, token_addresses, portfolio):
             continue
         snapshot.set_balance(stable, _face_value_balance(stable, portfolio.cash_usd))
+        cash_keys.append(stable)
     for stable_key in _portfolio_cash_equivalent_keys(portfolio):
         display_token = token_ref_display(stable_key)
         if stable_key in portfolio.tokens or display_token in portfolio.tokens:
             continue
         snapshot.set_price(display_token, Decimal("1"))
         snapshot.set_balance(display_token, _face_value_balance(display_token, portfolio.cash_usd))
+        cash_keys.append(display_token)
+    snapshot._register_cash_mirror_keys(cash_keys)
 
 
 def _registered_key_held(
