@@ -47,8 +47,21 @@ DESCRIPTOR = register_chain(
                 "swap_simple": 180000,
                 "swap_multi_hop": 300000,
             },
-            fallback_base_fee_gwei=20.0,
-            fallback_priority_fee_gwei=2.0,
+            # Backtest-only fallback estimate (feeds
+            # ``default_gas_price_gwei_for_chain`` and ``DEFAULT_GAS_PRICES``;
+            # the live lane uses ``min_priority_fee_gwei`` below). Retuned
+            # 2026-07-24 from the legacy 20+2=22 gwei, which was calibrated
+            # for pre-blob L1 and overstated post-blob mainnet gas ~140x
+            # (observed ~0.156 gwei total, 2026-07): every backtest using the
+            # chain default simulated $15-20 of gas per mainnet tx. Base
+            # matches the OBSERVED_TYPICAL_GAS_GWEI snapshot
+            # (``framework/execution/gas/constants.py``, 2026-05-27/28
+            # multi-RPC sweep); priority matches the ~0.05 gwei landable tip
+            # measured in the VIB-5673 investigation. Total 0.21 gwei still
+            # rounds up from observed — the conservative direction for
+            # backtest cost estimation (same convention as robinhood.py).
+            fallback_base_fee_gwei=0.16,
+            fallback_priority_fee_gwei=0.05,
             # VIB-5419: live-submit tip floor. L1 nodes legitimately return
             # eth_maxPriorityFeePerGas=0; without a floor the tx ships with
             # tip≈0 and stalls/drops when the base fee rises.

@@ -99,9 +99,12 @@ DESCRIPTOR = register_chain(
         # survives as a measured value rather than collapsing to "unset".
         #
         # Without these, ``default_gas_price_gwei_for_chain`` falls through to
-        # ``ChainRegistry.conservative_gas_fallback()`` → ethereum's 20+2=22
-        # gwei, over-stating Robinhood gas by ~413x (a $3 demo swap simulated
-        # $7.06 of gas and turned a +4.16% benchmark into a -36.46% return).
+        # ``ChainRegistry.conservative_gas_fallback()`` → the ethereum
+        # descriptor's fallbacks (20+2=22 gwei when this bug shipped,
+        # over-stating Robinhood gas by ~413x: a $3 demo swap simulated $7.06
+        # of gas and turned a +4.16% benchmark into a -36.46% return; even
+        # ethereum's 2026-07 post-blob retune to 0.16+0.05 would still
+        # overstate Robinhood by ~3.8x).
         gas=GasProfile(
             l1_fee_oracle_kind="arbitrum_nodeinterface",
             l1_fee_oracle_address="0x000000000000000000000000000000000000006C",

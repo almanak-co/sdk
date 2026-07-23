@@ -84,7 +84,8 @@ def default_gas_price_gwei_for_chain(chain: str) -> Decimal:
     ``ChainDescriptor.gas.fallback_base_fee_gwei`` +
     ``fallback_priority_fee_gwei`` -- the same sourced constants that back
     ``DEFAULT_GAS_PRICES`` in ``pnl/providers/gas.py`` (e.g. Arbitrum
-    0.1 + 0.0, Base/Optimism 0.001 + 0.001, Ethereum 20 + 2).
+    0.1 + 0.0, Base/Optimism 0.001 + 0.001, Ethereum 0.16 + 0.05 after the
+    2026-07 post-blob retune).
 
     Chains without registered fallback fees use the ethereum descriptor's
     values -- the documented conservative default, mirroring the legacy
@@ -155,7 +156,7 @@ class PnLBacktestConfig:
         include_gas_costs: Whether to include gas costs in PnL calculations
         gas_price_gwei: Gas price to use for cost calculations (default: None =
             chain-aware default from the chain registry, e.g. 0.1 gwei on
-            Arbitrum, 22 gwei on Ethereum -- VIB-5088)
+            Arbitrum, 0.21 gwei on Ethereum -- VIB-5088)
         inclusion_delay_blocks: Number of blocks to delay intent execution to simulate
             realistic trade timing (default: 1). When > 0, intents are queued and
             executed in the next iteration(s) rather than immediately.
@@ -430,7 +431,7 @@ class PnLBacktestConfig:
     1. Historical gas price from gas_provider (if use_historical_gas_gwei=True)
     2. MarketState.gas_price_gwei (if populated by data provider)
     3. config.gas_price_gwei (chain-aware default from the chain registry, e.g.
-       ~0.1 gwei on Arbitrum, ~22 gwei on Ethereum -- VIB-5088)
+       ~0.1 gwei on Arbitrum, ~0.21 gwei on Ethereum -- VIB-5088)
 
     When disabled, gas costs use the static gas_price_gwei for all trades,
     which is faster but may not reflect actual network conditions.

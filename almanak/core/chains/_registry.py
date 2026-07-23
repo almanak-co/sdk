@@ -270,11 +270,18 @@ class ChainRegistry:
         """Gas profile assumed for chains with no usable gas facts.
 
         Policy: an unregistered chain (or one whose descriptor carries no
-        fallback fees) prices like Ethereum mainnet - the most expensive
-        common case - so its backtests overstate rather than understate
-        execution costs. Owned by the registry so framework consumers
+        fallback fees) prices like Ethereum mainnet - the canonical L1
+        reference case. Owned by the registry so framework consumers
         (e.g. the backtester's default gas resolution, VIB-5088) carry no
         chain literals (VIB-4851 coupling rule).
+
+        Note: before the 2026-07 post-blob retune of ethereum's fallbacks
+        (20+2=22 gwei -> 0.16+0.05) this was also guaranteed to overstate
+        execution costs on any unknown chain. Post-retune that guarantee is
+        weaker - an unknown chain with Polygon-like gwei magnitudes would be
+        understated. The durable fix for any such chain is registering its
+        measured fallback fees on its own descriptor (see robinhood.py for
+        the pattern), not re-inflating the ethereum reference.
         """
         return cls._by_name["ethereum"].gas
 

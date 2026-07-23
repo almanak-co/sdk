@@ -134,7 +134,7 @@ class TestDefaultGasPriceForChain:
             ("arbitrum", Decimal("0.1")),  # 0.1 base + 0.0 priority
             ("base", Decimal("0.002")),  # 0.001 base + 0.001 priority
             ("optimism", Decimal("0.002")),  # 0.001 base + 0.001 priority
-            ("ethereum", Decimal("22")),  # 20 base + 2 priority
+            ("ethereum", Decimal("0.21")),  # 0.16 base + 0.05 priority (2026-07 post-blob retune)
         ],
     )
     def test_headline_chains(self, chain: str, expected_gwei: Decimal) -> None:
@@ -173,7 +173,7 @@ class TestConfigChainAwareDefault:
 
         assert arb.gas_price_gwei == Decimal("0.1")
         assert base.gas_price_gwei == Decimal("0.002")
-        assert eth.gas_price_gwei == Decimal("22")
+        assert eth.gas_price_gwei == Decimal("0.21")
         assert arb.gas_price_gwei_is_default is True
         assert base.gas_price_gwei_is_default is True
         assert eth.gas_price_gwei_is_default is True

@@ -75,6 +75,8 @@ HISTORICAL_RECEIPT_POLLING: dict[str, int] = {
 
 
 HISTORICAL_FALLBACK_GAS_PRICES: dict[str, dict[str, Decimal]] = {
+    # ethereum's legacy 20/2 mirror is superseded by the measured 2026-07
+    # retune in MEASURED_FALLBACK_GAS_PRICES, which overrides it in the union.
     "ethereum": {"base_fee": Decimal("20"), "priority_fee": Decimal("2")},
     "arbitrum": {"base_fee": Decimal("0.1"), "priority_fee": Decimal("0")},
     "optimism": {"base_fee": Decimal("0.001"), "priority_fee": Decimal("0.001")},
@@ -85,19 +87,30 @@ HISTORICAL_FALLBACK_GAS_PRICES: dict[str, dict[str, Decimal]] = {
 }
 
 
-# Post-legacy additions: chains that were never in the legacy DEFAULT_GAS_PRICES
-# and whose fallback fees were measured from the live chain instead of inherited.
-# Kept OUT of HISTORICAL_FALLBACK_GAS_PRICES on purpose — that map is a frozen
-# legacy snapshot whose value is that a diff against ``main`` stays obvious, and
-# these values have no legacy counterpart to mirror.
+# Measured values: chains whose fallback fees were measured from the live
+# chain instead of inherited from the legacy dicts — either post-legacy
+# additions with no legacy counterpart to mirror, or legacy chains whose
+# mirror was retired after the value drifted from reality. Kept OUT of
+# HISTORICAL_FALLBACK_GAS_PRICES on purpose — that map is a frozen legacy
+# snapshot whose value is that a diff against ``main`` stays obvious; entries
+# here override it in the union below.
 #
 # robinhood (VIB-5811): measured 2026-07-14 from baseFeePerGas sampled every
 # 1000 blocks over the last 20_000 (min 0.05293 / median 0.05328 / max 0.05427
 # gwei); 0.055 rounds the median up, the conservative direction for backtest
 # cost estimation. priority_fee is a measured 0.0 (Orbit sequencer is FCFS with
 # no priority auction), NOT an unmeasured blank — same shape as arbitrum/bsc.
+#
+# ethereum (2026-07-24): retuned from the legacy 20+2=22 gwei, which was
+# calibrated for pre-blob L1 and overstated post-blob mainnet gas ~140x
+# (observed ~0.156 gwei total, 2026-07). base_fee matches the
+# OBSERVED_TYPICAL_GAS_GWEI snapshot (0.16, 2026-05-27/28 multi-RPC sweep in
+# ``framework/execution/gas/constants.py``); priority_fee matches the ~0.05
+# gwei landable tip from the VIB-5673 investigation. 0.21 total rounds up
+# from observed — the conservative direction for backtest cost estimation.
 MEASURED_FALLBACK_GAS_PRICES: dict[str, dict[str, Decimal]] = {
     "robinhood": {"base_fee": Decimal("0.055"), "priority_fee": Decimal("0")},
+    "ethereum": {"base_fee": Decimal("0.16"), "priority_fee": Decimal("0.05")},
 }
 
 
