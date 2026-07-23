@@ -618,7 +618,10 @@ async def execute_iteration_loop(
     # tick-derivable timeframes) and engine-modeled gas, per-tick bound.
     from almanak.framework.backtesting.pnl.engine import (
         BacktestOHLCVView,
+        BacktestPoolAnalyticsReader,
+        BacktestPoolHistoryReader,
         BacktestPoolPriceView,
+        BacktestRateHistoryReader,
         BacktestVolatilityCalculator,
         SimulatedGasView,
         SimulatedPositionView,
@@ -664,6 +667,19 @@ async def execute_iteration_loop(
         indicator_engine=state.indicator_engine,
         tick_interval_seconds=config.interval_seconds,
     )
+    # market.pool_history() served from the run's pool-history lane — the
+    # same daily ladder LP fee accrual already consumes internally (parity:
+    # the accessor refused data the engine was using). pool_history_provider
+    # routes through the run's broker when active, else the legacy singleton.
+    from almanak.framework.backtesting.pnl.data_broker import pool_history_provider
+
+    pool_history_reader = BacktestPoolHistoryReader(pool_history_provider(), config.chain)
+    # market.pool_analytics() from the same daily plane (best_pool keeps its
+    # live-parity refusal — live best_pool is deferred to a gateway RPC).
+    pool_analytics_reader = BacktestPoolAnalyticsReader(pool_history_provider(), config.chain)
+    # market.funding_rate_history() from the run's funding lane; the reader
+    # refuses in fallback-funding mode (constant-series-as-history guard).
+    rate_history_reader = BacktestRateHistoryReader(funding_rate_source, config.chain)
     lending_rates = build_backtest_lending_rates(
         [*token_addresses, *(str(token) for token in config.tokens if isinstance(token, str))],
         config.chain,
@@ -728,6 +744,9 @@ async def execute_iteration_loop(
             position_view.bind(market_state, timestamp)
             pool_price_view.bind(market_state, timestamp)
             slippage_view.bind(market_state, timestamp)
+            pool_history_reader.bind(timestamp)
+            pool_analytics_reader.bind(timestamp)
+            rate_history_reader.bind(timestamp)
             snapshot = create_market_snapshot_from_state(
                 market_state=market_state,
                 chain=config.chain,
@@ -746,6 +765,9 @@ async def execute_iteration_loop(
                 volatility_calculator=volatility_calculator,
                 il_calculator=il_calculator,
                 risk_calculator=risk_calculator,
+                pool_history_reader=pool_history_reader,
+                pool_analytics_reader=pool_analytics_reader,
+                rate_history_reader=rate_history_reader,
                 soft_empty_noted=soft_empty_noted,
             )
 

@@ -688,6 +688,9 @@ def create_market_snapshot_from_state(
     volatility_calculator: Any | None = None,
     il_calculator: Any | None = None,
     risk_calculator: Any | None = None,
+    pool_history_reader: Any | None = None,
+    pool_analytics_reader: Any | None = None,
+    rate_history_reader: Any | None = None,
     soft_empty_noted: "set[str] | None" = None,
 ) -> MarketSnapshot:
     """Create a MarketSnapshot from historical MarketState data.
@@ -765,6 +768,9 @@ def create_market_snapshot_from_state(
         volatility_calculator=volatility_calculator,
         il_calculator=il_calculator,
         risk_calculator=risk_calculator,
+        pool_history_reader=pool_history_reader,
+        pool_analytics_reader=pool_analytics_reader,
+        rate_history_reader=rate_history_reader,
     )
     # Soft-empty lanes explain themselves once per run (ALM-2943): live
     # snapshots leave this None, which disables the ledger notes.
@@ -1775,6 +1781,403 @@ class BacktestPoolPriceView:
                     # a connector author's casing.
                     return token0.lower(), token1.lower(), int(fee)
         return None
+
+
+class BacktestPoolHistoryReader:
+    """Serves ``market.pool_history()`` from the run's pool-history lane.
+
+    The engine already consumes this exact data internally (LP fee accrual
+    reads historical pool-day volume; LP sizing reads liquidity depth) while
+    the strategy-facing accessor refused — the live/backtest parity gap this
+    reader closes. Contract:
+
+    - **Daily bars only**: the lane's ladder measures pool-days (TVL +
+      24h volume). ``resolution="1d"`` serves; anything finer refuses —
+      relabeling daily bars as hourly would be a substitution.
+    - **Completed days only, no look-ahead**: at tick T the newest servable
+      bar is T's previous day — the tick's own day-bar includes trades from
+      the tick's future. The window end also clamps to the bound tick.
+    - **Empty != Zero**: per-row unmeasured fields stay ``None``
+      (``fee_revenue_24h`` and reserves are never measured by this ladder).
+    - Provenance stamps happen provider-side (the broker's pool-history
+      lane records serves/misses on the run manifest).
+
+    Bound per tick via :meth:`bind`.
+    """
+
+    def __init__(self, provider: Any, chain: str | None) -> None:
+        self._provider = provider
+        self._chain = str(chain) if chain else None
+        self._timestamp: datetime | None = None
+
+    def bind(self, timestamp: datetime) -> None:
+        self._timestamp = timestamp
+
+    def get_pool_history(
+        self,
+        *,
+        pool_address: str,
+        chain: str,
+        start_date: datetime,
+        end_date: datetime,
+        resolution: str,
+        protocol: str,
+    ) -> Any:
+        from datetime import time as _time
+        from datetime import timedelta as _timedelta
+
+        from almanak.framework.data.models import DataClassification, DataMeta
+        from almanak.framework.data.pools.history import DataEnvelope, PoolSnapshot
+
+        if self._timestamp is None:
+            raise ValueError("pool_history unavailable: backtest pool-history reader is not bound to a tick")
+        if str(resolution) != "1d":
+            raise ValueError(
+                f"pool_history unavailable at resolution {resolution!r} in backtests: the run's "
+                "pool-history plane measures DAILY bars — pass resolution='1d' (serving daily bars "
+                "under a finer label would be a substitution)"
+            )
+        target_chain = (chain or self._chain or "").lower()
+        if not target_chain:
+            raise ValueError("pool_history unavailable: no chain in scope for the backtest reader")
+
+        last_complete_day = (self._timestamp - _timedelta(days=1)).date()
+        end_day = min(end_date.date(), last_complete_day)
+        start_day = start_date.date()
+        if start_day > end_day:
+            raise ValueError(
+                f"pool_history window has no completed days at this tick: requested "
+                f"{start_day} → {end_date.date()}, newest completed pool-day is {last_complete_day}"
+            )
+
+        snapshots: list[PoolSnapshot] = []
+        sources: set[str] = set()
+        missed = 0
+        day = start_day
+        while day <= end_day:
+            row = self._provider.daily_history(
+                pool_address=pool_address,
+                chain=target_chain,
+                protocol=protocol,
+                day=day,
+            )
+            if row is None or (row.tvl is None and row.volume_24h is None):
+                missed += 1
+            else:
+                unmeasured = frozenset(
+                    name
+                    for name, value in (
+                        ("tvl", row.tvl),
+                        ("volume_24h", row.volume_24h),
+                        ("fee_revenue_24h", None),
+                        ("token0_reserve", None),
+                        ("token1_reserve", None),
+                    )
+                    if value is None
+                )
+                snapshots.append(
+                    PoolSnapshot(
+                        timestamp=datetime.combine(day, _time(0), tzinfo=UTC),
+                        tvl=row.tvl,
+                        volume_24h=row.volume_24h,
+                        fee_revenue_24h=None,
+                        token0_reserve=None,
+                        token1_reserve=None,
+                        unmeasured_fields=unmeasured,
+                    )
+                )
+                for source in (row.tvl_source, row.volume_source):
+                    if source:
+                        sources.add(source)
+            day += _timedelta(days=1)
+
+        if not snapshots:
+            raise ValueError(
+                f"pool-history plane measured no days for pool {pool_address} on {target_chain} "
+                f"({protocol}) in {start_day} → {end_day} — the pool may be outside provider coverage"
+            )
+
+        meta = DataMeta(
+            source="backtest_pool_history:" + ("+".join(sorted(sources)) if sources else "unknown"),
+            # The bound tick, NOT wall clock: results stay deterministic.
+            observed_at=self._timestamp,
+            finality="off_chain",
+            staleness_ms=0,
+            latency_ms=0,
+            confidence=0.85,
+            cache_hit=False,
+        )
+        envelope = DataEnvelope(
+            value=snapshots,
+            meta=meta,
+            classification=DataClassification.INFORMATIONAL,
+        )
+        if missed:
+            logger.debug(
+                "pool_history served %d/%d requested days for %s (%d unmeasured days skipped)",
+                len(snapshots),
+                len(snapshots) + missed,
+                pool_address,
+                missed,
+            )
+        return envelope
+
+
+class BacktestPoolAnalyticsReader:
+    """Serves ``market.pool_analytics()`` from the run's pool-history lane.
+
+    Same parity rationale and daily plane as :class:`BacktestPoolHistoryReader`
+    (the engine already consumed pool-day TVL/volume internally while the
+    accessor refused). Serve shape, per the ``PoolAnalytics`` contract:
+
+    - ``tvl_usd`` / ``volume_24h_usd`` from the newest COMPLETED pool-day
+      (the tick's own day-bar would include the tick's future).
+    - ``volume_7d_usd`` summed over the last 7 completed days when every
+      day measured; otherwise unmeasured.
+    - ``fee_apr`` / ``fee_apy`` UNMEASURED in this plane (declared in
+      ``unmeasured_fields``; the 0 values are placeholders per the model's
+      documented backwards-compat contract, and ``meta.confidence`` decays
+      accordingly). ``utilization_rate`` stays None (DEX pools).
+    - ``best_pool`` keeps refusing — LIVE ``best_pool`` is itself deferred
+      to a gateway RPC (VIB-4729), so a refusal IS live parity.
+
+    Bound per tick via :meth:`bind`.
+    """
+
+    _MONEY_FIELDS = ("tvl_usd", "volume_24h_usd", "volume_7d_usd", "fee_apr", "fee_apy")
+
+    def __init__(self, provider: Any, chain: str | None) -> None:
+        self._provider = provider
+        self._chain = str(chain) if chain else None
+        self._timestamp: datetime | None = None
+
+    def bind(self, timestamp: datetime) -> None:
+        self._timestamp = timestamp
+
+    def get_pool_analytics(
+        self,
+        pool_address: str,
+        chain: str,
+        protocol: str | None = None,
+    ) -> Any:
+        from datetime import timedelta as _timedelta
+
+        from almanak.framework.data.models import DataClassification, DataMeta
+        from almanak.framework.data.pools.analytics import DataEnvelope, PoolAnalytics
+
+        if self._timestamp is None:
+            raise ValueError("pool_analytics unavailable: backtest reader is not bound to a tick")
+        if not protocol:
+            raise ValueError(
+                "pool_analytics unavailable in backtest without a protocol hint: the pool-history "
+                "plane is protocol-scoped — pass protocol= (e.g. 'uniswap_v3')"
+            )
+        target_chain = (chain or self._chain or "").lower()
+
+        newest_day = (self._timestamp - _timedelta(days=1)).date()
+        rows = []
+        for offset in range(7):
+            day = newest_day - _timedelta(days=offset)
+            rows.append(
+                self._provider.daily_history(pool_address=pool_address, chain=target_chain, protocol=protocol, day=day)
+            )
+        newest = rows[0]
+        if newest is None or (newest.tvl is None and newest.volume_24h is None):
+            raise ValueError(
+                f"pool-history plane measured no data for pool {pool_address} on {target_chain} "
+                f"({protocol}) for {newest_day} — the pool may be outside provider coverage"
+            )
+
+        unmeasured: set[str] = {"fee_apr", "fee_apy"}  # not derivable from this plane
+        tvl = newest.tvl
+        if tvl is None:
+            unmeasured.add("tvl_usd")
+        volume_24h = newest.volume_24h
+        if volume_24h is None:
+            unmeasured.add("volume_24h_usd")
+        day_volumes = [row.volume_24h if row is not None else None for row in rows]
+        measured_volumes = [volume for volume in day_volumes if volume is not None]
+        if len(measured_volumes) < len(day_volumes):
+            volume_7d = None
+            unmeasured.add("volume_7d_usd")
+        else:
+            volume_7d = sum(measured_volumes, Decimal("0"))
+        sources = {
+            source for row in rows if row is not None for source in (row.tvl_source, row.volume_source) if source
+        }
+
+        analytics = PoolAnalytics(
+            pool_address=pool_address,
+            chain=target_chain,
+            protocol=protocol,
+            tvl_usd=tvl if tvl is not None else Decimal("0"),
+            volume_24h_usd=volume_24h if volume_24h is not None else Decimal("0"),
+            volume_7d_usd=volume_7d if volume_7d is not None else Decimal("0"),
+            fee_apr=0.0,
+            fee_apy=0.0,
+            utilization_rate=None,
+            unmeasured_fields=frozenset(unmeasured),
+        )
+        confidence = max(0.85 - 0.15 * len(unmeasured & set(self._MONEY_FIELDS)), 0.1)
+        meta = DataMeta(
+            source="backtest_pool_history:" + ("+".join(sorted(sources)) if sources else "unknown"),
+            observed_at=self._timestamp,  # bound tick — deterministic
+            finality="off_chain",
+            staleness_ms=0,
+            latency_ms=0,
+            confidence=confidence,
+            cache_hit=False,
+        )
+        return DataEnvelope(value=analytics, meta=meta, classification=DataClassification.INFORMATIONAL)
+
+    def best_pool(self, *args: Any, **kwargs: Any) -> Any:
+        # LIVE best_pool is itself deferred to a gateway RPC (VIB-4729) and
+        # refuses — so a backtest refusal IS live parity, not a gap.
+        raise ValueError(
+            "best_pool is not served in backtests (live best_pool is deferred to a gateway RPC, "
+            "VIB-4729) — rank candidate pools via pool_analytics() per pool instead"
+        )
+
+
+class BacktestRateHistoryReader:
+    """Serves ``market.funding_rate_history()`` from the run's funding lane.
+
+    The lane already resolves measured per-hour rates for the engine's own
+    funding accrual (no look-ahead: each hour resolves to the latest measured
+    point at or before it) — this reader exposes the same resolution as an
+    ascending hourly series ending at the tick's hour.
+
+    Honesty gates:
+    - Refuses when the run is in fallback-funding mode: every hour would be
+      one configured constant, and a constant series labeled "history" is
+      fabrication, not measurement.
+    - ``lending_rate_history`` refuses: the run's decide()-time lending plane
+      serves connector-default constants (see ``build_backtest_lending_rates``)
+      — same constant-series objection; an honest serve needs the historical
+      as-of APY plane.
+
+    Bound per tick via :meth:`bind`.
+    """
+
+    def __init__(self, source: Any, chain: str | None) -> None:
+        self._source = source
+        self._chain = str(chain) if chain else None
+        self._timestamp: datetime | None = None
+        self._bridge_executor: Any = None
+        self._orphaned_future: Any = None
+
+    def bind(self, timestamp: datetime) -> None:
+        self._timestamp = timestamp
+
+    def _run_bridged(self, coro: Any) -> Any:
+        import asyncio
+        import concurrent.futures
+
+        # A timed-out worker cannot be cancelled once running — it keeps
+        # resolving hours (and mutating the shared source's per-hour cache /
+        # degradation set) until its coroutine returns. Refuse to serve while
+        # it lives: a series assembled concurrently with those writes could
+        # pass the degraded-check before the orphan records the degradation.
+        # Once done, its writes are complete (and deterministic per hour), so
+        # service resumes safely.
+        if self._orphaned_future is not None:
+            if not self._orphaned_future.done():
+                coro.close()
+                raise ValueError(
+                    "rate history unavailable: a previous lookup timed out and its worker is "
+                    "still resolving in the background — refusing to read the shared funding "
+                    "lane while it may still be mutating; retry on a later tick"
+                )
+            self._orphaned_future = None
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        # ONE long-lived worker per reader (per run), not a per-call pool: a
+        # stalled lookup then serializes later calls behind the single worker
+        # (backpressure) instead of leaking a fresh thread per timeout.
+        if self._bridge_executor is None:
+            self._bridge_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="backtest-rate-history"
+            )
+        future = self._bridge_executor.submit(asyncio.run, coro)
+        try:
+            return future.result(timeout=30)
+        except concurrent.futures.TimeoutError:
+            # cancel() only helps if the future never started; a running one
+            # is orphaned — remember it so later calls refuse until it dies.
+            future.cancel()
+            self._orphaned_future = future
+            raise
+
+    def get_funding_rate_history(self, *, venue: str, market_symbol: str, hours: int = 168) -> Any:
+        from datetime import timedelta as _timedelta
+
+        from almanak.framework.data.models import DataClassification, DataMeta
+        from almanak.framework.data.rates.history import DataEnvelope, FundingRateSnapshot
+
+        if self._timestamp is None:
+            raise ValueError("funding_rate_history unavailable: backtest reader is not bound to a tick")
+        if not getattr(self._source, "history_capable", False):
+            raise ValueError(
+                "funding_rate_history unavailable: this run resolves funding from the configured "
+                "fallback rate (use_historical_funding is off) — a constant series labeled history "
+                "would be fabrication; enable historical funding or read funding_rate (point)"
+            )
+        if hours < 1:
+            raise ValueError(f"funding_rate_history needs hours >= 1, got {hours}")
+
+        tick_hour = self._timestamp.replace(minute=0, second=0, microsecond=0)
+        points = [tick_hour - _timedelta(hours=offset) for offset in range(hours - 1, -1, -1)]
+
+        async def _resolve_all() -> list[Any]:
+            resolved: list[Any] = []
+            for point in points:
+                # Per-point no-look-ahead is the source's own contract; a
+                # strict-mode unavailability propagates (never fabricates).
+                resolved.append(await self._source.funding_rate_at(venue, market_symbol, point))
+            return resolved
+
+        rates = self._run_bridged(_resolve_all())
+        # A point that resolved from the fallback constant is NOT a
+        # measurement: serving it inside a "history" series would fabricate
+        # exactly what the history_capable gate refuses. Point reads may
+        # tolerate the degrade; the history accessor must not.
+        was_degraded = getattr(self._source, "point_was_degraded", None)
+        if was_degraded is not None:
+            degraded = [point for point in points if was_degraded(venue, market_symbol, point)]
+            if degraded:
+                raise ValueError(
+                    f"funding_rate_history unavailable: {len(degraded)} of {len(points)} hours in the "
+                    f"window resolved from the configured fallback rate (first: {degraded[0]}) — "
+                    "refusing to serve a partially fabricated history; narrow the window or enable "
+                    "strict_historical_mode to fail per-point"
+                )
+        snapshots = [
+            FundingRateSnapshot(
+                rate=rate.rate_hourly,
+                annualized_rate=rate.rate_annualized,
+                timestamp=rate.timestamp,
+            )
+            for rate in rates
+        ]
+        meta = DataMeta(
+            source="backtest_funding_history",
+            observed_at=self._timestamp,  # bound tick — deterministic
+            finality="off_chain",
+            staleness_ms=0,
+            latency_ms=0,
+            confidence=0.85,
+            cache_hit=False,
+        )
+        return DataEnvelope(value=snapshots, meta=meta, classification=DataClassification.INFORMATIONAL)
+
+    def get_lending_rate_history(self, *args: Any, **kwargs: Any) -> Any:
+        raise ValueError(
+            "lending_rate_history is not served in backtests: the run's lending plane carries "
+            "connector-default constant APYs, and a constant series labeled history would be "
+            "fabrication — read lending_rate (point, connector-default plane) instead"
+        )
 
 
 class BacktestVolatilityCalculator:

@@ -39,6 +39,7 @@ most once per simulated hour, not once per tick.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -98,15 +99,36 @@ class SnapshotFundingRateSource:
         self._fallback_rate = data_config.funding_fallback_rate if data_config is not None else DEFAULT_FALLBACK_RATE
         self._provider: FundingRateProvider | None = None
         self._provider_init_done = False
+        self._provider_init_lock = threading.Lock()
         # Cached resolution per (venue, market, hour): the served FundingRate,
         # or the strict-mode FundingRateUnavailableError — unavailability is as
         # deterministic per simulated hour as a resolved rate, and caching it
         # keeps strict runs at one gateway attempt per hour like non-strict.
         self._cache: dict[tuple[str, str, datetime], FundingRate | FundingRateUnavailableError] = {}
+        # Hours that resolved from the FALLBACK rate (non-strict degrade):
+        # point reads tolerate this; the HISTORY accessor must refuse rather
+        # than emit fallback constants labeled as measured history.
+        self._degraded_points: set[tuple[str, str, datetime]] = set()
 
     def view_at(self, timestamp: datetime) -> SnapshotFundingRateView:
         """Provider view bound to one tick's simulated timestamp."""
         return SnapshotFundingRateView(self, timestamp)
+
+    def point_was_degraded(self, venue: Venue | str, market: str, timestamp: datetime) -> bool:
+        """True when the hour covering ``timestamp`` resolved from the fallback."""
+        venue_value = str(venue).lower()
+        market_upper = perp_market_funding_key(market) or market.upper()
+        return (venue_value, market_upper, _hour_utc(timestamp)) in self._degraded_points
+
+    @property
+    def history_capable(self) -> bool:
+        """True when the run resolves measured historical rates.
+
+        A fallback-mode run answers every hour with one configured constant —
+        a constant series labeled "history" would be fabrication, so the
+        history accessor refuses unless this is True.
+        """
+        return self._use_historical
 
     async def funding_rate_at(self, venue: Venue | str, market: str, timestamp: datetime) -> FundingRate:
         """The funding rate in effect at simulated time ``timestamp``.
@@ -155,23 +177,23 @@ class SnapshotFundingRateSource:
         """Latest measured hourly rate at or before ``hour`` (no look-ahead)."""
         declared = FundingHistoryRegistry.declared_chains(venue)
         if declared and self._chain not in declared:
-            return self._degraded(venue, market, f"venue declares no funding data for chain '{self._chain}'")
+            return self._degraded(venue, market, f"venue declares no funding data for chain '{self._chain}'", hour=hour)
 
         provider = self._ensure_provider()
         if provider is None:
-            return self._degraded(venue, market, "no funding-history connector declares this run's chain")
+            return self._degraded(venue, market, "no funding-history connector declares this run's chain", hour=hour)
 
         from almanak.framework.backtesting.pnl.providers.funding_rates import FundingRateError
 
         try:
             data = await provider.get_historical_funding_rate(protocol=venue, market=market, timestamp=hour)
         except FundingRateError as exc:
-            return self._degraded(venue, market, str(exc))
+            return self._degraded(venue, market, str(exc), hour=hour)
         if data.source == "fallback":
             # The gateway had no measured point in the lookback window (or was
             # unreachable) — substitute the engine-configured fallback, not the
             # provider's module default, so one knob governs both funding lanes.
-            return self._degraded(venue, market, "no measured funding point at or before the tick")
+            return self._degraded(venue, market, "no measured funding point at or before the tick", hour=hour)
         return data.rate
 
     def _ensure_provider(self) -> FundingRateProvider | None:
@@ -183,19 +205,28 @@ class SnapshotFundingRateSource:
         chain entirely, so any declared chain is a safe stand-in when this
         run's chain has no on-chain funding venue.
         """
+        # Locked, and the done-flag is set AFTER construction: the reader's
+        # timed-out bridge worker can outlive its call and race the engine
+        # loop into this method; flag-before-build would let the loser observe
+        # done=True with _provider still None and falsely degrade a measured
+        # hour to the fallback.
         if not self._provider_init_done:
-            self._provider_init_done = True
-            from almanak.framework.backtesting.pnl.providers.funding_rates import FundingRateProvider
+            with self._provider_init_lock:
+                if not self._provider_init_done:
+                    from almanak.framework.backtesting.pnl.providers.funding_rates import FundingRateProvider
 
-            declared = FundingHistoryRegistry.all_declared_chains()
-            chain = self._chain if self._chain in declared else next(iter(sorted(declared)), None)
-            if chain is not None:
-                self._provider = FundingRateProvider(chain=chain)
+                    declared = FundingHistoryRegistry.all_declared_chains()
+                    chain = self._chain if self._chain in declared else next(iter(sorted(declared)), None)
+                    if chain is not None:
+                        self._provider = FundingRateProvider(chain=chain)
+                    self._provider_init_done = True
         return self._provider
 
-    def _degraded(self, venue: str, market: str, reason: str) -> Decimal:
+    def _degraded(self, venue: str, market: str, reason: str, hour: datetime | None = None) -> Decimal:
         if self._strict:
             raise FundingRateUnavailableError(venue, market, reason)
+        if hour is not None:
+            self._degraded_points.add((venue, market, hour))
         logger.warning(
             "Historical funding unavailable for %s/%s (%s); using fallback rate %s/h",
             venue,
