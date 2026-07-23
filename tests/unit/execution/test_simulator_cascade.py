@@ -788,34 +788,42 @@ class TestMantleFallbackGasEstimates:
     """Verify Mantle fallback gas estimates are calibrated to measured on-chain values.
 
     These constants are only used when Tenderly/Alchemy simulation is unavailable.
+
+    VIB-5958 (2026-07-22): the ~203M/118M/146M thresholds these tests originally
+    pinned were themselves the stale ~2000x-inflated premise this fix corrects (see
+    ``almanak/core/chains/mantle.py`` operation_overrides comment) -- current Mantle
+    mainnet block gas limit is 60,000,000, so a >=203M floor could never have been
+    submittable. Thresholds below are the same measured baselines divided by the
+    file's own documented 2000x correction factor, corroborated by real Mantle
+    mainnet transactions (docs/internal/uat-runs/VIB-5958/evidence.md).
     """
 
     def test_mantle_approve_gas_covers_usdc_proxy(self):
-        """Mantle approve estimate must cover USDC proxy (~203M measured)."""
+        """Mantle approve estimate must cover USDC proxy (~203M measured / 2000x = ~101,500)."""
         from almanak.framework.intents.compiler import get_gas_estimate
 
         gas = get_gas_estimate("mantle", "approve")
-        assert gas >= 203_000_000, (
-            f"Mantle approve fallback ({gas}) too low for USDC proxy (~203M). "
+        assert gas >= 101_500, (
+            f"Mantle approve fallback ({gas}) too low for USDC proxy (~203M/2000x ~= 101,500). "
             "This will cause 'out of gas' when simulation is unavailable."
         )
 
     def test_mantle_wrap_gas_covers_wmnt_deposit(self):
-        """Mantle wrap estimate must cover WMNT deposit() (~118M measured)."""
+        """Mantle wrap estimate must cover WMNT deposit() (~118M measured / 2000x = ~59,000)."""
         from almanak.framework.intents.compiler import get_gas_estimate
 
         gas = get_gas_estimate("mantle", "wrap_eth")
-        assert gas >= 118_000_000, (
-            f"Mantle wrap fallback ({gas}) too low for WMNT deposit (~118M)."
+        assert gas >= 59_000, (
+            f"Mantle wrap fallback ({gas}) too low for WMNT deposit (~118M/2000x ~= 59,000)."
         )
 
     def test_mantle_unwrap_gas_covers_wmnt_withdraw(self):
-        """Mantle unwrap estimate must cover WMNT withdraw() (~146M measured)."""
+        """Mantle unwrap estimate must cover WMNT withdraw() (~146M measured / 2000x = ~73,000)."""
         from almanak.framework.intents.compiler import get_gas_estimate
 
         gas = get_gas_estimate("mantle", "unwrap_eth")
-        assert gas >= 146_000_000, (
-            f"Mantle unwrap fallback ({gas}) too low for WMNT withdraw (~146M)."
+        assert gas >= 73_000, (
+            f"Mantle unwrap fallback ({gas}) too low for WMNT withdraw (~146M/2000x ~= 73,000)."
         )
 
 class TestAlchemyRpcErrorClassificationVib4588:

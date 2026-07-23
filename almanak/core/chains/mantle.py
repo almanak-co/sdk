@@ -41,28 +41,65 @@ DESCRIPTOR = register_chain(
             # backstop for accidental absurd-fee scenarios.
             price_cap_gwei=100,
             cost_cap_native=50.0,
-            # VIB-4857: chain half of CHAIN_GAS_OVERRIDES. Mantle gas
-            # units are ~2000x higher than L1 equivalents (a Uniswap V3
-            # swap uses ~150k on L1 but ~340M on Mantle). Gas prices are
-            # proportionally lower (~0.02 Gwei), so actual cost in MNT is
-            # comparable to other L2s (~$0.006/swap). Fallback values used
-            # when simulation (Tenderly/Alchemy) is unavailable. Measured
-            # via cast estimate: USDC approve ~203M, wrap ~118M,
-            # unwrap ~146M.
+            # VIB-4857: chain half of CHAIN_GAS_OVERRIDES.
+            #
+            # STALE PREMISE, CORRECTED 2026-07-22: this table was originally
+            # sized under "Mantle gas units are ~2000x higher than L1
+            # equivalents" (a real historical Mantle gas-metering quirk,
+            # measured via cast estimate at the time: USDC approve ~203M,
+            # wrap ~118M, unwrap ~146M). That premise no longer holds.
+            # Live evidence gathered 2026-07-22: current Mantle mainnet block
+            # gas limit is 60,000,000 (every value below individually
+            # exceeded it, several by 10x+); a full recent block used only
+            # 163,345 gas total; and a real live `eth_estimateGas` for an
+            # actual MNT->USDT swap via Agni Finance returned 347,088 — normal
+            # L1-equivalent scale, not the ~2000x-inflated figures below. This
+            # means the "never go below the compiler-provided floor" safety
+            # clamp (orchestrator.py `_update_gas_estimate`) was turning a
+            # perfectly good live estimate into an unsubmittable
+            # "exceeds block gas limit" transaction on every swap, 100% of
+            # the time (the floor is `override x gas.buffer`, e.g. this
+            # table's OLD swap_simple=500_000_000 x 1.5 buffer = 750,000,000
+            # -- 12x the real block limit).
+            #
+            # Values below are the OLD table divided by 2000 (the file's own
+            # documented original inflation factor) — directly corroborated
+            # for approve/swap_simple/unwrap_eth by 6 independent real Mantle
+            # mainnet transactions (see docs/internal/uat-runs/VIB-5958/evidence.md;
+            # the live estimate now legitimately wins over this floor, exactly
+            # as intended). The remaining entries share the same chain-level
+            # gas-metering premise so the same 2000x correction should hold,
+            # but split into two different kinds of "not yet verified":
+            #   - lp_mint / lp_increase_liquidity / lp_decrease_liquidity /
+            #     lp_collect / lp_burn / vault_deposit: currently UNREACHABLE
+            #     dead config — no LP or vault connector declares support for
+            #     this chain today (see each connector's own
+            #     supported_chains.py — which connectors run on which chain is
+            #     CONNECTOR knowledge, never named here), so no code path can
+            #     exercise them.
+            #   - lending_supply / lending_borrow: REACHABLE (a lending
+            #     connector IS registered for this chain) but NOT independently
+            #     re-measured — a real mainnet SUPPLY attempt on this chain hit
+            #     an unrelated revert before gas estimation was ever reached
+            #     (VIB-5959). These are live money-path floors the moment
+            #     VIB-5959 clears; re-measure via `cast estimate` against real
+            #     mainnet contracts before trusting them at a large
+            #     TRADING_CAP_USD, and update this comment with the fresh
+            #     measurements when done.
             operation_overrides={
-                "approve": 250_000_000,
-                "swap_simple": 500_000_000,
-                "swap_multi_hop": 800_000_000,
-                "wrap_eth": 200_000_000,
-                "unwrap_eth": 200_000_000,
-                "lp_mint": 1_000_000_000,
-                "lp_increase_liquidity": 400_000_000,
-                "lp_decrease_liquidity": 500_000_000,
-                "lp_collect": 400_000_000,
-                "lp_burn": 200_000_000,
-                "lending_supply": 600_000_000,
-                "lending_borrow": 900_000_000,
-                "vault_deposit": 400_000_000,
+                "approve": 125_000,
+                "swap_simple": 250_000,
+                "swap_multi_hop": 400_000,
+                "wrap_eth": 100_000,
+                "unwrap_eth": 100_000,
+                "lp_mint": 500_000,
+                "lp_increase_liquidity": 200_000,
+                "lp_decrease_liquidity": 250_000,
+                "lp_collect": 200_000,
+                "lp_burn": 100_000,
+                "lending_supply": 300_000,
+                "lending_borrow": 450_000,
+                "vault_deposit": 200_000,
             },
         ),
         timeouts=Timeouts(

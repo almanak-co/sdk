@@ -44,19 +44,26 @@ HISTORICAL_OPERATION_OVERRIDES: dict[str, dict[str, int]] = {
         "lp_burn": 150000,
     },
     "mantle": {
-        "approve": 250_000_000,
-        "swap_simple": 500_000_000,
-        "swap_multi_hop": 800_000_000,
-        "wrap_eth": 200_000_000,
-        "unwrap_eth": 200_000_000,
-        "lp_mint": 1_000_000_000,
-        "lp_increase_liquidity": 400_000_000,
-        "lp_decrease_liquidity": 500_000_000,
-        "lp_collect": 400_000_000,
-        "lp_burn": 200_000_000,
-        "lending_supply": 600_000_000,
-        "lending_borrow": 900_000_000,
-        "vault_deposit": 400_000_000,
+        # Corrected 2026-07-22: the pre-existing ~2000x-inflated values were
+        # stale (Mantle's real gas metering is now L1-equivalent scale; the
+        # old floor exceeded the real 60M block gas limit by 10x+ and made
+        # every Mantle swap unsubmittable). See almanak/core/chains/mantle.py
+        # for the live evidence. This fixture is a byte-equivalence pin, not
+        # a correctness claim — update it whenever mantle.py's real values
+        # intentionally change.
+        "approve": 125_000,
+        "swap_simple": 250_000,
+        "swap_multi_hop": 400_000,
+        "wrap_eth": 100_000,
+        "unwrap_eth": 100_000,
+        "lp_mint": 500_000,
+        "lp_increase_liquidity": 200_000,
+        "lp_decrease_liquidity": 250_000,
+        "lp_collect": 200_000,
+        "lp_burn": 100_000,
+        "lending_supply": 300_000,
+        "lending_borrow": 450_000,
+        "vault_deposit": 200_000,
     },
 }
 
