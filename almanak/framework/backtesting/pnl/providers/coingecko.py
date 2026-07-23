@@ -613,7 +613,16 @@ class OHLCVCache:
         return token.upper()
 
     def get_price_at(self, token: TokenRef, timestamp: datetime) -> Decimal | None:
-        """Get interpolated price at a specific timestamp."""
+        """Get the price at or just before a specific timestamp.
+
+        At-or-before semantics, matching ``get_ohlcv_at``: an exact-timestamp
+        candle is returned as-is — ``market_chart/range`` points are
+        instantaneous prices (open == close), so a candle stamped T IS the
+        price observed at T, not look-ahead. Strictly-future candles are never
+        used; a lookup before the first candle returns ``None``. Post-2026-07
+        CoinGecko serves boundary-aligned points, making exact hits the common
+        case rather than an edge case.
+        """
         token_key = self._key(token, self.default_chain)
         if token_key not in self.data:
             return None
@@ -622,15 +631,12 @@ class OHLCVCache:
         if not ohlcv_list:
             return None
 
-        # Find the closest OHLCV candle
         for i, candle in enumerate(ohlcv_list):
-            if candle.timestamp >= timestamp:
-                if i == 0 and candle.timestamp > timestamp:
-                    return None
-                # Use the close price of the previous candle if available
-                if i > 0:
-                    return ohlcv_list[i - 1].close
-                return candle.open
+            if candle.timestamp == timestamp:
+                return candle.close
+            if candle.timestamp > timestamp:
+                # Forward-fill the previous close; None before the first candle.
+                return ohlcv_list[i - 1].close if i > 0 else None
             if i == len(ohlcv_list) - 1:
                 # Past the last candle, use its close
                 return candle.close
@@ -1479,10 +1485,13 @@ class CoinGeckoDataProvider:
         during iteration and avoid rate limiting issues.
 
         For each token whose first in-window candle lands *after* the requested
-        ``start_time`` -- CoinGecko samples are not grid-aligned, so the first
-        hourly candle for a midnight start typically arrives a sub-interval later
-        (e.g. ``00:00:48``) -- a single candle from just *before* the window is
-        fetched and prepended. The first backtest tick then forward-fills a
+        ``start_time``, a single candle from just *before* the window is fetched
+        and prepended. Since CoinGecko's 2026-07 "consistent historical price
+        data spacing" rollout, ``market_chart/range`` points land exactly on
+        interval boundaries (they previously drifted, e.g. ``00:00:48`` for a
+        midnight start), so an aligned start usually hits its own candle — but
+        the seed still covers tokens whose history begins mid-window and any
+        residual off-grid data. The first backtest tick then forward-fills a
         genuine **prior** close, exactly like every later tick, instead of being
         unpriceable. It is a past price, not a future candle, so the cache's
         no-look-ahead invariant is preserved (see ``OHLCVCache.get_price_at`` and
@@ -1563,10 +1572,14 @@ class CoinGeckoDataProvider:
         """Return the latest candle at or before ``start``, or ``None``.
 
         Fetches a short pre-window range (one day before ``start``) purely to
-        obtain a prior price point for forward-filling the first tick. Returns
-        ``None`` when no candle at-or-before ``start`` exists (the token's
-        history begins at/after the window start), in which case the first tick
-        legitimately stays unpriceable -- no fabricated pre-history price.
+        obtain a prior price point for forward-filling the first tick. With
+        CoinGecko's 2026-07 boundary-aligned spacing, an aligned ``start``
+        usually has its own candle and never reaches this path; the seed
+        remains for tokens whose history begins mid-window and for residual
+        off-grid data. Returns ``None`` when no candle at-or-before ``start``
+        exists (the token's history begins strictly after the window start),
+        in which case the first tick legitimately stays unpriceable -- no
+        fabricated pre-history price.
         """
         start = _as_utc(start)
         try:

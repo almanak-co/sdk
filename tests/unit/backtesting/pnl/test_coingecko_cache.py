@@ -107,9 +107,7 @@ class TestCoinGeckoProviderInitialization:
             token_addresses={"wstETH": ("arbitrum", "0x5979D7b546E38E414F7E9822514be443A4800529")}
         )
 
-        assert provider._token_addresses == {
-            "WSTETH": ("arbitrum", "0x5979d7b546e38e414f7e9822514be443a4800529")
-        }
+        assert provider._token_addresses == {"WSTETH": ("arbitrum", "0x5979d7b546e38e414f7e9822514be443a4800529")}
 
 
 class TestHistoricalPriceCache:
@@ -349,6 +347,73 @@ class TestOHLCVCache:
 
         assert price is None
 
+    @staticmethod
+    def _instant_candle(ts: datetime, price: str) -> OHLCV:
+        """A market_chart/range point: instantaneous, so open == close."""
+        value = Decimal(price)
+        return OHLCV(timestamp=ts, open=value, high=value, low=value, close=value, volume=None)
+
+    def _boundary_aligned_series(self) -> list[OHLCV]:
+        """Hourly candles landing exactly on interval boundaries (post-2026-07 spacing)."""
+        return [
+            self._instant_candle(datetime(2024, 1, 1, 1, 0, tzinfo=UTC), "100"),
+            self._instant_candle(datetime(2024, 1, 1, 2, 0, tzinfo=UTC), "105"),
+            self._instant_candle(datetime(2024, 1, 1, 3, 0, tzinfo=UTC), "110"),
+        ]
+
+    def test_get_price_at_exact_boundary_first_candle(self):
+        """An exact hit on the first candle returns that candle's price."""
+        cache = OHLCVCache(data={"ETH": self._boundary_aligned_series()}, fetched_at=datetime(2024, 1, 1, tzinfo=UTC))
+
+        price = cache.get_price_at("ETH", datetime(2024, 1, 1, 1, 0, tzinfo=UTC))
+
+        assert price == Decimal("100")
+
+    def test_get_price_at_exact_boundary_later_candle_returns_that_candle(self):
+        """An exact hit at index i>0 returns the candle AT T, not the previous close.
+
+        Regression guard: the old ``>=`` scan skipped the candle stamped T and
+        forward-filled the previous interval's close — a systematic one-interval
+        price lag once CoinGecko points land exactly on boundaries.
+        """
+        cache = OHLCVCache(data={"ETH": self._boundary_aligned_series()}, fetched_at=datetime(2024, 1, 1, tzinfo=UTC))
+
+        price = cache.get_price_at("ETH", datetime(2024, 1, 1, 2, 0, tzinfo=UTC))
+
+        assert price == Decimal("105")
+
+    def test_get_price_at_between_candles_forward_fills_previous_close(self):
+        """A lookup between candles still forward-fills the prior close (no look-ahead)."""
+        cache = OHLCVCache(data={"ETH": self._boundary_aligned_series()}, fetched_at=datetime(2024, 1, 1, tzinfo=UTC))
+
+        price = cache.get_price_at("ETH", datetime(2024, 1, 1, 2, 30, tzinfo=UTC))
+
+        assert price == Decimal("105")
+
+    def test_get_price_at_after_last_candle_returns_last_close(self):
+        cache = OHLCVCache(data={"ETH": self._boundary_aligned_series()}, fetched_at=datetime(2024, 1, 1, tzinfo=UTC))
+
+        price = cache.get_price_at("ETH", datetime(2024, 1, 1, 5, 0, tzinfo=UTC))
+
+        assert price == Decimal("110")
+
+    def test_get_price_at_agrees_with_get_ohlcv_at_on_boundary_aligned_series(self):
+        """The two lookups must not disagree by one interval on boundary-aligned ticks."""
+        series = self._boundary_aligned_series()
+        cache = OHLCVCache(data={"ETH": series}, fetched_at=datetime(2024, 1, 1, tzinfo=UTC))
+
+        for tick in [candle.timestamp for candle in series] + [
+            datetime(2024, 1, 1, 1, 30, tzinfo=UTC),
+            datetime(2024, 1, 1, 4, 0, tzinfo=UTC),
+        ]:
+            candle = cache.get_ohlcv_at("ETH", tick)
+            assert candle is not None
+            assert cache.get_price_at("ETH", tick) == candle.close
+
+        before_first = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        assert cache.get_ohlcv_at("ETH", before_first) is None
+        assert cache.get_price_at("ETH", before_first) is None
+
     def test_get_price_at_accepts_address_tuple_key(self):
         """The per-run OHLCV cache can be keyed by resolved token identity."""
         token_key = ("arbitrum", "0x5979D7b546E38E414F7E9822514be443A4800529")
@@ -566,11 +631,12 @@ class TestCoinGeckoIteration:
 class TestPrefetchSeedPriorCandle:
     """Tests for the leading-edge prior-candle seed in ``_prefetch_ohlcv_data``.
 
-    CoinGecko's first in-window sample lands a sub-interval after the requested
-    start (e.g. ``00:00:48`` for a ``00:00:00`` start), so the first backtest
-    tick has no candle at-or-before it. The prefetch seeds a genuine *prior*
-    candle so the first tick forward-fills a past close -- without it a
-    token-quoted strategy's numeraire projection fails loud at t0 (VIB-5127).
+    When the first in-window sample lands after the requested start (a token
+    whose history begins mid-window, or residual off-grid data from before
+    CoinGecko's 2026-07 boundary-aligned spacing), the first backtest tick has
+    no candle at-or-before it. The prefetch seeds a genuine *prior* candle so
+    the first tick forward-fills a past close -- without it a token-quoted
+    strategy's numeraire projection fails loud at t0 (VIB-5127).
     """
 
     @staticmethod
@@ -772,16 +838,13 @@ class TestCoinGeckoProviderCaching:
         await provider.close()
 
     @pytest.mark.asyncio
-    async def test_get_price_uses_cache_on_second_call(
-        self, provider, mock_response_200
-    ):
+    async def test_get_price_uses_cache_on_second_call(self, provider, mock_response_200):
         """Test that second call to get_price uses cache."""
         timestamp = datetime(2024, 1, 15, tzinfo=UTC)
 
-        with patch.object(
-            provider, "_get_session"
-        ) as mock_session, patch.object(
-            provider, "_wait_for_rate_limit", new_callable=AsyncMock
+        with (
+            patch.object(provider, "_get_session") as mock_session,
+            patch.object(provider, "_wait_for_rate_limit", new_callable=AsyncMock),
         ):
             session = MagicMock()
             session.get = MagicMock(return_value=mock_response_200)
@@ -800,9 +863,7 @@ class TestCoinGeckoProviderCaching:
         await provider.close()
 
     @pytest.mark.asyncio
-    async def test_cache_hit_rate_logged(
-        self, provider, mock_response_200, caplog
-    ):
+    async def test_cache_hit_rate_logged(self, provider, mock_response_200, caplog):
         """Test that cache hit rate is logged during iteration."""
         # This test verifies the logging behavior
         # We need to test the iterate method but that requires more complex setup
@@ -817,10 +878,9 @@ class TestCoinGeckoProviderCaching:
         """Test clearing the historical cache."""
         timestamp = datetime(2024, 1, 15, tzinfo=UTC)
 
-        with patch.object(
-            provider, "_get_session"
-        ) as mock_session, patch.object(
-            provider, "_wait_for_rate_limit", new_callable=AsyncMock
+        with (
+            patch.object(provider, "_get_session") as mock_session,
+            patch.object(provider, "_wait_for_rate_limit", new_callable=AsyncMock),
         ):
             session = MagicMock()
             session.get = MagicMock(return_value=mock_response_200)
@@ -844,10 +904,9 @@ class TestCoinGeckoProviderCaching:
         """Test getting historical cache statistics."""
         timestamp = datetime(2024, 1, 15, tzinfo=UTC)
 
-        with patch.object(
-            provider, "_get_session"
-        ) as mock_session, patch.object(
-            provider, "_wait_for_rate_limit", new_callable=AsyncMock
+        with (
+            patch.object(provider, "_get_session") as mock_session,
+            patch.object(provider, "_wait_for_rate_limit", new_callable=AsyncMock),
         ):
             session = MagicMock()
             session.get = MagicMock(return_value=mock_response_200)
@@ -885,6 +944,7 @@ class TestCacheWarming:
     @pytest.fixture
     def mock_response_200_factory(self):
         """Create a factory for mock 200 responses with different prices."""
+
         def create_response(price: float):
             response = MagicMock()
             response.status = 200
@@ -898,26 +958,19 @@ class TestCacheWarming:
             response.__aenter__ = AsyncMock(return_value=response)
             response.__aexit__ = AsyncMock(return_value=None)
             return response
+
         return create_response
 
     @pytest.mark.asyncio
-    async def test_warm_cache_fetches_date_range(
-        self, provider, mock_response_200_factory
-    ):
+    async def test_warm_cache_fetches_date_range(self, provider, mock_response_200_factory):
         """Test warm_cache fetches prices for entire date range."""
-        with patch.object(
-            provider, "_get_session"
-        ) as mock_session, patch.object(
-            provider, "_wait_for_rate_limit", new_callable=AsyncMock
+        with (
+            patch.object(provider, "_get_session") as mock_session,
+            patch.object(provider, "_wait_for_rate_limit", new_callable=AsyncMock),
         ):
             session = MagicMock()
             # Return different prices for each call
-            session.get = MagicMock(
-                side_effect=[
-                    mock_response_200_factory(2500 + i * 10)
-                    for i in range(5)
-                ]
-            )
+            session.get = MagicMock(side_effect=[mock_response_200_factory(2500 + i * 10) for i in range(5)])
             mock_session.return_value = session
 
             cached = await provider.warm_cache(
@@ -933,14 +986,11 @@ class TestCacheWarming:
         await provider.close()
 
     @pytest.mark.asyncio
-    async def test_warm_cache_skips_already_cached(
-        self, provider, mock_response_200_factory
-    ):
+    async def test_warm_cache_skips_already_cached(self, provider, mock_response_200_factory):
         """Test warm_cache skips dates already in cache."""
-        with patch.object(
-            provider, "_get_session"
-        ) as mock_session, patch.object(
-            provider, "_wait_for_rate_limit", new_callable=AsyncMock
+        with (
+            patch.object(provider, "_get_session") as mock_session,
+            patch.object(provider, "_wait_for_rate_limit", new_callable=AsyncMock),
         ):
             session = MagicMock()
             session.get = MagicMock(return_value=mock_response_200_factory(2500))
@@ -971,9 +1021,7 @@ class TestCacheWarming:
         await provider.close()
 
     @pytest.mark.asyncio
-    async def test_warm_cache_multiple_tokens(
-        self, provider, mock_response_200_factory
-    ):
+    async def test_warm_cache_multiple_tokens(self, provider, mock_response_200_factory):
         """Test warm_cache handles multiple tokens.
 
         USDC is no longer in a hardcoded allowlist; it resolves by contract
@@ -984,10 +1032,9 @@ class TestCacheWarming:
         provider._token_addresses["USDC"] = ("arbitrum", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
         provider._coin_id_cache[("arbitrum", "0xaf88d065e77c8cc2239327c5edb3a432268e5831")] = "usd-coin"
 
-        with patch.object(
-            provider, "_get_session"
-        ) as mock_session, patch.object(
-            provider, "_wait_for_rate_limit", new_callable=AsyncMock
+        with (
+            patch.object(provider, "_get_session") as mock_session,
+            patch.object(provider, "_wait_for_rate_limit", new_callable=AsyncMock),
         ):
             session = MagicMock()
             session.get = MagicMock(return_value=mock_response_200_factory(2500))
@@ -1007,9 +1054,7 @@ class TestCacheWarming:
         await provider.close()
 
     @pytest.mark.asyncio
-    async def test_warm_cache_returns_counts(
-        self, provider, mock_response_200_factory
-    ):
+    async def test_warm_cache_returns_counts(self, provider, mock_response_200_factory):
         """Test warm_cache returns correct counts per token.
 
         ARB resolves by contract address now (R2 option b); the resolution is
@@ -1018,10 +1063,9 @@ class TestCacheWarming:
         provider._token_addresses["ARB"] = ("arbitrum", "0x912CE59144191C1204E64559FE8253a0e49E6548")
         provider._coin_id_cache[("arbitrum", "0x912ce59144191c1204e64559fe8253a0e49e6548")] = "arbitrum"
 
-        with patch.object(
-            provider, "_get_session"
-        ) as mock_session, patch.object(
-            provider, "_wait_for_rate_limit", new_callable=AsyncMock
+        with (
+            patch.object(provider, "_get_session") as mock_session,
+            patch.object(provider, "_wait_for_rate_limit", new_callable=AsyncMock),
         ):
             session = MagicMock()
             session.get = MagicMock(return_value=mock_response_200_factory(2500))
@@ -1041,14 +1085,11 @@ class TestCacheWarming:
         await provider.close()
 
     @pytest.mark.asyncio
-    async def test_warm_cache_logs_progress(
-        self, provider, mock_response_200_factory, caplog
-    ):
+    async def test_warm_cache_logs_progress(self, provider, mock_response_200_factory, caplog):
         """Test warm_cache logs progress information."""
-        with patch.object(
-            provider, "_get_session"
-        ) as mock_session, patch.object(
-            provider, "_wait_for_rate_limit", new_callable=AsyncMock
+        with (
+            patch.object(provider, "_get_session") as mock_session,
+            patch.object(provider, "_wait_for_rate_limit", new_callable=AsyncMock),
         ):
             session = MagicMock()
             session.get = MagicMock(return_value=mock_response_200_factory(2500))
@@ -1071,18 +1112,15 @@ class TestCacheWarming:
         await provider.close()
 
     @pytest.mark.asyncio
-    async def test_cache_hit_rate_over_90_after_warming(
-        self, provider, mock_response_200_factory
-    ):
+    async def test_cache_hit_rate_over_90_after_warming(self, provider, mock_response_200_factory):
         """Test that cache hit rate exceeds 90% after warming.
 
         This test validates the acceptance criteria: >90% cache hit rate
         for repeated backtests after cache warming.
         """
-        with patch.object(
-            provider, "_get_session"
-        ) as mock_session, patch.object(
-            provider, "_wait_for_rate_limit", new_callable=AsyncMock
+        with (
+            patch.object(provider, "_get_session") as mock_session,
+            patch.object(provider, "_wait_for_rate_limit", new_callable=AsyncMock),
         ):
             session = MagicMock()
             session.get = MagicMock(return_value=mock_response_200_factory(2500))
