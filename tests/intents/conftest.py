@@ -1714,6 +1714,7 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "borrow: Tests for borrow intents")
     config.addinivalue_line("markers", "repay: Tests for repay intents")
     config.addinivalue_line("markers", "withdraw: Tests for withdraw intents")
+    config.addinivalue_line("markers", "bridge: Tests for cross-chain bridge flows")
     config.addinivalue_line(
         "markers", "l3_semantic: L3 semantic verification — cross-checks intent params against receipt"
     )
