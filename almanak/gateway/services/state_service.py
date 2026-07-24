@@ -131,6 +131,10 @@ def _item_int(row: Any, key: str, default: int = 0) -> int:
     return int(row[key] or default)
 
 
+def _attr_text(entry: Any, name: str, default: str = "") -> Any:
+    return getattr(entry, name) or default
+
+
 def _ledger_entry_to_proto(entry: Any) -> gateway_pb2.LedgerEntryInfo:
     """Convert a ``LedgerEntry`` to the wire ``LedgerEntryInfo`` (VIB-5416).
 
@@ -141,24 +145,24 @@ def _ledger_entry_to_proto(entry: Any) -> gateway_pb2.LedgerEntryInfo:
     ts = getattr(entry, "timestamp", None)
     ts_epoch = int(ts.timestamp()) if isinstance(ts, datetime) else 0
     return gateway_pb2.LedgerEntryInfo(
-        id=entry.id or "",
-        cycle_id=entry.cycle_id or "",
-        deployment_id=entry.deployment_id or "",
+        id=_attr_text(entry, "id"),
+        cycle_id=_attr_text(entry, "cycle_id"),
+        deployment_id=_attr_text(entry, "deployment_id"),
         timestamp=ts_epoch,
-        intent_type=entry.intent_type or "",
-        token_in=entry.token_in or "",
-        amount_in=entry.amount_in or "",
-        token_out=entry.token_out or "",
-        amount_out=entry.amount_out or "",
-        effective_price=entry.effective_price or "",
+        intent_type=_attr_text(entry, "intent_type"),
+        token_in=_attr_text(entry, "token_in"),
+        amount_in=_attr_text(entry, "amount_in"),
+        token_out=_attr_text(entry, "token_out"),
+        amount_out=_attr_text(entry, "amount_out"),
+        effective_price=_attr_text(entry, "effective_price"),
         slippage_bps=entry.slippage_bps or 0.0,
         gas_used=entry.gas_used or 0,
-        gas_usd=entry.gas_usd or "",
-        tx_hash=entry.tx_hash or "",
-        chain=entry.chain or "",
-        protocol=entry.protocol or "",
+        gas_usd=_attr_text(entry, "gas_usd"),
+        tx_hash=_attr_text(entry, "tx_hash"),
+        chain=_attr_text(entry, "chain"),
+        protocol=_attr_text(entry, "protocol"),
         success=bool(entry.success),
-        error=entry.error or "",
+        error=_attr_text(entry, "error"),
     )
 
 
@@ -211,24 +215,24 @@ def _ledger_entry_from_row(
     post_state_key: str,
 ) -> gateway_pb2.LedgerEntryData:
     entry = gateway_pb2.LedgerEntryData(
-        id=row.get("id") or "",
-        cycle_id=row.get("cycle_id") or "",
-        deployment_id=row.get("deployment_id") or "",
-        execution_mode=row.get("execution_mode") or "",
+        id=_row_text(row, "id"),
+        cycle_id=_row_text(row, "cycle_id"),
+        deployment_id=_row_text(row, "deployment_id"),
+        execution_mode=_row_text(row, "execution_mode"),
         timestamp=timestamp,
-        intent_type=row.get("intent_type") or "",
-        token_in=row.get("token_in") or "",
-        amount_in=row.get("amount_in") or "",
-        token_out=row.get("token_out") or "",
-        amount_out=row.get("amount_out") or "",
-        effective_price=row.get("effective_price") or "",
-        gas_used=int(row.get("gas_used") or 0),
-        gas_usd=row.get("gas_usd") or "",
-        tx_hash=row.get("tx_hash") or "",
-        chain=row.get("chain") or "",
-        protocol=row.get("protocol") or "",
+        intent_type=_row_text(row, "intent_type"),
+        token_in=_row_text(row, "token_in"),
+        amount_in=_row_text(row, "amount_in"),
+        token_out=_row_text(row, "token_out"),
+        amount_out=_row_text(row, "amount_out"),
+        effective_price=_row_text(row, "effective_price"),
+        gas_used=_row_int(row, "gas_used"),
+        gas_usd=_row_text(row, "gas_usd"),
+        tx_hash=_row_text(row, "tx_hash"),
+        chain=_row_text(row, "chain"),
+        protocol=_row_text(row, "protocol"),
         success=bool(row.get("success")),
-        error=row.get("error") or "",
+        error=_row_text(row, "error"),
         extracted_data_json=_ledger_json_bytes(row.get(extracted_data_key)),
         price_inputs_json=_ledger_json_bytes(row.get(price_inputs_key)),
         pre_state_json=_ledger_json_bytes(row.get(pre_state_key)),
@@ -355,21 +359,21 @@ def _sqlite_row_to_accounting_event(row: dict[str, Any]) -> gateway_pb2.Accounti
     if isinstance(payload_text, bytes):
         payload_text = payload_text.decode("utf-8")
     return gateway_pb2.AccountingEvent(
-        id=row.get("id") or "",
-        deployment_id=row.get("deployment_id") or "",
-        cycle_id=row.get("cycle_id") or "",
-        execution_mode=row.get("execution_mode") or "",
+        id=_row_text(row, "id"),
+        deployment_id=_row_text(row, "deployment_id"),
+        cycle_id=_row_text(row, "cycle_id"),
+        execution_mode=_row_text(row, "execution_mode"),
         timestamp=_row_timestamp_epoch(row),
-        chain=row.get("chain") or "",
-        protocol=row.get("protocol") or "",
-        wallet_address=row.get("wallet_address") or "",
-        event_type=row.get("event_type") or "",
-        position_key=row.get("position_key") or "",
-        ledger_entry_id=row.get("ledger_entry_id") or "",
-        tx_hash=row.get("tx_hash") or "",
-        confidence=row.get("confidence") or "",
+        chain=_row_text(row, "chain"),
+        protocol=_row_text(row, "protocol"),
+        wallet_address=_row_text(row, "wallet_address"),
+        event_type=_row_text(row, "event_type"),
+        position_key=_row_text(row, "position_key"),
+        ledger_entry_id=_row_text(row, "ledger_entry_id"),
+        tx_hash=_row_text(row, "tx_hash"),
+        confidence=_row_text(row, "confidence"),
         payload_json=payload_text.encode("utf-8"),
-        schema_version=int(row.get("schema_version") or 1),
+        schema_version=_row_int(row, "schema_version", 1),
     )
 
 
