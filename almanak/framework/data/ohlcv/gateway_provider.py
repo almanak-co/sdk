@@ -62,12 +62,15 @@ TOKEN_TO_BINANCE_SYMBOL = {
     "1INCH": "1INCHUSDT",
 }
 
-# Timeframe mapping: our timeframes to Binance intervals
+# Timeframe mapping: our timeframes to Binance intervals. Keys must stay
+# exactly ``VALID_TIMEFRAMES`` (``almanak.framework.data.interfaces``) — the
+# request vocabulary ``validate_timeframe`` enforces. Binance natively supports
+# more intervals (30m, 2h, …); widening this map is a vocabulary change that
+# starts at ``VALID_TIMEFRAMES``, not here.
 TIMEFRAME_TO_BINANCE_INTERVAL = {
     "1m": "1m",
     "5m": "5m",
     "15m": "15m",
-    "30m": "30m",
     "1h": "1h",
     "4h": "4h",
     "1d": "1d",
@@ -121,7 +124,7 @@ class GatewayOHLCVProvider:
             print(f"Got {len(candles)} candles")
     """
 
-    _SUPPORTED_TIMEFRAMES: ClassVar[list[str]] = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+    _SUPPORTED_TIMEFRAMES: ClassVar[list[str]] = ["1m", "5m", "15m", "1h", "4h", "1d"]
     _LIVE_TIMEFRAMES: ClassVar[set[str]] = {"1m", "5m"}
 
     def __init__(
@@ -233,7 +236,7 @@ class GatewayOHLCVProvider:
         Args:
             token: Token symbol (e.g., "WETH", "ETH")
             quote: Quote currency (unused - internally uses USDT pairs)
-            timeframe: Candle timeframe. Supported: "1m", "5m", "15m", "30m", "1h", "4h", "1d"
+            timeframe: Candle timeframe. Supported: "1m", "5m", "15m", "1h", "4h", "1d"
             limit: Number of candles to fetch (max 1000)
 
         Returns:
@@ -538,7 +541,7 @@ class GatewayCoinGeckoOHLCVProvider:
         Args:
             token: Token symbol (e.g., "WETH", "ARB").
             quote: Quote currency (CoinGecko OHLC is fiat-quoted).
-            timeframe: Candle timeframe. Supported: 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d.
+            timeframe: Candle timeframe. Supported: 1h, 4h, 1d.
             limit: Number of candles (max 1000).
 
         Returns:

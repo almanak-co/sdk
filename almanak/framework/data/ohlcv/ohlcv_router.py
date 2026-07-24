@@ -290,8 +290,10 @@ _FINALIZATION_AGE = timedelta(hours=24)
 #
 # Mapping is duplicated from ``data.qa.test_definitions.cex_historical`` rather
 # than imported to keep the router free of QA-test transitive imports — the QA
-# suite pulls in pandas + grading machinery this hot path doesn't need. Keep
-# the two in sync; the keys mirror ``GatewayOHLCVProvider._SUPPORTED_TIMEFRAMES``.
+# suite pulls in pandas + grading machinery this hot path doesn't need. Keys
+# are a superset of ``VALID_TIMEFRAMES`` (the request vocabulary): the extra
+# Binance-native intervals are defensive coverage, and unknown keys fall back
+# to 1h inside ``_staleness_budget``.
 
 _TIMEFRAME_SECONDS: dict[str, int] = {
     "1m": 60,

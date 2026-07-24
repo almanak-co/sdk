@@ -184,23 +184,18 @@ class BinanceOHLCVProvider:
 
     API_BASE = "https://api.binance.com/api/v3"
 
-    # Supported timeframes - true minute-level granularity
+    # Supported timeframes — true minute-level granularity. Capped by
+    # ``VALID_TIMEFRAMES`` (``validate_timeframe`` gates ``get_ohlcv``), so
+    # advertising Binance's wider native interval set here would lie to
+    # callers; ``BINANCE_INTERVAL_MAP`` intentionally keeps the full native
+    # vocabulary as a translation table.
     SUPPORTED_TIMEFRAMES: list[str] = [
         "1m",
-        "3m",
         "5m",
         "15m",
-        "30m",
         "1h",
-        "2h",
         "4h",
-        "6h",
-        "8h",
-        "12h",
         "1d",
-        "3d",
-        "1w",
-        "1M",
     ]
 
     def __init__(
@@ -395,8 +390,7 @@ class BinanceOHLCVProvider:
         Args:
             token: Token symbol (e.g., "WETH", "ETH", "BTC")
             quote: Quote currency (ignored - Binance uses USDT pairs)
-            timeframe: Candle timeframe. Supported:
-                1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+            timeframe: Candle timeframe. Supported: 1m, 5m, 15m, 1h, 4h, 1d
             limit: Number of candles to fetch (max 1000)
 
         Returns:
