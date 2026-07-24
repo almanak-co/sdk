@@ -38,11 +38,13 @@ import pytest
 
 from almanak.framework.portfolio import (
     PortfolioSnapshot,
+    PositionValue,
     ValueConfidence,
 )
 from almanak.framework.runner.runner_state import capture_portfolio_snapshot
 from almanak.framework.state.exceptions import AccountingPersistenceError
 from almanak.framework.state.state_manager import StateData
+from almanak.framework.teardown.models import PositionType
 
 # =============================================================================
 # Fixtures
@@ -427,9 +429,7 @@ class TestErrorPropagation:
             del runner.state_manager.save_snapshot_and_metrics
         # get_portfolio_metrics returns None -> _build_metrics_for_snapshot
         # creates a fresh PortfolioMetrics. save_portfolio_metrics then raises.
-        runner.state_manager.save_portfolio_metrics = AsyncMock(
-            side_effect=RuntimeError("metrics backend down")
-        )
+        runner.state_manager.save_portfolio_metrics = AsyncMock(side_effect=RuntimeError("metrics backend down"))
         runner._portfolio_valuer.value.return_value = _make_snapshot()
         strategy = _make_strategy()
 
@@ -473,3 +473,207 @@ class TestErrorPropagation:
         assert persisted.value_confidence == ValueConfidence.UNAVAILABLE
         assert persisted.iteration_number == 9
         assert runner._last_snapshot_time is not None
+
+
+# =============================================================================
+# 12. VIB-4970 — fail-closed writer invariant: never persist a $0-valued OPEN
+#     position at HIGH confidence.
+# =============================================================================
+
+
+def _lp_position(*, value_usd: str, tokens: list[str] | None = None, slot: str = "A") -> PositionValue:
+    """An open Uniswap V3 LP leg, valued at ``value_usd``.
+
+    Mirrors the VIB-4970 corrupt-row shape: an open LP whose on-chain read came
+    back empty (``value_usd:"0", tokens:[]``).
+    """
+    return PositionValue(
+        position_type=PositionType.LP,
+        protocol="uniswap_v3",
+        chain="arbitrum",
+        value_usd=Decimal(value_usd),
+        label=f"WETH/USDC/500 {slot}",
+        tokens=tokens if tokens is not None else [],
+        details={"pool": "WETH/USDC/500", "slot": slot, "position_id": f"55148{slot}"},
+    )
+
+
+def _snapshot_with_positions(
+    *,
+    positions: list[PositionValue],
+    confidence: ValueConfidence = ValueConfidence.HIGH,
+    available_cash_usd: str = "13.11",
+) -> PortfolioSnapshot:
+    return PortfolioSnapshot(
+        timestamp=datetime.now(UTC),
+        deployment_id="test-strategy",
+        # Reproduce the ticket's corrupt column signature: cash leaked into
+        # total while positions valued to 0.
+        total_value_usd=Decimal(available_cash_usd),
+        available_cash_usd=Decimal(available_cash_usd),
+        deployed_capital_usd=Decimal("0"),
+        wallet_total_value_usd=Decimal("0"),
+        value_confidence=confidence,
+        positions=positions,
+        chain="arbitrum",
+        snapshot_metadata={"gas_native_status": "ok"},
+    )
+
+
+class TestOpenPositionZeroValueGuard:
+    @pytest.mark.asyncio
+    async def test_open_lp_valued_zero_at_high_is_demoted_on_persist(self):
+        """Repro VIB-4970: an open LP valued $0 must NOT persist at HIGH.
+
+        Pre-fix (no guard) this persists ``value_confidence=HIGH`` — the bug.
+        Post-fix the writer demotes it to ``UNAVAILABLE`` so no consumer trusts
+        the self-contradictory row.
+        """
+        runner = _make_runner()
+        corrupt = _snapshot_with_positions(
+            positions=[
+                _lp_position(value_usd="0", slot="A"),
+                _lp_position(value_usd="0", slot="C"),
+            ]
+        )
+        runner._portfolio_valuer.value.return_value = corrupt
+        strategy = _make_strategy()
+
+        result = await capture_portfolio_snapshot(runner, strategy, iteration_number=1)
+
+        assert result is not None
+        # The core invariant: a $0-valued OPEN LP can never persist at HIGH.
+        assert result.value_confidence != ValueConfidence.HIGH
+        assert result.value_confidence == ValueConfidence.UNAVAILABLE
+        # The persisted object carries the same demotion.
+        (persisted,) = runner.state_manager.save_portfolio_snapshot.call_args.args
+        assert persisted.value_confidence == ValueConfidence.UNAVAILABLE
+        # Forensic trail: offending legs flagged + metadata breadcrumb.
+        assert all(p.details.get("valuation_status") == "no_path" for p in persisted.positions)
+        assert "open_position_zero_value_guard" in persisted.snapshot_metadata
+        # Empty≠Zero: an UNAVAILABLE snapshot skips the metrics write, so a
+        # corrupt row can never feed a PnL / drawdown computation.
+        runner.state_manager.save_portfolio_metrics.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_healthy_lp_stays_high(self):
+        """Guard must NOT blanket-demote: a genuinely-valued LP keeps HIGH."""
+        runner = _make_runner()
+        healthy = _snapshot_with_positions(
+            positions=[_lp_position(value_usd="7.49", tokens=["WETH", "USDC"], slot="A")],
+        )
+        runner._portfolio_valuer.value.return_value = healthy
+        strategy = _make_strategy()
+
+        result = await capture_portfolio_snapshot(runner, strategy, iteration_number=1)
+
+        assert result.value_confidence == ValueConfidence.HIGH
+        assert "open_position_zero_value_guard" not in result.snapshot_metadata
+
+    @pytest.mark.asyncio
+    async def test_zero_borrow_leg_is_not_demoted(self):
+        """A BORROW leg is a liability; ``value_usd <= 0`` is legitimate."""
+        runner = _make_runner()
+        borrow = PositionValue(
+            position_type=PositionType.BORROW,
+            protocol="aave_v3",
+            chain="arbitrum",
+            value_usd=Decimal("0"),
+            label="AAVE USDC Borrow",
+        )
+        snap = _snapshot_with_positions(positions=[borrow])
+        runner._portfolio_valuer.value.return_value = snap
+        strategy = _make_strategy()
+
+        result = await capture_portfolio_snapshot(runner, strategy, iteration_number=1)
+
+        assert result.value_confidence == ValueConfidence.HIGH
+
+    @pytest.mark.asyncio
+    async def test_zero_perp_leg_is_not_demoted(self):
+        """A PERP's net equity can legitimately be <= $0; not a value-bearing long."""
+        runner = _make_runner()
+        perp = PositionValue(
+            position_type=PositionType.PERP,
+            protocol="gmx_v2",
+            chain="arbitrum",
+            value_usd=Decimal("0"),
+            label="GMX ETH-USD Perp",
+        )
+        snap = _snapshot_with_positions(positions=[perp])
+        runner._portfolio_valuer.value.return_value = snap
+        strategy = _make_strategy()
+
+        result = await capture_portfolio_snapshot(runner, strategy, iteration_number=1)
+
+        assert result.value_confidence == ValueConfidence.HIGH
+        assert "open_position_zero_value_guard" not in result.snapshot_metadata
+
+    @pytest.mark.asyncio
+    async def test_zero_token_pseudo_position_is_not_demoted(self):
+        """A TOKEN wallet pseudo-position (emptied leg / dust) can legitimately be $0."""
+        runner = _make_runner()
+        token = PositionValue(
+            position_type=PositionType.TOKEN,
+            protocol="wallet",
+            chain="arbitrum",
+            value_usd=Decimal("0"),
+            label="WETH wallet leg",
+            details={"asset": "WETH"},
+        )
+        snap = _snapshot_with_positions(positions=[token])
+        runner._portfolio_valuer.value.return_value = snap
+        strategy = _make_strategy()
+
+        result = await capture_portfolio_snapshot(runner, strategy, iteration_number=1)
+
+        assert result.value_confidence == ValueConfidence.HIGH
+        assert "open_position_zero_value_guard" not in result.snapshot_metadata
+
+
+class TestEnforceOpenPositionValueInvariantUnit:
+    """Pure-function coverage of the guard (no runner/persistence plumbing)."""
+
+    def test_demotes_zero_valued_open_lp(self):
+        from almanak.framework.portfolio import enforce_open_position_value_invariant
+
+        snap = _snapshot_with_positions(positions=[_lp_position(value_usd="0")])
+        out = enforce_open_position_value_invariant(snap)
+        assert out.value_confidence == ValueConfidence.UNAVAILABLE
+        assert out.error and "VIB-4970" in out.error
+
+    def test_supply_vault_stake_zero_demoted(self):
+        from almanak.framework.portfolio import enforce_open_position_value_invariant
+
+        for ptype in (PositionType.SUPPLY, PositionType.VAULT, PositionType.STAKE):
+            pos = PositionValue(
+                position_type=ptype,
+                protocol="proto",
+                chain="arbitrum",
+                value_usd=Decimal("0"),
+                label=f"{ptype.value} leg",
+            )
+            snap = _snapshot_with_positions(positions=[pos])
+            out = enforce_open_position_value_invariant(snap)
+            assert out.value_confidence == ValueConfidence.UNAVAILABLE, ptype
+
+    def test_non_high_snapshot_untouched(self):
+        from almanak.framework.portfolio import enforce_open_position_value_invariant
+
+        snap = _snapshot_with_positions(
+            positions=[_lp_position(value_usd="0")],
+            confidence=ValueConfidence.ESTIMATED,
+        )
+        out = enforce_open_position_value_invariant(snap)
+        assert out.value_confidence == ValueConfidence.ESTIMATED
+        assert "open_position_zero_value_guard" not in out.snapshot_metadata
+
+    def test_healthy_positions_returned_unchanged(self):
+        from almanak.framework.portfolio import enforce_open_position_value_invariant
+
+        snap = _snapshot_with_positions(
+            positions=[_lp_position(value_usd="12.34", tokens=["WETH", "USDC"])],
+        )
+        out = enforce_open_position_value_invariant(snap)
+        assert out.value_confidence == ValueConfidence.HIGH
+        assert out.error is None

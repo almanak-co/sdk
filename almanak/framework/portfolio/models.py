@@ -350,6 +350,113 @@ class PortfolioSnapshot:
         return [], {}
 
 
+# VIB-4970 — fail-closed writer invariant for the portfolio-snapshot lane.
+#
+# ``PositionType`` values (StrEnum, so equal to and hashable as their string
+# form) whose value is a LONG, value-bearing deployed holding: an OPEN position
+# of one of these types is always worth **more than $0** on-chain. A ``$0`` /
+# negative ``value_usd`` therefore means the valuation path could not measure it
+# (Empty≠Zero, blueprint 27 §10.10) — it is NOT a measured zero, and a snapshot
+# that reports it as one while claiming ``value_confidence=HIGH`` is internally
+# self-contradictory (VIB-4970: a live Uniswap V3 LP leg read back
+# ``liquidity=0`` → booked as measured ``$0`` at HIGH, zeroing
+# ``deployed_capital_usd`` / ``wallet_total_value_usd`` and driving a bogus
+# ~+100% Strategy PnL tile).
+#
+# Deliberately EXCLUDED:
+#   * ``BORROW`` — a liability whose ``value_usd`` is legitimately ≤ $0.
+#   * ``PERP``   — net equity can legitimately be ≤ $0; the perp repricer has
+#     its own ``no_path`` handling (``_reprice_position_enriched``).
+#   * ``TOKEN``  — wallet pseudo-positions / swap-inventory / dust rows, which
+#     are excluded from the value aggregations anyway and can legitimately be
+#     $0 (an emptied wallet leg surfaced only for teardown/operator visibility).
+_ZERO_VALUE_INVALID_POSITION_TYPES: frozenset[str] = frozenset({"LP", "SUPPLY", "VAULT", "STAKE"})
+
+
+def find_zero_valued_open_positions(snapshot: "PortfolioSnapshot") -> list[PositionValue]:
+    """Return long, value-bearing deployed positions valued at ``$0`` / negative.
+
+    These are the self-contradictory legs a HIGH-confidence snapshot must never
+    persist (VIB-4970): a discovered/reported OPEN ``LP`` / ``SUPPLY`` /
+    ``VAULT`` / ``STAKE`` position whose ``value_usd <= 0`` is unmeasured, not a
+    measured zero. Returns ``[]`` for a snapshot that already carries no such
+    leg (the byte-identical common case).
+    """
+    return [
+        p
+        for p in snapshot.positions
+        if getattr(p, "position_type", None) in _ZERO_VALUE_INVALID_POSITION_TYPES and p.value_usd <= Decimal("0")
+    ]
+
+
+def enforce_open_position_value_invariant(snapshot: "PortfolioSnapshot") -> "PortfolioSnapshot":
+    """Fail-closed writer guard: never persist a $0-valued OPEN position at HIGH (VIB-4970).
+
+    A portfolio snapshot that claims ``value_confidence=HIGH`` while reporting a
+    known-open, long, value-bearing position (LP / SUPPLY / VAULT / STAKE) at
+    ``value_usd <= 0`` is internally self-contradictory — the value is
+    **unmeasured**, not a measured zero (Empty≠Zero, blueprint 27 §10.10). The
+    intermittent VIB-4970 corruption (a transient on-chain read returning
+    ``liquidity=0`` for an open Uniswap V3 LP) is booked as a measured ``$0`` at
+    HIGH by the repricer, zeroing ``deployed_capital_usd`` /
+    ``wallet_total_value_usd`` and driving the dashboard's Strategy-PnL tile to a
+    bogus ~+100%.
+
+    This guard is the choke point every persisted snapshot passes through (wired
+    into ``capture_portfolio_snapshot``), so it catches the corruption
+    regardless of which producer emitted it (canonical ``PortfolioValuer`` OR
+    the strategy ``get_portfolio_snapshot`` fallback). It is **strictly
+    additive**: it changes no valuation / netting math and only *demotes*
+    confidence on an already-corrupt row —
+
+      * ``value_confidence`` → ``UNAVAILABLE`` (honest "could not measure a
+        known-open position", matching the existing ``no_path`` contract in
+        ``PortfolioValuer._determine_value_confidence``). Downstream this skips
+        the ``PortfolioMetrics`` write for the iteration
+        (``_build_metrics_for_snapshot``), so a corrupt row can never feed a
+        PnL / drawdown computation — instead of persisting a confident lie.
+      * each offending position's ``details["valuation_status"]`` → ``no_path``
+        and a ``value_invariant_violation="vib-4970"`` breadcrumb, so a forensic
+        reader can see *which* leg tripped the guard.
+      * a ``open_position_zero_value_guard`` note is stamped on
+        ``snapshot_metadata`` (rides through ``positions_json`` for audit).
+
+    A HIGH snapshot with all long positions genuinely valued (> $0) is returned
+    unchanged — the guard must never blanket-demote healthy rows. Non-HIGH
+    snapshots are returned untouched (already degraded; nothing to demote).
+    """
+    if snapshot.value_confidence != ValueConfidence.HIGH:
+        return snapshot
+
+    offenders = find_zero_valued_open_positions(snapshot)
+    if not offenders:
+        return snapshot
+
+    snapshot.value_confidence = ValueConfidence.UNAVAILABLE
+    offender_ids = []
+    for p in offenders:
+        pid = str(p.details.get("position_id") or p.label or p.position_type)
+        offender_ids.append(pid)
+        # Mirror the valuer's per-leg unmeasured marker so any reader that
+        # filters on ``valuation_status`` treats this leg as unmeasured, not
+        # measured-zero (Empty≠Zero).
+        p.details["valuation_status"] = "no_path"
+        p.details["value_invariant_violation"] = "vib-4970"
+
+    reason = (
+        "VIB-4970 writer invariant: refused HIGH confidence — "
+        f"{len(offenders)} open value-bearing position(s) valued at $0 "
+        f"(unmeasured, not measured zero): {', '.join(offender_ids)}"
+    )
+    snapshot.error = f"{snapshot.error}; {reason}" if snapshot.error else reason
+    snapshot.snapshot_metadata = dict(snapshot.snapshot_metadata or {})
+    snapshot.snapshot_metadata["open_position_zero_value_guard"] = {
+        "demoted_to": ValueConfidence.UNAVAILABLE.value,
+        "offending_positions": offender_ids,
+    }
+    return snapshot
+
+
 #: Storage / wire text for an UNMEASURED capital-flow amount (VIB-5866).
 #:
 #: Empty≠Zero (blueprint 27 §10.10): ``Decimal("0")`` is a measured zero,

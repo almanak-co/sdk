@@ -21,6 +21,8 @@ from almanak.framework.portfolio.models import (
     PositionValue,
     TokenBalance,
     ValueConfidence,
+    enforce_open_position_value_invariant,
+    find_zero_valued_open_positions,
 )
 
 __all__ = [
@@ -29,4 +31,6 @@ __all__ = [
     "PositionValue",
     "TokenBalance",
     "ValueConfidence",
+    "enforce_open_position_value_invariant",
+    "find_zero_valued_open_positions",
 ]

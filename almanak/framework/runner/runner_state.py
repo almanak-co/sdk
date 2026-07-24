@@ -27,7 +27,12 @@ from ..accounting.capital_flows import (
     scan_chain_transfers,
 )
 from ..intents.vocabulary import AnyIntent, BorrowIntent, HoldIntent, PerpCloseIntent, PerpOpenIntent
-from ..portfolio import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
+from ..portfolio import (
+    PortfolioMetrics,
+    PortfolioSnapshot,
+    ValueConfidence,
+    enforce_open_position_value_invariant,
+)
 from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
 from ..state.state_manager import StateConflictError, StateData, StateNotFoundError
 from .capital_flow_state import (
@@ -951,6 +956,20 @@ async def capture_portfolio_snapshot(
         # same values for PortfolioMetrics; the snapshot stamp closes the
         # other half of the loop.
         _stamp_snapshot_identity(runner, snapshot)
+
+        # VIB-4970 — fail-closed writer invariant. A snapshot that claims
+        # HIGH confidence while reporting a known-open, value-bearing position
+        # (LP / SUPPLY / VAULT / STAKE) at $0 is internally self-contradictory:
+        # the value is unmeasured (Empty≠Zero), not a measured zero. Demote it
+        # to UNAVAILABLE here — the single choke point every persisted snapshot
+        # passes through — so no producer (canonical valuer OR strategy
+        # fallback) can persist the $0-at-HIGH row that zeroed
+        # deployed_capital_usd / wallet_total_value_usd and drove the bogus
+        # ~+100% Strategy-PnL tile. Placed BEFORE the gas-status enforcer so a
+        # demoted (now UNAVAILABLE) snapshot cleanly short-circuits it rather
+        # than double-firing. Strictly additive: no valuation / netting math
+        # changes, only a confidence demotion on an already-corrupt row.
+        snapshot = enforce_open_position_value_invariant(snapshot)
 
         # VIB-4225 (ACC-02) §6 F1-F3 contract — inspect the typed
         # ``gas_native_status`` the strategy stamped during snapshot
