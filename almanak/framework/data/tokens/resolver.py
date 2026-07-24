@@ -36,18 +36,22 @@ Example:
 
     resolver = get_token_resolver()
 
-    # Resolve by symbol
-    usdc = resolver.resolve("USDC", "arbitrum")
+    # Resolve by address
+    usdc = resolver.resolve("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum")
     print(f"{usdc.symbol} has {usdc.decimals} decimals at {usdc.address}")
 
     # Resolve by address
     token = resolver.resolve("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum")
 
     # Get decimals directly
-    decimals = resolver.get_decimals("arbitrum", "USDC")
+    decimals = resolver.get_decimals("arbitrum", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
 
     # Resolve a trading pair
-    usdc, weth = resolver.resolve_pair("USDC", "WETH", "arbitrum")
+    usdc, weth = resolver.resolve_pair(
+        "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+        "arbitrum",
+    )
 """
 
 import logging
@@ -64,6 +68,7 @@ from almanak.core.enums import ChainFamily
 
 from .cache import TokenCacheManager
 from .defaults import DEFAULT_TOKENS, NATIVE_SENTINEL, SYMBOL_ALIASES, WRAPPED_NATIVE
+from .deprecation import warn_or_reject_symbol_token_reference
 from .exceptions import (
     AmbiguousTokenError,
     InvalidTokenAddressError,
@@ -139,6 +144,8 @@ def _is_address(token: str, chain: str | None = None) -> bool:
     If chain is provided, checks format for that chain's family.
     If chain is None, checks if it matches ANY known address format.
     """
+    if token.lower() == NATIVE_SENTINEL.lower():
+        return True
     if chain and _is_solana_chain(chain):
         return bool(SOLANA_ADDRESS_PATTERN.match(token))
     if ADDRESS_PATTERN.match(token):
@@ -170,6 +177,9 @@ def _validate_address(address: str, chain: str) -> None:
     Raises:
         InvalidTokenAddressError: If address format is invalid
     """
+    if address.lower() == NATIVE_SENTINEL.lower():
+        return
+
     if _is_solana_chain(chain):
         if not SOLANA_ADDRESS_PATTERN.match(address):
             raise InvalidTokenAddressError(
@@ -696,7 +706,10 @@ class TokenResolver:
                     f"CAIP-19 slip44 reference {parsed.asset_reference!r} does not match "
                     f"{descriptor.name!r} native coin type {expected}"
                 )
-            target = descriptor.native.symbol
+            # Keep the reverse path address-native. Routing through the native
+            # symbol would re-enter the deprecated symbol resolution path even
+            # though the caller supplied stable CAIP-19 identity.
+            target = NATIVE_SENTINEL
         else:
             # Fungible asset. The namespace must match the chain family (erc20
             # on EVM, token/SPL on Solana); anything else (unsupported namespace
@@ -714,7 +727,10 @@ class TokenResolver:
     def resolve(  # noqa: C901
         self, token: str, chain: str, *, log_errors: bool = True, skip_gateway: bool = False
     ) -> ResolvedToken:
-        """Resolve a token by symbol, address, or CAIP-19 asset id on a chain.
+        """Resolve a token by address or CAIP-19 asset id on a chain.
+
+        Bare symbols remain available with ``SymbolTokenResolutionWarning`` in
+        SDK 2.x and raise ``SymbolTokenResolutionError`` in SDK 3.0.0+.
 
         This is the main resolution method. It checks:
         1. Memory cache
@@ -723,7 +739,7 @@ class TokenResolver:
         4. Gateway on-chain lookup (if token is an address and gateway available)
 
         Args:
-            token: Token symbol (e.g., "USDC") or address (e.g., "0x...")
+            token: Token address or CAIP-19 identity. Bare symbols are deprecated.
             chain: Chain name or Chain enum
             log_errors: If False, suppress warning logs on resolution failure (default True).
                 Use False for best-effort lookups where failures are expected and handled.
@@ -740,9 +756,6 @@ class TokenResolver:
             TokenResolutionError: For other resolution errors
 
         Example:
-            # By symbol
-            usdc = resolver.resolve("USDC", "arbitrum")
-
             # By address
             token = resolver.resolve("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum")
 
@@ -777,6 +790,8 @@ class TokenResolver:
         self._gateway_miss_state.timed_out = False
 
         try:
+            warn_or_reject_symbol_token_reference(token, chain_lower, api="TokenResolver.resolve")
+
             # Determine if input is address or symbol (pure functions, no lock needed)
             is_address = _is_address(token, chain_lower)
 
@@ -1703,7 +1718,7 @@ class TokenResolver:
 
         Args:
             chain: Chain name or Chain enum
-            token: Token symbol or address
+            token: Token address or CAIP-19 identity. Bare symbols are deprecated.
 
         Returns:
             Number of decimal places
@@ -1712,7 +1727,10 @@ class TokenResolver:
             TokenNotFoundError: If token cannot be resolved
 
         Example:
-            decimals = resolver.get_decimals("arbitrum", "USDC")
+            decimals = resolver.get_decimals(
+                "arbitrum",
+                "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            )
             # Returns 6
         """
         resolved = self.resolve(token, chain)
@@ -1754,13 +1772,14 @@ class TokenResolver:
         return MappingProxyType(snapshot)
 
     def get_address(self, chain: str, symbol: str) -> str:
-        """Get the address for a token symbol on a specific chain.
+        """Get the address for a token reference on a specific chain.
 
         Convenience method that extracts just the address from resolution.
+        Passing a bare symbol is deprecated in SDK 2.x and rejected in 3.0.0+.
 
         Args:
             chain: Chain name or Chain enum
-            symbol: Token symbol (e.g., "USDC")
+            symbol: Address or CAIP-19 identity. Bare symbols are deprecated.
 
         Returns:
             Contract address
@@ -1769,7 +1788,10 @@ class TokenResolver:
             TokenNotFoundError: If token cannot be resolved
 
         Example:
-            address = resolver.get_address("arbitrum", "USDC")
+            address = resolver.get_address(
+                "arbitrum",
+                "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            )
             # Returns "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
         """
         resolved = self.resolve(symbol, chain)
@@ -1785,7 +1807,7 @@ class TokenResolver:
         For non-native tokens, this behaves identically to resolve().
 
         Args:
-            token: Token symbol (e.g., "ETH", "USDC") or address
+            token: Token address or CAIP-19 identity. Bare symbols are deprecated.
             chain: Chain name or Chain enum
 
         Returns:
@@ -1798,11 +1820,14 @@ class TokenResolver:
 
         Example:
             # ETH on Arbitrum returns WETH
-            token = resolver.resolve_for_swap("ETH", "arbitrum")
+            token = resolver.resolve_for_swap("eip155:42161/slip44:60", "arbitrum")
             assert token.symbol == "WETH"
 
             # USDC returns USDC (not native)
-            token = resolver.resolve_for_swap("USDC", "arbitrum")
+            token = resolver.resolve_for_swap(
+                "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+                "arbitrum",
+            )
             assert token.symbol == "USDC"
         """
         resolved = self.resolve(token, chain)
@@ -1840,7 +1865,7 @@ class TokenResolver:
         canonical bridge tokens, etc.).
 
         Args:
-            token: Token symbol or address
+            token: Token address or CAIP-19 identity. Bare symbols are deprecated.
             chain: Chain name or Chain enum
             protocol: Protocol identifier (e.g., "uniswap_v3", "aave_v3")
 
@@ -1853,11 +1878,19 @@ class TokenResolver:
 
         Example:
             # DEX protocols get auto-wrapped native tokens
-            token = resolver.resolve_for_protocol("ETH", "arbitrum", "uniswap_v3")
+            token = resolver.resolve_for_protocol(
+                "eip155:42161/slip44:60",
+                "arbitrum",
+                "uniswap_v3",
+            )
             assert token.symbol == "WETH"
 
             # Lending protocols get the original token
-            token = resolver.resolve_for_protocol("ETH", "ethereum", "aave_v3")
+            token = resolver.resolve_for_protocol(
+                "eip155:1/slip44:60",
+                "ethereum",
+                "aave_v3",
+            )
             assert token.symbol == "ETH"
         """
         # List of DEX protocols that need native token wrapping

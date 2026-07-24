@@ -4,7 +4,7 @@ This module defines :class:`BaseIntent`, the single shared parent every
 concrete intent class — ``SwapIntent``, ``LPOpenIntent``, ``BorrowIntent``,
 ``PerpOpenIntent``, ``BridgeIntent``, etc. — inherits from. ``BaseIntent``
 extends :class:`almanak.framework.models.base.AlmanakImmutableModel` and
-adds exactly two responsibilities:
+adds three responsibilities:
 
 1. **Reserved field** — ``registry_handle: str | None = None`` (VIB-4192).
 
@@ -24,6 +24,12 @@ adds exactly two responsibilities:
    :func:`classify` is intentionally NOT used (Acceptance Criterion #2).
    Both T2 (VIB-4162) and T4 (VIB-4164) precedent rejected the soft
    path for the same silent-classify reason.
+
+3. **Token identity migration** - every concrete field named ``token``,
+   ``token_*``, or ``*_token`` passes through the shared symbol deprecation
+   policy. SDK 2.x emits ``SymbolTokenResolutionWarning`` for bare symbols;
+   SDK 3.0.0 and later raise ``SymbolTokenResolutionError``. Address-based and
+   CAIP-19 identity remains unchanged.
 
 Notes:
 
@@ -48,6 +54,7 @@ from typing import Any
 
 from pydantic import model_validator
 
+from almanak.framework.data.tokens.deprecation import warn_or_reject_symbol_token_reference
 from almanak.framework.models.base import AlmanakImmutableModel
 from almanak.framework.primitives.taxonomy import (
     UnknownIntentTypeError,
@@ -56,6 +63,40 @@ from almanak.framework.primitives.taxonomy import (
 
 # Sentinel used for null intent_type messaging — see D3.F6 null-guard case.
 _NULL_INTENT_TYPE_SENTINEL = "<None>"
+
+
+def _token_reference_chain(intent: Any, field_name: str) -> str | None:
+    """Resolve the chain context for an intent token field."""
+    if field_name == "to_token":
+        destination_chain = getattr(intent, "destination_chain", None)
+        if destination_chain:
+            return destination_chain
+
+    chain = getattr(intent, "chain", None)
+    if chain:
+        return chain
+
+    from_chain = getattr(intent, "from_chain", None)
+    if from_chain:
+        return from_chain
+
+    target_chain = getattr(intent, "target_chain", None)
+    return target_chain or None
+
+
+def _validate_token_references(intent: Any) -> None:
+    """Apply the symbol deprecation policy to every concrete token field."""
+    for field_name in type(intent).model_fields:
+        if field_name != "token" and not field_name.startswith("token_") and not field_name.endswith("_token"):
+            continue
+        token = getattr(intent, field_name, None)
+        if not isinstance(token, str):
+            continue
+        warn_or_reject_symbol_token_reference(
+            token,
+            _token_reference_chain(intent, field_name),
+            api=f"{type(intent).__name__}.{field_name}",
+        )
 
 
 def _resolve_intent_type_string(intent_type: Any) -> str:
@@ -124,7 +165,9 @@ class BaseIntent(AlmanakImmutableModel):
     construction-time validator that enforces (a) non-empty / non-whitespace
     handles, and (b) presence of the intent's ``intent_type`` in
     :data:`~almanak.framework.primitives.taxonomy.TAXONOMY` via
-    :func:`~almanak.framework.primitives.taxonomy.record_for`.
+    :func:`~almanak.framework.primitives.taxonomy.record_for`. The same
+    validator applies the token symbol deprecation policy to concrete token
+    fields.
 
     See module docstring for design rationale and links to the UAT card.
     """
@@ -168,7 +211,10 @@ class BaseIntent(AlmanakImmutableModel):
 
     @model_validator(mode="after")
     def _validate_registry_handle(self) -> BaseIntent:
-        """Strict-on-construction validation of ``registry_handle``.
+        """Validate token identity and ``registry_handle`` on construction.
+
+        Token fields first apply the shared symbol deprecation/removal policy.
+        Registry handle validation then enforces:
 
         - ``None`` → no-op (the field is optional).
         - Empty / whitespace-only string → raises ``ValueError`` (D3.F1).
@@ -182,6 +228,8 @@ class BaseIntent(AlmanakImmutableModel):
         write into the catch-all bucket and leak unbounded.
         ``record_for`` raises instead.
         """
+        _validate_token_references(self)
+
         handle = self.registry_handle
         if handle is None:
             return self

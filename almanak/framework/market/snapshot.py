@@ -25,6 +25,8 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from ..data.tokens.deprecation import warn_or_reject_symbol_token_reference
+from ..data.tokens.exceptions import SymbolTokenResolutionError
 from .models import (
     ADXData,
     ATRData,
@@ -273,7 +275,9 @@ class _PricesAccessor:
         if not isinstance(key, str) or key in prices:
             return key
         try:
-            resolved = self._snapshot._token_cache_key(key)
+            resolved = self._snapshot._token_cache_key(key, warn_on_symbol=True)
+        except SymbolTokenResolutionError:
+            raise
         except Exception:  # noqa: BLE001 — resolution must never break dict reads
             return key
         if resolved != key and resolved in prices:
@@ -830,7 +834,7 @@ class MarketSnapshot:
             requested_chain = chain
         else:
             requested_chain = self._resolve_chain(chain)
-        token = self._token_cache_key(token, requested_chain)
+        token = self._token_cache_key(token, requested_chain, warn_on_symbol=True)
         cache_key = f"{token}/{quote}@{requested_chain}"
 
         # Check pre-populated prices first. Case-insensitive, matching the
@@ -955,7 +959,7 @@ class MarketSnapshot:
         """
         raw_token = token
         requested_chain = self._resolve_chain(chain)
-        token = self._token_cache_key(token, requested_chain)
+        token = self._token_cache_key(token, requested_chain, warn_on_symbol=True)
         cache_key = f"{token}/{quote}@{requested_chain}"
 
         if cache_key in self._price_cache:
@@ -1183,7 +1187,7 @@ class MarketSnapshot:
         Raises:
             ValueError: If RSI cannot be calculated
         """
-        token = self._token_cache_key(token)
+        token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
@@ -1364,7 +1368,7 @@ class MarketSnapshot:
             if macd.is_bullish_crossover:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._token_cache_key(token)
+        token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, fast_period, slow_period, signal_period)
 
@@ -1434,7 +1438,7 @@ class MarketSnapshot:
             if bb.is_oversold:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._token_cache_key(token)
+        token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period, std_dev)
 
@@ -1499,7 +1503,7 @@ class MarketSnapshot:
             if stoch.is_oversold and stoch.k_value > stoch.d_value:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._token_cache_key(token)
+        token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, k_period, d_period)
 
@@ -1560,7 +1564,7 @@ class MarketSnapshot:
                 # Safe to trade
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._token_cache_key(token)
+        token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
@@ -1620,7 +1624,7 @@ class MarketSnapshot:
             if sma.is_price_above:
                 print("Bullish - price above 50 SMA")
         """
-        token = self._token_cache_key(token)
+        token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, "SMA", period)
 
@@ -1676,7 +1680,7 @@ class MarketSnapshot:
             if ema_12.value > ema_26.value:
                 print("Golden cross - bullish")
         """
-        token = self._token_cache_key(token)
+        token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, "EMA", period)
 
@@ -1731,7 +1735,7 @@ class MarketSnapshot:
             if adx.is_uptrend:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._token_cache_key(token)
+        token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
@@ -1780,7 +1784,7 @@ class MarketSnapshot:
             if obv.is_bullish:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._token_cache_key(token)
+        token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, signal_period)
 
@@ -1829,7 +1833,7 @@ class MarketSnapshot:
             if cci.is_oversold:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._token_cache_key(token)
+        token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, period)
 
@@ -1887,7 +1891,7 @@ class MarketSnapshot:
             if ich.is_bullish_crossover and ich.is_above_cloud:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
         """
-        token = self._token_cache_key(token)
+        token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
         cache_key = (token, timeframe, tenkan_period, kijun_period, senkou_b_period)
 
@@ -2018,7 +2022,10 @@ class MarketSnapshot:
         requested_chain = self._resolve_chain(chain)
         # VIB-3138: translate generic symbol to protocol-preferred variant.
         provider_token = self._resolve_protocol_variant(token, protocol)
-        resolved = self._resolve_protocol_variant(self._token_cache_key(token, requested_chain), protocol)
+        resolved = self._resolve_protocol_variant(
+            self._token_cache_key(token, requested_chain, warn_on_symbol=True),
+            protocol,
+        )
         cache_key = f"{resolved}@{requested_chain}"
 
         # Check the per-chain cache FIRST when an explicit chain was given —
@@ -2379,7 +2386,13 @@ class MarketSnapshot:
             self._balance_usd_unmeasured.discard(cache_key)
         return filled
 
-    def _token_cache_key(self, token: str, chain: str | None = None) -> str:
+    def _token_cache_key(
+        self,
+        token: str,
+        chain: str | None = None,
+        *,
+        warn_on_symbol: bool = False,
+    ) -> str:
         """Return the seeded/cache lookup key for ``token`` on ``chain``.
 
         When symbol aliases are registered (address-native backtest snapshots
@@ -2387,8 +2400,15 @@ class MarketSnapshot:
         getters land on the same address-native key. Address-shaped tokens and
         symbols outside the map are untouched — an unregistered symbol on an
         address-keyed snapshot stays an honest miss.
+
+        User-facing reads pass ``warn_on_symbol=True``. Internal seed/setter
+        paths leave it false because they are ingesting provider data rather
+        than asking the SDK to resolve user-supplied token identity.
         """
-        key = _token_cache_key(token, chain or self._chain)
+        requested_chain = chain or self._chain
+        if warn_on_symbol:
+            warn_or_reject_symbol_token_reference(token, requested_chain, api="MarketSnapshot")
+        key = _token_cache_key(token, requested_chain)
         if self._symbol_alias_keys and isinstance(key, str) and ":" not in key:
             return self._symbol_alias_keys.get(key.strip().upper(), key)
         return key

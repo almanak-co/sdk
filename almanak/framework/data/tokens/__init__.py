@@ -28,21 +28,25 @@ Example:
     # Get the singleton resolver
     resolver = get_token_resolver()
 
-    # Resolve by symbol
-    usdc = resolver.resolve("USDC", "arbitrum")
+    # Resolve by address
+    usdc = resolver.resolve("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum")
     print(f"{usdc.symbol} has {usdc.decimals} decimals at {usdc.address}")
 
     # Resolve by address
     token = resolver.resolve("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum")
 
     # Get decimals directly
-    decimals = resolver.get_decimals("arbitrum", "USDC")
+    decimals = resolver.get_decimals("arbitrum", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
 
     # Resolve a trading pair
-    usdc, weth = resolver.resolve_pair("USDC", "WETH", "arbitrum")
+    usdc, weth = resolver.resolve_pair(
+        "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+        "arbitrum",
+    )
 
     # Resolve for swap (auto-wraps native tokens like ETH -> WETH)
-    token = resolver.resolve_for_swap("ETH", "arbitrum")  # Returns WETH
+    token = resolver.resolve_for_swap("eip155:42161/slip44:60", "arbitrum")  # Returns WETH
 """
 
 from .caip import ParsedAsset, parse_caip19, token_ref_to_caip19
@@ -70,9 +74,11 @@ from .defaults import (
     get_coingecko_id,
     get_coingecko_ids,
 )
+from .deprecation import SYMBOL_TOKEN_REMOVAL_VERSION, SymbolTokenResolutionWarning
 from .exceptions import (
     AmbiguousTokenError,
     InvalidTokenAddressError,
+    SymbolTokenResolutionError,
     TokenNotFoundError,
     TokenResolutionError,
     TokenResolutionTimeoutError,
@@ -115,6 +121,9 @@ __all__ = [
     "InvalidTokenAddressError",
     "TokenResolutionTimeoutError",
     "AmbiguousTokenError",
+    "SymbolTokenResolutionError",
+    "SymbolTokenResolutionWarning",
+    "SYMBOL_TOKEN_REMOVAL_VERSION",
     # =========================================================================
     # Constants
     # =========================================================================

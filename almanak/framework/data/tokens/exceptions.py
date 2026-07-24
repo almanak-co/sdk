@@ -95,6 +95,25 @@ class TokenResolutionError(Exception):
         )
 
 
+class SymbolTokenResolutionError(TokenResolutionError):
+    """Raised when a token symbol is used after the SDK 3.0.0 removal boundary."""
+
+    def __init__(self, token: str, chain: str, api: str) -> None:
+        self.api = api
+        super().__init__(
+            token=token,
+            chain=chain,
+            reason=(
+                f"{api} does not accept symbol-based token references in Almanak SDK 3.0.0 or later "
+                "because symbol resolution is unreliable"
+            ),
+            suggestions=[
+                "Use the chain-specific token contract address",
+                "Use a CAIP-19 asset identifier",
+            ],
+        )
+
+
 class TokenNotFoundError(TokenResolutionError):
     """Raised when a token is not found in any registry.
 
@@ -292,6 +311,7 @@ class AmbiguousTokenError(TokenResolutionError):
 
 __all__ = [
     "TokenResolutionError",
+    "SymbolTokenResolutionError",
     "TokenNotFoundError",
     "TokenResolutionTimeoutError",
     "InvalidTokenAddressError",
