@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.framework.execution.extracted_data import AsyncOrderData, AsyncOrderKind, AsyncOrderStatus
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionPhase,
@@ -423,6 +424,65 @@ class TestSingleChainHandleSuccess:
         strategy.on_intent_executed.assert_called_once()
         assert strategy.on_intent_executed.call_args.kwargs.get("success") is True
         runner._write_ledger_entry.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_async_submission_cannot_commit_success_before_terminal_settlement(self) -> None:
+        """Lifecycle-only barrier blocks all success side effects on unsupported Anvil."""
+        from almanak.connectors._strategy_base.runner_hook_registry import AsyncSettlementStatus
+        from almanak.framework.runner.async_settlement import AsyncSettlementBarrierResult
+
+        runner = _make_runner()
+        runner._require_terminal_async_settlement = True
+        runner._emit_execution_timeline_event = MagicMock()
+        runner._write_ledger_entry = AsyncMock()
+        runner._reconcile_post_execution_balances = AsyncMock(return_value={"incident": False})
+        strategy = _make_strategy()
+        strategy._gateway_network = "anvil"
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("100"))
+        state = _make_state(strategy, intent=intent)
+        state.gateway_client = object()
+        state.state_machine = MagicMock()
+        state.state_machine.retry_count = 0
+        state.last_execution_result = ExecutionResult(
+            success=True,
+            phase=ExecutionPhase.COMPLETE,
+            completed_at=datetime.now(UTC),
+            async_orders=[
+                AsyncOrderData(
+                    protocol="gmx_v2",
+                    order_id="0x" + "ab" * 32,
+                    status=AsyncOrderStatus.PENDING,
+                    kind=AsyncOrderKind.INCREASE,
+                )
+            ],
+        )
+        state.last_execution_context = ExecutionContext(deployment_id=strategy.deployment_id)
+        barrier = AsyncSettlementBarrierResult(
+            status=AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
+            terminal=False,
+            attempts=0,
+            elapsed_seconds=0,
+            reason="no managed-fork keeper simulator",
+        )
+
+        with (
+            patch("almanak.framework.runner.strategy_runner.ResultEnricher") as mock_enricher,
+            patch(
+                "almanak.framework.runner.async_settlement.await_async_settlement",
+                new=AsyncMock(return_value=barrier),
+            ),
+        ):
+            mock_enricher.return_value.enrich.return_value = state.last_execution_result
+            result = await runner._single_chain_handle_success(state)
+
+        assert result.status == IterationStatus.ASYNC_SETTLEMENT_FAILED
+        assert result.async_settlement is not None
+        assert result.async_settlement["status"] == "INFRASTRUCTURE_UNSUPPORTED"
+        runner._reconcile_post_execution_balances.assert_not_awaited()
+        runner._write_ledger_entry.assert_not_awaited()
+        runner._emit_execution_timeline_event.assert_not_called()
+        strategy.on_intent_executed.assert_not_called()
+        strategy.save_state.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_enrich_exception_still_proceeds_to_success_path(self) -> None:

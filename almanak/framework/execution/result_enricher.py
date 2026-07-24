@@ -36,7 +36,7 @@ from .extract_result import (
     ExtractMissing,
     ExtractOk,
 )
-from .extracted_data import BridgeData, LPCloseData, LPOpenData, ProtocolFees, SwapAmounts
+from .extracted_data import AsyncOrderData, BridgeData, LPCloseData, LPOpenData, ProtocolFees, SwapAmounts
 from .receipt_registry import ReceiptParserRegistry
 
 if TYPE_CHECKING:
@@ -68,6 +68,11 @@ _STRICT_TYPED_FIELDS: dict[str, tuple[str, Callable[[Any], bool], str]] = {
     "lp_close_data": ("lp_close_data", lambda v: isinstance(v, LPCloseData), "LPCloseData"),
     "bridge_data": ("bridge_data", lambda v: isinstance(v, BridgeData), "BridgeData"),
     "protocol_fees": ("protocol_fees", lambda v: isinstance(v, ProtocolFees), "ProtocolFees"),
+    "async_orders": (
+        "async_orders",
+        lambda v: isinstance(v, list) and bool(v) and all(isinstance(order, AsyncOrderData) for order in v),
+        "non-empty list[AsyncOrderData]",
+    ),
     "bin_ids": (
         "bin_ids",
         # ``bool`` is an ``int`` subclass in Python, so an explicit
@@ -1532,7 +1537,12 @@ class ResultEnricher:
         # accounting-relevant extraction, so silently ignoring hook failures
         # would hide parser-owned data loss.
         try:
-            extract_kwargs = self._build_extract_kwargs_for_parser(parser, field, bundle_metadata)
+            extract_kwargs = self._build_extract_kwargs_for_parser(
+                parser,
+                field,
+                bundle_metadata,
+                intent_type=intent_type,
+            )
         except CriticalAccountingError:
             raise
         except Exception as exc:  # noqa: BLE001 - malformed parser hook is extraction-critical
@@ -1594,13 +1604,46 @@ class ResultEnricher:
                 )
                 return
 
-        if last_error is not None:
-            self._handle_extract_error(result, last_error, field, intent_type, parser, protocol)
+        extraction_error = last_error or self._required_extraction_missing_error(
+            parser=parser,
+            field=field,
+            intent_type=intent_type,
+            receipt_count=len(receipts),
+        )
+        if extraction_error is not None:
+            self._handle_extract_error(
+                result,
+                extraction_error,
+                field,
+                intent_type,
+                parser,
+                protocol,
+            )
             return
 
         logger.debug(
             f"Enrichment: {field} missing from all {len(receipts)} receipt(s) "
             f"(parser={type(parser).__name__}, intent_type={intent_type})"
+        )
+
+    @staticmethod
+    def _required_extraction_missing_error(
+        *,
+        parser: Any,
+        field: str,
+        intent_type: str,
+        receipt_count: int,
+    ) -> ExtractError | None:
+        """Build a fail-closed error for a connector-declared required field."""
+        required = getattr(parser, "REQUIRED_EXTRACTIONS_BY_INTENT", None)
+        required_fields = required.get(intent_type, ()) if isinstance(required, dict) else ()
+        if field not in required_fields:
+            return None
+        return ExtractError(
+            error=(
+                f"required extraction missing from all {receipt_count} receipt(s); "
+                "the submitted intent cannot be tracked to terminal settlement"
+            )
         )
 
     @staticmethod
@@ -1768,6 +1811,8 @@ class ResultEnricher:
     def _build_extract_kwargs(
         field: str,
         bundle_metadata: dict[str, Any] | None,
+        *,
+        intent_type: str | None = None,
     ) -> dict[str, Any]:
         """Compute framework-owned extra kwargs for ``extract_<field>`` methods.
 
@@ -1784,6 +1829,13 @@ class ResultEnricher:
         Returns framework-generic kwargs only. Connector-specific parser
         kwargs are appended by :meth:`_build_extract_kwargs_for_parser`.
         """
+        if field == "async_orders" and intent_type:
+            # The intent is the authoritative order-kind source. Some async
+            # protocols emit the created identifier in an indexed topic while
+            # placing their order struct in a dynamically encoded event payload;
+            # a parser must not infer lifecycle semantics from a best-effort
+            # positional decode of that payload.
+            return {"intent_type": intent_type}
         if not bundle_metadata:
             return {}
         if field == "swap_amounts":
@@ -1824,6 +1876,8 @@ class ResultEnricher:
         parser: Any,
         field: str,
         bundle_metadata: dict[str, Any] | None,
+        *,
+        intent_type: str | None = None,
     ) -> dict[str, Any]:
         """Merge framework-generic kwargs with optional parser-owned kwargs.
 
@@ -1831,7 +1885,7 @@ class ResultEnricher:
         metadata such as ``expected_out`` and fee hints must not be shadowed by
         connector hooks because those values are compiler/orchestrator facts.
         """
-        kwargs = self._build_extract_kwargs(field, bundle_metadata)
+        kwargs = self._build_extract_kwargs(field, bundle_metadata, intent_type=intent_type)
         parser_kwargs = self._build_parser_extract_kwargs(parser, field, bundle_metadata)
         if not parser_kwargs:
             return kwargs

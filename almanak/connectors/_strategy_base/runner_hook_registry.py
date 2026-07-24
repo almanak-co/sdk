@@ -11,14 +11,19 @@ from __future__ import annotations
 import inspect
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, ClassVar, Protocol, TypeVar, runtime_checkable
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 
 __all__ = [
     "STRATEGY_RUNNER_HOOK_REGISTRY",
+    "AsyncSettlementPolicy",
+    "AsyncSettlementStatus",
+    "AsyncSettlementVerdict",
     "FillReconciliationVerdict",
+    "RunnerAsyncSettlementCapability",
     "RunnerFillReconciliationCapability",
     "RunnerHookConnector",
     "RunnerHookRegistry",
@@ -37,6 +42,92 @@ class RunnerHookRegistryError(Exception):
 
 logger = logging.getLogger(__name__)
 _TOPIC_RE = re.compile(r"^0x[0-9a-f]{64}$")
+
+
+class AsyncSettlementStatus(StrEnum):
+    """Protocol-neutral outcome of observing asynchronous order settlement."""
+
+    SETTLED = "SETTLED"
+    PENDING = "PENDING"
+    PENDING_SETTLEMENT_TIMEOUT = "PENDING_SETTLEMENT_TIMEOUT"
+    INFRASTRUCTURE_UNSUPPORTED = "INFRASTRUCTURE_UNSUPPORTED"
+    OBSERVATION_FAILED = "OBSERVATION_FAILED"
+    TERMINAL_FAILED = "TERMINAL_FAILED"
+
+
+@dataclass(frozen=True)
+class AsyncSettlementPolicy:
+    """Connector-owned timing and managed-fork support declaration."""
+
+    timeout_seconds: int
+    poll_interval_seconds: int
+    supports_local_order_execution: bool
+    supports_cancellation: bool
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds <= 0:
+            raise ValueError("AsyncSettlementPolicy.timeout_seconds must be positive")
+        if self.poll_interval_seconds <= 0:
+            raise ValueError("AsyncSettlementPolicy.poll_interval_seconds must be positive")
+        if not isinstance(self.supports_local_order_execution, bool):
+            raise TypeError("AsyncSettlementPolicy.supports_local_order_execution must be a bool")
+        if not isinstance(self.supports_cancellation, bool):
+            raise TypeError("AsyncSettlementPolicy.supports_cancellation must be a bool")
+
+
+@dataclass(frozen=True)
+class AsyncSettlementVerdict:
+    """One measured connector verdict for a group of submitted async orders."""
+
+    status: AsyncSettlementStatus
+    terminal: bool
+    orders: tuple[dict[str, Any], ...] = ()
+    reason: str | None = None
+    # Connector-private evidence carried between polls by the barrier. It is
+    # deliberately excluded from equality/repr/serialization: callers consume
+    # only the protocol-neutral verdict while the owning connector can retain a
+    # measured pre-settlement baseline without process-global mutable state.
+    observation_state: Any = field(default=None, repr=False, compare=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status.value,
+            "terminal": self.terminal,
+            "orders": [dict(order) for order in self.orders],
+            "reason": self.reason,
+        }
+
+
+@runtime_checkable
+class RunnerAsyncSettlementCapability(Protocol):
+    """Connector owns async-order observation and local-test progression.
+
+    The framework consumes only this protocol. It never branches on a concrete
+    venue name or cancellation delay.
+    """
+
+    def async_settlement_policy(self) -> AsyncSettlementPolicy: ...
+
+    def observe_async_orders(
+        self,
+        *,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str,
+        orders: tuple[Any, ...],
+        intent: Any,
+        observation_state: Any,
+    ) -> AsyncSettlementVerdict: ...
+
+    def prepare_pending_orders_for_teardown(
+        self,
+        *,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str,
+        residuals: tuple[Any, ...],
+        network: str,
+    ) -> bool: ...
 
 
 @runtime_checkable
@@ -191,6 +282,7 @@ class RunnerHookRegistry:
             or isinstance(connector, RunnerPoolKeyLookupCapability)
             or isinstance(connector, RunnerCurvePoolMetaLookupCapability)
             or isinstance(connector, RunnerV4PositionStateCapability)
+            or isinstance(connector, RunnerAsyncSettlementCapability)
         ):
             raise RunnerHookRegistryError(
                 "register() expects a connector implementing at least one runner hook capability; "
@@ -357,6 +449,81 @@ class RunnerHookRegistry:
                 return reader
         return None
 
+    def async_settlement_policy(self, protocol: ProtocolName) -> AsyncSettlementPolicy | None:
+        """Return the connector-owned async settlement policy, if declared."""
+        connector = self._connectors.get(protocol)
+        if not isinstance(connector, RunnerAsyncSettlementCapability):
+            return None
+        return connector.async_settlement_policy()
+
+    def observe_async_orders(
+        self,
+        *,
+        protocol: ProtocolName,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str,
+        orders: tuple[Any, ...],
+        intent: Any,
+        observation_state: Any = None,
+    ) -> AsyncSettlementVerdict | None:
+        """Observe submitted orders through their owning connector."""
+        connector = self._connectors.get(protocol)
+        if not isinstance(connector, RunnerAsyncSettlementCapability):
+            return None
+        try:
+            return connector.observe_async_orders(
+                gateway_client=gateway_client,
+                chain=chain,
+                wallet_address=wallet_address,
+                orders=orders,
+                intent=intent,
+                observation_state=observation_state,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Async settlement observation raised for protocol %s: %s",
+                protocol,
+                exc,
+                exc_info=True,
+            )
+            return AsyncSettlementVerdict(
+                status=AsyncSettlementStatus.OBSERVATION_FAILED,
+                terminal=False,
+                reason=f"{type(exc).__name__}: {exc}",
+                observation_state=observation_state,
+            )
+
+    def prepare_pending_orders_for_teardown(
+        self,
+        *,
+        protocol: ProtocolName,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str,
+        residuals: tuple[Any, ...],
+        network: str,
+    ) -> bool:
+        """Ask a connector to progress a managed-test pending-order window."""
+        connector = self._connectors.get(protocol)
+        if not isinstance(connector, RunnerAsyncSettlementCapability):
+            return False
+        try:
+            return connector.prepare_pending_orders_for_teardown(
+                gateway_client=gateway_client,
+                chain=chain,
+                wallet_address=wallet_address,
+                residuals=residuals,
+                network=network,
+            )
+        except Exception:
+            logger.warning(
+                "Async pending-order teardown preparation raised for protocol %s",
+                protocol,
+                exc_info=True,
+            )
+            return False
+
     def clear(self) -> None:
         """Test helper: clear registrations."""
         self._connectors.clear()
@@ -387,6 +554,20 @@ class RunnerHookRegistry:
             cls._validate_method_signature(connector, "build_curve_pool_meta_lookup", positional_count=1)
         if isinstance(connector, RunnerV4PositionStateCapability):
             cls._validate_method_signature(connector, "build_v4_position_state_reader", positional_count=1)
+        if isinstance(connector, RunnerAsyncSettlementCapability):
+            cls._validate_method_signature(connector, "async_settlement_policy", positional_count=0)
+            cls._validate_method_signature(
+                connector,
+                "observe_async_orders",
+                positional_count=0,
+                keyword_names=("gateway_client", "chain", "wallet_address", "orders", "intent", "observation_state"),
+            )
+            cls._validate_method_signature(
+                connector,
+                "prepare_pending_orders_for_teardown",
+                positional_count=0,
+                keyword_names=("gateway_client", "chain", "wallet_address", "residuals", "network"),
+            )
 
     @classmethod
     def _validate_method_signature(

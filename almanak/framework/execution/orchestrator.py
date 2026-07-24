@@ -57,7 +57,7 @@ from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..models.reproduction_bundle import ActionBundle
 from ..strategies.base import RiskGuard, RiskGuardResult
 from ..utils.log_formatters import _emojis_enabled, format_gas_cost, format_tx_hash
-from .extracted_data import BridgeData, LPCloseData, PredictionFill, ProtocolFees, SwapAmounts
+from .extracted_data import AsyncOrderData, BridgeData, LPCloseData, PredictionFill, ProtocolFees, SwapAmounts
 
 if TYPE_CHECKING:
     from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
@@ -214,6 +214,8 @@ class ExecutionResult:
             receipt parser. The destination-chain settlement is tracked
             asynchronously by EnsoStateProvider; ``bridge_data.destination_tx_hash``
             is a forward-looking hook and will usually be ``None`` here.
+        async_orders: Protocol-issued asynchronous order identifiers and their
+            latest observed lifecycle state.
         bin_ids: TraderJoe V2 bin IDs for LP positions
         protocol_fees: Typed ProtocolFees enrichment, when a receipt parser
             emits it (VIB-159). Top-level slot so strategy callbacks can read
@@ -247,6 +249,7 @@ class ExecutionResult:
     lp_close_data: LPCloseData | None = None
     prediction_fill: PredictionFill | None = None
     bridge_data: BridgeData | None = None  # VIB-3226: BRIDGE intent enrichment
+    async_orders: list[AsyncOrderData] = field(default_factory=list)
     bin_ids: list[int] | None = None  # TraderJoe V2 LP bin IDs
     protocol_fees: ProtocolFees | None = None  # VIB-159: protocol-fee enrichment
     # VIB-159 — connector-declared money legs (US-008/US-009). Type-only import
@@ -308,6 +311,7 @@ class ExecutionResult:
             swap_amounts=self.swap_amounts,
             lp_close_data=self.lp_close_data,
             bridge_data=self.bridge_data,
+            async_orders=list(self.async_orders),
             extracted_data=self.extracted_data,
             extraction_warnings=self.extraction_warnings,
         )
@@ -344,6 +348,7 @@ class ExecutionResult:
             "lp_close_data": self.lp_close_data.to_dict() if self.lp_close_data else None,
             "prediction_fill": self.prediction_fill.to_dict() if self.prediction_fill else None,
             "bridge_data": self.bridge_data.to_dict() if self.bridge_data else None,
+            "async_orders": [order.to_dict() for order in self.async_orders],
             "extracted_data": self.extracted_data,
             "extraction_warnings": self.extraction_warnings,
         }

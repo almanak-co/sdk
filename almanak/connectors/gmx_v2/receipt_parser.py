@@ -30,6 +30,7 @@ Example:
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -42,6 +43,11 @@ from almanak.framework.execution.extract_result import (
     ExtractMissing,
     ExtractOk,
     ExtractResult,
+)
+from almanak.framework.execution.extracted_data import (
+    AsyncOrderData,
+    AsyncOrderKind,
+    AsyncOrderStatus,
 )
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash, format_usd
 
@@ -252,6 +258,64 @@ class GMXv2Event:
             raw_data=data.get("raw_data", ""),
             timestamp=timestamp,
         )
+
+
+_INTENT_ASYNC_ORDER_KINDS = {
+    "PERP_OPEN": AsyncOrderKind.INCREASE,
+    "PERP_CLOSE": AsyncOrderKind.DECREASE,
+}
+_RAW_ASYNC_ORDER_KINDS = {
+    0: AsyncOrderKind.SWAP,
+    1: AsyncOrderKind.SWAP,
+    2: AsyncOrderKind.INCREASE,
+    3: AsyncOrderKind.INCREASE,
+    4: AsyncOrderKind.DECREASE,
+    5: AsyncOrderKind.DECREASE,
+    6: AsyncOrderKind.DECREASE,
+    7: AsyncOrderKind.LIQUIDATION,
+}
+
+
+def _async_order_kind(intent_type: str | None, raw_order_type: Any) -> AsyncOrderKind:
+    """Resolve an order kind, preferring the runner's authoritative intent."""
+    intent_kind = _INTENT_ASYNC_ORDER_KINDS.get(intent_type) if intent_type is not None else None
+    if intent_kind is not None:
+        return intent_kind
+    if not isinstance(raw_order_type, int) or isinstance(raw_order_type, bool):
+        return AsyncOrderKind.UNKNOWN
+    return _RAW_ASYNC_ORDER_KINDS.get(raw_order_type, AsyncOrderKind.UNKNOWN)
+
+
+def _async_order_from_created_event(
+    event: GMXv2Event,
+    *,
+    intent_type: str | None,
+    transaction_hash: str,
+) -> ExtractOk[AsyncOrderData] | ExtractError:
+    """Convert one OrderCreated event into receipt-measured settlement data."""
+    key = event.data.get("key")
+    if not isinstance(key, str) or re.fullmatch(r"0x[0-9a-f]{64}", key) is None or int(key, 16) == 0:
+        return ExtractError(
+            error=(
+                "OrderCreated event did not contain an exact non-zero bytes32 key "
+                f"(tx={transaction_hash or 'unknown'}, log_index={event.log_index})"
+            )
+        )
+
+    raw_size_delta = event.data.get("size_delta_usd")
+    direction = event.data.get("is_long")
+    return ExtractOk(
+        value=AsyncOrderData(
+            protocol="gmx_v2",
+            order_id=key,
+            status=AsyncOrderStatus.PENDING,
+            kind=_async_order_kind(intent_type, event.data.get("order_type")),
+            market=str(event.data.get("market") or "") or None,
+            collateral_token=str(event.data.get("initial_collateral_token") or "") or None,
+            is_long=direction if isinstance(direction, bool) else None,
+            size_delta_usd=Decimal(str(raw_size_delta)) if raw_size_delta is not None else None,
+        )
+    )
 
 
 @dataclass
@@ -555,6 +619,7 @@ class GMXv2ReceiptParser:
 
     SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
         {
+            "async_orders",
             "swap_amounts",
             "position_id",
             "size_delta",
@@ -575,6 +640,14 @@ class GMXv2ReceiptParser:
             "funding_fee_usd",
         }
     )
+    EXTRA_EXTRACTIONS_BY_INTENT: dict[str, tuple[str, ...]] = {
+        "PERP_OPEN": ("async_orders",),
+        "PERP_CLOSE": ("async_orders",),
+    }
+    REQUIRED_EXTRACTIONS_BY_INTENT: dict[str, frozenset[str]] = {
+        "PERP_OPEN": frozenset({"async_orders"}),
+        "PERP_CLOSE": frozenset({"async_orders"}),
+    }
 
     def __init__(self, **kwargs: Any) -> None:
         """Initialize the parser.
@@ -939,9 +1012,11 @@ class GMXv2ReceiptParser:
             # order_type, decrease_position_swap_type, is_long, size_delta_usd,
             # initial_collateral_delta_amount, trigger_price, acceptable_price,
             # execution_fee, min_output_amount, updated_at_block
-            # EventEmitter pattern: topic[2] has the indexed key
-            key_topic = topics[2] if len(topics) > 2 else (topics[1] if len(topics) > 1 else None)
-            key_str = HexDecoder.topic_to_bytes32(key_topic) if key_topic else "0x" + "00" * 32
+            # EventEmitter pattern: topic[2] has the indexed key. A missing
+            # topic[2] must stay missing rather than falling back to the event
+            # name hash in topic[1], which is itself bytes32-shaped but is not
+            # an order identifier.
+            key_str = self._strict_indexed_order_key(topics, event_name)
 
             result: dict[str, Any] = {
                 "key": key_str,
@@ -974,6 +1049,36 @@ class GMXv2ReceiptParser:
         except Exception as e:
             logger.warning(f"Failed to decode Order data: {e}")
             return {"raw_data": data, "event_name": event_name}
+
+    @staticmethod
+    def _strict_indexed_order_key(topics: list[Any], event_name: str) -> str:
+        """Return an exact non-zero bytes32 indexed order key, or an empty string."""
+
+        def normalize(topic: Any) -> str:
+            if isinstance(topic, bytes):
+                return "0x" + topic.hex()
+            value = str(topic)
+            return value if value.startswith("0x") else "0x" + value
+
+        expected = EVENT_TOPICS.get(event_name, "").lower()
+        key_topic: Any | None = None
+        if len(topics) >= 2 and normalize(topics[1]).lower() == expected:
+            if len(topics) >= 3:
+                key_topic = topics[2]
+        elif topics and normalize(topics[0]).lower() == expected and len(topics) >= 2:
+            key_topic = topics[1]
+
+        if key_topic is None:
+            return ""
+        if isinstance(key_topic, bytes):
+            if len(key_topic) != 32:
+                return ""
+            key = "0x" + key_topic.hex()
+        else:
+            key = normalize(key_topic)
+            if re.fullmatch(r"0x[0-9a-fA-F]{64}", key) is None:
+                return ""
+        return "" if int(key, 16) == 0 else key.lower()
 
     def _parse_position_increase(self, event: GMXv2Event) -> PositionIncreaseData | None:
         """Parse a PositionIncrease event into typed data."""
@@ -1137,9 +1242,50 @@ class GMXv2ReceiptParser:
         """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159."""
         return self._wrap_extract(self.extract_swap_amounts, receipt, "no swap order event")
 
+    def extract_async_orders_result(
+        self,
+        receipt: dict[str, Any],
+        *,
+        intent_type: str | None = None,
+    ) -> ExtractResult[list[AsyncOrderData]]:
+        """Extract authoritative GMX ``OrderCreated`` identifiers."""
+        err = self._strict_parse(receipt)
+        if err is not None:
+            return err
+        parsed = self.parse_receipt(receipt)
+        created_events = [event for event in parsed.events if event.event_type == GMXv2EventType.ORDER_CREATED]
+        if not created_events:
+            return ExtractMissing(reason="no OrderCreated event")
+
+        orders: list[AsyncOrderData] = []
+        for event in created_events:
+            result = _async_order_from_created_event(
+                event,
+                intent_type=intent_type,
+                transaction_hash=parsed.transaction_hash,
+            )
+            if isinstance(result, ExtractError):
+                return result
+            orders.append(result.value)
+        return ExtractOk(value=orders)
+
+    def extract_async_orders(
+        self,
+        receipt: dict[str, Any],
+        *,
+        intent_type: str | None = None,
+    ) -> list[AsyncOrderData] | None:
+        """Legacy-compatible raw accessor for authoritative created orders."""
+        result = self.extract_async_orders_result(receipt, intent_type=intent_type)
+        if isinstance(result, ExtractOk):
+            return result.value
+        if isinstance(result, ExtractError):
+            logger.warning("Failed to extract GMX asynchronous orders: %s", result.error)
+        return None
+
     def extract_position_id_result(self, receipt: dict[str, Any]) -> ExtractResult[str]:
         """Fail-closed variant of :meth:`extract_position_id` — see VIB-3159."""
-        return self._wrap_extract(self.extract_position_id, receipt, "no OrderCreated key")
+        return self._wrap_extract(self.extract_position_id, receipt, "no position increase/decrease key")
 
     def extract_size_delta_result(self, receipt: dict[str, Any]) -> ExtractResult[Decimal]:
         """Fail-closed variant of :meth:`extract_size_delta` — see VIB-3159."""

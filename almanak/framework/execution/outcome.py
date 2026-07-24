@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import BridgeData, LPCloseData, SwapAmounts
+    from almanak.framework.execution.extracted_data import AsyncOrderData, BridgeData, LPCloseData, SwapAmounts
 
 
 @dataclass
@@ -30,6 +30,7 @@ class ExecutionOutcome:
         swap_amounts: Swap data extracted by ResultEnricher.
         lp_close_data: LP close data extracted by ResultEnricher.
         bridge_data: Bridge data extracted by ResultEnricher for BRIDGE intents.
+        async_orders: Protocol-issued asynchronous order identifiers and states.
         extracted_data: Flexible dict for protocol-specific data.
         extraction_warnings: Non-fatal warnings from extraction process.
     """
@@ -46,5 +47,6 @@ class ExecutionOutcome:
     swap_amounts: SwapAmounts | None = None
     lp_close_data: LPCloseData | None = None
     bridge_data: BridgeData | None = None
+    async_orders: list[AsyncOrderData] = field(default_factory=list)
     extracted_data: dict[str, Any] = field(default_factory=dict)
     extraction_warnings: list[str] = field(default_factory=list)

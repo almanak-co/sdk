@@ -839,6 +839,12 @@ class StrategyRunner:
         # condition branches (indicator / price / depeg / drawdown) run instead of
         # being force-action short-circuited. Production runs never set it.
         self._snapshot_override_hook: Callable[[Any], None] | None = None
+        # ALM-2972: ``almanak strat test`` enables this barrier so a connector
+        # that emits asynchronous order handles cannot turn submission success
+        # into a position-success callback before terminal settlement is proven.
+        # Production remains unchanged until the persistent deferred-accounting
+        # lane is generalized from the existing Hyperliquid fill pump.
+        self._require_terminal_async_settlement = False
 
         # Detect if we're in multi-chain mode
         self._is_multi_chain = isinstance(execution_orchestrator, MultiChainOrchestrator)
@@ -8891,6 +8897,10 @@ class StrategyRunner:
             except Exception as e:
                 logger.warning(f"Result enrichment failed: {e}")
 
+        async_settlement_early = await self._single_chain_async_settlement_guard(state)
+        if async_settlement_early is not None:
+            return async_settlement_early
+
         # Slippage circuit breaker: check actual slippage against max_slippage_bps
         slippage_early = await self._single_chain_slippage_guard(state)
         if slippage_early is not None:
@@ -9095,6 +9105,76 @@ class StrategyRunner:
             deployment_id=deployment_id,
             duration_ms=self._calculate_duration_ms(state.start_time),
             balance_reconciliation=recon,
+        )
+
+    async def _single_chain_async_settlement_guard(
+        self,
+        state: SingleChainExecutionState,
+    ) -> IterationResult | None:
+        """Block lifecycle-test success until async protocol settlement is terminal.
+
+        The guard runs after receipt enrichment exposed authoritative order IDs,
+        but before reconciliation, ledger/registry commits, callbacks, or strategy
+        state persistence. Synchronous connectors and normal production runs stay
+        on the existing fast path.
+        """
+        if not self._require_terminal_async_settlement:
+            return None
+        execution_result = state.last_execution_result
+        orders = tuple(getattr(execution_result, "async_orders", ()) or ())
+        if not orders:
+            return None
+
+        from .async_settlement import await_async_settlement
+
+        strategy = state.strategy
+        gateway_client = state.gateway_client or self._get_gateway_client()
+        if gateway_client is None:
+            settlement = {
+                "status": "INFRASTRUCTURE_UNSUPPORTED",
+                "terminal": False,
+                "attempts": 0,
+                "elapsed_seconds": 0,
+                "orders": [order.to_dict() if hasattr(order, "to_dict") else str(order) for order in orders],
+                "reason": "No gateway client is available to observe asynchronous settlement",
+            }
+        else:
+            barrier = await await_async_settlement(
+                gateway_client=gateway_client,
+                chain=getattr(strategy, "chain", "") or getattr(state.last_execution_context, "chain", ""),
+                wallet_address=getattr(strategy, "wallet_address", "") or "",
+                network=str(getattr(strategy, "_gateway_network", "") or ""),
+                orders=orders,
+                intent=state.intent,
+                timeout_seconds=self.config.async_settlement_timeout_seconds,
+                poll_interval_seconds=self.config.async_settlement_poll_interval_seconds,
+            )
+            if barrier.terminal and barrier.status.value == "SETTLED":
+                return None
+            settlement = barrier.to_dict()
+
+        reason = str(settlement.get("reason") or "Asynchronous order did not reach terminal settlement")
+        status = str(settlement.get("status") or "OBSERVATION_FAILED")
+        error = f"Async settlement {status}: {reason}"
+        if execution_result is not None:
+            execution_result.error = error
+        logger.error(
+            "Async settlement barrier blocked lifecycle success for %s: status=%s orders=%s reason=%s",
+            state.deployment_id,
+            status,
+            [str(getattr(order, "order_id", "") or "") for order in orders],
+            reason,
+        )
+        if state.record_metrics:
+            self._record_failure()
+        return IterationResult(
+            status=IterationStatus.ASYNC_SETTLEMENT_FAILED,
+            intent=state.intent,
+            execution_result=execution_result,
+            error=error,
+            deployment_id=state.deployment_id,
+            duration_ms=self._calculate_duration_ms(state.start_time),
+            async_settlement=settlement,
         )
 
     async def _single_chain_slippage_guard(self, state: SingleChainExecutionState) -> IterationResult | None:

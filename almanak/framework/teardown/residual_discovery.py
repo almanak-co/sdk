@@ -316,6 +316,36 @@ def discover_teardown_residuals(strategy: Any) -> list[PositionInfo]:
         return []
 
 
+def remeasure_teardown_residuals(
+    strategy: Any,
+    known_residuals: list[PositionInfo],
+) -> list[PositionInfo]:
+    """Re-read after progressing known residuals, preserving failures as UNMEASURED.
+
+    The general discovery wrapper retains its historical never-raise, empty-list
+    contract. Once a connector has changed state for a known residual, however,
+    an unexpected empty result cannot safely mean both "measured zero" and
+    "discovery crashed". This narrower contract converts a failed re-measurement
+    into a sentinel for every known protocol/chain target so callers cannot
+    certify cleanup from an unmeasured empty list.
+    """
+    try:
+        return _discover_teardown_residuals(strategy)
+    except Exception as exc:  # noqa: BLE001 - re-measurement must fail closed without blocking teardown
+        logger.exception("Teardown residual re-measurement raised unexpectedly; preserving UNMEASURED sentinels")
+        targets = sorted(
+            {
+                (str(residual.protocol or "").lower(), str(residual.chain or "").lower())
+                for residual in known_residuals
+                if residual.protocol and residual.chain
+            }
+        )
+        if not targets:
+            raise RuntimeError("Residual re-measurement failed without a known protocol/chain target") from exc
+        error = f"post-progress residual re-measurement failed: {type(exc).__name__}: {exc}"
+        return [_unmeasured_sentinel(protocol, chain, error) for protocol, chain in targets]
+
+
 def _discover_teardown_residuals(strategy: Any) -> list[PositionInfo]:
     """Implementation of :func:`discover_teardown_residuals` (guarded by the wrapper)."""
     protocols = registered_residual_discovery_protocols()
@@ -495,4 +525,5 @@ __all__ = [
     "discover_teardown_residuals",
     "get_teardown_residual_discovery",
     "has_teardown_residual_discovery",
+    "remeasure_teardown_residuals",
 ]

@@ -643,6 +643,9 @@ EXPECTED_RUNNER_HOOK_PROVIDER_MODULES = {
     # VIB-5031: stamps FluidVaultOperateData (the nftId home) into
     # extracted_data before the ledger write.
     "fluid_vault": "almanak.connectors._fluid_core.runner_hooks",
+    # ALM-2972: observes keeper-settled GMX orders and progresses the measured
+    # cancellation window in the current managed Anvil session.
+    "gmx_v2": "almanak.connectors.gmx_v2.runner_hooks",
     # VIB-5595: reconstructs off-EVM perp fill economics (fee / realized-PnL /
     # funding) from HyperCore userFills/userFunding into extracted_data.
     "hyperliquid": "almanak.connectors.hyperliquid.runner_hooks",

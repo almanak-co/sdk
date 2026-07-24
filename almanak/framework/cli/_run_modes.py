@@ -842,6 +842,8 @@ def _run_test_lifecycle(  # noqa: C901
     async def run_lifecycle_with_cleanup() -> tuple[list[dict], dict | None]:  # noqa: C901
         nonlocal action_results, teardown_result_dict
         gateway_integration_ready = False
+        previous_settlement_requirement = getattr(runner, "_require_terminal_async_settlement", False)
+        runner._require_terminal_async_settlement = True
         try:
             runner.setup_gateway_integration(strategy_instance)
             gateway_integration_ready = True
@@ -965,6 +967,10 @@ def _run_test_lifecycle(  # noqa: C901
                     if not json_output:
                         click.echo(f"  failed: {result.error or result.status.value}", err=True)
                     break  # fail-fast
+
+            # Teardown owns its own pending-order convergence contract. Disable
+            # the action settlement barrier before entering that recovery lane.
+            runner._require_terminal_async_settlement = False
 
             # Always run teardown when requested — even if an earlier action
             # failed, we still want to clean up any positions opened by prior
@@ -1101,6 +1107,7 @@ def _run_test_lifecycle(  # noqa: C901
 
             return action_results, teardown_result_dict
         finally:
+            runner._require_terminal_async_settlement = previous_settlement_requirement
             try:
                 if gateway_integration_ready:
                     runner.teardown_gateway_integration(strategy_instance.deployment_id)

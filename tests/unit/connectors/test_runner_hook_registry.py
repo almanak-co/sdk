@@ -8,6 +8,10 @@ import pytest
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._strategy_base.runner_hook_registry import (
+    AsyncSettlementPolicy,
+    AsyncSettlementStatus,
+    AsyncSettlementVerdict,
+    RunnerAsyncSettlementCapability,
     RunnerHookConnector,
     RunnerHookRegistry,
     RunnerHookRegistryError,
@@ -90,6 +94,65 @@ class _SecondPoolKeyLookupConnector(_PoolKeyLookupConnector):
 class _NoCapabilityConnector(RunnerHookConnector):
     protocol: ClassVar[ProtocolName] = ProtocolName("none")
     kind: ClassVar[ProtocolKind] = ProtocolKind.LP
+
+
+class _AsyncSettlementConnector(RunnerHookConnector, RunnerAsyncSettlementCapability):
+    protocol: ClassVar[ProtocolName] = ProtocolName("async_settlement")
+    kind: ClassVar[ProtocolKind] = ProtocolKind.PERP
+
+    def __init__(self) -> None:
+        self.observed: list[dict[str, Any]] = []
+        self.prepared: list[dict[str, Any]] = []
+
+    def async_settlement_policy(self) -> AsyncSettlementPolicy:
+        return AsyncSettlementPolicy(
+            timeout_seconds=12,
+            poll_interval_seconds=3,
+            supports_local_order_execution=False,
+            supports_cancellation=True,
+        )
+
+    def observe_async_orders(
+        self,
+        *,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str,
+        orders: tuple[Any, ...],
+        intent: Any,
+        observation_state: Any = None,
+    ) -> AsyncSettlementVerdict:
+        self.observed.append(
+            {
+                "gateway_client": gateway_client,
+                "chain": chain,
+                "wallet_address": wallet_address,
+                "orders": orders,
+                "intent": intent,
+                "observation_state": observation_state,
+            }
+        )
+        return AsyncSettlementVerdict(status=AsyncSettlementStatus.SETTLED, terminal=True)
+
+    def prepare_pending_orders_for_teardown(
+        self,
+        *,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str,
+        residuals: tuple[Any, ...],
+        network: str,
+    ) -> bool:
+        self.prepared.append(
+            {
+                "gateway_client": gateway_client,
+                "chain": chain,
+                "wallet_address": wallet_address,
+                "residuals": residuals,
+                "network": network,
+            }
+        )
+        return True
 
 
 class _EmptyTopicConnector(RunnerHookConnector, RunnerLPReceiptTopicCapability):
@@ -220,3 +283,56 @@ def test_build_pool_key_lookup_returns_first_callback() -> None:
     assert registry.build_pool_key_lookup(gateway_client) is found.lookup
     assert skipped.calls == [gateway_client]
     assert found.calls == [gateway_client]
+
+
+def test_async_settlement_capability_dispatches_without_protocol_branching() -> None:
+    registry = RunnerHookRegistry()
+    connector = _AsyncSettlementConnector()
+    registry.register(connector)
+    gateway_client = object()
+    order = object()
+    intent = object()
+
+    policy = registry.async_settlement_policy(connector.protocol)
+    verdict = registry.observe_async_orders(
+        protocol=connector.protocol,
+        gateway_client=gateway_client,
+        chain="arbitrum",
+        wallet_address="0xabc",
+        orders=(order,),
+        intent=intent,
+    )
+    prepared = registry.prepare_pending_orders_for_teardown(
+        protocol=connector.protocol,
+        gateway_client=gateway_client,
+        chain="arbitrum",
+        wallet_address="0xabc",
+        residuals=(order,),
+        network="anvil",
+    )
+
+    assert policy == AsyncSettlementPolicy(12, 3, False, True)
+    assert verdict == AsyncSettlementVerdict(status=AsyncSettlementStatus.SETTLED, terminal=True)
+    assert prepared is True
+    assert connector.observed[0]["orders"] == (order,)
+    assert connector.prepared[0]["network"] == "anvil"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("supports_local_order_execution", "no"),
+        ("supports_cancellation", 1),
+    ],
+)
+def test_async_settlement_policy_rejects_non_boolean_capabilities(field: str, value: Any) -> None:
+    kwargs = {
+        "timeout_seconds": 12,
+        "poll_interval_seconds": 3,
+        "supports_local_order_execution": False,
+        "supports_cancellation": True,
+    }
+    kwargs[field] = value
+
+    with pytest.raises(TypeError, match=field):
+        AsyncSettlementPolicy(**kwargs)

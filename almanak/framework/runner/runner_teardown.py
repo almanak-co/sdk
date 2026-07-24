@@ -633,6 +633,35 @@ async def _recover_orphaned_lp_intents(
     return outcome.intents, outcome.incomplete, outcome.warning
 
 
+async def _prepare_deferred_pending_orders(strategy: Any, residuals: list[Any]) -> bool:
+    """Ask owning connectors to progress measured non-cancellable orders."""
+    deferred_by_protocol: dict[str, list[Any]] = {}
+    for residual in residuals:
+        details = residual.details or {}
+        protocol = str(getattr(residual, "protocol", "") or "").lower()
+        if details.get("kind") == "pending_order" and not details.get("cancellable") and protocol:
+            deferred_by_protocol.setdefault(protocol, []).append(residual)
+    if not deferred_by_protocol:
+        return False
+
+    from almanak.connectors._base.types import ProtocolName
+    from almanak.connectors._strategy_runner_hook_registry import STRATEGY_RUNNER_HOOK_REGISTRY
+
+    progressed = False
+    for protocol, deferred_residuals in deferred_by_protocol.items():
+        prepared = await asyncio.to_thread(
+            STRATEGY_RUNNER_HOOK_REGISTRY.prepare_pending_orders_for_teardown,
+            protocol=ProtocolName(protocol),
+            gateway_client=getattr(strategy, "_gateway_client", None),
+            chain=str(getattr(deferred_residuals[0], "chain", "") or getattr(strategy, "chain", "") or ""),
+            wallet_address=str(getattr(strategy, "wallet_address", "") or ""),
+            residuals=tuple(deferred_residuals),
+            network=str(getattr(strategy, "_gateway_network", "") or ""),
+        )
+        progressed = progressed or prepared
+    return progressed
+
+
 async def _recover_pending_order_intents(
     runner: Any,  # noqa: ARG001 — signature parity with _recover_orphaned_lp_intents
     strategy: Any,
@@ -664,7 +693,7 @@ async def _recover_pending_order_intents(
     risk-reducing intent (teardown's inverted failure semantics).
     """
     from ..teardown.full_close import full_close_intents
-    from ..teardown.residual_discovery import discover_teardown_residuals
+    from ..teardown.residual_discovery import discover_teardown_residuals, remeasure_teardown_residuals
 
     deployment_id = getattr(strategy, "deployment_id", "")
     try:
@@ -693,6 +722,11 @@ async def _recover_pending_order_intents(
     # clean) rather than raise, since a strand may remain unrecovered. This makes
     # the "never raises" guarantee structural, not incidental to the list-ops below.
     try:
+        if await _prepare_deferred_pending_orders(strategy, residuals):
+            # The connector changed the current managed session. Re-measure
+            # once, then build cancels only from the new authoritative state.
+            residuals = remeasure_teardown_residuals(strategy, residuals)
+
         # An UNMEASURED residual read (fail-closed sentinel) means we could NOT
         # enumerate the OrderVault — a strand may remain, so do not certify clean.
         unmeasured = any((p.details or {}).get("kind") == "residual_unverified" for p in residuals)

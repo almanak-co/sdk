@@ -860,6 +860,11 @@ def _build_orchestrator_and_providers(  # noqa: C901
             _wired.append("funding_rates")
         click.echo(f"  Injected strategy data services: {', '.join(_wired)}")
 
+    # Preserve the resolved execution network on the strategy. Teardown and
+    # async-settlement hooks need to distinguish a managed Anvil fork from a
+    # live network without re-reading CLI or environment configuration.
+    strategy_instance._gateway_network = resolved_network
+
     components.execution_orchestrator = execution_orchestrator
     components.price_oracle = price_oracle
     components.balance_provider = balance_provider

@@ -589,6 +589,39 @@ async def _reconcile_one(
     reduction).
     """
     try:
+        details = position.details if isinstance(position.details, dict) else {}
+        if details.get("kind") == "pending_order":
+            # A pending order is not a position shape that Plan-A can read.
+            # Its exact connector-owned TD-14 post-condition checks whether the
+            # authoritative order key remains in the protocol's pending set.
+            # Treat a measured key with a registered hook as structurally out
+            # of scope here so the inapplicable generic read cannot downgrade
+            # that exact proof.
+            order_key = details.get("order_key")
+            is_bytes32 = (
+                isinstance(order_key, str)
+                and len(order_key) == 66
+                and order_key.startswith("0x")
+                and all(char in "0123456789abcdefABCDEF" for char in order_key[2:])
+                and int(order_key, 16) != 0
+            )
+            if not is_bytes32:
+                return (
+                    ReconciliationVerdict.UNVERIFIABLE,
+                    "pending-order residual has no authoritative non-zero bytes32 order key",
+                )
+            from almanak.framework.teardown.post_conditions import has_teardown_post_condition
+
+            if has_teardown_post_condition(str(position.protocol or "")):
+                return (
+                    ReconciliationVerdict.NOT_APPLICABLE,
+                    "pending-order lifecycle is outside generic Plan-A position reads; "
+                    "deferring to the registered TD-14 connector post-condition",
+                )
+            return (
+                ReconciliationVerdict.UNVERIFIABLE,
+                "pending-order residual has no registered TD-14 connector post-condition",
+            )
         if position.position_type is PositionType.LP:
             return await _reconcile_lp(position=position, gateway_client=gateway_client, network=network)
         if position.position_type in (PositionType.SUPPLY, PositionType.BORROW):

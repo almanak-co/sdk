@@ -31,7 +31,7 @@ from almanak.framework.gateway_client import GatewayClient
 from almanak.gateway.proto import gateway_pb2
 
 if TYPE_CHECKING:
-    from .extracted_data import BridgeData, LPCloseData, SwapAmounts
+    from .extracted_data import AsyncOrderData, BridgeData, LPCloseData, SwapAmounts
     from .outcome import ExecutionOutcome
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ class GatewayExecutionResult:
         - position_id: LP position NFT tokenId (for LP_OPEN intents)
         - swap_amounts: Swap execution data (for SWAP intents)
         - lp_close_data: LP close data (for LP_CLOSE intents)
+        - async_orders: Protocol-issued asynchronous order identifiers and states
         - bin_ids: TraderJoe V2 bin IDs (for LP positions)
         - extracted_data: Flexible dict for protocol-specific data
 
@@ -135,6 +136,7 @@ class GatewayExecutionResult:
     swap_amounts: "SwapAmounts | None" = None
     lp_close_data: "LPCloseData | None" = None
     bridge_data: "BridgeData | None" = None  # VIB-3226: BRIDGE intent enrichment
+    async_orders: list["AsyncOrderData"] = field(default_factory=list)
     bin_ids: list[int] | None = None
     extracted_data: dict[str, Any] = field(default_factory=dict)
     extraction_warnings: list[str] = field(default_factory=list)
@@ -244,12 +246,13 @@ class GatewayExecutionResult:
             swap_amounts=self.swap_amounts,
             lp_close_data=self.lp_close_data,
             bridge_data=self.bridge_data,
+            async_orders=list(self.async_orders),
             extracted_data=self.extracted_data,
             extraction_warnings=self.extraction_warnings,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a dictionary, including bridge_data enrichment."""
+        """Serialize to a dictionary, including typed enrichment."""
         return {
             "success": self.success,
             "tx_hashes": self.tx_hashes,
@@ -258,6 +261,7 @@ class GatewayExecutionResult:
             "error": self.error,
             "error_code": self.error_code,
             "bridge_data": self.bridge_data.to_dict() if self.bridge_data else None,
+            "async_orders": [order.to_dict() for order in self.async_orders],
         }
 
     def get_extracted(self, key: str, expected_type: type | None = None, default: Any = None) -> Any:

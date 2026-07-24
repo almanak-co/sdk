@@ -6,13 +6,9 @@ Verifies:
   - GatewayExecutionResult.to_outcome() preserves all fields
 """
 
-from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock
 
-import pytest
-
-from almanak.framework.execution.extracted_data import SwapAmounts
+from almanak.framework.execution.extracted_data import AsyncOrderData, AsyncOrderKind, AsyncOrderStatus, SwapAmounts
 from almanak.framework.execution.outcome import ExecutionOutcome
 
 
@@ -131,6 +127,23 @@ class TestExecutionResultToOutcome:
         )
         outcome = result.to_outcome()
         assert outcome.swap_amounts is swap
+
+    def test_to_outcome_with_async_orders(self):
+        from almanak.framework.execution.orchestrator import ExecutionPhase, ExecutionResult
+
+        order = AsyncOrderData(
+            protocol="gmx_v2",
+            order_id="0x" + "ab" * 32,
+            status=AsyncOrderStatus.PENDING,
+            kind=AsyncOrderKind.INCREASE,
+        )
+        result = ExecutionResult(
+            success=True,
+            phase=ExecutionPhase.COMPLETE,
+            async_orders=[order],
+        )
+
+        assert result.to_outcome().async_orders == [order]
 
 
 class TestGatewayExecutionResultToOutcome:

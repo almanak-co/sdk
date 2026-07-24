@@ -169,6 +169,40 @@ def test_action_hold_counts_as_pass(capsys, monkeypatch):
     assert "failure_logs" not in payload["steps"][1]
 
 
+def test_action_requires_terminal_settlement_but_teardown_uses_recovery_lane(capsys, monkeypatch):
+    """The lifecycle barrier applies to actions and is restored after teardown."""
+    monkeypatch.setattr(
+        "almanak.framework.teardown.get_teardown_state_manager",
+        lambda *a, **k: MagicMock(create_request=MagicMock()),
+    )
+    runner = _make_runner()
+    runner._require_terminal_async_settlement = False
+    requirements_seen: list[bool] = []
+
+    async def fake_run_iteration(_strategy):
+        requirements_seen.append(runner._require_terminal_async_settlement)
+        if len(requirements_seen) == 1:
+            return _result(IterationStatus.SUCCESS)
+        return _result(IterationStatus.TEARDOWN)
+
+    runner.run_iteration = AsyncMock(side_effect=fake_run_iteration)
+    exit_code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=_make_strategy(),
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=["open"],
+        teardown=True,
+        json_output=True,
+    )
+    payload = _parse_last_json_object(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["summary"]["all_passed"] is True
+    assert requirements_seen == [True, False]
+    assert runner._require_terminal_async_settlement is False
+
+
 def test_teardown_failure_marks_all_passed_false(capsys, monkeypatch):
     """If teardown returns a non-TEARDOWN status, the run must fail."""
     monkeypatch.setattr(

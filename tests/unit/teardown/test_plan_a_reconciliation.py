@@ -631,6 +631,53 @@ async def test_perp_is_unverifiable_not_fabricated_confirmed():
 
 
 @pytest.mark.asyncio
+async def test_pending_order_with_exact_connector_post_condition_is_not_applicable():
+    order_key = "0x" + "ab" * 32
+    pending_order = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id=order_key,
+        chain="arbitrum",
+        protocol="gmx_v2",
+        value_usd=Decimal("0"),
+        details={"kind": "pending_order", "order_key": order_key},
+    )
+
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(pending_order),
+        gateway_client=object(),
+        market=None,
+    )
+
+    assert report.entries[0].verdict is ReconciliationVerdict.NOT_APPLICABLE
+    assert not report.has_unverifiable
+    assert (
+        report.apply_to_verification_status(VerificationStatus.CHAIN_VERIFIED)
+        is VerificationStatus.CHAIN_VERIFIED
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_order_without_authoritative_key_remains_unverifiable():
+    pending_order = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="unknown-order",
+        chain="arbitrum",
+        protocol="gmx_v2",
+        value_usd=Decimal("0"),
+        details={"kind": "pending_order"},
+    )
+
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(pending_order),
+        gateway_client=object(),
+        market=None,
+    )
+
+    assert report.entries[0].verdict is ReconciliationVerdict.UNVERIFIABLE
+    assert report.has_unverifiable
+
+
+@pytest.mark.asyncio
 async def test_empty_summary_is_empty_report():
     report = await reconcile_known_positions_against_chain(summary=_summary(), gateway_client=object(), market=None)
     assert report.checked_count == 0

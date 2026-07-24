@@ -740,6 +740,69 @@ class PredictionFill:
         }
 
 
+class AsyncOrderStatus(StrEnum):
+    """Framework-level lifecycle states for asynchronously settled orders."""
+
+    PENDING = "pending"
+    EXECUTABLE = "executable"
+    CANCELLABLE = "cancellable"
+    EXECUTED = "executed"
+    CANCELLED = "cancelled"
+    FROZEN = "frozen"
+    FAILED = "failed"
+
+
+class AsyncOrderKind(StrEnum):
+    """Protocol-neutral classification of an asynchronous order."""
+
+    INCREASE = "increase"
+    DECREASE = "decrease"
+    SWAP = "swap"
+    LIQUIDATION = "liquidation"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class AsyncOrderData:
+    """Authoritative identity and observed state of an asynchronous order.
+
+    ``order_id`` is the protocol-issued identifier measured from the execution
+    receipt. It must not contain a compiler-side placeholder. Connectors may
+    expose a venue-specific alias, such as :attr:`order_key` for GMX V2, while
+    settlement orchestration consumes the protocol-neutral field. The optional
+    perp target fields carry receipt-measured market, collateral, direction, and
+    requested size delta so a settlement observer can prove the submitted
+    order's exact position change instead of accepting unrelated account state.
+    """
+
+    protocol: str
+    order_id: str
+    status: AsyncOrderStatus
+    kind: AsyncOrderKind = AsyncOrderKind.UNKNOWN
+    market: str | None = None
+    collateral_token: str | None = None
+    is_long: bool | None = None
+    size_delta_usd: Decimal | None = None
+
+    @property
+    def order_key(self) -> str:
+        """GMX-compatible alias for the protocol-neutral order identifier."""
+        return self.order_id
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to a stable machine-readable dictionary."""
+        return {
+            "protocol": self.protocol,
+            "order_id": self.order_id,
+            "status": self.status.value,
+            "kind": self.kind.value,
+            "market": self.market,
+            "collateral_token": self.collateral_token,
+            "is_long": self.is_long,
+            "size_delta_usd": str(self.size_delta_usd) if self.size_delta_usd is not None else None,
+        }
+
+
 @dataclass(frozen=True)
 class BridgeData:
     """Extracted bridge execution data (VIB-3226).
@@ -1007,6 +1070,9 @@ class ProtocolFees:
 __all__ = [
     "SlippageSource",
     "SwapAmounts",
+    "AsyncOrderStatus",
+    "AsyncOrderKind",
+    "AsyncOrderData",
     "LPCloseData",
     "LPOpenData",
     "BorrowData",

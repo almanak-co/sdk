@@ -86,6 +86,9 @@ from almanak.framework.execution.evm_strategy import EvmExecutionStrategy
 
 # Extracted Data Models (for Result Enrichment)
 from almanak.framework.execution.extracted_data import (
+    AsyncOrderData,
+    AsyncOrderKind,
+    AsyncOrderStatus,
     BorrowData,
     LPCloseData,
     LPOpenData,
@@ -267,6 +270,9 @@ __all__ = [
     "SimulationResult",
     "SubmissionResult",
     "TransactionReceipt",
+    "AsyncOrderData",
+    "AsyncOrderKind",
+    "AsyncOrderStatus",
     # Abstract base classes
     "Signer",
     "Submitter",

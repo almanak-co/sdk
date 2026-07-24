@@ -263,6 +263,7 @@ class IterationStatus(StrEnum):
     # the circuit breaker + alerting path fire and the strategy does not
     # confidently keep trading on corrupted accounting.
     RECONCILIATION_FAILED = "RECONCILIATION_FAILED"
+    ASYNC_SETTLEMENT_FAILED = "ASYNC_SETTLEMENT_FAILED"
     STRATEGY_ERROR = "STRATEGY_ERROR"
     STRATEGY_TIMEOUT = "STRATEGY_TIMEOUT"  # strategy.decide() exceeded time limit
     DATA_ERROR = "DATA_ERROR"
@@ -309,6 +310,9 @@ class IterationResult:
     # (``FailureKind.GUARD_REFUSED``) is recognised from a typed pipeline signal,
     # never by matching the error message. ``None`` means "infer from status".
     failure_kind: FailureKind | None = None
+    # ALM-2972: machine-readable outcome from the protocol-neutral async
+    # settlement barrier. None keeps synchronous connectors on the fast path.
+    async_settlement: dict[str, Any] | None = None
 
     @property
     def success(self) -> bool:
@@ -331,6 +335,7 @@ class IterationResult:
             "duration_ms": self.duration_ms,
             "timestamp": self.timestamp.isoformat(),
             "balance_reconciliation": self.balance_reconciliation,
+            "async_settlement": self.async_settlement,
         }
 
 
@@ -515,6 +520,8 @@ class RunnerConfig:
     reconciliation_enforcement: bool = False
     reconciliation_confirmation_depth: int | None = None
     reconciliation_confirmation_timeout_seconds: float = 12.0
+    async_settlement_timeout_seconds: int | None = None
+    async_settlement_poll_interval_seconds: int | None = None
 
 
 # =============================================================================

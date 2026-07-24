@@ -15,7 +15,8 @@ The recovery half of VIB-5116. Two layers:
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -161,6 +162,106 @@ async def test_recover_defers_not_yet_cancellable_order():
     assert intents == []  # no doomed cancel built
     assert incomplete is True
     assert warning is not None and "not yet cancellable" in warning
+
+
+@pytest.mark.asyncio
+async def test_recover_advances_same_anvil_session_then_remeasures_and_cancels():
+    """Managed-test teardown progresses the measured age gate in place."""
+    from almanak.framework.runner.runner_teardown import _recover_pending_order_intents
+
+    deferred = _pending_residual(cancellable=False)
+    cancellable = _pending_residual(cancellable=True)
+    strategy = SimpleNamespace(
+        deployment_id="test:gmx",
+        chain="arbitrum",
+        wallet_address="0xabc",
+        _gateway_client=object(),
+        _gateway_network="anvil",
+    )
+    prepare = MagicMock(return_value=True)
+    with (
+        patch(
+            "almanak.framework.teardown.residual_discovery._discover_teardown_residuals",
+            side_effect=[[deferred], [cancellable]],
+        ) as discover,
+        patch(
+            "almanak.connectors._strategy_runner_hook_registry."
+            "STRATEGY_RUNNER_HOOK_REGISTRY.prepare_pending_orders_for_teardown",
+            prepare,
+        ),
+    ):
+        intents, incomplete, warning = await _recover_pending_order_intents(None, strategy, [], None)
+
+    assert [intent.intent_type for intent in intents] == [IntentType.PERP_CANCEL_ORDER]
+    assert incomplete is False
+    assert warning is None
+    assert discover.call_count == 2
+    assert prepare.call_args.kwargs["residuals"] == (deferred,)
+    assert prepare.call_args.kwargs["network"] == "anvil"
+
+
+@pytest.mark.asyncio
+async def test_recover_failed_post_progress_remeasurement_stays_incomplete():
+    """A re-measurement crash cannot turn a known pending order into measured zero."""
+    from almanak.framework.runner.runner_teardown import _recover_pending_order_intents
+
+    deferred = _pending_residual(cancellable=False)
+    strategy = SimpleNamespace(
+        deployment_id="test:gmx",
+        chain="arbitrum",
+        wallet_address="0xabc",
+        _gateway_client=object(),
+        _gateway_network="anvil",
+    )
+    with (
+        patch(
+            "almanak.framework.teardown.residual_discovery._discover_teardown_residuals",
+            side_effect=[[deferred], RuntimeError("rpc blip")],
+        ) as discover,
+        patch(
+            "almanak.connectors._strategy_runner_hook_registry."
+            "STRATEGY_RUNNER_HOOK_REGISTRY.prepare_pending_orders_for_teardown",
+            return_value=True,
+        ),
+    ):
+        intents, incomplete, warning = await _recover_pending_order_intents(None, strategy, [], None)
+
+    assert intents == []
+    assert incomplete is True
+    assert warning is not None and "UNMEASURED" in warning
+    assert discover.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_recover_does_not_remeasure_when_connector_cannot_progress_session():
+    """A live or unsupported environment remains a loud recoverable pending state."""
+    from almanak.framework.runner.runner_teardown import _recover_pending_order_intents
+
+    deferred = _pending_residual(cancellable=False)
+    strategy = SimpleNamespace(
+        deployment_id="test:gmx",
+        chain="arbitrum",
+        wallet_address="0xabc",
+        _gateway_client=object(),
+        _gateway_network="mainnet",
+    )
+    with (
+        patch(
+            "almanak.framework.teardown.residual_discovery.discover_teardown_residuals",
+            return_value=[deferred],
+        ) as discover,
+        patch(
+            "almanak.connectors._strategy_runner_hook_registry."
+            "STRATEGY_RUNNER_HOOK_REGISTRY.prepare_pending_orders_for_teardown",
+            return_value=False,
+        ),
+    ):
+        intents, incomplete, warning = await _recover_pending_order_intents(None, strategy, [], None)
+
+    assert intents == []
+    assert incomplete is True
+    assert warning is not None and "not yet cancellable" in warning
+    discover.assert_called_once()
 
 
 @pytest.mark.asyncio
