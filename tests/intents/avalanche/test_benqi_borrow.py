@@ -65,7 +65,7 @@ from almanak.framework.execution.orchestrator import (
     ExecutionResult,
 )
 from almanak.framework.execution.result_enricher import enrich_result
-from almanak.framework.intents import BorrowIntent, RepayIntent
+from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
@@ -254,14 +254,21 @@ class TestBenqiBorrowIntent:
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ):
-        """Test borrowing USDC with WAVAX collateral using BorrowIntent.
+        """Test borrowing USDC against AVAX collateral via the two-intent form.
+
+        Uses the accounting-correct SUPPLY -> standalone BORROW split (#2827):
+        a bundled ``BorrowIntent(collateral_amount > 0)`` is fail-closed at the
+        intent validator because accounting writes one event per intent — the
+        supply leg would collapse into the single BORROW event.
 
         Flow:
-        1. Create BorrowIntent with WAVAX as collateral, borrowing USDC
-        2. Compile to ActionBundle using IntentCompiler
-        3. Execute via ExecutionOrchestrator
-        4. Parse receipt for Mint (supply) and Borrow events
-        5. Verify WAVAX decreased (collateral) and USDC increased (borrowed)
+        1. Setup: supply AVAX collateral via SupplyIntent
+           (use_as_collateral=True adds the enterMarkets step)
+        2. Create a standalone BorrowIntent (collateral_amount=0) for USDC
+        3. Compile + execute via the production pipeline
+        4. Parse receipts: Mint on the supply leg; Borrow (and no Mint) on the
+           borrow leg
+        5. Verify AVAX decreased (collateral) and USDC increased (borrowed)
         6. Layer 5: assert persisted BORROW accounting event
 
         LTV calculation: AVAX trades around ~$6.60 (live CoinGecko, as of
@@ -287,7 +294,7 @@ class TestBenqiBorrowIntent:
         borrow_amount = Decimal("50")
 
         print(f"\n{'=' * 80}")
-        print(f"Test: Borrow {borrow_amount} USDC with {collateral_amount} AVAX collateral using BorrowIntent")
+        print(f"Test: Borrow {borrow_amount} USDC with {collateral_amount} AVAX collateral (two-intent form)")
         print(f"{'=' * 80}")
 
         # Record balances BEFORE
@@ -298,27 +305,53 @@ class TestBenqiBorrowIntent:
         print(f"Native AVAX before: {format_token_amount(avax_before, 18)}")
         print(f"USDC before: {format_token_amount(usdc_before, usdc_decimals)}")
 
-        # Create BorrowIntent
-        intent = BorrowIntent.model_construct(
-            protocol="benqi",
-            collateral_token="AVAX",
-            collateral_amount=collateral_amount,
-            borrow_token="USDC",
-            borrow_amount=borrow_amount,
-            chain=CHAIN_NAME,
-        )
-
-        print("\nCreated BorrowIntent:")
-        print(f"  Collateral: {intent.collateral_amount} {intent.collateral_token}")
-        print(f"  Borrow: {intent.borrow_amount} {intent.borrow_token}")
-
-        # Compile intent
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
         )
+
+        # Step 1 — supply the AVAX collateral (two-intent form, #2827: the
+        # bundled shape is fail-closed at the intent validator).
+        # use_as_collateral=True adds the enterMarkets step the standalone
+        # borrow relies on (its bundle is the bare borrow tx).
+        supply_intent = SupplyIntent(
+            protocol="benqi",
+            token="AVAX",
+            amount=collateral_amount,
+            use_as_collateral=True,
+            chain=CHAIN_NAME,
+        )
+        supply_compile = compiler.compile(supply_intent)
+        assert supply_compile.status.value == "SUCCESS", f"Supply compilation failed: {supply_compile.error}"
+        assert supply_compile.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_compile.action_bundle)
+        assert supply_exec.success, f"Collateral supply failed: {supply_exec.error}"
+
+        # Layer 3 (supply leg): the qiAVAX Mint (supply) event must be present.
+        supply_mint_seen = False
+        for tx_result in supply_exec.transaction_results:
+            if tx_result.receipt:
+                supply_parse = BenqiReceiptParser(underlying_decimals=18).parse_receipt(
+                    tx_result.receipt.to_dict()
+                )
+                if supply_parse.success and supply_parse.supply_amount > 0:
+                    supply_mint_seen = True
+        assert supply_mint_seen, "Receipt parser must find a Mint (supply) event on the supply leg"
+
+        # Step 2 — standalone borrow (the only shape the public API allows).
+        intent = BorrowIntent(
+            protocol="benqi",
+            collateral_token="AVAX",
+            collateral_amount=Decimal("0"),
+            borrow_token="USDC",
+            borrow_amount=borrow_amount,
+            chain=CHAIN_NAME,
+        )
+
+        print("\nCreated standalone BorrowIntent:")
+        print(f"  Borrow: {intent.borrow_amount} {intent.borrow_token}")
 
         print("\nCompiling intent to ActionBundle...")
         compilation_result = compiler.compile(intent)
@@ -338,7 +371,8 @@ class TestBenqiBorrowIntent:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
-        # Parse receipts - track that we found expected events
+        # Parse receipts (Layer 3) — the standalone borrow must emit a Borrow
+        # event and NO Mint/supply event (collateral moved in step 1).
         found_borrow_event = False
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i + 1}:")
@@ -346,18 +380,15 @@ class TestBenqiBorrowIntent:
             print(f"  Gas used: {tx_result.gas_used}")
 
             if tx_result.receipt:
-                # Use appropriate decimals: 18 for AVAX collateral supply, usdc_decimals for borrow
-                # The borrow tx (last) uses USDC decimals; supply tx uses AVAX (18) decimals
-                tx_decimals = usdc_decimals if i == len(execution_result.transaction_results) - 1 else 18
-                parser = BenqiReceiptParser(underlying_decimals=tx_decimals)
+                parser = BenqiReceiptParser(underlying_decimals=usdc_decimals)
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
 
                 if parse_result.success:
-                    if parse_result.supply_amount > 0:
-                        print(f"  Supply (collateral): {parse_result.supply_amount}")
+                    assert parse_result.supply_amount == 0, (
+                        "Standalone borrow must not emit a Mint (supply) event"
+                    )
                     if parse_result.borrow_amount > 0:
                         print(f"  Borrow amount: {parse_result.borrow_amount}")
-                        assert parse_result.borrow_amount > 0, "Borrow amount must be positive"
                         found_borrow_event = True
 
         assert found_borrow_event, "Receipt parser must find at least one Borrow event"
@@ -370,9 +401,12 @@ class TestBenqiBorrowIntent:
         avax_spent = avax_before - avax_after
         usdc_received = usdc_after - usdc_before
 
-        # Calculate total gas cost across all transactions
+        # Calculate total gas cost across both legs (supply + borrow)
         total_gas_cost = sum(
-            tx.gas_used * tx.receipt.effective_gas_price for tx in execution_result.transaction_results if tx.receipt
+            tx.gas_used * tx.receipt.effective_gas_price
+            for leg in (supply_exec, execution_result)
+            for tx in leg.transaction_results
+            if tx.receipt
         )
 
         print("\n--- Results ---")
@@ -481,10 +515,23 @@ class TestBenqiBorrowIntent:
         # price: Compound-V2 ``borrow()`` is comptroller-rejected via a ``Failure``
         # event WITHOUT reverting (status == 1), so no ``Borrow`` event is emitted
         # and ``amount_token`` comes back ``None`` (intent-tests.md LTV-cap rule #10).
-        borrow_intent = BorrowIntent.model_construct(
+        setup_supply_intent = SupplyIntent(
+            protocol="benqi",
+            token="AVAX",
+            amount=Decimal("40"),
+            use_as_collateral=True,
+            chain=CHAIN_NAME,
+        )
+        setup_supply_result = compiler.compile(setup_supply_intent)
+        assert setup_supply_result.status.value == "SUCCESS"
+        assert setup_supply_result.action_bundle is not None
+        setup_supply_exec = await orchestrator.execute(setup_supply_result.action_bundle)
+        assert setup_supply_exec.success, f"Collateral supply setup failed: {setup_supply_exec.error}"
+
+        borrow_intent = BorrowIntent(
             protocol="benqi",
             collateral_token="AVAX",
-            collateral_amount=Decimal("40"),
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
             borrow_amount=setup_borrow,
             chain=CHAIN_NAME,
@@ -669,7 +716,8 @@ class TestBenqiBorrowIntent:
         already have collateral supplied and entered as collateral.
 
         Flow:
-        1. Setup: Supply AVAX + enterMarkets via BorrowIntent with collateral
+        1. Setup: Supply AVAX + enterMarkets via SupplyIntent, then a small
+           standalone borrow (two-intent form, #2827)
         2. Record balances
         3. Create BorrowIntent with collateral_amount=0
         4. Compile (verify only BORROW tx, no SUPPLY/enterMarkets)
@@ -684,8 +732,9 @@ class TestBenqiBorrowIntent:
         usdc = tokens["USDC"]
         usdc_decimals = get_token_decimals(web3, usdc)
 
-        # ── Step 1: Setup — supply collateral via a regular BorrowIntent ──
-        # This supplies AVAX, enters markets, and borrows a small amount.
+        # ── Step 1: Setup — supply collateral, then a small standalone borrow
+        # (two-intent form, #2827). This supplies AVAX, enters markets, and
+        # borrows a small amount.
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
@@ -693,10 +742,23 @@ class TestBenqiBorrowIntent:
             rpc_url=anvil_rpc_url,
         )
 
-        setup_intent = BorrowIntent.model_construct(
+        setup_supply_intent = SupplyIntent(
+            protocol="benqi",
+            token="AVAX",
+            amount=Decimal("10"),  # ~$200 collateral
+            use_as_collateral=True,
+            chain=CHAIN_NAME,
+        )
+        setup_supply_result = compiler.compile(setup_supply_intent)
+        assert setup_supply_result.status.value == "SUCCESS", f"Setup supply compilation failed: {setup_supply_result.error}"
+        assert setup_supply_result.action_bundle is not None
+        setup_supply_exec = await orchestrator.execute(setup_supply_result.action_bundle)
+        assert setup_supply_exec.success, f"Setup supply execution failed: {setup_supply_exec.error}"
+
+        setup_intent = BorrowIntent(
             protocol="benqi",
             collateral_token="AVAX",
-            collateral_amount=Decimal("10"),  # ~$200 collateral
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
             borrow_amount=Decimal("10"),  # Small initial borrow
             chain=CHAIN_NAME,
@@ -901,8 +963,9 @@ class TestBenqiBorrowIntent:
     ):
         """Test that borrowing far more than collateral supports fails gracefully.
 
-        Supply minimal collateral (1 AVAX ~ $20) but try to borrow $100,000 USDC.
-        This exceeds any collateral factor and must revert on-chain.
+        Supply minimal collateral (1 AVAX ~ $20) via SupplyIntent, then try a
+        standalone borrow of $100,000 USDC (two-intent form, #2827). This
+        exceeds any collateral factor and must fail on-chain.
 
         Layer 5 failure contract: a failed execution must write ZERO
         accounting_events rows.
@@ -916,21 +979,34 @@ class TestBenqiBorrowIntent:
 
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
 
-        # Supply tiny collateral but borrow massive amount
-        intent = BorrowIntent.model_construct(
-            protocol="benqi",
-            collateral_token="AVAX",
-            collateral_amount=Decimal("1"),  # ~$20 collateral
-            borrow_token="USDC",
-            borrow_amount=Decimal("100000"),  # $100k borrow >> collateral
-            chain=CHAIN_NAME,
-        )
-
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+        )
+
+        # Supply tiny collateral (succeeds), then attempt a massive standalone borrow
+        supply_intent = SupplyIntent(
+            protocol="benqi",
+            token="AVAX",
+            amount=Decimal("1"),  # ~$20 collateral
+            use_as_collateral=True,
+            chain=CHAIN_NAME,
+        )
+        supply_compile = compiler.compile(supply_intent)
+        assert supply_compile.status.value == "SUCCESS"
+        assert supply_compile.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_compile.action_bundle)
+        assert supply_exec.success, f"Collateral supply failed: {supply_exec.error}"
+
+        intent = BorrowIntent(
+            protocol="benqi",
+            collateral_token="AVAX",
+            collateral_amount=Decimal("0"),
+            borrow_token="USDC",
+            borrow_amount=Decimal("100000"),  # $100k borrow >> collateral
+            chain=CHAIN_NAME,
         )
 
         compilation_result = compiler.compile(intent)

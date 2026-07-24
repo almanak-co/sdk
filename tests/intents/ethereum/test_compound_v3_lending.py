@@ -903,10 +903,11 @@ class TestCompoundV3SupplyIntent:
 class TestCompoundV3BorrowIntent:
     """Test Compound V3 borrow/repay on the USDC Comet.
 
-    The compiler bundles a BorrowIntent with ``collateral_amount > 0`` as
-    ``approve(collateral) + supplyCollateral(asset, amount) + borrow(base)``
-    in a single ActionBundle. Repay reuses ``Comet.supply()`` of the base
-    token; there is no distinct repay event.
+    Tests use the accounting-correct two-intent form (#2827): a SupplyIntent
+    posts the collateral (``approve + supplyCollateral``), then a standalone
+    ``BorrowIntent(collateral_amount=0)`` compiles to ``withdraw(base)`` on
+    the Comet. Repay reuses ``Comet.supply()`` of the base token; there is
+    no distinct repay event.
 
     No ``interest_rate_mode`` is passed — Compound V3 has a single
     utilization-driven rate per Comet, and the BorrowIntent validator rejects
@@ -928,6 +929,12 @@ class TestCompoundV3BorrowIntent:
         anvil_eth_call_adapter,
     ):
         """Borrow USDC against 1 WETH collateral on the Compound V3 USDC Comet.
+
+        Two-intent form (#2827): the SupplyIntent posts the WETH collateral,
+        then a standalone ``BorrowIntent(collateral_amount=0)`` draws the
+        base token — the bundled shape is fail-closed at the intent validator
+        because accounting writes one event per intent (and post-VIB-5218
+        merged receipts would record the BORROW row off the collateral leg).
 
         Borrow amount derived from the live price oracle to target ~25% LTV
         (5% headroom under the 30% cap mandated by .claude/rules/intent-tests.md).
@@ -960,20 +967,51 @@ class TestCompoundV3BorrowIntent:
         print(f"Comet debt before:          {comet_borrow_before}")
         print(f"Comet WETH collat before:   {comet_collateral_before}")
 
-        intent = BorrowIntent.model_construct(
-            protocol="compound_v3",
-            collateral_token="WETH",
-            collateral_amount=collateral_amount,
-            borrow_token="USDC",
-            borrow_amount=borrow_amount,
-            chain=CHAIN_NAME,
-            market_id=MARKET_ID,
-        )
-
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
+        )
+
+        # Step 1 — supply the WETH collateral (two-intent form, #2827: the
+        # bundled shape is fail-closed at the intent validator).
+        supply_intent = SupplyIntent(
+            protocol="compound_v3",
+            token="WETH",
+            amount=collateral_amount,
+            chain=CHAIN_NAME,
+            market_id=MARKET_ID,
+        )
+        supply_compile = compiler.compile(supply_intent)
+        assert supply_compile.status.value == "SUCCESS", f"Supply compilation failed: {supply_compile.error}"
+        assert supply_compile.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_compile.action_bundle, execution_context)
+        assert supply_exec.success, f"Collateral supply failed: {supply_exec.error}"
+
+        # Layer 3 (supply leg): SupplyCollateral(WETH) must land on the Comet.
+        supply_parser = CompoundV3ReceiptParser(base_decimals=usdc_decimals)
+        supplied_collateral: dict[str, Decimal] = {}
+        for tx_result in supply_exec.transaction_results:
+            if tx_result.receipt:
+                supply_parse = supply_parser.parse_receipt(tx_result.receipt.to_dict(), comet_address=comet_address)
+                if supply_parse.success:
+                    for asset, amount in supply_parse.collateral_supplied.items():
+                        supplied_collateral[asset.lower()] = (
+                            supplied_collateral.get(asset.lower(), Decimal("0")) + amount
+                        )
+        assert supplied_collateral.get(weth.lower(), Decimal("0")) > 0, (
+            "Receipt parser must observe a SupplyCollateral(WETH) event on the Comet for the supply leg"
+        )
+
+        # Step 2 — standalone borrow (the only shape the public API allows).
+        intent = BorrowIntent(
+            protocol="compound_v3",
+            collateral_token="WETH",
+            collateral_amount=Decimal("0"),
+            borrow_token="USDC",
+            borrow_amount=borrow_amount,
+            chain=CHAIN_NAME,
+            market_id=MARKET_ID,
         )
         compilation_result = compiler.compile(intent)
         assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
@@ -988,24 +1026,21 @@ class TestCompoundV3BorrowIntent:
         execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
         assert execution_result.success, f"Borrow execution failed: {execution_result.error}"
 
-        # Layer 3: SupplyCollateral(WETH) + Withdraw(base) on the Comet
+        # Layer 3: Withdraw(base) on the Comet — and NO SupplyCollateral (the
+        # collateral moved in step 1; one here would mean the bundled shape
+        # leaked back).
         parser = CompoundV3ReceiptParser(base_decimals=usdc_decimals)
-        observed_collateral: dict[str, Decimal] = {}
         observed_borrow_amount = Decimal("0")
         for tx_result in execution_result.transaction_results:
             if tx_result.receipt:
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict(), comet_address=comet_address)
                 if parse_result.success:
-                    for asset, amount in parse_result.collateral_supplied.items():
-                        observed_collateral[asset.lower()] = (
-                            observed_collateral.get(asset.lower(), Decimal("0")) + amount
-                        )
+                    assert not parse_result.collateral_supplied, (
+                        "Standalone borrow must not emit SupplyCollateral events. Got: "
+                        f"{list(parse_result.collateral_supplied)}"
+                    )
                     if parse_result.withdraw_amount > 0:
                         observed_borrow_amount += parse_result.withdraw_amount
-        weth_lower = weth.lower()
-        assert weth_lower in observed_collateral and observed_collateral[weth_lower] > 0, (
-            "Receipt parser must observe a SupplyCollateral(WETH) event on the Comet"
-        )
         assert observed_borrow_amount > 0, (
             "Receipt parser must observe a Withdraw (≡ borrow) event on the Comet for the base token"
         )
@@ -1107,15 +1142,29 @@ class TestCompoundV3BorrowIntent:
             price_oracle=price_oracle,
         )
 
-        # Setup: open the borrow position. Reuse the same oracle-derived sizing
+        # Setup: open the borrow position (two-intent form, #2827). Reuse the
+        # same oracle-derived sizing
         # as the dedicated borrow test so the repay flow stays under the 30% LTV
         # cap as WETH price moves.
         setup_collateral = Decimal("1")
         setup_borrow = _safe_usdc_borrow_amount(price_oracle, setup_collateral)
-        borrow_intent = BorrowIntent.model_construct(
+        supply_intent = SupplyIntent(
+            protocol="compound_v3",
+            token="WETH",
+            amount=setup_collateral,
+            chain=CHAIN_NAME,
+            market_id=MARKET_ID,
+        )
+        supply_result = compiler.compile(supply_intent)
+        assert supply_result.status.value == "SUCCESS"
+        assert supply_result.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_result.action_bundle, execution_context)
+        assert supply_exec.success, f"Collateral supply setup failed: {supply_exec.error}"
+
+        borrow_intent = BorrowIntent(
             protocol="compound_v3",
             collateral_token="WETH",
-            collateral_amount=setup_collateral,
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
             borrow_amount=setup_borrow,
             chain=CHAIN_NAME,
@@ -1313,15 +1362,29 @@ class TestCompoundV3BorrowIntent:
             price_oracle=price_oracle,
         )
 
-        # On-chain borrow setup — intentionally NOT persisted through Layer 5,
+        # On-chain borrow setup (two-intent form, #2827) — intentionally NOT
+        # persisted through Layer 5,
         # so the FIFO basis pool has no matching BORROW lot. Oracle-sized to
         # ~25% LTV so it stays under the 30% cap as WETH price moves.
         setup_collateral = Decimal("1")
         setup_borrow = _safe_usdc_borrow_amount(price_oracle, setup_collateral)
-        borrow_intent = BorrowIntent.model_construct(
+        supply_intent = SupplyIntent(
+            protocol="compound_v3",
+            token="WETH",
+            amount=setup_collateral,
+            chain=CHAIN_NAME,
+            market_id=MARKET_ID,
+        )
+        supply_result = compiler.compile(supply_intent)
+        assert supply_result.status.value == "SUCCESS"
+        assert supply_result.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_result.action_bundle, execution_context)
+        assert supply_exec.success, f"Collateral supply setup failed: {supply_exec.error}"
+
+        borrow_intent = BorrowIntent(
             protocol="compound_v3",
             collateral_token="WETH",
-            collateral_amount=setup_collateral,
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
             borrow_amount=setup_borrow,
             chain=CHAIN_NAME,

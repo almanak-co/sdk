@@ -158,10 +158,13 @@ class TestKaminoBorrowCompilation:
         Like repay and withdraw, borrow requires an existing Kamino obligation
         (the wallet must have deposited collateral first).
         """
-        intent = BorrowIntent.model_construct(
+        # Standalone borrow shape (#2827): the bundled collateralized form is
+        # fail-closed at the intent validator; collateral_token stays as
+        # metadata identifying the backing asset.
+        intent = BorrowIntent(
             protocol="kamino",
             collateral_token="SOL",
-            collateral_amount=Decimal("0.01"),
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
             borrow_amount=Decimal("0.50"),  # Low LTV
             chain=CHAIN_NAME,

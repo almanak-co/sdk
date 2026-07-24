@@ -707,13 +707,20 @@ class SparkReceiptParser:
 
         try:
             result = self.parse_receipt(receipt)
-            # First present lending event in precedence order. A single lending tx
-            # carries exactly one of these (a SUPPLY receipt has only ``supplies``,
-            # etc.), so first-present is the action's principal leg.
+            # Debt-side events (Borrow / Repay) take precedence over the
+            # collateral side (Withdraw / Supply). A single well-formed lending
+            # tx carries exactly one of these, but the enricher's merged-receipt
+            # path (VIB-5416) can hand this extractor a BUNDLE's receipt: a
+            # validator-bypassed bundled collateralized borrow (#2827) merges the
+            # collateral Supply AND the Borrow into one receipt, and the
+            # principal of a BORROW is the borrowed reserve — never the
+            # collateral. Collateral-side-first here booked the BORROW row off
+            # the Supply leg (wrong asset/amount); debt-side-first is the same
+            # defense the Euler V2 extractor ships.
             event = next(
                 (
                     e
-                    for events in (result.supplies, result.withdraws, result.borrows, result.repays)
+                    for events in (result.borrows, result.repays, result.withdraws, result.supplies)
                     for e in events[:1]
                 ),
                 None,

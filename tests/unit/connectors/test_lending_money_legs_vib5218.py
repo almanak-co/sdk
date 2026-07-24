@@ -55,6 +55,34 @@ def _spark_supply_receipt(amount_raw: int) -> dict[str, Any]:
     return {"transactionHash": "0xspark", "blockNumber": 1, "logs": [log]}
 
 
+_WETH_ETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+
+
+def _spark_borrow_with_collateral_receipt(*, collateral_raw: int, borrow_raw: int) -> dict[str, Any]:
+    """A merged bundled-borrow receipt: the collateral Supply(WETH) log BEFORE the
+    Borrow(USDC) log — the shape the enricher's merged-receipt path (VIB-5416)
+    produces for a validator-bypassed bundled collateralized borrow (#2827).
+
+    The principal of a BORROW is the borrowed reserve, so the extractor must book
+    USDC — NOT the WETH collateral leg emitted first.
+    """
+    from almanak.connectors.spark.receipt_parser import EVENT_TOPICS, SPARK_POOL_ADDRESSES
+
+    pool = next(iter(SPARK_POOL_ADDRESSES))
+    supply_log = {
+        "address": pool,
+        "topics": [EVENT_TOPICS["Supply"], _addr_topic(_WETH_ETH), _addr_topic(_USER)],
+        "data": "0x" + _word(int(_USER, 16)) + _word(collateral_raw) + _word(0),  # user, amount, referral
+    }
+    borrow_log = {
+        "address": pool,
+        "topics": [EVENT_TOPICS["Borrow"], _addr_topic(_USDC_ETH), _addr_topic(_USER)],
+        # user, amount, interestRateMode, borrowRate, referralCode
+        "data": "0x" + _word(int(_USER, 16)) + _word(borrow_raw) + _word(2) + _word(0) + _word(0),
+    }
+    return {"transactionHash": "0xspark_borrow", "blockNumber": 1, "logs": [supply_log, borrow_log]}
+
+
 def _euler_deposit_receipt(amount_raw: int, vault: str) -> dict[str, Any]:
     from almanak.connectors.euler_v2.receipt_parser import DEPOSIT_TOPIC
 
@@ -256,6 +284,27 @@ def test_euler_borrow_books_loan_token_not_collateral() -> None:
     assert len(principal) == 1
     leg = principal[0]
     assert leg.token == "USDC", "BORROW principal is the loan token, not the WETH collateral"
+    assert leg.amount.is_measured
+    assert str(leg.amount.value) == "3"
+
+
+def test_spark_borrow_books_loan_token_not_collateral() -> None:
+    """A merged bundled-borrow receipt (WETH Supply + USDC Borrow, VIB-5416 merged
+    fields) must declare the BORROWED reserve (USDC) as the principal, NOT the
+    collateral Supply emitted first. Debt-side precedence mirrors the euler guard —
+    collateral-side-first booked the BORROW accounting row off the WETH supply leg
+    (wrong asset/amount), which broke the ethereum Spark borrow/repay goldens."""
+    parser = _spark_parser()
+    receipt = _spark_borrow_with_collateral_receipt(
+        collateral_raw=500_000_000_000_000_000,  # 0.5 WETH
+        borrow_raw=3_000_000,  # 3 USDC
+    )
+    legs = parser.extract_primitive_money_legs(receipt)
+    assert isinstance(legs, PrimitiveMoneyLegs)
+    principal = legs.principal_legs
+    assert len(principal) == 1
+    leg = principal[0]
+    assert leg.token == "USDC", "BORROW principal is the borrowed reserve, not the WETH collateral"
     assert leg.amount.is_measured
     assert str(leg.amount.value) == "3"
 

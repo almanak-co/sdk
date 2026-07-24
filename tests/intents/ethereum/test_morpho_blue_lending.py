@@ -53,7 +53,7 @@ from almanak.framework.execution.orchestrator import (
     ExecutionResult,
 )
 from almanak.framework.execution.result_enricher import enrich_result
-from almanak.framework.intents import BorrowIntent, RepayIntent, WithdrawIntent
+from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
@@ -283,28 +283,51 @@ class TestMorphoBlueBorrowIntent:
         print(f"wstETH before: {format_token_amount(wsteth_before, wsteth_decimals)}")
         print(f"USDC before:   {format_token_amount(usdc_before, usdc_decimals)}")
 
-        intent = BorrowIntent.model_construct(
-            protocol="morpho_blue",
-            collateral_token="wstETH",
-            collateral_amount=collateral_amount,
-            borrow_token="USDC",
-            borrow_amount=borrow_amount,
-            market_id=MORPHO_MARKET_ID,
-            chain=CHAIN_NAME,
-        )
-
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
         )
+
+        # Step 1 — supply the wstETH collateral (two-intent form, #2827: the
+        # bundled shape is fail-closed at the intent validator).
+        supply_intent = SupplyIntent(
+            protocol="morpho_blue",
+            token="wstETH",
+            amount=collateral_amount,
+            use_as_collateral=True,
+            market_id=MORPHO_MARKET_ID,
+            chain=CHAIN_NAME,
+        )
+        supply_compile = compiler.compile(supply_intent)
+        assert supply_compile.status.value == "SUCCESS", f"Supply compilation failed: {supply_compile.error}"
+        assert supply_compile.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_compile.action_bundle, execution_context)
+        assert supply_exec.success, f"Collateral supply failed: {supply_exec.error}"
+
+        # Layer 3 (supply leg): SupplyCollateral must land on the market.
+        supply_events = _collect_morpho_events(supply_exec)
+        supply_collateral_event = _first_event(supply_events, MorphoBlueEventType.SUPPLY_COLLATERAL)
+        assert supply_collateral_event is not None, "Expected SupplyCollateral event in the supply-leg receipts"
+        assert supply_collateral_event.data["market_id"].lower() == MORPHO_MARKET_ID.lower()
+
+        # Step 2 — standalone borrow (the only shape the public API allows).
+        intent = BorrowIntent(
+            protocol="morpho_blue",
+            collateral_token="wstETH",
+            collateral_amount=Decimal("0"),
+            borrow_token="USDC",
+            borrow_amount=borrow_amount,
+            market_id=MORPHO_MARKET_ID,
+            chain=CHAIN_NAME,
+        )
         compilation_result = compiler.compile(intent)
 
         assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None, "ActionBundle must be created"
-        assert len(compilation_result.action_bundle.transactions) == 3, (
-            "Expected 3 transactions: approve(wstETH) + supplyCollateral + borrow"
+        assert len(compilation_result.action_bundle.transactions) == 1, (
+            "Expected 1 transaction: borrow (standalone two-intent form)"
         )
 
         # Layer 5: capture pre-state BEFORE execution (mirrors the runner)
@@ -317,9 +340,9 @@ class TestMorphoBlueBorrowIntent:
 
         events = _collect_morpho_events(execution_result)
 
-        supply_collateral_event = _first_event(events, MorphoBlueEventType.SUPPLY_COLLATERAL)
-        assert supply_collateral_event is not None, "Expected SupplyCollateral event in Morpho Blue receipts"
-        assert supply_collateral_event.data["market_id"].lower() == MORPHO_MARKET_ID.lower()
+        assert _first_event(events, MorphoBlueEventType.SUPPLY_COLLATERAL) is None, (
+            "Standalone borrow must not emit SupplyCollateral events (collateral moved in step 1)"
+        )
 
         borrow_event = _first_event(events, MorphoBlueEventType.BORROW)
         assert borrow_event is not None, "Expected Borrow event in Morpho Blue receipts"
@@ -476,27 +499,41 @@ async def _setup_borrow(
     collateral_amount: Decimal,
     borrow_amount: Decimal,
 ) -> tuple[BorrowIntent, ExecutionResult, dict | None]:
-    """Helper: supply wstETH collateral and borrow USDC. Asserts success.
+    """Helper: supply wstETH collateral, then standalone-borrow USDC (two-intent form, #2827).
 
     Returns ``(borrow_intent, exec_result, bundle_metadata)`` so callers that
     need the FIFO BORROW lot in the Layer-5 basis pool (the exact
     borrow-then-repay split) can persist it through the harness. Callers that
     only need the on-chain side effect ignore the return value.
     """
-    intent = BorrowIntent.model_construct(
-        protocol="morpho_blue",
-        collateral_token="wstETH",
-        collateral_amount=collateral_amount,
-        borrow_token="USDC",
-        borrow_amount=borrow_amount,
-        market_id=MORPHO_MARKET_ID,
-        chain=CHAIN_NAME,
-    )
     compiler = IntentCompiler(
         chain=CHAIN_NAME,
         wallet_address=funded_wallet,
         price_oracle=price_oracle,
         rpc_url=anvil_rpc_url,
+    )
+    supply_intent = SupplyIntent(
+        protocol="morpho_blue",
+        token="wstETH",
+        amount=collateral_amount,
+        use_as_collateral=True,
+        market_id=MORPHO_MARKET_ID,
+        chain=CHAIN_NAME,
+    )
+    supply_result = compiler.compile(supply_intent)
+    assert supply_result.status.value == "SUCCESS", f"Supply setup compile failed: {supply_result.error}"
+    assert supply_result.action_bundle is not None, "Supply setup missing action_bundle"
+    supply_exec = await orchestrator.execute(supply_result.action_bundle, execution_context)
+    assert supply_exec.success, f"Collateral supply setup failed: {supply_exec.error}"
+
+    intent = BorrowIntent(
+        protocol="morpho_blue",
+        collateral_token="wstETH",
+        collateral_amount=Decimal("0"),
+        borrow_token="USDC",
+        borrow_amount=borrow_amount,
+        market_id=MORPHO_MARKET_ID,
+        chain=CHAIN_NAME,
     )
     result = compiler.compile(intent)
     assert result.status.value == "SUCCESS", f"Borrow setup compile failed: {result.error}"

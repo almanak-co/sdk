@@ -282,20 +282,47 @@ class TestCurvanceBorrowIntent:
             f"funded_wallet has only {wmon_before} WMON wei, need >= {expected_collateral_wei}"
         )
 
-        intent = BorrowIntent.model_construct(
-            protocol="curvance",
-            collateral_token="WMON",
-            collateral_amount=collateral_amount,
-            borrow_token="USDC",
-            borrow_amount=borrow_amount,
-            market_id=MARKET.market_manager,
-            chain=CHAIN_NAME,
-        )
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+        )
+
+        # Step 1 — supply the WMON collateral (two-intent form, #2827: the
+        # bundled shape is fail-closed at the intent validator; supply-first is
+        # also the more robust Curvance ordering — depositAsCollateral succeeds
+        # in the post-deploy oracle window that reverts BORROW).
+        supply_intent = SupplyIntent(
+            protocol="curvance",
+            token="WMON",
+            amount=collateral_amount,
+            use_as_collateral=True,
+            market_id=MARKET.market_manager,
+            chain=CHAIN_NAME,
+        )
+        supply_compile = compiler.compile(supply_intent)
+        assert supply_compile.status.value == "SUCCESS", f"Supply compile failed: {supply_compile.error}"
+        assert supply_compile.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_compile.action_bundle, execution_context)
+        assert supply_exec.success, f"Collateral supply failed: {supply_exec.error}"
+
+        # Layer 3 (supply leg): the collateral Deposit event must be present
+        # with the exact collateral amount.
+        supply_events = _collect_events(supply_exec)
+        supply_deposit = _first_event(supply_events, CurvanceEventType.DEPOSIT)
+        assert supply_deposit is not None, "Missing collateral Deposit event on the supply leg"
+        assert int(supply_deposit.data["assets"]) == int(collateral_amount * Decimal(10**wmon_decimals))
+
+        # Step 2 — standalone borrow (the only shape the public API allows).
+        intent = BorrowIntent(
+            protocol="curvance",
+            collateral_token="WMON",
+            collateral_amount=Decimal("0"),
+            borrow_token="USDC",
+            borrow_amount=borrow_amount,
+            market_id=MARKET.market_manager,
+            chain=CHAIN_NAME,
         )
         compilation = compiler.compile(intent)
         assert compilation.status.value == "SUCCESS", f"Compile failed: {compilation.error}"
@@ -309,6 +336,9 @@ class TestCurvanceBorrowIntent:
         events = _collect_events(execution_result)
         borrow_event = _first_event(events, CurvanceEventType.BORROW)
         assert borrow_event is not None, "Missing Curvance Borrow event"
+        assert _first_event(events, CurvanceEventType.DEPOSIT) is None, (
+            "Standalone borrow must not emit a collateral Deposit event"
+        )
         borrowed_assets_wei = int(borrow_event.data["assets"])
         expected_borrow_wei = int(borrow_amount * Decimal(10**usdc_decimals))
         assert borrowed_assets_wei == expected_borrow_wei
@@ -355,21 +385,35 @@ class TestCurvanceRepayIntent:
         max_borrow_usd = collateral_amount * wmon_price * Decimal("0.25")
         borrow_amount = max_borrow_usd / usdc_price
 
-        # Setup: supply + borrow.
-        borrow_intent = BorrowIntent.model_construct(
-            protocol="curvance",
-            collateral_token="WMON",
-            collateral_amount=collateral_amount,
-            borrow_token="USDC",
-            borrow_amount=borrow_amount,
-            market_id=MARKET.market_manager,
-            chain=CHAIN_NAME,
-        )
+        # Setup: supply, then a standalone borrow (two-intent form, #2827).
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
+        )
+        setup_supply_intent = SupplyIntent(
+            protocol="curvance",
+            token="WMON",
+            amount=collateral_amount,
+            use_as_collateral=True,
+            market_id=MARKET.market_manager,
+            chain=CHAIN_NAME,
+        )
+        setup_supply_result = compiler.compile(setup_supply_intent)
+        assert setup_supply_result.status.value == "SUCCESS"
+        assert setup_supply_result.action_bundle is not None
+        setup_supply_exec = await orchestrator.execute(setup_supply_result.action_bundle, execution_context)
+        assert setup_supply_exec.success, f"Collateral supply setup failed: {setup_supply_exec.error}"
+
+        borrow_intent = BorrowIntent(
+            protocol="curvance",
+            collateral_token="WMON",
+            collateral_amount=Decimal("0"),
+            borrow_token="USDC",
+            borrow_amount=borrow_amount,
+            market_id=MARKET.market_manager,
+            chain=CHAIN_NAME,
         )
         borrow_compile = compiler.compile(borrow_intent)
         assert borrow_compile.status.value == "SUCCESS"

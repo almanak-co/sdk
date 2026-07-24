@@ -659,7 +659,14 @@ class TestAaveV3BorrowIntent:
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ):
-        """Test borrowing USDC with wstETH collateral using BorrowIntent.
+        """Test borrowing USDC against wstETH collateral via the two-intent form.
+
+        Uses the accounting-correct SUPPLY -> standalone BORROW split (#2827):
+        a bundled ``BorrowIntent(collateral_amount > 0)`` is fail-closed at the
+        intent validator because accounting writes one event per intent — the
+        supply leg would collapse into the single BORROW event, and (post
+        VIB-5218 merged-receipt money legs) the BORROW row would carry the
+        SUPPLY leg's asset/amount instead of the borrowed reserve.
 
         Uses wstETH as the collateral asset because Aave governance has frozen
         the Arbitrum WETH reserve (no new supplies allowed); wstETH still
@@ -668,9 +675,10 @@ class TestAaveV3BorrowIntent:
         See #1696 for the freeze details.
 
         Flow:
-        1. Create BorrowIntent with wstETH as collateral, borrowing USDC
-        2. Compile to ActionBundle using IntentCompiler
-        3. Execute via ExecutionOrchestrator
+        1. Setup: supply wstETH collateral via SupplyIntent (use_as_collateral
+           defaults True); verify the Supply receipt event
+        2. Create a standalone BorrowIntent (collateral_amount=0) for USDC
+        3. Compile + execute via the production pipeline
         4. Verify USDC balance increased and debt was created
         5. Layer 5: assert persisted BORROW accounting event — principal
            measured, interest_delta_usd None (no repay leg yet)
@@ -687,7 +695,7 @@ class TestAaveV3BorrowIntent:
         borrow_amount = Decimal("500")
 
         print(f"\n{'='*80}")
-        print(f"Test: Borrow {borrow_amount} USDC with {collateral_amount} wstETH collateral using BorrowIntent")
+        print(f"Test: Borrow {borrow_amount} USDC with {collateral_amount} wstETH collateral (two-intent form)")
         print(f"{'='*80}")
 
         # Record balances BEFORE
@@ -700,28 +708,59 @@ class TestAaveV3BorrowIntent:
         account_data_before = get_user_account_data(web3, funded_wallet)
         print(f"Debt before: {account_data_before['totalDebtBase']}")
 
-        # Create BorrowIntent
-        intent = BorrowIntent.model_construct(
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+        )
+
+        # Step 1 — supply the wstETH collateral (setup; deliberately not
+        # persisted through Layer 5: this test asserts the BORROW row, and the
+        # FIFO borrow lot does not depend on the supply lot).
+        supply_intent = SupplyIntent(
+            protocol="aave_v3",
+            token="wstETH",
+            amount=collateral_amount,
+            chain=CHAIN_NAME,
+        )
+        supply_compile = compiler.compile(supply_intent)
+        assert supply_compile.status.value == "SUCCESS", f"Supply compilation failed: {supply_compile.error}"
+        assert supply_compile.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_compile.action_bundle, execution_context)
+        assert supply_exec.success, f"Collateral supply failed: {supply_exec.error}"
+
+        # Layer 3 (supply leg): the Supply event must land on the wstETH reserve.
+        supply_event_seen = False
+        for tx_result in supply_exec.transaction_results:
+            if tx_result.receipt:
+                parse_result = AaveV3ReceiptParser().parse_receipt(tx_result.receipt.to_dict())
+                if parse_result.success and parse_result.supplies:
+                    collateral_supply = next(
+                        (s for s in parse_result.supplies if s.reserve.lower() == wsteth.lower()),
+                        None,
+                    )
+                    assert collateral_supply is not None, (
+                        f"Expected a Supply event for wstETH collateral. Got reserves: "
+                        f"{[s.reserve for s in parse_result.supplies]}"
+                    )
+                    assert collateral_supply.amount > 0, "wstETH collateral supply amount must be > 0"
+                    supply_event_seen = True
+        assert supply_event_seen, "Expected at least one Supply event for the wstETH collateral leg"
+
+        # Step 2 — standalone borrow (the only shape the public API allows).
+        intent = BorrowIntent(
             protocol="aave_v3",
             collateral_token="wstETH",
-            collateral_amount=collateral_amount,
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
             borrow_amount=borrow_amount,
             interest_rate_mode="variable",
             chain=CHAIN_NAME,
         )
 
-        print("\nCreated BorrowIntent:")
-        print(f"  Collateral: {intent.collateral_amount} {intent.collateral_token}")
+        print("\nCreated standalone BorrowIntent:")
         print(f"  Borrow: {intent.borrow_amount} {intent.borrow_token}")
         print(f"  Interest rate mode: {intent.interest_rate_mode}")
-
-        # Compile intent
-        compiler = IntentCompiler(
-            chain=CHAIN_NAME,
-            wallet_address=funded_wallet,
-            price_oracle=price_oracle,
-        )
 
         print("\nCompiling intent to ActionBundle...")
         compilation_result = compiler.compile(intent)
@@ -742,7 +781,10 @@ class TestAaveV3BorrowIntent:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
-        # Parse receipts
+        # Parse receipts (Layer 3) — the standalone borrow must emit a Borrow
+        # event on the USDC reserve and NO Supply event (collateral moved in
+        # step 1; a Supply here would mean the bundled shape leaked back).
+        borrow_event_seen = False
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i+1}:")
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
@@ -753,14 +795,26 @@ class TestAaveV3BorrowIntent:
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
 
                 if parse_result.success:
-                    if parse_result.supplies:
-                        for supply_event in parse_result.supplies:
-                            print(f"  Supply (collateral): {supply_event.amount}")
-
+                    assert not parse_result.supplies, (
+                        f"Standalone borrow must not emit Supply events. Got reserves: "
+                        f"{[s.reserve for s in parse_result.supplies]}"
+                    )
                     if parse_result.borrows:
+                        usdc_borrow = next(
+                            (b for b in parse_result.borrows if b.reserve.lower() == usdc.lower()),
+                            None,
+                        )
+                        assert usdc_borrow is not None, (
+                            f"Expected a Borrow event for USDC. Got reserves: "
+                            f"{[b.reserve for b in parse_result.borrows]}"
+                        )
+                        assert usdc_borrow.amount > 0, "USDC borrow amount must be > 0"
+                        borrow_event_seen = True
                         for borrow_event in parse_result.borrows:
                             print(f"  Borrow amount: {borrow_event.amount}")
                             print(f"  Interest rate mode: {borrow_event.interest_rate_mode}")
+
+        assert borrow_event_seen, "Expected at least one Borrow event for the USDC borrow leg"
 
         # Verify balance changes
         wsteth_after = get_token_balance(web3, wsteth, funded_wallet)
@@ -852,32 +906,47 @@ class TestAaveV3BorrowIntent:
         """Test repaying USDC debt using RepayIntent.
 
         Flow:
-        1. Setup: Borrow USDC with wstETH collateral first
-           (wstETH chosen for collateral because Aave froze the WETH reserve
-            on Arbitrum — see #1696.)
+        1. Setup: supply wstETH collateral, then a standalone borrow — the
+           accounting-correct two-intent form (#2827). (wstETH chosen for
+           collateral because Aave froze the WETH reserve on Arbitrum — see
+           #1696.)
         2. Create RepayIntent to repay partial debt
         3. Compile and execute
         4. Verify USDC balance decreased and debt was reduced
         5. Layer 5: persist BOTH the BORROW and the REPAY through the same
            harness so the FIFO basis pool matches — assert the EXACT
            principal_delta_usd / interest_delta_usd split (epic decision #6).
+           The supply setup is not persisted: the split matches the borrow
+           lot only.
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc = tokens["USDC"]
         usdc_decimals = get_token_decimals(web3, usdc)
 
-        # First borrow USDC
+        # Setup: supply collateral, then a standalone borrow (two-intent form).
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
         )
 
+        supply_intent = SupplyIntent(
+            protocol="aave_v3",
+            token="wstETH",
+            amount=Decimal("1"),
+            chain=CHAIN_NAME,
+        )
+        supply_result = compiler.compile(supply_intent)
+        assert supply_result.status.value == "SUCCESS"
+        assert supply_result.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_result.action_bundle, execution_context)
+        assert supply_exec.success, f"Collateral supply setup failed: {supply_exec.error}"
+
         borrow_amount = Decimal("500")
-        borrow_intent = BorrowIntent.model_construct(
+        borrow_intent = BorrowIntent(
             protocol="aave_v3",
             collateral_token="wstETH",
-            collateral_amount=Decimal("1"),
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
             borrow_amount=borrow_amount,
             interest_rate_mode="variable",
@@ -1083,12 +1152,25 @@ class TestAaveV3BorrowIntent:
             price_oracle=price_oracle,
         )
 
-        # On-chain borrow setup — intentionally NOT persisted through Layer 5,
-        # so the FIFO basis pool has no matching BORROW lot.
-        borrow_intent = BorrowIntent.model_construct(
+        # On-chain borrow setup (two-intent form, #2827) — intentionally NOT
+        # persisted through Layer 5, so the FIFO basis pool has no matching
+        # BORROW lot.
+        supply_intent = SupplyIntent(
+            protocol="aave_v3",
+            token="wstETH",
+            amount=Decimal("1"),
+            chain=CHAIN_NAME,
+        )
+        supply_result = compiler.compile(supply_intent)
+        assert supply_result.status.value == "SUCCESS"
+        assert supply_result.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_result.action_bundle, execution_context)
+        assert supply_exec.success, f"Collateral supply setup failed: {supply_exec.error}"
+
+        borrow_intent = BorrowIntent(
             protocol="aave_v3",
             collateral_token="wstETH",
-            collateral_amount=Decimal("1"),
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
             borrow_amount=Decimal("500"),
             interest_rate_mode="variable",

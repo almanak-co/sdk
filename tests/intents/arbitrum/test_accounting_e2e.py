@@ -55,6 +55,7 @@ from almanak.framework.intents import (
     LPCloseIntent,
     LPOpenIntent,
     RepayIntent,
+    SupplyIntent,
 )
 from almanak.framework.intents.vocabulary import IntentType
 from almanak.framework.observability.pnl_attributor import (
@@ -1116,17 +1117,34 @@ class TestLendingAccountingE2E:
 
             loan_dec = get_token_decimals(web3, loan_addr)
 
-            # === BORROW (supply collateral + borrow, the canonical Morpho flow) ===
-            # On Morpho Blue, collateral is supplied via supplyCollateral inside the
-            # BORROW bundle (approve + supplyCollateral + borrow). SupplyIntent on
-            # Morpho supplies the *loan* token as lending liquidity, NOT collateral,
-            # so a separate collateral SupplyIntent was the wrong primitive — the
-            # third defect VIB-4833 unmasked once the skip stopped hiding the body.
-            borrow_intent = BorrowIntent.model_construct(
+            # === SUPPLY-COLLATERAL then standalone BORROW (two-intent form) ===
+            # The bundled ``BorrowIntent(collateral_amount>0)`` is fail-closed at
+            # the intent validator (#2827): accounting writes one event per
+            # intent, so the supply leg would collapse into the single BORROW
+            # row. ``SupplyIntent(use_as_collateral=True)`` routes to Morpho's
+            # ``supplyCollateral`` (NOT loan-token lending liquidity), so the
+            # canonical flow is SUPPLY -> standalone BORROW.
+            col_before_borrow = get_token_balance(web3, collateral_addr, funded_wallet)
+            loan_before_borrow = get_token_balance(web3, loan_addr, funded_wallet)
+
+            supply_intent = SupplyIntent(
+                protocol="morpho_blue",
+                chain=CHAIN_NAME,
+                token=collateral_token,
+                amount=collateral_amount,
+                use_as_collateral=True,
+                market_id=market_id,
+            )
+            supply_compile = compiler.compile(supply_intent)
+            assert supply_compile.status.value == "SUCCESS", f"Supply compile failed: {supply_compile.error}"
+            supply_exec = await orchestrator.execute(supply_compile.action_bundle)
+            assert supply_exec.success, f"Collateral supply failed: {supply_exec.error}"
+
+            borrow_intent = BorrowIntent(
                 protocol="morpho_blue",
                 chain=CHAIN_NAME,
                 collateral_token=collateral_token,
-                collateral_amount=collateral_amount,
+                collateral_amount=Decimal("0"),
                 borrow_token=loan_token,
                 borrow_amount=borrow_amount,
                 market_id=market_id,
@@ -1134,8 +1152,6 @@ class TestLendingAccountingE2E:
             borrow_compile = compiler.compile(borrow_intent)
             assert borrow_compile.status.value == "SUCCESS", f"Borrow compile failed: {borrow_compile.error}"
 
-            col_before_borrow = get_token_balance(web3, collateral_addr, funded_wallet)
-            loan_before_borrow = get_token_balance(web3, loan_addr, funded_wallet)
             borrow_exec = await orchestrator.execute(borrow_compile.action_bundle)
             assert borrow_exec.success, f"Borrow execution failed: {borrow_exec.error}"
             col_after_borrow = get_token_balance(web3, collateral_addr, funded_wallet)
@@ -1158,29 +1174,40 @@ class TestLendingAccountingE2E:
             )
 
             # Layer 3: receipt parsing — the Morpho parser must extract the
-            # SupplyCollateral and Borrow events with assets matching the deltas.
+            # SupplyCollateral event from the supply leg and the Borrow event
+            # from the borrow leg, with assets matching the deltas. The
+            # standalone borrow leg must NOT carry a SupplyCollateral event.
             from almanak.connectors.morpho_blue.receipt_parser import (
                 MorphoBlueEventType,
                 MorphoBlueReceiptParser,
             )
 
             morpho_parser = MorphoBlueReceiptParser()
-            borrow_events = []
-            for tx_result in borrow_exec.transaction_results:
-                if tx_result.receipt is None:
-                    continue
-                parse_result = morpho_parser.parse_receipt(tx_result.receipt.to_dict())
-                assert parse_result.success, f"Morpho receipt parse failed: {parse_result.error}"
-                borrow_events.extend(parse_result.events)
+
+            def _parse_leg_events(exec_result):
+                leg_events = []
+                for tx_result in exec_result.transaction_results:
+                    if tx_result.receipt is None:
+                        continue
+                    parse_result = morpho_parser.parse_receipt(tx_result.receipt.to_dict())
+                    assert parse_result.success, f"Morpho receipt parse failed: {parse_result.error}"
+                    leg_events.extend(parse_result.events)
+                return leg_events
+
+            supply_events = _parse_leg_events(supply_exec)
+            borrow_events = _parse_leg_events(borrow_exec)
 
             supply_col_event = next(
-                (e for e in borrow_events if e.event_type == MorphoBlueEventType.SUPPLY_COLLATERAL), None
+                (e for e in supply_events if e.event_type == MorphoBlueEventType.SUPPLY_COLLATERAL), None
             )
             borrow_event = next(
                 (e for e in borrow_events if e.event_type == MorphoBlueEventType.BORROW), None
             )
-            assert supply_col_event is not None, "Parser must find a SupplyCollateral event"
-            assert borrow_event is not None, "Parser must find a Borrow event"
+            assert supply_col_event is not None, "Parser must find a SupplyCollateral event in the supply leg"
+            assert borrow_event is not None, "Parser must find a Borrow event in the borrow leg"
+            assert not any(e.event_type == MorphoBlueEventType.SUPPLY_COLLATERAL for e in borrow_events), (
+                "Standalone borrow leg must not emit SupplyCollateral events"
+            )
             assert int(Decimal(str(supply_col_event.data["assets"]))) == expected_col_wei, (
                 "Parsed SupplyCollateral assets must equal supplied collateral"
             )
@@ -1188,11 +1215,10 @@ class TestLendingAccountingE2E:
                 "Parsed Borrow assets must equal borrowed amount"
             )
 
-            # The BORROW bundle is approve(collateral) + supplyCollateral + borrow.
-            # Expose the supplyCollateral and borrow tx hashes for the proof block.
-            borrow_results = borrow_exec.transaction_results
-            supply_tx_hash = (borrow_results[1].tx_hash if len(borrow_results) > 1 else borrow_results[0].tx_hash) or "0x"
-            borrow_tx_hash = borrow_results[-1].tx_hash or "0x"
+            # Supply leg is approve(collateral) + supplyCollateral; borrow leg is
+            # the standalone borrow. Expose both tx hashes for the proof block.
+            supply_tx_hash = supply_exec.transaction_results[-1].tx_hash or "0x"
+            borrow_tx_hash = borrow_exec.transaction_results[-1].tx_hash or "0x"
             print(f"\n[SUPPLY-COLLATERAL] tx_hash={supply_tx_hash[:20]}...")
             print(f"[BORROW] tx_hash={borrow_tx_hash[:20]}...")
 

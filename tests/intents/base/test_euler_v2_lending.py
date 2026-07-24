@@ -59,6 +59,7 @@ from typing import Any
 import pytest
 from web3 import Web3
 
+from almanak.connectors.euler_v2.adapter import EULER_V2_VAULTS_BY_CHAIN
 from almanak.connectors.euler_v2.receipt_parser import EulerV2ReceiptParser
 from almanak.framework.accounting.lending_accounting import (
     capture_lending_post_state,
@@ -104,6 +105,7 @@ CHAIN_NAME = "base"
 # Euler V2 vault address on Ethereum (eUSDC-2) — used for receipt-parser filtering
 # so we only count Deposit/Withdraw/Borrow/Repay events emitted by this vault.
 EULER_V2_USDC_VAULT = "0x0A1a3b5f2041F33522C4efc754a7D096f880eE16"  # eUSDC-1 (base)
+EULER_V2_WETH_VAULT = EULER_V2_VAULTS_BY_CHAIN[CHAIN_NAME]["eWETH-1"]["vault_address"]  # collateral vault
 
 PROTOCOL = "euler_v2"
 
@@ -611,6 +613,12 @@ class TestEulerV2BorrowIntent:
     ) -> None:
         """Borrow USDC against WETH collateral on Euler V2 Base.
 
+        Two-intent form (#2827): a SupplyIntent deposits the WETH collateral
+        into the eWETH vault, then a standalone
+        ``BorrowIntent(collateral_amount=0)`` draws USDC via the EVC batch
+        (enableCollateral + enableController + borrow) — the bundled shape is
+        fail-closed at the intent validator.
+
         Uses the registered eWETH collateral vault + eUSDC borrow vault.
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
@@ -632,24 +640,58 @@ class TestEulerV2BorrowIntent:
             f"Funded wallet lacks WETH collateral. Need {collateral_amount}, have {weth_before / 10**weth_decimals}"
         )
 
-        intent = BorrowIntent.model_construct(
-            protocol="euler_v2",
-            collateral_token="WETH",
-            collateral_amount=collateral_amount,
-            borrow_token="USDC",
-            borrow_amount=borrow_amount,
-            chain=CHAIN_NAME,
-        )
-
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
         )
+
+        # Step 1 — deposit the WETH collateral into the eWETH vault (two-intent
+        # form, #2827: the bundled shape is fail-closed at the intent
+        # validator). The standalone borrow's EVC batch enables it as
+        # collateral.
+        supply_intent = SupplyIntent(
+            protocol="euler_v2",
+            token="WETH",
+            amount=collateral_amount,
+            chain=CHAIN_NAME,
+        )
+        supply_compile = compiler.compile(supply_intent)
+        assert supply_compile.status.value == "SUCCESS", f"Supply compilation failed: {supply_compile.error}"
+        assert supply_compile.action_bundle is not None
+        supply_exec = await orchestrator.execute(supply_compile.action_bundle)
+        assert supply_exec.success, f"Collateral supply failed: {supply_exec.error}"
+
+        # Layer 3 (supply leg): Deposit event on the WETH collateral vault.
+        supply_deposit_seen = False
+        for tx_result in supply_exec.transaction_results:
+            if tx_result.receipt:
+                supply_parse = EulerV2ReceiptParser(underlying_decimals=weth_decimals).parse_receipt(
+                    tx_result.receipt.to_dict(),
+                    vault_address=EULER_V2_WETH_VAULT,
+                )
+                if supply_parse.success and supply_parse.deposit_amount > 0:
+                    assert supply_parse.deposit_shares > 0
+                    supply_deposit_seen = True
+        assert supply_deposit_seen, "Receipt parser must find a Deposit event on the WETH collateral vault"
+
+        # Step 2 — standalone borrow (the only shape the public API allows).
+        intent = BorrowIntent(
+            protocol="euler_v2",
+            collateral_token="WETH",
+            collateral_amount=Decimal("0"),
+            borrow_token="USDC",
+            borrow_amount=borrow_amount,
+            chain=CHAIN_NAME,
+        )
+
         compilation_result = compiler.compile(intent)
         assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
+        assert len(compilation_result.action_bundle.transactions) == 1, (
+            "Standalone borrow must compile to a single EVC borrow tx (no bundled collateral deposit)"
+        )
 
         # Layer 5: capture pre-state BEFORE execution (mirrors the runner)
         pre_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False)
@@ -670,6 +712,17 @@ class TestEulerV2BorrowIntent:
                     assert parse_result.borrow_amount > 0
                     found_borrow_event = True
         assert found_borrow_event, "Receipt parser must find at least one Borrow event"
+
+        # Standalone borrow must not deposit collateral (moved to step 1).
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt:
+                wparse = EulerV2ReceiptParser(underlying_decimals=weth_decimals).parse_receipt(
+                    tx_result.receipt.to_dict(),
+                    vault_address=EULER_V2_WETH_VAULT,
+                )
+                assert not (wparse.success and wparse.deposit_amount > 0), (
+                    "Standalone borrow must not emit a collateral Deposit event"
+                )
 
         # Balance deltas — exact
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
@@ -762,10 +815,22 @@ class TestEulerV2BorrowIntent:
             f"Funded wallet lacks WETH collateral. Need {collateral_amount}, have {weth_balance / 10**weth_decimals}"
         )
 
-        borrow_intent = BorrowIntent.model_construct(
+        setup_supply_intent = SupplyIntent(
+            protocol="euler_v2",
+            token="WETH",
+            amount=collateral_amount,
+            chain=CHAIN_NAME,
+        )
+        setup_supply_result = compiler.compile(setup_supply_intent)
+        assert setup_supply_result.status.value == "SUCCESS"
+        assert setup_supply_result.action_bundle is not None
+        setup_supply_exec = await orchestrator.execute(setup_supply_result.action_bundle)
+        assert setup_supply_exec.success, f"Collateral supply setup failed: {setup_supply_exec.error}"
+
+        borrow_intent = BorrowIntent(
             protocol="euler_v2",
             collateral_token="WETH",
-            collateral_amount=collateral_amount,
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
             borrow_amount=borrow_amount,
             chain=CHAIN_NAME,
