@@ -1589,77 +1589,6 @@ class ToolExecutor:
 
         raise ToolValidationError(f"Unknown action tool: {tool_name}", tool_name=tool_name)
 
-    def _build_action_response(self, tool_name: str, exec_resp: Any, args: dict) -> dict:
-        """Build tool-specific response data from gateway ExecutionResult."""
-        tx_hashes = list(exec_resp.tx_hashes) if exec_resp.tx_hashes else []
-        tx_hash = tx_hashes[0] if tx_hashes else None
-
-        base = {"tx_hash": tx_hash, "gas_usd": ""}
-
-        if tool_name == "swap_tokens":
-            return {
-                **base,
-                "amount_in": args.get("amount", ""),
-                "amount_out": "",
-                "effective_price": "",
-                "price_impact": "",
-            }
-
-        if tool_name == "open_lp_position":
-            position_id = self._extract_position_id(exec_resp, args)
-            return {**base, "position_id": position_id, "liquidity": "", "tick_lower": 0, "tick_upper": 0}
-
-        if tool_name == "close_lp_position":
-            return {
-                **base,
-                "token_a_received": "",
-                "token_b_received": "",
-                "fees_collected_a": "",
-                "fees_collected_b": "",
-            }
-
-        if tool_name == "supply_lending":
-            return {**base, "amount_supplied": args.get("amount", "")}
-        if tool_name == "borrow_lending":
-            return {**base, "amount_borrowed": args.get("amount", "")}
-        if tool_name == "repay_lending":
-            requested = str(args.get("amount", ""))
-            # amount="all" is a sentinel, not a numeric value — don't leak it
-            # into a field downstream consumers will parse as a number.
-            return {**base, "amount_repaid": "" if requested.lower() == "all" else requested}
-        if tool_name == "withdraw_lending":
-            requested = str(args.get("amount", ""))
-            return {**base, "amount_withdrawn": "" if requested.lower() == "all" else requested}
-
-        if tool_name == "bridge_tokens":
-            return {
-                **base,
-                "amount_bridged": args.get("amount", ""),
-                "from_chain": args.get("from_chain", ""),
-                "to_chain": args.get("to_chain", ""),
-                "bridge_used": args.get("preferred_bridge", ""),
-                "estimated_arrival_seconds": None,
-                "gas_usd": "",
-            }
-
-        if tool_name == "wrap_native":
-            return {
-                **base,
-                "amount_wrapped": args.get("amount", ""),
-                "token": args.get("token", ""),
-                "chain": args.get("chain", self._default_chain),
-            }
-
-        if tool_name == "unwrap_native":
-            return {
-                **base,
-                "amount_unwrapped": args.get("amount", ""),
-                "token": args.get("token", ""),
-                "chain": args.get("chain", self._default_chain),
-            }
-
-        return base
-
     def _build_action_response_from_enriched(self, tool_name: str, enriched: Any, args: dict) -> dict:
         """Build tool-specific response data from EnrichedExecutionResult.
 
@@ -1778,27 +1707,6 @@ class ToolExecutor:
 
         logger.warning(message)
         self._fire_alert(message, severity=severity)
-
-    def _extract_position_id(self, exec_resp: Any, args: dict) -> int | None:
-        """Extract LP position NFT tokenId from execution receipts."""
-        try:
-            if not exec_resp.receipts:
-                return None
-            import json as _json
-
-            receipts = _json.loads(exec_resp.receipts)
-            if not isinstance(receipts, list):
-                receipts = [receipts]
-            # IncreaseLiquidity event topic (Uniswap V3 NonfungiblePositionManager)
-            increase_liq_topic = "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f"
-            for receipt in receipts:
-                for log in receipt.get("logs", []):
-                    topics = log.get("topics", [])
-                    if topics and topics[0] == increase_liq_topic and len(topics) >= 2:
-                        return int(topics[1], 16)
-        except Exception as e:
-            logger.debug("Could not extract position_id from receipts: %s", e)
-        return None
 
     async def _estimate_usd_spend(self, args: dict) -> Decimal:
         """Best-effort USD estimation for spend tracking.
