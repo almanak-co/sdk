@@ -425,3 +425,136 @@ class TestSwapIntentValidatorLiFi:
         )
         assert intent.is_cross_chain is True
         assert intent.protocol is None
+
+
+class TestCompileLiFiBridge:
+    """Tests for BridgeIntent compilation through LiFiCompiler.
+
+    ``BridgeIntent(preferred_bridge="lifi")`` dispatches to ``LiFiCompiler``
+    via ``_bridge_registry_protocol``; the compiled bundle must carry the
+    ``BridgeCompiler`` metadata contract (from_chain / to_chain / token /
+    amount / bridge) so ResultEnricher's BRIDGE enrichment resolves
+    ``LiFiReceiptParser.extract_bridge_data``, plus the LiFi deferred-refresh
+    keys (deferred_swap / route_params).
+    """
+
+    @staticmethod
+    def _bridge_intent(**overrides):
+        from almanak.framework.intents import BridgeIntent
+
+        kwargs = {
+            "token": "USDC",
+            "amount": Decimal("1000"),
+            "from_chain": "arbitrum",
+            "to_chain": "base",
+            "preferred_bridge": "lifi",
+        }
+        kwargs.update(overrides)
+        return BridgeIntent(**kwargs)
+
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
+    def test_bridge_intent_compiles_successfully(self, mock_get_quote: MagicMock) -> None:
+        """BridgeIntent(preferred_bridge='lifi') compiles to a BRIDGE ActionBundle."""
+        mock_get_quote.return_value = _mock_lifi_quote(
+            tool="across",
+            step_type="cross",
+            from_chain_id=42161,
+            to_chain_id=8453,
+        )
+        compiler = _make_compiler()
+
+        result = compiler.compile(self._bridge_intent())
+
+        assert result.status == CompilationStatus.SUCCESS, f"Compilation failed: {result.error}"
+        assert result.action_bundle is not None
+        assert result.action_bundle.intent_type == "BRIDGE"
+
+        metadata = result.action_bundle.metadata
+        # BridgeCompiler metadata contract (ResultEnricher bridge_data hints).
+        assert metadata["from_chain"] == "arbitrum"
+        assert metadata["to_chain"] == "base"
+        assert metadata["token"] == "USDC"
+        assert metadata["amount"] == "1000"
+        assert metadata["bridge"] == "lifi"
+        assert metadata["is_cross_chain"] is True
+        # LiFi deferred-execution keys.
+        assert metadata["protocol"] == "lifi"
+        assert metadata["tool"] == "across"
+        assert metadata["deferred_swap"] is True
+        assert metadata["from_chain_id"] == 42161
+        assert metadata["to_chain_id"] == 8453
+        assert metadata["route_params"]["from_amount"] == "1000000000"  # 1000 USDC, 6 decimals
+
+        # ERC-20 bridge: approve leg(s) + trailing bridge_deferred tx.
+        last_tx = result.transactions[-1]
+        assert last_tx.tx_type == "bridge_deferred"
+
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
+    def test_bridge_preferred_bridge_is_case_insensitive(self, mock_get_quote: MagicMock) -> None:
+        """preferred_bridge='LiFi' resolves to the same connector compiler."""
+        mock_get_quote.return_value = _mock_lifi_quote(from_chain_id=42161, to_chain_id=8453)
+        compiler = _make_compiler()
+
+        result = compiler.compile(self._bridge_intent(preferred_bridge="LiFi"))
+
+        assert result.status == CompilationStatus.SUCCESS, f"Compilation failed: {result.error}"
+        assert result.action_bundle is not None
+        assert result.action_bundle.intent_type == "BRIDGE"
+        assert result.action_bundle.metadata["bridge"] == "lifi"
+
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
+    def test_bridge_destination_address_threads_into_quote_and_route_params(
+        self, mock_get_quote: MagicMock
+    ) -> None:
+        """destination_address overrides the dest-chain recipient everywhere."""
+        mock_get_quote.return_value = _mock_lifi_quote(from_chain_id=42161, to_chain_id=8453)
+        compiler = _make_compiler()
+        dest = "0x2222222222222222222222222222222222222222"
+
+        result = compiler.compile(self._bridge_intent(destination_address=dest))
+
+        assert result.status == CompilationStatus.SUCCESS, f"Compilation failed: {result.error}"
+        call_kwargs = mock_get_quote.call_args.kwargs
+        assert call_kwargs["to_address"] == dest
+        assert result.action_bundle.metadata["route_params"]["to_address"] == dest
+
+    @patch("almanak.connectors.lifi.client.LiFiClient.get_quote")
+    def test_bridge_native_asset_has_no_approve(self, mock_get_quote: MagicMock) -> None:
+        """Native-asset bridge (ETH) emits only the bridge tx, funded by msg.value."""
+        mock_get_quote.return_value = _mock_lifi_quote(
+            from_chain_id=42161,
+            to_chain_id=8453,
+            tx_value="500000000000000000",
+        )
+        compiler = _make_compiler()
+
+        result = compiler.compile(self._bridge_intent(token="ETH", amount=Decimal("0.5")))
+
+        assert result.status == CompilationStatus.SUCCESS, f"Compilation failed: {result.error}"
+        assert len(result.transactions) == 1
+        assert result.transactions[0].tx_type == "bridge_deferred"
+        assert result.transactions[0].value == 500000000000000000
+        assert result.action_bundle.metadata["token"] == "ETH"
+        assert result.action_bundle.metadata["amount"] == "0.5"
+
+    def test_bridge_unsupported_chain_fails(self) -> None:
+        """A chain outside CHAIN_MAPPING fails compilation with a clear error."""
+        compiler = _make_compiler()
+
+        result = compiler.compile(self._bridge_intent(to_chain="fantom"))
+
+        assert result.status == CompilationStatus.FAILED
+        assert "LiFi does not support chain: fantom" in result.error
+
+    def test_bridge_amount_all_rejected_at_direct_compile(self) -> None:
+        """Direct connector compile (no IntentCompiler pre-resolution) rejects 'all'."""
+        from almanak.connectors._strategy_base.base.compiler import SwapCompilerContext
+        from almanak.connectors.lifi.compiler import LiFiCompiler
+
+        compiler = _make_compiler()
+        ctx = SwapCompilerContext(**compiler._swap_compiler_context_kwargs())
+
+        result = LiFiCompiler().compile(ctx, self._bridge_intent(amount="all"))
+
+        assert result.status == CompilationStatus.FAILED
+        assert "amount='all'" in result.error
