@@ -3,6 +3,14 @@
 Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for the
 USDC.e Comet on Polygon (``0xF25212E676D1F7F89Cd72fFEe66158f541246445``).
 
+WIND-DOWN (issue #3400, verified on-chain 2026-07-24): Compound governance has
+wound down the Polygon deployment — every collateral ``supplyCap`` on this
+Comet (WETH/WBTC/WMATIC/MaticX) and on the USDT Comet is 0, so any
+``supplyCollateral`` reverts with ``SupplyCapExceeded`` on forks at/after the
+cap-zeroing block. There is no live polygon Comet to re-point to, so the four
+tests that post WETH collateral are xfailed against #3400. Base-asset
+supply/withdraw/repay remains unpaused and those tests still run.
+
 Polygon is the one chain in this group where the Comet's base asset is
 **bridged** USDC (USDC.e at ``0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174``),
 NOT native Circle USDC (``0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359``).
@@ -547,6 +555,15 @@ class TestCompoundV3SupplyIntent:
 
     @pytest.mark.intent(IntentType.SUPPLY)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="#3400: Compound governance wound down the Polygon USDC.e Comet — every "
+        "collateral supplyCap (WETH/WBTC/WMATIC/MaticX) is 0 at chain head, so "
+        "supplyCollateral(WETH) reverts with SupplyCapExceeded (surfaces as 0xd27b44a9 "
+        "under execTransactionWithRole) on any fork at/after the cap-zeroing block. "
+        "strict=False because the failure is fork-block-dependent: a weekly fork pin "
+        "predating the wind-down still passes legitimately (as of 2026-07-24).",
+        strict=False,
+    )
     async def test_supply_weth_collateral_using_intent(
         self,
         web3: Web3,
@@ -931,6 +948,15 @@ class TestCompoundV3BorrowIntent:
 
     @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="#3400: Compound governance wound down the Polygon USDC.e Comet — every "
+        "collateral supplyCap is 0 at chain head, so the bundled "
+        "supplyCollateral(WETH) leg reverts with SupplyCapExceeded (0xd27b44a9 under "
+        "execTransactionWithRole) on any fork at/after the cap-zeroing block. "
+        "strict=False because the failure is fork-block-dependent: a weekly fork pin "
+        "predating the wind-down still passes legitimately (as of 2026-07-24).",
+        strict=False,
+    )
     async def test_borrow_usdc_with_weth_collateral_using_intent(
         self,
         web3: Web3,
@@ -1129,6 +1155,15 @@ class TestCompoundV3BorrowIntent:
 
     @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="#3400: Compound governance wound down the Polygon USDC.e Comet — every "
+        "collateral supplyCap is 0 at chain head, so the setup borrow's "
+        "supplyCollateral(WETH) leg reverts with SupplyCapExceeded (0xd27b44a9 under "
+        "execTransactionWithRole) on any fork at/after the cap-zeroing block. "
+        "strict=False because the failure is fork-block-dependent: a weekly fork pin "
+        "predating the wind-down still passes legitimately (as of 2026-07-24).",
+        strict=False,
+    )
     async def test_repay_usdc_using_intent(
         self,
         web3: Web3,
@@ -1342,6 +1377,15 @@ class TestCompoundV3BorrowIntent:
 
     @pytest.mark.intent(IntentType.REPAY)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="#3400: Compound governance wound down the Polygon USDC.e Comet — every "
+        "collateral supplyCap is 0 at chain head, so the setup borrow's "
+        "supplyCollateral(WETH) leg reverts with SupplyCapExceeded (0xd27b44a9 under "
+        "execTransactionWithRole) on any fork at/after the cap-zeroing block. "
+        "strict=False because the failure is fork-block-dependent: a weekly fork pin "
+        "predating the wind-down still passes legitimately (as of 2026-07-24).",
+        strict=False,
+    )
     async def test_standalone_repay_degrades_interest_to_none(
         self,
         web3: Web3,
