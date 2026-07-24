@@ -53,7 +53,6 @@ from almanak.framework.teardown.models import (
     TeardownRequest,
     TeardownState,
     TeardownStatus,
-    decode_consolidation_consent,
     encode_consolidation_consent,
 )
 
@@ -1334,21 +1333,9 @@ class SQLiteTeardownStateAdapter:
                         state.pending_intents_json,
                         json.dumps(state.intent_results),
                         state.cancel_window_until.isoformat() if state.cancel_window_until else None,
-                        # VIB-5174: fold consolidation consent into the config_json
-                        # snapshot so it survives a crash-resume without a dedicated
-                        # column (which would require external Postgres DDL). OR-merge
-                        # with the snapshot's own reserved key so a state hydrated by a
-                        # consent-agnostic layer (default field False, key present in
-                        # config_json) keeps its grant — consent is monotonic per
-                        # teardown, so True from either source can never wrongly grant.
-                        # The SOLE sanctioned revocation is the stale-regeneration reset
-                        # in ``TeardownManager.resume()``, which clears BOTH operands
-                        # (field + config_json key) so this OR-merge cannot re-grant a
-                        # consent that no longer applies to the regenerated plan.
-                        encode_consolidation_consent(
-                            state.config_json,
-                            state.consolidation_consent or decode_consolidation_consent(state.config_json),
-                        ),
+                        # VIB-5938: scrub any retired consent marker on every
+                        # SQLite write. Teardown is always clamp-scoped.
+                        encode_consolidation_consent(state.config_json, False),
                     ),
                 )
                 conn.commit()
@@ -1412,9 +1399,8 @@ class SQLiteTeardownStateAdapter:
                     datetime.fromisoformat(row["cancel_window_until"]) if row["cancel_window_until"] else None
                 ),
                 config_json=row["config_json"] or "",
-                # VIB-5174: recover consolidation consent from the config_json
-                # snapshot (default False for pre-feature rows → safe re-clamp).
-                consolidation_consent=decode_consolidation_consent(row["config_json"] or ""),
+                # VIB-5938: legacy rows cannot authorize an unclamped sweep.
+                consolidation_consent=False,
             )
 
         return _with_retry(_op, description="get_teardown_state")

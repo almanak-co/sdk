@@ -1098,17 +1098,8 @@ class TeardownManager:
             # (same plan, e.g. completed_intents=1/current_intent_index=0) must
             # keep ``completed_intents`` so it still skips finished intents.
             state.completed_intents = 0
-            # VIB-5174: the regenerated plan is a brand-new CLOSING plan, NOT the
-            # consolidation tail the operator consent was stamped for. Operator
-            # consent (set True only by ``run_token_consolidation`` for a MANUAL
-            # consolidation) must NOT carry over to this fresh closing plan — its
-            # ``amount='all'`` swap-backs would otherwise run UNCLAMPED (the
-            # ALM-2766 clamp is gated loop-wide on ``consolidation_consent``),
-            # sweeping commingled wallet funds. Reset to the fail-safe default so
-            # the regenerated swap-backs re-clamp (safe under-sweep direction).
-            # Reset BOTH the field AND the ``config_json`` reserved key, because
-            # the save-site OR-merge (``consolidation_consent or decode(config_json)``)
-            # would otherwise resurrect True from the snapshot on the next save.
+            # VIB-5938: scrub the retired full-wallet consent marker whenever a
+            # plan is regenerated. All teardown plans are clamp-scoped.
             state.consolidation_consent = False
             state.config_json = encode_consolidation_consent(state.config_json, False)
 
@@ -1209,14 +1200,6 @@ class TeardownManager:
             start_from_index=resume_from_index,
             price_oracle=price_oracle,
             market=market,
-            # VIB-5174: thread the persisted consent so a resumed MANUAL
-            # consolidation tail does NOT re-clamp the operator-consented
-            # full-wallet sweep. Default False (closing-phase resume, or an
-            # AUTOMATIC teardown, or a pre-feature row) keeps the clamp ON.
-            # Safe either way: the resume index is past every closing intent,
-            # so consent only ever reaches the consolidation swaps it was
-            # stamped for.
-            consolidation_consent=state.consolidation_consent,
         )
 
     def _consolidation_noop_target(
@@ -1434,20 +1417,11 @@ class TeardownManager:
             teardown_state.pending_intents_json = json.dumps([*existing, *serialized])
             teardown_state.total_intents = start_from_index + len(plan.intents)
             teardown_state.status = TeardownStatus.EXECUTING
-            # VIB-5174: persist the consent decision ALONGSIDE the extended plan so
-            # a crash mid-consolidation resumes with the same consent. The closing
-            # intents at [0, start_from_index) are already complete, so on resume
-            # ``_execute_intents`` only re-touches the consolidation tail — stamping
-            # the teardown-level flag never disables the clamp for a closing-intent
-            # swap-back. Mirrors the in-process ``consolidation_consent=`` arg below.
-            teardown_state.consolidation_consent = not is_auto_mode
-            # Keep the in-memory ``config_json`` snapshot in sync with the field so
-            # the two never diverge in-process (the save layer OR-merges anyway, but
-            # an in-process reader of ``config_json`` must see the same grant). This
-            # is the in-memory mirror of the regeneration reset in ``resume()``.
-            teardown_state.config_json = encode_consolidation_consent(
-                teardown_state.config_json, teardown_state.consolidation_consent
-            )
+            # VIB-5938: request provenance is not authorization to consume
+            # untracked wallet funds. Persist the clamp-scoped state and scrub
+            # any legacy consent marker before a possible crash-resume.
+            teardown_state.consolidation_consent = False
+            teardown_state.config_json = encode_consolidation_consent(teardown_state.config_json, False)
             teardown_state.updated_at = datetime.now(UTC)
             if self.state_manager:
                 await self.state_manager.save_teardown_state(teardown_state)
@@ -1475,21 +1449,6 @@ class TeardownManager:
                 is_auto_mode=is_auto_mode,
                 price_oracle=oracle_for_swaps,
                 market=market,
-                # ALM-2766: consent to a full-wallet consolidation sweep ONLY on
-                # an operator-initiated (manual) teardown. Consolidation also
-                # runs on AUTOMATIC teardowns (risk-guard / auto-protect /
-                # config-reload carry a non-None request, so
-                # ``_teardown_config_from_request`` leaves consolidation enabled
-                # and they run SOFT mode) — and an automatic teardown has NO
-                # operator present to consent to sweeping commingled / sibling-
-                # deployment balances. So the clamp must STAY ON for auto-mode
-                # consolidation; only a manual teardown (``is_auto_mode`` False
-                # → ``requested_by`` in {cli, dashboard, dashboard_api}) is the
-                # consented full-wallet sweep. ``TeardownRequest.asset_policy``
-                # defaults to TARGET_TOKEN, so it carries NO distinguishable
-                # explicit-consent signal — manual-vs-auto is the only reliable
-                # operator-initiated signal (derive_teardown_auto_mode).
-                consolidation_consent=not is_auto_mode,
             )
 
             # _execute_intents counts only the loop it ran (offset onward),
@@ -1558,19 +1517,13 @@ class TeardownManager:
             on_progress: Callback for progress
             start_from_index: Index to start from (for resumption)
             is_auto_mode: Whether this is auto-protect mode
-            consolidation_consent: ALM-2766 — when True, the ``amount='all'``
-                swap-back clamp is SKIPPED (full-wallet sweep preserved). Set
-                by the VIB-5011 token-consolidation lane ONLY for
-                operator-initiated (MANUAL) teardowns (``not is_auto_mode``).
-                Consolidation also runs on AUTOMATIC teardowns (risk-guard /
-                auto-protect / config-reload), but those have no operator
-                present to consent to a wallet-scoped sweep, so the clamp STAYS
-                ON for them (consent False). All non-consolidation closing-
-                intent calls leave it False (clamp on). See blueprint 14 §4.5.
+            consolidation_consent: Retired compatibility argument. Ignored;
+                teardown swaps are always clamp-scoped (VIB-5938).
 
         Returns:
             TeardownResult with execution outcome
         """
+        del consolidation_consent
         started_at = teardown_state.started_at
         mode_str = "graceful" if mode == TeardownMode.SOFT else "emergency"
 
@@ -1691,12 +1644,6 @@ class TeardownManager:
             # (skip the swap, flag degraded) — a swap-back is never the
             # risk-reducing intent, so skipping it strands no on-chain risk.
             #
-            # SKIPPED entirely under ``consolidation_consent`` — set ONLY by the
-            # VIB-5011 consolidation lane for an operator-initiated (MANUAL)
-            # teardown (§4.5). Automatic teardowns (risk-guard / auto-protect /
-            # config-reload) DO run consolidation, but with consent False so the
-            # clamp stays on (no operator present to consent to a wallet sweep).
-            #
             # Placed at loop scope (not inside ``execute_at_slippage``) so a
             # skip can ``continue`` the loop — the same pattern as the
             # zero-balance skip above; a skip from inside the per-slippage
@@ -1705,114 +1652,111 @@ class TeardownManager:
             # OWNS the outcome (proceed-clamped or skip): the swap never falls
             # through to the closure's full-``all`` resolution, fully closing
             # the sweep bypass.
-            if not consolidation_consent:
-                clamp_token = _clampable_swap_from_token(intent, market)
-                if clamp_token:
-                    live_balance = _read_live_wallet_balance(market, clamp_token)
-                    if live_balance is None:
-                        # Unmeasured live balance → cannot prove the clamp.
-                        # Fail closed: skip rather than risk a full sweep, and
-                        # flag degraded for reconciliation.
-                        decision = SwapClampDecision(None, True, True, "live_balance_unmeasured")
-                    else:
-                        tracked_map = (
-                            self.runner_helpers.get_tracked_swap_inventory(strategy)  # type: ignore[misc]
-                            if self.runner_helpers.has_tracked_inventory
-                            else None
-                        )
-                        decision = decide_swap_clamp(
-                            live_balance=live_balance,
-                            tracked_map=tracked_map,
-                            from_token=clamp_token,
-                        )
-                    if decision.degraded:
-                        accounting_degraded_records.append(
-                            {
-                                "kind": "swap_clamp_degraded",
-                                "intent_index": i,
-                                "token": clamp_token,
-                                "reason": decision.reason,
-                            }
-                        )
-                    if decision.skip:
-                        # Preserve the VIB-4587 sweep WARNING as the operator
-                        # signal — especially for the untracked-token skip
-                        # (this is exactly the commingled-funds case it warns
-                        # about). Best-effort; never blocks the unwind.
-                        if self.runner_helpers.has_sweep_warning:
-                            try:
-                                self.runner_helpers.warn_sweep_non_strategy_balance(  # type: ignore[misc]
-                                    strategy,
-                                    intent,
-                                    clamp_token,
-                                    live_balance if live_balance is not None else Decimal("0"),
-                                )
-                            except Exception:  # noqa: BLE001
-                                logger.debug("sweep-warning helper raised in clamp skip; ignored", exc_info=True)
-                        logger.warning(
-                            "🛑 ALM-2766 teardown swap-back clamp: SKIPPING %s swap "
-                            "(reason=%s, degraded=%s) — not sweeping commingled wallet funds.",
-                            clamp_token,
-                            decision.reason,
-                            decision.degraded,
-                        )
-                        # VIB-5478: structured BLOCK decision entry — a swap-back
-                        # the clamp REFUSED to sweep (untracked / unmeasured /
-                        # commingled). Audit trail only; never blocks the unwind.
-                        log_teardown_decision(
-                            deployment_id=strategy.deployment_id,
-                            teardown_id=teardown_id,
-                            phase=TeardownDecisionPhase.BLOCK,
-                            outcome="swap_clamp_skipped",
-                            description=f"swap-back clamp skipped {clamp_token} ({decision.reason})",
-                            token=clamp_token,
-                            reason=decision.reason,
-                            degraded=decision.degraded,
-                            intent_count=1,
-                        )
-                        # No-op success (nothing of ours to swap) — preserves
-                        # the ``intents_total = succeeded + failed`` invariant
-                        # and does not mark the teardown failed. Persist the
-                        # ABSOLUTE completed count (see the zero-balance skip).
-                        succeeded += 1
-                        skipped += 1
-                        if on_progress:
-                            await on_progress(
-                                progress_pct, f"Skipped step {i + 1}/{len(intents)}: clamp {decision.reason}"
-                            )
-                        # Done → drop from pending; persist the resume floor (VIB-5573).
-                        _pending_indices.discard(i)
-                        _floor = _resume_floor()
-                        teardown_state.completed_intents = _floor
-                        teardown_state.current_intent_index = _floor
-                        teardown_state.updated_at = datetime.now(UTC)
-                        if self.state_manager:
-                            await self.state_manager.save_teardown_state(teardown_state)
-                        continue
-                    # Proceed with the clamped amount: resolve the intent here so
-                    # the per-slippage closure's ``amount='all'`` branch is
-                    # bypassed and every retry uses the clamped quantity.
-                    intent = _set_intent_resolved_amount(intent, decision.amount)  # type: ignore[arg-type]
-                    logger.info(
-                        "🛑 ALM-2766 clamped %s swap-back to tracked qty %s (live wallet %s).",
-                        clamp_token,
-                        decision.amount,
-                        live_balance,
+            clamp_token = _clampable_swap_from_token(intent, market)
+            if clamp_token:
+                live_balance = _read_live_wallet_balance(market, clamp_token)
+                if live_balance is None:
+                    # Unmeasured live balance → cannot prove the clamp.
+                    # Fail closed: skip rather than risk a full sweep, and
+                    # flag degraded for reconciliation.
+                    decision = SwapClampDecision(None, True, True, "live_balance_unmeasured")
+                else:
+                    tracked_map = (
+                        self.runner_helpers.get_tracked_swap_inventory(strategy)  # type: ignore[misc]
+                        if self.runner_helpers.has_tracked_inventory
+                        else None
                     )
-                    # VIB-5478: structured SIZE decision entry — the swap-back was
-                    # sized to the strategy's tracked inventory (TD-07). The
-                    # resolved amount itself is money-shaped, so it lands in the
-                    # ledger, not here; the decision records only token + reason.
+                    decision = decide_swap_clamp(
+                        live_balance=live_balance,
+                        tracked_map=tracked_map,
+                        from_token=clamp_token,
+                    )
+                if decision.degraded:
+                    accounting_degraded_records.append(
+                        {
+                            "kind": "swap_clamp_degraded",
+                            "intent_index": i,
+                            "token": clamp_token,
+                            "reason": decision.reason,
+                        }
+                    )
+                if decision.skip:
+                    # Preserve the VIB-4587 sweep WARNING as the operator
+                    # signal — especially for the untracked-token skip
+                    # (this is exactly the commingled-funds case it warns
+                    # about). Best-effort; never blocks the unwind.
+                    if self.runner_helpers.has_sweep_warning:
+                        try:
+                            self.runner_helpers.warn_sweep_non_strategy_balance(  # type: ignore[misc]
+                                strategy,
+                                intent,
+                                clamp_token,
+                                live_balance if live_balance is not None else Decimal("0"),
+                            )
+                        except Exception:  # noqa: BLE001
+                            logger.debug("sweep-warning helper raised in clamp skip; ignored", exc_info=True)
+                    logger.warning(
+                        "🛑 ALM-2766 teardown swap-back clamp: SKIPPING %s swap "
+                        "(reason=%s, degraded=%s) — not sweeping commingled wallet funds.",
+                        clamp_token,
+                        decision.reason,
+                        decision.degraded,
+                    )
+                    # VIB-5478: structured BLOCK decision entry — a swap-back
+                    # the clamp REFUSED to sweep (untracked / unmeasured /
+                    # commingled). Audit trail only; never blocks the unwind.
                     log_teardown_decision(
                         deployment_id=strategy.deployment_id,
                         teardown_id=teardown_id,
-                        phase=TeardownDecisionPhase.SIZE,
-                        outcome="swap_clamp_applied",
-                        description=f"swap-back {clamp_token} sized to tracked inventory",
+                        phase=TeardownDecisionPhase.BLOCK,
+                        outcome="swap_clamp_skipped",
+                        description=f"swap-back clamp skipped {clamp_token} ({decision.reason})",
                         token=clamp_token,
-                        reason="clamped_to_tracked_quantity",
+                        reason=decision.reason,
+                        degraded=decision.degraded,
                         intent_count=1,
                     )
+                    # No-op success (nothing of ours to swap) — preserves
+                    # the ``intents_total = succeeded + failed`` invariant
+                    # and does not mark the teardown failed. Persist the
+                    # ABSOLUTE completed count (see the zero-balance skip).
+                    succeeded += 1
+                    skipped += 1
+                    if on_progress:
+                        await on_progress(progress_pct, f"Skipped step {i + 1}/{len(intents)}: clamp {decision.reason}")
+                    # Done → drop from pending; persist the resume floor (VIB-5573).
+                    _pending_indices.discard(i)
+                    _floor = _resume_floor()
+                    teardown_state.completed_intents = _floor
+                    teardown_state.current_intent_index = _floor
+                    teardown_state.updated_at = datetime.now(UTC)
+                    if self.state_manager:
+                        await self.state_manager.save_teardown_state(teardown_state)
+                    continue
+                # Proceed with the clamped amount: resolve the intent here so
+                # the per-slippage closure's ``amount='all'`` branch is
+                # bypassed and every retry uses the clamped quantity.
+                intent = _set_intent_resolved_amount(intent, decision.amount)  # type: ignore[arg-type]
+                logger.info(
+                    "🛑 ALM-2766 clamped %s swap-back to tracked qty %s (live wallet %s).",
+                    clamp_token,
+                    decision.amount,
+                    live_balance,
+                )
+                # VIB-5478: structured SIZE decision entry — the swap-back was
+                # sized to the strategy's tracked inventory (TD-07). The
+                # resolved amount itself is money-shaped, so it lands in the
+                # ledger, not here; the decision records only token + reason.
+                log_teardown_decision(
+                    deployment_id=strategy.deployment_id,
+                    teardown_id=teardown_id,
+                    phase=TeardownDecisionPhase.SIZE,
+                    outcome="swap_clamp_applied",
+                    description=f"swap-back {clamp_token} sized to tracked inventory",
+                    token=clamp_token,
+                    reason="clamped_to_tracked_quantity",
+                    intent_count=1,
+                )
 
             # Execute with escalating slippage
             async def execute_at_slippage(  # noqa: C901

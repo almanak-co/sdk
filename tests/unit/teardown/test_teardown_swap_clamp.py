@@ -5,8 +5,8 @@ against the FULL live wallet balance, sweeping commingled funds (a shared
 wallet's sibling-strategy balances, or pre-existing holdings the strategy
 never owned). This fix clamps the swap to
 ``min(Σ tracked_lot_remaining, live_balance)`` — the TRACKED quantity, never
-``qty_idle`` (the untracked remainder). Explicit operator consolidation
-consent (VIB-5011) opts out and keeps the full-wallet sweep.
+``qty_idle`` (the untracked remainder). VIB-5938 applies the same rule to
+manual CLI/dashboard consolidation; request provenance cannot bypass it.
 
 Layers tested:
   1. ``decide_swap_clamp`` — the pure fail-closed decision table.
@@ -15,7 +15,8 @@ Layers tested:
      scoping, UNMEASURED sentinel.
   3. ``read_tracked_swap_inventory`` — never-raises accessor sentinels.
   4. ``_clampable_swap_from_token`` — gating (SWAP only; not WITHDRAW/REPAY).
-  5. ``_execute_intents`` integration — clamp / skip / consent end to end.
+  5. ``_execute_intents`` integration — clamp / skip end to end, including the
+     ignored legacy-consent compatibility argument.
 """
 
 from __future__ import annotations
@@ -581,14 +582,14 @@ async def test_clamp_tracked_above_live_executes_live_amount():
 
 
 @pytest.mark.asyncio
-async def test_consent_skips_clamp_preserves_full_sweep():
-    # consolidation_consent=True → no clamp; amount stays "all" (full sweep).
+async def test_retired_consent_argument_cannot_skip_clamp():
+    # VIB-5938: the compatibility argument is ignored; tracked-only remains.
     result, escalation, inventory = await _run_clamp(
         tracked_map={"USDC": Decimal("30")}, live=Decimal("100"), consent=True
     )
     sent_intent = escalation.call_args.kwargs["intent"]
-    assert sent_intent["amount"] == "all"
-    inventory.assert_not_called()  # clamp path never engaged
+    assert sent_intent["amount"] == "30"
+    inventory.assert_called_once()
     assert result.intents_succeeded == 1
 
 
@@ -632,14 +633,13 @@ async def test_withdraw_intent_is_not_clamped():
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 6. run_token_consolidation — P1: clamp STAYS ON for AUTOMATIC teardowns
+# 6. run_token_consolidation — clamp stays on for every request provenance
 #
 # The VIB-5011 consolidation phase runs on automatic teardowns too (risk-guard
 # / auto-protect / config-reload carry a non-None request → consolidation
-# enabled → SOFT mode). An automatic teardown has no operator present to
-# consent to a wallet-scoped sweep, so the clamp MUST stay on
-# (consolidation_consent = not is_auto_mode). A planted commingled (untracked)
-# balance must NOT be swept on an automatic teardown.
+# enabled → SOFT mode). Manual CLI/dashboard provenance is also not informed
+# authorization to consume untracked funds. A planted commingled balance must
+# not be swept in either lane.
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -700,15 +700,12 @@ async def test_automatic_teardown_consolidation_does_not_sweep_commingled():
 
 
 @pytest.mark.asyncio
-async def test_manual_teardown_consolidation_sweeps_full_wallet():
-    # is_auto_mode=False (operator-initiated) → consent=True → clamp OFF.
-    # The full-wallet WETH consolidation sweep executes as designed.
+async def test_manual_teardown_consolidation_does_not_sweep_commingled():
+    # is_auto_mode=False (CLI/dashboard) is request provenance, not consent.
     outcome, escalation, inventory = await _run_consolidation(is_auto_mode=False, tracked_map={})
     assert outcome.planned == 1
-    assert escalation.call_count == 1  # full-wallet sweep executed (consented)
-    sent_intent = escalation.call_args.kwargs["intent"]
-    assert getattr(sent_intent, "amount", None) == "all"  # NOT clamped
-    inventory.assert_not_called()  # clamp path never engaged under consent
+    assert escalation.call_count == 0
+    inventory.assert_called()
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -59,23 +59,9 @@ def _teardown_state_to_dict(state: TeardownState) -> dict[str, Any]:
         "pending_intents_json": state.pending_intents_json,
         "intent_results": state.intent_results,
         "cancel_window_until": _iso_or_none(state.cancel_window_until),
-        # VIB-5174: consolidation consent rides the config_json snapshot so it
-        # survives the gateway → Postgres round-trip on an existing (mapped)
-        # column, without a dedicated field the external PG adapter would drop.
-        # OR-merge with the snapshot's own reserved key: the external (consent-
-        # agnostic) PG adapter reconstructs the dataclass with the default
-        # ``consolidation_consent=False`` but preserves ``config_json`` verbatim,
-        # so the granted consent lives only in the snapshot on that hop. Consent
-        # is monotonic per teardown (granted once at consolidation start), so
-        # merging True from either source can never wrongly grant. The SOLE
-        # sanctioned revocation is the stale-regeneration reset in
-        # ``TeardownManager.resume()``, which clears BOTH operands (the field AND
-        # the config_json reserved key) precisely so this OR-merge cannot
-        # re-grant a consent that no longer applies to the regenerated plan.
-        "config_json": encode_consolidation_consent(
-            state.config_json,
-            state.consolidation_consent or decode_consolidation_consent(state.config_json),
-        ),
+        # VIB-5938: scrub the retired consent key on every wire write. A legacy
+        # true must never survive a hosted round-trip and disable the clamp.
+        "config_json": encode_consolidation_consent(state.config_json, False),
     }
 
 
@@ -118,6 +104,6 @@ def _teardown_state_from_dict(data: dict[str, Any]) -> TeardownState:
         intent_results=intent_results,
         cancel_window_until=_parse_datetime(data.get("cancel_window_until")),
         config_json=config_json,
-        # VIB-5174: recover consolidation consent from the config_json snapshot.
+        # VIB-5938: legacy/malformed envelopes always decode tracked-only.
         consolidation_consent=decode_consolidation_consent(config_json),
     )

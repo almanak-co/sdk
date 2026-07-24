@@ -596,18 +596,10 @@ class TeardownState:
     # Configuration snapshot (for resumption with same settings)
     config_json: str = ""
 
-    # ALM-2766 / VIB-5174: operator consent to a full-wallet consolidation
-    # sweep, set True ONLY for an operator-initiated (MANUAL) token-consolidation
-    # phase. Persisted across crash-resume so the resumed consolidation tail does
-    # NOT re-clamp a sweep the operator already consented to. It rides the
-    # existing ``config_json`` snapshot column on the wire/disk (see
-    # ``encode_consolidation_consent`` / ``decode_consolidation_consent``) rather
-    # than a dedicated column — ``teardown_execution_state`` has a Postgres twin
-    # owned by the external metrics-database repo, so a new typed column would
-    # require external DDL and be dropped on a hosted save. config_json is an
-    # existing opaque TEXT column that already round-trips through SQLite, the
-    # gateway serialization, AND the Postgres adapter, so consent survives a
-    # resume on BOTH backends with zero schema change.
+    # Legacy ALM-2766 / VIB-5174 field. VIB-5938 removed the unsafe inference
+    # that a manual request consents to a full-wallet sweep. Keep this field only
+    # for source/wire compatibility with older SDK callers; production readers
+    # and writers force it to False and scrub the old config_json key.
     consolidation_consent: bool = False
 
     @property
@@ -630,29 +622,17 @@ class TeardownState:
         return self.status in (TeardownStatus.EXECUTING, TeardownStatus.PAUSED)
 
 
-# VIB-5174: the consolidation-consent flag rides the existing ``config_json``
-# snapshot column rather than a dedicated column. ``teardown_execution_state``
-# has a Postgres twin whose DDL is owned by the external ``metrics-database``
-# repo and a column-mapping adapter in the external ``platform-plugins`` package;
-# a new typed column would require external DDL and would be DROPPED on a hosted
-# save (the PG adapter never maps an unknown field), losing consent across a
-# hosted resume. ``config_json`` is an existing opaque TEXT column that already
-# round-trips through SQLite, the gateway serialization, and the Postgres
-# adapter, so embedding consent there fixes resume on BOTH backends with zero
-# schema change. The key is namespaced so it never collides with a
-# ``TeardownConfig.to_dict()`` field, and ``config_json`` is a write-only debug
-# snapshot (never parsed back as a TeardownConfig), so no consumer breaks.
+# Legacy VIB-5174 envelope key. VIB-5938 retains it only so every persistence
+# boundary can remove old grants without a hosted schema migration.
 _CONSOLIDATION_CONSENT_KEY = "__consolidation_consent__"
 
 
 def encode_consolidation_consent(config_json: str, consent: bool) -> str:
-    """Fold the consolidation-consent flag into a ``config_json`` snapshot.
+    """Scrub the retired full-wallet-consent key from ``config_json``.
 
-    Idempotent and content-preserving for a JSON-object snapshot: parse, set or
-    remove the reserved consent key, re-serialize. A non-object or corrupt
-    snapshot is replaced with a fresh object carrying only the consent key —
-    ``config_json`` is never read back as a ``TeardownConfig``, so no consumer
-    breaks.
+    ``consent`` remains in the signature for source compatibility but is
+    deliberately ignored. Teardown is tracked-only regardless of request
+    provenance or legacy persisted state.
     """
     try:
         data = json.loads(config_json) if config_json else {}
@@ -660,35 +640,20 @@ def encode_consolidation_consent(config_json: str, consent: bool) -> str:
         data = {}
     if not isinstance(data, dict):
         data = {}
-    # Only an exact ``True`` writes the reserved key (symmetric with the
-    # literal-``true`` decode); any other value clears it — the consent flag
-    # gates a money-path clamp, so never persist a non-boolean grant.
-    if consent is True:
-        data[_CONSOLIDATION_CONSENT_KEY] = True
-    else:
-        data.pop(_CONSOLIDATION_CONSENT_KEY, None)
+    del consent
+    data.pop(_CONSOLIDATION_CONSENT_KEY, None)
     return json.dumps(data)
 
 
 def decode_consolidation_consent(config_json: str) -> bool:
-    """Read the consolidation-consent flag out of a ``config_json`` snapshot.
+    """Return the fail-closed value for the retired consent envelope.
 
-    Tolerant of empty / non-object / corrupt snapshots (default ``False``). An
-    old pre-VIB-5174 row predates the feature, so it correctly reads ``False``
-    and a resumed consolidation re-clamps — the safe under-sweep direction.
-
-    Consent requires the reserved key to be the LITERAL JSON boolean ``true`` —
-    not merely truthy. This flag DISABLES the ALM-2766 swap-back clamp, so a
-    malformed or externally-written snapshot (e.g. ``"false"``, ``"0"``, ``1``)
-    must never be promoted to consent; only an exact ``true`` grants it.
+    Older local and hosted rows may contain literal ``true``. They are ignored:
+    request provenance was never explicit permission to consume untracked
+    wallet funds. The parameter remains for source compatibility.
     """
-    try:
-        data = json.loads(config_json) if config_json else {}
-    except (TypeError, ValueError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    return data.get(_CONSOLIDATION_CONSENT_KEY) is True
+    del config_json
+    return False
 
 
 class EscalationLevel(StrEnum):

@@ -13,13 +13,12 @@ TERMINOLOGY: ``qty_idle = live − lot_held`` is the UNTRACKED/commingled
 remainder; ``lot_held`` (Σ open wallet-basis lot remaining) is the TRACKED
 quantity. We swap the TRACKED quantity, never ``qty_idle``.
 
-Operator-initiated (MANUAL) consolidation opts OUT of the clamp — that lane
-intentionally does a full-wallet sweep with the operator present. The VIB-5011
-consolidation phase ALSO runs on AUTOMATIC teardowns (risk-guard / auto-protect
-/ config-reload, blueprint 14 §4.5), and those keep the clamp ON (no operator to
-consent to sweeping commingled / sibling-deployment balances). The CALLER gates
-on ``consolidation_consent = not is_auto_mode``; this module only computes the
-decision and reads inventory.
+Every teardown lane uses the clamp, including CLI/dashboard consolidation.
+Request provenance is not informed authorization to consume untracked wallet
+funds. A full-wallet sweep, if productized, must be a separate post-teardown
+wallet-administration operation with an exact, expiring grant; it is never an
+``amount='all'`` teardown intent (VIB-5938). This module computes the decision
+and reads inventory.
 
 Read-only and best-effort: the inventory read NEVER raises (returns the
 UNMEASURED sentinel ``None``) and a degraded decision flags
