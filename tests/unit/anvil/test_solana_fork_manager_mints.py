@@ -2,6 +2,7 @@
 
 Complements test_solana_fork_manager.py with focused coverage of:
 - ``SolanaForkManager._prepare_modified_mints`` (mint authority rewriting)
+- ``SolanaForkManager._prepare_clone_account_files`` (clone-account pre-fetch)
 - ``SolanaForkManager._fund_single_token`` (ATA create/mint + balance polling)
 
 All RPC, filesystem-listing, and solders seams are mocked or pointed at
@@ -125,8 +126,10 @@ class TestPrepareModifiedMints:
         mgr._mint_authority_keypair = _FakeKeypair()
         mgr._modified_mint_dir = str(tmp_path)
 
-        with patch.dict(MINTS_PATH, {"SOL": WSOL_MINT, "WSOL": WSOL_MINT}, clear=True), \
-             patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock) as rpc:
+        with (
+            patch.dict(MINTS_PATH, {"SOL": WSOL_MINT, "WSOL": WSOL_MINT}, clear=True),
+            patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock) as rpc,
+        ):
             await mgr._prepare_modified_mints()
 
         rpc.assert_not_awaited()
@@ -147,8 +150,10 @@ class TestPrepareModifiedMints:
             rentEpoch=361,
         )
 
-        with patch.dict(MINTS_PATH, {"USDC": USDC_MINT}, clear=True), \
-             patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock, return_value=response) as rpc:
+        with (
+            patch.dict(MINTS_PATH, {"USDC": USDC_MINT}, clear=True),
+            patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock, return_value=response) as rpc,
+        ):
             await mgr._prepare_modified_mints()
 
         rpc.assert_awaited_once_with(
@@ -185,8 +190,10 @@ class TestPrepareModifiedMints:
         # Value carries only "data" — every other field falls back to defaults
         response = _rpc_value(_mint_account_bytes(has_authority=False, has_freeze_authority=False))
 
-        with patch.dict(MINTS_PATH, {"USDT": USDT_MINT}, clear=True), \
-             patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock, return_value=response):
+        with (
+            patch.dict(MINTS_PATH, {"USDT": USDT_MINT}, clear=True),
+            patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock, return_value=response),
+        ):
             await mgr._prepare_modified_mints()
 
         account_json, raw = _read_written_mint(tmp_path, USDT_MINT)
@@ -211,8 +218,10 @@ class TestPrepareModifiedMints:
         mgr._mint_authority_keypair = _FakeKeypair()
         mgr._modified_mint_dir = str(tmp_path)
 
-        with patch.dict(MINTS_PATH, {"USDC": USDC_MINT}, clear=True), \
-             patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock, return_value=response):
+        with (
+            patch.dict(MINTS_PATH, {"USDC": USDC_MINT}, clear=True),
+            patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock, return_value=response),
+        ):
             await mgr._prepare_modified_mints()
 
         assert list(tmp_path.iterdir()) == []
@@ -225,8 +234,10 @@ class TestPrepareModifiedMints:
 
         response = _rpc_value(b"\x00" * (MINT_LAYOUT_SIZE - 42))
 
-        with patch.dict(MINTS_PATH, {"USDC": USDC_MINT}, clear=True), \
-             patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock, return_value=response):
+        with (
+            patch.dict(MINTS_PATH, {"USDC": USDC_MINT}, clear=True),
+            patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock, return_value=response),
+        ):
             await mgr._prepare_modified_mints()
 
         assert list(tmp_path.iterdir()) == []
@@ -239,19 +250,199 @@ class TestPrepareModifiedMints:
 
         good_response = _rpc_value(_mint_account_bytes())
 
-        with patch.dict(MINTS_PATH, {"BAD": USDT_MINT, "USDC": USDC_MINT}, clear=True), \
-             patch.object(
-                 mgr,
-                 "_rpc_call_to_url",
-                 new_callable=AsyncMock,
-                 side_effect=[RuntimeError("rpc down"), good_response],
-             ) as rpc:
+        with (
+            patch.dict(MINTS_PATH, {"BAD": USDT_MINT, "USDC": USDC_MINT}, clear=True),
+            patch.object(
+                mgr,
+                "_rpc_call_to_url",
+                new_callable=AsyncMock,
+                side_effect=[RuntimeError("rpc down"), good_response],
+            ) as rpc,
+        ):
             await mgr._prepare_modified_mints()
 
         assert rpc.await_count == 2
         # The failing mint produced no file; the loop still processed USDC
         assert not (tmp_path / f"{USDT_MINT}.json").exists()
         assert (tmp_path / f"{USDC_MINT}.json").exists()
+
+
+# =============================================================================
+# _prepare_clone_account_files
+# =============================================================================
+
+
+CLONE_ADDR_A = "CLoneAccountAAAA1111111111111111111111111111"
+CLONE_ADDR_B = "CLoneAccountBBBB2222222222222222222222222222"
+
+
+def _clone_value(**overrides) -> dict:
+    """A getAccountInfo value shaped like a pre-fetchable clone account."""
+    value = {
+        "lamports": 123_456,
+        "data": ["QUJDREVG", "base64"],
+        "owner": TOKEN_PROGRAM,
+        "executable": False,
+        "rentEpoch": 361,
+        "space": 82,
+    }
+    value.update(overrides)
+    return value
+
+
+class TestPrepareCloneAccountFiles:
+    """Branch coverage for SolanaForkManager._prepare_clone_account_files."""
+
+    @pytest.mark.asyncio
+    async def test_no_clone_accounts_returns_early(self, tmp_path):
+        mgr = _make_manager()
+        mgr._modified_mint_dir = str(tmp_path)
+
+        with patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock) as rpc:
+            await mgr._prepare_clone_account_files()
+
+        rpc.assert_not_awaited()
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.asyncio
+    async def test_missing_mint_dir_returns_early(self):
+        mgr = _make_manager(clone_accounts=[CLONE_ADDR_A])
+        mgr._modified_mint_dir = None
+
+        with patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock) as rpc:
+            await mgr._prepare_clone_account_files()
+
+        rpc.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_prefetch_writes_account_json_passthrough(self, tmp_path):
+        mgr = _make_manager(clone_accounts=[CLONE_ADDR_A])
+        mgr._modified_mint_dir = str(tmp_path)
+
+        with patch.object(
+            mgr,
+            "_rpc_call_to_url",
+            new_callable=AsyncMock,
+            return_value={"value": _clone_value()},
+        ) as rpc:
+            await mgr._prepare_clone_account_files()
+
+        rpc.assert_awaited_once_with(
+            mgr.rpc_url,
+            "getAccountInfo",
+            [CLONE_ADDR_A, {"encoding": "base64"}],
+        )
+        with open(tmp_path / f"{CLONE_ADDR_A}.json") as f:
+            account_json = json.load(f)
+        assert account_json == {
+            "pubkey": CLONE_ADDR_A,
+            "account": {
+                "lamports": 123_456,
+                "data": ["QUJDREVG", "base64"],
+                "owner": TOKEN_PROGRAM,
+                "executable": False,
+                "rentEpoch": 361,
+                "space": 82,
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_missing_optional_fields_default_to_zero(self, tmp_path):
+        mgr = _make_manager(clone_accounts=[CLONE_ADDR_A])
+        mgr._modified_mint_dir = str(tmp_path)
+
+        value = _clone_value()
+        del value["rentEpoch"]
+        del value["space"]
+
+        with patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock, return_value={"value": value}):
+            await mgr._prepare_clone_account_files()
+
+        with open(tmp_path / f"{CLONE_ADDR_A}.json") as f:
+            account_json = json.load(f)
+        assert account_json["account"]["rentEpoch"] == 0
+        assert account_json["account"]["space"] == 0
+
+    @pytest.mark.asyncio
+    async def test_skips_addresses_already_prepared_by_mint_pass(self, tmp_path):
+        mgr = _make_manager(clone_accounts=[CLONE_ADDR_A, CLONE_ADDR_B])
+        mgr._modified_mint_dir = str(tmp_path)
+
+        # ADDR_A was already written by _prepare_modified_mints; the stray
+        # non-JSON file exercises the endswith(".json") filter.
+        (tmp_path / f"{CLONE_ADDR_A}.json").write_text("{}")
+        (tmp_path / "notes.txt").write_text("not an account file")
+
+        with patch.object(
+            mgr,
+            "_rpc_call_to_url",
+            new_callable=AsyncMock,
+            return_value={"value": _clone_value()},
+        ) as rpc:
+            await mgr._prepare_clone_account_files()
+
+        rpc.assert_awaited_once_with(
+            mgr.rpc_url,
+            "getAccountInfo",
+            [CLONE_ADDR_B, {"encoding": "base64"}],
+        )
+        # ADDR_A untouched, ADDR_B freshly written
+        assert (tmp_path / f"{CLONE_ADDR_A}.json").read_text() == "{}"
+        assert (tmp_path / f"{CLONE_ADDR_B}.json").exists()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("response", [None, {"value": None}])
+    async def test_unfetchable_account_falls_back_to_clone(self, tmp_path, response, caplog):
+        mgr = _make_manager(clone_accounts=[CLONE_ADDR_A])
+        mgr._modified_mint_dir = str(tmp_path)
+
+        with (
+            patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock, return_value=response),
+            caplog.at_level("WARNING", logger="almanak.framework.anvil.solana_fork_manager"),
+        ):
+            await mgr._prepare_clone_account_files()
+
+        assert list(tmp_path.iterdir()) == []
+        assert "will fall back to --clone" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_dir_skips_existing_file_scan(self, tmp_path, caplog):
+        mgr = _make_manager(clone_accounts=[CLONE_ADDR_A])
+        missing_dir = tmp_path / "does-not-exist"
+        mgr._modified_mint_dir = str(missing_dir)
+
+        # RPC returns nothing so the loop takes the warning-continue branch
+        # instead of attempting to write into the missing directory.
+        with patch.object(mgr, "_rpc_call_to_url", new_callable=AsyncMock, return_value=None) as rpc:
+            await mgr._prepare_clone_account_files()
+
+        rpc.assert_awaited_once()
+        # The missing dir was neither scanned (os.listdir would raise) nor
+        # created, and no account file was written anywhere under tmp_path.
+        assert not missing_dir.exists()
+        assert list(tmp_path.iterdir()) == []
+        assert "will fall back to --clone" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_rpc_failure_on_one_account_continues_to_next(self, tmp_path, caplog):
+        mgr = _make_manager(clone_accounts=[CLONE_ADDR_A, CLONE_ADDR_B])
+        mgr._modified_mint_dir = str(tmp_path)
+
+        with (
+            patch.object(
+                mgr,
+                "_rpc_call_to_url",
+                new_callable=AsyncMock,
+                side_effect=[RuntimeError("rpc down"), {"value": _clone_value()}],
+            ) as rpc,
+            caplog.at_level("WARNING", logger="almanak.framework.anvil.solana_fork_manager"),
+        ):
+            await mgr._prepare_clone_account_files()
+
+        assert rpc.await_count == 2
+        assert not (tmp_path / f"{CLONE_ADDR_A}.json").exists()
+        assert (tmp_path / f"{CLONE_ADDR_B}.json").exists()
+        assert "Failed to pre-fetch clone account" in caplog.text
 
 
 # =============================================================================
@@ -277,8 +468,10 @@ class TestFundSingleToken:
         mgr = _make_manager()
 
         # A mint entry with no matching decimals entry hits the decimals guard
-        with patch.dict(MINTS_PATH, {"FAKETOKEN": USDC_MINT}), \
-             patch.object(mgr, "_rpc_call", new_callable=AsyncMock) as rpc:
+        with (
+            patch.dict(MINTS_PATH, {"FAKETOKEN": USDC_MINT}),
+            patch.object(mgr, "_rpc_call", new_callable=AsyncMock) as rpc,
+        ):
             result = await mgr._fund_single_token(OWNER_ADDRESS, "FAKETOKEN", Decimal("1"))
 
         assert result is False
@@ -305,10 +498,12 @@ class TestFundSingleToken:
         mint = Pubkey.from_string(USDC_MINT)
         expected_ata = mgr._derive_ata(owner, mint)
 
-        with patch.object(mgr, "_rpc_call", new_callable=AsyncMock, return_value=ata_info) as rpc, \
-             patch.object(mgr, "_create_ata_and_mint", new_callable=AsyncMock, return_value=True) as create, \
-             patch.object(mgr, "_mint_to", new_callable=AsyncMock) as mint_to, \
-             patch.object(mgr, "_get_token_balance", new_callable=AsyncMock, return_value="1000"):
+        with (
+            patch.object(mgr, "_rpc_call", new_callable=AsyncMock, return_value=ata_info) as rpc,
+            patch.object(mgr, "_create_ata_and_mint", new_callable=AsyncMock, return_value=True) as create,
+            patch.object(mgr, "_mint_to", new_callable=AsyncMock) as mint_to,
+            patch.object(mgr, "_get_token_balance", new_callable=AsyncMock, return_value="1000"),
+        ):
             result = await mgr._fund_single_token(OWNER_ADDRESS, "USDC", Decimal("1000"))
 
         assert result is True
@@ -335,10 +530,12 @@ class TestFundSingleToken:
         expected_ata = mgr._derive_ata(owner, mint)
         existing = {"value": {"data": ["", "base64"]}}
 
-        with patch.object(mgr, "_rpc_call", new_callable=AsyncMock, return_value=existing), \
-             patch.object(mgr, "_create_ata_and_mint", new_callable=AsyncMock) as create, \
-             patch.object(mgr, "_mint_to", new_callable=AsyncMock, return_value=True) as mint_to, \
-             patch.object(mgr, "_get_token_balance", new_callable=AsyncMock, return_value="5"):
+        with (
+            patch.object(mgr, "_rpc_call", new_callable=AsyncMock, return_value=existing),
+            patch.object(mgr, "_create_ata_and_mint", new_callable=AsyncMock) as create,
+            patch.object(mgr, "_mint_to", new_callable=AsyncMock, return_value=True) as mint_to,
+            patch.object(mgr, "_get_token_balance", new_callable=AsyncMock, return_value="5"),
+        ):
             result = await mgr._fund_single_token(OWNER_ADDRESS, "usdc", Decimal("5"))
 
         assert result is True
@@ -355,15 +552,17 @@ class TestFundSingleToken:
 
         mgr = _make_manager()
 
-        with patch.object(mgr, "_rpc_call", new_callable=AsyncMock, return_value=None), \
-             patch.object(mgr, "_create_ata_and_mint", new_callable=AsyncMock, return_value=True), \
-             patch.object(
-                 mgr,
-                 "_get_token_balance",
-                 new_callable=AsyncMock,
-                 side_effect=["0", "0", "42"],
-             ) as balance, \
-             patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+        with (
+            patch.object(mgr, "_rpc_call", new_callable=AsyncMock, return_value=None),
+            patch.object(mgr, "_create_ata_and_mint", new_callable=AsyncMock, return_value=True),
+            patch.object(
+                mgr,
+                "_get_token_balance",
+                new_callable=AsyncMock,
+                side_effect=["0", "0", "42"],
+            ) as balance,
+            patch("asyncio.sleep", new_callable=AsyncMock) as sleep,
+        ):
             result = await mgr._fund_single_token(OWNER_ADDRESS, "USDC", Decimal("42"))
 
         assert result is True
@@ -376,10 +575,12 @@ class TestFundSingleToken:
 
         mgr = _make_manager()
 
-        with patch.object(mgr, "_rpc_call", new_callable=AsyncMock, return_value=None), \
-             patch.object(mgr, "_create_ata_and_mint", new_callable=AsyncMock, return_value=True), \
-             patch.object(mgr, "_get_token_balance", new_callable=AsyncMock, return_value="0") as balance, \
-             patch("asyncio.sleep", new_callable=AsyncMock):
+        with (
+            patch.object(mgr, "_rpc_call", new_callable=AsyncMock, return_value=None),
+            patch.object(mgr, "_create_ata_and_mint", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_get_token_balance", new_callable=AsyncMock, return_value="0") as balance,
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
             result = await mgr._fund_single_token(OWNER_ADDRESS, "USDC", Decimal("1"))
 
         assert result is False
@@ -391,9 +592,11 @@ class TestFundSingleToken:
 
         mgr = _make_manager()
 
-        with patch.object(mgr, "_rpc_call", new_callable=AsyncMock, return_value=None), \
-             patch.object(mgr, "_create_ata_and_mint", new_callable=AsyncMock, return_value=False), \
-             patch.object(mgr, "_get_token_balance", new_callable=AsyncMock) as balance:
+        with (
+            patch.object(mgr, "_rpc_call", new_callable=AsyncMock, return_value=None),
+            patch.object(mgr, "_create_ata_and_mint", new_callable=AsyncMock, return_value=False),
+            patch.object(mgr, "_get_token_balance", new_callable=AsyncMock) as balance,
+        ):
             result = await mgr._fund_single_token(OWNER_ADDRESS, "USDC", Decimal("1"))
 
         assert result is False

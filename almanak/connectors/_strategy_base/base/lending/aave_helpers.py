@@ -934,7 +934,7 @@ def _euler_v2_has_controller(compiler: Any, owner: str) -> bool | None:
     return length > 0
 
 
-class _EulerV2FullExitMode(str, Enum):
+class _EulerV2FullExitMode(str, Enum):  # noqa: UP042 — StrEnum changes str() semantics; migrate separately
     """How a Euler V2 ``withdraw_all`` should be encoded, decided at compile time."""
 
     REDEEM_MAX = "redeem_max"  # redeem(MAX_UINT256) — caps to balance at broadcast time

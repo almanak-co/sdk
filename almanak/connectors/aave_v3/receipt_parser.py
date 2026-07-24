@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
 from almanak.framework.execution.extract_result import (
@@ -745,7 +745,86 @@ class AaveV3ReceiptParser:
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
         self._chain = kwargs.get("chain", "ethereum")
 
-    def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:  # noqa: C901
+    # Maps event type -> (typed-data parser method name, ParseResult bucket).
+    # Method names (not function objects) so the table is independent of the
+    # _parse_* definition order further down the class.
+    _EVENT_DISPATCH: ClassVar[dict[AaveV3EventType, tuple[str, str]]] = {
+        AaveV3EventType.SUPPLY: ("_parse_supply", "supplies"),
+        AaveV3EventType.WITHDRAW: ("_parse_withdraw", "withdraws"),
+        AaveV3EventType.BORROW: ("_parse_borrow", "borrows"),
+        AaveV3EventType.REPAY: ("_parse_repay", "repays"),
+        AaveV3EventType.FLASH_LOAN: ("_parse_flash_loan", "flash_loans"),
+        AaveV3EventType.LIQUIDATION_CALL: ("_parse_liquidation", "liquidations"),
+    }
+
+    @staticmethod
+    def _normalize_receipt_header(receipt: dict[str, Any]) -> tuple[str, int, int]:
+        """Normalize (tx_hash, block_number, status) across provider formats.
+
+        Each field can arrive as int, hex string, decimal string, or bytes
+        depending on the RPC provider.
+        """
+        tx_hash = receipt.get("transactionHash", "")
+        if isinstance(tx_hash, bytes):
+            tx_hash = "0x" + tx_hash.hex()
+
+        block_number = receipt.get("blockNumber", 0)
+        # Normalize block number (can be int, hex string, or bytes from different providers)
+        if isinstance(block_number, bytes):
+            block_number = int.from_bytes(block_number, "big")
+        elif isinstance(block_number, str):
+            block_number = int(block_number, 16) if block_number.startswith("0x") else int(block_number)
+
+        status = receipt.get("status", 1)
+        # Normalize status (can be int, hex string, or bytes from different providers)
+        if isinstance(status, bytes):
+            status = int.from_bytes(status, "big")
+        elif isinstance(status, str):
+            status = int(status, 16) if status.startswith("0x") else int(status)
+
+        return tx_hash, block_number, status
+
+    def _summarize_actions(
+        self,
+        supplies: list[SupplyEventData],
+        withdraws: list[WithdrawEventData],
+        borrows: list[BorrowEventData],
+        repays: list[RepayEventData],
+        liquidations: list[LiquidationCallEventData],
+    ) -> list[str]:
+        """Build the user-friendly action summary for the parsed-receipt log.
+
+        Flash loans are intentionally not summarized (matches the historical
+        log format).
+        """
+        actions = []
+        if supplies:
+            for s in supplies:
+                actions.append(
+                    f"SUPPLY {_format_token_amount(s.amount, s.reserve, self._chain)} to {format_address(s.reserve)}"
+                )
+        if withdraws:
+            for w in withdraws:
+                actions.append(
+                    f"WITHDRAW {_format_token_amount(w.amount, w.reserve, self._chain)} from {format_address(w.reserve)}"
+                )
+        if borrows:
+            for b in borrows:
+                rate_type = "variable" if b.is_variable_rate else "stable"
+                actions.append(
+                    f"BORROW {_format_token_amount(b.amount, b.reserve, self._chain)} ({rate_type}) from {format_address(b.reserve)}"
+                )
+        if repays:
+            for r in repays:
+                actions.append(
+                    f"REPAY {_format_token_amount(r.amount, r.reserve, self._chain)} to {format_address(r.reserve)}"
+                )
+        if liquidations:
+            for liq in liquidations:
+                actions.append(f"LIQUIDATION on {format_address(liq.user)}")
+        return actions
+
+    def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:
         """Parse a transaction receipt.
 
         Args:
@@ -756,23 +835,7 @@ class AaveV3ReceiptParser:
             ParseResult with extracted events and data
         """
         try:
-            tx_hash = receipt.get("transactionHash", "")
-            if isinstance(tx_hash, bytes):
-                tx_hash = "0x" + tx_hash.hex()
-
-            block_number = receipt.get("blockNumber", 0)
-            # Normalize block number (can be int, hex string, or bytes from different providers)
-            if isinstance(block_number, bytes):
-                block_number = int.from_bytes(block_number, "big")
-            elif isinstance(block_number, str):
-                block_number = int(block_number, 16) if block_number.startswith("0x") else int(block_number)
-
-            status = receipt.get("status", 1)
-            # Normalize status (can be int, hex string, or bytes from different providers)
-            if isinstance(status, bytes):
-                status = int.from_bytes(status, "big")
-            elif isinstance(status, str):
-                status = int(status, 16) if status.startswith("0x") else int(status)
+            tx_hash, block_number, status = self._normalize_receipt_header(receipt)
 
             # Check if transaction reverted
             if status == 0:
@@ -793,80 +856,36 @@ class AaveV3ReceiptParser:
                 )
 
             events: list[AaveV3Event] = []
-            supplies: list[SupplyEventData] = []
-            withdraws: list[WithdrawEventData] = []
-            borrows: list[BorrowEventData] = []
-            repays: list[RepayEventData] = []
-            flash_loans: list[FlashLoanEventData] = []
-            liquidations: list[LiquidationCallEventData] = []
+            typed: dict[str, list[Any]] = {bucket: [] for _, bucket in self._EVENT_DISPATCH.values()}
 
             for log in logs:
                 parsed_event = self._parse_log(log, tx_hash, block_number)
-                if parsed_event:
-                    events.append(parsed_event)
+                if not parsed_event:
+                    continue
+                events.append(parsed_event)
 
-                    # Extract typed data based on event type
-                    if parsed_event.event_type == AaveV3EventType.SUPPLY:
-                        supply_data = self._parse_supply(parsed_event)
-                        if supply_data:
-                            supplies.append(supply_data)
+                # Extract typed data based on event type
+                entry = self._EVENT_DISPATCH.get(parsed_event.event_type)
+                if entry is None:
+                    continue
+                parser_name, bucket = entry
+                data = getattr(self, parser_name)(parsed_event)
+                if data:
+                    typed[bucket].append(data)
 
-                    elif parsed_event.event_type == AaveV3EventType.WITHDRAW:
-                        withdraw_data = self._parse_withdraw(parsed_event)
-                        if withdraw_data:
-                            withdraws.append(withdraw_data)
-
-                    elif parsed_event.event_type == AaveV3EventType.BORROW:
-                        borrow_data = self._parse_borrow(parsed_event)
-                        if borrow_data:
-                            borrows.append(borrow_data)
-
-                    elif parsed_event.event_type == AaveV3EventType.REPAY:
-                        repay_data = self._parse_repay(parsed_event)
-                        if repay_data:
-                            repays.append(repay_data)
-
-                    elif parsed_event.event_type == AaveV3EventType.FLASH_LOAN:
-                        flash_loan_data = self._parse_flash_loan(parsed_event)
-                        if flash_loan_data:
-                            flash_loans.append(flash_loan_data)
-
-                    elif parsed_event.event_type == AaveV3EventType.LIQUIDATION_CALL:
-                        liquidation_data = self._parse_liquidation(parsed_event)
-                        if liquidation_data:
-                            liquidations.append(liquidation_data)
+            supplies = typed["supplies"]
+            withdraws = typed["withdraws"]
+            borrows = typed["borrows"]
+            repays = typed["repays"]
+            flash_loans = typed["flash_loans"]
+            liquidations = typed["liquidations"]
 
             # Log parsed receipt with user-friendly formatting
             gas_used = receipt.get("gasUsed", 0)
             tx_fmt = format_tx_hash(tx_hash)
             gas_fmt = format_gas_cost(gas_used)
 
-            # Build summary of actions
-            actions = []
-            if supplies:
-                for s in supplies:
-                    actions.append(
-                        f"SUPPLY {_format_token_amount(s.amount, s.reserve, self._chain)} to {format_address(s.reserve)}"
-                    )
-            if withdraws:
-                for w in withdraws:
-                    actions.append(
-                        f"WITHDRAW {_format_token_amount(w.amount, w.reserve, self._chain)} from {format_address(w.reserve)}"
-                    )
-            if borrows:
-                for b in borrows:
-                    rate_type = "variable" if b.is_variable_rate else "stable"
-                    actions.append(
-                        f"BORROW {_format_token_amount(b.amount, b.reserve, self._chain)} ({rate_type}) from {format_address(b.reserve)}"
-                    )
-            if repays:
-                for r in repays:
-                    actions.append(
-                        f"REPAY {_format_token_amount(r.amount, r.reserve, self._chain)} to {format_address(r.reserve)}"
-                    )
-            if liquidations:
-                for liq in liquidations:
-                    actions.append(f"LIQUIDATION on {format_address(liq.user)}")
+            actions = self._summarize_actions(supplies, withdraws, borrows, repays, liquidations)
 
             if actions:
                 logger.info(f"🔍 Parsed Aave V3: {', '.join(actions)}, tx={tx_fmt}, {gas_fmt}")

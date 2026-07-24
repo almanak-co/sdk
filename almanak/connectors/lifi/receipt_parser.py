@@ -280,7 +280,7 @@ class LiFiReceiptParser:
             token_out=token_out_addr,
         )
 
-    def extract_bridge_data(  # noqa: C901
+    def extract_bridge_data(
         self,
         receipt: dict[str, Any],
         *,
@@ -319,77 +319,20 @@ class LiFiReceiptParser:
         # before comparing so mixed-case never silently drops a wallet transfer.
         wallet_outgoing = [t for t in transfers if str(t.get("from", "")).lower() == wallet]
 
-        source_chain = (from_chain or self._chain or "").lower()
-        dest_chain = (to_chain or "").lower() if to_chain else None
-        if not source_chain or not dest_chain:
-            logger.debug("LiFi bridge_data: missing chain hints (from=%s, to=%s)", source_chain, dest_chain)
+        chains = self._resolve_bridge_chains(from_chain, to_chain)
+        if chains is None:
             return None
-
-        source_token_addr: str | None
-        amount_sent_raw: int
+        source_chain, dest_chain = chains
 
         if wallet_outgoing:
-            first_out = wallet_outgoing[0]
-            amount_sent_raw = int(first_out.get("amount", 0) or 0)
-            source_token_addr = first_out.get("token")
-            if amount_sent_raw <= 0 or not source_token_addr:
-                return None
-
-            # Pass ``source_chain`` explicitly so decimals resolution uses the
-            # caller-provided from_chain rather than ``self._chain`` (which
-            # may not match when a single parser services multi-chain flows).
-            decimals = self._get_decimals(source_token_addr, chain=source_chain)
-            if decimals is None and token:
-                try:
-                    from almanak.framework.data.tokens import get_token_resolver
-
-                    decimals = get_token_resolver().resolve(token, source_chain).decimals
-                except Exception:
-                    decimals = None
-            if decimals is None:
-                logger.warning(
-                    "LiFi bridge_data: cannot resolve token decimals (token=%s, address=%s, chain=%s)",
-                    token,
-                    source_token_addr,
-                    source_chain,
-                )
-                return None
-
-            amount_sent_decimal = Decimal(amount_sent_raw) / Decimal(10**decimals)
+            extracted = self._extract_erc20_deposit(wallet_outgoing[0], token, source_chain)
         else:
-            # Native-asset bridge (msg.value-funded, no ERC-20 Transfer).
-            # Resolve amount from the compiler-provided quote and the native
-            # token's decimals via the resolver — never default to 18.
-            if amount in (None, "") or not token:
-                return None
-            try:
-                amount_sent_decimal = Decimal(str(amount))
-            except Exception:
-                return None
-            if not amount_sent_decimal.is_finite() or amount_sent_decimal <= 0:
-                return None
-            try:
-                from almanak.framework.data.tokens import get_token_resolver
+            extracted = self._extract_native_deposit(amount, token, source_chain)
+        if extracted is None:
+            return None
+        amount_sent_decimal, amount_sent_raw, source_token_addr = extracted
 
-                decimals = get_token_resolver().resolve(token, source_chain).decimals
-            except Exception:
-                logger.warning(
-                    "LiFi bridge_data: native-asset path cannot resolve decimals (token=%s, chain=%s)",
-                    token,
-                    source_chain,
-                )
-                return None
-            amount_sent_raw = int(amount_sent_decimal * Decimal(10**decimals))
-            source_token_addr = None
-
-        expected_out_decimal: Decimal | None = None
-        if expected_amount_out not in (None, ""):
-            try:
-                candidate = Decimal(str(expected_amount_out))
-                if candidate.is_finite():
-                    expected_out_decimal = candidate
-            except Exception:
-                expected_out_decimal = None
+        expected_out_decimal = self._parse_expected_amount_out(expected_amount_out)
 
         tx_hash = self._normalize_tx_hash(receipt.get("transactionHash") or receipt.get("tx_hash"))
 
@@ -406,6 +349,92 @@ class LiFiReceiptParser:
             destination_tx_hash=None,
             expected_amount_out=expected_out_decimal,
         )
+
+    def _resolve_bridge_chains(self, from_chain: str | None, to_chain: str | None) -> tuple[str, str] | None:
+        """Resolve (source_chain, dest_chain) hints, or None when either is missing."""
+        source_chain = (from_chain or self._chain or "").lower()
+        dest_chain = (to_chain or "").lower() if to_chain else None
+        if not source_chain or not dest_chain:
+            logger.debug("LiFi bridge_data: missing chain hints (from=%s, to=%s)", source_chain, dest_chain)
+            return None
+        return source_chain, dest_chain
+
+    def _extract_erc20_deposit(
+        self, first_out: dict[str, Any], token: str | None, source_chain: str
+    ) -> tuple[Decimal, int, str | None] | None:
+        """Derive (amount_decimal, amount_raw, token_addr) from the wallet's first outgoing Transfer."""
+        amount_sent_raw = int(first_out.get("amount", 0) or 0)
+        source_token_addr = first_out.get("token")
+        if amount_sent_raw <= 0 or not source_token_addr:
+            return None
+
+        # Pass ``source_chain`` explicitly so decimals resolution uses the
+        # caller-provided from_chain rather than ``self._chain`` (which
+        # may not match when a single parser services multi-chain flows).
+        decimals = self._get_decimals(source_token_addr, chain=source_chain)
+        if decimals is None and token:
+            try:
+                from almanak.framework.data.tokens import get_token_resolver
+
+                decimals = get_token_resolver().resolve(token, source_chain).decimals
+            except Exception:
+                decimals = None
+        if decimals is None:
+            logger.warning(
+                "LiFi bridge_data: cannot resolve token decimals (token=%s, address=%s, chain=%s)",
+                token,
+                source_token_addr,
+                source_chain,
+            )
+            return None
+
+        amount_sent_decimal = Decimal(amount_sent_raw) / Decimal(10**decimals)
+        return amount_sent_decimal, amount_sent_raw, source_token_addr
+
+    def _extract_native_deposit(
+        self, amount: str | Decimal | None, token: str | None, source_chain: str
+    ) -> tuple[Decimal, int, str | None] | None:
+        """Native-asset bridge (msg.value-funded, no ERC-20 Transfer).
+
+        Resolve amount from the compiler-provided quote and the native
+        token's decimals via the resolver — never default to 18.
+        """
+        if amount in (None, "") or not token:
+            return None
+        try:
+            amount_sent_decimal = Decimal(str(amount))
+        except Exception:
+            return None
+        if not amount_sent_decimal.is_finite() or amount_sent_decimal <= 0:
+            return None
+        try:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            decimals = get_token_resolver().resolve(token, source_chain).decimals
+        except Exception:
+            logger.warning(
+                "LiFi bridge_data: native-asset path cannot resolve decimals (token=%s, chain=%s)",
+                token,
+                source_chain,
+            )
+            return None
+        amount_sent_raw = int(amount_sent_decimal * Decimal(10**decimals))
+        return amount_sent_decimal, amount_sent_raw, None
+
+    @staticmethod
+    def _parse_expected_amount_out(
+        expected_amount_out: str | Decimal | None,
+    ) -> Decimal | None:
+        """Sanitize the compiler-provided expected output amount (finite Decimal or None)."""
+        expected_out_decimal: Decimal | None = None
+        if expected_amount_out not in (None, ""):
+            try:
+                candidate = Decimal(str(expected_amount_out))
+                if candidate.is_finite():
+                    expected_out_decimal = candidate
+            except Exception:
+                expected_out_decimal = None
+        return expected_out_decimal
 
     def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
         """LiFi swaps do not create LP positions."""

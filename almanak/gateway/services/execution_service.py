@@ -506,7 +506,222 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         logger.info(f"Created SolanaExecutionPlanner for chain={chain}, wallet={wallet_address[:8]}...")
         return planner
 
-    async def CompileIntent(  # noqa: C901
+    def _validate_compile_request(
+        self,
+        request: gateway_pb2.CompileIntentRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[str, str, gateway_pb2.CompilationResult | None]:
+        """Validate intent_type / chain / wallet_address before initialization.
+
+        Returns (chain, wallet_address, error_result); error_result is None on
+        success.
+        """
+        if not request.intent_type:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("intent_type is required")
+            return "", "", gateway_pb2.CompilationResult(success=False, error="intent_type required")
+
+        try:
+            chain = validate_chain(request.chain or "arbitrum")
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return "", "", gateway_pb2.CompilationResult(success=False, error=str(e))
+
+        wallet_address = request.wallet_address
+        if wallet_address:
+            try:
+                from almanak.gateway.validation import validate_address_for_chain
+
+                wallet_address = validate_address_for_chain(wallet_address, chain, "wallet_address")
+            except ValidationError as e:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(str(e))
+                return "", "", gateway_pb2.CompilationResult(success=False, error=str(e))
+
+        return chain, wallet_address, None
+
+    def _parse_price_map(
+        self,
+        request: gateway_pb2.CompileIntentRequest,
+        intent_type: str,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[dict[str, Decimal] | None, gateway_pb2.CompilationResult | None]:
+        """Parse and validate the client-supplied price_map.
+
+        Returns (parsed_prices, error_result). parsed_prices stays None when
+        the request carried no price_map (placeholder-price compat path);
+        invalid client input returns INVALID_ARGUMENT, not INTERNAL.
+        """
+        price_map_raw = dict(request.price_map) if request.price_map else {}
+        if not price_map_raw:
+            return None, None
+        try:
+            parsed_prices: dict[str, Decimal] = {}
+            for symbol, price_str in price_map_raw.items():
+                price = Decimal(price_str)
+                if not price.is_finite() or price <= 0:
+                    raise ValueError(f"{symbol} price must be finite and > 0, got {price_str}")
+                parsed_prices[symbol] = price
+        except (ValueError, ArithmeticError) as e:
+            error_msg = f"Invalid price_map value: {e}"
+            logger.warning(f"CompileIntent rejected for {intent_type}: {error_msg}")
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(error_msg)
+            return None, gateway_pb2.CompilationResult(
+                success=False,
+                error=error_msg,
+                error_code="INVALID_PRICE_MAP",
+            )
+        return parsed_prices, None
+
+    def _deserialize_intent(
+        self,
+        request: gateway_pb2.CompileIntentRequest,
+        intent_type: str,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[Any, gateway_pb2.CompilationResult | None]:
+        """Deserialize intent_data JSON and build the intent object.
+
+        json.JSONDecodeError deliberately propagates to the caller's outer
+        except (INTERNAL); only intent construction errors map to
+        INVALID_ARGUMENT.
+        """
+        intent_data = json.loads(request.intent_data.decode("utf-8"))
+
+        # Create intent object from type and data.
+        # Catch pydantic.ValidationError (e.g., SafeDecimal rejection of raw floats)
+        # and ValueError (e.g., unknown intent_type) — both are client input errors and
+        # should surface as INVALID_ARGUMENT, not INTERNAL.
+        try:
+            intent = self._create_intent(intent_type, intent_data)
+        except (pydantic.ValidationError, ValueError) as e:
+            error_msg = str(e)
+            error_code = "INVALID_INTENT_DATA" if isinstance(e, pydantic.ValidationError) else "INVALID_INTENT_TYPE"
+            logger.warning(f"CompileIntent rejected for {intent_type}: {error_msg}")
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(error_msg)
+            return None, gateway_pb2.CompilationResult(
+                success=False,
+                error=error_msg,
+                error_code=error_code,
+            )
+        return intent, None
+
+    async def _enforce_mainnet_price_gate(
+        self,
+        compiler: Any,
+        intent: Any,
+        intent_type: str,
+    ) -> gateway_pb2.CompilationResult | None:
+        """VIB-523: fail-closed price gate for price-sensitive mainnet intents.
+
+        On mainnet, fail compilation for price-sensitive intents if no real
+        prices are available, instead of silently using placeholder prices
+        with incorrect slippage calculations. First try self-serving prices
+        from the gateway's own market service.
+        """
+        intent_tokens = self._extract_token_symbols_from_intent(intent)
+        self_served = await self._fetch_prices_for_tokens(intent_tokens) if intent_tokens else {}
+        # Require prices for ALL extracted tokens to prevent partial placeholder usage
+        all_covered = intent_tokens and all(t.upper() in self_served for t in intent_tokens)
+        # LP_CLOSE/PERP_CLOSE with only position_id may have no extractable
+        # tokens — these operations don't need prices (decreaseLiquidity/collect).
+        # Only bypass the price gate for close-type intents; all others must
+        # fail-closed to prevent compiling with placeholder prices.
+        normalized_type = self._normalize_intent_type(intent_type).upper()
+        if not intent_tokens and normalized_type in ("LPCLOSE", "PERPCLOSE"):
+            logger.info(
+                f"No token symbols extractable from {intent_type} intent — "
+                f"skipping price gate for close-type intent, letting compiler proceed."
+            )
+        elif not intent_tokens:
+            error_msg = (
+                f"No real prices available for {intent_type} compilation on mainnet. "
+                f"Could not extract token symbols from intent to self-serve prices. "
+                f"Refusing to compile with placeholder prices."
+            )
+            logger.warning(error_msg)
+            return gateway_pb2.CompilationResult(
+                success=False,
+                error=error_msg,
+                error_code="NO_PRICES_AVAILABLE",
+            )
+        elif all_covered and hasattr(compiler, "update_prices"):
+            compiler.update_prices(self_served)
+            logger.info(
+                f"Self-served {len(self_served)} prices for {intent_type} compilation: {list(self_served.keys())}"
+            )
+        else:
+            error_msg = (
+                f"No real prices available for {intent_type} compilation on mainnet. "
+                f"Price oracle returned no data (CoinGecko rate-limited or Chainlink "
+                f"unavailable). Refusing to compile with placeholder prices. "
+                f"Retry after price sources recover."
+            )
+            logger.warning(error_msg)
+            return gateway_pb2.CompilationResult(
+                success=False,
+                error=error_msg,
+                error_code="NO_PRICES_AVAILABLE",
+            )
+        return None
+
+    async def _apply_compile_prices(
+        self,
+        compiler: Any,
+        intent: Any,
+        intent_type: str,
+        parsed_prices: dict[str, Decimal] | None,
+    ) -> gateway_pb2.CompilationResult | None:
+        """Apply client prices, or enforce the mainnet fail-closed price gate."""
+        if parsed_prices and hasattr(compiler, "update_prices"):
+            compiler.update_prices(parsed_prices)
+            logger.debug(f"Applied {len(parsed_prices)} real prices for compilation: {list(parsed_prices.keys())}")
+        elif (
+            self.settings.network == "mainnet"
+            and self._normalize_intent_type(intent_type).upper() in PRICE_SENSITIVE_INTENT_TYPES
+        ):
+            return await self._enforce_mainnet_price_gate(compiler, intent, intent_type)
+        return None
+
+    def _build_compilation_response(
+        self,
+        compilation_result: Any,
+        intent_type: str,
+    ) -> gateway_pb2.CompilationResult:
+        """Map the framework CompilationResult onto the proto response."""
+        from almanak.framework.intents.compiler import CompilationStatus
+
+        if compilation_result.status != CompilationStatus.SUCCESS:
+            error_msg = compilation_result.error or "Compilation failed"
+            logger.warning(f"CompileIntent failed for {intent_type}: {error_msg}")
+            return gateway_pb2.CompilationResult(
+                success=False,
+                error=error_msg,
+                error_code="COMPILATION_FAILED",
+            )
+
+        if compilation_result.action_bundle is None:
+            return gateway_pb2.CompilationResult(
+                success=False,
+                error="Compilation succeeded but no action bundle produced",
+                error_code="NO_ACTION_BUNDLE",
+            )
+
+        # Serialize action bundle (include sensitive_data for gateway roundtrip,
+        # e.g. Raydium NFT mint keypair needed for co-signing during Execute)
+        bundle_dict = compilation_result.action_bundle.to_dict()
+        if compilation_result.action_bundle.sensitive_data:
+            bundle_dict["_sensitive_data"] = compilation_result.action_bundle.sensitive_data
+        bundle_bytes = json.dumps(bundle_dict).encode("utf-8")
+
+        return gateway_pb2.CompilationResult(
+            success=True,
+            action_bundle=bundle_bytes,
+        )
+
+    async def CompileIntent(
         self,
         request: gateway_pb2.CompileIntentRequest,
         context: grpc.aio.ServicerContext,
@@ -522,75 +737,22 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         """
         # Validate inputs BEFORE initialization
         intent_type = request.intent_type
-        if not intent_type:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("intent_type is required")
-            return gateway_pb2.CompilationResult(success=False, error="intent_type required")
-
-        try:
-            chain = validate_chain(request.chain or "arbitrum")
-        except ValidationError as e:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return gateway_pb2.CompilationResult(success=False, error=str(e))
-
-        wallet_address = request.wallet_address
-        if wallet_address:
-            try:
-                from almanak.gateway.validation import validate_address_for_chain
-
-                wallet_address = validate_address_for_chain(wallet_address, chain, "wallet_address")
-            except ValidationError as e:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(str(e))
-                return gateway_pb2.CompilationResult(success=False, error=str(e))
+        chain, wallet_address, invalid = self._validate_compile_request(request, context)
+        if invalid is not None:
+            return invalid
 
         await self._ensure_initialized()
 
         # Validate and parse price_map before entering the main try block
         # so invalid client input returns INVALID_ARGUMENT, not INTERNAL.
-        price_map_raw = dict(request.price_map) if request.price_map else {}
-        parsed_prices: dict[str, Decimal] | None = None
-        if price_map_raw:
-            try:
-                parsed_prices = {}
-                for symbol, price_str in price_map_raw.items():
-                    price = Decimal(price_str)
-                    if not price.is_finite() or price <= 0:
-                        raise ValueError(f"{symbol} price must be finite and > 0, got {price_str}")
-                    parsed_prices[symbol] = price
-            except (ValueError, ArithmeticError) as e:
-                error_msg = f"Invalid price_map value: {e}"
-                logger.warning(f"CompileIntent rejected for {intent_type}: {error_msg}")
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(error_msg)
-                return gateway_pb2.CompilationResult(
-                    success=False,
-                    error=error_msg,
-                    error_code="INVALID_PRICE_MAP",
-                )
+        parsed_prices, invalid = self._parse_price_map(request, intent_type, context)
+        if invalid is not None:
+            return invalid
 
         try:
-            # Deserialize intent data
-            intent_data = json.loads(request.intent_data.decode("utf-8"))
-
-            # Create intent object from type and data.
-            # Catch pydantic.ValidationError (e.g., SafeDecimal rejection of raw floats)
-            # and ValueError (e.g., unknown intent_type) — both are client input errors and
-            # should surface as INVALID_ARGUMENT, not INTERNAL.
-            try:
-                intent = self._create_intent(intent_type, intent_data)
-            except (pydantic.ValidationError, ValueError) as e:
-                error_msg = str(e)
-                error_code = "INVALID_INTENT_DATA" if isinstance(e, pydantic.ValidationError) else "INVALID_INTENT_TYPE"
-                logger.warning(f"CompileIntent rejected for {intent_type}: {error_msg}")
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(error_msg)
-                return gateway_pb2.CompilationResult(
-                    success=False,
-                    error=error_msg,
-                    error_code=error_code,
-                )
+            intent, invalid = self._deserialize_intent(request, intent_type, context)
+            if invalid is not None:
+                return invalid
 
             # Get compiler for this chain/wallet pair
             cache_key = f"{chain}:{wallet_address}"
@@ -599,70 +761,13 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
 
             # Serialize override+compile+restore per cached compiler to
             # prevent concurrent requests from seeing each other's prices.
-            from almanak.framework.intents.compiler import CompilationStatus
-
             async with compiler_lock:
                 original_oracle = getattr(compiler, "price_oracle", None)
                 original_placeholders = getattr(compiler, "_using_placeholders", True)
 
-                if parsed_prices and hasattr(compiler, "update_prices"):
-                    compiler.update_prices(parsed_prices)
-                    logger.debug(
-                        f"Applied {len(parsed_prices)} real prices for compilation: {list(parsed_prices.keys())}"
-                    )
-                elif (
-                    self.settings.network == "mainnet"
-                    and self._normalize_intent_type(intent_type).upper() in PRICE_SENSITIVE_INTENT_TYPES
-                ):
-                    # VIB-523: On mainnet, fail compilation for price-sensitive intents
-                    # if no real prices are available, instead of silently using
-                    # placeholder prices with incorrect slippage calculations.
-                    # First try self-serving prices from the gateway's own market service.
-                    intent_tokens = self._extract_token_symbols_from_intent(intent)
-                    self_served = await self._fetch_prices_for_tokens(intent_tokens) if intent_tokens else {}
-                    # Require prices for ALL extracted tokens to prevent partial placeholder usage
-                    all_covered = intent_tokens and all(t.upper() in self_served for t in intent_tokens)
-                    # LP_CLOSE/PERP_CLOSE with only position_id may have no extractable
-                    # tokens — these operations don't need prices (decreaseLiquidity/collect).
-                    # Only bypass the price gate for close-type intents; all others must
-                    # fail-closed to prevent compiling with placeholder prices.
-                    normalized_type = self._normalize_intent_type(intent_type).upper()
-                    if not intent_tokens and normalized_type in ("LPCLOSE", "PERPCLOSE"):
-                        logger.info(
-                            f"No token symbols extractable from {intent_type} intent — "
-                            f"skipping price gate for close-type intent, letting compiler proceed."
-                        )
-                    elif not intent_tokens:
-                        error_msg = (
-                            f"No real prices available for {intent_type} compilation on mainnet. "
-                            f"Could not extract token symbols from intent to self-serve prices. "
-                            f"Refusing to compile with placeholder prices."
-                        )
-                        logger.warning(error_msg)
-                        return gateway_pb2.CompilationResult(
-                            success=False,
-                            error=error_msg,
-                            error_code="NO_PRICES_AVAILABLE",
-                        )
-                    elif all_covered and hasattr(compiler, "update_prices"):
-                        compiler.update_prices(self_served)
-                        logger.info(
-                            f"Self-served {len(self_served)} prices for {intent_type} compilation: "
-                            f"{list(self_served.keys())}"
-                        )
-                    else:
-                        error_msg = (
-                            f"No real prices available for {intent_type} compilation on mainnet. "
-                            f"Price oracle returned no data (CoinGecko rate-limited or Chainlink "
-                            f"unavailable). Refusing to compile with placeholder prices. "
-                            f"Retry after price sources recover."
-                        )
-                        logger.warning(error_msg)
-                        return gateway_pb2.CompilationResult(
-                            success=False,
-                            error=error_msg,
-                            error_code="NO_PRICES_AVAILABLE",
-                        )
+                gate_error = await self._apply_compile_prices(compiler, intent, intent_type, parsed_prices)
+                if gate_error is not None:
+                    return gate_error
 
                 try:
                     compilation_result = compiler.compile(intent=intent)
@@ -670,34 +775,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                     if hasattr(compiler, "restore_prices"):
                         compiler.restore_prices(original_oracle, original_placeholders)
 
-            # Check compilation status
-            if compilation_result.status != CompilationStatus.SUCCESS:
-                error_msg = compilation_result.error or "Compilation failed"
-                logger.warning(f"CompileIntent failed for {intent_type}: {error_msg}")
-                return gateway_pb2.CompilationResult(
-                    success=False,
-                    error=error_msg,
-                    error_code="COMPILATION_FAILED",
-                )
-
-            if compilation_result.action_bundle is None:
-                return gateway_pb2.CompilationResult(
-                    success=False,
-                    error="Compilation succeeded but no action bundle produced",
-                    error_code="NO_ACTION_BUNDLE",
-                )
-
-            # Serialize action bundle (include sensitive_data for gateway roundtrip,
-            # e.g. Raydium NFT mint keypair needed for co-signing during Execute)
-            bundle_dict = compilation_result.action_bundle.to_dict()
-            if compilation_result.action_bundle.sensitive_data:
-                bundle_dict["_sensitive_data"] = compilation_result.action_bundle.sensitive_data
-            bundle_bytes = json.dumps(bundle_dict).encode("utf-8")
-
-            return gateway_pb2.CompilationResult(
-                success=True,
-                action_bundle=bundle_bytes,
-            )
+            return self._build_compilation_response(compilation_result, intent_type)
 
         except Exception as e:
             error_msg = str(e)

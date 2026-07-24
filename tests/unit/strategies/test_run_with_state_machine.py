@@ -300,3 +300,54 @@ class TestRun:
 
         strategy = _Strategy(_boom)
         assert strategy.run() is None
+
+
+class TestRunMulti:
+    """Covers run_multi(): raw DecideResult pass-through + _current_intent tracking."""
+
+    def test_none_result_sets_hold_and_returns_none(self):
+        strategy = _Strategy(decide_result=None)
+        assert strategy.run_multi() is None
+        assert isinstance(strategy._current_intent, HoldIntent)
+        assert strategy._current_intent.reason == "decide() returned None"
+
+    def test_single_intent_passthrough(self):
+        intent = _swap_intent()
+        strategy = _Strategy(intent)
+        assert strategy.run_multi() is intent
+        assert strategy._current_intent is intent
+
+    def test_sequence_returned_whole_and_first_tracked(self):
+        first, second = _swap_intent(), _swap_intent()
+        sequence = IntentSequence(intents=[first, second])
+        strategy = _Strategy(sequence)
+        assert strategy.run_multi() is sequence
+        assert strategy._current_intent is first
+
+    def test_list_returned_whole_and_first_item_tracked(self):
+        first, second = _swap_intent(), _swap_intent()
+        items = [first, second]
+        strategy = _Strategy(items)
+        assert strategy.run_multi() is items
+        assert strategy._current_intent is first
+
+    def test_list_with_leading_sequence_tracks_its_first(self):
+        inner = _swap_intent()
+        items = [IntentSequence(intents=[inner]), _swap_intent()]
+        strategy = _Strategy(items)
+        assert strategy.run_multi() is items
+        assert strategy._current_intent is inner
+
+    def test_empty_list_returned_and_current_intent_cleared(self):
+        strategy = _Strategy([])
+        strategy._current_intent = _swap_intent()  # stale from a prior iteration
+        result = strategy.run_multi()
+        assert result == []
+        assert strategy._current_intent is None
+
+    def test_decide_exception_returns_none(self):
+        def _boom():
+            raise RuntimeError("market data unavailable")
+
+        strategy = _Strategy(_boom)
+        assert strategy.run_multi() is None

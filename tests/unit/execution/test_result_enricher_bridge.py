@@ -19,15 +19,15 @@ from typing import Any
 
 from almanak.connectors.across.adapter import ACROSS_SPOKE_POOL_ADDRESSES
 from almanak.connectors.across.receipt_parser import (
-    AcrossReceiptParser,
     V3_FUNDS_DEPOSITED_TOPIC,
+    AcrossReceiptParser,
 )
+from almanak.connectors.lifi.receipt_parser import LiFiReceiptParser
 from almanak.connectors.stargate.adapter import STARGATE_ROUTER_ADDRESSES
 from almanak.connectors.stargate.receipt_parser import (
     OFT_SENT_TOPIC,
     StargateReceiptParser,
 )
-from almanak.connectors.lifi.receipt_parser import LiFiReceiptParser
 from almanak.framework.execution.extracted_data import BridgeData
 from almanak.framework.execution.result_enricher import ResultEnricher
 
@@ -542,6 +542,98 @@ class TestLiFiReceiptParserBridgeData:
         # Malformed value gets dropped to None rather than crashing the parser.
         assert bd.expected_amount_out is None
         assert bd.amount_sent == Decimal("1")
+
+    def test_extract_bridge_data_missing_wallet_returns_none(self):
+        """Success receipt without a from/from_address key -> None."""
+        receipt = self._success_receipt()
+        del receipt["from"]
+        parser = LiFiReceiptParser(chain="base")
+        assert parser.extract_bridge_data(receipt, from_chain="base", to_chain="arbitrum", token="USDC") is None
+
+    def test_extract_bridge_data_zero_amount_transfer_returns_none(self):
+        """Wallet-outgoing transfer of zero amount -> None."""
+        receipt = self._success_receipt(amount=0)
+        parser = LiFiReceiptParser(chain="base")
+        assert parser.extract_bridge_data(receipt, from_chain="base", to_chain="arbitrum", token="USDC") is None
+
+    def test_extract_bridge_data_symbol_fallback_resolves_decimals(self):
+        """Unknown token address resolves decimals via the token-symbol fallback."""
+        unknown_token = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        lifi_diamond = "0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae"
+        transfer = _transfer_log(unknown_token, WALLET, lifi_diamond, 5_000_000)
+        receipt = {"status": 1, "transactionHash": "0xsym", "logs": [transfer], "from": WALLET}
+        parser = LiFiReceiptParser(chain="base")
+        bd = parser.extract_bridge_data(receipt, from_chain="base", to_chain="arbitrum", token="USDC")
+        assert bd is not None
+        assert bd.amount_sent == Decimal("5")  # 6-decimal USDC scaling via fallback
+        assert bd.source_token_address == unknown_token.lower()
+
+    def test_extract_bridge_data_symbol_fallback_unresolvable_returns_none(self, caplog):
+        """Unknown address plus an unresolvable symbol -> warning + None."""
+        unknown_token = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        lifi_diamond = "0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae"
+        transfer = _transfer_log(unknown_token, WALLET, lifi_diamond, 1000)
+        receipt = {"status": 1, "transactionHash": "0xnosym", "logs": [transfer], "from": WALLET}
+        parser = LiFiReceiptParser(chain="base")
+        with caplog.at_level("WARNING"):
+            bd = parser.extract_bridge_data(
+                receipt, from_chain="base", to_chain="arbitrum", token="NOTAREALTOKEN"
+            )
+        assert bd is None
+        assert "cannot resolve token decimals" in caplog.text
+
+    def test_extract_bridge_data_native_malformed_amount_returns_none(self):
+        """Native path: unparseable quote amount -> None."""
+        receipt = {"status": 1, "transactionHash": "0xnative", "logs": [], "from": WALLET}
+        parser = LiFiReceiptParser(chain="base")
+        assert (
+            parser.extract_bridge_data(
+                receipt, from_chain="base", to_chain="arbitrum", token="ETH", amount="not-a-number"
+            )
+            is None
+        )
+
+    def test_extract_bridge_data_native_nonpositive_amount_returns_none(self):
+        """Native path: zero and non-finite amounts -> None."""
+        receipt = {"status": 1, "transactionHash": "0xnative", "logs": [], "from": WALLET}
+        parser = LiFiReceiptParser(chain="base")
+        for bad in (Decimal("0"), "NaN"):
+            assert (
+                parser.extract_bridge_data(
+                    receipt, from_chain="base", to_chain="arbitrum", token="ETH", amount=bad
+                )
+                is None
+            )
+
+    def test_extract_bridge_data_native_unresolvable_token_returns_none(self, caplog):
+        """Native path: resolver failure -> warning + None (never default to 18)."""
+        receipt = {"status": 1, "transactionHash": "0xnative", "logs": [], "from": WALLET}
+        parser = LiFiReceiptParser(chain="base")
+        with caplog.at_level("WARNING"):
+            bd = parser.extract_bridge_data(
+                receipt, from_chain="base", to_chain="arbitrum", token="NOTAREALTOKEN", amount="0.5"
+            )
+        assert bd is None
+        assert "native-asset path cannot resolve decimals" in caplog.text
+
+    def test_extract_bridge_data_nan_expected_amount_dropped(self):
+        """Non-finite expected_amount_out is dropped to None."""
+        receipt = self._success_receipt(amount=1_000_000)
+        parser = LiFiReceiptParser(chain="base")
+        bd = parser.extract_bridge_data(
+            receipt, from_chain="base", to_chain="arbitrum", token="USDC", expected_amount_out="NaN"
+        )
+        assert bd is not None
+        assert bd.expected_amount_out is None
+
+    def test_extract_bridge_data_tx_hash_fallback_key(self):
+        """Receipt carrying only tx_hash (no transactionHash) still populates it."""
+        receipt = self._success_receipt(amount=1_000_000)
+        receipt["tx_hash"] = receipt.pop("transactionHash")
+        parser = LiFiReceiptParser(chain="base")
+        bd = parser.extract_bridge_data(receipt, from_chain="base", to_chain="arbitrum", token="USDC")
+        assert bd is not None
+        assert bd.source_tx_hash
 
     def test_extract_bridge_data_expected_amount_out_decimal(self):
         receipt = self._success_receipt(amount=1_000_000)

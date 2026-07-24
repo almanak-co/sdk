@@ -15,7 +15,7 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, cast
@@ -115,8 +115,8 @@ def _row_timestamp_epoch(row: dict[str, Any]) -> int:
         return 0
 
 
-def _row_text(row: dict[str, Any], key: str) -> Any:
-    return row.get(key) or ""
+def _row_text(row: dict[str, Any], key: str, default: str = "") -> Any:
+    return row.get(key) or default
 
 
 def _row_int(row: dict[str, Any], key: str, default: int = 0) -> int:
@@ -264,6 +264,17 @@ def _sqlite_ledger_entry_row_to_proto(row: dict[str, Any]) -> gateway_pb2.Ledger
     )
 
 
+def _set_optional_field(msg: Any, field: str, value: Any, cast: Callable[[Any], Any]) -> None:
+    """Set an optional proto scalar only when the row value is non-None.
+
+    None == absent on the wire (SavePositionEvent convention); 0/False are
+    real measured values and MUST be set (Empty != Zero, AGENTS.md
+    §Accounting).
+    """
+    if value is not None:
+        setattr(msg, field, cast(value))
+
+
 def _position_event_row_to_proto(row: dict[str, Any]) -> gateway_pb2.PositionEventData:
     """Convert one SQLite ``position_events`` row dict to the proto wire shape (VIB-3944).
 
@@ -274,47 +285,39 @@ def _position_event_row_to_proto(row: dict[str, Any]) -> gateway_pb2.PositionEve
     convention where None == absent.
     """
     msg = gateway_pb2.PositionEventData(
-        id=row.get("id") or "",
-        deployment_id=row.get("deployment_id") or "",
-        cycle_id=row.get("cycle_id") or "",
-        execution_mode=row.get("execution_mode") or "",
-        position_id=row.get("position_id") or "",
-        position_type=row.get("position_type") or "",
-        event_type=row.get("event_type") or "",
+        id=_row_text(row, "id"),
+        deployment_id=_row_text(row, "deployment_id"),
+        cycle_id=_row_text(row, "cycle_id"),
+        execution_mode=_row_text(row, "execution_mode"),
+        position_id=_row_text(row, "position_id"),
+        position_type=_row_text(row, "position_type"),
+        event_type=_row_text(row, "event_type"),
         timestamp=_row_timestamp_epoch(row),
-        protocol=row.get("protocol") or "",
-        chain=row.get("chain") or "",
-        token0=row.get("token0") or "",
-        token1=row.get("token1") or "",
-        amount0=row.get("amount0") or "",
-        amount1=row.get("amount1") or "",
-        value_usd=row.get("value_usd") or "",
-        liquidity=row.get("liquidity") or "",
-        fees_token0=row.get("fees_token0") or "",
-        fees_token1=row.get("fees_token1") or "",
-        leverage=row.get("leverage") or "",
-        entry_price=row.get("entry_price") or "",
-        mark_price=row.get("mark_price") or "",
-        unrealized_pnl=row.get("unrealized_pnl") or "",
-        tx_hash=row.get("tx_hash") or "",
-        gas_usd=row.get("gas_usd") or "",
-        ledger_entry_id=row.get("ledger_entry_id") or "",
-        protocol_fees_usd=row.get("protocol_fees_usd") or "",
-        attribution_json=row.get("attribution_json") or "{}",
-        attribution_version=int(row.get("attribution_version") or 0),
+        protocol=_row_text(row, "protocol"),
+        chain=_row_text(row, "chain"),
+        token0=_row_text(row, "token0"),
+        token1=_row_text(row, "token1"),
+        amount0=_row_text(row, "amount0"),
+        amount1=_row_text(row, "amount1"),
+        value_usd=_row_text(row, "value_usd"),
+        liquidity=_row_text(row, "liquidity"),
+        fees_token0=_row_text(row, "fees_token0"),
+        fees_token1=_row_text(row, "fees_token1"),
+        leverage=_row_text(row, "leverage"),
+        entry_price=_row_text(row, "entry_price"),
+        mark_price=_row_text(row, "mark_price"),
+        unrealized_pnl=_row_text(row, "unrealized_pnl"),
+        tx_hash=_row_text(row, "tx_hash"),
+        gas_usd=_row_text(row, "gas_usd"),
+        ledger_entry_id=_row_text(row, "ledger_entry_id"),
+        protocol_fees_usd=_row_text(row, "protocol_fees_usd"),
+        attribution_json=_row_text(row, "attribution_json", "{}"),
+        attribution_version=_row_int(row, "attribution_version"),
     )
-    tick_lower = row.get("tick_lower")
-    if tick_lower is not None:
-        msg.tick_lower = int(tick_lower)
-    tick_upper = row.get("tick_upper")
-    if tick_upper is not None:
-        msg.tick_upper = int(tick_upper)
-    in_range = row.get("in_range")
-    if in_range is not None:
-        msg.in_range = bool(in_range)
-    is_long = row.get("is_long")
-    if is_long is not None:
-        msg.is_long = bool(is_long)
+    _set_optional_field(msg, "tick_lower", row.get("tick_lower"), int)
+    _set_optional_field(msg, "tick_upper", row.get("tick_upper"), int)
+    _set_optional_field(msg, "in_range", row.get("in_range"), bool)
+    _set_optional_field(msg, "is_long", row.get("is_long"), bool)
     return msg
 
 
