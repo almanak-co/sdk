@@ -58,7 +58,7 @@ from almanak.framework.execution.orchestrator import (
 )
 from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
-from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.compiler import CompilationResult, IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
@@ -131,6 +131,48 @@ def _safe_usdc_borrow_amount(price_oracle: dict[str, Decimal], weth_amount: Deci
     """
     weth_price_usd = price_oracle["WETH"]
     return (weth_amount * weth_price_usd * Decimal("0.25")).quantize(Decimal("0.01"))
+
+
+async def _supply_weth_and_compile_standalone_borrow(
+    compiler: IntentCompiler,
+    orchestrator: ExecutionOrchestrator,
+    execution_context: ExecutionContext,
+    collateral_amount: Decimal,
+    borrow_amount: Decimal,
+) -> tuple[ExecutionResult, BorrowIntent, CompilationResult]:
+    """Open the canonical two-intent borrow setup (#2827) shared by the borrow
+    and repay tests: supply WETH collateral on-chain, then compile a standalone
+    USDC ``BorrowIntent(collateral_amount=Decimal("0"))``.
+
+    The SUPPLY executes here; the BORROW is compiled but NOT executed, so each
+    caller controls its own pre-state bracket, execution, and whether the
+    result is persisted through Layer 5.
+    """
+    supply_intent = SupplyIntent(
+        protocol="spark",
+        token="WETH",
+        amount=collateral_amount,
+        chain=CHAIN_NAME,
+    )
+    supply_compilation = compiler.compile(supply_intent)
+    assert supply_compilation.status.value == "SUCCESS", f"Supply compilation failed: {supply_compilation.error}"
+    assert supply_compilation.action_bundle is not None
+    supply_exec = await orchestrator.execute(supply_compilation.action_bundle, execution_context)
+    assert supply_exec.success, f"Collateral supply failed: {supply_exec.error}"
+
+    borrow_intent = BorrowIntent(
+        protocol="spark",
+        collateral_token="WETH",
+        collateral_amount=Decimal("0"),
+        borrow_token="USDC",
+        borrow_amount=borrow_amount,
+        interest_rate_mode="variable",
+        chain=CHAIN_NAME,
+    )
+    borrow_compilation = compiler.compile(borrow_intent)
+    assert borrow_compilation.status.value == "SUCCESS", f"Borrow compilation failed: {borrow_compilation.error}"
+    assert borrow_compilation.action_bundle is not None
+    return supply_exec, borrow_intent, borrow_compilation
 
 
 # =============================================================================
@@ -721,10 +763,6 @@ class TestSparkBorrowIntent:
 
     @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=False,
-        reason="VIB-4590: USDC borrow reverts under execTransactionWithRole (selector 0xd27b44a9) at current ethereum fork pin — likely oracle/LTV/cap drift, not authz (as of 2026-05-18)",
-    )
     async def test_borrow_usdc_with_weth_collateral_using_intent(
         self,
         web3: Web3,
@@ -735,12 +773,20 @@ class TestSparkBorrowIntent:
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ):
-        """Test borrowing USDC with WETH collateral using BorrowIntent.
+        """Test borrowing USDC against WETH collateral via the two-intent form.
+
+        Uses the accounting-correct SUPPLY -> standalone BORROW split (#2827):
+        a bundled ``BorrowIntent(collateral_amount > 0)`` is fail-closed at the
+        intent validator because accounting writes one event per intent — the
+        supply leg would collapse into the single BORROW event, and (post
+        VIB-5218 merged-receipt money legs) the BORROW row would carry the
+        SUPPLY leg's asset/amount instead of the borrowed reserve.
 
         Flow:
-        1. Create BorrowIntent with WETH as collateral, borrowing USDC
-        2. Compile to ActionBundle using IntentCompiler
-        3. Execute via ExecutionOrchestrator
+        1. Setup: supply WETH collateral via SupplyIntent (use_as_collateral
+           defaults True); verify the Supply receipt event
+        2. Create a standalone BorrowIntent (collateral_amount=0) for USDC
+        3. Compile + execute via the production pipeline
         4. Verify USDC balance increased and debt was created
         5. Layer 5: assert persisted BORROW accounting event
         """
@@ -757,7 +803,7 @@ class TestSparkBorrowIntent:
         borrow_amount = _safe_usdc_borrow_amount(price_oracle, collateral_amount)
 
         print(f"\n{'=' * 80}")
-        print(f"Test: Borrow {borrow_amount} USDC with {collateral_amount} WETH collateral using BorrowIntent")
+        print(f"Test: Borrow {borrow_amount} USDC with {collateral_amount} WETH collateral (two-intent form)")
         print(f"{'=' * 80}")
 
         # Record balances BEFORE
@@ -770,38 +816,45 @@ class TestSparkBorrowIntent:
         account_data_before = get_user_account_data(web3, funded_wallet)
         print(f"Debt before: {account_data_before['totalDebtBase']}")
 
-        # Create BorrowIntent
-        intent = BorrowIntent.model_construct(
-            protocol="spark",
-            collateral_token="WETH",
-            collateral_amount=collateral_amount,
-            borrow_token="USDC",
-            borrow_amount=borrow_amount,
-            interest_rate_mode="variable",
-            chain=CHAIN_NAME,
-        )
-
-        print("\nCreated BorrowIntent:")
-        print(f"  Collateral: {intent.collateral_amount} {intent.collateral_token}")
-        print(f"  Borrow: {intent.borrow_amount} {intent.borrow_token}")
-        print(f"  Interest rate mode: {intent.interest_rate_mode}")
-
-        # Compile intent
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
         )
 
-        print("\nCompiling intent to ActionBundle...")
-        compilation_result = compiler.compile(intent)
+        # Canonical two-intent setup (#2827): supply the WETH collateral
+        # on-chain and compile the standalone borrow. The supply is
+        # deliberately not persisted through Layer 5: this test asserts the
+        # BORROW row, and the FIFO borrow lot does not depend on the supply lot.
+        supply_exec, intent, compilation_result = await _supply_weth_and_compile_standalone_borrow(
+            compiler, orchestrator, execution_context, collateral_amount, borrow_amount
+        )
 
-        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
-        assert compilation_result.action_bundle is not None
+        # Layer 3 (supply leg): the Supply event must land on the WETH reserve.
+        supply_event_seen = False
+        for tx_result in supply_exec.transaction_results:
+            if tx_result.receipt:
+                parse_result = SparkReceiptParser().parse_receipt(tx_result.receipt.to_dict())
+                if parse_result.success and parse_result.supplies:
+                    collateral_supply = next(
+                        (s for s in parse_result.supplies if s.reserve.lower() == weth.lower()),
+                        None,
+                    )
+                    assert collateral_supply is not None, (
+                        f"Expected a Supply event for WETH collateral. Got reserves: "
+                        f"{[s.reserve for s in parse_result.supplies]}"
+                    )
+                    assert collateral_supply.amount > 0, "WETH collateral supply amount must be > 0"
+                    supply_event_seen = True
+        assert supply_event_seen, "Expected at least one Supply event for the WETH collateral leg"
 
+        print("\nCreated standalone BorrowIntent:")
+        print(f"  Borrow: {intent.borrow_amount} {intent.borrow_token}")
+        print(f"  Interest rate mode: {intent.interest_rate_mode}")
         print(f"ActionBundle created with {len(compilation_result.action_bundle.transactions)} transactions")
 
-        # Layer 5: capture pre-state BEFORE execution (mirrors the runner)
+        # Layer 5: capture pre-state BEFORE the borrow executes (mirrors the
+        # runner's per-intent bracket; the collateral is already on the pool).
         pre_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False)
 
         # Execute via ExecutionOrchestrator
@@ -811,8 +864,9 @@ class TestSparkBorrowIntent:
         assert execution_result.success, f"Execution failed: {execution_result.error}"
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
-        # Parse receipts (Layer 3) — expect at least one Supply (collateral) and one Borrow event
-        supply_event_seen = False
+        # Parse receipts (Layer 3) — the standalone borrow must emit a Borrow
+        # event on the USDC reserve and NO Supply event (collateral moved in
+        # step 1; a Supply here would mean the bundled shape leaked back).
         borrow_event_seen = False
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i + 1}:")
@@ -824,23 +878,10 @@ class TestSparkBorrowIntent:
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
 
                 if parse_result.success:
-                    if parse_result.supplies:
-                        assert len(parse_result.supplies) >= 1, "Expected at least one Supply event"
-                        # Assert the supply event corresponds to WETH (collateral)
-                        collateral_supply = next(
-                            (s for s in parse_result.supplies if s.reserve.lower() == weth.lower()),
-                            None,
-                        )
-                        assert collateral_supply is not None, (
-                            f"Expected a Supply event for WETH collateral. Got reserves: "
-                            f"{[s.reserve for s in parse_result.supplies]}"
-                        )
-                        assert collateral_supply.amount > 0, "WETH collateral supply amount must be > 0"
-                        supply_event_seen = True
-                        for supply_event in parse_result.supplies:
-                            print(f"  Supply (collateral): {supply_event.amount}")
-                            print(f"  Reserve: {supply_event.reserve}")
-
+                    assert not parse_result.supplies, (
+                        f"Standalone borrow must not emit Supply events. Got reserves: "
+                        f"{[s.reserve for s in parse_result.supplies]}"
+                    )
                     if parse_result.borrows:
                         assert len(parse_result.borrows) >= 1, "Expected at least one Borrow event"
                         # Assert the borrow event corresponds to USDC (debt)
@@ -860,7 +901,6 @@ class TestSparkBorrowIntent:
                             print(f"  Reserve: {borrow_event.reserve}")
                             print(f"  Interest rate mode: {borrow_event.interest_rate_mode}")
 
-        assert supply_event_seen, "Expected at least one Supply event for the WETH collateral leg"
         assert borrow_event_seen, "Expected at least one Borrow event for the USDC borrow leg"
 
         # Verify balance changes (Layer 4)
@@ -943,10 +983,6 @@ class TestSparkBorrowIntent:
 
     @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=False,
-        reason="VIB-4590: setup borrow reverts under execTransactionWithRole (selector 0xd27b44a9) at current ethereum fork pin, blocking repay path (as of 2026-05-18)",
-    )
     async def test_repay_usdc_using_intent(
         self,
         web3: Web3,
@@ -960,8 +996,11 @@ class TestSparkBorrowIntent:
         """Test repaying USDC debt using RepayIntent.
 
         Flow:
-        1. Setup: Borrow USDC with WETH collateral first (persisted through the
-           Layer-5 harness so the FIFO basis pool holds the matching lot)
+        1. Setup: supply WETH collateral, then a standalone borrow — the
+           accounting-correct two-intent form (#2827). The BORROW is persisted
+           through the Layer-5 harness so the FIFO basis pool holds the
+           matching lot (the supply setup is not: the split matches the borrow
+           lot only)
         2. Create RepayIntent to repay partial debt
         3. Compile and execute
         4. Verify USDC balance decreased and debt was reduced
@@ -982,19 +1021,9 @@ class TestSparkBorrowIntent:
         # cap as WETH price moves.
         setup_collateral = Decimal("1")
         setup_borrow = _safe_usdc_borrow_amount(price_oracle, setup_collateral)
-        borrow_intent = BorrowIntent.model_construct(
-            protocol="spark",
-            collateral_token="WETH",
-            collateral_amount=setup_collateral,
-            borrow_token="USDC",
-            borrow_amount=setup_borrow,
-            interest_rate_mode="variable",
-            chain=CHAIN_NAME,
+        _, borrow_intent, borrow_result = await _supply_weth_and_compile_standalone_borrow(
+            compiler, orchestrator, execution_context, setup_collateral, setup_borrow
         )
-
-        borrow_result = compiler.compile(borrow_intent)
-        assert borrow_result.status.value == "SUCCESS"
-        assert borrow_result.action_bundle is not None
         borrow_pre_state = _capture_lending_state(
             borrow_intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False
         )
@@ -1153,10 +1182,6 @@ class TestSparkBorrowIntent:
 
     @pytest.mark.intent(IntentType.REPAY)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=False,
-        reason="VIB-4590: setup borrow reverts under execTransactionWithRole (selector 0xd27b44a9) at current ethereum fork pin, blocking the standalone repay setup (as of 2026-05-18)",
-    )
     async def test_standalone_repay_degrades_interest_to_none(
         self,
         web3: Web3,
@@ -1189,23 +1214,15 @@ class TestSparkBorrowIntent:
             price_oracle=price_oracle,
         )
 
-        # On-chain borrow setup — intentionally NOT persisted through Layer 5,
-        # so the FIFO basis pool has no matching BORROW lot. Oracle-sized to
-        # ~25% LTV so it stays under the 30% cap as WETH price moves.
+        # On-chain borrow setup (two-intent form, #2827) — intentionally NOT
+        # persisted through Layer 5, so the FIFO basis pool has no matching
+        # BORROW lot. Oracle-sized to ~25% LTV so it stays under the 30% cap
+        # as WETH price moves.
         setup_collateral = Decimal("1")
         setup_borrow = _safe_usdc_borrow_amount(price_oracle, setup_collateral)
-        borrow_intent = BorrowIntent.model_construct(
-            protocol="spark",
-            collateral_token="WETH",
-            collateral_amount=setup_collateral,
-            borrow_token="USDC",
-            borrow_amount=setup_borrow,
-            interest_rate_mode="variable",
-            chain=CHAIN_NAME,
+        _, _borrow_intent, borrow_result = await _supply_weth_and_compile_standalone_borrow(
+            compiler, orchestrator, execution_context, setup_collateral, setup_borrow
         )
-        borrow_result = compiler.compile(borrow_intent)
-        assert borrow_result.status.value == "SUCCESS"
-        assert borrow_result.action_bundle is not None
         borrow_exec = await orchestrator.execute(borrow_result.action_bundle, execution_context)
         assert borrow_exec.success, f"Borrow setup failed: {borrow_exec.error}"
 
