@@ -126,6 +126,41 @@ async def await_async_settlement(
     deadline = started + timeout
     last: AsyncSettlementVerdict | None = None
     observation_state: Any = None
+    if str(network or "").lower() == "anvil":
+        attempts += 1
+        last = await asyncio.to_thread(
+            STRATEGY_RUNNER_HOOK_REGISTRY.execute_pending_orders_for_test,
+            protocol=protocol,
+            gateway_client=gateway_client,
+            chain=chain,
+            wallet_address=wallet_address,
+            orders=orders,
+            intent=intent,
+            network=network,
+        )
+        if last is None:
+            return AsyncSettlementBarrierResult(
+                status=AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
+                terminal=False,
+                attempts=attempts,
+                elapsed_seconds=_monotonic() - started,
+                orders=_submitted_orders(orders, AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED),
+                reason=f"Connector {protocol} returned no managed-fork execution verdict",
+            )
+        observation_state = last.observation_state
+        if last.terminal or last.status in {
+            AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
+            AsyncSettlementStatus.OBSERVATION_FAILED,
+        }:
+            return AsyncSettlementBarrierResult(
+                status=last.status,
+                terminal=last.terminal,
+                attempts=attempts,
+                elapsed_seconds=_monotonic() - started,
+                orders=last.orders or _submitted_orders(orders, last.status),
+                reason=last.reason,
+            )
+
     while True:
         attempts += 1
         last = await asyncio.to_thread(

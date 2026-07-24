@@ -17,6 +17,7 @@ from almanak.connectors._strategy_base.runner_hook_registry import (
     RunnerAsyncSettlementCapability,
     RunnerHookConnector,
 )
+from almanak.connectors.gmx_v2.anvil_order_executor import execute_pending_orders_on_anvil
 from almanak.connectors.gmx_v2.teardown_reads import read_open_positions, read_pending_orders
 from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
 
@@ -209,7 +210,7 @@ class GmxV2RunnerHookConnector(RunnerHookConnector, RunnerAsyncSettlementCapabil
         return AsyncSettlementPolicy(
             timeout_seconds=360,
             poll_interval_seconds=5,
-            supports_local_order_execution=False,
+            supports_local_order_execution=True,
             supports_cancellation=True,
         )
 
@@ -272,6 +273,50 @@ class GmxV2RunnerHookConnector(RunnerHookConnector, RunnerAsyncSettlementCapabil
             requested_deltas=requested_deltas,
             intent=intent,
             baseline=observation_state,
+        )
+
+    def execute_pending_orders_for_test(
+        self,
+        *,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str,
+        orders: tuple[Any, ...],
+        intent: Any,
+        network: str,
+    ) -> AsyncSettlementVerdict:
+        """Execute exact pending GMX orders in the current managed Anvil fork."""
+        baseline = self.observe_async_orders(
+            gateway_client=gateway_client,
+            chain=chain,
+            wallet_address=wallet_address,
+            orders=orders,
+            intent=intent,
+        )
+        if baseline.status is not AsyncSettlementStatus.PENDING or baseline.observation_state is None:
+            return baseline
+
+        result = execute_pending_orders_on_anvil(
+            gateway_client=gateway_client,
+            chain=chain,
+            wallet_address=wallet_address,
+            orders=orders,
+            network=network,
+        )
+        if not result.ok:
+            return AsyncSettlementVerdict(
+                status=AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
+                terminal=False,
+                reason=result.reason or "GMX managed-Anvil order execution was unavailable",
+                observation_state=baseline.observation_state,
+            )
+        return self.observe_async_orders(
+            gateway_client=gateway_client,
+            chain=chain,
+            wallet_address=wallet_address,
+            orders=orders,
+            intent=intent,
+            observation_state=baseline.observation_state,
         )
 
     def prepare_pending_orders_for_teardown(

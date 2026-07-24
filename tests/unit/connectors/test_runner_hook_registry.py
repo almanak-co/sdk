@@ -102,6 +102,7 @@ class _AsyncSettlementConnector(RunnerHookConnector, RunnerAsyncSettlementCapabi
 
     def __init__(self) -> None:
         self.observed: list[dict[str, Any]] = []
+        self.executed: list[dict[str, Any]] = []
         self.prepared: list[dict[str, Any]] = []
 
     def async_settlement_policy(self) -> AsyncSettlementPolicy:
@@ -130,6 +131,28 @@ class _AsyncSettlementConnector(RunnerHookConnector, RunnerAsyncSettlementCapabi
                 "orders": orders,
                 "intent": intent,
                 "observation_state": observation_state,
+            }
+        )
+        return AsyncSettlementVerdict(status=AsyncSettlementStatus.SETTLED, terminal=True)
+
+    def execute_pending_orders_for_test(
+        self,
+        *,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str,
+        orders: tuple[Any, ...],
+        intent: Any,
+        network: str,
+    ) -> AsyncSettlementVerdict:
+        self.executed.append(
+            {
+                "gateway_client": gateway_client,
+                "chain": chain,
+                "wallet_address": wallet_address,
+                "orders": orders,
+                "intent": intent,
+                "network": network,
             }
         )
         return AsyncSettlementVerdict(status=AsyncSettlementStatus.SETTLED, terminal=True)
@@ -302,6 +325,15 @@ def test_async_settlement_capability_dispatches_without_protocol_branching() -> 
         orders=(order,),
         intent=intent,
     )
+    executed = registry.execute_pending_orders_for_test(
+        protocol=connector.protocol,
+        gateway_client=gateway_client,
+        chain="arbitrum",
+        wallet_address="0xabc",
+        orders=(order,),
+        intent=intent,
+        network="anvil",
+    )
     prepared = registry.prepare_pending_orders_for_teardown(
         protocol=connector.protocol,
         gateway_client=gateway_client,
@@ -313,8 +345,10 @@ def test_async_settlement_capability_dispatches_without_protocol_branching() -> 
 
     assert policy == AsyncSettlementPolicy(12, 3, False, True)
     assert verdict == AsyncSettlementVerdict(status=AsyncSettlementStatus.SETTLED, terminal=True)
+    assert executed == AsyncSettlementVerdict(status=AsyncSettlementStatus.SETTLED, terminal=True)
     assert prepared is True
     assert connector.observed[0]["orders"] == (order,)
+    assert connector.executed[0]["network"] == "anvil"
     assert connector.prepared[0]["network"] == "anvil"
 
 

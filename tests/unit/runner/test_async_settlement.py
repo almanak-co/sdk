@@ -82,6 +82,35 @@ async def test_managed_anvil_fails_immediately_when_connector_has_no_keeper_simu
 
 
 @pytest.mark.asyncio
+async def test_managed_anvil_executes_exact_order_before_polling() -> None:
+    registry = MagicMock()
+    registry.async_settlement_policy.return_value = AsyncSettlementPolicy(360, 5, True, True)
+    registry.execute_pending_orders_for_test.return_value = AsyncSettlementVerdict(
+        status=AsyncSettlementStatus.SETTLED,
+        terminal=True,
+        orders=({"protocol": "gmx_v2", "order_id": _KEY, "status": "SETTLED"},),
+    )
+    with patch(
+        "almanak.connectors._strategy_runner_hook_registry.STRATEGY_RUNNER_HOOK_REGISTRY",
+        registry,
+    ):
+        result = await await_async_settlement(
+            gateway_client=object(),
+            chain="arbitrum",
+            wallet_address="0xabc",
+            network="anvil",
+            orders=(_order(),),
+            intent=object(),
+        )
+
+    assert result.status == AsyncSettlementStatus.SETTLED
+    assert result.terminal is True
+    assert result.attempts == 1
+    assert registry.execute_pending_orders_for_test.call_args.kwargs["orders"] == (_order(),)
+    registry.observe_async_orders.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_live_observer_terminal_verdict_completes_barrier() -> None:
     registry = MagicMock()
     registry.async_settlement_policy.return_value = AsyncSettlementPolicy(360, 5, False, True)

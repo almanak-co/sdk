@@ -82,6 +82,10 @@ ANVIL_ONLY_RPC_METHODS = frozenset(
         "anvil_setBalance",
         "anvil_setStorageAt",
         "anvil_setCode",
+        # Required for transactions sent from impersonated accounts on a fork.
+        # Production/mainnet requests still fail validation because this method
+        # exists only in the network == "anvil" allowlist.
+        "eth_sendTransaction",
     }
 )
 

@@ -260,13 +260,13 @@ class TestAnvilOnlyRpcMethods:
 
     def test_anvil_methods_blocked_on_mainnet(self):
         """Anvil test methods are rejected when network='mainnet'."""
-        for method in ("evm_increaseTime", "evm_mine", "evm_snapshot"):
+        for method in ("evm_increaseTime", "evm_mine", "evm_snapshot", "eth_sendTransaction"):
             with pytest.raises(ValidationError, match="not allowed"):
                 validate_rpc_method(method, network="mainnet")
 
     def test_anvil_methods_blocked_without_network(self):
         """Anvil test methods are rejected when no network is specified (default mainnet)."""
-        for method in ("evm_increaseTime", "evm_mine"):
+        for method in ("evm_increaseTime", "evm_mine", "eth_sendTransaction"):
             with pytest.raises(ValidationError, match="not allowed"):
                 validate_rpc_method(method)
 

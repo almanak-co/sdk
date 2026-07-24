@@ -119,6 +119,17 @@ class RunnerAsyncSettlementCapability(Protocol):
         observation_state: Any,
     ) -> AsyncSettlementVerdict: ...
 
+    def execute_pending_orders_for_test(
+        self,
+        *,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str,
+        orders: tuple[Any, ...],
+        intent: Any,
+        network: str,
+    ) -> AsyncSettlementVerdict: ...
+
     def prepare_pending_orders_for_teardown(
         self,
         *,
@@ -494,6 +505,43 @@ class RunnerHookRegistry:
                 observation_state=observation_state,
             )
 
+    def execute_pending_orders_for_test(
+        self,
+        *,
+        protocol: ProtocolName,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str,
+        orders: tuple[Any, ...],
+        intent: Any,
+        network: str,
+    ) -> AsyncSettlementVerdict | None:
+        """Ask a connector to execute exact pending orders on a managed fork."""
+        connector = self._connectors.get(protocol)
+        if not isinstance(connector, RunnerAsyncSettlementCapability):
+            return None
+        try:
+            return connector.execute_pending_orders_for_test(
+                gateway_client=gateway_client,
+                chain=chain,
+                wallet_address=wallet_address,
+                orders=orders,
+                intent=intent,
+                network=network,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Managed-fork async execution raised for protocol %s: %s",
+                protocol,
+                exc,
+                exc_info=True,
+            )
+            return AsyncSettlementVerdict(
+                status=AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
+                terminal=False,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+
     def prepare_pending_orders_for_teardown(
         self,
         *,
@@ -561,6 +609,12 @@ class RunnerHookRegistry:
                 "observe_async_orders",
                 positional_count=0,
                 keyword_names=("gateway_client", "chain", "wallet_address", "orders", "intent", "observation_state"),
+            )
+            cls._validate_method_signature(
+                connector,
+                "execute_pending_orders_for_test",
+                positional_count=0,
+                keyword_names=("gateway_client", "chain", "wallet_address", "orders", "intent", "network"),
             )
             cls._validate_method_signature(
                 connector,

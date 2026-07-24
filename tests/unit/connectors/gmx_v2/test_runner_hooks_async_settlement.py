@@ -6,7 +6,11 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from almanak.connectors._strategy_base.runner_hook_registry import AsyncSettlementStatus
+from almanak.connectors._strategy_base.runner_hook_registry import (
+    AsyncSettlementStatus,
+    AsyncSettlementVerdict,
+)
+from almanak.connectors.gmx_v2.anvil_order_executor import GmxAnvilOrderExecutionResult
 from almanak.connectors.gmx_v2.runner_hooks import GmxV2RunnerHookConnector
 
 _KEY = "0x" + "ab" * 32
@@ -40,12 +44,12 @@ def _position(*, market: str = _MARKET, size_usd: int = 100 * _RAW_USD) -> Simpl
     )
 
 
-def test_policy_declares_live_keeper_wait_and_no_local_execution() -> None:
+def test_policy_declares_live_keeper_wait_and_managed_anvil_execution() -> None:
     policy = GmxV2RunnerHookConnector().async_settlement_policy()
 
     assert policy.timeout_seconds == 360
     assert policy.poll_interval_seconds == 5
-    assert policy.supports_local_order_execution is False
+    assert policy.supports_local_order_execution is True
     assert policy.supports_cancellation is True
 
 
@@ -201,6 +205,92 @@ def test_order_state_change_during_baseline_capture_fails_closed() -> None:
     assert verdict.status == AsyncSettlementStatus.OBSERVATION_FAILED
     assert verdict.terminal is False
     assert "changed state" in (verdict.reason or "")
+
+
+def test_managed_anvil_executor_observes_target_after_exact_order_executes() -> None:
+    result = GmxAnvilOrderExecutionResult(
+        ok=True,
+        executed_order_keys=(_KEY,),
+        transaction_hashes=("0x1234",),
+    )
+    baseline_state = object()
+    baseline = AsyncSettlementVerdict(
+        status=AsyncSettlementStatus.PENDING,
+        terminal=False,
+        observation_state=baseline_state,
+    )
+    settled = AsyncSettlementVerdict(status=AsyncSettlementStatus.SETTLED, terminal=True)
+    connector = GmxV2RunnerHookConnector()
+    with (
+        patch("almanak.connectors.gmx_v2.runner_hooks.execute_pending_orders_on_anvil", return_value=result) as execute,
+        patch.object(connector, "observe_async_orders", side_effect=(baseline, settled)) as observe,
+    ):
+        verdict = connector.execute_pending_orders_for_test(
+            gateway_client=object(),
+            chain="arbitrum",
+            wallet_address="0xabc",
+            orders=(_order(),),
+            intent=_intent("PERP_OPEN"),
+            network="anvil",
+        )
+
+    assert verdict is settled
+    assert execute.call_args.kwargs["network"] == "anvil"
+    assert observe.call_count == 2
+    assert observe.call_args_list[0].kwargs.get("observation_state") is None
+    assert observe.call_args_list[1].kwargs["observation_state"] is baseline_state
+
+
+def test_managed_anvil_executor_maps_failure_to_infrastructure_unsupported() -> None:
+    result = GmxAnvilOrderExecutionResult(ok=False, reason="no authorized keeper")
+    baseline_state = object()
+    baseline = AsyncSettlementVerdict(
+        status=AsyncSettlementStatus.PENDING,
+        terminal=False,
+        observation_state=baseline_state,
+    )
+    connector = GmxV2RunnerHookConnector()
+    with (
+        patch("almanak.connectors.gmx_v2.runner_hooks.execute_pending_orders_on_anvil", return_value=result),
+        patch.object(connector, "observe_async_orders", return_value=baseline),
+    ):
+        verdict = connector.execute_pending_orders_for_test(
+            gateway_client=object(),
+            chain="arbitrum",
+            wallet_address="0xabc",
+            orders=(_order(),),
+            intent=_intent("PERP_OPEN"),
+            network="anvil",
+        )
+
+    assert verdict.status == AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED
+    assert verdict.terminal is False
+    assert verdict.reason == "no authorized keeper"
+    assert verdict.observation_state is baseline_state
+
+
+def test_managed_anvil_executor_does_not_execute_without_measured_baseline() -> None:
+    unmeasured = AsyncSettlementVerdict(
+        status=AsyncSettlementStatus.OBSERVATION_FAILED,
+        terminal=False,
+        reason="baseline unavailable",
+    )
+    connector = GmxV2RunnerHookConnector()
+    with (
+        patch("almanak.connectors.gmx_v2.runner_hooks.execute_pending_orders_on_anvil") as execute,
+        patch.object(connector, "observe_async_orders", return_value=unmeasured),
+    ):
+        verdict = connector.execute_pending_orders_for_test(
+            gateway_client=object(),
+            chain="arbitrum",
+            wallet_address="0xabc",
+            orders=(_order(),),
+            intent=_intent("PERP_OPEN"),
+            network="anvil",
+        )
+
+    assert verdict is unmeasured
+    execute.assert_not_called()
 
 
 def test_teardown_advances_same_anvil_session_by_measured_wait() -> None:
