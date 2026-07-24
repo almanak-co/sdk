@@ -1,4 +1,4 @@
-.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-demos check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline
+.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-demos check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline
 
 # Load .env file if it exists
 -include .env
@@ -50,6 +50,14 @@ audit-intent-paths:
 # carry a ticket ref, a dated reason, and an explicit strict=. See issue #1694.
 check-xfail-hygiene:
 	uv run python scripts/ci/check_xfail_hygiene.py --check --verbose
+
+# Out-of-band ticket-liveness report (VIB-5965): resolve every VIB-XXXX /
+# #NNNN referenced by xfail sites under tests/intents/ and list sites whose
+# every tracker is closed. Needs the gh CLI for GitHub refs and LINEAR_API_KEY
+# for Linear refs; unresolvable refs report UNKNOWN. Never part of the PR gate
+# (the weekly xfail-liveness.yml workflow adds --fail-on-closed).
+check-xfail-liveness:
+	uv run python scripts/ci/check_xfail_hygiene.py --liveness
 
 # Enforce the config-service boundary (issues #2097-#2101): no direct
 # os.environ / load_dotenv reads outside almanak/config/ + a small allowlist.
